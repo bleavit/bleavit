@@ -1330,6 +1330,8 @@ Conventions: blocks relative to epoch start B0; prices in `s`-units; events abbr
 
 **Unresolved safety questions (open, tracked):** conditional prices estimate correlation dressed as causation — δ, σ and horizons mitigate, none eliminates (GFP §15.4, FGP §14); scalarization discards distributional questions (GFP §15.1); Goodhart pressure is permanent (TM-7); the A-2 arbitrage-elasticity assumption is empirical and must be re-validated each phase; values-layer plutocracy within its lane (A-3); attackers with off-system payoffs (TM-18); markets price means, not tails, outside the two gated tails (GFP §15.3); the entrenchment honesty clause (§2.3) is a process guarantee, not a mathematical one.
 
+**Bulletin Chain evidence artifacts (deferred):** once the Polkadot Bulletin Chain is live on mainnet and an authorization path exists **[VERIFY]**, large off-chain dispute-evidence and oracle-recomputation artifacts (§15) MAY be published to Bulletin by CID, with only the CID/hash referenced on the futarchy chain; this substitutes for ad-hoc archive-node hosting of evidence bundles and adds nothing consensus-critical. Retention renewal is the publishing party's burden; expiry of evidence storage MUST NOT affect the validity of any settled decision.
+
 ---
 
 ## 32. Bibliography and Source Provenance
