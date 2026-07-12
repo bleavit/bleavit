@@ -1,6 +1,6 @@
 # Futarchy System Architecture — Component Documents
 
-**Status: authoritative.** This document set is the single source of truth for the product design and architecture of the futarchy parachain and its canonical frontend. It supersedes `BACKEND_PLAN.md` and `FRONTEND_PLAN.md` (retained at the repository root as historical references) and implements every resolution recorded in [00-decision-record.md](00-decision-record.md), which in turn disposes of all 101 findings of `DESIGN_REVIEW.md` v2.0 (2026-07-12).
+**Status: authoritative.** This document set is the single source of truth for the product design and architecture of the futarchy parachain and its canonical frontend. It replaces the former `BACKEND_PLAN.md` and `FRONTEND_PLAN.md` (reorganized and repaired here; the originals are removed from the working tree but preserved in Git history) and implements every resolution recorded in [00-decision-record.md](00-decision-record.md), which in turn disposes of all 101 findings of the v2.0 design review (2026-07-12, likewise preserved in Git history).
 
 ## How this set is organized
 
@@ -31,6 +31,6 @@ Newcomers: 01 → 02 → 03 → 04 → 05, then as needed. Implementers of a sin
 
 ## Provenance
 
-- `BACKEND_PLAN.md` v1.0 draft and `FRONTEND_PLAN.md` — the source specifications, reorganized here with the review's repairs applied.
-- `DESIGN_REVIEW.md` v2.0 — the canonical review; its finding IDs (X-n, B-n, F-n) are cited throughout.
-- Everything the review verified as correct ("What the design gets right") is carried forward deliberately; `[VERIFY]` tags are retained wherever genuine uncertainty remains.
+- `BACKEND_PLAN.md` v1.0 draft and `FRONTEND_PLAN.md` — the source specifications, reorganized into this set with the review's repairs applied. Removed from the working tree; recoverable from Git history.
+- The v2.0 design review — the canonical review; its finding IDs (X-n, B-n, F-n) are cited throughout this set and dispositioned in full by [00-decision-record.md](00-decision-record.md) Part 2. Removed from the working tree; recoverable from Git history.
+- Everything the review verified as correct ("What the design gets right") is carried forward deliberately; `[VERIFY]` tags are retained wherever genuine uncertainty remains. Platform-source version pins and verification dates are consolidated in [01 §9](01-system-overview.md).

@@ -264,7 +264,16 @@ The design synthesizes five internal predecessor design documents, cited through
 | EFP | Epoch machine and values/beliefs table: pipelined epochs, geometric welfare aggregation, conflict pruning, arming schedule | **[VERIFY — as above]** |
 | AEGIS | Threat-model and defense catalogue: pillar decomposition, attestor/dispute designs, position-cap analysis (largely rejected as consensus defense, retained as analytics) | **[VERIFY — as above]** |
 
-External literature and platform sources (Hanson's futarchy and LMSR papers, MetaDAO conditional-market documentation, the Polkadot SDK repository state, and the npm-registry pins) carry forward exactly as recorded in the superseded plans' provenance sections, including their verification dates. Until the five [VERIFY] rows above are completed, no normative statement in this document set may rest on a source-document citation alone — every design element carried forward is restated normatively in its owning component document, so the bibliography gap does not weaken any binding text.
+Until the five [VERIFY] rows above are completed, no normative statement in this document set may rest on a source-document citation alone — every design element carried forward is restated normatively in its owning component document, so the bibliography gap does not weaken any binding text.
+
+**External literature.** R. Hanson, "Shall We Vote on Values, But Bet on Beliefs?" and Hanson's LMSR papers; MetaDAO conditional-market documentation (precedent for dual-mint conditional markets).
+
+**Platform-source verification (carried forward from the now-removed source plans, verified 2026-07-11).** These pins established feasibility and MUST be re-verified before implementation begins:
+
+- **Backend / Polkadot SDK** — verified against `raw.githubusercontent.com/paritytech/polkadot-sdk`: release branches `polkadot-stable2412 … polkadot-stable2606`; umbrella crate `polkadot-sdk = "2603.0.0"` on `polkadot-stable2603` (the pinned line); `frame_system::{authorize_upgrade, apply_authorized_upgrade, authorize_upgrade_without_checks}`; presence of `pallet-parameters`, `pallet-referenda`, `pallet-conviction-voting`, `pallet-preimage`, `pallet-scheduler`, `pallet-assets`, `pallet-treasury`, `pallet-utility`, `pallet-proxy`, `pallet-multisig`, `pallet-migrations`, `frame-metadata-hash-extension`, `pallet-safe-mode`, `pallet-tx-pause`, `cumulus-pallet-parachain-system`, cumulus `pallet-collator-selection`; `sp-arithmetic` fixed-point types; Zombienet, Chopsticks, `try-runtime-cli`. Model knowledge cutoff January 2026; Agile Coretime, async backing, Asset Hub registry and XCM v5 semantics were consulted from pre-cutoff knowledge and carry `[VERIFY]` in the owning docs.
+- **Frontend stack** — verified against `registry.npmjs.org` and the primary GitHub repos: `polkadot-api` 2.1.8, `smoldot` 3.3.1, `@substrate/connect` 2.1.8, `vite` 8.1.4, `dexie` 4.4.4, `idb` 8.0.3, `@ar.io/wayfinder-core` 2.0.0, `@ar.io/wayfinder-react` 2.0.1, `@ar.io/sdk` 4.0.3, `permaweb-deploy` 5.0.0, `@ardrive/turbo-sdk` 1.42.0 (`arkb` last published 2022 — rejected as unmaintained; `@reactive-dot/react` 0.72.0 evaluated, not adopted). Details and the FE-P1…P10 prototype gates live in [10](10-frontend-architecture.md) and [12](12-release-and-operations.md).
+
+The full historical text of the two source plans and the v2.0 design review is preserved in Git history (the commit prior to their removal) should the detailed derivations or the review's finding-by-finding arithmetic ever be needed.
 
 ---
 
