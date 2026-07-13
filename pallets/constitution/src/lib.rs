@@ -19,6 +19,7 @@ pub const RELEASE_CHANNEL_STORAGE_KEY: [u8; 32] = [
 pub const RELEASE_CHANNEL_LEN: usize = 168;
 pub const MAX_PARAMS: usize = 64;
 pub const MAX_CAPABILITIES: usize = 64;
+pub const MAX_METERS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum ParamValue {
@@ -92,9 +93,7 @@ impl ParamRecord {
         );
         if let Some(max_delta) = self.max_delta {
             ensure!(max_delta.same_kind(next), Error::WrongType);
-            let old = self.value.as_u128();
-            let new = next.as_u128();
-            let delta = old.abs_diff(new);
+            let delta = self.value.as_u128().abs_diff(next.as_u128());
             ensure!(delta <= max_delta.as_u128(), Error::DeltaTooLarge);
         }
         Ok(Self {
@@ -169,6 +168,13 @@ impl PhaseFlags {
     pub const fn empty() -> Self {
         Self(0)
     }
+    pub const fn from_bits(bits: u32) -> Result<Self, Error> {
+        if bits & Self::RESERVED_MASK == 0 {
+            Ok(Self(bits))
+        } else {
+            Err(Error::ReservedPhaseFlag)
+        }
+    }
     pub const fn bits(self) -> u32 {
         self.0
     }
@@ -196,7 +202,6 @@ impl ReleaseChannel {
         ensure!(bytes[0] == 1, Error::BadReleaseSchema);
         Ok(Self { bytes })
     }
-
     pub fn updated_at(&self) -> BlockNumber {
         le_u32_at(&self.bytes, 108)
     }
@@ -211,6 +216,55 @@ impl ReleaseChannel {
     }
 }
 
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+pub enum ConstitutionOrigin {
+    FutarchyParam,
+    FutarchyTreasury,
+    FutarchyCode,
+    FutarchyMeta,
+    ConstitutionalValues,
+    GuardianHold,
+    EmergencyPlaybook,
+    Root,
+    Signed,
+}
+
+impl ConstitutionOrigin {
+    const fn can_set_param(self, class: ParamClass) -> bool {
+        matches!(
+            (self, class),
+            (Self::FutarchyParam, ParamClass::Param)
+                | (Self::FutarchyTreasury, ParamClass::Treasury)
+                | (Self::FutarchyMeta, ParamClass::Meta)
+                | (Self::ConstitutionalValues, ParamClass::Const)
+                | (Self::ConstitutionalValues, ParamClass::Entrenched)
+                | (Self::ConstitutionalValues, ParamClass::MetaAndValues)
+                | (Self::Root, _)
+        )
+    }
+    const fn can_set_capability(self) -> bool {
+        matches!(
+            self,
+            Self::FutarchyMeta | Self::ConstitutionalValues | Self::Root
+        )
+    }
+    const fn can_set_release_channel(self) -> bool {
+        matches!(self, Self::FutarchyCode | Self::FutarchyMeta | Self::Root)
+    }
+    const fn can_set_phase_flag(self) -> bool {
+        matches!(
+            self,
+            Self::FutarchyMeta | Self::GuardianHold | Self::EmergencyPlaybook | Self::Root
+        )
+    }
+    const fn can_charge_meter(self) -> bool {
+        matches!(
+            self,
+            Self::FutarchyTreasury | Self::EmergencyPlaybook | Self::Root
+        )
+    }
+}
+
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
 pub struct ConstitutionState {
     pub params: Vec<ParamRecord>,
@@ -221,6 +275,16 @@ pub struct ConstitutionState {
 }
 
 impl ConstitutionState {
+    pub fn genesis() -> Self {
+        Self {
+            params: genesis_params(),
+            meters: genesis_meters(),
+            capabilities: genesis_capabilities(),
+            phase_flags: PhaseFlags::empty(),
+            release_channel: empty_release_channel(),
+        }
+    }
+
     pub fn set_param(&mut self, key: ParamKey, next: ParamValue, epoch: u32) -> Result<(), Error> {
         let record = self
             .params
@@ -229,6 +293,23 @@ impl ConstitutionState {
             .ok_or(Error::UnknownParam)?;
         *record = record.checked_update(next, epoch)?;
         Ok(())
+    }
+
+    pub fn dispatch_set_param(
+        &mut self,
+        origin: ConstitutionOrigin,
+        key: ParamKey,
+        next: ParamValue,
+        epoch: u32,
+    ) -> Result<(), Error> {
+        let class = self
+            .params
+            .iter()
+            .find(|r| r.key == key)
+            .ok_or(Error::UnknownParam)?
+            .class;
+        ensure!(origin.can_set_param(class), Error::BadOrigin);
+        self.set_param(key, next, epoch)
     }
 
     pub fn set_capability(&mut self, capability: CapabilityRecord) -> Result<(), Error> {
@@ -248,16 +329,93 @@ impl ConstitutionState {
         Ok(())
     }
 
+    pub fn dispatch_set_capability(
+        &mut self,
+        origin: ConstitutionOrigin,
+        capability: CapabilityRecord,
+    ) -> Result<(), Error> {
+        ensure!(origin.can_set_capability(), Error::BadOrigin);
+        self.set_capability(capability)
+    }
+
     pub fn capability_enabled(&self, class: ProposalClass, capability: Capability) -> bool {
         self.capabilities
             .iter()
             .any(|c| c.class == class && c.capability == capability && c.enabled)
+    }
+
+    pub fn dispatch_set_phase_flag(
+        &mut self,
+        origin: ConstitutionOrigin,
+        flag: u32,
+        enabled: bool,
+    ) -> Result<(), Error> {
+        ensure!(origin.can_set_phase_flag(), Error::BadOrigin);
+        self.phase_flags.set(flag, enabled)
+    }
+
+    pub fn dispatch_set_release_channel(
+        &mut self,
+        origin: ConstitutionOrigin,
+        bytes: [u8; RELEASE_CHANNEL_LEN],
+    ) -> Result<(), Error> {
+        ensure!(origin.can_set_release_channel(), Error::BadOrigin);
+        self.release_channel = ReleaseChannel::new(bytes)?;
+        Ok(())
+    }
+
+    pub fn dispatch_charge_meter(
+        &mut self,
+        origin: ConstitutionOrigin,
+        index: usize,
+        amount: u128,
+        epoch: u32,
+    ) -> Result<(), Error> {
+        ensure!(origin.can_charge_meter(), Error::BadOrigin);
+        let meter = self.meters.get_mut(index).ok_or(Error::UnknownMeter)?;
+        meter.charge(amount, epoch)
+    }
+
+    pub fn try_state(&self) -> Result<(), Error> {
+        ensure!(self.params.len() <= MAX_PARAMS, Error::TooManyParams);
+        ensure!(
+            self.capabilities.len() <= MAX_CAPABILITIES,
+            Error::TooManyCapabilities
+        );
+        ensure!(self.meters.len() <= MAX_METERS, Error::TooManyMeters);
+        PhaseFlags::from_bits(self.phase_flags.bits())?;
+        for record in &self.params {
+            ensure!(
+                record.value.same_kind(record.min) && record.value.same_kind(record.max),
+                Error::WrongType
+            );
+            ensure!(
+                record.min.as_u128() <= record.max.as_u128(),
+                Error::TryStateViolation
+            );
+            ensure!(
+                record.value.as_u128() >= record.min.as_u128(),
+                Error::BelowMin
+            );
+            ensure!(
+                record.value.as_u128() <= record.max.as_u128(),
+                Error::AboveMax
+            );
+            if let Some(max_delta) = record.max_delta {
+                ensure!(record.value.same_kind(max_delta), Error::WrongType);
+            }
+        }
+        for meter in &self.meters {
+            ensure!(meter.spent <= meter.limit, Error::MeterExhausted);
+        }
+        Ok(())
     }
 }
 
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum Error {
     UnknownParam,
+    UnknownMeter,
     WrongType,
     BelowMin,
     AboveMax,
@@ -267,7 +425,11 @@ pub enum Error {
     MeterExhausted,
     ReservedPhaseFlag,
     BadReleaseSchema,
+    TooManyParams,
+    TooManyMeters,
     TooManyCapabilities,
+    BadOrigin,
+    TryStateViolation,
 }
 
 macro_rules! ensure {
@@ -293,6 +455,44 @@ pub fn key16(name: &[u8]) -> ParamKey {
     let len = core::cmp::min(name.len(), out.len());
     out[..len].copy_from_slice(&name[..len]);
     out
+}
+
+pub fn empty_release_channel() -> ReleaseChannel {
+    let mut bytes = [0u8; RELEASE_CHANNEL_LEN];
+    bytes[0] = 1;
+    ReleaseChannel { bytes }
+}
+
+pub fn genesis_meters() -> Vec<Meter> {
+    alloc::vec![
+        Meter::new(kernel::KEEPER_BUDGET_EPOCH_FLOOR_USDC, 0),
+        Meter::new(0, 0)
+    ]
+}
+
+pub fn genesis_capabilities() -> Vec<CapabilityRecord> {
+    alloc::vec![
+        CapabilityRecord {
+            class: ProposalClass::Param,
+            capability: Capability::SetParam(key16(b"mkt.obs_interval")),
+            enabled: true
+        },
+        CapabilityRecord {
+            class: ProposalClass::Meta,
+            capability: Capability::SetCapability,
+            enabled: true
+        },
+        CapabilityRecord {
+            class: ProposalClass::Code,
+            capability: Capability::SetReleaseChannel,
+            enabled: true
+        },
+        CapabilityRecord {
+            class: ProposalClass::Treasury,
+            capability: Capability::TreasurySpend,
+            enabled: true
+        },
+    ]
 }
 
 pub fn genesis_params() -> Vec<ParamRecord> {
@@ -360,6 +560,28 @@ pub fn genesis_params() -> Vec<ParamRecord> {
     ]
 }
 
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarking {
+    use super::*;
+
+    pub fn benchmark_set_param() -> Result<(), Error> {
+        let mut state = ConstitutionState::genesis();
+        state.dispatch_set_param(
+            ConstitutionOrigin::FutarchyParam,
+            key16(b"mkt.obs_interval"),
+            ParamValue::U32(12),
+            1,
+        )
+    }
+
+    pub fn benchmark_set_release_channel() -> Result<(), Error> {
+        let mut state = ConstitutionState::genesis();
+        let mut bytes = [0u8; RELEASE_CHANNEL_LEN];
+        bytes[0] = 1;
+        state.dispatch_set_release_channel(ConstitutionOrigin::FutarchyCode, bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +625,55 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_set_param_checks_origin_and_error_paths() {
+        let mut state = ConstitutionState::genesis();
+        assert_eq!(
+            state.dispatch_set_param(
+                ConstitutionOrigin::Signed,
+                key16(b"mkt.obs_interval"),
+                ParamValue::U32(12),
+                1
+            ),
+            Err(Error::BadOrigin)
+        );
+        assert_eq!(
+            state.dispatch_set_param(
+                ConstitutionOrigin::FutarchyTreasury,
+                key16(b"mkt.obs_interval"),
+                ParamValue::U32(12),
+                1
+            ),
+            Err(Error::BadOrigin)
+        );
+        assert_eq!(
+            state.dispatch_set_param(
+                ConstitutionOrigin::FutarchyParam,
+                key16(b"missing"),
+                ParamValue::U32(12),
+                1
+            ),
+            Err(Error::UnknownParam)
+        );
+        state
+            .dispatch_set_param(
+                ConstitutionOrigin::FutarchyParam,
+                key16(b"mkt.obs_interval"),
+                ParamValue::U32(12),
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .params
+                .iter()
+                .find(|r| r.key == key16(b"mkt.obs_interval"))
+                .unwrap()
+                .value,
+            ParamValue::U32(12)
+        );
+    }
+
+    #[test]
     fn meters_reset_by_epoch_and_never_overspend() {
         let mut meter = Meter::new(10, 0);
         meter.charge(7, 0).unwrap();
@@ -412,15 +683,52 @@ mod tests {
     }
 
     #[test]
-    fn phase_flags_reject_reserved_bits() {
-        let mut flags = PhaseFlags::empty();
-        flags.set(PhaseFlags::SUDO_PRESENT, true).unwrap();
-        assert!(flags.contains(PhaseFlags::SUDO_PRESENT));
-        assert_eq!(flags.set(1 << 8, true), Err(Error::ReservedPhaseFlag));
+    fn dispatch_charge_meter_checks_origin_and_bounds() {
+        let mut state = ConstitutionState::genesis();
+        assert_eq!(
+            state.dispatch_charge_meter(ConstitutionOrigin::Signed, 0, 1, 0),
+            Err(Error::BadOrigin)
+        );
+        assert_eq!(
+            state.dispatch_charge_meter(ConstitutionOrigin::FutarchyTreasury, 99, 1, 0),
+            Err(Error::UnknownMeter)
+        );
+        assert_eq!(
+            state.dispatch_charge_meter(ConstitutionOrigin::FutarchyTreasury, 1, 1, 0),
+            Err(Error::MeterExhausted)
+        );
+        state
+            .dispatch_charge_meter(ConstitutionOrigin::FutarchyTreasury, 0, 1, 0)
+            .unwrap();
     }
 
     #[test]
-    fn release_channel_is_fixed_width_and_offset_readable() {
+    fn phase_flags_reject_reserved_bits_and_origin_misuse() {
+        let mut state = ConstitutionState::genesis();
+        assert_eq!(
+            state.dispatch_set_phase_flag(
+                ConstitutionOrigin::Signed,
+                PhaseFlags::SUDO_PRESENT,
+                true
+            ),
+            Err(Error::BadOrigin)
+        );
+        state
+            .dispatch_set_phase_flag(
+                ConstitutionOrigin::GuardianHold,
+                PhaseFlags::SUDO_PRESENT,
+                true,
+            )
+            .unwrap();
+        assert!(state.phase_flags.contains(PhaseFlags::SUDO_PRESENT));
+        assert_eq!(
+            state.dispatch_set_phase_flag(ConstitutionOrigin::GuardianHold, 1 << 8, true),
+            Err(Error::ReservedPhaseFlag)
+        );
+    }
+
+    #[test]
+    fn release_channel_is_fixed_width_offset_readable_and_origin_checked() {
         let channel = release_channel();
         assert_eq!(RELEASE_CHANNEL_STORAGE_KEY.len(), 32);
         assert_eq!(channel.updated_at(), 42);
@@ -430,23 +738,45 @@ mod tests {
         let mut bad = [0u8; RELEASE_CHANNEL_LEN];
         bad[0] = 2;
         assert_eq!(ReleaseChannel::new(bad), Err(Error::BadReleaseSchema));
+        let mut state = ConstitutionState::genesis();
+        assert_eq!(
+            state.dispatch_set_release_channel(ConstitutionOrigin::Signed, bad),
+            Err(Error::BadOrigin)
+        );
+        let mut good = [0u8; RELEASE_CHANNEL_LEN];
+        good[0] = 1;
+        state
+            .dispatch_set_release_channel(ConstitutionOrigin::FutarchyCode, good)
+            .unwrap();
     }
 
     #[test]
-    fn capability_table_is_bounded_and_queryable() {
-        let mut state = ConstitutionState {
-            params: genesis_params(),
-            meters: Vec::new(),
-            capabilities: Vec::new(),
-            phase_flags: PhaseFlags::empty(),
-            release_channel: release_channel(),
-        };
+    fn capability_table_is_bounded_origin_checked_and_queryable() {
+        let mut state = ConstitutionState::genesis();
         let cap = CapabilityRecord {
             class: ProposalClass::Meta,
             capability: Capability::SetCapability,
             enabled: true,
         };
-        state.set_capability(cap).unwrap();
+        assert_eq!(
+            state.dispatch_set_capability(ConstitutionOrigin::Signed, cap),
+            Err(Error::BadOrigin)
+        );
+        state
+            .dispatch_set_capability(ConstitutionOrigin::FutarchyMeta, cap)
+            .unwrap();
         assert!(state.capability_enabled(ProposalClass::Meta, Capability::SetCapability));
+    }
+
+    #[test]
+    fn try_state_rejects_corrupt_storage_shapes() {
+        let state = ConstitutionState::genesis();
+        state.try_state().unwrap();
+        let mut bad = state.clone();
+        bad.phase_flags = PhaseFlags(1 << 8);
+        assert_eq!(bad.try_state(), Err(Error::ReservedPhaseFlag));
+        let mut bad_meter = state;
+        bad_meter.meters[0].spent = bad_meter.meters[0].limit + 1;
+        assert_eq!(bad_meter.try_state(), Err(Error::MeterExhausted));
     }
 }
