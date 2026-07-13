@@ -15,3 +15,11 @@ cargo test --workspace
 if [[ -f tools/fixed/generate-lmsr-corpus.py ]]; then
   python3 tools/fixed/generate-lmsr-corpus.py --check
 fi
+
+if [[ -d reference-model/tests ]]; then
+  PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests
+fi
+
+if [[ -f tools/reference-model/generate-vectors.py ]]; then
+  python3 tools/reference-model/generate-vectors.py --check
+fi
