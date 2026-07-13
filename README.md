@@ -1,4 +1,4 @@
-# Bleavit
+# Bleavit — A self-governing system
 
 Futarchy was invented by Prof. Robin Hanson — thank you for your work; this project
 exists to build one.
