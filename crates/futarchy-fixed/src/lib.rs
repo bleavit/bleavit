@@ -278,23 +278,83 @@ pub const fn round_payout_down(value: FixedU64x64) -> u128 {
     value.raw() >> FRAC_BITS
 }
 
-/// Stable two-outcome LMSR cost `max(q_l,q_s) + b*ln(1 + exp(-|q_l-q_s|/b))`.
-pub fn lmsr_cost(
+fn ensure_lmsr_domain(
     q_l: FixedU64x64,
     q_s: FixedU64x64,
     b: FixedU64x64,
-) -> Result<FixedU64x64, FixedError> {
+) -> Result<(), FixedError> {
     if b.raw() == 0 {
         return Err(FixedError::DivisionByZero);
     }
     let max_q = cmp::max(q_l, q_s);
     let min_q = cmp::min(q_l, q_s);
     let displacement = max_q.checked_sub(min_q)?.checked_div(b)?;
-    let clamped = cmp::min(displacement, LMSR_DOMAIN_CLAMP);
+    if displacement > LMSR_DOMAIN_CLAMP {
+        return Err(FixedError::Domain);
+    }
+    Ok(())
+}
+
+/// Stable two-outcome LMSR cost `max(q_l,q_s) + b*ln(1 + exp(-|q_l-q_s|/b))`.
+///
+/// The protocol domain is enforced rather than silently clamped: states with
+/// `|q_l - q_s| / b > 48` must be rejected by callers before accepting a trade.
+pub fn lmsr_cost(
+    q_l: FixedU64x64,
+    q_s: FixedU64x64,
+    b: FixedU64x64,
+) -> Result<FixedU64x64, FixedError> {
+    ensure_lmsr_domain(q_l, q_s, b)?;
+    let max_q = cmp::max(q_l, q_s);
+    let min_q = cmp::min(q_l, q_s);
+    let displacement = max_q.checked_sub(min_q)?.checked_div(b)?;
     // exp(-d) is evaluated through the same in-crate helper in std and no_std builds.
-    let exp_neg = FixedU64x64::from_f64(exp_f64(-clamped.to_f64()))?;
+    let exp_neg = FixedU64x64::from_f64(exp_f64(-displacement.to_f64()))?;
     let log_term = FixedU64x64::ONE.checked_add(exp_neg)?.ln()?;
     max_q.checked_add(b.checked_mul(log_term)?)
+}
+
+/// Side of a two-outcome LMSR book.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LmsrSide {
+    Long,
+    Short,
+}
+
+/// Exact fixed-point cost of buying `amount` on `side`, before maker-adverse
+/// currency rounding and fees.
+pub fn lmsr_buy_cost(
+    q_l: FixedU64x64,
+    q_s: FixedU64x64,
+    b: FixedU64x64,
+    side: LmsrSide,
+    amount: FixedU64x64,
+) -> Result<FixedU64x64, FixedError> {
+    let before = lmsr_cost(q_l, q_s, b)?;
+    let (new_l, new_s) = match side {
+        LmsrSide::Long => (q_l.checked_add(amount)?, q_s),
+        LmsrSide::Short => (q_l, q_s.checked_add(amount)?),
+    };
+    let after = lmsr_cost(new_l, new_s, b)?;
+    after.checked_sub(before)
+}
+
+/// Exact fixed-point proceeds from selling `amount` on `side`, before
+/// maker-adverse currency rounding and fees.
+pub fn lmsr_sell_proceeds(
+    q_l: FixedU64x64,
+    q_s: FixedU64x64,
+    b: FixedU64x64,
+    side: LmsrSide,
+    amount: FixedU64x64,
+) -> Result<FixedU64x64, FixedError> {
+    let before = lmsr_cost(q_l, q_s, b)?;
+    let (new_l, new_s) = match side {
+        LmsrSide::Long => (q_l.checked_sub(amount)?, q_s),
+        LmsrSide::Short => (q_l, q_s.checked_sub(amount)?),
+    };
+    let after = lmsr_cost(new_l, new_s, b)?;
+    before.checked_sub(after)
 }
 
 impl Add for FixedU64x64 {
@@ -371,6 +431,51 @@ mod tests {
         approx(c0, 6931.47180560, 1e-8);
         let c1 = lmsr_cost(FixedU64x64::from_integer(1_000), FixedU64x64::ZERO, b).unwrap();
         approx(c1.checked_sub(c0).unwrap(), 512.494795136, 1e-8);
+        let buy = lmsr_buy_cost(
+            FixedU64x64::ZERO,
+            FixedU64x64::ZERO,
+            b,
+            LmsrSide::Long,
+            FixedU64x64::from_integer(1_000),
+        )
+        .unwrap();
+        approx(buy, 512.494795136, 1e-8);
+        let sell = lmsr_sell_proceeds(
+            FixedU64x64::from_integer(1_000),
+            FixedU64x64::ZERO,
+            b,
+            LmsrSide::Long,
+            FixedU64x64::from_integer(1_000),
+        )
+        .unwrap();
+        approx(sell, 512.494795136, 1e-8);
+    }
+
+    #[test]
+    fn lmsr_domain_edge_rejects_past_clamp() {
+        let b = FixedU64x64::from_integer(10_000);
+        assert_eq!(
+            lmsr_cost(FixedU64x64::from_integer(480_001), FixedU64x64::ZERO, b),
+            Err(FixedError::Domain)
+        );
+        assert_eq!(
+            lmsr_buy_cost(
+                FixedU64x64::from_integer(480_000),
+                FixedU64x64::ZERO,
+                b,
+                LmsrSide::Long,
+                FixedU64x64::from_integer(1),
+            ),
+            Err(FixedError::Domain)
+        );
+        assert!(lmsr_buy_cost(
+            FixedU64x64::from_integer(479_999),
+            FixedU64x64::ZERO,
+            b,
+            LmsrSide::Long,
+            FixedU64x64::from_integer(1),
+        )
+        .is_ok());
     }
 
     #[test]
