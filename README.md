@@ -1,4 +1,4 @@
-# Bliwit
+# Bleevit
 
 A **futarchy-governed Polkadot parachain**: token holders vote on *values* (what the
 chain should optimize), while conditional prediction markets decide *beliefs* (which
