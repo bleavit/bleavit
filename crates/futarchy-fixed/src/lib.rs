@@ -452,6 +452,149 @@ mod tests {
         );
     }
 
+    fn corpus_value(name: &str) -> FixedU64x64 {
+        match name {
+            "cost_0_0" => lmsr_cost(
+                FixedU64x64::ZERO,
+                FixedU64x64::ZERO,
+                FixedU64x64::from_integer(10_000),
+            )
+            .unwrap(),
+            "v1_buy_1000_long_cost" => lmsr_buy_cost(
+                FixedU64x64::ZERO,
+                FixedU64x64::ZERO,
+                FixedU64x64::from_integer(10_000),
+                LmsrSide::Long,
+                FixedU64x64::from_integer(1_000),
+            )
+            .unwrap(),
+            "v2_price_after_v1" => lmsr_price_long(
+                FixedU64x64::from_integer(1_000),
+                FixedU64x64::ZERO,
+                FixedU64x64::from_integer(10_000),
+            )
+            .unwrap(),
+            "v3_displace_0_5_to_0_6" => lmsr_displacement_between_prices(
+                FixedU64x64::from_integer(10_000),
+                FixedU64x64::from_f64(0.5).unwrap(),
+                FixedU64x64::from_f64(0.6).unwrap(),
+            )
+            .unwrap(),
+            "v3_cost_0_5_to_0_6" => {
+                let delta = lmsr_displacement_between_prices(
+                    FixedU64x64::from_integer(10_000),
+                    FixedU64x64::from_f64(0.5).unwrap(),
+                    FixedU64x64::from_f64(0.6).unwrap(),
+                )
+                .unwrap();
+                lmsr_buy_cost(
+                    FixedU64x64::ZERO,
+                    FixedU64x64::ZERO,
+                    FixedU64x64::from_integer(10_000),
+                    LmsrSide::Long,
+                    delta,
+                )
+                .unwrap()
+            }
+            "v4_worst_case_loss" => FixedU64x64::from_integer(10_000).checked_mul(LN_2).unwrap(),
+            "domain_edge_cost_480000_0" => lmsr_cost(
+                FixedU64x64::from_integer(480_000),
+                FixedU64x64::ZERO,
+                FixedU64x64::from_integer(10_000),
+            )
+            .unwrap(),
+            "cost_2500_0" => lmsr_cost(
+                FixedU64x64::from_integer(2_500),
+                FixedU64x64::ZERO,
+                FixedU64x64::from_integer(10_000),
+            )
+            .unwrap(),
+            "price_2500_0" => lmsr_price_long(
+                FixedU64x64::from_integer(2_500),
+                FixedU64x64::ZERO,
+                FixedU64x64::from_integer(10_000),
+            )
+            .unwrap(),
+            "cost_0_2500" => lmsr_cost(
+                FixedU64x64::ZERO,
+                FixedU64x64::from_integer(2_500),
+                FixedU64x64::from_integer(10_000),
+            )
+            .unwrap(),
+            "price_0_2500" => lmsr_price_long(
+                FixedU64x64::ZERO,
+                FixedU64x64::from_integer(2_500),
+                FixedU64x64::from_integer(10_000),
+            )
+            .unwrap(),
+            "cost_12345_6789" => lmsr_cost(
+                FixedU64x64::from_integer(12_345),
+                FixedU64x64::from_integer(6_789),
+                FixedU64x64::from_integer(10_000),
+            )
+            .unwrap(),
+            "price_12345_6789" => lmsr_price_long(
+                FixedU64x64::from_integer(12_345),
+                FixedU64x64::from_integer(6_789),
+                FixedU64x64::from_integer(10_000),
+            )
+            .unwrap(),
+            "cost_6789_12345" => lmsr_cost(
+                FixedU64x64::from_integer(6_789),
+                FixedU64x64::from_integer(12_345),
+                FixedU64x64::from_integer(10_000),
+            )
+            .unwrap(),
+            "price_6789_12345" => lmsr_price_long(
+                FixedU64x64::from_integer(6_789),
+                FixedU64x64::from_integer(12_345),
+                FixedU64x64::from_integer(10_000),
+            )
+            .unwrap(),
+            "cost_240000_0" => lmsr_cost(
+                FixedU64x64::from_integer(240_000),
+                FixedU64x64::ZERO,
+                FixedU64x64::from_integer(10_000),
+            )
+            .unwrap(),
+            "price_240000_0" => lmsr_price_long(
+                FixedU64x64::from_integer(240_000),
+                FixedU64x64::ZERO,
+                FixedU64x64::from_integer(10_000),
+            )
+            .unwrap(),
+            "cost_0_240000" => lmsr_cost(
+                FixedU64x64::ZERO,
+                FixedU64x64::from_integer(240_000),
+                FixedU64x64::from_integer(10_000),
+            )
+            .unwrap(),
+            "price_0_240000" => lmsr_price_long(
+                FixedU64x64::ZERO,
+                FixedU64x64::from_integer(240_000),
+                FixedU64x64::from_integer(10_000),
+            )
+            .unwrap(),
+            other => panic!("unknown corpus row: {other}"),
+        }
+    }
+
+    #[test]
+    fn generated_lmsr_corpus_matches_committed_values() {
+        let corpus = include_str!("../fixtures/lmsr_corpus.csv");
+        let mut checked = 0u32;
+        for line in corpus.lines() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (name, expected) = line.split_once(',').unwrap();
+            let expected = expected.parse::<f64>().unwrap();
+            approx(corpus_value(name), expected, 1e-8);
+            checked += 1;
+        }
+        assert_eq!(checked, 19);
+    }
+
     #[test]
     fn constants_match_reference_values() {
         approx(LN_2, core::f64::consts::LN_2, 1e-18);
