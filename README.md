@@ -20,7 +20,7 @@ rollout that removes `sudo` at Phase 4.
 
 ## Status
 
-**Specification complete (2026-07-12) · implementation bootstrap started (M0, 2026-07-13).**
+**Specification complete (2026-07-12) · foundations through M3 implemented (2026-07-13).**
 
 - The authoritative spec is [`docs/architecture/`](docs/architecture/README.md) —
   16 component documents + decision record, produced by resolving all 101 findings
@@ -41,8 +41,10 @@ rollout that removes `sudo` at Phase 4.
 | `.claude/` | Automation: session-context injection, skills, subagents, path-scoped rules, and Stop-hook guards for PLAN.md freshness and README's pinned lines |
 | `.codex/` | Codex CLI session playbooks mirroring the skills |
 | [`Cargo.toml`](Cargo.toml), [`rust-toolchain.toml`](rust-toolchain.toml), [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`tools/ci/rust-workspace-gates.sh`](tools/ci/rust-workspace-gates.sh), [`tools/ci/check-doc-links.py`](tools/ci/check-doc-links.py) | M0 bootstrap: Rust workspace manifest, pinned toolchain components, CI skeleton, and local gate scripts |
-| `crates/futarchy-primitives/` | M1 shared primitive crate: `no_std` contract/view types, version constant, and kernel/chain/currency bounds (SCALE derive wiring pending registry access) |
-| `crates/`, `pallets/`, `runtime/`, `node/`, `reference-model/`, `frontend/` | Implementation roots created for future milestones; currently placeholders except where a milestone adds code |
+| `crates/futarchy-primitives/` | M1 shared primitive crate: `no_std` contract/view types, version constant, and kernel/chain/currency bounds |
+| `crates/futarchy-fixed/` | M2 deterministic 64.64 fixed-point LMSR/transcendental crate with generated regression fixtures |
+| [`reference-model/`](reference-model/pyproject.toml), [`tools/reference-model/generate-vectors.py`](tools/reference-model/generate-vectors.py) | M3 independent Python executable spec and CI-regenerated JSON vector corpus |
+| `pallets/`, `runtime/`, `node/`, `frontend/` | Implementation roots created for future milestones; currently placeholders except where a milestone adds code |
 
 ## How this gets built
 
@@ -64,7 +66,7 @@ Humans and agents alike: read [AGENTS.md](AGENTS.md), then [PLAN.md](PLAN.md), t
   TLA⁺/Quint, cargo-fuzz, frame-benchmarking (01 §9, 15 §4).
 - **Frontend:** TypeScript, polkadot-api 2.x, smoldot 3.x, Vite 8, Dexie 4; Arweave
   via permaweb-deploy/Turbo; Playwright + Lighthouse CI (01 §9, 10, 12).
-- **Reference model:** Python + MPFR-256, CI-regenerated vector corpus (04 §5, 15 §4.4).
+- **Reference model:** Python high-precision reference math, CI-regenerated vector corpus (MPFR-256 release target) (04 §5, 15 §4.4).
 
 M0 re-verified the initial platform pins on 2026-07-13; the detailed result is tracked as V-1 in [PLAN.md](PLAN.md).
 

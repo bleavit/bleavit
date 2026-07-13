@@ -17,6 +17,19 @@ jobs:
       - name: Rust workspace gates
         run: tools/ci/rust-workspace-gates.sh
 
+  reference-model:
+    name: Reference model
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run reference model tests
+        run: python3 -m pytest reference-model
+      - name: Check generated vector corpus
+        run: python3 tools/reference-model/generate-vectors.py --check
+
   docs:
     name: Documentation links
     runs-on: ubuntu-latest

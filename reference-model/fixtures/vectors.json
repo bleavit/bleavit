@@ -1,0 +1,126 @@
+{
+  "decision_scenarios": [
+    {
+      "delta": "0.06",
+      "hurdle": "0.05",
+      "name": "hurdle_met",
+      "outcome": "Adopt"
+    },
+    {
+      "delta": "0.04",
+      "hurdle": "0.05",
+      "name": "below_hurdle",
+      "outcome": "Reject",
+      "reason": "HurdleNotMet"
+    }
+  ],
+  "high_precision_corpus": {
+    "b": "10000",
+    "samples": [
+      {
+        "cost": "6931.471805599453094172321214581766",
+        "cost_raw_64x64_nearest": 127863086452026556597886,
+        "price_long": "0.500000000000000000000000000000",
+        "price_raw_64x64_nearest": 9223372036854775808,
+        "q_long": "0",
+        "q_short": "0"
+      },
+      {
+        "cost": "7443.966600735708948300991083156580",
+        "cost_raw_64x64_nearest": 137316946777013275012526,
+        "price_long": "0.524979187478939986099193182604",
+        "price_raw_64x64_nearest": 9684156715447991832,
+        "q_long": "1000",
+        "q_short": "0"
+      },
+      {
+        "cost": "8259.394198788435622078361316583179",
+        "cost_raw_64x64_nearest": 152358930988931625093447,
+        "price_long": "0.562176500885798104027323637903",
+        "price_raw_64x64_nearest": 10370326036093868670,
+        "q_long": "2500",
+        "q_short": "0"
+      },
+      {
+        "cost": "8259.394198788435622078361316583179",
+        "cost_raw_64x64_nearest": 152358930988931625093447,
+        "price_long": "0.437823499114201895972676362097",
+        "price_raw_64x64_nearest": 8076418037615682946,
+        "q_long": "0",
+        "q_short": "2500"
+      },
+      {
+        "cost": "16879.472768273702586482265198428258",
+        "cost_raw_64x64_nearest": 311371314255494682808913,
+        "price_long": "0.635433855216816009556050908321",
+        "price_raw_64x64_nearest": 11721685702955213973,
+        "q_long": "12345",
+        "q_short": "6789"
+      },
+      {
+        "cost": "240000.000000377513454420783954750972",
+        "cost_raw_64x64_nearest": 4427218577697256281918082,
+        "price_long": "0.999999999962248654558634186566",
+        "price_raw_64x64_nearest": 18446744073013162208,
+        "q_long": "240000",
+        "q_short": "0"
+      },
+      {
+        "cost": "240000.000000377513454420783954750972",
+        "cost_raw_64x64_nearest": 4427218577697256281918082,
+        "price_long": "0.000000000037751345441365813434",
+        "price_raw_64x64_nearest": 696389408,
+        "q_long": "0",
+        "q_short": "240000"
+      },
+      {
+        "cost": "480000.000000000000000014251640827409",
+        "cost_raw_64x64_nearest": 8854437155380584775680263,
+        "price_long": "0.999999999999999999998574835917",
+        "price_raw_64x64_nearest": 18446744073709551616,
+        "q_long": "480000",
+        "q_short": "0"
+      }
+    ]
+  },
+  "ledger_scenarios": [
+    {
+      "input": "10.000000",
+      "name": "void_neutral_branch_usdc",
+      "payout": "5.000000"
+    }
+  ],
+  "lmsr_vectors": {
+    "V1": {
+      "action": "buy_1000_long_cost",
+      "raw_64x64_nearest": 9453860324986718414640,
+      "value": "512.494795136255854128669868574815"
+    },
+    "V2": {
+      "action": "price_after_v1",
+      "raw_64x64_nearest": 9684156715447991832,
+      "value": "0.524979187478939986099193182604"
+    },
+    "V3": {
+      "action": "displace_0_5_to_0_6",
+      "cost": "2231.435513142097557662950903098345",
+      "delta": "4054.651081081643819780131154643491"
+    },
+    "V4": {
+      "action": "worst_case_loss",
+      "raw_64x64_nearest": 127863086452026556597886,
+      "value": "6931.471805599453094172321214581766"
+    },
+    "V5": {
+      "action": "round_trip_v1_then_sell_1000",
+      "net_fees_only": "-3.074968770817535124772019211449",
+      "proceeds_before_fees": "512.494795136255854128669868574815"
+    },
+    "V6": {
+      "action": "domain_edge",
+      "error": "PriceBoundExceeded"
+    }
+  },
+  "precision": "Python Decimal, 90 decimal digits (>=256-bit precision target)",
+  "schema": "bleavit.reference-model.v1"
+}
