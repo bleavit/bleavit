@@ -1,9 +1,11 @@
+<p align="center">
+  <img src="assets/Bleavit-logo.png" alt="Bleavit logo" width="160">
+</p>
+
 # Bleavit — A self-governing system
 
 Futarchy was invented by Prof. Robin Hanson — thank you for your work; this project
 exists to build one.
-
-<img src="assets/Bleavit-logo.png" alt="Bleavit logo" width="200">
 
 A **futarchy-governed Polkadot parachain**: token holders vote on *values* (what the
 chain should optimize), while conditional prediction markets decide *beliefs* (which
