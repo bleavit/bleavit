@@ -2,7 +2,7 @@
 
 **Status: normative component specification. Supersedes the corresponding sections of BACKEND_PLAN.md/FRONTEND_PLAN.md** (FE §17 wallet/transaction architecture, FE §19 UX/degradation matrix, the workflow-facing rows of FE §30, and the FE §26 work breakdown; it consumes but does not restate FE §18, which is owned by [10-frontend-architecture.md](10-frontend-architecture.md)).
 
-**Boundary.** This document owns: the user-facing screen inventory, the transaction-construction and signing-safety rules, every per-call precondition table, the VOID redemption UX, the governance surface (FE-14), the operator surface (FE-15), the NUM funding flow, the sudo-era banner, the UX degradation matrix (E-rows), and the frontend work breakdown. It references: the frozen chain↔frontend contract in [02-integration-contract.md](02-integration-contract.md) (all storage/event/call/constant names used here are the canonical ones frozen there), the ledger semantics in [03-conditional-ledger.md](03-conditional-ledger.md), governance tracks and ratification in [06-governance-and-guardians.md](06-governance-and-guardians.md), the oracle/registry games in [07-oracle-and-disputes.md](07-oracle-and-disputes.md), fee and treasury economics in [08-treasury-and-economics.md](08-treasury-and-economics.md), the execution guard's dispatch-time checks in [09-execution-upgrades-and-rollout.md](09-execution-upgrades-and-rollout.md), the data layer and boot/compat machines in [10-frontend-architecture.md](10-frontend-architecture.md), and release/operations in [12-release-and-operations.md](12-release-and-operations.md). Constants quoted here are for readability only; normative values live in [13-parameters.md](13-parameters.md) and [02](02-integration-contract.md).
+**Boundary.** This document owns: the user-facing screen inventory, the transaction-construction and signing-safety rules, every per-call precondition table, the VOID redemption UX, the governance surface (FE-14), the operator surface (FE-15), the USDC funding flow, the sudo-era banner, the UX degradation matrix (E-rows), and the frontend work breakdown. It references: the frozen chain↔frontend contract in [02-integration-contract.md](02-integration-contract.md) (all storage/event/call/constant names used here are the canonical ones frozen there), the ledger semantics in [03-conditional-ledger.md](03-conditional-ledger.md), governance tracks and ratification in [06-governance-and-guardians.md](06-governance-and-guardians.md), the oracle/registry games in [07-oracle-and-disputes.md](07-oracle-and-disputes.md), fee and treasury economics in [08-treasury-and-economics.md](08-treasury-and-economics.md), the execution guard's dispatch-time checks in [09-execution-upgrades-and-rollout.md](09-execution-upgrades-and-rollout.md), the data layer and boot/compat machines in [10-frontend-architecture.md](10-frontend-architecture.md), and release/operations in [12-release-and-operations.md](12-release-and-operations.md). Constants quoted here are for readability only; normative values live in [13-parameters.md](13-parameters.md) and [02](02-integration-contract.md).
 
 RFC 2119 language throughout.
 
@@ -20,7 +20,7 @@ The design review verified the following as correct; this document carries them 
 
 ## 11.2 Screen inventory
 
-The canonical frontend serves **every** protocol workflow — including the values layer and operator workflows (D-11) and NUM funding (D-12). "All state light-client readable" is a hard requirement for every row: each screen's reads appear in its precondition/query table below, and none requires an archive node, indexer, or RPC (INV-FE-4 stands unamended).
+The canonical frontend serves **every** protocol workflow — including the values layer and operator workflows (D-11) and USDC funding (D-12). "All state light-client readable" is a hard requirement for every row: each screen's reads appear in its precondition/query table below, and none requires an archive node, indexer, or RPC (INV-FE-4 stands unamended).
 
 | # | Screen / workflow | Area | Primary reads | Extrinsics | Spec |
 |---|---|---|---|---|---|
@@ -43,9 +43,9 @@ The canonical frontend serves **every** protocol workflow — including the valu
 | S17 | Upgrade crank (`apply_authorized_upgrade`) | **FE-15** | authorized-hash storage, release artifact | `system.apply_authorized_upgrade` | §11.8.4 |
 | S18 | Welfare snapshot crank | **FE-15** | snapshot staleness | `welfare.snapshot(epoch)` | §11.8.5 |
 | S19 | Incident / Milestone registry: file + challenge | **FE-15** | `pallet-registry` storage per [07](07-oracle-and-disputes.md) | `registry.file_incident/file_milestone/challenge` | §11.8.6 |
-| S20 | Balances & funding status | core | `System.Account`, `ForeignAssets.Account(NUM_LOCATION, who)` | — | [02](02-integration-contract.md) |
+| S20 | Balances & funding status | core | `System.Account`, `ForeignAssets.Account(USDC_LOCATION, who)` | — | [02](02-integration-contract.md) |
 
-NUM balance reads use the `ForeignAssets` instance keyed by the pinned XCM `Location` (D-17, frozen in [02](02-integration-contract.md), incl. the `[VERIFY asset index 1337]` that lives there) — never `Assets.Account`.
+USDC balance reads use the `ForeignAssets` instance keyed by the pinned XCM `Location` (D-17, frozen in [02](02-integration-contract.md), incl. the `[VERIFY asset index 1337]` that lives there) — never `Assets.Account`.
 
 **Forecast trading is cut (D-8).** Books close at branch resolution and never reopen. No screen, route, precondition row, or copy in this document refers to post-resolution ("forecast") trading; the residue in FE §17.6/§14.1 is removed. S3 trades only while the owning proposal is in `Trading`/`Extended` (Baseline books: while the epoch trading window is open — see §11.5 row P-2).
 
@@ -60,7 +60,7 @@ Carried forward from FE §17.1–§17.3, §17.5, §17.7–§17.8 with the fee re
 - **Signers.** Injected PJS-compatible extensions via `polkadot-api/pjs-signer` **[VERIFY exact export names on PAPI 2.1.x — FE-P1]**; raw-payload flow (QR/hex + metadata-hash mode) for air-gapped and hardware signers **[VERIFY Ledger Generic App + CheckMetadataHash flow for a custom chain — FE-P6]**. Multisig via `Multisig.as_multi` with approval state read from `Multisig.Multisigs`; proxies supported as call wrappers under the same precondition system.
 - **Lifecycle.** Draft → Prepared(at B) → Refreshing → {Blocked | AwaitingSignature(at B′)} → Broadcast → InBestBlock → **Finalized** (only success state) | Dropped | Retracted. Post-finalization the app decodes the extrinsic's events to distinguish inclusion from call success and renders dispatch errors with human text (e.g. `market.buy failed: MaxCostExceeded — you paid nothing`).
 - **Mortality/nonce.** Era 64 blocks from B′ (256 for raw-external); nonce from finalized `System.Account(who).nonce` at B′ plus tracked in-flight increments; phase-boundary proximity warning when a relevant boundary is < 25 blocks away.
-- **Fee currency selector (D-12, X-14 resolved).** Fees are payable in GOV or NUM via `pallet-asset-tx-payment`; the conversion binds to the constitution key **`fee.gov_num_rate`** (typed, bounded [0.1×, 10×] around its reference, PARAM-adjustable — *(normative value: [08](08-treasury-and-economics.md)/[13](13-parameters.md))*). The selector reads this key live (a `Constitution.Params` storage read, light-client verified), shows the estimate in both currencies, and recomputes on selection. NUM-only accounts are always viable: every precondition table below computes fee headroom in the *selected* fee asset. The rate key and its bounds MUST be displayed in expert mode.
+- **Fee currency selector (D-12, X-14 resolved).** Fees are payable in WIT or USDC via `pallet-asset-tx-payment`; the conversion binds to the constitution key **`fee.wit_usdc_rate`** (typed, bounded [0.1×, 10×] around its reference, PARAM-adjustable — *(normative value: [08](08-treasury-and-economics.md)/[13](13-parameters.md))*). The selector reads this key live (a `Constitution.Params` storage read, light-client verified), shows the estimate in both currencies, and recomputes on selection. USDC-only accounts are always viable: every precondition table below computes fee headroom in the *selected* fee asset. The rate key and its bounds MUST be displayed in expert mode.
 - **Anti-substitution.** The confirm screen derives its human summary by decoding `prep.scaleHex` — the exact bytes to be signed — never from form state; the wallet's metadata-hash decode is the independent second channel.
 - **Dry-run.** No general dry-run through the light client; the precondition system statically checks every failure mode the runtime would (per-call tables, §11.5–§11.9); expert mode allows dry-run via the quarantined RPC fallback labelled "unverified simulation", never gating success.
 
@@ -96,15 +96,15 @@ Each row = the exact re-reads at B′. `[C]` marks a constants-API read; everyth
 
 | # | Tx | Preconditions re-read at B′ |
 |---|---|---|
-| P-1 | `market.buy/sell` (decision & gate books) | owning proposal state ∈ {`Trading`, `Extended`} — **only**; market phase Open; book `q_L, q_S, b` (recompute cost via client LMSR; recheck `max_cost`/`min_proceeds` still satisfiable); `quote()` vs. client recompute agree within the fixed-point bounds (else `FE-CHAIN-005`, trading blocked); user NUM balance (buy) / position balance (sell); per-trade min/max `[C]`; `Constitution.PhaseFlags` trading-enabled bit set; no PB-LEDGER-FREEZE active ([06](06-governance-and-guardians.md)) |
+| P-1 | `market.buy/sell` (decision & gate books) | owning proposal state ∈ {`Trading`, `Extended`} — **only**; market phase Open; book `q_L, q_S, b` (recompute cost via client LMSR; recheck `max_cost`/`min_proceeds` still satisfiable); `quote()` vs. client recompute agree within the fixed-point bounds (else `FE-CHAIN-005`, trading blocked); user USDC balance (buy) / position balance (sell); per-trade min/max `[C]`; `Constitution.PhaseFlags` trading-enabled bit set; no PB-LEDGER-FREEZE active ([06](06-governance-and-guardians.md)) |
 | P-2 | `market.buy/sell` (**Baseline book**) | `BaselineMarketOf(epoch)` exists (D-2/X-10); epoch trading window open — Trade phase d5–d18 *(normative value: [13](13-parameters.md))* **or** any epoch-e decision pair still in `Extended` (the Baseline book stays open through the last epoch-e decision incl. per-pair extensions, [04](04-markets-and-pricing.md) §8.4); `BaselineVaults(epoch)` open ([03](03-conditional-ledger.md)); book state + slippage recheck as P-1; per-trade min/max `[C]`; PhaseFlags trading-enabled; no PB-LEDGER-FREEZE |
-| P-3 | `ledger.split` / `split_scalar` | vault `Open`; NUM balance ≥ amount + fee headroom (in selected fee asset); `MinSplit` `[C]`; caller position count < `MaxPositionsPerAccount` `[C]` for each newly created position key; no PB-LEDGER-FREEZE |
-| P-4 | `ledger.merge` / `merge_scalar` | vault ∈ {`Open`, `Resolved`, **`Voided`**} (merge is available in every non-`ScalarSettled` state — the D-1 par path, [03](03-conditional-ledger.md) §5.1); user holds ≥ amount of the complete pair being merged (both sides re-read); payout = amount NUM at par, displayed |
-| P-5 | `ledger.redeem` (branch-NUM) | vault `ScalarSettled{winner, s}` **only** — `Resolved` admits no unpaired redemption (outflow monotonicity, [03](03-conditional-ledger.md) §2.3; `merge` is the par path there, row P-4); user holds winning-branch NUM ≥ amount; payout 1:1 displayed. *(Not applicable under `Voided` — see §11.6; the old "winning-position balance" requirement is deleted for VOID.)* |
+| P-3 | `ledger.split` / `split_scalar` | vault `Open`; USDC balance ≥ amount + fee headroom (in selected fee asset); `MinSplit` `[C]`; caller position count < `MaxPositionsPerAccount` `[C]` for each newly created position key; no PB-LEDGER-FREEZE |
+| P-4 | `ledger.merge` / `merge_scalar` | vault ∈ {`Open`, `Resolved`, **`Voided`**} (merge is available in every non-`ScalarSettled` state — the D-1 par path, [03](03-conditional-ledger.md) §5.1); user holds ≥ amount of the complete pair being merged (both sides re-read); payout = amount USDC at par, displayed |
+| P-5 | `ledger.redeem` (branch-USDC) | vault `ScalarSettled{winner, s}` **only** — `Resolved` admits no unpaired redemption (outflow monotonicity, [03](03-conditional-ledger.md) §2.3; `merge` is the par path there, row P-4); user holds winning-branch USDC ≥ amount; payout 1:1 displayed. *(Not applicable under `Voided` — see §11.6; the old "winning-position balance" requirement is deleted for VOID.)* |
 | P-6 | `ledger.redeem_scalar` | vault `ScalarSettled`; settlement `s` present; user LONG/SHORT balance ≥ amount; expected payout recomputed and displayed: LONG `floor(a·s)`, unpaired SHORT `floor(a·(1−s))` *(normative values: [13](13-parameters.md))* |
 | P-7 | `ledger.redeem_scalar_pair` | vault `ScalarSettled`; user holds ≥ a of **both** LONG and SHORT (winning branch); payout exactly `a`, displayed ([03](03-conditional-ledger.md), B-5) |
 | P-8 | `ledger.redeem_void` | see §11.6 table |
-| P-9 | `ledger.transfer` | vault ∈ {`Open`, `Resolved`, `Voided`}; recipient position count < `MaxPositionsPerAccount` `[C]` (protocol accounts exempt); `MinTransfer` `[C]`; per-entry deposit 0.1 NUM headroom *(normative value: [13](13-parameters.md))* |
+| P-9 | `ledger.transfer` | vault ∈ {`Open`, `Resolved`, `Voided`}; recipient position count < `MaxPositionsPerAccount` `[C]` (protocol accounts exempt); `MinTransfer` `[C]`; per-entry deposit 0.1 USDC headroom *(normative value: [13](13-parameters.md))* |
 | P-10 | `epoch.submit` | `Epoch.EpochOf.phase == Intake`; `IntakeQueue` len < 64 *(normative value: [13](13-parameters.md))*; caller's intake entries this epoch < 4 (rate limit, [06](06-governance-and-guardians.md)); class bond balance; preimage noted with matching hash + len **and pinned via `preimage.request_preimage`** ([06](06-governance-and-guardians.md), B-13); resource-domain validity vs. constitution tables; **warning surfaced**: preimage-missing cancellation slashes 10% of the bond, non-decision-grade outcomes slash 10% (to INSURANCE) — the old "full refund" copy is removed |
 | P-11 | `epoch.withdraw` | proposal in `Submitted`, caller is proposer, before Qualify |
 | P-12 | `execution_guard.execute` | **complete dispatch-time list — see below** |
@@ -141,8 +141,8 @@ The FE renders each of the 14 checks as a named row with expected/actual; any fa
 
 The redeem screen (S4) handles the `VaultState::Voided` state end-to-end. On `VaultVoided` (event frozen in [02](02-integration-contract.md)) the position card for that vault switches to the VOID layout:
 
-1. **Primary action — "Merge pairs → 100% recovery."** If the user holds complete pairs (branch-NUM pairs, or LONG+SHORT scalar sets within a branch), the screen leads with `merge`/`merge_scalar`: complete pairs always recover par under VOID. The screen computes the user's maximal pairable amount across their positions and pre-fills it.
-2. **Secondary action — `redeem_void(pid, kind, amount)`** for genuinely unpaired holdings, with the rates shown **honestly and prominently**: unpaired branch-NUM pays `floor(a/2)`; unpaired LONG or SHORT pays `floor(a/4)` *(normative values: [13](13-parameters.md))*. Copy (normative intent, exact wording localizable): *"This vault was voided. Complete pairs recover 100% by merging. An unpaired single-branch position redeems at 0.5 per branch-NUM (0.25 per LONG/SHORT) — the value of a voided binary claim."* No copy may describe the 0.5/0.25 rates as a penalty or loss of principal on the protocol path (PT-2 restated per D-1: complete-set holders and market buyers — who hold the mirror branch-NUM per D-3 — recover full principal).
+1. **Primary action — "Merge pairs → 100% recovery."** If the user holds complete pairs (branch-USDC pairs, or LONG+SHORT scalar sets within a branch), the screen leads with `merge`/`merge_scalar`: complete pairs always recover par under VOID. The screen computes the user's maximal pairable amount across their positions and pre-fills it.
+2. **Secondary action — `redeem_void(pid, kind, amount)`** for genuinely unpaired holdings, with the rates shown **honestly and prominently**: unpaired branch-USDC pays `floor(a/2)`; unpaired LONG or SHORT pays `floor(a/4)` *(normative values: [13](13-parameters.md))*. Copy (normative intent, exact wording localizable): *"This vault was voided. Complete pairs recover 100% by merging. An unpaired single-branch position redeems at 0.5 per branch-USDC (0.25 per LONG/SHORT) — the value of a voided binary claim."* No copy may describe the 0.5/0.25 rates as a penalty or loss of principal on the protocol path (PT-2 restated per D-1: complete-set holders and market buyers — who hold the mirror branch-USDC per D-3 — recover full principal).
 3. **Mixed holdings**: the screen decomposes the user's balances into (max mergeable pairs) + (residual unpaired amounts) and offers both actions in one flow, showing the total recovery.
 4. Rounding is against the redeemer; residues follow the dust rule ([03](03-conditional-ledger.md)); the displayed payout is the exact floor computation.
 
@@ -150,8 +150,8 @@ Precondition rows:
 
 | Tx (under `Voided`) | Preconditions re-read at B′ |
 |---|---|
-| `ledger.merge` / `merge_scalar` | vault state == `Voided` (or `Open`/`Resolved`); user holds ≥ amount of **both** sides of the pair; payout = amount NUM (par), displayed |
-| `ledger.redeem_void(pid, kind, amount)` | vault state == `Voided`; user balance of `kind` ≥ amount; expected payout recomputed and displayed (`floor(a/2)` branch-NUM; `floor(a/4)` LONG/SHORT); **no winning-position-balance requirement** — that requirement applies only to P-5/P-6 under `Resolved`/`ScalarSettled` and is explicitly absent here |
+| `ledger.merge` / `merge_scalar` | vault state == `Voided` (or `Open`/`Resolved`); user holds ≥ amount of **both** sides of the pair; payout = amount USDC (par), displayed |
+| `ledger.redeem_void(pid, kind, amount)` | vault state == `Voided`; user balance of `kind` ≥ amount; expected payout recomputed and displayed (`floor(a/2)` branch-USDC; `floor(a/4)` LONG/SHORT); **no winning-position-balance requirement** — that requirement applies only to P-5/P-6 under `Resolved`/`ScalarSettled` and is explicitly absent here |
 
 There is no "winning branch" under VOID; any UI element that gates redemption on a winning position MUST NOT render for a `Voided` vault. See E-row E16 (§11.12).
 
@@ -190,8 +190,8 @@ The values layer is served by the canonical frontend. All state involved is boun
 
 | # | Tx | Preconditions re-read at B′ |
 |---|---|---|
-| G-1 | `conviction_voting.vote(poll_index, vote)` | referendum status `Ongoing`; vote balance ≤ free GOV; conviction lock duration displayed; **oracle track: snapshot rule of §11.7.5 evaluated and surfaced** |
-| G-2 | `conviction_voting.delegate(class, to, conviction, balance)` | no direct votes recorded in `VotingFor(who, class)` (else offer `remove_vote` first); balance ≤ free GOV; target address reviewed per §11.3 anti-substitution |
+| G-1 | `conviction_voting.vote(poll_index, vote)` | referendum status `Ongoing`; vote balance ≤ free WIT; conviction lock duration displayed; **oracle track: snapshot rule of §11.7.5 evaluated and surfaced** |
+| G-2 | `conviction_voting.delegate(class, to, conviction, balance)` | no direct votes recorded in `VotingFor(who, class)` (else offer `remove_vote` first); balance ≤ free WIT; target address reviewed per §11.3 anti-substitution |
 | G-3 | `conviction_voting.undelegate(class)` | currently delegating in class |
 | G-4 | `conviction_voting.remove_vote(class, index)` | vote exists; referendum ended or removal allowed |
 | G-5 | `conviction_voting.unlock(class, target)` | computed unlock block ≤ now (else blocked with the exact remaining lock time) |
@@ -212,7 +212,7 @@ For every proposal whose class requires values ratification (CODE/META per [06](
 
 ### 11.7.5 OracleResolution ballot and the pre-cohort snapshot rule
 
-Terminal (round-3) oracle disputes escalate to the hardened `oracle` track: 60% approval / 10% support / 7-day *(normative values: [13](13-parameters.md); D-18)*, only admissible call `oracle.adjudicate(round_id, verdict)`. The tally uses a **pre-cohort conviction snapshot**: only GOV conviction-locked **before the subject cohort's creation block** counts; capital that entered after the cohort began is excluded ([06](06-governance-and-guardians.md)).
+Terminal (round-3) oracle disputes escalate to the hardened `oracle` track: 60% approval / 10% support / 7-day *(normative values: [13](13-parameters.md); D-18)*, only admissible call `oracle.adjudicate(round_id, verdict)`. The tally uses a **pre-cohort conviction snapshot**: only WIT conviction-locked **before the subject cohort's creation block** counts; capital that entered after the cohort began is excluded ([06](06-governance-and-guardians.md)).
 
 The ballot screen MUST:
 
@@ -237,7 +237,7 @@ The "Advanced" area. Every workflow below is light-client readable and follows �
 
 | Tx | Preconditions re-read at B′ |
 |---|---|
-| `oracle.register_reporter()` | free NUM ≥ `ReporterStake` (100,000 NUM *(normative value: [13](13-parameters.md))*); not already registered; stake-hold consequence displayed |
+| `oracle.register_reporter()` | free USDC ≥ `ReporterStake` (100,000 USDC *(normative value: [13](13-parameters.md))*); not already registered; stake-hold consequence displayed |
 | `oracle.report` / `oracle.challenge` | rows P-13/P-14 (§11.5) |
 | `oracle.recompute_proof(round_id, proof)` | round open and the consumed MetricSpec component permits deterministic recomputation ([07](07-oracle-and-disputes.md)); the FE recomputes the proof result locally from the committed raw data before submission and blocks on mismatch — never submit a proof the client's own recomputation contradicts |
 
@@ -260,7 +260,7 @@ The system's most privileged actors get a specified signing tool. Approval aggre
 |---|---|
 | `futarchy_treasury.claim_stream(stream_id)` | stream exists and not cancelled; caller is recipient; claimable amount (linear vesting, computed client-side from stream fields at B′) > 0 and displayed |
 
-**`nav()` view (rendered, at last).** The treasury screen renders every `NavView` component: liquid NUM at par, undisbursed stream remainders, obligations, in-flight XCM (marked 0, with copy explaining the conservative rule), GOV holdings (marked 0 in spendable NAV) — plus meter utilization (per-proposal/30 d/180 d) as gauges. **Reserve-haircut flag**: when the reserve-health trigger R is set ([07](07-oracle-and-disputes.md)/[08](08-treasury-and-economics.md) — e.g. a frozen USDC sovereign account), `nav()` carries the haircut flag; the FE MUST replace the headline NAV with the haircut presentation and a persistent banner *"reserve health degraded — NAV shown with haircut; split inflows halted (PB-RESERVE)"*. The FE never renders full backing while the flag is set.
+**`nav()` view (rendered, at last).** The treasury screen renders every `NavView` component: liquid USDC at par, undisbursed stream remainders, obligations, in-flight XCM (marked 0, with copy explaining the conservative rule), WIT holdings (marked 0 in spendable NAV) — plus meter utilization (per-proposal/30 d/180 d) as gauges. **Reserve-haircut flag**: when the reserve-health trigger R is set ([07](07-oracle-and-disputes.md)/[08](08-treasury-and-economics.md) — e.g. a frozen USDC sovereign account), `nav()` carries the haircut flag; the FE MUST replace the headline NAV with the haircut presentation and a persistent banner *"reserve health degraded — NAV shown with haircut; split inflows halted (PB-RESERVE)"*. The FE never renders full backing while the flag is set.
 
 ### 11.8.4 Upgrade crank — `system.apply_authorized_upgrade`
 
@@ -291,7 +291,7 @@ Registry state (filings, challenge windows, watchtower acknowledgments, slash ou
 
 ## 11.9 Funding flow (X-8, D-12)
 
-NUM funding is **in scope** for the canonical frontend and ships in the same release train (WBS row FE-16, §11.13).
+USDC funding is **in scope** for the canonical frontend and ships in the same release train (WBS row FE-16, §11.13).
 
 ### 11.9.1 Deposit — Asset Hub → futarchy chain
 
@@ -306,8 +306,8 @@ Precondition row (reads on the **AH connection** at its own finalized B′, plus
 | AH connection synced & descriptors compatible | AH compat gate ([10](10-frontend-architecture.md)) |
 | AH USDC balance ≥ amount + AH-side fees | AH `Assets.Account(1337, who)` **[VERIFY id]** |
 | AH existential/fee viability | AH account remains above its existential/sufficiency requirements after the transfer: USDC is a *sufficient* asset, but AH fee payment and the account's surviving state (DOT ED vs. sufficient-asset-only account) are re-checked and displayed **[VERIFY AH fee payment in USDC via asset conversion vs. DOT-only for this call shape — descriptor pipeline]** |
-| Amount ≥ NUM `min_balance` | 10⁴ units (1 cent *(normative value: [13](13-parameters.md))*) — below it the deposit would dust |
-| **Fee-viability note (mandatory)** | first-time deposits display: *"you will pay futarchy-chain fees in NUM at the `fee.gov_num_rate` conversion ([08](08-treasury-and-economics.md)); deposit at least enough to cover fees"* with a concrete minimum computed from the current rate |
+| Amount ≥ USDC `min_balance` | 10⁴ units (1 cent *(normative value: [13](13-parameters.md))*) — below it the deposit would dust |
+| **Fee-viability note (mandatory)** | first-time deposits display: *"you will pay futarchy-chain fees in USDC at the `fee.wit_usdc_rate` conversion ([08](08-treasury-and-economics.md)); deposit at least enough to cover fees"* with a concrete minimum computed from the current rate |
 | **Phase-3 exposure caps (D-13)** | while PhaseFlags < Phase 4: global TVL cap headroom and per-account deposit cap headroom (constitution keys) re-read; a deposit that would exceed either is blocked with the cap shown |
 | XCM channel health | the C_onchain XCM-health sub-metric / R flag ([05](05-welfare-and-decision-engine.md)/[07](07-oracle-and-disputes.md)); degraded health warns (and PB-RESERVE halts split inflows — surfaced) |
 
@@ -319,7 +319,7 @@ A normal FE screen on the local connection: `pallet_xcm.reserve_transfer` (the c
 
 | Check | Read at B′ |
 |---|---|
-| Free NUM ≥ amount + local fee (positions and holds excluded — free balance only) | `ForeignAssets.Account` |
+| Free USDC ≥ amount + local fee (positions and holds excluded — free balance only) | `ForeignAssets.Account` |
 | Remainder ≥ `min_balance` or full withdrawal | balance arithmetic displayed |
 | Destination viability on AH | via the AH connection when available: destination account's existential/sufficiency state; without the AH connection the check degrades to a warning, never silently skipped |
 | XCM channel health | as in deposit; a withdrawal during degraded XCM health warns that arrival may be delayed (fail-static: funds are never at decision risk, I-24) |
@@ -377,7 +377,7 @@ The frozen integration contract ([02](02-integration-contract.md), D-2) unblocks
 | FE-1 | `chain`: smoldot worker, dual relay+para (+ **lazy Asset Hub chain**), identity/compat gates, sync stores | FE-R1 (testnet) | boot machine green; budgets instrumented | 5 |
 | FE-2 | `descriptors` pipeline + CI drift gates + **pinned Asset Hub descriptor set** | FE-1 | multi-version + AH selection tested incl. simulated upgrade | 3 |
 | FE-3 | `protocol`: TS fixed-point math + derivations vs. regenerated reference vectors (V1 = 512.494795136 *(normative value: [13](13-parameters.md))*) | — | corrected V1–V6 + MPFR corpus pass | 3 |
-| FE-4 | `wallet`: signer abstraction, **corrected precondition system (§11.5 incl. the complete `execute` row)**, tx machine, fee selector bound to `fee.gov_num_rate` | FE-1..3 | §11.5 tables implemented; Playwright tx suite | 5 |
+| FE-4 | `wallet`: signer abstraction, **corrected precondition system (§11.5 incl. the complete `execute` row)**, tx machine, fee selector bound to `fee.wit_usdc_rate` | FE-1..3 | §11.5 tables implemented; Playwright tx suite | 5 |
 | FE-5 | Current-state screens incl. **Voided redeem UX (§11.6)** and Baseline book | FE-1..4 | screen matrix demo, providers disabled, cleared IDB; VOID e2e | 5 |
 | FE-6 | `local-index`: gap-tolerant schema, ingest, eviction, corruption recovery ([10](10-frontend-architecture.md)) | FE-1 | idempotency + gap-visibility property tests | 4 |
 | FE-7 | `providers` + `tools/snapshot` + sampler + forged-corpus tests | FE-6 | T-5/T-7 suites | 4 |
@@ -402,7 +402,7 @@ New prototype: **FE-P10** — multi-MB extrinsic submission through smoldot/PAPI
 | X-2 | §11.7: full FE-14 governance surface — six-track referenda list/detail, conviction vote/delegate/undelegate/unlock, ratification panel with the D-5 execute-time deadline, OracleResolution ballot with the pre-cohort snapshot rule; screens, storage enumeration, extrinsics, precondition rows G-1…G-8, E-rows E15/E23; WBS epic FE-14 |
 | X-5 (FE) | §11.2/§11.5: forecast trading removed entirely per D-8 — trading rows admit `Trading`/`Extended` only; the Baseline book gets its own precondition row (P-2); no forecast screen, route, or residue remains |
 | X-6 (FE) | §11.6: `Voided` vault state handled end-to-end — merge-at-par as the primary action, `redeem_void` with honest 0.5/0.25 rates, precondition rows for both, the winning-position-balance requirement explicitly deleted under VOID; E16 |
-| X-8 | §11.9: funding in scope — deposit via a second Asset Hub light-client connection with pinned AH descriptors and reserve-transfer construction; withdrawal via the chain's own `pallet_xcm.reserve_transfer`; precondition rows incl. AH-side existential/fee checks and Phase-3 exposure caps; mandatory `fee.gov_num_rate` fee-viability note; WBS epic FE-16 |
+| X-8 | §11.9: funding in scope — deposit via a second Asset Hub light-client connection with pinned AH descriptors and reserve-transfer construction; withdrawal via the chain's own `pallet_xcm.reserve_transfer`; precondition rows incl. AH-side existential/fee checks and Phase-3 exposure caps; mandatory `fee.wit_usdc_rate` fee-viability note; WBS epic FE-16 |
 | X-12 | §11.8: FE-15 "Advanced" operator surface — reporter registration/`recompute_proof`/hash-verified evidence display, guardian 5-of-7 signing console with trigger-condition preconditions, stream claims + rendered `nav()` with the reserve-haircut flag, `apply_authorized_upgrade` crank with pre-submission hash verification and an honest [VERIFY]-tagged memory/streaming fallback, `welfare.snapshot` crank, registry filing/challenge flows; WBS epic FE-15 |
 | X-11e | §11.4 rule 2 + §11.5: per-trade min/max, `MinSplit`, `MinTransfer`, `MaxPositionsPerAccount` and all §21-class kernel constants are read via the runtime constants API (`[C]` rows), never as storage and never hardcoded |
 | X-11i | §11.5 P-12: the `execute` precondition row lists all 14 dispatch-time checks the backend performs — including ratification (`NotRatified`), attestation presence, capability rules, rate meters, resource locks, guardian suspension, gate-breach flags, dead-man/freeze, batch/SafetyFilter bounds and DescriptorLeadTime — kept in lockstep with [09](09-execution-upgrades-and-rollout.md) |

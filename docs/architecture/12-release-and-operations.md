@@ -193,10 +193,10 @@ There is no application backend; "operations" is the set of **owned and funded**
 |---|---|---|---|
 | **WSS bootnodes** | ≥ 8 browser-reachable WSS bootnodes across ≥ 4 operators, ≥ 2 on port 443 *(normative values: [13](13-parameters.md))*; listed in the chain spec per the [02](02-integration-contract.md) node-roles row; liveness-monitored; set updates ride releases + on-chain discovery | Bootnode program coordinator | `ops.bootnodes` |
 | **Served-state window** | The protocol-funded bootnode/RPC operators jointly serve **30 days** of state and bodies *(normative value: [13](13-parameters.md))* — the [D-6](00-decision-record.md) layer-2 commitment backing FE backfill (`provider`-labeled unless smoldot re-read, per [10](10-frontend-architecture.md)) | Infrastructure coordinator | `ops.rpc_archive` |
-| **Collators** | 5 invulnerables → 8–12 bonded permissionless (Phase 4+); geographic/organizational diversity feeds the Security pillar; compensation 2,000 NUM/collator/epoch *(normative value: [08](08-treasury-and-economics.md))* | Collator program coordinator | `ops.collators` |
+| **Collators** | 5 invulnerables → 8–12 bonded permissionless (Phase 4+); geographic/organizational diversity feeds the Security pillar; compensation 2,000 USDC/collator/epoch *(normative value: [08](08-treasury-and-economics.md))* | Collator program coordinator | `ops.collators` |
 | **RPC / archive nodes** | ≥ 4 load-balanced public RPC (rate-limited, no signing) + ≥ 2 archive nodes (oracle recomputation, dispute evidence, and the 30-day window's tail) | Infrastructure coordinator | `ops.rpc_archive` |
 | **Monitoring & alerting** | The full §6.3 stack, including the release-integrity monitor (§5.2) and browser-reachability probes | Monitoring coordinator | `ops.monitoring` |
-| **Keeper operations** | ≥ 2 independent operator-run keepers + the permissionless public; subsidies beyond the metered budget of 12,000 NUM/epoch *(normative value: [08](08-treasury-and-economics.md))*, with the exhaustion alarm wired to §6.3 | Keeper coordinator | `ops.keepers` |
+| **Keeper operations** | ≥ 2 independent operator-run keepers + the permissionless public; subsidies beyond the metered budget of 12,000 USDC/epoch *(normative value: [08](08-treasury-and-economics.md))*, with the exhaustion alarm wired to §6.3 | Keeper coordinator | `ops.keepers` |
 | **Oracle evidence hosting** | Evidence artifacts and archived MetricSpec documents persisted to Arweave and mirrored on the archive nodes; retrievable for the full dispute-latency horizon ([07](07-oracle-and-disputes.md)) | Oracle operations coordinator | `ops.oracle_evidence` |
 | **Watchtowers** | ≥ 2 bonded registered watchtowers for the challenge-window acknowledgment quorum ([07](07-oracle-and-disputes.md)) | Oracle operations coordinator | `ops.watchtowers` |
 | **Arweave / ArNS** | Permabuy of `futarchy` (§4.1); per-release upload credits (Turbo); undername operations; status page hosting | Release operations lead | `ops.arweave` |
@@ -238,7 +238,7 @@ New rows owned by this document:
 | Release integrity | out-of-band bundle-vs-manifest comparison (§5.2), ArNS resolution consistency across gateways, ANT record history | any byte mismatch; 2-of-3 resolver divergence | RB-RELEASE (page immediately) |
 | Descriptor lead time | `UpgradeAuthorized` age vs covering-release liveness | no covering release at 50% of `DescriptorLeadTime` | RB-RELEASE |
 | ReleaseChannel | staleness vs latest repoint, flag changes | update missing 600 blocks after repoint; any `SECURITY` flip | RB-RELEASE |
-| Keeper budget | metered-budget utilization | > 80% of 12,000 NUM/epoch | RB-KEEPER |
+| Keeper budget | metered-budget utilization | > 80% of 12,000 USDC/epoch | RB-KEEPER |
 
 The frontend itself still has **no telemetry of any kind**; its only diagnostic channel is user-initiated copy-to-clipboard reports (unchanged). Everything above monitors *infrastructure*, not users.
 

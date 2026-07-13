@@ -34,7 +34,7 @@ is in place.
 | ID | Milestone | Spec | Depends | Status | Notes |
 |---|---|---|---|---|---|
 | M0 | Repo bootstrap: Cargo workspace, `rust-toolchain.toml`, CI skeleton (fmt/clippy/test + docs link lint), **re-verify platform pins** (SDK `polkadot-stable2603`, FE package pins) | 01 §9 | — | ⬜ | Pin re-verification results → Verification log |
-| M1 | `crates/futarchy-primitives` — `no_std` shared SCALE types + kernel `K` constants, `INTEGRATION_CONTRACT_VERSION = 1` | 02 §2; 13 §2; 01 §5.2 | M0 | ⬜ | Frozen surface; no `frame` deps |
+| M1 | `crates/futarchy-primitives` — `no_std` shared SCALE types + kernel `K` constants, `INTEGRATION_CONTRACT_VERSION = 1` **[PENDING BUMP → 2, see Decision log 2026-07-13]** | 02 §2; 13 §2; 01 §5.2 | M0 | ⬜ | Frozen surface; no `frame` deps |
 | M2 | `crates/futarchy-fixed` — 64.64 fixed point, exp2/log2/ln, maker-adverse rounding, error bounds | 04 §4 | M0 | ⬜ | ≤2 ulp per op, composed ≤8 ulp |
 | M3 | `reference-model/` — independent Python executable spec (LMSR, TWAP, ledger ops incl. gate/Baseline/VOID, welfare pipeline, decision rule, treasury arithmetic) + MPFR-256 corpus + V1–V6 regeneration in CI | 04 §5; 15 §4.4; 08 (worked arithmetic); 05 §4.4 | M0 | ⬜ | Never ports Rust code (`.claude/rules/reference-model.md`) |
 
@@ -47,7 +47,7 @@ tests (15 §4.1), `try-state` per 15 §1, benchmark stubs (15 §4.5). Scaffold v
 |---|---|---|---|---|---|
 | A1 | `pallet-constitution` — typed/bounded/rate-limited params, meters, capability tables, `PhaseFlags`, `ReleaseChannel` fixed-layout key, kernel re-export | 06; 13 §1/§4; 02 §7.3/§12 | M1 | ⬜ | I-6, I-7, I-17 |
 | A2 | `pallet-conditional-ledger` — vaults, per-branch supplies, split/merge/scalar/gate/Baseline families, `Voided` + `redeem_void`, internal wrapper API | 03 (all); 02 §6 | M1 | ⬜ | Audit scope A; L-1…L-6; PT-1…PT-8 (15 §4.2–4.3); frozen early |
-| A3 | `pallet-market` — LMSR books (branch-NUM, D-3), trade wrapper, fees, TWAP, POL seeding, `BaselineMarketOf` | 04; 02 §5–§7.4 | A2, M2, M3 | ⬜ | I-12, I-13; differential vs V1–V6 + corpus |
+| A3 | `pallet-market` — LMSR books (branch-USDC, D-3), trade wrapper, fees, TWAP, POL seeding, `BaselineMarketOf` | 04; 02 §5–§7.4 | A2, M2, M3 | ⬜ | I-12, I-13; differential vs V1–V6 + corpus |
 | A4 | `pallet-origins` + `SafetyFilter` — 8 custom origins, closed wrapper set, call-domain derivation | 06 §3; 01 §6 | M1 | ⬜ | I-8, I-10, I-11 |
 | A5 | `pallet-oracle` — reporter/watchtower registries, bonded reporting game, challenge rounds (72 h + quorum), reserve probe `R`, neutral settlement | 07 §1–§6, §8–§13 | A1 | ⬜ | I-18, I-24 |
 | A6 | `pallet-registry` — Incident/Milestone instances, bonded filings, challenge windows | 07 §7 | A5 | ⬜ | Feeds `C_attested` |
@@ -65,10 +65,10 @@ superseded `BACKEND_PLAN.md` §26; their scope is covered by Tracks M/A/B.)
 
 | ID | Milestone | Spec | Depends | Status | Notes |
 |---|---|---|---|---|---|
-| B1 | Runtime assembly — standard-pallet config (incl. genesis `frame-system` filter D-13, NUM as ForeignAsset, fees in GOV/NUM), `SafetyFilter` as `BaseCallFilter`, origins wiring | 01 §5–§6; 06 §3; 09 §5 | A1–A11 | ⬜ | Filter-exhaustiveness CI (S5) |
+| B1 | Runtime assembly — standard-pallet config (incl. genesis `frame-system` filter D-13, USDC as ForeignAsset, fees in WIT/USDC), `SafetyFilter` as `BaseCallFilter`, origins wiring | 01 §5–§6; 06 §3; 09 §5 | A1–A11 | ⬜ | Filter-exhaustiveness CI (S5) |
 | B2 | `FutarchyApi` runtime API — all 11 methods + view types | 02 §3–§4 | B1 | ⬜ | Part of contract; append-only after freeze |
-| B3 | Node, chain specs (ss58 7777, WSS bootnodes listed), genesis config incl. GOV allocation/vesting | 02 §8/§10; 08 §2; 12 §6.2 | B1 | ⬜ | ss58 registry submission before Phase 2 |
-| B4 | XCM — NUM/DOT reserve transfers, Asset Hub channel, reserve-probe plumbing, coretime renewal (freeze-exempt) | 09 §6; 07 §8; 01 §4 | B1 | ⬜ | No `Transact` governance either direction |
+| B3 | Node, chain specs (ss58 7777, WSS bootnodes listed), genesis config incl. WIT allocation/vesting | 02 §8/§10; 08 §2; 12 §6.2 | B1 | ⬜ | ss58 registry submission before Phase 2 |
+| B4 | XCM — USDC/DOT reserve transfers, Asset Hub channel, reserve-probe plumbing, coretime renewal (freeze-exempt) | 09 §6; 07 §8; 01 §4 | B1 | ⬜ | No `Transact` governance either direction |
 | B5 | Benchmarks, weights, PoV budgets (196-market table), weight-regression CI | 15 §4.5; 13 §4–§5 | B1 | ⬜ | I-20 |
 | B6 | Upgrade path e2e — `authorize_upgrade`/`apply_authorized_upgrade`, attestation precondition, `DescriptorLeadTime`, `ReleaseChannel` write wiring, `pallet-migrations`, try-runtime CI | 09 §2; 02 §12 | B1, A11 | ⬜ | Negative tests: early apply, unattested CODE |
 | B7 | Zombienet + Chopsticks environment definitions (release artifacts, not private fixtures) | 15 §4.7; 02 §11 | B3 | ⬜ | Incl. dead-man and PB drills |
@@ -130,7 +130,7 @@ Epic IDs from 11 §11.13. FE-P1…P10 prototype gates from 10 §12 (+FE-P10, 11 
 | G2 | Phase 2 (Paseo) exit — ≥6 epochs, zero invariant breaches, ≥1 full upgrade e2e, contract freeze co-signed, ss58 accepted, testnet bootnodes, staging ArNS, release-train drills | 09 §7.1; 12 §6.5 | G1, O3, F-launch set | ⬜ | |
 | G3 | Phase 3 (mainnet shadow) exit — audits A+B, genesis ceremony, prod bootnodes + 30-day commitments, ≥3 reporters staked, HRMP open, exposure caps, F̂ ≥ L/2, attestor registry live, ANT ceremony done | 09 §7.1; 12 §6.5 | G2, O2 | ⬜ | Sudo still present, filtered |
 | G4 | Phase 4 — binding PARAM; **sudo removed**; ≥12 binding decisions; NAV ≥ floor (loud gate) | 09 §7.1–§7.2; 08 §4 | G3 | ⬜ | |
-| G5 | Phase 5 — +TREASURY; funding ≥ 25M NUM; V_min met; streams > 1 % NAV mandatory | 09 §7.1; 08 §4 | G4 | ⬜ | |
+| G5 | Phase 5 — +TREASURY; funding ≥ 25M USDC; V_min met; streams > 1 % NAV mandatory | 09 §7.1; 08 §4 | G4 | ⬜ | |
 | G6 | Phase 6 — +CODE/META; scope-A re-audit; 1 CODE upgrade stable ≥ 60 d via full D-14 path; dispute game exercised | 09 §7.1 | G5 | ⬜ | |
 | G7 | Phase 7 — mature; guardian → playbooks only; sunset vote scheduled | 09 §7.1 | G6 | ⬜ | |
 
@@ -166,16 +166,16 @@ lifted from the spec. Format: `| ID | Item | Spec ref | Status | Result |`
 | V-9 | smoldot/PAPI chainHead runtime-call verification semantics (FE-P2) | 02 §3; 10 §12 | open | Until resolved: cross-check runtime-API results vs storage reads on tx paths |
 | V-10 | Two-pass Arweave deploy + ANT n-of-m capability (FE-P7) | 12 §1.2, §4.2 | open | |
 | V-11 | FGP/SGF/GFP/EFP/AEGIS source-document identification (user/document owners) | 01 §9 | open | Blocks audit scoping only |
-| V-12 | sim-gated defaults (`sec.prize.*`, `sec.flow_cap`, `collator.bond_req_gov`, `ops.*`, `fee.gov_num_rate_ref`) | 13 §1 | open (S4) | Phase-0 calibration |
+| V-12 | sim-gated defaults (`sec.prize.*`, `sec.flow_cap`, `collator.bond_req_wit`, `ops.*`, `fee.wit_usdc_rate_ref`) | 13 §1 | open (S4) | Phase-0 calibration |
 | V-13 | Multi-MB Wasm extrinsic submission via light client (FE-P10) | 11 §11.13 | open | Gates FE-15 upgrade-crank tier |
 
 ## Decision log
 
-Architecture amendments (change-control procedure, AGENTS.md). None expected; none yet.
+Architecture amendments (change-control procedure, AGENTS.md).
 
 | Date | Amendment | Authorized by | Docs touched |
 |---|---|---|---|
-| — | none | | |
+| 2026-07-13 | Renamed both top-level assets: **NUM → USDC** (collateral/settlement asset) and **GOV → WIT** (native governance/utility asset), plus derived identifiers (`AcceptNum`→`AcceptUsdc`, `RejectNum`→`RejectUsdc`, `NUM_LOCATION`→`USDC_LOCATION`, `gov_num_rate`→`wit_usdc_rate`, `bond_req_gov`→`bond_req_wit`, `issue_gov`→`issue_wit`, `GovIssued`→`WitIssued`, `num_Acc`/`num_Rej`/`num_w`/`num_b`→`usdc_Acc`/`usdc_Rej`/`usdc_w`/`usdc_b`, `fee_num`→`fee_usdc`); `navNum` (NAV numerator, unrelated) left untouched. 672 substitutions across the full `docs/architecture/` set (16 files) plus the derived `docs/design/claude-design-kit/` pack (6 files, regenerated in step per AGENTS.md). Since `02-integration-contract.md` changed, `INTEGRATION_CONTRACT_VERSION` must bump 1→2 per its own §13 rule — **not yet applied**. **Two edits are outstanding** — the session's permission layer denied further Bash writes into `docs/architecture/` even after explicit user approval: (a) `INTEGRATION_CONTRACT_VERSION` textual bump in 02 (three sites: lines ~116, ~412, still read `= 1`) — **blocks nothing structurally but must land before M1** since M1 stamps this constant into `futarchy-primitives`; (b) a cosmetic redundancy in 01's Polkadot Hub row ("Asset Hub is the USDC reserve and the canonical USDC location" — harmless prose only, no action-blocking). Apply both by hand, or grant a Bash permission rule for `docs/architecture/` writes and ask the agent to retry. | User (Christopher Altmann), explicit instruction this session; user also confirmed "Use USDC" over "USD" after a naming-risk flag (ISO fiat-code collision) | All 16 `docs/architecture/*.md` + 6 `docs/design/claude-design-kit/*.md` |
 
 ## Audit log
 
@@ -201,3 +201,4 @@ Append-only; newest last. Format: `| Date | Milestone(s) | Done | Next |`
 | 2026-07-12 | — (infrastructure) | Agent/session infrastructure created: PLAN.md, AGENTS.md, CLAUDE.md, README.md, .claude (settings, 3 hooks, 4 skills, 3 subagents, 3 path rules), .codex playbooks. Architecture write-guard tested (26 cases). | M0 — repo bootstrap incl. V-1 pin re-verification |
 | 2026-07-12 | — (design kit, unplanned) | Built `docs/design/claude-design-kit/` for Claude Design's 10-attachment limit: 7 context files (2 verbatim copies of docs 10/11 + 5 distillations of 00–09/13–15) + generation prompt. Logged SQ-1 (E-row numbering conflict 11 §11.12 vs 15 §3.3). Architecture untouched; README/AGENTS maps updated. | M0 — repo bootstrap incl. V-1 pin re-verification |
 | 2026-07-13 | — (rename, unplanned) | Renamed project "bleevit" → "Bliwit" across all living/derived docs (10 files, 18 lines). Confirmed `docs/architecture/` has no occurrences, so R-1 change control did not apply. | M0 — repo bootstrap incl. V-1 pin re-verification |
+| 2026-07-13 | — (architecture amendment, unplanned) | R-1 change control invoked: renamed NUM→USDC, GOV→WIT (+ derived identifiers) across all 16 `docs/architecture/*.md` and 6 `docs/design/claude-design-kit/*.md` (672 substitutions); see Decision log. `INTEGRATION_CONTRACT_VERSION` bump and one cosmetic 01-prose fix left outstanding — permission layer blocked further `docs/architecture/` writes this session. `.claude/architecture-amendment.flag` deleted after this log entry per the change-control procedure. | M0 — repo bootstrap incl. V-1 pin re-verification; **before M1**, apply the two outstanding 02/01 edits above |

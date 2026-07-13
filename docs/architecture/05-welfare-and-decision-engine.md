@@ -1,6 +1,6 @@
 # 05 — Welfare Function, State Machines and Decision Engine
 
-**Status: normative component specification. Supersedes the corresponding sections of BACKEND_PLAN.md/FRONTEND_PLAN.md** (BE §8, §9, §12, §13-veto-tests, §14; the welfare/decision rows of §5.2.3–5.2.4, §21, §23). Normative language: RFC 2119. Decisions implemented here: D-4, D-7, D-15 (cold start, collator-D cap), D-18 (gate split, GOV reflexivity), and the B-9/B-10/B-12/B-15 + medium-finding dispositions of [`00-decision-record.md`](./00-decision-record.md).
+**Status: normative component specification. Supersedes the corresponding sections of BACKEND_PLAN.md/FRONTEND_PLAN.md** (BE §8, §9, §12, §13-veto-tests, §14; the welfare/decision rows of §5.2.3–5.2.4, §21, §23). Normative language: RFC 2119. Decisions implemented here: D-4, D-7, D-15 (cold start, collator-D cap), D-18 (gate split, WIT reflexivity), and the B-9/B-10/B-12/B-15 + medium-finding dispositions of [`00-decision-record.md`](./00-decision-record.md).
 
 **Boundary.** This document owns: the proposal state machine, the epoch and cohort machines, the welfare function W and its aggregation/normalization discipline, the gate-veto tests, the settlement score `s`, and the decision engine `decide()`. It references but does not own: ledger mechanics and vault states ([`03-conditional-ledger.md`](./03-conditional-ledger.md)), LMSR/TWAP/Baseline market mechanics ([`04-markets-and-pricing.md`](./04-markets-and-pricing.md)), ratification, guardians and playbooks ([`06-governance-and-guardians.md`](./06-governance-and-guardians.md)), oracle rounds, registries and watchtowers ([`07-oracle-and-disputes.md`](./07-oracle-and-disputes.md)), security-sizing economics and defaults ([`08-treasury-and-economics.md`](./08-treasury-and-economics.md)), execution-guard dispatch checks ([`09-execution-upgrades-and-rollout.md`](./09-execution-upgrades-and-rollout.md)), parameter values ([`13-parameters.md`](./13-parameters.md)), and the canonical shared types ([`02-integration-contract.md`](./02-integration-contract.md)). Values quoted here for readability are *(normative value: §13)* unless marked kernel (K).
 
@@ -23,7 +23,7 @@ The canonical `Proposal` (type frozen in [doc 02](./02-integration-contract.md))
 ```rust
 pub struct Proposal {
     // ... fields as in doc 02 ...
-    pub ask: Balance,            // committed NUM outflow (TREASURY; 0 otherwise). Consumed by
+    pub ask: Balance,            // committed USDC outflow (TREASURY; 0 otherwise). Consumed by
                                  // bond formula, security sizing (§5.6), Ask-scaled liquidity (doc 08)
     pub decide_at: BlockNumber,  // absolute; computed and stored at qualification from the
                                  // creation-time epoch schedule (§2.3); updated only by T8/T13
@@ -201,7 +201,7 @@ All pillar values, gates and W in `FixedU64` (1e9) on [0,1]. Floors θ⁻ are ke
 
 **Settlement score:** `s = GeoMean(W_{e+1}, W_{e+2})` over the cohort's k = 2 horizon — already in [0,1]; no anchor-ratio mapping (ADR-6). Computation discipline in §4.6; consumption in §7.
 
-**Reflexivity exclusions (kernel):** no input may be a price from the protocol's own markets; **GOV price appears nowhere in W** — including, after the §4.3 E-component fix, in the C pillar (B-10 closed). Raw tx count, unadjusted TVL, and GOV price remain excluded from binding W.
+**Reflexivity exclusions (kernel):** no input may be a price from the protocol's own markets; **WIT price appears nowhere in W** — including, after the §4.3 E-component fix, in the C pillar (B-10 closed). Raw tx count, unadjusted TVL, and WIT price remain excluded from binding W.
 
 ### 4.2 The C split: `C_onchain` vs `C_attested` (B-9, D-18)
 
@@ -219,7 +219,7 @@ Changes vs. the superseded §12.3: XCM health `X` moves from S into `C_onchain` 
 | **S** = min(U, F, D_eff) | Block production `U` | authored parachain blocks ÷ scheduled slots per epoch; empty blocks weighted 25% | on-chain | halted chain ⇒ no snapshot ⇒ dead-man §4.8 | collator padding — priced by the 25% weight |
 | | Relay inclusion/finality `F` | `1 − clamp(median(relay_parent_gap − target)/Λ_max, 0, 1)` | relay-derived **[VERIFY exact accessible validation-data fields on stable2603 at implementation]** | carry-last-valid + flag | hard to fake upward |
 | | Collator concentration `D_eff` | phase-capped, §4.5 | on-chain | — | key-splitting — invulnerable-era value pinned to registry entities |
-| **C_onchain** (weighted geo, §4.4) | XCM health `X` (0.25) | delivered ÷ (delivered + failed + timed-out) NUM-channel messages | on-chain counters | no traffic ⇒ 1 (absence of failure) | self-sent failing XCM costs fees; alarms ops |
+| **C_onchain** (weighted geo, §4.4) | XCM health `X` (0.25) | delivered ÷ (delivered + failed + timed-out) USDC-channel messages | on-chain counters | no traffic ⇒ 1 (absence of failure) | self-sent failing XCM costs fees; alarms ops |
 | | Reserve health `R` (0.25) | fail-static flag ∈ {0, 1}: 0 while a reserve-anomaly trigger is active (Asset Hub channel down past threshold, or sovereign-reserve reconciliation mismatch / PB-RESERVE armed — [doc 07](./07-oracle-and-disputes.md)/[08](./08-treasury-and-economics.md)); else 1 | on-chain trigger | trigger state is the value (fail-static) | closes the USDC-freeze blindness gap (B-med) |
 | | Economic security `E` (0.20) | coverage ratios, §4.3.1 — **dimensionless, no price input** | on-chain | — | bond-asset pump is inert: no price enters (B-10) |
 | | Weight headroom `H` (0.15) | `1 − mean(block weight used ÷ limit)`, mapped so 40% target utilization ⇒ 1 | on-chain | — | spam lowers H and costs fees (self-defeating) |
@@ -227,27 +227,27 @@ Changes vs. the superseded §12.3: XCM health `X` moves from S into `C_onchain` 
 | | Collator-set adequacy `K` (0.05) | `min(1, distinct_active_authors / collator.n_min)` *(collator.n_min: §13, default 4)* | on-chain | — | — |
 | **C_attested** (§4.4) | Incident score `I` (multiplier) | `max(0, 1 − Σ severity)`; S1 = 1.0, S2 = 0.4, S3 = 0.1; bonded filings + challenge in `pallet-registry` ([doc 07](./07-oracle-and-disputes.md)) | attested | no filings ⇒ 1 | suppression — permissionless bonded filing, slash for wrong rejection |
 | | External-price components (admissible class; **none registered in v1**) | per registered MetricSpec via doc 07's registries | attested | per spec | value-scaled bonds (doc 07) |
-| **P** (weighted geo) | Fees burned/paid (0.45) | `N(log1p(fees_NUM))`, protocol fee sink | on-chain | carry + flag | costs exactly the fees |
+| **P** (weighted geo) | Fees burned/paid (0.45) | `N(log1p(fees_USDC))`, protocol fee sink | on-chain | carry + flag | costs exactly the fees |
 | | Economically qualified users (0.35) | accounts paying ≥ dust-indexed fee on ≥ 3 distinct days, HLL-estimated, cost-weighted | on-chain sketch | carry + flag | Sybils must pay repeatedly; weight-capped |
 | | Settled value (0.20) | fee-weighted transfer value, self-transfer down-weighted | on-chain | carry + flag | wash routing — fee weighting prices it |
 | **A** (weighted geo) | Shipped audited upgrades (0.40) | milestone points ÷ target, attested MilestoneRegistry ([doc 07](./07-oracle-and-disputes.md)) | attested | 0 if none | scope inflation — enumerated scope classes, challengeable |
 | | Runtime performance (0.30) | benchmarked weight-per-op regression index, full-epoch continuous sampling | attested reproducible harness | carry | benchmark-day gaming — continuous sampling |
 | | Ecosystem integrations (0.30) | qualified independent integrations passing a 30-day on-chain fee-paying usage bar | attested registry | 0 | shells — usage bar on-chain-verifiable |
 
-#### 4.3.1 `E` — coverage ratios, no GOV price anywhere (B-10, D-18)
+#### 4.3.1 `E` — coverage ratios, no WIT price anywhere (B-10, D-18)
 
-The superseded `E` valued GOV-denominated bonds through an attested GOV price — precisely the GOV → C → W → settlement reflexivity loop the kernel forbids, plus a 30-day-median pump vector into gate flags. Normative replacement:
+The superseded `E` valued WIT-denominated bonds through an attested WIT price — precisely the WIT → C → W → settlement reflexivity loop the kernel forbids, plus a 30-day-median pump vector into gate flags. Normative replacement:
 
 ```
 E = Π_j max(cov_j, ε_C)^{v_j},    Σ v_j = 1,   ε_C = 0.01
 cov_j = clamp(held_j / required_j, 0, 1)        // same-asset ratio, dimensionless
-j ∈ { collator: Σ collator bonds held (GOV) / (collator.bond_req_gov · n_target),
-      guardian: Σ guardian bonds held (GOV) / (grd.bond · 7),
-      oracle:   Σ reporter stakes held (NUM) / (orc.reporter_stake · orc.n_min) }
+j ∈ { collator: Σ collator bonds held (WIT) / (collator.bond_req_wit · n_target),
+      guardian: Σ guardian bonds held (WIT) / (grd.bond · 7),
+      oracle:   Σ reporter stakes held (USDC) / (orc.reporter_stake · orc.n_min) }
 Default v = (0.4, 0.3, 0.3)   (normative values incl. *_req keys: §13)
 ```
 
-Every ratio divides a held amount by a **requirement denominated in the same asset** (GOV requirements in GOV, NUM requirements in NUM — requirements are constitution keys). No conversion rate, no external price, no oracle input exists in `E`; it is deterministic and same-block computable, hence lives in `C_onchain`. Raising security by raising requirements is a values/META decision on the `*_req` keys, not a market observable.
+Every ratio divides a held amount by a **requirement denominated in the same asset** (WIT requirements in WIT, USDC requirements in USDC — requirements are constitution keys). No conversion rate, no external price, no oracle input exists in `E`; it is deterministic and same-block computable, hence lives in `C_onchain`. Raising security by raising requirements is a values/META decision on the `*_req` keys, not a market observable.
 
 ### 4.4 Intra-pillar aggregation — fully specified (B-med: C/P/A aggregation; G-7)
 
@@ -285,7 +285,7 @@ D_eff = min(1, (1 − HHI) / (1 − 1/n_cap(phase)))
 
 | Rollout phase ([doc 09](./09-execution-upgrades-and-rollout.md)) | `n_cap` |
 |---|---|
-| Phases 0–3 (bootstrap, shadow, real-NUM under sudo) | 5 |
+| Phases 0–3 (bootstrap, shadow, real-USDC under sudo) | 5 |
 | Phase 4 | 6 |
 | Phase 5 | 7 |
 | Phases 6+ | 8 (= n_ref; cap inactive) |
@@ -476,7 +476,7 @@ AttackCost̂ = F̂ · T_dec                          // normative gate input (do
           until published, F̂ = L̂/2
 
 InCapPrize = match class {                       // doc 08 §5.2's table governs
-    Treasury       => p.ask,                                    // committed NUM outflow
+    Treasury       => p.ask,                                    // committed USDC outflow
     Param          => certified capability-envelope value,      // floored at sec.prize.param
     Code | Meta    => max(p.ask, envelope value),               // floored at trs.cap_proposal ·
                                                                 //   spendable-NAV for upgrade payloads;
@@ -550,7 +550,7 @@ No other pallet, origin, playbook, or values track can invoke any settlement cal
 |---|---|
 | B-8 (engine side) | §5.4 step 9 + §5.6: `InCapPrize ≤ AttackCost̂/3` computed from measured depth at decide time, `RejectReason::SecuritySizing`; conservative rounding; economics and Ask-scaled secondary mechanism in [doc 08](./08-treasury-and-economics.md) (D-4) |
 | B-9 | §4.2/§4.4/§4.7: C split into `C_onchain` (X, R, E, H, Π, K — deterministic, same-block) driving daily flags and gate settlement, and `C_attested` entering settlement-time W only (D-18) |
-| B-10 | §4.3.1: E is dimensionless same-asset coverage ratios against constitution-key requirements; no GOV price (or any price) anywhere in W |
+| B-10 | §4.3.1: E is dimensionless same-asset coverage ratios against constitution-key requirements; no WIT price (or any price) anywhere in W |
 | B-12 | §2.1/§2.2: T21 `Rejected/Expired → Measuring`, T22 `FailedExecuted → Measuring`, T23 `FailedExecuted → Executed`; T13 restructured so reruns re-enter `Extended` for 3 days and decide via T9/T10, satisfying `decide()`'s precondition; table re-verified edge-for-edge against the diagram |
 | B-15 | §4.6: genesis `PriorBounds` (12 pseudo-observations/component from Phase-2 shadow data); epochs 1–12 winsorize against the trailing-12 of prior ∪ available; `s` deterministic from epoch 1 (D-15) |
 | D-7 | §1.1: `Emergency` deleted from class enum, classifier, and every state-machine/parameter row; guardian playbooks ([doc 06](./06-governance-and-guardians.md)) own emergencies; ADR-3 completeness satisfiable |

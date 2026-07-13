@@ -29,7 +29,7 @@ Disposition of FE §30: P-1…P-4, P-6, P-8…P-11 amend the topology, repositor
 
 ## 2. Shared SCALE primitives (`futarchy-primitives`)
 
-All types live in the `no_std` crate `futarchy-primitives`, SCALE-encoded, versioned via a `#[codec(index)]`-stable discipline: **enum variants and struct fields are append-only after genesis**; removals require a new type + storage migration + contract version bump. All collections `BoundedVec`/`BoundedBTreeMap`. Numeric conventions: balances `u128` (NUM 6 decimals, GOV 12 decimals); prices/scores `FixedU64` semantics (1e9 scale) at every API and event boundary; internal LMSR math in 64.64.
+All types live in the `no_std` crate `futarchy-primitives`, SCALE-encoded, versioned via a `#[codec(index)]`-stable discipline: **enum variants and struct fields are append-only after genesis**; removals require a new type + storage migration + contract version bump. All collections `BoundedVec`/`BoundedBTreeMap`. Numeric conventions: balances `u128` (USDC 6 decimals, WIT 12 decimals); prices/scores `FixedU64` semantics (1e9 scale) at every API and event boundary; internal LMSR math in 64.64.
 
 The pre-genesis repairs below (relative to the superseded BE §7) are FINAL as of contract v1; `ProposalClass::Emergency` is deleted *before* genesis, so append-only discipline is not violated.
 
@@ -49,7 +49,7 @@ pub enum GateType { Survival, Security }
 
 /// Enlarged per B-2 (gate instruments) — semantics in 03.
 pub enum PositionKind {
-    BranchNum,
+    BranchUsdc,
     Long,
     Short,
     GateYes(GateType),
@@ -128,7 +128,7 @@ sp_api::decl_runtime_apis! {
         fn epoch_status() -> EpochStatusView;                                        // ≤ 128 B
         /// All live proposals with market ids, states, decide_at, maturity, ratification.
         fn proposal_summaries() -> BoundedVec<ProposalSummaryView, ConstU32<32>>;    // ≤ 32 × 256 B
-        /// Exact quote incl. fee for a hypothetical trade at current book state (NUM-denominated, D-3 wrapper semantics).
+        /// Exact quote incl. fee for a hypothetical trade at current book state (USDC-denominated, D-3 wrapper semantics).
         fn quote(market: MarketId, side: TradeSide, amount: Balance) -> QuoteView;   // ≤ 96 B
         /// Decision statistics exactly as decide() would read them now (incl. D-4 sizing).
         fn decision_stats(pid: ProposalId) -> Option<DecisionStatsView>;             // ≤ 512 B
@@ -183,8 +183,8 @@ pub struct ProposalSummaryView {
 }
 
 pub struct QuoteView {
-    pub cost: Balance,            // NUM the wrapper charges (buy) / pays (sell), excl. fee
-    pub fee: Balance,             // NUM fee at the current mkt.fee
+    pub cost: Balance,            // USDC the wrapper charges (buy) / pays (sell), excl. fee
+    pub fee: Balance,             // USDC fee at the current mkt.fee
     pub p_after_1e9: FixedU64,    // post-trade instantaneous price
     pub max_trade: Balance,       // current per-trade max for this book
     pub within_domain: bool,      // |q_L − q_S|/b ≤ 48 after the trade
@@ -298,7 +298,7 @@ pub struct OracleRoundView {
 
 | Event | Fields | Emitted when |
 |---|---|---|
-| `Traded` | `{ market: MarketId, who: AccountId, side: TradeSide, amount: Balance, cost: Balance, p_after: FixedU64 }` | Every successful `buy`/`sell` fill (wrapper semantics D-3); `side` is the 4-variant `TradeSide` (§2) and `amount`/`cost` are **unsigned magnitudes** — direction is carried entirely by `side`; `cost` is NUM incl. maker payment, excl. fee; **`p_after` = the post-trade instantaneous `p_L`** (1e9; `p_S = 1 − p_L` is derived; gate books map YES ↦ LONG) |
+| `Traded` | `{ market: MarketId, who: AccountId, side: TradeSide, amount: Balance, cost: Balance, p_after: FixedU64 }` | Every successful `buy`/`sell` fill (wrapper semantics D-3); `side` is the 4-variant `TradeSide` (§2) and `amount`/`cost` are **unsigned magnitudes** — direction is carried entirely by `side`; `cost` is USDC incl. maker payment, excl. fee; **`p_after` = the post-trade instantaneous `p_L`** (1e9; `p_S = 1 − p_L` is derived; gate books map YES ↦ LONG) |
 | `Observed` | `{ market: MarketId, o_t: FixedU64 }` | Every accepted TWAP observation (on-trade and cranked) on the 10-block observation grid *(normative interval: [13](13-parameters.md))* |
 | `MarketCreated` | `{ market: MarketId, kind: MarketKind, pid: Option<ProposalId>, epoch: EpochId, b: Balance }` | Book deployment at Seed (`MarketKind ∈ { DecisionAccept, DecisionReject, GateS_Adopt, GateS_Reject, GateC_Adopt, GateC_Reject, Baseline }`) |
 | `MarketClosed` | `{ market: MarketId }` | Book frozen at decision close / branch resolution (books do NOT reopen — D-8) |
@@ -392,7 +392,7 @@ Events:
 | **`BaselineMarketOf`** | **`map EpochId → MarketId`** (in **`pallet-market`** — the pallet home per [04 §8.3](04-markets-and-pricing.md)) | **X-10 fix**: the declared backing storage for `baseline_market(epoch)`. Written at Baseline book creation (Seed of each epoch); retained for all epochs still present in the `RecentCohortSummaries` ring plus live epochs; pruned in lockstep with ring eviction (≤ 36 entries) |
 | `Markets` | `map MarketId → MarketState` | ≤ `MaxLiveMarkets = 196` *(normative value: [13](13-parameters.md))* |
 
-`pallet-conditional-ledger::{Vaults, BaselineVaults, Positions, PositionTotals}` — note the **key order of `Positions` is `(PositionId, AccountId)`** (per-vault drainable, B-med); a per-account storage prefix scan is therefore NOT available, and the frontend MUST use `account_positions()` (the runtime API iterates the bounded live-vault set) or the per-account key index maintained by the ledger ([03](03-conditional-ledger.md)). `pallet-execution-guard::{Queue, Ratifications, ExecutionRecords}` (a `RatificationRecord` is written by the frozen governance call `execution_guard.ratify(proposal_id, referendum_index)`, binding `(pid, payload_hash)` — [06 §2.2](06-governance-and-guardians.md)); `pallet-welfare::{Snapshots, MetricSpecs, GateBreachFlags}`; `pallet-guardian` membership/allowances; `System.Account`, `ForeignAssets.Account(NUM_LOCATION, who)` (NOT `Assets.Account(1337, who)` — X-11a; the NUM identifier is the XCM Location of §8).
+`pallet-conditional-ledger::{Vaults, BaselineVaults, Positions, PositionTotals}` — note the **key order of `Positions` is `(PositionId, AccountId)`** (per-vault drainable, B-med); a per-account storage prefix scan is therefore NOT available, and the frontend MUST use `account_positions()` (the runtime API iterates the bounded live-vault set) or the per-account key index maintained by the ledger ([03](03-conditional-ledger.md)). `pallet-execution-guard::{Queue, Ratifications, ExecutionRecords}` (a `RatificationRecord` is written by the frozen governance call `execution_guard.ratify(proposal_id, referendum_index)`, binding `(pid, payload_hash)` — [06 §2.2](06-governance-and-guardians.md)); `pallet-welfare::{Snapshots, MetricSpecs, GateBreachFlags}`; `pallet-guardian` membership/allowances; `System.Account`, `ForeignAssets.Account(USDC_LOCATION, who)` (NOT `Assets.Account(1337, who)` — X-11a; the USDC identifier is the XCM Location of §8).
 
 ---
 
@@ -404,10 +404,10 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 |---|---|
 | ss58 prefix | **7777** (ss58-registry submission REQUIRED before Phase 2) |
 | paraId | Assigned at onboarding; **all test fixtures use 4242** |
-| NUM asset | `pallet-assets` instance **`ForeignAssets`**, keyed by XCM `Location { parents: 1, interior: X3(Parachain(1000), PalletInstance(50), GeneralIndex(1337)) }` **[VERIFY asset index 1337 at implementation]** |
-| NUM decimals | 6 (preserved from Asset Hub); `min_balance = 10^4` (1 cent) |
-| GOV decimals | 12 |
-| GOV existential deposit | **0.01 GOV** (= 10^10 plancks) |
+| USDC asset | `pallet-assets` instance **`ForeignAssets`**, keyed by XCM `Location { parents: 1, interior: X3(Parachain(1000), PalletInstance(50), GeneralIndex(1337)) }` **[VERIFY asset index 1337 at implementation]** |
+| USDC decimals | 6 (preserved from Asset Hub); `min_balance = 10^4` (1 cent) |
+| WIT decimals | 12 |
+| WIT existential deposit | **0.01 WIT** (= 10^10 plancks) |
 | Phase flag storage | `pallet-constitution::PhaseFlags` (§7.3) — the trading-enablement key |
 | Contract version | `INTEGRATION_CONTRACT_VERSION = 1` (runtime constant) |
 
@@ -424,11 +424,11 @@ Enumeration of every value the frontend's precondition tables re-check (defaults
 
 | Value | Representation (FE binding target) | Used by FE precondition row |
 |---|---|---|
-| `MinSplit` kernel floor (0.01 NUM) + live `ledger.min_split` | metadata constant (floor) + `params()` (live) | `ledger.split/merge` |
+| `MinSplit` kernel floor (0.01 USDC) + live `ledger.min_split` | metadata constant (floor) + `params()` (live) | `ledger.split/merge` |
 | Per-trade min / max (`mkt.min_trade = 1`, `mkt.max_trade = b/4`) | metadata constants (K) | `market.buy/sell` |
 | `MinTransfer` | metadata constant (K) | `ledger.transfer` |
 | `MaxPositionsPerAccount = 64` (protocol accounts exempt) | metadata constant | `ledger.transfer` (recipient bound), position views |
-| Positions entry deposit (0.1 NUM) | metadata constant | `ledger.split`, `transfer` fee headroom |
+| Positions entry deposit (0.1 USDC) | metadata constant | `ledger.split`, `transfer` fee headroom |
 | `IntakeQueue = 64` bound; intake rate limit ≤ 4 entries/epoch/account | metadata constants | `epoch.submit` |
 | `MaxLiveProposals = 32` | metadata constant | discovery bounds |
 | `prop.bond` per class | `params()` | `epoch.submit` |
@@ -439,7 +439,7 @@ Enumeration of every value the frontend's precondition tables re-check (defaults
 | `exec.timelock` per class, `exec.grace` | `params()` (K floors as constants) | `execution_guard.execute` |
 | `orc.bond_floor`/`orc.rounds`/`orc.window`, `orc.bond_bps` value scaling, `orc.reporter_stake` | `params()` | `oracle.report/challenge` |
 | `trs.cap_proposal`/`cap_30d`/`cap_180d`, `trs.stream_threshold` | `params()` | treasury proposal screens |
-| `fee.gov_num_rate` | `params()` | fee-currency selector (D-12) |
+| `fee.wit_usdc_rate` | `params()` | fee-currency selector (D-12) |
 | `epoch.length`, `epoch.slots`, phase-offset fractions | `params()` + metadata constants | countdowns, phase headers |
 | `DescriptorLeadTime = 43,200` blocks | metadata constant | upgrade banners, execute precondition |
 | `RecentCohortSummaries` ring size = 32; books/proposal ≤ 6; `MaxLiveMarkets = 196` | metadata constants | history windows, chart bounds |
@@ -513,8 +513,8 @@ Total **168 bytes** (v1.0 baseline — the pre-freeze 78- and 92-byte drafts in 
 | X-1b | §5: `Traded { market, side, amount, cost, p_after }` and `Observed { market, o_t }` with an explicit Events table for `pallet-market` |
 | X-1c | §7.1: `RecentCohortSummaries` ring (last **32** cohorts) added to `pallet-epoch` storage — the §5.2.3 storage-list edit P-5 missed — with push point, eviction and weight argument |
 | X-10 | §7.4: `BaselineMarketOf: map EpochId → MarketId` declared (in `pallet-market`, per [04 §8.3](04-markets-and-pricing.md)) as the backing storage for Baseline-market discovery, with write point and pruning rule |
-| X-11a | §7.4/§8: NUM is `ForeignAssets` keyed by the pinned XCM Location; `ChainIdentity` pins the NUM identifier; `Assets.Account(1337, …)` reads are wrong by contract |
-| X-11b | §8: ss58 7777, paraId (fixtures 4242), GOV ED 0.01, `PhaseFlags` storage location all specified |
+| X-11a | §7.4/§8: USDC is `ForeignAssets` keyed by the pinned XCM Location; `ChainIdentity` pins the USDC identifier; `Assets.Account(1337, …)` reads are wrong by contract |
+| X-11b | §8: ss58 7777, paraId (fixtures 4242), WIT ED 0.01, `PhaseFlags` storage location all specified |
 | X-11c | §7.2: oracle pallet storage-item names and full event set defined canonically; [07](07-oracle-and-disputes.md) uses these names |
 | X-11d | §6: four FE §15.3 epoch event names corrected to `ProposalWithdrawn`/`ProposalCancelled`/`ProposalQualified`/`ProposalDeferred`; full canonical set frozen |
 | X-11f | §6: T20 now emits `ProposalForceRejected { pid, reason }`; the ledger emits `VaultVoided`/`VoidRedeemed` — no silent terminal transitions remain |

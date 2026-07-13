@@ -16,8 +16,8 @@ Block-time basis for human-time conversions: **6 s/block, 14,400 blocks/day** (1
 |---|---|
 | Address format | SS58 prefix **7777**, checksummed, with identicons |
 | paraId | assigned at onboarding; test fixtures use 4242 |
-| **NUM** (trading/treasury asset) | bridged USDC; **6 decimals**; `min_balance = 10^4` base units ("1 cent"); lives in `ForeignAssets` keyed by an XCM Location ([VERIFY asset index 1337]) |
-| **GOV** (native governance token) | **12 decimals**; total supply 10^9; existential deposit 0.01 GOV |
+| **USDC** (trading/treasury asset) | bridged USDC; **6 decimals**; `min_balance = 10^4` base units ("1 cent"); lives in `ForeignAssets` keyed by an XCM Location ([VERIFY asset index 1337]) |
+| **WIT** (native governance token) | **12 decimals**; total supply 10^9; existential deposit 0.01 WIT |
 | Prices / scores | fixed-point, **1e9 scale** at every API/event boundary; quote clamp [0.001, 0.999]; `p_S = 1 − p_L`; gate books map YES ↦ LONG |
 | Time | all deadlines are block numbers (`decide_at`, `maturity`, `grace_end`, `challenge_deadline`, `next_boundary`) — the UI computes countdowns from them |
 | Contract version | `INTEGRATION_CONTRACT_VERSION = 1`, a runtime constant, echoed in `release.json` |
@@ -35,7 +35,7 @@ CODE/META armed · 4 **sudo present** (drives the bootstrap banner) · 5 ledger 
 (PB-LEDGER-FREEZE) · 6 dead-man engaged · 7 reserve-health flag.
 
 **Proposals** — `proposal_summaries()` → up to 32 `ProposalSummaryView`: `id`, `class`,
-`state`, `proposer`, `epoch`, `payload_hash`, `ask` (NUM; 0 for non-treasury),
+`state`, `proposer`, `epoch`, `payload_hash`, `ask` (USDC; 0 for non-treasury),
 `decision_market` (accept, reject pair), `gate_markets` ([4]: (S,C) × (adopt, reject)),
 `decide_at`, `maturity`, `ratification`.
 Classes: **`Param, Treasury, Code, Meta, Constitutional`** (no Emergency).
@@ -45,7 +45,7 @@ Expired`**.
 Ratification badge: `NotRequired` / `Pending { referendum }` / `Passed { referendum }` /
 `Failed { referendum }`.
 
-**Markets & trading** — `quote(market, side, amount)` → `QuoteView`: `cost` (NUM, excl. fee),
+**Markets & trading** — `quote(market, side, amount)` → `QuoteView`: `cost` (USDC, excl. fee),
 `fee`, `p_after_1e9` (post-trade price), `max_trade`, `within_domain` — an exact pre-trade
 preview panel. Trade directions: `BuyLong, BuyShort, SellLong, SellShort`. Market kinds:
 **`DecisionAccept, DecisionReject, GateS_Adopt, GateS_Reject, GateC_Adopt, GateC_Reject,
@@ -63,11 +63,11 @@ exactly as the decision engine would read it.
 
 **Portfolio / ledger** — `account_positions(who)` → up to 64 `PositionView`: `position`,
 `balance`, `vault_state`. `PositionId` = `Proposal { proposal, branch, kind }` or
-`Baseline { epoch, side }`; `PositionKind` = `BranchNum, Long, Short, GateYes(GateType),
+`Baseline { epoch, side }`; `PositionKind` = `BranchUsdc, Long, Short, GateYes(GateType),
 GateNo(GateType)`; `Branch` = `Accept | Reject`; `GateType` = `Survival | Security`.
 Vault states (drive redeemability badges): **`Open`, `Resolved(Branch)`,
-`ScalarSettled { winner, s }`, `Voided`**. Balances: `System.Account` (GOV) and
-`ForeignAssets.Account(NUM_LOCATION, who)` (NUM).
+`ScalarSettled { winner, s }`, `Voided`**. Balances: `System.Account` (WIT) and
+`ForeignAssets.Account(USDC_LOCATION, who)` (USDC).
 
 **Execution queue** — `execution_queue()` → up to 32 `QueuedExecutionView`: `pid`, `class`,
 `payload_hash`, `maturity`, `grace_end`, `version_constraint`, `cancelled`, `ratification`,
@@ -176,7 +176,7 @@ expert detail + documented recovery per code; no free-text errors.
 6. `DescriptorLeadTime` (72 h) drives upgrade banners.
 7. On contract regression: fall back to the chain-served layer-1 surface — "reduced depth,
    full correctness; never a trusted third-party service".
-8. Fee-currency selector (GOV or NUM) reads `fee.gov_num_rate` live.
+8. Fee-currency selector (WIT or USDC) reads `fee.wit_usdc_rate` live.
 9. Trading enablement + sudo banner bind to `PhaseFlags`; dead-man and ledger-freeze states
    come from `EpochStatusView`.
 
@@ -208,12 +208,12 @@ live. For mock data these are the correct realistic values.
 | Parameter | Value | UI surface |
 |---|---|---|
 | `mkt.fee` | 30 bps | fee line in trade ticket |
-| `MinTrade` / `MaxTrade` | 1 NUM / b/4 per trade | amount validation, `max_trade` |
+| `MinTrade` / `MaxTrade` | 1 USDC / b/4 per trade | amount validation, `max_trade` |
 | `mkt.obs_interval` | 10 blocks (= 1 min) | chart granularity |
 | `mkt.kappa` κ | 0.005 per interval (TWAP slew cap) | "TWAP capped" chart annotation |
 | Price domain | quotes clamp to [0.001, 0.999] | price axes never show 0/1 |
-| `pol.b` decision books | floors 10k / 25k / 60k / 100k NUM per class (PARAM/TREASURY/CODE/META) | market depth indicator |
-| `pol.b_gate` / `pol.b_baseline` | 7,500 / 25,000 NUM | gate & Baseline book pages |
+| `pol.b` decision books | floors 10k / 25k / 60k / 100k USDC per class (PARAM/TREASURY/CODE/META) | market depth indicator |
+| `pol.b_gate` / `pol.b_baseline` | 7,500 / 25,000 USDC | gate & Baseline book pages |
 | Maker worst-case loss | b·ln 2 per book | market-info tooltip |
 | Sanity band | [0.02, 0.98] on welfare books (gate books exempt) | chart band shading |
 | Staleness | price gaps > 50 blocks in decision window ⇒ one 3-day extension, then reject | "market stale" warning |
@@ -230,7 +230,7 @@ live. For mock data these are the correct realistic values.
 | `dec.sigma` σ | 0.003 / 0.005 / 0.008 / 0.010 baseline noise floor | decision-stats panel |
 | `dec.delta_max` | 0.05 spot-vs-TWAP convergence bound | "converged" check |
 | `dec.coverage` | 95% required observation coverage | coverage meter |
-| `dec.v_min` | 100k / 250k / 600k / 1.2M NUM min volume (effective = max(floor, 2·InCapPrize)) | volume progress bar |
+| `dec.v_min` | 100k / 250k / 600k / 1.2M USDC min volume (effective = max(floor, 2·InCapPrize)) | volume progress bar |
 | `gate.p_max` | 0.05 gate veto threshold | gate-market red line |
 | `welfare.thetaS` lo/hi | 0.90 / 0.98 survival gate | welfare gauges |
 | `welfare.thetaC` lo/hi | 0.85 / 0.95 security gate | welfare gauges |
@@ -240,11 +240,11 @@ live. For mock data these are the correct realistic values.
 
 | Parameter | Value | UI surface |
 |---|---|---|
-| `prop.bond` | 1k / 5k+0.5%·Ask / 25k / 50k NUM per class | "bond required" in submit form |
+| `prop.bond` | 1k / 5k+0.5%·Ask / 25k / 50k USDC per class | "bond required" in submit form |
 | `intake.max_per_account` | 4 per epoch | "3 of 4 submissions used" |
 | `intake.slash_fraction` | 10% of bond (to INSURANCE) on non-decision-grade / missing preimage | submission warning; `IntakeSlashed` toast |
 | `IntakeQueue` | 64; overflow ⇒ `IntakeFull` | queue page "full" state |
-| `trs.proposer_reward` | PARAM 500 NUM; TREASURY/CODE min(0.05%·Ask, 25k); META 25k | "potential reward" |
+| `trs.proposer_reward` | PARAM 500 USDC; TREASURY/CODE min(0.05%·Ask, 25k); META 25k | "potential reward" |
 | Payload limits | ≤ 16 calls / 64 KiB / 25% block weight; nesting ≤ 4 | payload builder validation |
 
 ### B5. Execution & upgrades (13 §1, §2)
@@ -258,8 +258,8 @@ live. For mock data these are the correct realistic values.
 | `StaleEpochBound` | 7 days ⇒ force-reject in-flight | explains `StaleQueue` |
 | Dead-man switch | no finalized block ~8 h or snapshot > 4 d overdue ⇒ freeze | `dead_man_armed` banner |
 | PB-LEDGER-FREEZE | ≤ 14 days, one renewal | `ledger_frozen` banner |
-| Attestation | 25k GOV bond; ≥ 3 attestors; 2-of-N quorum; 72 h challenge window | "2 of 3 attested" progress |
-| `grd.bond` / `grd.review_deadline` | 50k GOV / 2 epochs | guardian roster, review countdown |
+| Attestation | 25k WIT bond; ≥ 3 attestors; 2-of-N quorum; 72 h challenge window | "2 of 3 attested" progress |
+| `grd.bond` / `grd.review_deadline` | 50k WIT / 2 epochs | guardian roster, review countdown |
 
 ### B6. Treasury & economics (13 §1, §3.4–§3.5)
 
@@ -269,10 +269,10 @@ live. For mock data these are the correct realistic values.
 | `trs.cap_30d` / `trs.cap_180d` | 10% / 30% of NAV | treasury spend meters (gauges) |
 | `trs.stream_threshold` | 1% of NAV — larger payouts stream | "paid as stream" badge |
 | `iss.inflation_cap` | 2%/yr, down-only | tokenomics page |
-| `fee.gov_num_rate` | 1.0 × ref (placeholder 0.05 NUM/GOV [VERIFY]; bounds 0.1×–10×) | fee-currency selector |
-| NUM treasury target | ≥ 25M NUM before Phase 5 | treasury progress |
-| `keeper.budget_epoch` / `keeper.rebate` | 12,000 NUM/epoch / ≈ 3× fee cost | keeper dashboard |
-| `phase3.tvl_cap` / `phase3.deposit_cap` | 2,000,000 / 20,000 NUM (sim-gated [VERIFY]) | deposit caps banner + form limit |
+| `fee.wit_usdc_rate` | 1.0 × ref (placeholder 0.05 USDC/WIT [VERIFY]; bounds 0.1×–10×) | fee-currency selector |
+| USDC treasury target | ≥ 25M USDC before Phase 5 | treasury progress |
+| `keeper.budget_epoch` / `keeper.rebate` | 12,000 USDC/epoch / ≈ 3× fee cost | keeper dashboard |
+| `phase3.tvl_cap` / `phase3.deposit_cap` | 2,000,000 / 20,000 USDC (sim-gated [VERIFY]) | deposit caps banner + form limit |
 
 ### B7. Oracle, disputes, registry, reserve (13 §1–§3.4)
 
@@ -280,30 +280,30 @@ live. For mock data these are the correct realistic values.
 |---|---|---|
 | `orc.window` | 72 h challenge window per round | `challenge_deadline` countdown |
 | `orc.rounds` | 3 max | "Round 2 of 3" stepper |
-| `orc.bond_floor` / `orc.bond_bps` | 10k NUM / 250 bps; B₁ = max(floor, bps × stake-at-risk); doubles per round | bond calculator |
-| `orc.reporter_stake` | 100,000 NUM | reporter registration |
+| `orc.bond_floor` / `orc.bond_bps` | 10k USDC / 250 bps; B₁ = max(floor, bps × stake-at-risk); doubles per round | bond calculator |
+| `orc.reporter_stake` | 100,000 USDC | reporter registration |
 | `orc.n_min` | 3 reporters required | "awaiting reporters (2/3)" |
-| `wt.quorum` / `wt.stake` / `wt.max` | 2 acks / 25,000 NUM / ≤ 16 seats | watchtower quorum progress |
+| `wt.quorum` / `wt.stake` / `wt.max` | 2 acks / 25,000 USDC / ≤ 16 seats | watchtower quorum progress |
 | Watchtower extension | one +48 h per (component, epoch) | `WindowExtended` notice |
 | Oracle settle deadline | epoch(m+1) Housekeeping (d20); unclosed ⇒ **neutral settlement** | "settles neutrally at d20" warning |
 | Adjudication track | 60% approval / 10% support / 7-day, pre-cohort conviction snapshot | oracle-dispute referendum page |
 | Slashing split | 40% challenger / 60% INSURANCE; reporter −50% on 2nd false report, ejected on 3rd | challenge-reward preview; `offenses` badge |
-| `reg.bond_incident` / `reg.bond_milestone` | 5,000 / 2,500 NUM | registry filing forms |
-| Reserve probe | daily, 1 h timeout, 0.10 NUM; unhealthy after 2 failures, recovered after 3 passes | reserve-health tile |
+| `reg.bond_incident` / `reg.bond_milestone` | 5,000 / 2,500 USDC | registry filing forms |
+| Reserve probe | daily, 1 h timeout, 0.10 USDC; unhealthy after 2 failures, recovered after 3 passes | reserve-health tile |
 
 ### B8. Ledger, positions, redemptions (13 §1–§4)
 
 | Parameter | Value | UI surface |
 |---|---|---|
-| `ledger.min_split` / `MinTransfer` | 0.01 NUM | split/transfer validation |
-| `ledger.position_deposit` | 0.1 NUM per position entry | deposit line in confirmations |
+| `ledger.min_split` / `MinTransfer` | 0.01 USDC | split/transfer validation |
+| `ledger.position_deposit` | 0.1 USDC per position entry | deposit line in confirmations |
 | `MaxPositionsPerAccount` | 64 | "62/64 positions" meter |
-| VOID payouts | pairs merge at par (100%); `redeem_void`: unpaired branch-NUM `floor(a/2)`, unpaired LONG/SHORT/gate `floor(a/4)` | VOID redemption dialog |
+| VOID payouts | pairs merge at par (100%); `redeem_void`: unpaired branch-USDC `floor(a/2)`, unpaired LONG/SHORT/gate `floor(a/4)` | VOID redemption dialog |
 | Scalar redemption | LONG `floor(a·s)`; unpaired SHORT `floor(a·(1−s))`; pairs via `redeem_scalar_pair` = exactly `a` | redeem payout preview |
 | Rounding | charges round up, payouts round down (against the claimant) | payout fine print |
 | `RecentCohortSummaries` | ring of 32 (~22 months) | history page range |
 | `ExecutionRecords` | ring of 256 | execution history range |
 
 **Unset-by-spec ([VERIFY], sim-/ops-gated — never invent values):** `sec.prize.*`,
-`sec.flow_cap`, `collator.bond_req_gov`, `ops.*` budget lines, `pol.b_baseline` calibration,
-`fee.gov_num_rate_ref` at TGE, `phase3.*` caps before Phase-3 arming.
+`sec.flow_cap`, `collator.bond_req_wit`, `ops.*` budget lines, `pol.b_baseline` calibration,
+`fee.wit_usdc_rate_ref` at TGE, `phase3.*` caps before Phase-3 arming.

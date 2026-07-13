@@ -8,18 +8,18 @@
 
 ## 1. The money system (03)
 
-- **NUM** is the collateral: all trading, bonds and payouts. **GOV** is for values voting and
+- **USDC** is the collateral: all trading, bonds and payouts. **WIT** is for values voting and
   operator bonds.
-- `ledger.split` turns `a` NUM into `a` **AcceptNum** + `a` **RejectNum** (**branch-NUM**):
-  conditional NUM that exists "in the ACCEPT world" / "in the REJECT world". A complete pair
-  (1 AcceptNum + 1 RejectNum) always merges back to 1 NUM at par.
-- Within a branch, branch-NUM splits further into **LONG/SHORT** scalar pairs on the
+- `ledger.split` turns `a` USDC into `a` **AcceptUsdc** + `a` **RejectUsdc** (**branch-USDC**):
+  conditional USDC that exists "in the ACCEPT world" / "in the REJECT world". A complete pair
+  (1 AcceptUsdc + 1 RejectUsdc) always merges back to 1 USDC at par.
+- Within a branch, branch-USDC splits further into **LONG/SHORT** scalar pairs on the
   settlement score `s` (LONG pays `s`, SHORT pays `1−s`), and for gated classes into
   **GateYes/GateNo** pairs per gate (`Survival`, `Security`). Per epoch there are also
   Baseline legs **B-LONG/B-SHORT** on the epoch score.
 - Each proposal has a **vault** (escrow + instrument home) with a state machine; each account
-  holds ≤ 64 position entries, 0.1 NUM refundable deposit per entry, minimum split/transfer
-  0.01 NUM.
+  holds ≤ 64 position entries, 0.1 USDC refundable deposit per entry, minimum split/transfer
+  0.01 USDC.
 
 **Vault states drive which buttons are enabled:**
 
@@ -34,11 +34,11 @@
 
 | Vault state | Holding | Call | Payout per unit |
 |---|---|---|---|
-| `ScalarSettled{w,s}` | winning branch-NUM | `redeem` | 1 |
+| `ScalarSettled{w,s}` | winning branch-USDC | `redeem` | 1 |
 | `ScalarSettled` | LONG / SHORT of winner | `redeem_scalar` | `floor(a·s)` / `floor(a·(1−s))` |
 | `ScalarSettled` | LONG+SHORT pair | `redeem_scalar_pair` | exactly `a` |
-| any non-settled | Accept+Reject pair | `merge` | 1 NUM per pair (par) |
-| `Voided` | unpaired branch-NUM | `redeem_void` | `floor(a/2)` |
+| any non-settled | Accept+Reject pair | `merge` | 1 USDC per pair (par) |
+| `Voided` | unpaired branch-USDC | `redeem_void` | `floor(a/2)` |
 | `Voided` | unpaired LONG/SHORT/gate leg | `redeem_void` | `floor(a/4)` |
 
 Unredeemed claims sweep to INSURANCE after 1 year (`VaultReaped`).
@@ -64,7 +64,7 @@ perfectly healthy path**), `Suspended → Rerun` (guardian delay + re-decision a
 and +1 pp hurdle), `FailedExecuted` (payload reverted; 50% bond slash), `Expired` (grace
 missed). Bonds: full refund on withdrawal and every decision-grade outcome; 10% slash on
 non-decision-grade/preimage-missing; 100% on constitution violation. Proposer rewards on
-execution (PARAM 500 NUM; TREASURY/CODE min(0.05%·Ask, 25k); META 25k).
+execution (PARAM 500 USDC; TREASURY/CODE min(0.05%·Ask, 25k); META 25k).
 
 **Dead-man switch**: if no block finalizes for ~8 h or a welfare snapshot is > 4 days
 overdue, the execution queue freezes, decision windows extend day-for-day, the epoch clock
@@ -81,11 +81,11 @@ no markets (referendum path). Typical epoch ≈ 31 live books; max 196.
   estimate of the welfare score conditional on that branch. Gate book price = breach
   probability (healthy gates trade near 0, e.g. 0.011). Baseline = unconditional welfare
   estimate.
-- **`buy(market, side, amount, max_cost)`** pays NUM (cost + 30 bps fee, slippage bound
+- **`buy(market, side, amount, max_cost)`** pays USDC (cost + 30 bps fee, slippage bound
   mandatory) and delivers the target position **plus a "mirror credit"** — `cost` of
-  mirror-branch branch-NUM. The portfolio must show this credit: it's what makes a
+  mirror-branch branch-USDC. The portfolio must show this credit: it's what makes a
   losing-branch buyer whole at par (they lose only fees). `sell` mirrors this (auto-merge;
-  any unmatched remainder stays as branch-NUM).
+  any unmatched remainder stays as branch-USDC).
 - **TWAP**: observations every 10 blocks from the previous block's quote, slew-capped
   (κ = 0.005/interval) — recorded series are smooth by construction. The decision uses the
   final-72 h TWAP + final-24 h trailing TWAP, never spot alone. A price gap > 50 blocks in
@@ -132,11 +132,11 @@ Outcome: `Adopt` / `Extend` (once) / `Reject(reason)` — all 16 `RejectReason`s
 
 Standard conviction voting (1×–6×, locks up to 32 weeks). Tracks (deposit / prepare /
 decision / confirm / approval / support / enactment):
-`metric` (10k GOV, 2d/14d/2d, 60%→50% / 10%→2%, 14 d) · `constitution` (25k, 2d/21d/3d,
+`metric` (10k WIT, 2d/14d/2d, 60%→50% / 10%→2%, 14 d) · `constitution` (25k, 2d/21d/3d,
 67% / 15%→5%, 28 d) · `entrenched` (50k, 7d/28d/7d, 80% / 20%→10%, 4 epochs) · `guardian`
 (5k, 1d/7d/1d, 55% / 5%, 2 d) · `ratify` (1k, 1d/7d/1d, 50% / 5%, immediate — the only
 deadline is at `execute()`) · `oracle` (5k, 0/7d/1d, 60% / 10%→3%, immediate).
-The `oracle` track tally uses a **pre-cohort conviction snapshot**: GOV locked after the
+The `oracle` track tally uses a **pre-cohort conviction snapshot**: WIT locked after the
 disputed cohort began has zero weight — the UI shows each voter's snapshot-eligible power.
 
 **Ratification** (CODE/META): a `ratify` referendum can be submitted any time after the
@@ -146,7 +146,7 @@ artifact hash is committed, runs concurrently with trading/timelock, and is chec
 
 ## 7. Guardians, playbooks, attestors (06 §5–§7)
 
-- **Guardians**: 7 elected accounts, 50k GOV bond each, **5-of-7** approvals dispatch
+- **Guardians**: 7 elected accounts, 50k WIT bond each, **5-of-7** approvals dispatch
   atomically; pending actions expire after 3 days. Powers with allowances: `pause_intake`
   (≤ 14 d, 1 per 4 epochs), `delay_once` (one queued proposal, once ever), `force_rerun`
   (1/epoch), `activate_playbook` (only while its on-chain trigger is verifiably active),
@@ -158,40 +158,40 @@ artifact hash is committed, runs concurrently with trading/timelock, and is chec
   `PB-RESERVE` (halt split inflows only; merge/redeem/exit stay open), `PB-LEDGER-FREEZE`
   (all ledger + market calls error `Frozen`; ≤ 14 d + one renewal). Active playbooks show
   trigger + expiry countdown.
-- **Attestors**: ≥ 3 bonded members (25k GOV); CODE/META upgrades need a 2-of-N signed
+- **Attestors**: ≥ 3 bonded members (25k WIT); CODE/META upgrades need a 2-of-N signed
   attestation (reproducible build + kernel invariants preserved), challengeable for 72 h.
   UI: "2 of 3 attested" progress on upgrade proposals.
 
 ## 8. Oracle game & registries (07)
 
 Per attested metric component and measurement epoch: report window (2 d) → up to 3 challenge
-rounds (72 h each; bonds double per round: B₁, 2B₁, 4B₁; B₁ = max(10k NUM, 2.5% ×
+rounds (72 h each; bonds double per round: B₁, 2B₁, 4B₁; B₁ = max(10k USDC, 2.5% ×
 stake-at-risk)) → terminal adjudication on the `oracle` referendum track (7 d). Unchallenged
 rounds need a **2-watchtower acknowledgment quorum**; missing quorum grants one 48 h
 extension then settles **neutrally** (carry last value, flagged). The **money deadline** is
 d20 of the next epoch (`OracleSettleDeadline`): whatever isn't closed settles neutrally;
 later verdicts move bonds and reputations only, never settled money. A failed **gate input**
-voids the affected cohorts. Roles: **reporters** (100k NUM stake, ≥ 3 required),
-**watchtowers** (25k NUM, ≤ 16 seats), challengers (anyone, bonded). `recompute_proof`
+voids the affected cohorts. Roles: **reporters** (100k USDC stake, ≥ 3 required),
+**watchtowers** (25k USDC, ≤ 16 seats), challengers (anyone, bonded). `recompute_proof`
 resolves deterministic disputes mechanically. Evidence is content-addressed
 (`evidence_hash`) — the UI re-hashes fetched evidence before rendering.
 
 **Registries** (bonded claims about off-chain facts, consumed at settlement): IncidentRegistry
-(severity S1 = 1.0 / S2 = 0.4 / S3 = 0.1; bond 5k NUM) and MilestoneRegistry (bond 2.5k NUM);
+(severity S1 = 1.0 / S2 = 0.4 / S3 = 0.1; bond 5k USDC) and MilestoneRegistry (bond 2.5k USDC);
 72 h challenge windows, watchtower quorum, per-epoch aggregates.
 
 ## 9. Treasury (08)
 
-- **NAV** = liquid NUM + stream remainders owed in − obligations; GOV holdings and in-flight
+- **NAV** = liquid USDC + stream remainders owed in − obligations; WIT holdings and in-flight
   XCM marked 0 (conservative). `nav()` exposes `nav`, `spendable_nav`, `reserve_impaired`,
   `meter_utilization` + per-class floors (distance-to-floor rendering; arming below floor
   fails loudly with `NavFloorUnmet`).
 - Sub-accounts / budget lines: `MAIN`, `POL` (≤ 0.75% NAV/epoch), `POL_BASELINE`, `KEEPER`
-  (12k NUM/epoch), `ORACLE`, `REWARDS`, `INSURANCE`, `ops.*` (bootnodes, RPC/archive,
+  (12k USDC/epoch), `ORACLE`, `REWARDS`, `INSURANCE`, `ops.*` (bootnodes, RPC/archive,
   keepers, evidence hosting, monitoring, Arweave, collators, coretime).
 - **Streams**: linear vesting grants, recipient-claimable (`claim_stream`); mandatory for
   grants > 1% NAV; cancellable by a later TREASURY decision.
-- **Meters** (gauges in the UI): per-proposal ≤ 5% NAV; 30-day ≤ 10%; 180-day ≤ 30%; GOV
+- **Meters** (gauges in the UI): per-proposal ≤ 5% NAV; 30-day ≤ 10%; 180-day ≤ 30%; WIT
   issuance ≤ 2%/yr. `SlotsShrunk` (slate reduced to fit the POL budget) must appear on the
   epoch dashboard.
 - **Reserve health**: daily XCM probe of USDC transferability; 2 consecutive fails ⇒
@@ -217,9 +217,9 @@ resolves deterministic disputes mechanically. Evidence is content-addressed
 
 ## 11. Merged glossary (canonical; supplement to kit file 05's naming tables)
 
-**branch-NUM / AcceptNum / RejectNum** conditional NUM per branch · **complete pair**
+**branch-USDC / AcceptUsdc / RejectUsdc** conditional USDC per branch · **complete pair**
 Accept+Reject pair (par) · **complete set** LONG+SHORT of one branch · **mirror credit**
-the mirror-branch branch-NUM a buyer keeps · **decision pair** the two scalar books per
+the mirror-branch branch-USDC a buyer keeps · **decision pair** the two scalar books per
 proposal · **gate books** the four (S,C)×(adopt,reject) veto books · **Baseline** the
 epoch's unconditional welfare book · **book** one LMSR market maker with subsidy `b` ·
 **settlement score `s`** GeoMean of the two measured epochs' welfare · **decision-grade**

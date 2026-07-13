@@ -52,7 +52,7 @@ Design a coherent, interactive multi-screen prototype covering:
    execute-time deadline; committed payload with hash.
 3. **Market trading (S3)** — trade ticket with exact quote preview (`cost`, 30 bps `fee`,
    post-trade price `p_after`, mandatory `max_cost` slippage bound, `within_domain` guard);
-   the mirror-credit explanation ("you also receive N REJECT-NUM — your principal is
+   the mirror-credit explanation ("you also receive N REJECT-USDC — your principal is
    protected if this branch is annulled"); spot vs TWAP chart with the sanity band [0.02,
    0.98] shaded, visible data gaps, and provenance labeling on the series.
 4. **Portfolio (S4)** — positions grouped by proposal and branch; vault-state badges
@@ -65,8 +65,8 @@ Design a coherent, interactive multi-screen prototype covering:
 6. **One complete transaction confirm flow** — the pre-sign ritual: refresh at a fresh
    finalized block, named precondition rows with expected vs actual (and the blocking diff
    state), the three-level payload review (human summary / decoded tree / raw SCALE bytes +
-   hash, all decoded from the exact bytes to be signed), fee-currency selector (GOV ⇄ NUM at
-   the live `fee.gov_num_rate`), then Broadcast → InBestBlock → **Finalized** with the
+   hash, all decoded from the exact bytes to be signed), fee-currency selector (WIT ⇄ USDC at
+   the live `fee.wit_usdc_rate`), then Broadcast → InBestBlock → **Finalized** with the
    outcome decoded from finalized events.
 7. **Degraded-state variants** (as screen states, not an afterthought): first-load
    light-client sync (first verified render takes 30–90 s — make the wait legible: relay →
@@ -77,8 +77,8 @@ Design a coherent, interactive multi-screen prototype covering:
 
 Use realistic mock data from file 05 throughout: the worked decision example (ACCEPT 0.560 /
 REJECT 0.520, TWAPs 0.5585 / 0.5210 / Baseline 0.5230, uplift 0.0375 vs δ 0.025), real bonds
-(PARAM 1,000 NUM … META 50,000 NUM), 21-day epoch with real phase days, NUM with 6 decimals,
-GOV with 12, SS58 addresses (prefix 7777) with identicons, block-denominated deadlines shown
+(PARAM 1,000 USDC … META 50,000 USDC), 21-day epoch with real phase days, USDC with 6 decimals,
+WIT with 12, SS58 addresses (prefix 7777) with identicons, block-denominated deadlines shown
 in both blocks and human time. No lorem ipsum anywhere.
 
 ## Design mandates from the spec (non-negotiable)
@@ -123,7 +123,7 @@ canonical term against file 05, every mandate above, WCAG AA contrast, visible f
 reduced-motion behavior — and remove one decorative element that isn't earning its place.
 
 **Copy voice**: plain verbs, sentence case, specific numbers over adjectives; controls say
-exactly what they do (`Split 1,000 NUM`, not `Submit`); errors state what happened and how
+exactly what they do (`Split 1,000 USDC`, not `Submit`); errors state what happened and how
 to recover, without apologizing; the mandated honesty texts (sudo banner, VOID rates, NAV
 haircut, unverified-mode warnings) appear verbatim in intent. If the files contradict each
 other or leave something ambiguous, list it under "Spec questions" in your response rather

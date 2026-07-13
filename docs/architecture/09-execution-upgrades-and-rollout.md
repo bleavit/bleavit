@@ -208,12 +208,12 @@ system.authorize_upgrade_without_checks
 
 (`system.set_code` remains filtered as before; `authorize_upgrade`/`apply_authorized_upgrade` are the sole upgrade path, §2.) Enforcement: the SafetyFilter denies these unconditionally, **and recurses through `sudo.sudo` / `sudo.sudo_unchecked_weight` / `sudo.sudo_as`** during Phases 0–3 so the multisig cannot reach them through the sudo wrapper; [15](./15-invariants-and-testing.md) carries negative tests for every wrapper × every filtered call. Consequence: even a fully malicious founding multisig cannot silently rewrite storage or install unchecked code — its worst case is bounded to the sudo-admissible surface, which is what the [14](./14-threat-model.md) founding-multisig threat row (new) prices.
 
-### 5.2 Phase-3 real-NUM exposure caps
+### 5.2 Phase-3 real-USDC exposure caps
 
-While real NUM trades under bootstrap authority, exposure is capped by two constitution keys (values in [13](./13-parameters.md)):
+While real USDC trades under bootstrap authority, exposure is capped by two constitution keys (values in [13](./13-parameters.md)):
 
-- `phase3.tvl_cap` — global cap on total NUM held by the ledger + treasury sovereign accounts; enforced at every `split`/inflow-crediting path and at the XCM inflow leg (excess inbound reserve transfers fail politely, funds remain on Asset Hub).
-- `phase3.deposit_cap` — per-account cumulative NUM deposit cap over the phase; enforced at the same points.
+- `phase3.tvl_cap` — global cap on total USDC held by the ledger + treasury sovereign accounts; enforced at every `split`/inflow-crediting path and at the XCM inflow leg (excess inbound reserve transfers fail politely, funds remain on Asset Hub).
+- `phase3.deposit_cap` — per-account cumulative USDC deposit cap over the phase; enforced at the same points.
 
 Both keys are **raised only by phase gates** (§7): they are not PARAM/META-adjustable during Phases ≤ 3; each phase-advancement upgrade carries the scheduled raise, and Phase 5+ sets them to unbounded sentinels. The FE surfaces the caps and the persistent **"bootstrap governance (sudo active)"** banner chain-read from `PhaseFlags` ([02](./02-integration-contract.md) chain identity; FE side [11](./11-frontend-workflows.md)) — sudo-era state is never presented as trust-equivalent to post-sudo state.
 
@@ -232,9 +232,9 @@ Both keys are **raised only by phase gates** (§7): they are not PARAM/META-adju
 | XCM version | latest stable on `stable2603` **[VERIFY exact version const]**; version negotiation enabled |
 | Accepted origins | Asset Hub, relay chain, Coretime chain; all others barred |
 | Barrier | paid-execution allowlist + known query responses; **`Transact` refused from all locations**; no superuser origin conversion; `UnpaidExecution` refused |
-| Asset mappings | NUM (Asset Hub USDC location ↔ local `ForeignAssets` id, pinned per D-17: `{parents: 1, X3(Parachain(1000), PalletInstance(50), GeneralIndex(1337))}` **[VERIFY asset index 1337]**) and DOT (parent) only; unknown assets refused |
-| Reserve model | Asset Hub is reserve for NUM; relay/AH for DOT; **teleports disabled** |
-| Fees/weight | `WeightTrader` selling execution for DOT or NUM at governed rates; NUM is a sufficient asset, so a NUM-only account can pay inbound execution fees ([08](./08-treasury-and-economics.md) owns `fee.gov_num_rate` for the tx-payment side) |
+| Asset mappings | USDC (Asset Hub location ↔ local `ForeignAssets` id, pinned per D-17: `{parents: 1, X3(Parachain(1000), PalletInstance(50), GeneralIndex(1337))}` **[VERIFY asset index 1337]**) and DOT (parent) only; unknown assets refused |
+| Reserve model | Asset Hub is reserve for USDC; relay/AH for DOT; **teleports disabled** |
+| Fees/weight | `WeightTrader` selling execution for DOT or USDC at governed rates; USDC is a sufficient asset, so a USDC-only account can pay inbound execution fees ([08](./08-treasury-and-economics.md) owns `fee.wit_usdc_rate` for the tx-payment side) |
 | Failure handling | protocol-initiated transfers (coretime funding §4, treasury recovery) are keeper-monitored with bounded retry and idempotency keys; user transfers follow standard XCM error semantics; **no XCM outcome participates in any decision or settlement path** (I-24) — an XCM failure can therefore never default to adoption |
 | Trapped assets | recovery via a TREASURY-class `claim_assets` call only |
 | Disabled instructions | `Transact`, HRMP channel-request handling beyond system defaults, any instruction not needed for reserve transfer + fee payment — default-deny posture |
@@ -244,14 +244,14 @@ External oracle-parachain feeds via XCM remain analyzed and excluded as settleme
 
 ### 6.2 Withdrawal (exit) path — user-callable
 
-`pallet_xcm.limited_reserve_transfer_assets` (NUM → Asset Hub, DOT for fees) is user-callable on this chain and is the canonical exit. It is an ordinary signed call subject to `phase3.tvl_cap` accounting (withdrawals always allowed — caps bind inflows only) and gets a normal FE screen with a precondition row ([11](./11-frontend-workflows.md), D-12). It is **not** frozen by PB-LEDGER-FREEZE's inflow arm; whether the freeze halts outflows too is owned by [06](./06-governance-and-guardians.md) (D-9 freezes both directions — the FE precondition row reflects the flag).
+`pallet_xcm.limited_reserve_transfer_assets` (USDC → Asset Hub, DOT for fees) is user-callable on this chain and is the canonical exit. It is an ordinary signed call subject to `phase3.tvl_cap` accounting (withdrawals always allowed — caps bind inflows only) and gets a normal FE screen with a precondition row ([11](./11-frontend-workflows.md), D-12). It is **not** frozen by PB-LEDGER-FREEZE's inflow arm; whether the freeze halts outflows too is owned by [06](./06-governance-and-guardians.md) (D-9 freezes both directions — the FE precondition row reflects the flag).
 
 ### 6.3 Asset Hub on-ramp — what the backend provides (D-12)
 
 The guided deposit flow ([11](./11-frontend-workflows.md)) runs a second light-client connection to Asset Hub. This chain's obligations, so that flow can exist:
 
-1. **Pinned identity**: the NUM `Location`, local `ForeignAssets` id, paraId and ss58 prefix frozen in [02](./02-integration-contract.md) (D-17) — the FE `ChainIdentity` pins them; nothing is discovered at runtime.
-2. **Sufficiency + fee viability**: NUM registered sufficient at genesis; inbound reserve transfers deliver to accounts holding zero GOV and the delivered NUM can pay subsequent local fees.
+1. **Pinned identity**: the USDC `Location`, local `ForeignAssets` id, paraId and ss58 prefix frozen in [02](./02-integration-contract.md) (D-17) — the FE `ChainIdentity` pins them; nothing is discovered at runtime.
+2. **Sufficiency + fee viability**: USDC registered sufficient at genesis; inbound reserve transfers deliver to accounts holding zero WIT and the delivered USDC can pay subsequent local fees.
 3. **HRMP channels**: opened during Phase 2 on Paseo, Phase 3 on Polkadot **[VERIFY current channel-establishment procedure]**; channel liveness is a rollout gate (§7).
 4. **Asset Hub descriptor set**: added to the descriptor pipeline and shipped in the same release train ([12](./12-release-and-operations.md)); pipeline liveness incl. Asset Hub descriptors is a Phase-3 gate (§7).
 5. **Test artifacts**: the [02](./02-integration-contract.md) published test-artifact feed includes a Chopsticks/Zombienet Asset Hub ⇄ parachain reserve-transfer environment (E21, §8) so the FE can regression-test the funding flow per release.
@@ -276,8 +276,8 @@ Advancement at every step = published evidence + META decision + values ratifica
 | 2 Public testnet (Paseo) + bounties | all classes, testnet-binding | full powers, penalty-free | Phase 1 exit; bounty program funded; **ss58 prefix 7777 registry submission accepted**; **testnet WSS bootnode set live (≥ 8 browser-reachable across ≥ 4 operators, ≥ 2 on :443)**; **integration-contract implementation (E15) deployed** | ≥ 6 epochs; zero invariant breaches; ≥ 1 full upgrade e2e **incl. `DescriptorLeadTime` + attestation + ratify path**; unclaimed core bounties or all findings fixed; **contract freeze signed by both teams ([02](./02-integration-contract.md))**; **descriptor pipeline exercised e2e on testnet**; **expedited-CODE-lane drill under a staged freeze** | redeploy | audit A begins |
 | 3 Mainnet shadow futarchy | markets real (under **`phase3.tvl_cap` / `phase3.deposit_cap`**, §5.2), decisions advisory (guard disconnected); sudo present, **dangerous calls filtered from genesis (§5.1)**; **FE sudo banner live** | full | audits A+B passed; genesis ceremony; **mainnet WSS bootnode set live (≥ 8/≥ 4 ops/≥ 2 on :443) + 30-day operator served-state commitment in force**; **descriptor pipeline live incl. Asset Hub descriptor set**; **≥ 3 registered oracle reporters with full stakes**; **HRMP channels to Asset Hub open; funding flow (deposit + withdraw) passing the published XCM test suite** | ≥ 6 epochs; standing-Baseline calibration error within band; F̂ measured ≥ L/2; zero oracle deadlocks; **attestor registry elected and ≥ 1 mainnet-shadow upgrade attested 2-of-3** | sudo pause | reproducible-build attest |
 | 4 Binding PARAM | PARAM only; **sudo removed** (§7.2); exposure caps raised per schedule | pause/delay/rerun/playbooks | Phase 3 exit + values ratification of the arming upgrade; **NAV ≥ min-viable NAV(PARAM) ([08](./08-treasury-and-economics.md)) — loud gate: arming refused with a published shortfall figure, never silently** | ≥ 12 binding PARAM decisions; zero constitutional slashes of the engine; zero reversal-consensus incidents | PB-HALT-INTAKE; values-voted retreat to shadow (guard disconnect is itself a playbook) | — |
-| 5 + TREASURY | + TREASURY (streams mandatory > 1% NAV); caps raised | as P4 | Phase 4 exit; V_min consistently met; **treasury funding ≥ 25M NUM and NAV ≥ min-viable NAV(TREASURY)** | 2 epochs at full treasury cadence; zero unratified guardian actions | as P4 | — |
-| 6 + CODE/META | + CODE, META (values ratification mandatory); caps → unbounded sentinels | delay-once + playbooks only | Phase 5 exit; scope-A re-audit; **NAV ≥ min-viable NAV(CODE/META) (≈ 14M NUM floor for one CODE at floor liquidity — normative value: [08](./08-treasury-and-economics.md))** | 1 CODE upgrade shipped and stable ≥ 60 d **through the full D-14 lead-time path**; dispute game exercised without deadlock | as P4 | scope-A re-audit |
+| 5 + TREASURY | + TREASURY (streams mandatory > 1% NAV); caps raised | as P4 | Phase 4 exit; V_min consistently met; **treasury funding ≥ 25M USDC and NAV ≥ min-viable NAV(TREASURY)** | 2 epochs at full treasury cadence; zero unratified guardian actions | as P4 | — |
+| 6 + CODE/META | + CODE, META (values ratification mandatory); caps → unbounded sentinels | delay-once + playbooks only | Phase 5 exit; scope-A re-audit; **NAV ≥ min-viable NAV(CODE/META) (≈ 14M USDC floor for one CODE at floor liquidity — normative value: [08](./08-treasury-and-economics.md))** | 1 CODE upgrade shipped and stable ≥ 60 d **through the full D-14 lead-time path**; dispute game exercised without deadlock | as P4 | scope-A re-audit |
 | 7 Mature | all; guardian reduced to playbooks only; renewal by entrenched track | playbooks only | Phase 6 exit; entrenched-track confirmation | steady-state; guardian sunset vote scheduled | as P4 | periodic |
 
 ### 7.2 Sudo removal (Phase 3→4; carried, normative)
