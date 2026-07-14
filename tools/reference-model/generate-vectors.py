@@ -50,7 +50,7 @@ def build():
         "observe_block": "100", "previous_quote": "0.900",
         "recorded": fmt(twap.observe(100, Decimal("0.900"))),
     }]
-    return {"schema":"bleavit.reference-model.v1","precision":"Python Decimal, 90 decimal digits (>=256-bit precision target)","lmsr_vectors":vectors_v1_v6(),"high_precision_corpus":{"b":"10000","samples":samples},"decision_scenarios":decision_scenarios,"welfare_scenarios":welfare_scenarios,"twap_scenarios":twap_scenarios,"ledger_scenarios":[{"name":"void_neutral_branch_usdc","input":"10.000000","payout":"5.000000"}]}
+    return {"schema":"bleavit.reference-model.v2","precision":"Python Decimal, 90 decimal digits (>=256-bit precision target)","lmsr_vectors":vectors_v1_v6(),"high_precision_corpus":{"b":"10000","samples":samples},"decision_scenarios":decision_scenarios,"welfare_scenarios":welfare_scenarios,"twap_scenarios":twap_scenarios,"ledger_scenarios":[{"name":"void_neutral_branch_usdc","input":"10.000000","payout":"5.000000"}]}
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument("--check", action="store_true"); p.add_argument("--out", default="reference-model/fixtures/vectors.json"); a=p.parse_args()

@@ -153,7 +153,7 @@
     }
   },
   "precision": "Python Decimal, 90 decimal digits (>=256-bit precision target)",
-  "schema": "bleavit.reference-model.v1",
+  "schema": "bleavit.reference-model.v2",
   "twap_scenarios": [
     {
       "initial": "0.500",
