@@ -164,6 +164,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-futarchy-treasury"
+version = "0.1.0"
+dependencies = [
+ "futarchy-primitives",
+ "pallet-origins",
+ "parity-scale-codec",
+ "scale-info",
+]
+
+[[package]]
 name = "pallet-market"
 version = "0.1.0"
 dependencies = [
