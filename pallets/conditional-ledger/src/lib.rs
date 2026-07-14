@@ -1043,19 +1043,18 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
                 VaultState::ScalarSettled { winner, s } => {
                     let w = winner;
                     let mut liability = self.total(position(pid, w, PositionKind::BranchUsdc));
+                    // redeem_scalar_pair pays complete pairs at par regardless
+                    // of s, so pairs must be counted exactly - flooring both
+                    // single legs undercounts by up to one unit per pair
+                    // (Codex review, PR #33).
+                    let long = self.total(position(pid, w, PositionKind::Long));
+                    let short = self.total(position(pid, w, PositionKind::Short));
+                    let pairs = long.min(short);
+                    liability = add(liability, pairs)?;
+                    liability = add(liability, mul_score(sub(long, pairs)?, s.0 as u128)?)?;
                     liability = add(
                         liability,
-                        mul_score(
-                            self.total(position(pid, w, PositionKind::Long)),
-                            s.0 as u128,
-                        )?,
-                    )?;
-                    liability = add(
-                        liability,
-                        mul_score(
-                            self.total(position(pid, w, PositionKind::Short)),
-                            SCALE_1E9 - s.0 as u128,
-                        )?,
+                        mul_score(sub(short, pairs)?, SCALE_1E9 - s.0 as u128)?,
                     )?;
                     for g in [GateType::Survival, GateType::Security] {
                         let yes = self.total(position(pid, w, PositionKind::GateYes(g)));
@@ -1070,23 +1069,43 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
                     ensure!(info.escrowed >= liability, Error::TryStateViolation);
                 }
                 VaultState::Voided => {
-                    let mut liability = 0u128;
+                    // transfer/merge/merge_scalar/merge_gate stay available in
+                    // Voided (03: the D-1 par-recovery path), so holders can
+                    // assemble complete sets into branch-USDC and complete
+                    // Accept+Reject pairs into par. Worst-case liability is
+                    // therefore pair-first (Codex review, PR #33): per branch,
+                    // scalar/gate pairs merge into effective branch-USDC;
+                    // cross-branch pairs redeem at par; only unmatched
+                    // remainders take the floor(a/2) / floor(a/4) VOID rates.
+                    let mut effective = [0u128; 2];
+                    let mut leftovers = 0u128;
                     for b in [Branch::Accept, Branch::Reject] {
-                        liability = add(
-                            liability,
-                            self.total(position(pid, b, PositionKind::BranchUsdc)) / 2,
+                        let mut eff = self.total(position(pid, b, PositionKind::BranchUsdc));
+                        let long = self.total(position(pid, b, PositionKind::Long));
+                        let short = self.total(position(pid, b, PositionKind::Short));
+                        let scalar_pairs = long.min(short);
+                        eff = add(eff, scalar_pairs)?;
+                        leftovers = add(
+                            leftovers,
+                            add(sub(long, scalar_pairs)? / 4, sub(short, scalar_pairs)? / 4)?,
                         )?;
-                        for kind in [
-                            PositionKind::Long,
-                            PositionKind::Short,
-                            PositionKind::GateYes(GateType::Survival),
-                            PositionKind::GateNo(GateType::Survival),
-                            PositionKind::GateYes(GateType::Security),
-                            PositionKind::GateNo(GateType::Security),
-                        ] {
-                            liability = add(liability, self.total(position(pid, b, kind)) / 4)?;
+                        for g in [GateType::Survival, GateType::Security] {
+                            let yes = self.total(position(pid, b, PositionKind::GateYes(g)));
+                            let no = self.total(position(pid, b, PositionKind::GateNo(g)));
+                            let gate_pairs = yes.min(no);
+                            eff = add(eff, gate_pairs)?;
+                            leftovers = add(
+                                leftovers,
+                                add(sub(yes, gate_pairs)? / 4, sub(no, gate_pairs)? / 4)?,
+                            )?;
                         }
+                        effective[bix(b)] = eff;
                     }
+                    let cross_pairs = effective[0].min(effective[1]);
+                    let mut liability = cross_pairs;
+                    liability = add(liability, sub(effective[0], cross_pairs)? / 2)?;
+                    liability = add(liability, sub(effective[1], cross_pairs)? / 2)?;
+                    liability = add(liability, leftovers)?;
                     ensure!(info.escrowed >= liability, Error::TryStateViolation);
                 }
             }
@@ -1102,9 +1121,14 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
                     ensure!(long == short && long == info.sets, Error::TryStateViolation);
                 }
                 BaselineState::Settled(s) => {
+                    // redeem_baseline_pair pays complete pairs at par.
+                    let pairs = long.min(short);
                     let liability = add(
-                        mul_score(long, s.0 as u128)?,
-                        mul_score(short, SCALE_1E9 - s.0 as u128)?,
+                        pairs,
+                        add(
+                            mul_score(sub(long, pairs)?, s.0 as u128)?,
+                            mul_score(sub(short, pairs)?, SCALE_1E9 - s.0 as u128)?,
+                        )?,
                     )?;
                     ensure!(info.escrowed >= liability, Error::TryStateViolation);
                 }
@@ -1506,6 +1530,41 @@ mod tests {
             .unwrap();
         s.try_state().unwrap();
         s.vaults[0].info.escrowed = 0;
+        assert_eq!(s.try_state().unwrap_err(), Error::TryStateViolation);
+    }
+
+    #[test]
+    fn settled_liability_counts_complete_pairs_at_par() {
+        // Codex review, PR #33: with an odd supply and s = 0.5, flooring both
+        // single legs undercounts the pair-redemption liability by one unit.
+        let mut s = LedgerState::new();
+        s.create_vault(1, 0).unwrap();
+        let a = acct(1);
+        s.split(LedgerOrigin::Signed, 1, &a, 10_001).unwrap();
+        s.split_scalar(LedgerOrigin::Signed, 1, Branch::Accept, &a, 10_001)
+            .unwrap();
+        s.resolve(LedgerOrigin::ResolveAuthority, 1, Branch::Accept)
+            .unwrap();
+        s.settle_scalar(LedgerOrigin::SettleAuthority, 1, FixedU64(500_000_000))
+            .unwrap();
+        s.try_state().unwrap();
+        // Escrow one unit below the pair liability must alarm - the old
+        // floored-legs formula (2 x floor(10_001/2) = 10_000) accepted it.
+        s.vaults[0].info.escrowed -= 1;
+        assert_eq!(s.try_state().unwrap_err(), Error::TryStateViolation);
+    }
+
+    #[test]
+    fn void_liability_counts_par_pair_assembly() {
+        // Codex review, PR #33: merge stays available in Voided, so live
+        // Accept+Reject pairs recover par - not 2 x floor(a/2).
+        let mut s = LedgerState::new();
+        s.create_vault(1, 0).unwrap();
+        let a = acct(1);
+        s.split(LedgerOrigin::Signed, 1, &a, 10_001).unwrap();
+        s.void(LedgerOrigin::ResolveAuthority, 1).unwrap();
+        s.try_state().unwrap();
+        s.vaults[0].info.escrowed -= 1;
         assert_eq!(s.try_state().unwrap_err(), Error::TryStateViolation);
     }
 
