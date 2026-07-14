@@ -9,6 +9,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
+name = "attestor-core"
+version = "0.1.0"
+dependencies = [
+ "futarchy-primitives",
+ "parity-scale-codec",
+ "scale-info",
+]
+
+[[package]]
 name = "bitvec"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -43,6 +52,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "conditional-ledger-core"
+version = "0.1.0"
+dependencies = [
+ "futarchy-primitives",
+ "parity-scale-codec",
+ "scale-info",
+]
+
+[[package]]
 name = "const_format"
 version = "0.2.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -61,6 +79,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-xid",
+]
+
+[[package]]
+name = "constitution-core"
+version = "0.1.0"
+dependencies = [
+ "futarchy-primitives",
+ "parity-scale-codec",
+ "scale-info",
 ]
 
 [[package]]
@@ -84,10 +111,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "epoch-core"
+version = "0.1.0"
+dependencies = [
+ "conditional-ledger-core",
+ "futarchy-primitives",
+ "parity-scale-codec",
+ "scale-info",
+ "welfare-core",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+
+[[package]]
+name = "execution-guard-core"
+version = "0.1.0"
+dependencies = [
+ "attestor-core",
+ "conditional-ledger-core",
+ "epoch-core",
+ "futarchy-primitives",
+ "guardian-core",
+ "origins-core",
+ "parity-scale-codec",
+ "scale-info",
+]
 
 [[package]]
 name = "funty"
@@ -103,6 +155,25 @@ version = "0.1.0"
 name = "futarchy-primitives"
 version = "0.1.0"
 dependencies = [
+ "parity-scale-codec",
+ "scale-info",
+]
+
+[[package]]
+name = "futarchy-treasury-core"
+version = "0.1.0"
+dependencies = [
+ "futarchy-primitives",
+ "origins-core",
+ "parity-scale-codec",
+ "scale-info",
+]
+
+[[package]]
+name = "guardian-core"
+version = "0.1.0"
+dependencies = [
+ "futarchy-primitives",
  "parity-scale-codec",
  "scale-info",
 ]
@@ -150,15 +221,46 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
 
 [[package]]
+name = "market-core"
+version = "0.1.0"
+dependencies = [
+ "conditional-ledger-core",
+ "futarchy-fixed",
+ "futarchy-primitives",
+ "parity-scale-codec",
+ "scale-info",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "oracle-core"
+version = "0.1.0"
+dependencies = [
+ "futarchy-primitives",
+ "origins-core",
+ "parity-scale-codec",
+ "scale-info",
+]
+
+[[package]]
+name = "origins-core"
+version = "0.1.0"
+dependencies = [
+ "futarchy-primitives",
+ "parity-scale-codec",
+ "scale-info",
+]
+
+[[package]]
 name = "pallet-attestor"
 version = "0.1.0"
 dependencies = [
+ "attestor-core",
  "futarchy-primitives",
  "parity-scale-codec",
  "scale-info",
@@ -168,6 +270,7 @@ dependencies = [
 name = "pallet-conditional-ledger"
 version = "0.1.0"
 dependencies = [
+ "conditional-ledger-core",
  "futarchy-primitives",
  "parity-scale-codec",
  "scale-info",
@@ -177,6 +280,7 @@ dependencies = [
 name = "pallet-constitution"
 version = "0.1.0"
 dependencies = [
+ "constitution-core",
  "futarchy-primitives",
  "parity-scale-codec",
  "scale-info",
@@ -186,6 +290,7 @@ dependencies = [
 name = "pallet-epoch"
 version = "0.1.0"
 dependencies = [
+ "epoch-core",
  "futarchy-primitives",
  "pallet-conditional-ledger",
  "pallet-welfare",
@@ -197,6 +302,7 @@ dependencies = [
 name = "pallet-execution-guard"
 version = "0.1.0"
 dependencies = [
+ "execution-guard-core",
  "futarchy-primitives",
  "pallet-attestor",
  "pallet-conditional-ledger",
@@ -212,6 +318,7 @@ name = "pallet-futarchy-treasury"
 version = "0.1.0"
 dependencies = [
  "futarchy-primitives",
+ "futarchy-treasury-core",
  "pallet-origins",
  "parity-scale-codec",
  "scale-info",
@@ -222,6 +329,7 @@ name = "pallet-guardian"
 version = "0.1.0"
 dependencies = [
  "futarchy-primitives",
+ "guardian-core",
  "parity-scale-codec",
  "scale-info",
 ]
@@ -232,6 +340,7 @@ version = "0.1.0"
 dependencies = [
  "futarchy-fixed",
  "futarchy-primitives",
+ "market-core",
  "pallet-conditional-ledger",
  "parity-scale-codec",
  "scale-info",
@@ -242,6 +351,7 @@ name = "pallet-oracle"
 version = "0.1.0"
 dependencies = [
  "futarchy-primitives",
+ "oracle-core",
  "pallet-origins",
  "parity-scale-codec",
  "scale-info",
@@ -252,6 +362,7 @@ name = "pallet-origins"
 version = "0.1.0"
 dependencies = [
  "futarchy-primitives",
+ "origins-core",
  "parity-scale-codec",
  "scale-info",
 ]
@@ -262,6 +373,7 @@ version = "0.1.0"
 dependencies = [
  "futarchy-primitives",
  "parity-scale-codec",
+ "registry-core",
  "scale-info",
 ]
 
@@ -273,6 +385,7 @@ dependencies = [
  "futarchy-primitives",
  "parity-scale-codec",
  "scale-info",
+ "welfare-core",
 ]
 
 [[package]]
@@ -335,6 +448,15 @@ name = "radium"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
+
+[[package]]
+name = "registry-core"
+version = "0.1.0"
+dependencies = [
+ "futarchy-primitives",
+ "parity-scale-codec",
+ "scale-info",
+]
 
 [[package]]
 name = "rustversion"
@@ -454,6 +576,16 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "welfare-core"
+version = "0.1.0"
+dependencies = [
+ "futarchy-fixed",
+ "futarchy-primitives",
+ "parity-scale-codec",
+ "scale-info",
+]
 
 [[package]]
 name = "winnow"

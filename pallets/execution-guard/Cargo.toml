@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+execution-guard-core = { path = "../../crates/execution-guard-core", default-features = false }
 futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
 pallet-attestor = { path = "../attestor", default-features = false }
 pallet-conditional-ledger = { path = "../conditional-ledger", default-features = false }
@@ -17,7 +18,7 @@ scale-info = { version = "2.11.6", default-features = false, features = ["derive
 
 [features]
 default = ["std"]
-std = [
+std = ["execution-guard-core/std", 
   "futarchy-primitives/std",
   "pallet-attestor/std",
   "pallet-conditional-ledger/std",

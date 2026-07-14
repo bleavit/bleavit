@@ -24,7 +24,7 @@ rollout that removes `sudo` at Phase 4.
 
 ## Status
 
-**Specification complete (2026-07-12) · foundations through M3 implemented (2026-07-13).**
+**Specification complete (2026-07-12) · foundations through M3 implemented (2026-07-13) · Track-A core relocation/shell scaffolds in progress (2026-07-14).**
 
 - The authoritative spec is [`docs/architecture/`](docs/architecture/README.md) —
   16 component documents + decision record, produced by resolving all 101 findings
@@ -48,7 +48,7 @@ rollout that removes `sudo` at Phase 4.
 | `crates/futarchy-primitives/` | M1 shared primitive crate: `no_std` contract/view types, version constant, and kernel/chain/currency bounds |
 | `crates/futarchy-fixed/` | M2 deterministic 64.64 fixed-point LMSR/transcendental crate with generated regression fixtures |
 | [`reference-model/`](reference-model/pyproject.toml), [`tools/reference-model/generate-vectors.py`](tools/reference-model/generate-vectors.py) | M3 independent Python executable spec and CI-regenerated JSON vector corpus |
-| `pallets/`, `crates/*-core/` | Track A (re-scoped to production FRAME): each `pallets/<name>/` is a `#[frame_support::pallet]` shell (lib.rs · mock · tests · benchmarks) over a frame-free functional core in `crates/<name>-core/`. A1–A11 logic exists as the cores; the FRAME shells are the reopened Track-A work |
+| `pallets/`, `crates/*-core/` | Track A (re-scoped to production FRAME): each `crates/<name>-core/` contains the frame-free functional core and each `pallets/<name>/` currently contains a compiling shell scaffold (lib.rs · mock · tests · benchmarking · weights). The remaining Track-A work is replacing those scaffolds with real `#[frame_support::pallet]` wrappers |
 | `runtime/bleavit-runtime/` | B1 runtime assembly crate: pallet composition model, SafetyFilter BaseCallFilter adapter, USDC/fee/origin/genesis filtering wiring — a frame-free model, not yet `construct_runtime!`/`impl_runtime_apis!` (that is B1a) |
 | `node/`, `frontend/` | Implementation roots created for future milestones; currently placeholders until their tracks begin |
 

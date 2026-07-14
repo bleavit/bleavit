@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+epoch-core = { path = "../../crates/epoch-core", default-features = false }
 futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
 pallet-conditional-ledger = { path = "../conditional-ledger", default-features = false }
 pallet-welfare = { path = "../welfare", default-features = false }
@@ -14,7 +15,7 @@ scale-info = { version = "2.11.6", default-features = false, features = ["derive
 
 [features]
 default = ["std"]
-std = [
+std = ["epoch-core/std", 
   "futarchy-primitives/std",
   "pallet-conditional-ledger/std",
   "pallet-welfare/std",

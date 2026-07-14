@@ -6,13 +6,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+origins-core = { path = "../../crates/origins-core", default-features = false }
 futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
 parity-scale-codec = { version = "3", default-features = false, features = ["derive", "max-encoded-len"] }
 scale-info = { version = "2", default-features = false, features = ["derive"] }
 
 [features]
 default = ["std"]
-std = [
+std = ["origins-core/std", 
   "futarchy-primitives/std",
   "parity-scale-codec/std",
   "scale-info/std",

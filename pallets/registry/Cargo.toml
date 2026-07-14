@@ -6,13 +6,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+registry-core = { path = "../../crates/registry-core", default-features = false }
 futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
 parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive"] }
 scale-info = { version = "2.11.6", default-features = false, features = ["derive"] }
 
 [features]
 default = ["std"]
-std = [
+std = ["registry-core/std", 
   "futarchy-primitives/std",
   "parity-scale-codec/std",
   "scale-info/std",

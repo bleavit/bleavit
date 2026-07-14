@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+market-core = { path = "../../crates/market-core", default-features = false }
 futarchy-fixed = { path = "../../crates/futarchy-fixed", default-features = false }
 futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
 pallet-conditional-ledger = { path = "../conditional-ledger", default-features = false }
@@ -14,7 +15,7 @@ scale-info = { version = "2.11.6", default-features = false, features = ["derive
 
 [features]
 default = ["std"]
-std = [
+std = ["market-core/std", 
   "futarchy-fixed/std",
   "futarchy-primitives/std",
   "pallet-conditional-ledger/std",

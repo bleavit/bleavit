@@ -7,7 +7,7 @@ repository.workspace = true
 
 [features]
 default = ["std"]
-std = [
+std = ["futarchy-treasury-core/std", 
   "futarchy-primitives/std",
   "pallet-origins/std",
   "parity-scale-codec/std",
@@ -16,6 +16,7 @@ std = [
 runtime-benchmarks = []
 
 [dependencies]
+futarchy-treasury-core = { path = "../../crates/futarchy-treasury-core", default-features = false }
 futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
 pallet-origins = { path = "../origins", default-features = false }
 parity-scale-codec = { version = "3", default-features = false, features = ["derive", "max-encoded-len"] }

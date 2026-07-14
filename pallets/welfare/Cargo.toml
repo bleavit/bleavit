@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+welfare-core = { path = "../../crates/welfare-core", default-features = false }
 futarchy-fixed = { path = "../../crates/futarchy-fixed", default-features = false }
 futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
 parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive"] }
@@ -13,7 +14,7 @@ scale-info = { version = "2.11.6", default-features = false, features = ["derive
 
 [features]
 default = ["std"]
-std = [
+std = ["welfare-core/std", 
   "futarchy-fixed/std",
   "futarchy-primitives/std",
   "parity-scale-codec/std",
