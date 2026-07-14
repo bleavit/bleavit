@@ -10,7 +10,7 @@ from bleavit_reference_model.twap import TwapAccumulator
 from bleavit_reference_model.ledger import Vault, VaultState
 from bleavit_reference_model.decision import decide, Outcome, RejectReason
 from bleavit_reference_model.treasury import security_sizing_ok
-from bleavit_reference_model.welfare import settlement_score
+from bleavit_reference_model.welfare import gate, settlement_score
 
 
 class ReferenceModelTests(unittest.TestCase):
@@ -84,6 +84,20 @@ class ReferenceModelTests(unittest.TestCase):
         self.assertEqual(settlement_score(Decimal("0.64"), Decimal("0.25")), Decimal("0.400000000"))
         zeroed = settlement_score(Decimal("0"), Decimal("0.5"))
         self.assertEqual(zeroed, Decimal("0.000022360"))
+
+
+    def test_welfare_gate_and_settlement_vectors(self):
+        self.assertEqual(gate(Decimal("0.85"), Decimal("0.85"), Decimal("0.95")), Decimal("0"))
+        self.assertEqual(gate(Decimal("0.95"), Decimal("0.85"), Decimal("0.95")), Decimal("1"))
+        self.assertEqual(settlement_score(Decimal("1"), Decimal("1")), Decimal("1"))
+        self.assertTrue(str(settlement_score(Decimal("0"), Decimal("1"))).startswith("0.000031622"))
+
+
+    def test_welfare_gate_and_settlement_vectors(self):
+        self.assertEqual(gate(Decimal("0.85"), Decimal("0.85"), Decimal("0.95")), Decimal("0"))
+        self.assertEqual(gate(Decimal("0.95"), Decimal("0.85"), Decimal("0.95")), Decimal("1"))
+        self.assertEqual(settlement_score(Decimal("1"), Decimal("1")), Decimal("1"))
+        self.assertTrue(str(settlement_score(Decimal("0"), Decimal("1"))).startswith("0.000031622"))
 
 
 if __name__ == "__main__":
