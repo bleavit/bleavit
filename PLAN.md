@@ -20,7 +20,7 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 
 ## Current focus
 
-**Current: A3 — `pallet-market`**. A2 is complete; next up is the LMSR market pallet milestone (branch-USDC books, trade wrapper, fees, TWAP, POL seeding, and Baseline market mapping).
+**Current: A4 — `pallet-origins` + `SafetyFilter`**. A3 is complete; next up is the custom-origin and closed-wrapper safety-filter milestone.
 
 ---
 
@@ -44,7 +44,7 @@ tests (15 §4.1), `try-state` per 15 §1, benchmark stubs (15 §4.5). Scaffold v
 |---|---|---|---|---|---|
 | A1 | `pallet-constitution` — typed/bounded/rate-limited params, meters, capability tables, `PhaseFlags`, `ReleaseChannel` fixed-layout key, kernel re-export | 06; 13 §1/§4; 02 §7.3/§12 | M1 | ✅ | I-6, I-7, I-17; typed storage model, origin-gated dispatch entrypoints, try-state validation, benchmark stubs, and origin-misuse/error-path tests are in place |
 | A2 | `pallet-conditional-ledger` — vaults, per-branch supplies, split/merge/scalar/gate/Baseline families, `Voided` + `redeem_void`, internal wrapper API | 03 (all); 02 §6 | M1 | ✅ | Audit scope A; pure no_std ledger state machine, bounded position accounting, deposit/cap logic, terminal redemptions, internal authority API, try-state checks, benchmark stubs, and origin/error-path tests are in place |
-| A3 | `pallet-market` — LMSR books (branch-USDC, D-3), trade wrapper, fees, TWAP, POL seeding, `BaselineMarketOf` | 04; 02 §5–§7.4 | A2, M2, M3 | ⬜ | I-12, I-13; differential vs V1–V6 + corpus |
+| A3 | `pallet-market` — LMSR books (branch-USDC, D-3), trade wrapper, fees, TWAP, POL seeding, `BaselineMarketOf` | 04; 02 §5–§7.4 | A2, M2, M3 | ✅ | I-12, I-13; pure no_std market state machine, branch/gate/Baseline LMSR books, wrapper ledger plumbing, 30 bps fees, observation/TWAP accumulator, POL headroom seeding, Baseline mapping, try-state checks, benchmark stubs, and origin/error/slippage tests are in place |
 | A4 | `pallet-origins` + `SafetyFilter` — 8 custom origins, closed wrapper set, call-domain derivation | 06 §3; 01 §6 | M1 | ⬜ | I-8, I-10, I-11 |
 | A5 | `pallet-oracle` — reporter/watchtower registries, bonded reporting game, challenge rounds (72 h + quorum), reserve probe `R`, neutral settlement | 07 §1–§6, §8–§13 | A1 | ⬜ | I-18, I-24 |
 | A6 | `pallet-registry` — Incident/Milestone instances, bonded filings, challenge windows | 07 §7 | A5 | ⬜ | Feeds `C_attested` |
@@ -225,3 +225,5 @@ Append-only; newest last. Format: `| Date | Milestone(s) | Done | Next |`
 | 2026-07-13 | A1 | Completed `pallet-constitution`: added bounded meter storage and genesis state helpers, origin-gated dispatch entrypoints for parameter, capability, phase-flag, release-channel, and meter updates, a try-state validator for storage shape/ranges, runtime-benchmark stubs behind `runtime-benchmarks`, and expanded unit coverage for origin misuse plus error paths. Full Rust workspace gates, no-default-features constitution tests, runtime-benchmarks feature tests, docs link lint, and a spec-compliance pass against 06, 13 §1/§4, 02 §7.3/§12, and 15 §4.1 found no blockers. A1 is now ✅. | A2 — `pallet-conditional-ledger` |
 
 | 2026-07-13 | A2 | Implemented `pallet-conditional-ledger` as a workspace crate: proposal and Baseline vault records, per-branch supply accounting, split/merge/scalar/gate families, authority state transitions, `Voided`/`redeem_void`, terminal scalar/gate/Baseline redemptions with claimant-adverse floors, protocol-account deposit/cap exemptions, internal authority-origin API, try-state validation, runtime-benchmark stubs, and mock-style unit coverage for origin misuse/error paths. Full Rust workspace gates, no-default-features conditional-ledger tests, runtime-benchmarks feature tests, docs link lint, and a spec-compliance pass against 03, 02 §6, and 15 §4.1–§4.3 found no blockers. A2 is now ✅. | A3 — `pallet-market` |
+
+| 2026-07-13 | A3 | Implemented `pallet-market`: added the workspace member, no_std SCALE market storage/event types, LMSR buy/sell wrappers over `pallet-conditional-ledger`, branch/gate/Baseline book creation and POL seeding, 30 bps fee accounting, previous-quote capped observations/TWAP accumulation, `BaselineMarketOf`, try-state validation, benchmark stubs, and error-path tests for slippage/phase/trade limits plus Baseline duplicate mapping. Full Rust workspace gates, no-default-features market tests, and docs link lint passed; spec-compliance pass against 04 and 02 §5–§7.4 found no blockers. A3 is now ✅. | A4 — `pallet-origins` + `SafetyFilter` |

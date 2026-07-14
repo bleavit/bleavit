@@ -164,6 +164,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-market"
+version = "0.1.0"
+dependencies = [
+ "futarchy-fixed",
+ "futarchy-primitives",
+ "pallet-conditional-ledger",
+ "parity-scale-codec",
+ "scale-info",
+]
+
+[[package]]
 name = "parity-scale-codec"
 version = "3.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
