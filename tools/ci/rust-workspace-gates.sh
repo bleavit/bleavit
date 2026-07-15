@@ -23,3 +23,5 @@ fi
 if [[ -f tools/reference-model/generate-vectors.py ]]; then
   python3 tools/reference-model/generate-vectors.py --check
 fi
+
+python3 tools/reference-model/check-doc-table.py

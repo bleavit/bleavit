@@ -1,48 +1,150 @@
 {
   "decision_scenarios": [
     {
-      "accept_full": "0.56",
-      "delta": "0.05",
-      "name": "hurdle_met",
-      "outcome": "Adopt",
-      "reject_full_effective": "0.50"
+      "inputs": {},
+      "name": "adopt",
+      "outcome": "Adopt"
     },
     {
-      "accept_full": "0.54",
-      "delta": "0.05",
-      "name": "below_hurdle",
+      "inputs": {
+        "preimage_ok": false
+      },
+      "name": "constitution_violation",
       "outcome": "Reject",
-      "reason": "HurdleNotMet",
-      "reject_full_effective": "0.50"
+      "reason": "ConstitutionViolation"
     },
     {
-      "accept_full": "0.56",
-      "converged": false,
-      "delta": "0.05",
-      "name": "convergence_failed_first_decide",
+      "inputs": {
+        "resource_locks_held": false
+      },
+      "name": "resource_conflict",
       "outcome": "Reject",
-      "reason": "ConvergenceFailed",
-      "reject_full_effective": "0.50"
+      "reason": "ResourceConflict"
     },
     {
-      "accept_full": "0.56",
-      "accept_trailing": "0.52",
-      "delta": "0.05",
-      "name": "window_disagreement_extends_once",
-      "outcome": "Extend",
-      "reject_full_effective": "0.50",
-      "reject_trailing_effective": "0.50"
-    },
-    {
-      "accept_full": "0.56",
-      "accept_trailing": "0.52",
-      "delta": "0.05",
-      "extended": true,
-      "name": "window_disagreement_recurs_rejects",
+      "inputs": {
+        "process_hold": true
+      },
+      "name": "process_hold",
       "outcome": "Reject",
-      "reason": "SecondExtensionFailed",
-      "reject_full_effective": "0.50",
-      "reject_trailing_effective": "0.50"
+      "reason": "ProcessHold"
+    },
+    {
+      "inputs": {
+        "gate_book_valid": false,
+        "requires_gate_markets": true
+      },
+      "name": "gate_book_invalid",
+      "outcome": "Reject",
+      "reason": "NotDecisionGrade"
+    },
+    {
+      "inputs": {
+        "p_adopt": {
+          "Survival": "0.06"
+        },
+        "p_reject": {
+          "Survival": "0.01"
+        },
+        "requires_gate_markets": true
+      },
+      "name": "gate_veto_survival",
+      "outcome": "Reject",
+      "reason": "GateVetoSurvival"
+    },
+    {
+      "inputs": {
+        "p_adopt": {
+          "Security": "0.06",
+          "Survival": "0.01"
+        },
+        "p_reject": {
+          "Security": "0.01",
+          "Survival": "0.01"
+        },
+        "requires_gate_markets": true
+      },
+      "name": "gate_veto_security",
+      "outcome": "Reject",
+      "reason": "GateVetoSecurity"
+    },
+    {
+      "inputs": {
+        "p_adopt": {
+          "Survival": "0.06"
+        },
+        "requires_gate_markets": true,
+        "welfare_grade": "Invalid"
+      },
+      "name": "gate_veto_precedes_welfare_invalid",
+      "outcome": "Reject",
+      "reason": "GateVetoSurvival"
+    },
+    {
+      "inputs": {
+        "welfare_grade": "Invalid"
+      },
+      "name": "welfare_invalid",
+      "outcome": "Reject",
+      "reason": "NotDecisionGrade"
+    },
+    {
+      "inputs": {
+        "welfare_grade": "Insufficient"
+      },
+      "name": "welfare_insufficient_extends",
+      "outcome": "Extend"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.54"
+      },
+      "name": "hurdle_not_met",
+      "outcome": "Reject",
+      "reason": "HurdleNotMet"
+    },
+    {
+      "inputs": {
+        "converged": false
+      },
+      "name": "convergence_failed",
+      "outcome": "Reject",
+      "reason": "ConvergenceFailed"
+    },
+    {
+      "inputs": {
+        "accept_trailing": "0.52",
+        "extended": true
+      },
+      "name": "second_extension_failed",
+      "outcome": "Reject",
+      "reason": "SecondExtensionFailed"
+    },
+    {
+      "inputs": {
+        "envelope_value": "1",
+        "measured_liquidity": "0"
+      },
+      "name": "security_sizing",
+      "outcome": "Reject",
+      "reason": "SecuritySizing"
+    },
+    {
+      "inputs": {
+        "attestation_ok": false,
+        "proposal_class": "Code"
+      },
+      "name": "attestation_missing",
+      "outcome": "Reject",
+      "reason": "AttestationMissing"
+    },
+    {
+      "inputs": {
+        "queue_time_ok": false
+      },
+      "name": "rate_limited",
+      "outcome": "Reject",
+      "reason": "RateLimited"
     }
   ],
   "high_precision_corpus": {
@@ -116,11 +218,69 @@
   },
   "ledger_scenarios": [
     {
-      "input": "10.000000",
-      "name": "void_neutral_branch_usdc",
-      "payout": "5.000000"
+      "branch_payout": 5000001,
+      "inputs": {
+        "branch_amount": 10000003,
+        "scalar_leg_amount": 4000003
+      },
+      "leg_payout": 1000000,
+      "name": "void_branch_and_leg_floors",
+      "unit": "USDC base units (1e-6)"
+    },
+    {
+      "inputs": {
+        "escrow": 20000,
+        "s": "0.70005"
+      },
+      "long_payout": 14001,
+      "name": "b5_scalar_fragmentation",
+      "short_payouts": [
+        2999,
+        2999
+      ],
+      "total_payout": 19999,
+      "unit": "USDC base units (1e-6)"
+    },
+    {
+      "inputs": {
+        "amount": 20000,
+        "s": "0.70005"
+      },
+      "name": "scalar_pair_exact",
+      "payout": 20000,
+      "unit": "USDC base units (1e-6)"
+    },
+    {
+      "inputs": {
+        "amount_each": 300,
+        "gate": "Survival",
+        "outcome": true
+      },
+      "name": "gate_settlement_one_zero",
+      "no_payout": 0,
+      "unit": "USDC base units (1e-6)",
+      "yes_payout": 300
+    },
+    {
+      "inputs": {
+        "amount": 10000,
+        "epoch": 7,
+        "s": "0.70005"
+      },
+      "long_payout": 7000,
+      "name": "baseline_scalar_and_pair",
+      "pair_payout": 10000,
+      "unit": "USDC base units (1e-6)"
     }
   ],
+  "lmsr_maker_example": {
+    "b": "25000",
+    "delta": "6029.051420422201761516032173405674947271950250117481684037561257509996520213181757961677939541385582",
+    "displacement_revenue": "3195.834287747122393058574175726735278849893005984075362151201608109768238309602514483743029682643558",
+    "expected_payout": "3376.268795436432986448978017107177970472292140065789743061034304205598051319381784458539646143175926",
+    "loss": "180.4345076893105933904038413804426916223991340817143809098326960958298130097792699747966164605323550",
+    "p": "0.56"
+  },
   "lmsr_vectors": {
     "V1": {
       "action": "buy_1000_long_cost",
@@ -149,40 +309,207 @@
     },
     "V6": {
       "action": "domain_edge",
-      "error": "PriceBoundExceeded"
+      "amount": "1",
+      "b": "10000",
+      "error": "PriceBoundExceeded",
+      "q_long": "480000",
+      "q_short": "0",
+      "side": "long"
     }
   },
-  "precision": "Python Decimal, 90 decimal digits (>=256-bit precision target)",
-  "schema": "bleavit.reference-model.v2",
+  "precision": "Python Decimal with function-local 100-digit working contexts",
+  "schema": "bleavit.reference-model.v3",
+  "treasury_scenarios": [
+    {
+      "commitment": "13862.94361119890618834464242916353136151000268720510508241360018986787243939389431211726653992837375",
+      "commitment_display": 13863,
+      "inputs": {
+        "large_treasury": false,
+        "proposal_class": "Param"
+      },
+      "name": "param_pol",
+      "nav_floor": "1848392.481493187491779285657",
+      "nav_floor_display": 1848392
+    },
+    {
+      "commitment": "34657.35902799726547086160607290882840377500671801276270603400047466968109848473578029316634982093438",
+      "commitment_display": 34657,
+      "inputs": {
+        "large_treasury": false,
+        "proposal_class": "Treasury"
+      },
+      "name": "treasury_pol",
+      "nav_floor": "4620981.203732968729448214143",
+      "nav_floor_display": 4620981
+    },
+    {
+      "commitment": "55451.77444479562475337856971665412544604001074882042032965440075947148975757557724846906615971349500",
+      "commitment_display": 55452,
+      "inputs": {
+        "large_treasury": true,
+        "proposal_class": "Treasury"
+      },
+      "name": "treasury_pol_large",
+      "nav_floor": "7393600",
+      "nav_floor_display": 7393600
+    },
+    {
+      "commitment": "103972.0770839917964125848182187264852113250201540382881181020014240090432954542073408794990494628031",
+      "commitment_display": 103972,
+      "inputs": {
+        "large_treasury": false,
+        "proposal_class": "Code"
+      },
+      "name": "code_pol",
+      "nav_floor": "13862943.61119890618834464243",
+      "nav_floor_display": 13862944
+    },
+    {
+      "commitment": "159423.8515287874211659633879353806106573650309028587084477564021834805330530297845893485652091762981",
+      "commitment_display": 159424,
+      "inputs": {
+        "large_treasury": false,
+        "proposal_class": "Meta"
+      },
+      "name": "meta_pol",
+      "nav_floor": "21256533.33333333333333333333",
+      "nav_floor_display": 21256533
+    },
+    {
+      "commitment": "17328.67951399863273543080303645441420188750335900638135301700023733484054924236789014658317491046719",
+      "commitment_display": 17329,
+      "inputs": {
+        "b": "25000"
+      },
+      "name": "baseline_commitment"
+    },
+    {
+      "attack_cost": "2204208.092500",
+      "attack_cost_third": "734736.0308333333333333333333",
+      "dec_v_min": "1386294.400000",
+      "inputs": {
+        "spendable_nav": "13862944"
+      },
+      "liquidity": "1469472.061667193437130067855",
+      "name": "code_security_at_nav_floor",
+      "pol_depth": "83177.66166719343713006785457",
+      "prize": "693147.200000",
+      "security_ok": true,
+      "three_prize": "2079441.600000"
+    },
+    {
+      "delta": "0.08116740799849665762789696008",
+      "inputs": {
+        "prize": "693147"
+      },
+      "name": "scaled_defaults",
+      "p_ref": "341588.8308335967185650339272874905940845300080616153152472408005696036173181816829363517996197851212",
+      "pol_b": "121751.1119977449864418454401"
+    }
+  ],
   "twap_scenarios": [
     {
-      "initial": "0.500",
-      "kappa": "0.005",
-      "name": "missed_intervals_widen_clamp",
-      "obs_interval": "10",
-      "observe_block": "100",
-      "previous_quote": "0.900",
-      "recorded": "0.525570066020395321298833007812"
+      "inputs": {
+        "initial": "0.500",
+        "observations": [
+          {
+            "block": 10,
+            "previous_quote": "0.900"
+          },
+          {
+            "block": 20,
+            "previous_quote": "0.900"
+          }
+        ]
+      },
+      "mean_0_20": "0.503756250",
+      "mean_10_20": "0.505012500",
+      "name": "backward_weighted_mean",
+      "recorded": [
+        "0.502500",
+        "0.505012500"
+      ],
+      "stale_events": 0
+    },
+    {
+      "inputs": {
+        "block": 60,
+        "previous_quote": "0.900"
+      },
+      "name": "stale_gap_accounting",
+      "recorded": "0.515188754696882812500",
+      "stale_events": 1
     }
   ],
   "welfare_scenarios": [
     {
+      "inputs": {
+        "w_next": "0.8",
+        "w_next_2": "0.8"
+      },
       "name": "equal_horizons",
-      "s": "0.800000000",
-      "w_next": "0.8",
-      "w_next_2": "0.8"
+      "s": "0.800000000"
     },
     {
+      "inputs": {
+        "w_next": "0.64",
+        "w_next_2": "0.25"
+      },
       "name": "mixed_horizons",
-      "s": "0.400000000",
-      "w_next": "0.64",
-      "w_next_2": "0.25"
+      "s": "0.400000000"
     },
     {
-      "name": "zeroed_epoch_epsilon_floor",
-      "s": "0.000022360",
-      "w_next": "0",
-      "w_next_2": "0.5"
+      "inputs": {
+        "a_components": {
+          "A01": "0.90",
+          "A02": "0.60"
+        },
+        "a_weights": {
+          "A01": "0.40",
+          "A02": "0.60"
+        },
+        "c_attested": {
+          "C03": "0.90"
+        },
+        "c_daily": {
+          "C01": "0.93",
+          "C02": "0.89"
+        },
+        "c_onchain": {
+          "C01": "0.94",
+          "C02": "0.91"
+        },
+        "c_weights": {
+          "C01": "0.50",
+          "C02": "0.30",
+          "C03": "0.20"
+        },
+        "f": "0.96",
+        "hhi": "0.335",
+        "incident": "0.98",
+        "p_components": {
+          "P01": "0.80",
+          "P02": "0.70"
+        },
+        "p_weights": {
+          "P01": "0.60",
+          "P02": "0.40"
+        },
+        "phase": 2,
+        "u": "0.97"
+      },
+      "name": "full_pipeline",
+      "outputs": {
+        "A": "0.705647413",
+        "C": "0.904379942",
+        "C_daily": "0.914793553",
+        "D_eff": "0.831250000",
+        "P": "0.758391065",
+        "S": "0.831250000",
+        "S_daily": "0.831250000",
+        "W": "0.000000000"
+      },
+      "settlement_with_self": "0.000000000"
     }
   ]
 }

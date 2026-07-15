@@ -29,6 +29,8 @@ jobs:
         run: PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests
       - name: Check generated vector corpus
         run: python3 tools/reference-model/generate-vectors.py --check
+      - name: Check normative LMSR documentation table
+        run: python3 tools/reference-model/check-doc-table.py
 
   docs:
     name: Documentation links
