@@ -2199,9 +2199,15 @@ name = "pallet-attestor"
 version = "0.1.0"
 dependencies = [
  "attestor-core",
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
  "futarchy-primitives",
  "parity-scale-codec",
  "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
 ]
 
 [[package]]
@@ -2297,10 +2303,16 @@ dependencies = [
 name = "pallet-guardian"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
  "futarchy-primitives",
  "guardian-core",
  "parity-scale-codec",
  "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
 ]
 
 [[package]]
