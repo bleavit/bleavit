@@ -200,7 +200,7 @@ The D-1 quarter-value rule is stated for LONG/SHORT; its application to `GateYes
 
 | Call | Origin | Preconditions | Effect | Event |
 |---|---|---|---|---|
-| `sweep_dust(pid)` / `sweep_dust_baseline(epoch)` | Signed (keeper) | vault terminal + `RedemptionArchiveDelay` elapsed | drain ≤ `ReapBatch(=100)` `Positions` entries per call across the vault's 14 (resp. 2) `PositionId` prefixes; refund deposits to entry owners; residual escrow → INSURANCE; storage reaped when drained | `VaultReaped { residue }` |
+| `sweep_dust(pid)` / `sweep_dust_baseline(epoch)` | Signed (keeper) | vault terminal + `RedemptionArchiveDelay` elapsed | drain ≤ `ReapBatch(=100)` `Positions` entries per call across the vault's 14 (resp. 2) `PositionId` prefixes; refund deposits to entry owners; residual escrow → INSURANCE; storage reaped when drained | `VaultReaped { pid, residue }` (proposal crank) / `BaselineVaultReaped { epoch, residue }` (Baseline crank) — each identifies its vault; only the name `VaultReaped` is frozen in [`02-integration-contract.md`](./02-integration-contract.md) §6 (fields open) |
 
 The BE §5.2.1 note on SGF §9.3 settlement perpetuity carries forward unchanged: after reaping, unredeemed claims remain redeemable through a Merkle-archived claims procedure executed by a TREASURY-class proposal (deliberate v1 compromise, recorded in BE §31).
 
