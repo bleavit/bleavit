@@ -8,8 +8,9 @@ use attestor_core::{AttestationId, AttestorRegistry};
 use conditional_ledger_core::LedgerState;
 use epoch_core::{EpochState, Origin as EpochOrigin};
 use futarchy_primitives::{
-    BlockNumber, DispatchOutcomeCode, ProposalClass, ProposalId, QueuedExecutionView,
-    RatificationStatus, RejectReason, ResourceId, RuntimeVersionConstraint, H256,
+    BlockNumber, DispatchOutcomeCode, ExecutionRecord, ProposalClass, ProposalId,
+    QueuedExecutionView, RatificationStatus, RejectReason, ResourceId, RuntimeVersionConstraint,
+    H256,
 };
 use guardian_core::{Guardian, PlaybookId};
 use origins_core::{Origin as ClassOrigin, RuntimeCall, SafetyFilter};
@@ -26,11 +27,12 @@ macro_rules! ensure {
 
 pub const MAX_QUEUE: usize = 32;
 pub const MAX_EXECUTION_RECORDS: usize = 256;
-pub const MAX_CALLS: usize = 16;
-pub const MAX_PAYLOAD_BYTES: u32 = 65_536;
+pub const MAX_CALLS: usize = futarchy_primitives::kernel::MAX_CALLS as usize;
+pub const MAX_PAYLOAD_BYTES: u32 = futarchy_primitives::kernel::MAX_BYTES;
 pub const MAX_DECLARED_DOMAINS: usize = 16;
 pub const MAX_RESOURCE_LOCKS: usize = 8;
-pub const DESCRIPTOR_LEAD_TIME: BlockNumber = 43_200;
+pub const DESCRIPTOR_LEAD_TIME: BlockNumber =
+    futarchy_primitives::kernel::DESCRIPTOR_LEAD_TIME_BLOCKS;
 /// T18 retry window (05 §2.1: **72 h**, `= 43,200` blocks per [13]). From the
 /// block a payload reverts, `execute` may be retried (T23) until this elapses;
 /// afterwards the proposal is measured executed-with-failure (T22).
@@ -154,15 +156,6 @@ pub struct PendingUpgrade {
     pub authorized_at: BlockNumber,
     pub applicable_at: BlockNumber,
     pub target_spec_version: u32,
-}
-
-#[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
-pub struct ExecutionRecord {
-    pub pid: ProposalId,
-    pub payload_hash: H256,
-    pub class: ProposalClass,
-    pub executed_at: BlockNumber,
-    pub result: DispatchOutcomeCode,
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
@@ -819,9 +812,10 @@ mod tests {
             epoch: 0,
             submitted_at: 0,
             payload_hash: h(9),
+            payload_len: 0,
             ask: 1,
             bond: 1,
-            resources: Vec::new(),
+            resources: BoundedVec::new(),
             metric_spec: 0,
             decide_at: 0,
             rerun: false,

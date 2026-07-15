@@ -56,12 +56,42 @@ impl<T, const N: u32> BoundedVec<T, N> {
         &self.0
     }
 
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> core::slice::Iter<'_, T> {
+        self.0.iter()
+    }
+
     pub fn try_push(&mut self, value: T) -> Result<(), BoundExceeded> {
         if self.0.len() >= N as usize {
             return Err(BoundExceeded);
         }
         self.0.push(value);
         Ok(())
+    }
+}
+
+impl<T, const N: u32> IntoIterator for BoundedVec<T, N> {
+    type Item = T;
+    type IntoIter = alloc::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a, T, const N: u32> IntoIterator for &'a BoundedVec<T, N> {
+    type Item = &'a T;
+    type IntoIter = core::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
     }
 }
 
@@ -425,12 +455,111 @@ pub enum TradeSide {
     SellShort,
 }
 
+/// Book kind carried by the `MarketCreated` event (02 §5). Declaration order is
+/// the SCALE index order and is frozen by the contract surface. Variant spelling
+/// is 02 §5's byte-for-byte: `02` is canonical for any name that appears on the
+/// contract surface (02 line 5; runtime-code rule 5), and the frontend decodes
+/// `MarketCreated.kind` by its TypeInfo variant name — so the underscored
+/// `GateS_Adopt`/`GateS_Reject`/`GateC_Adopt`/`GateC_Reject` spelling is
+/// load-bearing. `#[allow(non_camel_case_types)]` preserves that frozen spelling
+/// (SQ-37 resolved: the code conformed to the contract; `02` is unchanged, so no
+/// `INTEGRATION_CONTRACT_VERSION` bump and no joint sign-off are required).
+#[allow(non_camel_case_types)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
+pub enum MarketKind {
+    DecisionAccept,
+    DecisionReject,
+    GateS_Adopt,
+    GateS_Reject,
+    GateC_Adopt,
+    GateC_Reject,
+    Baseline,
+}
+
 #[derive(
     Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo,
 )]
 pub struct RuntimeVersionConstraint {
     pub spec_name: BoundedVec<u8, 32>,
     pub spec_version: u32,
+}
+
+/// Book ids seeded for a proposal (04). Carried by [`Proposal::markets`].
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
+pub struct MarketSet {
+    pub accept: MarketId,
+    pub reject: MarketId,
+    pub gates: Option<[MarketId; 4]>,
+    pub baseline: MarketId,
+}
+
+/// Canonical proposal record. Layout frozen by inclusion in `futarchy-primitives`
+/// (02 §2); declaration order **is** the SCALE layout (05 §1.2, enumerated in full
+/// there). Generic over the runtime `AccountId` (concrete: `AccountId32`, 02 §8).
+/// `MaxEncodedLen` is derived so `pallet-epoch`'s `Proposals` map is bounded
+/// (02 §114 ≤512 B; I-20/I-21, G-6).
+#[derive(
+    Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo,
+)]
+pub struct Proposal<AccountId> {
+    pub id: ProposalId,
+    pub proposer: AccountId,
+    pub class: ProposalClass,
+    pub state: ProposalState,
+    pub epoch: EpochId,
+    pub submitted_at: BlockNumber,
+    pub payload_hash: H256,
+    /// Preimage byte length; `(payload_hash, payload_len)` is the pinned commitment
+    /// read by decide()'s §5.6 preimage check (09 §1.2(2)).
+    pub payload_len: u32,
+    pub ask: Balance,
+    pub bond: Balance,
+    /// Declared resource-domain keys (bound: 13 §4 "Resource locks" = 8).
+    pub resources: BoundedVec<[u8; 8], 8>,
+    pub metric_spec: MetricSpecVersion,
+    pub decide_at: BlockNumber,
+    pub rerun: bool,
+    pub extended: bool,
+    pub delayed_once: bool,
+    pub markets: Option<MarketSet>,
+    pub maturity: Option<BlockNumber>,
+    pub grace_end: Option<BlockNumber>,
+    pub version_constraint: Option<RuntimeVersionConstraint>,
+    pub decision: Option<DecisionOutcome>,
+}
+
+/// Terminal execution-queue record (09). Layout single-homed here per 02 §2.
+#[derive(
+    Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo,
+)]
+pub struct ExecutionRecord {
+    pub pid: ProposalId,
+    pub payload_hash: H256,
+    pub class: ProposalClass,
+    pub executed_at: BlockNumber,
+    pub result: DispatchOutcomeCode,
 }
 
 #[derive(
@@ -639,12 +768,21 @@ pub mod kernel {
     pub const MAX_BYTES: u32 = 64 * 1024;
     pub const MAX_WEIGHT_PERCENT: u8 = 25;
     pub const LMSR_DOMAIN_BOUND: u32 = 48;
+    /// Maximum approximation error for a primitive transcendental (`exp2`/`log2`/`ln`),
+    /// in units of 1 ulp = 2⁻⁶⁴ (04 §4). Single home for the `futarchy-fixed` kernel bound
+    /// (13 rule 1: fixed imports domain/error bounds).
+    pub const PRIMITIVE_MAX_ULP: u32 = 2;
+    /// Maximum composed LMSR cost-function and marginal-price error, in ulp of 2⁻⁶⁴ (04 §4).
+    pub const COMPOSED_COST_MAX_ULP: u32 = 8;
     pub const QUOTE_CLAMP_MIN_1E9: u64 = 1_000_000;
     pub const QUOTE_CLAMP_MAX_1E9: u64 = 999_000_000;
     pub const GATE_P_MAX_CEILING_1E9: u64 = 100_000_000;
     pub const ORC_MAX_PROOF_BYTES: u32 = 256 * 1024;
     pub const REG_MAX_FILINGS_EPOCH: u32 = 64;
     pub const WT_MAX: u32 = 16;
+    /// Watchtower acknowledgement quorum (`wt.quorum` K floor, 07). Single home for
+    /// the value the oracle and registry cores previously each re-declared.
+    pub const WT_QUORUM: u8 = 2;
     pub const ATT_MIN_MEMBERS: u32 = 3;
     pub const ATT_QUORUM: u32 = 2;
     pub const DEAD_MAN_RELAY_BLOCKS: u32 = 4_800;
@@ -656,11 +794,41 @@ pub mod kernel {
     pub const KEEPER_BUDGET_EPOCH_FLOOR_USDC: u128 = 6_000_000_000;
 }
 
+/// Epoch phase-start offsets as fractions of `epoch.length` (13 §3.1). The pairs
+/// (numerator, [`DENOMINATOR`]) are kernel constants exposed to clients as pallet
+/// metadata constants — never `Params` storage. Review/Execute are per-class /
+/// per-proposal and carry no fixed fraction.
+pub mod phase_offsets {
+    /// Common denominator for every epoch phase-offset fraction (13 §3.1).
+    pub const DENOMINATOR: u32 = 21;
+    pub const INTAKE_NUM: u32 = 0;
+    pub const QUALIFY_NUM: u32 = 3;
+    pub const SEED_NUM: u32 = 4;
+    pub const TRADE_NUM: u32 = 5;
+    /// Decision-window accrual start (final 72 h; trailing = final 24 h).
+    pub const DECIDE_WINDOW_NUM: u32 = 15;
+    pub const DECIDE_NUM: u32 = 18;
+    pub const HOUSEKEEPING_NUM: u32 = 20;
+}
+
 impl Branch {
     pub const fn codec_index(self) -> u8 {
         match self {
             Self::Accept => 0,
             Self::Reject => 1,
+        }
+    }
+}
+impl MarketKind {
+    pub const fn codec_index(self) -> u8 {
+        match self {
+            Self::DecisionAccept => 0,
+            Self::DecisionReject => 1,
+            Self::GateS_Adopt => 2,
+            Self::GateS_Reject => 3,
+            Self::GateC_Adopt => 4,
+            Self::GateC_Reject => 5,
+            Self::Baseline => 6,
         }
     }
 }
@@ -780,5 +948,186 @@ mod tests {
         assert_eq!(Branch::Accept.codec_index(), 0);
         assert_eq!(RejectReason::AttestationMissing.codec_index(), 15);
         assert_eq!(TradeSide::SellShort.codec_index(), 3);
+    }
+
+    #[test]
+    fn market_kind_indices_are_stable() {
+        let variants = [
+            MarketKind::DecisionAccept,
+            MarketKind::DecisionReject,
+            MarketKind::GateS_Adopt,
+            MarketKind::GateS_Reject,
+            MarketKind::GateC_Adopt,
+            MarketKind::GateC_Reject,
+            MarketKind::Baseline,
+        ];
+        for (index, kind) in variants.iter().enumerate() {
+            let index = index as u8;
+            assert_eq!(kind.codec_index(), index);
+            // 02 §7 SCALE index = declaration order.
+            assert_eq!(kind.encode(), alloc::vec![index]);
+        }
+    }
+
+    #[test]
+    fn market_kind_variant_names_match_contract_02_section_5() {
+        use scale_info::TypeDef;
+        // 02 §5 (`MarketCreated` row) freezes these exact names, and `02` is canonical
+        // for any name that appears on the contract surface (02 line 5). The canonical
+        // frontend decodes `MarketCreated.kind` by its TypeInfo variant name, so this
+        // locks the spelling byte-for-byte against an accidental future rename (SQ-37).
+        const CONTRACT_NAMES: [&str; 7] = [
+            "DecisionAccept",
+            "DecisionReject",
+            "GateS_Adopt",
+            "GateS_Reject",
+            "GateC_Adopt",
+            "GateC_Reject",
+            "Baseline",
+        ];
+        let type_info = MarketKind::type_info();
+        let names: alloc::vec::Vec<&str> = match &type_info.type_def {
+            TypeDef::Variant(variant) => variant.variants.iter().map(|v| v.name).collect(),
+            _ => panic!("MarketKind must encode as a SCALE variant type"),
+        };
+        assert_eq!(names, CONTRACT_NAMES);
+    }
+
+    #[test]
+    fn proposal_scale_round_trips_and_bounds_resources() {
+        let proposal = Proposal::<AccountId> {
+            id: 7,
+            proposer: [1u8; 32],
+            class: ProposalClass::Treasury,
+            state: ProposalState::Trading,
+            epoch: 3,
+            submitted_at: 100,
+            payload_hash: [2u8; 32],
+            payload_len: 4096,
+            ask: 1_000_000,
+            bond: 50_000,
+            resources: BoundedVec::try_from(alloc::vec![[9u8; 8], [8u8; 8]]).unwrap(),
+            metric_spec: 1,
+            decide_at: 200,
+            rerun: false,
+            extended: true,
+            delayed_once: false,
+            markets: Some(MarketSet {
+                accept: 1,
+                reject: 2,
+                gates: Some([3, 4, 5, 6]),
+                baseline: 7,
+            }),
+            maturity: Some(300),
+            grace_end: None,
+            version_constraint: Some(RuntimeVersionConstraint {
+                spec_name: BoundedVec::try_from(alloc::vec![98, 108, 101, 97, 118]).unwrap(),
+                spec_version: 42,
+            }),
+            decision: Some(DecisionOutcome::Adopt),
+        };
+        let bytes = proposal.encode();
+        // Declaration order is the SCALE layout: id (u64 LE) leads.
+        assert_eq!(&bytes[..8], &7u64.to_le_bytes());
+        assert_eq!(
+            Proposal::<AccountId>::decode(&mut &bytes[..]).unwrap(),
+            proposal
+        );
+        // Golden order-lock: independently concatenate every field's encoding in
+        // the 05 §1.2 declaration order and require byte-equality, so a reordering
+        // of fields 1–21 (which a plain round-trip would not catch) fails here.
+        let mut ordered = Vec::new();
+        ordered.extend(proposal.id.encode());
+        ordered.extend(proposal.proposer.encode());
+        ordered.extend(proposal.class.encode());
+        ordered.extend(proposal.state.encode());
+        ordered.extend(proposal.epoch.encode());
+        ordered.extend(proposal.submitted_at.encode());
+        ordered.extend(proposal.payload_hash.encode());
+        ordered.extend(proposal.payload_len.encode());
+        ordered.extend(proposal.ask.encode());
+        ordered.extend(proposal.bond.encode());
+        ordered.extend(proposal.resources.encode());
+        ordered.extend(proposal.metric_spec.encode());
+        ordered.extend(proposal.decide_at.encode());
+        ordered.extend(proposal.rerun.encode());
+        ordered.extend(proposal.extended.encode());
+        ordered.extend(proposal.delayed_once.encode());
+        ordered.extend(proposal.markets.encode());
+        ordered.extend(proposal.maturity.encode());
+        ordered.extend(proposal.grace_end.encode());
+        ordered.extend(proposal.version_constraint.encode());
+        ordered.extend(proposal.decision.encode());
+        assert_eq!(
+            bytes, ordered,
+            "SCALE layout must follow 05 §1.2 field order"
+        );
+        // 02 §114: the record is bounded ≤ 512 B so `pallet-epoch`'s map is bounded.
+        assert!(Proposal::<AccountId>::max_encoded_len() <= 512);
+
+        // resources is bounded at 8 (13 §4): a 9-element encoding is rejected at decode.
+        let nine = alloc::vec![[0u8; 8]; 9];
+        let mut over = 7u64.encode();
+        over.extend_from_slice(&[1u8; 32]); // proposer
+        over.extend_from_slice(&ProposalClass::Treasury.encode());
+        over.extend_from_slice(&ProposalState::Trading.encode());
+        over.extend_from_slice(&3u32.encode()); // epoch
+        over.extend_from_slice(&100u32.encode()); // submitted_at
+        over.extend_from_slice(&[2u8; 32]); // payload_hash
+        over.extend_from_slice(&4096u32.encode()); // payload_len
+        over.extend_from_slice(&1_000_000u128.encode()); // ask
+        over.extend_from_slice(&50_000u128.encode()); // bond
+        over.extend_from_slice(&nine.encode()); // resources: 9 > bound 8
+        assert!(Proposal::<AccountId>::decode(&mut &over[..]).is_err());
+    }
+
+    #[test]
+    fn execution_record_scale_round_trips() {
+        let record = ExecutionRecord {
+            pid: 7,
+            payload_hash: [2u8; 32],
+            class: ProposalClass::Code,
+            executed_at: 900,
+            result: DispatchOutcomeCode::Ok,
+        };
+        let bytes = record.encode();
+        assert_eq!(&bytes[..8], &7u64.to_le_bytes());
+        assert_eq!(ExecutionRecord::decode(&mut &bytes[..]).unwrap(), record);
+    }
+
+    #[test]
+    fn view_types_have_pinned_encoded_bounds() {
+        // 02 §3/§4: the FutarchyApi view types are fully defined here and bounded.
+        // Pinning the MaxEncodedLen locks their SCALE layout as a regression.
+        assert_eq!(
+            (
+                EpochStatusView::max_encoded_len(),
+                ProposalSummaryView::max_encoded_len(),
+                QuoteView::max_encoded_len(),
+                DecisionStatsView::max_encoded_len(),
+                QueuedExecutionView::max_encoded_len(),
+                RatificationStatus::max_encoded_len(),
+            ),
+            (19, 159, 57, 155, 93, 5)
+        );
+    }
+
+    #[test]
+    fn phase_offsets_are_monotonic_fractions_over_21() {
+        use phase_offsets::*;
+        assert_eq!(DENOMINATOR, 21);
+        let boundaries = [
+            INTAKE_NUM,
+            QUALIFY_NUM,
+            SEED_NUM,
+            TRADE_NUM,
+            DECIDE_WINDOW_NUM,
+            DECIDE_NUM,
+            HOUSEKEEPING_NUM,
+        ];
+        assert!(boundaries.windows(2).all(|w| w[0] < w[1]));
+        assert!(*boundaries.last().unwrap() < DENOMINATOR);
+        // Pin the exact 13 §3.1 numerators, not just their ordering.
+        assert_eq!(boundaries, [0, 3, 4, 5, 15, 18, 20]);
     }
 }

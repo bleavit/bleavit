@@ -12,8 +12,12 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
-if [[ -f tools/fixed/generate-lmsr-corpus.py ]]; then
-  python3 tools/fixed/generate-lmsr-corpus.py --check
+# Real no_std build gate: the frame-free math surface (futarchy-primitives,
+# futarchy-fixed) must compile without std (01 §5.2 / rule 9). A --no-default-features
+# `cargo test` executes zero tests and so silently passes; a build does not.
+if cargo metadata --no-deps --format-version=1 \
+  | python3 -c 'import json,sys; ms={m["name"] for m in json.load(sys.stdin)["packages"]}; sys.exit(0 if {"futarchy-primitives","futarchy-fixed"} <= ms else 1)'; then
+  cargo build -p futarchy-primitives -p futarchy-fixed --no-default-features
 fi
 
 if [[ -d reference-model/tests ]]; then

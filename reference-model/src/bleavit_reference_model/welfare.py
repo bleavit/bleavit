@@ -272,14 +272,16 @@ def percentile(values: Sequence[Decimal], fraction: Decimal) -> Decimal:
         return ordered[0]
     with localcontext() as ctx:
         ctx.prec = WORK_PREC
-        # SPEC-NOTE: 05 §4.6 does not name an interpolation family. This is
-        # the inclusive (n-1)·p linear convention used for deterministic
-        # fixed-size samples; changing it requires matching the Rust oracle.
+        # Inclusive linear ("type-7") interpolation: rank 1 + f·(n−1) on the
+        # ascending sample (05 §4.6). The interpolation is evaluated on the
+        # FixedU64 1e9 grid and the product is rounded DOWN per §4.6/§4.4, so this
+        # is a grid-exact conforming implementation (15 §4.4), never vacuous on the
+        # 12-element sample.
         rank = Decimal(len(ordered) - 1) * fraction
         lower = int(rank.to_integral_value(rounding=ROUND_FLOOR))
         upper = min(lower + 1, len(ordered) - 1)
         part = rank - lower
-        return ordered[lower] + (ordered[upper] - ordered[lower]) * part
+        return floor_fixed(ordered[lower] + (ordered[upper] - ordered[lower]) * part)
 
 
 def normalization_sample(

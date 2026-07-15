@@ -6,11 +6,14 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use conditional_ledger_core::{LedgerOrigin, LedgerState};
+use futarchy_primitives::phase_offsets;
 use futarchy_primitives::{
-    Balance, BlockNumber, Branch, CohortSummary, DecisionOutcome, EpochId, EpochPhase,
-    EpochStatusView, FixedU64, GateType, MetricSpecVersion, ProposalClass, ProposalId,
-    ProposalState, RejectReason, RuntimeVersionConstraint, H256,
+    Branch, CohortSummary, DecisionOutcome, EpochId, EpochPhase, EpochStatusView, FixedU64,
+    GateType, MetricSpecVersion, ProposalClass, ProposalId, ProposalState, RejectReason, H256,
 };
+// Single-homed in `futarchy-primitives` (02 §2; 05 §1.2 frozen layout); re-exported
+// so the historical `epoch_core::{MarketSet, Proposal}` path keeps resolving.
+pub use futarchy_primitives::{Balance, BlockNumber, MarketSet, Proposal};
 use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 use welfare_core::WelfareState;
@@ -25,7 +28,7 @@ macro_rules! ensure {
 
 pub const DEFAULT_EPOCH_LENGTH: BlockNumber = 302_400;
 pub const MIN_EPOCH_LENGTH: BlockNumber = 201_600;
-pub const PHASE_DENOM: BlockNumber = 21;
+pub const PHASE_DENOM: BlockNumber = futarchy_primitives::phase_offsets::DENOMINATOR;
 pub const MAX_INTAKE_QUEUE: usize = 64;
 pub const MAX_LIVE_PROPOSALS: usize = 32;
 pub const MAX_ACTIVE_PER_EPOCH: usize = 5;
@@ -33,9 +36,9 @@ pub const MAX_NON_TERMINAL_COHORTS: usize = 4;
 pub const RECENT_COHORTS: usize = 32;
 pub const MAX_RESOURCES_PER_PROPOSAL: usize = 8;
 pub const DECISION_WINDOW: BlockNumber = 43_200;
-pub const DECISION_EXTENSION: BlockNumber = 43_200;
+pub const DECISION_EXTENSION: BlockNumber = futarchy_primitives::kernel::DEC_EXTENSION_BLOCKS;
 pub const TRAILING_WINDOW: BlockNumber = 14_400;
-pub const STALE_EPOCH_BOUND: BlockNumber = 100_800;
+pub const STALE_EPOCH_BOUND: BlockNumber = futarchy_primitives::kernel::STALE_EPOCH_BOUND_BLOCKS;
 pub const ONE: u64 = 1_000_000_000;
 pub const ONE_PP: u64 = 10_000_000;
 /// Convergence bound `dec.delta_max` — default 0.05 (13 §2; 05 §5.2/§5.4 step 8).
@@ -85,14 +88,6 @@ pub struct EpochInfo {
 }
 
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
-pub struct MarketSet {
-    pub accept: u64,
-    pub reject: u64,
-    pub gates: Option<[u64; 4]>,
-    pub baseline: u64,
-}
-
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct DecisionInputs {
     pub accept_full: FixedU64,
     pub reject_full: FixedU64,
@@ -111,30 +106,6 @@ pub struct DecisionInputs {
     pub in_cap_prize: Option<Balance>,
     pub attestation_quorate: bool,
     pub constitution_queue_ok: bool,
-}
-
-#[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
-pub struct Proposal<AccountId> {
-    pub id: ProposalId,
-    pub proposer: AccountId,
-    pub class: ProposalClass,
-    pub state: ProposalState,
-    pub epoch: EpochId,
-    pub submitted_at: BlockNumber,
-    pub payload_hash: H256,
-    pub ask: Balance,
-    pub bond: Balance,
-    pub resources: Vec<[u8; 8]>,
-    pub metric_spec: MetricSpecVersion,
-    pub decide_at: BlockNumber,
-    pub rerun: bool,
-    pub extended: bool,
-    pub delayed_once: bool,
-    pub markets: Option<MarketSet>,
-    pub maturity: Option<BlockNumber>,
-    pub grace_end: Option<BlockNumber>,
-    pub version_constraint: Option<RuntimeVersionConstraint>,
-    pub decision: Option<DecisionOutcome>,
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
@@ -266,7 +237,9 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         ensure!(
             length >= MIN_EPOCH_LENGTH
                 && length % PHASE_DENOM == 0
-                && DECISION_WINDOW <= length.saturating_mul(13) / 21,
+                && DECISION_WINDOW
+                    <= length.saturating_mul(phase_offsets::DECIDE_NUM - phase_offsets::TRADE_NUM)
+                        / PHASE_DENOM,
             Error::BadEpochLength
         );
         self.epoch.next_length = length;
@@ -383,10 +356,9 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
                 .all(|r| self.resource_locks.iter().all(|(l, _)| l != r)),
             Error::LockConflict
         );
-        let decide_at = self
-            .epoch
-            .epoch_start_block
-            .saturating_add(self.epoch.length.saturating_mul(18) / 21);
+        let decide_at = self.epoch.epoch_start_block.saturating_add(
+            self.epoch.length.saturating_mul(phase_offsets::DECIDE_NUM) / PHASE_DENOM,
+        );
         for r in resources {
             self.resource_locks.push((r, pid));
         }
@@ -933,12 +905,16 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
     fn phase_start(&self, phase: EpochPhase) -> BlockNumber {
         self.epoch.epoch_start_block.saturating_add(match phase {
             EpochPhase::Intake => 0,
-            EpochPhase::Qualify => self.epoch.length * 3 / 21,
-            EpochPhase::Seed => self.epoch.length * 4 / 21,
-            EpochPhase::Trade => self.epoch.length * 5 / 21,
-            EpochPhase::Decide => self.epoch.length * 18 / 21,
-            EpochPhase::Review | EpochPhase::Execute => self.epoch.length * 18 / 21 + 1,
-            EpochPhase::Housekeeping => self.epoch.length * 20 / 21,
+            EpochPhase::Qualify => self.epoch.length * phase_offsets::QUALIFY_NUM / PHASE_DENOM,
+            EpochPhase::Seed => self.epoch.length * phase_offsets::SEED_NUM / PHASE_DENOM,
+            EpochPhase::Trade => self.epoch.length * phase_offsets::TRADE_NUM / PHASE_DENOM,
+            EpochPhase::Decide => self.epoch.length * phase_offsets::DECIDE_NUM / PHASE_DENOM,
+            EpochPhase::Review | EpochPhase::Execute => {
+                self.epoch.length * phase_offsets::DECIDE_NUM / PHASE_DENOM + 1
+            }
+            EpochPhase::Housekeeping => {
+                self.epoch.length * phase_offsets::HOUSEKEEPING_NUM / PHASE_DENOM
+            }
         })
     }
 }
@@ -949,28 +925,35 @@ impl<AccountId: Clone + Eq> Default for EpochState<AccountId> {
 }
 
 fn phase_at(offset: BlockNumber, l: BlockNumber) -> EpochPhase {
-    if offset < l * 3 / 21 {
+    if offset < l * phase_offsets::QUALIFY_NUM / PHASE_DENOM {
         EpochPhase::Intake
-    } else if offset < l * 4 / 21 {
+    } else if offset < l * phase_offsets::SEED_NUM / PHASE_DENOM {
         EpochPhase::Qualify
-    } else if offset < l * 5 / 21 {
+    } else if offset < l * phase_offsets::TRADE_NUM / PHASE_DENOM {
         EpochPhase::Seed
-    } else if offset < l * 18 / 21 {
+    } else if offset < l * phase_offsets::DECIDE_NUM / PHASE_DENOM {
         EpochPhase::Trade
-    } else if offset < l * 20 / 21 {
+    } else if offset < l * phase_offsets::HOUSEKEEPING_NUM / PHASE_DENOM {
         EpochPhase::Decide
     } else {
         EpochPhase::Housekeeping
     }
 }
 fn phase_len(p: EpochPhase, l: BlockNumber) -> BlockNumber {
+    // Phase durations = the gap to the next phase-start offset (13 §3.1).
     match p {
-        EpochPhase::Intake => l * 3 / 21,
-        EpochPhase::Qualify | EpochPhase::Seed => l / 21,
-        EpochPhase::Trade => l * 13 / 21,
-        EpochPhase::Decide => l * 2 / 21,
+        EpochPhase::Intake => {
+            l * (phase_offsets::QUALIFY_NUM - phase_offsets::INTAKE_NUM) / PHASE_DENOM
+        }
+        EpochPhase::Qualify | EpochPhase::Seed => l / PHASE_DENOM,
+        EpochPhase::Trade => {
+            l * (phase_offsets::DECIDE_NUM - phase_offsets::TRADE_NUM) / PHASE_DENOM
+        }
+        EpochPhase::Decide => {
+            l * (phase_offsets::HOUSEKEEPING_NUM - phase_offsets::DECIDE_NUM) / PHASE_DENOM
+        }
         EpochPhase::Review | EpochPhase::Execute => 0,
-        EpochPhase::Housekeeping => l / 21,
+        EpochPhase::Housekeeping => l / PHASE_DENOM,
     }
 }
 fn requires_gate(c: ProposalClass, ask: Balance) -> bool {
@@ -1036,6 +1019,7 @@ pub mod benchmarking {
 mod tests {
     use super::*;
     use conditional_ledger_core::Event as LedgerEvent;
+    use futarchy_primitives::BoundedVec;
     use welfare_core::{GateBreachFlags, Snapshot};
     fn acct(x: u8) -> [u8; 32] {
         [x; 32]
@@ -1049,9 +1033,10 @@ mod tests {
             epoch: 0,
             submitted_at: 0,
             payload_hash: [id as u8; 32],
+            payload_len: 0,
             ask: 0,
             bond: 10,
-            resources: alloc::vec![[id as u8; 8]],
+            resources: BoundedVec::try_from(alloc::vec![[id as u8; 8]]).unwrap(),
             metric_spec: 1,
             decide_at: 0,
             rerun: false,

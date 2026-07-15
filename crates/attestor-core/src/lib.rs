@@ -9,8 +9,8 @@ use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
 pub type AttestationId = u32;
-pub const MIN_MEMBERS: usize = 3;
-pub const QUORUM: usize = 2;
+pub const MIN_MEMBERS: usize = futarchy_primitives::kernel::ATT_MIN_MEMBERS as usize;
+pub const QUORUM: usize = futarchy_primitives::kernel::ATT_QUORUM as usize;
 pub const ATTESTOR_BOND: Balance = 25_000_000_000_000_000;
 pub const CHALLENGE_WINDOW_BLOCKS: BlockNumber = 43_200;
 pub const CHALLENGE_BOND: Balance = ATTESTOR_BOND / 2;

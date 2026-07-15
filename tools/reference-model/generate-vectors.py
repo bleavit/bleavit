@@ -25,6 +25,9 @@ from bleavit_reference_model.lmsr import (
     fmt,
     marginal_price_long,
     raw_64x64_nearest,
+    ref_exp2,
+    ref_ln,
+    ref_log2,
     vectors_v1_v6,
     worked_maker_example,
 )
@@ -84,6 +87,15 @@ DECISION_SCENARIOS = [
             "requires_gate_markets": True,
             "p_adopt": {"Survival": "0.06"},
             "welfare_grade": "Invalid",
+        },
+    },
+    {
+        "name": "gate_veto_precedes_later_gate_invalid",
+        "inputs": {
+            "requires_gate_markets": True,
+            "gate_valid": {"Survival": True, "Security": False},
+            "p_adopt": {"Survival": "0.06"},
+            "p_reject": {"Survival": "0.01"},
         },
     },
     {
@@ -180,7 +192,12 @@ def _decision_row(scenario):
         supplied["welfare_grade"] = Grade(supplied["welfare_grade"])
     inputs.update(supplied)
     decision = decide(**inputs)
-    row = {"name": scenario["name"], "inputs": scenario["inputs"]}
+    # 04 §5: every row carries the full effective input set (base + overrides), not
+    # just the scenario override, so `decide(**row["inputs"])` replays it standalone.
+    replay = dict(inputs)
+    if isinstance(replay.get("welfare_grade"), Grade):
+        replay["welfare_grade"] = replay["welfare_grade"].value
+    row = {"name": scenario["name"], "inputs": _string_tree(replay)}
     row["outcome"] = decision.outcome.value
     if decision.reason is not None:
         row["reason"] = decision.reason.value
@@ -361,6 +378,73 @@ def _treasury_scenarios():
     return rows
 
 
+def _transcendental_corpus():
+    """04 §4/§5 per-commit adversarial transcendental corpus (≥10³ points).
+
+    Dense-bit fractional inputs (uniform 64-bit draws average ~32 set bits) plus
+    a spread of magnitudes and structured edges. Deterministic: a fixed-seed
+    Mersenne Twister driven only through `getrandbits` (stable across CPython
+    versions), so the committed corpus regenerates byte-identically (rule 3).
+    Every row is standalone-replayable from its raw 64.64 input.
+    """
+    import random
+
+    q64 = 1 << 64
+    rng = random.Random(0xB1EA_1770_C0DE_F1AE)
+    rows = []
+
+    def value_of(raw):
+        return Decimal(raw) / Decimal(q64)
+
+    def push(function, input_raw, value):
+        rows.append(
+            {
+                "f": function,
+                "in": input_raw,
+                "out": raw_64x64_nearest(value),
+            }
+        )
+
+    # exp2 — dense fractional inputs (the [1,2) kernel bound is tight here) …
+    for _ in range(640):
+        frac = rng.getrandbits(64)
+        push("exp2", frac, ref_exp2(value_of(frac)))
+    # … and a spread of integer parts across the whole domain [1, 63] to exercise
+    # the post-kernel left shift, including the top octave near the 2^64 ceiling.
+    for _ in range(200):
+        whole = 1 + (rng.getrandbits(8) % 63)
+        frac = rng.getrandbits(64)
+        raw = (whole << 64) | frac
+        push("exp2", raw, ref_exp2(value_of(raw)))
+    for frac in (
+        q64 - 1,
+        (q64 - 1) & 0xAAAAAAAAAAAAAAAA,
+        (q64 - 1) & 0x5555555555555555,
+        0xFFFFFFFF00000000,
+        0x00000000FFFFFFFF,
+        0xF0F0F0F0F0F0F0F0,
+    ):
+        push("exp2", frac, ref_exp2(value_of(frac)))
+
+    # log2 / ln — values ≥ 1 with dense mantissae across the full magnitude range
+    # (wide inputs are where a 64-bit-wide log2 drifted past 2 ulp).
+    # bits ∈ [65, 128] covers value ∈ [1, 2^64): the top band (bits 128, value near
+    # 2^64) is the wide-input edge where an unguarded log2 drifted past 2 ulp.
+    for function, ref in (("log2", ref_log2), ("ln", ref_ln)):
+        for _ in range(220):
+            bits = 65 + (rng.getrandbits(8) % 64)
+            raw = (1 << (bits - 1)) | rng.getrandbits(bits - 1)
+            push(function, raw, ref(value_of(raw)))
+
+    return {
+        "count": len(rows),
+        "seed": "0xB1EA1770C0DEF1AE",
+        "exp2_relative_bound": "2**-63",
+        "primitive_abs_ulp_bound": 2,
+        "rows": rows,
+    }
+
+
 def build():
     samples = []
     for ql, qs in [
@@ -369,6 +453,7 @@ def build():
         (2500, 0),
         (0, 2500),
         (12345, 6789),
+        (6789, 12345),
         (240000, 0),
         (0, 240000),
         (480000, 0),
@@ -446,6 +531,7 @@ def build():
         "lmsr_vectors": vectors_v1_v6(),
         "lmsr_maker_example": _string_tree(worked_maker_example()),
         "high_precision_corpus": {"b": "10000", "samples": samples},
+        "transcendental_corpus": _transcendental_corpus(),
         "ledger_scenarios": _ledger_scenarios(),
         "decision_scenarios": [
             _decision_row(scenario) for scenario in DECISION_SCENARIOS

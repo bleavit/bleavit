@@ -19,7 +19,7 @@ use scale_info::TypeInfo;
 
 pub const FEE_BPS: u128 = 30;
 pub const BPS_DENOM: u128 = 10_000;
-pub const MIN_TRADE: Balance = 1_000_000;
+pub const MIN_TRADE: Balance = futarchy_primitives::kernel::MIN_TRADE_USDC;
 pub const OBS_INTERVAL: u64 = 10;
 pub const STALE_GAP_BLOCKS: u64 = 50;
 pub const KAPPA_1E9: u64 = 5_000_000;

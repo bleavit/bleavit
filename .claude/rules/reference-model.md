@@ -17,11 +17,17 @@ The Python reference model exists to catch bugs in the Rust implementation by
    V1 error is the standing justification).
 3. **Determinism.** Fixed seeds, no wall-clock, no environment-dependent behavior;
    byte-identical JSON output for identical inputs (stable key order, explicit precision).
-   MPFR reference math runs at 256-bit precision.
-4. **Shared corpus schema is contract-owned.** The JSON vector schema is defined by
-   `02-integration-contract.md` §11 — the same artifacts feed the backend differential
-   suites and the frontend's TypeScript port. Changing the schema is a change to doc 02
-   (rule R-1): bump `INTEGRATION_CONTRACT_VERSION` and keep both consumers in step.
+   The transcendental reference math runs at **≥ 256-bit precision** (the model uses
+   100-digit `Decimal` ≈ 332-bit; MPFR-256 is an equivalent — the precision is normative,
+   the library is not; 15 §4.4).
+4. **Corpus schema is owned by `04 §5`.** The JSON vector schema (`reference-model/
+   fixtures/vectors.json`, `bleavit.reference-model.vN`) is normatively owned by
+   `04-markets-and-pricing.md` §5, not by `02 §11` (02's artifact table deliberately
+   covers only the four runtime-surface artifacts — the corpus is consumed by test
+   suites, never by the running frontend). Fields are **append-only within a major
+   `N`** and need no contract bump; a breaking layout change bumps `N`. Every row must
+   carry the inputs needed to replay it standalone. The backend differential suites and
+   the frontend TypeScript port both certify against this one artifact.
 5. **Scope.** The model covers LMSR cost/pricing, TWAP, the ledger operation semantics
    (incl. gate/Baseline/VOID and rounding), the welfare pipeline, and the decision rule
    with reason codes (05 §4.4 bit-identical requirement), plus the treasury arithmetic

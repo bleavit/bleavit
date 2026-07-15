@@ -12,16 +12,17 @@ use scale_info::TypeInfo;
 
 pub type FilingId = u32;
 
-pub const MAX_FILINGS_PER_EPOCH: u32 = 64;
+pub const MAX_FILINGS_PER_EPOCH: u32 = futarchy_primitives::kernel::REG_MAX_FILINGS_EPOCH;
 pub const MAX_LIVE_EPOCHS: usize = 4;
 pub const MAX_AGGREGATES: usize = 4;
 pub const REG_CLOSE_BATCH: usize = 20;
 pub const REG_WINDOW_BLOCKS: BlockNumber = 43_200;
-pub const REG_EXT_WINDOW_BLOCKS: BlockNumber = 28_800;
+pub const REG_EXT_WINDOW_BLOCKS: BlockNumber =
+    futarchy_primitives::kernel::WATCHTOWER_EXTENSION_BLOCKS;
 pub const REPORT_WINDOW_BLOCKS: BlockNumber = 28_800;
 pub const REG_BOND_INCIDENT: Balance = 5_000_000_000;
 pub const REG_BOND_MILESTONE: Balance = 2_500_000_000;
-pub const WT_QUORUM: u8 = 2;
+pub const WT_QUORUM: u8 = futarchy_primitives::kernel::WT_QUORUM;
 pub const MILESTONE_TARGET_POINTS: u32 = 100;
 const ONE: u64 = 1_000_000_000;
 

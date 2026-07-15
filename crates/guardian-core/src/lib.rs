@@ -16,7 +16,9 @@ pub const ACTION_EXPIRY_BLOCKS: BlockNumber = 43_200;
 pub const REVIEW_DEADLINE_EPOCHS: EpochId = 2;
 pub const REVIEW_SLASH_PERCENT: u8 = 50;
 pub const HOLD_MAX_BLOCKS: BlockNumber = 201_600;
-pub const FORCE_RERUN_WINDOW_BLOCKS: BlockNumber = 43_200;
+// 13 §3.4: `frn.window = dec.extension` (shared K).
+pub const FORCE_RERUN_WINDOW_BLOCKS: BlockNumber =
+    futarchy_primitives::kernel::DEC_EXTENSION_BLOCKS;
 pub const DELAY_ONCE_ALLOWANCE_PER_EPOCH: u8 = 2;
 pub const FORCE_RERUN_ALLOWANCE_PER_EPOCH: u8 = 1;
 pub const PAUSE_INTAKE_ALLOWANCE_WINDOW_EPOCHS: EpochId = 4;

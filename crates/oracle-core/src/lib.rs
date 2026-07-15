@@ -12,11 +12,12 @@ use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
 pub const MAX_REPORTERS: usize = 64;
-pub const MAX_WATCHTOWERS: usize = 16;
+pub const MAX_WATCHTOWERS: usize = futarchy_primitives::kernel::WT_MAX as usize;
 pub const MAX_ROUNDS: usize = 64;
 pub const MAX_COMPONENT_VALUES: usize = 64;
 pub const ORC_WINDOW_BLOCKS: BlockNumber = 43_200;
-pub const ORC_EXT_WINDOW_BLOCKS: BlockNumber = 28_800;
+pub const ORC_EXT_WINDOW_BLOCKS: BlockNumber =
+    futarchy_primitives::kernel::WATCHTOWER_EXTENSION_BLOCKS;
 pub const REPORT_WINDOW_BLOCKS: BlockNumber = 28_800;
 pub const RES_PROBE_INTERVAL: BlockNumber = 14_400;
 pub const RES_PROBE_TIMEOUT: BlockNumber = 600;
@@ -25,12 +26,12 @@ pub const ORC_BOND_FLOOR: Balance = 10_000_000_000;
 pub const ORC_BOND_BPS: u32 = 250;
 pub const ORC_REPORTER_STAKE: Balance = 100_000_000_000;
 pub const WT_STAKE: Balance = 25_000_000_000;
-pub const WT_QUORUM: u8 = 2;
+pub const WT_QUORUM: u8 = futarchy_primitives::kernel::WT_QUORUM;
 pub const RES_FAIL_THRESHOLD: u8 = 2;
 pub const RES_RECOVER_THRESHOLD: u8 = 3;
 pub const RES_PROBE_AMOUNT: Balance = 100_000;
 /// 13 §5 `orc.max_proof_bytes` (K): 256 KiB per `recompute_proof` submission.
-pub const ORC_MAX_PROOF_BYTES: usize = 262_144;
+pub const ORC_MAX_PROOF_BYTES: usize = futarchy_primitives::kernel::ORC_MAX_PROOF_BYTES as usize;
 /// Component values are FixedU64 (1e9 scale) in [0, 1] before aggregation
 /// (05 §4.4 determinism rule 1).
 pub const COMPONENT_VALUE_MAX: u64 = 1_000_000_000;

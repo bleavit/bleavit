@@ -74,6 +74,20 @@ def _decimal_map(
     return result
 
 
+def _bool_map(
+    values: Mapping[Gate | str, bool] | None, default: bool
+) -> dict[Gate, bool]:
+    result = {gate: default for gate in Gate}
+    if values is None:
+        return result
+    for gate in Gate:
+        for key in (gate, gate.value, gate.name, gate.name.lower()):
+            if key in values:
+                result[gate] = bool(values[key])
+                break
+    return result
+
+
 def _grade(value: Grade | str) -> Grade:
     if isinstance(value, Grade):
         return value
@@ -109,6 +123,7 @@ def decide(
     process_hold: bool = False,
     requires_gate_markets: bool = False,
     gate_book_valid: bool = True,
+    gate_valid: Mapping[Gate | str, bool] | None = None,
     p_adopt: Mapping[Gate | str, Decimal] | None = None,
     p_reject: Mapping[Gate | str, Decimal] | None = None,
     p_max: Mapping[Gate | str, Decimal] | None = None,
@@ -154,15 +169,19 @@ def decide(
     if process_hold:
         return Decision(Outcome.REJECT, RejectReason.PROCESS_HOLD)
 
-    # Steps 3-4 apply only to gate-bearing classes.
+    # Steps 3-4 apply only to gate-bearing classes. Per 05 §5.4 the loop asserts
+    # each gate's validity *then* its veto, so a Survival veto is reported before
+    # Security's validity is inspected (per-gate `gate_valid` overrides the scalar
+    # `gate_book_valid` fallback).
     if requires_gate_markets:
-        if not gate_book_valid:
-            return Decision(Outcome.REJECT, RejectReason.NOT_DECISION_GRADE)
         adopt = _decimal_map(p_adopt, Decimal(0))
         reject = _decimal_map(p_reject, Decimal(0))
         maxima = _decimal_map(p_max, DEFAULT_P_MAX)
         margins = _decimal_map(eps, DEFAULT_EPS)
+        valid = _bool_map(gate_valid, gate_book_valid)
         for gate in (Gate.SURVIVAL, Gate.SECURITY):
+            if not valid[gate]:
+                return Decision(Outcome.REJECT, RejectReason.NOT_DECISION_GRADE)
             if (
                 adopt[gate] > maxima[gate]
                 or adopt[gate] > reject[gate] + margins[gate]
