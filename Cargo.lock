@@ -2325,12 +2325,19 @@ dependencies = [
 name = "pallet-market"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
  "futarchy-fixed",
  "futarchy-primitives",
  "market-core",
+ "pallet-assets",
+ "pallet-balances",
  "pallet-conditional-ledger",
  "parity-scale-codec",
  "scale-info",
+ "sp-io",
+ "sp-runtime",
 ]
 
 [[package]]
