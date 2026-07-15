@@ -31,6 +31,9 @@ pub struct Proposal<AccountId> {
     pub epoch: EpochId,                     // creation epoch — the schedule anchor (§2.3)
     pub submitted_at: BlockNumber,
     pub payload_hash: H256,                 // pinned at qualification (06; re-checked 09 §1.2(2))
+    pub payload_len: u32,                    // preimage byte length; (hash, len) is the pinned
+                                             // commitment (09 §1.2(2); read by decide()'s §5.6
+                                             // preimage check and listed in 09 §1.1's queued fields)
     pub ask: Balance,            // committed USDC outflow (TREASURY; 0 otherwise). Consumed by
                                  // bond formula, security sizing (§5.6), Ask-scaled liquidity (doc 08)
     pub bond: Balance,                      // class bond held (13 §1 `prop.bond`)
