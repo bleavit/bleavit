@@ -5,27 +5,195 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use conditional_ledger_core::{baseline, position, LedgerState};
+use conditional_ledger_core::{baseline, position, LedgerOrigin, LedgerState};
 use futarchy_fixed::{
     lmsr_buy_cost, lmsr_price_long, lmsr_sell_proceeds, round_charge_up, round_payout_down,
     FixedError, FixedU64x64, LmsrSide, LN_2,
 };
 use futarchy_primitives::{
-    Balance, Branch, EpochId, FixedU64, GateType, MarketId, PositionKind, ProposalId, ScalarSide,
-    TradeSide,
+    Balance, Branch, EpochId, FixedU64, GateType, MarketId, PositionId, PositionKind, ProposalId,
+    ScalarSide, TradeSide,
 };
-use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
+use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
 pub const FEE_BPS: u128 = 30;
 pub const BPS_DENOM: u128 = 10_000;
 pub const MIN_TRADE: Balance = futarchy_primitives::kernel::MIN_TRADE_USDC;
 pub const OBS_INTERVAL: u64 = 10;
-pub const STALE_GAP_BLOCKS: u64 = 50;
+pub const STALE_GAP_BLOCKS: u64 = futarchy_primitives::kernel::MKT_STALE_GAP_BLOCKS;
 pub const KAPPA_1E9: u64 = 5_000_000;
 pub const PRICE_ONE_1E9: u64 = 1_000_000_000;
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+/// Live market tunables the FRAME pallet injects from pallet-constitution::Params.
+/// Defaults are the reference-model / differential-oracle values (13 §1).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MarketParams {
+    pub fee_bps: u128,
+    pub obs_interval: u64,
+    pub kappa_1e9: u64,
+    pub stale_gap_blocks: u64,
+}
+
+impl Default for MarketParams {
+    fn default() -> Self {
+        Self {
+            fee_bps: FEE_BPS,
+            obs_interval: OBS_INTERVAL,
+            kappa_1e9: KAPPA_1E9,
+            stale_gap_blocks: STALE_GAP_BLOCKS,
+        }
+    }
+}
+
+/// The exact ledger operations the D-3 trade wrapper (04 §6) consumes.
+///
+/// The in-memory [`LedgerState`] implements this for the differential oracle;
+/// the production FRAME pallet supplies a shim over `pallet-conditional-ledger`.
+/// Ledger errors collapse to [`Error::Ledger`] so every failure is status-quo.
+#[allow(clippy::result_unit_err)]
+pub trait LedgerOps<AccountId> {
+    fn do_split(&mut self, pid: ProposalId, who: &AccountId, a: Balance) -> Result<(), ()>;
+    fn do_transfer(
+        &mut self,
+        id: PositionId,
+        from: &AccountId,
+        to: &AccountId,
+        a: Balance,
+    ) -> Result<(), ()>;
+    fn do_split_scalar(
+        &mut self,
+        pid: ProposalId,
+        b: Branch,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), ()>;
+    fn do_split_gate(
+        &mut self,
+        pid: ProposalId,
+        b: Branch,
+        g: GateType,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), ()>;
+    fn do_split_baseline(&mut self, epoch: EpochId, who: &AccountId, a: Balance) -> Result<(), ()>;
+    fn do_merge(&mut self, pid: ProposalId, who: &AccountId, a: Balance) -> Result<(), ()>;
+    fn do_merge_scalar(
+        &mut self,
+        pid: ProposalId,
+        b: Branch,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), ()>;
+    fn do_merge_gate(
+        &mut self,
+        pid: ProposalId,
+        b: Branch,
+        g: GateType,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), ()>;
+    fn do_merge_baseline(&mut self, epoch: EpochId, who: &AccountId, a: Balance) -> Result<(), ()>;
+    fn note_protocol_account(&mut self, who: AccountId);
+    fn position_balance(&self, id: PositionId, who: &AccountId) -> Balance;
+}
+
+impl<A: Clone + Eq> LedgerOps<A> for LedgerState<A> {
+    fn do_split(&mut self, pid: ProposalId, who: &A, a: Balance) -> Result<(), ()> {
+        self.split(LedgerOrigin::MarketAuthority, pid, who, a)
+            .map_err(|_| ())
+    }
+
+    fn do_transfer(&mut self, id: PositionId, from: &A, to: &A, a: Balance) -> Result<(), ()> {
+        self.transfer(LedgerOrigin::MarketAuthority, id, from, to, a)
+            .map_err(|_| ())
+    }
+
+    fn do_split_scalar(
+        &mut self,
+        pid: ProposalId,
+        b: Branch,
+        who: &A,
+        a: Balance,
+    ) -> Result<(), ()> {
+        self.split_scalar(LedgerOrigin::MarketAuthority, pid, b, who, a)
+            .map_err(|_| ())
+    }
+
+    fn do_split_gate(
+        &mut self,
+        pid: ProposalId,
+        b: Branch,
+        g: GateType,
+        who: &A,
+        a: Balance,
+    ) -> Result<(), ()> {
+        self.split_gate(LedgerOrigin::MarketAuthority, pid, b, g, who, a)
+            .map_err(|_| ())
+    }
+
+    fn do_split_baseline(&mut self, epoch: EpochId, who: &A, a: Balance) -> Result<(), ()> {
+        self.split_baseline(LedgerOrigin::MarketAuthority, epoch, who, a)
+            .map_err(|_| ())
+    }
+
+    fn do_merge(&mut self, pid: ProposalId, who: &A, a: Balance) -> Result<(), ()> {
+        self.merge(LedgerOrigin::MarketAuthority, pid, who, a)
+            .map_err(|_| ())
+    }
+
+    fn do_merge_scalar(
+        &mut self,
+        pid: ProposalId,
+        b: Branch,
+        who: &A,
+        a: Balance,
+    ) -> Result<(), ()> {
+        self.merge_scalar(LedgerOrigin::MarketAuthority, pid, b, who, a)
+            .map_err(|_| ())
+    }
+
+    fn do_merge_gate(
+        &mut self,
+        pid: ProposalId,
+        b: Branch,
+        g: GateType,
+        who: &A,
+        a: Balance,
+    ) -> Result<(), ()> {
+        self.merge_gate(LedgerOrigin::MarketAuthority, pid, b, g, who, a)
+            .map_err(|_| ())
+    }
+
+    fn do_merge_baseline(&mut self, epoch: EpochId, who: &A, a: Balance) -> Result<(), ()> {
+        self.merge_baseline(LedgerOrigin::MarketAuthority, epoch, who, a)
+            .map_err(|_| ())
+    }
+
+    fn note_protocol_account(&mut self, who: A) {
+        self.add_protocol_account(who);
+    }
+
+    fn position_balance(&self, id: PositionId, who: &A) -> Balance {
+        self.positions
+            .iter()
+            .find(|p| p.id == id && &p.owner == who)
+            .map_or(0, |p| p.balance)
+    }
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub enum BookKind {
     Decision {
         proposal: ProposalId,
@@ -41,7 +209,18 @@ pub enum BookKind {
     },
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub enum MarketPhase {
     Trading,
     Extended,
@@ -49,7 +228,18 @@ pub enum MarketPhase {
     Settled,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub struct MarketBook<AccountId> {
     pub id: MarketId,
     pub kind: BookKind,
@@ -67,7 +257,46 @@ pub struct MarketBook<AccountId> {
     pub stale_events: u8,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+impl<AccountId> MarketBook<AccountId> {
+    /// Construct a fresh trading book with the canonical neutral quote (04 §2).
+    pub fn open(
+        id: MarketId,
+        kind: BookKind,
+        account: AccountId,
+        fees_account: AccountId,
+        b: Balance,
+    ) -> Self {
+        Self {
+            id,
+            kind,
+            phase: MarketPhase::Trading,
+            account,
+            fees_account,
+            b,
+            q_long: 0,
+            q_short: 0,
+            fees_accrued: 0,
+            last_quote_1e9: FixedU64(500_000_000),
+            last_observation_1e9: FixedU64(500_000_000),
+            last_observed_block: 0,
+            cumulative_price_blocks: 0,
+            stale_events: 0,
+        }
+    }
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub enum Event<AccountId> {
     MarketCreated(MarketId),
     BaselineMarketMapped(EpochId, MarketId),
@@ -88,7 +317,18 @@ pub enum Event<AccountId> {
     Reaped(MarketId),
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub enum Error {
     UnknownMarket,
     DuplicateMarket,
@@ -140,22 +380,8 @@ impl<AccountId: Clone + Eq> MarketState<AccountId> {
             self.baseline_market_of.push((epoch, id));
             self.events.push(Event::BaselineMarketMapped(epoch, id));
         }
-        self.markets.push(MarketBook {
-            id,
-            kind,
-            phase: MarketPhase::Trading,
-            account,
-            fees_account,
-            b,
-            q_long: 0,
-            q_short: 0,
-            fees_accrued: 0,
-            last_quote_1e9: FixedU64(500_000_000),
-            last_observation_1e9: FixedU64(500_000_000),
-            last_observed_block: 0,
-            cumulative_price_blocks: 0,
-            stale_events: 0,
-        });
+        self.markets
+            .push(MarketBook::open(id, kind, account, fees_account, b));
         self.events.push(Event::MarketCreated(id));
         Ok(())
     }
@@ -166,53 +392,12 @@ impl<AccountId: Clone + Eq> MarketState<AccountId> {
         id: MarketId,
         treasury: &AccountId,
     ) -> Result<Balance, Error> {
-        let m = self.market_mut(id)?;
-        let headroom = fixed_to_base_units_up(fx(m.b)?.checked_mul(LN_2).map_err(map_fixed)?)?;
-        ledger.add_protocol_account(m.account.clone());
-        ledger.add_protocol_account(m.fees_account.clone());
-        match m.kind {
-            BookKind::Decision { proposal, branch } => {
-                ledger
-                    .do_split(proposal, treasury, headroom)
-                    .map_err(|_| Error::Ledger)?;
-                ledger
-                    .do_transfer(
-                        position(proposal, branch, PositionKind::BranchUsdc),
-                        treasury,
-                        &m.account,
-                        headroom,
-                    )
-                    .map_err(|_| Error::Ledger)?;
-                ledger
-                    .do_split_scalar(proposal, branch, &m.account, headroom)
-                    .map_err(|_| Error::Ledger)?;
-            }
-            BookKind::Gate {
-                proposal,
-                branch,
-                gate,
-            } => {
-                ledger
-                    .do_split(proposal, treasury, headroom)
-                    .map_err(|_| Error::Ledger)?;
-                ledger
-                    .do_transfer(
-                        position(proposal, branch, PositionKind::BranchUsdc),
-                        treasury,
-                        &m.account,
-                        headroom,
-                    )
-                    .map_err(|_| Error::Ledger)?;
-                ledger
-                    .do_split_gate(proposal, branch, gate, &m.account, headroom)
-                    .map_err(|_| Error::Ledger)?;
-            }
-            BookKind::Baseline { epoch } => {
-                ledger
-                    .do_split_baseline(epoch, &m.account, headroom)
-                    .map_err(|_| Error::Ledger)?;
-            }
-        }
+        let idx = self
+            .markets
+            .iter()
+            .position(|m| m.id == id)
+            .ok_or(Error::UnknownMarket)?;
+        let headroom = seed_book(&self.markets[idx], ledger, treasury)?;
         self.events.push(Event::Seeded(id, headroom));
         Ok(headroom)
     }
@@ -251,81 +436,22 @@ impl<AccountId: Clone + Eq> MarketState<AccountId> {
         max_cost: Balance,
         block: u64,
     ) -> Result<(), Error> {
-        let m = self.market_mut(id)?;
-        ensure_trading(m.phase)?;
-        ensure_trade_bounds(m.b, amount)?;
-        let lside = lside(side);
-        let cost_fx = lmsr_buy_cost(fx(m.q_long)?, fx(m.q_short)?, fx(m.b)?, lside, fx(amount)?)
-            .map_err(map_fixed)?;
-        let cost = fixed_to_base_units_up(cost_fx)?;
-        let fee = fee_up(cost)?;
-        ensure!(
-            cost.checked_add(fee).ok_or(Error::ArithmeticOverflow)? <= max_cost,
-            Error::SlippageExceeded
-        );
-        match m.kind {
-            BookKind::Decision { proposal, branch } => buy_branch(
-                ledger,
-                proposal,
-                branch,
-                side,
-                who,
-                &m.account,
-                &m.fees_account,
-                amount,
-                cost,
-                fee,
-            )?,
-            BookKind::Gate {
-                proposal,
-                branch,
-                gate,
-            } => buy_gate(
-                ledger,
-                proposal,
-                branch,
-                gate,
-                side,
-                who,
-                &m.account,
-                &m.fees_account,
-                amount,
-                cost,
-                fee,
-            )?,
-            BookKind::Baseline { epoch } => buy_baseline(
-                ledger,
-                epoch,
-                side,
-                who,
-                &m.account,
-                amount,
-                cost.checked_add(fee).ok_or(Error::ArithmeticOverflow)?,
-            )?,
-        }
-        match side {
-            ScalarSide::Long => m.q_long = add(m.q_long, amount)?,
-            ScalarSide::Short => m.q_short = add(m.q_short, amount)?,
-        }
-        m.fees_accrued = add(m.fees_accrued, fee)?;
-        let observed = observe_if_due(m, block)?;
-        let p = price_1e9(m)?;
-        m.last_quote_1e9 = p;
-        if let Some(event) = observed {
-            self.events.push(event);
-        }
-        self.events.push(Event::Traded {
-            market: id,
-            who: who.clone(),
-            side: if matches!(side, ScalarSide::Long) {
-                TradeSide::BuyLong
-            } else {
-                TradeSide::BuyShort
-            },
+        let idx = self
+            .markets
+            .iter()
+            .position(|m| m.id == id)
+            .ok_or(Error::UnknownMarket)?;
+        let events = buy_book(
+            &mut self.markets[idx],
+            ledger,
+            &MarketParams::default(),
+            who,
+            side,
             amount,
-            cost,
-            p_after: p,
-        });
+            max_cost,
+            block,
+        )?;
+        self.events.extend(events);
         Ok(())
     }
 
@@ -363,78 +489,22 @@ impl<AccountId: Clone + Eq> MarketState<AccountId> {
         min_proceeds: Balance,
         block: u64,
     ) -> Result<(), Error> {
-        let m = self.market_mut(id)?;
-        ensure_trading(m.phase)?;
-        ensure_trade_bounds(m.b, amount)?;
-        let proceeds_fx = lmsr_sell_proceeds(
-            fx(m.q_long)?,
-            fx(m.q_short)?,
-            fx(m.b)?,
-            lside(side),
-            fx(amount)?,
-        )
-        .map_err(map_fixed)?;
-        let proceeds = fixed_to_base_units_down(proceeds_fx)?;
-        let fee = fee_up(proceeds)?;
-        let net = sub(proceeds, fee)?;
-        ensure!(net >= min_proceeds, Error::SlippageExceeded);
-        match m.kind {
-            BookKind::Decision { proposal, branch } => sell_branch(
-                ledger,
-                proposal,
-                branch,
-                side,
-                who,
-                &m.account,
-                &m.fees_account,
-                amount,
-                net,
-                fee,
-            )?,
-            BookKind::Gate {
-                proposal,
-                branch,
-                gate,
-            } => sell_gate(
-                ledger,
-                proposal,
-                branch,
-                gate,
-                side,
-                who,
-                &m.account,
-                &m.fees_account,
-                amount,
-                net,
-                fee,
-            )?,
-            BookKind::Baseline { epoch } => {
-                sell_baseline(ledger, epoch, side, who, &m.account, amount, net)?
-            }
-        }
-        match side {
-            ScalarSide::Long => m.q_long = sub(m.q_long, amount)?,
-            ScalarSide::Short => m.q_short = sub(m.q_short, amount)?,
-        }
-        m.fees_accrued = add(m.fees_accrued, fee)?;
-        let observed = observe_if_due(m, block)?;
-        let p = price_1e9(m)?;
-        m.last_quote_1e9 = p;
-        if let Some(event) = observed {
-            self.events.push(event);
-        }
-        self.events.push(Event::Traded {
-            market: id,
-            who: who.clone(),
-            side: if matches!(side, ScalarSide::Long) {
-                TradeSide::SellLong
-            } else {
-                TradeSide::SellShort
-            },
+        let idx = self
+            .markets
+            .iter()
+            .position(|m| m.id == id)
+            .ok_or(Error::UnknownMarket)?;
+        let events = sell_book(
+            &mut self.markets[idx],
+            ledger,
+            &MarketParams::default(),
+            who,
+            side,
             amount,
-            cost: proceeds,
-            p_after: p,
-        });
+            min_proceeds,
+            block,
+        )?;
+        self.events.extend(events);
         Ok(())
     }
 
@@ -476,8 +546,243 @@ impl<AccountId: Clone + Eq> Default for MarketState<AccountId> {
     }
 }
 
-fn buy_branch<A: Clone + Eq>(
-    ledger: &mut LedgerState<A>,
+/// Execute one buy against a single book using the supplied ledger adapter.
+#[allow(clippy::too_many_arguments)]
+pub fn buy_book<A: Clone + Eq, L: LedgerOps<A>>(
+    m: &mut MarketBook<A>,
+    ledger: &mut L,
+    params: &MarketParams,
+    who: &A,
+    side: ScalarSide,
+    amount: Balance,
+    max_cost: Balance,
+    block: u64,
+) -> Result<Vec<Event<A>>, Error> {
+    ensure_trading(m.phase)?;
+    ensure_trade_bounds(m.b, amount)?;
+    let cost_fx = lmsr_buy_cost(
+        fx(m.q_long)?,
+        fx(m.q_short)?,
+        fx(m.b)?,
+        lside(side),
+        fx(amount)?,
+    )
+    .map_err(map_fixed)?;
+    let cost = fixed_to_base_units_up(cost_fx)?;
+    let fee = fee_up(cost, params.fee_bps)?;
+    ensure!(
+        cost.checked_add(fee).ok_or(Error::ArithmeticOverflow)? <= max_cost,
+        Error::SlippageExceeded
+    );
+    match m.kind {
+        BookKind::Decision { proposal, branch } => buy_branch(
+            ledger,
+            proposal,
+            branch,
+            side,
+            who,
+            &m.account,
+            &m.fees_account,
+            amount,
+            cost,
+            fee,
+        )?,
+        BookKind::Gate {
+            proposal,
+            branch,
+            gate,
+        } => buy_gate(
+            ledger,
+            proposal,
+            branch,
+            gate,
+            side,
+            who,
+            &m.account,
+            &m.fees_account,
+            amount,
+            cost,
+            fee,
+        )?,
+        BookKind::Baseline { epoch } => buy_baseline(
+            ledger,
+            epoch,
+            side,
+            who,
+            &m.account,
+            amount,
+            cost.checked_add(fee).ok_or(Error::ArithmeticOverflow)?,
+        )?,
+    }
+    match side {
+        ScalarSide::Long => m.q_long = add(m.q_long, amount)?,
+        ScalarSide::Short => m.q_short = add(m.q_short, amount)?,
+    }
+    m.fees_accrued = add(m.fees_accrued, fee)?;
+    let observed = observe_book(m, params, block)?;
+    let p = price_1e9(m)?;
+    m.last_quote_1e9 = p;
+    let mut events = Vec::new();
+    if let Some(event) = observed {
+        events.push(event);
+    }
+    events.push(Event::Traded {
+        market: m.id,
+        who: who.clone(),
+        side: if matches!(side, ScalarSide::Long) {
+            TradeSide::BuyLong
+        } else {
+            TradeSide::BuyShort
+        },
+        amount,
+        cost,
+        p_after: p,
+    });
+    Ok(events)
+}
+
+/// Execute one sell against a single book using the supplied ledger adapter.
+#[allow(clippy::too_many_arguments)]
+pub fn sell_book<A: Clone + Eq, L: LedgerOps<A>>(
+    m: &mut MarketBook<A>,
+    ledger: &mut L,
+    params: &MarketParams,
+    who: &A,
+    side: ScalarSide,
+    amount: Balance,
+    min_proceeds: Balance,
+    block: u64,
+) -> Result<Vec<Event<A>>, Error> {
+    ensure_trading(m.phase)?;
+    ensure_trade_bounds(m.b, amount)?;
+    let proceeds_fx = lmsr_sell_proceeds(
+        fx(m.q_long)?,
+        fx(m.q_short)?,
+        fx(m.b)?,
+        lside(side),
+        fx(amount)?,
+    )
+    .map_err(map_fixed)?;
+    let proceeds = fixed_to_base_units_down(proceeds_fx)?;
+    let fee = fee_up(proceeds, params.fee_bps)?;
+    let net = sub(proceeds, fee)?;
+    ensure!(net >= min_proceeds, Error::SlippageExceeded);
+    match m.kind {
+        BookKind::Decision { proposal, branch } => sell_branch(
+            ledger,
+            proposal,
+            branch,
+            side,
+            who,
+            &m.account,
+            &m.fees_account,
+            amount,
+            net,
+            fee,
+        )?,
+        BookKind::Gate {
+            proposal,
+            branch,
+            gate,
+        } => sell_gate(
+            ledger,
+            proposal,
+            branch,
+            gate,
+            side,
+            who,
+            &m.account,
+            &m.fees_account,
+            amount,
+            net,
+            fee,
+        )?,
+        BookKind::Baseline { epoch } => {
+            sell_baseline(ledger, epoch, side, who, &m.account, amount, net)?
+        }
+    }
+    match side {
+        ScalarSide::Long => m.q_long = sub(m.q_long, amount)?,
+        ScalarSide::Short => m.q_short = sub(m.q_short, amount)?,
+    }
+    m.fees_accrued = add(m.fees_accrued, fee)?;
+    let observed = observe_book(m, params, block)?;
+    let p = price_1e9(m)?;
+    m.last_quote_1e9 = p;
+    let mut events = Vec::new();
+    if let Some(event) = observed {
+        events.push(event);
+    }
+    events.push(Event::Traded {
+        market: m.id,
+        who: who.clone(),
+        side: if matches!(side, ScalarSide::Long) {
+            TradeSide::SellLong
+        } else {
+            TradeSide::SellShort
+        },
+        amount,
+        cost: proceeds,
+        p_after: p,
+    });
+    Ok(events)
+}
+
+/// Seed one book with its LMSR worst-case-loss headroom (04 §10).
+pub fn seed_book<A: Clone + Eq, L: LedgerOps<A>>(
+    m: &MarketBook<A>,
+    ledger: &mut L,
+    treasury: &A,
+) -> Result<Balance, Error> {
+    let headroom = fixed_to_base_units_up(fx(m.b)?.checked_mul(LN_2).map_err(map_fixed)?)?;
+    ledger.note_protocol_account(m.account.clone());
+    ledger.note_protocol_account(m.fees_account.clone());
+    match m.kind {
+        BookKind::Decision { proposal, branch } => {
+            ledger
+                .do_split(proposal, treasury, headroom)
+                .map_err(|_| Error::Ledger)?;
+            ledger
+                .do_transfer(
+                    position(proposal, branch, PositionKind::BranchUsdc),
+                    treasury,
+                    &m.account,
+                    headroom,
+                )
+                .map_err(|_| Error::Ledger)?;
+            ledger
+                .do_split_scalar(proposal, branch, &m.account, headroom)
+                .map_err(|_| Error::Ledger)?;
+        }
+        BookKind::Gate {
+            proposal,
+            branch,
+            gate,
+        } => {
+            ledger
+                .do_split(proposal, treasury, headroom)
+                .map_err(|_| Error::Ledger)?;
+            ledger
+                .do_transfer(
+                    position(proposal, branch, PositionKind::BranchUsdc),
+                    treasury,
+                    &m.account,
+                    headroom,
+                )
+                .map_err(|_| Error::Ledger)?;
+            ledger
+                .do_split_gate(proposal, branch, gate, &m.account, headroom)
+                .map_err(|_| Error::Ledger)?;
+        }
+        BookKind::Baseline { epoch } => ledger
+            .do_split_baseline(epoch, &m.account, headroom)
+            .map_err(|_| Error::Ledger)?,
+    }
+    Ok(headroom)
+}
+
+fn buy_branch<A: Clone + Eq, L: LedgerOps<A>>(
+    ledger: &mut L,
     pid: ProposalId,
     branch: Branch,
     side: ScalarSide,
@@ -525,8 +830,8 @@ fn buy_branch<A: Clone + Eq>(
         .map_err(|_| Error::Ledger)?;
     Ok(())
 }
-fn buy_gate<A: Clone + Eq>(
-    ledger: &mut LedgerState<A>,
+fn buy_gate<A: Clone + Eq, L: LedgerOps<A>>(
+    ledger: &mut L,
     pid: ProposalId,
     branch: Branch,
     gate: GateType,
@@ -580,8 +885,8 @@ fn buy_gate<A: Clone + Eq>(
         .map_err(|_| Error::Ledger)?;
     Ok(())
 }
-fn buy_baseline<A: Clone + Eq>(
-    ledger: &mut LedgerState<A>,
+fn buy_baseline<A: Clone + Eq, L: LedgerOps<A>>(
+    ledger: &mut L,
     epoch: EpochId,
     side: ScalarSide,
     who: &A,
@@ -606,8 +911,8 @@ fn buy_baseline<A: Clone + Eq>(
         .map_err(|_| Error::Ledger)?;
     Ok(())
 }
-fn sell_branch<A: Clone + Eq>(
-    ledger: &mut LedgerState<A>,
+fn sell_branch<A: Clone + Eq, L: LedgerOps<A>>(
+    ledger: &mut L,
     pid: ProposalId,
     branch: Branch,
     side: ScalarSide,
@@ -643,8 +948,8 @@ fn sell_branch<A: Clone + Eq>(
     merge_net_with_mirror(ledger, pid, branch, who, net)?;
     Ok(())
 }
-fn sell_gate<A: Clone + Eq>(
-    ledger: &mut LedgerState<A>,
+fn sell_gate<A: Clone + Eq, L: LedgerOps<A>>(
+    ledger: &mut L,
     pid: ProposalId,
     branch: Branch,
     gate: GateType,
@@ -691,19 +996,16 @@ fn sell_gate<A: Clone + Eq>(
 /// target-branch proceeds with the seller's mirror-branch branch-USDC
 /// balance - up to min(net, mirror balance) - into USDC; any unmatched
 /// remainder stays with the seller as target-branch branch-USDC.
-fn merge_net_with_mirror<A: Clone + Eq>(
-    ledger: &mut LedgerState<A>,
+fn merge_net_with_mirror<A: Clone + Eq, L: LedgerOps<A>>(
+    ledger: &mut L,
     pid: ProposalId,
     branch: Branch,
     who: &A,
     net: Balance,
 ) -> Result<(), Error> {
     let mirror = other(branch);
-    let mirror_balance = ledger
-        .positions
-        .iter()
-        .find(|p| p.id == position(pid, mirror, PositionKind::BranchUsdc) && &p.owner == who)
-        .map_or(0, |p| p.balance);
+    let mirror_balance =
+        ledger.position_balance(position(pid, mirror, PositionKind::BranchUsdc), who);
     let merge_amount = net.min(mirror_balance);
     if merge_amount > 0 {
         ledger
@@ -712,8 +1014,8 @@ fn merge_net_with_mirror<A: Clone + Eq>(
     }
     Ok(())
 }
-fn sell_baseline<A: Clone + Eq>(
-    ledger: &mut LedgerState<A>,
+fn sell_baseline<A: Clone + Eq, L: LedgerOps<A>>(
+    ledger: &mut L,
     epoch: EpochId,
     side: ScalarSide,
     who: &A,
@@ -721,9 +1023,15 @@ fn sell_baseline<A: Clone + Eq>(
     amount: Balance,
     net: Balance,
 ) -> Result<(), Error> {
-    // The 30 bps fee is withheld from the payout (04 §6.1): the seller
-    // receives net-of-fee value; the withheld remainder stays with the book
-    // against the fees_accrued meter.
+    // The 30 bps fee is withheld from the payout (04 §6.1): the seller receives
+    // net-of-fee value; the withheld remainder stays with the book. The seller's
+    // `amount` leg is merged by the book into USDC, then the BOOK funds the `net`
+    // payout complete set and hands both legs to the seller. A seller must never pay
+    // for their own proceeds — the unbranched Baseline book has no mirror leg to
+    // merge against (cf. `merge_net_with_mirror` for decision/gate), so the payout is
+    // delivered in-kind as a par-redeemable set the book, not the seller, funds.
+    // (`do_split_baseline(who, net)` here would debit the seller ~net USDC against the
+    // real ledger — the in-memory oracle models no custody and hid it; Codex A3 review.)
     ledger
         .do_transfer(baseline(epoch, side), who, book, amount)
         .map_err(|_| Error::Ledger)?;
@@ -731,29 +1039,46 @@ fn sell_baseline<A: Clone + Eq>(
         .do_merge_baseline(epoch, book, amount)
         .map_err(|_| Error::Ledger)?;
     ledger
-        .do_split_baseline(epoch, who, net)
+        .do_split_baseline(epoch, book, net)
+        .map_err(|_| Error::Ledger)?;
+    ledger
+        .do_transfer(baseline(epoch, ScalarSide::Long), book, who, net)
+        .map_err(|_| Error::Ledger)?;
+    ledger
+        .do_transfer(baseline(epoch, ScalarSide::Short), book, who, net)
         .map_err(|_| Error::Ledger)?;
     Ok(())
 }
 
-fn observe_if_due<A: Clone + Eq>(
+pub fn observe_book<A: Clone + Eq>(
     m: &mut MarketBook<A>,
+    params: &MarketParams,
     block: u64,
 ) -> Result<Option<Event<A>>, Error> {
-    if block < m.last_observed_block.saturating_add(OBS_INTERVAL) {
+    ensure!(params.obs_interval > 0, Error::ArithmeticOverflow);
+    ensure!(params.kappa_1e9 <= PRICE_ONE_1E9, Error::ArithmeticOverflow);
+    if block < m.last_observed_block.saturating_add(params.obs_interval) {
         return Ok(None);
     }
     let elapsed = block.saturating_sub(m.last_observed_block);
-    if elapsed > STALE_GAP_BLOCKS {
+    if elapsed > params.stale_gap_blocks {
         m.stale_events = m.stale_events.saturating_add(1);
     }
     let prev = m.last_quote_1e9.0;
     let old = m.last_observation_1e9.0;
     // 04 §7: over k missed observation intervals the slew clamp widens to
     // (1±kappa)^k; flooring the interval count is the conservative reading.
-    let intervals = (elapsed / OBS_INTERVAL).max(1);
-    let low = mul_1e9(old, pow_1e9(PRICE_ONE_1E9 - KAPPA_1E9, intervals));
-    let high = mul_1e9(old, pow_1e9(PRICE_ONE_1E9 + KAPPA_1E9, intervals));
+    let intervals = (elapsed / params.obs_interval).max(1);
+    let low = mul_1e9(old, pow_1e9(PRICE_ONE_1E9 - params.kappa_1e9, intervals));
+    let high = mul_1e9(
+        old,
+        pow_1e9(
+            PRICE_ONE_1E9
+                .checked_add(params.kappa_1e9)
+                .ok_or(Error::ArithmeticOverflow)?,
+            intervals,
+        ),
+    );
     let capped = prev.clamp(low, high);
     m.cumulative_price_blocks = add(
         m.cumulative_price_blocks,
@@ -771,14 +1096,14 @@ fn observe_if_due<A: Clone + Eq>(
 /// Saturating 1e9-scale multiply; results are only consumed clamped to the
 /// price range, so capping intermediates at 2e9 keeps every product exact
 /// where it matters and overflow-free.
-fn mul_1e9(a: u64, b: u64) -> u64 {
+pub fn mul_1e9(a: u64, b: u64) -> u64 {
     ((u128::from(a) * u128::from(b)) / u128::from(PRICE_ONE_1E9)).min(u128::from(u64::MAX)) as u64
 }
 /// 1e9-scale integer power by squaring. Saturates at 1e18 so that even the
 /// smallest representable observation (one raw unit) widens to the full
 /// [0, 1] price band under a long enough gap - a 2x cap would under-widen
 /// low observations (Codex review, PR #34).
-fn pow_1e9(base: u64, mut exp: u64) -> u64 {
+pub fn pow_1e9(base: u64, mut exp: u64) -> u64 {
     const CAP: u64 = PRICE_ONE_1E9 * PRICE_ONE_1E9;
     let mut result = PRICE_ONE_1E9;
     let mut factor = base.min(CAP);
@@ -820,8 +1145,8 @@ fn fx(v: Balance) -> Result<FixedU64x64, Error> {
         .checked_add(FixedU64x64::from_raw(((v % 1_000_000) << 64) / 1_000_000))
         .map_err(map_fixed)
 }
-fn fee_up(cost: Balance) -> Result<Balance, Error> {
-    let v = cost.checked_mul(FEE_BPS).ok_or(Error::ArithmeticOverflow)?;
+pub fn fee_up(cost: Balance, fee_bps: u128) -> Result<Balance, Error> {
+    let v = cost.checked_mul(fee_bps).ok_or(Error::ArithmeticOverflow)?;
     Ok(v / BPS_DENOM + u128::from(v % BPS_DENOM != 0))
 }
 fn ensure_trading(p: MarketPhase) -> Result<(), Error> {
@@ -928,7 +1253,12 @@ pub mod benchmarking {
     pub fn benchmark_crank_observe() -> Result<(), Error> {
         let mut markets = MarketState::new();
         markets.create_market(1, BookKind::Baseline { epoch: 1 }, 900, 901, 10_000_000_000)?;
-        observe_if_due(&mut markets.markets[0], OBS_INTERVAL).map(|_| ())
+        observe_book(
+            &mut markets.markets[0],
+            &MarketParams::default(),
+            OBS_INTERVAL,
+        )
+        .map(|_| ())
     }
 }
 

@@ -758,6 +758,8 @@ pub mod kernel {
     pub const MIN_SPLIT_USDC: u128 = super::currency::USDC_CENT;
     pub const MIN_TRANSFER_USDC: u128 = super::currency::USDC_CENT;
     pub const MIN_TRADE_USDC: u128 = 1_000_000;
+    /// Max observation gap before a decision-window staleness event (04 §7; 13 §3.2).
+    pub const MKT_STALE_GAP_BLOCKS: u64 = 50;
     pub const POSITION_DEPOSIT_USDC: u128 = 100_000;
     pub const DEC_EXTENSION_BLOCKS: u32 = 43_200;
     pub const DESCRIPTOR_LEAD_TIME_BLOCKS: u32 = 43_200;
