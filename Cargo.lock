@@ -2175,6 +2175,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-assets"
+version = "49.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c80dd5920bbfbe4100e7d7e64265de790f1e51b47e3a2e13ffc9e7d39767169"
+dependencies = [
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
+ "impl-trait-for-tuples",
+ "log",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-runtime",
+]
+
+[[package]]
 name = "pallet-attestor"
 version = "0.1.0"
 dependencies = [
@@ -2185,13 +2202,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-balances"
+version = "47.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5355bbb74a9c34990c1d2a4c5dde0effaef9410eef0b587868651bd38cb6f013"
+dependencies = [
+ "docify",
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
+ "log",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-runtime",
+]
+
+[[package]]
 name = "pallet-conditional-ledger"
 version = "0.1.0"
 dependencies = [
  "conditional-ledger-core",
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
  "futarchy-primitives",
+ "pallet-assets",
+ "pallet-balances",
  "parity-scale-codec",
  "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
 ]
 
 [[package]]
