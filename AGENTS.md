@@ -119,7 +119,7 @@ per milestone):
 |---|---|
 | Rust | `tools/ci/rust-workspace-gates.sh` (runs `cargo fmt --all -- --check` · `cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace` once member crates exist) |
 | Runtime crates | `try-state` green in test envs; benchmarks compile; no new `unwrap`/`expect`/`panic!`/`unsafe` in runtime code |
-| Reference model | its pytest suite; CI-regenerated vectors match committed vectors (04 §5) |
+| Reference model | `PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests`; vector freshness via `python3 tools/reference-model/generate-vectors.py --check`; normative LMSR documentation-table agreement via `python3 tools/reference-model/check-doc-table.py` (04 §5; 15 §4.4) |
 | Frontend (once scaffolded) | lint · typecheck · unit tests · build; dependency-cruiser firewall clean |
 | Docs | every relative link in living documents resolves |
 

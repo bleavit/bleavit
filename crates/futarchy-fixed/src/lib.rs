@@ -732,6 +732,195 @@ mod tests {
         }
     }
 
+    mod reference_model_vectors {
+        use super::*;
+
+        const REFERENCE_VECTORS: &str =
+            include_str!("../../../reference-model/fixtures/vectors.json");
+        const CORPUS_B: u128 = 10_000;
+        const USDC_BASE_UNIT_RAW_CEIL: u128 = ONE_RAW.div_ceil(1_000_000);
+        const COMPOSED_RAW_TOLERANCE: u128 =
+            (COMPOSED_COST_MAX_ULP as u128) * CORPUS_B + USDC_BASE_UNIT_RAW_CEIL;
+
+        fn json_value<'a>(text: &'a str, key: &str) -> &'a str {
+            let needle = format!("\"{key}\":");
+            let start = text
+                .find(&needle)
+                .unwrap_or_else(|| panic!("missing JSON key: {key}"));
+            text[start + needle.len()..].trim_start()
+        }
+
+        fn container_from_start(text: &str, opening: u8, closing: u8) -> &str {
+            assert_eq!(text.as_bytes().first(), Some(&opening));
+            let mut depth = 0u32;
+            let mut in_string = false;
+            let mut escaped = false;
+            for (index, byte) in text.bytes().enumerate() {
+                if in_string {
+                    if escaped {
+                        escaped = false;
+                    } else if byte == b'\\' {
+                        escaped = true;
+                    } else if byte == b'"' {
+                        in_string = false;
+                    }
+                    continue;
+                }
+                if byte == b'"' {
+                    in_string = true;
+                } else if byte == opening {
+                    depth += 1;
+                } else if byte == closing {
+                    depth = depth.checked_sub(1).unwrap();
+                    if depth == 0 {
+                        return &text[..=index];
+                    }
+                }
+            }
+            panic!("unterminated JSON container")
+        }
+
+        fn json_container<'a>(text: &'a str, key: &str, opening: u8, closing: u8) -> &'a str {
+            container_from_start(json_value(text, key), opening, closing)
+        }
+
+        fn json_string<'a>(text: &'a str, key: &str) -> &'a str {
+            let value = json_value(text, key);
+            assert_eq!(value.as_bytes().first(), Some(&b'"'));
+            let mut escaped = false;
+            for (index, byte) in value.bytes().enumerate().skip(1) {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    return &value[1..index];
+                }
+            }
+            panic!("unterminated JSON string for key: {key}")
+        }
+
+        fn json_u128(text: &str, key: &str) -> u128 {
+            let value = json_value(text, key);
+            let end = value
+                .bytes()
+                .position(|byte| !byte.is_ascii_digit())
+                .unwrap_or(value.len());
+            assert!(end > 0, "JSON value for {key} is not an unsigned integer");
+            value[..end].parse().unwrap()
+        }
+
+        fn fixed_integer(text: &str, key: &str) -> FixedU64x64 {
+            FixedU64x64::from_integer(json_string(text, key).parse().unwrap())
+        }
+
+        fn fixed_decimal(text: &str, key: &str) -> FixedU64x64 {
+            FixedU64x64::from_f64(json_string(text, key).parse().unwrap()).unwrap()
+        }
+
+        fn assert_composed_within(actual: FixedU64x64, expected_raw: u128) {
+            assert_raw_within(actual, expected_raw, COMPOSED_RAW_TOLERANCE);
+        }
+
+        fn assert_price_within(actual: FixedU64x64, expected_raw: u128) {
+            assert_raw_within(actual, expected_raw, u128::from(COMPOSED_COST_MAX_ULP));
+        }
+
+        #[test]
+        fn normative_lmsr_vectors_match_reference_model_artifact() {
+            assert_eq!(
+                json_string(REFERENCE_VECTORS, "schema"),
+                "bleavit.reference-model.v3"
+            );
+            let vectors = json_container(REFERENCE_VECTORS, "lmsr_vectors", b'{', b'}');
+            let b = FixedU64x64::from_integer(CORPUS_B as u64);
+            let zero = FixedU64x64::ZERO;
+
+            let v1 = json_container(vectors, "V1", b'{', b'}');
+            let buy = lmsr_buy_cost(
+                zero,
+                zero,
+                b,
+                LmsrSide::Long,
+                FixedU64x64::from_integer(1_000),
+            )
+            .unwrap();
+            assert_composed_within(buy, json_u128(v1, "raw_64x64_nearest"));
+
+            let v2 = json_container(vectors, "V2", b'{', b'}');
+            let price = lmsr_price_long(FixedU64x64::from_integer(1_000), zero, b).unwrap();
+            assert_price_within(price, json_u128(v2, "raw_64x64_nearest"));
+
+            let v3 = json_container(vectors, "V3", b'{', b'}');
+            let displacement = lmsr_displacement_between_prices(
+                b,
+                FixedU64x64::from_raw(CORPUS_RAW_HALF),
+                FixedU64x64::from_raw(CORPUS_RAW_SIX_TENTHS),
+            )
+            .unwrap();
+            assert_composed_within(displacement, fixed_decimal(v3, "delta").raw());
+            let displacement_cost =
+                lmsr_buy_cost(zero, zero, b, LmsrSide::Long, displacement).unwrap();
+            assert_composed_within(displacement_cost, fixed_decimal(v3, "cost").raw());
+
+            let v4 = json_container(vectors, "V4", b'{', b'}');
+            let worst_case_loss = b.checked_mul(LN_2).unwrap();
+            assert_composed_within(worst_case_loss, json_u128(v4, "raw_64x64_nearest"));
+
+            let v5 = json_container(vectors, "V5", b'{', b'}');
+            let proceeds = lmsr_sell_proceeds(
+                FixedU64x64::from_integer(1_000),
+                zero,
+                b,
+                LmsrSide::Long,
+                FixedU64x64::from_integer(1_000),
+            )
+            .unwrap();
+            assert_composed_within(proceeds, fixed_decimal(v5, "proceeds_before_fees").raw());
+
+            let v6 = json_container(vectors, "V6", b'{', b'}');
+            assert_eq!(json_string(v6, "error"), "PriceBoundExceeded");
+            assert_eq!(json_string(v6, "side"), "long");
+            assert_eq!(fixed_integer(v6, "b"), b);
+            assert_eq!(
+                lmsr_buy_cost(
+                    fixed_integer(v6, "q_long"),
+                    fixed_integer(v6, "q_short"),
+                    fixed_integer(v6, "b"),
+                    LmsrSide::Long,
+                    fixed_integer(v6, "amount"),
+                ),
+                Err(FixedError::Domain)
+            );
+        }
+
+        #[test]
+        fn high_precision_lmsr_corpus_matches_reference_model_artifact() {
+            let corpus = json_container(REFERENCE_VECTORS, "high_precision_corpus", b'{', b'}');
+            let b = fixed_integer(corpus, "b");
+            let samples = json_container(corpus, "samples", b'[', b']');
+            let mut remaining = &samples[1..samples.len() - 1];
+            let mut checked = 0u32;
+            while let Some(start) = remaining.find('{') {
+                remaining = &remaining[start..];
+                let sample = container_from_start(remaining, b'{', b'}');
+                let q_l = fixed_integer(sample, "q_long");
+                let q_s = fixed_integer(sample, "q_short");
+                assert_composed_within(
+                    lmsr_cost(q_l, q_s, b).unwrap(),
+                    json_u128(sample, "cost_raw_64x64_nearest"),
+                );
+                assert_price_within(
+                    lmsr_price_long(q_l, q_s, b).unwrap(),
+                    json_u128(sample, "price_raw_64x64_nearest"),
+                );
+                checked += 1;
+                remaining = &remaining[sample.len()..];
+            }
+            assert_eq!(checked, 8);
+        }
+    }
+
     #[test]
     fn checked_arithmetic_uses_two_limb_intermediates() {
         let large = FixedU64x64::from_integer(1_000_000_000);

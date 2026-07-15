@@ -8,7 +8,7 @@ Normative language: RFC 2119. Blocks at 6 s (14,400/day); USDC 6 decimals, VIT 1
 
 **Reading rules (X-11e/X-11h — no hardcoding, anywhere):**
 
-1. **K** = kernel constant: compile-time in `futarchy-primitives`, no storage representation, changeable only by a Wasm upgrade that the attestation regime surfaces ([09](09-execution-upgrades-and-rollout.md)).
+1. **K** = kernel constant: compile-time in `futarchy-primitives`, no storage representation, changeable only by a Wasm upgrade that the attestation regime surfaces ([09](09-execution-upgrades-and-rollout.md)). **Boundary of the primitives home:** every K-marked numeric value in this document — the LMSR domain bound and error-bound constants included, which `futarchy-fixed` imports and asserts rather than re-declares — lives in `futarchy-primitives::kernel`; sibling crates MUST import it, never re-declare it. Two carve-outs: per-pallet **storage-bound arguments** (§4) live with their owning pallets ([02 §7](02-integration-contract.md)), and pallet-internal implementation constants with no row in this document need no primitives home. Contract-surface **types** — every type named in 02 §§2–7, event-field enums such as `MarketKind` included — likewise live in `futarchy-primitives` (02 §2).
 2. Everything not marked K lives in `pallet-constitution::Params` as a typed record `{ value, min, max, max_delta_per_decision, cooldown, last_change, class, kernel_bounded }`; min/max/max-delta/cooldown/class are genesis-fixed for kernel-bounded keys and META-amendable within compile-time meta-bounds otherwise.
 3. **Every value in this document — K constants included — is machine-readable by clients** via the runtime **constants API** (metadata) or the named storage item, per the [02](02-integration-contract.md) contract. The frontend MUST read, never hardcode (this closes X-11h's backend side: there is no value the FE re-checks that the chain does not expose).
 4. Every default is a **simulation hypothesis** unless marked frozen; Phase 0–3 calibration obligations are tagged *sim-gated*.
@@ -121,7 +121,7 @@ Safety rationale (row-wise, carried forward): kernel floors/ceilings exist so no
 | Dead-man switch | no finalized parachain block for 4,800 relay blocks (~8 h) or snapshot > 4 d overdue ⇒ queue freeze, clock pause; coretime-renewal call **exempt** (D-9) | [05](05-welfare-and-decision-engine.md), [09](09-execution-upgrades-and-rollout.md) |
 | `StaleEpochBound` | 7 days ⇒ force-reject all in-flight on next tick | [05](05-welfare-and-decision-engine.md) |
 | Crank batch bounds | `TickBatch` = 10; `ReapBatch` = 100; `settle_cohort` ≤ 100 items/call | [05](05-welfare-and-decision-engine.md), [03](03-conditional-ledger.md) |
-| Entrenched floors | θS⁻/θC⁻ K-entrenched; guardian scope K; annulment requirement K; VOID rule K | [05](05-welfare-and-decision-engine.md), [06](06-governance-and-guardians.md) |
+| Entrenched floors | θS⁻/θC⁻ K-entrenched at **0.90 / 0.85** — deliberately equal to the [05](05-welfare-and-decision-engine.md) launch defaults: the welfare-gate knees are tighten-only from genesis and can never be amended below launch values; guardian scope K; annulment requirement K; VOID rule K | [05](05-welfare-and-decision-engine.md), [06](06-governance-and-guardians.md) |
 | Keeper-budget floor note | the 6,000 USDC hard min of `keeper.budget_epoch` is a kernel floor: below it the metered budget cannot cover decision-critical cranks at the 1× rebate bound and A-1 fails silently | [08](08-treasury-and-economics.md) §6 |
 
 ---
@@ -130,7 +130,7 @@ Safety rationale (row-wise, carried forward): kernel floors/ceilings exist so no
 
 ### 3.1 Epoch schedule — offsets as **fractions of `epoch.length`** (d-labels at the 21-day default)
 
-Phase offsets are stored as rational fractions of `epoch.length` (B-med fix), so the schedule survives `epoch.length` changes. **Changes take effect next epoch; in-flight cohorts keep their creation-time schedule.** Day labels below are the 302,400-block default.
+Phase offsets are stored as rational fractions of `epoch.length` (B-med fix), so the schedule survives `epoch.length` changes. **Representation: the fraction pairs (numerator, denominator = 21) are kernel constants (K) in `futarchy-primitives`, exposed to clients as pallet metadata constants — not `Params` storage.** ([02 §9](02-integration-contract.md)'s constant-binding table currently lumps the fractions with the genuinely-`Params` keys `epoch.length`/`epoch.slots` under one "`params()` + metadata constants" row; splitting the fractions onto the metadata-constant side is queued for the B2 contract amendment alongside SQ-2/SQ-23, so 02 bumps once. Until then a frontend binds the fractions via metadata constants, never `params()`.) **Changes take effect next epoch; in-flight cohorts keep their creation-time schedule.** Day labels below are the 302,400-block default.
 
 | Phase | Fraction of epoch | Blocks (default) | Label |
 |---|---|---|---|
