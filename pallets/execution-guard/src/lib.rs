@@ -516,8 +516,12 @@ pub mod pallet {
         #[pallet::call_index(2)]
         #[pallet::weight(T::WeightInfo::expire_failed_execution())]
         pub fn expire_failed_execution(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
-            let _ = ensure_signed(origin)?;
-            with_storage_layer(|| Self::do_expire_failed_execution(pid))
+            let who = ensure_signed(origin)?;
+            let result = with_storage_layer(|| Self::do_expire_failed_execution(pid));
+            if result.is_ok() && !Queue::<T>::contains_key(pid) {
+                T::KeeperRebate::rebate(&who, CrankClass::General);
+            }
+            result
         }
 
         /// Sole ratify-track governance call (06 §2.2/§3.2).
@@ -537,8 +541,12 @@ pub mod pallet {
         #[pallet::call_index(4)]
         #[pallet::weight(T::WeightInfo::reject_stale())]
         pub fn reject_stale(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
-            let _ = ensure_signed(origin)?;
-            with_storage_layer(|| Self::do_reject_stale(pid))
+            let who = ensure_signed(origin)?;
+            let result = with_storage_layer(|| Self::do_reject_stale(pid));
+            if result.is_ok() && !Queue::<T>::contains_key(pid) {
+                T::KeeperRebate::rebate(&who, CrankClass::General);
+            }
+            result
         }
     }
 

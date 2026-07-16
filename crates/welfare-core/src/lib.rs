@@ -23,6 +23,9 @@ pub const EPSILON_PILLAR: FixedU64 = FixedU64(10_000_000);
 pub const MAX_METRIC_SPECS: usize = 16;
 pub const MAX_SNAPSHOTS: usize = 20;
 pub const MAX_GATE_FLAGS: usize = MAX_SNAPSHOTS;
+/// Number of day indices accepted by the daily-gate recorder. The two-word
+/// frozen breach bitmap covers this whole range (05 §4.7).
+pub const MAX_DAILY_GATE_SAMPLES: u8 = 64;
 pub const MAX_COMPONENTS_PER_SPEC: usize = 16;
 pub const HISTORY_PRIORS: usize = 12;
 pub const THETA_S_LO: FixedU64 = FixedU64(900_000_000);
@@ -555,7 +558,7 @@ impl WelfareState {
             specs.iter().all(|spec| spec.activation_epoch <= epoch),
             Error::SpecNotActive
         );
-        ensure!(day < 64, Error::ValueOutOfRange);
+        ensure!(day < MAX_DAILY_GATE_SAMPLES, Error::ValueOutOfRange);
         ensure!(
             components.len() <= MAX_COMPONENTS_PER_SPEC,
             Error::TooManyComponents
@@ -572,14 +575,18 @@ impl WelfareState {
                 day_bitmap: [0; 2],
             });
         let before = flags;
-        // The bitmap records which daily samples have been written. The two
-        // booleans remain the epoch-wide breach latches. Keeping those roles
-        // separate lets the shell distinguish a new sample from an identical
-        // repeat while still allowing a repeat to add a newly observed breach.
-        flags.day_bitmap[(day / 32) as usize] |= 1u32 << (day % 32);
+        // Frozen 02 §7.4 / 05 §4.7 semantics: this bitmap identifies
+        // breached days only. Pallet-internal sample tracking must not reuse it.
+        if s_breach || c_breach {
+            let word = flags
+                .day_bitmap
+                .get_mut(usize::from(day / 32))
+                .ok_or(Error::ValueOutOfRange)?;
+            *word |= 1u32 << (day % 32);
+        }
         flags.s_breached |= s_breach;
         flags.c_breached |= c_breach;
-        let changed = idx.is_none() || flags != before;
+        let changed = flags != before;
         if let Some(i) = idx {
             self.gate_flags[i].1 = flags;
         } else {
@@ -1260,13 +1267,14 @@ mod tests {
                 &WelfareParams::DEFAULT,
             )
             .unwrap();
-        assert!(changed);
+        assert!(!changed);
         assert!(!flags.s_breached);
         assert!(!flags.c_breached);
+        assert_eq!(flags.day_bitmap, [0; 2]);
     }
 
     #[test]
-    fn daily_gate_signals_new_samples_and_latch_augmentation_but_not_duplicates() {
+    fn daily_gate_signals_only_new_breach_flags_and_not_samples_or_duplicates() {
         let mut w = WelfareState::new();
         w.register_metric_spec(0, 1, default_specs(1)).unwrap();
 
@@ -1276,7 +1284,7 @@ mod tests {
         let (_, duplicate_changed) = w
             .record_daily_gate(2, 0, 1, healthy_components(), &WelfareParams::DEFAULT)
             .unwrap();
-        assert!(first_changed);
+        assert!(!first_changed);
         assert!(!duplicate_changed);
 
         let mut breached = healthy_components();
@@ -1293,7 +1301,32 @@ mod tests {
             .unwrap();
         assert!(augmented);
         assert!(flags.s_breached);
+        assert_eq!(flags.day_bitmap, [1, 0]);
         assert!(!repeated_augmentation);
+    }
+
+    #[test]
+    fn daily_gate_bitmap_contains_breached_days_only() {
+        let mut w = WelfareState::new();
+        w.register_metric_spec(0, 1, default_specs(1)).unwrap();
+
+        let (healthy, changed) = w
+            .record_daily_gate(2, 3, 1, healthy_components(), &WelfareParams::DEFAULT)
+            .unwrap();
+        assert!(!changed);
+        assert_eq!(healthy.day_bitmap, [0, 0]);
+
+        let mut breached = healthy_components();
+        breached
+            .iter_mut()
+            .find(|component| component.id == 1)
+            .expect("default specs include the S component")
+            .value = FixedU64(0);
+        let (flags, changed) = w
+            .record_daily_gate(2, 5, 1, breached, &WelfareParams::DEFAULT)
+            .unwrap();
+        assert!(changed);
+        assert_eq!(flags.day_bitmap, [1 << 5, 0]);
     }
 
     #[test]

@@ -1284,11 +1284,13 @@ fn t22_expiry_is_closed_during_retry_window_and_terminal_after_it() {
         let failed_at = Queue::<Test>::get(1)
             .and_then(|queued| queued.failed_at)
             .expect("T18");
+        RecordKeeperRebates::set(true);
         System::set_block_number(failed_at.saturating_add(RETRY_WINDOW).into());
         assert_noop!(
             GuardPallet::expire_failed_execution(RuntimeOrigin::signed(keeper()), 1),
             Error::<Test>::RetryWindowOpen
         );
+        assert!(KeeperRebates::get().is_empty());
         System::set_block_number(
             failed_at
                 .saturating_add(RETRY_WINDOW)
@@ -1306,6 +1308,12 @@ fn t22_expiry_is_closed_during_retry_window_and_terminal_after_it() {
             epoch_calls(),
             vec![EpochCall::Failed(1), EpochCall::RetryExhausted(1)]
         );
+        assert_eq!(KeeperRebates::get(), vec![(keeper(), CrankClass::General)]);
+        assert_noop!(
+            GuardPallet::expire_failed_execution(RuntimeOrigin::signed(keeper()), 1),
+            Error::<Test>::NotFound
+        );
+        assert_eq!(KeeperRebates::get(), vec![(keeper(), CrankClass::General)]);
         assert_ok!(GuardPallet::do_try_state());
     });
 }
@@ -1314,10 +1322,12 @@ fn t22_expiry_is_closed_during_retry_window_and_terminal_after_it() {
 fn reject_stale_is_permissionless_deterministic_and_terminal() {
     new_test_ext().execute_with(|| {
         setup_param(1, 1);
+        RecordKeeperRebates::set(true);
         assert_noop!(
             GuardPallet::reject_stale(RuntimeOrigin::signed(keeper()), 1),
             Error::<Test>::StaleQueue
         );
+        assert!(KeeperRebates::get().is_empty());
         CurrentSpecName::<Test>::put(spec(2));
         assert_ok!(GuardPallet::reject_stale(
             RuntimeOrigin::signed(keeper()),
@@ -1336,6 +1346,12 @@ fn reject_stale_is_permissionless_deterministic_and_terminal() {
                 reason: RejectReason::StaleQueue
             })
         ));
+        assert_eq!(KeeperRebates::get(), vec![(keeper(), CrankClass::General)]);
+        assert_noop!(
+            GuardPallet::reject_stale(RuntimeOrigin::signed(keeper()), 1),
+            Error::<Test>::NotFound
+        );
+        assert_eq!(KeeperRebates::get(), vec![(keeper(), CrankClass::General)]);
     });
 }
 

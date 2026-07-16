@@ -88,6 +88,18 @@ pub struct Cli {
     #[arg(long)]
     pub obs_interval: Option<u64>,
 
+    /// Override the on-chain/default decision-window length in blocks.
+    #[arg(long)]
+    pub decision_window: Option<u64>,
+
+    /// Override the on-chain/default reserve-probe interval in blocks.
+    #[arg(long)]
+    pub reserve_probe_interval: Option<u64>,
+
+    /// Override the on-chain/default reserve-probe timeout in blocks.
+    #[arg(long)]
+    pub reserve_probe_timeout: Option<u64>,
+
     /// Plan and log cranks without signing or submitting.
     #[arg(long)]
     pub dry_run: bool,
@@ -132,7 +144,10 @@ pub struct Config {
     pub node_urls: Vec<String>,
     pub signer: Option<SignerSource>,
     pub enabled_roles: RoleSet,
-    pub obs_interval: u64,
+    pub obs_interval: Option<u64>,
+    pub decision_window: Option<u64>,
+    pub reserve_probe_interval: Option<u64>,
+    pub reserve_probe_timeout: Option<u64>,
     pub dry_run: bool,
     pub metrics_bind: Option<SocketAddr>,
     pub every_n_blocks: u64,
@@ -151,6 +166,9 @@ struct FileConfig {
     signer_file: Option<PathBuf>,
     enabled_roles: Option<Vec<Role>>,
     obs_interval: Option<u64>,
+    decision_window: Option<u64>,
+    reserve_probe_interval: Option<u64>,
+    reserve_probe_timeout: Option<u64>,
     dry_run: Option<bool>,
     metrics_bind: Option<SocketAddr>,
     every_n_blocks: Option<u64>,
@@ -218,12 +236,27 @@ impl Config {
             bail!("at least one keeper role must be enabled");
         }
 
-        let obs_interval = cli.obs_interval.or(file.obs_interval).unwrap_or(10);
+        let obs_interval = cli.obs_interval.or(file.obs_interval);
+        let decision_window = cli.decision_window.or(file.decision_window);
+        let reserve_probe_interval = cli.reserve_probe_interval.or(file.reserve_probe_interval);
+        let reserve_probe_timeout = cli.reserve_probe_timeout.or(file.reserve_probe_timeout);
         let every_n_blocks = cli.every_n_blocks.or(file.every_n_blocks).unwrap_or(1);
         let cooldown_depth = cli.cooldown_depth.or(file.cooldown_depth).unwrap_or(3);
         let tx_timeout_secs = cli.tx_timeout_secs.or(file.tx_timeout_secs).unwrap_or(90);
         let retry_base_ms = cli.retry_base_ms.or(file.retry_base_ms).unwrap_or(500);
-        if obs_interval == 0 || every_n_blocks == 0 || tx_timeout_secs == 0 || retry_base_ms == 0 {
+        if [
+            obs_interval,
+            decision_window,
+            reserve_probe_interval,
+            reserve_probe_timeout,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| value == 0)
+            || every_n_blocks == 0
+            || tx_timeout_secs == 0
+            || retry_base_ms == 0
+        {
             bail!("intervals and timeouts must be greater than zero");
         }
 
@@ -232,6 +265,9 @@ impl Config {
             signer,
             enabled_roles,
             obs_interval,
+            decision_window,
+            reserve_probe_interval,
+            reserve_probe_timeout,
             dry_run,
             metrics_bind: cli.metrics_bind.or(file.metrics_bind),
             every_n_blocks,
@@ -297,7 +333,7 @@ mod tests {
         .expect("test CLI should parse");
         let config = Config::merge(cli, FileConfig::default()).expect("config should merge");
         assert_eq!(config.node_urls.len(), 2);
-        assert_eq!(config.obs_interval, 12);
+        assert_eq!(config.obs_interval, Some(12));
         assert!(config.dry_run);
         assert_eq!(config.enabled_roles, [Role::Tick, Role::OracleClose].into());
     }
@@ -319,7 +355,7 @@ mod tests {
         let config = Config::merge(cli, file).expect("config should merge");
         assert_eq!(config.node_urls, ["wss://file.example"]);
         assert_eq!(config.signer, Some(SignerSource::Uri("//Bob".to_owned())));
-        assert_eq!(config.obs_interval, 7);
+        assert_eq!(config.obs_interval, Some(7));
         assert_eq!(config.cooldown_depth, 9);
         assert_eq!(config.enabled_roles, [Role::Cleanup].into());
     }

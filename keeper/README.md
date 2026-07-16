@@ -71,7 +71,11 @@ enabled_roles = [
   "renewal",
   "welfare",
 ]
-obs_interval = 10
+# Optional live-Params overrides; omit them in ordinary production operation.
+# obs_interval = 10
+# decision_window = 43200
+# reserve_probe_interval = 14400
+# reserve_probe_timeout = 600
 dry_run = false
 metrics_bind = "127.0.0.1:9616"
 every_n_blocks = 1
@@ -83,13 +87,14 @@ retry_base_ms = 500
 ```
 
 Start it with `cargo run --locked -p bleavit-keeper -- --config keeper.toml`. Node URLs are tried in
-the listed order. `obs_interval` defaults to the normative ten-block observation grid and is the
-operator override requested for unusual test networks. The cooldown ledger suppresses an accepted
-call with the same role, pallet, call, and arguments for the configured finalized-block depth.
-The other documented planner fallbacks are `dec.window = 43,200`, `res.probe_int = 14,400`, and
-`res.probe_to = 600` blocks. Tick planning reads `Epoch.TickBatch` from live metadata and falls back
-to 10 only when that constant is unavailable or invalid; these numeric copies are compatibility
-defaults, not alternate parameter homes.
+the listed order. Observation, decision-window, and reserve-probe timing uses the precedence
+explicit CLI/TOML override → live `Constitution.Params` row → documented fallback. The dynamic
+reads use the canonical 16-byte keys `mkt.obs_interval`, `dec.window`, `res.probe_int`, and
+`res.probe_to`; their fallbacks are 10, 43,200, 14,400, and 600 blocks respectively. The cooldown
+ledger suppresses an accepted call with the same role, pallet, call, and arguments for the
+configured finalized-block depth. Tick planning reads `Epoch.TickBatch` from live metadata and
+falls back to 10 only when that constant is unavailable or invalid; these numeric copies are
+compatibility defaults, not alternate parameter homes.
 
 The exact role names used by configuration, logs, and metric labels are `tick`, `observe`,
 `decide`, `settle`, `execute`, `oracle-close`, `registry-close`, `cleanup`, `renewal`, and
@@ -99,10 +104,15 @@ Some roles are deliberately conservative. `record_snapshot` is submitted only wh
 welfare specification and a missing completed-epoch snapshot are directly visible. For every live
 cohort, the extractor also follows its frozen `CohortSchedules` metric specification and catches up
 missing `(cohort epoch + 1)` and `(cohort epoch + 2)` snapshots, including across later spec
-activations. The current storage contract has no durable success bit for a healthy
-`record_daily_gate` call, so that subtask is logged once as not yet plannable. Internal-only pruning,
-upgrade-proof recomputation, and other calls whose arguments cannot be proved from storage are
-likewise never guessed. Zero-filing registry epochs are deliberately unclosable on-chain under the
+activations. Daily gate planning reads the pallet-internal `Welfare.SampledGateDays` marker and
+fills unsampled days across the bounded welfare lookback. The marker is separate from the frozen
+`GateBreachFlags` surface, whose bitmap continues to identify breach days only. Older runtimes
+without `SampledGateDays` retain honest degradation: the subtask emits its one `not yet plannable`
+startup line and plans nothing. The keeper reads `Welfare.MaxGateFlags` and
+`Welfare.MaxDailyGateSamples` from live metadata, with compatibility fallbacks of 20 epochs and 64
+day indices matching welfare-core. Internal-only pruning, upgrade-proof recomputation, and other
+calls whose arguments cannot be proved from storage are likewise never guessed. Zero-filing
+registry epochs are deliberately unclosable on-chain under the
 A6 dual-review ruling: `close_epoch` requires a live `FilingCount` entry, preventing a
 reaped/never-filed epoch from being (re-)closed to the favorable `no filings => 1` aggregate.
 Welfare instead applies its pull-side `no record => 1` default, so the keeper never plans these

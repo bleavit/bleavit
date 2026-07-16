@@ -16,17 +16,23 @@ use tracing::{debug, warn};
 
 use crate::config::{Role, RoleSet};
 
-pub const DECISION_WINDOW_BLOCKS: u64 = 43_200;
+pub const DEFAULT_OBSERVATION_INTERVAL_BLOCKS: u64 = 10;
+pub const DEFAULT_DECISION_WINDOW_BLOCKS: u64 = 43_200;
 pub const STALE_OBSERVATION_GAP_BLOCKS: u64 = 50;
-pub const RESERVE_PROBE_INTERVAL_BLOCKS: u64 = 14_400;
-pub const RESERVE_PROBE_TIMEOUT_BLOCKS: u64 = 600;
+pub const DEFAULT_RESERVE_PROBE_INTERVAL_BLOCKS: u64 = 14_400;
+pub const DEFAULT_RESERVE_PROBE_TIMEOUT_BLOCKS: u64 = 600;
 pub const DEFAULT_TICK_BATCH: usize = 10;
+/// Compatibility fallbacks for older metadata. The chain publishes the same
+/// welfare-core bounds as `Welfare.MaxGateFlags`/`MaxDailyGateSamples`.
+pub const DEFAULT_WELFARE_LOOKBACK: usize = 20;
+pub const DEFAULT_DAILY_GATE_SAMPLES: u8 = 64;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ChainSnapshot {
     pub current_block: u64,
     pub available_pallets: BTreeSet<String>,
     pub available_calls: BTreeSet<String>,
+    pub live_params: LivePlannerParams,
     pub tick_batch: Option<usize>,
     pub epoch: Option<EpochSnapshot>,
     pub books: Vec<BookSnapshot>,
@@ -47,6 +53,23 @@ impl ChainSnapshot {
     pub fn has_call(&self, pallet: &str, call: &str) -> bool {
         self.available_calls.contains(&call_key(pallet, call))
     }
+
+    pub fn apply_decision_window(&mut self, decision_window: u64) {
+        mark_decision_window(
+            self.current_block,
+            decision_window,
+            &self.proposals,
+            &mut self.books,
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LivePlannerParams {
+    pub obs_interval: Option<u64>,
+    pub decision_window: Option<u64>,
+    pub reserve_probe_interval: Option<u64>,
+    pub reserve_probe_timeout: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -278,17 +301,33 @@ impl SnapshotExtractor {
             .collect()
     }
 
+    /// Older runtimes do not expose the auxiliary marker added after the B9
+    /// review. In that case daily-gate planning must remain disabled.
+    pub fn welfare_daily_gates_plannable(&self) -> bool {
+        self.has_storage("Welfare", "SampledGateDays")
+    }
+
     pub async fn extract(
         &self,
         current_block: u64,
         block_hash: HashFor<PolkadotConfig>,
     ) -> Result<ChainSnapshot, SnapshotTransportError> {
         self.transport_failed.store(false, Ordering::Relaxed);
+        let live_params = self.extract_live_planner_params(block_hash).await;
         let epoch = self.extract_epoch(block_hash).await;
         let proposals = self.extract_proposals(block_hash).await;
         let cohorts = self.extract_cohorts(block_hash).await;
         let mut books = self.extract_books(block_hash).await;
-        mark_decision_window(current_block, &proposals, &mut books);
+        mark_decision_window(
+            current_block,
+            resolve_chain_param(
+                None,
+                live_params.decision_window,
+                DEFAULT_DECISION_WINDOW_BLOCKS,
+            ),
+            &proposals,
+            &mut books,
+        );
         let market_archive = self.constant_u64("Market", "ArchiveDelay");
         let ledger_archive = self.constant_u64("ConditionalLedger", "ArchiveDelay");
         let tick_batch = resolve_tick_batch(self.constant_u64("Epoch", "TickBatch"));
@@ -301,6 +340,7 @@ impl SnapshotExtractor {
             current_block,
             available_pallets: self.pallets.clone(),
             available_calls: self.calls.clone(),
+            live_params,
             tick_batch: Some(tick_batch),
             epoch,
             books,
@@ -336,6 +376,24 @@ impl SnapshotExtractor {
             Err(SnapshotTransportError)
         } else {
             Ok(snapshot)
+        }
+    }
+
+    async fn extract_live_planner_params(
+        &self,
+        block_hash: HashFor<PolkadotConfig>,
+    ) -> LivePlannerParams {
+        let (obs_interval, decision_window, reserve_probe_interval, reserve_probe_timeout) = tokio::join!(
+            self.fetch_u32_param(block_hash, b"mkt.obs_interval"),
+            self.fetch_u32_param(block_hash, b"dec.window"),
+            self.fetch_u32_param(block_hash, b"res.probe_int"),
+            self.fetch_u32_param(block_hash, b"res.probe_to"),
+        );
+        LivePlannerParams {
+            obs_interval,
+            decision_window,
+            reserve_probe_interval,
+            reserve_probe_timeout,
         }
     }
 
@@ -655,13 +713,34 @@ impl SnapshotExtractor {
             &recorded_snapshots,
             cohorts,
         );
+        let sampled_gate_days = if self.welfare_daily_gates_plannable() {
+            Some(
+                self.iter_values(block_hash, "Welfare", "SampledGateDays")
+                    .await
+                    .into_iter()
+                    .filter_map(|(keys, value)| {
+                        Some((keys.first().and_then(as_u64)?, gate_day_bitmap(&value)?))
+                    })
+                    .collect::<BTreeMap<_, _>>(),
+            )
+        } else {
+            None
+        };
+        let lookback = resolve_welfare_lookback(self.constant_u64("Welfare", "MaxGateFlags"));
+        let daily_samples =
+            resolve_daily_gate_samples(self.constant_u64("Welfare", "MaxDailyGateSamples"));
+        let daily_gate_candidates = derive_daily_gate_candidates(
+            epoch.map(|value| value.index),
+            &spec_activations,
+            sampled_gate_days.as_ref(),
+            lookback,
+            daily_samples,
+        );
         Some(WelfareSnapshot {
             active_spec_version,
             recorded_snapshots,
             snapshot_candidates,
-            // GateBreachFlags only marks breached days. A healthy recorded day has no
-            // durable per-day bit, so finalized storage cannot prove non-submission.
-            daily_gate_candidates: Vec::new(),
+            daily_gate_candidates,
         })
     }
 
@@ -671,10 +750,38 @@ impl SnapshotExtractor {
         pallet: &str,
         storage_name: &str,
     ) -> Option<Value<u32>> {
+        self.fetch_value_with_keys(block_hash, pallet, storage_name, Vec::new())
+            .await
+    }
+
+    async fn fetch_u32_param(
+        &self,
+        block_hash: HashFor<PolkadotConfig>,
+        name: &[u8],
+    ) -> Option<u64> {
+        let key = param_key(name)?;
+        let value = self
+            .fetch_value_with_keys(
+                block_hash,
+                "Constitution",
+                "Params",
+                vec![param_key_value(&key)],
+            )
+            .await?;
+        param_record_u32(&value, &key)
+    }
+
+    async fn fetch_value_with_keys(
+        &self,
+        block_hash: HashFor<PolkadotConfig>,
+        pallet: &str,
+        storage_name: &str,
+        keys: Vec<Value<()>>,
+    ) -> Option<Value<u32>> {
         if !self.has_storage(pallet, storage_name) {
             return None;
         }
-        let address = dynamic::storage(pallet, storage_name, Vec::<Value<()>>::new());
+        let address = dynamic::storage(pallet, storage_name, keys);
         match self.client.storage().at(block_hash).fetch(&address).await {
             Ok(Some(value)) => match value.to_value() {
                 Ok(value) => Some(value),
@@ -772,6 +879,62 @@ fn call_key(pallet: &str, call: &str) -> String {
     format!("{pallet}.{call}")
 }
 
+/// Shared precedence for every constitution row mirrored by the keeper.
+pub const fn resolve_chain_param(
+    operator_override: Option<u64>,
+    live_value: Option<u64>,
+    documented_default: u64,
+) -> u64 {
+    match operator_override {
+        Some(value) => value,
+        None => match live_value {
+            Some(value) => value,
+            None => documented_default,
+        },
+    }
+}
+
+/// 13 rule 6: UTF-8 names are zero-padded to the full 16-byte `ParamKey`.
+/// Names longer than 16 bytes require an explicit short registry key.
+fn param_key(name: &[u8]) -> Option<[u8; 16]> {
+    if name.len() > 16 {
+        return None;
+    }
+    let mut key = [0u8; 16];
+    key.get_mut(..name.len())?.copy_from_slice(name);
+    Some(key)
+}
+
+fn param_key_value(key: &[u8; 16]) -> Value<()> {
+    Value::unnamed_composite(key.iter().map(|byte| Value::u128(u128::from(*byte))))
+}
+
+fn param_key_from_value<C>(value: &Value<C>) -> Option<[u8; 16]> {
+    composite_values(value)
+        .map(|byte| u8::try_from(as_u64(byte)?).ok())
+        .collect::<Option<Vec<_>>>()?
+        .try_into()
+        .ok()
+}
+
+/// Exact `ParamRecord { key, value: ParamValue, ... }` navigation from
+/// constitution-core. Only the `U32` variant is admitted for mirrored rows.
+fn param_record_u32<C>(record: &Value<C>, expected_key: &[u8; 16]) -> Option<u64> {
+    let stored_key = record.at("key").and_then(param_key_from_value)?;
+    if &stored_key != expected_key {
+        return None;
+    }
+    let value = record.at("value")?;
+    match &value.value {
+        ValueDef::Variant(variant) if variant.name == "U32" => {
+            let mut fields = variant.values.values();
+            let decoded = as_u64(fields.next()?)?;
+            fields.next().is_none().then_some(decoded)
+        }
+        _ => None,
+    }
+}
+
 fn capability(role: Role, available: bool, missing_reason: &'static str) -> RoleCapability {
     RoleCapability {
         role,
@@ -803,6 +966,21 @@ fn resolve_tick_batch(value: Option<u64>) -> usize {
         .unwrap_or(DEFAULT_TICK_BATCH)
 }
 
+fn resolve_welfare_lookback(value: Option<u64>) -> usize {
+    value
+        .filter(|value| *value > 0)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(DEFAULT_WELFARE_LOOKBACK)
+}
+
+fn resolve_daily_gate_samples(value: Option<u64>) -> u8 {
+    value
+        .filter(|value| *value > 0)
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| *value <= DEFAULT_DAILY_GATE_SAMPLES)
+        .unwrap_or(DEFAULT_DAILY_GATE_SAMPLES)
+}
+
 fn phase_boundary(epoch_start: u64, length: u64, phase: &str) -> Option<u64> {
     let numerator = match phase {
         "Intake" => 3,
@@ -825,6 +1003,7 @@ fn phase_boundary(epoch_start: u64, length: u64, phase: &str) -> Option<u64> {
 
 fn mark_decision_window(
     current_block: u64,
+    decision_window: u64,
     proposals: &[ProposalSnapshot],
     books: &mut [BookSnapshot],
 ) {
@@ -833,7 +1012,7 @@ fn mark_decision_window(
         .filter(|proposal| matches!(proposal.state.as_str(), "Trading" | "Extended"))
         .filter(|proposal| {
             proposal.decide_at.is_some_and(|decide_at| {
-                current_block >= decide_at.saturating_sub(DECISION_WINDOW_BLOCKS)
+                current_block >= decide_at.saturating_sub(decision_window)
                     && current_block <= decide_at
             })
         })
@@ -877,6 +1056,13 @@ fn composite_u64s<C>(value: &Value<C>) -> Vec<u64> {
 fn tuple_key_pair(keys: &[Value<()>]) -> Option<(u64, u64)> {
     let mut values = composite_values(keys.first()?);
     Some((as_u64(values.next()?)?, as_u64(values.next()?)?))
+}
+
+fn gate_day_bitmap<C>(value: &Value<C>) -> Option<[u32; 2]> {
+    let mut words = composite_values(value).map(as_u64);
+    let first = u32::try_from(words.next()??).ok()?;
+    let second = u32::try_from(words.next()??).ok()?;
+    words.next().is_none().then_some([first, second])
 }
 
 fn single_cohort_spec<C>(value: &Value<C>) -> Option<u64> {
@@ -935,6 +1121,42 @@ fn derive_welfare_candidates(
     (active_spec, candidates.into_iter().collect())
 }
 
+fn derive_daily_gate_candidates(
+    current_epoch: Option<u64>,
+    spec_activations: &BTreeMap<u64, u64>,
+    sampled: Option<&BTreeMap<u64, [u32; 2]>>,
+    lookback: usize,
+    daily_samples: u8,
+) -> Vec<(u64, u8, u64)> {
+    let (Some(current_epoch), Some(sampled)) = (current_epoch, sampled) else {
+        return Vec::new();
+    };
+    let lookback = u64::try_from(lookback).unwrap_or(u64::MAX);
+    let first_epoch = current_epoch.saturating_sub(lookback).max(1);
+    let mut candidates = Vec::new();
+    for epoch in first_epoch..current_epoch {
+        let Some(spec_version) = spec_activations
+            .iter()
+            .filter(|(_, activation)| **activation <= epoch)
+            .map(|(version, _)| *version)
+            .max()
+        else {
+            continue;
+        };
+        for day in 0..daily_samples {
+            let bit = 1u32 << (day % 32);
+            let already_sampled = sampled
+                .get(&epoch)
+                .and_then(|bitmap| bitmap.get(usize::from(day / 32)))
+                .is_some_and(|word| *word & bit != 0);
+            if !already_sampled {
+                candidates.push((epoch, day, spec_version));
+            }
+        }
+    }
+    candidates
+}
+
 fn composite_values<C>(value: &Value<C>) -> impl Iterator<Item = &Value<C>> {
     match &value.value {
         ValueDef::Composite(composite) => Some(composite.values()),
@@ -980,7 +1202,55 @@ fn nonzero(value: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use subxt::ext::scale_value::Value;
+    use scale_info::TypeInfo;
+    use subxt::ext::{codec::Encode, scale_decode::DecodeAsType, scale_value::Value};
+
+    #[allow(dead_code)]
+    #[derive(Encode, TypeInfo)]
+    struct EncodedFixedU64(u64);
+
+    #[allow(dead_code)]
+    #[derive(Encode, TypeInfo)]
+    enum EncodedParamValue {
+        U8(u8),
+        U32(u32),
+        Balance(u128),
+        Fixed(EncodedFixedU64),
+        Percent(u8),
+        Perbill(u32),
+    }
+
+    #[allow(dead_code)]
+    #[derive(Encode, TypeInfo)]
+    enum EncodedMaxDelta {
+        Absolute(EncodedParamValue),
+        Percent(u8),
+        Factor(u8),
+    }
+
+    #[allow(dead_code)]
+    #[derive(Encode, TypeInfo)]
+    enum EncodedParamClass {
+        Param,
+        Treasury,
+        Meta,
+        Const,
+        Entrenched,
+        MetaAndValues,
+    }
+
+    #[derive(Encode, TypeInfo)]
+    struct EncodedParamRecord {
+        key: [u8; 16],
+        value: EncodedParamValue,
+        min: EncodedParamValue,
+        max: EncodedParamValue,
+        max_delta: Option<EncodedMaxDelta>,
+        cooldown_epochs: u32,
+        last_changed_epoch: u32,
+        class: EncodedParamClass,
+        kernel_bounded: bool,
+    }
 
     #[test]
     fn phase_boundaries_follow_the_frozen_fraction_grid() {
@@ -995,6 +1265,39 @@ mod tests {
         let none = Value::unnamed_variant("None", []);
         assert_eq!(option_u64(&some), Some(7));
         assert_eq!(option_u64(&none), None);
+    }
+
+    #[test]
+    fn param_record_u32_decodes_the_hand_encoded_constitution_shape() {
+        let key = param_key(b"mkt.obs_interval").expect("canonical key fits");
+        let record = EncodedParamRecord {
+            key,
+            value: EncodedParamValue::U32(7),
+            min: EncodedParamValue::U32(5),
+            max: EncodedParamValue::U32(50),
+            max_delta: Some(EncodedMaxDelta::Absolute(EncodedParamValue::U32(5))),
+            cooldown_epochs: 1,
+            last_changed_epoch: 3,
+            class: EncodedParamClass::Param,
+            kernel_bounded: false,
+        };
+        let mut registry = scale_info::Registry::new();
+        let type_id = registry
+            .register_type(&scale_info::MetaType::new::<EncodedParamRecord>())
+            .id;
+        let portable: scale_info::PortableRegistry = registry.into();
+        let encoded = record.encode();
+        let decoded = Value::decode_as_type(&mut encoded.as_slice(), type_id, &portable)
+            .expect("hand-encoded ParamRecord follows its type metadata");
+
+        assert_eq!(param_record_u32(&decoded, &key), Some(7));
+    }
+
+    #[test]
+    fn chain_param_precedence_is_override_then_live_then_default() {
+        assert_eq!(resolve_chain_param(Some(7), Some(5), 10), 7);
+        assert_eq!(resolve_chain_param(None, Some(5), 10), 5);
+        assert_eq!(resolve_chain_param(None, None, 10), 10);
     }
 
     #[test]
@@ -1022,6 +1325,38 @@ mod tests {
         assert_eq!(resolve_tick_batch(Some(2)), 2);
         assert_eq!(resolve_tick_batch(None), DEFAULT_TICK_BATCH);
         assert_eq!(resolve_tick_batch(Some(0)), DEFAULT_TICK_BATCH);
+    }
+
+    #[test]
+    fn welfare_gate_bounds_use_metadata_with_documented_fallbacks() {
+        assert_eq!(resolve_welfare_lookback(Some(3)), 3);
+        assert_eq!(resolve_welfare_lookback(None), DEFAULT_WELFARE_LOOKBACK);
+        assert_eq!(resolve_daily_gate_samples(Some(21)), 21);
+        assert_eq!(resolve_daily_gate_samples(None), DEFAULT_DAILY_GATE_SAMPLES);
+    }
+
+    #[test]
+    fn gate_day_bitmap_decoder_requires_exactly_two_u32_words() {
+        let bitmap = Value::unnamed_composite([Value::u128(3), Value::u128(5)]);
+        let short = Value::unnamed_composite([Value::u128(3)]);
+        assert_eq!(gate_day_bitmap(&bitmap), Some([3, 5]));
+        assert_eq!(gate_day_bitmap(&short), None);
+    }
+
+    #[test]
+    fn unsampled_daily_gate_is_due_and_sampled_day_is_not_due() {
+        let activations = BTreeMap::from([(1, 1)]);
+        let sampled = BTreeMap::from([(2, [1, 0])]);
+        assert_eq!(
+            derive_daily_gate_candidates(Some(3), &activations, Some(&sampled), 1, 2),
+            vec![(2, 1, 1)]
+        );
+    }
+
+    #[test]
+    fn absent_sample_marker_disables_daily_gate_candidates() {
+        let activations = BTreeMap::from([(1, 1)]);
+        assert!(derive_daily_gate_candidates(Some(3), &activations, None, 1, 2).is_empty());
     }
 
     #[test]

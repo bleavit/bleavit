@@ -6,7 +6,11 @@ use bleavit_keeper::{
     metrics::KeeperMetrics,
     plan,
     planner::PlannerConfig,
-    snapshot::SnapshotExtractor,
+    snapshot::{
+        resolve_chain_param, SnapshotExtractor, DEFAULT_DECISION_WINDOW_BLOCKS,
+        DEFAULT_OBSERVATION_INTERVAL_BLOCKS, DEFAULT_RESERVE_PROBE_INTERVAL_BLOCKS,
+        DEFAULT_RESERVE_PROBE_TIMEOUT_BLOCKS,
+    },
     submit::Submitter,
     Cli,
 };
@@ -170,7 +174,7 @@ async fn run_connection(
         if current_block % config.every_n_blocks != 0 {
             continue;
         }
-        let snapshot = tokio::select! {
+        let mut snapshot = tokio::select! {
             changed = shutdown.changed() => {
                 restore_cooldowns(&submitter, shared_cooldowns);
                 if changed.is_err() || *shutdown.borrow() {
@@ -189,6 +193,35 @@ async fn run_connection(
                 }
             }
         };
+        let planner_config = PlannerConfig {
+            enabled_roles: enabled_roles.clone(),
+            obs_interval: resolve_chain_param(
+                config.obs_interval,
+                snapshot.live_params.obs_interval,
+                DEFAULT_OBSERVATION_INTERVAL_BLOCKS,
+            ),
+            decision_window: resolve_chain_param(
+                config.decision_window,
+                snapshot.live_params.decision_window,
+                DEFAULT_DECISION_WINDOW_BLOCKS,
+            ),
+            reserve_probe_interval: resolve_chain_param(
+                config.reserve_probe_interval,
+                snapshot.live_params.reserve_probe_interval,
+                DEFAULT_RESERVE_PROBE_INTERVAL_BLOCKS,
+            ),
+            reserve_probe_timeout: resolve_chain_param(
+                config.reserve_probe_timeout,
+                snapshot.live_params.reserve_probe_timeout,
+                DEFAULT_RESERVE_PROBE_TIMEOUT_BLOCKS,
+            ),
+            cooldown_depth: config.cooldown_depth,
+            cooldowns: submitter
+                .as_ref()
+                .map(|submitter| submitter.cooldowns().clone())
+                .unwrap_or_default(),
+        };
+        snapshot.apply_decision_window(planner_config.decision_window);
         let stale_market_ids = snapshot
             .books
             .iter()
@@ -204,15 +237,6 @@ async fn run_connection(
                 "decision-window books exceed the TWAP staleness gap"
             );
         }
-        let planner_config = PlannerConfig {
-            enabled_roles: enabled_roles.clone(),
-            obs_interval: config.obs_interval,
-            cooldown_depth: config.cooldown_depth,
-            cooldowns: submitter
-                .as_ref()
-                .map(|submitter| submitter.cooldowns().clone())
-                .unwrap_or_default(),
-        };
         let planned = plan(&snapshot, &planner_config);
         for crank in &planned {
             metrics.planned(crank.role);
@@ -276,11 +300,14 @@ fn report_capabilities(
                 "keeper role disabled from live metadata"
             );
         }
-        if capability.role == Role::Welfare && capability.available {
+        if capability.role == Role::Welfare
+            && capability.available
+            && !extractor.welfare_daily_gates_plannable()
+        {
             info!(
                 role = %Role::Welfare,
                 call = "record_daily_gate",
-                "role subtask not yet plannable: storage has no marker for a successfully recorded healthy day"
+                "role subtask not yet plannable: SampledGateDays absent from live metadata"
             );
         }
     }

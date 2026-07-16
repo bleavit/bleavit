@@ -34,6 +34,7 @@ fn genesis_seeds_the_frontend_named_metric_specs() {
         assert_eq!(MetricSpecs::<Test>::iter().count(), 1);
         assert_eq!(Snapshots::<Test>::iter().count(), 0);
         assert_eq!(GateBreachFlags::<Test>::iter().count(), 0);
+        assert_eq!(SampledGateDays::<Test>::iter().count(), 0);
         assert_eq!(Welfare::welfare_state().specs, vec![(1, genesis_specs(1))]);
         assert_ok!(Welfare::seed(&Welfare::welfare_state()));
     });
@@ -124,12 +125,32 @@ fn daily_gate_happy_path_persists_and_emits() {
         let flags = GateBreachFlags::<Test>::get(7).expect("gate flags were stored by epoch");
         assert!(flags.s_breached);
         assert_eq!(flags.day_bitmap, [1 << 3, 0]);
+        assert_eq!(SampledGateDays::<Test>::get(7), Some([1 << 3, 0]));
         System::assert_last_event(RuntimeEvent::Welfare(Event::GateBreachRecorded {
             epoch: 7,
             day: 3,
             s_breached: true,
             c_breached: false,
         }));
+    });
+}
+
+#[test]
+fn healthy_daily_gate_marks_sampling_without_marking_a_breach() {
+    new_test_ext().execute_with(|| {
+        DailyInput::set(components(ONE, ONE, ONE, ONE));
+        assert_ok!(Welfare::record_daily_gate(
+            RuntimeOrigin::signed(keeper()),
+            7,
+            4,
+            1,
+        ));
+
+        let flags = GateBreachFlags::<Test>::get(7).expect("epoch gate record exists");
+        assert!(!flags.s_breached);
+        assert!(!flags.c_breached);
+        assert_eq!(flags.day_bitmap, [0, 0]);
+        assert_eq!(SampledGateDays::<Test>::get(7), Some([1 << 4, 0]));
     });
 }
 
@@ -175,13 +196,19 @@ fn keeper_rebates_only_after_useful_snapshot_and_daily_gate_work() {
             1,
         ));
         assert_eq!(
+            GateBreachFlags::<Test>::get(7)
+                .expect("healthy epoch gate record exists")
+                .day_bitmap,
+            [0, 0]
+        );
+        assert_eq!(SampledGateDays::<Test>::get(7), Some([1, 0]));
+        assert_eq!(
             KeeperRebates::get(),
             vec![
                 (keeper(), CrankClass::DecisionCritical),
                 (keeper(), CrankClass::General),
             ]
         );
-
         // An identical successful re-record is repeat-tolerant but state-neutral,
         // so it cannot drain the keeper meter.
         assert_ok!(Welfare::record_daily_gate(
@@ -197,7 +224,6 @@ fn keeper_rebates_only_after_useful_snapshot_and_daily_gate_work() {
                 (keeper(), CrankClass::General),
             ]
         );
-
         // Re-recording the same day with a newly breached gate advances the
         // epoch-wide latch and therefore earns one further rebate.
         DailyInput::set(components(800_000_000, ONE, ONE, ONE));
@@ -215,6 +241,13 @@ fn keeper_rebates_only_after_useful_snapshot_and_daily_gate_work() {
                 (keeper(), CrankClass::General),
             ]
         );
+        assert_eq!(
+            GateBreachFlags::<Test>::get(7)
+                .expect("augmented epoch gate record exists")
+                .day_bitmap,
+            [1, 0]
+        );
+        assert_eq!(SampledGateDays::<Test>::get(7), Some([1, 0]));
     });
 }
 
@@ -528,10 +561,12 @@ fn prune_rolls_the_snapshot_and_gate_windows() {
         }
         assert_eq!(Snapshots::<Test>::iter().count(), MAX_SNAPSHOTS);
         assert_eq!(GateBreachFlags::<Test>::iter().count(), MAX_GATE_FLAGS);
+        assert_eq!(SampledGateDays::<Test>::iter().count(), MAX_GATE_FLAGS);
 
         assert_ok!(Welfare::prune(3));
         assert!(!Snapshots::<Test>::contains_key((2, 1)));
         assert!(!GateBreachFlags::<Test>::contains_key(2));
+        assert!(!SampledGateDays::<Test>::contains_key(2));
         assert_eq!(MetricSpecs::<Test>::iter().count(), 1);
 
         let next = MAX_SNAPSHOTS as u32 + 2;
@@ -548,8 +583,10 @@ fn prune_rolls_the_snapshot_and_gate_windows() {
         ));
         assert!(Snapshots::<Test>::contains_key((next, 1)));
         assert!(GateBreachFlags::<Test>::contains_key(next));
+        assert!(SampledGateDays::<Test>::contains_key(next));
         assert_eq!(Snapshots::<Test>::iter().count(), MAX_SNAPSHOTS);
         assert_eq!(GateBreachFlags::<Test>::iter().count(), MAX_GATE_FLAGS);
+        assert_eq!(SampledGateDays::<Test>::iter().count(), MAX_GATE_FLAGS);
     });
 }
 
@@ -611,6 +648,15 @@ fn try_state_rejects_a_snapshot_stored_under_the_wrong_map_key() {
         ));
         let snapshot = Snapshots::<Test>::take((7, 1)).expect("snapshot exists");
         Snapshots::<Test>::insert((8, 1), snapshot);
+        assert!(Welfare::do_try_state().is_err());
+    });
+}
+
+#[test]
+fn try_state_rejects_an_orphan_sampled_gate_marker() {
+    new_test_ext().execute_with(|| {
+        SampledGateDays::<Test>::insert(7, [1, 0]);
+        assert!(!GateBreachFlags::<Test>::contains_key(7));
         assert!(Welfare::do_try_state().is_err());
     });
 }

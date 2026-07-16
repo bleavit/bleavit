@@ -5,8 +5,9 @@ use subxt::ext::scale_value::{Composite, Value};
 use crate::{
     config::{Role, RoleSet},
     snapshot::{
-        ChainSnapshot, RegistryEpochSnapshot, DEFAULT_TICK_BATCH, RESERVE_PROBE_INTERVAL_BLOCKS,
-        RESERVE_PROBE_TIMEOUT_BLOCKS,
+        ChainSnapshot, RegistryEpochSnapshot, DEFAULT_DECISION_WINDOW_BLOCKS,
+        DEFAULT_OBSERVATION_INTERVAL_BLOCKS, DEFAULT_RESERVE_PROBE_INTERVAL_BLOCKS,
+        DEFAULT_RESERVE_PROBE_TIMEOUT_BLOCKS, DEFAULT_TICK_BATCH,
     },
 };
 
@@ -50,6 +51,9 @@ impl PlannedCrank {
 pub struct PlannerConfig {
     pub enabled_roles: RoleSet,
     pub obs_interval: u64,
+    pub decision_window: u64,
+    pub reserve_probe_interval: u64,
+    pub reserve_probe_timeout: u64,
     pub cooldown_depth: u64,
     pub cooldowns: BTreeMap<String, u64>,
 }
@@ -58,7 +62,10 @@ impl Default for PlannerConfig {
     fn default() -> Self {
         Self {
             enabled_roles: Role::ALL.into_iter().collect(),
-            obs_interval: 10,
+            obs_interval: DEFAULT_OBSERVATION_INTERVAL_BLOCKS,
+            decision_window: DEFAULT_DECISION_WINDOW_BLOCKS,
+            reserve_probe_interval: DEFAULT_RESERVE_PROBE_INTERVAL_BLOCKS,
+            reserve_probe_timeout: DEFAULT_RESERVE_PROBE_TIMEOUT_BLOCKS,
             cooldown_depth: 3,
             cooldowns: BTreeMap::new(),
         }
@@ -229,10 +236,10 @@ fn plan_oracle(snapshot: &ChainSnapshot, config: &PlannerConfig, cranks: &mut Ve
     if snapshot.has_call("Oracle", "crank_reserve_probe")
         && snapshot.reserve_health.as_ref().is_some_and(|health| {
             let interval_due = health.last_probe_at.is_some_and(|last| {
-                snapshot.current_block >= last.saturating_add(RESERVE_PROBE_INTERVAL_BLOCKS)
+                snapshot.current_block >= last.saturating_add(config.reserve_probe_interval)
             });
             let timeout_due = health.pending_since.is_some_and(|since| {
-                snapshot.current_block >= since.saturating_add(RESERVE_PROBE_TIMEOUT_BLOCKS)
+                snapshot.current_block >= since.saturating_add(config.reserve_probe_timeout)
             });
             interval_due || timeout_due
         })
@@ -636,6 +643,7 @@ mod tests {
             .into_iter()
             .map(str::to_owned)
             .collect(),
+            live_params: crate::snapshot::LivePlannerParams::default(),
             tick_batch: Some(DEFAULT_TICK_BATCH),
             epoch: Some(EpochSnapshot {
                 index: 5,
@@ -779,6 +787,19 @@ mod tests {
             );
             assert!(planned.iter().all(|crank| crank.role == role));
         }
+    }
+
+    #[test]
+    fn unsampled_daily_gate_uses_the_welfare_decision_critical_priority() {
+        let mut snapshot = snapshot();
+        let welfare = snapshot.welfare.as_mut().expect("fixture welfare");
+        welfare.snapshot_candidates.clear();
+        welfare.daily_gate_candidates = vec![(4, 3, 2)];
+
+        let planned = plan(&snapshot, &config_for(Role::Welfare));
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].call, "record_daily_gate");
+        assert_eq!(planned[0].priority, PRIORITY_WELFARE);
     }
 
     #[test]
@@ -980,7 +1001,7 @@ mod tests {
             pending_since: Some(
                 snapshot
                     .current_block
-                    .saturating_sub(RESERVE_PROBE_TIMEOUT_BLOCKS),
+                    .saturating_sub(DEFAULT_RESERVE_PROBE_TIMEOUT_BLOCKS),
             ),
         });
         let timed_out = plan(&snapshot, &config_for(Role::OracleClose));
@@ -994,7 +1015,7 @@ mod tests {
             .pending_since = Some(
             snapshot
                 .current_block
-                .saturating_sub(RESERVE_PROBE_TIMEOUT_BLOCKS - 1),
+                .saturating_sub(DEFAULT_RESERVE_PROBE_TIMEOUT_BLOCKS - 1),
         );
         assert!(plan(&snapshot, &config_for(Role::OracleClose)).is_empty());
     }
