@@ -28,6 +28,7 @@ members = [
   "pallets/epoch",
   "pallets/execution-guard",
   "runtime/bleavit-runtime",
+  "runtime/bleavit-xcm",
 ]
 
 [workspace.package]
@@ -50,6 +51,14 @@ frame-benchmarking = { version = "=46.0.0", default-features = false }
 sp-runtime = { version = "=46.0.0", default-features = false }
 sp-io = { version = "=45.0.0", default-features = false }
 sp-core = { version = "=40.0.0", default-features = false }
+# XCM crates on the same `polkadot-stable2603` family (B4; pins read from the
+# polkadot-sdk 2603.0.0 umbrella manifest via crates.io, 2026-07-16 — see
+# PLAN.md · Verification log). Runtime-side only; none drags the node stack.
+staging-xcm = { version = "=22.0.0", default-features = false }
+staging-xcm-builder = { version = "=26.0.0", default-features = false }
+staging-xcm-executor = { version = "=25.0.0", default-features = false }
+pallet-xcm = { version = "=26.0.0", default-features = false }
+cumulus-primitives-core = { version = "=0.24.0", default-features = false }
 # Test-only SDK crates for pallet mock runtimes (fungibles collateral mocks).
 pallet-assets = { version = "=49.0.1", default-features = false }
 pallet-balances = { version = "=47.0.0", default-features = false }

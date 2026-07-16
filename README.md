@@ -50,6 +50,7 @@ rollout that removes `sudo` at Phase 4.
 | [`reference-model/`](reference-model/pyproject.toml), [`tools/reference-model/generate-vectors.py`](tools/reference-model/generate-vectors.py) | M3 independent Python executable spec and CI-regenerated JSON vector corpus |
 | `pallets/`, `crates/*-core/` | Track A (re-scoped to production FRAME): each `crates/<name>-core/` contains the frame-free functional core and each `pallets/<name>/` currently contains a compiling shell scaffold (lib.rs · mock · tests · benchmarking · weights). The remaining Track-A work is replacing those scaffolds with real `#[frame_support::pallet]` wrappers |
 | `runtime/bleavit-runtime/` | B1 runtime assembly crate: pallet composition model, SafetyFilter BaseCallFilter adapter, USDC/fee/origin/genesis filtering wiring — a frame-free model, not yet `construct_runtime!`/`impl_runtime_apis!` (that is B1a) |
+| `runtime/bleavit-xcm/` | B4 XCM layer (runtime-independent library B1a wires): default-deny barrier (`Transact`/unpaid refused; Asset Hub/relay/Coretime origins only), pinned USDC/DOT matchers + reserve model (no teleports locally), governed-rate weight trader, reserve-probe program + authenticated response router, coretime-renewal DOT funding leg (relay-teleport route), Phase-3 inflow-cap adapters, `pallet_xcm` call classifier |
 | `node/`, `frontend/` | Implementation roots created for future milestones; currently placeholders until their tracks begin |
 
 ## How this gets built
