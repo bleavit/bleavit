@@ -415,13 +415,22 @@ impl WelfareState {
             Error::TooManyComponents
         );
         specs.sort_by_key(|s| s.id);
-        // Two-epoch activation lead time (05 §4.4). `checked_add` (not
-        // saturating) so a registration near `EpochId::MAX` cannot bypass the
-        // lead time by saturating `current + 2` down to `MAX` (G-1; final
-        // review 2026-07-16).
-        let min_activation = current_epoch
-            .checked_add(2)
-            .ok_or(Error::BadActivationEpoch)?;
+        // Activation lead time. The two-epoch lead (05 §4.4/§4.6) exists to
+        // protect in-flight cohorts (I-16), of which there are none at genesis,
+        // so a genesis registration (`current_epoch == 0` — the reserved
+        // pre-launch sentinel; live welfare epochs are 1-indexed per 05 §4.6)
+        // activates at epoch 1, keeping welfare computable from epoch 1 (the
+        // cold start, 05 §4.6). Post-genesis version changes keep the
+        // `>= current + 2` lead. `checked_add` (not saturating) so a
+        // registration near `EpochId::MAX` cannot bypass the lead time by
+        // saturating `current + 2` down to `MAX` (G-1; final review 2026-07-16).
+        let min_activation = if current_epoch == 0 {
+            1
+        } else {
+            current_epoch
+                .checked_add(2)
+                .ok_or(Error::BadActivationEpoch)?
+        };
         let mut prev = None;
         for spec in &specs {
             ensure!(spec.version == version, Error::SpecNotFound);
@@ -1062,8 +1071,11 @@ mod tests {
     #[test]
     fn metric_spec_registration_enforces_activation_disciplines_and_weight_sums() {
         let mut w = WelfareState::new();
+        // Genesis floor: activation must be >= 1 (epoch 0 is the pre-launch
+        // sentinel, not a welfare epoch — 05 §4.6). `activation_epoch = 0` is
+        // below the floor and rejected.
         let mut specs = default_specs(1);
-        specs[0].activation_epoch = 1;
+        specs[0].activation_epoch = 0;
         assert_eq!(
             w.register_metric_spec(0, 1, specs),
             Err(Error::BadActivationEpoch)
@@ -1075,6 +1087,46 @@ mod tests {
             Err(Error::MissingMetricDiscipline)
         );
         assert_eq!(w.register_metric_spec(0, 1, default_specs(1)), Ok(()));
+    }
+
+    #[test]
+    fn genesis_specs_activate_at_epoch_one_but_post_genesis_keeps_the_lead_time() {
+        // 05 §4.6 cold start: genesis specs (registered at the epoch-0 sentinel)
+        // activate at epoch 1 so `s` is computable from epoch 1. The core has no
+        // finalization gate — that is the pallet's live-clock concern — so it
+        // records epoch 1 directly here.
+        let mut w = WelfareState::new();
+        let mut specs = default_specs(1);
+        for spec in &mut specs {
+            spec.activation_epoch = 1;
+        }
+        assert_eq!(w.register_metric_spec(0, 1, specs), Ok(()));
+        assert_eq!(
+            w.record_snapshot(
+                1,
+                1,
+                healthy_components(),
+                FixedU64(ONE),
+                &WelfareParams::DEFAULT,
+            ),
+            Ok(FixedU64(ONE))
+        );
+        // Post-genesis (current epoch 1) the two-epoch lead is enforced: a
+        // version that activates at epoch 2 is one short and rejected...
+        let mut specs = default_specs(2);
+        for spec in &mut specs {
+            spec.activation_epoch = 2;
+        }
+        assert_eq!(
+            w.register_metric_spec(1, 2, specs),
+            Err(Error::BadActivationEpoch)
+        );
+        // ...but activating at epoch 3 (current + 2) is accepted.
+        let mut specs = default_specs(2);
+        for spec in &mut specs {
+            spec.activation_epoch = 3;
+        }
+        assert_eq!(w.register_metric_spec(1, 2, specs), Ok(()));
     }
 
     #[test]

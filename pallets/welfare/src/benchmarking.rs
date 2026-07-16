@@ -75,7 +75,18 @@ mod benches {
         }
         Pallet::<T>::seed(&state)?;
         let version = MAX_METRIC_SPECS as u16;
-        let specs = BoundedSpecSet::try_from(full_specs(version))
+        // The extrinsic registers at the live clock, so its specs must clear the
+        // two-epoch activation lead (05 §4.6) — unlike the epoch-0 seed above.
+        let activation =
+            <T::CurrentEpoch as frame_support::traits::Get<EpochId>>::get().saturating_add(2);
+        let specs_vec = full_specs(version)
+            .into_iter()
+            .map(|spec| MetricSpec {
+                activation_epoch: activation,
+                ..spec
+            })
+            .collect::<Vec<_>>();
+        let specs = BoundedSpecSet::try_from(specs_vec)
             .map_err(|_| BenchmarkError::Stop("benchmark specs exceed bound"))?;
         let origin = T::BenchmarkHelper::metric_governance_origin();
 

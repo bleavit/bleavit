@@ -77,6 +77,30 @@ pub fn default_specs(version: u16) -> Vec<MetricSpec> {
     ]
 }
 
+/// `default_specs` with an explicit activation epoch (post-genesis registrations
+/// must clear the `current + 2` lead; genesis specs activate at epoch 1).
+pub fn specs_activating(version: u16, activation: EpochId) -> Vec<MetricSpec> {
+    default_specs(version)
+        .into_iter()
+        .map(|spec| MetricSpec {
+            activation_epoch: activation,
+            ..spec
+        })
+        .collect()
+}
+
+/// Genesis MetricSpecs activate at epoch 1 (05 §4.6 cold start): welfare is
+/// computable from epoch 1, so the genesis spec carries no lead time.
+pub fn genesis_specs(version: u16) -> Vec<MetricSpec> {
+    specs_activating(version, 1)
+}
+
+/// A finalized-epoch horizon for the ext-builder default: high enough that every
+/// epoch the snapshot/gate tests record is already finalized (`epoch < NOW`), so
+/// the pallet's `EpochNotFinalized` guard is a no-op unless a test sets the clock
+/// itself. Registration tests that assert the two-epoch lead pin the clock lower.
+pub const FINALIZED_NOW: EpochId = 1_000;
+
 pub fn healthy_components() -> Vec<ComponentValue> {
     (1..=4)
         .map(|id| ComponentValue {
@@ -266,7 +290,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     ThetaCHi::set(CORE_THETA_C_HI);
     WP::set(CORE_W_P);
     WA::set(CORE_W_A);
-    CurrentEpochValue::set(0);
+    CurrentEpochValue::set(FINALIZED_NOW);
     OnchainInput::set(healthy_components());
     OnchainInputsByVersion::set(Vec::new());
     DailyInput::set(healthy_components());
@@ -277,7 +301,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     let storage = RuntimeGenesisConfig {
         system: Default::default(),
         welfare: pallet_welfare::GenesisConfig {
-            specs: vec![(1, default_specs(1))],
+            specs: vec![(1, genesis_specs(1))],
             _config: core::marker::PhantomData,
         },
     }

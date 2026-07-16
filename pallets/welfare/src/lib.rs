@@ -282,6 +282,10 @@ pub mod pallet {
         ArithmeticOverflow,
         TryStateViolation,
         BadParams,
+        /// A snapshot/daily-gate crank named an epoch that has not finalized yet
+        /// (`epoch >= CurrentEpoch`). 05 §4.6 winsorizes over *finalized* epoch
+        /// values, so a keeper may only record an epoch the clock has passed.
+        EpochNotFinalized,
     }
 
     #[pallet::hooks]
@@ -309,7 +313,11 @@ pub mod pallet {
             })
         }
 
-        /// Permissionless signed keeper crank for one epoch snapshot.
+        /// Permissionless signed keeper crank for one **finalized** epoch's
+        /// snapshot. The epoch must have closed (`epoch < CurrentEpoch`; 05 §4.6
+        /// winsorizes over finalized epoch values), else the crank is rejected —
+        /// this stops an early/future call from locking a wrong `W` or consuming
+        /// the bounded snapshot window before the real counters exist.
         #[pallet::call_index(1)]
         #[pallet::weight(T::WeightInfo::record_snapshot())]
         pub fn record_snapshot(
@@ -318,6 +326,10 @@ pub mod pallet {
             spec_version: MetricSpecVersion,
         ) -> DispatchResult {
             let _ = ensure_signed(origin)?;
+            frame_support::ensure!(
+                epoch < T::CurrentEpoch::get(),
+                Error::<T>::EpochNotFinalized
+            );
             let components = T::MetricInputs::onchain_components(epoch, spec_version);
             let incident = T::MetricInputs::incident_multiplier(epoch);
             let params = Self::live_params()?;
@@ -328,7 +340,9 @@ pub mod pallet {
             })
         }
 
-        /// Permissionless signed keeper crank for a daily S/C gate sample.
+        /// Permissionless signed keeper crank for a **finalized** epoch's daily
+        /// S/C gate sample. Like `record_snapshot`, the epoch must have closed
+        /// (`epoch < CurrentEpoch`) so the day's counters are final (05 §4.7).
         #[pallet::call_index(2)]
         #[pallet::weight(T::WeightInfo::record_daily_gate())]
         pub fn record_daily_gate(
@@ -338,6 +352,10 @@ pub mod pallet {
             spec_version: MetricSpecVersion,
         ) -> DispatchResult {
             let _ = ensure_signed(origin)?;
+            frame_support::ensure!(
+                epoch < T::CurrentEpoch::get(),
+                Error::<T>::EpochNotFinalized
+            );
             let components = T::MetricInputs::daily_components(epoch, day, spec_version);
             let params = Self::live_params()?;
             Self::mutate(|state| {

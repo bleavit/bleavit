@@ -34,7 +34,7 @@ fn genesis_seeds_the_frontend_named_metric_specs() {
         assert_eq!(MetricSpecs::<Test>::iter().count(), 1);
         assert_eq!(Snapshots::<Test>::iter().count(), 0);
         assert_eq!(GateBreachFlags::<Test>::iter().count(), 0);
-        assert_eq!(Welfare::welfare_state().specs, vec![(1, default_specs(1))]);
+        assert_eq!(Welfare::welfare_state().specs, vec![(1, genesis_specs(1))]);
         assert_ok!(Welfare::seed(&Welfare::welfare_state()));
     });
 }
@@ -42,6 +42,7 @@ fn genesis_seeds_the_frontend_named_metric_specs() {
 #[test]
 fn register_spec_happy_path_deposits_core_event() {
     new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(0);
         assert_ok!(Welfare::register_spec(
             RuntimeOrigin::signed(governance_acc()),
             2,
@@ -164,6 +165,7 @@ fn bad_activation_epoch_is_rejected() {
 #[test]
 fn missing_metric_discipline_is_rejected() {
     new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(0);
         let mut specs = default_specs(2);
         specs[0].has_challenge_procedure = false;
         assert_noop!(
@@ -176,6 +178,7 @@ fn missing_metric_discipline_is_rejected() {
 #[test]
 fn bad_weight_sum_is_rejected() {
     new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(0);
         let mut specs = default_specs(2);
         specs[1].weight = FixedU64(ONE - 1);
         assert_noop!(
@@ -188,6 +191,7 @@ fn bad_weight_sum_is_rejected() {
 #[test]
 fn bad_epsilon_floor_and_source_class_are_rejected() {
     new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(0);
         let mut specs = default_specs(2);
         specs[0].epsilon_floor = FixedU64(EPSILON_PILLAR.0 - 1);
         assert_noop!(
@@ -205,29 +209,108 @@ fn bad_epsilon_floor_and_source_class_are_rejected() {
 }
 
 #[test]
-fn crank_rejects_a_metric_version_before_activation() {
+fn genesis_spec_is_active_from_epoch_one() {
+    // 05 §4.6 cold start: the genesis MetricSpec activates at epoch 1, so W₁ is
+    // computable. The ext-builder clock is finalized-high, so epoch 1 is past.
     new_test_ext().execute_with(|| {
+        assert_ok!(Welfare::record_snapshot(
+            RuntimeOrigin::signed(keeper()),
+            1,
+            1,
+        ));
+        assert!(Snapshots::<Test>::contains_key((1, 1)));
+        assert_ok!(Welfare::record_daily_gate(
+            RuntimeOrigin::signed(keeper()),
+            1,
+            0,
+            1,
+        ));
+        assert!(GateBreachFlags::<Test>::contains_key(1));
+    });
+}
+
+#[test]
+fn post_genesis_spec_before_activation_is_rejected() {
+    new_test_ext().execute_with(|| {
+        // Register v2 post-genesis (clock 5) activating at epoch 10 (>= 5 + 2).
+        CurrentEpochValue::set(5);
+        assert_ok!(Welfare::register_spec(
+            RuntimeOrigin::signed(governance_acc()),
+            2,
+            bounded(specs_activating(2, 10)),
+        ));
+        // Epoch 9 is finalized (clock 20) but still before v2's activation (10).
+        CurrentEpochValue::set(20);
         assert_noop!(
-            Welfare::record_snapshot(RuntimeOrigin::signed(keeper()), 1, 1),
+            Welfare::record_snapshot(RuntimeOrigin::signed(keeper()), 9, 2),
             Error::<Test>::SpecNotActive
         );
         assert_noop!(
-            Welfare::record_daily_gate(RuntimeOrigin::signed(keeper()), 1, 0, 1),
+            Welfare::record_daily_gate(RuntimeOrigin::signed(keeper()), 9, 0, 2),
             Error::<Test>::SpecNotActive
         );
+        assert!(!Snapshots::<Test>::contains_key((9, 2)));
+        assert!(!GateBreachFlags::<Test>::contains_key(9));
+    });
+}
+
+#[test]
+fn snapshot_for_an_unfinalized_or_future_epoch_is_rejected() {
+    // 05 §4.6: only a finalized (strictly past) epoch may be snapshotted. The
+    // current epoch (still in progress) and any future epoch are rejected, so an
+    // early keeper cannot lock a wrong W or consume the bounded window early.
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(7);
+        for epoch in [7u32, 8, 100] {
+            assert_noop!(
+                Welfare::record_snapshot(RuntimeOrigin::signed(keeper()), epoch, 1),
+                Error::<Test>::EpochNotFinalized
+            );
+        }
         assert_eq!(Snapshots::<Test>::iter().count(), 0);
+        // Once the clock passes epoch 7, its snapshot becomes admissible.
+        CurrentEpochValue::set(8);
+        assert_ok!(Welfare::record_snapshot(
+            RuntimeOrigin::signed(keeper()),
+            7,
+            1,
+        ));
+    });
+}
+
+#[test]
+fn daily_gate_for_an_unfinalized_or_future_epoch_is_rejected() {
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(7);
+        for epoch in [7u32, 8, 100] {
+            assert_noop!(
+                Welfare::record_daily_gate(RuntimeOrigin::signed(keeper()), epoch, 0, 1),
+                Error::<Test>::EpochNotFinalized
+            );
+        }
         assert_eq!(GateBreachFlags::<Test>::iter().count(), 0);
+        CurrentEpochValue::set(8);
+        assert_ok!(Welfare::record_daily_gate(
+            RuntimeOrigin::signed(keeper()),
+            7,
+            0,
+            1,
+        ));
     });
 }
 
 #[test]
 fn metric_inputs_are_scoped_by_spec_version() {
     new_test_ext().execute_with(|| {
+        // Register v2 with the two-epoch lead honored (clock 0 → activation 2),
+        // then advance the clock so epoch 7 is finalized before the cranks.
+        CurrentEpochValue::set(0);
         assert_ok!(Welfare::register_spec(
             RuntimeOrigin::signed(governance_acc()),
             2,
             bounded(default_specs(2)),
         ));
+        CurrentEpochValue::set(FINALIZED_NOW);
         OnchainInputsByVersion::set(vec![
             (1, components(ONE, ONE, ONE, ONE)),
             (2, components(ONE, 900_000_000, ONE, ONE)),
@@ -282,6 +365,7 @@ fn missing_spec_is_rejected() {
 #[test]
 fn metric_spec_history_accepts_16_and_rejects_17th() {
     new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(0);
         for version in 2..=16 {
             assert_ok!(Welfare::register_spec(
                 RuntimeOrigin::signed(governance_acc()),
@@ -410,11 +494,13 @@ fn injected_component_vector_over_limit_is_rejected() {
 #[test]
 fn try_state_passes_after_representative_sequence() {
     new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(0);
         assert_ok!(Welfare::register_spec(
             RuntimeOrigin::signed(governance_acc()),
             2,
             bounded(default_specs(2)),
         ));
+        CurrentEpochValue::set(FINALIZED_NOW);
         assert_ok!(Welfare::record_snapshot(
             RuntimeOrigin::signed(keeper()),
             7,
@@ -646,7 +732,7 @@ fn assert_last_matches_core(event: CoreEvent) {
 fn shell_matches_core_over_400_step_fixed_seed_sequence() {
     new_test_ext().execute_with(|| {
         let mut core = WelfareState::new();
-        core.register_metric_spec(0, 1, default_specs(1))
+        core.register_metric_spec(0, 1, genesis_specs(1))
             .expect("seed spec is valid");
         core.events.clear();
         let params = CoreWelfareParams::DEFAULT;
@@ -663,8 +749,15 @@ fn shell_matches_core_over_400_step_fixed_seed_sequence() {
             let expected_ok = match selector {
                 0 => {
                     let version = 2 + ((seed >> 16) % 18) as u16;
-                    let specs = default_specs(version);
-                    let core_result = core.register_metric_spec(0, version, specs.clone());
+                    // Register at the live clock with the two-epoch lead honored,
+                    // exactly as the extrinsic does; both sides use the same
+                    // `now`, so shell ≡ core holds. These post-genesis specs
+                    // activate at `now + 2`, past every snapshot epoch below, so
+                    // the snapshot steps exercise the SpecNotActive mirror while
+                    // the genesis version (active from epoch 1) drives success.
+                    let now = CurrentEpochValue::get();
+                    let specs = specs_activating(version, now + 2);
+                    let core_result = core.register_metric_spec(now, version, specs.clone());
                     let pallet_result = Welfare::register_spec(
                         RuntimeOrigin::signed(governance_acc()),
                         version,
