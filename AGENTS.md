@@ -146,7 +146,7 @@ per milestone):
 | `vendor/` | support | Vendored `core2 0.4.0` (all published versions yanked; required by the node's networking closure) — `vendor/README.md` has provenance |
 | `reference-model/` | scaffold (M3) | Placeholder root for independent Python executable spec + vector corpus |
 | `frontend/` | scaffold (Track F) | Placeholder root for monorepo per 10 §10 (`apps/web`, `packages/*`, `tools/*`) |
-| `zombienet/`, `chopsticks/` | planned (B7) | Test-environment definitions (release artifacts, 15 §4.7) |
+| `zombienet/`, `chopsticks/`, `tools/env/` | B7 done | Test-environment definitions — release artifacts, not private fixtures (15 §4.7; 02 §11): zombienet relay+para(+AH/Coretime) topologies + the 09 §7.1 drill suite (`.zndsl` + js helpers), chopsticks forked-state scenario configs for every upgrade path and all six 06 §6.2 playbooks, pinned tooling (`tools/env/pins.env` single-homes the zombienet/chopsticks/polkadot-sdk/paseo-CSG pins) + fetch/generate scripts and the structural validator (`tools/env/validate-environments.py`, CI job `environments`). Execution of the suites against published artifacts is B8/G1 |
 
 ## Changing the specification
 

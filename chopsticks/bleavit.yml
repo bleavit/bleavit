@@ -1,0 +1,8 @@
+# Base fork-from-genesis config — 15 §4.7; 02 §11.
+genesis: zombienet/specs/out/bleavit-drill-raw.json
+mock-signature-host: true
+port: 8000
+db: chopsticks/.state/bleavit.sqlite
+runtime-log-level: 3
+# wasm-override: target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
+import-storage: []
