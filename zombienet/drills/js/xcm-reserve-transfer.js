@@ -278,8 +278,12 @@ async function recovery(api, alice, networkInfo) {
   const state = readState();
   if (!state.trap) throw new Error("trap leg has not recorded exact trapped assets");
   const send = api.tx.polkadotXcm?.send;
-  if (!send) {
-    throw new Error("NOTE(B7): Asset Hub signed v5 ClaimAsset dispatch is not available/authorized in the generated paseo-local runtime");
+  const sudo = api.tx.sudo?.sudo;
+  if (!send || !sudo) {
+    throw new Error(
+      "NOTE(B7): Asset Hub v5 ClaimAsset dispatch needs polkadotXcm.send behind the local preset's sudo " +
+        "(a signed send would descend to Alice's account origin and can never match the AH-chain-keyed trap)",
+    );
   }
   const bleavit = await connect(networkInfo, "bleavit-collator-1");
   const start = (await bleavit.rpc.chain.getHeader()).number.toNumber();
@@ -299,10 +303,13 @@ async function recovery(api, alice, networkInfo) {
   };
   let receipt;
   try {
+    // Root-dispatched send: pallet_xcm converts Root to the bare chain origin
+    // (no DescendOrigin is prepended), so the message reaches Bleavit as the
+    // sibling-AH origin the trap is keyed under (amended 09 §6.1 recovery row).
     receipt = await submit(
-      send(destination, message),
+      sudo(send(destination, message)),
       alice,
-      "NOTE(B7): Asset Hub signed v5 ClaimAsset dispatch is not available/authorized in the generated paseo-local runtime",
+      "NOTE(B7): Asset Hub sudo v5 ClaimAsset dispatch is not available/authorized in the generated paseo-local runtime",
     );
   } catch (error) {
     throw new Error(String(error));
@@ -310,7 +317,7 @@ async function recovery(api, alice, networkInfo) {
   const sent = eventOf(receipt, "polkadotXcm", "Sent");
   if (!sent || !isHereOrigin(sent.data[0])) {
     throw new Error(
-      "NOTE(B7): Asset Hub signed send did not produce the bare chain origin required to recover an AH-keyed trap",
+      "NOTE(B7): Asset Hub sudo send did not produce the bare chain origin required to recover an AH-keyed trap",
     );
   }
   assertV5(sent.data[1], "recovery Sent.destination");
