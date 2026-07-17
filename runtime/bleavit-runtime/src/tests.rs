@@ -5,12 +5,14 @@
 use alloc::{boxed::Box, vec, vec::Vec};
 
 use frame_support::{
-    dispatch::GetDispatchInfo,
+    assert_noop, assert_ok,
+    dispatch::{DispatchClass, GetDispatchInfo},
     traits::{
         fungible::Inspect as FungibleInspect,
         fungibles::{Inspect as FungiblesInspect, Mutate as FungiblesMutate},
         tokens::ConversionToAssetBalance,
-        Contains, EnsureOrigin, PalletInfo, PalletsInfoAccess, VestingSchedule,
+        Contains, EnsureOrigin, Get, Hooks, PalletInfo, PalletsInfoAccess, StorePreimage,
+        VestingSchedule,
     },
     weights::Weight,
 };
@@ -30,17 +32,26 @@ use sp_runtime::{
 };
 
 use crate::{
-    classifier::{set_test_applicable_at, RuntimeBaseCallFilter},
-    AccountId, AllPalletsWithSystem, AssetTxPayment, Attestor, Aura, AuraExt, Authorship, Balances,
-    BlockNumber, CollatorSelection, ConditionalLedger, Constitution, ConvictionVoting, CumulusXcm,
-    ForeignAssets, FutarchyTreasury, Guardian, IncidentRegistry, Market, MessageQueue, Migrations,
-    MilestoneRegistry, Multisig, Oracle, Origins, PalletInfo as RuntimePalletInfo, ParachainInfo,
-    ParachainSystem, PolkadotXcm, Preimage, Proxy, Referenda, Runtime, RuntimeCall,
-    RuntimeGenesisConfig, RuntimeOrigin, Scheduler, Session, Sudo, System, Timestamp,
-    TransactionPayment, TxExtension, UncheckedExtrinsic, Utility, Vesting, Welfare, XcmpQueue,
-    FEE_VIT_USDC_RATE_KEY, MILLISECS_PER_BLOCK, SS58_PREFIX, USDC_ASSET_ID, USDC_DECIMALS,
-    USDC_LOCATION, VERSION, VIT_DECIMALS,
+    classifier::RuntimeBaseCallFilter, AccountId, AllPalletsWithSystem, AssetTxPayment, Attestor,
+    Aura, AuraExt, Authorship, Balances, BlockNumber, CollatorSelection, ConditionalLedger,
+    Constitution, ConvictionVoting, CumulusXcm, ExecutionGuard, ForeignAssets, FutarchyTreasury,
+    Guardian, IncidentRegistry, Market, MessageQueue, Migrations, MilestoneRegistry, Multisig,
+    Oracle, Origins, PalletInfo as RuntimePalletInfo, ParachainInfo, ParachainSystem, PolkadotXcm,
+    Preimage, Proxy, Referenda, Runtime, RuntimeCall, RuntimeGenesisConfig, RuntimeOrigin,
+    Scheduler, Session, Sudo, System, Timestamp, TransactionPayment, TxExtension,
+    UncheckedExtrinsic, Utility, Vesting, Welfare, XcmpQueue, FEE_VIT_USDC_RATE_KEY,
+    MILLISECS_PER_BLOCK, SS58_PREFIX, USDC_ASSET_ID, USDC_DECIMALS, USDC_LOCATION, VERSION,
+    VIT_DECIMALS,
 };
+
+trait SameType<Rhs> {}
+impl<T> SameType<T> for T {}
+
+fn assert_same_type<Left, Right>()
+where
+    Left: SameType<Right>,
+{
+}
 
 fn account(seed: u8) -> AccountId {
     AccountId::new([seed; 32])
@@ -101,8 +112,264 @@ fn development_ext() -> sp_io::TestExternalities {
     sp_io::TestExternalities::new(storage)
 }
 
+struct CandidateRuntimeVersion(Vec<u8>);
+
+impl sp_core::traits::ReadRuntimeVersion for CandidateRuntimeVersion {
+    fn read_runtime_version(
+        &self,
+        _: &[u8],
+        _: &mut dyn sp_externalities::Externalities,
+    ) -> Result<Vec<u8>, String> {
+        Ok(self.0.clone())
+    }
+}
+
+fn upgrade_ext() -> sp_io::TestExternalities {
+    let mut version = VERSION;
+    version.spec_version = version.spec_version.saturating_add(1);
+    let mut ext = development_ext();
+    ext.register_extension(sp_core::traits::ReadRuntimeVersionExt::new(
+        CandidateRuntimeVersion(version.encode()),
+    ));
+    ext
+}
+
+fn release_channel_raw() -> Option<Vec<u8>> {
+    let mut key = sp_io::hashing::twox_128(b"Constitution").to_vec();
+    key.extend_from_slice(&sp_io::hashing::twox_128(b"ReleaseChannel"));
+    sp_io::storage::get(&key).map(|bytes| bytes.to_vec())
+}
+
+fn raw_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    let source = bytes.get(offset..offset.checked_add(4)?)?;
+    let mut encoded = [0u8; 4];
+    encoded.copy_from_slice(source);
+    Some(u32::from_le_bytes(encoded))
+}
+
+fn assert_raw_unchanged_outside(before: &[u8], after: &[u8], owned: &[core::ops::Range<usize>]) {
+    assert_eq!(before.len(), after.len());
+    for (index, (before, after)) in before.iter().zip(after).enumerate() {
+        if !owned.iter().any(|range| range.contains(&index)) {
+            assert_eq!(before, after, "unexpected ReleaseChannel write at {index}");
+        }
+    }
+}
+
+fn enqueue_attested_code_upgrade(
+    pid: futarchy_primitives::ProposalId,
+    candidate: &[u8],
+    referendum_index: u32,
+) -> Option<(BlockNumber, H256)> {
+    let members = [account(90), account(91), account(92)];
+    assert_ok!(Attestor::set_members(
+        pallet_origins::Origin::ConstitutionalValues.into(),
+        members.to_vec(),
+    ));
+    let artifact = H256::from(sp_io::hashing::blake2_256(candidate));
+    for (member, statement) in members.iter().take(2).zip([101u8, 102u8]) {
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(member.clone()),
+            pid,
+            artifact.0,
+            [statement; 32],
+        ));
+    }
+    let first = pallet_attestor::Attestations::<Runtime>::get()
+        .into_iter()
+        .find(|record| record.pid == pid && record.artifact_hash == artifact.0)?;
+    System::set_block_number(first.challenge_deadline.saturating_add(1));
+    assert!(Attestor::has_quorum(pid, artifact.0));
+
+    let call = RuntimeCall::System(frame_system::Call::authorize_upgrade {
+        code_hash: artifact,
+    });
+    let batch =
+        pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(vec![call]).ok()?;
+    let bytes = batch.encode();
+    let payload_len = u32::try_from(bytes.len()).ok()?;
+    let payload_hash = <Preimage as StorePreimage>::note(bytes.into()).ok()?;
+    crate::configs::set_test_execution_payload(pid, payload_hash.0);
+
+    let now = System::block_number();
+    let maturity = now.checked_add(
+        <crate::configs::ExecutionParams as pallet_execution_guard::Params>::exec_timelock(
+            ProposalClass::Code,
+        ),
+    )?;
+    let grace_end = maturity.checked_add(
+        <crate::configs::ExecutionParams as pallet_execution_guard::Params>::exec_grace(
+            ProposalClass::Code,
+        ),
+    )?;
+    let version_constraint = pallet_execution_guard::CurrentSpecName::<Runtime>::get()?;
+    let declared_domains = pallet_execution_guard::pallet::StoredDomains::try_from(vec![
+        pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade,
+    ])
+    .ok()?;
+    assert_ok!(ExecutionGuard::enqueue(
+        crate::configs::test_execution_enqueue_origin(),
+        pallet_execution_guard::pallet::StoredQueuedExecution {
+            pid,
+            payload_hash: payload_hash.0,
+            payload_len,
+            class: ProposalClass::Code,
+            maturity,
+            grace_end,
+            version_constraint,
+            meters_declared: Default::default(),
+            ratify_ref: Some(referendum_index),
+            ratification_passed: false,
+            attestation_id: Some(first.id),
+            pre_upgrade_checkpoint: None,
+            cancelled: false,
+            declared_domains,
+            failed_at: None,
+        },
+        false,
+    ));
+    assert_ok!(ExecutionGuard::ratify(
+        pallet_origins::Origin::ConstitutionalValues.into(),
+        pid,
+        referendum_index,
+    ));
+    Some((maturity, artifact))
+}
+
+fn enqueue_treasury_call(
+    pid: futarchy_primitives::ProposalId,
+    call: RuntimeCall,
+) -> Option<BlockNumber> {
+    let batch =
+        pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(vec![call]).ok()?;
+    let bytes = batch.encode();
+    let payload_len = u32::try_from(bytes.len()).ok()?;
+    let payload_hash = <Preimage as StorePreimage>::note(bytes.into()).ok()?;
+    crate::configs::set_test_execution_payload(pid, payload_hash.0);
+    let now = System::block_number();
+    let maturity = now.checked_add(
+        <crate::configs::ExecutionParams as pallet_execution_guard::Params>::exec_timelock(
+            ProposalClass::Treasury,
+        ),
+    )?;
+    let grace_end = maturity.checked_add(
+        <crate::configs::ExecutionParams as pallet_execution_guard::Params>::exec_grace(
+            ProposalClass::Treasury,
+        ),
+    )?;
+    let version_constraint = pallet_execution_guard::CurrentSpecName::<Runtime>::get()?;
+    let declared_domains = pallet_execution_guard::pallet::StoredDomains::try_from(vec![
+        pallet_execution_guard::CallDomain::Treasury,
+    ])
+    .ok()?;
+    assert_ok!(ExecutionGuard::enqueue(
+        crate::configs::test_execution_enqueue_origin(),
+        pallet_execution_guard::pallet::StoredQueuedExecution {
+            pid,
+            payload_hash: payload_hash.0,
+            payload_len,
+            class: ProposalClass::Treasury,
+            maturity,
+            grace_end,
+            version_constraint,
+            meters_declared: Default::default(),
+            ratify_ref: None,
+            ratification_passed: false,
+            attestation_id: None,
+            pre_upgrade_checkpoint: None,
+            cancelled: false,
+            declared_domains,
+            failed_at: None,
+        },
+        false,
+    ));
+    Some(maturity)
+}
+
+fn seed_parachain_upgrade_boundary(candidate_len: usize) {
+    let max_code_size = u32::try_from(candidate_len).map_or(u32::MAX, |len| len.saturating_add(1));
+    cumulus_pallet_parachain_system::ValidationData::<Runtime>::put(
+        cumulus_primitives_core::PersistedValidationData::default(),
+    );
+    cumulus_pallet_parachain_system::HostConfiguration::<Runtime>::put(
+        cumulus_primitives_core::AbridgedHostConfiguration {
+            max_code_size,
+            max_head_data_size: 0,
+            max_upward_queue_count: 0,
+            max_upward_queue_size: 0,
+            max_upward_message_size: 0,
+            max_upward_message_num_per_candidate: 0,
+            hrmp_max_message_num_per_candidate: 0,
+            validation_upgrade_cooldown: 0,
+            validation_upgrade_delay: 0,
+            async_backing_params: cumulus_primitives_core::relay_chain::AsyncBackingParams {
+                max_candidate_depth: 0,
+                allowed_ancestry_len: 0,
+            },
+        },
+    );
+    cumulus_pallet_parachain_system::UpgradeRestrictionSignal::<Runtime>::kill();
+}
+
+fn submit_relay_upgrade_go_ahead() {
+    submit_relay_upgrade_signal(cumulus_primitives_core::relay_chain::UpgradeGoAhead::GoAhead);
+}
+
+fn submit_relay_upgrade_abort() {
+    submit_relay_upgrade_signal(cumulus_primitives_core::relay_chain::UpgradeGoAhead::Abort);
+}
+
+fn submit_relay_upgrade_signal(signal: cumulus_primitives_core::relay_chain::UpgradeGoAhead) {
+    let builder = cumulus_test_relay_sproof_builder::RelayStateSproofBuilder {
+        para_id: futarchy_primitives::chain_identity::FIXTURE_PARA_ID.into(),
+        upgrade_go_ahead: Some(signal),
+        included_para_head: Some(cumulus_primitives_core::relay_chain::HeadData(Vec::new())),
+        ..Default::default()
+    };
+    let (relay_parent_storage_root, relay_chain_state) = builder.into_state_root_and_proof();
+    let data = cumulus_pallet_parachain_system::parachain_inherent::BasicParachainInherentData {
+        validation_data: cumulus_primitives_core::PersistedValidationData {
+            relay_parent_number: 1,
+            relay_parent_storage_root,
+            ..Default::default()
+        },
+        relay_chain_state,
+        relay_parent_descendants: Default::default(),
+        collator_peer_id: None,
+    };
+    let inbound = cumulus_pallet_parachain_system::parachain_inherent::InboundMessagesData::new(
+        Default::default(),
+        Default::default(),
+    );
+    // `seed_parachain_upgrade_boundary` models the scheduling block. The real
+    // next-block initialize removes its validation data before this inherent.
+    cumulus_pallet_parachain_system::ValidationData::<Runtime>::kill();
+    assert_ok!(ParachainSystem::set_validation_data(
+        RuntimeOrigin::none(),
+        data,
+        inbound,
+    ));
+}
+
 fn remark() -> RuntimeCall {
     RuntimeCall::System(frame_system::Call::remark { remark: vec![1] })
+}
+
+fn set_pending_upgrade(applicable_at: Option<BlockNumber>) {
+    match applicable_at {
+        Some(applicable_at) => {
+            pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::put(
+                pallet_execution_guard::PendingUpgrade {
+                    hash: sp_io::hashing::blake2_256(&[1]),
+                    authorized_at: applicable_at
+                        .saturating_sub(kernel::DESCRIPTOR_LEAD_TIME_BLOCKS),
+                    applicable_at,
+                    target_spec_version: VERSION.spec_version.saturating_add(1),
+                },
+            );
+        }
+        None => pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::kill(),
+    }
 }
 
 fn nobody_system_calls() -> Vec<RuntimeCall> {
@@ -120,6 +387,9 @@ fn nobody_system_calls() -> Vec<RuntimeCall> {
             prefix: vec![1],
             subkeys: 1,
         }),
+        RuntimeCall::System(frame_system::Call::authorize_upgrade {
+            code_hash: H256::repeat_byte(8),
+        }),
         RuntimeCall::System(frame_system::Call::authorize_upgrade_without_checks {
             code_hash: H256::repeat_byte(9),
         }),
@@ -128,6 +398,8 @@ fn nobody_system_calls() -> Vec<RuntimeCall> {
 
 fn closed_wrappers(call: RuntimeCall) -> Vec<RuntimeCall> {
     let who = account(7);
+    let signed_origin: <RuntimeOrigin as frame_support::traits::OriginTrait>::PalletsOrigin =
+        frame_system::RawOrigin::Signed(who.clone()).into();
     vec![
         RuntimeCall::Utility(pallet_utility::Call::batch {
             calls: vec![call.clone()],
@@ -137,6 +409,30 @@ fn closed_wrappers(call: RuntimeCall) -> Vec<RuntimeCall> {
         }),
         RuntimeCall::Utility(pallet_utility::Call::force_batch {
             calls: vec![call.clone()],
+        }),
+        RuntimeCall::Utility(pallet_utility::Call::as_derivative {
+            index: 0,
+            call: Box::new(call.clone()),
+        }),
+        RuntimeCall::Utility(pallet_utility::Call::dispatch_as {
+            as_origin: Box::new(signed_origin.clone()),
+            call: Box::new(call.clone()),
+        }),
+        RuntimeCall::Utility(pallet_utility::Call::with_weight {
+            call: Box::new(call.clone()),
+            weight: Weight::zero(),
+        }),
+        RuntimeCall::Utility(pallet_utility::Call::if_else {
+            main: Box::new(call.clone()),
+            fallback: Box::new(remark()),
+        }),
+        RuntimeCall::Utility(pallet_utility::Call::if_else {
+            main: Box::new(remark()),
+            fallback: Box::new(call.clone()),
+        }),
+        RuntimeCall::Utility(pallet_utility::Call::dispatch_as_fallible {
+            as_origin: Box::new(signed_origin),
+            call: Box::new(call.clone()),
         }),
         RuntimeCall::Proxy(pallet_proxy::Call::proxy {
             real: MultiAddress::Id(who.clone()),
@@ -322,9 +618,10 @@ fn composition_contains_all_b1a_pallets_and_only_future_slots_are_absent() {
     assert_pallet!(FutarchyTreasury, 58, "FutarchyTreasury");
     assert_pallet!(Guardian, 59, "Guardian");
     assert_pallet!(Attestor, 60, "Attestor");
+    assert_pallet!(ExecutionGuard, 62, "ExecutionGuard");
     assert_eq!(
         <AllPalletsWithSystem as PalletsInfoAccess>::infos().len(),
-        38
+        39
     );
 }
 
@@ -716,12 +1013,23 @@ fn metadata_generates_and_runtime_constants_are_visible() {
 
 #[test]
 fn d13_system_calls_are_denied_bare_and_through_every_closed_wrapper() {
-    for call in nobody_system_calls() {
-        assert!(!RuntimeBaseCallFilter::contains(&call));
+    let calls = nobody_system_calls();
+    for call in &calls {
+        assert!(!RuntimeBaseCallFilter::contains(call));
         for wrapped in closed_wrappers(call.clone()) {
             assert!(!RuntimeBaseCallFilter::contains(&wrapped));
         }
     }
+    development_ext().execute_with(|| {
+        for call in calls {
+            let result = call.clone().dispatch(RuntimeOrigin::signed(account(70)));
+            assert!(matches!(result, Err(error) if error.error == frame_system::Error::<Runtime>::CallFiltered.into()));
+            for wrapped in closed_wrappers(call) {
+                let result = wrapped.dispatch(RuntimeOrigin::signed(account(70)));
+                assert!(matches!(result, Err(error) if error.error == frame_system::Error::<Runtime>::CallFiltered.into()));
+            }
+        }
+    });
     let mut nested = RuntimeCall::System(frame_system::Call::set_code { code: vec![1] });
     for depth in 0..kernel::MAX_NESTED_LEVELS {
         nested = match depth % 3 {
@@ -782,27 +1090,1169 @@ fn upgrade_filter_requires_internal_root_and_a_mature_pending_descriptor() {
         assert!(!RuntimeBaseCallFilter::contains_for(origin, &authorize));
     }
 
-    development_ext().execute_with(|| {
+    upgrade_ext().execute_with(|| {
         let apply =
             RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { code: vec![1] });
         System::set_block_number(10);
-        set_test_applicable_at(None);
+        seed_parachain_upgrade_boundary(1);
+        set_pending_upgrade(None);
         assert!(!RuntimeBaseCallFilter::contains(&apply));
         for wrapped in closed_wrappers(apply.clone()) {
             assert!(!RuntimeBaseCallFilter::contains(&wrapped));
         }
-        set_test_applicable_at(Some(11));
+        set_pending_upgrade(Some(11));
         assert!(!RuntimeBaseCallFilter::contains(&apply));
-        set_test_applicable_at(Some(10));
+        set_pending_upgrade(Some(10));
         assert!(RuntimeBaseCallFilter::contains(&apply));
         assert!(RuntimeBaseCallFilter::contains(&RuntimeCall::Utility(
             pallet_utility::Call::batch {
                 calls: vec![apply.clone()],
             }
         )));
-        set_test_applicable_at(Some(9));
+        set_pending_upgrade(Some(9));
         assert!(RuntimeBaseCallFilter::contains(&apply));
-        set_test_applicable_at(None);
+        set_pending_upgrade(None);
+    });
+}
+
+#[test]
+fn upgrade_path_authorizes_schedules_and_clears_only_after_validation_code_applies() {
+    upgrade_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 6_001;
+        const RATIFY_REF: u32 = 71;
+        let candidate = b"bleavit-b6-candidate-runtime-v2".to_vec();
+        let (maturity, artifact) = match enqueue_attested_code_upgrade(PID, &candidate, RATIFY_REF) {
+            Some(setup) => setup,
+            None => {
+                assert!(false, "attested upgrade fixture must be constructible");
+                return;
+            }
+        };
+
+        System::set_block_number(maturity);
+        let release_before = release_channel_raw();
+        let checkpoint_parent = System::parent_hash();
+        assert_ok!(ExecutionGuard::execute(
+            RuntimeOrigin::signed(account(75)),
+            PID,
+        ));
+
+        let authorization = System::authorized_upgrade();
+        assert!(authorization
+            .is_some_and(|authorization| authorization.code_hash() == &artifact));
+        let pending = match pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get() {
+            Some(pending) => pending,
+            None => {
+                assert!(false, "successful CODE execution must create PendingUpgrade");
+                return;
+            }
+        };
+        assert_eq!(pending.hash, artifact.0);
+        assert_eq!(pending.authorized_at, maturity);
+        assert_eq!(
+            pending.applicable_at,
+            maturity.saturating_add(kernel::DESCRIPTOR_LEAD_TIME_BLOCKS)
+        );
+        assert_eq!(
+            pending.target_spec_version,
+            VERSION.spec_version.saturating_add(1)
+        );
+        let checkpoint = pallet_execution_guard::PendingUpgradeCheckpoint::<Runtime>::get();
+        assert!(checkpoint.is_some_and(|(parent, state_root)| {
+            parent == checkpoint_parent.0 && state_root != [0; 32]
+        }));
+        assert!(System::events().iter().any(|record| matches!(
+            &record.event,
+            crate::RuntimeEvent::ExecutionGuard(
+                pallet_execution_guard::Event::UpgradeAuthorized {
+                    code_hash,
+                    authorized_at,
+                }
+            ) if *code_hash == artifact.0 && *authorized_at == maturity
+        )));
+
+        let raw = match release_channel_raw() {
+            Some(raw) => raw,
+            None => {
+                assert!(false, "frozen ReleaseChannel raw key must exist");
+                return;
+            }
+        };
+        assert_eq!(raw.len(), pallet_constitution::RELEASE_CHANNEL_LEN);
+        assert_eq!(raw_u32(&raw, 108), Some(maturity));
+        assert_eq!(raw_u32(&raw, 112), Some(pending.target_spec_version));
+        assert_eq!(raw_u32(&raw, 116), Some(maturity));
+        assert!(raw_u32(&raw, 164).is_some_and(|flags| flags & (1 << 2) != 0));
+        if let Some(before) = release_before {
+            assert_raw_unchanged_outside(&before, &raw, &[108..120, 164..168]);
+            assert_eq!(
+                raw_u32(&before, 164).map(|flags| flags & !(1 << 2)),
+                raw_u32(&raw, 164).map(|flags| flags & !(1 << 2))
+            );
+        } else {
+            assert!(false, "genesis ReleaseChannel raw key must exist");
+        }
+
+        let system_apply = RuntimeCall::System(frame_system::Call::apply_authorized_upgrade {
+            code: candidate.clone(),
+        });
+        System::set_block_number(pending.applicable_at.saturating_sub(1));
+        assert!(!RuntimeBaseCallFilter::contains(&system_apply));
+        let early = system_apply
+            .clone()
+            .dispatch(RuntimeOrigin::signed(account(76)));
+        assert!(matches!(early, Err(error) if error.error == frame_system::Error::<Runtime>::CallFiltered.into()));
+        assert!(System::authorized_upgrade().is_some());
+
+        System::set_block_number(pending.applicable_at);
+        let wrong_apply = RuntimeCall::System(frame_system::Call::apply_authorized_upgrade {
+            code: b"wrong-authorized-artifact".to_vec(),
+        });
+        assert!(!RuntimeBaseCallFilter::contains(&wrong_apply));
+        let wrong = wrong_apply.dispatch(RuntimeOrigin::signed(account(76)));
+        assert!(matches!(wrong, Err(error) if error.error == frame_system::Error::<Runtime>::CallFiltered.into()));
+        assert!(System::authorized_upgrade().is_some());
+
+        seed_parachain_upgrade_boundary(candidate.len());
+        assert!(RuntimeBaseCallFilter::contains(&system_apply));
+        assert!(system_apply
+            .dispatch(RuntimeOrigin::signed(account(76)))
+            .is_ok());
+        assert_eq!(
+            cumulus_pallet_parachain_system::PendingValidationCode::<Runtime>::get(),
+            candidate
+        );
+        assert_eq!(
+            cumulus_pallet_parachain_system::NewValidationCode::<Runtime>::get(),
+            Some(candidate.clone())
+        );
+        assert!(System::authorized_upgrade().is_none());
+        assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_some());
+        let authorized_raw = raw.clone();
+
+        // The next block's guard initialization observes the successful
+        // Cumulus schedule before the relay inherent can consume its signal.
+        System::set_block_number(System::block_number().saturating_add(1));
+        let _ = ExecutionGuard::on_initialize(System::block_number());
+        assert_eq!(
+            pallet_execution_guard::ScheduledUpgrade::<Runtime>::get(),
+            Some(artifact.0)
+        );
+
+        // Exercise the production Cumulus boundary: relay-state proof decode,
+        // `GoAhead`, `:code` installation, and the configured OnSystemEvent.
+        submit_relay_upgrade_go_ahead();
+
+        assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::PendingUpgradeCheckpoint::<Runtime>::get().is_none());
+        let applied_raw = match release_channel_raw() {
+            Some(raw) => raw,
+            None => {
+                assert!(false, "ReleaseChannel must survive applied-upgrade callback");
+                return;
+            }
+        };
+        assert_eq!(raw_u32(&applied_raw, 108), Some(System::block_number()));
+        assert_eq!(raw_u32(&applied_raw, 116), Some(0));
+        assert!(raw_u32(&applied_raw, 164).is_some_and(|flags| flags & (1 << 2) == 0));
+        assert_raw_unchanged_outside(
+            &authorized_raw,
+            &applied_raw,
+            &[108..112, 116..120, 164..168],
+        );
+        assert_eq!(
+            raw_u32(&authorized_raw, 164).map(|flags| flags & !(1 << 2)),
+            raw_u32(&applied_raw, 164).map(|flags| flags & !(1 << 2))
+        );
+        assert!(System::events().iter().any(|record| matches!(
+            &record.event,
+            crate::RuntimeEvent::ExecutionGuard(pallet_execution_guard::Event::UpgradeApplied {
+                code_hash,
+                spec_version,
+            }) if *code_hash == artifact.0 && *spec_version == pending.target_spec_version
+        )));
+        assert!(!System::events().iter().any(|record| matches!(
+            &record.event,
+            crate::RuntimeEvent::ExecutionGuard(pallet_execution_guard::Event::UpgradeAborted {
+                ..
+            })
+        )));
+    });
+}
+
+#[test]
+fn relay_abort_clears_pending_state_alarms_and_allows_normal_reproposal() {
+    use pallet_guardian::GuardianTriggers;
+
+    upgrade_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 6_007;
+        const RETRY_PID: futarchy_primitives::ProposalId = 6_008;
+        let candidate = b"bleavit-b6-relay-aborted-runtime-v2".to_vec();
+        let (maturity, artifact) = match enqueue_attested_code_upgrade(PID, &candidate, 77) {
+            Some(setup) => setup,
+            None => {
+                assert!(false, "abort fixture must be constructible");
+                return;
+            }
+        };
+        System::set_block_number(maturity);
+        assert_ok!(ExecutionGuard::execute(
+            RuntimeOrigin::signed(account(85)),
+            PID,
+        ));
+        let pending = match pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get() {
+            Some(pending) => pending,
+            None => {
+                assert!(false, "abort fixture must authorize an upgrade");
+                return;
+            }
+        };
+        System::set_block_number(pending.applicable_at);
+        seed_parachain_upgrade_boundary(candidate.len());
+        let apply = RuntimeCall::System(frame_system::Call::apply_authorized_upgrade {
+            code: candidate.clone(),
+        });
+        assert!(apply.dispatch(RuntimeOrigin::signed(account(86))).is_ok());
+        assert!(System::authorized_upgrade().is_none());
+        assert!(cumulus_pallet_parachain_system::PendingValidationCode::<
+            Runtime,
+        >::exists());
+
+        System::set_block_number(System::block_number().saturating_add(1));
+        let _ = ExecutionGuard::on_initialize(System::block_number());
+        assert_eq!(
+            pallet_execution_guard::ScheduledUpgrade::<Runtime>::get(),
+            Some(artifact.0)
+        );
+        let release_before_abort = match release_channel_raw() {
+            Some(raw) => raw,
+            None => {
+                assert!(false, "abort fixture release channel must exist");
+                return;
+            }
+        };
+
+        submit_relay_upgrade_abort();
+
+        assert!(
+            cumulus_pallet_parachain_system::PendingValidationCode::<Runtime>::get().is_empty()
+        );
+        assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::PendingUpgradeCheckpoint::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::ScheduledUpgrade::<Runtime>::get().is_none());
+        assert!(System::authorized_upgrade().is_none());
+        assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        assert!(crate::configs::RuntimeGuardianTriggers::current().migration_halt);
+        assert!(System::events().iter().any(|record| matches!(
+            &record.event,
+            crate::RuntimeEvent::ExecutionGuard(pallet_execution_guard::Event::UpgradeAborted {
+                code_hash,
+            }) if *code_hash == artifact.0
+        )));
+        let release_after_abort = match release_channel_raw() {
+            Some(raw) => raw,
+            None => {
+                assert!(false, "abort cleanup must preserve ReleaseChannel");
+                return;
+            }
+        };
+        assert_eq!(
+            raw_u32(&release_after_abort, 108),
+            Some(System::block_number())
+        );
+        assert_eq!(raw_u32(&release_after_abort, 116), Some(0));
+        assert!(raw_u32(&release_after_abort, 164).is_some_and(|flags| flags & (1 << 2) == 0));
+        assert_raw_unchanged_outside(
+            &release_before_abort,
+            &release_after_abort,
+            &[108..112, 116..120, 164..168],
+        );
+
+        // No callback re-arms frame-system. A fresh proposal must perform the
+        // full attestation/queue/ratification/execution path again.
+        let spacing_end = pallet_execution_guard::LastUpgradeAuthorized::<Runtime>::get()
+            .and_then(|last| {
+                last.checked_add(
+                    <crate::configs::ExecutionParams as pallet_execution_guard::Params>::code_spacing(),
+                )
+            })
+            .unwrap_or_else(System::block_number);
+        System::set_block_number(System::block_number().max(spacing_end));
+        let (retry_maturity, _) = match enqueue_attested_code_upgrade(RETRY_PID, &candidate, 78) {
+            Some(setup) => setup,
+            None => {
+                assert!(false, "the aborted artifact must be re-proposable");
+                return;
+            }
+        };
+        assert!(System::authorized_upgrade().is_none());
+        System::set_block_number(retry_maturity);
+        assert_ok!(ExecutionGuard::execute(
+            RuntimeOrigin::signed(account(87)),
+            RETRY_PID,
+        ));
+        assert!(System::authorized_upgrade()
+            .is_some_and(|authorization| authorization.code_hash() == &artifact));
+    });
+}
+
+#[test]
+fn relay_abort_cleanup_survives_a_writer_b_release_channel_rewrite() {
+    upgrade_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 6_009;
+        let candidate = b"bleavit-b6-abort-writer-b-runtime-v2".to_vec();
+        let (maturity, artifact) = match enqueue_attested_code_upgrade(PID, &candidate, 81) {
+            Some(setup) => setup,
+            None => {
+                assert!(false, "writer-b abort fixture must be constructible");
+                return;
+            }
+        };
+        System::set_block_number(maturity);
+        assert_ok!(ExecutionGuard::execute(
+            RuntimeOrigin::signed(account(88)),
+            PID,
+        ));
+        let pending = match pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get() {
+            Some(pending) => pending,
+            None => {
+                assert!(false, "writer-b abort fixture must authorize an upgrade");
+                return;
+            }
+        };
+        System::set_block_number(pending.applicable_at);
+        seed_parachain_upgrade_boundary(candidate.len());
+        let apply = RuntimeCall::System(frame_system::Call::apply_authorized_upgrade {
+            code: candidate.clone(),
+        });
+        assert!(apply.dispatch(RuntimeOrigin::signed(account(89))).is_ok());
+        System::set_block_number(System::block_number().saturating_add(1));
+        let _ = ExecutionGuard::on_initialize(System::block_number());
+        assert_eq!(
+            pallet_execution_guard::ScheduledUpgrade::<Runtime>::get(),
+            Some(artifact.0)
+        );
+
+        // Writer (b) lawfully repoints the channel mid-flight, zeroing the
+        // guard-owned pending fields (the SQ-134 interaction). The abort
+        // cleanup must tolerate this — never wedge `PendingUpgrade` — and
+        // must leave writer (b)'s newer value byte-identical.
+        let mut rewritten = [0u8; pallet_constitution::RELEASE_CHANNEL_LEN];
+        match release_channel_raw() {
+            Some(raw) if raw.len() == rewritten.len() => rewritten.copy_from_slice(&raw),
+            _ => {
+                assert!(false, "writer-b fixture release channel must exist");
+                return;
+            }
+        }
+        rewritten[116..120].copy_from_slice(&0u32.to_le_bytes());
+        let flags = raw_u32(&rewritten, 164).unwrap_or(0) & !(1 << 2);
+        rewritten[164..168].copy_from_slice(&flags.to_le_bytes());
+        assert_ok!(Constitution::set_release_channel(
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            rewritten,
+        ));
+
+        submit_relay_upgrade_abort();
+
+        assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::PendingUpgradeCheckpoint::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::ScheduledUpgrade::<Runtime>::get().is_none());
+        assert!(System::events().iter().any(|record| matches!(
+            &record.event,
+            crate::RuntimeEvent::ExecutionGuard(pallet_execution_guard::Event::UpgradeAborted {
+                code_hash,
+            }) if *code_hash == artifact.0
+        )));
+        assert_eq!(release_channel_raw().as_deref(), Some(&rewritten[..]));
+    });
+}
+
+#[test]
+fn applied_cleanup_survives_a_writer_b_release_channel_rewrite() {
+    upgrade_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 6_010;
+        let candidate = b"bleavit-b6-applied-writer-b-runtime-v2".to_vec();
+        let (maturity, artifact) = match enqueue_attested_code_upgrade(PID, &candidate, 82) {
+            Some(setup) => setup,
+            None => {
+                assert!(false, "applied writer-b fixture must be constructible");
+                return;
+            }
+        };
+        System::set_block_number(maturity);
+        assert_ok!(ExecutionGuard::execute(
+            RuntimeOrigin::signed(account(93)),
+            PID,
+        ));
+        let pending = match pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get() {
+            Some(pending) => pending,
+            None => {
+                assert!(false, "applied writer-b fixture must authorize an upgrade");
+                return;
+            }
+        };
+        System::set_block_number(pending.applicable_at);
+        seed_parachain_upgrade_boundary(candidate.len());
+        let apply = RuntimeCall::System(frame_system::Call::apply_authorized_upgrade {
+            code: candidate.clone(),
+        });
+        assert!(apply.dispatch(RuntimeOrigin::signed(account(94))).is_ok());
+        System::set_block_number(System::block_number().saturating_add(1));
+        let _ = ExecutionGuard::on_initialize(System::block_number());
+
+        // Writer (b) lawfully repoints the channel between scheduling and the
+        // relay GoAhead, zeroing the guard-owned pending fields. An applied
+        // upgrade cannot be retried, so the applied cleanup must tolerate the
+        // rewrite (PR #65 P1): guard state records the application, writer
+        // (b)'s newer channel value stays byte-identical, and no halt source
+        // is raised.
+        let mut rewritten = [0u8; pallet_constitution::RELEASE_CHANNEL_LEN];
+        match release_channel_raw() {
+            Some(raw) if raw.len() == rewritten.len() => rewritten.copy_from_slice(&raw),
+            _ => {
+                assert!(false, "applied writer-b fixture release channel must exist");
+                return;
+            }
+        }
+        rewritten[116..120].copy_from_slice(&0u32.to_le_bytes());
+        let flags = raw_u32(&rewritten, 164).unwrap_or(0) & !(1 << 2);
+        rewritten[164..168].copy_from_slice(&flags.to_le_bytes());
+        assert_ok!(Constitution::set_release_channel(
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            rewritten,
+        ));
+
+        submit_relay_upgrade_go_ahead();
+
+        assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::PendingUpgradeCheckpoint::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::ScheduledUpgrade::<Runtime>::get().is_none());
+        assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        assert!(System::events().iter().any(|record| matches!(
+            &record.event,
+            crate::RuntimeEvent::ExecutionGuard(pallet_execution_guard::Event::UpgradeApplied {
+                code_hash,
+                ..
+            }) if *code_hash == artifact.0
+        )));
+        assert_eq!(release_channel_raw().as_deref(), Some(&rewritten[..]));
+    });
+}
+
+#[test]
+fn upgrade_apply_without_pending_descriptor_is_filter_denied() {
+    development_ext().execute_with(|| {
+        let apply = RuntimeCall::System(frame_system::Call::apply_authorized_upgrade {
+            code: b"no-pending-upgrade".to_vec(),
+        });
+        assert!(!RuntimeBaseCallFilter::contains(&apply));
+        let result = apply.dispatch(RuntimeOrigin::signed(account(77)));
+        assert!(matches!(result, Err(error) if error.error == frame_system::Error::<Runtime>::CallFiltered.into()));
+    });
+}
+
+#[test]
+fn system_authorization_survives_cumulus_overlap_preflight_rejection() {
+    upgrade_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 6_006;
+        let candidate = b"bleavit-b6-overlap-preflight-runtime-v2".to_vec();
+        let (maturity, artifact) = match enqueue_attested_code_upgrade(PID, &candidate, 76) {
+            Some(setup) => setup,
+            None => {
+                assert!(false, "overlap preflight fixture must be constructible");
+                return;
+            }
+        };
+        System::set_block_number(maturity);
+        assert_ok!(ExecutionGuard::execute(
+            RuntimeOrigin::signed(account(82)),
+            PID,
+        ));
+        let pending_before = match pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get()
+        {
+            Some(pending) => pending,
+            None => {
+                assert!(false, "CODE execution must leave a guard pending upgrade");
+                return;
+            }
+        };
+        let checkpoint_before =
+            pallet_execution_guard::PendingUpgradeCheckpoint::<Runtime>::get();
+        let release_before = release_channel_raw();
+        System::set_block_number(pending_before.applicable_at);
+        seed_parachain_upgrade_boundary(candidate.len());
+        let existing = b"already-scheduled-validation-code".to_vec();
+        cumulus_pallet_parachain_system::PendingValidationCode::<Runtime>::put(existing.clone());
+
+        let apply = RuntimeCall::System(frame_system::Call::apply_authorized_upgrade {
+            code: candidate,
+        });
+        assert!(!RuntimeBaseCallFilter::contains(&apply));
+        let result = apply.dispatch(RuntimeOrigin::signed(account(83)));
+        assert!(matches!(result, Err(error) if error.error == frame_system::Error::<Runtime>::CallFiltered.into()));
+
+        assert!(System::authorized_upgrade()
+            .is_some_and(|authorization| authorization.code_hash() == &artifact));
+        assert_eq!(
+            pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get(),
+            Some(pending_before)
+        );
+        assert_eq!(
+            pallet_execution_guard::PendingUpgradeCheckpoint::<Runtime>::get(),
+            checkpoint_before
+        );
+        assert_eq!(release_channel_raw(), release_before);
+        assert_eq!(
+            cumulus_pallet_parachain_system::PendingValidationCode::<Runtime>::get(),
+            existing
+        );
+    });
+}
+
+#[test]
+fn migration_halt_keeps_forward_remediation_upgrade_applicable() {
+    use frame_support::migrations::FailedMigrationHandler;
+
+    upgrade_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 6_003;
+        let candidate = b"bleavit-b6-dispatcher-runtime-v2".to_vec();
+        let (maturity, _) = match enqueue_attested_code_upgrade(PID, &candidate, 73) {
+            Some(setup) => setup,
+            None => {
+                assert!(false, "dispatcher upgrade fixture must be constructible");
+                return;
+            }
+        };
+        System::set_block_number(maturity);
+        assert_ok!(ExecutionGuard::execute(
+            RuntimeOrigin::signed(account(80)),
+            PID,
+        ));
+        let applicable_at = match pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get() {
+            Some(pending) => pending.applicable_at,
+            None => {
+                assert!(false, "dispatcher fixture must authorize an upgrade");
+                return;
+            }
+        };
+        System::set_block_number(applicable_at);
+        seed_parachain_upgrade_boundary(candidate.len());
+
+        pallet_migrations::Cursor::<Runtime>::put(pallet_migrations::MigrationCursor::Stuck);
+        assert_eq!(
+            crate::configs::MigrationFailureToGuard::failed(Some(3)),
+            frame_support::migrations::FailedMigrationHandling::KeepStuck
+        );
+        assert!(System::authorized_upgrade().is_some());
+        let bounded = match pallet_execution_guard::pallet::RuntimeCode::<Runtime>::try_from(
+            candidate.clone(),
+        ) {
+            Ok(code) => code,
+            Err(_) => {
+                assert!(false, "remediation runtime must fit the code bound");
+                return;
+            }
+        };
+        assert_ok!(ExecutionGuard::apply_authorized_upgrade(
+            RuntimeOrigin::signed(account(84)),
+            bounded,
+        ));
+        assert_eq!(
+            cumulus_pallet_parachain_system::PendingValidationCode::<Runtime>::get(),
+            candidate
+        );
+        assert!(System::authorized_upgrade().is_none());
+        assert!(pallet_migrations::Cursor::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_some());
+    });
+}
+
+#[test]
+fn applied_code_alarm_does_not_retire_a_healthy_active_migration_cursor() {
+    use cumulus_pallet_parachain_system::OnSystemEvent;
+
+    upgrade_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 6_010;
+        let candidate = b"bleavit-b6-healthy-active-cursor-runtime-v2".to_vec();
+        let (maturity, _) = match enqueue_attested_code_upgrade(PID, &candidate, 79) {
+            Some(setup) => setup,
+            None => {
+                assert!(false, "healthy cursor fixture must be constructible");
+                return;
+            }
+        };
+        System::set_block_number(maturity);
+        assert_ok!(ExecutionGuard::execute(
+            RuntimeOrigin::signed(account(89)),
+            PID,
+        ));
+        let pending = match pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get() {
+            Some(pending) => pending,
+            None => {
+                assert!(false, "healthy cursor fixture must authorize an upgrade");
+                return;
+            }
+        };
+        System::set_block_number(pending.applicable_at);
+        seed_parachain_upgrade_boundary(candidate.len());
+        let cursor = pallet_migrations::MigrationCursor::Active(pallet_migrations::ActiveCursor {
+            index: 0,
+            inner_cursor: None,
+            started_at: System::block_number(),
+        });
+        pallet_migrations::Cursor::<Runtime>::put(cursor.clone());
+        crate::configs::ExecutionGuardSystemEvent::on_validation_code_applied();
+        assert!(pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        let authorization_hash_before =
+            System::authorized_upgrade().map(|authorization| *authorization.code_hash());
+        let release_before = release_channel_raw();
+        let bounded =
+            match pallet_execution_guard::pallet::RuntimeCode::<Runtime>::try_from(candidate) {
+                Ok(code) => code,
+                Err(_) => {
+                    assert!(false, "healthy cursor runtime must fit the code bound");
+                    return;
+                }
+            };
+
+        assert_noop!(
+            ExecutionGuard::apply_authorized_upgrade(RuntimeOrigin::signed(account(90)), bounded,),
+            frame_system::Error::<Runtime>::MultiBlockMigrationsOngoing
+        );
+        assert_eq!(pallet_migrations::Cursor::<Runtime>::get(), Some(cursor));
+        assert_eq!(
+            System::authorized_upgrade().map(|authorization| *authorization.code_hash()),
+            authorization_hash_before
+        );
+        assert_eq!(release_channel_raw(), release_before);
+        assert_eq!(
+            pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get(),
+            Some(pending)
+        );
+    });
+}
+
+#[test]
+fn code_queue_rejects_real_under_quorum_attestation_without_storage_changes() {
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 6_004;
+        let candidate = b"bleavit-b6-under-quorum-candidate".to_vec();
+        let members = [account(94), account(95), account(96)];
+        assert_ok!(Attestor::set_members(
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            members.to_vec(),
+        ));
+        let artifact = sp_io::hashing::blake2_256(&candidate);
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(members[0].clone()),
+            PID,
+            artifact,
+            [104; 32],
+        ));
+        let record = match pallet_attestor::Attestations::<Runtime>::get()
+            .into_iter()
+            .find(|record| record.pid == PID && record.artifact_hash == artifact)
+        {
+            Some(record) => record,
+            None => {
+                assert!(
+                    false,
+                    "the real attestor adapter fixture must store one record"
+                );
+                return;
+            }
+        };
+        System::set_block_number(record.challenge_deadline.saturating_add(1));
+        assert!(!Attestor::has_quorum(PID, artifact));
+
+        let call = RuntimeCall::System(frame_system::Call::authorize_upgrade {
+            code_hash: H256::from(artifact),
+        });
+        let batch =
+            match pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(vec![call]) {
+                Ok(batch) => batch,
+                Err(_) => {
+                    assert!(false, "single-call upgrade batch must fit");
+                    return;
+                }
+            };
+        let bytes = batch.encode();
+        let payload_len = match u32::try_from(bytes.len()) {
+            Ok(len) => len,
+            Err(_) => {
+                assert!(false, "bounded batch length must fit u32");
+                return;
+            }
+        };
+        let payload_hash = match <Preimage as StorePreimage>::note(bytes.into()) {
+            Ok(hash) => hash,
+            Err(_) => {
+                assert!(false, "bounded batch preimage must be accepted");
+                return;
+            }
+        };
+        crate::configs::set_test_execution_payload(PID, payload_hash.0);
+        let now = System::block_number();
+        let maturity = now.saturating_add(
+            <crate::configs::ExecutionParams as pallet_execution_guard::Params>::exec_timelock(
+                ProposalClass::Code,
+            ),
+        );
+        let grace_end = maturity.saturating_add(
+            <crate::configs::ExecutionParams as pallet_execution_guard::Params>::exec_grace(
+                ProposalClass::Code,
+            ),
+        );
+        let version_constraint = match pallet_execution_guard::CurrentSpecName::<Runtime>::get() {
+            Some(version) => version,
+            None => {
+                assert!(
+                    false,
+                    "guard genesis must store the current runtime version"
+                );
+                return;
+            }
+        };
+        let declared_domains = match pallet_execution_guard::pallet::StoredDomains::try_from(vec![
+            pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade,
+        ]) {
+            Ok(domains) => domains,
+            Err(_) => {
+                assert!(false, "single upgrade domain must fit");
+                return;
+            }
+        };
+        assert_noop!(
+            ExecutionGuard::enqueue(
+                crate::configs::test_execution_enqueue_origin(),
+                pallet_execution_guard::pallet::StoredQueuedExecution {
+                    pid: PID,
+                    payload_hash: payload_hash.0,
+                    payload_len,
+                    class: ProposalClass::Code,
+                    maturity,
+                    grace_end,
+                    version_constraint,
+                    meters_declared: Default::default(),
+                    ratify_ref: Some(74),
+                    ratification_passed: false,
+                    attestation_id: Some(record.id),
+                    pre_upgrade_checkpoint: None,
+                    cancelled: false,
+                    declared_domains,
+                    failed_at: None,
+                },
+                false,
+            ),
+            pallet_execution_guard::Error::<Runtime>::AttestationMissing
+        );
+        assert!(!pallet_execution_guard::pallet::Queue::<Runtime>::contains_key(PID));
+        assert!(!pallet_execution_guard::AttestationBindings::<Runtime>::contains_key(PID));
+    });
+}
+
+#[test]
+fn code_execution_losing_live_attestor_quorum_is_a_storage_noop() {
+    upgrade_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 6_002;
+        let candidate = b"bleavit-b6-unattested-runtime-v2".to_vec();
+        let (maturity, _) = match enqueue_attested_code_upgrade(PID, &candidate, 72) {
+            Some(setup) => setup,
+            None => {
+                assert!(false, "attested upgrade fixture must be constructible");
+                return;
+            }
+        };
+        // Member 91 supplied one of the two attestations. Replacing it makes
+        // the still-present record live-below-quorum before execution.
+        assert_ok!(Attestor::set_members(
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            vec![account(90), account(92), account(93)],
+        ));
+        assert!(!Attestor::has_quorum(
+            PID,
+            sp_io::hashing::blake2_256(&candidate),
+        ));
+        System::set_block_number(maturity);
+        let queued_before = pallet_execution_guard::pallet::Queue::<Runtime>::get(PID);
+        let release_before = release_channel_raw();
+        assert_noop!(
+            ExecutionGuard::execute(RuntimeOrigin::signed(account(78)), PID),
+            pallet_execution_guard::Error::<Runtime>::AttestationMissing
+        );
+        assert_eq!(
+            pallet_execution_guard::pallet::Queue::<Runtime>::get(PID),
+            queued_before
+        );
+        assert_eq!(release_channel_raw(), release_before);
+        assert!(System::authorized_upgrade().is_none());
+        assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_none());
+    });
+}
+
+#[test]
+fn live_code_capability_disables_and_reenables_upgrade_authorization() {
+    upgrade_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 6_005;
+        let capability = pallet_constitution::Capability::AuthorizeUpgrade;
+        assert_ok!(Constitution::set_capability(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::CapabilityRecord {
+                class: ProposalClass::Code,
+                capability,
+                enabled: false,
+            },
+        ));
+        let candidate = b"bleavit-b6-capability-gated-runtime-v2".to_vec();
+        let (maturity, _) = match enqueue_attested_code_upgrade(PID, &candidate, 75) {
+            Some(setup) => setup,
+            None => {
+                assert!(false, "capability fixture must be constructible");
+                return;
+            }
+        };
+        assert!(pallet_execution_guard::pallet::Queue::<Runtime>::contains_key(PID));
+        System::set_block_number(maturity);
+
+        assert!(!Constitution::capability_enabled(
+            ProposalClass::Code,
+            capability,
+        ));
+        assert_noop!(
+            ExecutionGuard::execute(RuntimeOrigin::signed(account(81)), PID),
+            pallet_execution_guard::Error::<Runtime>::CapabilityDenied
+        );
+        assert!(System::authorized_upgrade().is_none());
+        assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::pallet::Queue::<Runtime>::contains_key(PID));
+
+        assert_ok!(Constitution::set_capability(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::CapabilityRecord {
+                class: ProposalClass::Code,
+                capability,
+                enabled: true,
+            },
+        ));
+        assert!(Constitution::capability_enabled(
+            ProposalClass::Code,
+            capability,
+        ));
+        assert_ok!(ExecutionGuard::execute(
+            RuntimeOrigin::signed(account(81)),
+            PID,
+        ));
+        assert!(System::authorized_upgrade().is_some());
+        assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_some());
+    });
+}
+
+#[test]
+fn live_treasury_capability_disables_queued_call_without_state_change_then_reenables() {
+    upgrade_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 6_009;
+        let capability = pallet_constitution::Capability::TreasurySpend;
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| state.main_usdc = 10);
+        let call =
+            RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::fund_budget_line {
+                line: pallet_futarchy_treasury::BudgetLine::Pol,
+                amount: 1,
+            });
+        let maturity = match enqueue_treasury_call(PID, call) {
+            Some(maturity) => maturity,
+            None => {
+                assert!(false, "treasury capability fixture must be constructible");
+                return;
+            }
+        };
+        assert_ok!(Constitution::set_capability(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::CapabilityRecord {
+                class: ProposalClass::Treasury,
+                capability,
+                enabled: false,
+            },
+        ));
+        System::set_block_number(maturity);
+        let state_before = pallet_futarchy_treasury::State::<Runtime>::get();
+        let queue_before = pallet_execution_guard::pallet::Queue::<Runtime>::get(PID);
+
+        assert_noop!(
+            ExecutionGuard::execute(RuntimeOrigin::signed(account(88)), PID),
+            pallet_execution_guard::Error::<Runtime>::CapabilityDenied
+        );
+        assert_eq!(
+            pallet_futarchy_treasury::State::<Runtime>::get(),
+            state_before
+        );
+        assert_eq!(
+            pallet_execution_guard::pallet::Queue::<Runtime>::get(PID),
+            queue_before
+        );
+
+        assert_ok!(Constitution::set_capability(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::CapabilityRecord {
+                class: ProposalClass::Treasury,
+                capability,
+                enabled: true,
+            },
+        ));
+        assert_ok!(ExecutionGuard::execute(
+            RuntimeOrigin::signed(account(88)),
+            PID,
+        ));
+        assert!(pallet_execution_guard::pallet::Queue::<Runtime>::get(PID).is_none());
+        assert_ne!(
+            pallet_futarchy_treasury::State::<Runtime>::get(),
+            state_before
+        );
+    });
+}
+
+#[test]
+fn failed_migration_handler_sets_the_guard_machine_signal() {
+    use frame_support::migrations::FailedMigrationHandler;
+    use pallet_guardian::GuardianTriggers;
+
+    development_ext().execute_with(|| {
+        assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        assert_eq!(
+            crate::configs::MigrationFailureToGuard::failed(Some(3)),
+            frame_support::migrations::FailedMigrationHandling::KeepStuck
+        );
+        assert!(pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        assert_eq!(crate::configs::MigrationFailedStep::get(), Some(3));
+        assert!(crate::configs::RuntimeGuardianTriggers::current().migration_halt);
+    });
+}
+
+#[test]
+fn migration_completion_clears_a_migration_failure_halt() {
+    use frame_support::migrations::{FailedMigrationHandler, MigrationStatusHandler};
+
+    development_ext().execute_with(|| {
+        assert_eq!(
+            crate::configs::MigrationFailureToGuard::failed(Some(4)),
+            frame_support::migrations::FailedMigrationHandling::KeepStuck
+        );
+        assert!(pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        crate::configs::MigrationStatusToGuard::completed();
+        assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        assert!(crate::configs::MigrationFailedStep::get().is_none());
+    });
+}
+
+#[test]
+fn valid_zero_mbm_recovery_image_clears_migration_failure_and_stall_sources() {
+    use cumulus_pallet_parachain_system::OnSystemEvent;
+    use frame_support::migrations::FailedMigrationHandler;
+
+    upgrade_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 6_011;
+        let candidate = b"bleavit-b6-zero-mbm-recovery-runtime-v2".to_vec();
+        let (maturity, artifact) = match enqueue_attested_code_upgrade(PID, &candidate, 80) {
+            Some(setup) => setup,
+            None => {
+                assert!(false, "zero-MBM recovery fixture must be constructible");
+                return;
+            }
+        };
+        System::set_block_number(maturity);
+        assert_ok!(ExecutionGuard::execute(
+            RuntimeOrigin::signed(account(91)),
+            PID,
+        ));
+        let pending = match pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get() {
+            Some(pending) => pending,
+            None => {
+                assert!(false, "zero-MBM recovery fixture must authorize an upgrade");
+                return;
+            }
+        };
+        assert_eq!(
+            crate::configs::MigrationFailureToGuard::failed(Some(5)),
+            frame_support::migrations::FailedMigrationHandling::KeepStuck
+        );
+        let observed_at = System::block_number();
+        pallet_migrations::Cursor::<Runtime>::put(pallet_migrations::MigrationCursor::Active(
+            pallet_migrations::ActiveCursor {
+                index: 0,
+                inner_cursor: None,
+                started_at: observed_at,
+            },
+        ));
+        crate::configs::ExecutionGuardSystemEvent::on_validation_data(
+            &cumulus_primitives_core::PersistedValidationData::default(),
+        );
+        System::set_block_number(
+            observed_at
+                .saturating_add(kernel::MIGRATION_STALL_BLOCKS)
+                .saturating_add(1),
+        );
+        crate::configs::ExecutionGuardSystemEvent::on_validation_data(
+            &cumulus_primitives_core::PersistedValidationData::default(),
+        );
+        assert!(pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        assert_eq!(crate::configs::MigrationHaltSources::get() & 0b011, 0b011);
+        // The recovery image contains no MBMs; model the abandoned cursor as
+        // already retired before its application boundary.
+        pallet_migrations::Cursor::<Runtime>::kill();
+        System::set_block_number(System::block_number().max(pending.applicable_at));
+        seed_parachain_upgrade_boundary(candidate.len());
+        let apply =
+            RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { code: candidate });
+        assert!(apply.dispatch(RuntimeOrigin::signed(account(92))).is_ok());
+        System::set_block_number(System::block_number().saturating_add(1));
+        let _ = ExecutionGuard::on_initialize(System::block_number());
+        assert_eq!(
+            pallet_execution_guard::ScheduledUpgrade::<Runtime>::get(),
+            Some(artifact.0)
+        );
+
+        submit_relay_upgrade_go_ahead();
+
+        assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        assert_eq!(crate::configs::MigrationHaltSources::get(), 0);
+        assert!(crate::configs::MigrationFailedStep::get().is_none());
+        assert!(crate::configs::MigrationProgressMarker::get().is_none());
+    });
+}
+
+#[test]
+fn migration_completion_does_not_clear_an_applied_code_mismatch_halt() {
+    use cumulus_pallet_parachain_system::OnSystemEvent;
+    use frame_support::migrations::MigrationStatusHandler;
+
+    upgrade_ext().execute_with(|| {
+        crate::configs::ExecutionGuardSystemEvent::on_validation_code_applied();
+        assert!(pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        crate::configs::MigrationStatusToGuard::completed();
+        assert!(pallet_execution_guard::MigrationHalt::<Runtime>::get());
+    });
+}
+
+#[test]
+fn active_migration_cursor_halts_only_after_stall_threshold() {
+    use cumulus_pallet_parachain_system::OnSystemEvent;
+
+    development_ext().execute_with(|| {
+        let first_observed = 10;
+        pallet_migrations::Cursor::<Runtime>::put(pallet_migrations::MigrationCursor::Active(
+            pallet_migrations::ActiveCursor {
+                index: 0,
+                inner_cursor: None,
+                started_at: first_observed,
+            },
+        ));
+        System::set_block_number(first_observed);
+        let mandatory_before = *System::block_weight().get(DispatchClass::Mandatory);
+        crate::configs::ExecutionGuardSystemEvent::on_validation_data(
+            &cumulus_primitives_core::PersistedValidationData::default(),
+        );
+        let mandatory_after = *System::block_weight().get(DispatchClass::Mandatory);
+        assert!(mandatory_after.ref_time() > mandatory_before.ref_time());
+        assert!(mandatory_after.proof_size() > mandatory_before.proof_size());
+        assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
+
+        System::set_block_number(first_observed.saturating_add(kernel::MIGRATION_STALL_BLOCKS));
+        crate::configs::ExecutionGuardSystemEvent::on_validation_data(
+            &cumulus_primitives_core::PersistedValidationData::default(),
+        );
+        assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
+
+        System::set_block_number(
+            first_observed
+                .saturating_add(kernel::MIGRATION_STALL_BLOCKS)
+                .saturating_add(1),
+        );
+        crate::configs::ExecutionGuardSystemEvent::on_validation_data(
+            &cumulus_primitives_core::PersistedValidationData::default(),
+        );
+        assert!(pallet_execution_guard::MigrationHalt::<Runtime>::get());
+    });
+}
+
+#[test]
+fn runtime_type_wiring_pins_migration_and_upgrade_event_bridges() {
+    assert_same_type::<
+        <Runtime as pallet_migrations::Config>::FailedMigrationHandler,
+        crate::configs::MigrationFailureToGuard,
+    >();
+    assert_same_type::<
+        <Runtime as pallet_migrations::Config>::MigrationStatusHandler,
+        crate::configs::MigrationStatusToGuard,
+    >();
+    assert_same_type::<
+        <Runtime as cumulus_pallet_parachain_system::Config>::OnSystemEvent,
+        crate::configs::ExecutionGuardSystemEvent,
+    >();
+    assert_eq!(
+        <<Runtime as pallet_migrations::Config>::CursorMaxLen as Get<u32>>::get(),
+        futarchy_primitives::bounds::MIGRATION_CURSOR_MAX_LEN,
+    );
+    assert_eq!(
+        <<Runtime as pallet_migrations::Config>::IdentifierMaxLen as Get<u32>>::get(),
+        futarchy_primitives::bounds::MIGRATION_IDENTIFIER_MAX_LEN,
+    );
+    let expected_service_weight = sp_runtime::Perbill::from_percent(
+        futarchy_primitives::bounds::MIGRATION_SERVICE_WEIGHT_PERCENT,
+    ) * crate::configs::RuntimeBlockWeights::get().max_block;
+    assert_eq!(
+        <<Runtime as pallet_migrations::Config>::MaxServiceWeight as Get<Weight>>::get(),
+        expected_service_weight,
+    );
+}
+
+#[test]
+fn sq104_migration_admin_calls_are_denied_bare_and_under_sudo() {
+    let calls = vec![
+        RuntimeCall::Migrations(pallet_migrations::Call::force_set_cursor { cursor: None }),
+        RuntimeCall::Migrations(pallet_migrations::Call::force_set_active_cursor {
+            index: 0,
+            inner_cursor: None,
+            started_at: None,
+        }),
+        RuntimeCall::Migrations(pallet_migrations::Call::force_onboard_mbms {}),
+        RuntimeCall::Migrations(pallet_migrations::Call::clear_historic {
+            selector: pallet_migrations::HistoricCleanupSelector::Specific(Vec::new()),
+        }),
+    ];
+    development_ext().execute_with(|| {
+        for call in calls {
+            assert!(!RuntimeBaseCallFilter::contains(&call));
+            for wrapped in closed_wrappers(call) {
+                assert!(!RuntimeBaseCallFilter::contains(&wrapped));
+                let result = wrapped.dispatch(RuntimeOrigin::signed(account(79)));
+                assert!(matches!(result, Err(error) if error.error == frame_system::Error::<Runtime>::CallFiltered.into()));
+            }
+        }
+    });
+}
+
+#[test]
+fn guard_dispatcher_rechecks_the_dynamic_classifier_at_dispatch_time() {
+    use pallet_execution_guard::BatchDispatcher;
+
+    development_ext().execute_with(|| {
+        let key = pallet_constitution::key16(b"mkt.obs_interval");
+        let value = match pallet_constitution::Params::<Runtime>::take(key) {
+            Some(record) => record.value,
+            None => {
+                assert!(false, "Param-class benchmark key must exist");
+                return;
+            }
+        };
+        let call = RuntimeCall::Constitution(pallet_constitution::Call::set_param { key, value });
+        assert_eq!(
+            crate::configs::RuntimeBatchDispatcher::dispatch_with_class_origin(
+                call,
+                ProposalClass::Param,
+            ),
+            Err(DispatchError::Other("guard dispatch-time safety filter"))
+        );
     });
 }
 
@@ -870,7 +2320,9 @@ fn domain_delegation_and_privileged_laundering_are_pinned() {
     ));
     for (index, wrapped) in closed_wrappers(treasury.clone()).into_iter().enumerate() {
         assert!(!RuntimeBaseCallFilter::contains(&wrapped));
-        if (3..=6).contains(&index) {
+        // Proxy and multisig may project the wrapped domain, but they cannot
+        // carry a privileged class origin across the delegation boundary.
+        if (9..=12).contains(&index) {
             assert!(!RuntimeBaseCallFilter::contains_for(
                 ClassOrigin::FutarchyTreasury,
                 &wrapped
@@ -968,6 +2420,7 @@ fn classifier_sweeps_every_callable_pallet_and_every_closed_wrapper_shape() {
             artifact_hash: H256::zero().into(),
             statement_hash: H256::zero().into(),
         }),
+        RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::execute { pid: 0 }),
     ];
     calls.extend(
         registry_calls::<()>()
@@ -1115,6 +2568,13 @@ fn signed_custom_pallet_row_is_admitted_by_the_base_filter() {
             artifact_hash: H256::zero().into(),
             statement_hash: H256::zero().into(),
         }),
+        RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::apply_authorized_upgrade {
+            code: Default::default(),
+        }),
+        RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::expire_failed_execution {
+            pid: 0,
+        }),
+        RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::reject_stale { pid: 0 }),
     ];
     for call in calls {
         assert!(RuntimeBaseCallFilter::contains(&call));
@@ -1224,6 +2684,24 @@ fn executive_smoke_state_passes_all_try_state_checks() {
             )
             .is_ok()
         );
+    });
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn try_runtime_api_executes_genesis_upgrade_and_try_state_checks() {
+    development_ext().execute_with(|| {
+        let input = frame_try_runtime::UpgradeCheckSelect::All.encode();
+        let Some(output) = crate::apis::api::dispatch("TryRuntime_on_runtime_upgrade", &input)
+        else {
+            assert!(false, "TryRuntime runtime API method must be generated");
+            return;
+        };
+        let decoded = <(Weight, Weight) as parity_scale_codec::Decode>::decode(&mut &output[..]);
+        match decoded {
+            Ok((used, maximum)) => assert!(used.all_lte(maximum)),
+            Err(error) => assert!(false, "TryRuntime result must decode: {error}"),
+        }
     });
 }
 

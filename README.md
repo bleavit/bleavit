@@ -24,7 +24,7 @@ rollout that removes `sudo` at Phase 4.
 
 ## Status
 
-**Specification complete (2026-07-12) · Track M (M0–M3) finished (2026-07-15) · Track A complete — all 11 custom pallets are production FRAME pallets (2026-07-16) · B1a Cumulus runtime assembled (2026-07-16) · B3 collator node, chain-spec pipeline and genesis allocation/vesting (2026-07-16).**
+**Specification complete (2026-07-12) · Track M (M0–M3) finished (2026-07-15) · Track A complete — all 11 custom pallets are production FRAME pallets (2026-07-16) · B1a Cumulus runtime assembled (2026-07-16) · B3 collator node, chain-spec pipeline and genesis allocation/vesting (2026-07-16) · B4 XCM layer (2026-07-16) · B6 upgrade path e2e wired into the runtime (2026-07-17).**
 
 - The authoritative spec is [`docs/architecture/`](docs/architecture/README.md) —
   16 component documents + decision record, produced by resolving all 101 findings
@@ -49,7 +49,7 @@ rollout that removes `sudo` at Phase 4.
 | `crates/futarchy-fixed/` | M2 deterministic 64.64 fixed-point LMSR/transcendental crate with generated regression fixtures |
 | [`reference-model/`](reference-model/pyproject.toml), [`tools/reference-model/generate-vectors.py`](tools/reference-model/generate-vectors.py) | M3 independent Python executable spec and CI-regenerated JSON vector corpus |
 | `pallets/`, `crates/*-core/` | Track A (complete): each `crates/<name>-core/` is the frame-free functional core (differential oracle) and each `pallets/<name>/` its production `#[frame_support::pallet]` shell (origin-checked calls, bounded 02-frozen storage, try-state, benchmarks, doc-15 suites) |
-| `runtime/bleavit-runtime/` | B1a: the real Cumulus parachain runtime — `construct_runtime!` over the Track-A + standard/system pallets, `BaseCallFilter = SafetyFilter`, genesis presets carrying the 08 §2.1 VIT allocation/vesting, Wasm-buildable (`--features substrate-wasm-builder`) |
+| `runtime/bleavit-runtime/` | B1a + B6: the real Cumulus parachain runtime — `construct_runtime!` over the Track-A + standard/system pallets (incl. `ExecutionGuard` at index 62), `BaseCallFilter = SafetyFilter` with the `DescriptorLeadTime` apply gate, the full 09 §2 upgrade path (attestation precondition, ReleaseChannel writer, `pallet-migrations` + PB-MIGRATION halt bridge), genesis presets carrying the 08 §2.1 VIT allocation/vesting, Wasm-buildable (`--features substrate-wasm-builder`) |
 | `runtime/bleavit-xcm/` | B4 XCM layer (runtime-independent library the runtime wires): default-deny barrier (`Transact`/unpaid refused; Asset Hub/relay/Coretime origins only), pinned USDC/DOT matchers + reserve model (no teleports locally), governed-rate weight trader, reserve-probe program + authenticated response router, coretime-renewal DOT funding leg (relay-teleport route), Phase-3 inflow-cap adapters, `pallet_xcm` call classifier |
 | `runtime-api/` | B2 `futarchy-runtime-api` crate: the `sp_api::decl_runtime_apis!` declaration of the frozen 11-method `FutarchyApi` (02 §3) over the view types in `futarchy-primitives`; wiring it into the runtime's `impl_runtime_apis!` is the follow-up |
 | `node/bleavit-node/` | B3: the collator node — a thin branding of the pinned `polkadot-omni-node` stack; the runtime ships in the chain spec, not in the node |

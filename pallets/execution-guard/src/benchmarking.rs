@@ -33,7 +33,10 @@ mod benches {
         #[extrinsic_call]
         _(RawOrigin::Signed(caller), code);
 
-        assert!(PendingUpgrade::<T>::get().is_none());
+        // The extrinsic schedules the candidate with parachain-system. The
+        // guard record is cleared only at relay `GoAhead`, through the
+        // assembled runtime's `OnSystemEvent` callback.
+        assert!(PendingUpgrade::<T>::get().is_some());
         Ok(())
     }
 

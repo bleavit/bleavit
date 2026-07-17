@@ -18,7 +18,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
-      - name: Rust workspace gates
+      - name: Rust workspace, runtime wasm, and try-runtime gates
         run: tools/ci/rust-workspace-gates.sh
 
   reference-model:

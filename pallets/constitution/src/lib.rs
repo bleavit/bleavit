@@ -52,7 +52,9 @@ pub use constitution_core::{
     CapabilityRecord, ConstitutionOrigin, ConstitutionState, Error as CoreError, MaxDelta, Meter,
     ParamClass, ParamRecord, ParamValue, PhaseFlags as PhaseFlagsValue,
     ReleaseChannel as ReleaseChannelValue, CONTRACT_VERSION, MAX_CAPABILITIES, MAX_METERS,
-    MAX_PARAMS, RELEASE_CHANNEL_LEN, RELEASE_CHANNEL_STORAGE_KEY,
+    MAX_PARAMS, RELEASE_CHANNEL_FLAGS, RELEASE_CHANNEL_FLAG_URGENT_UPGRADE, RELEASE_CHANNEL_LEN,
+    RELEASE_CHANNEL_PENDING_AUTHORIZED_AT, RELEASE_CHANNEL_SPEC_VERSION,
+    RELEASE_CHANNEL_STORAGE_KEY, RELEASE_CHANNEL_UPDATED_AT,
 };
 pub use futarchy_primitives::kernel;
 

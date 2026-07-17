@@ -151,6 +151,9 @@ fn testnet_genesis(
             phase_flags: BOOTSTRAP_PHASE_FLAGS,
             ..Default::default()
         },
+        // Seeds CurrentSpecName from the live RuntimeVersion; all other guard
+        // state is empty until A8 lawfully enqueues a passed proposal.
+        execution_guard: Default::default(),
         sudo: SudoConfig { key: Some(root) },
     })
 }

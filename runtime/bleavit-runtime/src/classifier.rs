@@ -6,44 +6,19 @@ use pallet_origins::{SafetyClassifier, SafetyFilter};
 
 use crate::{RuntimeCall, System};
 
-/// Execution-guard-owned upgrade availability seam (A11). Until A11 lands,
-/// production always returns `None`, making `apply_authorized_upgrade`
-/// unreachable under G-1.
+/// Execution-guard-owned upgrade availability seam (09 §2.2).
 pub trait PendingUpgradeProvider {
     fn applicable_at() -> Option<futarchy_primitives::BlockNumber>;
 }
 
-/// A11 pending adapter: no pending descriptor can be fabricated before the
-/// execution guard is present.
+/// The base filter trusts only the real guard-owned pending-upgrade record.
 pub struct PendingExecutionGuard;
 
 impl PendingUpgradeProvider for PendingExecutionGuard {
     fn applicable_at() -> Option<futarchy_primitives::BlockNumber> {
-        #[cfg(test)]
-        {
-            let value = TEST_APPLICABLE_AT.load(core::sync::atomic::Ordering::Relaxed);
-            (value != u32::MAX).then_some(value)
-        }
-        #[cfg(not(test))]
-        {
-            None
-        }
+        pallet_execution_guard::pallet::PendingUpgrade::<crate::Runtime>::get()
+            .map(|pending| pending.applicable_at)
     }
-}
-
-#[cfg(test)]
-static TEST_APPLICABLE_AT: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(u32::MAX);
-
-#[cfg(test)]
-pub(crate) fn set_test_applicable_at(value: Option<u32>) {
-    TEST_APPLICABLE_AT.store(
-        match value {
-            Some(at) => at,
-            None => u32::MAX,
-        },
-        core::sync::atomic::Ordering::Relaxed,
-    );
 }
 
 #[derive(Clone, Copy)]
@@ -144,8 +119,8 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
                 leaf(CallDomain::Public)
             }
             frame_system::Call::authorize_upgrade { .. } => leaf(CallDomain::InternalRoot),
-            frame_system::Call::apply_authorized_upgrade { .. } => {
-                if pending_upgrade_is_applicable() {
+            frame_system::Call::apply_authorized_upgrade { code } => {
+                if pending_upgrade_is_applicable(code) {
                     leaf(CallDomain::Public)
                 } else {
                     denied()
@@ -346,8 +321,8 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             pallet_migrations::Call::force_set_cursor { .. }
             | pallet_migrations::Call::force_set_active_cursor { .. }
             | pallet_migrations::Call::force_onboard_mbms { .. }
-            | pallet_migrations::Call::clear_historic { .. } => leaf(CallDomain::Public),
-            pallet_migrations::Call::__Ignore(_, _) => denied(),
+            | pallet_migrations::Call::clear_historic { .. }
+            | pallet_migrations::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::Sudo(call) => match call {
             // `sudo`/`sudo_unchecked_weight` dispatch the inner call as Root.
@@ -574,7 +549,22 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_attestor::Call::challenge_attestation { .. } => leaf(CallDomain::Public),
             pallet_attestor::Call::__Ignore(_, _) => denied(),
         },
+        RuntimeCall::ExecutionGuard(call) => match call {
+            pallet_execution_guard::Call::execute { .. }
+            | pallet_execution_guard::Call::apply_authorized_upgrade { .. }
+            | pallet_execution_guard::Call::expire_failed_execution { .. }
+            | pallet_execution_guard::Call::reject_stale { .. } => leaf(CallDomain::Public),
+            pallet_execution_guard::Call::ratify { .. } => leaf(CallDomain::ConstitutionalValues),
+            pallet_execution_guard::Call::__Ignore(_, _) => denied(),
+        },
     }
+}
+
+/// Guard dispatch analysis uses the same exhaustive runtime-call projection as
+/// the base filter. The dispatcher adds the guard-only distinction between the
+/// two internal upgrade domains before admitting a payload.
+pub(crate) fn project_for_guard(call: &RuntimeCall) -> FilterCall {
+    project_inner(call, &mut ProjectionBudget::root())
 }
 
 pub struct BleavitSafetyClassifier;
@@ -587,8 +577,9 @@ impl SafetyClassifier for BleavitSafetyClassifier {
     }
 }
 
-fn pending_upgrade_is_applicable() -> bool {
+fn pending_upgrade_is_applicable(code: &[u8]) -> bool {
     PendingExecutionGuard::applicable_at().is_some_and(|at| System::block_number() >= at)
+        && crate::configs::direct_system_upgrade_allowed(code)
 }
 
 /// Closed bare-leaf admission set required because stable2603 scheduler uses
@@ -633,7 +624,8 @@ pub fn is_values_enactment_leaf(call: &RuntimeCall) -> bool {
             | RuntimeCall::Guardian(pallet_guardian::Call::renew_playbook { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::set_members { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::resolve_challenge { .. })
-            | RuntimeCall::Oracle(pallet_oracle::Call::adjudicate { .. }) // A11-wiring: execution_guard.ratify joins this closed list with the pallet.
+            | RuntimeCall::Oracle(pallet_oracle::Call::adjudicate { .. })
+            | RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::ratify { .. })
     )
 }
 

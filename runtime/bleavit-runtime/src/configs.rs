@@ -4,13 +4,14 @@ use alloc::{borrow::Cow, vec::Vec};
 
 use frame_support::{
     derive_impl,
-    dispatch::DispatchClass,
+    dispatch::{DispatchClass, DispatchResult},
     parameter_types,
     traits::{
         fungibles::{Inspect, Mutate},
         tokens::Preservation,
         ConstBool, ConstU128, ConstU32, ConstU64, ConstU8, Contains, EqualPrivilegeOnly,
-        InstanceFilter, Nothing, TransformOrigin, VariantCountOf, WithdrawReasons,
+        InstanceFilter, Nothing, QueryPreimage, StorageInstance, TransformOrigin,
+        UnfilteredDispatchable, VariantCountOf, WithdrawReasons,
     },
     weights::{
         constants::{
@@ -25,20 +26,21 @@ use frame_system::{
     EnsureRoot, EnsureSigned,
 };
 use futarchy_primitives::{bounds, chain_identity, currency, kernel, EpochId, FixedU64, ParamKey};
+use parity_scale_codec::{Decode, Encode};
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 #[cfg(feature = "runtime-benchmarks")]
 use sp_runtime::AccountId32;
 use sp_runtime::{
-    traits::{AccountIdConversion, AccountIdLookup},
-    Perbill,
+    traits::{AccountIdConversion, AccountIdLookup, Dispatchable},
+    DispatchError, Perbill,
 };
 
 use crate::{
-    AccountId, AssetId, Aura, Balance, Balances, Block, CollatorSelection, ConditionalLedger,
-    ConsensusHook, ForeignAssets, FutarchyTreasury, Hash, MessageQueue, Migrations, Nonce,
-    PalletInfo, ParachainSystem, PolkadotXcm, Preimage, Referenda, Runtime, RuntimeCall,
-    RuntimeEvent, RuntimeFreezeReason, RuntimeHoldReason, RuntimeOrigin, RuntimeTask, Scheduler,
-    Session, SessionKeys, System, XcmpQueue, USDC_ASSET_ID, VERSION,
+    AccountId, AssetId, Aura, Balance, Balances, Block, BlockNumber, CollatorSelection,
+    ConditionalLedger, ConsensusHook, ForeignAssets, FutarchyTreasury, Hash, MessageQueue,
+    Migrations, Nonce, PalletInfo, ParachainSystem, PolkadotXcm, Preimage, Referenda, Runtime,
+    RuntimeCall, RuntimeEvent, RuntimeFreezeReason, RuntimeHoldReason, RuntimeOrigin, RuntimeTask,
+    Scheduler, Session, SessionKeys, System, XcmpQueue, USDC_ASSET_ID, VERSION,
 };
 
 const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
@@ -399,16 +401,183 @@ impl pallet_multisig::Config for Runtime {
 }
 
 parameter_types! {
-    pub MigrationMaxServiceWeight: Weight = Perbill::from_percent(50) * RuntimeBlockWeights::get().max_block;
+    pub MigrationMaxServiceWeight: Weight = Perbill::from_percent(bounds::MIGRATION_SERVICE_WEIGHT_PERCENT) * RuntimeBlockWeights::get().max_block;
 }
-#[derive_impl(pallet_migrations::config_preludes::TestDefaultConfig)]
+
+// Runtime-internal PB-MIGRATION observability. These aliases deliberately do
+// not join the 02-frozen pallet storage surface; every value is fixed-size and
+// bounded. The cursor itself remains single-sourced in `pallet-migrations`.
+pub struct MigrationHaltSourcesStorage;
+impl StorageInstance for MigrationHaltSourcesStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "HaltSources";
+}
+pub type MigrationHaltSources = frame_support::storage::types::StorageValue<
+    MigrationHaltSourcesStorage,
+    u8,
+    frame_support::pallet_prelude::ValueQuery,
+>;
+
+pub struct MigrationFailedStepStorage;
+impl StorageInstance for MigrationFailedStepStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "FailedStep";
+}
+pub type MigrationFailedStep = frame_support::storage::types::StorageValue<
+    MigrationFailedStepStorage,
+    u32,
+    frame_support::pallet_prelude::OptionQuery,
+>;
+
+pub struct MigrationProgressMarkerStorage;
+impl StorageInstance for MigrationProgressMarkerStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "ProgressMarker";
+}
+pub type MigrationProgressMarker = frame_support::storage::types::StorageValue<
+    MigrationProgressMarkerStorage,
+    ([u8; 32], BlockNumber),
+    frame_support::pallet_prelude::OptionQuery,
+>;
+
+const MIGRATION_FAILURE_HALT: u8 = 0b001;
+const MIGRATION_STALL_HALT: u8 = 0b010;
+const APPLIED_DETECTION_HALT: u8 = 0b100;
+const UPGRADE_ABORT_TRIGGER: u8 = 0b1000;
+const EXECUTION_HALT_SOURCES: u8 =
+    MIGRATION_FAILURE_HALT | MIGRATION_STALL_HALT | APPLIED_DETECTION_HALT;
+
+fn sync_execution_migration_halt(sources: u8) {
+    pallet_execution_guard::MigrationHalt::<Runtime>::put(sources & EXECUTION_HALT_SOURCES != 0);
+}
+
+fn set_migration_halt_source(source: u8) {
+    let sources = MigrationHaltSources::mutate(|sources| {
+        *sources |= source;
+        *sources
+    });
+    sync_execution_migration_halt(sources);
+}
+
+fn clear_migration_halt_sources(mask: u8) {
+    let remaining = MigrationHaltSources::mutate(|sources| {
+        *sources &= !mask;
+        *sources
+    });
+    sync_execution_migration_halt(remaining);
+}
+
+fn active_migration_marker(cursor: &pallet_migrations::ActiveCursorOf<Runtime>) -> [u8; 32] {
+    // `started_at` is lifecycle metadata, not cursor progress. Track the MBM
+    // index and the migration-owned cursor bytes that `step` actually returns.
+    sp_io::hashing::blake2_256(&(cursor.index, &cursor.inner_cursor).encode())
+}
+
+fn active_migration_stall_is_live(cursor: &pallet_migrations::ActiveCursorOf<Runtime>) -> bool {
+    MigrationProgressMarker::get().is_some_and(|(marker, since)| {
+        marker == active_migration_marker(cursor)
+            && System::block_number().saturating_sub(since) > kernel::MIGRATION_STALL_BLOCKS
+    })
+}
+
+fn track_migration_progress() {
+    let now = System::block_number();
+    match pallet_migrations::Cursor::<Runtime>::get() {
+        Some(pallet_migrations::MigrationCursor::Active(cursor)) => {
+            let marker = active_migration_marker(&cursor);
+            match MigrationProgressMarker::get() {
+                Some((previous, since)) if previous == marker => {
+                    // A lawful `SteppedMigration::step` may mutate storage yet
+                    // return identical cursor bytes. Such work lasting >900
+                    // blocks can conservatively false-trigger this bounded,
+                    // deterministic tracker. The halt self-clears when
+                    // `completed()` fires; the normative semantic definition
+                    // of "stalled" remains an open specification question.
+                    if now.saturating_sub(since) > kernel::MIGRATION_STALL_BLOCKS {
+                        set_migration_halt_source(MIGRATION_STALL_HALT);
+                    }
+                }
+                _ => MigrationProgressMarker::put((marker, now)),
+            }
+        }
+        Some(pallet_migrations::MigrationCursor::Stuck) => {
+            // The failure callback normally records this first. Seeing an
+            // externally restored stuck cursor is still a machine trigger.
+            set_migration_halt_source(MIGRATION_FAILURE_HALT);
+            MigrationProgressMarker::kill();
+        }
+        None => MigrationProgressMarker::kill(),
+    }
+}
+
+fn migration_validation_hook_weight() -> Weight {
+    // `remark_with_event` is the stable2603 benchmarked linear hash-of-bytes
+    // path. Charge it at CursorMaxLen plus the hook's bounded worst-case
+    // storage/proof work; this remains conservative until B5 benchmarking.
+    <<Runtime as frame_system::Config>::SystemWeightInfo as frame_system::WeightInfo>::remark_with_event(
+        bounds::MIGRATION_CURSOR_MAX_LEN,
+    )
+    .saturating_add(
+        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(8, 5),
+    )
+    .saturating_add(Weight::from_parts(
+        0,
+        u64::from(bounds::MIGRATION_CURSOR_MAX_LEN),
+    ))
+}
+
+/// PB-MIGRATION signal bridge. A failed step stays stuck (the SDK's
+/// fail-closed transaction pause) and makes the guard's machine trigger live.
+pub struct MigrationFailureToGuard;
+impl frame_support::migrations::FailedMigrationHandler for MigrationFailureToGuard {
+    fn failed(failed_step: Option<u32>) -> frame_support::migrations::FailedMigrationHandling {
+        match failed_step {
+            Some(index) => MigrationFailedStep::put(index),
+            None => MigrationFailedStep::kill(),
+        }
+        set_migration_halt_source(MIGRATION_FAILURE_HALT);
+        frame_support::migrations::FailedMigrationHandling::KeepStuck
+    }
+}
+
+/// A genuinely completed retry is the only SDK status transition that clears
+/// the PB-MIGRATION trigger. Starting a migration never clears an earlier halt.
+pub struct MigrationStatusToGuard;
+impl frame_support::migrations::MigrationStatusHandler for MigrationStatusToGuard {
+    fn started() {
+        MigrationFailedStep::kill();
+        track_migration_progress();
+    }
+
+    fn completed() {
+        MigrationFailedStep::kill();
+        MigrationProgressMarker::kill();
+        // MBM completion clears only migration failure/stall sources. An
+        // applied-code mismatch remains halted until a later valid applied
+        // callback resolves that condition. The additional try-state-before-
+        // lift coupling is intentionally still an open specification question.
+        clear_migration_halt_sources(MIGRATION_FAILURE_HALT | MIGRATION_STALL_HALT);
+    }
+}
+
 impl pallet_migrations::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     #[cfg(not(feature = "runtime-benchmarks"))]
     type Migrations = ();
     #[cfg(feature = "runtime-benchmarks")]
     type Migrations = pallet_migrations::mock_helpers::MockedMigrations;
+    type CursorMaxLen = ConstU32<{ bounds::MIGRATION_CURSOR_MAX_LEN }>;
+    type IdentifierMaxLen = ConstU32<{ bounds::MIGRATION_IDENTIFIER_MAX_LEN }>;
+    type MigrationStatusHandler = MigrationStatusToGuard;
+    type FailedMigrationHandler = MigrationFailureToGuard;
     type MaxServiceWeight = MigrationMaxServiceWeight;
+    type WeightInfo = pallet_migrations::weights::SubstrateWeight<Runtime>;
 }
 
 impl pallet_sudo::Config for Runtime {
@@ -425,7 +594,7 @@ parameter_types! {
 impl cumulus_pallet_parachain_system::Config for Runtime {
     type WeightInfo = ();
     type RuntimeEvent = RuntimeEvent;
-    type OnSystemEvent = ();
+    type OnSystemEvent = ExecutionGuardSystemEvent;
     type SelfParaId = staging_parachain_info::Pallet<Runtime>;
     type OutboundXcmpMessageSource = XcmpQueue;
     type DmpQueue = frame_support::traits::EnqueueWithOrigin<MessageQueue, RelayOrigin>;
@@ -1356,11 +1525,18 @@ impl pallet_guardian::GuardianProposalStatus for PendingGuardianStatus {
         (pallet_guardian::ProposalStatus::Other, false)
     }
 }
-/// A8 pending guardian-trigger seam: no trigger is active before epoch lands.
-pub struct PendingGuardianTriggers;
-impl pallet_guardian::GuardianTriggers for PendingGuardianTriggers {
+/// Guard-owned machine triggers that already have a production source. A8's
+/// remaining trigger signals stay false until its reserved runtime slot lands.
+pub struct RuntimeGuardianTriggers;
+impl pallet_guardian::GuardianTriggers for RuntimeGuardianTriggers {
     fn current() -> pallet_guardian::TriggerState {
-        pallet_guardian::TriggerState::none()
+        pallet_guardian::TriggerState {
+            // The relay-abort bit is guardian-visible but deliberately does
+            // not freeze the normal re-proposal lane: Abort preserves the old
+            // code and must not replace one wedge with another.
+            migration_halt: MigrationHaltSources::get() != 0,
+            ..pallet_guardian::TriggerState::none()
+        }
     }
 }
 /// A8/referenda integration pending adapter. Empty guardian membership at B1a
@@ -1380,7 +1556,7 @@ impl pallet_guardian::Config for Runtime {
     type ValuesOrigin = pallet_origins::EnsureConstitutionalValues;
     type CurrentEpoch = PendingEpochClock;
     type ProposalStatusProvider = PendingGuardianStatus;
-    type TriggerProvider = PendingGuardianTriggers;
+    type TriggerProvider = RuntimeGuardianTriggers;
     type ReviewScheduler = PendingGuardianScheduler;
     type RecallScheduler = PendingGuardianScheduler;
     type WeightInfo = pallet_guardian::weights::SubstrateWeight<Runtime>;
@@ -1392,6 +1568,826 @@ impl pallet_attestor::Config for Runtime {
     // Ratification shares ConstitutionalValues pending the stock-referenda track split SQ.
     type RatifyOrigin = pallet_origins::EnsureConstitutionalValues;
     type WeightInfo = pallet_attestor::weights::SubstrateWeight<Runtime>;
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = RuntimeBenchmarkHelper;
+}
+
+// --- B6 execution-guard production wiring ---------------------------------
+
+/// Test/benchmark-only payload commitment store for the reserved A8 seam.
+/// Production has no key path at all and therefore returns `None` below.
+#[cfg(any(test, feature = "runtime-benchmarks"))]
+fn pending_epoch_payload_key(pid: futarchy_primitives::ProposalId) -> Vec<u8> {
+    let mut key = b":bleavit:b6:epoch-payload:".to_vec();
+    key.extend_from_slice(&pid.to_le_bytes());
+    key
+}
+
+#[cfg(any(test, feature = "runtime-benchmarks"))]
+fn note_pending_epoch_payload(
+    pid: futarchy_primitives::ProposalId,
+    hash: futarchy_primitives::H256,
+) {
+    sp_io::storage::set(&pending_epoch_payload_key(pid), &hash.encode());
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_execution_payload(
+    pid: futarchy_primitives::ProposalId,
+    hash: futarchy_primitives::H256,
+) {
+    note_pending_epoch_payload(pid, hash);
+}
+
+/// Slot 61 is intentionally still empty. This adapter makes every production
+/// enqueue fail its immutable epoch commitment check and makes terminal
+/// callbacks no-ops; only cfg-gated tests/benchmarks can seed a commitment.
+pub struct PendingEpochHandoff;
+impl pallet_execution_guard::EpochHandoff for PendingEpochHandoff {
+    fn payload_hash(pid: futarchy_primitives::ProposalId) -> Option<futarchy_primitives::H256> {
+        #[cfg(any(test, feature = "runtime-benchmarks"))]
+        {
+            sp_io::storage::get(&pending_epoch_payload_key(pid))
+                .and_then(|bytes| Decode::decode(&mut &bytes[..]).ok())
+        }
+        #[cfg(not(any(test, feature = "runtime-benchmarks")))]
+        {
+            let _ = pid;
+            None
+        }
+    }
+    fn mark_executed(_: futarchy_primitives::ProposalId) -> DispatchResult {
+        Ok(())
+    }
+    fn mark_failed_executed(_: futarchy_primitives::ProposalId) -> DispatchResult {
+        Ok(())
+    }
+    fn retry_exhausted_to_measurement(_: futarchy_primitives::ProposalId) -> DispatchResult {
+        Ok(())
+    }
+    fn reject_or_stale(
+        _: futarchy_primitives::ProposalId,
+        _: futarchy_primitives::RejectReason,
+    ) -> DispatchResult {
+        Ok(())
+    }
+    fn is_terminal(_: futarchy_primitives::ProposalId) -> bool {
+        false
+    }
+}
+
+/// Only A8 may enqueue (I-9). Until slot 61 is wired, production rejects every
+/// origin. A sentinel exists solely in test/benchmark builds.
+pub struct PendingExecutionEnqueueAuthority;
+#[cfg(any(test, feature = "runtime-benchmarks"))]
+const EXECUTION_ENQUEUE_TEST_ACCOUNT: [u8; 32] = [242; 32];
+impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for PendingExecutionEnqueueAuthority {
+    type Success = ();
+    fn try_origin(origin: RuntimeOrigin) -> Result<(), RuntimeOrigin> {
+        #[cfg(any(test, feature = "runtime-benchmarks"))]
+        {
+            let raw: Result<frame_system::RawOrigin<AccountId>, RuntimeOrigin> =
+                origin.clone().into();
+            if matches!(raw, Ok(frame_system::RawOrigin::Signed(who)) if who == AccountId::new(EXECUTION_ENQUEUE_TEST_ACCOUNT))
+            {
+                return Ok(());
+            }
+        }
+        Err(origin)
+    }
+    #[cfg(feature = "runtime-benchmarks")]
+    fn try_successful_origin() -> Result<RuntimeOrigin, ()> {
+        Ok(RuntimeOrigin::signed(AccountId::new(
+            EXECUTION_ENQUEUE_TEST_ACCOUNT,
+        )))
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_execution_enqueue_origin() -> RuntimeOrigin {
+    RuntimeOrigin::signed(AccountId::new(EXECUTION_ENQUEUE_TEST_ACCOUNT))
+}
+
+pub struct RuntimeAttestations;
+impl pallet_execution_guard::Attestations for RuntimeAttestations {
+    fn artifact_hash(attestation_id: u32) -> Option<futarchy_primitives::H256> {
+        pallet_attestor::Attestations::<Runtime>::get()
+            .into_iter()
+            .find_map(|record| (record.id == attestation_id).then_some(record.artifact_hash))
+    }
+    fn present_unrevoked_unchallenged(attestation_id: u32) -> bool {
+        let record = pallet_attestor::Attestations::<Runtime>::get()
+            .into_iter()
+            .find(|record| record.id == attestation_id);
+        record.is_some_and(|record| {
+            matches!(
+                record.challenge,
+                None | Some(pallet_attestor::ChallengeStatus::Upheld)
+            ) && pallet_attestor::Members::<Runtime>::get()
+                .iter()
+                .any(|member| member.account == record.attestor && member.active)
+        })
+    }
+    fn has_quorum(
+        pid: futarchy_primitives::ProposalId,
+        artifact_hash: futarchy_primitives::H256,
+    ) -> bool {
+        crate::Attestor::has_quorum(pid, artifact_hash)
+    }
+}
+
+pub struct RuntimeGuardianState;
+impl pallet_execution_guard::GuardianState for RuntimeGuardianState {
+    fn rerun_held(pid: futarchy_primitives::ProposalId) -> bool {
+        // Slot 61 is not wired, so the exact A8 `in_rerun` bit is not yet
+        // available. Conservatively retain the hold while the dispatched
+        // guardian action remains live; unlike `RerunUsed`, this is not a
+        // lifetime veto on an adopted rerun that later re-enters the queue.
+        pallet_guardian::PendingActions::<Runtime>::get()
+            .iter()
+            .any(|action| {
+                action.dispatched
+                    && matches!(
+                        action.power,
+                        pallet_guardian::GuardianPower::DelayOnce { pid: held }
+                            | pallet_guardian::GuardianPower::ForceRerun { pid: held }
+                            if held == pid
+                    )
+            })
+    }
+    fn ledger_freeze_active() -> bool {
+        crate::Guardian::playbook_active(pallet_guardian::PlaybookId::LedgerFreeze)
+    }
+}
+
+pub struct ExecutionParams;
+impl pallet_execution_guard::Params for ExecutionParams {
+    fn exec_timelock(class: futarchy_primitives::ProposalClass) -> BlockNumber {
+        match class {
+            futarchy_primitives::ProposalClass::Param => u32_param(b"exec.lock.param"),
+            futarchy_primitives::ProposalClass::Treasury => u32_param(b"exec.lock.trs"),
+            futarchy_primitives::ProposalClass::Code => u32_param(b"exec.lock.code"),
+            futarchy_primitives::ProposalClass::Meta => u32_param(b"exec.lock.meta"),
+            futarchy_primitives::ProposalClass::Constitutional => 0,
+        }
+    }
+    fn exec_grace(_: futarchy_primitives::ProposalClass) -> BlockNumber {
+        u32_param(b"exec.grace")
+    }
+    fn code_spacing() -> BlockNumber {
+        u32_param(b"code.spacing")
+    }
+}
+
+pub struct RuntimeCapabilities;
+impl RuntimeCapabilities {
+    fn enabled(
+        class: futarchy_primitives::ProposalClass,
+        capability: pallet_constitution::Capability,
+    ) -> bool {
+        // `capability_enabled` is intentionally an exact live-table lookup:
+        // an absent `(class, capability)` row is disabled, matching the core.
+        crate::Constitution::capability_enabled(class, capability)
+    }
+
+    fn leaf_enabled(class: futarchy_primitives::ProposalClass, call: &RuntimeCall) -> bool {
+        match call {
+            RuntimeCall::Constitution(pallet_constitution::Call::set_param { key, .. }) => {
+                Self::enabled(class, pallet_constitution::Capability::SetParam(*key))
+            }
+            RuntimeCall::Constitution(pallet_constitution::Call::set_capability { .. }) => {
+                Self::enabled(class, pallet_constitution::Capability::SetCapability)
+            }
+            RuntimeCall::Constitution(pallet_constitution::Call::amend_registry { .. }) => {
+                Self::enabled(class, pallet_constitution::Capability::AmendRegistry)
+            }
+            RuntimeCall::Constitution(pallet_constitution::Call::set_release_channel {
+                ..
+            }) => Self::enabled(class, pallet_constitution::Capability::SetReleaseChannel),
+            RuntimeCall::System(frame_system::Call::authorize_upgrade { .. }) => {
+                Self::enabled(class, pallet_constitution::Capability::AuthorizeUpgrade)
+            }
+            RuntimeCall::FutarchyTreasury(
+                pallet_futarchy_treasury::Call::fund_budget_line { .. }
+                | pallet_futarchy_treasury::Call::spend { .. }
+                | pallet_futarchy_treasury::Call::open_stream { .. }
+                | pallet_futarchy_treasury::Call::cancel_stream { .. }
+                | pallet_futarchy_treasury::Call::issue_vit { .. }
+                | pallet_futarchy_treasury::Call::recover_foreign { .. },
+            ) => Self::enabled(class, pallet_constitution::Capability::TreasurySpend),
+            _ => {
+                let Ok(analysis) =
+                    <RuntimeBatchDispatcher as pallet_execution_guard::BatchDispatcher<
+                        RuntimeCall,
+                    >>::rederive_call(call)
+                else {
+                    return false;
+                };
+                analysis.domains.iter().all(|domain| match domain {
+                    pallet_execution_guard::CallDomain::Public
+                    | pallet_execution_guard::CallDomain::InternalRootApplyUpgrade => true,
+                    // Wrappers are peeled by `call_enabled`, so this arm only
+                    // sees genuine leaves. EVERY privileged leaf requires an
+                    // exact keyed/variant mapping above — a newly classified
+                    // Treasury/Code/Param/Meta call fails closed until its
+                    // 06 §3.2 capability row is made explicit here (it must
+                    // never inherit a broad capability structurally).
+                    pallet_execution_guard::CallDomain::Param
+                    | pallet_execution_guard::CallDomain::Treasury
+                    | pallet_execution_guard::CallDomain::Code
+                    | pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade
+                    | pallet_execution_guard::CallDomain::Meta => false,
+                })
+            }
+        }
+    }
+}
+
+impl pallet_execution_guard::Capabilities<RuntimeCall> for RuntimeCapabilities {
+    fn call_enabled(class: futarchy_primitives::ProposalClass, call: &RuntimeCall) -> bool {
+        match call {
+            RuntimeCall::Utility(
+                pallet_utility::Call::batch { calls }
+                | pallet_utility::Call::batch_all { calls }
+                | pallet_utility::Call::force_batch { calls },
+            ) => calls.iter().all(|call| Self::call_enabled(class, call)),
+            RuntimeCall::Utility(
+                pallet_utility::Call::as_derivative { call, .. }
+                | pallet_utility::Call::dispatch_as { call, .. }
+                | pallet_utility::Call::with_weight { call, .. },
+            )
+            | RuntimeCall::Proxy(
+                pallet_proxy::Call::proxy { call, .. }
+                | pallet_proxy::Call::proxy_announced { call, .. },
+            )
+            | RuntimeCall::Multisig(
+                pallet_multisig::Call::as_multi { call, .. }
+                | pallet_multisig::Call::as_multi_threshold_1 { call, .. },
+            )
+            | RuntimeCall::Sudo(
+                pallet_sudo::Call::sudo { call }
+                | pallet_sudo::Call::sudo_unchecked_weight { call, .. },
+            ) => Self::call_enabled(class, call),
+            _ => Self::leaf_enabled(class, call),
+        }
+    }
+}
+
+pub struct RuntimePreimages;
+impl pallet_execution_guard::Preimages for RuntimePreimages {
+    fn len(hash: futarchy_primitives::H256) -> Option<u32> {
+        <Preimage as QueryPreimage>::len(&Hash::from(hash))
+    }
+    fn fetch(hash: futarchy_primitives::H256) -> Option<Vec<u8>> {
+        <Preimage as QueryPreimage>::fetch(&Hash::from(hash), None)
+            .ok()
+            .map(Cow::into_owned)
+    }
+    fn unpin(hash: futarchy_primitives::H256) -> DispatchResult {
+        let hash = Hash::from(hash);
+        if !<Preimage as QueryPreimage>::is_requested(&hash) {
+            return Err(DispatchError::Unavailable);
+        }
+        <Preimage as QueryPreimage>::unrequest(&hash);
+        Ok(())
+    }
+}
+
+fn write_release_u32(
+    bytes: &mut [u8; pallet_constitution::RELEASE_CHANNEL_LEN],
+    range: core::ops::Range<usize>,
+    value: u32,
+) -> DispatchResult {
+    let slot = bytes
+        .get_mut(range)
+        .ok_or(DispatchError::Other("release channel offset"))?;
+    slot.copy_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+pub struct RuntimeReleaseChannel;
+impl pallet_execution_guard::ReleaseChannelWriter for RuntimeReleaseChannel {
+    fn on_upgrade_authorized(
+        target_spec_version: u32,
+        authorized_at: BlockNumber,
+    ) -> DispatchResult {
+        let channel = pallet_constitution::ReleaseChannel::<Runtime>::get();
+        let mut bytes = channel.bytes;
+        write_release_u32(
+            &mut bytes,
+            pallet_constitution::RELEASE_CHANNEL_UPDATED_AT,
+            authorized_at,
+        )?;
+        write_release_u32(
+            &mut bytes,
+            pallet_constitution::RELEASE_CHANNEL_SPEC_VERSION,
+            target_spec_version,
+        )?;
+        write_release_u32(
+            &mut bytes,
+            pallet_constitution::RELEASE_CHANNEL_PENDING_AUTHORIZED_AT,
+            authorized_at,
+        )?;
+        write_release_u32(
+            &mut bytes,
+            pallet_constitution::RELEASE_CHANNEL_FLAGS,
+            channel.flags() | pallet_constitution::RELEASE_CHANNEL_FLAG_URGENT_UPGRADE,
+        )?;
+        crate::Constitution::note_release_channel(bytes)
+    }
+    fn on_upgrade_applied(target_spec_version: u32) -> DispatchResult {
+        let channel = pallet_constitution::ReleaseChannel::<Runtime>::get();
+        // Tolerant clear (G-1/SQ-134, PR #65 P1): the caller has already
+        // verified the installed `:code` hash and version — an applied
+        // upgrade cannot be retried, so a writer-(b) `set_release_channel`
+        // rewrite that no longer shows this pending upgrade must not wedge
+        // `PendingUpgrade`. Writer (b)'s newer value is authoritative; leave
+        // it untouched and let the guard record the application.
+        if channel.pending_authorized_at() == 0 || channel.spec_version() != target_spec_version {
+            return Ok(());
+        }
+        let mut bytes = channel.bytes;
+        write_release_u32(
+            &mut bytes,
+            pallet_constitution::RELEASE_CHANNEL_UPDATED_AT,
+            System::block_number(),
+        )?;
+        write_release_u32(
+            &mut bytes,
+            pallet_constitution::RELEASE_CHANNEL_PENDING_AUTHORIZED_AT,
+            0,
+        )?;
+        write_release_u32(
+            &mut bytes,
+            pallet_constitution::RELEASE_CHANNEL_FLAGS,
+            channel.flags() & !pallet_constitution::RELEASE_CHANNEL_FLAG_URGENT_UPGRADE,
+        )?;
+        crate::Constitution::note_release_channel(bytes)
+    }
+    fn on_upgrade_aborted(target_spec_version: u32) -> DispatchResult {
+        let channel = pallet_constitution::ReleaseChannel::<Runtime>::get();
+        // Tolerant clear (G-1/SQ-131): a writer-(b) `set_release_channel`
+        // rewrite during the in-flight upgrade is newer and authoritative —
+        // leave it untouched and still let the guard restore its status quo.
+        // Only a channel that still shows exactly this pending upgrade is
+        // cleared (bump `updated_at`, zero pending, drop URGENT — the same
+        // writer-(a) shape as the applied-path clear, SQ-133 offsets).
+        if channel.pending_authorized_at() == 0 || channel.spec_version() != target_spec_version {
+            return Ok(());
+        }
+        let mut bytes = channel.bytes;
+        write_release_u32(
+            &mut bytes,
+            pallet_constitution::RELEASE_CHANNEL_UPDATED_AT,
+            System::block_number(),
+        )?;
+        write_release_u32(
+            &mut bytes,
+            pallet_constitution::RELEASE_CHANNEL_PENDING_AUTHORIZED_AT,
+            0,
+        )?;
+        write_release_u32(
+            &mut bytes,
+            pallet_constitution::RELEASE_CHANNEL_FLAGS,
+            channel.flags() & !pallet_constitution::RELEASE_CHANNEL_FLAG_URGENT_UPGRADE,
+        )?;
+        crate::Constitution::note_release_channel(bytes)
+    }
+}
+
+pub struct RuntimeUpgradeSchedule;
+impl pallet_execution_guard::UpgradeSchedule for RuntimeUpgradeSchedule {
+    fn scheduling_performed() -> bool {
+        // A guard pending upgrade exists before application. Scheduling is
+        // proven only once frame-system consumed AuthorizedUpgrade and
+        // Cumulus durably holds the validation function for relay review.
+        cumulus_pallet_parachain_system::PendingValidationCode::<Runtime>::exists()
+            && System::authorized_upgrade().is_none()
+    }
+}
+
+fn guard_domain(
+    domain: origins_core::CallDomain,
+) -> Result<pallet_execution_guard::CallDomain, DispatchError> {
+    match domain {
+        origins_core::CallDomain::Public => Ok(pallet_execution_guard::CallDomain::Public),
+        origins_core::CallDomain::Param => Ok(pallet_execution_guard::CallDomain::Param),
+        origins_core::CallDomain::Treasury => Ok(pallet_execution_guard::CallDomain::Treasury),
+        origins_core::CallDomain::Code => Ok(pallet_execution_guard::CallDomain::Code),
+        origins_core::CallDomain::Meta => Ok(pallet_execution_guard::CallDomain::Meta),
+        origins_core::CallDomain::InternalRoot => {
+            Ok(pallet_execution_guard::CallDomain::InternalRootApplyUpgrade)
+        }
+        origins_core::CallDomain::Nobody
+        | origins_core::CallDomain::ConstitutionalValues
+        | origins_core::CallDomain::OracleResolution
+        | origins_core::CallDomain::GuardianHold
+        | origins_core::CallDomain::EmergencyPlaybook => {
+            Err(DispatchError::Other("guard-inadmissible call domain"))
+        }
+    }
+}
+
+fn collect_guard_domains(
+    call: &origins_core::RuntimeCall,
+    domains: &mut pallet_execution_guard::ReDerivedDomains,
+    nested_calls: &mut u32,
+) -> DispatchResult {
+    *nested_calls = nested_calls
+        .checked_add(1)
+        .ok_or(DispatchError::Other("guard nested-call overflow"))?;
+    match call {
+        origins_core::RuntimeCall::Leaf(domain) => {
+            let domain = guard_domain(*domain)?;
+            if !domains.contains(&domain) {
+                domains
+                    .try_push(domain)
+                    .map_err(|_| DispatchError::Other("too many guard domains"))?;
+            }
+        }
+        origins_core::RuntimeCall::UtilityBatch(calls)
+        | origins_core::RuntimeCall::UtilityBatchAll(calls)
+        | origins_core::RuntimeCall::UtilityForceBatch(calls) => {
+            for call in calls {
+                collect_guard_domains(call, domains, nested_calls)?;
+            }
+        }
+        origins_core::RuntimeCall::UtilityDispatchAs(call)
+        | origins_core::RuntimeCall::UtilityAsDerivative(call)
+        | origins_core::RuntimeCall::UtilityWithWeight(call)
+        | origins_core::RuntimeCall::Proxy(call)
+        | origins_core::RuntimeCall::ProxyAnnounced(call)
+        | origins_core::RuntimeCall::MultisigAsMulti(call)
+        | origins_core::RuntimeCall::MultisigAsMultiThreshold1(call)
+        | origins_core::RuntimeCall::Sudo(call) => {
+            collect_guard_domains(&call.0, domains, nested_calls)?;
+        }
+        origins_core::RuntimeCall::Scheduler { call, .. } => {
+            collect_guard_domains(&call.0, domains, nested_calls)?;
+        }
+        origins_core::RuntimeCall::MultisigApproveAsMulti => {}
+    }
+    Ok(())
+}
+
+fn guard_has_non_atomic_wrapper(call: &origins_core::RuntimeCall) -> bool {
+    match call {
+        origins_core::RuntimeCall::UtilityBatch(_)
+        | origins_core::RuntimeCall::UtilityForceBatch(_)
+        | origins_core::RuntimeCall::Sudo(_) => true,
+        origins_core::RuntimeCall::UtilityBatchAll(calls) => {
+            calls.iter().any(guard_has_non_atomic_wrapper)
+        }
+        origins_core::RuntimeCall::UtilityDispatchAs(call)
+        | origins_core::RuntimeCall::UtilityAsDerivative(call)
+        | origins_core::RuntimeCall::UtilityWithWeight(call)
+        | origins_core::RuntimeCall::Proxy(call)
+        | origins_core::RuntimeCall::ProxyAnnounced(call)
+        | origins_core::RuntimeCall::MultisigAsMulti(call)
+        | origins_core::RuntimeCall::MultisigAsMultiThreshold1(call) => {
+            guard_has_non_atomic_wrapper(&call.0)
+        }
+        origins_core::RuntimeCall::Scheduler { call, .. } => guard_has_non_atomic_wrapper(&call.0),
+        origins_core::RuntimeCall::Leaf(_) | origins_core::RuntimeCall::MultisigApproveAsMulti => {
+            false
+        }
+    }
+}
+
+fn runtime_call_contains_apply(call: &RuntimeCall) -> bool {
+    match call {
+        RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { .. }) => true,
+        RuntimeCall::Utility(
+            pallet_utility::Call::batch { calls }
+            | pallet_utility::Call::batch_all { calls }
+            | pallet_utility::Call::force_batch { calls },
+        ) => calls.iter().any(runtime_call_contains_apply),
+        RuntimeCall::Utility(
+            pallet_utility::Call::as_derivative { call, .. }
+            | pallet_utility::Call::dispatch_as { call, .. }
+            | pallet_utility::Call::with_weight { call, .. },
+        )
+        | RuntimeCall::Proxy(
+            pallet_proxy::Call::proxy { call, .. }
+            | pallet_proxy::Call::proxy_announced { call, .. },
+        )
+        | RuntimeCall::Multisig(
+            pallet_multisig::Call::as_multi { call, .. }
+            | pallet_multisig::Call::as_multi_threshold_1 { call, .. },
+        )
+        | RuntimeCall::Sudo(
+            pallet_sudo::Call::sudo { call }
+            | pallet_sudo::Call::sudo_unchecked_weight { call, .. },
+        ) => runtime_call_contains_apply(call),
+        _ => false,
+    }
+}
+
+/// Exact stable2603 pre-write checks performed by
+/// `cumulus_pallet_parachain_system::schedule_code_upgrade`. Frame-system
+/// removes `AuthorizedUpgrade` before invoking `OnSetCode`, and a direct
+/// dispatch is not transactional, so every typed Cumulus rejection must be
+/// refused by the filter before frame-system can consume the authorization.
+fn parachain_upgrade_preflight(code: &[u8]) -> DispatchResult {
+    use cumulus_pallet_parachain_system as parachain_system;
+
+    if !parachain_system::ValidationData::<Runtime>::exists() {
+        return Err(parachain_system::Error::<Runtime>::ValidationDataNotAvailable.into());
+    }
+    if parachain_system::UpgradeRestrictionSignal::<Runtime>::get().is_some() {
+        return Err(parachain_system::Error::<Runtime>::ProhibitedByPolkadot.into());
+    }
+    if parachain_system::PendingValidationCode::<Runtime>::exists() {
+        return Err(parachain_system::Error::<Runtime>::OverlappingUpgrades.into());
+    }
+    let host = parachain_system::HostConfiguration::<Runtime>::get()
+        .ok_or(parachain_system::Error::<Runtime>::HostConfigurationNotAvailable)?;
+    let code_len =
+        u32::try_from(code.len()).map_err(|_| parachain_system::Error::<Runtime>::TooBig)?;
+    if code_len > host.max_code_size {
+        return Err(parachain_system::Error::<Runtime>::TooBig.into());
+    }
+    Ok(())
+}
+
+pub struct RuntimeBatchDispatcher;
+impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeBatchDispatcher {
+    fn rederive_call(
+        call: &RuntimeCall,
+    ) -> Result<pallet_execution_guard::ReDerivedCall, DispatchError> {
+        if Self::authorize_upgrade_hash(call).is_some() {
+            let mut domains = pallet_execution_guard::ReDerivedDomains::default();
+            domains
+                .try_push(pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade)
+                .map_err(|_| DispatchError::Other("authorize domain bound"))?;
+            return Ok(pallet_execution_guard::ReDerivedCall {
+                domains,
+                nested_calls: 1,
+            });
+        }
+        let projected = crate::classifier::project_for_guard(call);
+        let mut domains = pallet_execution_guard::ReDerivedDomains::default();
+        let mut nested_calls = 0;
+        collect_guard_domains(&projected, &mut domains, &mut nested_calls)?;
+        if runtime_call_contains_apply(call)
+            && !domains.contains(&pallet_execution_guard::CallDomain::InternalRootApplyUpgrade)
+        {
+            domains
+                .try_push(pallet_execution_guard::CallDomain::InternalRootApplyUpgrade)
+                .map_err(|_| DispatchError::Other("apply domain bound"))?;
+        }
+        Ok(pallet_execution_guard::ReDerivedCall {
+            domains,
+            nested_calls,
+        })
+    }
+
+    fn safety_filter(class: futarchy_primitives::ProposalClass, call: &RuntimeCall) -> bool {
+        let projected = crate::classifier::project_for_guard(call);
+        if guard_has_non_atomic_wrapper(&projected) {
+            return false;
+        }
+        origins_core::Origin::from_proposal_class(class).is_some_and(|origin| {
+            crate::classifier::RuntimeBaseCallFilter::contains_for(origin, call)
+        })
+    }
+
+    fn authorize_upgrade_hash(call: &RuntimeCall) -> Option<futarchy_primitives::H256> {
+        match call {
+            RuntimeCall::System(frame_system::Call::authorize_upgrade { code_hash }) => {
+                Some(code_hash.0)
+            }
+            _ => None,
+        }
+    }
+
+    fn dispatch_with_class_origin(
+        call: RuntimeCall,
+        class: futarchy_primitives::ProposalClass,
+    ) -> DispatchResult {
+        let class_origin =
+            origins_core::Origin::from_proposal_class(class).ok_or(DispatchError::BadOrigin)?;
+        if !crate::classifier::RuntimeBaseCallFilter::contains_for(class_origin, &call) {
+            return Err(DispatchError::Other("guard dispatch-time safety filter"));
+        }
+        let origin = pallet_origins::Origin::from(class_origin);
+        call.dispatch_bypass_filter(RuntimeOrigin::from(origin))
+            .map(|_| ())
+            .map_err(|error| error.error)
+    }
+
+    fn dispatch_authorize_upgrade(code_hash: futarchy_primitives::H256) -> DispatchResult {
+        let call = RuntimeCall::System(frame_system::Call::authorize_upgrade {
+            code_hash: Hash::from(code_hash),
+        });
+        call.dispatch_bypass_filter(RuntimeOrigin::root())
+            .map(|_| ())
+            .map_err(|error| error.error)
+    }
+
+    fn dispatch_apply_authorized_upgrade(code: Vec<u8>) -> DispatchResult {
+        frame_support::storage::with_storage_layer(|| {
+            parachain_upgrade_preflight(&code)?;
+
+            // PB-MIGRATION's rollback is a forward remediation upgrade. The
+            // stock frame-system preflight rejects every non-empty MBM cursor,
+            // so only an actually stuck cursor, or a still-live active stall
+            // backed by the migration failure/stall sources, is retired before
+            // scheduling. Unrelated alarms and resumed/healthy active work do
+            // not make a cursor disposable.
+            let retire_cursor = match pallet_migrations::Cursor::<Runtime>::get() {
+                Some(pallet_migrations::MigrationCursor::Stuck) => true,
+                Some(pallet_migrations::MigrationCursor::Active(ref cursor)) => {
+                    MigrationHaltSources::get() & (MIGRATION_FAILURE_HALT | MIGRATION_STALL_HALT)
+                        != 0
+                        && active_migration_stall_is_live(cursor)
+                }
+                None => false,
+            };
+            if retire_cursor {
+                pallet_migrations::Cursor::<Runtime>::kill();
+                MigrationProgressMarker::kill();
+            } else {
+                #[cfg(not(feature = "runtime-benchmarks"))]
+                System::can_set_code(&code, true).into_result()?;
+            }
+
+            let call = RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { code });
+            call.dispatch(RuntimeOrigin::none())
+                .map(|_| ())
+                .map_err(|error| error.error)
+        })
+    }
+
+    fn observed_runtime_version(
+        code: &[u8],
+    ) -> Option<futarchy_primitives::RuntimeVersionConstraint> {
+        let decoded = sp_io::misc::runtime_version(code)
+            .and_then(|bytes| sp_version::RuntimeVersion::decode(&mut &bytes[..]).ok());
+        #[cfg(feature = "runtime-benchmarks")]
+        let decoded = decoded.or_else(|| {
+            let mut version = VERSION;
+            version.spec_version = version.spec_version.saturating_add(1);
+            Some(version)
+        });
+        let version = decoded?;
+        let spec_name = futarchy_primitives::BoundedVec::<u8, 32>::try_from(
+            version.spec_name.as_bytes().to_vec(),
+        )
+        .ok()?;
+        Some(futarchy_primitives::RuntimeVersionConstraint {
+            spec_name,
+            spec_version: version.spec_version,
+        })
+    }
+
+    fn checkpoint() -> (futarchy_primitives::H256, futarchy_primitives::H256) {
+        let parent_hash = System::parent_hash().0;
+        let root = sp_io::storage::root(VERSION.state_version());
+        let state_root = Hash::decode(&mut &root[..]).map_or([0; 32], |hash| hash.0);
+        (parent_hash, state_root)
+    }
+}
+
+/// The origin-blind base filter admits the permissionless frame-system apply
+/// call only after reproducing every artifact-dependent guard precondition.
+/// This prevents a direct call from consuming `AuthorizedUpgrade` with the
+/// wrong version or while pallet-migrations is active.
+pub(crate) fn direct_system_upgrade_allowed(code: &[u8]) -> bool {
+    let Some(pending) = pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get() else {
+        return false;
+    };
+    if sp_io::hashing::blake2_256(code) != pending.hash {
+        return false;
+    }
+    let Some(observed) = <RuntimeBatchDispatcher as pallet_execution_guard::BatchDispatcher<
+        RuntimeCall,
+    >>::observed_runtime_version(code) else {
+        return false;
+    };
+    let Some(current) = pallet_execution_guard::CurrentSpecName::<Runtime>::get() else {
+        return false;
+    };
+    let version_matches = observed.spec_name == current.spec_name
+        && observed.spec_version == pending.target_spec_version;
+    #[cfg(not(feature = "runtime-benchmarks"))]
+    let preflight_passes = System::can_set_code(code, true).into_result().is_ok()
+        && parachain_upgrade_preflight(code).is_ok();
+    #[cfg(feature = "runtime-benchmarks")]
+    let preflight_passes = true;
+    version_matches && preflight_passes
+}
+
+fn scheduled_upgrade_aborted() -> bool {
+    use cumulus_primitives_core::relay_chain::UpgradeGoAhead;
+
+    let Some(pending) = pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get() else {
+        return false;
+    };
+    if pallet_execution_guard::ScheduledUpgrade::<Runtime>::get() != Some(pending.hash)
+        || !matches!(
+            cumulus_pallet_parachain_system::UpgradeGoAhead::<Runtime>::get(),
+            Some(UpgradeGoAhead::Abort)
+        )
+        || cumulus_pallet_parachain_system::PendingValidationCode::<Runtime>::exists()
+    {
+        return false;
+    }
+    // The scheduled latch surviving proves `on_validation_code_applied` did
+    // not complete. The installed-code comparison independently separates an
+    // Abort from the GoAhead path that consumed the same Cumulus pending key.
+    sp_io::storage::get(sp_core::storage::well_known_keys::CODE)
+        .map(|code| sp_io::hashing::blake2_256(&code) != pending.hash)
+        .unwrap_or(true)
+}
+
+/// Cumulus calls this only after relay `GoAhead` has written the new `:code`.
+/// Any missing/mismatched guard state raises PB-MIGRATION instead of claiming
+/// that an untracked upgrade applied.
+pub struct ExecutionGuardSystemEvent;
+impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEvent {
+    fn on_validation_data(_: &cumulus_primitives_core::PersistedValidationData) {
+        frame_system::Pallet::<Runtime>::register_extra_weight_unchecked(
+            migration_validation_hook_weight(),
+            DispatchClass::Mandatory,
+        );
+        // Called once by the mandatory parachain inherent before the
+        // executive services the MBM cursor for this block. Comparing with
+        // the prior marker is O(1) storage and bounded by CursorMaxLen.
+        track_migration_progress();
+        if scheduled_upgrade_aborted() {
+            if crate::ExecutionGuard::validation_code_aborted().is_ok() {
+                // Guardian-visible incident trigger, intentionally not an
+                // execution-queue halt: the relay preserved status quo and a
+                // fresh normal proposal must remain possible.
+                set_migration_halt_source(UPGRADE_ABORT_TRIGGER);
+            } else {
+                // A failed status-quo cleanup is itself a halt-worthy applied
+                // boundary mismatch; retain every pending record for review.
+                set_migration_halt_source(UPGRADE_ABORT_TRIGGER | APPLIED_DETECTION_HALT);
+            }
+        }
+    }
+    fn on_validation_code_applied() {
+        let valid =
+            sp_io::storage::get(sp_core::storage::well_known_keys::CODE).is_some_and(|code| {
+                let hash = sp_io::hashing::blake2_256(&code);
+                let observed =
+                    <RuntimeBatchDispatcher as pallet_execution_guard::BatchDispatcher<
+                        RuntimeCall,
+                    >>::observed_runtime_version(&code);
+                pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_some_and(
+                    |pending| {
+                        let current = pallet_execution_guard::CurrentSpecName::<Runtime>::get();
+                        hash == pending.hash
+                            && observed.is_some_and(|version| {
+                                current.is_some_and(|current| {
+                                    version.spec_name == current.spec_name
+                                        && version.spec_version == pending.target_spec_version
+                                })
+                            })
+                    },
+                )
+            });
+        if !valid || crate::ExecutionGuard::validation_code_applied().is_err() {
+            set_migration_halt_source(APPLIED_DETECTION_HALT);
+        } else {
+            MigrationFailedStep::kill();
+            MigrationProgressMarker::kill();
+            // A valid recovery image may intentionally carry zero MBMs, in
+            // which case `MigrationStatusHandler::completed()` never fires.
+            // Any MBM in the new image that later fails/stalls re-raises its
+            // own source through the normal handlers.
+            clear_migration_halt_sources(
+                MIGRATION_FAILURE_HALT
+                    | MIGRATION_STALL_HALT
+                    | APPLIED_DETECTION_HALT
+                    | UPGRADE_ABORT_TRIGGER,
+            );
+        }
+    }
+    fn on_relay_state_proof(
+        _: &cumulus_pallet_parachain_system::relay_state_snapshot::RelayChainStateProof,
+    ) -> Weight {
+        Weight::zero()
+    }
+}
+
+impl pallet_execution_guard::Config for Runtime {
+    type Epoch = PendingEpochHandoff;
+    type EnqueueAuthority = PendingExecutionEnqueueAuthority;
+    type Attestations = RuntimeAttestations;
+    type KeeperRebate = FutarchyTreasury;
+    type Guardian = RuntimeGuardianState;
+    type Params = ExecutionParams;
+    type Capabilities = RuntimeCapabilities;
+    type UpgradeSchedule = RuntimeUpgradeSchedule;
+    type Preimages = RuntimePreimages;
+    type ReleaseChannel = RuntimeReleaseChannel;
+    type RatifyOrigin = pallet_origins::EnsureConstitutionalValues;
+    type Dispatcher = RuntimeBatchDispatcher;
+    type MaxRuntimeCodeBytes = ConstU32<{ pallet_preimage::MAX_SIZE }>;
+    type WeightInfo = pallet_execution_guard::weights::SubstrateWeight<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
@@ -1484,5 +2480,154 @@ impl pallet_attestor::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper 
     }
     fn ratify() -> RuntimeOrigin {
         pallet_origins::Origin::ConstitutionalValues.into()
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_guard_enqueue(
+    pid: futarchy_primitives::ProposalId,
+    call: RuntimeCall,
+    domain: pallet_execution_guard::CallDomain,
+) -> Result<BlockNumber, DispatchError> {
+    use frame_support::traits::StorePreimage;
+
+    let batch =
+        pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(alloc::vec![call])
+            .map_err(|_| DispatchError::Other("benchmark guard batch bound"))?;
+    let bytes = batch.encode();
+    let payload_len = u32::try_from(bytes.len())
+        .map_err(|_| DispatchError::Other("benchmark guard payload length"))?;
+    let hash = <Preimage as StorePreimage>::note(Cow::Owned(bytes))?;
+    <Preimage as QueryPreimage>::request(&hash);
+    note_pending_epoch_payload(pid, hash.0);
+
+    let now = System::block_number();
+    let maturity = now
+        .checked_add(
+            <ExecutionParams as pallet_execution_guard::Params>::exec_timelock(
+                futarchy_primitives::ProposalClass::Param,
+            ),
+        )
+        .ok_or(DispatchError::Arithmetic(
+            sp_runtime::ArithmeticError::Overflow,
+        ))?;
+    let grace_end = maturity
+        .checked_add(
+            <ExecutionParams as pallet_execution_guard::Params>::exec_grace(
+                futarchy_primitives::ProposalClass::Param,
+            ),
+        )
+        .ok_or(DispatchError::Arithmetic(
+            sp_runtime::ArithmeticError::Overflow,
+        ))?;
+    let version_constraint = pallet_execution_guard::CurrentSpecName::<Runtime>::get()
+        .ok_or(DispatchError::Other("benchmark guard current version"))?;
+    let declared_domains =
+        pallet_execution_guard::pallet::StoredDomains::try_from(alloc::vec![domain])
+            .map_err(|_| DispatchError::Other("benchmark guard domain bound"))?;
+    crate::ExecutionGuard::enqueue(
+        RuntimeOrigin::signed(AccountId::new(EXECUTION_ENQUEUE_TEST_ACCOUNT)),
+        pallet_execution_guard::pallet::StoredQueuedExecution {
+            pid,
+            payload_hash: hash.0,
+            payload_len,
+            class: futarchy_primitives::ProposalClass::Param,
+            maturity,
+            grace_end,
+            version_constraint,
+            meters_declared: Default::default(),
+            ratify_ref: None,
+            ratification_passed: false,
+            attestation_id: None,
+            pre_upgrade_checkpoint: None,
+            cancelled: false,
+            declared_domains,
+            failed_at: None,
+        },
+        false,
+    )?;
+    Ok(maturity)
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_execution_guard::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
+    fn ratify_origin() -> RuntimeOrigin {
+        pallet_origins::Origin::ConstitutionalValues.into()
+    }
+
+    fn prime_ratify(pid: futarchy_primitives::ProposalId, _: u32) {
+        note_pending_epoch_payload(pid, sp_io::hashing::blake2_256(&pid.encode()));
+    }
+
+    fn prime_execute(pid: futarchy_primitives::ProposalId) {
+        let key = pallet_constitution::key16(b"mkt.obs_interval");
+        let Some(mut record) = pallet_constitution::Params::<Runtime>::get(key) else {
+            return;
+        };
+        record.cooldown_epochs = 0;
+        pallet_constitution::Params::<Runtime>::insert(key, record);
+        let call = RuntimeCall::Constitution(pallet_constitution::Call::set_param {
+            key,
+            value: record.value,
+        });
+        if let Ok(maturity) =
+            benchmark_guard_enqueue(pid, call, pallet_execution_guard::CallDomain::Param)
+        {
+            System::set_block_number(maturity);
+        }
+    }
+
+    fn prime_failed(pid: futarchy_primitives::ProposalId) {
+        let call = RuntimeCall::System(frame_system::Call::remark {
+            remark: b"guard-benchmark-failure".to_vec(),
+        });
+        if let Ok(maturity) =
+            benchmark_guard_enqueue(pid, call, pallet_execution_guard::CallDomain::Public)
+        {
+            System::set_block_number(maturity);
+            let caller = AccountId::new([241; 32]);
+            let _ = crate::ExecutionGuard::execute(RuntimeOrigin::signed(caller), pid);
+            if let Some(failed_at) = pallet_execution_guard::pallet::Queue::<Runtime>::get(pid)
+                .and_then(|queued| queued.failed_at)
+            {
+                System::set_block_number(
+                    failed_at
+                        .saturating_add(pallet_execution_guard::RETRY_WINDOW)
+                        .saturating_add(1),
+                );
+            }
+        }
+    }
+
+    fn prime_pending_upgrade(code: &[u8]) {
+        let hash = sp_io::hashing::blake2_256(code);
+        let now = System::block_number();
+        let _ = System::authorize_upgrade(RuntimeOrigin::root(), Hash::from(hash));
+        pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::put(
+            pallet_execution_guard::PendingUpgrade {
+                hash,
+                authorized_at: now,
+                applicable_at: now,
+                target_spec_version: VERSION.spec_version.saturating_add(1),
+            },
+        );
+    }
+
+    fn prime_stale(pid: futarchy_primitives::ProposalId) {
+        let key = pallet_constitution::key16(b"mkt.obs_interval");
+        let Some(record) = pallet_constitution::Params::<Runtime>::get(key) else {
+            return;
+        };
+        let call = RuntimeCall::Constitution(pallet_constitution::Call::set_param {
+            key,
+            value: record.value,
+        });
+        if benchmark_guard_enqueue(pid, call, pallet_execution_guard::CallDomain::Param).is_ok() {
+            pallet_execution_guard::CurrentSpecName::<Runtime>::mutate(|current| {
+                if let Some(version) = current {
+                    version.spec_version = version.spec_version.saturating_add(1);
+                }
+            });
+        }
     }
 }
