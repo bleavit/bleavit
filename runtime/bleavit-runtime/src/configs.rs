@@ -2542,6 +2542,16 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         let Some(calls) = proposal_calls(proposal) else {
             return StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold);
         };
+        let footprint = crate::classifier::derive_resource_footprint(&calls);
+        let unclassifiable = || {
+            if proposal.resources.is_empty() {
+                StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold)
+            } else {
+                StaticCheckDisposition::SlashAll(
+                    futarchy_primitives::RejectReason::ConstitutionViolation,
+                )
+            }
+        };
         // 05 §1/T4 requires every proposal payload to derive at least one
         // class domain. Empty batches and call carriers with no classifiable
         // leaf (for example an empty utility batch) are verifiable no-ops,
@@ -2552,20 +2562,16 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         let mut has_classifiable_domain = false;
         for call in &calls {
             let Ok(analysis) = crate::classifier::RuntimeDispatcher::rederive_call(call) else {
-                return StaticCheckDisposition::Refund(
-                    futarchy_primitives::RejectReason::ProcessHold,
-                );
+                return if footprint.is_err() {
+                    unclassifiable()
+                } else {
+                    StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold)
+                };
             };
             has_classifiable_domain |= !analysis.domains.is_empty();
         }
         if !has_classifiable_domain {
-            return if proposal.resources.is_empty() {
-                StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold)
-            } else {
-                StaticCheckDisposition::SlashAll(
-                    futarchy_primitives::RejectReason::ConstitutionViolation,
-                )
-            };
+            return unclassifiable();
         }
         if !calls
             .iter()
@@ -2581,10 +2587,25 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         {
             return StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold);
         }
-        // SQ-172: no canonical RuntimeCall→8-byte resource-key mapping exists.
-        // A non-empty payload is therefore implementation-unverifiable, never
-        // evidence of a false declaration. Cancel status quo and refund.
-        StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold)
+        let Ok(footprint) = footprint else {
+            return unclassifiable();
+        };
+        let declared_matches_footprint = proposal
+            .resources
+            .iter()
+            .all(|resource| footprint.iter().any(|derived| derived == resource))
+            && footprint.iter().all(|resource| {
+                proposal
+                    .resources
+                    .iter()
+                    .any(|declared| declared == resource)
+            });
+        if !declared_matches_footprint {
+            return StaticCheckDisposition::SlashAll(
+                futarchy_primitives::RejectReason::ConstitutionViolation,
+            );
+        }
+        StaticCheckDisposition::Eligible
     }
 
     fn queue_time_check(proposal: &futarchy_primitives::Proposal<AccountId>) -> bool {
