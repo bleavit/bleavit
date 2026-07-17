@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::pallet::{Pallet, TickBatch};
+use alloc::{vec, vec::Vec};
 use frame_benchmarking::v2::*;
 use frame_system::RawOrigin;
 use futarchy_primitives::{phase_offsets, DecisionOutcome, ProposalState};
@@ -296,10 +297,10 @@ mod benches {
         #[extrinsic_call]
         _(origin as T::RuntimeOrigin, 0);
 
-        assert_eq!(
-            crate::Cohorts::<T>::get(0).map(|cohort| cohort.status),
-            Some(CohortStatus::Void)
-        );
+        assert!(!crate::Cohorts::<T>::contains_key(0));
+        assert!(crate::RecentCohortSummaries::<T>::get()
+            .iter()
+            .any(|summary| summary.epoch == 0 && summary.voided));
         Ok(())
     }
 

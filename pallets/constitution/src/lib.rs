@@ -268,6 +268,21 @@ pub mod pallet {
             let updated = record
                 .checked_update(value, T::CurrentEpoch::get())
                 .map_err(Self::map_core_error)?;
+            if let Some(pair) = constitution_core::gate_v_min_pair(key) {
+                let paired = Params::<T>::get(pair).ok_or(Error::<T>::TryStateViolation)?;
+                let (decision, gate) = if key.as_slice().starts_with(b"dec.") {
+                    (updated.value, paired.value)
+                } else {
+                    (paired.value, updated.value)
+                };
+                match (decision, gate) {
+                    (ParamValue::Balance(decision), ParamValue::Balance(gate)) => ensure!(
+                        constitution_core::gate_v_min_coupled(decision, gate),
+                        Error::<T>::TryStateViolation
+                    ),
+                    _ => return Err(Error::<T>::WrongType.into()),
+                }
+            }
             Params::<T>::insert(key, updated);
             Self::deposit_event(Event::ParamUpdated { key, value });
             Ok(())

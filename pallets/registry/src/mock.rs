@@ -175,8 +175,8 @@ impl EpochContext for TestEpoch {
     fn filing_window_end(_epoch: EpochId) -> u32 {
         FilingWindowEnd::get()
     }
-    fn frozen_spec_version(_epoch: EpochId) -> u16 {
-        FrozenSpec::get()
+    fn frozen_spec_version(_epoch: EpochId) -> Option<u16> {
+        Some(FrozenSpec::get())
     }
     fn milestone_target(_epoch: EpochId) -> u32 {
         MilestoneTarget::get()

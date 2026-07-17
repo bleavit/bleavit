@@ -64,6 +64,7 @@ pub struct EpochParams {
     pub timelock: [BlockNumber; 5],
     pub grace: [BlockNumber; 5],
     pub intake_max_per_account: u8,
+    pub intake_slash_pct: u8,
 }
 
 impl EpochParams {
@@ -110,6 +111,7 @@ impl EpochParams {
         timelock: [28_800, 43_200, 100_800, 201_600, 0],
         grace: [201_600, 201_600, 201_600, 201_600, 0],
         intake_max_per_account: 4,
+        intake_slash_pct: 10,
     };
 
     pub fn validate(&self) -> Result<(), Error> {
@@ -129,6 +131,7 @@ impl EpochParams {
                 && self.intake_max_per_account > 0
                 && usize::from(self.intake_max_per_account) <= MAX_INTAKE_QUEUE
                 && self.coverage_pct <= 100
+                && self.intake_slash_pct <= 100
                 && self.gate_nb_coverage_pct <= 100
                 && self.delta_max.0 <= ONE
                 && self.gate_nb_convergence.0 <= ONE
@@ -138,6 +141,19 @@ impl EpochParams {
                     .all(|v| { v.0 <= futarchy_primitives::kernel::GATE_P_MAX_CEILING_1E9 })
                 && self.delta.iter().all(|v| v.0 <= ONE)
                 && self.sigma.iter().all(|v| v.0 <= ONE),
+            Error::BadParams
+        );
+        ensure!(
+            self.v_min
+                .iter()
+                .zip(self.gate_v_min.iter())
+                .take(4)
+                .all(|(decision, gate)| {
+                    futarchy_primitives::Balance::checked_div(*decision, 20)
+                        .is_some_and(|lower| *gate >= lower)
+                        && futarchy_primitives::Balance::checked_div(*decision, 2)
+                            .is_some_and(|upper| *gate <= upper)
+                }),
             Error::BadParams
         );
         Ok(())
@@ -229,10 +245,24 @@ pub struct DecisionGuards {
     pub process_hold: bool,
 }
 
+/// Screening result supplied by the runtime's bounded call classifier.
+///
+/// T4 names only two full-slash findings: a verified constitution violation
+/// or a verified false resource declaration.  Any check the implementation
+/// cannot prove is therefore a refundable, status-quo cancellation (G-1), not
+/// evidence of proposer fault.
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+pub enum StaticCheckDisposition {
+    Eligible,
+    SlashAll(RejectReason),
+    Refund(RejectReason),
+}
+
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct TickInputs {
-    pub static_checks_pass: bool,
-    pub active_metric_spec_version: MetricSpecVersion,
+    pub static_check: StaticCheckDisposition,
+    pub preimage_ok: bool,
+    pub active_metric_spec_version: Option<MetricSpecVersion>,
     pub markets: Option<MarketSet>,
     pub review_window_closed: bool,
     pub queue_reject_reason: Option<RejectReason>,
@@ -242,8 +272,9 @@ pub struct TickInputs {
 impl Default for TickInputs {
     fn default() -> Self {
         Self {
-            static_checks_pass: true,
-            active_metric_spec_version: 1,
+            static_check: StaticCheckDisposition::Eligible,
+            preimage_ok: true,
+            active_metric_spec_version: Some(1),
             markets: None,
             review_window_closed: false,
             queue_reject_reason: None,
@@ -652,6 +683,10 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
     ) -> Result<(), Error> {
         ensure!(matches!(origin, Origin::Signed), Error::BadOrigin);
         ensure!(self.epoch.phase == EpochPhase::Intake, Error::BadState);
+        ensure!(
+            self.proposal(pid)?.epoch == self.epoch.index,
+            Error::BadState
+        );
         let p = self.proposal_mut(pid)?;
         ensure!(
             p.state == ProposalState::Submitted && &p.proposer == who,
@@ -667,7 +702,7 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         &mut self,
         origin: Origin,
         pid: ProposalId,
-        static_checks_pass: bool,
+        static_check: StaticCheckDisposition,
         active_metric_spec_version: MetricSpecVersion,
         params: &EpochParams,
     ) -> Result<(), Error> {
@@ -702,15 +737,23 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             Error::BadState
         );
         self.events.push(Event::ScreeningStarted(pid));
-        if !static_checks_pass {
-            self.cancel(pid, RejectReason::ConstitutionViolation, true)?;
-            return Ok(());
+        match static_check {
+            StaticCheckDisposition::Eligible => {}
+            StaticCheckDisposition::SlashAll(reason) => {
+                let bond = self.proposal(pid)?.bond;
+                self.cancel(pid, reason, bond)?;
+                return Ok(());
+            }
+            StaticCheckDisposition::Refund(reason) => {
+                self.cancel(pid, reason, 0)?;
+                return Ok(());
+            }
         }
         let remaining = usize::from(params.epoch_slots).saturating_sub(active);
         // On-chain ranking prevents a lower-bond candidate from stealing a slot.
-        // Static eligibility arrives one bounded keeper item at a time, so the
-        // keeper must still crank candidates in this same deterministic order;
-        // a future batch-screening transition can remove that residual obligation.
+        // `tick` has already required this item to be the globally canonical
+        // next candidate; this bounded rank check additionally protects direct
+        // core callers and the slot-count transition itself.
         let mut candidates = self
             .proposals
             .iter()
@@ -871,6 +914,14 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             }
             DecisionOutcome::Reject(r) => {
                 self.reject_to_measurement(ledger, pid, r)?;
+                if r == RejectReason::NotDecisionGrade || !guards.preimage_ok {
+                    let amount = Self::fraction(self.proposal(pid)?.bond, params.intake_slash_pct)?;
+                    self.events.push(Event::IntakeSlashed {
+                        pid,
+                        reason: r,
+                        amount,
+                    });
+                }
             }
         }
         Ok(out)
@@ -888,6 +939,36 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             pid,
             justification_hash: h,
         });
+        Ok(())
+    }
+    /// Guardian force-rerun: immediately restart every proposal book for one
+    /// fresh Extended window. Queue timing is voided; positions and the shared
+    /// Baseline identity remain intact (06 §5.3).
+    pub fn force_rerun(
+        &mut self,
+        origin: Origin,
+        pid: ProposalId,
+        now: BlockNumber,
+    ) -> Result<(), Error> {
+        ensure!(matches!(origin, Origin::GuardianHold), Error::BadOrigin);
+        let p = self.proposal_mut(pid)?;
+        ensure!(
+            matches!(
+                p.state,
+                ProposalState::Trading | ProposalState::Extended | ProposalState::Queued
+            ) && !p.rerun
+                && !p.delayed_once,
+            Error::BadState
+        );
+        p.state = ProposalState::Extended;
+        p.rerun = true;
+        p.extended = true;
+        p.maturity = None;
+        p.grace_end = None;
+        p.decision = None;
+        p.decide_at = now
+            .checked_add(DECISION_EXTENSION)
+            .ok_or(Error::ArithmeticOverflow)?;
         Ok(())
     }
     pub fn schedule_rerun(&mut self, origin: Origin, pid: ProposalId) -> Result<(), Error> {
@@ -954,11 +1035,43 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
     }
 
     /// PB-ORACLE-VOID cohort path (06 §6.2; 05 §7).
+    pub fn void_affected_proposals(&self, epoch: EpochId) -> Result<Vec<ProposalId>, Error> {
+        let mut affected = self
+            .cohorts
+            .iter()
+            .find(|cohort| cohort.epoch == epoch)
+            .map(|cohort| cohort.proposals.clone())
+            .ok_or(Error::BadState)?;
+        for proposal in &self.proposals {
+            if proposal.epoch == epoch
+                && matches!(
+                    proposal.state,
+                    ProposalState::Qualified
+                        | ProposalState::Trading
+                        | ProposalState::Extended
+                        | ProposalState::Queued
+                        | ProposalState::Suspended
+                        | ProposalState::Rerun
+                        | ProposalState::FailedExecuted
+                )
+                && !affected.contains(&proposal.id)
+            {
+                affected.push(proposal.id);
+            }
+        }
+        ensure!(
+            affected.len() <= MAX_ACTIVE_PER_EPOCH,
+            Error::TooManyCohortProposals
+        );
+        Ok(affected)
+    }
+
     pub fn void_cohort<L: LedgerOps<AccountId>>(
         &mut self,
         origin: Origin,
         ledger: &mut L,
         epoch: EpochId,
+        now: BlockNumber,
     ) -> Result<(), Error> {
         ensure!(matches!(origin, Origin::VoidAuthority), Error::BadOrigin);
         let idx = self
@@ -970,24 +1083,35 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             matches!(self.cohorts[idx].status, CohortStatus::Measuring { .. }),
             Error::BadState
         );
-        let proposals = self.cohorts[idx].proposals.clone();
-        for pid in &proposals {
-            ledger.void(*pid)?;
+        let affected = self.void_affected_proposals(epoch)?;
+        for pid in &affected {
+            if self.proposal(*pid)?.markets.is_some() {
+                ledger.void(*pid)?;
+            }
         }
-        for pid in proposals {
-            let proposal = self.proposal_mut(pid)?;
+        for pid in &affected {
+            let proposal = self.proposal_mut(*pid)?;
             proposal.state = ProposalState::Rejected(RejectReason::ProcessHold);
             proposal.decision = Some(DecisionOutcome::Reject(RejectReason::ProcessHold));
-            self.intake_queue.retain(|queued| *queued != pid);
-            self.rollovers.retain(|(proposal, _)| *proposal != pid);
-            self.resource_locks.retain(|(_, owner)| *owner != pid);
+            self.intake_queue.retain(|queued| *queued != *pid);
+            self.rollovers.retain(|(proposal, _)| *proposal != *pid);
+            self.resource_locks.retain(|(_, owner)| *owner != *pid);
             self.events.push(Event::ProposalForceRejected {
-                pid,
+                pid: *pid,
                 reason: RejectReason::ProcessHold,
             });
         }
         self.cohorts[idx].status = CohortStatus::Void;
+        // VOID completes the cohort without welfare settlement. Archive the
+        // terminal outcome and reap its bounded working set in the same
+        // transaction, just as successful settlement does below. The zero
+        // score fields are non-semantic when `voided` is set.
+        self.push_summary(epoch, FixedU64(0), FixedU64(0), now, true, &affected)?;
         self.events.push(Event::CohortVoided { epoch });
+        self.cohorts.remove(idx);
+        self.proposals.retain(|p| !affected.contains(&p.id));
+        self.resource_locks
+            .retain(|(_, pid)| !affected.contains(pid));
         Ok(())
     }
     /// T24 guardian review callback.
@@ -1120,6 +1244,23 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         self.sync_phase(now);
 
         let state = self.proposal(pid)?.state;
+        let proposal_epoch = self.proposal(pid)?.epoch;
+        if self.cohort_epoch_voided(proposal_epoch)
+            && matches!(
+                state,
+                ProposalState::Submitted
+                    | ProposalState::Screening
+                    | ProposalState::Qualified
+                    | ProposalState::Trading
+                    | ProposalState::Extended
+                    | ProposalState::Queued
+                    | ProposalState::Suspended
+                    | ProposalState::Rerun
+                    | ProposalState::FailedExecuted
+            )
+        {
+            return self.force_reject_process_hold(Origin::Keeper, ledger, pid);
+        }
         // T20 force-reject (05 §2.1): a genuine stale-epoch (`StaleEpochBound`), or
         // a ledger freeze (06 §6.3 — a live proposal resolves to status quo; any
         // vault voids at par, D-1). Dead-man is deliberately *excluded*: 05 §4.8
@@ -1153,13 +1294,36 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
                 if self.epoch.phase == EpochPhase::Qualify
                     && self.proposal(pid)?.epoch == self.epoch.index =>
             {
-                self.qualify(
-                    Origin::Keeper,
-                    pid,
-                    input.static_checks_pass,
-                    input.active_metric_spec_version,
-                    params,
-                )
+                // The bounded intake cannot be screened atomically inside one
+                // TickBatch.  Enforce the reviewer's deterministic minimum:
+                // every screening outcome is committed in canonical
+                // descending-bond / ascending-id order, so caller order and
+                // ineligible competitors cannot decide the available slots.
+                let next = self
+                    .proposals
+                    .iter()
+                    .filter(|proposal| {
+                        proposal.epoch == self.epoch.index
+                            && proposal.state == ProposalState::Submitted
+                    })
+                    .map(|proposal| (proposal.bond, proposal.id))
+                    .max_by(|(bond_a, pid_a), (bond_b, pid_b)| {
+                        bond_a.cmp(bond_b).then_with(|| pid_b.cmp(pid_a))
+                    })
+                    .map(|(_, candidate)| candidate);
+                ensure!(next == Some(pid), Error::BadState);
+                if !input.preimage_ok {
+                    self.events.push(Event::ScreeningStarted(pid));
+                    let slash = Self::fraction(self.proposal(pid)?.bond, params.intake_slash_pct)?;
+                    self.cancel(pid, RejectReason::NotDecisionGrade, slash)
+                } else if let Some(spec) = input.active_metric_spec_version {
+                    self.qualify(Origin::Keeper, pid, input.static_check, spec, params)
+                } else {
+                    // Missing system MetricSpec is a fail-closed qualification
+                    // failure, not proposer fraud.
+                    self.events.push(Event::ScreeningStarted(pid));
+                    self.cancel(pid, RejectReason::ProcessHold, 0)
+                }
             }
             ProposalState::Qualified if self.epoch.phase == EpochPhase::Seed => {
                 let markets = input.markets.ok_or(Error::BadDecisionInput)?;
@@ -1273,7 +1437,7 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             p.state = ProposalState::Settled;
             p.decision.get_or_insert(DecisionOutcome::Adopt);
         }
-        self.push_summary(epoch, final_score, baseline_twap, now)?;
+        self.push_summary(epoch, final_score, baseline_twap, now, false, &proposals)?;
         self.events.push(Event::CohortSettled {
             epoch,
             s: final_score,
@@ -1325,11 +1489,11 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             Error::TryStateViolation
         );
         ensure!(
-            self.cohorts
-                .iter()
-                .filter(|c| !matches!(c.status, CohortStatus::Settled | CohortStatus::Void))
-                .count()
-                <= MAX_NON_TERMINAL_COHORTS,
+            self.cohorts.len() <= MAX_NON_TERMINAL_COHORTS
+                && self
+                    .cohorts
+                    .iter()
+                    .all(|c| !matches!(c.status, CohortStatus::Settled | CohortStatus::Void)),
             Error::TryStateViolation
         );
         for p in &self.proposals {
@@ -1545,20 +1709,41 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         Ok(())
     }
 
-    fn cancel(&mut self, pid: ProposalId, reason: RejectReason, slash: bool) -> Result<(), Error> {
-        let bond = self.proposal(pid)?.bond;
+    fn cancel(
+        &mut self,
+        pid: ProposalId,
+        reason: RejectReason,
+        slash: Balance,
+    ) -> Result<(), Error> {
         self.proposal_mut(pid)?.state = ProposalState::Cancelled;
         self.intake_queue.retain(|x| *x != pid);
         self.rollovers.retain(|(proposal, _)| *proposal != pid);
         self.events.push(Event::ProposalCancelled { pid, reason });
-        if slash {
+        if slash > 0 {
             self.events.push(Event::IntakeSlashed {
                 pid,
                 reason,
-                amount: bond,
+                amount: slash,
             });
         }
         Ok(())
+    }
+
+    fn fraction(amount: Balance, percent: u8) -> Result<Balance, Error> {
+        let percent = Balance::from(percent);
+        let whole = amount
+            .checked_div(100)
+            .and_then(|value| value.checked_mul(percent))
+            .ok_or(Error::ArithmeticOverflow)?;
+        let remainder = amount % 100;
+        let fractional = remainder
+            .checked_mul(percent)
+            .and_then(|value| value.checked_add(99))
+            .and_then(|value| value.checked_div(100))
+            .ok_or(Error::ArithmeticOverflow)?;
+        whole
+            .checked_add(fractional)
+            .ok_or(Error::ArithmeticOverflow)
     }
 
     /// Latch an overdue persisted phase boundary before catch-up erases the
@@ -1687,16 +1872,21 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         pid: ProposalId,
     ) -> Result<bool, Error> {
         let epoch = self.proposal(pid)?.epoch;
-        if !self
-            .cohorts
-            .iter()
-            .any(|cohort| cohort.epoch == epoch && cohort.status == CohortStatus::Void)
-        {
+        if !self.cohort_epoch_voided(epoch) {
             return Ok(false);
         }
         self.force_reject_process_hold(Origin::Keeper, ledger, pid)?;
         self.proposal_mut(pid)?.decision = Some(DecisionOutcome::Reject(RejectReason::ProcessHold));
         Ok(true)
+    }
+    fn cohort_epoch_voided(&self, epoch: EpochId) -> bool {
+        self.cohorts
+            .iter()
+            .any(|cohort| cohort.epoch == epoch && cohort.status == CohortStatus::Void)
+            || self
+                .recent
+                .iter()
+                .any(|summary| summary.epoch == epoch && summary.voided)
     }
     fn push_summary(
         &mut self,
@@ -1704,12 +1894,15 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         s: FixedU64,
         baseline_twap: FixedU64,
         now: BlockNumber,
+        voided: bool,
+        summary_pids: &[ProposalId],
     ) -> Result<(), Error> {
         let mut proposals = futarchy_primitives::BoundedVec::<
             (ProposalId, ProposalClass, DecisionOutcome),
             5,
         >::new();
-        for p in self.proposals.iter().filter(|p| p.epoch == epoch).take(5) {
+        for pid in summary_pids {
+            let p = self.proposal(*pid)?;
             proposals
                 .try_push((
                     p.id,
@@ -1727,7 +1920,7 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             s_1e9: s,
             baseline_twap_1e9: baseline_twap,
             proposals,
-            voided: false,
+            voided,
             settled_at: now,
         });
         Ok(())
@@ -1962,8 +2155,14 @@ mod tests {
         )
         .unwrap();
         s.sync_phase(43_200);
-        s.qualify(Origin::Keeper, 1, true, 1, &EpochParams::DEFAULT)
-            .unwrap();
+        s.qualify(
+            Origin::Keeper,
+            1,
+            StaticCheckDisposition::Eligible,
+            1,
+            &EpochParams::DEFAULT,
+        )
+        .unwrap();
         s.epoch.phase = EpochPhase::Trade;
         s.proposal_mut(1).unwrap().state = ProposalState::Trading;
         s.proposal_mut(1).unwrap().markets = Some(MarketSet {
@@ -2102,7 +2301,8 @@ mod tests {
     fn recent_ring_is_bounded() {
         let mut s = EpochState::<[u8; 32]>::new();
         for e in 0..40 {
-            s.push_summary(e, FixedU64(1), FixedU64(2), e).unwrap();
+            s.push_summary(e, FixedU64(1), FixedU64(2), e, false, &[])
+                .unwrap();
         }
         assert_eq!(s.recent.len(), RECENT_COHORTS);
         assert_eq!(s.recent[0].epoch, 8);
@@ -2179,6 +2379,7 @@ mod tests {
                 timelock: [28_800, 43_200, 100_800, 201_600, 0],
                 grace: [201_600, 201_600, 201_600, 201_600, 0],
                 intake_max_per_account: 4,
+                intake_slash_pct: 10,
             }
         );
     }

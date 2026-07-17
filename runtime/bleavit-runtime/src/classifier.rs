@@ -549,6 +549,27 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_attestor::Call::challenge_attestation { .. } => leaf(CallDomain::Public),
             pallet_attestor::Call::__Ignore(_, _) => denied(),
         },
+        RuntimeCall::Epoch(call) => match call {
+            pallet_epoch::Call::submit { .. }
+            | pallet_epoch::Call::withdraw { .. }
+            | pallet_epoch::Call::tick { .. }
+            | pallet_epoch::Call::decide { .. }
+            | pallet_epoch::Call::settle_cohort { .. }
+            | pallet_epoch::Call::mark_executed { .. }
+            | pallet_epoch::Call::mark_failed_executed { .. }
+            | pallet_epoch::Call::retry_exhausted_to_measurement { .. }
+            | pallet_epoch::Call::expire_or_stale_queue { .. } => leaf(CallDomain::Public),
+            pallet_epoch::Call::set_next_epoch_length { .. } => {
+                leaf(CallDomain::ConstitutionalValues)
+            }
+            pallet_epoch::Call::delay_once { .. }
+            | pallet_epoch::Call::veto_upheld { .. }
+            | pallet_epoch::Call::force_reject_process_hold { .. } => {
+                leaf(CallDomain::GuardianHold)
+            }
+            pallet_epoch::Call::void_cohort { .. } => leaf(CallDomain::EmergencyPlaybook),
+            pallet_epoch::Call::__Ignore(_, _) => denied(),
+        },
         RuntimeCall::ExecutionGuard(call) => match call {
             pallet_execution_guard::Call::execute { .. }
             | pallet_execution_guard::Call::apply_authorized_upgrade { .. }

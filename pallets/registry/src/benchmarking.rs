@@ -26,7 +26,7 @@ fn worst_class<T: Config<I>, I: 'static>() -> FilingClass {
 
 /// File one live filing for `EPOCH` from `filer`.
 fn file_one<T: Config<I>, I: 'static>(filer: &T::AccountId) {
-    let spec = T::Epoch::frozen_spec_version(EPOCH);
+    let spec = T::Epoch::frozen_spec_version(EPOCH).unwrap_or_default();
     Pallet::<T, I>::file(
         RawOrigin::Signed(filer.clone()).into(),
         EPOCH,
@@ -45,7 +45,7 @@ mod benches {
     #[benchmark]
     fn file() {
         let caller: T::AccountId = T::BenchmarkHelper::funded_account(1);
-        let spec = T::Epoch::frozen_spec_version(EPOCH);
+        let spec = T::Epoch::frozen_spec_version(EPOCH).unwrap_or_default();
         let class = worst_class::<T, I>();
 
         #[extrinsic_call]

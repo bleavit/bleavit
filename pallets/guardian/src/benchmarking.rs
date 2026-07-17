@@ -6,7 +6,7 @@ use super::*;
 use crate::pallet::{ActivePlaybooks, Members, PendingActions, ReviewDeadlines};
 
 use frame_benchmarking::v2::*;
-use frame_support::traits::{Get, OnInitialize};
+use frame_support::traits::OnInitialize;
 use futarchy_primitives::H256;
 
 /// A distinct member account by index (matches the genesis council).

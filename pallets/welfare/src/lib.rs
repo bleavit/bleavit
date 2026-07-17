@@ -477,7 +477,7 @@ pub mod pallet {
             cohort_epoch: EpochId,
             spec_version: MetricSpecVersion,
             target: SettleTarget,
-        ) -> DispatchResult {
+        ) -> Result<FixedU64, DispatchError> {
             let mut state = Self::load();
             let score = state
                 .compute_settlement(cohort_epoch, spec_version)
@@ -513,8 +513,9 @@ pub mod pallet {
                     spec_version,
                     score,
                 });
-                Ok(())
-            })
+                Ok::<(), DispatchError>(())
+            })?;
+            Ok(score)
         }
 
         /// Runtime-internal rolling-window maintenance. B1a wires this from

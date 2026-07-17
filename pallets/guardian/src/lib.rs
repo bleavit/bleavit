@@ -104,23 +104,36 @@ pub trait GuardianTriggers {
     fn current() -> TriggerState;
 }
 
+/// Atomic downstream effect of a fifth-approved guardian action. The runtime
+/// maps the exhaustive power enum to the narrow epoch/playbook producers; an
+/// unavailable effect rejects and rolls the approval back (G-1).
+pub trait GuardianEffectDispatcher {
+    fn dispatch(
+        power: GuardianPower,
+        justification_hash: futarchy_primitives::H256,
+    ) -> Result<(), sp_runtime::DispatchError>;
+}
+
 /// Retrospective-review scheduler (06 §5.4). On dispatch the guardian pallet
 /// auto-submits a `ratify`-track referendum; the runtime wires this to
 /// `pallet-referenda` (B1a) and returns the referendum index that the frozen
 /// `ReviewScheduled { action, referendum }` event carries (02 §6).
 pub trait GuardianReviewScheduler {
     /// Submit the review referendum for `action_id`; return its index.
-    fn schedule_review(action_id: ActionId) -> u32;
+    fn schedule_review(action_id: ActionId) -> Result<u32, sp_runtime::DispatchError>;
+    /// Refund the closed review's pro-rata submission-deposit fronting.
+    fn refund_review(action_id: ActionId, referendum: u32)
+        -> Result<(), sp_runtime::DispatchError>;
 }
 
 /// Recall scheduler (06 §5.4): when a retrospective review misses its 2-epoch
 /// deadline the approving members are slashed **and** "a recall referendum is
 /// auto-scheduled on the `guardian` track". Mirrors [`GuardianReviewScheduler`];
 /// the runtime wires this to `pallet-referenda` (B1a) and returns the recall
-/// referendum index. A no-op stub is a valid pre-B1a wiring.
+/// referendum index. Scheduling failure must roll back the maintenance step.
 pub trait GuardianRecallScheduler {
     /// Submit the recall referendum for the failed `action_id`; return its index.
-    fn schedule_recall(action_id: ActionId) -> u32;
+    fn schedule_recall(action_id: ActionId) -> Result<u32, sp_runtime::DispatchError>;
 }
 
 /// Maps an authority role to a concrete origin so benchmarks can exercise each
@@ -177,6 +190,9 @@ pub mod pallet {
 
         /// Verified-trigger feed for playbook activation (06 §6.2).
         type TriggerProvider: GuardianTriggers;
+
+        /// Atomic cross-pallet effect of the fifth approval (06 §5.1).
+        type EffectDispatcher: GuardianEffectDispatcher;
 
         /// Retrospective-review referendum scheduler (06 §5.4).
         type ReviewScheduler: GuardianReviewScheduler;
@@ -259,6 +275,12 @@ pub mod pallet {
     /// core's `set_epoch`).
     #[pallet::storage]
     pub type LastSeenEpoch<T: Config> = StorageValue<_, EpochId, ValueQuery>;
+
+    /// Internal action→referendum join used to refund the review deposit.
+    /// Live cardinality is bounded by [`ReviewDeadlines`].
+    #[pallet::storage]
+    pub type ReviewReferenda<T: Config> =
+        StorageMap<_, Blake2_128Concat, ActionId, u32, OptionQuery>;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -419,7 +441,7 @@ pub mod pallet {
             g.set_members(guardian_core::GuardianOrigin::ConstitutionalValues, raw)
                 .map_err(Self::map_core_error)?;
             Self::persist(&g)?;
-            Self::drain_events(&mut g);
+            Self::drain_events(&mut g)?;
             Ok(())
         }
 
@@ -445,7 +467,7 @@ pub mod pallet {
             )
             .map_err(Self::map_core_error)?;
             Self::persist(&g)?;
-            Self::drain_events(&mut g);
+            Self::drain_events(&mut g)?;
             Ok(())
         }
 
@@ -455,16 +477,28 @@ pub mod pallet {
         #[pallet::call_index(2)]
         #[pallet::weight(T::WeightInfo::approve_action())]
         pub fn approve_action(origin: OriginFor<T>, action_id: ActionId) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-            Self::sync_epoch();
-            let mut g = Self::load().ok_or(Error::<T>::NotInitialized)?;
-            let now = Self::now();
-            let ctx = Self::dispatch_context_for(&g, action_id);
-            g.approve_action(Self::to_core_authorized(&who)?, action_id, now, ctx)
-                .map_err(Self::map_core_error)?;
-            Self::persist(&g)?;
-            Self::drain_events(&mut g);
-            Ok(())
+            frame_support::storage::with_storage_layer(|| {
+                let who = ensure_signed(origin)?;
+                Self::sync_epoch();
+                let mut g = Self::load().ok_or(Error::<T>::NotInitialized)?;
+                let now = Self::now();
+                let ctx = Self::dispatch_context_for(&g, action_id);
+                let dispatched = g
+                    .approve_action(Self::to_core_authorized(&who)?, action_id, now, ctx)
+                    .map_err(Self::map_core_error)?;
+                if dispatched {
+                    let action = g
+                        .pending
+                        .iter()
+                        .find(|action| action.id == action_id)
+                        .copied()
+                        .ok_or(Error::<T>::ActionNotFound)?;
+                    T::EffectDispatcher::dispatch(action.power, action.justification_hash)?;
+                }
+                Self::persist(&g)?;
+                Self::drain_events(&mut g)?;
+                Ok(())
+            })
         }
 
         /// `guardian.ratify_action` — the `ratify` referendum records a passed
@@ -473,16 +507,22 @@ pub mod pallet {
         #[pallet::call_index(3)]
         #[pallet::weight(T::WeightInfo::ratify_action())]
         pub fn ratify_action(origin: OriginFor<T>, action_id: ActionId) -> DispatchResult {
-            T::ValuesOrigin::ensure_origin(origin)?;
-            let mut g = Self::load().ok_or(Error::<T>::NotInitialized)?;
-            g.ratify_action(
-                guardian_core::GuardianOrigin::ConstitutionalValues,
-                action_id,
-            )
-            .map_err(Self::map_core_error)?;
-            Self::persist(&g)?;
-            Self::drain_events(&mut g);
-            Ok(())
+            frame_support::storage::with_storage_layer(|| {
+                T::ValuesOrigin::ensure_origin(origin)?;
+                let mut g = Self::load().ok_or(Error::<T>::NotInitialized)?;
+                g.ratify_action(
+                    guardian_core::GuardianOrigin::ConstitutionalValues,
+                    action_id,
+                )
+                .map_err(Self::map_core_error)?;
+                let referendum =
+                    ReviewReferenda::<T>::get(action_id).ok_or(Error::<T>::ReviewNotFound)?;
+                T::ReviewScheduler::refund_review(action_id, referendum)?;
+                Self::persist(&g)?;
+                Self::drain_events(&mut g)?;
+                ReviewReferenda::<T>::remove(action_id);
+                Ok(())
+            })
         }
 
         /// `guardian.renew_playbook` — the single admissible `PB-LEDGER-FREEZE`
@@ -498,7 +538,7 @@ pub mod pallet {
             g.renew_playbook(guardian_core::GuardianOrigin::ConstitutionalValues, id, now)
                 .map_err(Self::map_core_error)?;
             Self::persist(&g)?;
-            Self::drain_events(&mut g);
+            Self::drain_events(&mut g)?;
             Ok(())
         }
     }
@@ -682,7 +722,7 @@ pub mod pallet {
 
         /// Translate the core's event log into pallet events. `ReviewScheduled`
         /// is where the pallet injects the referendum index (02 §6).
-        fn drain_events(g: &mut Guardian) {
+        fn drain_events(g: &mut Guardian) -> DispatchResult {
             for ev in core::mem::take(&mut g.events) {
                 match ev {
                     CoreEvent::MembersSet { members } => {
@@ -749,7 +789,8 @@ pub mod pallet {
                         Self::deposit_event(Event::PlaybookExpired { id });
                     }
                     CoreEvent::ReviewScheduled { action } => {
-                        let referendum = T::ReviewScheduler::schedule_review(action);
+                        let referendum = T::ReviewScheduler::schedule_review(action)?;
+                        ReviewReferenda::<T>::insert(action, referendum);
                         Self::deposit_event(Event::ReviewScheduled { action, referendum });
                     }
                     CoreEvent::ActionRatified { action } => {
@@ -759,17 +800,30 @@ pub mod pallet {
                         action,
                         slashed_each,
                     } => {
+                        // 06 §5.4: the missed deadline also auto-schedules a
+                        // recall referendum on the `guardian` track.
+                        // The recall substrate can fail (SQ-146). Isolate it
+                        // so a partial scheduler write rolls back without
+                        // erasing the already-persisted slash, review cleanup,
+                        // and `ReviewFailed` accountability signal.
+                        let scheduled = frame_support::storage::with_storage_layer(|| {
+                            T::RecallScheduler::schedule_recall(action)
+                        });
+                        // Emit/write accountability only after the child
+                        // layer has committed or rolled back; a failed child
+                        // must not erase these outer effects.
+                        ReviewReferenda::<T>::remove(action);
                         Self::deposit_event(Event::ReviewFailed {
                             action,
                             slashed_each,
                         });
-                        // 06 §5.4: the missed deadline also auto-schedules a
-                        // recall referendum on the `guardian` track.
-                        let referendum = T::RecallScheduler::schedule_recall(action);
-                        Self::deposit_event(Event::RecallScheduled { action, referendum });
+                        if let Ok(referendum) = scheduled {
+                            Self::deposit_event(Event::RecallScheduled { action, referendum });
+                        }
                     }
                 }
             }
+            Ok(())
         }
 
         /// Build the [`DispatchContext`] for approving `action_id`: triggers
@@ -813,10 +867,14 @@ pub mod pallet {
         /// so the live-slot caps stay concurrent (not lifetime). Idempotent and
         /// no-op-safe.
         fn run_maintenance() {
-            if let Some(mut g) = Self::load() {
+            let _ = frame_support::storage::with_storage_layer(|| -> DispatchResult {
+                let Some(mut g) = Self::load() else {
+                    return Ok(());
+                };
                 let before = g.clone();
                 g.expire_playbooks(Self::now());
-                let _ = g.enforce_reviews(T::CurrentEpoch::get());
+                g.enforce_reviews(T::CurrentEpoch::get())
+                    .map_err(Self::map_core_error)?;
                 g.reap_terminal(Self::now());
                 if g.events.is_empty()
                     && g.active_playbooks == before.active_playbooks
@@ -825,12 +883,11 @@ pub mod pallet {
                     && g.pending == before.pending
                     && g.approvals == before.approvals
                 {
-                    return; // nothing changed — skip the writes
+                    return Ok(()); // nothing changed — skip the writes
                 }
-                if Self::persist(&g).is_ok() {
-                    Self::drain_events(&mut g);
-                }
-            }
+                Self::persist(&g)?;
+                Self::drain_events(&mut g)
+            });
         }
 
         /// Read helper: the current council (view for the FE / sibling pallets).
