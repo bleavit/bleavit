@@ -16,7 +16,6 @@ pub trait WeightInfo {
     fn settle_cohort(items: u32) -> Weight;
     fn set_next_epoch_length() -> Weight;
     fn delay_once() -> Weight;
-    fn veto_upheld() -> Weight;
     fn mark_executed() -> Weight;
     fn mark_failed_executed() -> Weight;
     fn retry_exhausted_to_measurement() -> Weight;
@@ -52,9 +51,6 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     }
     fn delay_once() -> Weight {
         base::<T>(40_000_000, 12, 10)
-    }
-    fn veto_upheld() -> Weight {
-        base::<T>(70_000_000, 16, 12)
     }
     fn mark_executed() -> Weight {
         base::<T>(70_000_000, 16, 12)
@@ -106,9 +102,6 @@ impl WeightInfo for () {
     }
     fn delay_once() -> Weight {
         rocks(40_000_000, 12, 10)
-    }
-    fn veto_upheld() -> Weight {
-        rocks(70_000_000, 16, 12)
     }
     fn mark_executed() -> Weight {
         rocks(70_000_000, 16, 12)

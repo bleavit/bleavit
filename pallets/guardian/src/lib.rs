@@ -18,9 +18,10 @@
 //!
 //! ## Origins (06 §3.2)
 //!
-//! - `set_members`, `ratify_action`, `renew_playbook` require the
-//!   `ConstitutionalValues` origin (rows 5–6: the guardian/ratify values
-//!   tracks), resolved through [`Config::ValuesOrigin`].
+//! - `ratify_action` and `uphold_veto` use the ratify-scoped values origin;
+//!   `set_members`, `renew_playbook` and `recall` use the guardian-scoped
+//!   values origin. The runtime adapters also accept the conservative legacy
+//!   `ConstitutionalValues` origin.
 //! - `propose_action`, `approve_action` are `Signed` council-member workflow
 //!   calls (06 §8); the member check is enforced inside the core. The fifth
 //!   approval dispatches the action's effect with the `GuardianHold` /
@@ -28,13 +29,12 @@
 //!   dispatch is recorded and surfaced as the frozen `GuardianAction` /
 //!   `ForceRerun` / `PlaybookActivated` events, exactly as the core models it.
 //!
-//! ## Scope boundary (deferred, like A1's PoV weights → B5)
+//! Seat bonds are real native-currency holds. Review deposits are temporarily
+//! fronted from those holds through the pallet sovereign, restored on a verdict,
+//! or counted into the 50% deadline slash before the net recall funding reaches
+//! treasury MAIN.
 //!
-//! - **Bonds** mirror the core's arithmetic bond ledger (`MemberBonds`,
-//!   slashed 50% on a failed review). Real `fungible` reserve/slash against
-//!   member accounts (destination, election-time funding) is runtime-integration
-//!   work — A10 is not audit-scope-A (R-7 lists A1/A2/A11).
-//! - The downstream **effect dispatch** of a guardian action (pause intake in
+//! The downstream **effect dispatch** of a guardian action (pause intake in
 //!   `pallet-epoch`, freeze the ledger/market, TWAP reset) travels through the
 //!   `GuardianHold` / `EmergencyPlaybook` runtime origins wired in B1a.
 
@@ -84,6 +84,11 @@ pub const MAX_ACTIVE_PLAYBOOKS: u32 = 6;
 /// no-op per G-1). At ≤ 1 rerun/epoch the cap spans centuries; migrating the
 /// ledger to a reaped map keyed by proposal id is a follow-up (PLAN spec-note).
 pub const MAX_RERUN_USED: u32 = 512;
+/// At most two complete outgoing councils can await their one-epoch release;
+/// a further election fails closed until maintenance frees capacity.
+pub const MAX_PENDING_BOND_RELEASES: u32 = (GUARDIAN_SEATS as u32) * 2;
+/// Failed accountability records share the open-review concurrency ceiling.
+pub const MAX_FAILED_ACTIONS: u32 = MAX_REVIEWS;
 
 /// Guardian-side proposal status feed (reads `pallet-epoch`). Supplies the
 /// admissibility context for `delay_once` / `force_rerun` (06 §5.3): the
@@ -114,16 +119,24 @@ pub trait GuardianEffectDispatcher {
     ) -> Result<(), sp_runtime::DispatchError>;
 }
 
+/// Narrow T24 producer seam. The runtime implementation calls the epoch
+/// pallet's internal review-authority entry point; no public epoch call exists.
+pub trait GuardianProposalVeto {
+    fn uphold(pid: ProposalId) -> Result<(), sp_runtime::DispatchError>;
+}
+
 /// Retrospective-review scheduler (06 §5.4). On dispatch the guardian pallet
 /// auto-submits a `ratify`-track referendum; the runtime wires this to
 /// `pallet-referenda` (B1a) and returns the referendum index that the frozen
 /// `ReviewScheduled { action, referendum }` event carries (02 §6).
 pub trait GuardianReviewScheduler {
+    /// Total liquid VIT needed for one review (submission + ratify decision
+    /// deposits). The pallet releases this amount pro-rata from seat holds.
+    fn review_deposit() -> futarchy_primitives::Balance;
     /// Submit the review referendum for `action_id`; return its index.
     fn schedule_review(action_id: ActionId) -> Result<u32, sp_runtime::DispatchError>;
-    /// Refund the closed review's pro-rata submission-deposit fronting.
-    fn refund_review(action_id: ActionId, referendum: u32)
-        -> Result<(), sp_runtime::DispatchError>;
+    /// Refund both deposits of a closed review into the guardian sovereign.
+    fn refund_review(referendum: u32) -> Result<(), sp_runtime::DispatchError>;
 }
 
 /// Recall scheduler (06 §5.4): when a retrospective review misses its 2-epoch
@@ -132,8 +145,19 @@ pub trait GuardianReviewScheduler {
 /// the runtime wires this to `pallet-referenda` (B1a) and returns the recall
 /// referendum index. Scheduling failure must roll back the maintenance step.
 pub trait GuardianRecallScheduler {
-    /// Submit the recall referendum for the failed `action_id`; return its index.
-    fn schedule_recall(action_id: ActionId) -> Result<u32, sp_runtime::DispatchError>;
+    /// Submit and decision-fund the recall referendum from `slash_pool`, then
+    /// forward the net remainder to treasury MAIN. A failure is returned so
+    /// the pallet can forward the complete pool instead of stranding funds.
+    fn schedule_recall(
+        action_id: ActionId,
+        slash_pool: futarchy_primitives::Balance,
+    ) -> Result<u32, sp_runtime::DispatchError>;
+    /// Refund a concluded recall's two deposits and forward them to MAIN.
+    fn refund_recall(referendum: u32) -> Result<(), sp_runtime::DispatchError>;
+    /// Forward a failed scheduling attempt's complete slash pool to MAIN.
+    fn forward_failed_recall_pool(
+        amount: futarchy_primitives::Balance,
+    ) -> Result<(), sp_runtime::DispatchError>;
 }
 
 /// Maps an authority role to a concrete origin so benchmarks can exercise each
@@ -150,6 +174,8 @@ pub trait BenchmarkHelper<RuntimeOrigin> {
     fn prime_for_worst_case();
     /// Advance the real epoch feed for the maintenance benchmark.
     fn prime_maintenance_epoch(epoch: EpochId);
+    /// Close a seeded review so the measured verdict may refund both deposits.
+    fn close_review(referendum: u32) -> Result<(), sp_runtime::DispatchError>;
 }
 
 #[frame_support::pallet]
@@ -157,7 +183,11 @@ pub mod pallet {
     use super::*;
     use alloc::vec::Vec;
     use frame_support::pallet_prelude::*;
-    use frame_support::traits::EnsureOrigin;
+    use frame_support::traits::{
+        fungible::{Inspect, InspectHold, Mutate, MutateHold},
+        tokens::{Fortitude, Precision, Preservation, Restriction},
+        EnsureOrigin,
+    };
     use frame_system::pallet_prelude::*;
     use sp_runtime::{SaturatedConversion, TryRuntimeError};
 
@@ -166,6 +196,12 @@ pub mod pallet {
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
+
+    /// Guardian-owned VIT hold namespace (06 §5.1).
+    #[pallet::composite_enum]
+    pub enum HoldReason {
+        SeatBond,
+    }
 
     // The council is the concrete 32-byte runtime account (AccountId32, 02 §8);
     // the frame-free core is written against `[u8; 32]`, so the pallet bridges
@@ -178,10 +214,24 @@ pub mod pallet {
         RuntimeEvent: From<Event<Self>>,
     >
     {
-        /// The `ConstitutionalValues` origin for the guardian/ratify values
-        /// tracks (06 §3.2 rows 5–6). Governs `set_members`, `ratify_action`
-        /// and `renew_playbook`. No signed/unsigned origin resolves here.
+        /// The `ratify`-track values origin for review verdicts.
         type ValuesOrigin: EnsureOrigin<Self::RuntimeOrigin>;
+
+        /// The `guardian`-track values origin for membership/admin calls.
+        type AdminOrigin: EnsureOrigin<Self::RuntimeOrigin>;
+
+        /// Native VIT custody for seat bonds and fronted deposits.
+        type Currency: Inspect<Self::AccountId, Balance = futarchy_primitives::Balance>
+            + Mutate<Self::AccountId>
+            + InspectHold<Self::AccountId, Reason = Self::RuntimeHoldReason>
+            + MutateHold<Self::AccountId>;
+
+        /// Aggregate runtime hold reason.
+        type RuntimeHoldReason: From<HoldReason>;
+
+        /// PalletId-derived account which submits and funds accountability
+        /// referenda.
+        type SovereignAccount: Get<Self::AccountId>;
 
         /// Current epoch index (06 §5.2 allowances, §5.4 review deadlines).
         /// Wired to `pallet-epoch`'s clock by the runtime; a constant in mocks.
@@ -195,6 +245,9 @@ pub mod pallet {
 
         /// Atomic cross-pallet effect of the fifth approval (06 §5.1).
         type EffectDispatcher: GuardianEffectDispatcher;
+
+        /// T24 callback into the epoch proposal machine.
+        type ProposalVeto: GuardianProposalVeto;
 
         /// Retrospective-review referendum scheduler (06 §5.4).
         type ReviewScheduler: GuardianReviewScheduler;
@@ -229,7 +282,8 @@ pub mod pallet {
     /// The seven elected council members (06 §5.1). `None` until genesis or the
     /// first `set_members`; every workflow call requires it (`NotInitialized`).
     #[pallet::storage]
-    pub type Members<T: Config> = StorageValue<_, [CoreAccountId; GUARDIAN_SEATS], OptionQuery>;
+    pub type Members<T: Config> =
+        StorageValue<_, [Option<CoreAccountId>; GUARDIAN_SEATS], OptionQuery>;
 
     /// Per-seat bond ledger, parallel to [`Members`] (06 §5.1: 50,000 VIT held).
     /// Slashed 50% on a failed review (§5.4); real `fungible` holds are B-track.
@@ -283,6 +337,51 @@ pub mod pallet {
     #[pallet::storage]
     pub type ReviewReferenda<T: Config> =
         StorageMap<_, Blake2_128Concat, ActionId, u32, OptionQuery>;
+
+    #[derive(
+        Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo, Default,
+    )]
+    pub struct ReviewFronting {
+        pub referendum: u32,
+        pub approvers: [CoreAccountId; GUARDIAN_SEATS],
+        pub approver_count: u8,
+        pub obligations: [futarchy_primitives::Balance; GUARDIAN_SEATS],
+        pub slices: [futarchy_primitives::Balance; GUARDIAN_SEATS],
+    }
+
+    /// Exact per-action slices temporarily moved out of approver seat holds.
+    #[pallet::storage]
+    pub type ReviewFrontingOf<T: Config> =
+        CountedStorageMap<_, Blake2_128Concat, ActionId, ReviewFronting, OptionQuery>;
+
+    #[derive(Clone, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+    pub struct BondRelease<AccountId> {
+        pub who: AccountId,
+        pub amount: futarchy_primitives::Balance,
+        pub release_epoch: EpochId,
+    }
+
+    /// Departed members' residual bonds, held through term plus one epoch.
+    #[pallet::storage]
+    pub type PendingBondReleases<T: Config> = StorageValue<
+        _,
+        BoundedVec<BondRelease<T::AccountId>, ConstU32<MAX_PENDING_BOND_RELEASES>>,
+        ValueQuery,
+    >;
+
+    #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+    pub struct FailedAction {
+        pub approvers: [CoreAccountId; GUARDIAN_SEATS],
+        pub approver_count: u8,
+        pub failed_epoch: EpochId,
+        pub recall_referendum: Option<u32>,
+    }
+
+    /// Deterministic recall substrate, retained for at most four epochs after
+    /// failure (longer only while a recall deposit is not yet refundable).
+    #[pallet::storage]
+    pub type FailedActions<T: Config> =
+        CountedStorageMap<_, Blake2_128Concat, ActionId, FailedAction, OptionQuery>;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -342,6 +441,11 @@ pub mod pallet {
         /// failed review (06 §5.4); `referendum` is the index returned by
         /// [`Config::RecallScheduler`].
         RecallScheduled { action: ActionId, referendum: u32 },
+        /// A guardian-track recall enacted; listed approvers' seats are vacant.
+        RecallEnacted {
+            action: ActionId,
+            removed: BoundedVec<T::AccountId, ConstU32<7>>,
+        },
     }
 
     /// 1:1 with [`CoreError`]; `CoreError::BadOrigin` maps to
@@ -399,6 +503,14 @@ pub mod pallet {
         Overflow,
         /// Core state validator rejected the aggregate (try-state only).
         TryStateViolation,
+        /// The failed-action recall record is absent or already reaped.
+        FailedActionNotFound,
+        /// `uphold_veto` targets a non-delay action.
+        NotDelayAction,
+        /// The bounded post-term bond-release queue is full.
+        TooManyBondReleases,
+        /// Held funds, the obligation ledger and fronting slices disagree.
+        BondAccounting,
     }
 
     #[pallet::hooks]
@@ -434,17 +546,10 @@ pub mod pallet {
             origin: OriginFor<T>,
             members: [T::AccountId; GUARDIAN_SEATS],
         ) -> DispatchResult {
-            T::ValuesOrigin::ensure_origin(origin)?;
-            let raw = Self::members_to_core(&members);
-            // Validate + install via the core (uniqueness, values-origin shape,
-            // bond reset, pending/approvals clear); persist the full result so
-            // the workflow clear reaches storage.
-            let mut g = Self::load().unwrap_or_else(|| Self::empty_core(raw));
-            g.set_members(guardian_core::GuardianOrigin::ConstitutionalValues, raw)
-                .map_err(Self::map_core_error)?;
-            Self::persist(&g)?;
-            Self::drain_events(&mut g)?;
-            Ok(())
+            frame_support::storage::with_storage_layer(|| {
+                T::AdminOrigin::ensure_origin(origin)?;
+                Self::install_members(members)
+            })
         }
 
         /// `guardian.propose_action` — a member proposes an action (06 §5.1).
@@ -517,12 +622,11 @@ pub mod pallet {
                     action_id,
                 )
                 .map_err(Self::map_core_error)?;
-                let referendum =
-                    ReviewReferenda::<T>::get(action_id).ok_or(Error::<T>::ReviewNotFound)?;
-                T::ReviewScheduler::refund_review(action_id, referendum)?;
+                Self::refund_review_fronting(action_id)?;
                 Self::persist(&g)?;
                 Self::drain_events(&mut g)?;
                 ReviewReferenda::<T>::remove(action_id);
+                ReviewFrontingOf::<T>::remove(action_id);
                 Ok(())
             })
         }
@@ -533,7 +637,7 @@ pub mod pallet {
         #[pallet::call_index(4)]
         #[pallet::weight(T::WeightInfo::renew_playbook())]
         pub fn renew_playbook(origin: OriginFor<T>, id: PlaybookId) -> DispatchResult {
-            T::ValuesOrigin::ensure_origin(origin)?;
+            T::AdminOrigin::ensure_origin(origin)?;
             Self::sync_epoch();
             let mut g = Self::load().ok_or(Error::<T>::NotInitialized)?;
             let now = Self::now();
@@ -542,6 +646,102 @@ pub mod pallet {
             Self::persist(&g)?;
             Self::drain_events(&mut g)?;
             Ok(())
+        }
+
+        /// Uphold a `delay_once` veto through its live ratify-track review. The
+        /// verdict and T24 transition are one storage transaction.
+        #[pallet::call_index(5)]
+        #[pallet::weight(T::WeightInfo::uphold_veto())]
+        pub fn uphold_veto(origin: OriginFor<T>, action_id: ActionId) -> DispatchResult {
+            frame_support::storage::with_storage_layer(|| {
+                T::ValuesOrigin::ensure_origin(origin)?;
+                let mut g = Self::load().ok_or(Error::<T>::NotInitialized)?;
+                let pid = g
+                    .pending
+                    .iter()
+                    .find(|action| action.id == action_id)
+                    .and_then(|action| match action.power {
+                        GuardianPower::DelayOnce { pid } => Some(pid),
+                        _ => None,
+                    })
+                    .ok_or(Error::<T>::NotDelayAction)?;
+                g.ratify_action(
+                    guardian_core::GuardianOrigin::ConstitutionalValues,
+                    action_id,
+                )
+                .map_err(Self::map_core_error)?;
+                T::ProposalVeto::uphold(pid)?;
+                Self::refund_review_fronting(action_id)?;
+                Self::persist(&g)?;
+                Self::drain_events(&mut g)?;
+                ReviewReferenda::<T>::remove(action_id);
+                ReviewFrontingOf::<T>::remove(action_id);
+                Ok(())
+            })
+        }
+
+        /// Enact a guardian-track recall for a failed action. Every recorded
+        /// approver still seated is removed; residual bonds remain held for one
+        /// further epoch and live approvals are cleared fail-closed.
+        #[pallet::call_index(6)]
+        #[pallet::weight(T::WeightInfo::recall())]
+        pub fn recall(origin: OriginFor<T>, action_id: ActionId) -> DispatchResult {
+            frame_support::storage::with_storage_layer(|| {
+                T::AdminOrigin::ensure_origin(origin)?;
+                let failed =
+                    FailedActions::<T>::get(action_id).ok_or(Error::<T>::FailedActionNotFound)?;
+                let mut g = Self::load().ok_or(Error::<T>::NotInitialized)?;
+                let release_epoch = T::CurrentEpoch::get()
+                    .checked_add(1)
+                    .ok_or(Error::<T>::Overflow)?;
+                let mut releases = PendingBondReleases::<T>::get();
+                let mut removed: BoundedVec<T::AccountId, ConstU32<7>> = BoundedVec::default();
+
+                for approver in failed
+                    .approvers
+                    .iter()
+                    .take(usize::from(failed.approver_count))
+                {
+                    let Some(index) = g
+                        .members
+                        .iter()
+                        .position(|member| member.as_ref() == Some(approver))
+                    else {
+                        continue;
+                    };
+                    let who = Self::from_core(*approver);
+                    removed
+                        .try_push(who.clone())
+                        .map_err(|_| Error::<T>::TooManyBondReleases)?;
+                    let amount = g.member_bonds[index];
+                    if amount > 0 {
+                        releases
+                            .try_push(BondRelease {
+                                who,
+                                amount,
+                                release_epoch,
+                            })
+                            .map_err(|_| Error::<T>::TooManyBondReleases)?;
+                    }
+                }
+
+                g.recall_members(
+                    guardian_core::GuardianOrigin::ConstitutionalValues,
+                    &failed.approvers[..usize::from(failed.approver_count)],
+                )
+                .map_err(Self::map_core_error)?;
+                if let Some(referendum) = failed.recall_referendum {
+                    T::RecallScheduler::refund_recall(referendum)?;
+                }
+                PendingBondReleases::<T>::put(releases);
+                Self::persist(&g)?;
+                FailedActions::<T>::remove(action_id);
+                Self::deposit_event(Event::RecallEnacted {
+                    action: action_id,
+                    removed,
+                });
+                Ok(())
+            })
         }
     }
 
@@ -590,6 +790,10 @@ pub mod pallet {
     #[pallet::genesis_build]
     impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
         fn build(&self) {
+            // Keep the PalletId account alive independently of Balances. This
+            // lets it place the exact fronted submission + decision deposits
+            // without retaining an extra existential-deposit slice.
+            frame_system::Pallet::<T>::inc_providers(&T::SovereignAccount::get());
             if self.members.is_empty() {
                 return;
             }
@@ -608,8 +812,16 @@ pub mod pallet {
                 Guardian::new(raw).is_ok(),
                 "guardian genesis: members must be unique (06 §5.1)"
             );
-            Members::<T>::put(raw);
+            let seated = raw.map(Some);
+            Members::<T>::put(seated);
             MemberBonds::<T>::put([GUARDIAN_BOND; GUARDIAN_SEATS]);
+            let reason: T::RuntimeHoldReason = HoldReason::SeatBond.into();
+            for member in &self.members {
+                assert!(
+                    T::Currency::hold(&reason, member, GUARDIAN_BOND).is_ok(),
+                    "guardian genesis: each member must fund the seat bond"
+                );
+            }
             LastSeenEpoch::<T>::put(T::CurrentEpoch::get());
         }
     }
@@ -640,6 +852,161 @@ pub mod pallet {
             raw
         }
 
+        fn seat_reason() -> T::RuntimeHoldReason {
+            HoldReason::SeatBond.into()
+        }
+
+        /// Install a complete incoming council while preserving outgoing bond
+        /// custody for one epoch. All holds and storage writes participate in
+        /// the caller's storage layer, so one underfunded account rolls the
+        /// election back in full.
+        fn install_members(members: [T::AccountId; GUARDIAN_SEATS]) -> DispatchResult {
+            let raw = Self::members_to_core(&members);
+            // Validate uniqueness before touching balances.
+            Guardian::new(raw).map_err(Self::map_core_error)?;
+            let existing = Self::load();
+            let was_initialized = existing.is_some();
+            let mut g = existing.unwrap_or_else(|| Self::empty_core(raw));
+            let mut releases = PendingBondReleases::<T>::get();
+            let release_epoch = T::CurrentEpoch::get()
+                .checked_add(1)
+                .ok_or(Error::<T>::Overflow)?;
+            let reason = Self::seat_reason();
+
+            for (who, raw_who) in members.iter().zip(raw.iter()) {
+                let seated = if was_initialized {
+                    g.members
+                        .iter()
+                        .position(|member| member.as_ref() == Some(raw_who))
+                        .map(|index| g.member_bonds[index])
+                } else {
+                    None
+                };
+                let released = releases
+                    .iter()
+                    .position(|release| release.who == *who)
+                    .map(|index| releases.remove(index).amount);
+                let existing = seated.or(released).unwrap_or(0);
+                ensure!(existing <= GUARDIAN_BOND, Error::<T>::BondAccounting);
+                let top_up = GUARDIAN_BOND.saturating_sub(existing);
+                if top_up > 0 {
+                    T::Currency::hold(&reason, who, top_up)?;
+                }
+            }
+
+            for (index, member) in g.members.iter().enumerate() {
+                let Some(raw_member) = member else {
+                    continue;
+                };
+                if raw.contains(raw_member) {
+                    continue;
+                }
+                let amount = g.member_bonds[index];
+                if amount > 0 {
+                    releases
+                        .try_push(BondRelease {
+                            who: Self::from_core(*raw_member),
+                            amount,
+                            release_epoch,
+                        })
+                        .map_err(|_| Error::<T>::TooManyBondReleases)?;
+                }
+            }
+
+            g.set_members(guardian_core::GuardianOrigin::ConstitutionalValues, raw)
+                .map_err(Self::map_core_error)?;
+            PendingBondReleases::<T>::put(releases);
+            Self::persist(&g)?;
+            Self::drain_events(&mut g)
+        }
+
+        fn front_review(action: ActionId) -> Result<u32, DispatchError> {
+            let review = ReviewDeadlines::<T>::get()
+                .iter()
+                .find(|review| review.action_id == action)
+                .copied()
+                .ok_or(Error::<T>::ReviewNotFound)?;
+            let count = usize::from(review.approver_count);
+            ensure!(
+                count > 0 && count <= GUARDIAN_SEATS,
+                Error::<T>::BondAccounting
+            );
+            let total = T::ReviewScheduler::review_deposit();
+            let divisor = futarchy_primitives::Balance::from(review.approver_count);
+            let base = total / divisor;
+            let remainder =
+                usize::try_from(total % divisor).map_err(|_| Error::<T>::BondAccounting)?;
+            let reason = Self::seat_reason();
+            let sovereign = T::SovereignAccount::get();
+            let bonds = MemberBonds::<T>::get();
+            let members = Members::<T>::get().ok_or(Error::<T>::NotInitialized)?;
+            let releases = PendingBondReleases::<T>::get();
+            let mut fronting = ReviewFronting {
+                referendum: 0,
+                approvers: review.approvers,
+                approver_count: review.approver_count,
+                obligations: [0; GUARDIAN_SEATS],
+                slices: [0; GUARDIAN_SEATS],
+            };
+
+            for (position, raw) in review.approvers.iter().take(count).enumerate() {
+                let who = Self::from_core(*raw);
+                let obligation = members
+                    .iter()
+                    .position(|member| member.as_ref() == Some(raw))
+                    .map(|index| bonds[index])
+                    .or_else(|| {
+                        releases
+                            .iter()
+                            .find(|release| release.who == who)
+                            .map(|release| release.amount)
+                    })
+                    .ok_or(Error::<T>::BondAccounting)?;
+                let slice =
+                    base.saturating_add(futarchy_primitives::Balance::from(position < remainder));
+                ensure!(slice <= obligation, Error::<T>::BondAccounting);
+                let moved = T::Currency::transfer_on_hold(
+                    &reason,
+                    &who,
+                    &sovereign,
+                    slice,
+                    Precision::Exact,
+                    Restriction::Free,
+                    Fortitude::Force,
+                )?;
+                ensure!(moved == slice, Error::<T>::BondAccounting);
+                fronting.obligations[position] = obligation;
+                fronting.slices[position] = slice;
+            }
+
+            let referendum = T::ReviewScheduler::schedule_review(action)?;
+            fronting.referendum = referendum;
+            ReviewFrontingOf::<T>::insert(action, fronting);
+            Ok(referendum)
+        }
+
+        fn refund_review_fronting(action: ActionId) -> DispatchResult {
+            let fronting = ReviewFrontingOf::<T>::get(action).ok_or(Error::<T>::ReviewNotFound)?;
+            T::ReviewScheduler::refund_review(fronting.referendum)?;
+            let reason = Self::seat_reason();
+            let sovereign = T::SovereignAccount::get();
+            for (position, raw) in fronting
+                .approvers
+                .iter()
+                .take(usize::from(fronting.approver_count))
+                .enumerate()
+            {
+                let slice = fronting.slices[position];
+                if slice == 0 {
+                    continue;
+                }
+                let who = Self::from_core(*raw);
+                T::Currency::transfer(&sovereign, &who, slice, Preservation::Expendable)?;
+                T::Currency::hold(&reason, &who, slice)?;
+            }
+            Ok(())
+        }
+
         /// Current block as the core's `u32` block number (real runtime is u32;
         /// mocks stay well below the ceiling — `saturated_into` is exact there).
         fn now() -> futarchy_primitives::BlockNumber {
@@ -650,7 +1017,7 @@ pub mod pallet {
         /// before any storage exists).
         fn empty_core(members: [CoreAccountId; GUARDIAN_SEATS]) -> Guardian {
             Guardian {
-                members,
+                members: members.map(Some),
                 member_bonds: [GUARDIAN_BOND; GUARDIAN_SEATS],
                 pending: Vec::new(),
                 approvals: Vec::new(),
@@ -791,7 +1158,7 @@ pub mod pallet {
                         Self::deposit_event(Event::PlaybookExpired { id });
                     }
                     CoreEvent::ReviewScheduled { action } => {
-                        let referendum = T::ReviewScheduler::schedule_review(action)?;
+                        let referendum = Self::front_review(action)?;
                         ReviewReferenda::<T>::insert(action, referendum);
                         Self::deposit_event(Event::ReviewScheduled { action, referendum });
                     }
@@ -802,30 +1169,110 @@ pub mod pallet {
                         action,
                         slashed_each,
                     } => {
-                        // 06 §5.4: the missed deadline also auto-schedules a
-                        // recall referendum on the `guardian` track.
-                        // The recall substrate can fail (SQ-146). Isolate it
-                        // so a partial scheduler write rolls back without
-                        // erasing the already-persisted slash, review cleanup,
-                        // and `ReviewFailed` accountability signal.
-                        let scheduled = frame_support::storage::with_storage_layer(|| {
-                            T::RecallScheduler::schedule_recall(action)
-                        });
-                        // Emit/write accountability only after the child
-                        // layer has committed or rolled back; a failed child
-                        // must not erase these outer effects.
-                        ReviewReferenda::<T>::remove(action);
+                        let scheduled = Self::settle_failed_review(action, slashed_each)?;
                         Self::deposit_event(Event::ReviewFailed {
                             action,
                             slashed_each,
                         });
-                        if let Ok(referendum) = scheduled {
+                        if let Some(referendum) = scheduled {
                             Self::deposit_event(Event::RecallScheduled { action, referendum });
                         }
                     }
                 }
             }
             Ok(())
+        }
+
+        /// Materialize a missed review against real holds. Review-fronted
+        /// slices count toward each approver's slash; only the residual is
+        /// transferred from the seat hold. Recall submission and its net
+        /// treasury forwarding run in a child layer. If submission fails, the
+        /// child rolls back and the complete pool is forwarded to MAIN in the
+        /// outer layer, so funds are never silently stranded while the slash,
+        /// `FailedActions` and `ReviewFailed` remain durable.
+        fn settle_failed_review(
+            action: ActionId,
+            slashed_each: futarchy_primitives::Balance,
+        ) -> Result<Option<u32>, DispatchError> {
+            let fronting = ReviewFrontingOf::<T>::get(action).ok_or(Error::<T>::ReviewNotFound)?;
+            T::ReviewScheduler::refund_review(fronting.referendum)?;
+            ensure!(
+                FailedActions::<T>::contains_key(action)
+                    || FailedActions::<T>::count() < MAX_FAILED_ACTIONS,
+                Error::<T>::TooManyReviews
+            );
+
+            let reason = Self::seat_reason();
+            let sovereign = T::SovereignAccount::get();
+            let members = Members::<T>::get().ok_or(Error::<T>::NotInitialized)?;
+            let mut releases = PendingBondReleases::<T>::get();
+            let mut pool = 0u128;
+
+            for (position, raw) in fronting
+                .approvers
+                .iter()
+                .take(usize::from(fronting.approver_count))
+                .enumerate()
+            {
+                let who = Self::from_core(*raw);
+                let effective_slash = fronting.obligations[position].min(slashed_each);
+                let slice = fronting.slices[position];
+                let consumed_fronting = slice.min(effective_slash);
+                let held_slash = effective_slash.saturating_sub(consumed_fronting);
+                if held_slash > 0 {
+                    let moved = T::Currency::transfer_on_hold(
+                        &reason,
+                        &who,
+                        &sovereign,
+                        held_slash,
+                        Precision::Exact,
+                        Restriction::Free,
+                        Fortitude::Force,
+                    )?;
+                    ensure!(moved == held_slash, Error::<T>::BondAccounting);
+                }
+                let restore = slice.saturating_sub(consumed_fronting);
+                if restore > 0 {
+                    T::Currency::transfer(&sovereign, &who, restore, Preservation::Expendable)?;
+                    T::Currency::hold(&reason, &who, restore)?;
+                }
+
+                if members.iter().all(|member| member.as_ref() != Some(raw)) {
+                    let release = releases
+                        .iter_mut()
+                        .find(|release| release.who == who)
+                        .ok_or(Error::<T>::BondAccounting)?;
+                    release.amount = release.amount.saturating_sub(effective_slash);
+                }
+                pool = pool
+                    .checked_add(effective_slash)
+                    .ok_or(Error::<T>::Overflow)?;
+            }
+
+            PendingBondReleases::<T>::put(releases);
+            let mut failed = FailedAction {
+                approvers: fronting.approvers,
+                approver_count: fronting.approver_count,
+                failed_epoch: T::CurrentEpoch::get(),
+                recall_referendum: None,
+            };
+            let scheduled = frame_support::storage::with_storage_layer(|| {
+                T::RecallScheduler::schedule_recall(action, pool)
+            });
+            let referendum = match scheduled {
+                Ok(index) => {
+                    failed.recall_referendum = Some(index);
+                    Some(index)
+                }
+                Err(_) => {
+                    T::RecallScheduler::forward_failed_recall_pool(pool)?;
+                    None
+                }
+            };
+            FailedActions::<T>::insert(action, failed);
+            ReviewReferenda::<T>::remove(action);
+            ReviewFrontingOf::<T>::remove(action);
+            Ok(referendum)
         }
 
         /// Build the [`DispatchContext`] for approving `action_id`: triggers
@@ -870,31 +1317,93 @@ pub mod pallet {
         /// no-op-safe.
         fn run_maintenance() {
             let _ = frame_support::storage::with_storage_layer(|| -> DispatchResult {
-                let Some(mut g) = Self::load() else {
-                    return Ok(());
-                };
-                let before = g.clone();
-                g.expire_playbooks(Self::now());
-                g.enforce_reviews(T::CurrentEpoch::get())
-                    .map_err(Self::map_core_error)?;
-                g.reap_terminal(Self::now());
-                if g.events.is_empty()
-                    && g.active_playbooks == before.active_playbooks
-                    && g.reviews == before.reviews
-                    && g.member_bonds == before.member_bonds
-                    && g.pending == before.pending
-                    && g.approvals == before.approvals
-                {
-                    return Ok(()); // nothing changed — skip the writes
+                if let Some(mut g) = Self::load() {
+                    let before = g.clone();
+                    g.expire_playbooks(Self::now());
+                    g.enforce_reviews(T::CurrentEpoch::get())
+                        .map_err(Self::map_core_error)?;
+                    g.reap_terminal(Self::now());
+                    if !(g.events.is_empty()
+                        && g.active_playbooks == before.active_playbooks
+                        && g.reviews == before.reviews
+                        && g.member_bonds == before.member_bonds
+                        && g.pending == before.pending
+                        && g.approvals == before.approvals)
+                    {
+                        Self::persist(&g)?;
+                        Self::drain_events(&mut g)?;
+                    }
                 }
-                Self::persist(&g)?;
-                Self::drain_events(&mut g)
+                Self::release_due_bonds()?;
+                Self::reap_failed_actions();
+                Ok(())
             });
         }
 
+        fn outstanding_fronting(who: &T::AccountId) -> futarchy_primitives::Balance {
+            ReviewFrontingOf::<T>::iter_values().fold(0u128, |total, fronting| {
+                let addition = fronting
+                    .approvers
+                    .iter()
+                    .take(usize::from(fronting.approver_count))
+                    .enumerate()
+                    .filter(|(_, raw)| Self::from_core(**raw) == *who)
+                    .fold(0u128, |sum, (position, _)| {
+                        sum.saturating_add(fronting.slices[position])
+                    });
+                total.saturating_add(addition)
+            })
+        }
+
+        fn release_due_bonds() -> DispatchResult {
+            let epoch = T::CurrentEpoch::get();
+            let reason = Self::seat_reason();
+            PendingBondReleases::<T>::try_mutate(|releases| -> DispatchResult {
+                let mut kept: BoundedVec<
+                    BondRelease<T::AccountId>,
+                    ConstU32<MAX_PENDING_BOND_RELEASES>,
+                > = BoundedVec::default();
+                for release in releases.iter() {
+                    if epoch >= release.release_epoch
+                        && Self::outstanding_fronting(&release.who) == 0
+                    {
+                        let actual = T::Currency::release(
+                            &reason,
+                            &release.who,
+                            release.amount,
+                            Precision::Exact,
+                        )?;
+                        ensure!(actual == release.amount, Error::<T>::BondAccounting);
+                    } else {
+                        kept.try_push(release.clone())
+                            .map_err(|_| Error::<T>::TooManyBondReleases)?;
+                    }
+                }
+                *releases = kept;
+                Ok(())
+            })
+        }
+
+        fn reap_failed_actions() {
+            let epoch = T::CurrentEpoch::get();
+            for (action, failed) in FailedActions::<T>::iter() {
+                if epoch < failed.failed_epoch.saturating_add(4) {
+                    continue;
+                }
+                match failed.recall_referendum {
+                    Some(referendum) => {
+                        if T::RecallScheduler::refund_recall(referendum).is_ok() {
+                            FailedActions::<T>::remove(action);
+                        }
+                    }
+                    None => FailedActions::<T>::remove(action),
+                }
+            }
+        }
+
         /// Read helper: the current council (view for the FE / sibling pallets).
-        pub fn members() -> Option<[T::AccountId; GUARDIAN_SEATS]> {
-            Members::<T>::get().map(|raw| core::array::from_fn(|i| Self::from_core(raw[i])))
+        pub fn members() -> Option<[Option<T::AccountId>; GUARDIAN_SEATS]> {
+            Members::<T>::get().map(|raw| core::array::from_fn(|i| raw[i].map(Self::from_core)))
         }
 
         /// Read helper: is a playbook currently active?
@@ -919,6 +1428,18 @@ pub mod pallet {
                 ActivePlaybooks::<T>::get().len() as u32 <= MAX_ACTIVE_PLAYBOOKS,
                 TryRuntimeError::Other("guardian: ActivePlaybooks over bound")
             );
+            ensure!(
+                PendingBondReleases::<T>::get().len() as u32 <= MAX_PENDING_BOND_RELEASES,
+                TryRuntimeError::Other("guardian: PendingBondReleases over bound")
+            );
+            ensure!(
+                FailedActions::<T>::count() <= MAX_FAILED_ACTIONS,
+                TryRuntimeError::Other("guardian: FailedActions over bound")
+            );
+            ensure!(
+                ReviewFrontingOf::<T>::count() <= MAX_REVIEWS,
+                TryRuntimeError::Other("guardian: ReviewFrontingOf over bound")
+            );
             if let Some(g) = Self::load() {
                 g.try_state().map_err(|_| {
                     TryRuntimeError::Other("guardian core try_state failed (06 §5/§6)")
@@ -934,6 +1455,51 @@ pub mod pallet {
                         TryRuntimeError::Other(
                             "guardian I-23: a dispatched action has no review record"
                         )
+                    );
+                }
+
+                let reason = Self::seat_reason();
+                for (index, member) in g.members.iter().enumerate() {
+                    match member {
+                        Some(raw) => {
+                            let who = Self::from_core(*raw);
+                            let held = T::Currency::balance_on_hold(&reason, &who);
+                            let fronted = Self::outstanding_fronting(&who);
+                            ensure!(
+                                held.saturating_add(fronted) == g.member_bonds[index],
+                                TryRuntimeError::Other(
+                                    "guardian bond: seated hold + fronting != obligation"
+                                )
+                            );
+                        }
+                        None => ensure!(
+                            g.member_bonds[index] == 0,
+                            TryRuntimeError::Other("guardian bond: vacant seat has obligation")
+                        ),
+                    }
+                }
+                for release in PendingBondReleases::<T>::get() {
+                    let held = T::Currency::balance_on_hold(&reason, &release.who);
+                    let fronted = Self::outstanding_fronting(&release.who);
+                    ensure!(
+                        held.saturating_add(fronted) == release.amount,
+                        TryRuntimeError::Other(
+                            "guardian bond: departed hold + fronting != release obligation"
+                        )
+                    );
+                }
+                for fronting in ReviewFrontingOf::<T>::iter_values() {
+                    ensure!(
+                        fronting.approver_count > 0
+                            && usize::from(fronting.approver_count) <= GUARDIAN_SEATS
+                            && fronting
+                                .slices
+                                .iter()
+                                .take(usize::from(fronting.approver_count))
+                                .copied()
+                                .fold(0u128, u128::saturating_add)
+                                == T::ReviewScheduler::review_deposit(),
+                        TryRuntimeError::Other("guardian bond: malformed review fronting")
                     );
                 }
             }

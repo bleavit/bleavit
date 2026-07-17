@@ -289,6 +289,8 @@ pub enum Origin {
     Keeper,
     Root,
     GuardianHold,
+    /// Pallet-internal authority used only by the guardian review verdict.
+    GuardianReview,
     ExecutionGuard,
     VoidAuthority,
 }
@@ -1121,7 +1123,7 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         ledger: &mut L,
         pid: ProposalId,
     ) -> Result<(), Error> {
-        ensure!(matches!(origin, Origin::GuardianHold), Error::BadOrigin);
+        ensure!(matches!(origin, Origin::GuardianReview), Error::BadOrigin);
         ensure!(
             self.proposal(pid)?.state == ProposalState::Suspended,
             Error::BadState

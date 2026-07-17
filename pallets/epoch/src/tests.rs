@@ -648,13 +648,6 @@ fn authority_calls_reject_the_closed_origin_misuse_set() {
             RuntimeOrigin::none(),
             RuntimeOrigin::signed(nobody()),
         ] {
-            assert_noop!(Epoch::veto_upheld(origin, 1), DispatchError::BadOrigin);
-        }
-        for origin in [
-            RuntimeOrigin::root(),
-            RuntimeOrigin::none(),
-            RuntimeOrigin::signed(nobody()),
-        ] {
             assert_noop!(
                 Epoch::force_reject_process_hold(origin, 1),
                 DispatchError::BadOrigin
@@ -2155,7 +2148,7 @@ fn guardian_delay_rerun_and_t24_veto_paths_work_without_enqueue() {
 
     new_test_ext().execute_with(|| {
         assert_ok!(Epoch::seed(callback_state(1, ProposalState::Suspended)));
-        assert_ok!(Epoch::veto_upheld(RuntimeOrigin::signed(guardian()), 1));
+        assert_ok!(Epoch::veto_upheld_from_review(1));
         let proposal = Proposals::<Test>::get(1).expect("vetoed proposal enters measurement");
         assert_eq!(proposal.state, ProposalState::Measuring);
         assert_eq!(
@@ -2270,7 +2263,7 @@ fn veto_upheld_releases_the_queued_guard_entry() {
         );
         assert!(!GuardStateModel::get().queue.is_empty());
         // T24: upholding the veto drives it terminal and must dequeue A11.
-        assert_ok!(Epoch::veto_upheld(RuntimeOrigin::signed(guardian()), 1));
+        assert_ok!(Epoch::veto_upheld_from_review(1));
         assert_eq!(
             Proposals::<Test>::get(1).map(|proposal| proposal.state),
             Some(ProposalState::Measuring)

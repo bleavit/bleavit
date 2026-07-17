@@ -564,16 +564,6 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::CounterForProposals` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::CounterForCohorts` (r:1 w:1)
 	/// Proof: `Epoch::CounterForCohorts` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
-	fn veto_upheld() -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `40036`
-		//  Estimated: `183055`
-		// Minimum execution time: 1_779_921_000 picoseconds.
-		Weight::from_parts(1_818_080_000, 0)
-			.saturating_add(Weight::from_parts(0, 183055))
-			.saturating_add(T::DbWeight::get().reads(201))
-			.saturating_add(T::DbWeight::get().writes(129))
-	}
 	/// Storage: `Epoch::EpochOf` (r:1 w:1)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Schedule` (r:1 w:1)

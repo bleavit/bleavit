@@ -1048,24 +1048,6 @@ pub mod pallet {
             })
         }
 
-        #[pallet::call_index(7)]
-        #[pallet::weight(T::WeightInfo::veto_upheld())]
-        pub fn veto_upheld(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
-            T::GuardianOrigin::ensure_origin(origin)?;
-            let result = Self::mutate(|state, ledger| {
-                // T24: a `Suspended` proposal was `Queued` before `delay_once`, so A11
-                // still owns its queue entry, preimage pin and resource locks. Upholding
-                // the veto drives it to the terminal rejected/measuring outcome; release
-                // the guard state in lockstep (idempotent — a no-op if nothing is queued).
-                state.veto_upheld(CoreOrigin::GuardianHold, ledger, pid)?;
-                T::ExecutionGuard::dequeue_terminal(pid).map_err(|_| CoreError::ExecutionGuard)
-            });
-            if result.is_ok() {
-                GuardianReviewDeadlines::<T>::remove(pid);
-            }
-            result
-        }
-
         #[pallet::call_index(8)]
         #[pallet::weight(T::WeightInfo::mark_executed())]
         pub fn mark_executed(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
@@ -1379,6 +1361,20 @@ pub mod pallet {
                 })?;
                 Self::persist(state)
             })
+        }
+
+        /// Sole T24 producer, called by `guardian.uphold_veto` after its
+        /// ratify-track origin and live review have been validated. This is not
+        /// a dispatchable: GuardianHold alone cannot reject a proposal.
+        pub fn veto_upheld_from_review(pid: ProposalId) -> DispatchResult {
+            let result = Self::mutate(|state, ledger| {
+                state.veto_upheld(CoreOrigin::GuardianReview, ledger, pid)?;
+                T::ExecutionGuard::dequeue_terminal(pid).map_err(|_| CoreError::ExecutionGuard)
+            });
+            if result.is_ok() {
+                GuardianReviewDeadlines::<T>::remove(pid);
+            }
+            result
         }
 
         /// Bind the retrospective-review deadline to a delayed proposal. This

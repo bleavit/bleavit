@@ -13,11 +13,11 @@ use frame_support::{
     assert_noop, assert_ok,
     dispatch::{DispatchClass, GetDispatchInfo},
     traits::{
-        fungible::Inspect as FungibleInspect,
+        fungible::{Inspect as FungibleInspect, InspectHold},
         fungibles::{Inspect as FungiblesInspect, Mutate as FungiblesMutate},
         tokens::ConversionToAssetBalance,
-        ConstU32, Contains, EnsureOrigin, Get, Hooks, PalletInfo, PalletsInfoAccess, QueryPreimage,
-        StorePreimage, VestingSchedule,
+        ConstU32, Contains, EnsureOrigin, Get, Hooks, OriginTrait, PalletInfo, PalletsInfoAccess,
+        QueryPreimage, StorePreimage, VestingSchedule,
     },
     weights::Weight,
     BoundedVec,
@@ -53,9 +53,9 @@ use crate::{
     InflowCaps, Market, MessageQueue, Migrations, MilestoneRegistry, Multisig, Oracle, Origins,
     PalletInfo as RuntimePalletInfo, ParachainInfo, ParachainSystem, PolkadotXcm, Preimage, Proxy,
     Referenda, Runtime, RuntimeCall, RuntimeGenesisConfig, RuntimeOrigin, Scheduler, Session, Sudo,
-    System, Timestamp, TransactionPayment, TxExtension, UncheckedExtrinsic, Utility, Vesting,
-    Welfare, XcmpQueue, FEE_VIT_USDC_RATE_KEY, MILLISECS_PER_BLOCK, SS58_PREFIX, USDC_DECIMALS,
-    USDC_LOCATION_ENCODED, VERSION, VIT_DECIMALS,
+    System, Timestamp, TrackOrigins, TransactionPayment, TxExtension, UncheckedExtrinsic, Utility,
+    Vesting, Welfare, XcmpQueue, FEE_VIT_USDC_RATE_KEY, MILLISECS_PER_BLOCK, SS58_PREFIX,
+    USDC_DECIMALS, USDC_LOCATION_ENCODED, VERSION, VIT_DECIMALS,
 };
 
 trait SameType<Rhs> {}
@@ -1288,9 +1288,10 @@ fn composition_contains_all_wired_pallets_at_their_frozen_indices() {
     assert_pallet!(Epoch, 61, "Epoch");
     assert_pallet!(ExecutionGuard, 62, "ExecutionGuard");
     assert_pallet!(InflowCaps, 63, "InflowCaps");
+    assert_pallet!(TrackOrigins, 64, "TrackOrigins");
     assert_eq!(
         <AllPalletsWithSystem as PalletsInfoAccess>::infos().len(),
-        41
+        42
     );
 }
 
@@ -4334,7 +4335,6 @@ fn epoch_call_samples() -> Vec<RuntimeCall> {
             pid: 0,
             justification_hash: [0; 32],
         }),
-        RuntimeCall::Epoch(pallet_epoch::Call::veto_upheld { pid: 0 }),
         RuntimeCall::Epoch(pallet_epoch::Call::mark_executed { pid: 0 }),
         RuntimeCall::Epoch(pallet_epoch::Call::mark_failed_executed { pid: 0 }),
         RuntimeCall::Epoch(pallet_epoch::Call::retry_exhausted_to_measurement { pid: 0 }),
@@ -4350,12 +4350,12 @@ fn epoch_call_samples() -> Vec<RuntimeCall> {
 #[test]
 fn epoch_classifier_rows_and_closed_privileged_wrappers_match_the_authority_matrix() {
     let calls = epoch_call_samples();
-    assert_eq!(calls.len(), 14);
+    assert_eq!(calls.len(), 13);
 
     for call in &calls[0..5] {
         assert!(RuntimeBaseCallFilter::contains(call));
     }
-    for call in &calls[8..12] {
+    for call in &calls[7..11] {
         assert!(RuntimeBaseCallFilter::contains(call));
     }
 
@@ -4367,21 +4367,21 @@ fn epoch_classifier_rows_and_closed_privileged_wrappers_match_the_authority_matr
         values,
     ));
 
-    for guardian in [&calls[6], &calls[7], &calls[12]] {
+    for guardian in [&calls[6], &calls[11]] {
         assert!(!RuntimeBaseCallFilter::contains(guardian));
         assert!(RuntimeBaseCallFilter::contains_for(
             ClassOrigin::GuardianHold,
             guardian,
         ));
     }
-    let void = &calls[13];
+    let void = &calls[12];
     assert!(!RuntimeBaseCallFilter::contains(void));
     assert!(RuntimeBaseCallFilter::contains_for(
         ClassOrigin::EmergencyPlaybook,
         void,
     ));
 
-    for privileged in [&calls[5], &calls[6], &calls[7], &calls[12], &calls[13]] {
+    for privileged in [&calls[5], &calls[6], &calls[11], &calls[12]] {
         for wrapped in closed_wrappers(privileged.clone()) {
             assert!(
                 !RuntimeBaseCallFilter::contains(&wrapped),
@@ -4395,7 +4395,7 @@ fn epoch_classifier_rows_and_closed_privileged_wrappers_match_the_authority_matr
 fn epoch_privileged_leaves_reject_every_non_authority_origin() {
     development_ext().execute_with(|| {
         let calls = epoch_call_samples();
-        for index in [5usize, 6, 7, 8, 9, 10, 11, 12, 13] {
+        for index in [5usize, 6, 7, 8, 9, 10, 11, 12] {
             for bad_origin in [
                 RuntimeOrigin::signed(account(71)),
                 RuntimeOrigin::root(),
@@ -4412,7 +4412,7 @@ fn epoch_privileged_leaves_reject_every_non_authority_origin() {
             }
         }
 
-        for index in [5usize, 6, 7, 12, 13] {
+        for index in [5usize, 6, 11, 12] {
             for wrapped in closed_wrappers(calls[index].clone()) {
                 assert!(!RuntimeBaseCallFilter::contains(&wrapped));
                 let result = wrapped.dispatch(RuntimeOrigin::signed(account(72)));
@@ -4800,6 +4800,277 @@ fn delayed_decide_uses_own_baseline_window_before_classless_queue_refusal() {
     });
 }
 
+fn enact_passing_referendum(index: u32) {
+    let voter = account(199);
+    let voting_balance = Balances::total_issuance().saturating_mul(10);
+    assert_ok!(Balances::force_set_balance(
+        RuntimeOrigin::root(),
+        MultiAddress::Id(voter.clone()),
+        voting_balance,
+    ));
+    assert_ok!(ConvictionVoting::vote(
+        RuntimeOrigin::signed(voter),
+        index,
+        pallet_conviction_voting::AccountVote::Standard {
+            vote: pallet_conviction_voting::Vote {
+                aye: true,
+                conviction: pallet_conviction_voting::Conviction::Locked1x,
+            },
+            balance: voting_balance,
+        },
+    ));
+    let Some(pallet_referenda::ReferendumInfo::Ongoing(status)) =
+        pallet_referenda::ReferendumInfoFor::<Runtime>::get(index)
+    else {
+        assert!(false, "referendum must be ongoing before preparation ends");
+        return;
+    };
+    let prepare_at = status.submitted.saturating_add(
+        crate::configs::TRACKS[usize::from(status.track)]
+            .info
+            .prepare_period,
+    );
+    System::set_block_number(prepare_at);
+    assert_ok!(Referenda::nudge_referendum(RuntimeOrigin::root(), index));
+    let Some(pallet_referenda::ReferendumInfo::Ongoing(status)) =
+        pallet_referenda::ReferendumInfoFor::<Runtime>::get(index)
+    else {
+        assert!(false, "referendum must enter deciding");
+        return;
+    };
+    let Some(confirm_at) = status.deciding.and_then(|deciding| deciding.confirming) else {
+        assert!(false, "supermajority vote must enter confirmation");
+        return;
+    };
+    let enactment_delay = crate::configs::TRACKS[usize::from(status.track)]
+        .info
+        .min_enactment_period;
+    System::set_block_number(confirm_at);
+    assert_ok!(Referenda::nudge_referendum(RuntimeOrigin::root(), index));
+    assert!(matches!(
+        pallet_referenda::ReferendumInfoFor::<Runtime>::get(index),
+        Some(pallet_referenda::ReferendumInfo::Approved(..))
+    ));
+    // A zero-minimum track schedules at the approval block, whose scheduler
+    // hook has already run in this direct test harness; execute it next block.
+    let enact_at = confirm_at.saturating_add(enactment_delay.max(1));
+    System::set_block_number(enact_at);
+    let _ = Scheduler::on_initialize(enact_at);
+}
+
+fn seed_guardian_delay_action(
+    pid: futarchy_primitives::ProposalId,
+    first_member_seed: u8,
+) -> ([AccountId; pallet_guardian::GUARDIAN_SEATS], u32, u32) {
+    System::set_block_number(System::block_number().max(1));
+    let members = core::array::from_fn(|index| account(first_member_seed + index as u8));
+    for member in &members {
+        assert_ok!(Balances::force_set_balance(
+            RuntimeOrigin::root(),
+            MultiAddress::Id(member.clone()),
+            pallet_guardian::GUARDIAN_BOND.saturating_add(currency::VIT),
+        ));
+    }
+    assert_ok!(Guardian::set_members(
+        pallet_origins::Origin::ConstitutionalValues.into(),
+        members.clone(),
+    ));
+    let version_constraint = pallet_execution_guard::CurrentSpecName::<Runtime>::get()
+        .expect("guard genesis binds a runtime version");
+    assert_ok!(seed_queued_epoch_proposal(
+        pid,
+        ProposalClass::Treasury,
+        H256::repeat_byte(first_member_seed),
+        1,
+        System::block_number().saturating_add(20),
+        System::block_number().saturating_add(30),
+        version_constraint,
+    ));
+    assert_ok!(Guardian::propose_action(
+        RuntimeOrigin::signed(members[0].clone()),
+        pallet_guardian::GuardianPower::DelayOnce { pid },
+        H256::repeat_byte(first_member_seed.saturating_add(1)).into(),
+    ));
+    let action = pallet_guardian::NextActionId::<Runtime>::get().saturating_sub(1);
+    for member in members.iter().take(5).skip(1) {
+        assert_ok!(Guardian::approve_action(
+            RuntimeOrigin::signed(member.clone()),
+            action,
+        ));
+    }
+    let referendum = pallet_guardian::ReviewReferenda::<Runtime>::get(action)
+        .expect("fifth approval schedules review");
+    (members, action, referendum)
+}
+
+#[test]
+fn guardian_review_votes_and_enacts_on_ratify_track_with_bonds_restored() {
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 8_009;
+        let (members, action, referendum) = seed_guardian_delay_action(PID, 80);
+        let Some(pallet_referenda::ReferendumInfo::Ongoing(status)) =
+            pallet_referenda::ReferendumInfoFor::<Runtime>::get(referendum)
+        else {
+            assert!(false, "review must be ongoing");
+            return;
+        };
+        assert_eq!(status.track, 4);
+        assert_eq!(
+            status.decision_deposit.map(|deposit| deposit.amount),
+            Some(1_000 * currency::VIT)
+        );
+        assert!(pallet_guardian::ReviewFrontingOf::<Runtime>::contains_key(
+            action
+        ));
+
+        enact_passing_referendum(referendum);
+
+        assert!(pallet_guardian::ReviewDeadlines::<Runtime>::get()
+            .iter()
+            .any(|review| review.action_id == action && review.ratified));
+        assert!(!pallet_guardian::ReviewFrontingOf::<Runtime>::contains_key(
+            action
+        ));
+        let reason: crate::RuntimeHoldReason = pallet_guardian::HoldReason::SeatBond.into();
+        for member in members.iter().take(5) {
+            assert_eq!(
+                Balances::balance_on_hold(&reason, member),
+                pallet_guardian::GUARDIAN_BOND
+            );
+        }
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
+fn guardian_uphold_veto_is_the_atomic_t24_review_verdict() {
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 8_007;
+        let (members, action, referendum) = seed_guardian_delay_action(PID, 60);
+        assert_ok!(Referenda::cancel(
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            referendum,
+        ));
+
+        assert_ok!(Guardian::uphold_veto(
+            crate::track_origins::Origin::Ratify.into(),
+            action,
+        ));
+
+        let proposal = pallet_epoch::Proposals::<Runtime>::get(PID)
+            .expect("vetoed proposal enters measurement");
+        assert_eq!(proposal.state, ProposalState::Measuring);
+        assert_eq!(
+            proposal.decision,
+            Some(DecisionOutcome::Reject(RejectReason::VetoUpheldByReview))
+        );
+        assert!(!pallet_epoch::GuardianReviewDeadlines::<Runtime>::contains_key(PID));
+        assert!(pallet_guardian::ReviewDeadlines::<Runtime>::get()
+            .iter()
+            .any(|review| review.action_id == action && review.ratified));
+        let reason: crate::RuntimeHoldReason = pallet_guardian::HoldReason::SeatBond.into();
+        for member in members.iter().take(5) {
+            assert_eq!(
+                Balances::balance_on_hold(&reason, member),
+                pallet_guardian::GUARDIAN_BOND
+            );
+        }
+        assert!(!pallet_guardian::ReviewFrontingOf::<Runtime>::contains_key(
+            action
+        ));
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
+fn uphold_veto_after_rerun_is_benign_and_plain_ratification_still_works() {
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 8_008;
+        let (_, action, referendum) = seed_guardian_delay_action(PID, 70);
+        // The epoch T12/T13 path owns reopening and its queue handoff; seed the
+        // resulting state here so this test isolates the review-verdict race.
+        pallet_epoch::Proposals::<Runtime>::mutate(PID, |proposal| {
+            if let Some(proposal) = proposal {
+                proposal.state = ProposalState::Extended;
+                proposal.rerun = true;
+            }
+        });
+        pallet_epoch::GuardianReviewDeadlines::<Runtime>::remove(PID);
+        assert_eq!(
+            pallet_epoch::Proposals::<Runtime>::get(PID).map(|proposal| proposal.state),
+            Some(ProposalState::Extended)
+        );
+        assert_noop!(
+            Guardian::uphold_veto(crate::track_origins::Origin::Ratify.into(), action),
+            pallet_epoch::Error::<Runtime>::BadState
+        );
+        assert!(pallet_guardian::ReviewDeadlines::<Runtime>::get()
+            .iter()
+            .any(|review| review.action_id == action && !review.ratified));
+        assert_ok!(Referenda::cancel(
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            referendum,
+        ));
+        assert_ok!(Guardian::ratify_action(
+            crate::track_origins::Origin::Ratify.into(),
+            action,
+        ));
+        assert!(pallet_guardian::ReviewDeadlines::<Runtime>::get()
+            .iter()
+            .any(|review| review.action_id == action && review.ratified));
+    });
+}
+
+#[test]
+fn guardian_track_scope_is_enforced_and_underfunded_election_is_atomic() {
+    development_ext().execute_with(|| {
+        assert_noop!(
+            Guardian::ratify_action(crate::track_origins::Origin::Metric.into(), 0),
+            DispatchError::BadOrigin
+        );
+        let members = core::array::from_fn(|index| account(210 + index as u8));
+        for member in &members {
+            assert_ok!(Balances::force_set_balance(
+                RuntimeOrigin::root(),
+                MultiAddress::Id(member.clone()),
+                currency::VIT,
+            ));
+        }
+        for member in members.iter().take(6) {
+            assert_ok!(Balances::force_set_balance(
+                RuntimeOrigin::root(),
+                MultiAddress::Id(member.clone()),
+                pallet_guardian::GUARDIAN_BOND.saturating_add(currency::VIT),
+            ));
+        }
+        assert!(Guardian::set_members(
+            crate::track_origins::Origin::GuardianTrack.into(),
+            members.clone(),
+        )
+        .is_err());
+        assert!(Guardian::members().is_none());
+        let reason: crate::RuntimeHoldReason = pallet_guardian::HoldReason::SeatBond.into();
+        for member in members.iter().take(6) {
+            assert_eq!(Balances::balance_on_hold(&reason, member), 0);
+        }
+
+        assert_ok!(Balances::force_set_balance(
+            RuntimeOrigin::root(),
+            MultiAddress::Id(members[6].clone()),
+            pallet_guardian::GUARDIAN_BOND.saturating_add(currency::VIT),
+        ));
+        assert_ok!(Guardian::set_members(
+            crate::track_origins::Origin::GuardianTrack.into(),
+            members.clone(),
+        ));
+        assert_eq!(Guardian::members(), Some(members.clone().map(Some)));
+        assert_noop!(
+            Guardian::set_members(crate::track_origins::Origin::Ratify.into(), members),
+            DispatchError::BadOrigin
+        );
+    });
+}
+
 #[test]
 fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_review() {
     development_ext().execute_with(|| {
@@ -4878,6 +5149,20 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
             pallet_guardian::ReviewReferenda::<Runtime>::get(action),
             Some(before_referenda),
         );
+        let review_info = pallet_referenda::ReferendumInfoFor::<Runtime>::get(before_referenda);
+        let Some(pallet_referenda::ReferendumInfo::Ongoing(review_status)) = review_info else {
+            assert!(false, "review referendum must be ongoing");
+            return;
+        };
+        assert_eq!(review_status.track, 4);
+        assert_eq!(review_status.submission_deposit.amount, currency::VIT);
+        assert_eq!(
+            review_status
+                .decision_deposit
+                .as_ref()
+                .map(|deposit| deposit.amount),
+            Some(1_000 * currency::VIT),
+        );
         let deadline = match pallet_epoch::GuardianReviewDeadlines::<Runtime>::get(PID) {
             Some(deadline) => deadline,
             None => {
@@ -4893,14 +5178,17 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
             <crate::configs::RuntimeEpochGuardian as pallet_epoch::GuardianAccess>::review_window_closed(PID),
         );
 
-        // The recall-track substrate is deliberately still fail-closed, but
-        // that failure must not roll back the implementable accountability
-        // half: slash the approving seats, clean the review and expose the
-        // missed review durably.
+        // Model the review finishing without an enacted verdict. On chain its
+        // seven-day decision period closes well before the two-epoch guardian
+        // deadline; cancellation gives this direct-storage clock jump the same
+        // refundable terminal deposit state.
+        assert_ok!(Referenda::cancel(
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            before_referenda,
+        ));
         let bonds_before = pallet_guardian::MemberBonds::<Runtime>::get();
-        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
-            clock.index = deadline.saturating_add(1)
-        });
+        let treasury_before = Balances::balance(&crate::genesis::treasury_account());
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| clock.index = deadline);
         let _ = Guardian::on_initialize(System::block_number());
         let bonds_after = pallet_guardian::MemberBonds::<Runtime>::get();
         let slash = pallet_guardian::GUARDIAN_BOND
@@ -4915,8 +5203,43 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
         for index in 5..pallet_guardian::GUARDIAN_SEATS {
             assert_eq!(bonds_after[index], bonds_before[index]);
         }
+        let reason: crate::RuntimeHoldReason = pallet_guardian::HoldReason::SeatBond.into();
+        for member in members.iter().take(5) {
+            assert_eq!(Balances::balance_on_hold(&reason, member), slash);
+        }
+        for member in members.iter().skip(5) {
+            assert_eq!(
+                Balances::balance_on_hold(&reason, member),
+                pallet_guardian::GUARDIAN_BOND
+            );
+        }
         assert!(pallet_guardian::ReviewDeadlines::<Runtime>::get().is_empty());
         assert!(!pallet_guardian::ReviewReferenda::<Runtime>::contains_key(action));
+        let failed = pallet_guardian::FailedActions::<Runtime>::get(action)
+            .expect("deadline writes the recall substrate");
+        let recall = failed
+            .recall_referendum
+            .expect("deadline schedules a real recall referendum");
+        let recall_info = pallet_referenda::ReferendumInfoFor::<Runtime>::get(recall);
+        let Some(pallet_referenda::ReferendumInfo::Ongoing(recall_status)) = recall_info else {
+            assert!(false, "recall referendum must be ongoing");
+            return;
+        };
+        assert_eq!(recall_status.track, 3);
+        assert_eq!(
+            recall_status
+                .decision_deposit
+                .as_ref()
+                .map(|deposit| deposit.amount),
+            Some(5_000 * currency::VIT),
+        );
+        let recall_deposits = 5_001 * currency::VIT;
+        assert_eq!(
+            Balances::balance(&crate::genesis::treasury_account()),
+            treasury_before
+                .saturating_add(slash.saturating_mul(5))
+                .saturating_sub(recall_deposits),
+        );
         let events = System::events();
         assert!(
             events.iter().any(|record| matches!(
@@ -4928,13 +5251,45 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
             )),
             "guardian accountability signal missing from {events:?}",
         );
-        assert!(!System::events().iter().any(|record| matches!(
+        assert!(System::events().iter().any(|record| matches!(
             record.event,
             crate::RuntimeEvent::Guardian(pallet_guardian::Event::RecallScheduled {
                 action: recalled,
-                ..
-            }) if recalled == action
+                referendum,
+            }) if recalled == action && referendum == recall
         )));
+
+        enact_passing_referendum(recall);
+        let seated = Guardian::members().expect("council remains initialized");
+        assert_eq!(seated.iter().filter(|member| member.is_some()).count(), 2);
+        assert!(!pallet_guardian::FailedActions::<Runtime>::contains_key(action));
+        assert_eq!(
+            Balances::balance(&crate::genesis::treasury_account()),
+            treasury_before.saturating_add(slash.saturating_mul(5)),
+            "recall refunds both deposits into treasury MAIN",
+        );
+
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = deadline.saturating_add(1)
+        });
+        let _ = Guardian::on_initialize(System::block_number());
+        for member in members.iter().take(5) {
+            assert_eq!(Balances::balance_on_hold(&reason, member), 0);
+        }
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(members[5].clone()),
+            pallet_guardian::GuardianPower::DelayOnce { pid: PID },
+            H256::repeat_byte(8).into(),
+        ));
+        let blocked = pallet_guardian::NextActionId::<Runtime>::get().saturating_sub(1);
+        assert_ok!(Guardian::approve_action(
+            RuntimeOrigin::signed(members[6].clone()),
+            blocked,
+        ));
+        assert!(!pallet_guardian::PendingActions::<Runtime>::get()
+            .iter()
+            .find(|pending| pending.id == blocked)
+            .is_some_and(|pending| pending.dispatched));
     });
 }
 
@@ -6338,11 +6693,20 @@ fn values_leaf_dispatches_with_values_origin_and_signed_dies_in_pallet() {
         account(6),
         account(7),
     ];
-    let call = RuntimeCall::Guardian(pallet_guardian::Call::set_members { members });
+    let call = RuntimeCall::Guardian(pallet_guardian::Call::set_members {
+        members: members.clone(),
+    });
     assert!(RuntimeBaseCallFilter::contains(&call));
     development_ext().execute_with(|| {
         let signed = call.clone().dispatch(RuntimeOrigin::signed(account(1)));
         assert!(matches!(signed, Err(error) if error.error == DispatchError::BadOrigin));
+        for member in &members {
+            assert_ok!(Balances::force_set_balance(
+                RuntimeOrigin::root(),
+                MultiAddress::Id(member.clone()),
+                pallet_guardian::GUARDIAN_BOND.saturating_add(currency::VIT),
+            ));
+        }
         let values = call
             .clone()
             .dispatch(pallet_origins::Origin::ConstitutionalValues.into());
@@ -8043,20 +8407,36 @@ fn genesis_phase_flags_advertise_sudo_present_alongside_the_sudo_key() {
 
 #[test]
 fn referenda_support_curves_decay_high_to_low_without_underflow() {
-    // Major (spec-reviewer): a floor/ceil-swapped `make_linear` underflows
-    // `Perbill::sub` in `Curve::threshold` — panic under overflow-checks, or a
-    // wrapped ~419% support requirement in release — making EVERY values track
-    // unable to confirm. Drive each support curve at turnout 0/½/1 and assert
-    // the monotone high→low shape and the exact endpoints. The shared CV track
-    // carries the strongest (entrenched) 06 §2.1 thresholds (20%→10%, PR #57 bot
-    // P1); oracle keeps its own (10%→3%).
+    // A floor/ceil-swapped curve underflows inside `Curve::threshold`. Exercise
+    // every distinct six-track support curve at 0/½/1 turnout and pin its
+    // normative endpoints.
     use sp_runtime::Perbill;
     let eval = |curve: &pallet_referenda::Curve, x: Perbill| curve.threshold(x);
     let cases = [
         (
-            &crate::configs::CV_SUPPORT,
+            &crate::configs::METRIC_SUPPORT,
+            Perbill::from_percent(10),
+            Perbill::from_percent(2),
+        ),
+        (
+            &crate::configs::CONSTITUTION_SUPPORT,
+            Perbill::from_percent(15),
+            Perbill::from_percent(5),
+        ),
+        (
+            &crate::configs::ENTRENCHED_SUPPORT,
             Perbill::from_percent(20),
             Perbill::from_percent(10),
+        ),
+        (
+            &crate::configs::GUARDIAN_SUPPORT,
+            Perbill::from_percent(5),
+            Perbill::from_percent(5),
+        ),
+        (
+            &crate::configs::RATIFY_SUPPORT,
+            Perbill::from_percent(5),
+            Perbill::from_percent(5),
         ),
         (
             &crate::configs::ORACLE_SUPPORT,
@@ -8077,14 +8457,23 @@ fn referenda_support_curves_decay_high_to_low_without_underflow() {
             lo >= mid && mid >= hi,
             "support requirement must decay monotonically"
         );
-        assert!(
-            mid < at_zero && mid > at_one,
-            "midpoint strictly between endpoints"
-        );
+        if at_zero != at_one {
+            assert!(
+                mid < at_zero && mid > at_one,
+                "midpoint strictly between unequal endpoints"
+            );
+        }
     }
-    // Approval curves are flat at their single value (order-immaterial).
     assert_eq!(
-        crate::configs::CV_APPROVAL.threshold(Perbill::from_rational(1u32, 3u32)),
+        crate::configs::METRIC_APPROVAL.threshold(Perbill::zero()),
+        Perbill::from_percent(60)
+    );
+    assert_eq!(
+        crate::configs::METRIC_APPROVAL.threshold(Perbill::one()),
+        Perbill::from_percent(50)
+    );
+    assert_eq!(
+        crate::configs::ENTRENCHED_APPROVAL.threshold(Perbill::from_rational(1u32, 3u32)),
         Perbill::from_percent(80)
     );
     assert_eq!(
@@ -8094,36 +8483,52 @@ fn referenda_support_curves_decay_high_to_low_without_underflow() {
 }
 
 #[test]
-fn shared_cv_track_dominates_every_values_track_threshold() {
-    // PR #57 Codex-bot P1: the five `ConstitutionalValues` 06 §2.1 tracks
-    // collapse onto one (stock referenda routes by origin), so the shared track
-    // MUST demand at least the strongest track's approval/support at every
-    // turnout — otherwise an entrenched-scope action (e.g. lowering the
-    // entrenched-class `att.bond`) could pass at a weaker bar. Assert the shared
-    // CV curves dominate every 06 §2.1 CV track (metric 60%→50%/10%→2%,
-    // constitution 67%/15%→5%, guardian 55%/5%, ratify 50%/5%, entrenched
-    // 80%/20%→10%) pointwise.
-    use sp_runtime::Perbill;
-    let strongest_approval = Perbill::from_percent(80); // entrenched
-    let strongest_support_ceil = Perbill::from_percent(20); // entrenched at turnout 0
-    for num in 0u32..=4 {
-        let x = Perbill::from_rational(num, 4u32);
-        assert!(
-            crate::configs::CV_APPROVAL.threshold(x) >= strongest_approval,
-            "shared CV approval must be ≥ the strongest (entrenched 80%) at every turnout"
+fn six_referenda_tracks_have_normative_schedules_and_origins() {
+    use pallet_referenda::TracksInfo;
+
+    let expected = [
+        (0, 2, 14, 2, 14, 10_000),
+        (1, 2, 21, 3, 28, 25_000),
+        (2, 7, 28, 7, 84, 50_000),
+        (3, 1, 7, 1, 2, 5_000),
+        (4, 1, 7, 1, 0, 1_000),
+        (5, 0, 7, 1, 0, 5_000),
+    ];
+    assert_eq!(crate::configs::TRACKS.len(), expected.len());
+    for (track, (id, prepare, decision, confirm, enactment, deposit)) in
+        crate::configs::TRACKS.iter().zip(expected)
+    {
+        assert_eq!(track.id, id);
+        assert_eq!(track.info.prepare_period, prepare * kernel::BLOCKS_PER_DAY);
+        assert_eq!(
+            track.info.decision_period,
+            decision * kernel::BLOCKS_PER_DAY
+        );
+        assert_eq!(track.info.confirm_period, confirm * kernel::BLOCKS_PER_DAY);
+        assert_eq!(
+            track.info.min_enactment_period,
+            enactment * kernel::BLOCKS_PER_DAY
+        );
+        assert_eq!(track.info.decision_deposit, deposit * currency::VIT);
+    }
+
+    for (origin, id) in [
+        (crate::track_origins::Origin::Metric, 0),
+        (crate::track_origins::Origin::Constitution, 1),
+        (crate::track_origins::Origin::Entrenched, 2),
+        (crate::track_origins::Origin::GuardianTrack, 3),
+        (crate::track_origins::Origin::Ratify, 4),
+    ] {
+        let runtime_origin: RuntimeOrigin = origin.into();
+        assert_eq!(
+            crate::configs::BleavitTracks::track_for(runtime_origin.caller()),
+            Ok(id)
         );
     }
-    // Support requirement at any turnout is ≥ the strongest track's requirement
-    // at that turnout (both decay; the CV ceil equals entrenched's ceil).
+    let legacy: RuntimeOrigin = pallet_origins::Origin::ConstitutionalValues.into();
     assert_eq!(
-        crate::configs::CV_SUPPORT.threshold(Perbill::zero()),
-        strongest_support_ceil
-    );
-    // No weaker legacy value leaked in (a 67%/15% constitution-track config
-    // would fail the approval dominance above).
-    assert_eq!(
-        crate::configs::CV_APPROVAL.threshold(Perbill::zero()),
-        Perbill::from_percent(80)
+        crate::configs::BleavitTracks::track_for(legacy.caller()),
+        Ok(2)
     );
 }
 

@@ -725,28 +725,6 @@ mod benches {
     }
 
     #[benchmark]
-    fn veto_upheld() -> Result<(), BenchmarkError> {
-        let mut state = callback_state::<T>(1, ProposalState::Suspended);
-        fill_epoch_state::<T>(
-            &mut state,
-            MAX_INTAKE_QUEUE,
-            MAX_LIVE_PROPOSALS,
-            MAX_NON_TERMINAL_COHORTS - 1,
-        );
-        Pallet::<T>::seed(state)?;
-        let origin = T::BenchmarkHelper::guardian_origin();
-
-        #[extrinsic_call]
-        _(origin as T::RuntimeOrigin, 1);
-
-        assert_eq!(
-            crate::Proposals::<T>::get(1).map(|p| p.state),
-            Some(ProposalState::Measuring)
-        );
-        Ok(())
-    }
-
-    #[benchmark]
     fn mark_executed() -> Result<(), BenchmarkError> {
         let mut state = callback_state::<T>(1, ProposalState::Queued);
         fill_epoch_state::<T>(

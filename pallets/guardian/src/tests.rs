@@ -4,7 +4,10 @@
 
 use crate::mock::*;
 use crate::{pallet::*, Error, Event};
-use frame_support::{assert_noop, assert_ok};
+use frame_support::{
+    assert_noop, assert_ok,
+    traits::fungible::{InspectHold, Mutate},
+};
 use guardian_core::{
     ActionId, DispatchContext, GuardianOrigin, GuardianPower, PlaybookId, PlaybookTrigger,
     ProposalStatus, TriggerState, ACTION_EXPIRY_BLOCKS, FORCE_RERUN_WINDOW_BLOCKS, GUARDIAN_BOND,
@@ -43,6 +46,15 @@ fn genesis_seeds_council_and_try_state_holds() {
     new_test_ext().execute_with(|| {
         assert!(Members::<Test>::get().is_some());
         assert_eq!(MemberBonds::<Test>::get(), [GUARDIAN_BOND; 7]);
+        for member in members() {
+            assert_eq!(
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(
+                    &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+                    &member,
+                ),
+                GUARDIAN_BOND
+            );
+        }
         assert_ok!(Guardian::do_try_state());
     });
 }
@@ -179,6 +191,16 @@ fn ratify_action_is_values_origin_only() {
         );
         assert_ok!(Guardian::ratify_action(values_origin(), 0));
         assert!(ReviewDeadlines::<Test>::get()[0].ratified);
+        assert!(!ReviewFrontingOf::<Test>::contains_key(0));
+        for member in members().into_iter().take(5) {
+            assert_eq!(
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(
+                    &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+                    &member,
+                ),
+                GUARDIAN_BOND
+            );
+        }
     });
 }
 
@@ -316,12 +338,21 @@ fn maintenance_crank_expires_playbooks_and_slashes_overdue_reviews() {
             hash(2)
         ));
         approve_to_dispatch();
-        // Review deadline is `current_epoch + 2`; advance past it and crank.
-        set_epoch(3);
+        // Review deadline is `current_epoch + 2`; it fails at that boundary.
+        set_epoch(2);
         run_to_block(2);
         let bonds = MemberBonds::<Test>::get();
         assert!(bonds[..5].iter().all(|b| *b == GUARDIAN_BOND / 2));
         assert!(bonds[5..].iter().all(|b| *b == GUARDIAN_BOND));
+        for member in members().into_iter().take(5) {
+            assert_eq!(
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(
+                    &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+                    &member,
+                ),
+                GUARDIAN_BOND / 2
+            );
+        }
         assert!(last_events()
             .iter()
             .any(|e| matches!(e, Event::ReviewFailed { action: 0, .. })));
@@ -1321,6 +1352,10 @@ fn assert_shell_matches_oracle(g: &guardian_core::Guardian, step: u32) {
 #[test]
 fn shell_and_core_agree_over_randomized_guardian_operations() {
     new_test_ext().execute_with(|| {
+        // This differential targets the frame-free state machine. Real hold
+        // custody has dedicated tests below, so suppress fronting here to keep
+        // the oracle and shell state spaces identical across 500 operations.
+        ReviewDepositValue::set(0);
         let mut rng = Lcg(0xA10B_1EA0_17C0_FFEE);
         let mut oracle = guardian_core::Guardian::new(members_raw()).unwrap();
         let mut epoch: u32 = 0;
@@ -1495,6 +1530,12 @@ fn re_election_clears_pending_and_approvals_blocking_stale_dispatch() {
         assert_eq!(Approvals::<Test>::get().len(), 4);
 
         let new_council: [AccountId32; 7] = core::array::from_fn(|i| acct((i as u8) + 10));
+        for member in &new_council {
+            assert_ok!(<Balances as Mutate<AccountId32>>::mint_into(
+                member,
+                2 * GUARDIAN_BOND
+            ));
+        }
         assert_ok!(Guardian::set_members(values_origin(), new_council));
 
         assert!(PendingActions::<Test>::get().is_empty());
@@ -1538,7 +1579,7 @@ fn review_failure_slashes_and_schedules_recall() {
             hash(4)
         ));
         approve_to_dispatch();
-        set_epoch(3); // past the dispatch epoch (0) + REVIEW_DEADLINE_EPOCHS (2)
+        set_epoch(2); // dispatch epoch (0) + REVIEW_DEADLINE_EPOCHS (2)
         run_to_block(2);
         assert!(last_events()
             .iter()
@@ -1546,5 +1587,155 @@ fn review_failure_slashes_and_schedules_recall() {
         assert!(last_events()
             .iter()
             .any(|e| matches!(e, Event::RecallScheduled { action: 0, .. })));
+        assert!(FailedActions::<Test>::contains_key(0));
+        assert!(!ReviewFrontingOf::<Test>::contains_key(0));
+    });
+}
+
+#[test]
+fn underfunded_set_members_is_fully_atomic() {
+    new_test_ext().execute_with(|| {
+        let before_members = Members::<Test>::get();
+        let before_holds: Vec<_> = members()
+            .iter()
+            .map(|member| {
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(
+                    &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+                    member,
+                )
+            })
+            .collect();
+        let new_council: [AccountId32; 7] = core::array::from_fn(|i| acct((i as u8) + 20));
+        assert!(Guardian::set_members(values_origin(), new_council).is_err());
+        assert_eq!(Members::<Test>::get(), before_members);
+        assert!(PendingBondReleases::<Test>::get().is_empty());
+        let after_holds: Vec<_> = members()
+            .iter()
+            .map(|member| {
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(
+                    &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+                    member,
+                )
+            })
+            .collect();
+        assert_eq!(after_holds, before_holds);
+    });
+}
+
+#[test]
+fn outgoing_bonds_release_one_epoch_after_re_election() {
+    new_test_ext().execute_with(|| {
+        let outgoing = members();
+        let incoming: [AccountId32; 7] = core::array::from_fn(|i| acct((i as u8) + 30));
+        for member in &incoming {
+            assert_ok!(<Balances as Mutate<AccountId32>>::mint_into(
+                member,
+                2 * GUARDIAN_BOND
+            ));
+        }
+        assert_ok!(Guardian::set_members(values_origin(), incoming));
+        assert_eq!(PendingBondReleases::<Test>::get().len(), 7);
+        for member in &outgoing {
+            assert_eq!(
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(
+                    &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+                    member,
+                ),
+                GUARDIAN_BOND
+            );
+        }
+        set_epoch(1);
+        run_to_block(2);
+        assert!(PendingBondReleases::<Test>::get().is_empty());
+        for member in outgoing {
+            assert_eq!(
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(
+                    &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+                    &member,
+                ),
+                0
+            );
+        }
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
+fn recall_vacates_approvers_and_releases_residual_bonds_one_epoch_later() {
+    new_test_ext().execute_with(|| {
+        set_triggers(all_triggers());
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::SuspendOnGate,
+            hash(7)
+        ));
+        approve_to_dispatch();
+        set_epoch(2);
+        run_to_block(2);
+        assert_ok!(Guardian::recall(values_origin(), 0));
+        let seats = Members::<Test>::get().expect("council remains initialized");
+        assert_eq!(seats.iter().filter(|seat| seat.is_none()).count(), 5);
+        assert_eq!(PendingBondReleases::<Test>::get().len(), 5);
+
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(6)),
+            GuardianPower::SuspendOnGate,
+            hash(8)
+        ));
+        assert_ok!(Guardian::approve_action(RuntimeOrigin::signed(acct(7)), 1));
+        assert!(!PendingActions::<Test>::get()[0].dispatched);
+
+        set_epoch(3);
+        run_to_block(3);
+        assert!(PendingBondReleases::<Test>::get().is_empty());
+        for member in members().into_iter().take(5) {
+            assert_eq!(
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(
+                    &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+                    &member,
+                ),
+                0
+            );
+        }
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
+fn uphold_veto_is_delay_only_and_atomic_with_the_epoch_callback() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::DelayOnce { pid: 42 },
+            hash(9)
+        ));
+        approve_to_dispatch();
+        VetoFails::set(true);
+        assert_noop!(
+            Guardian::uphold_veto(values_origin(), 0),
+            DispatchError::Other("veto callback unavailable")
+        );
+        assert!(!ReviewDeadlines::<Test>::get()[0].ratified);
+        assert!(ReviewFrontingOf::<Test>::contains_key(0));
+
+        VetoFails::set(false);
+        assert_ok!(Guardian::uphold_veto(values_origin(), 0));
+        assert!(ReviewDeadlines::<Test>::get()[0].ratified);
+        assert!(!ReviewFrontingOf::<Test>::contains_key(0));
+        assert_ok!(Guardian::do_try_state());
+    });
+
+    new_test_ext().execute_with(|| {
+        set_triggers(all_triggers());
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::SuspendOnGate,
+            hash(10)
+        ));
+        approve_to_dispatch();
+        assert_noop!(
+            Guardian::uphold_veto(values_origin(), 0),
+            Error::<Test>::NotDelayAction
+        );
     });
 }

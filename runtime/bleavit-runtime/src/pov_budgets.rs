@@ -186,7 +186,7 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
     all.extend(
         pallet_call_weights!(pallet_guardian as pallet_guardian::WeightInfo {
             set_members, propose_action, approve_action, ratify_action, renew_playbook,
-            on_initialize,
+            uphold_veto, recall, on_initialize,
         }),
     );
     all.extend(
@@ -196,7 +196,7 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
     );
     all.extend(
         pallet_call_weights!(pallet_epoch as pallet_epoch::WeightInfo {
-            submit, withdraw, decide, set_next_epoch_length, delay_once, veto_upheld,
+            submit, withdraw, decide, set_next_epoch_length, delay_once,
             mark_executed, mark_failed_executed, retry_exhausted_to_measurement,
             expire_or_stale_queue, force_reject_process_hold,
             tick(TICK_BATCH_BOUND),
@@ -224,7 +224,7 @@ fn every_futarchy_call_and_hook_fits_the_normal_class() {
     // Exact count of the 12 futarchy pallets' WeightInfo functions — update
     // in lockstep when a trait gains or loses a function, so a silently
     // dropped inventory entry cannot pass.
-    assert_eq!(all.len(), 94, "call inventory drifted");
+    assert_eq!(all.len(), 95, "call inventory drifted");
     for (name, w) in all {
         assert_fits(name, w);
     }

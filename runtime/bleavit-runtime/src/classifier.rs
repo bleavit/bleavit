@@ -535,9 +535,9 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
         RuntimeCall::Guardian(call) => match call {
             pallet_guardian::Call::set_members { .. }
             | pallet_guardian::Call::ratify_action { .. }
-            | pallet_guardian::Call::renew_playbook { .. } => {
-                leaf(CallDomain::ConstitutionalValues)
-            }
+            | pallet_guardian::Call::renew_playbook { .. }
+            | pallet_guardian::Call::uphold_veto { .. }
+            | pallet_guardian::Call::recall { .. } => leaf(CallDomain::ConstitutionalValues),
             pallet_guardian::Call::propose_action { .. }
             | pallet_guardian::Call::approve_action { .. } => leaf(CallDomain::Public),
             pallet_guardian::Call::__Ignore(_, _) => denied(),
@@ -561,7 +561,6 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
                 leaf(CallDomain::ConstitutionalValues)
             }
             pallet_epoch::Call::delay_once { .. }
-            | pallet_epoch::Call::veto_upheld { .. }
             | pallet_epoch::Call::force_reject_process_hold { .. } => {
                 leaf(CallDomain::GuardianHold)
             }
@@ -884,6 +883,8 @@ pub fn is_values_enactment_leaf(call: &RuntimeCall) -> bool {
             | RuntimeCall::Guardian(pallet_guardian::Call::set_members { .. })
             | RuntimeCall::Guardian(pallet_guardian::Call::ratify_action { .. })
             | RuntimeCall::Guardian(pallet_guardian::Call::renew_playbook { .. })
+            | RuntimeCall::Guardian(pallet_guardian::Call::uphold_veto { .. })
+            | RuntimeCall::Guardian(pallet_guardian::Call::recall { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::set_members { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::resolve_challenge { .. })
             | RuntimeCall::Oracle(pallet_oracle::Call::adjudicate { .. })

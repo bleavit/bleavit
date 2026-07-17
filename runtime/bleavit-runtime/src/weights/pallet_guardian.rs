@@ -194,6 +194,16 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 			.saturating_add(T::DbWeight::get().reads(11))
 			.saturating_add(T::DbWeight::get().writes(9))
 	}
+	fn uphold_veto() -> Weight {
+		Weight::from_parts(1_950_000_000, 183055)
+			.saturating_add(T::DbWeight::get().reads(220))
+			.saturating_add(T::DbWeight::get().writes(150))
+	}
+	fn recall() -> Weight {
+		Weight::from_parts(300_000_000, 50000)
+			.saturating_add(T::DbWeight::get().reads(35))
+			.saturating_add(T::DbWeight::get().writes(35))
+	}
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
 	/// Storage: `Guardian::LastSeenEpoch` (r:1 w:1)

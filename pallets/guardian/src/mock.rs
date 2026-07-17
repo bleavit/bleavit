@@ -7,8 +7,9 @@
 
 use crate as pallet_guardian;
 use crate::{
-    GuardianEffectDispatcher, GuardianPower, GuardianProposalStatus, GuardianRecallScheduler,
-    GuardianReviewScheduler, GuardianTriggers, ProposalStatus, TriggerState,
+    GuardianEffectDispatcher, GuardianPower, GuardianProposalStatus, GuardianProposalVeto,
+    GuardianRecallScheduler, GuardianReviewScheduler, GuardianTriggers, ProposalStatus,
+    TriggerState,
 };
 use frame_support::{derive_impl, parameter_types, traits::EnsureOrigin};
 use futarchy_primitives::ProposalId;
@@ -20,6 +21,7 @@ type Block = frame_system::mocking::MockBlock<Test>;
 frame_support::construct_runtime!(
     pub enum Test {
         System: frame_system,
+        Balances: pallet_balances,
         Guardian: pallet_guardian,
     }
 );
@@ -29,6 +31,13 @@ impl frame_system::Config for Test {
     type Block = Block;
     type AccountId = AccountId32;
     type Lookup = IdentityLookup<AccountId32>;
+    type AccountData = pallet_balances::AccountData<futarchy_primitives::Balance>;
+}
+
+#[derive_impl(pallet_balances::config_preludes::TestDefaultConfig)]
+impl pallet_balances::Config for Test {
+    type AccountStore = System;
+    type Balance = futarchy_primitives::Balance;
 }
 
 parameter_types! {
@@ -41,6 +50,10 @@ parameter_types! {
     pub static NextReferendum: u32 = 100;
     pub static ReviewSchedulingFails: bool = false;
     pub static RecallSchedulingFails: bool = false;
+    pub static VetoFails: bool = false;
+    pub static ReviewDepositValue: futarchy_primitives::Balance =
+        1_001 * futarchy_primitives::currency::VIT;
+    pub SovereignAccountValue: AccountId32 = AccountId32::from([210; 32]);
 }
 
 /// The account the mock `ValuesOrigin` accepts as `ConstitutionalValues`.
@@ -93,6 +106,10 @@ impl GuardianEffectDispatcher for TestEffects {
 
 pub struct TestScheduler;
 impl GuardianReviewScheduler for TestScheduler {
+    fn review_deposit() -> futarchy_primitives::Balance {
+        ReviewDepositValue::get()
+    }
+
     fn schedule_review(_action_id: crate::ActionId) -> Result<u32, sp_runtime::DispatchError> {
         if ReviewSchedulingFails::get() {
             return Err(sp_runtime::DispatchError::Other(
@@ -104,17 +121,17 @@ impl GuardianReviewScheduler for TestScheduler {
         Ok(n)
     }
 
-    fn refund_review(
-        _action_id: crate::ActionId,
-        _referendum: u32,
-    ) -> Result<(), sp_runtime::DispatchError> {
+    fn refund_review(_referendum: u32) -> Result<(), sp_runtime::DispatchError> {
         Ok(())
     }
 }
 
 pub struct TestRecallScheduler;
 impl GuardianRecallScheduler for TestRecallScheduler {
-    fn schedule_recall(_action_id: crate::ActionId) -> Result<u32, sp_runtime::DispatchError> {
+    fn schedule_recall(
+        _action_id: crate::ActionId,
+        _slash_pool: futarchy_primitives::Balance,
+    ) -> Result<u32, sp_runtime::DispatchError> {
         if RecallSchedulingFails::get() {
             return Err(sp_runtime::DispatchError::Other(
                 "recall scheduler unavailable",
@@ -124,14 +141,42 @@ impl GuardianRecallScheduler for TestRecallScheduler {
         NextReferendum::set(n + 1);
         Ok(n)
     }
+
+    fn refund_recall(_referendum: u32) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
+
+    fn forward_failed_recall_pool(
+        _amount: futarchy_primitives::Balance,
+    ) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
+}
+
+pub struct TestVeto;
+impl GuardianProposalVeto for TestVeto {
+    fn uphold(_pid: ProposalId) -> Result<(), sp_runtime::DispatchError> {
+        if VetoFails::get() {
+            Err(sp_runtime::DispatchError::Other(
+                "veto callback unavailable",
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl pallet_guardian::Config for Test {
     type ValuesOrigin = TestValuesOrigin;
+    type AdminOrigin = TestValuesOrigin;
+    type Currency = Balances;
+    type RuntimeHoldReason = RuntimeHoldReason;
+    type SovereignAccount = SovereignAccountValue;
     type CurrentEpoch = CurrentEpochValue;
     type ProposalStatusProvider = TestStatus;
     type TriggerProvider = TestTriggers;
     type EffectDispatcher = TestEffects;
+    type ProposalVeto = TestVeto;
     type ReviewScheduler = TestScheduler;
     type RecallScheduler = TestRecallScheduler;
     type WeightInfo = ();
@@ -164,6 +209,9 @@ impl pallet_guardian::BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
     }
     fn prime_maintenance_epoch(epoch: futarchy_primitives::EpochId) {
         CurrentEpochValue::set(epoch);
+    }
+    fn close_review(_referendum: u32) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
     }
 }
 
@@ -201,6 +249,14 @@ pub fn new_test_ext_with(
 ) -> sp_io::TestExternalities {
     let storage = RuntimeGenesisConfig {
         system: Default::default(),
+        balances: pallet_balances::GenesisConfig {
+            balances: members()
+                .into_iter()
+                .map(|who| (who, 2 * crate::GUARDIAN_BOND))
+                .chain(core::iter::once((SovereignAccountValue::get(), 1)))
+                .collect(),
+            dev_accounts: None,
+        },
         guardian,
     }
     .build_storage()

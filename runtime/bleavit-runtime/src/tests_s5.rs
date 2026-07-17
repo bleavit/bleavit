@@ -224,7 +224,7 @@ inventory! {
         leaf public => ["claim_stream", "execute_coretime_renewal"];
     }
     "Guardian" {
-        leaf values => ["set_members", "ratify_action", "renew_playbook"];
+        leaf values => ["set_members", "ratify_action", "renew_playbook", "uphold_veto", "recall"];
         leaf public => ["propose_action", "approve_action"];
     }
     "Attestor" {
@@ -234,7 +234,7 @@ inventory! {
     "Epoch" {
         leaf public => ["submit", "withdraw", "tick", "decide", "settle_cohort", "mark_executed", "mark_failed_executed", "retry_exhausted_to_measurement", "expire_or_stale_queue"];
         leaf values => ["set_next_epoch_length"];
-        leaf guardian_hold => ["delay_once", "veto_upheld", "force_reject_process_hold"];
+        leaf guardian_hold => ["delay_once", "force_reject_process_hold"];
         leaf emergency_playbook => ["void_cohort"];
     }
     "ExecutionGuard" {
@@ -660,6 +660,38 @@ fn encode_primitive(primitive: TypeDefPrimitive) -> Vec<u8> {
 
 fn with_metadata(test: impl FnOnce(&RuntimeMetadataModel)) {
     sp_io::TestExternalities::default().execute_with(|| test(&RuntimeMetadataModel::load()));
+}
+
+#[test]
+fn track_origins_is_pinned_as_origin_only_pallet_at_index_64() {
+    sp_io::TestExternalities::default().execute_with(|| {
+        let version = Runtime::metadata_versions()
+            .into_iter()
+            .filter(|version| matches!(version, 15 | 16))
+            .max()
+            .expect("stable2603 must expose V15 or V16 metadata");
+        let encoded = Runtime::metadata_at_version(version)
+            .expect("a reported metadata version must be constructible");
+        let prefixed = RuntimeMetadataPrefixed::decode(&mut &encoded[..])
+            .expect("runtime-generated metadata must decode");
+        let pin = match prefixed.1 {
+            RuntimeMetadata::V15(metadata) => metadata
+                .pallets
+                .iter()
+                .find(|pallet| pallet.name == "TrackOrigins")
+                .map(|pallet| (pallet.index, pallet.calls.is_none())),
+            RuntimeMetadata::V16(metadata) => metadata
+                .pallets
+                .iter()
+                .find(|pallet| pallet.name == "TrackOrigins")
+                .map(|pallet| (pallet.index, pallet.calls.is_none())),
+            metadata => panic!(
+                "requested V{version}, but runtime returned V{}",
+                metadata.version()
+            ),
+        };
+        assert_eq!(pin, Some((64, true)));
+    });
 }
 
 #[test]

@@ -7727,6 +7727,7 @@ dependencies = [
  "frame-system",
  "futarchy-primitives",
  "guardian-core",
+ "pallet-balances",
  "parity-scale-codec",
  "scale-info",
  "sp-core",

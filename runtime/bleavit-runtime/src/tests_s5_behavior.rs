@@ -718,7 +718,7 @@ fn matching_origin(domain: CallDomain) -> Option<ClassOrigin> {
     }
 }
 
-fn epoch_privileged_calls() -> [(String, RuntimeCall, CallDomain); 5] {
+fn epoch_privileged_calls() -> [(String, RuntimeCall, CallDomain); 4] {
     [
         (
             String::from("Epoch.set_next_epoch_length"),
@@ -730,13 +730,6 @@ fn epoch_privileged_calls() -> [(String, RuntimeCall, CallDomain); 5] {
             RuntimeCall::Epoch(pallet_epoch::Call::delay_once {
                 pid: Default::default(),
                 justification_hash: Default::default(),
-            }),
-            CallDomain::GuardianHold,
-        ),
-        (
-            String::from("Epoch.veto_upheld"),
-            RuntimeCall::Epoch(pallet_epoch::Call::veto_upheld {
-                pid: Default::default(),
             }),
             CallDomain::GuardianHold,
         ),
