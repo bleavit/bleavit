@@ -168,8 +168,7 @@ construct_runtime!(
         FutarchyTreasury: pallet_futarchy_treasury = 58,
         Guardian: pallet_guardian = 59,
         Attestor: pallet_attestor = 60,
-        // A8 slot: `Epoch: pallet_epoch = 61` once its production FRAME shell
-        // lands (pallet indices are SCALE-frozen — never renumber the above).
+        Epoch: pallet_epoch = 61,
         ExecutionGuard: pallet_execution_guard = 62,
     }
 );

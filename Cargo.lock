@@ -1259,6 +1259,7 @@ dependencies = [
  "pallet-conditional-ledger",
  "pallet-constitution",
  "pallet-conviction-voting",
+ "pallet-epoch",
  "pallet-execution-guard",
  "pallet-futarchy-treasury",
  "pallet-guardian",

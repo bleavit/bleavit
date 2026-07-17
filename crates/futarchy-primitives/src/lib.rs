@@ -902,6 +902,15 @@ pub mod kernel {
     pub const EXECUTION_TIMELOCK_FLOORS_BLOCKS: [u32; 4] = [EXECUTION_TIMELOCK_FLOOR_BLOCKS; 4];
     /// `exec.grace` kernel floor (seven days; 13 §1).
     pub const EXECUTION_GRACE_FLOOR_BLOCKS: u32 = 7 * BLOCKS_PER_DAY;
+    /// 05 §5 decision-grade scalar-book sanity band (kernel rule, not a
+    /// governance-tunable parameter).
+    pub const DECISION_SANITY_MIN_1E9: u64 = 20_000_000;
+    pub const DECISION_SANITY_MAX_1E9: u64 = 980_000_000;
+    /// 06 §4 Treasury proposal bond surcharge: 0.5% of Ask.
+    pub const TREASURY_BOND_ASK_BPS: u128 = 50;
+    /// 04 §9 / 05 §5.1 Treasury hard-gate threshold: 1% of spendable NAV.
+    pub const TREASURY_GATE_NAV_BPS: u128 = 100;
+    pub const BASIS_POINTS_DENOMINATOR: u128 = 10_000;
     pub const ORC_MAX_PROOF_BYTES: u32 = 256 * 1024;
     pub const REG_MAX_FILINGS_EPOCH: u32 = 64;
     pub const WT_MAX: u32 = 16;

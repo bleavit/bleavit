@@ -7,7 +7,7 @@ repository.workspace = true
 build = "build.rs"
 
 [dependencies]
-# --- Local protocol crates (B6 wires A11; A8 remains a pending runtime seam).
+# --- Local protocol crates.
 futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
 origins-core = { path = "../../crates/origins-core", default-features = false }
 pallet-constitution = { path = "../../pallets/constitution", default-features = false }
@@ -20,6 +20,7 @@ pallet-futarchy-treasury = { path = "../../pallets/futarchy-treasury", default-f
 pallet-guardian = { path = "../../pallets/guardian", default-features = false }
 pallet-attestor = { path = "../../pallets/attestor", default-features = false }
 pallet-execution-guard = { path = "../../pallets/execution-guard", default-features = false }
+pallet-epoch = { path = "../../pallets/epoch", default-features = false }
 pallet-welfare = { path = "../../pallets/welfare", default-features = false }
 registry-core = { path = "../../crates/registry-core", default-features = false }
 
@@ -132,6 +133,7 @@ std = [
   "pallet-constitution/std",
   "pallet-conviction-voting/std",
   "pallet-execution-guard/std",
+  "pallet-epoch/std",
   "pallet-futarchy-treasury/std",
   "pallet-guardian/std",
   "pallet-market/std",
@@ -195,6 +197,7 @@ runtime-benchmarks = [
   "pallet-constitution/runtime-benchmarks",
   "pallet-conviction-voting/runtime-benchmarks",
   "pallet-execution-guard/runtime-benchmarks",
+  "pallet-epoch/runtime-benchmarks",
   "pallet-futarchy-treasury/runtime-benchmarks",
   "pallet-guardian/runtime-benchmarks",
   "pallet-market/runtime-benchmarks",
@@ -241,6 +244,7 @@ try-runtime = [
   "pallet-constitution/try-runtime",
   "pallet-conviction-voting/try-runtime",
   "pallet-execution-guard/try-runtime",
+  "pallet-epoch/try-runtime",
   "pallet-futarchy-treasury/try-runtime",
   "pallet-guardian/try-runtime",
   "pallet-market/try-runtime",

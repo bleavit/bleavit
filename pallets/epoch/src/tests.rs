@@ -88,6 +88,42 @@ fn callback_state(
     state
 }
 
+fn qualification_owned_state() -> (
+    EpochState<sp_core::crypto::AccountId32>,
+    Vec<(ProposalId, H256)>,
+) {
+    let mut state = EpochState::new();
+    let mut requests = Vec::new();
+    for (pid, proposal_state) in [
+        (1, ProposalState::Qualified),
+        (2, ProposalState::Trading),
+        (3, ProposalState::Extended),
+    ] {
+        let mut proposal = live_proposal(pid, proposal_state, 0);
+        proposal.extended = proposal_state == ProposalState::Extended;
+        let hash = proposal.payload_hash;
+        requests.push((pid, hash));
+        state.proposals.push(proposal);
+    }
+    state.proposal_id_high_water = 3;
+    (state, requests)
+}
+
+fn install_qualification_requests(requests: &[(ProposalId, H256)]) {
+    for (pid, hash) in requests {
+        <TestPreimage as PreimageAccess>::request(*hash);
+        QualificationPreimageRequests::<Test>::insert(pid, *hash);
+        assert_eq!(TestPreimageRequests::count(*hash), 1);
+    }
+}
+
+fn assert_qualification_requests_released(requests: &[(ProposalId, H256)]) {
+    for (pid, hash) in requests {
+        assert!(!QualificationPreimageRequests::<Test>::contains_key(pid));
+        assert_eq!(TestPreimageRequests::count(*hash), 0);
+    }
+}
+
 #[derive(Default)]
 struct DifferentialLedger {
     calls: Vec<SeamCall>,
@@ -326,6 +362,11 @@ fn run_decision_seam_differential(case: DifferentialDecisionCase) {
             )
             .expect("core decision scenario is accepted");
         assert_eq!(outcome, expected, "unexpected core outcome for {case:?}");
+        if outcome == DecisionOutcome::Extend {
+            ledger.calls.push(SeamCall::ExtendMarkets(1));
+        } else {
+            ledger.calls.push(SeamCall::CloseMarkets(1));
+        }
         if outcome == DecisionOutcome::Adopt {
             let queued = oracle
                 .proposals
@@ -343,6 +384,8 @@ fn run_decision_seam_differential(case: DifferentialDecisionCase) {
                     ProposalClass::Code | ProposalClass::Meta
                 ),
             });
+        } else if matches!(outcome, DecisionOutcome::Reject(_)) {
+            ledger.calls.push(SeamCall::DequeueTerminal(1));
         }
         assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
         let shell_events = System::events()
@@ -690,6 +733,68 @@ fn stalled_epoch_latches_and_force_rejects_every_affected_proposal() {
 }
 
 #[test]
+fn every_prequeue_terminal_path_releases_each_qualification_preimage_request() {
+    new_test_ext().execute_with(|| {
+        let (state, requests) = qualification_owned_state();
+        assert_ok!(Epoch::seed(state));
+        install_qualification_requests(&requests);
+
+        let stale = phase_block(0, phase_offsets::SEED_NUM)
+            .saturating_add(epoch_core::STALE_EPOCH_BOUND)
+            .saturating_add(1);
+        set_block(stale);
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(vec![1, 2, 3]),
+        ));
+
+        assert_qualification_requests_released(&requests);
+    });
+
+    for state in [
+        ProposalState::Qualified,
+        ProposalState::Trading,
+        ProposalState::Extended,
+    ] {
+        new_test_ext().execute_with(|| {
+            let mut proposal = live_proposal(1, state, 0);
+            proposal.extended = state == ProposalState::Extended;
+            let hash = proposal.payload_hash;
+            let mut epoch_state = EpochState::new();
+            epoch_state.proposals.push(proposal);
+            epoch_state.proposal_id_high_water = 1;
+            assert_ok!(Epoch::seed(epoch_state));
+            install_qualification_requests(&[(1, hash)]);
+
+            assert_ok!(Epoch::force_reject_process_hold(
+                RuntimeOrigin::signed(guardian()),
+                1,
+            ));
+
+            assert_qualification_requests_released(&[(1, hash)]);
+        });
+    }
+
+    new_test_ext().execute_with(|| {
+        let (mut state, requests) = qualification_owned_state();
+        state.cohorts.push(CoreCohort {
+            epoch: 0,
+            proposals: vec![1, 2, 3],
+            status: CohortStatus::Measuring { until_epoch: 2 },
+        });
+        assert_ok!(Epoch::seed(state));
+        install_qualification_requests(&requests);
+
+        assert_ok!(Epoch::void_cohort(
+            RuntimeOrigin::signed(void_authority()),
+            0,
+        ));
+
+        assert_qualification_requests_released(&requests);
+    });
+}
+
+#[test]
 fn bad_preimage_precedes_unavailable_baseline_input() {
     new_test_ext().execute_with(|| {
         assert_ok!(Epoch::seed(decision_state(1, ProposalClass::Param)));
@@ -892,6 +997,30 @@ fn proposal_ids_are_monotone_and_never_reused_after_reap() {
 }
 
 #[test]
+fn arithmetic_epoch_catchup_archives_every_retained_intermediate_timing() {
+    new_test_ext().execute_with(|| {
+        let schedule = Schedule::<Test>::get();
+        let skipped = RECENT_COHORTS_BOUND.saturating_add(2);
+        set_block(schedule.length.saturating_mul(skipped));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(Vec::new()),
+        ));
+        assert_eq!(EpochOf::<Test>::get().index, skipped);
+        let timings = EpochTimings::<Test>::get();
+        assert_eq!(timings.len(), RECENT_COHORTS_BOUND as usize);
+        let first = skipped.saturating_sub(RECENT_COHORTS_BOUND);
+        for (offset, timing) in timings.iter().enumerate() {
+            let index = first.saturating_add(offset as EpochId);
+            assert_eq!(timing.index, index);
+            assert_eq!(timing.start, schedule.length.saturating_mul(index));
+            assert_eq!(timing.length, schedule.next_length);
+        }
+        assert_ok!(Epoch::do_try_state());
+    });
+}
+
+#[test]
 fn qualification_binds_chain_active_metric_spec_version() {
     new_test_ext().execute_with(|| {
         let mut candidate = proposal(999, keeper(), ProposalState::Submitted, 0, 1);
@@ -915,7 +1044,7 @@ fn qualification_binds_chain_active_metric_spec_version() {
 }
 
 #[test]
-fn void_cohort_voids_every_vault_and_marks_the_cohort_void() {
+fn void_cohort_voids_every_vault_and_reaps_the_terminal_working_set() {
     new_test_ext().execute_with(|| {
         let mut state = EpochState::new();
         for pid in 1..=2 {
@@ -933,10 +1062,12 @@ fn void_cohort_voids_every_vault_and_marks_the_cohort_void() {
             RuntimeOrigin::signed(void_authority()),
             0,
         ));
-        assert_eq!(
-            Cohorts::<Test>::get(0).map(|cohort| cohort.status),
-            Some(CohortStatus::Void)
-        );
+        assert!(!Cohorts::<Test>::contains_key(0));
+        assert!(!Proposals::<Test>::contains_key(1));
+        assert!(!Proposals::<Test>::contains_key(2));
+        assert!(RecentCohortSummaries::<Test>::get()
+            .iter()
+            .any(|summary| summary.epoch == 0 && summary.voided));
         assert_eq!(
             SeamCalls::get()
                 .iter()
@@ -950,7 +1081,7 @@ fn void_cohort_voids_every_vault_and_marks_the_cohort_void() {
 }
 
 #[test]
-fn r2_6_void_cohort_makes_every_proposal_terminal() {
+fn r2_6_void_cohort_archives_every_terminal_proposal() {
     new_test_ext().execute_with(|| {
         let mut state = EpochState::new();
         for pid in 1..=2 {
@@ -971,15 +1102,16 @@ fn r2_6_void_cohort_makes_every_proposal_terminal() {
             0,
         ));
 
-        for pid in 1..=2 {
-            assert_eq!(
-                Proposals::<Test>::get(pid).map(|proposal| (proposal.state, proposal.decision)),
-                Some((
-                    ProposalState::Rejected(RejectReason::ProcessHold),
-                    Some(DecisionOutcome::Reject(RejectReason::ProcessHold)),
-                ))
-            );
-        }
+        assert!(!Cohorts::<Test>::contains_key(0));
+        assert!(!Proposals::<Test>::contains_key(1));
+        assert!(!Proposals::<Test>::contains_key(2));
+        let summary = RecentCohortSummaries::<Test>::get()
+            .into_iter()
+            .find(|summary| summary.epoch == 0);
+        assert!(summary.is_some_and(|summary| summary.voided
+            && summary.proposals.iter().all(|(_, _, decision)| {
+                *decision == DecisionOutcome::Reject(RejectReason::ProcessHold)
+            })));
         assert_ok!(Epoch::do_try_state());
     });
 }
@@ -1350,16 +1482,14 @@ fn highest_bond_wins_the_last_qualification_slot() {
         set_block(phase_block(0, phase_offsets::QUALIFY_NUM));
         assert_ok!(Epoch::tick(
             RuntimeOrigin::signed(keeper()),
-            tick_batch(vec![5]),
+            // Caller order is deliberately low-first; the pallet screens the
+            // canonical descending-bond order before assigning the last slot.
+            tick_batch(vec![5, 6]),
         ));
         assert_eq!(
             IntakeProposals::<Test>::get(5).map(|proposal| (proposal.state, proposal.epoch)),
             Some((ProposalState::Submitted, 1))
         );
-        assert_ok!(Epoch::tick(
-            RuntimeOrigin::signed(keeper()),
-            tick_batch(vec![6]),
-        ));
         assert_eq!(
             Proposals::<Test>::get(6).map(|proposal| proposal.state),
             Some(ProposalState::Qualified)
@@ -1569,9 +1699,14 @@ fn decide_adopts_and_only_then_enqueues() {
         let queued = Proposals::<Test>::get(1).expect("adopted proposal remains live");
         assert_eq!(queued.state, ProposalState::Queued);
         assert_eq!(queued.decision, Some(DecisionOutcome::Adopt));
-        assert!(SeamCalls::get()
+        let calls = SeamCalls::get();
+        let close = calls
             .iter()
-            .any(|call| matches!(call, SeamCall::Enqueue { pid: 1, .. })));
+            .position(|call| matches!(call, SeamCall::CloseMarkets(1)));
+        let enqueue = calls
+            .iter()
+            .position(|call| matches!(call, SeamCall::Enqueue { pid: 1, .. }));
+        assert!(close.is_some_and(|close| enqueue.is_some_and(|enqueue| close < enqueue)));
         assert_eq!(
             last_epoch_event(),
             Some(Event::ProposalQueued {
@@ -1647,6 +1782,9 @@ fn decision_extension_is_once_only_and_keeps_creation_schedule_frozen() {
         let extended = Proposals::<Test>::get(1).expect("extended proposal remains live");
         assert_eq!(extended.state, ProposalState::Extended);
         assert!(extended.extended);
+        assert!(SeamCalls::get()
+            .iter()
+            .any(|call| matches!(call, SeamCall::ExtendMarkets(1))));
         let frozen = ProposalSchedules::<Test>::get(1).expect("schedule was frozen at creation");
         assert_eq!(frozen.decide_at, 1);
         assert_eq!(
@@ -1675,6 +1813,9 @@ fn decision_extension_is_once_only_and_keeps_creation_schedule_frozen() {
             Epoch::epoch_state().proposals[0].decision,
             Some(DecisionOutcome::Reject(RejectReason::NotDecisionGrade))
         );
+        assert!(SeamCalls::get()
+            .iter()
+            .any(|call| matches!(call, SeamCall::CloseMarkets(1))));
         assert_eq!(
             KeeperRebates::get(),
             vec![
@@ -1711,9 +1852,44 @@ fn live_params_flip_changes_the_decision_hurdle() {
 }
 
 #[test]
+fn market_extension_and_close_registration_failures_are_atomic_g1() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Epoch::seed(decision_state(1, ProposalClass::Param)));
+        MarketGrade::set(false);
+        SeamFailure::set(Some(SeamCall::ExtendMarkets(1)));
+        let before_state = Epoch::epoch_state().encode();
+        let before_events = System::events();
+        let before_calls = SeamCalls::get();
+        assert_noop!(
+            Epoch::decide(RuntimeOrigin::signed(keeper()), 1),
+            DispatchError::Other("injected epoch seam failure")
+        );
+        assert_eq!(Epoch::epoch_state().encode(), before_state);
+        assert_eq!(System::events(), before_events);
+        assert_eq!(SeamCalls::get(), before_calls);
+    });
+
+    new_test_ext().execute_with(|| {
+        assert_ok!(Epoch::seed(decision_state(1, ProposalClass::Param)));
+        SeamFailure::set(Some(SeamCall::CloseMarkets(1)));
+        let before_state = Epoch::epoch_state().encode();
+        let before_events = System::events();
+        let before_calls = SeamCalls::get();
+        assert_noop!(
+            Epoch::decide(RuntimeOrigin::signed(keeper()), 1),
+            DispatchError::Other("injected epoch seam failure")
+        );
+        assert_eq!(Epoch::epoch_state().encode(), before_state);
+        assert_eq!(System::events(), before_events);
+        assert_eq!(SeamCalls::get(), before_calls);
+    });
+}
+
+#[test]
 fn guardian_delay_rerun_and_t24_veto_paths_work_without_enqueue() {
     new_test_ext().execute_with(|| {
         assert_ok!(Epoch::seed(callback_state(1, ProposalState::Queued)));
+        assert_ok!(GuardStateModel::prime_full(1, [1; 32]));
         assert_ok!(Epoch::delay_once(
             RuntimeOrigin::signed(guardian()),
             1,
@@ -1723,6 +1899,7 @@ fn guardian_delay_rerun_and_t24_veto_paths_work_without_enqueue() {
             Proposals::<Test>::get(1).map(|p| p.state),
             Some(ProposalState::Suspended)
         );
+        assert!(!GuardStateModel::get().queue.is_empty());
         assert_noop!(
             Epoch::delay_once(RuntimeOrigin::signed(guardian()), 1, [8; 32]),
             Error::<Test>::BadState
@@ -1736,6 +1913,20 @@ fn guardian_delay_rerun_and_t24_veto_paths_work_without_enqueue() {
             Proposals::<Test>::get(1).map(|p| p.state),
             Some(ProposalState::Rerun)
         );
+        assert_eq!(
+            SeamCalls::get()
+                .iter()
+                .filter(|call| **call == SeamCall::DequeueForRerun(1))
+                .count(),
+            1,
+        );
+        let guard = GuardStateModel::get();
+        assert!(guard.queue.is_empty());
+        assert!(guard.held_resources.is_empty());
+        assert!(guard.expedited.is_empty());
+        assert_eq!(guard.attestation_bindings.len(), 1);
+        assert_eq!(guard.ratifications, vec![1]);
+        assert_eq!(guard.pinned_preimages, vec![(1, [1; 32])]);
         set_block(phase_block(0, phase_offsets::SEED_NUM));
         assert_ok!(Epoch::tick(
             RuntimeOrigin::signed(keeper()),
@@ -2356,7 +2547,7 @@ fn r2_6_four_void_cohorts_do_not_block_a_fifth_non_terminal_cohort() {
             RuntimeOrigin::signed(execution_guard()),
             5,
         ));
-        assert_eq!(Cohorts::<Test>::count(), 5);
+        assert_eq!(Cohorts::<Test>::count(), 1);
         assert_eq!(
             Cohorts::<Test>::get(4).map(|cohort| cohort.status),
             Some(CohortStatus::Measuring { until_epoch: 6 })
@@ -2366,51 +2557,160 @@ fn r2_6_four_void_cohorts_do_not_block_a_fifth_non_terminal_cohort() {
 }
 
 #[test]
-fn r2_6_late_same_epoch_proposal_force_rejects_without_mutating_void_cohort() {
+fn forty_void_cohorts_reap_working_storage_and_bound_the_archive_ring() {
+    new_test_ext().execute_with(|| {
+        for epoch in 0..40 {
+            let pid = epoch as u64 + 1;
+            let mut state = Epoch::epoch_state();
+            let mut proposal = live_proposal(pid, ProposalState::Measuring, epoch);
+            proposal.decision = Some(DecisionOutcome::Adopt);
+            state.proposals.push(proposal);
+            state.cohorts.push(CoreCohort {
+                epoch,
+                proposals: vec![pid],
+                status: CohortStatus::Measuring {
+                    until_epoch: epoch.saturating_add(2),
+                },
+            });
+            state.proposal_id_high_water = pid;
+            assert_ok!(Epoch::seed(state));
+            assert_ok!(Epoch::void_cohort(
+                RuntimeOrigin::signed(void_authority()),
+                epoch,
+            ));
+            assert_eq!(Cohorts::<Test>::count(), 0);
+            assert_eq!(Proposals::<Test>::count(), 0);
+            assert_ok!(Epoch::do_try_state());
+        }
+
+        let recent = RecentCohortSummaries::<Test>::get();
+        assert_eq!(recent.len(), RECENT_COHORTS);
+        assert_eq!(recent.first().map(|summary| summary.epoch), Some(8));
+        assert_eq!(recent.last().map(|summary| summary.epoch), Some(39));
+        assert!(recent.iter().all(|summary| summary.voided));
+    });
+}
+
+#[test]
+fn r2_6_void_cohort_synchronously_cancels_same_epoch_queued_proposals() {
     new_test_ext().execute_with(|| {
         let mut state = EpochState::new();
         let mut measuring = live_proposal(1, ProposalState::Measuring, 0);
         measuring.decision = Some(DecisionOutcome::Adopt);
         let mut queued = live_proposal(2, ProposalState::Queued, 0);
         queued.decision = Some(DecisionOutcome::Adopt);
-        state.proposals.extend([measuring, queued]);
+        let mut failed = live_proposal(3, ProposalState::FailedExecuted, 0);
+        failed.decision = Some(DecisionOutcome::Adopt);
+        state.proposals.extend([measuring, queued, failed]);
         state.cohorts.push(CoreCohort {
             epoch: 0,
             proposals: vec![1],
             status: CohortStatus::Measuring { until_epoch: 2 },
         });
-        state.proposal_id_high_water = 2;
+        state.proposal_id_high_water = 3;
+        assert_ok!(Epoch::seed(state));
+        assert_ok!(GuardStateModel::insert(2, [2; 32]));
+        assert_ok!(GuardStateModel::insert(3, [3; 32]));
+
+        assert_ok!(Epoch::void_cohort(
+            RuntimeOrigin::signed(void_authority()),
+            0,
+        ));
+
+        assert!(!Proposals::<Test>::contains_key(2));
+        assert!(!Proposals::<Test>::contains_key(3));
+        assert!(!ProposalSchedules::<Test>::contains_key(2));
+        assert!(!ProposalSchedules::<Test>::contains_key(3));
+        assert!(!GuardStateModel::get()
+            .queue
+            .iter()
+            .any(|(pid, _)| matches!(*pid, 2 | 3)));
+        assert!(!Cohorts::<Test>::contains_key(0));
+        let summary = RecentCohortSummaries::<Test>::get()
+            .into_iter()
+            .find(|summary| summary.epoch == 0);
+        assert!(summary.as_ref().is_some_and(|summary| summary.voided));
+        assert_eq!(
+            summary.map(|summary| summary.proposals.into_inner()),
+            Some(vec![
+                (
+                    1,
+                    ProposalClass::Param,
+                    DecisionOutcome::Reject(RejectReason::ProcessHold),
+                ),
+                (
+                    2,
+                    ProposalClass::Param,
+                    DecisionOutcome::Reject(RejectReason::ProcessHold),
+                ),
+                (
+                    3,
+                    ProposalClass::Param,
+                    DecisionOutcome::Reject(RejectReason::ProcessHold),
+                ),
+            ])
+        );
+        assert!(RecentCohortSummaries::<Test>::get()
+            .iter()
+            .any(|summary| summary.epoch == 0 && summary.voided));
+        assert_eq!(last_epoch_event(), Some(Event::CohortVoided { epoch: 0 }));
+        assert_eq!(
+            SeamCalls::get()
+                .into_iter()
+                .filter(|call| matches!(call, SeamCall::Void(_)))
+                .collect::<Vec<_>>(),
+            vec![SeamCall::Void(1), SeamCall::Void(2), SeamCall::Void(3)]
+        );
+        assert_eq!(
+            SeamCalls::get()
+                .into_iter()
+                .filter(|call| matches!(call, SeamCall::DequeueTerminal(_)))
+                .collect::<Vec<_>>(),
+            vec![
+                SeamCall::DequeueTerminal(1),
+                SeamCall::DequeueTerminal(2),
+                SeamCall::DequeueTerminal(3),
+            ]
+        );
+        assert_ok!(Epoch::do_try_state());
+    });
+}
+
+#[test]
+fn void_cohort_does_not_block_on_stale_intake_and_ticks_it_to_t20() {
+    new_test_ext().execute_with(|| {
+        let mut state = EpochState::new();
+        let mut measuring = live_proposal(1, ProposalState::Measuring, 0);
+        measuring.decision = Some(DecisionOutcome::Adopt);
+        state.proposals.push(measuring);
+        state.cohorts.push(CoreCohort {
+            epoch: 0,
+            proposals: vec![1],
+            status: CohortStatus::Measuring { until_epoch: 2 },
+        });
+        for pid in 2..=8 {
+            state
+                .proposals
+                .push(live_proposal(pid, ProposalState::Submitted, 0));
+            state.intake_queue.push(pid);
+        }
+        state.proposal_id_high_water = 8;
         assert_ok!(Epoch::seed(state));
 
         assert_ok!(Epoch::void_cohort(
             RuntimeOrigin::signed(void_authority()),
             0,
         ));
-        assert_ok!(Epoch::mark_executed(
-            RuntimeOrigin::signed(execution_guard()),
-            2,
-        ));
+        assert!(!Cohorts::<Test>::contains_key(0));
+        assert_eq!(IntakeProposals::<Test>::count(), 7);
 
-        assert!(!Proposals::<Test>::contains_key(2));
-        assert!(!ProposalSchedules::<Test>::contains_key(2));
-        assert_eq!(
-            Cohorts::<Test>::get(0).map(|cohort| cohort.proposals.into_inner()),
-            Some(vec![1])
-        );
-        assert_eq!(
-            last_epoch_event(),
-            Some(Event::ProposalForceRejected {
-                pid: 2,
-                reason: RejectReason::ProcessHold,
-            })
-        );
-        assert_eq!(
-            SeamCalls::get()
-                .into_iter()
-                .filter(|call| matches!(call, SeamCall::Void(_)))
-                .collect::<Vec<_>>(),
-            vec![SeamCall::Void(1), SeamCall::Void(2)]
-        );
+        let batch = TickBatch::try_from((2..=8).collect::<Vec<_>>());
+        assert!(batch.is_ok());
+        if let Ok(batch) = batch {
+            assert_ok!(Epoch::tick(RuntimeOrigin::signed(keeper()), batch));
+        }
+        assert_eq!(IntakeProposals::<Test>::count(), 0);
+        assert!(IntakeQueue::<Test>::get().is_empty());
         assert_ok!(Epoch::do_try_state());
     });
 }
@@ -2574,6 +2874,9 @@ fn randomized_512_step_shell_core_differential_covers_refactored_seams() {
                     .map(|proposal| (proposal.id, proposal.proposer.clone()))
                     .unwrap_or((u64::MAX, nobody()));
                 let core = oracle.withdraw(CoreOrigin::Signed, pid, &who).is_ok();
+                if core {
+                    oracle_ledger.calls.push(SeamCall::DequeueTerminal(pid));
+                }
                 let shell = Epoch::withdraw(RuntimeOrigin::signed(who), pid).is_ok();
                 (core, shell)
             } else if step < 256 {
@@ -2593,6 +2896,19 @@ fn randomized_512_step_shell_core_differential_covers_refactored_seams() {
                         &params,
                     )
                     .is_ok();
+                if core
+                    && oracle.proposal_view(pid).is_ok_and(|proposal| {
+                        matches!(
+                            proposal.state,
+                            ProposalState::Cancelled
+                                | ProposalState::Settled
+                                | ProposalState::Rejected(_)
+                                | ProposalState::Expired
+                        )
+                    })
+                {
+                    oracle_ledger.calls.push(SeamCall::DequeueTerminal(pid));
+                }
                 let shell =
                     Epoch::tick(RuntimeOrigin::signed(keeper()), tick_batch(vec![pid])).is_ok();
                 (core, shell)
@@ -2626,6 +2942,19 @@ fn randomized_512_step_shell_core_differential_covers_refactored_seams() {
                         &params,
                     )
                     .is_ok();
+                if core
+                    && oracle.proposal_view(pid).is_ok_and(|proposal| {
+                        matches!(
+                            proposal.state,
+                            ProposalState::Cancelled
+                                | ProposalState::Settled
+                                | ProposalState::Rejected(_)
+                                | ProposalState::Expired
+                        )
+                    })
+                {
+                    oracle_ledger.calls.push(SeamCall::DequeueTerminal(pid));
+                }
                 let shell =
                     Epoch::tick(RuntimeOrigin::signed(keeper()), tick_batch(vec![pid])).is_ok();
                 (core, shell)

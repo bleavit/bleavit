@@ -28,16 +28,17 @@ mod tests;
 #[frame_support::pallet]
 pub mod pallet {
     use crate::weights::WeightInfo;
+    use alloc::vec::Vec;
     use core::marker::PhantomData;
     use frame_support::{pallet_prelude::*, traits::Contains, PalletId};
     use frame_system::pallet_prelude::*;
     use futarchy_primitives::{
         bounds,
         keeper::{CrankClass, KeeperRebateSink},
-        kernel, Balance, Branch, EpochId, FixedU64, GateType, MarketId, MarketKind, PositionId,
-        ProposalId, ScalarSide, TradeSide,
+        kernel, Balance, BlockNumber, Branch, EpochId, FixedU64, GateType, MarketId, MarketKind,
+        PositionId, ProposalId, ScalarSide, TradeSide,
     };
-    use market_core::{BookKind, MarketBook, MarketParams, MarketPhase};
+    use market_core::{BookKind, MarketBook, MarketParams, MarketPhase, TwapWindow};
     use sp_runtime::{
         traits::{AccountIdConversion, Saturating, UniqueSaturatedInto},
         DispatchError,
@@ -106,6 +107,34 @@ pub mod pallet {
     /// removed at reap.
     #[pallet::storage]
     pub type SeededMarkets<T: Config> = StorageMap<_, Blake2_128Concat, MarketId, (), OptionQuery>;
+
+    /// Monotonic internal id allocator used by epoch's bounded market-opening
+    /// orchestration. Zero means no id has yet been allocated.
+    #[pallet::storage]
+    pub type NextMarketId<T: Config> = StorageValue<_, MarketId, ValueQuery>;
+
+    /// O(1) accumulator checkpoints at registered full/trailing boundaries
+    /// (04 §7). Internal backing outside the frozen 02 §7.4 surface.
+    #[pallet::storage]
+    pub type WindowCheckpoints<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        MarketId,
+        BoundedVec<(BlockNumber, u128), ConstU32<8>>,
+        ValueQuery,
+    >;
+
+    /// Per-window coverage and staleness counters. A Baseline can serve
+    /// several proposal pairs, hence the same eight-entry bound as checkpoints.
+    #[pallet::storage]
+    pub type DecisionWindows<T: Config> =
+        StorageMap<_, Blake2_128Concat, MarketId, BoundedVec<TwapWindow, ConstU32<8>>, ValueQuery>;
+
+    /// Idempotence marker for the one extra seed that brings a guardian rerun
+    /// from its original POL allocation to the specified 2× allocation.
+    #[pallet::storage]
+    pub type RerunSeededMarkets<T: Config> =
+        StorageMap<_, Blake2_128Concat, MarketId, (), OptionQuery>;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -401,6 +430,10 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let mut book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
+            Self::ensure_registered_window_open(market)?;
+            let before = book.clone();
+            Self::seal_due_windows(market, &before, Self::now_u64(), false)?;
+            Self::accrue_contest(market, &before, Self::now_u64());
             let mut ledger = PalletLedger::<T>::new();
             let events = market_core::buy_book(
                 &mut book,
@@ -413,6 +446,7 @@ pub mod pallet {
                 Self::now_u64(),
             )
             .map_err(Error::<T>::from)?;
+            Self::record_observation(market, &before, &book);
             Markets::<T>::insert(market, book);
             for event in events {
                 Self::deposit_trade_event(event)?;
@@ -432,6 +466,10 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let mut book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
+            Self::ensure_registered_window_open(market)?;
+            let before = book.clone();
+            Self::seal_due_windows(market, &before, Self::now_u64(), false)?;
+            Self::accrue_contest(market, &before, Self::now_u64());
             let mut ledger = PalletLedger::<T>::new();
             let events = market_core::sell_book(
                 &mut book,
@@ -444,6 +482,7 @@ pub mod pallet {
                 Self::now_u64(),
             )
             .map_err(Error::<T>::from)?;
+            Self::record_observation(market, &before, &book);
             Markets::<T>::insert(market, book);
             for event in events {
                 Self::deposit_trade_event(event)?;
@@ -466,10 +505,15 @@ pub mod pallet {
                 matches!(book.phase, MarketPhase::Trading | MarketPhase::Extended),
                 Error::<T>::NotTrading
             );
+            Self::ensure_registered_window_open(market)?;
+            let before = book.clone();
+            Self::seal_due_windows(market, &before, Self::now_u64(), false)?;
+            Self::accrue_contest(market, &before, Self::now_u64());
             if let Some(event) =
                 market_core::observe_book(&mut book, &Self::params(), Self::now_u64())
                     .map_err(Error::<T>::from)?
             {
+                Self::record_observation(market, &before, &book);
                 Markets::<T>::insert(market, book);
                 Self::deposit_trade_event(event)?;
                 let class = if T::InDecisionWindow::contains(&market) {
@@ -507,6 +551,9 @@ pub mod pallet {
             Markets::<T>::remove(market);
             ClosedAt::<T>::remove(market);
             SeededMarkets::<T>::remove(market);
+            RerunSeededMarkets::<T>::remove(market);
+            WindowCheckpoints::<T>::remove(market);
+            DecisionWindows::<T>::remove(market);
             Self::deposit_event(Event::MarketReaped { market });
             <T as Config>::KeeperRebate::rebate(&who, CrankClass::General);
             Ok(())
@@ -514,6 +561,466 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
+        /// Allocate one monotonic market id. Epoch calls this a bounded number
+        /// of times (at most six proposal books plus one Baseline).
+        pub fn allocate_market_id(origin: OriginFor<T>) -> Result<MarketId, DispatchError> {
+            T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            NextMarketId::<T>::try_mutate(|next| {
+                let id = (*next).max(1);
+                ensure!(!Markets::<T>::contains_key(id), Error::<T>::DuplicateMarket);
+                *next = id.checked_add(1).ok_or(Error::<T>::ArithmeticOverflow)?;
+                Ok(id)
+            })
+        }
+
+        /// Register exact full/trailing TWAP boundaries for one deciding pair.
+        /// Duplicate registrations are idempotent; capacity exhaustion rejects
+        /// the caller so epoch cannot open an ungradeable book.
+        pub fn register_decision_window(
+            origin: OriginFor<T>,
+            id: MarketId,
+            start: BlockNumber,
+            trailing_start: BlockNumber,
+            end: BlockNumber,
+        ) -> DispatchResult {
+            T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            let book = Markets::<T>::get(id).ok_or(Error::<T>::UnknownMarket)?;
+            ensure!(
+                start < trailing_start && trailing_start < end,
+                Error::<T>::TryStateViolation
+            );
+            let candidate = TwapWindow {
+                start,
+                trailing_start,
+                end,
+                observations: 0,
+                stale_events: 0,
+                contest_notional_blocks: 0,
+                contest_accrued_until: start,
+                contest_valid: true,
+                close_spot: None,
+                sealed: false,
+            };
+            if DecisionWindows::<T>::get(id).iter().any(|window| {
+                window.start == start
+                    && window.trailing_start == trailing_start
+                    && window.end == end
+            }) {
+                return Ok(());
+            }
+            let mut boundaries = DecisionWindows::<T>::get(id)
+                .iter()
+                .flat_map(|window| [window.start, window.trailing_start, window.end])
+                .collect::<Vec<_>>();
+            boundaries.extend([start, trailing_start, end]);
+            boundaries.sort_unstable();
+            boundaries.dedup();
+            ensure!(boundaries.len() <= 8, Error::<T>::TryStateViolation);
+            DecisionWindows::<T>::try_mutate(id, |windows| {
+                windows
+                    .try_push(candidate)
+                    .map_err(|_| Error::<T>::TryStateViolation)
+            })?;
+            if u64::from(start) == book.last_observed_block {
+                Self::insert_checkpoint(id, start, book.cumulative_price_blocks);
+            }
+            Ok(())
+        }
+
+        /// Reopen a guardian-rerun book with positions intact and a fresh TWAP
+        /// accumulator (05 T13). Baseline books are never rerun targets.
+        pub fn reopen_for_rerun(origin: OriginFor<T>, id: MarketId) -> DispatchResult {
+            T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            let now = Self::now_u64();
+            Markets::<T>::try_mutate(id, |maybe_book| -> DispatchResult {
+                let book = maybe_book.as_mut().ok_or(Error::<T>::UnknownMarket)?;
+                ensure!(
+                    !matches!(book.kind, BookKind::Baseline { .. }),
+                    Error::<T>::BadOrigin
+                );
+                book.phase = MarketPhase::Extended;
+                book.last_observation_1e9 = book.last_quote_1e9;
+                book.last_observed_block = now;
+                book.cumulative_price_blocks = 0;
+                book.stale_events = 0;
+                Ok(())
+            })?;
+            WindowCheckpoints::<T>::remove(id);
+            DecisionWindows::<T>::remove(id);
+            RerunSeededMarkets::<T>::remove(id);
+            Ok(())
+        }
+
+        /// Reopen the shared Baseline when a delayed proposal starts a later
+        /// decision window after the original cohort had already closed it.
+        /// Baseline is never a guardian-rerun target and receives no rerun POL;
+        /// this only restarts its observation accumulator so the fresh window
+        /// can be graded (04 §8.4; 05 T13).
+        pub fn reopen_baseline_for_rerun(origin: OriginFor<T>, id: MarketId) -> DispatchResult {
+            T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            let now = Self::now_u64();
+            Markets::<T>::try_mutate(id, |maybe_book| -> DispatchResult {
+                let book = maybe_book.as_mut().ok_or(Error::<T>::UnknownMarket)?;
+                ensure!(
+                    matches!(book.kind, BookKind::Baseline { .. }),
+                    Error::<T>::BadOrigin
+                );
+                if matches!(book.phase, MarketPhase::Closed) {
+                    let elapsed = now
+                        .checked_sub(book.last_observed_block)
+                        .ok_or(Error::<T>::TryStateViolation)?;
+                    let addition = u128::from(book.last_observation_1e9.0)
+                        .checked_mul(u128::from(elapsed))
+                        .ok_or(Error::<T>::ArithmeticOverflow)?;
+                    book.cumulative_price_blocks = book
+                        .cumulative_price_blocks
+                        .checked_add(addition)
+                        .ok_or(Error::<T>::ArithmeticOverflow)?;
+                    book.phase = MarketPhase::Trading;
+                    book.last_observation_1e9 = book.last_quote_1e9;
+                    book.last_observed_block = now;
+                    ClosedAt::<T>::remove(id);
+                }
+                ensure!(
+                    matches!(book.phase, MarketPhase::Trading | MarketPhase::Extended),
+                    Error::<T>::NotTrading
+                );
+                Ok(())
+            })
+        }
+
+        /// Mark an existing proposal book as extended before registering its
+        /// fresh exact window. Baseline books stay shared/trading.
+        pub fn mark_extended(origin: OriginFor<T>, id: MarketId) -> DispatchResult {
+            T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            Markets::<T>::try_mutate(id, |maybe_book| -> DispatchResult {
+                let book = maybe_book.as_mut().ok_or(Error::<T>::UnknownMarket)?;
+                ensure!(
+                    !matches!(book.kind, BookKind::Baseline { .. }),
+                    Error::<T>::BadOrigin
+                );
+                ensure!(
+                    matches!(book.phase, MarketPhase::Trading | MarketPhase::Extended),
+                    Error::<T>::NotTrading
+                );
+                book.phase = MarketPhase::Extended;
+                Ok(())
+            })
+        }
+
+        /// Seed an Accept/Reject pair from one dual-mint collateral split.
+        pub fn seed_branch_pair(
+            origin: OriginFor<T>,
+            accept: MarketId,
+            reject: MarketId,
+            treasury: T::AccountId,
+        ) -> DispatchResult {
+            T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            ensure!(
+                !SeededMarkets::<T>::contains_key(accept)
+                    && !SeededMarkets::<T>::contains_key(reject),
+                Error::<T>::AlreadySeeded
+            );
+            let accept_book = Markets::<T>::get(accept).ok_or(Error::<T>::UnknownMarket)?;
+            let reject_book = Markets::<T>::get(reject).ok_or(Error::<T>::UnknownMarket)?;
+            frame_support::storage::with_storage_layer(|| -> DispatchResult {
+                let mut ledger = PalletLedger::<T>::new();
+                let headroom = market_core::seed_branch_pair(
+                    &accept_book,
+                    &reject_book,
+                    &mut ledger,
+                    &treasury,
+                )
+                .map_err(Error::<T>::from)?;
+                for id in [accept, reject] {
+                    SeededMarkets::<T>::insert(id, ());
+                    Self::deposit_event(Event::Seeded {
+                        market: id,
+                        headroom,
+                    });
+                }
+                Ok(())
+            })
+        }
+
+        /// Add one pair-sized rerun headroom split and double both books' LMSR
+        /// depth while preserving every trader position.
+        pub fn seed_rerun_branch_pair(
+            origin: OriginFor<T>,
+            accept: MarketId,
+            reject: MarketId,
+            treasury: T::AccountId,
+        ) -> DispatchResult {
+            T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            ensure!(
+                SeededMarkets::<T>::contains_key(accept)
+                    && SeededMarkets::<T>::contains_key(reject)
+                    && !RerunSeededMarkets::<T>::contains_key(accept)
+                    && !RerunSeededMarkets::<T>::contains_key(reject),
+                Error::<T>::AlreadySeeded
+            );
+            let accept_book = Markets::<T>::get(accept).ok_or(Error::<T>::UnknownMarket)?;
+            let reject_book = Markets::<T>::get(reject).ok_or(Error::<T>::UnknownMarket)?;
+            frame_support::storage::with_storage_layer(|| -> DispatchResult {
+                let mut ledger = PalletLedger::<T>::new();
+                let headroom = market_core::seed_branch_pair(
+                    &accept_book,
+                    &reject_book,
+                    &mut ledger,
+                    &treasury,
+                )
+                .map_err(Error::<T>::from)?;
+                for id in [accept, reject] {
+                    Markets::<T>::try_mutate(id, |maybe_book| -> DispatchResult {
+                        let book = maybe_book.as_mut().ok_or(Error::<T>::UnknownMarket)?;
+                        book.b = book
+                            .b
+                            .checked_mul(2)
+                            .ok_or(Error::<T>::ArithmeticOverflow)?;
+                        Ok(())
+                    })?;
+                    RerunSeededMarkets::<T>::insert(id, ());
+                    Self::deposit_event(Event::Seeded {
+                        market: id,
+                        headroom,
+                    });
+                }
+                Ok(())
+            })
+        }
+
+        /// Add exactly one original-size headroom seed and double LMSR `b`,
+        /// yielding 2× total POL/depth while preserving positions (05 T13).
+        pub fn seed_rerun(
+            origin: OriginFor<T>,
+            id: MarketId,
+            treasury: T::AccountId,
+        ) -> DispatchResult {
+            T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            ensure!(
+                SeededMarkets::<T>::contains_key(id),
+                Error::<T>::TryStateViolation
+            );
+            ensure!(
+                !RerunSeededMarkets::<T>::contains_key(id),
+                Error::<T>::AlreadySeeded
+            );
+            let book = Markets::<T>::get(id).ok_or(Error::<T>::UnknownMarket)?;
+            frame_support::storage::with_storage_layer(|| -> DispatchResult {
+                let mut ledger = PalletLedger::<T>::new();
+                let headroom = market_core::seed_book(&book, &mut ledger, &treasury)
+                    .map_err(Error::<T>::from)?;
+                Markets::<T>::try_mutate(id, |maybe_book| -> DispatchResult {
+                    let stored = maybe_book.as_mut().ok_or(Error::<T>::UnknownMarket)?;
+                    stored.b = stored
+                        .b
+                        .checked_mul(2)
+                        .ok_or(Error::<T>::ArithmeticOverflow)?;
+                    Ok(())
+                })?;
+                RerunSeededMarkets::<T>::insert(id, ());
+                Self::deposit_event(Event::Seeded {
+                    market: id,
+                    headroom,
+                });
+                Ok(())
+            })
+        }
+
+        /// Exact TWAP for a registered window ending at `end`.
+        pub fn twap_at(id: MarketId, end: BlockNumber, window: BlockNumber) -> Option<FixedU64> {
+            let start = end.checked_sub(window)?;
+            let registered = DecisionWindows::<T>::get(id).iter().any(|record| {
+                (record.start == start || record.trailing_start == start) && record.end == end
+            });
+            if !registered {
+                return None;
+            }
+            let checkpoints = WindowCheckpoints::<T>::get(id);
+            let start_cumulative = checkpoints
+                .iter()
+                .find_map(|(block, cumulative)| (*block == start).then_some(*cumulative))?;
+            let end_cumulative = checkpoints
+                .iter()
+                .find_map(|(block, cumulative)| (*block == end).then_some(*cumulative))?;
+            market_core::twap_between(start_cumulative, end_cumulative, window)
+        }
+
+        pub fn spot_at(id: MarketId, end: BlockNumber) -> Option<FixedU64> {
+            DecisionWindows::<T>::get(id)
+                .iter()
+                .find_map(|window| (window.end == end).then_some(window.close_spot).flatten())
+        }
+
+        pub fn contest_notional(id: MarketId) -> Option<Balance> {
+            let book = Markets::<T>::get(id)?;
+            book.q_long.checked_add(book.q_short)
+        }
+
+        /// Full-window time-averaged non-POL contest notional, rounded down.
+        pub fn average_contest_at(
+            id: MarketId,
+            end: BlockNumber,
+            window: BlockNumber,
+        ) -> Option<Balance> {
+            DecisionWindows::<T>::get(id)
+                .iter()
+                .find(|record| {
+                    record.end == end
+                        && end
+                            .checked_sub(window)
+                            .is_some_and(|start| record.start == start)
+                })
+                .filter(|record| record.contest_valid)
+                .and_then(|record| {
+                    record
+                        .contest_notional_blocks
+                        .checked_div(u128::from(window))
+                })
+        }
+
+        /// Coverage/staleness/POL/contest/convergence grade shared by the
+        /// runtime role-specific adapter.
+        #[allow(clippy::too_many_arguments)]
+        pub fn decision_grade_at(
+            id: MarketId,
+            end: BlockNumber,
+            window: BlockNumber,
+            coverage_pct: u8,
+            convergence: FixedU64,
+            contest_floor: Balance,
+            pol_floor: Balance,
+            require_sanity_band: bool,
+        ) -> bool {
+            let Some(book) = Markets::<T>::get(id) else {
+                return false;
+            };
+            let Some(twap) = Self::twap_at(id, end, window) else {
+                return false;
+            };
+            let start = match end.checked_sub(window) {
+                Some(value) => value,
+                None => return false,
+            };
+            let windows = DecisionWindows::<T>::get(id);
+            let Some(stats) = windows
+                .iter()
+                .find(|record| record.start == start && record.end == end)
+            else {
+                return false;
+            };
+            let sane = !require_sanity_band
+                || (twap.0 >= futarchy_primitives::kernel::DECISION_SANITY_MIN_1E9
+                    && twap.0 <= futarchy_primitives::kernel::DECISION_SANITY_MAX_1E9);
+            let interval = match u32::try_from(T::ObsInterval::get()) {
+                Ok(value) => value,
+                Err(_) => return false,
+            };
+            sane && stats.sealed
+                && stats.stale_events == 0
+                && market_core::coverage_at_least(
+                    stats.observations,
+                    window,
+                    interval,
+                    coverage_pct,
+                )
+                && SeededMarkets::<T>::contains_key(id)
+                && book.b >= pol_floor
+                && stats.contest_valid
+                && stats
+                    .contest_notional_blocks
+                    .checked_div(u128::from(window))
+                    .is_some_and(|contest| contest >= contest_floor)
+                && stats
+                    .close_spot
+                    .is_some_and(|spot| spot.0.abs_diff(twap.0) <= convergence.0)
+        }
+
+        fn insert_checkpoint(id: MarketId, block: BlockNumber, cumulative: u128) {
+            WindowCheckpoints::<T>::mutate(id, |checkpoints| {
+                // A boundary is a historical accumulator snapshot. Once
+                // present it is immutable, including when another overlapping
+                // window later crosses the same boundary.
+                if checkpoints.iter().any(|(at, _)| *at == block) {
+                    return;
+                }
+                if checkpoints.try_push((block, cumulative)).is_ok() {
+                    checkpoints.sort_by_key(|(at, _)| *at);
+                }
+                // Capacity failure deliberately leaves the checkpoint absent;
+                // the grade read then returns false (G-1).
+            });
+        }
+
+        fn record_observation(
+            id: MarketId,
+            before: &MarketBook<T::AccountId>,
+            after: &MarketBook<T::AccountId>,
+        ) {
+            // A trade in the exact close block must leave the final quote as
+            // the window's spot even when the observation cadence does not
+            // advance in that block.  Update this before the observation
+            // early-return so a second close-block trade cannot leave a stale
+            // first-trade quote behind (04 §7.2; 05 §5.2).
+            if let Ok(now) = u32::try_from(Self::now_u64()) {
+                DecisionWindows::<T>::mutate(id, |windows| {
+                    for window in windows
+                        .iter_mut()
+                        .filter(|window| window.end == now && !window.sealed)
+                    {
+                        window.close_spot = Some(after.last_quote_1e9);
+                    }
+                });
+            }
+            if before.last_observed_block == after.last_observed_block {
+                return;
+            }
+            let Ok(previous_block) = u32::try_from(before.last_observed_block) else {
+                return;
+            };
+            let Ok(observed_block) = u32::try_from(after.last_observed_block) else {
+                return;
+            };
+            let observation = after.last_observation_1e9;
+            DecisionWindows::<T>::mutate(id, |windows| {
+                for window in windows.iter_mut() {
+                    if window.sealed {
+                        continue;
+                    }
+                    // A crank after the close may not backfill an end checkpoint
+                    // using information first observed after that close.
+                    if observed_block > window.end {
+                        continue;
+                    }
+                    for boundary in [window.start, window.trailing_start, window.end] {
+                        if previous_block < boundary && boundary <= observed_block {
+                            if let Some(cumulative) = market_core::accumulator_at_boundary(
+                                previous_block,
+                                before.cumulative_price_blocks,
+                                observation,
+                                boundary,
+                            ) {
+                                Self::insert_checkpoint(id, boundary, cumulative);
+                            }
+                        }
+                    }
+                    if observed_block > window.start {
+                        window.observations = window.observations.saturating_add(1);
+                        let stale_gap = match u32::try_from(market_core::STALE_GAP_BLOCKS) {
+                            Ok(value) => value,
+                            Err(_) => return,
+                        };
+                        if observed_block.saturating_sub(previous_block) > stale_gap {
+                            window.stale_events = window.stale_events.saturating_add(1);
+                        }
+                    }
+                    if observed_block == window.end {
+                        window.close_spot = Some(after.last_quote_1e9);
+                    }
+                }
+            });
+        }
+
         /// Internal epoch-authority API: create the vault and its trading book.
         #[allow(clippy::too_many_arguments)]
         pub fn create_market(
@@ -615,14 +1122,30 @@ pub mod pallet {
         /// Internal epoch-authority API: close a book and start its archive delay.
         pub fn close(origin: OriginFor<T>, id: MarketId) -> DispatchResult {
             T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
-            Markets::<T>::try_mutate(id, |maybe_book| -> DispatchResult {
-                let book = maybe_book.as_mut().ok_or(Error::<T>::UnknownMarket)?;
+            frame_support::storage::with_storage_layer(|| -> DispatchResult {
+                let mut book = Markets::<T>::get(id).ok_or(Error::<T>::UnknownMarket)?;
+                let now = Self::now_u64();
+                Self::seal_due_windows(id, &book, now, true)?;
+                Self::accrue_contest(id, &book, now);
                 book.phase = MarketPhase::Closed;
+                Markets::<T>::insert(id, book);
+                ClosedAt::<T>::insert(id, frame_system::Pallet::<T>::block_number());
+                Self::deposit_event(Event::MarketClosed { market: id });
                 Ok(())
-            })?;
-            ClosedAt::<T>::insert(id, frame_system::Pallet::<T>::block_number());
-            Self::deposit_event(Event::MarketClosed { market: id });
-            Ok(())
+            })
+        }
+
+        /// Epoch-authority boundary seal for a particular proposal window.
+        /// Shared Baseline books remain open, but this window becomes immutable.
+        pub fn seal_decision_window(
+            origin: OriginFor<T>,
+            id: MarketId,
+            end: BlockNumber,
+        ) -> DispatchResult {
+            T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            let book = Markets::<T>::get(id).ok_or(Error::<T>::UnknownMarket)?;
+            ensure!(Self::now_u64() >= u64::from(end), Error::<T>::NotTrading);
+            Self::seal_window(id, &book, end)
         }
 
         /// Market sovereign account used to sign the ledger's internal API.
@@ -641,6 +1164,119 @@ pub mod pallet {
 
         fn now_u64() -> u64 {
             frame_system::Pallet::<T>::block_number().unique_saturated_into()
+        }
+
+        fn accrue_contest(id: MarketId, book: &MarketBook<T::AccountId>, through: u64) {
+            let Ok(through) = u32::try_from(through) else {
+                DecisionWindows::<T>::mutate(id, |windows| {
+                    for window in windows.iter_mut() {
+                        if !window.sealed {
+                            window.contest_valid = false;
+                        }
+                    }
+                });
+                return;
+            };
+            DecisionWindows::<T>::mutate(id, |windows| {
+                for window in windows.iter_mut() {
+                    if window.sealed {
+                        continue;
+                    }
+                    let from = window.contest_accrued_until.max(window.start);
+                    let to = through.min(window.end);
+                    if from >= to {
+                        continue;
+                    }
+                    if window.contest_valid {
+                        let addition = book
+                            .q_long
+                            .checked_add(book.q_short)
+                            .and_then(|notional| notional.checked_mul(u128::from(to - from)));
+                        match addition
+                            .and_then(|value| window.contest_notional_blocks.checked_add(value))
+                        {
+                            Some(value) => window.contest_notional_blocks = value,
+                            None => window.contest_valid = false,
+                        }
+                    }
+                    window.contest_accrued_until = to;
+                }
+            });
+        }
+
+        fn seal_due_windows(
+            id: MarketId,
+            book: &MarketBook<T::AccountId>,
+            now: u64,
+            include_current: bool,
+        ) -> DispatchResult {
+            let now = u32::try_from(now).map_err(|_| Error::<T>::ArithmeticOverflow)?;
+            let ends = DecisionWindows::<T>::get(id)
+                .iter()
+                .filter(|window| {
+                    !window.sealed && (window.end < now || (include_current && window.end == now))
+                })
+                .map(|window| window.end)
+                .collect::<Vec<_>>();
+            for end in ends {
+                Self::seal_window(id, book, end)?;
+            }
+            Ok(())
+        }
+
+        fn seal_window(
+            id: MarketId,
+            book: &MarketBook<T::AccountId>,
+            end: BlockNumber,
+        ) -> DispatchResult {
+            ensure!(
+                DecisionWindows::<T>::get(id)
+                    .iter()
+                    .any(|window| window.end == end),
+                Error::<T>::TryStateViolation
+            );
+            if DecisionWindows::<T>::get(id)
+                .iter()
+                .filter(|window| window.end == end)
+                .all(|window| window.sealed)
+            {
+                return Ok(());
+            }
+            Self::accrue_contest(id, book, u64::from(end));
+            let checkpoints = WindowCheckpoints::<T>::get(id);
+            if !checkpoints.iter().any(|(at, _)| *at == end) {
+                let previous = u32::try_from(book.last_observed_block)
+                    .map_err(|_| Error::<T>::ArithmeticOverflow)?;
+                ensure!(previous <= end, Error::<T>::TryStateViolation);
+                let cumulative = market_core::accumulator_at_boundary(
+                    previous,
+                    book.cumulative_price_blocks,
+                    book.last_observation_1e9,
+                    end,
+                )
+                .ok_or(Error::<T>::ArithmeticOverflow)?;
+                Self::insert_checkpoint(id, end, cumulative);
+            }
+            DecisionWindows::<T>::mutate(id, |windows| {
+                for window in windows.iter_mut().filter(|window| window.end == end) {
+                    if window.close_spot.is_none() {
+                        window.close_spot = Some(book.last_quote_1e9);
+                    }
+                    window.sealed = true;
+                }
+            });
+            Ok(())
+        }
+
+        fn ensure_registered_window_open(id: MarketId) -> DispatchResult {
+            let windows = DecisionWindows::<T>::get(id);
+            if let Some(latest_end) = windows.iter().map(|window| window.end).max() {
+                ensure!(
+                    Self::now_u64() <= u64::from(latest_end),
+                    Error::<T>::NotTrading
+                );
+            }
+            Ok(())
         }
 
         fn describe_kind(kind: BookKind) -> (MarketKind, Option<ProposalId>, EpochId) {
@@ -754,6 +1390,63 @@ pub mod pallet {
                 let book = Markets::<T>::get(market).ok_or(Error::<T>::TryStateViolation)?;
                 ensure!(
                     matches!(book.kind, BookKind::Baseline { epoch: e } if e == epoch),
+                    Error::<T>::TryStateViolation
+                );
+            }
+            for (id, checkpoints) in WindowCheckpoints::<T>::iter() {
+                let _book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
+                let mut previous = None;
+                let mut previous_cumulative = None;
+                for (block, cumulative) in checkpoints {
+                    let max_at_boundary = u128::from(block)
+                        .checked_mul(u128::from(market_core::PRICE_ONE_1E9))
+                        .ok_or(Error::<T>::TryStateViolation)?;
+                    ensure!(
+                        previous.is_none_or(|prior| prior < block)
+                            && u64::from(block) <= now
+                            && previous_cumulative.is_none_or(|prior| prior <= cumulative)
+                            && cumulative <= max_at_boundary,
+                        Error::<T>::TryStateViolation
+                    );
+                    previous = Some(block);
+                    previous_cumulative = Some(cumulative);
+                }
+            }
+            for (id, windows) in DecisionWindows::<T>::iter() {
+                ensure!(
+                    Markets::<T>::contains_key(id),
+                    Error::<T>::TryStateViolation
+                );
+                for window in windows {
+                    ensure!(
+                        window.start < window.trailing_start
+                            && window.trailing_start < window.end
+                            && window
+                                .close_spot
+                                .is_none_or(|spot| spot.0 <= market_core::PRICE_ONE_1E9),
+                        Error::<T>::TryStateViolation
+                    );
+                    if window.sealed {
+                        ensure!(
+                            window.close_spot.is_some()
+                                && window.contest_accrued_until == window.end
+                                && WindowCheckpoints::<T>::get(id)
+                                    .iter()
+                                    .any(|(block, _)| *block == window.end),
+                            Error::<T>::TryStateViolation
+                        );
+                    }
+                }
+            }
+            for id in SeededMarkets::<T>::iter_keys() {
+                ensure!(
+                    Markets::<T>::contains_key(id),
+                    Error::<T>::TryStateViolation
+                );
+            }
+            for id in RerunSeededMarkets::<T>::iter_keys() {
+                ensure!(
+                    Markets::<T>::contains_key(id) && SeededMarkets::<T>::contains_key(id),
                     Error::<T>::TryStateViolation
                 );
             }

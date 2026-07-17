@@ -11,8 +11,8 @@ use futarchy_fixed::{
     FixedError, FixedU64x64, LmsrSide, LN_2,
 };
 use futarchy_primitives::{
-    kernel, Balance, Branch, EpochId, FixedU64, GateType, MarketId, PositionId, PositionKind,
-    ProposalId, QuoteView, ScalarSide, TradeSide,
+    kernel, Balance, BlockNumber, Branch, EpochId, FixedU64, GateType, MarketId, PositionId,
+    PositionKind, ProposalId, QuoteView, ScalarSide, TradeSide,
 };
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
@@ -226,6 +226,84 @@ pub enum MarketPhase {
     Extended,
     Closed,
     Settled,
+}
+
+/// One decision-window registration. The FRAME shell keeps at most eight of
+/// these per book, matching the bounded checkpoint contract in 04 §7.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
+pub struct TwapWindow {
+    pub start: BlockNumber,
+    pub trailing_start: BlockNumber,
+    pub end: BlockNumber,
+    pub observations: u32,
+    pub stale_events: u8,
+    /// Time integral of non-POL contest notional over this full window.
+    pub contest_notional_blocks: u128,
+    /// Last block through which contest notional has been integrated.
+    pub contest_accrued_until: BlockNumber,
+    /// Cleared on any accumulator overflow; an invalid window never grades.
+    pub contest_valid: bool,
+    /// Quote after all trades in the exact close block. A later observation
+    /// may never synthesize this value from post-close information.
+    pub close_spot: Option<FixedU64>,
+    /// Set only by the epoch decision-boundary read (or market close). Once
+    /// true, no observation, trade or contest accrual may mutate this window.
+    pub sealed: bool,
+}
+
+/// Accumulator value at a boundary crossed by a newly recorded observation.
+/// Observations are weighted backward over the interval ending at their record
+/// block (04 §7).
+pub fn accumulator_at_boundary(
+    previous_block: BlockNumber,
+    previous_cumulative: u128,
+    observation: FixedU64,
+    boundary: BlockNumber,
+) -> Option<u128> {
+    let elapsed = boundary.checked_sub(previous_block)?;
+    previous_cumulative.checked_add(u128::from(observation.0).checked_mul(u128::from(elapsed))?)
+}
+
+/// Exact fixed-grid mean between two cumulative checkpoints.
+pub fn twap_between(start: u128, end: u128, blocks: BlockNumber) -> Option<FixedU64> {
+    if blocks == 0 || end < start {
+        return None;
+    }
+    let value = end.checked_sub(start)?.checked_div(u128::from(blocks))?;
+    u64::try_from(value).ok().map(FixedU64)
+}
+
+/// Scheduled-interval coverage check (05 §5). Division is avoided so the
+/// comparison has no rounding ambiguity.
+pub fn coverage_at_least(
+    observations: u32,
+    window: BlockNumber,
+    interval: BlockNumber,
+    required_pct: u8,
+) -> bool {
+    if interval == 0 || required_pct > 100 {
+        return false;
+    }
+    let expected = window / interval;
+    expected > 0
+        && observations.saturating_mul(100) >= expected.saturating_mul(u32::from(required_pct))
+}
+
+/// Maker-loss depth for one seeded book, rounded down so security sizing never
+/// overstates the capital available to absorb manipulation flow.
+pub fn maker_loss_floor(b: Balance) -> Option<Balance> {
+    fixed_to_base_units_down(fx(b).ok()?.checked_mul(LN_2).ok()?).ok()
 }
 
 #[derive(
@@ -876,6 +954,73 @@ pub fn seed_book<A: Clone + Eq, L: LedgerOps<A>>(
                     headroom,
                 )
                 .map_err(|_| Error::Ledger)?;
+        }
+    }
+    Ok(headroom)
+}
+
+/// Seed the Accept/Reject pair from one collateral split. A proposal split
+/// mints both branch legs; consuming one split per book would strand mirror
+/// legs in POL and double the specified budget (04 §10; 08 §8.4).
+pub fn seed_branch_pair<A: Clone + Eq, L: LedgerOps<A>>(
+    accept: &MarketBook<A>,
+    reject: &MarketBook<A>,
+    ledger: &mut L,
+    treasury: &A,
+) -> Result<Balance, Error> {
+    ensure!(
+        accept.id != reject.id && accept.b == reject.b,
+        Error::TryStateViolation
+    );
+    let (proposal, gate) = match (accept.kind, reject.kind) {
+        (
+            BookKind::Decision {
+                proposal: left,
+                branch: Branch::Accept,
+            },
+            BookKind::Decision {
+                proposal: right,
+                branch: Branch::Reject,
+            },
+        ) if left == right => (left, None),
+        (
+            BookKind::Gate {
+                proposal: left,
+                branch: Branch::Accept,
+                gate: left_gate,
+            },
+            BookKind::Gate {
+                proposal: right,
+                branch: Branch::Reject,
+                gate: right_gate,
+            },
+        ) if left == right && left_gate == right_gate => (left, Some(left_gate)),
+        _ => return Err(Error::TryStateViolation),
+    };
+    let headroom = fixed_to_base_units_up(fx(accept.b)?.checked_mul(LN_2).map_err(map_fixed)?)?;
+    for book in [accept, reject] {
+        ledger.note_protocol_account(book.account.clone());
+        ledger.note_protocol_account(book.fees_account.clone());
+    }
+    ledger
+        .do_split(proposal, treasury, headroom)
+        .map_err(|_| Error::Ledger)?;
+    for (book, branch) in [(accept, Branch::Accept), (reject, Branch::Reject)] {
+        ledger
+            .do_transfer(
+                position(proposal, branch, PositionKind::BranchUsdc),
+                treasury,
+                &book.account,
+                headroom,
+            )
+            .map_err(|_| Error::Ledger)?;
+        match gate {
+            Some(gate) => ledger
+                .do_split_gate(proposal, branch, gate, &book.account, headroom)
+                .map_err(|_| Error::Ledger)?,
+            None => ledger
+                .do_split_scalar(proposal, branch, &book.account, headroom)
+                .map_err(|_| Error::Ledger)?,
         }
     }
     Ok(headroom)

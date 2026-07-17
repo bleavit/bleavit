@@ -28,6 +28,32 @@ pub const MAX_METERS: usize = 16;
 /// 13 rule 7 meta-bound: `amend_registry` may not set a cooldown above this.
 pub const META_MAX_COOLDOWN_EPOCHS: u32 = 8;
 
+pub fn gate_v_min_pair(key: ParamKey) -> Option<ParamKey> {
+    for (decision, gate) in [
+        (
+            b"dec.v_min.param".as_slice(),
+            b"gate.v_min.param".as_slice(),
+        ),
+        (b"dec.v_min.trs".as_slice(), b"gate.v_min.trs".as_slice()),
+        (b"dec.v_min.code".as_slice(), b"gate.v_min.code".as_slice()),
+        (b"dec.v_min.meta".as_slice(), b"gate.v_min.meta".as_slice()),
+    ] {
+        let decision = key16(decision);
+        let gate = key16(gate);
+        if key == decision {
+            return Some(gate);
+        }
+        if key == gate {
+            return Some(decision);
+        }
+    }
+    None
+}
+
+pub const fn gate_v_min_coupled(decision: Balance, gate: Balance) -> bool {
+    gate >= decision / 20 && gate <= decision / 2
+}
+
 #[derive(
     Clone,
     Copy,
@@ -544,12 +570,34 @@ impl ConstitutionState {
         epoch: u32,
         block: BlockNumber,
     ) -> Result<(), Error> {
-        let record = self
+        let index = self
             .params
-            .iter_mut()
-            .find(|r| r.key == key)
+            .iter()
+            .position(|r| r.key == key)
             .ok_or(Error::UnknownParam)?;
-        *record = record.checked_update(next, epoch, block)?;
+        let updated = self.params[index].checked_update(next, epoch, block)?;
+        if let Some(pair) = gate_v_min_pair(key) {
+            let paired = self
+                .params
+                .iter()
+                .find(|record| record.key == pair)
+                .ok_or(Error::TryStateViolation)?;
+            let (decision, gate) = if key.as_slice().starts_with(b"dec.") {
+                (updated.value, paired.value)
+            } else {
+                (paired.value, updated.value)
+            };
+            match (decision, gate) {
+                (ParamValue::Balance(decision), ParamValue::Balance(gate)) => {
+                    ensure!(
+                        gate_v_min_coupled(decision, gate),
+                        Error::MetaBoundViolation
+                    );
+                }
+                _ => return Err(Error::WrongType),
+            }
+        }
+        self.params[index] = updated;
         Ok(())
     }
 
@@ -697,6 +745,30 @@ impl ConstitutionState {
                 Some(MaxDelta::Factor(factor)) => {
                     ensure!(factor >= 1, Error::WrongType);
                 }
+            }
+        }
+        for decision_key in [
+            b"dec.v_min.param".as_slice(),
+            b"dec.v_min.trs".as_slice(),
+            b"dec.v_min.code".as_slice(),
+            b"dec.v_min.meta".as_slice(),
+        ] {
+            let decision = self
+                .params
+                .iter()
+                .find(|record| record.key == key16(decision_key))
+                .ok_or(Error::TryStateViolation)?;
+            let gate_key = gate_v_min_pair(decision.key).ok_or(Error::TryStateViolation)?;
+            let gate = self
+                .params
+                .iter()
+                .find(|record| record.key == gate_key)
+                .ok_or(Error::TryStateViolation)?;
+            match (decision.value, gate.value) {
+                (ParamValue::Balance(decision), ParamValue::Balance(gate)) => {
+                    ensure!(gate_v_min_coupled(decision, gate), Error::TryStateViolation);
+                }
+                _ => return Err(Error::WrongType),
             }
         }
         for meter in &self.meters {
@@ -1114,6 +1186,46 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             ParamValue::Balance(1_200_000_000_000),
             ParamValue::Balance(120_000_000_000),
             ParamValue::Balance(12_000_000_000_000),
+            Some(MaxDelta::Factor(2)),
+            2,
+            ParamClass::Meta,
+            false
+        ),
+        row(
+            b"gate.v_min.param",
+            ParamValue::Balance(10_000_000_000),
+            ParamValue::Balance(5_000_000_000),
+            ParamValue::Balance(50_000_000_000),
+            Some(MaxDelta::Factor(2)),
+            2,
+            ParamClass::Meta,
+            false
+        ),
+        row(
+            b"gate.v_min.trs",
+            ParamValue::Balance(25_000_000_000),
+            ParamValue::Balance(12_500_000_000),
+            ParamValue::Balance(125_000_000_000),
+            Some(MaxDelta::Factor(2)),
+            2,
+            ParamClass::Meta,
+            false
+        ),
+        row(
+            b"gate.v_min.code",
+            ParamValue::Balance(60_000_000_000),
+            ParamValue::Balance(30_000_000_000),
+            ParamValue::Balance(300_000_000_000),
+            Some(MaxDelta::Factor(2)),
+            2,
+            ParamClass::Meta,
+            false
+        ),
+        row(
+            b"gate.v_min.meta",
+            ParamValue::Balance(120_000_000_000),
+            ParamValue::Balance(60_000_000_000),
+            ParamValue::Balance(600_000_000_000),
             Some(MaxDelta::Factor(2)),
             2,
             ParamClass::Meta,
