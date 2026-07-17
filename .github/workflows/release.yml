@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: rustfmt, clippy
@@ -31,7 +31,7 @@ jobs:
       - name: Run release-blocking supply-chain gates
         run: tools/ci/supply-chain-gates.sh --summary-out release-work/supply-chain-summary.json
       - name: Preserve supply-chain disclosure for the release bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bleavit-supply-chain-${{ github.run_id }}
           if-no-files-found: error
@@ -45,7 +45,7 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Free runner disk space (the workspace build needs ~35 GB)
         run: |
           set -euo pipefail
@@ -59,10 +59,10 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown, wasm32v1-none
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - name: Install native build dependencies
@@ -94,7 +94,7 @@ jobs:
       RELEASE_WORK: release-work
       CARGO_INCREMENTAL: 0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Free runner disk space (runtime + node release builds need ~35 GB)
@@ -110,13 +110,13 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown, wasm32v1-none
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: bleavit-supply-chain-${{ github.run_id }}
           path: release-work
@@ -188,7 +188,7 @@ jobs:
             --supply-chain-summary "$RELEASE_WORK/supply-chain-summary.json" \
             "${assemble_args[@]}"
       - name: Upload immutable bundle for publication or dry-run inspection
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bleavit-release-${{ github.run_id }}
           if-no-files-found: error
@@ -199,7 +199,7 @@ jobs:
             release-work/readiness-report.md
       - name: Preserve environment run logs and report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bleavit-env-evidence-${{ github.run_id }}
           if-no-files-found: ignore
@@ -215,7 +215,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: bleavit-release-${{ github.run_id }}
           path: release-work
