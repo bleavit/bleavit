@@ -102,6 +102,11 @@ jobs:
         with:
           # substrate-wasm-builder needs the Wasm runtime target on a clean runner.
           targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native build dependencies
+        # omni-bencher's dependency tree reaches litep2p, whose build script
+        # needs `protoc`; the workspace build needs libclang (bindgen).
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
       - name: Install FRAME omni-bencher
         run: cargo install --locked frame-omni-bencher --version 0.15.0
       - name: Build benchmark runtime Wasm
