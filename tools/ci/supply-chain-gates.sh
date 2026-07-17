@@ -41,7 +41,7 @@ assert_lockfile keeper/Cargo.lock
 )
 
 # cargo-audit reads .cargo/audit.toml from its current working directory. The
-# root SDK/node closure uses the annotated stable2603 exceptions; keeper is a
+# root SDK/node closure uses the annotated stable2606 exceptions; keeper is a
 # separate workspace and is intentionally audited from its own clean root so
 # none of those exceptions can mask a future keeper vulnerability.
 "$auditor" audit

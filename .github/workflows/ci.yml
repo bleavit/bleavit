@@ -165,7 +165,7 @@ jobs:
         # needs `protoc`; the workspace build needs libclang (bindgen).
         run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
       - name: Install FRAME omni-bencher
-        run: cargo install --locked frame-omni-bencher --version 0.15.0
+        run: cargo install --locked frame-omni-bencher --version 0.22.0
       - name: Build benchmark runtime Wasm
         run: cargo build --locked --release -p bleavit-runtime --features runtime-benchmarks
       - name: Execute every pallet benchmark
