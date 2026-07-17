@@ -42,8 +42,18 @@ parameter_types! {
     /// crank only neutralizes live rounds (tests that exercise the no-report path
     /// set this explicitly).
     pub static ExpectedComponents: Vec<(MetricId, MetricSpecVersion)> = vec![];
+    /// Number of committed reserve-probe timeout folds observed by the mock sink.
+    pub static ProbeTimeoutCount: u32 = 0;
     /// Keeper-batch cap for `crank_round_close`.
     pub const MaxRoundCloseBatch: u32 = 20;
+}
+
+pub struct TestProbeTimeoutSink;
+
+impl pallet_oracle::ProbeTimeoutSink for TestProbeTimeoutSink {
+    fn probe_timed_out() {
+        ProbeTimeoutCount::mutate(|count| *count = count.saturating_add(1));
+    }
 }
 
 /// The account the mock `AdjudicationOrigin` treats as the `OracleResolution`
@@ -106,6 +116,7 @@ impl pallet_oracle::Config for Test {
     type Reporting = TestReporting;
     type MaxRoundCloseBatch = MaxRoundCloseBatch;
     type ProbeDispatch = ();
+    type ProbeTimeoutSink = TestProbeTimeoutSink;
     type KeeperRebate = ();
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
@@ -120,6 +131,7 @@ impl pallet_oracle::BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
     fn adjudication_origin() -> RuntimeOrigin {
         RuntimeOrigin::signed(oracle_resolution_acc())
     }
+    fn prime_reporting(_: MetricId, _: EpochId, _: MetricSpecVersion) {}
 }
 
 /// Externalities with the default (empty registries) genesis.
@@ -129,6 +141,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 
 /// Externalities with an explicit oracle genesis (e.g. seeded recomputable set).
 pub fn new_test_ext_with(oracle: pallet_oracle::GenesisConfig<Test>) -> sp_io::TestExternalities {
+    ProbeTimeoutCount::set(0);
     let storage = RuntimeGenesisConfig {
         system: Default::default(),
         oracle,

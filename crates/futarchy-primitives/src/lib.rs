@@ -24,6 +24,33 @@ pub type AccountId = [u8; 32];
 pub type H256 = [u8; 32];
 pub type BlockNumber = u32;
 
+/// Canonical v1 component identifiers from architecture 05 §4.3.
+///
+/// These ids are frozen and append-only: future components receive new ids,
+/// and an assigned id is never reused.
+pub mod metric_ids {
+    use super::MetricId;
+
+    pub const X: MetricId = 1;
+    pub const R: MetricId = 2;
+    pub const E: MetricId = 3;
+    pub const H: MetricId = 4;
+    pub const PI: MetricId = 5;
+    pub const K: MetricId = 6;
+
+    pub const U: MetricId = 10;
+    pub const F: MetricId = 11;
+    pub const D_EFF: MetricId = 12;
+
+    pub const P_FEES: MetricId = 20;
+    pub const P_QUALIFIED_USERS: MetricId = 21;
+    pub const P_SETTLED_VALUE: MetricId = 22;
+
+    pub const A_SHIPPED_UPGRADES: MetricId = 30;
+    pub const A_RUNTIME_PERF: MetricId = 31;
+    pub const A_INTEGRATIONS: MetricId = 32;
+}
+
 /// Shared keeper-rebate vocabulary used by permissionless crank pallets.
 pub mod keeper {
     use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
@@ -875,6 +902,8 @@ pub mod kernel {
     /// both use; the registry uses the frozen floor (07 §7 "72 h ... frozen
     /// constant"), never a live-amended value.
     pub const ORC_WINDOW_BLOCKS: u32 = 43_200;
+    /// Class-4 oracle report window after the measurement epoch closes (07 §5(1)).
+    pub const ORC_REPORT_WINDOW_BLOCKS: u32 = 2 * BLOCKS_PER_DAY;
     pub const MAX_NESTED_LEVELS: u32 = 4;
     pub const MAX_NESTED_CALLS: u32 = 16;
     pub const MAX_CALLS: u32 = 16;
@@ -1019,6 +1048,30 @@ mod tests {
         // Bumped 3 → 4 for the pre-genesis B2 integration-contract amendment
         // batch (02 §13). A change to §2–§12 of the frozen contract bumps this.
         assert_eq!(INTEGRATION_CONTRACT_VERSION, 4);
+    }
+
+    #[test]
+    fn canonical_v1_metric_ids_match_05_section_4_3() {
+        assert_eq!(
+            [
+                metric_ids::X,
+                metric_ids::R,
+                metric_ids::E,
+                metric_ids::H,
+                metric_ids::PI,
+                metric_ids::K,
+                metric_ids::U,
+                metric_ids::F,
+                metric_ids::D_EFF,
+                metric_ids::P_FEES,
+                metric_ids::P_QUALIFIED_USERS,
+                metric_ids::P_SETTLED_VALUE,
+                metric_ids::A_SHIPPED_UPGRADES,
+                metric_ids::A_RUNTIME_PERF,
+                metric_ids::A_INTEGRATIONS,
+            ],
+            [1, 2, 3, 4, 5, 6, 10, 11, 12, 20, 21, 22, 30, 31, 32]
+        );
     }
 
     #[test]

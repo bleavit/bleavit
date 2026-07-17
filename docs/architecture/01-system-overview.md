@@ -194,6 +194,7 @@ Cohesion rule: pallets are bounded by *trust domain and settlement lifecycle*, n
 | `pallet-guardian` | 7-seat council, bonds, allowances, pause-intake/delay-once/force-rerun/playbooks (incl. PB-LEDGER-FREEZE, D-9), mandatory retro ratification | constitution, epoch, values origins | [06](06-governance-and-guardians.md) |
 | `pallet-attestor` | Thin attestation registry ([06 §7](06-governance-and-guardians.md)): attestor set (≥ 3 members, guardian-track elected, 25k-VIT bonds), `Attestation` lifecycle (`attest`/`challenge_attestation`, 72 h windows), 2-of-N quorum surfaced to `decide()` and the execution guard; shipped storage names and SCALE shapes are frozen in [02 §7.5](02-integration-contract.md) for the CODE/META execute-path frontend read | constitution, values origins | [06](06-governance-and-guardians.md) |
 | `pallet-origins` | Shared custom-origin shim | — | [06](06-governance-and-guardians.md) |
+| `pallet-inflow-caps` | Phase-3 real-USDC exposure meters (D-13, added 2026-07-17 with the SQ-110/111 resolution): the shared per-account cumulative deposit meter + the total-local-issuance global-cap admission check, consumed by the XCM inflow leg and the ledger split-path defense-in-depth read; state-only (no dispatchables — its checks run inside callers' weight envelopes) | constitution (caps via Params), assets (issuance) | [09](09-execution-upgrades-and-rollout.md) §5.2 |
 
 ### 5.2 Shared crates
 

@@ -9,12 +9,18 @@ use std::{
 use subxt::{
     config::HashFor,
     dynamic,
-    ext::scale_value::{At, Value, ValueDef},
-    OnlineClient, PolkadotConfig,
+    ext::{
+        scale_decode::DecodeAsType,
+        scale_value::{At, Value, ValueDef},
+    },
+    ArcMetadata, OnlineClient, OnlineClientAtBlock, PolkadotConfig,
 };
 use tracing::{debug, warn};
 
-use crate::config::{Role, RoleSet};
+use crate::{
+    config::{Role, RoleSet},
+    transport::is_transport,
+};
 
 pub const DEFAULT_OBSERVATION_INTERVAL_BLOCKS: u64 = 10;
 pub const DEFAULT_DECISION_WINDOW_BLOCKS: u64 = 43_200;
@@ -183,6 +189,7 @@ pub struct RoleCapability {
 #[derive(Clone)]
 pub struct SnapshotExtractor {
     client: OnlineClient<PolkadotConfig>,
+    metadata: ArcMetadata,
     capabilities: Vec<RoleCapability>,
     pallets: BTreeSet<String>,
     calls: BTreeSet<String>,
@@ -201,8 +208,10 @@ impl std::fmt::Display for SnapshotTransportError {
 impl std::error::Error for SnapshotTransportError {}
 
 impl SnapshotExtractor {
-    pub fn new(client: OnlineClient<PolkadotConfig>) -> Self {
-        let metadata = client.metadata();
+    pub async fn new(
+        client: OnlineClient<PolkadotConfig>,
+    ) -> Result<Self, subxt::error::OnlineClientAtBlockError> {
+        let metadata = client.at_current_block().await?.metadata();
         let pallets = metadata
             .pallets()
             .map(|pallet| pallet.name().to_owned())
@@ -280,13 +289,14 @@ impl SnapshotExtractor {
                 "welfare crank calls absent",
             ),
         ];
-        Self {
+        Ok(Self {
             client,
+            metadata,
             capabilities,
             pallets,
             calls,
             transport_failed: Arc::new(AtomicBool::new(false)),
-        }
+        })
     }
 
     pub fn capabilities(&self) -> &[RoleCapability] {
@@ -313,11 +323,27 @@ impl SnapshotExtractor {
         block_hash: HashFor<PolkadotConfig>,
     ) -> Result<ChainSnapshot, SnapshotTransportError> {
         self.transport_failed.store(false, Ordering::Relaxed);
-        let live_params = self.extract_live_planner_params(block_hash).await;
-        let epoch = self.extract_epoch(block_hash).await;
-        let proposals = self.extract_proposals(block_hash).await;
-        let cohorts = self.extract_cohorts(block_hash).await;
-        let mut books = self.extract_books(block_hash).await;
+        let at_block = match self.client.at_block(block_hash).await {
+            Ok(at_block) => at_block,
+            Err(error) => {
+                let error = subxt::Error::from(error);
+                if is_transport(&error) {
+                    return Err(SnapshotTransportError);
+                }
+                warn!(%error, current_block, "block-scoped snapshot client unavailable");
+                return Ok(ChainSnapshot {
+                    current_block,
+                    available_pallets: self.pallets.clone(),
+                    available_calls: self.calls.clone(),
+                    ..ChainSnapshot::default()
+                });
+            }
+        };
+        let live_params = self.extract_live_planner_params(&at_block).await;
+        let epoch = self.extract_epoch(&at_block).await;
+        let proposals = self.extract_proposals(&at_block).await;
+        let cohorts = self.extract_cohorts(&at_block).await;
+        let mut books = self.extract_books(&at_block).await;
         mark_decision_window(
             current_block,
             resolve_chain_param(
@@ -328,13 +354,13 @@ impl SnapshotExtractor {
             &proposals,
             &mut books,
         );
-        let market_archive = self.constant_u64("Market", "ArchiveDelay");
-        let ledger_archive = self.constant_u64("ConditionalLedger", "ArchiveDelay");
-        let tick_batch = resolve_tick_batch(self.constant_u64("Epoch", "TickBatch"));
-        let registry_epochs = self.extract_registries(block_hash).await;
+        let market_archive = self.constant_u64(&at_block, "Market", "ArchiveDelay");
+        let ledger_archive = self.constant_u64(&at_block, "ConditionalLedger", "ArchiveDelay");
+        let tick_batch = resolve_tick_batch(self.constant_u64(&at_block, "Epoch", "TickBatch"));
+        let registry_epochs = self.extract_registries(&at_block).await;
 
         let welfare = self
-            .extract_welfare(block_hash, epoch.as_ref(), &cohorts)
+            .extract_welfare(&at_block, epoch.as_ref(), &cohorts)
             .await;
         let snapshot = ChainSnapshot {
             current_block,
@@ -346,17 +372,17 @@ impl SnapshotExtractor {
             books,
             proposals,
             cohorts,
-            oracle_rounds: self.extract_oracle_rounds(block_hash).await,
-            reserve_health: self.extract_reserve_health(block_hash).await,
+            oracle_rounds: self.extract_oracle_rounds(&at_block).await,
+            reserve_health: self.extract_reserve_health(&at_block).await,
             registry_epochs,
-            execution_queue: self.extract_execution_queue(block_hash).await,
-            coretime: self.extract_coretime(block_hash).await,
+            execution_queue: self.extract_execution_queue(&at_block).await,
+            coretime: self.extract_coretime(&at_block).await,
             market_reaps: self
-                .extract_reaps(block_hash, "Market", "ClosedAt", market_archive)
+                .extract_reaps(&at_block, "Market", "ClosedAt", market_archive)
                 .await,
             proposal_dust: self
                 .extract_reaps(
-                    block_hash,
+                    &at_block,
                     "ConditionalLedger",
                     "VaultTerminalAt",
                     ledger_archive,
@@ -364,7 +390,7 @@ impl SnapshotExtractor {
                 .await,
             baseline_dust: self
                 .extract_reaps(
-                    block_hash,
+                    &at_block,
                     "ConditionalLedger",
                     "BaselineTerminalAt",
                     ledger_archive,
@@ -381,13 +407,13 @@ impl SnapshotExtractor {
 
     async fn extract_live_planner_params(
         &self,
-        block_hash: HashFor<PolkadotConfig>,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
     ) -> LivePlannerParams {
         let (obs_interval, decision_window, reserve_probe_interval, reserve_probe_timeout) = tokio::join!(
-            self.fetch_u32_param(block_hash, b"mkt.obs_interval"),
-            self.fetch_u32_param(block_hash, b"dec.window"),
-            self.fetch_u32_param(block_hash, b"res.probe_int"),
-            self.fetch_u32_param(block_hash, b"res.probe_to"),
+            self.fetch_u32_param(at_block, b"mkt.obs_interval"),
+            self.fetch_u32_param(at_block, b"dec.window"),
+            self.fetch_u32_param(at_block, b"res.probe_int"),
+            self.fetch_u32_param(at_block, b"res.probe_to"),
         );
         LivePlannerParams {
             obs_interval,
@@ -397,9 +423,12 @@ impl SnapshotExtractor {
         }
     }
 
-    async fn extract_epoch(&self, block_hash: HashFor<PolkadotConfig>) -> Option<EpochSnapshot> {
-        let value = self.fetch_value(block_hash, "Epoch", "EpochOf").await?;
-        let schedule = self.fetch_value(block_hash, "Epoch", "Schedule").await;
+    async fn extract_epoch(
+        &self,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
+    ) -> Option<EpochSnapshot> {
+        let value = self.fetch_value(at_block, "Epoch", "EpochOf").await?;
+        let schedule = self.fetch_value(at_block, "Epoch", "Schedule").await;
         let index = value.at("index").and_then(as_u64)?;
         let phase = value.at("phase").and_then(variant_name)?.to_owned();
         let phase_start_block = value.at("phase_start_block").and_then(as_u64)?;
@@ -426,9 +455,9 @@ impl SnapshotExtractor {
 
     async fn extract_proposals(
         &self,
-        block_hash: HashFor<PolkadotConfig>,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
     ) -> Vec<ProposalSnapshot> {
-        self.iter_values(block_hash, "Epoch", "Proposals")
+        self.iter_values(at_block, "Epoch", "Proposals")
             .await
             .into_iter()
             .filter_map(|(keys, value)| {
@@ -455,9 +484,12 @@ impl SnapshotExtractor {
             .collect()
     }
 
-    async fn extract_cohorts(&self, block_hash: HashFor<PolkadotConfig>) -> Vec<CohortSnapshot> {
+    async fn extract_cohorts(
+        &self,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
+    ) -> Vec<CohortSnapshot> {
         let schedules = self
-            .iter_values(block_hash, "Epoch", "CohortSchedules")
+            .iter_values(at_block, "Epoch", "CohortSchedules")
             .await
             .into_iter()
             .filter_map(|(keys, value)| {
@@ -468,7 +500,7 @@ impl SnapshotExtractor {
                 Some((epoch, value.at("specs").and_then(single_cohort_spec)))
             })
             .collect::<BTreeMap<_, _>>();
-        self.iter_values(block_hash, "Epoch", "Cohorts")
+        self.iter_values(at_block, "Epoch", "Cohorts")
             .await
             .into_iter()
             .filter_map(|(keys, value)| {
@@ -489,8 +521,11 @@ impl SnapshotExtractor {
             .collect()
     }
 
-    async fn extract_books(&self, block_hash: HashFor<PolkadotConfig>) -> Vec<BookSnapshot> {
-        self.iter_values(block_hash, "Market", "Markets")
+    async fn extract_books(
+        &self,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
+    ) -> Vec<BookSnapshot> {
+        self.iter_values(at_block, "Market", "Markets")
             .await
             .into_iter()
             .filter_map(|(keys, value)| {
@@ -511,9 +546,9 @@ impl SnapshotExtractor {
 
     async fn extract_oracle_rounds(
         &self,
-        block_hash: HashFor<PolkadotConfig>,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
     ) -> Vec<OracleRoundSnapshot> {
-        self.iter_values(block_hash, "Oracle", "Rounds")
+        self.iter_values(at_block, "Oracle", "Rounds")
             .await
             .into_iter()
             .filter_map(|(keys, value)| {
@@ -538,10 +573,10 @@ impl SnapshotExtractor {
 
     async fn extract_reserve_health(
         &self,
-        block_hash: HashFor<PolkadotConfig>,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
     ) -> Option<ReserveHealthSnapshot> {
         let value = self
-            .fetch_value(block_hash, "Oracle", "ReserveHealth")
+            .fetch_value(at_block, "Oracle", "ReserveHealth")
             .await?;
         Some(ReserveHealthSnapshot {
             last_probe_at: value.at("last_probe_at").and_then(as_u64),
@@ -551,16 +586,16 @@ impl SnapshotExtractor {
 
     async fn extract_registries(
         &self,
-        block_hash: HashFor<PolkadotConfig>,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
     ) -> Vec<RegistryEpochSnapshot> {
         let mut result = Vec::new();
         for pallet in ["IncidentRegistry", "MilestoneRegistry"] {
             if !self.has_storage(pallet, "Filings") {
                 continue;
             }
-            let archive_delay = self.constant_u64(pallet, "ArchiveDelay");
+            let archive_delay = self.constant_u64(at_block, pallet, "ArchiveDelay");
             let mut by_epoch = BTreeMap::<u64, RegistryEpochSnapshot>::new();
-            for (keys, value) in self.iter_values(block_hash, pallet, "Filings").await {
+            for (keys, value) in self.iter_values(at_block, pallet, "Filings").await {
                 let Some(epoch) = keys.first().and_then(as_u64) else {
                     continue;
                 };
@@ -583,7 +618,7 @@ impl SnapshotExtractor {
                         deadline: variant_field(state_value, "window_end").and_then(as_u64),
                     });
             }
-            for (keys, _) in self.iter_values(block_hash, pallet, "FilingCount").await {
+            for (keys, _) in self.iter_values(at_block, pallet, "FilingCount").await {
                 if let Some(epoch) = keys.first().and_then(as_u64) {
                     by_epoch
                         .entry(epoch)
@@ -591,7 +626,7 @@ impl SnapshotExtractor {
                         .filing_count_present = true;
                 }
             }
-            for (keys, _) in self.iter_values(block_hash, pallet, "Aggregates").await {
+            for (keys, _) in self.iter_values(at_block, pallet, "Aggregates").await {
                 if let Some(epoch) = keys.first().and_then(as_u64) {
                     by_epoch
                         .entry(epoch)
@@ -599,7 +634,7 @@ impl SnapshotExtractor {
                         .aggregate_present = true;
                 }
             }
-            for (keys, value) in self.iter_values(block_hash, pallet, "ClosedAt").await {
+            for (keys, value) in self.iter_values(at_block, pallet, "ClosedAt").await {
                 if let Some(epoch) = keys.first().and_then(as_u64) {
                     by_epoch
                         .entry(epoch)
@@ -614,9 +649,9 @@ impl SnapshotExtractor {
 
     async fn extract_execution_queue(
         &self,
-        block_hash: HashFor<PolkadotConfig>,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
     ) -> Vec<ExecutionSnapshot> {
-        self.iter_values(block_hash, "ExecutionGuard", "Queue")
+        self.iter_values(at_block, "ExecutionGuard", "Queue")
             .await
             .into_iter()
             .filter_map(|(keys, value)| {
@@ -639,10 +674,10 @@ impl SnapshotExtractor {
 
     async fn extract_coretime(
         &self,
-        block_hash: HashFor<PolkadotConfig>,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
     ) -> Option<CoretimeSnapshot> {
         let value = self
-            .fetch_value(block_hash, "FutarchyTreasury", "State")
+            .fetch_value(at_block, "FutarchyTreasury", "State")
             .await?;
         let quotes = value
             .at("coretime_quotes")
@@ -662,12 +697,12 @@ impl SnapshotExtractor {
 
     async fn extract_reaps(
         &self,
-        block_hash: HashFor<PolkadotConfig>,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
         pallet: &str,
         storage_name: &str,
         archive_delay: Option<u64>,
     ) -> Vec<ReapSnapshot> {
-        self.iter_values(block_hash, pallet, storage_name)
+        self.iter_values(at_block, pallet, storage_name)
             .await
             .into_iter()
             .filter_map(|(keys, value)| {
@@ -682,16 +717,16 @@ impl SnapshotExtractor {
 
     async fn extract_welfare(
         &self,
-        block_hash: HashFor<PolkadotConfig>,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
         epoch: Option<&EpochSnapshot>,
         cohorts: &[CohortSnapshot],
     ) -> Option<WelfareSnapshot> {
         if !self.has_storage("Welfare", "MetricSpecs") {
             return None;
         }
-        let metric_specs = self.iter_values(block_hash, "Welfare", "MetricSpecs").await;
+        let metric_specs = self.iter_values(at_block, "Welfare", "MetricSpecs").await;
         let recorded_snapshots: BTreeSet<(u64, u64)> = self
-            .iter_values(block_hash, "Welfare", "Snapshots")
+            .iter_values(at_block, "Welfare", "Snapshots")
             .await
             .into_iter()
             .filter_map(|(keys, _)| tuple_key_pair(&keys))
@@ -715,7 +750,7 @@ impl SnapshotExtractor {
         );
         let sampled_gate_days = if self.welfare_daily_gates_plannable() {
             Some(
-                self.iter_values(block_hash, "Welfare", "SampledGateDays")
+                self.iter_values(at_block, "Welfare", "SampledGateDays")
                     .await
                     .into_iter()
                     .filter_map(|(keys, value)| {
@@ -726,9 +761,13 @@ impl SnapshotExtractor {
         } else {
             None
         };
-        let lookback = resolve_welfare_lookback(self.constant_u64("Welfare", "MaxGateFlags"));
-        let daily_samples =
-            resolve_daily_gate_samples(self.constant_u64("Welfare", "MaxDailyGateSamples"));
+        let lookback =
+            resolve_welfare_lookback(self.constant_u64(at_block, "Welfare", "MaxGateFlags"));
+        let daily_samples = resolve_daily_gate_samples(self.constant_u64(
+            at_block,
+            "Welfare",
+            "MaxDailyGateSamples",
+        ));
         let daily_gate_candidates = derive_daily_gate_candidates(
             epoch.map(|value| value.index),
             &spec_activations,
@@ -746,23 +785,23 @@ impl SnapshotExtractor {
 
     async fn fetch_value(
         &self,
-        block_hash: HashFor<PolkadotConfig>,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
         pallet: &str,
         storage_name: &str,
-    ) -> Option<Value<u32>> {
-        self.fetch_value_with_keys(block_hash, pallet, storage_name, Vec::new())
+    ) -> Option<Value<()>> {
+        self.fetch_value_with_keys(at_block, pallet, storage_name, Vec::new())
             .await
     }
 
     async fn fetch_u32_param(
         &self,
-        block_hash: HashFor<PolkadotConfig>,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
         name: &[u8],
     ) -> Option<u64> {
         let key = param_key(name)?;
         let value = self
             .fetch_value_with_keys(
-                block_hash,
+                at_block,
                 "Constitution",
                 "Params",
                 vec![param_key_value(&key)],
@@ -773,25 +812,56 @@ impl SnapshotExtractor {
 
     async fn fetch_value_with_keys(
         &self,
-        block_hash: HashFor<PolkadotConfig>,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
         pallet: &str,
         storage_name: &str,
         keys: Vec<Value<()>>,
-    ) -> Option<Value<u32>> {
+    ) -> Option<Value<()>> {
         if !self.has_storage(pallet, storage_name) {
             return None;
         }
-        let address = dynamic::storage(pallet, storage_name, keys);
-        match self.client.storage().at(block_hash).fetch(&address).await {
-            Ok(Some(value)) => match value.to_value() {
+        let address = dynamic::storage::<Vec<Value<()>>, Value<()>>(pallet, storage_name);
+        let entry = match at_block.storage().entry(address) {
+            Ok(entry) => entry,
+            Err(error) => {
+                warn!(pallet, storage = storage_name, %error, "dynamic storage entry unavailable");
+                return None;
+            }
+        };
+        let key = match entry.fetch_key(keys) {
+            Ok(key) => key,
+            Err(error) => {
+                warn!(pallet, storage = storage_name, %error, "dynamic storage key unavailable");
+                return None;
+            }
+        };
+        let value_ty = match at_block
+            .metadata_ref()
+            .pallet_by_name(pallet)
+            .and_then(|details| details.storage())
+            .and_then(|storage| storage.entry_by_name(storage_name))
+        {
+            Some(entry) => entry.value_ty(),
+            None => return None,
+        };
+        // Subxt 0.50's `try_fetch` applies a metadata default when raw state is
+        // absent. The 0.44 dynamic `fetch` used here returned `None`, so fetch
+        // raw bytes to preserve the keeper's fail-closed absence semantics.
+        match at_block.storage().fetch_raw(key).await {
+            Ok(bytes) => match Value::decode_as_type(
+                &mut bytes.as_slice(),
+                value_ty,
+                at_block.metadata_ref().types(),
+            ) {
                 Ok(value) => Some(value),
                 Err(error) => {
                     warn!(pallet, storage = storage_name, %error, "dynamic storage decode failed");
                     None
                 }
             },
-            Ok(None) => None,
+            Err(subxt::error::StorageError::NoValueFound) => None,
             Err(error) => {
+                let error = subxt::Error::from(error);
                 self.note_transport_error(&error);
                 warn!(pallet, storage = storage_name, %error, "dynamic storage read failed");
                 None
@@ -801,17 +871,25 @@ impl SnapshotExtractor {
 
     async fn iter_values(
         &self,
-        block_hash: HashFor<PolkadotConfig>,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
         pallet: &str,
         storage_name: &str,
-    ) -> Vec<(Vec<Value<()>>, Value<u32>)> {
+    ) -> Vec<(Vec<Value<()>>, Value<()>)> {
         if !self.has_storage(pallet, storage_name) {
             return Vec::new();
         }
-        let address = dynamic::storage(pallet, storage_name, Vec::<Value<()>>::new());
-        let mut entries = match self.client.storage().at(block_hash).iter(address).await {
+        let address = dynamic::storage::<Vec<Value<()>>, Value<()>>(pallet, storage_name);
+        let entry = match at_block.storage().entry(address) {
+            Ok(entry) => entry,
+            Err(error) => {
+                warn!(pallet, storage = storage_name, %error, "dynamic storage entry unavailable");
+                return Vec::new();
+            }
+        };
+        let mut entries = match entry.iter(Vec::<Value<()>>::new()).await {
             Ok(entries) => entries,
             Err(error) => {
+                let error = subxt::Error::from(error);
                 self.note_transport_error(&error);
                 warn!(pallet, storage = storage_name, %error, "dynamic storage iteration failed");
                 return Vec::new();
@@ -820,16 +898,26 @@ impl SnapshotExtractor {
         let mut values = Vec::new();
         while let Some(entry) = entries.next().await {
             match entry {
-                Ok(entry) => match entry.value.to_value() {
-                    Ok(value) => values.push((entry.keys, value)),
-                    Err(error) => warn!(
-                        pallet,
-                        storage = storage_name,
-                        %error,
-                        "dynamic storage item decode failed"
-                    ),
-                },
+                Ok(entry) => {
+                    let keys = match entry.key().and_then(|key| key.decode()) {
+                        Ok(keys) => keys,
+                        Err(error) => {
+                            warn!(pallet, storage = storage_name, %error, "dynamic storage key decode failed");
+                            break;
+                        }
+                    };
+                    match entry.value().decode() {
+                        Ok(value) => values.push((keys, value)),
+                        Err(error) => warn!(
+                            pallet,
+                            storage = storage_name,
+                            %error,
+                            "dynamic storage item decode failed"
+                        ),
+                    }
+                }
                 Err(error) => {
+                    let error = subxt::Error::from(error);
                     self.note_transport_error(&error);
                     warn!(pallet, storage = storage_name, %error, "dynamic storage item read failed");
                     break;
@@ -840,8 +928,7 @@ impl SnapshotExtractor {
     }
 
     fn has_storage(&self, pallet: &str, storage_name: &str) -> bool {
-        self.client
-            .metadata()
+        self.metadata
             .pallet_by_name(pallet)
             .and_then(|details| details.storage())
             .and_then(|storage| storage.entry_by_name(storage_name))
@@ -849,24 +936,23 @@ impl SnapshotExtractor {
     }
 
     fn note_transport_error(&self, error: &subxt::Error) {
-        if matches!(error, subxt::Error::Io(_) | subxt::Error::Rpc(_)) {
+        if is_transport(error) {
             self.transport_failed.store(true, Ordering::Relaxed);
         }
     }
 
-    fn constant_u64(&self, pallet: &str, constant: &str) -> Option<u64> {
+    fn constant_u64(
+        &self,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
+        pallet: &str,
+        constant: &str,
+    ) -> Option<u64> {
         if !self.pallets.contains(pallet) {
             return None;
         }
-        let address = dynamic::constant(pallet, constant);
-        match self.client.constants().at(&address) {
-            Ok(value) => match value.to_value() {
-                Ok(value) => as_u64(&value),
-                Err(error) => {
-                    debug!(pallet, constant, %error, "dynamic constant decode failed");
-                    None
-                }
-            },
+        let address = dynamic::constant::<Value<()>>(pallet, constant);
+        match at_block.constants().entry(address) {
+            Ok(value) => as_u64(&value),
             Err(error) => {
                 debug!(pallet, constant, %error, "dynamic constant unavailable");
                 None

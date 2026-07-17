@@ -134,6 +134,7 @@ pub enum SeamCall {
     DequeueTerminal(ProposalId),
     DequeueForRerun(ProposalId),
     Welfare(EpochId, MetricSpecVersion, SettlementTarget),
+    WelfarePrune(EpochId),
     CreateVault(ProposalId, MetricSpecVersion),
     Resolve(ProposalId, Branch),
     Void(ProposalId),
@@ -296,6 +297,9 @@ parameter_types! {
     pub static ActiveMetricSpecVersion: MetricSpecVersion = 1;
     pub static TreasuryGateRequired: bool = false;
     pub static PreimageLen: Option<u32> = Some(32);
+    pub static PreimageNoted: bool = true;
+    pub static PreimageRequests: Vec<(H256, u32)> = Vec::new();
+    pub static PreimageRequestFails: bool = false;
     pub static QueueReject: Option<RejectReason> = None;
     pub static RetryExhausted: bool = false;
     pub static WelfareScore: FixedU64 = FixedU64(500_000_000);
@@ -497,66 +501,49 @@ pub struct TestPreimage;
 pub struct TestPreimageRequests;
 
 impl TestPreimageRequests {
-    const KEY: &'static [u8] = b":test:epoch:preimage-requests";
-
-    fn get() -> Vec<(H256, u32)> {
-        sp_io::storage::get(Self::KEY)
-            .and_then(|encoded| {
-                let mut input: &[u8] = encoded.as_ref();
-                Vec::<(H256, u32)>::decode(&mut input).ok()
-            })
-            .unwrap_or_default()
-    }
-
-    fn set(requests: Vec<(H256, u32)>) {
-        sp_io::storage::set(Self::KEY, &requests.encode());
-    }
-
     pub fn count(hash: H256) -> u32 {
-        Self::get()
+        PreimageRequests::get()
             .into_iter()
             .find_map(|(candidate, count)| (candidate == hash).then_some(count))
             .unwrap_or_default()
     }
-
-    fn request(hash: H256) {
-        let mut requests = Self::get();
-        if let Some((_, count)) = requests
-            .iter_mut()
-            .find(|(candidate, _)| *candidate == hash)
-        {
-            *count = count.saturating_add(1);
-        } else {
-            requests.push((hash, 1));
-        }
-        Self::set(requests);
-    }
-
-    fn unrequest(hash: H256) {
-        let mut requests = Self::get();
-        if let Some(index) = requests
-            .iter()
-            .position(|(candidate, _)| *candidate == hash)
-        {
-            if requests[index].1 <= 1 {
-                requests.remove(index);
-            } else {
-                requests[index].1 = requests[index].1.saturating_sub(1);
-            }
-        }
-        Self::set(requests);
-    }
 }
 
 impl PreimageAccess for TestPreimage {
-    fn len(_hash: H256) -> Option<u32> {
-        PreimageLen::get()
+    fn len(hash: H256) -> Option<u32> {
+        (PreimageNoted::get()
+            || PreimageRequests::get()
+                .iter()
+                .any(|(candidate, count)| *candidate == hash && *count > 0))
+        .then(PreimageLen::get)
+        .flatten()
     }
-    fn request(hash: H256) {
-        TestPreimageRequests::request(hash);
+    fn request(hash: H256) -> frame_support::dispatch::DispatchResult {
+        if PreimageRequestFails::get() || Self::len(hash).is_none() {
+            return Err(DispatchError::Other("mock preimage request failed"));
+        }
+        PreimageRequests::mutate(|requests| {
+            if let Some((_, count)) = requests
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == hash)
+            {
+                *count = count.saturating_add(1);
+            } else {
+                requests.push((hash, 1));
+            }
+        });
+        Ok(())
     }
     fn unrequest(hash: H256) {
-        TestPreimageRequests::unrequest(hash);
+        PreimageRequests::mutate(|requests| {
+            if let Some((_, count)) = requests
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == hash)
+            {
+                *count = count.saturating_sub(1);
+            }
+            requests.retain(|(_, count)| *count > 0);
+        });
     }
 }
 
@@ -626,6 +613,84 @@ impl WelfareSettlement for TestWelfare {
     ) -> Result<FixedU64, DispatchError> {
         SeamCalls::push(SeamCall::Welfare(cohort_epoch, spec, target))?;
         Ok(WelfareScore::get())
+    }
+
+    fn prune(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
+        SeamCalls::push(SeamCall::WelfarePrune(current_epoch))?;
+        let cutoff = current_epoch.saturating_sub(TEST_WELFARE_SNAPSHOT_WINDOW.saturating_sub(1));
+        WelfareTrafficBacklog::prune_before(cutoff);
+        #[cfg(feature = "runtime-benchmarks")]
+        crate::benchmarking::prune_benchmark_xcm_traffic(cutoff);
+        Ok(())
+    }
+
+    fn prune_xcm_traffic(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
+        WelfareTrafficPrunes::push(current_epoch);
+        let cutoff = current_epoch.saturating_sub(TEST_WELFARE_SNAPSHOT_WINDOW);
+        WelfareTrafficBacklog::prune_before(cutoff);
+        #[cfg(feature = "runtime-benchmarks")]
+        crate::benchmarking::prune_benchmark_xcm_traffic(cutoff);
+        Ok(())
+    }
+}
+
+const TEST_WELFARE_SNAPSHOT_WINDOW: EpochId = 20;
+const TEST_XCM_TRAFFIC_PRUNE_MAX_EPOCHS: usize = 2;
+
+pub struct WelfareTrafficPrunes;
+
+impl WelfareTrafficPrunes {
+    const KEY: &'static [u8] = b":test:epoch:welfare-traffic-prunes";
+
+    pub fn get() -> Vec<EpochId> {
+        sp_io::storage::get(Self::KEY)
+            .and_then(|encoded| {
+                let mut input: &[u8] = encoded.as_ref();
+                Vec::<EpochId>::decode(&mut input).ok()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn push(epoch: EpochId) {
+        let mut epochs = Self::get();
+        epochs.push(epoch);
+        sp_io::storage::set(Self::KEY, &epochs.encode());
+    }
+}
+
+/// Transaction-aware model of welfare's bounded XCM-traffic epoch index.
+pub struct WelfareTrafficBacklog;
+
+impl WelfareTrafficBacklog {
+    const KEY: &'static [u8] = b":test:epoch:welfare-traffic-backlog";
+
+    pub fn get() -> Vec<EpochId> {
+        if let Some(encoded) = sp_io::storage::get(Self::KEY) {
+            let mut input: &[u8] = encoded.as_ref();
+            if let Ok(epochs) = Vec::<EpochId>::decode(&mut input) {
+                return epochs;
+            }
+        }
+        Vec::new()
+    }
+
+    pub fn set(epochs: Vec<EpochId>) {
+        sp_io::storage::set(Self::KEY, &epochs.encode());
+    }
+
+    fn prune_before(cutoff_epoch: EpochId) {
+        let mut epochs = Self::get();
+        epochs.sort_unstable();
+        let mut drained = 0usize;
+        epochs.retain(|epoch| {
+            if *epoch < cutoff_epoch && drained < TEST_XCM_TRAFFIC_PRUNE_MAX_EPOCHS {
+                drained = drained.saturating_add(1);
+                false
+            } else {
+                true
+            }
+        });
+        Self::set(epochs);
     }
 }
 
@@ -700,6 +765,7 @@ pub struct TestBenchmarkHelper;
 
 #[cfg(feature = "runtime-benchmarks")]
 impl BenchmarkHelper<RuntimeOrigin, AccountId32> for TestBenchmarkHelper {
+    fn prime_submit_epoch(_: EpochId) {}
     fn constitutional_values_origin() -> RuntimeOrigin {
         RuntimeOrigin::signed(constitutional_values())
     }
@@ -721,7 +787,13 @@ impl BenchmarkHelper<RuntimeOrigin, AccountId32> for TestBenchmarkHelper {
         now: BlockNumber,
         epoch: EpochId,
     ) -> Proposal<AccountId32> {
-        proposal(id, who, ProposalState::Submitted, epoch, now)
+        let mut proposal = proposal(id, who, ProposalState::Submitted, epoch, now);
+        // The assembled benchmark helper notes the matching distinct 64 KiB
+        // preimages. Keep the generic mock benchmark at the same committed
+        // length and distinct-per-id hash shape.
+        proposal.payload_len = futarchy_primitives::kernel::MAX_BYTES;
+        PreimageLen::set(Some(futarchy_primitives::kernel::MAX_BYTES));
+        proposal
     }
     fn prime_decision(pid: ProposalId, epoch: EpochId, gates: bool) -> MarketSet {
         MarketGrade::set(true);
@@ -729,6 +801,7 @@ impl BenchmarkHelper<RuntimeOrigin, AccountId32> for TestBenchmarkHelper {
         AttestationQuorate::set(true);
         markets(pid, epoch, gates)
     }
+    fn prime_guard_enqueue(_pid: ProposalId) {}
     fn prime_settlement(_epoch: EpochId) {
         WelfareScore::set(FixedU64(500_000_000));
     }
@@ -760,6 +833,9 @@ pub fn reset_doubles() {
     ActiveMetricSpecVersion::set(1);
     TreasuryGateRequired::set(false);
     PreimageLen::set(Some(32));
+    PreimageNoted::set(true);
+    PreimageRequests::set(Vec::new());
+    PreimageRequestFails::set(false);
     QueueReject::set(None);
     RetryExhausted::set(false);
     WelfareScore::set(FixedU64(500_000_000));
@@ -791,6 +867,23 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 
 pub fn set_block(block: BlockNumber) {
     System::set_block_number(block.into());
+}
+
+pub fn preimage_request_count(hash: H256) -> u32 {
+    PreimageRequests::get()
+        .into_iter()
+        .find_map(|(candidate, count)| (candidate == hash).then_some(count))
+        .unwrap_or(0)
+}
+
+/// Model `pallet_preimage::unnote_preimage`: a noted payload cannot be
+/// removed while any consumer owns a request reference.
+pub fn try_unnote_preimage(hash: H256) -> bool {
+    if preimage_request_count(hash) > 0 {
+        return false;
+    }
+    PreimageNoted::set(false);
+    true
 }
 
 pub fn last_epoch_event() -> Option<Event<Test>> {

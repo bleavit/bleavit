@@ -1827,6 +1827,46 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             ParamClass::MetaAndValues,
             false
         ),
+        row(
+            b"xcm.dot_per_sec",
+            ParamValue::Balance(100_000_000_000),
+            ParamValue::Balance(1_000_000_000),
+            ParamValue::Balance(10_000_000_000_000),
+            Some(MaxDelta::Factor(2)),
+            1,
+            ParamClass::Param,
+            false
+        ),
+        row(
+            b"xcm.dot_per_mb",
+            ParamValue::Balance(10_000_000_000),
+            ParamValue::Balance(100_000_000),
+            ParamValue::Balance(1_000_000_000_000),
+            Some(MaxDelta::Factor(2)),
+            1,
+            ParamClass::Param,
+            false
+        ),
+        row(
+            b"xcm.usdc_per_sec",
+            ParamValue::Balance(50_000_000),
+            ParamValue::Balance(500_000),
+            ParamValue::Balance(5_000_000_000),
+            Some(MaxDelta::Factor(2)),
+            1,
+            ParamClass::Param,
+            false
+        ),
+        row(
+            b"xcm.usdc_per_mb",
+            ParamValue::Balance(5_000_000),
+            ParamValue::Balance(50_000),
+            ParamValue::Balance(500_000_000),
+            Some(MaxDelta::Factor(2)),
+            1,
+            ParamClass::Param,
+            false
+        ),
     ]
 }
 
@@ -2038,12 +2078,58 @@ mod tests {
         let params = genesis_params();
         // 13 §1 canonical spellings (Codex review, PR #14): the seeded keys
         // must match the names downstream binders derive with key16.
-        assert!(params
-            .iter()
-            .any(|record| record.key == key16(b"intake.max_acct")));
-        assert!(params
-            .iter()
-            .any(|record| record.key == key16(b"keeper.budget")));
+        for name in [
+            b"intake.max_acct".as_slice(),
+            b"keeper.budget".as_slice(),
+            b"xcm.dot_per_sec".as_slice(),
+            b"xcm.dot_per_mb".as_slice(),
+            b"xcm.usdc_per_sec".as_slice(),
+            b"xcm.usdc_per_mb".as_slice(),
+        ] {
+            assert!(
+                params.iter().any(|record| record.key == key16(name)),
+                "missing canonical genesis Param key: {name:?}"
+            );
+        }
+        for (name, value, min, max) in [
+            (
+                b"xcm.dot_per_sec".as_slice(),
+                100_000_000_000,
+                1_000_000_000,
+                10_000_000_000_000,
+            ),
+            (
+                b"xcm.dot_per_mb".as_slice(),
+                10_000_000_000,
+                100_000_000,
+                1_000_000_000_000,
+            ),
+            (
+                b"xcm.usdc_per_sec".as_slice(),
+                50_000_000,
+                500_000,
+                5_000_000_000,
+            ),
+            (
+                b"xcm.usdc_per_mb".as_slice(),
+                5_000_000,
+                50_000,
+                500_000_000,
+            ),
+        ] {
+            let mut matches = 0_u8;
+            for record in params.iter().filter(|record| record.key == key16(name)) {
+                matches = matches.saturating_add(1);
+                assert_eq!(record.value, ParamValue::Balance(value));
+                assert_eq!(record.min, ParamValue::Balance(min));
+                assert_eq!(record.max, ParamValue::Balance(max));
+                assert_eq!(record.max_delta, Some(MaxDelta::Factor(2)));
+                assert_eq!(record.cooldown_epochs, 1);
+                assert_eq!(record.class, ParamClass::Param);
+                assert!(!record.kernel_bounded);
+            }
+            assert_eq!(matches, 1, "missing or duplicate governed XCM rate");
+        }
         for (index, record) in params.iter().enumerate() {
             for other in params.iter().skip(index + 1) {
                 assert_ne!(record.key, other.key, "duplicate ParamKey after key16");

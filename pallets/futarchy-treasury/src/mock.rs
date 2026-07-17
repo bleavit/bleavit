@@ -2,7 +2,7 @@
 
 use crate as pallet_futarchy_treasury;
 use crate::{
-    PayoutLine, RebatePayout, TreasuryParams, ISS_INFLATION_CAP_BPS, TRS_CAP_180D_BPS,
+    PayoutLine, PotFunding, RebatePayout, TreasuryParams, ISS_INFLATION_CAP_BPS, TRS_CAP_180D_BPS,
     TRS_CAP_30D_BPS, TRS_CAP_PROPOSAL_BPS, TRS_STREAM_THRESHOLD_BPS,
 };
 use frame_support::{derive_impl, parameter_types, traits::EnsureOrigin};
@@ -87,6 +87,37 @@ impl TreasuryParams for TestParams {
 std::thread_local! {
     static REBATE_PAYOUTS: RefCell<Vec<(AccountId32, u128, PayoutLine)>> = const { RefCell::new(Vec::new()) };
     static FAIL_REBATE_PAYOUT: Cell<bool> = const { Cell::new(false) };
+    static POT_FUNDING_CALLS: RefCell<Vec<(PayoutLine, u128)>> = const { RefCell::new(Vec::new()) };
+    static FAIL_POT_FUNDING: Cell<bool> = const { Cell::new(false) };
+}
+
+pub struct MockPotFunding;
+
+impl PotFunding<AccountId32> for MockPotFunding {
+    fn fund(line: PayoutLine, amount: u128) -> frame_support::pallet_prelude::DispatchResult {
+        POT_FUNDING_CALLS.with(|calls| calls.borrow_mut().push((line, amount)));
+        if FAIL_POT_FUNDING.with(Cell::get) {
+            return Err(sp_runtime::DispatchError::Other("pot funding failed"));
+        }
+        let next = RecordingRebatePayout::pot_balance(line)
+            .checked_add(amount)
+            .ok_or(sp_runtime::DispatchError::Other("pot funding overflow"))?;
+        set_rebate_pot_balance(line, next);
+        Ok(())
+    }
+}
+
+pub fn pot_funding_calls() -> Vec<(PayoutLine, u128)> {
+    POT_FUNDING_CALLS.with(|calls| calls.borrow().clone())
+}
+
+pub fn set_pot_funding_failure(fail: bool) {
+    FAIL_POT_FUNDING.with(|value| value.set(fail));
+}
+
+pub fn reset_pot_funding() {
+    POT_FUNDING_CALLS.with(|calls| calls.borrow_mut().clear());
+    set_pot_funding_failure(false);
 }
 
 pub struct RecordingRebatePayout;
@@ -170,6 +201,7 @@ impl pallet_futarchy_treasury::Config for Test {
     type CurrentEpoch = CurrentEpochValue;
     type RenewalDispatch = ();
     type RebatePayout = RecordingRebatePayout;
+    type PotFunding = MockPotFunding;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestBenchmarkHelper;
@@ -209,6 +241,7 @@ pub fn new_test_ext_with(
         KeeperBudgetEpoch::set(futarchy_treasury_core::KEEPER_BUDGET_EPOCH);
         KeeperRebate::set(0);
         reset_rebate_payout();
+        reset_pot_funding();
     });
     ext
 }

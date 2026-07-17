@@ -2,14 +2,14 @@ use std::{collections::BTreeMap, time::Duration};
 
 use futures::{stream::FuturesUnordered, StreamExt};
 use subxt::{
-    config::polkadot::PolkadotExtrinsicParamsBuilder, dynamic, tx::TxProgress, OnlineClient,
-    PolkadotConfig,
+    client::OnlineClientAtBlockImpl, config::polkadot::PolkadotExtrinsicParamsBuilder, dynamic,
+    transactions::TransactionProgress, OnlineClient, PolkadotConfig,
 };
 use subxt_signer::sr25519::Keypair;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, info, warn};
 
-use crate::{metrics::KeeperMetrics, planner::PlannedCrank};
+use crate::{metrics::KeeperMetrics, planner::PlannedCrank, transport::is_transport};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AttemptOutcome {
@@ -21,11 +21,11 @@ enum AttemptOutcome {
 struct PendingCrank {
     crank: PlannedCrank,
     nonce: u64,
-    progress: TxProgress<PolkadotConfig, OnlineClient<PolkadotConfig>>,
+    progress: TransactionProgress<PolkadotConfig, OnlineClientAtBlockImpl<PolkadotConfig>>,
 }
 
 enum SubmissionOutcome {
-    Pending(PendingCrank),
+    Pending(Box<PendingCrank>),
     ExpectedFailure,
     TransportFailure,
 }
@@ -88,7 +88,7 @@ impl Submitter {
         let mut reconnect = false;
         for crank in cranks {
             match self.begin_submission(crank, current_block, metrics).await {
-                SubmissionOutcome::Pending(crank) => pending.push(crank),
+                SubmissionOutcome::Pending(crank) => pending.push(*crank),
                 SubmissionOutcome::ExpectedFailure => {}
                 SubmissionOutcome::TransportFailure => {
                     reconnect = true;
@@ -173,11 +173,13 @@ impl Submitter {
                 .nonce(nonce)
                 .mortal(64)
                 .build();
-            let mut tx = self.client.tx();
-            let submission = timeout(
-                self.timeout,
-                tx.sign_and_submit_then_watch(&payload, &self.signer, params),
-            )
+            let submission = timeout(self.timeout, async {
+                let mut tx = self.client.tx().await?;
+                let progress = tx
+                    .sign_and_submit_then_watch(&payload, &self.signer, params)
+                    .await?;
+                Ok::<_, subxt::Error>(progress)
+            })
             .await;
             let progress = match submission {
                 Ok(Ok(progress)) => progress,
@@ -244,18 +246,19 @@ impl Submitter {
                 nonce,
                 "crank submitted"
             );
-            return SubmissionOutcome::Pending(PendingCrank {
+            return SubmissionOutcome::Pending(Box::new(PendingCrank {
                 crank: crank.clone(),
                 nonce,
                 progress,
-            });
+            }));
         }
         SubmissionOutcome::TransportFailure
     }
 
     async fn fetch_nonce(&self) -> Result<u64, subxt::Error> {
         let account = self.signer.public_key().to_account_id();
-        self.client.tx().account_nonce(&account).await
+        let tx = self.client.tx().await?;
+        Ok(tx.account_nonce(&account).await?)
     }
 }
 
@@ -281,20 +284,20 @@ async fn await_finality(
             );
             AttemptOutcome::Success
         }
-        Ok(Err(error)) if is_transport(&error) => {
-            metrics.failed(crank.role);
-            warn!(
-                role = %crank.role,
-                pallet = crank.pallet,
-                call = crank.call,
-                nonce,
-                %error,
-                "transport error while awaiting crank finality; reconnecting"
-            );
-            AttemptOutcome::TransportFailure
-        }
         Ok(Err(error)) => {
+            let error = subxt::Error::from(error);
             metrics.failed(crank.role);
+            if is_transport(&error) {
+                warn!(
+                    role = %crank.role,
+                    pallet = crank.pallet,
+                    call = crank.call,
+                    nonce,
+                    %error,
+                    "transport error while awaiting crank finality; reconnecting"
+                );
+                return AttemptOutcome::TransportFailure;
+            }
             // A concurrent keeper commonly wins the state race between our
             // finalized snapshot and inclusion. This is expected and quiet.
             debug!(
@@ -319,10 +322,6 @@ async fn await_finality(
             AttemptOutcome::TransportFailure
         }
     }
-}
-
-fn is_transport(error: &subxt::Error) -> bool {
-    matches!(error, subxt::Error::Io(_) | subxt::Error::Rpc(_))
 }
 
 fn backoff(base: Duration, attempt: u32) -> Duration {

@@ -102,20 +102,11 @@ class SurfaceManifestTests(unittest.TestCase):
     def test_frozen_storage_and_event_rows_have_layout_expectations(self) -> None:
         # Wired surface carries frozen layout expectations; unwired surface
         # must not (guessed renderings would false-alarm when the owning
-        # milestone lands and freezes them from the real runtime). The SQ-101
-        # trio is the deliberate exception: its Location-keyed expectation is
-        # the strict-fail driver against today's u32-keyed runtime.
-        sq101 = {
-            "storage.foreign_assets.account",
-            "storage.identity.usdc_asset",
-            "storage.identity.usdc_metadata",
-        }
+        # milestone lands and freezes them from the real runtime).
         for entry in self.entries:
             if entry["kind"] not in {"storage", "event"}:
                 continue
-            if entry["id"] in sq101:
-                self.assertIn("layout", entry, entry["id"])
-            elif "blocked_by" in entry:
+            if "blocked_by" in entry:
                 self.assertNotIn("layout", entry, entry["id"])
             else:
                 self.assertIn("layout", entry, entry["id"])
@@ -338,13 +329,13 @@ class SurfaceManifestTests(unittest.TestCase):
                 {
                     "id": "b1b.compliance",
                     "owner": "B1b",
-                    "reason": "SQ-140..SQ-150 remain open",
+                    "reason": "SQ-172..SQ-182 remain open",
                 },
                 {
                     "id": "treasury.reserve_health_unwired",
                     "owner": "B1a",
                     "reason": (
-                        "SQ-163: oracle ReserveHealth never reaches treasury "
+                        "SQ-205: oracle ReserveHealth never reaches treasury "
                         "set_reserve_impaired — 08 §1.2 fail-static NAV is not enforced"
                     ),
                 },
@@ -369,26 +360,24 @@ class SurfaceManifestTests(unittest.TestCase):
             self.assertNotIn("blocked_by", entry, entry["id"])
 
     def test_remaining_surface_blockers_are_attributed_to_open_gaps(self) -> None:
+        # Every critical surface now records: B2 wired the FutarchyApi and the
+        # metadata constants, A8/A11 wired their pallets, and SQ-101 re-keyed
+        # USDC to the frozen 02 §8 Location. The remaining release-blocking
+        # gaps span *recorded* surface, so they live in `release_blockers`
+        # (which the assembler always reads) rather than in a per-entry
+        # `blocked_by` (which it only reads for a missing recording).
         blockers = {
             entry["blocked_by"]
             for entry in self.entries
             if "blocked_by" in entry
         }
-        self.assertEqual(
-            blockers,
-            {"SQ-101 (B4 follow-up)"},
-        )
+        self.assertEqual(blockers, set())
 
     def test_no_speculative_layout_on_blocked_entries(self) -> None:
-        sq101 = {
-            "storage.foreign_assets.account",
-            "storage.identity.usdc_asset",
-            "storage.identity.usdc_metadata",
-        }
         offenders = [
             entry["id"]
             for entry in self.entries
-            if entry.get("blocked_by") and "layout" in entry and entry["id"] not in sq101
+            if entry.get("blocked_by") and "layout" in entry
         ]
         self.assertEqual(offenders, [])
 
@@ -425,7 +414,7 @@ class SurfaceManifestTests(unittest.TestCase):
         self.assertEqual(asset["expected"], {"min_balance": 10000})
         self.assertEqual(metadata["expected"], {"decimals": 6})
         for entry in (asset, metadata):
-            self.assertEqual(entry["blocked_by"], "SQ-101 (B4 follow-up)")
+            self.assertNotIn("blocked_by", entry)
 
     def test_chain_identity_properties_entry(self) -> None:
         entry = next(
@@ -446,7 +435,7 @@ class SurfaceManifestTests(unittest.TestCase):
         ):
             entry = next(item for item in self.entries if item["id"] == identifier)
             self.assertIn("staging_xcm::v5::location::Location", entry["layout"]["key"])
-            self.assertEqual(entry["blocked_by"], "SQ-101 (B4 follow-up)")
+            self.assertNotIn("blocked_by", entry)
 
     def test_section_nine_constant_surface_is_complete(self) -> None:
         identifiers = {entry["id"] for entry in self.entries}

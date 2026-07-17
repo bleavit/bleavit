@@ -10,7 +10,7 @@ use futarchy_primitives::{
     QuoteView, RatificationStatus, TradeSide, VaultState, WelfareView,
 };
 
-use crate::{AccountId, ForeignAssets, Runtime, USDC_ASSET_ID};
+use crate::{usdc_location, AccountId, ForeignAssets, Runtime};
 
 /// Assemble `FutarchyApi::epoch_status` per 02 §3/§4. `epoch_state()`
 /// hydrates the clock and all three machine/provider flags through the B1b
@@ -380,8 +380,9 @@ pub fn nav() -> NavView {
     let baseline_pol = pallet_futarchy_treasury::Pallet::<Runtime>::line_balance(
         pallet_futarchy_treasury::BudgetLine::PolBaseline,
     );
+    // SQ-101: the instance is keyed by the frozen 02 §8 XCM Location, not a u32.
     let insurance = <ForeignAssets as Inspect<AccountId>>::balance(
-        USDC_ASSET_ID,
+        usdc_location(),
         &crate::configs::insurance_account(),
     );
     NavView {

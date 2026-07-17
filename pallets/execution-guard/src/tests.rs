@@ -2,10 +2,33 @@ use super::*;
 use crate::mock::ExecutionGuard as GuardPallet;
 use crate::mock::*;
 use crate::pallet::PendingUpgrade as PendingUpgradeStorage;
-use frame_support::{assert_noop, assert_ok, traits::Hooks};
+use frame_support::{
+    assert_noop, assert_ok,
+    dispatch::{DispatchErrorWithPostInfo, GetDispatchInfo, Pays, PostDispatchInfo},
+    traits::Hooks,
+    weights::Weight,
+};
 use futarchy_primitives::{keeper::CrankClass, DispatchOutcomeCode, RejectReason};
 use parity_scale_codec::Encode;
 use sp_runtime::{traits::Dispatchable, DispatchError};
+
+macro_rules! assert_noop {
+    (GuardPallet::execute($($args:tt)*), $error:expr $(,)?) => {{
+        frame_support::assert_noop!(
+            GuardPallet::execute($($args)*),
+            DispatchErrorWithPostInfo {
+                post_info: PostDispatchInfo {
+                    actual_weight: Some(<() as crate::WeightInfo>::execute(MAX_CALLS_BOUND)),
+                    pays_fee: Pays::Yes,
+                },
+                error: ($error).into(),
+            }
+        );
+    }};
+    ($call:expr, $error:expr $(,)?) => {{
+        frame_support::assert_noop!($call, $error);
+    }};
+}
 
 fn ratify_origin() -> RuntimeOrigin {
     RuntimeOrigin::from(pallet_origins::Origin::ConstitutionalValues)
@@ -110,6 +133,83 @@ fn queue_view_exposes_sorted_core_projection_and_meter_state() {
             entry.ratification,
             futarchy_primitives::RatificationStatus::NotRequired
         )));
+    });
+}
+
+#[test]
+fn execute_post_info_includes_inner_actual_weight_and_never_exceeds_precharge() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(enqueue_calls(
+            1,
+            ProposalClass::Param,
+            vec![weighted_call(41)],
+            vec![CallDomain::Param],
+        ));
+        run_to_maturity(1);
+
+        let post = GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1)
+            .expect("weighted execution succeeds");
+        let expected =
+            <() as crate::WeightInfo>::execute(1).saturating_add(Weight::from_parts(400, 40));
+        assert_eq!(post.actual_weight, Some(expected));
+        assert!(expected.all_lte(GuardPallet::execute_precharge()));
+    });
+}
+
+#[test]
+fn execute_falls_back_to_declared_inner_weight_when_post_info_is_absent() {
+    new_test_ext().execute_with(|| {
+        let call = param_call(7);
+        let declared = call.get_dispatch_info().total_weight();
+        assert_ok!(enqueue_calls(
+            1,
+            ProposalClass::Param,
+            vec![call],
+            vec![CallDomain::Param],
+        ));
+        run_to_maturity(1);
+
+        let post = GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1)
+            .expect("fallback-weight execution succeeds");
+        let expected = <() as crate::WeightInfo>::execute(1).saturating_add(declared);
+        assert_eq!(post.actual_weight, Some(expected));
+        assert!(expected.all_lte(GuardPallet::execute_precharge()));
+    });
+}
+
+#[test]
+fn execute_reject_refunds_the_inner_ceiling_to_checks_only() {
+    new_test_ext().execute_with(|| {
+        setup_param(1, 9);
+        GuardianHeld::set(vec![1]);
+
+        let error = GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1)
+            .expect_err("guardian hold rejects before dispatch");
+        assert_eq!(error.error, Error::<Test>::GuardianHold.into());
+        let checks_only = <() as crate::WeightInfo>::execute(MAX_CALLS_BOUND);
+        assert_eq!(error.post_info.actual_weight, Some(checks_only));
+        assert!(checks_only.all_lte(GuardPallet::execute_precharge()));
+        assert!(Queue::<Test>::contains_key(1));
+        assert_eq!(pallet_test_dispatch::Value::<Test>::get(), 0);
+    });
+}
+
+#[test]
+fn post_dispatch_failure_still_charges_consumed_inner_weight() {
+    new_test_ext().execute_with(|| {
+        let code = b"post-dispatch-weight";
+        let code_hash = hash(code);
+        let declared = authorize_call(code_hash).get_dispatch_info().total_weight();
+        setup_upgrade(1, code, 9);
+        ReleaseRefuses::set(true);
+
+        let error = GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1)
+            .expect_err("release-channel callback rejects after inner dispatch");
+        assert_eq!(error.error, DispatchError::Other("release channel refused"));
+        let expected = <() as crate::WeightInfo>::execute(1).saturating_add(declared);
+        assert_eq!(error.post_info.actual_weight, Some(expected));
+        assert!(expected.all_lte(GuardPallet::execute_precharge()));
+        assert!(Queue::<Test>::contains_key(1));
     });
 }
 
@@ -321,6 +421,7 @@ fn core_seed_rejects_per_entry_domain_and_lock_overflow() {
 
 #[test]
 fn ordered_check_1_rejects_cancelled_immature_and_expired_entries() {
+    // limit-coverage: exec.grace
     new_test_ext().execute_with(|| {
         setup_param(1, 1);
         Queue::<Test>::mutate(1, |queued| {
@@ -355,6 +456,41 @@ fn ordered_check_1_rejects_cancelled_immature_and_expired_entries() {
 }
 
 #[test]
+fn execution_before_maturity_is_rejected_for_every_proposal_class() {
+    // limit-coverage: exec.lock.param, exec.lock.trs, exec.lock.code, exec.lock.meta
+    for (index, class) in [
+        futarchy_primitives::ProposalClass::Param,
+        futarchy_primitives::ProposalClass::Treasury,
+        futarchy_primitives::ProposalClass::Code,
+        futarchy_primitives::ProposalClass::Meta,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        new_test_ext().execute_with(|| {
+            let pid = index as ProposalId + 1;
+            let (payload_hash, payload_len) = put_preimage(&[param_call(pid as u32)]);
+            commit_payload(pid, payload_hash);
+            Queue::<Test>::insert(
+                pid,
+                queued_item(
+                    pid,
+                    class,
+                    payload_hash,
+                    payload_len,
+                    vec![CallDomain::Param],
+                ),
+            );
+
+            assert_noop!(
+                GuardPallet::execute(RuntimeOrigin::signed(keeper()), pid),
+                Error::<Test>::NotMature
+            );
+        });
+    }
+}
+
+#[test]
 fn ordered_check_2_rederives_hash_and_rejects_preimage_swap() {
     new_test_ext().execute_with(|| {
         setup_param(1, 1);
@@ -366,6 +502,18 @@ fn ordered_check_2_rederives_hash_and_rejects_preimage_swap() {
             Error::<Test>::BadPreimage
         );
         assert_eq!(pallet_test_dispatch::Value::<Test>::get(), 0);
+    });
+    new_test_ext().execute_with(|| {
+        setup_param(1, 1);
+        PreimageFetchRequests::set(Vec::new());
+        Queue::<Test>::mutate(1, |queued| {
+            queued.as_mut().expect("queued").payload_len = 1;
+        });
+        assert_noop!(
+            GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
+            Error::<Test>::BadPreimage
+        );
+        assert!(PreimageFetchRequests::get().is_empty());
     });
     new_test_ext().execute_with(|| {
         setup_param(1, 1);
@@ -410,6 +558,7 @@ fn ordered_checks_3_and_4_reject_stale_version_and_bad_ratification_binding() {
 
 #[test]
 fn ordered_check_5_fails_closed_for_forged_underquorum_and_challenged_attestations() {
+    // limit-coverage: att.quorum
     // A forged queue row has no queue-time-frozen attestation binding.
     new_test_ext().execute_with(|| {
         let code = b"attested-runtime";
@@ -500,6 +649,7 @@ fn ordered_checks_6_to_10_reject_capability_meter_lock_guardian_and_freezes() {
 
 #[test]
 fn ordered_check_11_enforces_payload_call_domain_and_safety_bounds() {
+    // limit-coverage: prop.max_calls, prop.max_bytes, prop.max_weight
     new_test_ext().execute_with(|| {
         let calls = (0..=MAX_CALLS)
             .map(|value| param_call(value as u32))
@@ -554,6 +704,19 @@ fn ordered_check_11_enforces_payload_call_domain_and_safety_bounds() {
         assert_noop!(
             GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
             Error::<Test>::SafetyFilter
+        );
+    });
+    new_test_ext().execute_with(|| {
+        assert_ok!(enqueue_calls(
+            1,
+            futarchy_primitives::ProposalClass::Param,
+            vec![heavy_call()],
+            vec![CallDomain::Param],
+        ));
+        run_to_maturity(1);
+        assert_noop!(
+            GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
+            Error::<Test>::CapabilityDenied
         );
     });
 }
@@ -926,6 +1089,7 @@ fn r2_forty_sequential_terminal_dequeues_do_not_exhaust_the_queue() {
 
 #[test]
 fn upgrade_enforces_lead_time_hash_version_and_release_channel_rollback() {
+    // limit-coverage: DescriptorLeadTime
     new_test_ext().execute_with(|| {
         let code = b"runtime-v2";
         setup_upgrade(1, code, 7);
@@ -1192,6 +1356,7 @@ fn upgrade_authorization_rejects_hash_mismatch_pending_conflict_and_spacing() {
 
 #[test]
 fn code_spacing_exact_boundary_and_expedited_zero_spacing_are_recorded() {
+    // limit-coverage: code.spacing
     new_test_ext().execute_with(|| {
         Grace::set(100);
         let code = b"spacing-boundary-runtime";
@@ -1279,10 +1444,12 @@ fn g1_epoch_and_release_refusals_roll_back_all_runtime_storage() {
     new_test_ext().execute_with(|| {
         setup_param(1, 9);
         EpochRefuses::set(true);
-        assert_noop!(
-            GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
-            Error::<Test>::DispatchFailed
-        );
+        let error = GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1)
+            .expect_err("epoch callback rejects after inner dispatch");
+        assert_eq!(error.error, Error::<Test>::DispatchFailed.into());
+        let expected = <() as crate::WeightInfo>::execute(1)
+            .saturating_add(param_call(9).get_dispatch_info().total_weight());
+        assert_eq!(error.post_info.actual_weight, Some(expected));
         assert_eq!(pallet_test_dispatch::Value::<Test>::get(), 0);
         assert!(Queue::<Test>::contains_key(1));
         assert!(ExecutionRecords::<Test>::get().is_empty());
@@ -1474,6 +1641,7 @@ fn r5_payload_weight_ceiling_matches_the_kernel_ratio() {
 
 #[test]
 fn execution_record_ring_evicts_fifo_at_256() {
+    // limit-coverage: ExecutionRecords
     new_test_ext().execute_with(|| {
         for pid in 1..=MAX_EXECUTION_RECORDS as ProposalId + 1 {
             setup_param(pid, pid as u32);

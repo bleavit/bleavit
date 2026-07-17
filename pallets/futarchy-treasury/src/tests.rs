@@ -139,7 +139,112 @@ fn fund_budget_line_moves_main_into_the_line() {
 }
 
 #[test]
+fn pot_backed_budget_lines_sync_exact_funding_to_custody() {
+    funded_ext().execute_with(|| {
+        let keeper_before = Treasury::line_balance(BudgetLine::Keeper);
+        let oracle_before = Treasury::line_balance(BudgetLine::Oracle);
+
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Keeper,
+            50 * USDC
+        ));
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Oracle,
+            30 * USDC
+        ));
+
+        assert_eq!(
+            pot_funding_calls(),
+            vec![
+                (PayoutLine::Keeper, 50 * USDC),
+                (PayoutLine::Oracle, 30 * USDC),
+            ]
+        );
+        assert_eq!(
+            Treasury::line_balance(BudgetLine::Keeper),
+            keeper_before + 50 * USDC
+        );
+        assert_eq!(
+            Treasury::line_balance(BudgetLine::Oracle),
+            oracle_before + 30 * USDC
+        );
+        assert_eq!(KeeperRebatePotBalance::get(), 50 * USDC);
+        assert_eq!(OracleRebatePotBalance::get(), 30 * USDC);
+        assert_ok!(crate::Pallet::<Test>::do_try_state());
+    });
+}
+
+#[test]
+fn pot_funding_failure_rolls_back_internal_credit_and_event() {
+    funded_ext().execute_with(|| {
+        let main_before = crate::Pallet::<Test>::treasury().main_usdc;
+        let line_before = Treasury::line_balance(BudgetLine::Keeper);
+        set_pot_funding_failure(true);
+        System::reset_events();
+
+        assert_noop!(
+            Treasury::fund_budget_line(to(), BudgetLine::Keeper, 50 * USDC),
+            sp_runtime::DispatchError::Other("pot funding failed")
+        );
+
+        assert_eq!(crate::Pallet::<Test>::treasury().main_usdc, main_before);
+        assert_eq!(Treasury::line_balance(BudgetLine::Keeper), line_before);
+        assert!(System::events().is_empty());
+        assert_eq!(pot_funding_calls(), vec![(PayoutLine::Keeper, 50 * USDC)]);
+    });
+}
+
+#[test]
+fn non_pot_budget_lines_credit_without_custody_calls() {
+    funded_ext().execute_with(|| {
+        let cases = [
+            (BudgetLine::Pol, 11 * USDC),
+            (BudgetLine::OpsCoretime, 12 * USDC),
+            (BudgetLine::Rewards, 13 * USDC),
+        ];
+        let before = cases
+            .iter()
+            .map(|(line, _)| (*line, Treasury::line_balance(*line)))
+            .collect::<Vec<_>>();
+
+        for (line, amount) in cases {
+            assert_ok!(Treasury::fund_budget_line(to(), line, amount));
+        }
+
+        assert!(pot_funding_calls().is_empty());
+        for ((line, amount), (_, old_balance)) in cases.into_iter().zip(before) {
+            assert_eq!(Treasury::line_balance(line), old_balance + amount);
+        }
+    });
+}
+
+#[test]
+fn zero_funding_keeps_core_bookkeeping_without_custody_movement() {
+    funded_ext().execute_with(|| {
+        let main_before = crate::Pallet::<Test>::treasury().main_usdc;
+        System::reset_events();
+
+        assert_ok!(Treasury::fund_budget_line(to(), BudgetLine::Keeper, 0));
+
+        assert_eq!(crate::Pallet::<Test>::treasury().main_usdc, main_before);
+        assert_eq!(Treasury::line_balance(BudgetLine::Keeper), 0);
+        assert!(crate::Pallet::<Test>::treasury()
+            .lines
+            .contains(&(BudgetLine::Keeper, 0)));
+        assert!(pot_funding_calls().is_empty());
+        assert_eq!(KeeperRebatePotBalance::get(), 0);
+        System::assert_last_event(RuntimeEvent::Treasury(Event::BudgetLineFunded {
+            line: BudgetLine::Keeper,
+            amount: 0,
+        }));
+    });
+}
+
+#[test]
 fn spend_enforces_stream_threshold_cap_and_line_balance() {
+    // limit-coverage: trs.stream_thr
     funded_ext().execute_with(|| {
         // > 1% NAV (250k) must stream, not spend.
         assert_noop!(
@@ -272,6 +377,7 @@ fn streams_are_mandatory_claimable_and_cancellable() {
 
 #[test]
 fn issuance_is_line_scoped_and_capped_at_two_percent() {
+    // limit-coverage: iss.inflation
     funded_ext().execute_with(|| {
         assert_noop!(
             Treasury::issue_vit(to(), 1, BudgetLine::Pol),
@@ -388,6 +494,7 @@ fn payout_failure_drops_line_meter_and_events() {
 
 #[test]
 fn threshold_events_map_and_zero_pay_exhaustion_flag_persists_once() {
+    // limit-coverage: keeper.budget
     funded_ext().execute_with(|| {
         assert_ok!(Treasury::fund_budget_line(
             to(),
@@ -581,6 +688,7 @@ mod renewal_dispatch_seam {
         type CurrentEpoch = CurrentEpoch;
         type RenewalDispatch = RecordingRenewalDispatch;
         type RebatePayout = ();
+        type PotFunding = ();
         type WeightInfo = ();
         #[cfg(feature = "runtime-benchmarks")]
         type BenchmarkHelper = DispatchBenchmarkHelper;
@@ -833,6 +941,7 @@ fn nav_floor_gate_is_loud() {
 
 #[test]
 fn rolling_30d_meter_binds_spending() {
+    // limit-coverage: trs.cap_30d, trs.cap_180d
     // NAV 25M ⇒ trailing-30d ceiling = 10% = 2.5M. Pre-load the meter to just
     // under it so a within-threshold, within-per-proposal-cap spend still trips.
     funded_ext().execute_with(|| {
@@ -852,12 +961,25 @@ fn rolling_30d_meter_binds_spending() {
             50_000 * USDC
         ));
     });
+
+    funded_ext().execute_with(|| {
+        let mut t = crate::Pallet::<Test>::treasury();
+        let nav = t.nav().nav;
+        t.meter_180d.buckets[0] =
+            nav * u128::from(futarchy_treasury_core::TRS_CAP_180D_BPS) / 10_000;
+        crate::Pallet::<Test>::seed(&t);
+        assert_noop!(
+            Treasury::spend(to(), BudgetLine::OpsCollators, acc(1), USDC),
+            Error::<Test>::MeterExhausted
+        );
+    });
 }
 
 // ---- rule 4: caps are read from Params, not hardcoded -----------------------
 
 #[test]
 fn caps_track_params_not_a_hardcode() {
+    // limit-coverage: trs.cap_proposal
     funded_ext().execute_with(|| {
         // A 300k grant is a valid stream at defaults (> 1% NAV threshold, ≤ 5%
         // NAV cap). Tighten the per-proposal cap to 0.2% via Params ⇒ the same
@@ -913,6 +1035,7 @@ fn caps_track_params_not_a_hardcode() {
 
 #[test]
 fn stream_bound_is_enforced() {
+    // limit-coverage: Treasury Streams
     funded_ext().execute_with(|| {
         // Seed the stream table to its 13 §4 bound.
         let mut t = crate::Pallet::<Test>::treasury();
@@ -1009,6 +1132,14 @@ fn nav_nets_pol_and_pending_obligations() {
             ]),
             Error::<Test>::TooManyObligations
         );
+        assert_noop!(
+            crate::Pallet::<Test>::set_pending_outflows(vec![
+                1;
+                futarchy_treasury_core::MAX_PENDING_OUTFLOWS
+                    + 1
+            ]),
+            Error::<Test>::TooManyObligations
+        );
         assert_eq!(crate::Pallet::<Test>::nav().nav, MAIN0 - 1_750_000 * USDC);
     });
 }
@@ -1094,8 +1225,15 @@ fn try_state_reconciles_rebate_lines_against_real_custody_pots() {
             BudgetLine::Oracle,
             30 * USDC
         ));
-        // Funding the internal ledger is not a custody transfer. The mismatch
-        // is deliberately loud until the follow-up sync mechanism is built.
+        // The funding seam keeps the internal lines and the real custody pots
+        // synchronized atomically (08 §1.4).
+        assert_eq!(KeeperRebatePotBalance::get(), 50 * USDC);
+        assert_eq!(OracleRebatePotBalance::get(), 30 * USDC);
+        assert_ok!(crate::Pallet::<Test>::do_try_state());
+
+        // Direct transfers, recovery, or genesis mistakes can still create
+        // drift; the standing alarm remains the backstop for those sources.
+        set_rebate_pot_balance(PayoutLine::Keeper, 49 * USDC);
         assert!(matches!(
             crate::Pallet::<Test>::do_try_state(),
             Err(sp_runtime::TryRuntimeError::Other(
@@ -1104,6 +1242,7 @@ fn try_state_reconciles_rebate_lines_against_real_custody_pots() {
         ));
 
         set_rebate_pot_balance(PayoutLine::Keeper, 50 * USDC);
+        set_rebate_pot_balance(PayoutLine::Oracle, 29 * USDC);
         assert!(matches!(
             crate::Pallet::<Test>::do_try_state(),
             Err(sp_runtime::TryRuntimeError::Other(

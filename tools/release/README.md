@@ -54,6 +54,26 @@ from the self-referential `artifact_hashes` map):
 }
 ```
 
+[`tools/env/run-evidence.py`](../env/run-evidence.py) is the producer for this
+contract. The tag pipeline runs its release tier against the built artifacts,
+records G1-tier exclusions explicitly, and inventories only the clean committed
+environment definitions after generated state is removed. Evidence for a kind
+is produced only when every release-tier suite of that kind was attempted and
+passed: G1-tier exclusions are recorded, but a gated release-tier skip blocks
+evidence. The producer self-checks with the assembler's validator, while
+assembly remains the single release-blocking enforcement point.
+Evidence emission is currently blocked fail-closed until the SQ-204 try-state
+leg and the SQ-203 Chopsticks card-depth execution land; the producer still runs
+the suites and writes run reports.
+
+Pending SQ-139 ratification, the producer adds consumer-tolerated fields to the
+minimal contract above: top-level `tier`, `suites_skipped`, `produced_by`,
+`suites_manifest_sha256`, and `pins_env_sha256`, plus `duration_seconds` and
+`checks` on each `suites_run` row. These extras identify the selected policy
+tier and producer inputs, record exclusions, and describe the execution depth;
+the authoritative consumer continues to validate the frozen fields shown in
+the contract block.
+
 The suite must match its directory. Every regular file other than the evidence
 file must be listed, every hash must match, every suite result must be `pass`,
 and both the runtime hash and commit must bind to this release. Invalid evidence
@@ -133,13 +153,17 @@ the resolved layout; a manifest layout mismatch is a strict failure with both
 forms in `fixtures-report.json`.
 
 Layout expectations are frozen only for surface the current runtime actually
-wires. The wired Epoch storage/events carry layouts rendered from the runtime's
-real metadata, like every other live storage/event row. Runtime API entries
-likewise carry no speculative layout expectations: the recorder resolves their
-registered method signatures from the released metadata. The
-deliberate exception is the SQ-101 `ForeignAssets` trio, whose Location-keyed
-expectation must fail strict mode against today's u32-keyed runtime. Two
-renderer caveats are inherent to portable metadata: const-generic
+wires (they were validated against a live node), and a still-blocked entry
+carries no `layout` — a guessed rendering would false-alarm once the owning
+milestone lands; the expectation is frozen from the real runtime at that point.
+The wired Epoch storage/events carry layouts rendered from the runtime's real
+metadata, like every other live storage/event row, and the `ForeignAssets`
+trio's Location-keyed expectation is now live wired surface too: the runtime
+keys the instance by the frozen XCM `Location` (02 §8; SQ-101 resolved
+2026-07-17). Runtime API entries deliberately carry no layout expectation: the
+recorder resolves their registered method signatures from the released
+metadata. Two renderer caveats are inherent to portable
+metadata: const-generic
 bounds (`BoundedVec<T, ConstU32<N>>`) do not appear in the registry — bounds
 are certified through the paired metadata constants instead — and the 02 §12
 `ReleaseChannel` key is deliberately metadata-independent, so its fixture is a
@@ -162,13 +186,26 @@ coverage missing. Strict mode fails; it never fabricates chainHead responses.
 
 Strict mode is expected to fail today:
 
-- B7 owns per-release `run-evidence.json` for the committed `zombienet/` and
-  `chopsticks/` environment definitions;
-- SQ-101 (B4 follow-up) owns replacing the current `ForeignAssets` `u32` asset
-  key with the frozen XCM `Location` key; the manifest detects this mismatch;
-- B1b's compliance gaps SQ-140…SQ-150 remain release-blocking (canonical
+- B7 owns the per-release `run-evidence.json` for the committed `zombienet/`
+  and `chopsticks/` environment definitions;
+- B1b's compliance gaps SQ-172…SQ-182 remain release-blocking (canonical
   resource keys/call effects, values and prize backing, phase/playbook mirrors,
-  and the remaining epoch integration gaps tracked in `PLAN.md`).
+  and the remaining epoch integration gaps tracked in `PLAN.md`) — enforced by
+  the manifest's `release_blockers` row `b1b.compliance`;
+- SQ-205 (owner B1a): the oracle's authoritative reserve health never reaches
+  `treasury::set_reserve_impaired`, so 08 §1.2's fail-static NAV is not
+  enforced — enforced by the `treasury.reserve_health_unwired` row.
+
+Two previously-listed blockers are cleared: **B2** implemented all 11
+`FutarchyApi` methods and the remaining metadata constants (contract v4), and
+**A8/A11** are wired (`pallet-epoch` at index 61, `pallet-execution-guard` at
+62). The `ForeignAssets` `u32`→`Location` re-key (SQ-101) cleared its three
+rows on 2026-07-17; the manifest's frozen Location-keyed expectations now
+record against the live runtime.
+
+`release_blockers` rows fail a tagged release closed even when every surface
+records — a per-entry `blocked_by` cannot, since the assembler only reads it
+for a *missing* recording.
 
 These entries remain `required: true` in `surface-manifest.json`. Their
 `blocked_by` fields are diagnostics, not waivers. A tagged workflow uses strict

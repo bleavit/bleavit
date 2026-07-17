@@ -13,7 +13,7 @@ use crate::{
 use frame_support::{assert_noop, assert_ok};
 use sp_runtime::DispatchError;
 
-use futarchy_primitives::ProposalClass;
+use futarchy_primitives::{ParamKey, ProposalClass};
 
 const OBS_KEY: &[u8] = b"mkt.obs_interval"; // PARAM class, Δ=5 abs, cooldown 1
 const SLOTS_KEY: &[u8] = b"epoch.slots"; // META class, Δ=2 abs, cooldown 1
@@ -482,6 +482,7 @@ fn set_capability_origin_misuse_is_refused() {
 
 #[test]
 fn set_capability_limit_binds_at_the_bound() {
+    // limit-coverage: Capabilities table
     new_test_ext().execute_with(|| {
         // Fill the table to exactly MAX_CAPABILITIES distinct rows…
         let mut i: u32 = 0;
@@ -981,9 +982,9 @@ fn extrinsic_value_types_do_not_admit_wrong_kinds_via_scale() {
 fn genesis_registry_matches_13_1_row_encodings() {
     new_test_ext().execute_with(|| {
         // Every 13 §1 row with a scalar concrete default and no open
-        // [VERIFY] tag is seeded (91 total, incl. per-class suffix keys and
+        // [VERIFY] tag is seeded (95 total, incl. per-class suffix keys and
         // rule-6 short keys); spot-pin the unit encodings per kind.
-        assert_eq!(Params::<Test>::count(), 91);
+        assert_eq!(Params::<Test>::count(), 95);
 
         // Per-class suffix keys (13 rule 6) — δ floors, kernel-capped.
         let delta_meta = Params::<Test>::get(key16(b"dec.delta.meta")).unwrap();
@@ -993,18 +994,44 @@ fn genesis_registry_matches_13_1_row_encodings() {
         );
         assert!(delta_meta.kernel_bounded);
 
-        let gate_v_min = Params::<Test>::get(key16(b"gate.v_min.meta"));
-        assert!(
-            gate_v_min.is_some(),
-            "gate.v_min.meta must be present at genesis",
-        );
-        let Some(gate_v_min) = gate_v_min else {
-            return;
-        };
-        assert_eq!(gate_v_min.value, ParamValue::Balance(120_000_000_000));
-        assert_eq!(gate_v_min.min, ParamValue::Balance(60_000_000_000));
-        assert_eq!(gate_v_min.max, ParamValue::Balance(600_000_000_000));
-        assert_eq!(gate_v_min.class, ParamClass::Meta);
+        for (key, value, min, max) in [
+            (
+                b"gate.v_min.param".as_slice(),
+                10_000_000_000,
+                5_000_000_000,
+                50_000_000_000,
+            ),
+            (
+                b"gate.v_min.trs".as_slice(),
+                25_000_000_000,
+                12_500_000_000,
+                125_000_000_000,
+            ),
+            (
+                b"gate.v_min.code".as_slice(),
+                60_000_000_000,
+                30_000_000_000,
+                300_000_000_000,
+            ),
+            (
+                b"gate.v_min.meta".as_slice(),
+                120_000_000_000,
+                60_000_000_000,
+                600_000_000_000,
+            ),
+        ] {
+            assert_eq!(
+                Params::<Test>::get(key16(key))
+                    .map(|record| { (record.value, record.min, record.max, record.class) }),
+                Some((
+                    ParamValue::Balance(value),
+                    ParamValue::Balance(min),
+                    ParamValue::Balance(max),
+                    ParamClass::Meta,
+                )),
+                "{key:?} must be a bounded genesis-seeded META record",
+            );
+        }
 
         // Rule-6 short key for a >16-byte dotted name.
         let slash = Params::<Test>::get(key16(b"intake.slash_pct")).unwrap();
@@ -1058,6 +1085,182 @@ fn genesis_registry_matches_13_1_row_encodings() {
 
         assert_ok!(Constitution::do_try_state());
     });
+}
+
+fn param_key_name(key: ParamKey) -> String {
+    let length = key.iter().position(|byte| *byte == 0).unwrap_or(key.len());
+    String::from_utf8(key[..length].to_vec()).expect("genesis ParamKeys are valid UTF-8")
+}
+
+fn param_value_from_raw(kind: ParamValue, raw: u128) -> Option<ParamValue> {
+    match kind {
+        ParamValue::U8(_) => u8::try_from(raw).ok().map(ParamValue::U8),
+        ParamValue::U32(_) => u32::try_from(raw).ok().map(ParamValue::U32),
+        ParamValue::Balance(_) => Some(ParamValue::Balance(raw)),
+        ParamValue::Fixed(_) => u64::try_from(raw)
+            .ok()
+            .map(|value| ParamValue::Fixed(futarchy_primitives::FixedU64(value))),
+        ParamValue::Percent(_) => u8::try_from(raw).ok().map(ParamValue::Percent),
+        ParamValue::Perbill(_) => u32::try_from(raw).ok().map(ParamValue::Perbill),
+    }
+}
+
+fn governance_origin_for(class: ParamClass) -> RuntimeOrigin {
+    let account = match class {
+        ParamClass::Param => PARAM_ACC,
+        ParamClass::Treasury => TREASURY_ACC,
+        ParamClass::Meta | ParamClass::MetaAndValues => META_ACC,
+        ParamClass::Const | ParamClass::Entrenched => VALUES_ACC,
+    };
+    RuntimeOrigin::signed(account)
+}
+
+fn delta_past_limit(record: ParamRecord) -> Option<ParamValue> {
+    let value = record.value.as_u128();
+    let min = record.min.as_u128();
+    let max = record.max.as_u128();
+    let outside_distance = match record.max_delta? {
+        crate::MaxDelta::Absolute(bound) => bound.as_u128().checked_add(1)?,
+        crate::MaxDelta::Percent(percent) => value
+            .saturating_mul(u128::from(percent))
+            .checked_div(100)?
+            .checked_add(1)?,
+        crate::MaxDelta::Factor(factor) => {
+            let factor = u128::from(factor);
+            let upper = value.saturating_mul(factor);
+            if upper < max {
+                return param_value_from_raw(record.value, upper.checked_add(1)?);
+            }
+            if value > 0 {
+                let lower = value.checked_sub(1)?.checked_div(factor)?;
+                if lower >= min {
+                    return param_value_from_raw(record.value, lower);
+                }
+            }
+            return None;
+        }
+    };
+    if let Some(upper) = value.checked_add(outside_distance) {
+        if upper <= max {
+            return param_value_from_raw(record.value, upper);
+        }
+    }
+    let lower = value.checked_sub(outside_distance)?;
+    if lower >= min {
+        param_value_from_raw(record.value, lower)
+    } else {
+        None
+    }
+}
+
+#[test]
+fn generated_genesis_key_fixture_matches_the_seeded_registry() {
+    let mut keys: Vec<String> = genesis_params()
+        .into_iter()
+        .map(|record| param_key_name(record.key))
+        .collect();
+    keys.sort();
+    let body = keys
+        .iter()
+        .map(|key| format!("  \"{key}\""))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let rendered = format!("[\n{body}\n]\n");
+    assert_eq!(
+        include_str!("../../../tools/limit-coverage/genesis-keys.json"),
+        rendered,
+        "regenerate genesis-keys.json from constitution_core::genesis_params"
+    );
+}
+
+/// Covers amendment dispatch bounds only; keys annotated `consumer_binding` in
+/// the S3 registry still have kernel-constant consumers until B10 rewires them.
+#[test]
+fn generated_registry_suite_rejects_every_seeded_key_past_its_amendment_limits() {
+    for expected in genesis_params() {
+        let key_name = param_key_name(expected.key);
+        new_test_ext().execute_with(|| {
+            let record = Params::<Test>::get(expected.key)
+                .unwrap_or_else(|| panic!("generated key {key_name} is not seeded"));
+
+            if let Some(above_max) = record
+                .max
+                .as_u128()
+                .checked_add(1)
+                .and_then(|raw| param_value_from_raw(record.value, raw))
+            {
+                assert_noop!(
+                    Constitution::set_param(
+                        governance_origin_for(record.class),
+                        record.key,
+                        above_max
+                    ),
+                    Error::<Test>::AboveMax
+                );
+            }
+            if let Some(below_min) = record
+                .min
+                .as_u128()
+                .checked_sub(1)
+                .and_then(|raw| param_value_from_raw(record.value, raw))
+            {
+                assert_noop!(
+                    Constitution::set_param(
+                        governance_origin_for(record.class),
+                        record.key,
+                        below_min
+                    ),
+                    Error::<Test>::BelowMin
+                );
+            }
+
+            if record.max_delta.is_some() {
+                let candidate = delta_past_limit(record).unwrap_or_else(|| {
+                    panic!("generated key {key_name} has no in-bounds past-Δ candidate")
+                });
+                set_epoch(record.cooldown_epochs);
+                assert_noop!(
+                    Constitution::set_param(
+                        governance_origin_for(record.class),
+                        record.key,
+                        candidate
+                    ),
+                    Error::<Test>::DeltaTooLarge
+                );
+            }
+
+            if record.kernel_bounded {
+                assert_noop!(
+                    Constitution::amend_registry(
+                        RuntimeOrigin::signed(META_ACC),
+                        record.key,
+                        record.min,
+                        record.max,
+                        record.max_delta,
+                        record.cooldown_epochs,
+                    ),
+                    Error::<Test>::KernelBoundImmutable
+                );
+            }
+
+            if record.cooldown_epochs > 0 {
+                set_epoch(record.cooldown_epochs);
+                assert_ok!(Constitution::set_param(
+                    governance_origin_for(record.class),
+                    record.key,
+                    record.value
+                ));
+                assert_noop!(
+                    Constitution::set_param(
+                        governance_origin_for(record.class),
+                        record.key,
+                        record.value
+                    ),
+                    Error::<Test>::CooldownActive
+                );
+            }
+        });
+    }
 }
 
 // ------------------------------------------- randomized differential (PRNG) --

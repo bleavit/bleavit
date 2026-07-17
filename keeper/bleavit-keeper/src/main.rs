@@ -15,7 +15,7 @@ use bleavit_keeper::{
     Cli,
 };
 use clap::Parser;
-use rand::Rng;
+use rand::RngExt;
 use subxt::{OnlineClient, PolkadotConfig};
 use subxt_signer::{sr25519::Keypair, SecretUri};
 use tokio::{sync::watch, time::sleep};
@@ -113,7 +113,13 @@ async fn run_connection(
     reported_roles: &mut BTreeMap<Role, bool>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> ConnectionOutcome {
-    let extractor = SnapshotExtractor::new(client.clone());
+    let extractor = match SnapshotExtractor::new(client.clone()).await {
+        Ok(extractor) => extractor,
+        Err(error) => {
+            warn!(%error, "finalized metadata initialization failed; reconnecting");
+            return ConnectionOutcome::Reconnect;
+        }
+    };
     report_capabilities(config, &extractor, reported_roles);
     let enabled_roles: RoleSet = config
         .enabled_roles
@@ -133,7 +139,7 @@ async fn run_connection(
         submitter
     });
 
-    let mut blocks = match client.blocks().subscribe_finalized().await {
+    let mut blocks = match client.stream_blocks().await {
         Ok(blocks) => blocks,
         Err(error) => {
             warn!(%error, "finalized subscription failed; reconnecting");
@@ -169,7 +175,7 @@ async fn run_connection(
                 }
             }
         };
-        let current_block = u64::from(block.number());
+        let current_block = block.number();
         metrics.set_current_block(current_block);
         if current_block % config.every_n_blocks != 0 {
             continue;

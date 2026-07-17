@@ -153,6 +153,25 @@ impl<AccountId> RebatePayout<AccountId> for () {
     }
 }
 
+/// Runtime custody seam for funding a dedicated real-USDC payout pot (08 §1.4).
+pub trait PotFunding<AccountId> {
+    fn fund(
+        line: PayoutLine,
+        amount: futarchy_primitives::Balance,
+    ) -> frame_support::dispatch::DispatchResult;
+}
+
+/// Custody-free test environments may use the unit implementation. Production
+/// binds a real MAIN-to-pot USDC transfer at the runtime boundary.
+impl<AccountId> PotFunding<AccountId> for () {
+    fn fund(
+        _: PayoutLine,
+        _: futarchy_primitives::Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
+}
+
 /// B4/B1a seam (09 §4): dispatch the DOT funding transfer for a renewal the
 /// accounting just committed. An `Err` rolls back the whole extrinsic (quote
 /// restored, period not funded) so the keeper can retry — bounded retry via
@@ -182,6 +201,16 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     fn treasury_origin() -> RuntimeOrigin;
     /// A funded keeper/recipient account for Signed calls.
     fn account(seed: u8) -> AccountId;
+    /// Seed the real-USDC `MAIN` custody balance used by the dedicated payout
+    /// pot funding path. Custody-free pallet mocks may keep the no-op default;
+    /// the assembled runtime mints its benchmark fixture into `ForeignAssets`.
+    fn prime_pot_funding(
+        _: futarchy_primitives::Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
+    fn prime_keeper_rebate() {}
+    fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 }
 
 #[frame_support::pallet]
@@ -235,6 +264,10 @@ pub mod pallet {
         /// Runtime custody adapter which transfers real USDC from the selected
         /// treasury sub-account. Errors are swallowed by `do_keeper_rebate`.
         type RebatePayout: RebatePayout<Self::AccountId>;
+
+        /// Runtime custody adapter which atomically moves real USDC from MAIN
+        /// into the KEEPER/ORACLE payout pot when its budget line is funded.
+        type PotFunding: PotFunding<Self::AccountId>;
 
         /// Weight information for extrinsics.
         type WeightInfo: WeightInfo;
@@ -441,7 +474,22 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             T::TreasuryOrigin::ensure_origin(origin)?;
-            Self::mutate(|t| t.fund_budget_line(Origin::FutarchyTreasury, line, amount))
+            Self::mutate(|t| t.fund_budget_line(Origin::FutarchyTreasury, line, amount))?;
+            // Zero retains the core's established bookkeeping/event semantics,
+            // but has no custody movement to perform. Skipping the seam cannot
+            // strand or double-move value and avoids making a zero funding call
+            // depend on an external custody adapter.
+            if amount != 0 {
+                let payout_line = match line {
+                    BudgetLine::Keeper => Some(PayoutLine::Keeper),
+                    BudgetLine::Oracle => Some(PayoutLine::Oracle),
+                    _ => None,
+                };
+                if let Some(payout_line) = payout_line {
+                    T::PotFunding::fund(payout_line, amount)?;
+                }
+            }
+            Ok(())
         }
 
         /// `treasury.spend(line, dest, amount)` — a direct in-cap grant
@@ -1006,9 +1054,9 @@ pub mod pallet {
                     "treasury: minted VIT credited to lines exceeds total supply",
                 ));
             }
-            // Loud custody-drift alarm: accounting a funded payout line does
-            // not itself transfer USDC into its real custody pot. Until the
-            // custody-sync follow-up lands, operators must fund both legs.
+            // Loud custody-drift alarm: `fund_budget_line` is custody-synced,
+            // while this remains the backstop for every other drift source
+            // (genesis funding, recover_foreign and direct transfers into pots).
             if t.line_balance(BudgetLine::Keeper) > T::RebatePayout::pot_balance(PayoutLine::Keeper)
             {
                 return Err(TryRuntimeError::Other(

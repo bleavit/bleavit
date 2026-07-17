@@ -5,6 +5,11 @@ on:
   push:
     branches: [main]
 
+# Every job only checks out the tree and runs tests/validators — the token
+# never needs write scopes (CodeQL: actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
 jobs:
   rust:
     name: Rust workspace
@@ -14,7 +19,7 @@ jobs:
       # benefit; stock runners have ~14 GB free against a ~35 GB build.
       CARGO_INCREMENTAL: 0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Free runner disk space (the workspace build needs ~35 GB)
         run: |
           set -euo pipefail
@@ -37,7 +42,7 @@ jobs:
     name: Supply chain
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
       - name: Check lockfiles and RustSec advisories
@@ -47,8 +52,8 @@ jobs:
     name: Reference model
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Run reference model tests
@@ -71,27 +76,107 @@ jobs:
     name: Documentation links
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Check local Markdown links
         run: python3 tools/ci/check-doc-links.py
+
+  # S1 formal models — 15 §4.1; 03 §11.
+  model-checking:
+    name: Model checking (TLC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Check model-checking shell syntax
+        run: |
+          bash -n tools/verify/fetch-tla2tools.sh
+          bash -n tools/verify/run-model-checks.sh
+      - name: Run TLC over all committed models
+        run: tools/verify/run-model-checks.sh
+
+  # S1 property suites at the normative ≥10^6 case count — 15 §4.2–4.3; 03 §11.
+  property-suites:
+    name: Property suites (full count)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
+      - name: Run property suites at full case count
+        run: tools/ci/property-gates.sh
+
+  weights:
+    name: Weight regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Test weight regression gate
+        run: python3 tools/ci/check-weight-regression.py --self-test
+      - name: Check committed weight diffs
+        run: python3 tools/ci/check-weight-regression.py
+
+  benchmark-smoke:
+    name: Benchmark smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # substrate-wasm-builder needs the Wasm runtime target on a clean runner.
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native build dependencies
+        # omni-bencher's dependency tree reaches litep2p, whose build script
+        # needs `protoc`; the workspace build needs libclang (bindgen).
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
+      - name: Install FRAME omni-bencher
+        run: cargo install --locked frame-omni-bencher --version 0.15.0
+      - name: Build benchmark runtime Wasm
+        run: cargo build --locked --release -p bleavit-runtime --features runtime-benchmarks
+      - name: Execute every pallet benchmark
+        # pallet_assets::migration_v2_foreign_asset_set_reserve_weight is the
+        # weight function for pallet-assets's v2 storage migration, which a
+        # chain born at the current storage version never executes. Upstream's
+        # benchmark asserts `Asset::iter_keys().next()` equals its own created
+        # asset — an empty-map assumption the development genesis breaks by
+        # design: it registers the 02 §8 Location-keyed USDC at genesis and the
+        # USDC key hashes before the benchmark's. Every executable call/hook
+        # weight remains covered (15 §4.5).
+        run: >-
+          frame-omni-bencher v1 benchmark pallet
+          --runtime target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
+          --all --steps 2 --repeat 1
+          --exclude-extrinsics pallet_assets::migration_v2_foreign_asset_set_reserve_weight
 
   # B7 environment release artifacts — 15 §4.7; 02 §11.
   environments:
     name: Environment definitions
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - name: Install environment validator dependencies
-        run: pip install pyyaml==6.0.2
+        run: pip install pyyaml==6.0.2 websockets==15.0.1
+      - name: Compile environment tooling
+        run: python3 -m py_compile tools/env/*.py tools/env/tests/*.py
       - name: Run environment validator tests
         run: python3 -m unittest discover -s tools/env/tests
       - name: Validate committed environment definitions
@@ -105,3 +190,17 @@ jobs:
           for helper in zombienet/drills/js/*.js; do
             node --check "$helper"
           done
+
+  # S3 generated rate-limit/meter/bound coverage — 15 §4.6; I-22.
+  limit-coverage:
+    name: Generated limit coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Run limit-coverage checker tests
+        run: python3 -m unittest discover -s tools/limit-coverage/tests
+      - name: Validate registry classifications and Rust test markers
+        run: python3 tools/limit-coverage/check-limit-coverage.py

@@ -9,9 +9,9 @@ use staging_xcm::latest::{Assets, Location, SendError, SendResult, SendXcm, Xcm,
 /// a failure here is a local validate/deliver failure only. The oracle timeout
 /// fold is the B1a binding point for [`Self::note_probe_timeout`], the only
 /// locally-observable signal that a sent reserve probe received no response.
-/// `pallet-oracle` deliberately exposes no fold callback (its XCM surface is the
-/// two B4 seams only), so B1a derives this signal from `ReserveHealth` deltas or
-/// the `ReserveProbeResult { passed: false }` event stream at the welfare binding.
+/// `pallet-oracle::ProbeTimeoutSink` exposes that committed fold directly while
+/// keeping the oracle pallet XCM-free; the runtime binding forwards it to the
+/// welfare traffic recorder.
 /// Remote outcomes are not runtime-readable: when X is partial, R alone drives
 /// the C flag. Implementations must never use these signals to improve an input
 /// or infer remote success (I-24).
