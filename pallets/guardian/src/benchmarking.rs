@@ -200,6 +200,7 @@ mod benches {
         seed_council::<T>();
         let id = action_at_four::<T>();
         Pallet::<T>::approve_action(T::BenchmarkHelper::signed([5; 32]), id).expect("dispatch");
+        T::BenchmarkHelper::prime_review_approved(id);
         fill_pending_with_five::<T>(1);
         fill_reviews::<T>(MAX_REVIEWS);
         fill_playbooks::<T>(ACTION_EXPIRY_BLOCKS);

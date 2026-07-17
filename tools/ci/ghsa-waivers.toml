@@ -18,8 +18,11 @@
 # stale-waiver leg): an exemption can never outlive the advisory that justified
 # it, mirroring the limit-coverage registry discipline (SQ-155).
 #
-# Triaged 2026-07-17 against the 25 open Dependabot alerts. Of those 25, this is
-# the only one RustSec does not carry; the other 24 are cargo-audit's to gate.
+# Triaged 2026-07-17 against the 25 open Dependabot alerts; re-triaged from
+# scratch the same day at the stable2603 → stable2606 line move (D-19, PLAN
+# B11), which cleared the 16 wasmtime alerts but changes nothing here: this is
+# still the only advisory RustSec does not carry; the rest are cargo-audit's to
+# gate via .cargo/audit.toml.
 
 [[waiver]]
 id = "GHSA-vxx9-2994-q338"
@@ -38,19 +41,20 @@ severity = "high"
 # libp2p-yamux 0.47.0 still declares it. The 0.13.10 copy is already in the
 # lockfile and is already patched.
 #
-# NOT REACHED in the shipped collator. Every sc-network 0.56.1 call site
-# constructs `yamux::Config::default()`, and libp2p-yamux's `impl Default for
-# Config` returns `Either::Right(Config013::default())` — the yamux 0.13 path.
-# The 0.12 multiplexer is only constructible through the deprecated
+# NOT REACHED in the shipped collator. Every sc-network 0.58.0 call site
+# constructs `yamux::Config::default()` (re-verified at the stable2606 move:
+# transport.rs/discovery.rs/request_responses.rs), and libp2p-yamux's `impl
+# Default for Config` returns `Either::Right(Config013::default())` — the yamux
+# 0.13 path. The 0.12 multiplexer is only constructible through the deprecated
 # `Config::client()` / `Config::server()` constructors, which appear nowhere in
 # the tree. The vulnerable code is linked but never instantiated. Independently,
-# litep2p is the default backend (sc-cli `default_value_t =
+# litep2p is the default backend (sc-cli 0.61.0 `default_value_t =
 # NetworkBackendType::Litep2p`) and carries its own yamux 0.13.10.
 #
 # Residual risk: an operator who explicitly passes `--network-backend libp2p`
 # runs the linked-but-legacy path; impact would be collator liveness (DoS), not
 # state integrity. The runtime wasm contains no yamux at all.
 reason = "linked but never instantiated (libp2p-yamux defaults to yamux 0.13); 0.12.x line has no fix and libp2p-yamux hard-pins it"
-blocked_by = "libp2p-yamux 0.46.0 -> yamux012 = yamux \"^0.12.1\" (non-optional; 0.47.0 unchanged)"
-clears_when = "upstream libp2p-yamux drops its yamux 0.12 dependency — NOT cleared by a polkadot-sdk train bump alone"
+blocked_by = "libp2p-yamux 0.46.0 -> yamux012 = yamux \"^0.12.1\" (non-optional; 0.47.0, still the newest, unchanged)"
+clears_when = "upstream libp2p-yamux drops its yamux 0.12 dependency — NOT cleared by a polkadot-sdk train bump alone (re-proven at the stable2606 move, D-19)"
 triaged = "2026-07-17"
