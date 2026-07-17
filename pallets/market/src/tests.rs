@@ -368,6 +368,52 @@ fn buy_collects_complete_pair_fee_and_records_twap() {
 }
 
 #[test]
+fn reserve_pause_blocks_market_buys_for_every_book_kind_but_keeps_exits_open() {
+    use futarchy_primitives::GateType;
+
+    new_test_ext().execute_with(|| {
+        let gate_id = MARKET_ID + 1;
+        create_decision();
+        assert_ok!(Market::create_market(
+            signed(MARKET_ADMIN),
+            gate_id,
+            BookKind::Gate {
+                proposal: PROPOSAL,
+                branch: Branch::Accept,
+                gate: GateType::Survival,
+            },
+            POL,
+            INSURANCE,
+            B,
+        ));
+        create_baseline();
+        for id in [MARKET_ID, gate_id, BASELINE_ID] {
+            seed(id);
+        }
+        assert_ok!(Ledger::split(signed(ALICE), PROPOSAL, 3 * UNIT));
+
+        System::set_block_number(10);
+        assert_ok!(Ledger::set_split_paused(signed(SETTLER), true, 20));
+        for id in [MARKET_ID, gate_id, BASELINE_ID] {
+            assert_noop!(
+                Market::buy(signed(ALICE), id, ScalarSide::Long, TRADE, 600 * UNIT,),
+                E::Ledger
+            );
+        }
+
+        assert_ok!(Ledger::merge(signed(ALICE), PROPOSAL, UNIT));
+        assert_ok!(Ledger::resolve(signed(RESOLVER), PROPOSAL, Branch::Accept));
+        assert_ok!(Ledger::settle_scalar(
+            signed(SETTLER),
+            PROPOSAL,
+            FixedU64(1_000_000_000),
+        ));
+        assert_ok!(Ledger::redeem(signed(ALICE), PROPOSAL, UNIT));
+        assert_try_state();
+    });
+}
+
+#[test]
 fn decision_sell_round_trip_releases_usdc_via_mirror_merge() {
     new_test_ext().execute_with(|| {
         create_decision();

@@ -49,6 +49,7 @@ parameter_types! {
     /// Monotonic referendum index handed back by the review scheduler.
     pub static NextReferendum: u32 = 100;
     pub static ReviewSchedulingFails: bool = false;
+    pub static ReviewRefundFailsFor: Option<u32> = None;
     pub static RecallSchedulingFails: bool = false;
     pub static VetoFails: bool = false;
     pub static ReviewDepositValue: futarchy_primitives::Balance =
@@ -129,7 +130,16 @@ impl GuardianReviewScheduler for TestScheduler {
         Ok(n)
     }
 
-    fn refund_review(_referendum: u32) -> Result<(), sp_runtime::DispatchError> {
+    fn cancel_review(_referendum: u32) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
+
+    fn refund_review(referendum: u32) -> Result<(), sp_runtime::DispatchError> {
+        if ReviewRefundFailsFor::get() == Some(referendum) {
+            return Err(sp_runtime::DispatchError::Other(
+                "review refund unavailable",
+            ));
+        }
         Ok(())
     }
 }

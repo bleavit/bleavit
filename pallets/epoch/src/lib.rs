@@ -539,11 +539,16 @@ pub mod pallet {
     #[pallet::storage]
     pub type BaselineCarry<T: Config> = StorageValue<_, (EpochId, u8), OptionQuery>;
 
-    /// Intake-only emergency pause. The value is a hard pallet-level backstop:
-    /// a stale guardian maintenance crank cannot keep intake paused once
-    /// `now >= until` (06 §5.2/§6.2).
+    /// PB-HALT-INTAKE's source-scoped intake pause. The value is a hard
+    /// pallet-level backstop: a stale guardian maintenance crank cannot keep
+    /// intake paused once `now >= until` (06 §6.2).
     #[pallet::storage]
     pub type IntakePausedUntil<T: Config> = StorageValue<_, BlockNumber, OptionQuery>;
+
+    /// The direct guardian `pause_intake` contribution, kept separate so a
+    /// playbook expiry cannot clear a longer direct pause (06 §5.2/§6.2).
+    #[pallet::storage]
+    pub type GuardianIntakePausedUntil<T: Config> = StorageValue<_, BlockNumber, OptionQuery>;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -1177,7 +1182,7 @@ pub mod pallet {
         ) -> DispatchResult {
             T::EmergencyPlaybookOrigin::ensure_origin(origin)?;
             if paused {
-                Self::set_intake_paused_internal(expiry)
+                Self::set_intake_pause_for_source::<IntakePausedUntil<T>>(expiry)
             } else {
                 IntakePausedUntil::<T>::kill();
                 Self::deposit_event(Event::IntakePauseCleared);
@@ -1405,6 +1410,13 @@ pub mod pallet {
         /// The bound is rechecked here so the downstream effect remains safe if
         /// a caller bypasses the guardian core in a test/runtime adapter.
         pub fn set_intake_paused_internal(until: BlockNumber) -> DispatchResult {
+            Self::set_intake_pause_for_source::<GuardianIntakePausedUntil<T>>(until)
+        }
+
+        fn set_intake_pause_for_source<S>(until: BlockNumber) -> DispatchResult
+        where
+            S: frame_support::storage::StorageValue<BlockNumber, Query = Option<BlockNumber>>,
+        {
             let now = Self::now();
             ensure!(
                 until >= now
@@ -1412,15 +1424,26 @@ pub mod pallet {
                         <= futarchy_primitives::kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS,
                 Error::<T>::IntakePauseOutOfBounds
             );
-            IntakePausedUntil::<T>::put(until);
+            S::put(until);
             Self::deposit_event(Event::IntakePauseSet { until });
             Ok(())
         }
 
-        /// Lazy expiry predicate. Storage may retain a historical timestamp,
-        /// but it has no effect at or after the boundary.
+        /// Effective source-composed deadline. Storage may retain historical
+        /// timestamps, but neither source has effect at or after its boundary.
+        pub fn intake_paused_until() -> Option<BlockNumber> {
+            match (
+                IntakePausedUntil::<T>::get(),
+                GuardianIntakePausedUntil::<T>::get(),
+            ) {
+                (Some(playbook), Some(guardian)) => Some(playbook.max(guardian)),
+                (playbook, guardian) => playbook.or(guardian),
+            }
+        }
+
+        /// Lazy expiry predicate over the maximum source-scoped deadline.
         pub fn intake_paused(now: BlockNumber) -> bool {
-            IntakePausedUntil::<T>::get().is_some_and(|until| now < until)
+            Self::intake_paused_until().is_some_and(|until| now < until)
         }
 
         /// Sole T24 producer, called by `guardian.uphold_veto` after its

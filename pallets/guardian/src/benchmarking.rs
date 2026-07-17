@@ -261,8 +261,6 @@ mod benches {
         seed_council::<T>();
         let id = action_at_four::<T>(GuardianPower::DelayOnce { pid: 1 });
         Pallet::<T>::approve_action(T::BenchmarkHelper::signed([5; 32]), id).expect("dispatch");
-        let referendum = ReviewReferenda::<T>::get(id).expect("review referendum");
-        T::BenchmarkHelper::close_review(referendum).expect("close review");
 
         #[extrinsic_call]
         _(T::BenchmarkHelper::values() as T::RuntimeOrigin, id);

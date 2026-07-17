@@ -987,6 +987,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             T::MarketAuthority::ensure_origin(origin)?;
+            Self::ensure_splits_open()?;
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.do_split(pid, &who, amount)
             })
@@ -1021,6 +1022,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             T::MarketAuthority::ensure_origin(origin)?;
+            Self::ensure_splits_open()?;
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.do_split_scalar(pid, branch, &who, amount)
             })
@@ -1036,6 +1038,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             T::MarketAuthority::ensure_origin(origin)?;
+            Self::ensure_splits_open()?;
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.split_gate(
                     LedgerOrigin::MarketAuthority,
@@ -1056,6 +1059,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             T::MarketAuthority::ensure_origin(origin)?;
+            Self::ensure_splits_open()?;
             Self::run_baseline(epoch, core::slice::from_ref(&who), &who, |st| {
                 st.do_split_baseline(epoch, &who, amount)
             })

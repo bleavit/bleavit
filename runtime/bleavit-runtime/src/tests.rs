@@ -2905,6 +2905,76 @@ fn deep_preimage_batch_decode_fails_closed_at_the_depth_limit() {
 }
 
 #[test]
+fn screening_rejects_overdeep_preimage_with_shared_decode_limit() {
+    let spawned = std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let mut nested = remark();
+            for _ in 0..(kernel::MAX_PAYLOAD_DECODE_DEPTH as usize + 200) {
+                nested = RuntimeCall::Utility(pallet_utility::Call::batch {
+                    calls: vec![nested],
+                });
+            }
+            vec![nested].encode()
+        });
+    assert!(
+        spawned.is_ok(),
+        "deep screening-preimage encoder must spawn"
+    );
+    let Ok(handle) = spawned else {
+        return;
+    };
+    let joined = handle.join();
+    assert!(
+        joined.is_ok(),
+        "deep screening-preimage encoder must complete"
+    );
+    let Ok(deep_bytes) = joined else {
+        return;
+    };
+
+    development_ext().execute_with(|| {
+        let decoded = pallet_execution_guard::Pallet::<Runtime>::decode_batch(&deep_bytes);
+        assert!(
+            decoded.is_err(),
+            "shared decoder must reject an over-deep preimage"
+        );
+        let Err(decode_error) = decoded else {
+            return;
+        };
+        assert_eq!(
+            decode_error,
+            pallet_execution_guard::Error::<Runtime>::BadPreimage.into()
+        );
+
+        let payload_len = u32::try_from(deep_bytes.len());
+        assert!(
+            payload_len.is_ok(),
+            "bounded screening preimage length must fit u32"
+        );
+        let Ok(payload_len) = payload_len else {
+            return;
+        };
+        let payload_hash = <Preimage as StorePreimage>::note(deep_bytes.into());
+        assert!(
+            payload_hash.is_ok(),
+            "bounded screening preimage must be noted"
+        );
+        let Ok(payload_hash) = payload_hash else {
+            return;
+        };
+        let proposal = empty_param_proposal(9_257, account(93), payload_hash, payload_len);
+        assert_eq!(
+            <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
+                AccountId,
+            >>::static_check(&proposal),
+            pallet_epoch::StaticCheckDisposition::Refund(RejectReason::ProcessHold),
+            "screening must fail closed with the typed unverifiable disposition"
+        );
+    });
+}
+
+#[test]
 fn bare_system_upgrade_calls_stay_denied_when_guard_descriptor_matures() {
     let authorize = RuntimeCall::System(frame_system::Call::authorize_upgrade {
         code_hash: H256::repeat_byte(1),
@@ -5001,18 +5071,23 @@ fn guardian_review_votes_and_enacts_on_ratify_track_with_bonds_restored() {
 }
 
 #[test]
-fn guardian_uphold_veto_is_the_atomic_t24_review_verdict() {
+fn guardian_uphold_veto_cancels_ongoing_review_and_commits_t24() {
     development_ext().execute_with(|| {
         const PID: futarchy_primitives::ProposalId = 8_007;
         let (members, action, referendum) = seed_guardian_delay_action(PID, 60);
-        assert_ok!(Referenda::cancel(
-            pallet_origins::Origin::ConstitutionalValues.into(),
-            referendum,
+        assert!(matches!(
+            pallet_referenda::ReferendumInfoFor::<Runtime>::get(referendum),
+            Some(pallet_referenda::ReferendumInfo::Ongoing(_))
         ));
 
         assert_ok!(Guardian::uphold_veto(
             crate::track_origins::Origin::Ratify.into(),
             action,
+        ));
+
+        assert!(matches!(
+            pallet_referenda::ReferendumInfoFor::<Runtime>::get(referendum),
+            Some(pallet_referenda::ReferendumInfo::Cancelled(_, None, None))
         ));
 
         let proposal = pallet_epoch::Proposals::<Runtime>::get(PID)
@@ -8186,7 +8261,72 @@ fn resource_lock_conflict_rolls_second_proposal_and_distinct_keys_both_qualify()
 }
 
 #[test]
-fn more_than_eight_resource_domains_uses_unclassifiable_refund_slash_taxonomy() {
+fn duplicate_resource_declaration_acquires_one_lock_and_does_not_wedge_qualification() {
+    development_ext().execute_with(|| {
+        assert!(install_single_active_metric_spec(33).is_some());
+        let first_record = pallet_constitution::Params::<Runtime>::get(pallet_constitution::key16(
+            b"mkt.obs_interval",
+        ));
+        assert!(first_record.is_some(), "first PARAM record must exist");
+        let Some(first_record) = first_record else {
+            return;
+        };
+        let second_record =
+            pallet_constitution::Params::<Runtime>::get(pallet_constitution::key16(b"mkt.fee"));
+        assert!(second_record.is_some(), "second PARAM record must exist");
+        let Some(second_record) = second_record else {
+            return;
+        };
+        assert_ok!(Constitution::set_capability(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::CapabilityRecord {
+                class: ProposalClass::Param,
+                capability: pallet_constitution::Capability::SetParam(second_record.key),
+                enabled: true,
+            },
+        ));
+
+        let first_resource = expected_resource_key(0x01, Some(&first_record.key));
+        let second_resource = expected_resource_key(0x01, Some(&second_record.key));
+        let first = submit_param_payload(
+            account(246),
+            vec![registered_param_call(first_record)],
+            vec![first_resource, first_resource],
+        );
+        assert!(
+            first.is_some(),
+            "duplicate-insensitive proposal must submit"
+        );
+        let Some(first) = first else {
+            return;
+        };
+        let second = submit_param_payload(
+            account(247),
+            vec![registered_param_call(second_record)],
+            vec![second_resource],
+        );
+        assert!(second.is_some(), "distinct-key proposal must submit");
+        let Some(second) = second else {
+            return;
+        };
+
+        assert!(tick_qualification(vec![first, second]).is_some());
+        assert_eq!(stored_proposal_state(first), Some(ProposalState::Qualified));
+        assert_eq!(
+            stored_proposal_state(second),
+            Some(ProposalState::Qualified)
+        );
+        assert_eq!(
+            pallet_epoch::ResourceLocks::<Runtime>::get().into_inner(),
+            vec![(first_resource, first), (second_resource, second)],
+            "qualification must persist exactly one lock per distinct resource"
+        );
+        assert_ok!(Epoch::do_try_state());
+    });
+}
+
+#[test]
+fn overbound_footprint_slashes_empty_declaration_but_unknown_wrapper_refunds() {
     use frame_support::traits::tokens::{Fortitude, Preservation};
 
     development_ext().execute_with(|| {
@@ -8214,33 +8354,55 @@ fn more_than_eight_resource_domains_uses_unclassifiable_refund_slash_taxonomy() 
             .collect::<Vec<_>>();
         assert!(crate::classifier::derive_resource_footprint(&calls).is_err());
 
-        let refunded = account(238);
-        let slashed = account(239);
-        let refund_pid = match submit_param_payload(refunded.clone(), calls.clone(), Vec::new()) {
-            Some(pid) => pid,
-            None => {
-                assert!(false, "over-bound empty-declaration fixture must submit");
-                return;
-            }
+        let empty_overbound = account(238);
+        let nonempty_overbound = account(239);
+        let unknown_wrapper = account(248);
+        let empty_overbound_pid =
+            submit_param_payload(empty_overbound.clone(), calls.clone(), Vec::new());
+        assert!(
+            empty_overbound_pid.is_some(),
+            "over-bound empty-declaration fixture must submit"
+        );
+        let Some(empty_overbound_pid) = empty_overbound_pid else {
+            return;
         };
-        let slash_pid = match submit_param_payload(slashed.clone(), calls, vec![[0xee; 8]]) {
-            Some(pid) => pid,
-            None => {
-                assert!(
-                    false,
-                    "over-bound non-empty-declaration fixture must submit"
-                );
-                return;
-            }
+        let nonempty_overbound_pid =
+            submit_param_payload(nonempty_overbound.clone(), calls, vec![[0xee; 8]]);
+        assert!(
+            nonempty_overbound_pid.is_some(),
+            "over-bound non-empty-declaration fixture must submit"
+        );
+        let Some(nonempty_overbound_pid) = nonempty_overbound_pid else {
+            return;
+        };
+        let unknown_wrapper_pid = submit_param_payload(
+            unknown_wrapper.clone(),
+            vec![RuntimeCall::Utility(pallet_utility::Call::batch {
+                calls: vec![registered_param_call(records[0])],
+            })],
+            Vec::new(),
+        );
+        assert!(
+            unknown_wrapper_pid.is_some(),
+            "unknown-wrapper empty-declaration fixture must submit"
+        );
+        let Some(unknown_wrapper_pid) = unknown_wrapper_pid else {
+            return;
         };
         let bond = crate::configs::balance_param(b"prop.bond.param");
         let insurance = crate::configs::insurance_account();
         let insurance_before = ForeignAssets::balance(usdc_location(), &insurance);
-        assert!(tick_qualification(vec![refund_pid, slash_pid]).is_some());
+        assert!(tick_qualification(vec![
+            empty_overbound_pid,
+            nonempty_overbound_pid,
+            unknown_wrapper_pid,
+        ])
+        .is_some());
 
         for (pid, reason) in [
-            (refund_pid, RejectReason::ProcessHold),
-            (slash_pid, RejectReason::ConstitutionViolation),
+            (empty_overbound_pid, RejectReason::ConstitutionViolation),
+            (nonempty_overbound_pid, RejectReason::ConstitutionViolation),
+            (unknown_wrapper_pid, RejectReason::ProcessHold),
         ] {
             assert_eq!(
                 pallet_epoch::IntakeProposals::<Runtime>::get(pid).map(|p| p.state),
@@ -8257,24 +8419,33 @@ fn more_than_eight_resource_domains_uses_unclassifiable_refund_slash_taxonomy() 
         assert_eq!(
             ForeignAssets::reducible_balance(
                 usdc_location(),
-                &refunded,
-                Preservation::Expendable,
-                Fortitude::Polite,
-            ),
-            bond,
-        );
-        assert_eq!(
-            ForeignAssets::reducible_balance(
-                usdc_location(),
-                &slashed,
+                &empty_overbound,
                 Preservation::Expendable,
                 Fortitude::Polite,
             ),
             0,
         );
         assert_eq!(
+            ForeignAssets::reducible_balance(
+                usdc_location(),
+                &nonempty_overbound,
+                Preservation::Expendable,
+                Fortitude::Polite,
+            ),
+            0,
+        );
+        assert_eq!(
+            ForeignAssets::reducible_balance(
+                usdc_location(),
+                &unknown_wrapper,
+                Preservation::Expendable,
+                Fortitude::Polite,
+            ),
+            bond,
+        );
+        assert_eq!(
             ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(bond),
+            insurance_before.saturating_add(bond.saturating_mul(2)),
         );
     });
 }
@@ -9358,6 +9529,57 @@ fn six_referenda_tracks_have_normative_schedules_and_origins() {
         crate::configs::BleavitTracks::track_for(legacy.caller()),
         Ok(2)
     );
+}
+
+#[test]
+fn constitution_track_cannot_amend_entrenched_class_but_entrenched_track_can() {
+    development_ext().execute_with(|| {
+        let key = pallet_constitution::key16(b"att.bond");
+        let record = pallet_constitution::Params::<Runtime>::get(key);
+        assert!(record.is_some(), "att.bond must be seeded");
+        let Some(record) = record else {
+            return;
+        };
+        assert_eq!(record.class, pallet_constitution::ParamClass::Entrenched);
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(record.cooldown_epochs)
+        });
+
+        let constitution_origin: RuntimeOrigin = crate::track_origins::Origin::Constitution.into();
+        let entrenched_origin: RuntimeOrigin = crate::track_origins::Origin::Entrenched.into();
+        let next = pallet_constitution::ParamValue::Balance(
+            record.value.as_u128().saturating_add(currency::VIT),
+        );
+        assert_noop!(
+            Constitution::set_param(constitution_origin.clone(), key, next),
+            DispatchError::BadOrigin
+        );
+        assert_ok!(Constitution::set_param(
+            entrenched_origin.clone(),
+            key,
+            next
+        ));
+
+        assert_noop!(
+            Constitution::amend_registry(
+                constitution_origin,
+                key,
+                record.min,
+                record.max,
+                record.max_delta,
+                record.cooldown_epochs,
+            ),
+            DispatchError::BadOrigin
+        );
+        assert_ok!(Constitution::amend_registry(
+            entrenched_origin,
+            key,
+            record.min,
+            record.max,
+            record.max_delta,
+            record.cooldown_epochs,
+        ));
+    });
 }
 
 #[test]
@@ -10841,7 +11063,10 @@ fn five_guardians_pause_intake_until_the_lazy_expiry_boundary() {
             pallet_guardian::GuardianPower::PauseIntake { until: 20 },
             120,
         );
-        assert_eq!(pallet_epoch::IntakePausedUntil::<Runtime>::get(), Some(20));
+        assert_eq!(
+            pallet_epoch::GuardianIntakePausedUntil::<Runtime>::get(),
+            Some(20)
+        );
         assert!(pallet_guardian::ReviewReferenda::<Runtime>::contains_key(
             action
         ));
@@ -10939,6 +11164,67 @@ fn halt_intake_playbook_activates_from_gate_breach_and_expiry_reverts() {
             pallet_guardian::PlaybookId::HaltIntake
         ));
         assert_eq!(pallet_epoch::IntakePausedUntil::<Runtime>::get(), None);
+    });
+}
+
+#[test]
+fn halt_intake_expiry_preserves_a_longer_direct_guardian_pause() {
+    use frame_support::traits::Hooks;
+
+    development_ext().execute_with(|| {
+        System::set_block_number(10);
+        let direct_until =
+            10_u32.saturating_add(futarchy_primitives::kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS);
+        let playbook_until = 10_u32.saturating_add(14_400);
+        let _direct_action = dispatch_runtime_guardian_power(
+            pallet_guardian::GuardianPower::PauseIntake {
+                until: direct_until,
+            },
+            150,
+        );
+
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        pallet_welfare::GateBreachFlags::<Runtime>::insert(
+            epoch,
+            pallet_welfare::CoreGateBreachFlags {
+                s_breached: true,
+                c_breached: false,
+                day_bitmap: [1, 0],
+            },
+        );
+        let _playbook_action = dispatch_runtime_guardian_power(
+            pallet_guardian::GuardianPower::ActivatePlaybook {
+                id: pallet_guardian::PlaybookId::HaltIntake,
+                trigger: pallet_guardian::PlaybookTrigger::GateBreach,
+                expiry: playbook_until,
+                target: None,
+            },
+            160,
+        );
+        assert_eq!(
+            pallet_epoch::GuardianIntakePausedUntil::<Runtime>::get(),
+            Some(direct_until)
+        );
+        assert_eq!(
+            pallet_epoch::IntakePausedUntil::<Runtime>::get(),
+            Some(playbook_until)
+        );
+        assert_eq!(Epoch::intake_paused_until(), Some(direct_until));
+
+        System::set_block_number(playbook_until);
+        let _ = Guardian::on_initialize(playbook_until);
+        assert!(!Guardian::playbook_active(
+            pallet_guardian::PlaybookId::HaltIntake
+        ));
+        assert_eq!(pallet_epoch::IntakePausedUntil::<Runtime>::get(), None);
+        assert_eq!(
+            pallet_epoch::GuardianIntakePausedUntil::<Runtime>::get(),
+            Some(direct_until)
+        );
+        assert!(Epoch::intake_paused(playbook_until));
+
+        System::set_block_number(direct_until);
+        assert!(!Epoch::intake_paused(direct_until));
     });
 }
 

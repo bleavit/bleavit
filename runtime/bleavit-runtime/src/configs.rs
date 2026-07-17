@@ -28,7 +28,7 @@ use frame_system::{
 #[cfg(feature = "runtime-benchmarks")]
 use futarchy_primitives::keeper::CrankClass;
 use futarchy_primitives::{bounds, chain_identity, currency, kernel, EpochId, FixedU64, ParamKey};
-use parity_scale_codec::{Decode, Encode};
+use parity_scale_codec::Encode;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 #[cfg(feature = "runtime-benchmarks")]
 use sp_runtime::AccountId32;
@@ -1082,12 +1082,12 @@ impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for ConstitutionGovernan
     type Success = pallet_constitution::ConstitutionOrigin;
     fn try_origin(origin: RuntimeOrigin) -> Result<Self::Success, RuntimeOrigin> {
         let scoped: Result<crate::track_origins::Origin, RuntimeOrigin> = origin.clone().into();
-        if matches!(
-            scoped,
-            Ok(crate::track_origins::Origin::Constitution)
-                | Ok(crate::track_origins::Origin::Entrenched)
-        ) {
-            return Ok(Self::Success::ConstitutionalValues);
+        if let Ok(track) = scoped {
+            return match track {
+                crate::track_origins::Origin::Constitution => Ok(Self::Success::ConstitutionTrack),
+                crate::track_origins::Origin::Entrenched => Ok(Self::Success::EntrenchedTrack),
+                _ => Err(origin),
+            };
         }
         let custom: Result<pallet_origins::Origin, RuntimeOrigin> = origin.clone().into();
         if let Ok(custom) = custom {
@@ -2437,9 +2437,7 @@ fn proposal_calls(
     if u32::try_from(bytes.len()).ok()? != proposal.payload_len {
         return None;
     }
-    let mut input = &bytes[..];
-    let calls = pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::decode(&mut input).ok()?;
-    input.is_empty().then_some(calls)
+    pallet_execution_guard::Pallet::<Runtime>::decode_batch(&bytes).ok()
 }
 
 /// Re-derive the committed USDC outflow (`Ask`) from the only Treasury leaves
@@ -2682,8 +2680,10 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
             return StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold);
         };
         let footprint = crate::classifier::derive_resource_footprint(&calls);
-        let unclassifiable = || {
-            if proposal.resources.is_empty() {
+        let footprint_failure = |error: crate::classifier::FootprintError| {
+            if error == crate::classifier::FootprintError::Unclassifiable
+                && proposal.resources.is_empty()
+            {
                 StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold)
             } else {
                 StaticCheckDisposition::SlashAll(
@@ -2701,16 +2701,17 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         let mut has_classifiable_domain = false;
         for call in &calls {
             let Ok(analysis) = crate::classifier::RuntimeDispatcher::rederive_call(call) else {
-                return if footprint.is_err() {
-                    unclassifiable()
-                } else {
-                    StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold)
+                return match footprint.as_ref() {
+                    Err(error) => footprint_failure(*error),
+                    Ok(_) => StaticCheckDisposition::Refund(
+                        futarchy_primitives::RejectReason::ProcessHold,
+                    ),
                 };
             };
             has_classifiable_domain |= !analysis.domains.is_empty();
         }
         if !has_classifiable_domain {
-            return unclassifiable();
+            return footprint_failure(crate::classifier::FootprintError::Unclassifiable);
         }
         if !calls
             .iter()
@@ -2726,8 +2727,9 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         {
             return StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold);
         }
-        let Ok(footprint) = footprint else {
-            return unclassifiable();
+        let footprint = match footprint {
+            Ok(footprint) => footprint,
+            Err(error) => return footprint_failure(error),
         };
         let declared_matches_footprint = proposal
             .resources
@@ -3800,6 +3802,17 @@ impl pallet_guardian::GuardianReviewScheduler for RuntimeGuardianScheduler {
         Ok(referendum)
     }
 
+    fn cancel_review(referendum: u32) -> Result<(), DispatchError> {
+        match pallet_referenda::ReferendumInfoFor::<Runtime>::get(referendum) {
+            Some(pallet_referenda::ReferendumInfo::Ongoing(_)) => Referenda::cancel(
+                pallet_origins::Origin::ConstitutionalValues.into(),
+                referendum,
+            ),
+            Some(_) => Ok(()),
+            None => Err(DispatchError::Other("guardian review referendum missing")),
+        }
+    }
+
     fn refund_review(referendum: u32) -> Result<(), DispatchError> {
         Referenda::refund_decision_deposit(RuntimeOrigin::signed(guardian_account()), referendum)?;
         Referenda::refund_submission_deposit(
@@ -3963,13 +3976,8 @@ impl pallet_epoch::ExecutionGuardAccess for RuntimeEpochExecutionGuard {
         );
         let bytes = RuntimePreimages::fetch(payload_hash, proposal.payload_len)
             .ok_or(DispatchError::Other("epoch payload preimage missing"))?;
-        let mut input = &bytes[..];
-        let calls = pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::decode(&mut input)
+        let calls = pallet_execution_guard::Pallet::<Runtime>::decode_batch(&bytes)
             .map_err(|_| DispatchError::Other("epoch payload batch invalid"))?;
-        frame_support::ensure!(
-            input.is_empty(),
-            DispatchError::Other("epoch payload trailing bytes")
-        );
         let mut declared_domains = pallet_execution_guard::pallet::StoredDomains::default();
         let mut artifact = None;
         for call in &calls {
@@ -4811,6 +4819,12 @@ impl pallet_constitution::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHel
             }
             pallet_constitution::ConstitutionOrigin::FutarchyMeta => {
                 pallet_origins::Origin::FutarchyMeta.into()
+            }
+            pallet_constitution::ConstitutionOrigin::ConstitutionTrack => {
+                crate::track_origins::Origin::Constitution.into()
+            }
+            pallet_constitution::ConstitutionOrigin::EntrenchedTrack => {
+                crate::track_origins::Origin::Entrenched.into()
             }
             pallet_constitution::ConstitutionOrigin::ConstitutionalValues => {
                 pallet_origins::Origin::ConstitutionalValues.into()

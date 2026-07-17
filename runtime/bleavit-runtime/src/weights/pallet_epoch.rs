@@ -76,6 +76,8 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::CounterForProposals` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::CounterForCohorts` (r:1 w:1)
 	/// Proof: `Epoch::CounterForCohorts` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::GuardianIntakePausedUntil` (r:1 w:0)
+	/// Proof: `Epoch::GuardianIntakePausedUntil` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	fn submit() -> Weight {
 		// Proof Size summary in bytes:
 		//  Measured:  `39081`
@@ -83,7 +85,7 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Minimum execution time: 1_534_210_000 picoseconds.
 		Weight::from_parts(1_648_070_000, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
-			.saturating_add(T::DbWeight::get().reads(182))
+			.saturating_add(T::DbWeight::get().reads(183))
 			.saturating_add(T::DbWeight::get().writes(112))
 	}
 	/// Storage: `Epoch::EpochOf` (r:1 w:1)

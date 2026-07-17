@@ -1698,6 +1698,76 @@ fn review_failure_slashes_and_schedules_recall() {
 }
 
 #[test]
+fn three_concurrent_failed_reviews_settle_independently_with_bounded_liability() {
+    new_test_ext().execute_with(|| {
+        set_status(ProposalStatus::Queued, false);
+        for (action, power) in [
+            (0, GuardianPower::DelayOnce { pid: 10 }),
+            (1, GuardianPower::DelayOnce { pid: 11 }),
+            (2, GuardianPower::ForceRerun { pid: 12 }),
+        ] {
+            assert_ok!(Guardian::propose_action(
+                RuntimeOrigin::signed(acct(1)),
+                power,
+                hash(action as u8),
+            ));
+            for member in 2..=5u8 {
+                assert_ok!(Guardian::approve_action(
+                    RuntimeOrigin::signed(acct(member)),
+                    action,
+                ));
+            }
+        }
+        assert_eq!(ReviewDeadlines::<Test>::get().len(), 3);
+
+        // Isolate the middle review's refund failure. The first and third
+        // reviews must commit independently instead of sharing one rollback.
+        ReviewRefundFailsFor::set(Some(101));
+        set_epoch(2);
+        run_to_block(2);
+        assert!(FailedActions::<Test>::contains_key(0));
+        assert!(!FailedActions::<Test>::contains_key(1));
+        assert!(FailedActions::<Test>::contains_key(2));
+        assert!(ReviewFrontingOf::<Test>::contains_key(1));
+        assert!(!ReviewFrontingOf::<Test>::contains_key(0));
+        assert!(!ReviewFrontingOf::<Test>::contains_key(2));
+
+        let stranded = ReviewFrontingOf::<Test>::get(1);
+        assert!(stranded.is_some(), "failed review must remain retryable");
+        let Some(stranded) = stranded else {
+            return;
+        };
+        let bonds = MemberBonds::<Test>::get();
+        for (position, bond) in bonds.iter().take(5).enumerate() {
+            assert_eq!(
+                *bond, stranded.slices[position],
+                "actual obligation is held balance plus outstanding fronting"
+            );
+        }
+
+        // Retrying only the failed review consumes the remaining bounded
+        // liability. No exact transfer can demand more than the live hold.
+        ReviewRefundFailsFor::set(None);
+        run_to_block(3);
+        for action in 0..3 {
+            assert!(FailedActions::<Test>::contains_key(action));
+            assert!(!ReviewFrontingOf::<Test>::contains_key(action));
+        }
+        assert!(MemberBonds::<Test>::get()[..5]
+            .iter()
+            .all(|bond| *bond == 0));
+        let reason = RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond);
+        for member in members().iter().take(5) {
+            assert_eq!(
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(&reason, member),
+                0
+            );
+        }
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
 fn underfunded_set_members_is_fully_atomic() {
     new_test_ext().execute_with(|| {
         let before_members = Members::<Test>::get();

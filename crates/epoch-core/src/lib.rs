@@ -733,7 +733,9 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
                     )
             })
             .count();
-        let resources = self.proposal(pid)?.resources.clone();
+        let mut resources = self.proposal(pid)?.resources.clone().into_inner();
+        resources.sort_unstable();
+        resources.dedup();
         ensure!(
             self.proposal(pid)?.state == ProposalState::Submitted,
             Error::BadState

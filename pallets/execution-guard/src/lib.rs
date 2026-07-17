@@ -1578,7 +1578,7 @@ pub mod pallet {
             T::Hashing::hash(bytes).into()
         }
 
-        fn decode_batch(bytes: &[u8]) -> Result<RuntimeBatch<T>, DispatchError> {
+        pub fn decode_batch(bytes: &[u8]) -> Result<RuntimeBatch<T>, DispatchError> {
             let mut prefix = bytes;
             let call_count = Compact::<u32>::decode(&mut prefix)
                 .map_err(|_| Error::<T>::BadPreimage)?

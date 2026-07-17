@@ -516,28 +516,53 @@ impl Guardian {
             .push(Event::ActionRatified { action: action_id });
         Ok(())
     }
-    pub fn enforce_reviews(&mut self, epoch: EpochId) -> Result<(), Error> {
-        for review in &mut self.reviews {
-            if !review.ratified && !review.recall_scheduled && epoch >= review.deadline_epoch {
-                let slash = GUARDIAN_BOND.saturating_mul(REVIEW_SLASH_PERCENT as Balance) / 100;
-                // The core updates seated obligations; the FRAME shell keys the
-                // real holds and post-term release records by account, applying
-                // this same slash to departed approvers as well.
-                for approver in review.approvers.iter().take(review.approver_count as usize) {
-                    if let Some(idx) = self
-                        .members
-                        .iter()
-                        .position(|member| member.as_ref() == Some(approver))
-                    {
-                        self.member_bonds[idx] = self.member_bonds[idx].saturating_sub(slash);
-                    }
-                }
-                review.recall_scheduled = true;
-                self.events.push(Event::ReviewFailed {
-                    action: review.action_id,
-                    slashed_each: slash,
-                });
+    pub fn mark_review_failed(
+        &mut self,
+        action_id: ActionId,
+        epoch: EpochId,
+        actual_slashes: [Balance; GUARDIAN_SEATS],
+    ) -> Result<(), Error> {
+        let review = self
+            .reviews
+            .iter_mut()
+            .find(|review| review.action_id == action_id)
+            .ok_or(Error::ReviewNotFound)?;
+        ensure!(
+            !review.ratified && !review.recall_scheduled && epoch >= review.deadline_epoch,
+            Error::ReviewNotFound
+        );
+        let approvers = review.approvers;
+        let approver_count = review.approver_count;
+        review.recall_scheduled = true;
+        for (position, approver) in approvers.iter().take(approver_count as usize).enumerate() {
+            if let Some(index) = self
+                .members
+                .iter()
+                .position(|member| member.as_ref() == Some(approver))
+            {
+                self.member_bonds[index] =
+                    self.member_bonds[index].saturating_sub(actual_slashes[position]);
             }
+        }
+        Ok(())
+    }
+
+    pub fn enforce_reviews(&mut self, epoch: EpochId) -> Result<(), Error> {
+        let due = self
+            .reviews
+            .iter()
+            .filter(|review| {
+                !review.ratified && !review.recall_scheduled && epoch >= review.deadline_epoch
+            })
+            .map(|review| review.action_id)
+            .collect::<Vec<_>>();
+        let slash = GUARDIAN_BOND.saturating_mul(REVIEW_SLASH_PERCENT as Balance) / 100;
+        for action in due {
+            self.mark_review_failed(action, epoch, [slash; GUARDIAN_SEATS])?;
+            self.events.push(Event::ReviewFailed {
+                action,
+                slashed_each: slash,
+            });
         }
         Ok(())
     }

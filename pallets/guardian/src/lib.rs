@@ -141,6 +141,10 @@ pub trait GuardianReviewScheduler {
     fn review_deposit() -> futarchy_primitives::Balance;
     /// Submit the review referendum for `action_id`; return its index.
     fn schedule_review(action_id: ActionId) -> Result<u32, sp_runtime::DispatchError>;
+    /// Cancel the automatic review if it is still ongoing before an
+    /// `uphold_veto` verdict refunds its deposits. Already-closed reviews are
+    /// accepted so the two verdict paths remain race-safe and one-shot.
+    fn cancel_review(referendum: u32) -> Result<(), sp_runtime::DispatchError>;
     /// Refund both deposits of a closed review into the guardian sovereign.
     fn refund_review(referendum: u32) -> Result<(), sp_runtime::DispatchError>;
 }
@@ -700,6 +704,9 @@ pub mod pallet {
                 )
                 .map_err(Self::map_core_error)?;
                 T::ProposalVeto::uphold(pid)?;
+                let referendum =
+                    ReviewReferenda::<T>::get(action_id).ok_or(Error::<T>::ReviewNotFound)?;
+                T::ReviewScheduler::cancel_review(referendum)?;
                 Self::refund_review_fronting(action_id)?;
                 Self::persist(&g)?;
                 Self::drain_events(&mut g)?;
@@ -1039,6 +1046,9 @@ pub mod pallet {
 
         fn refund_review_fronting(action: ActionId) -> DispatchResult {
             let fronting = ReviewFrontingOf::<T>::get(action).ok_or(Error::<T>::ReviewNotFound)?;
+            if fronting.slices.iter().all(|slice| *slice == 0) {
+                return Ok(());
+            }
             T::ReviewScheduler::refund_review(fronting.referendum)?;
             let reason = Self::seat_reason();
             let sovereign = T::SovereignAccount::get();
@@ -1056,6 +1066,38 @@ pub mod pallet {
                 T::Currency::transfer(&sovereign, &who, slice, Preservation::Expendable)?;
                 T::Currency::hold(&reason, &who, slice)?;
             }
+            Ok(())
+        }
+
+        /// Return one concluded review's fronted slices to their seat holds
+        /// without consuming the review record. Maintenance performs this for
+        /// every refundable overdue review before computing any slash, so the
+        /// current hold is the authoritative bounded liability.
+        fn restore_due_review_fronting(action: ActionId) -> DispatchResult {
+            let mut fronting =
+                ReviewFrontingOf::<T>::get(action).ok_or(Error::<T>::ReviewNotFound)?;
+            if fronting.slices.iter().all(|slice| *slice == 0) {
+                return Ok(());
+            }
+            T::ReviewScheduler::refund_review(fronting.referendum)?;
+            let reason = Self::seat_reason();
+            let sovereign = T::SovereignAccount::get();
+            for (position, raw) in fronting
+                .approvers
+                .iter()
+                .take(usize::from(fronting.approver_count))
+                .enumerate()
+            {
+                let slice = fronting.slices[position];
+                if slice == 0 {
+                    continue;
+                }
+                let who = Self::from_core(*raw);
+                T::Currency::transfer(&sovereign, &who, slice, Preservation::Expendable)?;
+                T::Currency::hold(&reason, &who, slice)?;
+                fronting.slices[position] = 0;
+            }
+            ReviewFrontingOf::<T>::insert(action, fronting);
             Ok(())
         }
 
@@ -1227,7 +1269,8 @@ pub mod pallet {
                         action,
                         slashed_each,
                     } => {
-                        let scheduled = Self::settle_failed_review(action, slashed_each)?;
+                        Self::restore_due_review_fronting(action)?;
+                        let (scheduled, _) = Self::settle_failed_review(action, slashed_each)?;
                         Self::deposit_event(Event::ReviewFailed {
                             action,
                             slashed_each,
@@ -1251,9 +1294,13 @@ pub mod pallet {
         fn settle_failed_review(
             action: ActionId,
             slashed_each: futarchy_primitives::Balance,
-        ) -> Result<Option<u32>, DispatchError> {
+        ) -> Result<(Option<u32>, [futarchy_primitives::Balance; GUARDIAN_SEATS]), DispatchError>
+        {
             let fronting = ReviewFrontingOf::<T>::get(action).ok_or(Error::<T>::ReviewNotFound)?;
-            T::ReviewScheduler::refund_review(fronting.referendum)?;
+            ensure!(
+                fronting.slices.iter().all(|slice| *slice == 0),
+                Error::<T>::BondAccounting
+            );
             ensure!(
                 FailedActions::<T>::contains_key(action)
                     || FailedActions::<T>::count() < MAX_FAILED_ACTIONS,
@@ -1265,6 +1312,7 @@ pub mod pallet {
             let members = Members::<T>::get().ok_or(Error::<T>::NotInitialized)?;
             let mut releases = PendingBondReleases::<T>::get();
             let mut pool = 0u128;
+            let mut actual_slashes = [0u128; GUARDIAN_SEATS];
 
             for (position, raw) in fronting
                 .approvers
@@ -1273,27 +1321,21 @@ pub mod pallet {
                 .enumerate()
             {
                 let who = Self::from_core(*raw);
-                let effective_slash = fronting.obligations[position].min(slashed_each);
-                let slice = fronting.slices[position];
-                let consumed_fronting = slice.min(effective_slash);
-                let held_slash = effective_slash.saturating_sub(consumed_fronting);
-                if held_slash > 0 {
+                let held = T::Currency::balance_on_hold(&reason, &who);
+                let effective_slash = fronting.obligations[position].min(slashed_each).min(held);
+                if effective_slash > 0 {
                     let moved = T::Currency::transfer_on_hold(
                         &reason,
                         &who,
                         &sovereign,
-                        held_slash,
+                        effective_slash,
                         Precision::Exact,
                         Restriction::Free,
                         Fortitude::Force,
                     )?;
-                    ensure!(moved == held_slash, Error::<T>::BondAccounting);
+                    ensure!(moved == effective_slash, Error::<T>::BondAccounting);
                 }
-                let restore = slice.saturating_sub(consumed_fronting);
-                if restore > 0 {
-                    T::Currency::transfer(&sovereign, &who, restore, Preservation::Expendable)?;
-                    T::Currency::hold(&reason, &who, restore)?;
-                }
+                actual_slashes[position] = effective_slash;
 
                 if members.iter().all(|member| member.as_ref() != Some(raw)) {
                     let release = releases
@@ -1330,7 +1372,7 @@ pub mod pallet {
             FailedActions::<T>::insert(action, failed);
             ReviewReferenda::<T>::remove(action);
             ReviewFrontingOf::<T>::remove(action);
-            Ok(referendum)
+            Ok((referendum, actual_slashes))
         }
 
         /// Build the [`DispatchContext`] for approving `action_id`: triggers
@@ -1374,12 +1416,59 @@ pub mod pallet {
         /// so the live-slot caps stay concurrent (not lifetime). Idempotent and
         /// no-op-safe.
         fn run_maintenance() {
+            let epoch = T::CurrentEpoch::get();
+            let overdue = match Self::load() {
+                Some(g) => g
+                    .reviews
+                    .iter()
+                    .filter(|review| {
+                        !review.ratified
+                            && !review.recall_scheduled
+                            && epoch >= review.deadline_epoch
+                    })
+                    .map(|review| review.action_id)
+                    .collect::<Vec<_>>(),
+                None => Vec::new(),
+            };
+
+            // Refund and restore every independently-refundable due slice
+            // first. Each child layer is durable on its own; one unfinished or
+            // corrupt review cannot erase another review's restored liability.
+            for action in &overdue {
+                let _ = frame_support::storage::with_storage_layer(|| {
+                    Self::restore_due_review_fronting(*action)
+                });
+            }
+
+            // Settle each missed review in its own transaction. A failed
+            // refund/slash/recall for one action remains retryable without
+            // rolling back already-settled peers.
+            for action in overdue {
+                let _ = frame_support::storage::with_storage_layer(|| {
+                    let mut g = Self::load().ok_or(Error::<T>::NotInitialized)?;
+                    let nominal = GUARDIAN_BOND
+                        .saturating_mul(futarchy_primitives::Balance::from(REVIEW_SLASH_PERCENT))
+                        / 100;
+                    let (scheduled, actual_slashes) = Self::settle_failed_review(action, nominal)?;
+                    g.mark_review_failed(action, epoch, actual_slashes)
+                        .map_err(Self::map_core_error)?;
+                    g.reap_terminal(Self::now());
+                    Self::persist(&g)?;
+                    Self::deposit_event(Event::ReviewFailed {
+                        action,
+                        slashed_each: nominal,
+                    });
+                    if let Some(referendum) = scheduled {
+                        Self::deposit_event(Event::RecallScheduled { action, referendum });
+                    }
+                    Ok::<(), DispatchError>(())
+                });
+            }
+
             let _ = frame_support::storage::with_storage_layer(|| -> DispatchResult {
                 if let Some(mut g) = Self::load() {
                     let before = g.clone();
                     g.expire_playbooks(Self::now());
-                    g.enforce_reviews(T::CurrentEpoch::get())
-                        .map_err(Self::map_core_error)?;
                     g.reap_terminal(Self::now());
                     if !(g.events.is_empty()
                         && g.active_playbooks == before.active_playbooks
@@ -1557,16 +1646,16 @@ pub mod pallet {
                     );
                 }
                 for fronting in ReviewFrontingOf::<T>::iter_values() {
+                    let fronted = fronting
+                        .slices
+                        .iter()
+                        .take(usize::from(fronting.approver_count))
+                        .copied()
+                        .fold(0u128, u128::saturating_add);
                     ensure!(
                         fronting.approver_count > 0
                             && usize::from(fronting.approver_count) <= GUARDIAN_SEATS
-                            && fronting
-                                .slices
-                                .iter()
-                                .take(usize::from(fronting.approver_count))
-                                .copied()
-                                .fold(0u128, u128::saturating_add)
-                                == T::ReviewScheduler::review_deposit(),
+                            && (fronted == 0 || fronted == T::ReviewScheduler::review_deposit()),
                         TryRuntimeError::Other("guardian bond: malformed review fronting")
                     );
                 }

@@ -31,7 +31,7 @@ pub struct SubstrateWeight<T>(PhantomData<T>);
 
 impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     fn submit() -> Weight {
-        base::<T>(45_000_000, 12, 10)
+        base::<T>(45_000_000, 13, 10)
     }
     fn withdraw() -> Weight {
         base::<T>(40_000_000, 12, 10)
@@ -85,7 +85,7 @@ fn base<T: frame_system::Config>(time: u64, reads: u64, writes: u64) -> Weight {
 
 impl WeightInfo for () {
     fn submit() -> Weight {
-        rocks(45_000_000, 12, 10)
+        rocks(45_000_000, 13, 10)
     }
     fn withdraw() -> Weight {
         rocks(40_000_000, 12, 10)
