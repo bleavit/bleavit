@@ -30,7 +30,7 @@ pub use weights::WeightInfo;
 pub mod weights;
 
 #[cfg(feature = "runtime-benchmarks")]
-mod benchmarking;
+pub mod benchmarking;
 #[cfg(test)]
 mod mock;
 #[cfg(test)]
@@ -56,6 +56,8 @@ pub const MAX_METRIC_SPECS_BOUND: u32 = MAX_METRIC_SPECS as u32;
 pub const MAX_SNAPSHOTS_BOUND: u32 = MAX_SNAPSHOTS as u32;
 pub const MAX_GATE_FLAGS_BOUND: u32 = MAX_GATE_FLAGS as u32;
 pub const MAX_COMPONENTS_PER_SPEC_BOUND: u32 = MAX_COMPONENTS_PER_SPEC as u32;
+/// Current epoch plus the retained snapshot-history window.
+pub const MAX_XCM_TRAFFIC_EPOCHS_BOUND: u32 = MAX_SNAPSHOTS_BOUND + 1;
 
 /// Live 13 §1 welfare tunables. B1a implements this provider over
 /// `pallet-constitution::Params`; tests use overridable parameter statics.
@@ -122,6 +124,13 @@ pub enum SettleTarget {
 #[cfg(feature = "runtime-benchmarks")]
 pub trait BenchmarkHelper<RuntimeOrigin> {
     fn metric_governance_origin() -> RuntimeOrigin;
+    /// Advance the configured clock so `epoch` is finalized before a keeper
+    /// crank. Runtime implementations inject the real epoch storage state.
+    fn prime_finalized_epoch(epoch: EpochId);
+    /// Populate every component the active benchmark MetricSpec reads.
+    fn prime_metric_inputs(count: u16);
+    fn prime_keeper_rebate() {}
+    fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 }
 
 #[frame_support::pallet]
@@ -297,10 +306,27 @@ pub mod pallet {
     /// `accepted / (accepted + failed + probe_timeouts)` over the requested
     /// day/epoch window; no traffic means X = 1. This pallet records only the
     /// three local signals and deliberately does not compute X. Entries are
-    /// reaped with the welfare rolling window by [`Pallet::prune`].
+    /// reaped with the welfare rolling window by [`Pallet::prune`] and the
+    /// epoch-clock maintenance seam.
     #[pallet::storage]
-    pub type XcmTraffic<T: Config> =
-        StorageMap<_, Twox64Concat, (EpochId, u8), XcmTrafficCounters, ValueQuery>;
+    pub type XcmTraffic<T: Config> = StorageDoubleMap<
+        _,
+        Twox64Concat,
+        EpochId,
+        Twox64Concat,
+        u8,
+        XcmTrafficCounters,
+        ValueQuery,
+    >;
+
+    /// Bounded epoch prefixes which currently own XCM traffic entries.
+    ///
+    /// This lets clock-roll maintenance reap traffic-only epochs without a
+    /// historical full-map scan. The inclusive retained range is the current
+    /// epoch plus the preceding snapshot window.
+    #[pallet::storage]
+    pub type XcmTrafficEpochs<T: Config> =
+        StorageValue<_, BoundedVec<EpochId, ConstU32<MAX_XCM_TRAFFIC_EPOCHS_BOUND>>, ValueQuery>;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -571,22 +597,48 @@ pub mod pallet {
         /// Runtime-internal rolling-window maintenance. B1a wires this from
         /// epoch Housekeeping only after the cohort reap precondition in 05 §3.3.
         pub fn prune(cutoff_epoch: EpochId) -> DispatchResult {
-            Self::mutate(|state| {
-                state.prune_before(cutoff_epoch);
-                Ok(())
-            })?;
-            for epoch in SampledGateDays::<T>::iter_keys()
-                .filter(|epoch| *epoch < cutoff_epoch)
-                .collect::<Vec<_>>()
-            {
+            let pre = Self::load();
+            let mut retired_epochs = pre
+                .snapshots
+                .iter()
+                .filter_map(|snapshot| (snapshot.epoch < cutoff_epoch).then_some(snapshot.epoch))
+                .chain(
+                    pre.gate_flags
+                        .iter()
+                        .filter_map(|(epoch, _)| (*epoch < cutoff_epoch).then_some(*epoch)),
+                )
+                .chain(SampledGateDays::<T>::iter_keys().filter(|epoch| *epoch < cutoff_epoch))
+                .collect::<Vec<_>>();
+            retired_epochs.sort_unstable();
+            retired_epochs.dedup();
+
+            let mut post = pre.clone();
+            post.prune_before(cutoff_epoch);
+            Self::persist(&pre, post)?;
+            for epoch in retired_epochs {
                 SampledGateDays::<T>::remove(epoch);
             }
-            for key in XcmTraffic::<T>::iter_keys()
-                .filter(|(epoch, _)| *epoch < cutoff_epoch)
-                .collect::<Vec<_>>()
-            {
-                XcmTraffic::<T>::remove(key);
-            }
+            Self::prune_xcm_traffic(cutoff_epoch)?;
+            Ok(())
+        }
+
+        /// Reap only retired XCM traffic prefixes.
+        ///
+        /// Epoch calls this whenever its persisted clock crosses an epoch
+        /// boundary, including when no settlement cohort exists. Both loops
+        /// are bounded: the epoch index has at most the retained-window size,
+        /// and the `u8` day key admits at most 256 entries per prefix.
+        pub fn prune_xcm_traffic(cutoff_epoch: EpochId) -> DispatchResult {
+            XcmTrafficEpochs::<T>::mutate(|epochs| {
+                epochs.retain(|epoch| {
+                    if *epoch < cutoff_epoch {
+                        let _ = XcmTraffic::<T>::clear_prefix(*epoch, u8::MAX as u32 + 1, None);
+                        false
+                    } else {
+                        true
+                    }
+                });
+            });
             Ok(())
         }
 
@@ -595,7 +647,19 @@ pub mod pallet {
         /// Saturation is deliberate: router delivery and oracle timeout handling
         /// are fail-soft observation paths, so recording can never error or panic.
         pub fn note_xcm_traffic(epoch: EpochId, day: u8, kind: XcmTrafficKind) {
-            XcmTraffic::<T>::mutate((epoch, day), |counters| match kind {
+            let tracked = XcmTrafficEpochs::<T>::mutate(|epochs| {
+                if epochs.contains(&epoch) {
+                    true
+                } else {
+                    epochs.try_push(epoch).is_ok()
+                }
+            });
+            // A full index indicates corrupt or stale maintenance state. Keep
+            // the observation path fail-soft without creating unindexed state.
+            if !tracked {
+                return;
+            }
+            XcmTraffic::<T>::mutate(epoch, day, |counters| match kind {
                 XcmTrafficKind::Accepted => {
                     counters.accepted = counters.accepted.saturating_add(1);
                 }
@@ -610,22 +674,24 @@ pub mod pallet {
 
         /// Return the local XCM counters for one epoch/day window.
         pub fn xcm_traffic(epoch: EpochId, day: u8) -> XcmTrafficCounters {
-            XcmTraffic::<T>::get((epoch, day))
+            XcmTraffic::<T>::get(epoch, day)
         }
 
         /// Return the field-wise saturating sum of an epoch's local XCM counters.
         ///
-        /// The prescribed storage shape is a single map keyed by `(EpochId, u8)`,
-        /// so probing the complete `u8` day domain gives a fixed 256-read bound
-        /// independent of historical map size.
+        /// The double-map epoch prefix makes the reads proportional to days that
+        /// actually recorded traffic; the `u8` second key hard-bounds that at 256.
         pub fn xcm_traffic_epoch(epoch: EpochId) -> XcmTrafficCounters {
-            (u8::MIN..=u8::MAX).fold(XcmTrafficCounters::default(), |mut total, day| {
-                let counters = XcmTraffic::<T>::get((epoch, day));
-                total.accepted = total.accepted.saturating_add(counters.accepted);
-                total.failed = total.failed.saturating_add(counters.failed);
-                total.probe_timeouts = total.probe_timeouts.saturating_add(counters.probe_timeouts);
-                total
-            })
+            XcmTraffic::<T>::iter_prefix(epoch).fold(
+                XcmTrafficCounters::default(),
+                |mut total, (_, counters)| {
+                    total.accepted = total.accepted.saturating_add(counters.accepted);
+                    total.failed = total.failed.saturating_add(counters.failed);
+                    total.probe_timeouts =
+                        total.probe_timeouts.saturating_add(counters.probe_timeouts);
+                    total
+                },
+            )
         }
 
         /// Full core state rebuilt from the three frozen storage mirrors.
@@ -635,7 +701,7 @@ pub mod pallet {
 
         /// Seed a checked core state for tests and worst-case benchmarks.
         #[cfg(any(test, feature = "runtime-benchmarks"))]
-        pub(crate) fn seed(state: &WelfareState) -> DispatchResult {
+        pub fn seed(state: &WelfareState) -> DispatchResult {
             let mut state = state.clone();
             state.events.clear();
             let pre = Self::load();
@@ -832,6 +898,43 @@ pub mod pallet {
                 if !GateBreachFlags::<T>::contains_key(epoch) {
                     return Err(TryRuntimeError::Other(
                         "welfare sampled-gate marker has no corresponding gate record",
+                    ));
+                }
+            }
+            let current_epoch = T::CurrentEpoch::get();
+            let oldest_retained = current_epoch.saturating_sub(MAX_SNAPSHOTS_BOUND);
+            let traffic_epochs = XcmTrafficEpochs::<T>::get();
+            for (position, epoch) in traffic_epochs.iter().enumerate() {
+                if *epoch < oldest_retained || *epoch > current_epoch {
+                    return Err(TryRuntimeError::Other(
+                        "welfare XCM traffic index lies outside the retained epoch window",
+                    ));
+                }
+                if traffic_epochs[..position].contains(epoch) {
+                    return Err(TryRuntimeError::Other(
+                        "welfare XCM traffic index contains a duplicate epoch",
+                    ));
+                }
+                if XcmTraffic::<T>::iter_prefix(*epoch).next().is_none() {
+                    return Err(TryRuntimeError::Other(
+                        "welfare XCM traffic index has no corresponding counter",
+                    ));
+                }
+            }
+            for (epoch, _, counters) in XcmTraffic::<T>::iter() {
+                if epoch < oldest_retained || epoch > current_epoch {
+                    return Err(TryRuntimeError::Other(
+                        "welfare XCM traffic lies outside the retained epoch window",
+                    ));
+                }
+                if !traffic_epochs.contains(&epoch) {
+                    return Err(TryRuntimeError::Other(
+                        "welfare XCM traffic counter has no indexed epoch",
+                    ));
+                }
+                if counters.accepted == 0 && counters.failed == 0 && counters.probe_timeouts == 0 {
+                    return Err(TryRuntimeError::Other(
+                        "welfare XCM traffic stores an all-zero counter triple",
                     ));
                 }
             }

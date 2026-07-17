@@ -563,14 +563,19 @@ fn prune_rolls_the_snapshot_and_gate_windows() {
         assert_eq!(GateBreachFlags::<Test>::iter().count(), MAX_GATE_FLAGS);
         assert_eq!(SampledGateDays::<Test>::iter().count(), MAX_GATE_FLAGS);
         Welfare::note_xcm_traffic(2, 0, XcmTrafficKind::Accepted);
+        Welfare::note_xcm_traffic(2, u8::MAX, XcmTrafficKind::ProbeTimeout);
         Welfare::note_xcm_traffic(3, 0, XcmTrafficKind::SendFailed);
+        // No snapshot/gate owns epoch 1: its traffic-only prefix must still reap.
+        Welfare::note_xcm_traffic(1, 7, XcmTrafficKind::Accepted);
 
         assert_ok!(Welfare::prune(3));
         assert!(!Snapshots::<Test>::contains_key((2, 1)));
         assert!(!GateBreachFlags::<Test>::contains_key(2));
         assert!(!SampledGateDays::<Test>::contains_key(2));
-        assert!(!XcmTraffic::<Test>::contains_key((2, 0)));
-        assert!(XcmTraffic::<Test>::contains_key((3, 0)));
+        assert_eq!(XcmTraffic::<Test>::iter_prefix(2).count(), 0);
+        assert_eq!(XcmTraffic::<Test>::iter_prefix(1).count(), 0);
+        assert!(XcmTraffic::<Test>::contains_key(3, 0));
+        assert_eq!(XcmTrafficEpochs::<Test>::get().into_inner(), vec![3]);
         assert_eq!(MetricSpecs::<Test>::iter().count(), 1);
 
         let next = MAX_SNAPSHOTS as u32 + 2;
@@ -598,7 +603,8 @@ fn prune_rolls_the_snapshot_and_gate_windows() {
 fn xcm_traffic_recorder_saturates_each_counter() {
     new_test_ext().execute_with(|| {
         XcmTraffic::<Test>::insert(
-            (7, 3),
+            7,
+            3,
             XcmTrafficCounters {
                 accepted: u64::MAX,
                 failed: u64::MAX,
@@ -660,7 +666,8 @@ fn xcm_traffic_is_isolated_by_epoch_and_day() {
 fn xcm_traffic_epoch_sum_is_field_wise_and_saturating() {
     new_test_ext().execute_with(|| {
         XcmTraffic::<Test>::insert(
-            (7, 0),
+            7,
+            0,
             XcmTrafficCounters {
                 accepted: u64::MAX,
                 failed: 1,
@@ -668,7 +675,8 @@ fn xcm_traffic_epoch_sum_is_field_wise_and_saturating() {
             },
         );
         XcmTraffic::<Test>::insert(
-            (7, u8::MAX),
+            7,
+            u8::MAX,
             XcmTrafficCounters {
                 accepted: 1,
                 failed: u64::MAX,
@@ -676,7 +684,8 @@ fn xcm_traffic_epoch_sum_is_field_wise_and_saturating() {
             },
         );
         XcmTraffic::<Test>::insert(
-            (8, 0),
+            8,
+            0,
             XcmTrafficCounters {
                 accepted: 0,
                 failed: 0,
@@ -713,6 +722,51 @@ fn xcm_traffic_recorder_is_infallible_across_epoch_and_day_boundaries() {
                 256
             );
         }
+    });
+}
+
+#[test]
+fn try_state_rejects_xcm_traffic_outside_retention_and_zero_counters() {
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(30);
+        XcmTraffic::<Test>::insert(
+            9,
+            0,
+            XcmTrafficCounters {
+                accepted: 1,
+                ..Default::default()
+            },
+        );
+        assert!(Welfare::do_try_state().is_err());
+
+        XcmTraffic::<Test>::remove(9, 0);
+        XcmTrafficEpochs::<Test>::kill();
+        XcmTraffic::<Test>::insert(
+            31,
+            0,
+            XcmTrafficCounters {
+                probe_timeouts: 1,
+                ..Default::default()
+            },
+        );
+        assert!(Welfare::do_try_state().is_err());
+
+        XcmTraffic::<Test>::remove(31, 0);
+        XcmTrafficEpochs::<Test>::kill();
+        XcmTraffic::<Test>::insert(10, 0, XcmTrafficCounters::default());
+        assert!(Welfare::do_try_state().is_err());
+
+        XcmTraffic::<Test>::remove(10, 0);
+        XcmTrafficEpochs::<Test>::kill();
+        Welfare::note_xcm_traffic(30, u8::MAX, XcmTrafficKind::SendFailed);
+        assert_ok!(Welfare::do_try_state());
+
+        XcmTrafficEpochs::<Test>::kill();
+        assert!(Welfare::do_try_state().is_err());
+
+        XcmTraffic::<Test>::remove(30, u8::MAX);
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![30]));
+        assert!(Welfare::do_try_state().is_err());
     });
 }
 
@@ -1141,5 +1195,32 @@ fn shell_matches_core_over_400_step_fixed_seed_sequence() {
                 "gate flags diverged at step {step}"
             );
         }
+    });
+}
+
+#[test]
+fn rolling_window_with_the_runtime_prune_cutoff_never_jams() {
+    // Regression for the 2026-07-17 re-review blocker: the runtime seam prunes
+    // with cutoff = current − (MAX_SNAPSHOTS_BOUND − 1) — the 05 §3.3 "snapshot
+    // e−20 and older" reading — which must always leave one free slot in the
+    // 20-capacity window so the next epoch's snapshot records. A cutoff of
+    // current − MAX_SNAPSHOTS_BOUND retains a full window and jams recording
+    // permanently (settlement deadlock → dead-man; PLAN SQ-155).
+    new_test_ext().execute_with(|| {
+        // The mock genesis spec activates at epoch 1, so the first recordable
+        // snapshot epoch is 1 (clock 2).
+        for current in 2..=(3 * MAX_SNAPSHOTS_BOUND) {
+            CurrentEpochValue::set(current);
+            assert_ok!(Welfare::record_snapshot(
+                RuntimeOrigin::signed(keeper()),
+                current - 1,
+                1,
+            ));
+            assert_ok!(Welfare::prune(
+                current.saturating_sub(MAX_SNAPSHOTS_BOUND - 1)
+            ));
+        }
+        // The window is at steady state: 19 retained + the slot just used.
+        assert!(Snapshots::<Test>::iter().count() <= MAX_SNAPSHOTS);
     });
 }

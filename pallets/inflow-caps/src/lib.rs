@@ -80,8 +80,14 @@ pub mod pallet {
         /// Check and record one account's cumulative Phase-3 USDC inflow.
         /// Refusal is a strict no-op; callers compose this write with the
         /// beneficiary credit in one storage transaction (`09 §5.2`, G-1).
+        /// Once Phase 5 installs the unbounded sentinel, the retired meter is
+        /// neither read nor extended.
         #[allow(clippy::result_unit_err)]
         pub fn note_inflow(who: &T::AccountId, amount: u128) -> Result<(), ()> {
+            let cap = T::CapParams::deposit_cap_usdc();
+            if cap == u128::MAX {
+                return Ok(());
+            }
             // Do not create zero-value map entries: try-state treats them as
             // non-canonical and a zero inflow changes no meter state.
             if amount == 0 {
@@ -89,16 +95,20 @@ pub mod pallet {
             }
             let current = CumulativeDeposits::<T>::get(who);
             let next = current.checked_add(amount).ok_or(())?;
-            let cap = T::CapParams::deposit_cap_usdc();
-            if cap != u128::MAX && next > cap {
+            if next > cap {
                 return Err(());
             }
             CumulativeDeposits::<T>::insert(who, next);
             Ok(())
         }
 
-        /// Validate the live raise-only cap against every Phase-3 meter entry.
+        /// Validate both live raise-only caps and every Phase-3 meter entry.
         pub fn do_try_state() -> Result<(), TryRuntimeError> {
+            let tvl_cap = T::CapParams::tvl_cap_usdc();
+            ensure!(
+                tvl_cap == u128::MAX || T::UsdcIssuance::get() <= tvl_cap,
+                TryRuntimeError::Other("inflow-caps: total USDC issuance exceeds live cap")
+            );
             let cap = T::CapParams::deposit_cap_usdc();
             for (_, cumulative) in CumulativeDeposits::<T>::iter() {
                 ensure!(

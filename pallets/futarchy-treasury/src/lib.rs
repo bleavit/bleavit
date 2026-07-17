@@ -201,6 +201,16 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     fn treasury_origin() -> RuntimeOrigin;
     /// A funded keeper/recipient account for Signed calls.
     fn account(seed: u8) -> AccountId;
+    /// Seed the real-USDC `MAIN` custody balance used by the dedicated payout
+    /// pot funding path. Custody-free pallet mocks may keep the no-op default;
+    /// the assembled runtime mints its benchmark fixture into `ForeignAssets`.
+    fn prime_pot_funding(
+        _: futarchy_primitives::Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
+    fn prime_keeper_rebate() {}
+    fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 }
 
 #[frame_support::pallet]

@@ -1333,6 +1333,8 @@ mod probe_dispatch_seam {
         fn adjudication_origin() -> RuntimeOrigin {
             RuntimeOrigin::root()
         }
+
+        fn prime_reporting(_: MetricId, _: EpochId, _: MetricSpecVersion) {}
     }
 
     fn new_ext() -> sp_io::TestExternalities {
@@ -1600,6 +1602,8 @@ mod probe_dispatch_seam {
             fn adjudication_origin() -> RuntimeOrigin {
                 RuntimeOrigin::root()
             }
+
+            fn prime_reporting(_: MetricId, _: EpochId, _: MetricSpecVersion) {}
         }
 
         fn new_ext() -> sp_io::TestExternalities {

@@ -43,7 +43,7 @@ fn refused_inflow_writes_nothing() {
         assert_eq!(InflowCaps::note_inflow(&1, 7), Err(()));
         assert_eq!(CumulativeDeposits::<Test>::get(1), 4);
 
-        DepositCap::set(u128::MAX);
+        DepositCap::set(10);
         CumulativeDeposits::<Test>::insert(1, u128::MAX);
         assert_eq!(InflowCaps::note_inflow(&1, 1), Err(()));
         assert_eq!(CumulativeDeposits::<Test>::get(1), u128::MAX);
@@ -62,12 +62,13 @@ fn meters_are_isolated_per_account() {
 }
 
 #[test]
-fn sentinel_makes_per_account_cap_unbounded_and_zero_is_not_stored() {
+fn sentinel_retires_meter_without_reading_or_writing_it() {
     new_test_ext().execute_with(|| {
+        CumulativeDeposits::<Test>::insert(1, 7);
         DepositCap::set(u128::MAX);
         assert_ok!(InflowCaps::note_inflow(&1, u128::MAX));
-        assert_ok!(InflowCaps::note_inflow(&2, 0));
-        assert_eq!(CumulativeDeposits::<Test>::get(1), u128::MAX);
+        assert_ok!(InflowCaps::note_inflow(&2, 10));
+        assert_eq!(CumulativeDeposits::<Test>::get(1), 7);
         assert!(!CumulativeDeposits::<Test>::contains_key(2));
         assert_ok!(InflowCaps::do_try_state());
     });
@@ -83,5 +84,17 @@ fn try_state_rejects_over_cap_and_zero_entries() {
         CumulativeDeposits::<Test>::remove(1);
         CumulativeDeposits::<Test>::insert(2, 0);
         assert!(InflowCaps::do_try_state().is_err());
+    });
+}
+
+#[test]
+fn try_state_rejects_total_issuance_over_a_finite_tvl_cap() {
+    new_test_ext().execute_with(|| {
+        TvlCap::set(999);
+        UsdcIssuance::set(1_000);
+        assert!(InflowCaps::do_try_state().is_err());
+
+        TvlCap::set(u128::MAX);
+        assert_ok!(InflowCaps::do_try_state());
     });
 }

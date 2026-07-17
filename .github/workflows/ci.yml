@@ -78,6 +78,45 @@ jobs:
       - name: Check local Markdown links
         run: python3 tools/ci/check-doc-links.py
 
+  weights:
+    name: Weight regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test weight regression gate
+        run: python3 tools/ci/check-weight-regression.py --self-test
+      - name: Check committed weight diffs
+        run: python3 tools/ci/check-weight-regression.py
+
+  benchmark-smoke:
+    name: Benchmark smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # substrate-wasm-builder needs the Wasm runtime target on a clean runner.
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native build dependencies
+        # omni-bencher's dependency tree reaches litep2p, whose build script
+        # needs `protoc`; the workspace build needs libclang (bindgen).
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
+      - name: Install FRAME omni-bencher
+        run: cargo install --locked frame-omni-bencher --version 0.15.0
+      - name: Build benchmark runtime Wasm
+        run: cargo build --locked --release -p bleavit-runtime --features runtime-benchmarks
+      - name: Execute every pallet benchmark
+        run: >-
+          frame-omni-bencher v1 benchmark pallet
+          --runtime target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
+          --all --steps 2 --repeat 1
+
   # B7 environment release artifacts — 15 §4.7; 02 §11.
   environments:
     name: Environment definitions
