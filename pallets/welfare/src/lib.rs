@@ -38,13 +38,17 @@ mod tests;
 
 use alloc::vec::Vec;
 use frame_support::pallet_prelude::DispatchResult;
-use futarchy_primitives::{EpochId, FixedU64, MetricSpecVersion, ProposalId};
+use futarchy_primitives::{
+    keeper::{CrankClass, KeeperRebateSink},
+    EpochId, FixedU64, MetricSpecVersion, ProposalId,
+};
 
 pub use welfare_core::{
     ComponentValue, Error as CoreError, Event as CoreEvent, GateBreachFlags as CoreGateBreachFlags,
     MetricSpec, Pillar, Snapshot as CoreSnapshot, SourceClass, WelfareParams as CoreWelfareParams,
-    WelfareState, EPSILON, EPSILON_PILLAR, HISTORY_PRIORS, MAX_COMPONENTS_PER_SPEC, MAX_GATE_FLAGS,
-    MAX_METRIC_SPECS, MAX_SNAPSHOTS, ONE, THETA_C_HI, THETA_C_LO, THETA_S_HI, THETA_S_LO, W_A, W_P,
+    WelfareState, EPSILON, EPSILON_PILLAR, HISTORY_PRIORS, MAX_COMPONENTS_PER_SPEC,
+    MAX_DAILY_GATE_SAMPLES, MAX_GATE_FLAGS, MAX_METRIC_SPECS, MAX_SNAPSHOTS, ONE, THETA_C_HI,
+    THETA_C_LO, THETA_S_HI, THETA_S_LO, W_A, W_P,
 };
 
 /// Core bounds in the `u32` form required by FRAME's `ConstU32`.
@@ -147,6 +151,8 @@ pub mod pallet {
         type Ledger: LedgerSettlement;
         /// Current epoch clock used by metric registration.
         type CurrentEpoch: Get<EpochId>;
+        /// Fail-soft keeper rebate endpoint (08 §6.3).
+        type KeeperRebate: KeeperRebateSink<Self::AccountId>;
         /// Weight information for all extrinsics.
         type WeightInfo: WeightInfo;
         /// Admitted origin construction for benchmarks.
@@ -235,6 +241,16 @@ pub mod pallet {
     pub type GateBreachFlags<T: Config> =
         StorageMap<_, Blake2_128Concat, EpochId, CoreGateBreachFlags, OptionQuery>;
 
+    /// Pallet-internal marker for successfully sampled daily gates.
+    ///
+    /// This is deliberately separate from the frozen `GateBreachFlags` surface:
+    /// 02 §7.4 names only `Snapshots`, `MetricSpecs`, and `GateBreachFlags`, and
+    /// 05 §4.7 requires the latter's bitmap to identify breached days only.
+    /// The auxiliary map is bounded and pruned in lockstep with gate history.
+    #[pallet::storage]
+    pub type SampledGateDays<T: Config> =
+        StorageMap<_, Blake2_128Concat, EpochId, [u32; 2], OptionQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -319,13 +335,14 @@ pub mod pallet {
         /// this stops an early/future call from locking a wrong `W` or consuming
         /// the bounded snapshot window before the real counters exist.
         #[pallet::call_index(1)]
+        // B5: recalibrate for the keeper-rebate sink's additional storage path.
         #[pallet::weight(T::WeightInfo::record_snapshot())]
         pub fn record_snapshot(
             origin: OriginFor<T>,
             epoch: EpochId,
             spec_version: MetricSpecVersion,
         ) -> DispatchResult {
-            let _ = ensure_signed(origin)?;
+            let who = ensure_signed(origin)?;
             frame_support::ensure!(
                 epoch < T::CurrentEpoch::get(),
                 Error::<T>::EpochNotFinalized
@@ -337,13 +354,16 @@ pub mod pallet {
                 state
                     .record_snapshot(epoch, spec_version, components, incident, &params)
                     .map(|_| ())
-            })
+            })?;
+            T::KeeperRebate::rebate(&who, CrankClass::DecisionCritical);
+            Ok(())
         }
 
         /// Permissionless signed keeper crank for a **finalized** epoch's daily
         /// S/C gate sample. Like `record_snapshot`, the epoch must have closed
         /// (`epoch < CurrentEpoch`) so the day's counters are final (05 §4.7).
         #[pallet::call_index(2)]
+        // B5: recalibrate for the keeper-rebate sink's additional storage path.
         #[pallet::weight(T::WeightInfo::record_daily_gate())]
         pub fn record_daily_gate(
             origin: OriginFor<T>,
@@ -351,18 +371,33 @@ pub mod pallet {
             day: u8,
             spec_version: MetricSpecVersion,
         ) -> DispatchResult {
-            let _ = ensure_signed(origin)?;
+            let who = ensure_signed(origin)?;
             frame_support::ensure!(
                 epoch < T::CurrentEpoch::get(),
                 Error::<T>::EpochNotFinalized
             );
             let components = T::MetricInputs::daily_components(epoch, day, spec_version);
             let params = Self::live_params()?;
+            frame_support::ensure!(day < MAX_DAILY_GATE_SAMPLES, Error::<T>::ValueOutOfRange);
+            let word_index = usize::from(day / 32);
+            let bit = 1u32 << (day % 32);
+            let mut sampled_days = SampledGateDays::<T>::get(epoch).unwrap_or([0; 2]);
+            let sampled_word = sampled_days
+                .get_mut(word_index)
+                .ok_or(Error::<T>::ValueOutOfRange)?;
+            let newly_sampled = *sampled_word & bit == 0;
+            *sampled_word |= bit;
+            let mut new_breach_flags = false;
             Self::mutate(|state| {
                 state
                     .record_daily_gate(epoch, day, spec_version, components, &params)
-                    .map(|_| ())
-            })
+                    .map(|(_, did_change)| new_breach_flags = did_change)
+            })?;
+            SampledGateDays::<T>::insert(epoch, sampled_days);
+            if newly_sampled || new_breach_flags {
+                T::KeeperRebate::rebate(&who, CrankClass::General);
+            }
+            Ok(())
         }
     }
 
@@ -381,6 +416,16 @@ pub mod pallet {
         #[pallet::constant_name(MaxSnapshots)]
         fn max_snapshots() -> u32 {
             MAX_SNAPSHOTS_BOUND
+        }
+
+        #[pallet::constant_name(MaxGateFlags)]
+        fn max_gate_flags() -> u32 {
+            MAX_GATE_FLAGS_BOUND
+        }
+
+        #[pallet::constant_name(MaxDailyGateSamples)]
+        fn max_daily_gate_samples() -> u8 {
+            MAX_DAILY_GATE_SAMPLES
         }
     }
 
@@ -478,7 +523,14 @@ pub mod pallet {
             Self::mutate(|state| {
                 state.prune_before(cutoff_epoch);
                 Ok(())
-            })
+            })?;
+            for epoch in SampledGateDays::<T>::iter_keys()
+                .filter(|epoch| *epoch < cutoff_epoch)
+                .collect::<Vec<_>>()
+            {
+                SampledGateDays::<T>::remove(epoch);
+            }
+            Ok(())
         }
 
         /// Full core state rebuilt from the three frozen storage mirrors.
@@ -658,6 +710,7 @@ pub mod pallet {
             if MetricSpecs::<T>::iter().count() > MAX_METRIC_SPECS
                 || Snapshots::<T>::iter().count() > MAX_SNAPSHOTS
                 || GateBreachFlags::<T>::iter().count() > MAX_GATE_FLAGS
+                || SampledGateDays::<T>::iter().count() > MAX_GATE_FLAGS
             {
                 return Err(TryRuntimeError::Other(
                     "welfare map entry count exceeds its core bound",
@@ -679,6 +732,13 @@ pub mod pallet {
                 StoredSnapshot::try_from(CoreSnapshot::from(snapshot)).map_err(|_| {
                     TryRuntimeError::Other("welfare snapshot violates its component bound")
                 })?;
+            }
+            for epoch in SampledGateDays::<T>::iter_keys() {
+                if !GateBreachFlags::<T>::contains_key(epoch) {
+                    return Err(TryRuntimeError::Other(
+                        "welfare sampled-gate marker has no corresponding gate record",
+                    ));
+                }
             }
             Ok(())
         }

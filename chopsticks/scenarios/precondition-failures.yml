@@ -1,0 +1,25 @@
+# Manufactured dispatch-time failures — 15 §4.7; 02 §11; 09 §1.2.
+# ExecutionGuard cells are inert until A11 occupies runtime slot 62 (B1a follow-up).
+genesis: zombienet/specs/out/bleavit-drill-raw.json
+mock-signature-host: true
+port: 8104
+db: chopsticks/.state/precondition-failures.sqlite
+runtime-log-level: 3
+# wasm-override: target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
+import-storage:
+  # Constitution.PhaseFlags = shadow|sudo|ledger-freeze|dead-man (bits 0,4,5,6).
+  - - "0xfb8ccbf677a3d2ce27ab85165f32df6a4b970b8d50ccb811cd988b36f7f6cf7c"
+    - "0x71000000"
+  # ExecutionGuard.HardGateBreach = true (real pallet storage name).
+  - - "0x0fa4af4f19b810e797f335f5b2f479289ce573cc45ebc4934cb0c15055d8f075"
+    - "0x01"
+  # ExecutionGuard.DeadManFreeze = true.
+  - - "0x0fa4af4f19b810e797f335f5b2f479283820e5996b94d5b5353b433dd3ac450b"
+    - "0x01"
+  # ExecutionGuard.MigrationHalt = true.
+  - - "0x0fa4af4f19b810e797f335f5b2f479282405b4b29c977f7ec63d38c3ae2db231"
+    - "0x01"
+  # CurrentSpecName is absent from the pre-A11 genesis and must accompany any
+  # future slot-62 Wasm override before closing try-state.
+  - - "0x0fa4af4f19b810e797f335f5b2f4792891c90e4173ef123718d6afdf349e68db"
+    - "0x1c626c656176697401000000"

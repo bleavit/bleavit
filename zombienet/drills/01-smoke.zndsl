@@ -1,0 +1,14 @@
+# 15 §4.7; 02 §11; 09 §7.1 — boot and parachain inclusion smoke.
+Description: Bleavit boots on Paseo local and parachain 4242 produces included blocks.
+Network: ./zombienet/networks/bleavit-local.toml
+
+relay-alice: is up within 120 seconds
+relay-bob: is up within 120 seconds
+relay-charlie: is up within 120 seconds
+relay-dave: is up within 120 seconds
+bleavit-collator-1: is up within 180 seconds
+bleavit-collator-2: is up within 180 seconds
+bleavit-collator-3: is up within 180 seconds
+relay-alice: parachain 4242 is registered within 240 seconds
+relay-alice: parachain 4242 block height is at least 10 within 300 seconds
+bleavit-collator-1: reports block height is at least 10 within 300 seconds

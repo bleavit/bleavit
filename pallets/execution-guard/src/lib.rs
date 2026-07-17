@@ -151,7 +151,7 @@ pub trait ReleaseChannelWriter {
         authorized_at: BlockNumber,
     ) -> DispatchResult;
     fn on_upgrade_applied(target_spec_version: u32) -> DispatchResult;
-    /// Relay-Abort status-quo clear (SQ-115). MUST be tolerant: if writer (b)
+    /// Relay-Abort status-quo clear (SQ-131). MUST be tolerant: if writer (b)
     /// lawfully rewrote the channel while the upgrade was in flight, the
     /// guard's own cleanup still proceeds — a mismatched channel is left
     /// untouched and this returns Ok, never wedging `PendingUpgrade` (G-1).
@@ -215,6 +215,7 @@ pub mod pallet {
     };
     use frame_system::pallet_prelude::*;
     use futarchy_primitives::{
+        keeper::{CrankClass, KeeperRebateSink},
         DispatchOutcomeCode, ExecutionRecord, RejectReason, INTEGRATION_CONTRACT_VERSION,
     };
     use parity_scale_codec::{Compact, Decode, DecodeWithMemTracking, Encode};
@@ -241,6 +242,8 @@ pub mod pallet {
         type ReleaseChannel: ReleaseChannelWriter;
         type RatifyOrigin: EnsureOrigin<Self::RuntimeOrigin>;
         type Dispatcher: BatchDispatcher<Self::RuntimeCall>;
+        /// Fail-soft keeper rebate sink (08 §6). It must never affect a crank.
+        type KeeperRebate: KeeperRebateSink<Self::AccountId>;
         /// Runtime-assembly bound for candidate Wasm. This is intentionally
         /// distinct from the 64 KiB proposal-call batch bound.
         #[pallet::constant]
@@ -541,8 +544,13 @@ pub mod pallet {
         #[pallet::call_index(0)]
         #[pallet::weight(T::WeightInfo::execute(MAX_CALLS_BOUND))]
         pub fn execute(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
-            let _ = ensure_signed(origin)?;
-            with_storage_layer(|| Self::do_execute(pid))
+            let who = ensure_signed(origin)?;
+            let result = with_storage_layer(|| Self::do_execute(pid));
+            if result.is_ok() && !Queue::<T>::contains_key(pid) {
+                // B5 recalibrates this weight for the rebate sink's treasury writes.
+                T::KeeperRebate::rebate(&who, CrankClass::General);
+            }
+            result
         }
 
         /// Permissionless second phase of the authorized-upgrade flow.
@@ -560,8 +568,12 @@ pub mod pallet {
         #[pallet::call_index(2)]
         #[pallet::weight(T::WeightInfo::expire_failed_execution())]
         pub fn expire_failed_execution(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
-            let _ = ensure_signed(origin)?;
-            with_storage_layer(|| Self::do_expire_failed_execution(pid))
+            let who = ensure_signed(origin)?;
+            let result = with_storage_layer(|| Self::do_expire_failed_execution(pid));
+            if result.is_ok() && !Queue::<T>::contains_key(pid) {
+                T::KeeperRebate::rebate(&who, CrankClass::General);
+            }
+            result
         }
 
         /// Sole ratify-track governance call (06 §2.2/§3.2).
@@ -581,8 +593,12 @@ pub mod pallet {
         #[pallet::call_index(4)]
         #[pallet::weight(T::WeightInfo::reject_stale())]
         pub fn reject_stale(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
-            let _ = ensure_signed(origin)?;
-            with_storage_layer(|| Self::do_reject_stale(pid))
+            let who = ensure_signed(origin)?;
+            let result = with_storage_layer(|| Self::do_reject_stale(pid));
+            if result.is_ok() && !Queue::<T>::contains_key(pid) {
+                T::KeeperRebate::rebate(&who, CrankClass::General);
+            }
+            result
         }
     }
 

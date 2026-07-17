@@ -1,0 +1,22 @@
+# StaleQueue manufactured state — 15 §4.7; 02 §11; 09 §1.2(3).
+# ExecutionGuard cells are inert until A11 occupies runtime slot 62 (B1a follow-up).
+genesis: zombienet/specs/out/bleavit-drill-raw.json
+mock-signature-host: true
+port: 8102
+db: chopsticks/.state/stale-queue.sqlite
+runtime-log-level: 3
+# wasm-override: target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
+import-storage:
+  # CountedStorageMap counter: twox128("ExecutionGuard") ++ twox128("CounterForQueue").
+  - - "0x0fa4af4f19b810e797f335f5b2f47928176b47d9aa103add5fb8dc68d3c6c165"
+    - "0x01000000"
+  # Queue[1]: Blake2_128Concat(SCALE u64 1); future grace_end=1,000,000 and
+  # deliberately mismatched RuntimeVersionConstraint("bleavit", 2).
+  - - "0x0fa4af4f19b810e797f335f5b2f479287a04cf465f6cde79f5825e350c74814a9ea2d098b5f70192f96c06f38d3fbc970100000000000000"
+    - "0x0100000000000000111111111111111111111111111111111111111111111111111111111111111104000000000000000040420f001c626c6561766974020000000000000000000000"
+  # Expedited[1] = false; try-state requires one marker per Queue entry.
+  - - "0x0fa4af4f19b810e797f335f5b2f4792847149234daa42aa4242b2806dc5e0a129ea2d098b5f70192f96c06f38d3fbc970100000000000000"
+    - "0x00"
+  # CurrentSpecName = RuntimeVersionConstraint("bleavit", 1).
+  - - "0x0fa4af4f19b810e797f335f5b2f4792891c90e4173ef123718d6afdf349e68db"
+    - "0x1c626c656176697401000000"

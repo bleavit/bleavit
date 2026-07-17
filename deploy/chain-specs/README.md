@@ -64,6 +64,8 @@ operators, including at least 2 endpoints on TCP port 443. The validator
 enforces all three thresholds against the operator manifest. A spec update that
 would fall below any threshold MUST NOT be released.
 
-Artifact publication is milestone B8. Zombienet and Chopsticks environment
-definitions are milestone B7. The ss58-registry submission artifact, which must
+Artifact publication is milestone B8. The Zombienet and Chopsticks environment
+definitions (milestone B7) live in `zombienet/` and `chopsticks/`, with their
+pinned tooling in `tools/env/` (`generate-relay-specs.sh` reuses this pipeline
+for the Bleavit drill spec). The ss58-registry submission artifact, which must
 land before Phase 2, is in `deploy/ss58/`.

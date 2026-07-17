@@ -1,0 +1,27 @@
+# Upgrade transition — 15 §4.7; 02 §11; 09 §2.1.
+# ExecutionGuard cells are inert until A11 occupies runtime slot 62 (B1a follow-up).
+# Base keys mirror ../bleavit.yml because Chopsticks configs have no include directive.
+genesis: zombienet/specs/out/bleavit-drill-raw.json
+mock-signature-host: true
+port: 8101
+db: chopsticks/.state/upgrade-transition.sqlite
+runtime-log-level: 3
+# wasm-override: target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
+import-storage:
+  # ExecutionGuard.PendingUpgrade: hash aa.. placeholder, authorized_at=0,
+  # applicable_at=43,200, target spec_version=2. Replace aa.. with the exact
+  # blake2_256 candidate-code hash before exercising apply.
+  - - "0x0fa4af4f19b810e797f335f5b2f479285aa1e59659356d7bccc0c9ca5fdfa73f"
+    - "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa00000000c0a8000002000000"
+  # ExecutionGuard.PendingUpgradeCheckpoint = (pre-upgrade state root, audit hash).
+  - - "0x0fa4af4f19b810e797f335f5b2f479283d687b5785c6f93388a1e8978c48102f"
+    - "0xccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  # ExecutionGuard.CurrentSpecName = RuntimeVersionConstraint("bleavit", 1).
+  - - "0x0fa4af4f19b810e797f335f5b2f4792891c90e4173ef123718d6afdf349e68db"
+    - "0x1c626c656176697401000000"
+  # ExecutionGuard.LastUpgradeAuthorized = authorized_at = 0.
+  - - "0x0fa4af4f19b810e797f335f5b2f47928815f330a7ed1a3d487568a6b29a84051"
+    - "0x00000000"
+  # ExecutionGuard.UpgradeSpacingHistory = [(authorized_at=0, spacing=432,000)].
+  - - "0x0fa4af4f19b810e797f335f5b2f4792854dd959e0c1308f840e2d08ea231f234"
+    - "0x040000000080970600"

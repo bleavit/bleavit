@@ -23,6 +23,9 @@ pub const EPSILON_PILLAR: FixedU64 = FixedU64(10_000_000);
 pub const MAX_METRIC_SPECS: usize = 16;
 pub const MAX_SNAPSHOTS: usize = 20;
 pub const MAX_GATE_FLAGS: usize = MAX_SNAPSHOTS;
+/// Number of day indices accepted by the daily-gate recorder. The two-word
+/// frozen breach bitmap covers this whole range (05 §4.7).
+pub const MAX_DAILY_GATE_SAMPLES: u8 = 64;
 pub const MAX_COMPONENTS_PER_SPEC: usize = 16;
 pub const HISTORY_PRIORS: usize = 12;
 pub const THETA_S_LO: FixedU64 = FixedU64(900_000_000);
@@ -548,14 +551,14 @@ impl WelfareState {
         spec_version: MetricSpecVersion,
         components: Vec<ComponentValue>,
         params: &WelfareParams,
-    ) -> Result<GateBreachFlags, Error> {
+    ) -> Result<(GateBreachFlags, bool), Error> {
         params.validate()?;
         let specs = self.spec(spec_version)?.to_vec();
         ensure!(
             specs.iter().all(|spec| spec.activation_epoch <= epoch),
             Error::SpecNotActive
         );
-        ensure!(day < 64, Error::ValueOutOfRange);
+        ensure!(day < MAX_DAILY_GATE_SAMPLES, Error::ValueOutOfRange);
         ensure!(
             components.len() <= MAX_COMPONENTS_PER_SPEC,
             Error::TooManyComponents
@@ -571,11 +574,19 @@ impl WelfareState {
                 c_breached: false,
                 day_bitmap: [0; 2],
             });
+        let before = flags;
+        // Frozen 02 §7.4 / 05 §4.7 semantics: this bitmap identifies
+        // breached days only. Pallet-internal sample tracking must not reuse it.
         if s_breach || c_breach {
-            flags.day_bitmap[(day / 32) as usize] |= 1u32 << (day % 32);
+            let word = flags
+                .day_bitmap
+                .get_mut(usize::from(day / 32))
+                .ok_or(Error::ValueOutOfRange)?;
+            *word |= 1u32 << (day % 32);
         }
         flags.s_breached |= s_breach;
         flags.c_breached |= c_breach;
+        let changed = flags != before;
         if let Some(i) = idx {
             self.gate_flags[i].1 = flags;
         } else {
@@ -591,7 +602,7 @@ impl WelfareState {
             s_breached: s_breach,
             c_breached: c_breach,
         });
-        Ok(flags)
+        Ok((flags, changed))
     }
 
     pub fn compute_settlement(
@@ -1238,7 +1249,7 @@ mod tests {
     fn daily_gate_uses_only_s_and_onchain_c_components() {
         let mut w = WelfareState::new();
         w.register_metric_spec(0, 1, default_specs(1)).unwrap();
-        let flags = w
+        let (flags, changed) = w
             .record_daily_gate(
                 2,
                 0,
@@ -1256,9 +1267,68 @@ mod tests {
                 &WelfareParams::DEFAULT,
             )
             .unwrap();
+        assert!(!changed);
         assert!(!flags.s_breached);
         assert!(!flags.c_breached);
+        assert_eq!(flags.day_bitmap, [0; 2]);
     }
+
+    #[test]
+    fn daily_gate_signals_only_new_breach_flags_and_not_samples_or_duplicates() {
+        let mut w = WelfareState::new();
+        w.register_metric_spec(0, 1, default_specs(1)).unwrap();
+
+        let (_, first_changed) = w
+            .record_daily_gate(2, 0, 1, healthy_components(), &WelfareParams::DEFAULT)
+            .unwrap();
+        let (_, duplicate_changed) = w
+            .record_daily_gate(2, 0, 1, healthy_components(), &WelfareParams::DEFAULT)
+            .unwrap();
+        assert!(!first_changed);
+        assert!(!duplicate_changed);
+
+        let mut breached = healthy_components();
+        breached
+            .iter_mut()
+            .find(|component| component.id == 1)
+            .expect("default specs include the S component")
+            .value = FixedU64(0);
+        let (flags, augmented) = w
+            .record_daily_gate(2, 0, 1, breached.clone(), &WelfareParams::DEFAULT)
+            .unwrap();
+        let (_, repeated_augmentation) = w
+            .record_daily_gate(2, 0, 1, breached, &WelfareParams::DEFAULT)
+            .unwrap();
+        assert!(augmented);
+        assert!(flags.s_breached);
+        assert_eq!(flags.day_bitmap, [1, 0]);
+        assert!(!repeated_augmentation);
+    }
+
+    #[test]
+    fn daily_gate_bitmap_contains_breached_days_only() {
+        let mut w = WelfareState::new();
+        w.register_metric_spec(0, 1, default_specs(1)).unwrap();
+
+        let (healthy, changed) = w
+            .record_daily_gate(2, 3, 1, healthy_components(), &WelfareParams::DEFAULT)
+            .unwrap();
+        assert!(!changed);
+        assert_eq!(healthy.day_bitmap, [0, 0]);
+
+        let mut breached = healthy_components();
+        breached
+            .iter_mut()
+            .find(|component| component.id == 1)
+            .expect("default specs include the S component")
+            .value = FixedU64(0);
+        let (flags, changed) = w
+            .record_daily_gate(2, 5, 1, breached, &WelfareParams::DEFAULT)
+            .unwrap();
+        assert!(changed);
+        assert_eq!(flags.day_bitmap, [1 << 5, 0]);
+    }
+
     #[test]
     fn c_weight_vector_is_joint_across_onchain_and_attested() {
         // 05 §4.4: one C weight vector across C_onchain and C_attested,
@@ -1293,7 +1363,7 @@ mod tests {
         specs.push(spec(5, Pillar::CAttested, 200_000_000, 1));
         specs.sort_by_key(|s| s.id);
         w.register_metric_spec(0, 1, specs).unwrap();
-        let flags = w
+        let (flags, changed) = w
             .record_daily_gate(
                 2,
                 0,
@@ -1311,6 +1381,7 @@ mod tests {
                 &WelfareParams::DEFAULT,
             )
             .unwrap();
+        assert!(changed);
         assert!(flags.c_breached);
         assert!(!flags.s_breached);
     }

@@ -8,9 +8,11 @@ use frame_support::{
     assert_noop, assert_ok,
     dispatch::{DispatchClass, GetDispatchInfo},
     traits::{
-        fungible::Inspect as FungibleInspect, fungibles::Inspect as FungiblesInspect,
-        tokens::ConversionToAssetBalance, Contains, EnsureOrigin, Get, Hooks, PalletInfo,
-        PalletsInfoAccess, StorePreimage, VestingSchedule,
+        fungible::Inspect as FungibleInspect,
+        fungibles::{Inspect as FungiblesInspect, Mutate as FungiblesMutate},
+        tokens::ConversionToAssetBalance,
+        Contains, EnsureOrigin, Get, Hooks, PalletInfo, PalletsInfoAccess, StorePreimage,
+        VestingSchedule,
     },
     weights::Weight,
 };
@@ -782,6 +784,65 @@ fn development_allocations_match_the_genesis_economics_exactly() {
 }
 
 #[test]
+fn treasury_rebate_payout_moves_real_usdc_from_the_selected_pot() {
+    use crate::configs::{treasury_keeper_account, treasury_oracle_account, TreasuryRebatePayout};
+    use pallet_futarchy_treasury::{PayoutLine, RebatePayout, TreasuryParams as _};
+
+    development_ext().execute_with(|| {
+        // `keeper.rebate` is deliberately unseeded until B5 calibration.
+        assert_eq!(crate::configs::TreasuryParams::keeper_rebate(), 0);
+        assert_eq!(
+            crate::configs::TreasuryParams::keeper_budget_epoch(),
+            12_000 * currency::USDC
+        );
+
+        let keeper = account(77);
+        let keeper_pot = treasury_keeper_account();
+        let oracle_pot = treasury_oracle_account();
+        let amount = 10 * currency::USDC;
+        let retained = currency::USDC_CENT;
+        assert!(<ForeignAssets as FungiblesMutate<AccountId>>::mint_into(
+            USDC_ASSET_ID,
+            &keeper_pot,
+            amount + retained,
+        )
+        .is_ok());
+        assert!(<ForeignAssets as FungiblesMutate<AccountId>>::mint_into(
+            USDC_ASSET_ID,
+            &oracle_pot,
+            amount + retained,
+        )
+        .is_ok());
+        assert_eq!(
+            TreasuryRebatePayout::pot_balance(PayoutLine::Keeper),
+            amount + retained
+        );
+        assert_eq!(
+            TreasuryRebatePayout::pot_balance(PayoutLine::Oracle),
+            amount + retained
+        );
+
+        assert!(<TreasuryRebatePayout as RebatePayout<AccountId>>::pay(
+            &keeper,
+            amount,
+            PayoutLine::Keeper,
+        )
+        .is_ok());
+        assert_eq!(ForeignAssets::balance(USDC_ASSET_ID, &keeper), amount);
+        assert_eq!(ForeignAssets::balance(USDC_ASSET_ID, &keeper_pot), retained);
+
+        assert!(<TreasuryRebatePayout as RebatePayout<AccountId>>::pay(
+            &keeper,
+            amount,
+            PayoutLine::Oracle,
+        )
+        .is_ok());
+        assert_eq!(ForeignAssets::balance(USDC_ASSET_ID, &keeper), 2 * amount);
+        assert_eq!(ForeignAssets::balance(USDC_ASSET_ID, &oracle_pot), retained);
+    });
+}
+
+#[test]
 fn development_key_constants_match_the_well_known_sr25519_keys() {
     assert_eq!(
         crate::genesis::ALICE_PUBLIC,
@@ -1373,7 +1434,7 @@ fn relay_abort_cleanup_survives_a_writer_b_release_channel_rewrite() {
         );
 
         // Writer (b) lawfully repoints the channel mid-flight, zeroing the
-        // guard-owned pending fields (the SQ-118 interaction). The abort
+        // guard-owned pending fields (the SQ-134 interaction). The abort
         // cleanup must tolerate this — never wedge `PendingUpgrade` — and
         // must leave writer (b)'s newer value byte-identical.
         let mut rewritten = [0u8; pallet_constitution::RELEASE_CHANNEL_LEN];
@@ -1401,6 +1462,78 @@ fn relay_abort_cleanup_survives_a_writer_b_release_channel_rewrite() {
             &record.event,
             crate::RuntimeEvent::ExecutionGuard(pallet_execution_guard::Event::UpgradeAborted {
                 code_hash,
+            }) if *code_hash == artifact.0
+        )));
+        assert_eq!(release_channel_raw().as_deref(), Some(&rewritten[..]));
+    });
+}
+
+#[test]
+fn applied_cleanup_survives_a_writer_b_release_channel_rewrite() {
+    upgrade_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 6_010;
+        let candidate = b"bleavit-b6-applied-writer-b-runtime-v2".to_vec();
+        let (maturity, artifact) = match enqueue_attested_code_upgrade(PID, &candidate, 82) {
+            Some(setup) => setup,
+            None => {
+                assert!(false, "applied writer-b fixture must be constructible");
+                return;
+            }
+        };
+        System::set_block_number(maturity);
+        assert_ok!(ExecutionGuard::execute(
+            RuntimeOrigin::signed(account(93)),
+            PID,
+        ));
+        let pending = match pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get() {
+            Some(pending) => pending,
+            None => {
+                assert!(false, "applied writer-b fixture must authorize an upgrade");
+                return;
+            }
+        };
+        System::set_block_number(pending.applicable_at);
+        seed_parachain_upgrade_boundary(candidate.len());
+        let apply = RuntimeCall::System(frame_system::Call::apply_authorized_upgrade {
+            code: candidate.clone(),
+        });
+        assert!(apply.dispatch(RuntimeOrigin::signed(account(94))).is_ok());
+        System::set_block_number(System::block_number().saturating_add(1));
+        let _ = ExecutionGuard::on_initialize(System::block_number());
+
+        // Writer (b) lawfully repoints the channel between scheduling and the
+        // relay GoAhead, zeroing the guard-owned pending fields. An applied
+        // upgrade cannot be retried, so the applied cleanup must tolerate the
+        // rewrite (PR #65 P1): guard state records the application, writer
+        // (b)'s newer channel value stays byte-identical, and no halt source
+        // is raised.
+        let mut rewritten = [0u8; pallet_constitution::RELEASE_CHANNEL_LEN];
+        match release_channel_raw() {
+            Some(raw) if raw.len() == rewritten.len() => rewritten.copy_from_slice(&raw),
+            _ => {
+                assert!(false, "applied writer-b fixture release channel must exist");
+                return;
+            }
+        }
+        rewritten[116..120].copy_from_slice(&0u32.to_le_bytes());
+        let flags = raw_u32(&rewritten, 164).unwrap_or(0) & !(1 << 2);
+        rewritten[164..168].copy_from_slice(&flags.to_le_bytes());
+        assert_ok!(Constitution::set_release_channel(
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            rewritten,
+        ));
+
+        submit_relay_upgrade_go_ahead();
+
+        assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::PendingUpgradeCheckpoint::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::ScheduledUpgrade::<Runtime>::get().is_none());
+        assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        assert!(System::events().iter().any(|record| matches!(
+            &record.event,
+            crate::RuntimeEvent::ExecutionGuard(pallet_execution_guard::Event::UpgradeApplied {
+                code_hash,
+                ..
             }) if *code_hash == artifact.0
         )));
         assert_eq!(release_channel_raw().as_deref(), Some(&rewritten[..]));
