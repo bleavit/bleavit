@@ -214,7 +214,7 @@ pub mod pallet_test_dispatch {
 
         /// A Normal-class call whose declared weight is guaranteed to exceed
         /// the guard's 25%-of-block payload ceiling.
-        #[pallet::call_index(3)]
+        #[pallet::call_index(4)]
         #[pallet::weight(Weight::MAX)]
         pub fn heavy(origin: OriginFor<T>) -> DispatchResult {
             T::FutarchyOrigin::ensure_origin(origin)?;
