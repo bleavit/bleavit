@@ -130,7 +130,9 @@ jobs:
         with:
           node-version: '22'
       - name: Install environment validator dependencies
-        run: pip install pyyaml==6.0.2
+        run: pip install pyyaml==6.0.2 websockets==15.0.1
+      - name: Compile environment tooling
+        run: python3 -m py_compile tools/env/*.py tools/env/tests/*.py
       - name: Run environment validator tests
         run: python3 -m unittest discover -s tools/env/tests
       - name: Validate committed environment definitions
