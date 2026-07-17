@@ -414,7 +414,7 @@ OpenRerun ==
     /\ UNCHANGED <<decisionHistory, settlementHistory>>
 
 (***************************************************************************
- * 06 §5.3 force_rerun.  SQ-150 records that these edges are absent from
+ * 06 §5.3 force_rerun.  SQ-155 records that these edges are absent from
  * 05 §2.1's exhaustive T-table, so every edge is gated by the model constant
  * and carries its own FR label rather than claiming a T-row.
  *

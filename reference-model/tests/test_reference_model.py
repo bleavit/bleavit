@@ -347,7 +347,7 @@ class ReferenceModelTests(unittest.TestCase):
                 "GateAlreadySettled",
                 "GateNotSettled",
                 # WrongBranch deliberately absent: dead core variant, no honest
-                # differential witness exists (SQ-159).
+                # differential witness exists (SQ-164).
             },
         )
         successful = [row for row in rows if "ok" in row["outcome"]]

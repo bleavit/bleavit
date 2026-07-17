@@ -12,12 +12,12 @@ to the values/referenda track with no markets, so they do not enter this market
 proposal machine.
 
 The force-rerun scope is conditional because of open specification question
-PLAN.md SQ-150: 06 §5.3 requires `Trading/Extended/Queued → Extended`, while
+PLAN.md SQ-155: 06 §5.3 requires `Trading/Extended/Queued → Extended`, while
 05 §2.1 calls its T1–T24 table exhaustive and contains no such row. The model
 constant `ForceRerunModeled` is `FALSE` in every pre-existing main, witness and
 mutation config, preserving the strict 05 §2.1 interpretation and its state
 spaces. Only the explicitly named force-rerun configs set it to `TRUE`; they
-prove safety under the 06 §5.3 interpretation pending SQ-150's resolution.
+prove safety under the 06 §5.3 interpretation pending SQ-155's resolution.
 
 Run any main scope directly from this directory:
 
@@ -83,7 +83,7 @@ rows in counterexample traces.
 | `RetryExhausted` | T22 | `retry_exhausted_to_measurement` |
 | `RetrySucceeds` | T23 + automatic T17 | `mark_executed` |
 | `ReviewUpholdsVeto` | T24 + automatic T21 | `veto_upheld` |
-| `GuardianForceRerun` | **FR — 06 §5.3, conditional per SQ-150; not a T-row** | guardian `force_rerun` hook into the epoch machine |
+| `GuardianForceRerun` | **FR — 06 §5.3, conditional per SQ-155; not a T-row** | guardian `force_rerun` hook into the epoch machine |
 
 Environment-only actions do not change the proposal state and therefore do
 not claim T-rows: `ValuesRatify`, `RatificationFails`, `RevokeAttestation`,
