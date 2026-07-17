@@ -6,7 +6,8 @@ use futarchy_primitives::{
 };
 use market_core::{
     buy_book, observe_book, seed_book, sell_book, BookKind, Error as MarketError,
-    Event as MarketEvent, LedgerOps, MarketBook, MarketParams, FEE_BPS, MIN_TRADE, PRICE_ONE_1E9,
+    Event as MarketEvent, LedgerOps, MarketBook, MarketParams, TwapCumulative, FEE_BPS, MIN_TRADE,
+    PRICE_ONE_1E9,
 };
 use proptest::{
     prelude::*,
@@ -394,10 +395,10 @@ proptest! {
                 recorded >= low && recorded <= high,
                 "I-13: {recorded} outside [{low},{high}] over {intervals} intervals"
             );
-            prop_assert_eq!(
-                book.cumulative_price_blocks,
-                before.cumulative_price_blocks + u128::from(recorded) * u128::from(elapsed)
+            let expected_cumulative = before.cumulative_price_blocks.checked_add(
+                TwapCumulative::from(u128::from(recorded) * u128::from(elapsed)),
             );
+            prop_assert_eq!(Some(book.cumulative_price_blocks), expected_cumulative);
             if intervals == 1 {
                 let one_low = reference_mul_1e9(
                     before.last_observation_1e9.0,

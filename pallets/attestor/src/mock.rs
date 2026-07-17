@@ -1,7 +1,7 @@
 //! Mock runtime for `pallet-attestor` (15 §4.1).
 
 use crate as pallet_attestor;
-use frame_support::{derive_impl, traits::EnsureOrigin};
+use frame_support::{derive_impl, parameter_types, traits::EnsureOrigin};
 use sp_core::crypto::AccountId32;
 use sp_runtime::{traits::IdentityLookup, BuildStorage};
 
@@ -23,6 +23,18 @@ impl frame_system::Config for Test {
 
 pub const VALUES_ACC: [u8; 32] = [200; 32];
 pub const RATIFY_ACC: [u8; 32] = [201; 32];
+
+parameter_types! {
+    pub static AttestorParamsValue: pallet_attestor::AttestorParams =
+        pallet_attestor::AttestorParams::DEFAULT;
+}
+
+pub struct TestAttestorParams;
+impl pallet_attestor::AttestorParamsProvider for TestAttestorParams {
+    fn get() -> pallet_attestor::AttestorParams {
+        AttestorParamsValue::get()
+    }
+}
 
 /// Mock `ConstitutionalValues` origin resolver.
 pub struct TestValuesOrigin;
@@ -69,6 +81,7 @@ impl EnsureOrigin<RuntimeOrigin> for TestRatifyOrigin {
 }
 
 impl pallet_attestor::Config for Test {
+    type Params = TestAttestorParams;
     type ValuesOrigin = TestValuesOrigin;
     type RatifyOrigin = TestRatifyOrigin;
     type WeightInfo = ();
@@ -124,6 +137,7 @@ pub fn new_test_ext_empty() -> sp_io::TestExternalities {
 pub fn new_test_ext_with(
     attestor: pallet_attestor::GenesisConfig<Test>,
 ) -> sp_io::TestExternalities {
+    AttestorParamsValue::set(pallet_attestor::AttestorParams::DEFAULT);
     let storage = RuntimeGenesisConfig {
         system: Default::default(),
         attestor,

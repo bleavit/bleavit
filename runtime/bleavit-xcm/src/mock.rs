@@ -115,6 +115,7 @@ impl pallet_oracle::ReportingContext for TestReporting {
 impl pallet_oracle::Config for Test {
     type AdjudicationOrigin = NeverEnsureOrigin<()>;
     type Reporting = TestReporting;
+    type Params = TestOracleParams;
     type MaxRoundCloseBatch = MaxRoundCloseBatch;
     type ProbeDispatch = TestProbeDispatcher;
     type ProbeTimeoutSink = ();
@@ -136,6 +137,16 @@ impl pallet_oracle::BenchmarkHelper<RuntimeOrigin> for TestOracleBenchmarkHelper
 
 parameter_types! {
     pub const CurrentEpoch: EpochId = 0;
+}
+
+pub struct TestOracleParams;
+impl pallet_oracle::OracleParamsProvider for TestOracleParams {
+    fn get() -> pallet_oracle::OracleParams {
+        pallet_oracle::OracleParams {
+            probe_amount: ProbeAmount::get(),
+            ..pallet_oracle::OracleParams::DEFAULT
+        }
+    }
 }
 
 pub struct TestTreasuryParams;
@@ -386,13 +397,8 @@ pub type TestCappedAssets =
 pub type TestResponseHandler = ProbeAwareResponseHandler<PalletXcm, OracleProbeSink>;
 pub type TestBarrier = BleavitBarrier<TestResponseHandler, UniversalLocation, MaxPrefixes>;
 pub type TestRouter = HealthTrackingRouter<RecordingSender, TestHealthSink>;
-pub type TestProbeDispatcher = XcmProbeDispatcher<
-    TestRouter,
-    ProbeAmount,
-    ProbeExecWeightBudget,
-    ProbeMaxResponseWeight,
-    OurParaId,
->;
+pub type TestProbeDispatcher =
+    XcmProbeDispatcher<TestRouter, ProbeExecWeightBudget, ProbeMaxResponseWeight, OurParaId>;
 pub type TestRenewalDispatcher = XcmRenewalDispatcher<
     XcmExecutor<XcmConfig>,
     RuntimeCall,

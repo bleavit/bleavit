@@ -282,6 +282,8 @@ parameter_types! {
     /// keeper-rebate regression explicitly enables recording.
     pub static RecordKeeperRebates: bool = false;
     pub static KeeperRebates: Vec<(AccountId32, CrankClass)> = Vec::new();
+    pub static PendingSyncRefuses: bool = false;
+    pub static PendingFailStaticForced: bool = false;
 }
 
 pub struct TestKeeperRebate;
@@ -293,6 +295,27 @@ impl KeeperRebateSink<AccountId32> for TestKeeperRebate {
             rebates.push((who.clone(), class));
             KeeperRebates::set(rebates);
         }
+    }
+}
+
+pub struct TestPendingOutflowSync;
+
+impl PendingOutflowSync for TestPendingOutflowSync {
+    fn sync_pending_outflows() -> frame_support::dispatch::DispatchResult {
+        if PendingSyncRefuses::get() {
+            Err(DispatchError::Other("pending-outflow sync refused"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn force_fail_static() -> bool {
+        PendingFailStaticForced::set(true);
+        true
+    }
+
+    fn pending_outflows_synced() -> bool {
+        !PendingSyncRefuses::get()
     }
 }
 
@@ -996,6 +1019,7 @@ impl pallet_execution_guard::Config for Test {
     type RatifyOrigin = pallet_origins::EnsureConstitutionalValues;
     type Dispatcher = TestDispatcher;
     type KeeperRebate = TestKeeperRebate;
+    type PendingOutflowSync = TestPendingOutflowSync;
     type MaxRuntimeCodeBytes = frame_support::traits::ConstU32<2_097_152>;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
@@ -1060,6 +1084,8 @@ pub fn reset_statics() {
     UpgradeDispatchOrigins::set(Vec::new());
     RecordKeeperRebates::set(false);
     KeeperRebates::set(Vec::new());
+    PendingSyncRefuses::set(false);
+    PendingFailStaticForced::set(false);
     pallet_test_dispatch::DispatchFailure::<Test>::put(false);
     pallet_test_dispatch::EpochLog::<Test>::kill();
     pallet_test_dispatch::ReleaseLog::<Test>::kill();

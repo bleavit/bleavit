@@ -372,7 +372,10 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             cumulus_pallet_xcm::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::PolkadotXcm(call) => match call {
-            pallet_xcm::Call::claim_assets { .. } => leaf(CallDomain::Treasury),
+            // Self-scoped by pallet-xcm's `(origin, assets)` trap key: a Signed
+            // account can recover only its own local-origin trap, while remote
+            // traps require an inbound ClaimAsset from that exact origin.
+            pallet_xcm::Call::claim_assets { .. } => leaf(CallDomain::Public),
             // B4: all other pallet-xcm calls remain nobody until reserve lanes,
             // caps, and the user exit path are wired and tested.
             pallet_xcm::Call::send { .. }

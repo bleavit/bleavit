@@ -8,6 +8,7 @@
 use crate as pallet_oracle;
 use frame_support::{derive_impl, parameter_types, traits::EnsureOrigin};
 use futarchy_primitives::{Balance, BlockNumber, EpochId, MetricId, MetricSpecVersion};
+use oracle_core::OracleParams;
 use sp_runtime::{traits::IdentityLookup, AccountId32, BuildStorage};
 
 type Block = frame_system::mocking::MockBlock<Test>;
@@ -44,8 +45,36 @@ parameter_types! {
     pub static ExpectedComponents: Vec<(MetricId, MetricSpecVersion)> = vec![];
     /// Number of committed reserve-probe timeout folds observed by the mock sink.
     pub static ProbeTimeoutCount: u32 = 0;
+    /// Mutable constitution-param seam used by amend-then-observe tests.
+    pub static ParamsValue: OracleParams = OracleParams::DEFAULT;
+    /// Probe dispatch observations, including the live `res.probe_amount`.
+    pub static ProbeDispatches: Vec<(u64, Balance)> = Vec::new();
+    /// Whether the mock models a live XCM probe route.
+    pub static ProbeDispatchLive: bool = false;
     /// Keeper-batch cap for `crank_round_close`.
     pub const MaxRoundCloseBatch: u32 = 20;
+}
+
+pub struct TestParams;
+
+impl pallet_oracle::OracleParamsProvider for TestParams {
+    fn get() -> OracleParams {
+        ParamsValue::get()
+    }
+}
+
+pub struct TestProbeDispatch;
+
+impl pallet_oracle::ProbeDispatch for TestProbeDispatch {
+    fn live() -> bool {
+        ProbeDispatchLive::get()
+    }
+
+    fn probe_due(query_id: u64, amount: Balance) {
+        let mut dispatches = ProbeDispatches::get();
+        dispatches.push((query_id, amount));
+        ProbeDispatches::set(dispatches);
+    }
 }
 
 pub struct TestProbeTimeoutSink;
@@ -114,8 +143,9 @@ impl EnsureOrigin<RuntimeOrigin> for TestAdjudicationOrigin {
 impl pallet_oracle::Config for Test {
     type AdjudicationOrigin = TestAdjudicationOrigin;
     type Reporting = TestReporting;
+    type Params = TestParams;
     type MaxRoundCloseBatch = MaxRoundCloseBatch;
-    type ProbeDispatch = ();
+    type ProbeDispatch = TestProbeDispatch;
     type ProbeTimeoutSink = TestProbeTimeoutSink;
     type KeeperRebate = ();
     type WeightInfo = ();
@@ -142,6 +172,9 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 /// Externalities with an explicit oracle genesis (e.g. seeded recomputable set).
 pub fn new_test_ext_with(oracle: pallet_oracle::GenesisConfig<Test>) -> sp_io::TestExternalities {
     ProbeTimeoutCount::set(0);
+    ParamsValue::set(OracleParams::DEFAULT);
+    ProbeDispatches::set(Vec::new());
+    ProbeDispatchLive::set(false);
     let storage = RuntimeGenesisConfig {
         system: Default::default(),
         oracle,

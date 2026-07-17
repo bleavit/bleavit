@@ -242,6 +242,14 @@ impl MetricInputs for TestMetricInputs {
     }
 }
 
+pub struct TestSnapshotSchedule;
+
+impl pallet_welfare::SnapshotSchedule for TestSnapshotSchedule {
+    fn snapshot_due(epoch: EpochId) -> Option<futarchy_primitives::BlockNumber> {
+        epoch.checked_add(1)?.checked_mul(100)
+    }
+}
+
 pub struct TestLedger;
 
 impl LedgerSettlement for TestLedger {
@@ -303,6 +311,7 @@ impl pallet_welfare::Config for Test {
     type MetricInputs = TestMetricInputs;
     type Ledger = TestLedger;
     type CurrentEpoch = CurrentEpochValue;
+    type SnapshotSchedule = TestSnapshotSchedule;
     type KeeperRebate = TestKeeperRebate;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]

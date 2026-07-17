@@ -356,7 +356,7 @@
           "Blake2_128Concat"
         ],
         "key": "u64",
-        "value": "market_core::MarketBook{id:u64,kind:market_core::BookKindenum[Decision=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1]}|Gate=1{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],gate:futarchy_primitives::GateTypeenum[Survival=0|Security=1]}|Baseline=2{epoch:u32}],phase:market_core::MarketPhaseenum[Trading=0|Extended=1|Closed=2|Settled=3],account:sp_core::crypto::AccountId32([u8;32]),fees_account:sp_core::crypto::AccountId32([u8;32]),b:u128,q_long:u128,q_short:u128,fees_accrued:u128,last_quote_1e9:futarchy_primitives::FixedU64(u64),last_observation_1e9:futarchy_primitives::FixedU64(u64),last_observed_block:u64,cumulative_price_blocks:u128,stale_events:u8}"
+        "value": "market_core::MarketBook{id:u64,kind:market_core::BookKindenum[Decision=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1]}|Gate=1{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],gate:futarchy_primitives::GateTypeenum[Survival=0|Security=1]}|Baseline=2{epoch:u32}],phase:market_core::MarketPhaseenum[Trading=0|Extended=1|Closed=2|Settled=3],account:sp_core::crypto::AccountId32([u8;32]),fees_account:sp_core::crypto::AccountId32([u8;32]),b:u128,q_long:u128,q_short:u128,fees_accrued:u128,last_quote_1e9:futarchy_primitives::FixedU64(u64),last_observation_1e9:futarchy_primitives::FixedU64(u64),last_observed_block:u64,cumulative_price_blocks:market_core::TwapCumulative{hi:u128,lo:u128},stale_events:u8}"
       }
     },
     {

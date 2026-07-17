@@ -98,6 +98,29 @@ pub trait EpochHandoff {
     fn is_terminal(pid: ProposalId) -> bool;
 }
 
+/// Runtime treasury mirror for queued, statically-sized proposal outflows
+/// (08 §1.2). Queue progress is fail-soft, but a failed exact sync must force
+/// spendable NAV to zero and leave a try-state-visible mismatch.
+pub trait PendingOutflowSync {
+    fn sync_pending_outflows() -> DispatchResult;
+    fn force_fail_static() -> bool;
+    fn pending_outflows_synced() -> bool;
+}
+
+impl PendingOutflowSync for () {
+    fn sync_pending_outflows() -> DispatchResult {
+        Ok(())
+    }
+
+    fn force_fail_static() -> bool {
+        true
+    }
+
+    fn pending_outflows_synced() -> bool {
+        true
+    }
+}
+
 /// Read-only preimage projection. `fetch` must return only the bytes stored under
 /// the exact `(hash, expected_len)` key. Implementations must reject an expected
 /// length above the kernel payload cap before reading the payload bytes. The
@@ -226,6 +249,7 @@ pub trait BenchmarkHelper<RuntimeOrigin> {
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
+    use crate::PendingOutflowSync;
     use alloc::vec::Vec;
     use core::marker::PhantomData;
     use frame_support::{
@@ -268,6 +292,8 @@ pub mod pallet {
         type Dispatcher: BatchDispatcher<Self::RuntimeCall>;
         /// Fail-soft keeper rebate sink (08 §6). It must never affect a crank.
         type KeeperRebate: KeeperRebateSink<Self::AccountId>;
+        /// Fail-soft/loud exact mirror of queue-owned treasury obligations.
+        type PendingOutflowSync: crate::PendingOutflowSync;
         /// Runtime-assembly bound for candidate Wasm. This is intentionally
         /// distinct from the 64 KiB proposal-call batch bound.
         #[pallet::constant]
@@ -489,6 +515,12 @@ pub mod pallet {
         },
         UpgradeAborted {
             code_hash: H256,
+        },
+        /// Defensive alarm: the exact queue mirror failed. `fail_static` says
+        /// whether the adapter successfully forced spendable NAV to zero.
+        PendingOutflowSyncFailed {
+            queued: u32,
+            fail_static: bool,
         },
     }
 
@@ -1662,6 +1694,16 @@ pub mod pallet {
             for event in core::mem::take(&mut state.events) {
                 Self::deposit_core_event(event);
             }
+            // The queue's hard maximum is 32 while the treasury mirror accepts
+            // 64 entries (13 §4), so a healthy adapter cannot overflow. Keep the
+            // queue mutation fail-soft, but alarm and poison spendable NAV if
+            // decoding, arithmetic, or that structural bound ever drifts.
+            if T::PendingOutflowSync::sync_pending_outflows().is_err() {
+                Self::deposit_event(Event::PendingOutflowSyncFailed {
+                    queued: Queue::<T>::count(),
+                    fail_static: T::PendingOutflowSync::force_fail_static(),
+                });
+            }
             Ok(())
         }
 
@@ -1849,6 +1891,11 @@ pub mod pallet {
             {
                 return Err(TryRuntimeError::Other(
                     "execution guard pending upgrade/checkpoint mismatch",
+                ));
+            }
+            if !T::PendingOutflowSync::pending_outflows_synced() {
+                return Err(TryRuntimeError::Other(
+                    "execution guard pending-outflow mirror mismatch",
                 ));
             }
             match (PendingUpgrade::<T>::get(), ScheduledUpgrade::<T>::get()) {

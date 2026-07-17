@@ -113,6 +113,57 @@ fn five_of_seven_dispatches_schedules_review_with_referendum() {
 }
 
 #[test]
+fn amended_review_deadline_moves_new_records_without_rewriting_existing_records() {
+    new_test_ext().execute_with(|| {
+        set_epoch(7);
+        set_triggers(guardian_core::TriggerState {
+            gate_breach: true,
+            ..guardian_core::TriggerState::none()
+        });
+
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::SuspendOnGate,
+            hash(1)
+        ));
+        approve_span(0, 2, 5);
+        assert_eq!(
+            ReviewDeadlines::<Test>::get()
+                .iter()
+                .map(|review| review.deadline_epoch)
+                .collect::<Vec<_>>(),
+            [7u32.saturating_add(guardian_core::REVIEW_DEADLINE_EPOCHS)]
+        );
+
+        ReviewDeadlineEpochValue::set(4);
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::SuspendOnGate,
+            hash(2)
+        ));
+        approve_span(1, 2, 5);
+        let reviews = ReviewDeadlines::<Test>::get();
+        assert_eq!(
+            reviews
+                .iter()
+                .map(|review| review.deadline_epoch)
+                .collect::<Vec<_>>(),
+            [9, 11]
+        );
+
+        ReviewDeadlineEpochValue::set(1);
+        let snapshotted = ReviewDeadlines::<Test>::get();
+        assert_eq!(
+            snapshotted
+                .iter()
+                .map(|review| review.deadline_epoch)
+                .collect::<Vec<_>>(),
+            [9, 11]
+        );
+    });
+}
+
+#[test]
 fn unavailable_review_scheduler_rolls_back_the_dispatching_approval() {
     new_test_ext().execute_with(|| {
         set_triggers(guardian_core::TriggerState {

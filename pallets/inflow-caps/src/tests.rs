@@ -13,6 +13,26 @@ fn mint_admits_exact_cap_and_refuses_cap_plus_one() {
 }
 
 #[test]
+fn escrow_gate_is_a_pure_read_and_refuses_only_while_already_over_cap() {
+    new_test_ext().execute_with(|| {
+        TvlCap::set(900);
+        UsdcIssuance::set(900);
+        DepositCap::set(10);
+        CumulativeDeposits::<Test>::insert(1, 10);
+        assert!(InflowCaps::escrow_admissible(&1));
+
+        UsdcIssuance::set(901);
+        assert!(!InflowCaps::escrow_admissible(&1));
+        UsdcIssuance::set(900);
+
+        CumulativeDeposits::<Test>::insert(1, 11);
+        assert!(!InflowCaps::escrow_admissible(&1));
+        assert_eq!(UsdcIssuance::get(), 900);
+        assert_eq!(CumulativeDeposits::<Test>::get(1), 11);
+    });
+}
+
+#[test]
 fn zero_mint_is_always_admissible_and_sentinel_is_unbounded() {
     new_test_ext().execute_with(|| {
         TvlCap::set(0);

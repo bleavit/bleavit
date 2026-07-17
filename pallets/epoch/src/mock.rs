@@ -120,7 +120,7 @@ pub fn live_proposal(
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq)]
 pub enum SeamCall {
-    OpenMarkets(ProposalId, bool, bool),
+    OpenMarkets(ProposalId, bool, Option<PolSeedPlan>),
     ExtendMarkets(ProposalId),
     ForceRerunMarkets(ProposalId),
     CloseMarkets(ProposalId),
@@ -296,6 +296,8 @@ parameter_types! {
     pub static PhaseFlagsValue: u32 = 0;
     pub static ActiveMetricSpecVersion: MetricSpecVersion = 1;
     pub static TreasuryGateRequired: bool = false;
+    pub static PolEpochBudget: Balance = Balance::MAX;
+    pub static PolCommitments: Vec<(ProposalId, Balance)> = Vec::new();
     pub static PreimageLen: Option<u32> = Some(32);
     pub static PreimageNoted: bool = true;
     pub static PreimageRequests: Vec<(H256, u32)> = Vec::new();
@@ -330,19 +332,45 @@ impl EpochParamsProvider for TestParams {
     }
 }
 
+pub struct TestPolBudget;
+
+impl PolBudget<AccountId32> for TestPolBudget {
+    fn epoch_budget() -> Balance {
+        PolEpochBudget::get()
+    }
+
+    fn proposal_seed_plan(proposal: &Proposal<AccountId32>) -> Option<PolSeedPlan> {
+        let amount = PolCommitments::get()
+            .iter()
+            .find_map(|(pid, amount)| (*pid == proposal.id).then_some(*amount))
+            .unwrap_or(0);
+        let gates = matches!(proposal.class, ProposalClass::Code | ProposalClass::Meta)
+            || (proposal.class == ProposalClass::Treasury && TreasuryGateRequired::get());
+        Some(PolSeedPlan {
+            commitment: amount,
+            decision_b: amount,
+            gate_b: gates.then_some(amount),
+        })
+    }
+}
+
 pub struct TestMarket;
 
 impl MarketAccess<AccountId32> for TestMarket {
     fn open_markets(
         proposal: &Proposal<AccountId32>,
         rerun: bool,
-        requires_gate_markets: bool,
+        seed_plan: Option<PolSeedPlan>,
     ) -> Result<MarketSet, DispatchError> {
-        SeamCalls::push(SeamCall::OpenMarkets(
-            proposal.id,
-            rerun,
-            requires_gate_markets,
-        ))?;
+        let requires_gate_markets = seed_plan.map_or_else(
+            || {
+                proposal
+                    .markets
+                    .is_some_and(|markets| markets.gates.is_some())
+            },
+            |plan| plan.gate_b.is_some(),
+        );
+        SeamCalls::push(SeamCall::OpenMarkets(proposal.id, rerun, seed_plan))?;
         Ok(markets(proposal.id, proposal.epoch, requires_gate_markets))
     }
 
@@ -484,6 +512,10 @@ impl ConstitutionAccess<AccountId32> for TestConstitution {
     }
     fn phase_flags() -> u32 {
         PhaseFlagsValue::get()
+    }
+    fn note_dead_man_engaged(engaged: bool) -> frame_support::dispatch::DispatchResult {
+        DeadManEngaged::set(engaged);
+        Ok(())
     }
     fn active_metric_spec_version() -> Option<MetricSpecVersion> {
         Some(ActiveMetricSpecVersion::get())
@@ -745,6 +777,7 @@ impl pallet_epoch::Config for Test {
     type Guardian = TestGuardian;
     type Attestation = TestAttestation;
     type Constitution = TestConstitution;
+    type PolBudget = TestPolBudget;
     type ProposalBond = TestProposalBond;
     type Preimage = TestPreimage;
     type ExecutionGuard = TestExecutionGuard;
@@ -809,6 +842,8 @@ impl BenchmarkHelper<RuntimeOrigin, AccountId32> for TestBenchmarkHelper {
 
 pub fn reset_doubles() {
     ParamsValue::set(CoreEpochParams::DEFAULT);
+    PolEpochBudget::set(Balance::MAX);
+    PolCommitments::set(Vec::new());
     SeamFailure::set(None);
     MarketGrade::set(true);
     UnavailableMarkets::set(Vec::new());

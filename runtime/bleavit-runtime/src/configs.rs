@@ -559,6 +559,13 @@ fn migration_validation_hook_weight() -> Weight {
     ))
 }
 
+fn dead_man_detector_hook_weight() -> Weight {
+    // Worst case includes the one-time bounded MetricSpecs scan that seeds the
+    // first schedule-derived deadline, plus the fixed relay/cause/flag writes.
+    Weight::from_parts(50_000_000, 60_000)
+        .saturating_add(<Runtime as frame_system::Config>::DbWeight::get().reads_writes(24, 6))
+}
+
 /// PB-MIGRATION signal bridge. A failed step stays stuck (the SDK's
 /// fail-closed transaction pause) and makes the guard's machine trigger live.
 pub struct MigrationFailureToGuard;
@@ -635,34 +642,87 @@ impl cumulus_pallet_parachain_system::Config for Runtime {
 }
 impl staging_parachain_info::Config for Runtime {}
 
-mod xcm_config {
+pub(crate) mod xcm_config {
     use super::*;
     use staging_xcm::latest::prelude::*;
     use staging_xcm_builder::{FixedWeightBounds, FrameTransactionalProcessor};
     use staging_xcm_executor::XcmExecutor;
 
     parameter_types! {
-        pub UniversalLocation: InteriorLocation = Parachain(staging_parachain_info::Pallet::<Runtime>::parachain_id().into()).into();
+        pub RelayNetwork: Option<NetworkId> = Some(NetworkId::Polkadot);
+        pub UniversalLocation: InteriorLocation = [
+            GlobalConsensus(NetworkId::Polkadot),
+            Parachain(staging_parachain_info::Pallet::<Runtime>::parachain_id().into()),
+        ].into();
         pub UnitWeightCost: Weight = Weight::from_parts(1_000_000_000, 64 * 1024);
         pub const MaxInstructions: u32 = 100;
         pub const MaxAssetsIntoHolding: u32 = 64;
+        pub const MaxPrefixes: u32 = 8;
+        pub CheckingAccount: AccountId = PolkadotXcm::check_account();
     }
-    pub struct XcmConfig;
-    impl staging_xcm_executor::Config for XcmConfig {
+    pub type LocationToAccountId =
+        bleavit_xcm::assets::StandardLocationToAccountId<AccountId, RelayNetwork>;
+    pub type AssetTransactors = bleavit_xcm::assets::AssetTransactors<
+        ForeignAssets,
+        LocationToAccountId,
+        AccountId,
+        CheckingAccount,
+    >;
+    pub type CappedAssets = bleavit_xcm::caps::CappedInflows<
+        AssetTransactors,
+        PhaseInflowCaps,
+        LocationToAccountId,
+        AccountId,
+    >;
+    pub type TrapRecoveryAssets = bleavit_xcm::caps::TrapRecoveryInflows<
+        AssetTransactors,
+        PhaseInflowCaps,
+        LocationToAccountId,
+        AccountId,
+    >;
+    pub type Barrier =
+        bleavit_xcm::barrier::BleavitBarrier<PolkadotXcm, UniversalLocation, MaxPrefixes>;
+
+    /// Maps the Treasury-class execution origin to the protocol custody
+    /// location under which protocol-owned local traps are keyed (09 §6.1).
+    pub struct TreasuryOriginToLocation;
+    impl sp_runtime::traits::TryConvert<RuntimeOrigin, Location> for TreasuryOriginToLocation {
+        fn try_convert(origin: RuntimeOrigin) -> Result<Location, RuntimeOrigin> {
+            let custom: Result<pallet_origins::Origin, RuntimeOrigin> = origin.clone().into();
+            match custom {
+                Ok(pallet_origins::Origin::FutarchyTreasury) => Ok(Location::new(
+                    0,
+                    [Junction::AccountId32 {
+                        network: RelayNetwork::get(),
+                        id: treasury_protocol_account().into(),
+                    }],
+                )),
+                _ => Err(origin),
+            }
+        }
+    }
+
+    pub type LocalOriginToLocation = (
+        TreasuryOriginToLocation,
+        staging_xcm_builder::SignedToAccountId32<RuntimeOrigin, AccountId, RelayNetwork>,
+    );
+
+    pub struct XcmConfig<Assets = CappedAssets>(core::marker::PhantomData<Assets>);
+    impl<Assets: staging_xcm_executor::traits::TransactAsset> staging_xcm_executor::Config
+        for XcmConfig<Assets>
+    {
         type RuntimeCall = RuntimeCall;
         // The real transport remains fail closed. The health wrapper records
         // only actual accepted/failing routes; `()` returning NotApplicable is
         // tuple-router control flow and records no traffic.
         type XcmSender = bleavit_xcm::health::HealthTrackingRouter<(), XcmTrafficRecorder>;
         type XcmEventEmitter = PolkadotXcm;
-        // PhaseInflowCaps is ready, but the production transactor remains
-        // fail closed until the complete asset conversion route is wired.
-        type AssetTransactor = ();
+        type AssetTransactor = Assets;
         type OriginConverter = ();
-        type IsReserve = ();
+        type IsReserve = bleavit_xcm::assets::BleavitReserves;
         type IsTeleporter = ();
         type UniversalLocation = UniversalLocation;
-        type Barrier = ();
+        type Barrier = Barrier;
         type Weigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
         // Unrefunded fees use payer-adverse disposal until treasury revenue
         // routing is wired; this cannot create an unbacked claim.
@@ -686,7 +746,15 @@ mod xcm_config {
         type HrmpChannelClosingHandler = ();
         type XcmRecorder = PolkadotXcm;
     }
-    pub type Executor = XcmExecutor<XcmConfig>;
+    /// Executor used by inbound DMP/XCMP transport: every reserve mint and
+    /// beneficiary deposit passes through the live Phase-3 cap adapter.
+    pub type Executor = XcmExecutor<XcmConfig<CappedAssets>>;
+    /// `pallet-xcm` reconstructs an existing trapped imbalance by calling its
+    /// configured executor's `mint_asset`, then immediately balances the clone
+    /// so issuance is unchanged. The recovery transactor bypasses only that
+    /// prospective global check; its beneficiary deposit remains capped and
+    /// records the per-account cumulative meter.
+    pub type TrapRecoveryExecutor = XcmExecutor<XcmConfig<TrapRecoveryAssets>>;
 }
 
 parameter_types! {
@@ -748,9 +816,10 @@ impl pallet_xcm::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type SendXcmOrigin = staging_xcm_builder::EnsureXcmOrigin<RuntimeOrigin, ()>;
     type XcmRouter = bleavit_xcm::health::HealthTrackingRouter<(), XcmTrafficRecorder>;
-    type ExecuteXcmOrigin = staging_xcm_builder::EnsureXcmOrigin<RuntimeOrigin, ()>;
+    type ExecuteXcmOrigin =
+        staging_xcm_builder::EnsureXcmOrigin<RuntimeOrigin, xcm_config::LocalOriginToLocation>;
     type XcmExecuteFilter = Nothing;
-    type XcmExecutor = xcm_config::Executor;
+    type XcmExecutor = xcm_config::TrapRecoveryExecutor;
     type XcmTeleportFilter = Nothing;
     type XcmReserveTransferFilter = Nothing;
     type Weigher = staging_xcm_builder::FixedWeightBounds<
@@ -766,7 +835,7 @@ impl pallet_xcm::Config for Runtime {
     type Currency = Balances;
     type CurrencyMatcher = ();
     type TrustedLockers = ();
-    type SovereignAccountOf = ();
+    type SovereignAccountOf = xcm_config::LocationToAccountId;
     type MaxLockers = ConstU32<0>;
     type WeightInfo = pallet_xcm::TestWeightInfo;
     type AdminOrigin = EnsureRoot<AccountId>;
@@ -1056,8 +1125,7 @@ impl pallet_inflow_caps::Config for Runtime {
     type UsdcIssuance = ForeignUsdcIssuance;
 }
 
-/// Ready-to-bind 09 §5.2 XCM adapter over the shared on-chain meters.
-#[allow(dead_code)] // Consumed once SQ-101 replaces XcmConfig::AssetTransactor = ().
+/// 09 §5.2 XCM adapter over the shared on-chain meters.
 pub struct PhaseInflowCaps;
 impl bleavit_xcm::caps::InflowCaps<AccountId> for PhaseInflowCaps {
     fn usdc_mint_admissible(amount: u128) -> Result<(), ()> {
@@ -1066,6 +1134,14 @@ impl bleavit_xcm::caps::InflowCaps<AccountId> for PhaseInflowCaps {
 
     fn note_usdc_inflow(who: &AccountId, amount: u128) -> Result<(), ()> {
         pallet_inflow_caps::Pallet::<Runtime>::note_inflow(who, amount)
+    }
+}
+
+/// Pure-read 09 §5.2 defense-in-depth gate for signed ledger splits.
+pub struct RuntimeLedgerInflowCapGate;
+impl pallet_conditional_ledger::InflowCapGate<AccountId> for RuntimeLedgerInflowCapGate {
+    fn escrow_admissible(who: &AccountId) -> bool {
+        pallet_inflow_caps::Pallet::<Runtime>::escrow_admissible(who)
     }
 }
 fn fixed_param(name: &[u8]) -> u64 {
@@ -1116,6 +1192,49 @@ fn u8_param(name: &[u8]) -> u8 {
             Some(pallet_constitution::ParamValue::U8(value)) => value,
             _ => 0,
         },
+    }
+}
+
+/// Live 07 §§4–8 oracle/reserve parameters. The constitution stores
+/// `orc.bond_bps` as parts-per-billion (25_000_000 = 2.5%); the frame-free
+/// oracle kernel consumes basis points (250), so convert at this adapter.
+pub struct RuntimeOracleParams;
+impl pallet_oracle::OracleParamsProvider for RuntimeOracleParams {
+    fn get() -> pallet_oracle::OracleParams {
+        pallet_oracle::OracleParams {
+            window: u32_param(b"orc.window"),
+            rounds: u8_param(b"orc.rounds"),
+            bond_floor: balance_param(b"orc.bond_floor"),
+            bond_bps: perbill_param(b"orc.bond_bps") / 100_000,
+            reporter_stake: balance_param(b"orc.rep_stake"),
+            watchtower_stake: balance_param(b"wt.stake"),
+            watchtower_quorum: u8_param(b"wt.quorum"),
+            probe_interval: u32_param(b"res.probe_int"),
+            probe_timeout: u32_param(b"res.probe_to"),
+            fail_threshold: u8_param(b"res.fail_thr"),
+            recover_threshold: u8_param(b"res.recover_thr"),
+            probe_amount: balance_param(b"res.probe_amount"),
+        }
+    }
+}
+
+/// Live 06 §7 attestor economics and creation-time challenge window.
+pub struct RuntimeAttestorParams;
+impl pallet_attestor::AttestorParamsProvider for RuntimeAttestorParams {
+    fn get() -> pallet_attestor::AttestorParams {
+        pallet_attestor::AttestorParams {
+            bond: balance_param(b"att.bond"),
+            challenge_window: u32_param(b"att.window"),
+        }
+    }
+}
+
+/// Live 06 §5.4 retrospective-review deadline. The guardian core snapshots
+/// this value when it creates a review record.
+pub struct GuardianReviewDeadline;
+impl Get<EpochId> for GuardianReviewDeadline {
+    fn get() -> EpochId {
+        u32_param(b"grd.review_dl")
     }
 }
 
@@ -1376,6 +1495,14 @@ impl Contains<AccountId> for ProtocolAccounts {
             execution_guard_account(),
         ];
         accounts.contains(who)
+            // Market books and fee pots are deterministic protocol custody
+            // accounts too. They are allocated dynamically, so recognize the
+            // accounts from the live book set (hard-capped at 196 by I-21)
+            // instead of pretending the unused shared BOOK/FEES accounts cover
+            // them. This keeps seed-created positions deposit-exempt exactly as
+            // the ledger protocol-account rule requires.
+            || pallet_market::Markets::<Runtime>::iter_values()
+                .any(|book| book.account == *who || book.fees_account == *who)
     }
 }
 parameter_types! { pub InsuranceAccount: AccountId = insurance_account(); }
@@ -1394,6 +1521,7 @@ impl pallet_conditional_ledger::Config for Runtime {
     type InsuranceAccount = InsuranceAccount;
     type PalletId = LedgerPalletId;
     type KeeperRebate = FutarchyTreasury;
+    type InflowCapGate = RuntimeLedgerInflowCapGate;
     type WeightInfo = crate::weights::pallet_conditional_ledger::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
@@ -1611,8 +1739,16 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
     fn open_markets(
         proposal: &futarchy_primitives::Proposal<AccountId>,
         rerun: bool,
-        requires_gate_markets: bool,
+        seed_plan: Option<pallet_epoch::PolSeedPlan>,
     ) -> Result<futarchy_primitives::MarketSet, DispatchError> {
+        let requires_gate_markets = seed_plan.map_or_else(
+            || {
+                proposal
+                    .markets
+                    .is_some_and(|markets| markets.gates.is_some())
+            },
+            |plan| plan.gate_b.is_some(),
+        );
         #[cfg(feature = "runtime-benchmarks")]
         {
             // The epoch weights predate B5 calibration, but their fixtures
@@ -1710,6 +1846,8 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
             return Ok(markets);
         }
 
+        let seed_plan = seed_plan.ok_or(DispatchError::Other("funded POL seed plan missing"))?;
+
         if let Some(vault) = pallet_conditional_ledger::Vaults::<Runtime>::get(proposal.id) {
             if vault.spec != proposal.metric_spec {
                 return Err(DispatchError::Other("proposal metric-spec vault mismatch"));
@@ -1742,7 +1880,7 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
             Ok::<_, DispatchError>(id)
         };
 
-        let b = class_pol_floor(proposal.class);
+        let b = seed_plan.decision_b;
         // A8 fail-closed: the simulation-gated P/P_ref slope has no verified
         // on-chain P_ref backing yet. The normative floor is used; effective
         // v_min=2P still prevents under-sized adoption — owner Phase-0/SQ-177.
@@ -1766,8 +1904,7 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
             reject,
             pol_account(),
         )?;
-        let gates = if requires_gate_markets {
-            let gate_b = balance_param(b"pol.b_gate");
+        let gates = if let Some(gate_b) = seed_plan.gate_b {
             let ids = [
                 create(
                     BookKind::Gate {
@@ -2213,6 +2350,51 @@ impl Contains<futarchy_primitives::MarketId> for RuntimeInDecisionWindow {
     }
 }
 
+fn live_pol_commitments() -> Result<Vec<Balance>, DispatchError> {
+    let mut books = pallet_market::Markets::<Runtime>::iter()
+        .filter(|(id, book)| pallet_market::Pallet::<Runtime>::pol_obligation_live(*id, book))
+        .collect::<Vec<_>>();
+    books.sort_by_key(|(id, _)| *id);
+    books
+        .into_iter()
+        .map(|(id, book)| {
+            // A rerun is funded by two separately ceil-rounded original-size
+            // seeds. Reconstruct that exact deposited headroom; ceil(2b·ln2)
+            // can otherwise be one base unit lower than 2·ceil(b·ln2).
+            if pallet_market::RerunSeededMarkets::<Runtime>::contains_key(id) {
+                let original_b = book.b.checked_div(2).ok_or(DispatchError::Other(
+                    "live POL commitment arithmetic failed",
+                ))?;
+                pallet_market::core_market::seed_headroom(original_b)
+                    .ok()
+                    .and_then(|headroom| headroom.checked_mul(2))
+                    .ok_or(DispatchError::Other(
+                        "live POL commitment arithmetic failed",
+                    ))
+            } else {
+                pallet_market::core_market::seed_headroom(book.b)
+                    .map_err(|_| DispatchError::Other("live POL commitment arithmetic failed"))
+            }
+        })
+        .collect()
+}
+
+/// Mirror every seeded, still-live book into NAV. Baseline books are included
+/// here because 08 §1.2 nets all live-book obligations; their only exemption is
+/// from the *new proposal* `pol.budget_epoch` charge (08 §4.3).
+pub struct RuntimePolCommitmentSync;
+
+impl pallet_market::PolCommitmentSync for RuntimePolCommitmentSync {
+    fn sync_pol_commitments() -> DispatchResult {
+        crate::FutarchyTreasury::set_pol_commitments(live_pol_commitments()?)
+    }
+
+    fn pol_commitments_synced() -> bool {
+        live_pol_commitments()
+            .is_ok_and(|expected| crate::FutarchyTreasury::treasury().pol_commitments == expected)
+    }
+}
+
 impl pallet_market::Config for Runtime {
     type WeightInfo = crate::weights::pallet_market::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
@@ -2225,6 +2407,7 @@ impl pallet_market::Config for Runtime {
     type PalletId = MarketPalletId;
     type KeeperRebate = FutarchyTreasury;
     type InDecisionWindow = RuntimeInDecisionWindow;
+    type PolCommitmentSync = RuntimePolCommitmentSync;
 }
 
 pub struct RuntimeEpochOracle;
@@ -2237,8 +2420,12 @@ impl pallet_epoch::OracleAccess for RuntimeEpochOracle {
         pallet_oracle::Rounds::<Runtime>::iter().any(|(_, round)| {
             round.spec_version == spec
                 && round.challenger.is_some()
-                && pallet_oracle::round_bond(round.stake_at_risk, 1)
-                    .map_or(true, |floor| round.bond >= floor)
+                && pallet_oracle::round_bond(
+                    round.stake_at_risk,
+                    1,
+                    &<RuntimeOracleParams as pallet_oracle::OracleParamsProvider>::get(),
+                )
+                .map_or(true, |floor| round.bond >= floor)
         })
     }
 }
@@ -2293,9 +2480,16 @@ impl pallet_epoch::AttestationAccess for RuntimeEpochAttestation {
 fn proposal_calls(
     proposal: &futarchy_primitives::Proposal<AccountId>,
 ) -> Option<pallet_execution_guard::pallet::RuntimeBatch<Runtime>> {
+    runtime_batch(proposal.payload_hash, proposal.payload_len)
+}
+
+fn runtime_batch(
+    payload_hash: futarchy_primitives::H256,
+    payload_len: u32,
+) -> Option<pallet_execution_guard::pallet::RuntimeBatch<Runtime>> {
     use pallet_execution_guard::Preimages;
-    let bytes = RuntimePreimages::fetch(proposal.payload_hash, proposal.payload_len)?;
-    if u32::try_from(bytes.len()).ok()? != proposal.payload_len {
+    let bytes = RuntimePreimages::fetch(payload_hash, payload_len)?;
+    if u32::try_from(bytes.len()).ok()? != payload_len {
         return None;
     }
     let mut input = &bytes[..];
@@ -2312,31 +2506,40 @@ fn derived_treasury_ask(
 ) -> Option<Balance> {
     let mut ask = 0_u128;
     for call in calls {
-        let addition = match call {
-            RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::spend {
-                amount, ..
-            }) => *amount,
-            RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::open_stream {
-                total,
-                ..
-            }) => *total,
-            RuntimeCall::FutarchyTreasury(
-                pallet_futarchy_treasury::Call::fund_budget_line { .. }
-                | pallet_futarchy_treasury::Call::cancel_stream { .. }
-                | pallet_futarchy_treasury::Call::issue_vit { .. }
-                | pallet_futarchy_treasury::Call::recover_foreign { .. },
-            ) => 0,
-            // `claim_stream` is Signed-recipient-only and coretime renewal is
-            // priced from live quote storage. Neither can be committed as a
-            // statically-sized Treasury proposal outflow.
-            RuntimeCall::FutarchyTreasury(
-                pallet_futarchy_treasury::Call::claim_stream { .. }
-                | pallet_futarchy_treasury::Call::execute_coretime_renewal { .. }
-                | pallet_futarchy_treasury::Call::__Ignore(_, _),
-            ) => return None,
-            _ => return None,
-        };
-        ask = ask.checked_add(addition)?;
+        if !visit_runtime_leaves(call, &mut |leaf| {
+            let addition = match leaf {
+                RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::spend {
+                    amount,
+                    ..
+                }) => *amount,
+                RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::open_stream {
+                    total,
+                    ..
+                }) => *total,
+                RuntimeCall::FutarchyTreasury(
+                    pallet_futarchy_treasury::Call::fund_budget_line { .. }
+                    | pallet_futarchy_treasury::Call::cancel_stream { .. }
+                    | pallet_futarchy_treasury::Call::issue_vit { .. }
+                    | pallet_futarchy_treasury::Call::recover_foreign { .. },
+                ) => 0,
+                // `claim_stream` is Signed-recipient-only and coretime renewal is
+                // priced from live quote storage. Neither can be committed as a
+                // statically-sized Treasury proposal outflow.
+                RuntimeCall::FutarchyTreasury(
+                    pallet_futarchy_treasury::Call::claim_stream { .. }
+                    | pallet_futarchy_treasury::Call::execute_coretime_renewal { .. }
+                    | pallet_futarchy_treasury::Call::__Ignore(_, _),
+                ) => return false,
+                _ => return false,
+            };
+            let Some(updated) = ask.checked_add(addition) else {
+                return false;
+            };
+            ask = updated;
+            true
+        }) {
+            return None;
+        }
     }
     Some(ask)
 }
@@ -2417,6 +2620,61 @@ pub(crate) fn derived_execution_meters(
         }
     }
     pallet_execution_guard::pallet::StoredMeters::try_from(meters).ok()
+}
+
+fn queued_pending_outflows() -> Result<Vec<Balance>, DispatchError> {
+    let mut queue = pallet_execution_guard::Queue::<Runtime>::iter().collect::<Vec<_>>();
+    queue.sort_by_key(|(pid, _)| *pid);
+    let mut pending = Vec::new();
+    let meter = RuntimeAdmissionMeter::TreasuryOutflow.key();
+    for (pid, queued) in queue {
+        if !queued.meters_declared.contains(&meter) {
+            continue;
+        }
+        if !matches!(queued.class, futarchy_primitives::ProposalClass::Treasury) {
+            return Err(DispatchError::Other(
+                "treasury meter on non-treasury queue item",
+            ));
+        }
+        let proposal = pallet_epoch::Proposals::<Runtime>::get(pid)
+            .ok_or(DispatchError::Other("queued treasury proposal absent"))?;
+        if proposal.payload_hash != queued.payload_hash
+            || proposal.payload_len != queued.payload_len
+        {
+            return Err(DispatchError::Other(
+                "queued treasury payload binding mismatch",
+            ));
+        }
+        let calls = runtime_batch(queued.payload_hash, queued.payload_len)
+            .ok_or(DispatchError::Other("queued treasury payload unavailable"))?;
+        let amount = derived_treasury_ask(&calls).ok_or(DispatchError::Other(
+            "queued treasury outflow cannot be derived",
+        ))?;
+        if amount != proposal.ask {
+            return Err(DispatchError::Other("queued treasury ask mismatch"));
+        }
+        pending.push(amount);
+    }
+    Ok(pending)
+}
+
+pub struct RuntimePendingOutflowSync;
+
+impl pallet_execution_guard::PendingOutflowSync for RuntimePendingOutflowSync {
+    fn sync_pending_outflows() -> DispatchResult {
+        // Queue is structurally capped at 32, below the treasury's 64-entry
+        // mirror bound. Any rejection here therefore signals invariant drift.
+        FutarchyTreasury::set_pending_outflows(queued_pending_outflows()?)
+    }
+
+    fn force_fail_static() -> bool {
+        FutarchyTreasury::set_pending_outflows(Vec::from([Balance::MAX])).is_ok()
+    }
+
+    fn pending_outflows_synced() -> bool {
+        queued_pending_outflows()
+            .is_ok_and(|expected| FutarchyTreasury::treasury().pending_outflows == expected)
+    }
 }
 
 /// Read-only decision-time preview of every live treasury/issuance/spacing
@@ -2635,26 +2893,13 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         crate::Constitution::phase_flags()
     }
 
+    fn note_dead_man_engaged(engaged: bool) -> DispatchResult {
+        crate::Constitution::note_dead_man_engaged(engaged)
+    }
+
     fn active_metric_spec_version() -> Option<futarchy_primitives::MetricSpecVersion> {
         let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
-        let candidates = pallet_welfare::MetricSpecs::<Runtime>::iter()
-            .filter(|(_, specs)| {
-                !specs.is_empty() && specs.iter().all(|spec| spec.activation_epoch <= epoch)
-            })
-            .filter_map(|(version, specs)| {
-                specs
-                    .iter()
-                    .map(|spec| spec.activation_epoch)
-                    .max()
-                    .map(|activation| (activation, version))
-            })
-            .collect::<Vec<_>>();
-        let latest = candidates.iter().map(|(activation, _)| *activation).max()?;
-        let mut latest_versions = candidates
-            .into_iter()
-            .filter_map(|(activation, version)| (activation == latest).then_some(version));
-        let version = latest_versions.next()?;
-        latest_versions.next().is_none().then_some(version)
+        pallet_welfare::Pallet::<Runtime>::active_snapshot_spec(epoch)
     }
 
     fn treasury_gate_required(proposal: &futarchy_primitives::Proposal<AccountId>) -> bool {
@@ -2681,6 +2926,67 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
             }
         }
         Some(artifact.map_or(proposal.payload_hash, |hash| hash))
+    }
+}
+
+/// Treasury-free runtime boundary for 08 §4.4. The budget uses the published
+/// spendable NAV, which is already zero under reserve impairment and already
+/// nets every existing obligation. Per-book predictions reuse market-core's
+/// exact ceil-rounded seeding arithmetic, including gate books but excluding
+/// the independently-funded Baseline book.
+pub struct RuntimePolBudget;
+
+impl pallet_epoch::PolBudget<AccountId> for RuntimePolBudget {
+    fn epoch_budget() -> Balance {
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            return Balance::MAX;
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        {
+            let nav = crate::FutarchyTreasury::nav().spendable_nav;
+            Perbill::from_parts(perbill_param(b"pol.budget_epoch")).mul_floor(nav)
+        }
+    }
+
+    fn proposal_seed_plan(
+        proposal: &futarchy_primitives::Proposal<AccountId>,
+    ) -> Option<pallet_epoch::PolSeedPlan> {
+        let b = match proposal.class {
+            futarchy_primitives::ProposalClass::Param => balance_param(b"pol.b.param"),
+            futarchy_primitives::ProposalClass::Treasury => balance_param(b"pol.b.trs"),
+            futarchy_primitives::ProposalClass::Code => balance_param(b"pol.b.code"),
+            futarchy_primitives::ProposalClass::Meta => balance_param(b"pol.b.meta"),
+            futarchy_primitives::ProposalClass::Constitutional => return None,
+        };
+        let decision = pallet_market::core_market::seed_headroom(b)
+            .ok()?
+            .checked_mul(2)?;
+        let gate_required = matches!(
+            proposal.class,
+            futarchy_primitives::ProposalClass::Code | futarchy_primitives::ProposalClass::Meta
+        ) || <RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
+            AccountId,
+        >>::treasury_gate_required(proposal);
+        if gate_required {
+            let gate_b = balance_param(b"pol.b_gate");
+            let gates = pallet_market::core_market::seed_headroom(gate_b)
+                .ok()?
+                .checked_mul(4)?;
+            decision
+                .checked_add(gates)
+                .map(|commitment| pallet_epoch::PolSeedPlan {
+                    commitment,
+                    decision_b: b,
+                    gate_b: Some(gate_b),
+                })
+        } else {
+            Some(pallet_epoch::PolSeedPlan {
+                commitment: decision,
+                decision_b: b,
+                gate_b: None,
+            })
+        }
     }
 }
 
@@ -2809,6 +3115,7 @@ impl pallet_epoch::Config for Runtime {
     type Guardian = RuntimeEpochGuardian;
     type Attestation = RuntimeEpochAttestation;
     type Constitution = RuntimeConstitutionAccess;
+    type PolBudget = RuntimePolBudget;
     type ProposalBond = RuntimeProposalBond;
     type Preimage = RuntimeEpochPreimages;
     type ExecutionGuard = RuntimeEpochExecutionGuard;
@@ -3000,7 +3307,8 @@ impl pallet_welfare::LedgerSettlement for WelfareLedger {
             RuntimeOrigin::signed(welfare_settlement_account()),
             pid,
             score,
-        )
+        )?;
+        pallet_market::Pallet::<Runtime>::sync_pol_commitments_after_settlement()
     }
     fn settle_gate(
         pid: u64,
@@ -3023,15 +3331,25 @@ impl pallet_welfare::LedgerSettlement for WelfareLedger {
             RuntimeOrigin::signed(welfare_settlement_account()),
             epoch,
             score,
-        )
+        )?;
+        pallet_market::Pallet::<Runtime>::sync_pol_commitments_after_settlement()
     }
 }
+
+pub struct RuntimeSnapshotSchedule;
+impl pallet_welfare::SnapshotSchedule for RuntimeSnapshotSchedule {
+    fn snapshot_due(epoch: EpochId) -> Option<BlockNumber> {
+        pallet_epoch::Pallet::<Runtime>::scheduled_epoch_end(epoch)
+    }
+}
+
 impl pallet_welfare::Config for Runtime {
     type MetricGovernanceOrigin = pallet_origins::EnsureConstitutionalValues;
     type Params = WelfareParams;
     type MetricInputs = RuntimeMetricInputs;
     type Ledger = WelfareLedger;
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
+    type SnapshotSchedule = RuntimeSnapshotSchedule;
     type KeeperRebate = FutarchyTreasury;
     type WeightInfo = crate::weights::pallet_welfare::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
@@ -3114,6 +3432,7 @@ impl pallet_oracle::ReportingContext for RuntimeReporting {
 impl pallet_oracle::Config for Runtime {
     type AdjudicationOrigin = pallet_origins::EnsureOracleResolution;
     type Reporting = RuntimeReporting;
+    type Params = RuntimeOracleParams;
     // Production remains fail-static until the B4 XCM dispatcher is wired.
     // Benchmark Wasm uses a live no-op sender so the reserve-probe benchmark
     // reaches its documented post-commit rebate path.
@@ -3143,7 +3462,7 @@ impl pallet_oracle::ProbeDispatch for BenchmarkProbeDispatch {
         true
     }
 
-    fn probe_due(_: u64) {}
+    fn probe_due(_: u64, _: Balance) {}
 }
 #[cfg(feature = "runtime-benchmarks")]
 type RuntimeProbeDispatch = BenchmarkProbeDispatch;
@@ -3317,11 +3636,10 @@ impl pallet_futarchy_treasury::PotFunding<AccountId> for TreasuryPotFunding {
         .map(|_| ())
     }
 }
-/// B4 pending renewal-dispatch seam: fail-closed (G-1) — every
-/// `execute_coretime_renewal` rolls back until the real
-/// `bleavit_xcm::coretime::XcmRenewalDispatcher` is wired with the stub XCM
-/// config swap (09 §4: an unwireable transfer must not consume the quote or
-/// mark the period funded; the keeper simply retries once wired).
+/// Coretime renewal stays fail-closed (G-1): production has no authenticated
+/// period-price/freshness source or specified USDC-budget-to-DOT-route
+/// denomination rule. Until both are defined, `execute_coretime_renewal` must
+/// roll back without consuming a quote or marking the period funded (09 §4).
 pub struct PendingRenewalDispatch;
 impl pallet_futarchy_treasury::RenewalDispatch for PendingRenewalDispatch {
     fn dispatch_renewal(
@@ -3329,7 +3647,7 @@ impl pallet_futarchy_treasury::RenewalDispatch for PendingRenewalDispatch {
         _amount: Balance,
     ) -> frame_support::dispatch::DispatchResult {
         Err(sp_runtime::DispatchError::Other(
-            "coretime renewal XCM dispatch not wired yet (B4 runtime integration)",
+            "coretime renewal quote authority and denomination are not wired",
         ))
     }
 }
@@ -3540,6 +3858,7 @@ impl pallet_guardian::Config for Runtime {
     type EffectDispatcher = RuntimeGuardianEffects;
     type ReviewScheduler = RuntimeGuardianScheduler;
     type RecallScheduler = RuntimeGuardianScheduler;
+    type ReviewDeadlineEpochs = GuardianReviewDeadline;
     type WeightInfo = crate::weights::pallet_guardian::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
@@ -3548,6 +3867,7 @@ impl pallet_attestor::Config for Runtime {
     type ValuesOrigin = pallet_origins::EnsureConstitutionalValues;
     // Ratification shares ConstitutionalValues pending the stock-referenda track split SQ.
     type RatifyOrigin = pallet_origins::EnsureConstitutionalValues;
+    type Params = RuntimeAttestorParams;
     type WeightInfo = crate::weights::pallet_attestor::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
@@ -4107,15 +4427,24 @@ fn scheduled_upgrade_aborted() -> bool {
 /// that an untracked upgrade applied.
 pub struct ExecutionGuardSystemEvent;
 impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEvent {
-    fn on_validation_data(_: &cumulus_primitives_core::PersistedValidationData) {
+    fn on_validation_data(data: &cumulus_primitives_core::PersistedValidationData) {
         frame_system::Pallet::<Runtime>::register_extra_weight_unchecked(
-            migration_validation_hook_weight(),
+            migration_validation_hook_weight().saturating_add(dead_man_detector_hook_weight()),
             DispatchClass::Mandatory,
         );
         // Called once by the mandatory parachain inherent before the
         // executive services the MBM cursor for this block. Comparing with
         // the prior marker is O(1) storage and bounded by CursorMaxLen.
         track_migration_progress();
+        let snapshot_overdue = pallet_welfare::Pallet::<Runtime>::snapshot_overdue(
+            frame_system::Pallet::<Runtime>::block_number(),
+        );
+        // The pallet seam accepts only the plain relay number (I-24); detector
+        // failure leaves the already-latched status quo untouched.
+        let _ = pallet_epoch::Pallet::<Runtime>::observe_dead_man(
+            data.relay_parent_number,
+            snapshot_overdue,
+        );
         if scheduled_upgrade_aborted() {
             if crate::ExecutionGuard::validation_code_aborted().is_ok() {
                 // Guardian-visible incident trigger, intentionally not an
@@ -4179,6 +4508,7 @@ impl pallet_execution_guard::Config for Runtime {
     type EnqueueAuthority = EnsureEpochAccount;
     type Attestations = RuntimeAttestations;
     type KeeperRebate = FutarchyTreasury;
+    type PendingOutflowSync = RuntimePendingOutflowSync;
     type Guardian = RuntimeGuardianState;
     type Params = ExecutionParams;
     type Capabilities = RuntimeCapabilities;
@@ -4214,6 +4544,7 @@ pub(crate) fn prime_keeper_rebate_worst_case() {
             max_delta: None,
             cooldown_epochs: 0,
             last_changed_epoch: 0,
+            last_change_block: 0,
             class: pallet_constitution::ParamClass::Param,
             kernel_bounded: false,
         },

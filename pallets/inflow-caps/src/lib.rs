@@ -62,6 +62,22 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
+        /// Return whether new conditional-ledger escrow is admissible under the
+        /// live Phase-3 caps. This is a pure defense-in-depth read: splits move
+        /// already-issued, already-metered USDC, so they neither reserve cap
+        /// headroom nor extend [`CumulativeDeposits`]. Exact-cap state remains
+        /// admissible; only state already above either cap halts new escrow.
+        pub fn escrow_admissible(who: &T::AccountId) -> bool {
+            let tvl_cap = T::CapParams::tvl_cap_usdc();
+            let global_admissible = tvl_cap == u128::MAX || T::UsdcIssuance::get() <= tvl_cap;
+            if !global_admissible {
+                return false;
+            }
+
+            let deposit_cap = T::CapParams::deposit_cap_usdc();
+            deposit_cap == u128::MAX || CumulativeDeposits::<T>::get(who) <= deposit_cap
+        }
+
         /// Return `Ok` iff minting `amount` keeps total local issuance within
         /// the live global cap. This pure admission check performs no writes.
         #[allow(clippy::result_unit_err)]

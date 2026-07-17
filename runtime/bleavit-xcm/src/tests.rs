@@ -955,7 +955,6 @@ fn caps_group_full_inbound_program_under_caps_credits_and_records_the_beneficiar
 
 #[test]
 fn caps_group_over_global_cap_fails_at_mint_with_zero_issuance_and_zero_trap() {
-    // limit-coverage: phase3.tvl_cap
     new_test_ext().execute_with(|| {
         set_caps(99, u128::MAX);
         let issuance_before = ForeignAssets::total_supply(usdc_location());
@@ -982,7 +981,6 @@ fn caps_group_over_global_cap_fails_at_mint_with_zero_issuance_and_zero_trap() {
 
 #[test]
 fn caps_group_per_account_rejection_still_gates_deposit_and_traps_minted_holding() {
-    // limit-coverage: phase3.dep_cap
     new_test_ext().execute_with(|| {
         set_caps(u128::MAX, 1);
         let outcome = execute_inbound_usdc(100, ALICE_BYTES, 43);

@@ -17,6 +17,34 @@ pub const CHALLENGE_WINDOW_BLOCKS: BlockNumber = 43_200;
 pub const CHALLENGE_BOND: Balance = ATTESTOR_BOND / 2;
 pub const FALSE_EJECTION_THRESHOLD: u8 = 2;
 
+/// Live constitution values consumed by the attestor state machine.
+///
+/// The constants above remain the genesis defaults exposed through runtime
+/// metadata. Runtime callers hydrate this plain frame-free value from
+/// `pallet-constitution::Params` before every operation that consumes a
+/// tunable (13 reading rule 2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AttestorParams {
+    pub bond: Balance,
+    pub challenge_window: BlockNumber,
+}
+
+impl AttestorParams {
+    pub const DEFAULT: Self = Self {
+        bond: ATTESTOR_BOND,
+        challenge_window: CHALLENGE_WINDOW_BLOCKS,
+    };
+
+    pub const fn challenge_bond(self) -> Balance {
+        half_ceil(self.bond)
+    }
+}
+
+/// Fifty percent of governed `att.bond`, rounded against the claimant (R-7).
+const fn half_ceil(value: Balance) -> Balance {
+    (value / 2).saturating_add(value % 2)
+}
+
 #[derive(
     Clone,
     Copy,
@@ -153,8 +181,8 @@ pub struct AttestorRegistry {
 }
 
 impl AttestorRegistry {
-    pub fn new(members: Vec<AccountId>) -> Result<Self, Error> {
-        let infos = validate_and_infos(members)?;
+    pub fn new(members: Vec<AccountId>, params: AttestorParams) -> Result<Self, Error> {
+        let infos = validate_and_infos(members, params.bond)?;
         Ok(Self {
             members: infos,
             attestations: Vec::new(),
@@ -166,12 +194,13 @@ impl AttestorRegistry {
         &mut self,
         origin: AttestorOrigin,
         members: Vec<AccountId>,
+        params: AttestorParams,
     ) -> Result<(), Error> {
         ensure!(
             matches!(origin, AttestorOrigin::ConstitutionalValues),
             Error::BadOrigin
         );
-        let infos = validate_and_infos(members.clone())?;
+        let infos = validate_and_infos(members.clone(), params.bond)?;
         self.members = infos;
         self.events.push(Event::MembersSet { members });
         Ok(())
@@ -183,6 +212,7 @@ impl AttestorRegistry {
         artifact_hash: H256,
         statement_hash: H256,
         now: BlockNumber,
+        params: AttestorParams,
     ) -> Result<AttestationId, Error> {
         self.ensure_active_member(who)?;
         ensure!(
@@ -205,7 +235,7 @@ impl AttestorRegistry {
             attestor: who,
             submitted_at: now,
             challenge_deadline: now
-                .checked_add(CHALLENGE_WINDOW_BLOCKS)
+                .checked_add(params.challenge_window)
                 .ok_or(Error::Overflow)?,
             challenge: None,
         };
@@ -225,8 +255,12 @@ impl AttestorRegistry {
         evidence_hash: H256,
         bond: Balance,
         now: BlockNumber,
+        params: AttestorParams,
     ) -> Result<(), Error> {
-        ensure!(bond >= CHALLENGE_BOND, Error::ChallengeBondTooSmall);
+        ensure!(
+            bond >= params.challenge_bond(),
+            Error::ChallengeBondTooSmall
+        );
         let att = self
             .attestations
             .iter_mut()
@@ -275,7 +309,13 @@ impl AttestorRegistry {
         let slashed = if attestation_upheld {
             bond / 2
         } else {
-            ATTESTOR_BOND / 2
+            let stored_bond = self
+                .members
+                .iter()
+                .find(|member| member.account == loser)
+                .map(|member| member.bond)
+                .ok_or(Error::NotMember)?;
+            half_ceil(stored_bond)
         };
         if attestation_upheld {
             self.attestations[idx].challenge = Some(ChallengeStatus::Upheld);
@@ -378,7 +418,10 @@ impl AttestorRegistry {
     }
 }
 
-fn validate_and_infos(members: Vec<AccountId>) -> Result<Vec<AttestorInfo>, Error> {
+fn validate_and_infos(
+    members: Vec<AccountId>,
+    attestor_bond: Balance,
+) -> Result<Vec<AttestorInfo>, Error> {
     ensure!(members.len() >= MIN_MEMBERS, Error::TooFewMembers);
     for i in 0..members.len() {
         for j in (i + 1)..members.len() {
@@ -395,7 +438,7 @@ fn validate_and_infos(members: Vec<AccountId>) -> Result<Vec<AttestorInfo>, Erro
         .into_iter()
         .map(|account| AttestorInfo {
             account,
-            bond: ATTESTOR_BOND,
+            bond: attestor_bond,
             false_count: 0,
             active: true,
         })
@@ -428,36 +471,39 @@ mod tests {
     fn members() -> Vec<AccountId> {
         vec![acct(1), acct(2), acct(3)]
     }
+    fn params() -> AttestorParams {
+        AttestorParams::DEFAULT
+    }
     #[test]
     fn membership_values_origin_and_floor() {
         assert_eq!(
-            AttestorRegistry::new(vec![acct(1), acct(2)]),
+            AttestorRegistry::new(vec![acct(1), acct(2)], params()),
             Err(Error::TooFewMembers)
         );
         assert_eq!(
-            AttestorRegistry::new(vec![acct(1), acct(1), acct(2)]),
+            AttestorRegistry::new(vec![acct(1), acct(1), acct(2)], params()),
             Err(Error::DuplicateMember)
         );
-        let mut r = AttestorRegistry::new(members()).unwrap();
+        let mut r = AttestorRegistry::new(members(), params()).unwrap();
         assert_eq!(
-            r.set_members(AttestorOrigin::Signed, members()),
+            r.set_members(AttestorOrigin::Signed, members(), params()),
             Err(Error::BadOrigin)
         );
     }
     #[test]
     fn two_distinct_attestors_after_window_form_quorum() {
-        let mut r = AttestorRegistry::new(members()).unwrap();
-        r.attest(acct(1), 9, [7; 32], [8; 32], 0).unwrap();
-        r.attest(acct(2), 9, [7; 32], [8; 32], 0).unwrap();
+        let mut r = AttestorRegistry::new(members(), params()).unwrap();
+        r.attest(acct(1), 9, [7; 32], [8; 32], 0, params()).unwrap();
+        r.attest(acct(2), 9, [7; 32], [8; 32], 0, params()).unwrap();
         assert!(!r.has_quorum(9, [7; 32], CHALLENGE_WINDOW_BLOCKS));
         assert!(r.has_quorum(9, [7; 32], CHALLENGE_WINDOW_BLOCKS + 1));
     }
     #[test]
     fn open_challenge_suppresses_quorum_until_upheld() {
-        let mut r = AttestorRegistry::new(members()).unwrap();
-        let a = r.attest(acct(1), 9, [7; 32], [8; 32], 0).unwrap();
-        r.attest(acct(2), 9, [7; 32], [8; 32], 0).unwrap();
-        r.challenge_attestation(acct(9), a, [5; 32], CHALLENGE_BOND, 1)
+        let mut r = AttestorRegistry::new(members(), params()).unwrap();
+        let a = r.attest(acct(1), 9, [7; 32], [8; 32], 0, params()).unwrap();
+        r.attest(acct(2), 9, [7; 32], [8; 32], 0, params()).unwrap();
+        r.challenge_attestation(acct(9), a, [5; 32], CHALLENGE_BOND, 1, params())
             .unwrap();
         assert!(!r.has_quorum(9, [7; 32], CHALLENGE_WINDOW_BLOCKS + 1));
         r.resolve_challenge(AttestorOrigin::RatifyTrack, a, true)
@@ -466,14 +512,14 @@ mod tests {
     }
     #[test]
     fn false_attestation_slashes_and_ejects_on_second_loss() {
-        let mut r = AttestorRegistry::new(members()).unwrap();
-        let a = r.attest(acct(1), 1, [1; 32], [2; 32], 0).unwrap();
-        r.challenge_attestation(acct(9), a, [3; 32], CHALLENGE_BOND, 1)
+        let mut r = AttestorRegistry::new(members(), params()).unwrap();
+        let a = r.attest(acct(1), 1, [1; 32], [2; 32], 0, params()).unwrap();
+        r.challenge_attestation(acct(9), a, [3; 32], CHALLENGE_BOND, 1, params())
             .unwrap();
         r.resolve_challenge(AttestorOrigin::RatifyTrack, a, false)
             .unwrap();
-        let b = r.attest(acct(1), 2, [1; 32], [2; 32], 2).unwrap();
-        r.challenge_attestation(acct(9), b, [3; 32], CHALLENGE_BOND, 3)
+        let b = r.attest(acct(1), 2, [1; 32], [2; 32], 2, params()).unwrap();
+        r.challenge_attestation(acct(9), b, [3; 32], CHALLENGE_BOND, 3, params())
             .unwrap();
         r.resolve_challenge(AttestorOrigin::RatifyTrack, b, false)
             .unwrap();
@@ -481,10 +527,10 @@ mod tests {
     }
     #[test]
     fn challenge_paths_check_window_and_bond() {
-        let mut r = AttestorRegistry::new(members()).unwrap();
-        let a = r.attest(acct(1), 1, [1; 32], [2; 32], 0).unwrap();
+        let mut r = AttestorRegistry::new(members(), params()).unwrap();
+        let a = r.attest(acct(1), 1, [1; 32], [2; 32], 0, params()).unwrap();
         assert_eq!(
-            r.challenge_attestation(acct(9), a, [3; 32], CHALLENGE_BOND - 1, 1),
+            r.challenge_attestation(acct(9), a, [3; 32], CHALLENGE_BOND - 1, 1, params()),
             Err(Error::ChallengeBondTooSmall)
         );
         assert_eq!(
@@ -493,7 +539,8 @@ mod tests {
                 a,
                 [3; 32],
                 CHALLENGE_BOND,
-                CHALLENGE_WINDOW_BLOCKS + 1
+                CHALLENGE_WINDOW_BLOCKS + 1,
+                params(),
             ),
             Err(Error::ChallengeWindowClosed)
         );
@@ -503,10 +550,11 @@ mod tests {
     fn upheld_attestation_still_waits_for_its_challenge_window() {
         // 06 §7: an upheld challenge proves the attestation valid but does not
         // shortcut the 72h window — quorum still waits for `challenge_deadline`.
-        let mut r = AttestorRegistry::new(members()).unwrap();
-        r.attest(acct(2), 9, [7; 32], [8; 32], 0).unwrap(); // id 0, deadline = CWB
-        r.attest(acct(1), 9, [7; 32], [8; 32], 100).unwrap(); // id 1, deadline = 100+CWB
-        r.challenge_attestation(acct(9), 1, [5; 32], CHALLENGE_BOND, 101)
+        let mut r = AttestorRegistry::new(members(), params()).unwrap();
+        r.attest(acct(2), 9, [7; 32], [8; 32], 0, params()).unwrap(); // id 0, deadline = CWB
+        r.attest(acct(1), 9, [7; 32], [8; 32], 100, params())
+            .unwrap(); // id 1, deadline = 100+CWB
+        r.challenge_attestation(acct(9), 1, [5; 32], CHALLENGE_BOND, 101, params())
             .unwrap();
         r.resolve_challenge(AttestorOrigin::RatifyTrack, 1, true)
             .unwrap(); // upheld early
@@ -523,23 +571,23 @@ mod tests {
         // qualify". Eject one of three attestors, then have the two remaining
         // active members attest with closed windows — quorum must still FAIL
         // because the active registry is below MIN_MEMBERS (A10 Codex PR review).
-        let mut r = AttestorRegistry::new(members()).unwrap();
+        let mut r = AttestorRegistry::new(members(), params()).unwrap();
         // Eject acct(1) via two adjudicated-false attestations.
-        let a = r.attest(acct(1), 1, [1; 32], [2; 32], 0).unwrap();
-        r.challenge_attestation(acct(9), a, [3; 32], CHALLENGE_BOND, 1)
+        let a = r.attest(acct(1), 1, [1; 32], [2; 32], 0, params()).unwrap();
+        r.challenge_attestation(acct(9), a, [3; 32], CHALLENGE_BOND, 1, params())
             .unwrap();
         r.resolve_challenge(AttestorOrigin::RatifyTrack, a, false)
             .unwrap();
-        let b = r.attest(acct(1), 2, [1; 32], [2; 32], 2).unwrap();
-        r.challenge_attestation(acct(9), b, [3; 32], CHALLENGE_BOND, 3)
+        let b = r.attest(acct(1), 2, [1; 32], [2; 32], 2, params()).unwrap();
+        r.challenge_attestation(acct(9), b, [3; 32], CHALLENGE_BOND, 3, params())
             .unwrap();
         r.resolve_challenge(AttestorOrigin::RatifyTrack, b, false)
             .unwrap();
         assert!(!r.is_active_member(acct(1)));
         assert_eq!(r.active_member_count(), 2);
         // The two still-active members each attest a CODE artifact; windows close.
-        r.attest(acct(2), 9, [7; 32], [8; 32], 0).unwrap();
-        r.attest(acct(3), 9, [7; 32], [8; 32], 0).unwrap();
+        r.attest(acct(2), 9, [7; 32], [8; 32], 0, params()).unwrap();
+        r.attest(acct(3), 9, [7; 32], [8; 32], 0, params()).unwrap();
         // Two counting attestations from distinct active members, but the active
         // registry is below MIN_MEMBERS ⇒ the CODE/META gate has no quorum.
         assert!(!r.has_quorum(9, [7; 32], CHALLENGE_WINDOW_BLOCKS + 1));

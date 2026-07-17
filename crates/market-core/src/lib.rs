@@ -262,26 +262,130 @@ pub struct TwapWindow {
     pub sealed: bool,
 }
 
+/// Two-limb unsigned accumulator for the 04 §7 price×block integral.
+///
+/// Realistic chain values occupy `lo`; the explicit high limb keeps the
+/// consensus representation and overflow behavior correct for the full u256
+/// domain without adding a big-integer dependency.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Default,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    TypeInfo,
+)]
+pub struct TwapCumulative {
+    pub hi: u128,
+    pub lo: u128,
+}
+
+impl TwapCumulative {
+    pub const ZERO: Self = Self { hi: 0, lo: 0 };
+
+    pub const fn from_low(lo: u128) -> Self {
+        Self { hi: 0, lo }
+    }
+
+    pub fn checked_add(self, rhs: Self) -> Option<Self> {
+        let (lo, carry) = self.lo.overflowing_add(rhs.lo);
+        let hi = self
+            .hi
+            .checked_add(rhs.hi)?
+            .checked_add(u128::from(carry))?;
+        Some(Self { hi, lo })
+    }
+
+    pub fn checked_add_product(self, observation: u64, blocks: u64) -> Option<Self> {
+        let product = u128::from(observation).checked_mul(u128::from(blocks))?;
+        self.checked_add(Self::from_low(product))
+    }
+
+    pub fn checked_sub(self, rhs: Self) -> Option<Self> {
+        let (lo, borrow) = self.lo.overflowing_sub(rhs.lo);
+        let hi = self
+            .hi
+            .checked_sub(rhs.hi)?
+            .checked_sub(u128::from(borrow))?;
+        Some(Self { hi, lo })
+    }
+
+    /// Divide the full two-limb value by a block count using base-2⁶⁴ long
+    /// division. The quotient remains a two-limb value; callers decide whether
+    /// their narrower result type can represent it.
+    pub fn checked_div_by_blocks(self, blocks: u64) -> Option<Self> {
+        if blocks == 0 {
+            return None;
+        }
+
+        let hi_hi = u64::try_from(self.hi >> 64).ok()?;
+        let hi_lo = u64::try_from(self.hi & u128::from(u64::MAX)).ok()?;
+        let lo_hi = u64::try_from(self.lo >> 64).ok()?;
+        let lo_lo = u64::try_from(self.lo & u128::from(u64::MAX)).ok()?;
+
+        let (q_hi_hi, remainder) = Self::divide_word(0, hi_hi, blocks)?;
+        let (q_hi_lo, remainder) = Self::divide_word(remainder, hi_lo, blocks)?;
+        let (q_lo_hi, remainder) = Self::divide_word(remainder, lo_hi, blocks)?;
+        let (q_lo_lo, _) = Self::divide_word(remainder, lo_lo, blocks)?;
+
+        Some(Self {
+            hi: (u128::from(q_hi_hi) << 64) | u128::from(q_hi_lo),
+            lo: (u128::from(q_lo_hi) << 64) | u128::from(q_lo_lo),
+        })
+    }
+
+    pub fn try_into_u64(self) -> Option<u64> {
+        if self.hi != 0 {
+            return None;
+        }
+        u64::try_from(self.lo).ok()
+    }
+
+    fn divide_word(remainder: u64, word: u64, divisor: u64) -> Option<(u64, u64)> {
+        let numerator = (u128::from(remainder) << 64) | u128::from(word);
+        let quotient = u64::try_from(numerator.checked_div(u128::from(divisor))?).ok()?;
+        let remainder = u64::try_from(numerator.checked_rem(u128::from(divisor))?).ok()?;
+        Some((quotient, remainder))
+    }
+}
+
+impl From<u128> for TwapCumulative {
+    fn from(value: u128) -> Self {
+        Self::from_low(value)
+    }
+}
+
 /// Accumulator value at a boundary crossed by a newly recorded observation.
 /// Observations are weighted backward over the interval ending at their record
 /// block (04 §7).
 pub fn accumulator_at_boundary(
     previous_block: BlockNumber,
-    previous_cumulative: u128,
+    previous_cumulative: TwapCumulative,
     observation: FixedU64,
     boundary: BlockNumber,
-) -> Option<u128> {
+) -> Option<TwapCumulative> {
     let elapsed = boundary.checked_sub(previous_block)?;
-    previous_cumulative.checked_add(u128::from(observation.0).checked_mul(u128::from(elapsed))?)
+    previous_cumulative.checked_add_product(observation.0, u64::from(elapsed))
 }
 
 /// Exact fixed-grid mean between two cumulative checkpoints.
-pub fn twap_between(start: u128, end: u128, blocks: BlockNumber) -> Option<FixedU64> {
-    if blocks == 0 || end < start {
-        return None;
-    }
-    let value = end.checked_sub(start)?.checked_div(u128::from(blocks))?;
-    u64::try_from(value).ok().map(FixedU64)
+pub fn twap_between(
+    start: TwapCumulative,
+    end: TwapCumulative,
+    blocks: BlockNumber,
+) -> Option<FixedU64> {
+    let value = end
+        .checked_sub(start)?
+        .checked_div_by_blocks(u64::from(blocks))?
+        .try_into_u64()?;
+    Some(FixedU64(value))
 }
 
 /// Scheduled-interval coverage check (05 §5). Division is avoided so the
@@ -304,6 +408,14 @@ pub fn coverage_at_least(
 /// overstates the capital available to absorb manipulation flow.
 pub fn maker_loss_floor(b: Balance) -> Option<Balance> {
     fixed_to_base_units_down(fx(b).ok()?.checked_mul(LN_2).ok()?).ok()
+}
+
+/// Exact per-book POL obligation created by seeding, rounded up in the same
+/// maker-solvent direction as the actual ledger split (04 §10; 08 §1.2/§3).
+/// Treasury NAV mirroring and epoch budget prediction call this function too,
+/// so no parallel `b·ln 2` formula can drift from the cash seed path.
+pub fn seed_headroom(b: Balance) -> Result<Balance, Error> {
+    fixed_to_base_units_up(fx(b)?.checked_mul(LN_2).map_err(map_fixed)?)
 }
 
 #[derive(
@@ -331,7 +443,7 @@ pub struct MarketBook<AccountId> {
     pub last_quote_1e9: FixedU64,
     pub last_observation_1e9: FixedU64,
     pub last_observed_block: u64,
-    pub cumulative_price_blocks: u128,
+    pub cumulative_price_blocks: TwapCumulative,
     pub stale_events: u8,
 }
 
@@ -357,7 +469,7 @@ impl<AccountId> MarketBook<AccountId> {
             last_quote_1e9: FixedU64(500_000_000),
             last_observation_1e9: FixedU64(500_000_000),
             last_observed_block: 0,
-            cumulative_price_blocks: 0,
+            cumulative_price_blocks: TwapCumulative::ZERO,
             stale_events: 0,
         }
     }
@@ -891,7 +1003,7 @@ pub fn seed_book<A: Clone + Eq, L: LedgerOps<A>>(
     ledger: &mut L,
     treasury: &A,
 ) -> Result<Balance, Error> {
-    let headroom = fixed_to_base_units_up(fx(m.b)?.checked_mul(LN_2).map_err(map_fixed)?)?;
+    let headroom = seed_headroom(m.b)?;
     ledger.note_protocol_account(m.account.clone());
     ledger.note_protocol_account(m.fees_account.clone());
     match m.kind {
@@ -1000,7 +1112,7 @@ pub fn seed_branch_pair<A: Clone + Eq, L: LedgerOps<A>>(
         ) if left == right && left_gate == right_gate => (left, Some(left_gate)),
         _ => return Err(Error::TryStateViolation),
     };
-    let headroom = fixed_to_base_units_up(fx(accept.b)?.checked_mul(LN_2).map_err(map_fixed)?)?;
+    let headroom = seed_headroom(accept.b)?;
     for book in [accept, reject] {
         ledger.note_protocol_account(book.account.clone());
         ledger.note_protocol_account(book.fees_account.clone());
@@ -1374,12 +1486,10 @@ pub fn observe_book<A: Clone + Eq>(
         ),
     );
     let capped = prev.clamp(low, high);
-    m.cumulative_price_blocks = add(
-        m.cumulative_price_blocks,
-        (capped as u128)
-            .checked_mul(elapsed as u128)
-            .ok_or(Error::ArithmeticOverflow)?,
-    )?;
+    m.cumulative_price_blocks = m
+        .cumulative_price_blocks
+        .checked_add_product(capped, elapsed)
+        .ok_or(Error::ArithmeticOverflow)?;
     m.last_observation_1e9 = FixedU64(capped);
     m.last_observed_block = block;
     Ok(Some(Event::Observed {
@@ -1617,6 +1727,53 @@ mod tests {
         [n; 32]
     }
     const B: Balance = 10_000_000_000;
+
+    #[test]
+    fn twap_cumulative_checked_math_spans_both_limbs() {
+        let carried = TwapCumulative::from(u128::MAX).checked_add(TwapCumulative::from(1));
+        assert_eq!(carried, Some(TwapCumulative { hi: 1, lo: 0 }));
+        assert_eq!(
+            carried.and_then(|value| value.checked_sub(TwapCumulative::from(1))),
+            Some(TwapCumulative::from(u128::MAX)),
+        );
+        assert_eq!(
+            TwapCumulative { hi: 1, lo: 0 }.checked_div_by_blocks(2),
+            Some(TwapCumulative {
+                hi: 0,
+                lo: 1u128 << 127,
+            }),
+        );
+        assert_eq!(TwapCumulative::default(), TwapCumulative::ZERO);
+        assert_eq!(TwapCumulative::max_encoded_len(), 32);
+    }
+
+    #[test]
+    fn twap_cumulative_failures_are_checked_and_low_limb_results_are_identical() {
+        let maximum = TwapCumulative {
+            hi: u128::MAX,
+            lo: u128::MAX,
+        };
+        assert_eq!(maximum.checked_add(TwapCumulative::from(1)), None);
+        assert_eq!(
+            TwapCumulative::ZERO.checked_sub(TwapCumulative::from(1)),
+            None
+        );
+        assert_eq!(TwapCumulative::from(1).checked_div_by_blocks(0), None);
+
+        let start = TwapCumulative {
+            hi: 0,
+            lo: u128::MAX - 4_999_999_999,
+        };
+        let end = TwapCumulative { hi: 1, lo: 0 };
+        assert_eq!(
+            accumulator_at_boundary(0, start, FixedU64(500_000_000), 10),
+            Some(end),
+        );
+        assert_eq!(twap_between(start, end, 10), Some(FixedU64(500_000_000)),);
+        assert_eq!(twap_between(start, end, 0), None);
+        assert_eq!(twap_between(end, start, 10), None);
+    }
+
     #[test]
     fn quote_matches_buy_and_sell_execution_paths_without_mutating() {
         let mut ledger = LedgerState::new();

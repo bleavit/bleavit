@@ -48,6 +48,9 @@ pub const MAX_RESOURCE_LOCKS_BOUND: u32 =
     MAX_LIVE_PROPOSALS_BOUND * MAX_RESOURCES_PER_PROPOSAL as u32;
 pub const MAX_PROPOSAL_BONDS_BOUND: u32 = MAX_INTAKE_QUEUE_BOUND + MAX_LIVE_PROPOSALS_BOUND;
 pub const TICK_BATCH_BOUND: u32 = futarchy_primitives::kernel::TICK_BATCH;
+const DEAD_MAN_CAUSE_RELAY: u8 = 1 << 0;
+const DEAD_MAN_CAUSE_SNAPSHOT: u8 = 1 << 1;
+const DEAD_MAN_CAUSE_MASK: u8 = DEAD_MAN_CAUSE_RELAY | DEAD_MAN_CAUSE_SNAPSHOT;
 
 /// Live epoch/decision tunables sourced from `pallet-constitution::Params`.
 pub trait EpochParamsProvider {
@@ -80,7 +83,7 @@ pub trait MarketAccess<AccountId> {
     fn open_markets(
         proposal: &Proposal<AccountId>,
         rerun: bool,
-        requires_gate_markets: bool,
+        seed_plan: Option<pallet::PolSeedPlan>,
     ) -> Result<MarketSet, DispatchError>;
     /// Register the one permitted decision extension against the existing
     /// books. If an exact fresh window cannot be exposed, the proposal must
@@ -140,11 +143,28 @@ pub trait ConstitutionAccess<AccountId> {
     fn in_cap_prize(proposal: &Proposal<AccountId>) -> Option<Balance>;
     fn ledger_frozen() -> bool;
     fn phase_flags() -> u32;
+    /// Epoch-owned writer for the dead-man machinery bit. The detector only
+    /// engages; the epoch recovery boundary is the sole clearing caller.
+    fn note_dead_man_engaged(engaged: bool) -> DispatchResult;
     fn active_metric_spec_version() -> Option<MetricSpecVersion>;
     fn treasury_gate_required(proposal: &Proposal<AccountId>) -> bool;
     /// Canonical CODE/META artifact commitment checked by attestors. `None`
     /// is an ambiguous payload and therefore blocks adoption.
     fn attestation_artifact(proposal: &Proposal<AccountId>) -> Option<H256>;
+}
+
+/// Runtime-only 08 §4.4 funding projection. The epoch pallet remains treasury-
+/// and XCM-free: the runtime supplies the conservative spendable-NAV budget and
+/// predicts each proposal's exact seed commitment from live Params.
+pub trait PolBudget<AccountId> {
+    /// `pol.budget_epoch × spendable NAV`, rounded down. Reserve impairment
+    /// therefore returns zero through the treasury's spendable-NAV view.
+    fn epoch_budget() -> Balance;
+    /// Exact ceil-rounded commitment plus the live Params book depths that
+    /// produce it. `None` is unfundable (G-1). Epoch freezes the whole plan with
+    /// the funded slate so later NAV or Params changes cannot seed more than the
+    /// amount admitted at Seed entry.
+    fn proposal_seed_plan(proposal: &Proposal<AccountId>) -> Option<pallet::PolSeedPlan>;
 }
 
 /// Real USDC escrow used for proposal-bond custody.
@@ -270,6 +290,7 @@ pub mod pallet {
         type Guardian: GuardianAccess;
         type Attestation: AttestationAccess;
         type Constitution: ConstitutionAccess<Self::AccountId>;
+        type PolBudget: PolBudget<Self::AccountId>;
         type ProposalBond: ProposalBondCurrency<Self::AccountId>;
         type Preimage: PreimageAccess;
         type ExecutionGuard: ExecutionGuardAccess;
@@ -443,6 +464,26 @@ pub mod pallet {
         pub recovery_epoch: Option<EpochId>,
     }
 
+    /// Fixed-size detector latch. Causes may clear after healthy observations,
+    /// but `incident_active` remains set until the recovery epoch completes.
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        Decode,
+        DecodeWithMemTracking,
+        Default,
+        Encode,
+        Eq,
+        MaxEncodedLen,
+        PartialEq,
+        TypeInfo,
+    )]
+    pub struct DeadManDetectorState {
+        pub causes: u8,
+        pub incident_active: bool,
+    }
+
     pub type SpecBindings =
         BoundedVec<(ProposalId, MetricSpecVersion), ConstU32<MAX_COHORT_PROPOSALS_BOUND>>;
 
@@ -457,11 +498,33 @@ pub mod pallet {
         pub specs: SpecBindings,
     }
 
+    /// Seed-entry funding plan for one newly qualified proposal. Baseline depth
+    /// is intentionally absent because 08 §4.3 funds it outside the epoch cap.
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        Decode,
+        DecodeWithMemTracking,
+        Encode,
+        Eq,
+        MaxEncodedLen,
+        PartialEq,
+        TypeInfo,
+    )]
+    pub struct PolSeedPlan {
+        pub commitment: Balance,
+        pub decision_b: Balance,
+        pub gate_b: Option<Balance>,
+    }
+
     pub type Intake = BoundedVec<ProposalId, ConstU32<MAX_INTAKE_QUEUE_BOUND>>;
     pub type Recent = BoundedVec<CohortSummary, ConstU32<RECENT_COHORTS_BOUND>>;
     pub type Locks = BoundedVec<([u8; 8], ProposalId), ConstU32<MAX_RESOURCE_LOCKS_BOUND>>;
     pub type TickBatch = BoundedVec<ProposalId, ConstU32<TICK_BATCH_BOUND>>;
     pub type Rollovers = BoundedVec<(ProposalId, u8), ConstU32<MAX_INTAKE_QUEUE_BOUND>>;
+    pub type FundedPolSlotSet =
+        BoundedVec<(ProposalId, PolSeedPlan), ConstU32<MAX_COHORT_PROPOSALS_BOUND>>;
 
     /// Frozen 02 §7.1 live proposal map (Screening→settled pipeline only).
     #[pallet::storage]
@@ -528,8 +591,21 @@ pub mod pallet {
     #[pallet::storage]
     pub type RolloverCounts<T: Config> = StorageValue<_, Rollovers, ValueQuery>;
 
+    /// Seed-entry snapshot of the funded proposal ids and their gate-book
+    /// shapes. Bounded by the qualified cohort cap and replaced every epoch.
+    #[pallet::storage]
+    pub type FundedPolSlots<T: Config> = StorageValue<_, FundedPolSlotSet, ValueQuery>;
+
     #[pallet::storage]
     pub type DeadMan<T: Config> = StorageValue<_, DeadManState, ValueQuery>;
+
+    /// Last relay parent accepted by the parachain inherent. The runtime glue
+    /// crosses the Cumulus boundary with this plain number only (I-24).
+    #[pallet::storage]
+    pub type LastRelayParent<T: Config> = StorageValue<_, u32, OptionQuery>;
+
+    #[pallet::storage]
+    pub type DeadManDetector<T: Config> = StorageValue<_, DeadManDetectorState, ValueQuery>;
 
     #[pallet::storage]
     pub type StaleEpochCutoff<T: Config> = StorageValue<_, ProposalId, OptionQuery>;
@@ -549,6 +625,12 @@ pub mod pallet {
         },
         ProposalQualified(ProposalId),
         ProposalDeferred(ProposalId),
+        SlotsShrunk {
+            epoch: EpochId,
+            requested: u32,
+            funded: u32,
+            dropped: Vec<ProposalId>,
+        },
         MarketsOpened(ProposalId),
         DecisionExtended(ProposalId),
         ProposalQueued {
@@ -723,6 +805,56 @@ pub mod pallet {
                         state.epoch.length,
                     );
                     Self::sync_clock(state, now)?;
+                    let entered_seed =
+                        clock_before.1 != EpochPhase::Seed && state.epoch.phase == EpochPhase::Seed;
+                    if entered_seed {
+                        let predictions = state
+                            .proposals
+                            .iter()
+                            .filter(|proposal| {
+                                proposal.epoch == state.epoch.index
+                                    && proposal.state == ProposalState::Qualified
+                            })
+                            .map(|proposal| {
+                                (proposal.id, T::PolBudget::proposal_seed_plan(proposal))
+                            })
+                            .collect::<Vec<_>>();
+                        let commitments = predictions
+                            .iter()
+                            .map(|(pid, prediction)| (*pid, prediction.map(|plan| plan.commitment)))
+                            .collect::<Vec<_>>();
+                        let dropped = state.shrink_qualified_slots(
+                            CoreOrigin::Keeper,
+                            T::PolBudget::epoch_budget(),
+                            &commitments,
+                        )?;
+                        for pid in &dropped {
+                            Self::release_qualification_preimage(*pid);
+                        }
+                        let funded = state
+                            .proposals
+                            .iter()
+                            .filter(|proposal| {
+                                proposal.epoch == state.epoch.index
+                                    && proposal.state == ProposalState::Qualified
+                            })
+                            .map(|proposal| {
+                                predictions
+                                    .iter()
+                                    .find_map(|(pid, prediction)| {
+                                        (*pid == proposal.id).then_some(*prediction)
+                                    })
+                                    .flatten()
+                                    .map(|plan| (proposal.id, plan))
+                                    .ok_or(CoreError::BadDecisionInput)
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        FundedPolSlots::<T>::put(
+                            FundedPolSlotSet::try_from(funded)
+                                .map_err(|_| CoreError::TryStateViolation)?,
+                        );
+                        advanced |= !dropped.is_empty();
+                    }
                     let mut ordered_pids = pids.into_inner();
                     ordered_pids.sort_by(|pid_a, pid_b| {
                         let proposal_a = state.proposal_view(*pid_a).ok();
@@ -750,13 +882,6 @@ pub mod pallet {
                     for pid in ordered_pids {
                         let proposal = state.proposal_view(pid)?.clone();
                         let rerun = proposal.state == ProposalState::Rerun;
-                        let requires_gate_markets = if rerun {
-                            proposal
-                                .markets
-                                .is_some_and(|markets| markets.gates.is_some())
-                        } else {
-                            Self::requires_gate_markets_at_seed(&proposal)
-                        };
                         // Suppress new market/vault deployment while any safety hold
                         // is active: a genuine stale-epoch (the core's T20 force-reject),
                         // the dead-man pause (05 §4.8) or a ledger freeze (06 §6.3). The
@@ -772,9 +897,28 @@ pub mod pallet {
                                 proposal.state,
                                 ProposalState::Qualified | ProposalState::Rerun
                             ) {
-                            let markets =
-                                T::Market::open_markets(&proposal, rerun, requires_gate_markets)
-                                    .map_err(|_| CoreError::Ledger)?;
+                            let seed_plan = if rerun {
+                                None
+                            } else {
+                                FundedPolSlots::<T>::get()
+                                    .iter()
+                                    .find_map(|(funded, plan)| {
+                                        (*funded == proposal.id).then_some(*plan)
+                                    })
+                            };
+                            let requires_gate_markets = seed_plan.map_or_else(
+                                || {
+                                    proposal
+                                        .markets
+                                        .is_some_and(|markets| markets.gates.is_some())
+                                },
+                                |plan| plan.gate_b.is_some(),
+                            );
+                            if !rerun && seed_plan.is_none() {
+                                return Err(CoreError::BadDecisionInput);
+                            };
+                            let markets = T::Market::open_markets(&proposal, rerun, seed_plan)
+                                .map_err(|_| CoreError::Ledger)?;
                             ensure!(
                                 markets.gates.is_some() == requires_gate_markets,
                                 CoreError::BadDecisionInput
@@ -1315,6 +1459,68 @@ pub mod pallet {
             EpochOf::<T>::get().index
         }
 
+        /// Observe the two 05 §4.8 detector inputs once per parachain block.
+        ///
+        /// `relay_parent` is deliberately a plain `u32`: Cumulus validation
+        /// data is terminated in the runtime composition layer (I-24). A relay
+        /// regression is ignored status-quo-safe; the parachain-system
+        /// monotonicity check rejects it before production reaches this seam.
+        pub fn observe_dead_man(relay_parent: u32, snapshot_overdue: bool) -> DispatchResult {
+            frame_support::storage::with_storage_layer(|| {
+                let previous = LastRelayParent::<T>::get();
+                if previous.is_none_or(|seen| relay_parent >= seen) {
+                    LastRelayParent::<T>::put(relay_parent);
+                }
+
+                let relay_gap = previous.and_then(|seen| relay_parent.checked_sub(seen));
+                let mut detector = DeadManDetector::<T>::get();
+                match relay_gap {
+                    Some(gap) if gap >= futarchy_primitives::kernel::DEAD_MAN_RELAY_BLOCKS => {
+                        detector.causes |= DEAD_MAN_CAUSE_RELAY;
+                    }
+                    Some(_) => detector.causes &= !DEAD_MAN_CAUSE_RELAY,
+                    None => {}
+                }
+                if snapshot_overdue {
+                    detector.causes |= DEAD_MAN_CAUSE_SNAPSHOT;
+                } else {
+                    detector.causes &= !DEAD_MAN_CAUSE_SNAPSHOT;
+                }
+
+                if detector.causes != 0 {
+                    detector.incident_active = true;
+                    DeadMan::<T>::mutate(|state| {
+                        state.paused_at.get_or_insert_with(Self::now);
+                    });
+                    if !T::Guardian::dead_man_engaged() {
+                        T::Constitution::note_dead_man_engaged(true)?;
+                    }
+                }
+                DeadManDetector::<T>::put(detector);
+                Ok(())
+            })
+        }
+
+        /// Epoch-close instant for the requested logical epoch. Completed,
+        /// current, and arithmetically predictable future schedules share this
+        /// one checked derivation; no independent snapshot cadence exists.
+        pub fn scheduled_epoch_end(index: EpochId) -> Option<BlockNumber> {
+            if let Some(timing) = Self::epoch_timing(index) {
+                return timing.start.checked_add(timing.length);
+            }
+            let current = EpochOf::<T>::get();
+            if index <= current.index {
+                return None;
+            }
+            let schedule = Schedule::<T>::get();
+            let future_offset = index.checked_sub(current.index)?.checked_sub(1)?;
+            schedule
+                .epoch_start_block
+                .checked_add(schedule.length)?
+                .checked_add(schedule.next_length.checked_mul(future_offset)?)?
+                .checked_add(schedule.next_length)
+        }
+
         pub fn epoch_state() -> EpochState<T::AccountId> {
             Self::load()
         }
@@ -1569,22 +1775,17 @@ pub mod pallet {
             })
         }
 
-        fn requires_gate_markets_at_seed(proposal: &Proposal<T::AccountId>) -> bool {
-            match proposal.class {
-                ProposalClass::Code | ProposalClass::Meta => true,
-                ProposalClass::Treasury => T::Constitution::treasury_gate_required(proposal),
-                ProposalClass::Param | ProposalClass::Constitutional => false,
-            }
-        }
-
         fn sync_clock(
             state: &mut EpochState<T::AccountId>,
             now: BlockNumber,
         ) -> Result<(), CoreError> {
             let paused_at = state.dead_man_paused_at;
+            let recovery_before = state.recovery_epoch;
             state.sync_phase(now);
             if let Some(paused_at) = paused_at {
-                if !state.dead_man_armed && state.dead_man_paused_at.is_none() {
+                // Recovery starts while bit 6 remains latched, so the consumed
+                // pause marker—not the flag—is the signal to extend schedules.
+                if state.dead_man_paused_at.is_none() {
                     let paused_for = now.saturating_sub(paused_at);
                     for proposal in state.proposals.iter().filter(|proposal| {
                         matches!(
@@ -1604,6 +1805,19 @@ pub mod pallet {
                     }
                 }
             }
+            if recovery_before.is_some()
+                && state.recovery_epoch.is_none()
+                && state.dead_man_armed
+                && state.dead_man_recovery_ready
+            {
+                // The detector never clears its own latch. Only this exact
+                // full-epoch boundary releases bit 6 and the execution queue.
+                T::Constitution::note_dead_man_engaged(false)
+                    .map_err(|_| CoreError::TryStateViolation)?;
+                DeadManDetector::<T>::put(DeadManDetectorState::default());
+                state.dead_man_armed = false;
+                state.dead_man_recovery_ready = false;
+            }
             Ok(())
         }
 
@@ -1616,6 +1830,8 @@ pub mod pallet {
             frame_support::storage::with_storage_layer(|| {
                 let mut state = Self::load();
                 state.dead_man_armed = T::Guardian::dead_man_engaged();
+                let detector = DeadManDetector::<T>::get();
+                state.dead_man_recovery_ready = detector.incident_active && detector.causes == 0;
                 state.ledger_frozen = T::Constitution::ledger_frozen();
                 state.phase_flags = T::Constitution::phase_flags();
                 state.horizon_k = T::Params::get().horizon_k;
@@ -1635,6 +1851,7 @@ pub mod pallet {
                 .map(CoreCohortInfo::from)
                 .collect::<Vec<_>>();
             cohorts.sort_by_key(|c| c.epoch);
+            let detector = DeadManDetector::<T>::get();
             EpochState {
                 epoch: CoreEpochInfo {
                     index: epoch.index,
@@ -1651,6 +1868,7 @@ pub mod pallet {
                 resource_locks: ResourceLocks::<T>::get().into_inner(),
                 events: Vec::new(),
                 dead_man_armed: T::Guardian::dead_man_engaged(),
+                dead_man_recovery_ready: detector.incident_active && detector.causes == 0,
                 ledger_frozen: T::Constitution::ledger_frozen(),
                 phase_flags: T::Constitution::phase_flags(),
                 proposal_id_high_water: NextProposalId::<T>::get().saturating_sub(1),
@@ -2029,6 +2247,17 @@ pub mod pallet {
                 }
                 CoreEvent::ProposalQualified(pid) => Some(Event::ProposalQualified(pid)),
                 CoreEvent::ProposalDeferred(pid) => Some(Event::ProposalDeferred(pid)),
+                CoreEvent::SlotsShrunk {
+                    epoch,
+                    requested,
+                    funded,
+                    dropped,
+                } => Some(Event::SlotsShrunk {
+                    epoch,
+                    requested,
+                    funded,
+                    dropped,
+                }),
                 CoreEvent::MarketsOpened(pid) => Some(Event::MarketsOpened(pid)),
                 CoreEvent::DecisionExtended(pid) => Some(Event::DecisionExtended(pid)),
                 CoreEvent::ProposalQueued {
@@ -2089,6 +2318,37 @@ pub mod pallet {
             T::Params::get()
                 .validate()
                 .map_err(|_| TryRuntimeError::Other("epoch live Params are invalid"))?;
+            let detector = DeadManDetector::<T>::get();
+            let dead_man = DeadMan::<T>::get();
+            if detector.causes & !DEAD_MAN_CAUSE_MASK != 0
+                || (detector.causes != 0 && !detector.incident_active)
+                || (detector.incident_active && !T::Guardian::dead_man_engaged())
+                || (detector.causes & DEAD_MAN_CAUSE_RELAY != 0
+                    && LastRelayParent::<T>::get().is_none())
+                || (dead_man.recovery_epoch.is_some()
+                    && (!detector.incident_active || !T::Guardian::dead_man_engaged()))
+            {
+                return Err(TryRuntimeError::Other(
+                    "epoch dead-man detector latch/cause state is incoherent",
+                ));
+            }
+            let funded_pol = FundedPolSlots::<T>::get();
+            if funded_pol
+                .iter()
+                .enumerate()
+                .any(|(index, (pid, _))| funded_pol.iter().take(index).any(|(seen, _)| seen == pid))
+                || (state.epoch.phase == EpochPhase::Seed
+                    && state.recovery_epoch.is_none()
+                    && state.proposals.iter().any(|proposal| {
+                        proposal.epoch == state.epoch.index
+                            && proposal.state == ProposalState::Qualified
+                            && !funded_pol.iter().any(|(pid, _)| *pid == proposal.id)
+                    }))
+            {
+                return Err(TryRuntimeError::Other(
+                    "epoch funded POL slot snapshot is invalid",
+                ));
+            }
             let live_proposals = Proposals::<T>::iter_values()
                 .filter(|proposal| {
                     !matches!(

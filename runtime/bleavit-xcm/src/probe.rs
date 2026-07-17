@@ -74,30 +74,22 @@ pub fn reserve_probe_program(
 ///
 /// Send failures are deliberately swallowed: the committed pending query then
 /// reaches the oracle's bounded timeout and degrades reserve health fail-static.
-pub struct XcmProbeDispatcher<Router, ProbeAmount, ExecWeightBudget, MaxResponseWeight, OurParaId>(
-    PhantomData<(
-        Router,
-        ProbeAmount,
-        ExecWeightBudget,
-        MaxResponseWeight,
-        OurParaId,
-    )>,
+pub struct XcmProbeDispatcher<Router, ExecWeightBudget, MaxResponseWeight, OurParaId>(
+    PhantomData<(Router, ExecWeightBudget, MaxResponseWeight, OurParaId)>,
 );
 
-impl<Router, ProbeAmount, ExecWeightBudget, MaxResponseWeight, OurParaId>
-    pallet_oracle::ProbeDispatch
-    for XcmProbeDispatcher<Router, ProbeAmount, ExecWeightBudget, MaxResponseWeight, OurParaId>
+impl<Router, ExecWeightBudget, MaxResponseWeight, OurParaId> pallet_oracle::ProbeDispatch
+    for XcmProbeDispatcher<Router, ExecWeightBudget, MaxResponseWeight, OurParaId>
 where
     Router: SendXcm,
-    ProbeAmount: Get<u128>,
     ExecWeightBudget: Get<Weight>,
     MaxResponseWeight: Get<Weight>,
     OurParaId: Get<u32>,
 {
-    fn probe_due(query_id: u64) {
+    fn probe_due(query_id: u64, probe_amount: u128) {
         let program = reserve_probe_program(
             query_id,
-            ProbeAmount::get(),
+            probe_amount,
             ExecWeightBudget::get(),
             MaxResponseWeight::get(),
             OurParaId::get(),

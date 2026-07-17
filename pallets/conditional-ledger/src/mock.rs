@@ -116,6 +116,13 @@ parameter_types! {
     /// keeper-rebate regression explicitly enables recording.
     pub static RecordKeeperRebates: bool = false;
     pub static KeeperRebates: Vec<(AccountId, CrankClass)> = Vec::new();
+    /// Pure-read model of the production Phase-3 inflow-cap inputs. Defaults are
+    /// permissive; tests can independently put either the global issuance or an
+    /// account's cumulative deposit meter above its live cap.
+    pub static MockLocalUsdcIssuance: Balance = 0;
+    pub static MockTvlCap: Balance = u128::MAX;
+    pub static MockCumulativeDeposits: Vec<(AccountId, Balance)> = Vec::new();
+    pub static MockDepCap: Balance = u128::MAX;
 }
 
 pub struct TestKeeperRebate;
@@ -127,6 +134,21 @@ impl KeeperRebateSink<AccountId> for TestKeeperRebate {
             rebates.push((*who, class));
             KeeperRebates::set(rebates);
         }
+    }
+}
+
+pub struct TestInflowCapGate;
+
+impl pallet_conditional_ledger::InflowCapGate<AccountId> for TestInflowCapGate {
+    fn escrow_admissible(who: &AccountId) -> bool {
+        if MockLocalUsdcIssuance::get() > MockTvlCap::get() {
+            return false;
+        }
+        let cumulative = MockCumulativeDeposits::get()
+            .into_iter()
+            .find_map(|(account, amount)| (account == *who).then_some(amount))
+            .unwrap_or(0);
+        cumulative <= MockDepCap::get()
     }
 }
 
@@ -145,6 +167,7 @@ impl pallet_conditional_ledger::Config for Test {
     type InsuranceAccount = InsuranceAccount;
     type PalletId = LedgerPalletId;
     type KeeperRebate = TestKeeperRebate;
+    type InflowCapGate = TestInflowCapGate;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = ();
@@ -206,6 +229,10 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         ReapBatch::set(kernel::REAP_BATCH);
         RecordKeeperRebates::set(false);
         KeeperRebates::set(Vec::new());
+        MockLocalUsdcIssuance::set(0);
+        MockTvlCap::set(u128::MAX);
+        MockCumulativeDeposits::set(Vec::new());
+        MockDepCap::set(u128::MAX);
     });
     ext
 }

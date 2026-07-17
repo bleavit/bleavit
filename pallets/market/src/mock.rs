@@ -132,6 +132,7 @@ parameter_types! {
     pub const MarketArchiveDelay: u64 = 100;
     pub static DecisionWindowMarkets: Vec<MarketId> = Vec::new();
     pub static RecordKeeperRebates: bool = false;
+    pub static PolSyncRefuses: bool = false;
 }
 
 pub struct TestInDecisionWindow;
@@ -139,6 +140,24 @@ pub struct TestInDecisionWindow;
 impl Contains<MarketId> for TestInDecisionWindow {
     fn contains(market: &MarketId) -> bool {
         DecisionWindowMarkets::get().contains(market)
+    }
+}
+
+pub struct TestPolCommitmentSync;
+
+impl pallet_market::PolCommitmentSync for TestPolCommitmentSync {
+    fn sync_pol_commitments() -> frame_support::dispatch::DispatchResult {
+        if PolSyncRefuses::get() {
+            Err(sp_runtime::DispatchError::Other(
+                "POL commitment sync refused",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn pol_commitments_synced() -> bool {
+        !PolSyncRefuses::get()
     }
 }
 
@@ -188,6 +207,7 @@ impl pallet_conditional_ledger::Config for Test {
     type InsuranceAccount = InsuranceAccount;
     type PalletId = LedgerPalletId;
     type KeeperRebate = ();
+    type InflowCapGate = ();
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = ();
@@ -205,6 +225,7 @@ impl pallet_market::Config for Test {
     type PalletId = MarketPalletId;
     type KeeperRebate = TestKeeperRebate;
     type InDecisionWindow = TestInDecisionWindow;
+    type PolCommitmentSync = TestPolCommitmentSync;
 }
 
 pub fn ledger_account() -> AccountId {
@@ -218,6 +239,7 @@ pub fn market_account() -> AccountId {
 pub fn new_test_ext() -> sp_io::TestExternalities {
     DecisionWindowMarkets::set(Vec::new());
     RecordKeeperRebates::set(false);
+    PolSyncRefuses::set(false);
     let mut storage = frame_system::GenesisConfig::<Test>::default()
         .build_storage()
         .expect("mock system genesis builds");

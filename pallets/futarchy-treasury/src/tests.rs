@@ -856,6 +856,45 @@ fn coretime_quote_rejects_zero_and_can_be_pruned() {
     });
 }
 
+#[test]
+fn coretime_obligation_pair_enforces_open_quote_and_funded_history_bounds() {
+    funded_ext().execute_with(|| {
+        // limit-coverage: Treasury coretime obligations
+        for period in 0..=futarchy_treasury_core::MAX_FUNDED_CORETIME_PERIODS as u32 {
+            assert_ok!(crate::Pallet::<Test>::note_coretime_renewal_quote(
+                period, 1
+            ));
+            assert_ok!(Treasury::execute_coretime_renewal(
+                RuntimeOrigin::signed(acc(7)),
+                period,
+            ));
+        }
+        let funded = crate::Pallet::<Test>::treasury().funded_coretime_periods;
+        assert_eq!(
+            funded.len(),
+            futarchy_treasury_core::MAX_FUNDED_CORETIME_PERIODS
+        );
+        assert!(!funded.contains(&0));
+        assert!(funded.contains(&(futarchy_treasury_core::MAX_FUNDED_CORETIME_PERIODS as u32)));
+
+        let first_open = 100_u32;
+        for offset in 0..futarchy_treasury_core::MAX_FUNDED_CORETIME_PERIODS as u32 {
+            assert_ok!(crate::Pallet::<Test>::note_coretime_renewal_quote(
+                first_open.saturating_add(offset),
+                1,
+            ));
+        }
+        assert_noop!(
+            crate::Pallet::<Test>::note_coretime_renewal_quote(
+                first_open
+                    .saturating_add(futarchy_treasury_core::MAX_FUNDED_CORETIME_PERIODS as u32),
+                1,
+            ),
+            Error::<Test>::TooManyObligations
+        );
+    });
+}
+
 // ---- fund_budget_line atomicity (G-1) ---------------------------------------
 
 #[test]

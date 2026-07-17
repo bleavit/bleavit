@@ -52,7 +52,8 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 		Weight::from_parts(396_361_000, 0)
 			.saturating_add(Weight::from_parts(0, 94654))
 			.saturating_add(T::DbWeight::get().reads(59))
-			.saturating_add(T::DbWeight::get().writes(56))
+			.saturating_add(T::DbWeight::get().writes(57))
+			.saturating_add(T::DbWeight::get().reads(20))
 	}
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
@@ -80,7 +81,8 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 		Weight::from_parts(532_641_000, 0)
 			.saturating_add(Weight::from_parts(0, 100508))
 			.saturating_add(T::DbWeight::get().reads(77))
-			.saturating_add(T::DbWeight::get().writes(60))
+			.saturating_add(T::DbWeight::get().writes(61))
+			.saturating_add(T::DbWeight::get().reads(20))
 	}
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)

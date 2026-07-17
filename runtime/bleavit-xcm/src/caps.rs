@@ -39,6 +39,18 @@ pub struct CappedInflows<Inner, Caps, LocationToAccountId, AccountId>(
     PhantomData<(Inner, Caps, LocationToAccountId, AccountId)>,
 );
 
+/// Trap-recovery transactor which bypasses only the prospective global mint check.
+///
+/// `pallet-xcm` reconstructs a previously trapped imbalance by calling `mint_asset`,
+/// then drops the cloned accounting object so local issuance is unchanged. Reapplying
+/// the prospective global cap to that reconstruction could consume a trap while
+/// yielding no holding. Every other operation, especially the beneficiary deposit,
+/// remains routed through [`CappedInflows`] so the per-account cap and cumulative
+/// meter still bind local `claim_assets` recovery (09 §5.2/§6.1).
+pub struct TrapRecoveryInflows<Inner, Caps, LocationToAccountId, AccountId>(
+    PhantomData<(Inner, Caps, LocationToAccountId, AccountId)>,
+);
+
 enum CapTransactionError {
     CapExceeded,
     Inner(XcmError),
@@ -258,6 +270,126 @@ where
         // The check precedes the inner mint. In a multi-mint message, each
         // subsequent instruction therefore observes issuance committed by the
         // previous successful mint (09 §5.2).
+        Inner::mint_asset(what, context)
+    }
+}
+
+impl<Inner, Caps, LocationToAccountId, AccountId> TransactAsset
+    for TrapRecoveryInflows<Inner, Caps, LocationToAccountId, AccountId>
+where
+    Inner: TransactAsset,
+    Caps: InflowCaps<AccountId>,
+    LocationToAccountId: ConvertLocation<AccountId>,
+{
+    fn can_check_in(origin: &Location, what: &Asset, context: &XcmContext) -> Result<(), XcmError> {
+        CappedInflows::<Inner, Caps, LocationToAccountId, AccountId>::can_check_in(
+            origin, what, context,
+        )
+    }
+
+    fn check_in(origin: &Location, what: &Asset, context: &XcmContext) {
+        CappedInflows::<Inner, Caps, LocationToAccountId, AccountId>::check_in(
+            origin, what, context,
+        );
+    }
+
+    fn can_check_out(dest: &Location, what: &Asset, context: &XcmContext) -> Result<(), XcmError> {
+        CappedInflows::<Inner, Caps, LocationToAccountId, AccountId>::can_check_out(
+            dest, what, context,
+        )
+    }
+
+    fn check_out(dest: &Location, what: &Asset, context: &XcmContext) {
+        CappedInflows::<Inner, Caps, LocationToAccountId, AccountId>::check_out(
+            dest, what, context,
+        );
+    }
+
+    fn deposit_asset(
+        what: AssetsInHolding,
+        who: &Location,
+        context: Option<&XcmContext>,
+    ) -> Result<(), (AssetsInHolding, XcmError)> {
+        CappedInflows::<Inner, Caps, LocationToAccountId, AccountId>::deposit_asset(
+            what, who, context,
+        )
+    }
+
+    fn deposit_asset_with_surplus(
+        what: AssetsInHolding,
+        who: &Location,
+        context: Option<&XcmContext>,
+    ) -> Result<Weight, (AssetsInHolding, XcmError)> {
+        CappedInflows::<Inner, Caps, LocationToAccountId, AccountId>::deposit_asset_with_surplus(
+            what, who, context,
+        )
+    }
+
+    fn withdraw_asset(
+        what: &Asset,
+        who: &Location,
+        context: Option<&XcmContext>,
+    ) -> Result<AssetsInHolding, XcmError> {
+        CappedInflows::<Inner, Caps, LocationToAccountId, AccountId>::withdraw_asset(
+            what, who, context,
+        )
+    }
+
+    fn withdraw_asset_with_surplus(
+        what: &Asset,
+        who: &Location,
+        context: Option<&XcmContext>,
+    ) -> Result<(AssetsInHolding, Weight), XcmError> {
+        CappedInflows::<Inner, Caps, LocationToAccountId, AccountId>::withdraw_asset_with_surplus(
+            what, who, context,
+        )
+    }
+
+    fn internal_transfer_asset(
+        asset: &Asset,
+        from: &Location,
+        to: &Location,
+        context: &XcmContext,
+    ) -> Result<Asset, XcmError> {
+        CappedInflows::<Inner, Caps, LocationToAccountId, AccountId>::internal_transfer_asset(
+            asset, from, to, context,
+        )
+    }
+
+    fn internal_transfer_asset_with_surplus(
+        asset: &Asset,
+        from: &Location,
+        to: &Location,
+        context: &XcmContext,
+    ) -> Result<(Asset, Weight), XcmError> {
+        CappedInflows::<Inner, Caps, LocationToAccountId, AccountId>::internal_transfer_asset_with_surplus(
+            asset, from, to, context,
+        )
+    }
+
+    fn transfer_asset(
+        asset: &Asset,
+        from: &Location,
+        to: &Location,
+        context: &XcmContext,
+    ) -> Result<Asset, XcmError> {
+        CappedInflows::<Inner, Caps, LocationToAccountId, AccountId>::transfer_asset(
+            asset, from, to, context,
+        )
+    }
+
+    fn transfer_asset_with_surplus(
+        asset: &Asset,
+        from: &Location,
+        to: &Location,
+        context: &XcmContext,
+    ) -> Result<(Asset, Weight), XcmError> {
+        CappedInflows::<Inner, Caps, LocationToAccountId, AccountId>::transfer_asset_with_surplus(
+            asset, from, to, context,
+        )
+    }
+
+    fn mint_asset(what: &Asset, context: &XcmContext) -> Result<AssetsInHolding, XcmError> {
         Inner::mint_asset(what, context)
     }
 }

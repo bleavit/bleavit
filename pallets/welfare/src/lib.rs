@@ -40,7 +40,7 @@ use alloc::vec::Vec;
 use frame_support::pallet_prelude::DispatchResult;
 use futarchy_primitives::{
     keeper::{CrankClass, KeeperRebateSink},
-    EpochId, FixedU64, MetricSpecVersion, ProposalId,
+    BlockNumber, EpochId, FixedU64, MetricSpecVersion, ProposalId,
 };
 
 pub use welfare_core::{
@@ -98,6 +98,13 @@ pub trait MetricInputs {
         day: u8,
         spec_version: MetricSpecVersion,
     ) -> Vec<ComponentValue>;
+}
+
+/// Epoch-owned schedule projection used only to derive snapshot deadlines.
+/// Implementations accept and return plain protocol numbers; welfare remains
+/// independent of FRAME epoch and Cumulus types (I-24).
+pub trait SnapshotSchedule {
+    fn snapshot_due(epoch: EpochId) -> Option<BlockNumber>;
 }
 
 /// Gate-market dimension settled through the conditional ledger seam.
@@ -166,6 +173,8 @@ pub mod pallet {
         type Ledger: LedgerSettlement;
         /// Current epoch clock used by metric registration.
         type CurrentEpoch: Get<EpochId>;
+        /// Exact epoch-close schedule used by the 05 §4.8 detector.
+        type SnapshotSchedule: SnapshotSchedule;
         /// Fail-soft keeper rebate endpoint (08 §6.3).
         type KeeperRebate: KeeperRebateSink<Self::AccountId>;
         /// Weight information for all extrinsics.
@@ -242,6 +251,25 @@ pub mod pallet {
         pub components: BoundedComponents,
     }
 
+    /// The oldest outstanding scheduled snapshot and the last obligation that
+    /// advanced it. This is pallet-internal and does not alter 02 §7.4.
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        Decode,
+        DecodeWithMemTracking,
+        Encode,
+        Eq,
+        MaxEncodedLen,
+        PartialEq,
+        TypeInfo,
+    )]
+    pub struct SnapshotProgress {
+        pub last_snapshot_epoch: Option<EpochId>,
+        pub due_epoch: EpochId,
+    }
+
     impl TryFrom<CoreSnapshot> for StoredSnapshot {
         type Error = CoreError;
 
@@ -290,6 +318,9 @@ pub mod pallet {
     #[pallet::storage]
     pub type Snapshots<T: Config> =
         StorageMap<_, Blake2_128Concat, (EpochId, MetricSpecVersion), StoredSnapshot, OptionQuery>;
+
+    #[pallet::storage]
+    pub type SnapshotDeadline<T: Config> = StorageValue<_, SnapshotProgress, OptionQuery>;
 
     /// Frozen 02 §7.4 frontend surface: daily breach outcomes by epoch.
     #[pallet::storage]
@@ -409,7 +440,9 @@ pub mod pallet {
             T::MetricGovernanceOrigin::ensure_origin(origin)?;
             Self::mutate(|state| {
                 state.register_metric_spec(T::CurrentEpoch::get(), version, specs.into_inner())
-            })
+            })?;
+            let _ = Self::snapshot_progress();
+            Ok(())
         }
 
         /// Permissionless signed keeper crank for one **finalized** epoch's
@@ -438,6 +471,7 @@ pub mod pallet {
                     .record_snapshot(epoch, spec_version, components, incident, &params)
                     .map(|_| ())
             })?;
+            Self::note_snapshot_recorded(epoch, spec_version);
             T::KeeperRebate::rebate(&who, CrankClass::DecisionCritical);
             Ok(())
         }
@@ -551,6 +585,85 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
+        /// True only after the oldest outstanding snapshot has been overdue
+        /// for strictly more than the 13 §2 four-day grace.
+        pub fn snapshot_overdue(now: BlockNumber) -> bool {
+            let Some(progress) = Self::snapshot_progress() else {
+                return false;
+            };
+            T::SnapshotSchedule::snapshot_due(progress.due_epoch)
+                .and_then(|due_at| {
+                    due_at
+                        .checked_add(futarchy_primitives::kernel::DEAD_MAN_SNAPSHOT_OVERDUE_BLOCKS)
+                })
+                .is_some_and(|deadline| now > deadline)
+        }
+
+        fn snapshot_progress() -> Option<SnapshotProgress> {
+            if let Some(progress) = SnapshotDeadline::<T>::get() {
+                return Some(progress);
+            }
+            let due_epoch = MetricSpecs::<T>::iter_values()
+                .filter_map(|specs| specs.iter().map(|spec| spec.activation_epoch).max())
+                .min()?;
+            T::SnapshotSchedule::snapshot_due(due_epoch)?;
+            let progress = SnapshotProgress {
+                last_snapshot_epoch: None,
+                due_epoch,
+            };
+            SnapshotDeadline::<T>::put(progress);
+            Some(progress)
+        }
+
+        fn note_snapshot_recorded(epoch: EpochId, spec_version: MetricSpecVersion) {
+            let Some(progress) = Self::snapshot_progress() else {
+                return;
+            };
+            if progress.due_epoch != epoch
+                || Self::active_snapshot_spec(epoch) != Some(spec_version)
+            {
+                return;
+            }
+            let Some(next_epoch) = epoch.checked_add(1) else {
+                return;
+            };
+            if T::SnapshotSchedule::snapshot_due(next_epoch).is_none() {
+                return;
+            }
+            SnapshotDeadline::<T>::put(SnapshotProgress {
+                last_snapshot_epoch: Some(epoch),
+                due_epoch: next_epoch,
+            });
+        }
+
+        /// Canonical active spec: the unique version at the latest fully-live
+        /// activation epoch. An activation tie is fail-closed as ambiguous.
+        pub fn active_snapshot_spec(epoch: EpochId) -> Option<MetricSpecVersion> {
+            let mut selected = None;
+            let mut ambiguous = false;
+            for (version, specs) in MetricSpecs::<T>::iter() {
+                if specs.is_empty() || specs.iter().any(|spec| spec.activation_epoch > epoch) {
+                    continue;
+                }
+                let Some(activation) = specs.iter().map(|spec| spec.activation_epoch).max() else {
+                    continue;
+                };
+                match selected {
+                    None => {
+                        selected = Some((activation, version));
+                        ambiguous = false;
+                    }
+                    Some((latest, _)) if activation > latest => {
+                        selected = Some((activation, version));
+                        ambiguous = false;
+                    }
+                    Some((latest, _)) if activation == latest => ambiguous = true,
+                    Some(_) => {}
+                }
+            }
+            (!ambiguous).then_some(selected?.1)
+        }
+
         /// The one 05 §6 settlement endpoint. It is runtime-internal (not a
         /// call); B1a exposes it only through `pallet-epoch::settle_cohort`.
         // B1a: the SettleAuthority-trusted epoch caller supplies the proposal's
@@ -887,6 +1000,34 @@ pub mod pallet {
             T::Params::welfare_params().validate().map_err(|_| {
                 TryRuntimeError::Other("welfare live Params violate kernel floors or weight sum")
             })?;
+            if let Some(progress) = SnapshotDeadline::<T>::get() {
+                let first_due = MetricSpecs::<T>::iter_values()
+                    .filter_map(|specs| specs.iter().map(|spec| spec.activation_epoch).max())
+                    .min();
+                let expected_epoch = match progress.last_snapshot_epoch {
+                    Some(last) => last.checked_add(1),
+                    None => first_due,
+                };
+                if expected_epoch != Some(progress.due_epoch)
+                    || T::SnapshotSchedule::snapshot_due(progress.due_epoch).is_none()
+                {
+                    return Err(TryRuntimeError::Other(
+                        "welfare snapshot deadline is not schedule-derived",
+                    ));
+                }
+                if let Some(last) = progress.last_snapshot_epoch {
+                    let Some(spec_version) = Self::active_snapshot_spec(last) else {
+                        return Err(TryRuntimeError::Other(
+                            "welfare snapshot deadline has no canonical prior spec",
+                        ));
+                    };
+                    if !Snapshots::<T>::contains_key((last, spec_version)) {
+                        return Err(TryRuntimeError::Other(
+                            "welfare snapshot deadline lacks its prior snapshot",
+                        ));
+                    }
+                }
+            }
             if MetricSpecs::<T>::iter().count() > MAX_METRIC_SPECS
                 || Snapshots::<T>::iter().count() > MAX_SNAPSHOTS
                 || GateBreachFlags::<T>::iter().count() > MAX_GATE_FLAGS

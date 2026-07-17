@@ -961,8 +961,10 @@ pub mod kernel {
     pub const WT_QUORUM: u8 = 2;
     pub const ATT_MIN_MEMBERS: u32 = 3;
     pub const ATT_QUORUM: u32 = 2;
+    /// 13 §2 dead-man finality-stall threshold, measured in relay blocks.
     pub const DEAD_MAN_RELAY_BLOCKS: u32 = 4_800;
-    pub const DEAD_MAN_SNAPSHOT_OVERDUE_BLOCKS: u32 = 57_600;
+    /// 13 §2 dead-man snapshot grace: strictly more than four six-second days.
+    pub const DEAD_MAN_SNAPSHOT_OVERDUE_BLOCKS: u32 = 4 * BLOCKS_PER_DAY;
     pub const STALE_EPOCH_BOUND_BLOCKS: u32 = 100_800;
     pub const TICK_BATCH: u32 = 10;
     pub const REAP_BATCH: u32 = 100;

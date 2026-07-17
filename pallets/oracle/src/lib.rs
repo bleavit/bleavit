@@ -61,7 +61,8 @@
 //!   B-track runtime concern: the core models bond/stake amounts as `Balance`
 //!   fields, matching every other frame-free core (and A1).
 //! - Live `pallet-constitution::Params` sourcing of the META/PARAM oracle tunables
-//!   (`orc.*`, `wt.*`, `res.*`) is B1a wiring; the core carries the 13 defaults.
+//!   (`orc.*`, `wt.*`, `res.*`) enters through [`Config::Params`]; the frame-free
+//!   core carries the 13 defaults for fallback and standalone use.
 
 extern crate alloc;
 
@@ -80,10 +81,10 @@ mod tests;
 // The functional core is the semantic source of truth; re-export its surface
 // named (not glob — the pallet owns its own `Error`/`ReserveHealth` aliases).
 pub use oracle_core::{
-    round_bond, Error as CoreError, Event as CoreEvent, Oracle, ReportInput, ReporterInfo,
-    ReserveHealth as ReserveHealthValue, RoundKey, RoundState, SettlePath, SettledComponent,
-    WatchtowerInfo, MAX_ACK_RECORDS, MAX_COMPONENT_VALUES, MAX_REPORTERS, MAX_ROUNDS,
-    MAX_WATCHTOWERS, ORC_MAX_PROOF_BYTES, RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT,
+    round_bond, Error as CoreError, Event as CoreEvent, Oracle, OracleParams, ReportInput,
+    ReporterInfo, ReserveHealth as ReserveHealthValue, RoundKey, RoundState, SettlePath,
+    SettledComponent, WatchtowerInfo, MAX_ACK_RECORDS, MAX_COMPONENT_VALUES, MAX_REPORTERS,
+    MAX_ROUNDS, MAX_WATCHTOWERS, ORC_MAX_PROOF_BYTES, RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT,
 };
 
 use futarchy_primitives::{BlockNumber, EpochId, MetricId, MetricSpecVersion};
@@ -102,6 +103,12 @@ pub const MAX_ACK_RECORDS_BOUND: u32 = MAX_ACK_RECORDS as u32;
 pub const MAX_PROOF_BYTES_BOUND: u32 = ORC_MAX_PROOF_BYTES as u32;
 /// Recomputable `(component, version)` declarations from the MetricSpec registry.
 pub const MAX_RECOMPUTABLE_BOUND: u32 = 64;
+
+/// Live oracle and reserve-probe tunables sourced from
+/// `pallet-constitution::Params`.
+pub trait OracleParamsProvider {
+    fn get() -> OracleParams;
+}
 
 /// The three cross-pallet inputs `report` derives rather than trusting the caller
 /// (07 §5.1 window, §2(4) frozen version, §6.1 `StakeAtRisk`). The runtime wires
@@ -151,7 +158,7 @@ pub trait ProbeDispatch {
         true
     }
 
-    fn probe_due(query_id: u64);
+    fn probe_due(query_id: u64, amount: futarchy_primitives::Balance);
 }
 
 impl ProbeDispatch for () {
@@ -159,7 +166,7 @@ impl ProbeDispatch for () {
         false
     }
 
-    fn probe_due(_: u64) {}
+    fn probe_due(_: u64, _: futarchy_primitives::Balance) {}
 }
 
 /// XCM-free observation seam fired after an unanswered reserve probe is folded.
@@ -221,6 +228,9 @@ pub mod pallet {
 
         /// The `report`-time cross-pallet reads (07 §5.1/§2(4)/§6.1).
         type Reporting: ReportingContext;
+
+        /// Live constitution-backed oracle and reserve-probe tunables.
+        type Params: OracleParamsProvider;
 
         /// Upper bound on rounds closed per `crank_round_close` call — a
         /// keeper-batch cap that bounds the crank's PoV (07 §13 "bounded
@@ -514,7 +524,8 @@ pub mod pallet {
         pub fn register_reporter(origin: OriginFor<T>) -> DispatchResult {
             let who: [u8; 32] = ensure_signed(origin)?.into();
             let now = Self::now();
-            Self::mutate_core(|o| o.register_reporter(who, now))
+            let params = T::Params::get();
+            Self::mutate_core(|o| o.register_reporter_with_params(who, now, &params))
         }
 
         /// `oracle.deregister_reporter` — exit once every round the reporter
@@ -548,21 +559,25 @@ pub mod pallet {
             );
             let report_window_end = T::Reporting::report_window_end(epoch);
             let stake_at_risk = T::Reporting::stake_at_risk(component, epoch);
+            let params = T::Params::get();
             Self::mutate_core(|o| {
-                o.report(ReportInput {
-                    who,
-                    now,
-                    component,
-                    epoch,
-                    spec_version,
-                    value,
-                    evidence_hash,
-                    stake_at_risk,
-                    // Validated above against the live frozen-version set; the
-                    // core's equality check is then a no-op (Codex F7).
-                    report_window_end,
-                    expected_spec: spec_version,
-                })
+                o.report(
+                    ReportInput {
+                        who,
+                        now,
+                        component,
+                        epoch,
+                        spec_version,
+                        value,
+                        evidence_hash,
+                        stake_at_risk,
+                        // Validated above against the live frozen-version set; the
+                        // core's equality check is then a no-op (Codex F7).
+                        report_window_end,
+                        expected_spec: spec_version,
+                    },
+                    &params,
+                )
             })
         }
 
@@ -621,7 +636,8 @@ pub mod pallet {
         pub fn register_watchtower(origin: OriginFor<T>) -> DispatchResult {
             let who: [u8; 32] = ensure_signed(origin)?.into();
             let now = Self::now();
-            Self::mutate_core(|o| o.register_watchtower(who, now))
+            let params = T::Params::get();
+            Self::mutate_core(|o| o.register_watchtower_with_params(who, now, &params))
         }
 
         /// `oracle.ack_observed` — a registered watchtower asserts a round was
@@ -660,8 +676,10 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             let now = Self::now();
             let batch = batch.min(T::MaxRoundCloseBatch::get()) as usize;
-            let progressed =
-                Self::mutate_core_with_rebate_progress(|o| o.crank_round_close(now, batch))?;
+            let params = T::Params::get();
+            let progressed = Self::mutate_core_with_rebate_progress(|o| {
+                o.crank_round_close_with_params(now, batch, &params)
+            })?;
             if progressed {
                 // B5 recalibrates this weight for the post-commit rebate write/payout.
                 T::KeeperRebate::rebate(&who, CrankClass::OracleLine);
@@ -680,15 +698,16 @@ pub mod pallet {
         pub fn crank_reserve_probe(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let now = Self::now();
+            let params = T::Params::get();
             let mut fresh_query_id = None;
             let mut folded_timeout = false;
             Self::mutate_core(|o| {
                 let mut folded = false;
                 if let Some(since) = o.reserve_health.pending_since {
-                    if now >= since.saturating_add(RES_PROBE_TIMEOUT) {
+                    if now >= since.saturating_add(params.probe_timeout) {
                         // The outstanding probe never got a response: absence is
                         // never healthy (07 §8) — count it before sending anew.
-                        o.crank_probe_timeout(now)?;
+                        o.crank_probe_timeout_with_params(now, &params)?;
                         folded = true;
                         folded_timeout = true;
                     }
@@ -700,9 +719,9 @@ pub mod pallet {
                 if now
                     >= o.reserve_health
                         .last_probe_at
-                        .saturating_add(RES_PROBE_INTERVAL)
+                        .saturating_add(params.probe_interval)
                 {
-                    let query_id = o.crank_reserve_probe(now)?;
+                    let query_id = o.crank_reserve_probe_with_params(now, &params)?;
                     fresh_query_id = Some(query_id);
                     Ok(())
                 } else if folded {
@@ -717,7 +736,7 @@ pub mod pallet {
             let dispatch_live = T::ProbeDispatch::live();
             if dispatch_live {
                 if let Some(query_id) = fresh_query_id {
-                    T::ProbeDispatch::probe_due(query_id);
+                    T::ProbeDispatch::probe_due(query_id, params.probe_amount);
                 }
             }
             if dispatch_live && (fresh_query_id.is_some() || folded_timeout) {
@@ -746,12 +765,14 @@ pub mod pallet {
                 epoch,
                 spec_version,
             };
+            let params = T::Params::get();
             Self::mutate_core(|o| {
-                o.adjudicate(
+                o.adjudicate_with_params(
                     origins_core::Origin::OracleResolution,
                     key,
                     value,
                     reporter_wrong,
+                    &params,
                 )
             })
         }
@@ -806,7 +827,10 @@ pub mod pallet {
         /// current block.
         pub fn reserve_probe_result(query_id: u64, passed: bool) -> DispatchResult {
             let now = Self::now();
-            Self::mutate_core(|o| o.reserve_probe_result(now, query_id, passed))
+            let params = T::Params::get();
+            Self::mutate_core(|o| {
+                o.reserve_probe_result_with_params(now, query_id, passed, &params)
+            })
         }
 
         /// Escalate a round-3 dispute onto the `OracleResolution` track, recording
@@ -824,7 +848,8 @@ pub mod pallet {
                 epoch,
                 spec_version,
             };
-            Self::mutate_core(|o| o.request_adjudication(key, referendum))
+            let params = T::Params::get();
+            Self::mutate_core(|o| o.request_adjudication_with_params(key, referendum, &params))
         }
 
         /// Run the 07 §4 watchtower liveness sweep for a just-ended epoch. Not an
@@ -1255,8 +1280,9 @@ pub mod pallet {
                     ));
                 }
             }
+            let params = T::Params::get();
             oracle
-                .try_state()
+                .try_state_with_params(&params)
                 .map_err(|_| TryRuntimeError::Other("oracle core try_state failed (07 §13; I-18)"))
         }
 

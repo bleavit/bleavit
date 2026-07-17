@@ -4,7 +4,9 @@
 
 use crate::mock::*;
 use crate::{pallet::*, Error, Event};
-use attestor_core::{ChallengeStatus, ATTESTOR_BOND, CHALLENGE_BOND, CHALLENGE_WINDOW_BLOCKS};
+use attestor_core::{
+    AttestorParams, ChallengeStatus, ATTESTOR_BOND, CHALLENGE_BOND, CHALLENGE_WINDOW_BLOCKS,
+};
 use frame_support::{assert_noop, assert_ok};
 use sp_runtime::DispatchError;
 
@@ -320,6 +322,269 @@ fn challenge_is_signed_only_and_checks_id_bond_window_and_single_open_case() {
             Error::<Test>::ChallengeWindowClosed
         );
     });
+
+    // The genesis-default boundary remains inclusive at the stored deadline.
+    new_test_ext().execute_with(|| {
+        set_block(1);
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(acct(1)),
+            1,
+            hash(1),
+            hash(2),
+        ));
+        set_block(u64::from(CHALLENGE_WINDOW_BLOCKS + 1));
+        assert_ok!(Attestor::challenge_attestation(
+            RuntimeOrigin::signed(acct(9)),
+            0,
+            hash(3),
+            CHALLENGE_BOND,
+        ));
+    });
+
+    // Amend the mock provider, then observe the creation-time window move.
+    // Existing records retain their snapshotted deadline.
+    new_test_ext().execute_with(|| {
+        set_block(1);
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(acct(1)),
+            10,
+            hash(1),
+            hash(2),
+        ));
+        AttestorParamsValue::set(AttestorParams {
+            challenge_window: 5,
+            ..AttestorParams::DEFAULT
+        });
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(acct(1)),
+            11,
+            hash(1),
+            hash(2),
+        ));
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(acct(1)),
+            12,
+            hash(1),
+            hash(2),
+        ));
+        let attestations = Attestations::<Test>::get();
+        assert_eq!(
+            attestations[0].challenge_deadline,
+            CHALLENGE_WINDOW_BLOCKS + 1
+        );
+        assert_eq!(attestations[1].challenge_deadline, 6);
+        assert_eq!(attestations[2].challenge_deadline, 6);
+
+        set_block(6);
+        assert_ok!(Attestor::challenge_attestation(
+            RuntimeOrigin::signed(acct(9)),
+            1,
+            hash(3),
+            CHALLENGE_BOND,
+        ));
+        set_block(7);
+        assert_noop!(
+            Attestor::challenge_attestation(
+                RuntimeOrigin::signed(acct(9)),
+                2,
+                hash(3),
+                CHALLENGE_BOND,
+            ),
+            Error::<Test>::ChallengeWindowClosed
+        );
+        assert_ok!(Attestor::challenge_attestation(
+            RuntimeOrigin::signed(acct(9)),
+            0,
+            hash(3),
+            CHALLENGE_BOND,
+        ));
+    });
+}
+
+#[test]
+fn amended_attestor_bond_moves_challenge_floor_and_new_member_bond_snapshot() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(acct(1)),
+            1,
+            hash(1),
+            hash(2),
+        ));
+
+        let amended_bond = ATTESTOR_BOND.saturating_mul(2);
+        AttestorParamsValue::set(AttestorParams {
+            bond: amended_bond,
+            ..AttestorParams::DEFAULT
+        });
+        assert_noop!(
+            Attestor::challenge_attestation(
+                RuntimeOrigin::signed(acct(9)),
+                0,
+                hash(3),
+                CHALLENGE_BOND,
+            ),
+            Error::<Test>::ChallengeBondTooSmall
+        );
+        assert_ok!(Attestor::challenge_attestation(
+            RuntimeOrigin::signed(acct(9)),
+            0,
+            hash(3),
+            ATTESTOR_BOND,
+        ));
+        assert_ok!(Attestor::resolve_challenge(ratify_origin(), 0, false));
+        let core_account: futarchy_primitives::AccountId = acct(1).into();
+        let slashed_bond = Members::<Test>::get()
+            .into_iter()
+            .find(|member| member.account == core_account)
+            .map(|member| member.bond);
+        assert_eq!(slashed_bond, Some(CHALLENGE_BOND));
+        assert!(matches!(
+            attestor_events().last(),
+            Some(Event::ChallengeResolved {
+                attestation_id: 0,
+                upheld: false,
+                slashed,
+                ..
+            }) if *slashed == CHALLENGE_BOND
+        ));
+
+        assert_ok!(Attestor::set_members(
+            values_origin(),
+            vec![acct(4), acct(5), acct(6)],
+        ));
+        assert!(Members::<Test>::get()
+            .iter()
+            .all(|member| member.bond == amended_bond));
+
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(acct(4)),
+            2,
+            hash(4),
+            hash(5),
+        ));
+        assert_ok!(Attestor::challenge_attestation(
+            RuntimeOrigin::signed(acct(9)),
+            1,
+            hash(6),
+            ATTESTOR_BOND,
+        ));
+        assert_ok!(Attestor::resolve_challenge(ratify_origin(), 1, false));
+        let post_amend_account: futarchy_primitives::AccountId = acct(4).into();
+        let post_amend_bond = Members::<Test>::get()
+            .into_iter()
+            .find(|member| member.account == post_amend_account)
+            .map(|member| member.bond);
+        assert_eq!(post_amend_bond, Some(ATTESTOR_BOND));
+        assert!(matches!(
+            attestor_events().last(),
+            Some(Event::ChallengeResolved {
+                attestation_id: 1,
+                upheld: false,
+                slashed,
+                ..
+            }) if *slashed == ATTESTOR_BOND
+        ));
+    });
+}
+
+#[test]
+fn odd_attestor_bond_rounds_live_floor_and_false_loss_up() {
+    new_test_ext().execute_with(|| {
+        AttestorParamsValue::set(AttestorParams {
+            bond: 3,
+            ..AttestorParams::DEFAULT
+        });
+        assert_ok!(Attestor::set_members(
+            values_origin(),
+            vec![acct(4), acct(5), acct(6)],
+        ));
+
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(acct(4)),
+            1,
+            hash(1),
+            hash(2),
+        ));
+        assert_noop!(
+            Attestor::challenge_attestation(RuntimeOrigin::signed(acct(9)), 0, hash(3), 1),
+            Error::<Test>::ChallengeBondTooSmall
+        );
+        assert_ok!(Attestor::challenge_attestation(
+            RuntimeOrigin::signed(acct(9)),
+            0,
+            hash(3),
+            2,
+        ));
+        assert_ok!(Attestor::resolve_challenge(ratify_origin(), 0, false));
+        let false_attestor: futarchy_primitives::AccountId = acct(4).into();
+        assert_eq!(
+            Members::<Test>::get()
+                .into_iter()
+                .find(|member| member.account == false_attestor)
+                .map(|member| member.bond),
+            Some(1),
+        );
+        assert!(matches!(
+            attestor_events().last(),
+            Some(Event::ChallengeResolved { slashed: 2, .. })
+        ));
+
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(acct(5)),
+            2,
+            hash(4),
+            hash(5),
+        ));
+        assert_ok!(Attestor::challenge_attestation(
+            RuntimeOrigin::signed(acct(9)),
+            1,
+            hash(6),
+            3,
+        ));
+        // The caller-supplied challenge bond is not `att.bond`; preserve its
+        // existing floor-divided forfeiture semantics.
+        assert_ok!(Attestor::resolve_challenge(ratify_origin(), 1, true));
+        assert!(matches!(
+            attestor_events().last(),
+            Some(Event::ChallengeResolved {
+                attestation_id: 1,
+                upheld: true,
+                slashed: 1,
+                ..
+            })
+        ));
+    });
+}
+
+#[test]
+fn false_resolution_rejects_if_the_losing_attestor_is_no_longer_stored() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(acct(1)),
+            1,
+            hash(1),
+            hash(2),
+        ));
+        assert_ok!(Attestor::challenge_attestation(
+            RuntimeOrigin::signed(acct(9)),
+            0,
+            hash(3),
+            CHALLENGE_BOND,
+        ));
+        assert_ok!(Attestor::set_members(
+            values_origin(),
+            vec![acct(4), acct(5), acct(6)],
+        ));
+
+        assert_noop!(
+            Attestor::resolve_challenge(ratify_origin(), 0, false),
+            Error::<Test>::NotMember
+        );
+        assert!(matches!(
+            Attestations::<Test>::get()[0].challenge,
+            Some(ChallengeStatus::Open { .. })
+        ));
+    });
 }
 
 #[test]
@@ -396,7 +661,7 @@ fn two_false_attestations_slash_then_eject_the_attestor() {
             .into_iter()
             .find(|member| member.account == core_account)
             .expect("seeded attestor remains represented after ejection");
-        assert_eq!(member.bond, 0);
+        assert_eq!(member.bond, ATTESTOR_BOND / 4);
         assert_eq!(member.false_count, 2);
         assert!(!member.active);
         assert!(attestor_events().iter().any(|event| matches!(

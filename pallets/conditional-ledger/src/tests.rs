@@ -53,6 +53,54 @@ fn try_state() {
     assert_ok!(Ledger::do_try_state());
 }
 
+fn cap_inputs() -> (u128, u128, Vec<(AccountId, u128)>, u128) {
+    (
+        MockLocalUsdcIssuance::get(),
+        MockTvlCap::get(),
+        MockCumulativeDeposits::get(),
+        MockDepCap::get(),
+    )
+}
+
+fn assert_all_split_paths_proceed(pid: ProposalId, epoch: u32) {
+    create(pid);
+    create_base(epoch);
+    assert_ok!(Ledger::split(signed(ALICE), pid, 4 * UNIT));
+    assert_ok!(Ledger::split_scalar(
+        signed(ALICE),
+        pid,
+        Branch::Accept,
+        UNIT
+    ));
+    assert_ok!(Ledger::split_gate(
+        signed(ALICE),
+        pid,
+        Branch::Accept,
+        GateType::Security,
+        UNIT
+    ));
+    assert_ok!(Ledger::split_baseline(signed(ALICE), epoch, UNIT));
+}
+
+fn assert_all_split_paths_refuse(pid: ProposalId, epoch: u32) {
+    assert_noop!(
+        Ledger::split(signed(ALICE), pid, UNIT),
+        E::InflowCapExceeded
+    );
+    assert_noop!(
+        Ledger::split_scalar(signed(ALICE), pid, Branch::Accept, UNIT),
+        E::InflowCapExceeded
+    );
+    assert_noop!(
+        Ledger::split_gate(signed(ALICE), pid, Branch::Accept, GateType::Security, UNIT),
+        E::InflowCapExceeded
+    );
+    assert_noop!(
+        Ledger::split_baseline(signed(ALICE), epoch, UNIT),
+        E::InflowCapExceeded
+    );
+}
+
 // --------------------------------------------------------------- happy paths
 
 #[test]
@@ -171,6 +219,89 @@ fn baseline_lifecycle_pair_exact() {
             FixedU64(500_000_000)
         ));
         assert_ok!(Ledger::redeem_baseline_pair(signed(ALICE), 9, 5 * UNIT));
+        try_state();
+    });
+}
+
+// ------------------------------------------ 09 §5.2 Phase-3 split cap gate
+
+#[test]
+fn all_split_paths_refuse_only_while_global_issuance_is_over_cap() {
+    new_test_ext().execute_with(|| {
+        create(1);
+        create_base(9);
+        assert_ok!(Ledger::split(signed(ALICE), 1, 4 * UNIT));
+
+        MockLocalUsdcIssuance::set(11 * UNIT);
+        MockTvlCap::set(10 * UNIT);
+        MockCumulativeDeposits::set(vec![(ALICE, 5 * UNIT)]);
+        MockDepCap::set(5 * UNIT);
+        let inputs_before = cap_inputs();
+
+        assert_all_split_paths_refuse(1, 9);
+
+        // Split gating is a pure read: neither the issuance observation nor the
+        // cumulative-deposit meter is extended by an escrow operation.
+        assert_eq!(cap_inputs(), inputs_before);
+        try_state();
+    });
+}
+
+#[test]
+fn all_split_paths_refuse_only_while_signer_deposit_meter_is_over_cap() {
+    new_test_ext().execute_with(|| {
+        create(1);
+        create_base(9);
+        assert_ok!(Ledger::split(signed(ALICE), 1, 4 * UNIT));
+
+        MockLocalUsdcIssuance::set(10 * UNIT);
+        MockTvlCap::set(10 * UNIT);
+        MockCumulativeDeposits::set(vec![(ALICE, 6 * UNIT), (BOB, 100 * UNIT)]);
+        MockDepCap::set(5 * UNIT);
+        let inputs_before = cap_inputs();
+
+        assert_all_split_paths_refuse(1, 9);
+
+        assert_eq!(cap_inputs(), inputs_before);
+        try_state();
+    });
+}
+
+#[test]
+fn all_split_paths_proceed_below_and_at_both_caps_without_recording_again() {
+    new_test_ext().execute_with(|| {
+        MockLocalUsdcIssuance::set(9 * UNIT);
+        MockTvlCap::set(10 * UNIT);
+        MockCumulativeDeposits::set(vec![(ALICE, 4 * UNIT)]);
+        MockDepCap::set(5 * UNIT);
+        let below_inputs = cap_inputs();
+        assert_all_split_paths_proceed(1, 9);
+        assert_eq!(cap_inputs(), below_inputs);
+
+        MockLocalUsdcIssuance::set(10 * UNIT);
+        MockCumulativeDeposits::set(vec![(ALICE, 5 * UNIT)]);
+        let boundary_inputs = cap_inputs();
+        assert_all_split_paths_proceed(2, 10);
+        assert_eq!(cap_inputs(), boundary_inputs);
+        try_state();
+    });
+}
+
+#[test]
+fn merge_exit_remains_allowed_while_both_inflow_caps_are_exceeded() {
+    new_test_ext().execute_with(|| {
+        create(1);
+        assert_ok!(Ledger::split(signed(ALICE), 1, UNIT));
+        MockLocalUsdcIssuance::set(11 * UNIT);
+        MockTvlCap::set(10 * UNIT);
+        MockCumulativeDeposits::set(vec![(ALICE, 6 * UNIT)]);
+        MockDepCap::set(5 * UNIT);
+        let inputs_before = cap_inputs();
+
+        assert_ok!(Ledger::merge(signed(ALICE), 1, UNIT));
+
+        assert_eq!(escrow(1), 0);
+        assert_eq!(cap_inputs(), inputs_before);
         try_state();
     });
 }

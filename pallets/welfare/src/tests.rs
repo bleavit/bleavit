@@ -113,6 +113,75 @@ fn snapshot_happy_path_persists_and_emits() {
 }
 
 #[test]
+fn snapshot_deadline_is_strict_and_a_due_snapshot_advances_it() {
+    new_test_ext().execute_with(|| {
+        let due_epoch = 7;
+        let due_at = TestSnapshotSchedule::snapshot_due(due_epoch);
+        assert!(due_at.is_some(), "mock epoch schedule must be finite");
+        let due_at = due_at.unwrap_or_default();
+        SnapshotDeadline::<Test>::put(SnapshotProgress {
+            last_snapshot_epoch: Some(due_epoch - 1),
+            due_epoch,
+        });
+        let boundary =
+            due_at.checked_add(futarchy_primitives::kernel::DEAD_MAN_SNAPSHOT_OVERDUE_BLOCKS);
+        assert!(boundary.is_some(), "test deadline must fit");
+        let boundary = boundary.unwrap_or_default();
+
+        assert!(!Welfare::snapshot_overdue(boundary.saturating_sub(1)));
+        assert!(!Welfare::snapshot_overdue(boundary));
+        assert!(Welfare::snapshot_overdue(boundary.saturating_add(1)));
+
+        assert_ok!(Welfare::record_snapshot(
+            RuntimeOrigin::signed(keeper()),
+            due_epoch,
+            1,
+        ));
+        let progress = SnapshotDeadline::<Test>::get();
+        assert!(progress.is_some(), "deadline remains armed");
+        let progress = progress.unwrap_or(SnapshotProgress {
+            last_snapshot_epoch: None,
+            due_epoch: 0,
+        });
+        assert_eq!(progress.last_snapshot_epoch, Some(due_epoch));
+        assert_eq!(progress.due_epoch, due_epoch.saturating_add(1));
+        let next_due = TestSnapshotSchedule::snapshot_due(due_epoch.saturating_add(1));
+        assert!(
+            next_due.is_some(),
+            "next mock epoch schedule must be finite"
+        );
+        let next_due = next_due.unwrap_or_default();
+        assert_eq!(
+            TestSnapshotSchedule::snapshot_due(progress.due_epoch),
+            Some(next_due)
+        );
+        assert!(!Welfare::snapshot_overdue(boundary.saturating_add(1)));
+        assert!(Welfare::do_try_state().is_ok());
+    });
+}
+
+#[test]
+fn first_snapshot_does_not_become_overdue_before_its_activation_epoch_close() {
+    new_test_ext().execute_with(|| {
+        SnapshotDeadline::<Test>::kill();
+        let first_due = TestSnapshotSchedule::snapshot_due(1);
+        assert!(
+            first_due.is_some(),
+            "genesis MetricSpec activation must have a due block"
+        );
+        let first_due = first_due.unwrap_or_default();
+        assert!(!Welfare::snapshot_overdue(first_due));
+        assert_eq!(
+            SnapshotDeadline::<Test>::get(),
+            Some(SnapshotProgress {
+                last_snapshot_epoch: None,
+                due_epoch: 1,
+            })
+        );
+    });
+}
+
+#[test]
 fn daily_gate_happy_path_persists_and_emits() {
     new_test_ext().execute_with(|| {
         DailyInput::set(components(800_000_000, ONE, ONE, ONE));
@@ -264,6 +333,81 @@ fn duplicate_spec_version_is_rejected_without_storage_change() {
             Error::<Test>::DuplicateSpecVersion
         );
         assert_eq!(MetricSpecs::<Test>::iter().collect::<Vec<_>>(), before);
+    });
+}
+
+#[test]
+fn snapshot_deadline_uses_latest_unique_activation_not_largest_version() {
+    new_test_ext().execute_with(|| {
+        for (version, _) in MetricSpecs::<Test>::iter() {
+            MetricSpecs::<Test>::remove(version);
+        }
+        MetricSpecs::<Test>::insert(9, bounded(specs_activating(9, 5)));
+        MetricSpecs::<Test>::insert(2, bounded(specs_activating(2, 7)));
+        SnapshotDeadline::<Test>::put(SnapshotProgress {
+            last_snapshot_epoch: None,
+            due_epoch: 7,
+        });
+
+        assert_eq!(Welfare::active_snapshot_spec(7), Some(2));
+        assert_ok!(Welfare::record_snapshot(
+            RuntimeOrigin::signed(keeper()),
+            7,
+            2,
+        ));
+        assert_eq!(
+            SnapshotDeadline::<Test>::get().map(|progress| progress.due_epoch),
+            Some(8)
+        );
+    });
+}
+
+#[test]
+fn tied_latest_activations_cannot_suppress_the_snapshot_detector() {
+    new_test_ext().execute_with(|| {
+        for (version, _) in MetricSpecs::<Test>::iter() {
+            MetricSpecs::<Test>::remove(version);
+        }
+        MetricSpecs::<Test>::insert(9, bounded(specs_activating(9, 7)));
+        MetricSpecs::<Test>::insert(2, bounded(specs_activating(2, 7)));
+        SnapshotDeadline::<Test>::put(SnapshotProgress {
+            last_snapshot_epoch: None,
+            due_epoch: 7,
+        });
+
+        assert_eq!(Welfare::active_snapshot_spec(7), None);
+        assert_ok!(Welfare::record_snapshot(
+            RuntimeOrigin::signed(keeper()),
+            7,
+            9,
+        ));
+        assert_eq!(
+            SnapshotDeadline::<Test>::get().map(|progress| progress.due_epoch),
+            Some(7)
+        );
+    });
+}
+
+#[test]
+fn snapshot_deadline_overflow_is_not_spuriously_overdue() {
+    new_test_ext().execute_with(|| {
+        let due_epoch = u32::MAX / 100 - 1;
+        SnapshotDeadline::<Test>::put(SnapshotProgress {
+            last_snapshot_epoch: None,
+            due_epoch,
+        });
+        assert!(!Welfare::snapshot_overdue(u32::MAX));
+    });
+}
+
+#[test]
+fn try_state_rejects_snapshot_progress_without_its_prior_snapshot() {
+    new_test_ext().execute_with(|| {
+        SnapshotDeadline::<Test>::put(SnapshotProgress {
+            last_snapshot_epoch: Some(7),
+            due_epoch: 8,
+        });
+        assert!(Welfare::do_try_state().is_err());
     });
 }
 

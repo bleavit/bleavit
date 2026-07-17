@@ -223,6 +223,17 @@ fn map_core_events(events: &[CoreEvent]) -> Vec<Event<Test>> {
             }),
             CoreEvent::ProposalQualified(pid) => Some(Event::ProposalQualified(*pid)),
             CoreEvent::ProposalDeferred(pid) => Some(Event::ProposalDeferred(*pid)),
+            CoreEvent::SlotsShrunk {
+                epoch,
+                requested,
+                funded,
+                dropped,
+            } => Some(Event::SlotsShrunk {
+                epoch: *epoch,
+                requested: *requested,
+                funded: *funded,
+                dropped: dropped.clone(),
+            }),
             CoreEvent::MarketsOpened(pid) => Some(Event::MarketsOpened(*pid)),
             CoreEvent::DecisionExtended(pid) => Some(Event::DecisionExtended(*pid)),
             CoreEvent::ProposalQueued {
@@ -915,9 +926,10 @@ fn r2_1_seeded_treasury_gate_veto_survives_live_nav_reclassification() {
             RuntimeOrigin::signed(keeper()),
             tick_batch(vec![1]),
         ));
-        assert!(SeamCalls::get()
-            .iter()
-            .any(|call| matches!(call, SeamCall::OpenMarkets(1, false, true))));
+        assert!(SeamCalls::get().iter().any(|call| matches!(
+            call,
+            SeamCall::OpenMarkets(1, false, Some(plan)) if plan.gate_b.is_some()
+        )));
         let gates = Proposals::<Test>::get(1)
             .and_then(|proposal| proposal.markets)
             .and_then(|books| books.gates)
@@ -1404,19 +1416,28 @@ fn dead_man_pauses_phase_and_rejects_submission() {
 fn recovery_is_exactly_one_proposal_free_epoch() {
     new_test_ext().execute_with(|| {
         let pause_at = phase_block(0, phase_offsets::QUALIFY_NUM);
-        DeadManEngaged::set(true);
         set_block(pause_at);
+        assert_ok!(Epoch::observe_dead_man(1, false));
+        assert_ok!(Epoch::observe_dead_man(
+            1_u32.saturating_add(futarchy_primitives::kernel::DEAD_MAN_RELAY_BLOCKS),
+            false,
+        ));
+        assert!(DeadManEngaged::get());
         assert_ok!(Epoch::tick(
             RuntimeOrigin::signed(keeper()),
             tick_batch(Vec::new()),
         ));
-        DeadManEngaged::set(false);
         let recovery_start = pause_at.saturating_add(100);
         set_block(recovery_start);
+        assert_ok!(Epoch::observe_dead_man(
+            2_u32.saturating_add(futarchy_primitives::kernel::DEAD_MAN_RELAY_BLOCKS),
+            false,
+        ));
         assert_ok!(Epoch::tick(
             RuntimeOrigin::signed(keeper()),
             tick_batch(Vec::new()),
         ));
+        assert!(DeadManEngaged::get());
         assert_eq!(DeadMan::<Test>::get().recovery_epoch, Some(1));
         assert_noop!(
             Epoch::submit(
@@ -1431,11 +1452,85 @@ fn recovery_is_exactly_one_proposal_free_epoch() {
             RuntimeOrigin::signed(keeper()),
             tick_batch(Vec::new()),
         ));
+        assert!(!DeadManEngaged::get());
         assert_eq!(DeadMan::<Test>::get().recovery_epoch, None);
         assert_ok!(Epoch::submit(
             RuntimeOrigin::signed(keeper()),
             proposal(999, keeper(), ProposalState::Submitted, 2, normal_start,),
         ));
+    });
+}
+
+#[test]
+fn fresh_trigger_discards_partial_recovery_and_requires_a_new_full_epoch() {
+    new_test_ext().execute_with(|| {
+        let pause_at = phase_block(0, phase_offsets::QUALIFY_NUM);
+        set_block(pause_at);
+        assert_ok!(Epoch::observe_dead_man(1, false));
+        let first_stalled_parent =
+            1_u32.saturating_add(futarchy_primitives::kernel::DEAD_MAN_RELAY_BLOCKS);
+        assert_ok!(Epoch::observe_dead_man(first_stalled_parent, false));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(Vec::new()),
+        ));
+
+        let first_resume = pause_at.saturating_add(100);
+        set_block(first_resume);
+        assert_ok!(Epoch::observe_dead_man(
+            first_stalled_parent.saturating_add(1),
+            false,
+        ));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(Vec::new()),
+        ));
+        let first_recovery_epoch = DeadMan::<Test>::get().recovery_epoch;
+        assert!(first_recovery_epoch.is_some());
+        let recovery_length = Schedule::<Test>::get().length;
+        let first_recovery_end = first_resume.saturating_add(recovery_length);
+
+        let restall_at = first_resume.saturating_add(10);
+        set_block(restall_at);
+        let second_stalled_parent = first_stalled_parent
+            .saturating_add(1)
+            .saturating_add(futarchy_primitives::kernel::DEAD_MAN_RELAY_BLOCKS);
+        assert_ok!(Epoch::observe_dead_man(second_stalled_parent, false));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(Vec::new()),
+        ));
+        assert_eq!(DeadMan::<Test>::get().recovery_epoch, None);
+        assert_eq!(DeadMan::<Test>::get().paused_at, Some(restall_at));
+        assert!(DeadManEngaged::get());
+
+        let second_resume = restall_at.saturating_add(1);
+        set_block(second_resume);
+        assert_ok!(Epoch::observe_dead_man(
+            second_stalled_parent.saturating_add(1),
+            false,
+        ));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(Vec::new()),
+        ));
+        assert_ne!(DeadMan::<Test>::get().recovery_epoch, first_recovery_epoch);
+        assert_eq!(Schedule::<Test>::get().epoch_start_block, second_resume);
+
+        set_block(first_recovery_end);
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(Vec::new()),
+        ));
+        assert!(DeadManEngaged::get());
+
+        set_block(second_resume.saturating_add(recovery_length));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(Vec::new()),
+        ));
+        assert!(!DeadManEngaged::get());
+        assert_eq!(DeadMan::<Test>::get().recovery_epoch, None);
     });
 }
 
@@ -1574,6 +1669,218 @@ fn highest_bond_wins_the_last_qualification_slot() {
             Proposals::<Test>::get(6).map(|proposal| proposal.state),
             Some(ProposalState::Qualified)
         );
+    });
+}
+
+fn qualified_seed_state(
+    bonds: &[(ProposalId, Balance)],
+) -> EpochState<sp_core::crypto::AccountId32> {
+    let mut state = EpochState::new();
+    state.epoch.phase = EpochPhase::Qualify;
+    state.epoch.phase_start_block = phase_block(0, phase_offsets::QUALIFY_NUM);
+    for (pid, bond) in bonds {
+        let mut qualified = proposal(
+            *pid,
+            account((*pid % 200) as u8),
+            ProposalState::Qualified,
+            0,
+            1,
+        );
+        qualified.bond = *bond;
+        qualified.decide_at = phase_block(0, phase_offsets::DECIDE_NUM);
+        state.resource_locks.extend(
+            qualified
+                .resources
+                .iter()
+                .copied()
+                .map(|resource| (resource, *pid)),
+        );
+        state.proposals.push(qualified);
+        state.proposal_id_high_water = state.proposal_id_high_water.max(*pid);
+    }
+    state
+}
+
+#[test]
+fn pol_budget_shrinks_in_reverse_bond_priority_and_defers_dropped_slots() {
+    new_test_ext().execute_with(|| {
+        // limit-coverage: pol.budget_epoch
+        let bonds = [(1, 40), (2, 30), (3, 20), (4, 10)];
+        assert_ok!(Epoch::seed(qualified_seed_state(&bonds)));
+        let commitment = 11;
+        PolCommitments::set(bonds.iter().map(|(pid, _)| (*pid, commitment)).collect());
+        PolEpochBudget::set(commitment.saturating_mul(2));
+        for (pid, _) in bonds {
+            let hash = Proposals::<Test>::get(pid)
+                .expect("qualified proposal exists")
+                .payload_hash;
+            assert_ok!(<TestPreimage as PreimageAccess>::request(hash));
+            QualificationPreimageRequests::<Test>::insert(pid, hash);
+        }
+        set_block(phase_block(0, phase_offsets::SEED_NUM));
+
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(Vec::new()),
+        ));
+
+        assert_eq!(
+            IntakeProposals::<Test>::get(3).map(|proposal| (proposal.state, proposal.epoch)),
+            Some((ProposalState::Submitted, 1))
+        );
+        assert_eq!(
+            IntakeProposals::<Test>::get(4).map(|proposal| (proposal.state, proposal.epoch)),
+            Some((ProposalState::Submitted, 1))
+        );
+        assert_eq!(RolloverCounts::<Test>::get().as_slice(), &[(4, 1), (3, 1)]);
+        assert_eq!(IntakeQueue::<Test>::get().as_slice(), &[4, 3]);
+        for pid in [3, 4] {
+            assert!(!QualificationPreimageRequests::<Test>::contains_key(pid));
+        }
+        for pid in [1, 2] {
+            assert!(QualificationPreimageRequests::<Test>::contains_key(pid));
+        }
+        assert!(System::events().iter().any(|record| {
+            matches!(
+                &record.event,
+                RuntimeEvent::Epoch(Event::SlotsShrunk {
+                    epoch: 0,
+                    requested: 4,
+                    funded: 2,
+                    dropped,
+                }) if dropped.as_slice() == [4, 3]
+            )
+        }));
+        assert!(System::events().iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::Epoch(Event::ProposalDeferred(4))
+            )
+        }));
+        assert!(System::events().iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::Epoch(Event::ProposalDeferred(3))
+            )
+        }));
+    });
+}
+
+#[test]
+fn fitting_pol_slate_is_not_shrunk() {
+    new_test_ext().execute_with(|| {
+        let bonds = [(1, 20), (2, 10)];
+        assert_ok!(Epoch::seed(qualified_seed_state(&bonds)));
+        PolCommitments::set(vec![(1, 7), (2, 5)]);
+        PolEpochBudget::set(12);
+        set_block(phase_block(0, phase_offsets::SEED_NUM));
+
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(Vec::new()),
+        ));
+
+        assert!(bonds.iter().all(|(pid, _)| {
+            Proposals::<Test>::get(pid)
+                .is_some_and(|proposal| proposal.state == ProposalState::Qualified)
+        }));
+        assert!(!System::events().iter().any(|record| {
+            matches!(record.event, RuntimeEvent::Epoch(Event::SlotsShrunk { .. }))
+        }));
+    });
+}
+
+#[test]
+fn funded_pol_seed_plan_is_frozen_at_seed_entry() {
+    new_test_ext().execute_with(|| {
+        let bonds = [(1, 20)];
+        let mut state = qualified_seed_state(&bonds);
+        state.proposals[0].class = ProposalClass::Treasury;
+        assert_ok!(Epoch::seed(state));
+        PolCommitments::set(vec![(1, 1)]);
+        PolEpochBudget::set(1);
+        TreasuryGateRequired::set(true);
+        set_block(phase_block(0, phase_offsets::SEED_NUM));
+
+        // The transition fixes both the funded slot and its predicted gate shape.
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(Vec::new()),
+        ));
+        assert_eq!(
+            FundedPolSlots::<Test>::get().as_slice(),
+            &[(
+                1,
+                PolSeedPlan {
+                    commitment: 1,
+                    decision_b: 1,
+                    gate_b: Some(1),
+                }
+            )]
+        );
+
+        // Later NAV movement can change both live projections, but must neither
+        // double-charge the slate nor change the books that seeding will create.
+        PolEpochBudget::set(0);
+        PolCommitments::set(vec![(1, 99)]);
+        TreasuryGateRequired::set(false);
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(vec![1]),
+        ));
+        assert_eq!(
+            Proposals::<Test>::get(1).map(|proposal| proposal.state),
+            Some(ProposalState::Trading)
+        );
+        assert!(SeamCalls::get().contains(&SeamCall::OpenMarkets(
+            1,
+            false,
+            Some(PolSeedPlan {
+                commitment: 1,
+                decision_b: 1,
+                gate_b: Some(1),
+            }),
+        )));
+        assert!(!System::events().iter().any(|record| {
+            matches!(record.event, RuntimeEvent::Epoch(Event::SlotsShrunk { .. }))
+        }));
+    });
+}
+
+#[test]
+fn zero_spendable_nav_fails_static_and_funds_no_pol_slots() {
+    new_test_ext().execute_with(|| {
+        let bonds = [(1, 20), (2, 10)];
+        assert_ok!(Epoch::seed(qualified_seed_state(&bonds)));
+        PolCommitments::set(vec![(1, 1), (2, 1)]);
+        // The production provider returns zero when reserve health makes
+        // spendable NAV zero; the mock injects that conservative result.
+        PolEpochBudget::set(0);
+        set_block(phase_block(0, phase_offsets::SEED_NUM));
+
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(vec![1, 2]),
+        ));
+
+        assert!(bonds.iter().all(|(pid, _)| {
+            IntakeProposals::<Test>::get(pid).is_some_and(|proposal| {
+                proposal.state == ProposalState::Submitted && proposal.epoch == 1
+            })
+        }));
+        assert!(!SeamCalls::get()
+            .iter()
+            .any(|call| matches!(call, SeamCall::OpenMarkets(_, _, _))));
+        assert!(System::events().iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::Epoch(Event::SlotsShrunk {
+                    requested: 2,
+                    funded: 0,
+                    ..
+                })
+            )
+        }));
     });
 }
 
@@ -3190,10 +3497,13 @@ fn randomized_512_step_shell_core_differential_covers_refactored_seams() {
                 let opening = target
                     .filter(|proposal| proposal.state == ProposalState::Qualified)
                     .map(|proposal| markets(pid, proposal.epoch, false));
+                let seed_plan = target
+                    .filter(|proposal| proposal.state == ProposalState::Qualified)
+                    .and_then(TestPolBudget::proposal_seed_plan);
                 if opening.is_some() {
                     oracle_ledger
                         .calls
-                        .push(SeamCall::OpenMarkets(pid, false, false));
+                        .push(SeamCall::OpenMarkets(pid, false, seed_plan));
                 }
                 let core = oracle
                     .tick(
@@ -3298,7 +3608,7 @@ fn randomized_512_step_shell_core_differential_covers_refactored_seams() {
         assert!(oracle_ledger
             .calls
             .iter()
-            .any(|call| matches!(call, SeamCall::OpenMarkets(_, false, false))));
+            .any(|call| matches!(call, SeamCall::OpenMarkets(_, false, Some(_)))));
         assert!(oracle_ledger
             .calls
             .iter()

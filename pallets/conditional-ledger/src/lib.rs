@@ -67,9 +67,25 @@ pub trait BenchmarkHelper {
 #[cfg(feature = "runtime-benchmarks")]
 impl BenchmarkHelper for () {}
 
+/// Consumer-owned seam for the 09 §5.2 defense-in-depth split gate.
+///
+/// Implementations perform pure reads only: signed splits move USDC that was
+/// already issued and recorded at the XCM inflow leg, so this seam must never
+/// extend the cumulative deposit meter.
+pub trait InflowCapGate<AccountId> {
+    /// Return `true` while the account may create new conditional-ledger escrow.
+    fn escrow_admissible(who: &AccountId) -> bool;
+}
+
+impl<AccountId> InflowCapGate<AccountId> for () {
+    fn escrow_admissible(_who: &AccountId) -> bool {
+        true
+    }
+}
+
 #[frame_support::pallet]
 pub mod pallet {
-    use crate::weights::WeightInfo;
+    use crate::{weights::WeightInfo, InflowCapGate};
     use alloc::{collections::BTreeMap, vec::Vec};
     use conditional_ledger_core::{
         baseline as baseline_id, position as proposal_position, BaselineVaultInfo,
@@ -82,6 +98,7 @@ pub mod pallet {
             tokens::Preservation,
             Contains,
         },
+        weights::Weight,
         PalletId,
     };
     use frame_system::pallet_prelude::*;
@@ -109,6 +126,14 @@ pub mod pallet {
         PositionKind::GateYes(GateType::Security),
         PositionKind::GateNo(GateType::Security),
     ];
+
+    /// Explicit surcharge because the committed generated weights predate this
+    /// cross-pallet seam: two Params reads, total ForeignAssets issuance, and
+    /// one cumulative-meter read. The proof bound conservatively covers four
+    /// distinct map values until the next full runtime weight regeneration.
+    fn inflow_cap_gate_weight<T: Config>() -> Weight {
+        Weight::from_parts(1_000_000, 12 * 1024).saturating_add(T::DbWeight::get().reads(4))
+    }
 
     #[pallet::config]
     pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
@@ -171,6 +196,9 @@ pub mod pallet {
 
         /// Fail-soft keeper rebate sink (08 §6). It must never affect a crank.
         type KeeperRebate: KeeperRebateSink<Self::AccountId>;
+
+        /// Pure-read Phase-3 cap gate for signed split paths (09 §5.2).
+        type InflowCapGate: crate::InflowCapGate<Self::AccountId>;
 
         /// Benchmarked weights.
         type WeightInfo: WeightInfo;
@@ -377,6 +405,9 @@ pub mod pallet {
         /// The position-storage deposit could not be taken from the entry owner
         /// (03 §4 / §8).
         DepositFailed,
+        /// New escrow is halted because global USDC issuance or the signer's
+        /// cumulative Phase-3 deposit meter is already above its live cap.
+        InflowCapExceeded,
     }
 
     impl<T: Config> From<conditional_ledger_core::Error> for Error<T> {
@@ -440,10 +471,14 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 03 §5.1. Split `a` USDC into `a` Accept-USDC + `a` Reject-USDC.
         #[pallet::call_index(0)]
-        #[pallet::weight(T::WeightInfo::split())]
+        #[pallet::weight(T::WeightInfo::split().saturating_add(inflow_cap_gate_weight::<T>()))]
         pub fn split(origin: OriginFor<T>, pid: ProposalId, amount: Balance) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(amount >= T::MinSplit::get(), Error::<T>::BelowMinimum);
+            ensure!(
+                T::InflowCapGate::escrow_admissible(&who),
+                Error::<T>::InflowCapExceeded
+            );
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.split(LedgerOrigin::Signed, pid, &who, amount)
             })
@@ -461,7 +496,7 @@ pub mod pallet {
 
         /// 03 §5.1. Split branch-USDC into a LONG/SHORT scalar set.
         #[pallet::call_index(2)]
-        #[pallet::weight(T::WeightInfo::split_scalar())]
+        #[pallet::weight(T::WeightInfo::split_scalar().saturating_add(inflow_cap_gate_weight::<T>()))]
         pub fn split_scalar(
             origin: OriginFor<T>,
             pid: ProposalId,
@@ -475,6 +510,10 @@ pub mod pallet {
             // stale compile-time K floor; `do_split_scalar` (`MarketAuthority`,
             // exact by construction) stays exempt.
             ensure!(amount >= T::MinSplit::get(), Error::<T>::BelowMinimum);
+            ensure!(
+                T::InflowCapGate::escrow_admissible(&who),
+                Error::<T>::InflowCapExceeded
+            );
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.split_scalar(LedgerOrigin::Signed, pid, branch, &who, amount)
             })
@@ -497,7 +536,7 @@ pub mod pallet {
 
         /// 03 §5.1. Split branch-USDC into a gate YES/NO set.
         #[pallet::call_index(4)]
-        #[pallet::weight(T::WeightInfo::split_gate())]
+        #[pallet::weight(T::WeightInfo::split_gate().saturating_add(inflow_cap_gate_weight::<T>()))]
         pub fn split_gate(
             origin: OriginFor<T>,
             pid: ProposalId,
@@ -509,6 +548,10 @@ pub mod pallet {
             // 03 §7 R-2 creation floor at the LIVE `ledger.min_split` (as
             // `split_scalar`): the minted gate legs are new non-protocol entries.
             ensure!(amount >= T::MinSplit::get(), Error::<T>::BelowMinimum);
+            ensure!(
+                T::InflowCapGate::escrow_admissible(&who),
+                Error::<T>::InflowCapExceeded
+            );
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.split_gate(LedgerOrigin::Signed, pid, branch, gate, &who, amount)
             })
@@ -580,7 +623,7 @@ pub mod pallet {
 
         /// 03 §5.1. Baseline split.
         #[pallet::call_index(7)]
-        #[pallet::weight(T::WeightInfo::split_baseline())]
+        #[pallet::weight(T::WeightInfo::split_baseline().saturating_add(inflow_cap_gate_weight::<T>()))]
         pub fn split_baseline(
             origin: OriginFor<T>,
             epoch: EpochId,
@@ -588,6 +631,10 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(amount >= T::MinSplit::get(), Error::<T>::BelowMinimum);
+            ensure!(
+                T::InflowCapGate::escrow_admissible(&who),
+                Error::<T>::InflowCapExceeded
+            );
             Self::run_baseline(epoch, core::slice::from_ref(&who), &who, |st| {
                 st.split_baseline(LedgerOrigin::Signed, epoch, &who, amount)
             })

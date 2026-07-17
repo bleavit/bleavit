@@ -101,6 +101,35 @@ fn execute_happy_path_dispatches_with_class_origin_and_records_terminal_state() 
 }
 
 #[test]
+fn pending_outflow_sync_failure_is_fail_soft_loud_and_fail_static() {
+    new_test_ext().execute_with(|| {
+        PendingSyncRefuses::set(true);
+
+        assert_ok!(enqueue_calls(
+            1,
+            futarchy_primitives::ProposalClass::Param,
+            vec![param_call(1)],
+            vec![CallDomain::Param],
+        ));
+
+        assert!(Queue::<Test>::contains_key(1));
+        assert!(PendingFailStaticForced::get());
+        assert!(matches!(
+            last_guard_event(),
+            Some(Event::PendingOutflowSyncFailed {
+                queued: 1,
+                fail_static: true,
+            })
+        ));
+        assert!(GuardPallet::do_try_state().is_err());
+
+        PendingSyncRefuses::set(false);
+        assert_ok!(GuardPallet::dequeue_terminal(1));
+        assert_ok!(GuardPallet::do_try_state());
+    });
+}
+
+#[test]
 fn queue_view_exposes_sorted_core_projection_and_meter_state() {
     new_test_ext().execute_with(|| {
         assert_ok!(enqueue_calls(

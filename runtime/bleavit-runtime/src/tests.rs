@@ -41,6 +41,7 @@ use sp_runtime::{
 use staging_xcm::latest::{
     Asset as XcmAsset, AssetId as XcmAssetId, Fungibility, Weight as XcmWeight, XcmContext,
 };
+use staging_xcm::{IdentifyVersion, VersionedAssets, VersionedLocation};
 use staging_xcm_executor::{
     test_helpers::mock_asset_to_holding, traits::WeightTrader, AssetsInHolding,
 };
@@ -276,7 +277,8 @@ fn seed_decision_grade_market(
     book.last_observed_block = u64::from(end);
     book.cumulative_price_blocks = u128::from(quote.0)
         .checked_mul(u128::from(window))
-        .ok_or(DispatchError::Other("twap accumulator"))?;
+        .ok_or(DispatchError::Other("twap accumulator"))?
+        .into();
     pallet_market::Markets::<Runtime>::insert(id, book);
     pallet_market::SeededMarkets::<Runtime>::insert(id, ());
     let interval = u32::try_from(crate::configs::MarketObsInterval::get())
@@ -307,10 +309,11 @@ fn seed_decision_grade_market(
     let cumulative_at = |at: BlockNumber| {
         at.checked_sub(start)
             .and_then(|elapsed| u128::from(quote.0).checked_mul(u128::from(elapsed)))
+            .map(pallet_market::core_market::TwapCumulative::from)
     };
     let checkpoints =
         frame_support::BoundedVec::<_, frame_support::traits::ConstU32<8>>::try_from(vec![
-            (start, 0),
+            (start, pallet_market::core_market::TwapCumulative::ZERO),
             (
                 trailing_start,
                 cumulative_at(trailing_start)
@@ -322,7 +325,7 @@ fn seed_decision_grade_market(
             ),
         ])
         .map_err(|_| DispatchError::Other("checkpoint bound"))?;
-    pallet_market::WindowCheckpoints::<Runtime>::insert(id, checkpoints);
+    pallet_market::TwapCheckpoints::<Runtime>::insert(id, checkpoints);
     Ok(())
 }
 
@@ -502,7 +505,7 @@ fn seed_two_window_baseline(
     book.last_quote_1e9 = late_quote;
     book.last_observation_1e9 = late_quote;
     book.last_observed_block = u64::from(late_end);
-    book.cumulative_price_blocks = late_total;
+    book.cumulative_price_blocks = late_total.into();
     pallet_market::Markets::<Runtime>::insert(id, book);
     pallet_market::SeededMarkets::<Runtime>::insert(id, ());
 
@@ -546,13 +549,17 @@ fn seed_two_window_baseline(
 
     let checkpoints =
         frame_support::BoundedVec::<_, frame_support::traits::ConstU32<8>>::try_from(vec![
-            (early_start, 0),
+            (
+                early_start,
+                pallet_market::core_market::TwapCumulative::ZERO,
+            ),
             (
                 early_trailing,
                 cumulative(early_trailing.saturating_sub(early_start), early_quote)
-                    .ok_or(DispatchError::Other("early trailing accumulator"))?,
+                    .ok_or(DispatchError::Other("early trailing accumulator"))?
+                    .into(),
             ),
-            (early_end, early_total),
+            (early_end, early_total.into()),
             (
                 late_trailing,
                 early_total
@@ -560,12 +567,13 @@ fn seed_two_window_baseline(
                         cumulative(late_trailing.saturating_sub(late_start), late_quote)
                             .ok_or(DispatchError::Other("late trailing accumulator"))?,
                     )
-                    .ok_or(DispatchError::Other("late trailing accumulator"))?,
+                    .ok_or(DispatchError::Other("late trailing accumulator"))?
+                    .into(),
             ),
-            (late_end, late_total),
+            (late_end, late_total.into()),
         ])
         .map_err(|_| DispatchError::Other("checkpoint bound"))?;
-    pallet_market::WindowCheckpoints::<Runtime>::insert(id, checkpoints);
+    pallet_market::TwapCheckpoints::<Runtime>::insert(id, checkpoints);
     Ok(())
 }
 
@@ -725,6 +733,40 @@ fn install_single_active_metric_spec(
         units: [2; 16],
         repr: [3; 16],
         cadence_blocks,
+        sanity_min: futarchy_primitives::FixedU64(0),
+        sanity_max: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+        has_normalization_rule: true,
+        has_missing_data_rule: true,
+        has_gaming_vectors: true,
+        has_challenge_procedure: true,
+        prior_bounds: [futarchy_primitives::FixedU64(pallet_welfare::ONE);
+            pallet_welfare::HISTORY_PRIORS],
+    };
+    let active_specs = pallet_welfare::BoundedSpecSet::try_from(vec![active_spec]).ok()?;
+    pallet_welfare::MetricSpecs::<Runtime>::insert(version, active_specs);
+    Some(())
+}
+
+fn install_active_x_snapshot_spec(
+    version: futarchy_primitives::MetricSpecVersion,
+    activation_epoch: futarchy_primitives::EpochId,
+) -> Option<()> {
+    for (stored_version, _) in pallet_welfare::MetricSpecs::<Runtime>::iter() {
+        pallet_welfare::MetricSpecs::<Runtime>::remove(stored_version);
+    }
+    pallet_welfare::SnapshotDeadline::<Runtime>::kill();
+    let active_spec = pallet_welfare::MetricSpec {
+        id: futarchy_primitives::metric_ids::X,
+        version,
+        pillar: pallet_welfare::Pillar::COnchain,
+        weight: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+        epsilon_floor: pallet_welfare::EPSILON_PILLAR,
+        activation_epoch,
+        source: pallet_welfare::SourceClass::Onchain,
+        formula_ref: [1; 32],
+        units: [2; 16],
+        repr: [3; 16],
+        cadence_blocks: 1,
         sanity_min: futarchy_primitives::FixedU64(0),
         sanity_max: futarchy_primitives::FixedU64(pallet_welfare::ONE),
         has_normalization_rule: true,
@@ -984,6 +1026,39 @@ fn submit_relay_upgrade_go_ahead() {
 
 fn submit_relay_upgrade_abort() {
     submit_relay_upgrade_signal(cumulus_primitives_core::relay_chain::UpgradeGoAhead::Abort);
+}
+
+fn submit_relay_parent(relay_parent_number: u32) {
+    let builder = cumulus_test_relay_sproof_builder::RelayStateSproofBuilder {
+        para_id: futarchy_primitives::chain_identity::FIXTURE_PARA_ID.into(),
+        current_slot: u64::from(relay_parent_number).into(),
+        included_para_head: Some(cumulus_primitives_core::relay_chain::HeadData(Vec::new())),
+        ..Default::default()
+    };
+    let (relay_parent_storage_root, relay_chain_state) = builder.into_state_root_and_proof();
+    let data = cumulus_pallet_parachain_system::parachain_inherent::BasicParachainInherentData {
+        validation_data: cumulus_primitives_core::PersistedValidationData {
+            relay_parent_number,
+            relay_parent_storage_root,
+            ..Default::default()
+        },
+        relay_chain_state,
+        relay_parent_descendants: Default::default(),
+        collator_peer_id: None,
+    };
+    let inbound = cumulus_pallet_parachain_system::parachain_inherent::InboundMessagesData::new(
+        Default::default(),
+        Default::default(),
+    );
+    pallet_aura::CurrentSlot::<Runtime>::put(sp_consensus_aura::Slot::from(u64::from(
+        relay_parent_number,
+    )));
+    cumulus_pallet_parachain_system::ValidationData::<Runtime>::kill();
+    assert_ok!(ParachainSystem::set_validation_data(
+        RuntimeOrigin::none(),
+        data,
+        inbound,
+    ));
 }
 
 fn submit_relay_upgrade_signal(signal: cumulus_primitives_core::relay_chain::UpgradeGoAhead) {
@@ -1445,6 +1520,10 @@ fn guard_rejects_best_effort_wrappers_and_admits_atomic_batch_all() {
             ProposalClass::Param,
             &batch_all
         ));
+        let coretime_renewal = RuntimeCall::FutarchyTreasury(
+            pallet_futarchy_treasury::Call::execute_coretime_renewal { period_index: 1 },
+        );
+        assert!(RuntimeBaseCallFilter::contains(&coretime_renewal));
     });
 }
 
@@ -1590,6 +1669,111 @@ fn governed_xcm_rates_are_read_from_genesis_params_and_live_updates() {
 }
 
 #[test]
+fn oracle_registration_reads_live_constitution_stake() {
+    development_ext().execute_with(|| {
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(2)
+        });
+        assert_eq!(
+            <crate::configs::RuntimeOracleParams as pallet_oracle::OracleParamsProvider>::get()
+                .bond_bps,
+            250,
+        );
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::key16(b"orc.bond_bps"),
+            pallet_constitution::ParamValue::Perbill(30_000_000),
+        ));
+        assert_eq!(
+            <crate::configs::RuntimeOracleParams as pallet_oracle::OracleParamsProvider>::get()
+                .bond_bps,
+            300,
+            "Perbill storage must convert to basis points exactly once",
+        );
+        let amended_stake = 150_000_000_000_u128;
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::key16(b"orc.rep_stake"),
+            pallet_constitution::ParamValue::Balance(amended_stake),
+        ));
+
+        let reporter = account(48);
+        assert_ok!(Oracle::register_reporter(RuntimeOrigin::signed(
+            reporter.clone()
+        )));
+        assert_eq!(
+            pallet_oracle::Reporters::<Runtime>::get(reporter).map(|info| info.stake),
+            Some(amended_stake),
+        );
+    });
+}
+
+#[test]
+fn attestation_creation_snapshots_the_live_constitution_window() {
+    development_ext().execute_with(|| {
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(2)
+        });
+        let key = pallet_constitution::key16(b"att.window");
+        let first_window = 50_000_u32;
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            key,
+            pallet_constitution::ParamValue::U32(first_window),
+        ));
+
+        let members = [account(51), account(52), account(53)];
+        assert_ok!(Attestor::set_members(
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            members.to_vec(),
+        ));
+        let submitted_at = System::block_number();
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(members[0].clone()),
+            9_101,
+            [91; 32],
+            [92; 32],
+        ));
+        let first_deadline = submitted_at.saturating_add(first_window);
+        assert_eq!(
+            pallet_attestor::Attestations::<Runtime>::get()
+                .first()
+                .map(|record| record.challenge_deadline),
+            Some(first_deadline),
+        );
+
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(2)
+        });
+        let second_window = 60_000_u32;
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            key,
+            pallet_constitution::ParamValue::U32(second_window),
+        ));
+        assert_eq!(
+            pallet_attestor::Attestations::<Runtime>::get()
+                .first()
+                .map(|record| record.challenge_deadline),
+            Some(first_deadline),
+            "an existing attestation keeps its creation-time deadline",
+        );
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(members[1].clone()),
+            9_101,
+            [91; 32],
+            [93; 32],
+        ));
+        assert_eq!(
+            pallet_attestor::Attestations::<Runtime>::get()
+                .get(1)
+                .map(|record| record.challenge_deadline),
+            Some(submitted_at.saturating_add(second_window)),
+        );
+    });
+}
+
+#[test]
 fn governed_xcm_trader_rounds_both_weight_dimensions_up_against_the_payer() {
     use crate::configs::ConstitutionTraderRates;
     use frame_support::weights::constants::{WEIGHT_PROOF_SIZE_PER_MB, WEIGHT_REF_TIME_PER_SECOND};
@@ -1671,6 +1855,448 @@ fn phase_inflow_caps_use_real_foreign_asset_issuance_and_live_params() {
         assert_eq!(
             pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(beneficiary),
             10
+        );
+    });
+}
+
+fn set_balance_param_value(name: &[u8], value: Balance) {
+    let key = pallet_constitution::key16(name);
+    let Some(mut record) = pallet_constitution::Params::<Runtime>::get(key) else {
+        assert!(false, "missing genesis balance param {name:?}");
+        return;
+    };
+    record.value = pallet_constitution::ParamValue::Balance(value);
+    pallet_constitution::Params::<Runtime>::insert(key, record);
+}
+
+fn local_xcm_account(who: &AccountId) -> staging_xcm::latest::Location {
+    staging_xcm::latest::Location::new(
+        0,
+        [staging_xcm::latest::Junction::AccountId32 {
+            network: Some(staging_xcm::latest::NetworkId::Polkadot),
+            id: who.clone().into(),
+        }],
+    )
+}
+
+fn production_xcm_weight_limit() -> XcmWeight {
+    crate::configs::xcm_config::UnitWeightCost::get().saturating_mul(10)
+}
+
+fn execute_production_inbound_usdc(
+    amount: Balance,
+    beneficiary: &AccountId,
+    message_byte: u8,
+) -> staging_xcm::latest::Outcome {
+    use staging_xcm::latest::prelude::*;
+
+    let incoming = XcmAsset {
+        id: XcmAssetId(usdc_location()),
+        fun: Fungibility::Fungible(amount),
+    };
+    let weight_limit = production_xcm_weight_limit();
+    let program = Xcm(vec![
+        ReserveAssetDeposited(Assets::from(incoming.clone())),
+        ClearOrigin,
+        BuyExecution {
+            fees: incoming,
+            weight_limit: Limited(weight_limit),
+        },
+        DepositAsset {
+            assets: Wild(AllCounted(1)),
+            beneficiary: local_xcm_account(beneficiary),
+        },
+    ]);
+    let mut message_id = [message_byte; 32];
+    <crate::configs::xcm_config::Executor as ExecuteXcm<RuntimeCall>>::prepare_and_execute(
+        bleavit_xcm::identity::asset_hub_location(),
+        program,
+        &mut message_id,
+        weight_limit,
+        XcmWeight::zero(),
+    )
+}
+
+fn latest_production_xcm_trap() -> Option<(H256, staging_xcm::latest::Location, VersionedAssets)> {
+    System::events().iter().rev().find_map(|record| {
+        if let crate::RuntimeEvent::PolkadotXcm(pallet_xcm::Event::AssetsTrapped {
+            hash,
+            origin,
+            assets,
+        }) = &record.event
+        {
+            Some((*hash, origin.clone(), assets.clone()))
+        } else {
+            None
+        }
+    })
+}
+
+fn create_local_production_xcm_trap(
+    origin: &staging_xcm::latest::Location,
+    amount: Balance,
+    message_byte: u8,
+) -> Option<(H256, VersionedAssets)> {
+    use staging_xcm_executor::traits::{DropAssets, TransactAsset};
+
+    System::set_block_number(1);
+    let asset = XcmAsset {
+        id: XcmAssetId(usdc_location()),
+        fun: Fungibility::Fungible(amount),
+    };
+    let context = XcmContext::with_message_id([message_byte; 32]);
+    let holding = match <crate::configs::xcm_config::AssetTransactors as TransactAsset>::mint_asset(
+        &asset, &context,
+    ) {
+        Ok(holding) => holding,
+        Err(error) => {
+            assert!(false, "local trap setup must mint USDC: {error:?}");
+            return None;
+        }
+    };
+    <PolkadotXcm as DropAssets>::drop_assets(origin, holding, &context);
+    let Some((hash, trapped_origin, assets)) = latest_production_xcm_trap() else {
+        assert!(false, "local trap setup must emit AssetsTrapped");
+        return None;
+    };
+    assert_eq!(&trapped_origin, origin);
+    Some((hash, assets))
+}
+
+#[test]
+fn production_xcm_config_binds_capped_assets_reserves_barrier_and_trap_claims() {
+    use crate::configs::xcm_config;
+    use staging_xcm_executor::{traits::TrapAndClaimAssets, Config as ExecutorConfig};
+
+    assert_same_type::<
+        <xcm_config::XcmConfig as ExecutorConfig>::AssetTransactor,
+        xcm_config::CappedAssets,
+    >();
+    assert_same_type::<
+        <xcm_config::XcmConfig<xcm_config::TrapRecoveryAssets> as ExecutorConfig>::AssetTransactor,
+        xcm_config::TrapRecoveryAssets,
+    >();
+    assert_same_type::<
+        <Runtime as pallet_xcm::Config>::XcmExecutor,
+        xcm_config::TrapRecoveryExecutor,
+    >();
+    assert_same_type::<
+        <xcm_config::XcmConfig as ExecutorConfig>::IsReserve,
+        bleavit_xcm::assets::BleavitReserves,
+    >();
+    assert_same_type::<<xcm_config::XcmConfig as ExecutorConfig>::IsTeleporter, ()>();
+    assert_same_type::<<xcm_config::XcmConfig as ExecutorConfig>::OriginConverter, ()>();
+    assert_same_type::<<xcm_config::XcmConfig as ExecutorConfig>::Barrier, xcm_config::Barrier>();
+    assert_same_type::<<xcm_config::XcmConfig as ExecutorConfig>::AssetTrap, PolkadotXcm>();
+    fn assert_trap_and_claim<T: TrapAndClaimAssets>() {}
+    assert_trap_and_claim::<<xcm_config::XcmConfig as ExecutorConfig>::AssetTrap>();
+    assert_eq!(
+        xcm_config::RelayNetwork::get(),
+        Some(staging_xcm::latest::NetworkId::Polkadot)
+    );
+}
+
+#[test]
+fn production_xcm_under_caps_mints_deposits_and_records_the_beneficiary() {
+    development_ext().execute_with(|| {
+        let beneficiary = account(54);
+        let amount = 20 * currency::USDC;
+        let issuance_before = ForeignAssets::total_issuance(usdc_location());
+        set_balance_param_value(b"phase3.tvl_cap", issuance_before.saturating_add(amount));
+        set_balance_param_value(b"phase3.dep_cap", amount);
+
+        assert!(execute_production_inbound_usdc(amount, &beneficiary, 54)
+            .ensure_complete()
+            .is_ok());
+        let credited = ForeignAssets::balance(usdc_location(), &beneficiary);
+        assert!(credited > 0);
+        assert_eq!(
+            pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&beneficiary),
+            credited
+        );
+        assert!(latest_production_xcm_trap().is_none());
+    });
+}
+
+#[test]
+fn production_xcm_global_cap_refuses_before_minting_or_trapping() {
+    // limit-coverage: phase3.tvl_cap
+    use staging_xcm::latest::{Error as XcmError, InstructionError, Outcome};
+
+    development_ext().execute_with(|| {
+        let beneficiary = account(55);
+        let amount = 20 * currency::USDC;
+        let issuance_before = ForeignAssets::total_issuance(usdc_location());
+        set_balance_param_value(
+            b"phase3.tvl_cap",
+            issuance_before.saturating_add(amount).saturating_sub(1),
+        );
+        set_balance_param_value(b"phase3.dep_cap", Balance::MAX);
+
+        let outcome = execute_production_inbound_usdc(amount, &beneficiary, 55);
+        assert!(matches!(
+            outcome,
+            Outcome::Incomplete {
+                error: InstructionError {
+                    index: 0,
+                    error: XcmError::FailedToTransactAsset("USDC global inflow cap exceeded"),
+                },
+                ..
+            }
+        ));
+        assert_eq!(
+            ForeignAssets::total_issuance(usdc_location()),
+            issuance_before
+        );
+        assert_eq!(ForeignAssets::balance(usdc_location(), &beneficiary), 0);
+        assert_eq!(
+            pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&beneficiary),
+            0
+        );
+        assert!(latest_production_xcm_trap().is_none());
+    });
+}
+
+#[test]
+fn production_xcm_account_cap_traps_and_asset_hub_origin_can_recover() {
+    // limit-coverage: phase3.dep_cap
+    use staging_xcm::latest::prelude::*;
+
+    development_ext().execute_with(|| {
+        System::set_block_number(1);
+        let refused_beneficiary = account(56);
+        let recovery_beneficiary = account(57);
+        let amount = 20 * currency::USDC;
+        let issuance_before = ForeignAssets::total_issuance(usdc_location());
+        set_balance_param_value(b"phase3.tvl_cap", issuance_before.saturating_add(amount));
+        set_balance_param_value(b"phase3.dep_cap", 1);
+
+        let outcome = execute_production_inbound_usdc(amount, &refused_beneficiary, 56);
+        assert!(matches!(
+            outcome,
+            Outcome::Incomplete {
+                error: InstructionError {
+                    index: 3,
+                    error: XcmError::FailedToTransactAsset("USDC inflow cap exceeded"),
+                },
+                ..
+            }
+        ));
+        let issuance_after_trap = ForeignAssets::total_issuance(usdc_location());
+        assert!(issuance_after_trap > issuance_before);
+        assert!(issuance_after_trap <= issuance_before.saturating_add(amount));
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &refused_beneficiary),
+            0
+        );
+        assert_eq!(
+            pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&refused_beneficiary),
+            0
+        );
+
+        let Some((hash, trap_origin, versioned_assets)) = latest_production_xcm_trap() else {
+            assert!(false, "deposit-cap refusal must trap its minted holding");
+            return;
+        };
+        assert_eq!(trap_origin, bleavit_xcm::identity::asset_hub_location());
+        assert_eq!(PolkadotXcm::asset_trap(&hash), 1);
+
+        let local_claim = RuntimeCall::PolkadotXcm(pallet_xcm::Call::claim_assets {
+            assets: Box::new(versioned_assets.clone()),
+            beneficiary: Box::new(VersionedLocation::from(local_xcm_account(
+                &recovery_beneficiary,
+            ))),
+        });
+        assert!(RuntimeBaseCallFilter::contains(&local_claim));
+        assert!(PolkadotXcm::claim_assets(
+            RuntimeOrigin::signed(refused_beneficiary.clone()),
+            Box::new(versioned_assets.clone()),
+            Box::new(VersionedLocation::from(local_xcm_account(
+                &recovery_beneficiary,
+            ))),
+        )
+        .is_err());
+        assert_eq!(
+            PolkadotXcm::asset_trap(&hash),
+            1,
+            "a Signed account cannot claim an Asset-Hub-keyed trap"
+        );
+
+        let latest_assets: Assets = match versioned_assets.clone().try_into() {
+            Ok(assets) => assets,
+            Err(()) => {
+                assert!(false, "trapped v5 assets must decode as latest");
+                return;
+            }
+        };
+        let fee_asset = match latest_assets.inner().first() {
+            Some(asset) => asset.clone(),
+            None => {
+                assert!(false, "the trapped holding must contain USDC");
+                return;
+            }
+        };
+        let ticket = Location::new(
+            0,
+            [GeneralIndex(u128::from(
+                versioned_assets.identify_version(),
+            ))],
+        );
+        // Pin the global cap exactly to issuance that already includes the
+        // trapped holding. Recovery must not re-apply a prospective mint gate:
+        // pallet-xcm's reconstruction is net issuance-neutral.
+        set_balance_param_value(b"phase3.tvl_cap", issuance_after_trap);
+        set_balance_param_value(b"phase3.dep_cap", amount);
+        let weight_limit = production_xcm_weight_limit();
+        let recovery = Xcm(vec![
+            ClaimAsset {
+                assets: latest_assets,
+                ticket,
+            },
+            BuyExecution {
+                fees: fee_asset,
+                weight_limit: Limited(weight_limit),
+            },
+            DepositAsset {
+                assets: Wild(AllCounted(1)),
+                beneficiary: local_xcm_account(&recovery_beneficiary),
+            },
+        ]);
+        let mut message_id = [57; 32];
+        let recovery_outcome =
+            <crate::configs::xcm_config::Executor as ExecuteXcm<RuntimeCall>>::prepare_and_execute(
+                bleavit_xcm::identity::asset_hub_location(),
+                recovery,
+                &mut message_id,
+                weight_limit,
+                XcmWeight::zero(),
+            );
+        assert!(recovery_outcome.ensure_complete().is_ok());
+        assert_eq!(PolkadotXcm::asset_trap(&hash), 0);
+        let recovered = ForeignAssets::balance(usdc_location(), &recovery_beneficiary);
+        assert!(recovered > 0);
+        assert_eq!(
+            pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&recovery_beneficiary),
+            recovered
+        );
+        let issuance_after_recovery = ForeignAssets::total_issuance(usdc_location());
+        assert!(issuance_after_recovery <= issuance_after_trap);
+        assert_eq!(
+            issuance_after_recovery,
+            issuance_before.saturating_add(recovered),
+            "claim reconstruction adds no issuance; only paid recovery fees are removed"
+        );
+    });
+}
+
+#[test]
+fn production_xcm_signed_claim_reconstructs_at_the_global_cap_and_records_deposit() {
+    development_ext().execute_with(|| {
+        let owner = account(58);
+        let owner_location = local_xcm_account(&owner);
+        let amount = 20 * currency::USDC;
+        let issuance_before = ForeignAssets::total_issuance(usdc_location());
+        let Some((hash, assets)) = create_local_production_xcm_trap(&owner_location, amount, 58)
+        else {
+            return;
+        };
+        let issuance_with_trap = ForeignAssets::total_issuance(usdc_location());
+        assert_eq!(issuance_with_trap, issuance_before.saturating_add(amount));
+        set_balance_param_value(b"phase3.tvl_cap", issuance_with_trap);
+        set_balance_param_value(b"phase3.dep_cap", amount);
+
+        assert_ok!(PolkadotXcm::claim_assets(
+            RuntimeOrigin::signed(owner.clone()),
+            Box::new(assets),
+            Box::new(VersionedLocation::from(owner_location)),
+        ));
+        assert_eq!(PolkadotXcm::asset_trap(&hash), 0);
+        assert_eq!(ForeignAssets::balance(usdc_location(), &owner), amount);
+        assert_eq!(
+            pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&owner),
+            amount
+        );
+        assert_eq!(
+            ForeignAssets::total_issuance(usdc_location()),
+            issuance_with_trap
+        );
+    });
+}
+
+#[test]
+fn production_xcm_signed_claim_over_account_cap_retraps_without_recording() {
+    development_ext().execute_with(|| {
+        let owner = account(59);
+        let owner_location = local_xcm_account(&owner);
+        let amount = 20 * currency::USDC;
+        let Some((hash, assets)) = create_local_production_xcm_trap(&owner_location, amount, 59)
+        else {
+            return;
+        };
+        let issuance_with_trap = ForeignAssets::total_issuance(usdc_location());
+        set_balance_param_value(b"phase3.tvl_cap", issuance_with_trap);
+        set_balance_param_value(b"phase3.dep_cap", amount.saturating_sub(1));
+
+        assert!(PolkadotXcm::claim_assets(
+            RuntimeOrigin::signed(owner.clone()),
+            Box::new(assets),
+            Box::new(VersionedLocation::from(owner_location)),
+        )
+        .is_err());
+        assert_eq!(
+            PolkadotXcm::asset_trap(&hash),
+            1,
+            "a refused local recovery must remain trapped"
+        );
+        assert_eq!(ForeignAssets::balance(usdc_location(), &owner), 0);
+        assert_eq!(
+            pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&owner),
+            0
+        );
+        assert_eq!(
+            ForeignAssets::total_issuance(usdc_location()),
+            issuance_with_trap
+        );
+    });
+}
+
+#[test]
+fn production_xcm_treasury_class_can_recover_only_the_protocol_keyed_trap() {
+    use pallet_execution_guard::BatchDispatcher;
+
+    development_ext().execute_with(|| {
+        let protocol = crate::configs::treasury_protocol_account();
+        let protocol_location = local_xcm_account(&protocol);
+        let amount = 20 * currency::USDC;
+        let Some((hash, assets)) = create_local_production_xcm_trap(&protocol_location, amount, 60)
+        else {
+            return;
+        };
+        let issuance_with_trap = ForeignAssets::total_issuance(usdc_location());
+        set_balance_param_value(b"phase3.tvl_cap", issuance_with_trap);
+        set_balance_param_value(b"phase3.dep_cap", amount);
+
+        let claim = RuntimeCall::PolkadotXcm(pallet_xcm::Call::claim_assets {
+            assets: Box::new(assets),
+            beneficiary: Box::new(VersionedLocation::from(protocol_location)),
+        });
+        assert!(RuntimeBaseCallFilter::contains_for(
+            ClassOrigin::FutarchyTreasury,
+            &claim
+        ));
+        assert_ok!(RuntimeDispatcher::dispatch_with_class_origin(
+            claim,
+            ProposalClass::Treasury,
+        ));
+        assert_eq!(PolkadotXcm::asset_trap(&hash), 0);
+        assert_eq!(ForeignAssets::balance(usdc_location(), &protocol), amount);
+        assert_eq!(
+            pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&protocol),
+            amount
+        );
+        assert_eq!(
+            ForeignAssets::total_issuance(usdc_location()),
+            issuance_with_trap
         );
     });
 }
@@ -1804,37 +2430,176 @@ fn live_epoch_clock_fans_out_to_all_four_sibling_pallets() {
 }
 
 #[test]
-fn dead_man_phase_flag_is_visible_and_pauses_then_recovers_the_epoch_clock() {
+fn relay_gap_4_799_does_not_engage_the_dead_man_switch() {
     development_ext().execute_with(|| {
         System::set_block_number(1);
+        submit_relay_parent(1);
+        System::set_block_number(2);
+        submit_relay_parent(
+            1_u32
+                .saturating_add(kernel::DEAD_MAN_RELAY_BLOCKS)
+                .saturating_sub(1),
+        );
+        assert_eq!(
+            Constitution::phase_flags() & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED,
+            0,
+        );
+        assert_eq!(pallet_epoch::LastRelayParent::<Runtime>::get(), Some(4_800));
+    });
+}
+
+#[test]
+fn relay_gap_4_800_latches_until_one_full_proposal_free_recovery_epoch() {
+    use pallet_execution_guard::BatchDispatcher;
+
+    development_ext().execute_with(|| {
+        System::set_block_number(1);
+        submit_relay_parent(1);
         let frozen = pallet_epoch::EpochOf::<Runtime>::get();
-        assert_ok!(Constitution::note_dead_man_engaged(true));
+
+        System::set_block_number(2);
+        submit_relay_parent(1_u32.saturating_add(kernel::DEAD_MAN_RELAY_BLOCKS));
+        let batch_all = RuntimeCall::Utility(pallet_utility::Call::batch_all {
+            calls: vec![RuntimeCall::Constitution(
+                pallet_constitution::Call::set_param {
+                    key: pallet_constitution::key16(b"mkt.obs_interval"),
+                    value: pallet_constitution::ParamValue::U32(10),
+                },
+            )],
+        });
+        assert_ne!(
+            Constitution::phase_flags() & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED,
+            0,
+        );
+        assert!(RuntimeDispatcher::rederive_call(&batch_all).is_err());
         assert_ok!(Epoch::tick(
             RuntimeOrigin::signed(account(77)),
             Default::default(),
         ));
         assert_eq!(pallet_epoch::EpochOf::<Runtime>::get(), frozen);
-        assert_eq!(pallet_epoch::DeadMan::<Runtime>::get().paused_at, Some(1));
-        assert_ne!(
-            pallet_constitution::PhaseFlags::<Runtime>::get()
-                & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED,
-            0,
-        );
+        assert_eq!(pallet_epoch::DeadMan::<Runtime>::get().paused_at, Some(2));
 
-        assert_ok!(Constitution::note_dead_man_engaged(false));
-        System::set_block_number(2);
+        // A normal next relay parent heals the detector cause, not the latch.
+        System::set_block_number(3);
+        submit_relay_parent(2_u32.saturating_add(kernel::DEAD_MAN_RELAY_BLOCKS));
         assert_ok!(Epoch::tick(
             RuntimeOrigin::signed(account(77)),
             Default::default(),
         ));
+        assert_ne!(
+            Constitution::phase_flags() & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED,
+            0,
+        );
         assert_eq!(pallet_epoch::DeadMan::<Runtime>::get().paused_at, None);
         assert_eq!(
             pallet_epoch::DeadMan::<Runtime>::get().recovery_epoch,
             Some(frozen.index.saturating_add(1)),
         );
+        let proposer = account(78);
+        let bond = crate::configs::balance_param(b"prop.bond.param");
+        assert_ok!(ForeignAssets::mint_into(usdc_location(), &proposer, bond));
+        let (payload_hash, payload_len) = match note_runtime_batch(Vec::new()) {
+            Some(payload) => payload,
+            None => {
+                assert!(false, "empty runtime batch must encode");
+                return;
+            }
+        };
+        assert_noop!(
+            Epoch::submit(
+                RuntimeOrigin::signed(proposer.clone()),
+                empty_param_proposal(
+                    pallet_epoch::NextProposalId::<Runtime>::get(),
+                    proposer,
+                    payload_hash,
+                    payload_len,
+                ),
+            ),
+            pallet_epoch::Error::<Runtime>::BadPhase
+        );
+
+        let recovery_start = pallet_epoch::Schedule::<Runtime>::get().epoch_start_block;
+        let recovery_length = pallet_epoch::Schedule::<Runtime>::get().length;
+        System::set_block_number(recovery_start.saturating_add(recovery_length));
+        submit_relay_parent(3_u32.saturating_add(kernel::DEAD_MAN_RELAY_BLOCKS));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(account(77)),
+            Default::default(),
+        ));
+        assert_eq!(pallet_epoch::DeadMan::<Runtime>::get().recovery_epoch, None);
         assert_eq!(
-            pallet_epoch::EpochOf::<Runtime>::get().index,
-            frozen.index.saturating_add(1),
+            Constitution::phase_flags() & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED,
+            0,
+        );
+        assert!(RuntimeDispatcher::rederive_call(&batch_all).is_ok());
+    });
+}
+
+#[test]
+fn snapshot_overdue_boundary_engages_and_a_due_snapshot_resets_the_marker() {
+    const SPEC: futarchy_primitives::MetricSpecVersion = 41;
+
+    development_ext().execute_with(|| {
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        assert!(install_active_x_snapshot_spec(SPEC, epoch).is_some());
+        let Some(due) = Epoch::scheduled_epoch_end(epoch) else {
+            assert!(false, "current epoch end must be scheduled");
+            return;
+        };
+        let Some(boundary) = due.checked_add(kernel::DEAD_MAN_SNAPSHOT_OVERDUE_BLOCKS) else {
+            assert!(false, "snapshot boundary must fit");
+            return;
+        };
+
+        System::set_block_number(boundary);
+        submit_relay_parent(1);
+        assert_eq!(
+            Constitution::phase_flags() & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED,
+            0,
+        );
+        System::set_block_number(boundary.saturating_add(1));
+        submit_relay_parent(2);
+        assert_ne!(
+            Constitution::phase_flags() & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED,
+            0,
+        );
+    });
+
+    development_ext().execute_with(|| {
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        assert!(install_active_x_snapshot_spec(SPEC, epoch).is_some());
+        let Some(due) = Epoch::scheduled_epoch_end(epoch) else {
+            assert!(false, "current epoch end must be scheduled");
+            return;
+        };
+        System::set_block_number(due);
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(account(79)),
+            Default::default(),
+        ));
+        assert_ok!(Welfare::record_snapshot(
+            RuntimeOrigin::signed(account(79)),
+            epoch,
+            SPEC,
+        ));
+        let Some(progress) = pallet_welfare::SnapshotDeadline::<Runtime>::get() else {
+            assert!(
+                false,
+                "successful due snapshot must retain the next deadline"
+            );
+            return;
+        };
+        assert_eq!(progress.last_snapshot_epoch, Some(epoch));
+        assert_eq!(progress.due_epoch, epoch.saturating_add(1));
+
+        System::set_block_number(
+            due.saturating_add(kernel::DEAD_MAN_SNAPSHOT_OVERDUE_BLOCKS)
+                .saturating_add(1),
+        );
+        submit_relay_parent(1);
+        assert_eq!(
+            Constitution::phase_flags() & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED,
+            0,
         );
     });
 }
@@ -4805,6 +5570,16 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
     development_ext().execute_with(|| {
         const PID: futarchy_primitives::ProposalId = 8_010;
         System::set_block_number(System::block_number().max(1));
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(2)
+        });
+        let review_start_epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let amended_review_deadline = 3_u32;
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::key16(b"grd.review_dl"),
+            pallet_constitution::ParamValue::U32(amended_review_deadline),
+        ));
         let members = [
             account(101),
             account(102),
@@ -4878,6 +5653,13 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
             pallet_guardian::ReviewReferenda::<Runtime>::get(action),
             Some(before_referenda),
         );
+        assert_eq!(
+            pallet_guardian::ReviewDeadlines::<Runtime>::get()
+                .iter()
+                .find(|review| review.action_id == action)
+                .map(|review| review.deadline_epoch),
+            Some(review_start_epoch.saturating_add(amended_review_deadline)),
+        );
         let deadline = match pallet_epoch::GuardianReviewDeadlines::<Runtime>::get(PID) {
             Some(deadline) => deadline,
             None => {
@@ -4885,6 +5667,10 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
                 return;
             }
         };
+        assert_eq!(
+            deadline,
+            review_start_epoch.saturating_add(amended_review_deadline),
+        );
         assert!(
             !<crate::configs::RuntimeEpochGuardian as pallet_epoch::GuardianAccess>::review_window_closed(PID),
         );
@@ -5856,6 +6642,11 @@ fn queue_meters_are_rederived_from_the_batch_not_copied_from_resource_locks() {
             maturity.saturating_add(grace),
             version.clone(),
         ));
+        pallet_epoch::Proposals::<Runtime>::mutate(PID, |proposal| {
+            if let Some(proposal) = proposal {
+                proposal.ask = 1;
+            }
+        });
         assert!(pallet_epoch::Proposals::<Runtime>::get(PID)
             .is_some_and(|proposal| proposal.resources.is_empty()));
 
@@ -5901,6 +6692,382 @@ fn queue_meters_are_rederived_from_the_batch_not_copied_from_resource_locks() {
             Err(pallet_execution_guard::Error::<Runtime>::MetersBlocked.into()),
         );
         assert!(pallet_execution_guard::Queue::<Runtime>::contains_key(PID));
+    });
+}
+
+#[test]
+fn queued_treasury_outflows_mirror_enqueue_execute_and_terminal_dequeue() {
+    use pallet_epoch::ExecutionGuardAccess;
+
+    development_ext().execute_with(|| {
+        use pallet_futarchy_treasury::BudgetLine;
+
+        assert_ok!(Constitution::set_capability(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::CapabilityRecord {
+                class: ProposalClass::Treasury,
+                capability: pallet_constitution::Capability::TreasurySpend,
+                enabled: true,
+            },
+        ));
+        let amount = currency::USDC;
+        let main = amount
+            .saturating_mul(kernel::BASIS_POINTS_DENOMINATOR)
+            .checked_div(Balance::from(
+                pallet_futarchy_treasury::TRS_STREAM_THRESHOLD_BPS,
+            ))
+            .map_or(Balance::MAX, |minimum| minimum.saturating_mul(2));
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.main_usdc = main;
+        });
+        assert_ok!(FutarchyTreasury::fund_budget_line(
+            pallet_origins::Origin::FutarchyTreasury.into(),
+            BudgetLine::Pol,
+            amount.saturating_mul(2),
+        ));
+        let nav_before = FutarchyTreasury::nav().nav;
+
+        let enqueue = |pid: futarchy_primitives::ProposalId| -> Option<BlockNumber> {
+            let call = RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::spend {
+                line: BudgetLine::Pol,
+                dest: account(150),
+                amount,
+            });
+            let batch =
+                pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(vec![call])
+                    .ok()?;
+            let bytes = batch.encode();
+            let payload_len = u32::try_from(bytes.len()).ok()?;
+            let payload_hash = <Preimage as StorePreimage>::note(bytes.into()).ok()?;
+            let version = pallet_execution_guard::CurrentSpecName::<Runtime>::get()?;
+            let maturity = System::block_number().checked_add(
+                <crate::configs::ExecutionParams as pallet_execution_guard::Params>::exec_timelock(
+                    ProposalClass::Treasury,
+                ),
+            )?;
+            let grace =
+                <crate::configs::ExecutionParams as pallet_execution_guard::Params>::exec_grace(
+                    ProposalClass::Treasury,
+                );
+            seed_queued_epoch_proposal(
+                pid,
+                ProposalClass::Treasury,
+                payload_hash,
+                payload_len,
+                maturity,
+                maturity.checked_add(grace)?,
+                version.clone(),
+            )
+            .ok()?;
+            pallet_epoch::Proposals::<Runtime>::mutate(pid, |proposal| {
+                if let Some(proposal) = proposal {
+                    proposal.ask = amount;
+                }
+            });
+            <crate::configs::RuntimeEpochExecutionGuard as ExecutionGuardAccess>::enqueue(
+                pid,
+                payload_hash.0,
+                Some(version),
+                maturity,
+                grace,
+                false,
+            )
+            .ok()?;
+            Some(maturity)
+        };
+
+        let execute_pid = 8_014;
+        let maturity = match enqueue(execute_pid) {
+            Some(maturity) => maturity,
+            None => {
+                assert!(false, "treasury execution must enqueue");
+                return;
+            }
+        };
+        assert_eq!(
+            FutarchyTreasury::treasury().pending_outflows.as_slice(),
+            &[amount]
+        );
+        assert_eq!(
+            FutarchyTreasury::nav().nav,
+            nav_before.saturating_sub(amount)
+        );
+        System::set_block_number(maturity);
+        assert_ok!(ExecutionGuard::execute(
+            RuntimeOrigin::signed(account(151)),
+            execute_pid,
+        ));
+        assert!(FutarchyTreasury::treasury().pending_outflows.is_empty());
+        assert_eq!(
+            FutarchyTreasury::nav().nav,
+            nav_before.saturating_sub(amount)
+        );
+
+        let dequeue_pid = 8_015;
+        if enqueue(dequeue_pid).is_none() {
+            assert!(false, "treasury cancellation must enqueue");
+            return;
+        }
+        let nav_with_pending = FutarchyTreasury::nav().nav;
+        assert_eq!(
+            FutarchyTreasury::treasury().pending_outflows.as_slice(),
+            &[amount]
+        );
+        assert_ok!(ExecutionGuard::dequeue_terminal(dequeue_pid));
+        assert!(FutarchyTreasury::treasury().pending_outflows.is_empty());
+        assert_eq!(
+            FutarchyTreasury::nav().nav,
+            nav_with_pending.saturating_add(amount)
+        );
+    });
+}
+
+#[test]
+fn wired_pending_outflow_sync_rejects_a_corrupt_sixty_fifth_entry() {
+    use pallet_execution_guard::{PendingOutflowSync, Preimages};
+
+    development_ext().execute_with(|| {
+        // limit-coverage: Treasury pending outflows
+        let amount = 1;
+        let call = RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::spend {
+            line: pallet_futarchy_treasury::BudgetLine::Pol,
+            dest: account(154),
+            amount,
+        });
+        let batch = match pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(vec![
+            call,
+        ]) {
+            Ok(batch) => batch,
+            Err(_) => {
+                assert!(false, "one pending-outflow call must fit");
+                return;
+            }
+        };
+        let meters = match crate::configs::derived_execution_meters(&batch) {
+            Some(meters) => meters,
+            None => {
+                assert!(false, "treasury spend must derive its outflow meter");
+                return;
+            }
+        };
+        let bytes = batch.encode();
+        let payload_len = match u32::try_from(bytes.len()) {
+            Ok(len) => len,
+            Err(_) => {
+                assert!(false, "bounded batch length must fit");
+                return;
+            }
+        };
+        let payload_hash = match <Preimage as StorePreimage>::note(bytes.into()) {
+            Ok(hash) => hash,
+            Err(error) => {
+                assert!(false, "pending-outflow preimage must note: {error:?}");
+                return;
+            }
+        };
+        assert!(crate::configs::RuntimePreimages::fetch(payload_hash.0, payload_len).is_some());
+        let version = match pallet_execution_guard::CurrentSpecName::<Runtime>::get() {
+            Some(version) => version,
+            None => {
+                assert!(false, "guard runtime version must exist");
+                return;
+            }
+        };
+        for index in 0..=pallet_futarchy_treasury::MAX_PENDING_OUTFLOWS {
+            let pid = 20_000_u64.saturating_add(index as u64);
+            let mut proposal = empty_param_proposal(pid, account(155), payload_hash, payload_len);
+            proposal.class = ProposalClass::Treasury;
+            proposal.state = ProposalState::Queued;
+            proposal.ask = amount;
+            pallet_epoch::Proposals::<Runtime>::insert(pid, proposal);
+            pallet_execution_guard::Queue::<Runtime>::insert(
+                pid,
+                pallet_execution_guard::pallet::StoredQueuedExecution {
+                    pid,
+                    payload_hash: payload_hash.0,
+                    payload_len,
+                    class: ProposalClass::Treasury,
+                    maturity: 0,
+                    grace_end: 0,
+                    version_constraint: version.clone(),
+                    meters_declared: meters.clone(),
+                    ratify_ref: None,
+                    ratification_passed: false,
+                    attestation_id: None,
+                    pre_upgrade_checkpoint: None,
+                    cancelled: false,
+                    declared_domains: Default::default(),
+                    failed_at: None,
+                },
+            );
+        }
+
+        assert_eq!(
+            <crate::configs::RuntimePendingOutflowSync as PendingOutflowSync>::sync_pending_outflows(
+            ),
+            Err(pallet_futarchy_treasury::Error::<Runtime>::TooManyObligations.into())
+        );
+        assert!(FutarchyTreasury::treasury().pending_outflows.is_empty());
+    });
+}
+
+#[test]
+fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
+    use pallet_epoch::{EpochParamsProvider, MarketAccess};
+    use pallet_welfare::LedgerSettlement;
+
+    development_ext().execute_with(|| {
+        let pid = 8_016;
+        let params = <crate::configs::RuntimeEpochParams as EpochParamsProvider>::get();
+        let decision_b = crate::configs::balance_param(b"pol.b.param");
+        let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
+        let decision_headroom = match pallet_market::core_market::seed_headroom(decision_b) {
+            Ok(amount) => amount,
+            Err(error) => {
+                assert!(false, "decision headroom must be computable: {error:?}");
+                return;
+            }
+        };
+        let baseline_headroom = match pallet_market::core_market::seed_headroom(baseline_b) {
+            Ok(amount) => amount,
+            Err(error) => {
+                assert!(false, "baseline headroom must be computable: {error:?}");
+                return;
+            }
+        };
+        let total = decision_headroom
+            .saturating_mul(2)
+            .saturating_add(baseline_headroom);
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &crate::configs::pol_account(),
+            decision_headroom.saturating_add(currency::USDC),
+        ));
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &crate::configs::pol_baseline_account(),
+            baseline_headroom.saturating_add(currency::USDC),
+        ));
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.main_usdc = total.saturating_mul(2);
+        });
+        let mut proposal = empty_param_proposal(pid, account(152), H256::zero(), 0);
+        proposal.metric_spec = 1;
+        proposal.state = ProposalState::Qualified;
+        proposal.decide_at = System::block_number().saturating_add(params.decision_window);
+        let nav_before = FutarchyTreasury::nav().nav;
+
+        let seed_plan = match <crate::configs::RuntimePolBudget as pallet_epoch::PolBudget<
+            AccountId,
+        >>::proposal_seed_plan(&proposal)
+        {
+            Some(plan) => plan,
+            None => {
+                assert!(false, "PARAM proposal must have a live POL seed plan");
+                return;
+            }
+        };
+        let markets =
+            match <crate::configs::RuntimeMarketAccess as MarketAccess<AccountId>>::open_markets(
+                &proposal,
+                false,
+                Some(seed_plan),
+            ) {
+                Ok(markets) => markets,
+                Err(error) => {
+                    assert!(false, "market set must open: {error:?}");
+                    return;
+                }
+            };
+        proposal.markets = Some(markets);
+        let commitments = FutarchyTreasury::treasury().pol_commitments;
+        assert_eq!(
+            commitments.as_slice(),
+            &[decision_headroom, decision_headroom, baseline_headroom],
+            "Baseline is a live-book NAV obligation even though its budget line is separate",
+        );
+        assert_eq!(
+            FutarchyTreasury::nav().nav,
+            nav_before.saturating_sub(total)
+        );
+
+        System::set_block_number(proposal.decide_at);
+        assert_ok!(<crate::configs::RuntimeMarketAccess as MarketAccess<
+            AccountId,
+        >>::close_markets(&proposal,));
+        assert_eq!(FutarchyTreasury::treasury().pol_commitments, commitments);
+
+        assert_ok!(ConditionalLedger::resolve(
+            RuntimeOrigin::signed(crate::configs::epoch_account()),
+            pid,
+            futarchy_primitives::Branch::Accept,
+        ));
+        assert_ok!(
+            <crate::configs::WelfareLedger as LedgerSettlement>::settle_scalar(
+                pid,
+                futarchy_primitives::FixedU64(500_000_000),
+            )
+        );
+        assert_eq!(
+            FutarchyTreasury::treasury().pol_commitments.as_slice(),
+            &[baseline_headroom]
+        );
+        assert_eq!(
+            FutarchyTreasury::nav().nav,
+            nav_before.saturating_sub(baseline_headroom)
+        );
+        assert_ok!(
+            <crate::configs::WelfareLedger as LedgerSettlement>::settle_baseline(
+                proposal.epoch,
+                futarchy_primitives::FixedU64(500_000_000),
+            )
+        );
+        assert!(FutarchyTreasury::treasury().pol_commitments.is_empty());
+        assert_eq!(FutarchyTreasury::nav().nav, nav_before);
+
+        System::set_block_number(
+            proposal
+                .decide_at
+                .saturating_add(crate::configs::LedgerArchiveDelay::get()),
+        );
+        for market in [markets.accept, markets.reject, markets.baseline] {
+            assert_ok!(Market::reap(RuntimeOrigin::signed(account(153)), market));
+        }
+        assert!(FutarchyTreasury::treasury().pol_commitments.is_empty());
+        assert_eq!(pallet_market::Markets::<Runtime>::count(), 0);
+    });
+}
+
+#[test]
+fn wired_pol_commitment_sync_rejects_a_corrupt_one_hundred_ninety_seventh_book() {
+    use pallet_market::PolCommitmentSync;
+
+    development_ext().execute_with(|| {
+        // limit-coverage: Treasury POL commitments
+        let b = crate::configs::balance_param(b"pol.b.param");
+        for index in 0..=futarchy_primitives::bounds::MAX_LIVE_MARKETS {
+            let id = u64::from(index).saturating_add(1);
+            pallet_market::Markets::<Runtime>::insert(
+                id,
+                pallet_market::core_market::MarketBook::open(
+                    id,
+                    pallet_market::core_market::BookKind::Decision {
+                        proposal: id,
+                        branch: futarchy_primitives::Branch::Accept,
+                    },
+                    account(156),
+                    account(157),
+                    b,
+                ),
+            );
+            pallet_market::SeededMarkets::<Runtime>::insert(id, ());
+        }
+
+        assert_eq!(
+            <crate::configs::RuntimePolCommitmentSync as PolCommitmentSync>::sync_pol_commitments(),
+            Err(pallet_futarchy_treasury::Error::<Runtime>::TooManyObligations.into())
+        );
+        assert!(FutarchyTreasury::treasury().pol_commitments.is_empty());
     });
 }
 
@@ -7121,6 +8288,12 @@ fn real_proposal_bond_custody_covers_full_static_slash_and_not_decision_grade_pa
         };
         let end = qualified.decide_at;
         let epoch = qualified.epoch;
+        // This regression targets partial decision-grade slashing, not POL
+        // capacity. Keep the newly enforced live budget from deferring its
+        // deliberately hand-built market fixture.
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.main_usdc = Balance::MAX;
+        });
         let seed_at = schedule.epoch_start_block.saturating_add(
             schedule
                 .length

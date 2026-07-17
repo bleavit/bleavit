@@ -294,10 +294,10 @@ reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/
 
 [[entry]]
 key = "pol.budget_epoch"
-class = "unwired"
+class = "dispatch-limit"
 genesis = true
-reason = "13 §1: the POL epoch meter is seeded but no consuming dispatch path is wired."
-owner = "B10"
+behavior = "SlotsShrunk"
+reason = "13 §1 / 08 §4.4: the Seed-phase decision engine consumes the live Params-backed epoch budget and drops reverse bond priority until the qualified slate fits."
 
 [[entry]]
 key = "exec.lock.param"
@@ -682,17 +682,17 @@ reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/
 
 [[entry]]
 key = "phase3.tvl_cap"
-class = "unwired"
+class = "dispatch-limit"
 genesis = true
-reason = "13 §1 / SQ-110/SQ-111 (resolved): the pallet-inflow-caps meter and PhaseInflowCaps adapter are live (B4-residual), but production AssetTransactor is still (), so no deployed XCM inflow reaches the cap adapter yet. Library-level bleavit-xcm + pallet coverage exists; re-arms as dispatch-limit when the post-SQ-101 B4 composition wires CappedInflows (ledger split leg: SQ-105)."
-owner = "B10"
+behavior = "USDC global inflow cap exceeded"
+reason = "13 §1 / 09 §5.2: the production XCM AssetTransactor now composes CappedInflows over ForeignAssets, so an over-cap reserve mint fails before issuance or trapping; SQ-105 additionally gates all four signed conditional-ledger split paths by pure-reading the same live global cap."
 
 [[entry]]
 key = "phase3.dep_cap"
-class = "unwired"
+class = "dispatch-limit"
 genesis = true
-reason = "13 §1 / SQ-110/SQ-111 (resolved): the per-account meter lives in pallet-inflow-caps with try-state + refusal tests (B4-residual), but production AssetTransactor is still (), so no deployed XCM inflow reaches it yet. Re-arms as dispatch-limit when the post-SQ-101 B4 composition wires CappedInflows."
-owner = "B10"
+behavior = "USDC inflow cap exceeded"
+reason = "13 §1 / 09 §5.2: the production XCM deposit leg now enforces and records the shared per-account cumulative meter transactionally, with refused minted holdings trapped for self-scoped recovery; SQ-105 additionally gates all four signed conditional-ledger split paths by pure-reading the same live account cap without double-counting."
 
 [[entry]]
 key = "MinTrade"
@@ -841,7 +841,7 @@ reason = "13 §2: attestation regime description; each independent numeric regis
 key = "dead-man-switch"
 class = "dispatch-limit"
 behavior = "DEAD_MAN_ENGAGED"
-reason = "13 §2: the enforcement consequence is covered — with the flag engaged the real SafetyFilter freezes queued dispatch and the epoch clock pauses/rejects submission (marked runtime + epoch tests). The 4,800-relay-block/overdue-snapshot DETECTOR that raises the flag is still B10 (SQ-155); until it lands the flag is guardian/writer-raised only."
+reason = "13 §2: both live detector triggers and their consequences are dispatch-tested — a >=4,800 relay-parent gap or a snapshot strictly >4 days overdue latches DEAD_MAN_ENGAGED, freezes queued dispatch, pauses the epoch clock, preserves the D-9 coretime-renewal exemption, and clears only after one full proposal-free recovery epoch."
 
 [[entry]]
 key = "StaleEpochBound"
@@ -918,9 +918,9 @@ reason = "13 §4: the existing owning-pallet test pushes past capacity and asser
 
 [[entry]]
 key = "TwapCheckpoints"
-class = "unwired"
-reason = "13 §4: the checkpoint ring is not implemented in pallet-market; this pre-existing A3/A5 gap was surfaced by S3."
-owner = "B10"
+class = "dispatch-limit"
+error = "Market::TryStateViolation"
+reason = "13 §4 / 04 §7: the now-spec-shaped eight-entry, two-limb TWAP checkpoint ring rejects registration of a ninth unique boundary and preserves every recorded checkpoint."
 
 [[entry]]
 key = "MaxPositionsPerAccount"
@@ -1031,20 +1031,20 @@ reason = "13 §4: upsert-keyed finite BudgetLine enum has fewer variants than th
 
 [[entry]]
 key = "Treasury pending outflows"
-class = "unwired"
-reason = "13 §4 / A9: the bounded internal helper exists, but the execution-guard queue has no runtime caller syncing pending outflows."
-owner = "B10"
+class = "dispatch-limit"
+error = "Treasury::TooManyObligations"
+reason = "13 §4 / 08 §1.2: execution-guard persist re-derives and mirrors every queued treasury outflow; its 32-entry Queue is structurally below this 64-entry bound, with the 65th wired-helper rejection covered."
 
 [[entry]]
 key = "Treasury POL commitments"
-class = "unwired"
-reason = "13 §4 / A9: the bounded internal helper exists, but the market/POL lifecycle has no runtime caller syncing commitments."
-owner = "B10"
+class = "dispatch-limit"
+error = "Treasury::TooManyObligations"
+reason = "13 §4 / 08 §1.2: market seed, settlement and reap transactionally mirror exact per-book headroom, with the 197th wired-helper rejection covered."
 
 [[entry]]
 key = "Treasury coretime obligations"
 class = "unwired"
-reason = "13 §4 / A9/B4: bounded quote/funded-period helpers exist, but the production runtime still has no Coretime quote-note/prune integration."
+reason = "13 §4 / 09 §4: both 8-entry helper behaviors are covered, but production still lacks an authenticated Coretime quote/freshness source and asset-denomination conversion from the USDC budget line to the DOT XCM route; note/prune cannot be wired without inventing protocol semantics."
 owner = "B10"
 
 [[entry]]

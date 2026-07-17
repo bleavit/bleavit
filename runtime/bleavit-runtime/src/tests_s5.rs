@@ -195,7 +195,7 @@ inventory! {
     "XcmpQueue" { leaf public => ["suspend_xcm_execution", "resume_xcm_execution", "update_suspend_threshold", "update_drop_threshold", "update_resume_threshold"]; }
     "MessageQueue" { leaf public => ["reap_page", "execute_overweight"]; }
     "PolkadotXcm" {
-        leaf treasury => ["claim_assets"];
+        leaf public => ["claim_assets"];
         leaf denied => ["send", "teleport_assets", "reserve_transfer_assets", "execute", "force_xcm_version", "force_default_xcm_version", "force_subscribe_version_notify", "force_unsubscribe_version_notify", "limited_reserve_transfer_assets", "limited_teleport_assets", "force_suspension", "transfer_assets", "transfer_assets_using_type_and_then", "add_authorized_alias", "remove_authorized_alias", "remove_all_authorized_aliases"];
     }
     "CollatorSelection" { leaf public => ["set_invulnerables", "set_desired_candidates", "set_candidacy_bond", "register_as_candidate", "leave_intent", "add_invulnerable", "remove_invulnerable", "update_bond", "take_candidate_slot"]; }
