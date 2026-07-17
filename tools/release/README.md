@@ -54,6 +54,26 @@ from the self-referential `artifact_hashes` map):
 }
 ```
 
+[`tools/env/run-evidence.py`](../env/run-evidence.py) is the producer for this
+contract. The tag pipeline runs its release tier against the built artifacts,
+records G1-tier exclusions explicitly, and inventories only the clean committed
+environment definitions after generated state is removed. Evidence for a kind
+is produced only when every release-tier suite of that kind was attempted and
+passed: G1-tier exclusions are recorded, but a gated release-tier skip blocks
+evidence. The producer self-checks with the assembler's validator, while
+assembly remains the single release-blocking enforcement point.
+Evidence emission is currently blocked fail-closed until the SQ-152 try-state
+leg and the SQ-151 Chopsticks card-depth execution land; the producer still runs
+the suites and writes run reports.
+
+Pending SQ-139 ratification, the producer adds consumer-tolerated fields to the
+minimal contract above: top-level `tier`, `suites_skipped`, `produced_by`,
+`suites_manifest_sha256`, and `pins_env_sha256`, plus `duration_seconds` and
+`checks` on each `suites_run` row. These extras identify the selected policy
+tier and producer inputs, record exclusions, and describe the execution depth;
+the authoritative consumer continues to validate the frozen fields shown in
+the contract block.
+
 The suite must match its directory. Every regular file other than the evidence
 file must be listed, every hash must match, every suite result must be `pass`,
 and both the runtime hash and commit must bind to this release. Invalid evidence
