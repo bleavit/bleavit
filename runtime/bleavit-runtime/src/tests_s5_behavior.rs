@@ -718,7 +718,7 @@ fn matching_origin(domain: CallDomain) -> Option<ClassOrigin> {
     }
 }
 
-fn epoch_privileged_calls() -> [(String, RuntimeCall, CallDomain); 4] {
+fn epoch_privileged_calls() -> [(String, RuntimeCall, CallDomain); 5] {
     [
         (
             String::from("Epoch.set_next_epoch_length"),
@@ -744,6 +744,14 @@ fn epoch_privileged_calls() -> [(String, RuntimeCall, CallDomain); 4] {
             String::from("Epoch.void_cohort"),
             RuntimeCall::Epoch(pallet_epoch::Call::void_cohort {
                 epoch: Default::default(),
+            }),
+            CallDomain::EmergencyPlaybook,
+        ),
+        (
+            String::from("Epoch.set_intake_paused"),
+            RuntimeCall::Epoch(pallet_epoch::Call::set_intake_paused {
+                paused: false,
+                expiry: 0,
             }),
             CallDomain::EmergencyPlaybook,
         ),

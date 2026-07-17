@@ -59,11 +59,11 @@ mod tests;
 pub use guardian_core::{
     ActionId, ActivePlaybook, DispatchContext, Error as CoreError, Event as CoreEvent, Guardian,
     GuardianPower, PendingAction, PlaybookId, PlaybookTrigger, ProposalStatus, ReviewRecord,
-    TriggerState, ACTION_EXPIRY_BLOCKS, GUARDIAN_BOND, GUARDIAN_SEATS, GUARDIAN_THRESHOLD,
-    REVIEW_DEADLINE_EPOCHS, REVIEW_SLASH_PERCENT,
+    TriggerState, ACTION_EXPIRY_BLOCKS, ALL_PLAYBOOKS, GUARDIAN_BOND, GUARDIAN_SEATS,
+    GUARDIAN_THRESHOLD, REVIEW_DEADLINE_EPOCHS, REVIEW_SLASH_PERCENT,
 };
 
-use futarchy_primitives::{AccountId as CoreAccountId, EpochId, ProposalId};
+use futarchy_primitives::{AccountId as CoreAccountId, BlockNumber, EpochId, ProposalId};
 
 /// Pallet-owned storage bounds (13 §4 has no guardian rows yet; per 13 rule 1
 /// these per-pallet storage-bound arguments live with the owning pallet). The
@@ -117,6 +117,12 @@ pub trait GuardianEffectDispatcher {
         power: GuardianPower,
         justification_hash: futarchy_primitives::H256,
     ) -> Result<(), sp_runtime::DispatchError>;
+
+    /// Fail-soft expiry reversion for a playbook's pallet effects.
+    fn revert_playbook(id: PlaybookId) -> Result<(), sp_runtime::DispatchError>;
+
+    /// Atomic LedgerFreeze renewal extension across all downstream pallets.
+    fn renew_playbook(id: PlaybookId) -> Result<(), sp_runtime::DispatchError>;
 }
 
 /// Narrow T24 producer seam. The runtime implementation calls the epoch
@@ -168,6 +174,8 @@ pub trait BenchmarkHelper<RuntimeOrigin> {
     fn signed(who: CoreAccountId) -> RuntimeOrigin;
     /// An origin that [`Config::ValuesOrigin`] accepts (`ConstitutionalValues`).
     fn values() -> RuntimeOrigin;
+    /// An origin that [`Config::AdminOrigin`] accepts (`GuardianTrack`).
+    fn admin() -> RuntimeOrigin;
     /// Prime the cross-pallet feeds so a dispatching approval succeeds: a
     /// rerunnable/`Queued` proposal status and every verified trigger live. In a
     /// real runtime this seeds the equivalent `pallet-epoch`/oracle/ledger state.
@@ -314,6 +322,12 @@ pub mod pallet {
     pub type ActivePlaybooks<T: Config> =
         StorageValue<_, BoundedVec<ActivePlaybook, ConstU32<MAX_ACTIVE_PLAYBOOKS>>, ValueQuery>;
 
+    /// Values-governed availability toggle for the six kernel-enumerated
+    /// routines. All six are enabled at genesis (06 §6.2).
+    #[pallet::storage]
+    pub type PlaybookRegistered<T: Config> =
+        StorageMap<_, Blake2_128Concat, PlaybookId, bool, ValueQuery>;
+
     /// The "one guardian rerun per proposal, ever" ledger (06 §5.3).
     #[pallet::storage]
     pub type RerunUsed<T: Config> =
@@ -446,6 +460,8 @@ pub mod pallet {
             action: ActionId,
             removed: BoundedVec<T::AccountId, ConstU32<7>>,
         },
+        /// Guardian-track availability toggle for an enumerated playbook.
+        PlaybookRegistrationSet { id: PlaybookId, enabled: bool },
     }
 
     /// 1:1 with [`CoreError`]; `CoreError::BadOrigin` maps to
@@ -486,6 +502,8 @@ pub mod pallet {
         TriggerInactive,
         /// The playbook/trigger pairing is not admissible (06 §6.2).
         BadPlaybookTrigger,
+        /// OracleVoid requires a cohort target; every other playbook forbids one.
+        BadPlaybookTarget,
         /// The proposal was already rerun, or is inside a rerun (06 §5.3).
         AlreadyRerun,
         /// The proposal is not in a rerunnable state (06 §5.3).
@@ -511,6 +529,8 @@ pub mod pallet {
         TooManyBondReleases,
         /// Held funds, the obligation ledger and fronting slices disagree.
         BondAccounting,
+        /// The values-governed availability toggle is disabled.
+        PlaybookNotRegistered,
     }
 
     #[pallet::hooks]
@@ -600,6 +620,12 @@ pub mod pallet {
                         .find(|action| action.id == action_id)
                         .copied()
                         .ok_or(Error::<T>::ActionNotFound)?;
+                    if let GuardianPower::ActivatePlaybook { id, .. } = action.power {
+                        ensure!(
+                            PlaybookRegistered::<T>::get(id),
+                            Error::<T>::PlaybookNotRegistered
+                        );
+                    }
                     T::EffectDispatcher::dispatch(action.power, action.justification_hash)?;
                 }
                 Self::persist(&g)?;
@@ -632,20 +658,23 @@ pub mod pallet {
         }
 
         /// `guardian.renew_playbook` — the single admissible `PB-LEDGER-FREEZE`
-        /// renewal via a `guardian`-track values referendum (06 §6.3; 06 §3.2
-        /// row 6). Authority: `ConstitutionalValues`.
+        /// renewal via a `guardian`-track referendum (06 §6.3; 06 §3.2 row 6).
+        /// Authority: the scoped `GuardianTrack` AdminOrigin.
         #[pallet::call_index(4)]
         #[pallet::weight(T::WeightInfo::renew_playbook())]
         pub fn renew_playbook(origin: OriginFor<T>, id: PlaybookId) -> DispatchResult {
-            T::AdminOrigin::ensure_origin(origin)?;
-            Self::sync_epoch();
-            let mut g = Self::load().ok_or(Error::<T>::NotInitialized)?;
-            let now = Self::now();
-            g.renew_playbook(guardian_core::GuardianOrigin::ConstitutionalValues, id, now)
-                .map_err(Self::map_core_error)?;
-            Self::persist(&g)?;
-            Self::drain_events(&mut g)?;
-            Ok(())
+            frame_support::storage::with_storage_layer(|| {
+                T::AdminOrigin::ensure_origin(origin)?;
+                Self::sync_epoch();
+                let mut g = Self::load().ok_or(Error::<T>::NotInitialized)?;
+                let now = Self::now();
+                g.renew_playbook(guardian_core::GuardianOrigin::ConstitutionalValues, id, now)
+                    .map_err(Self::map_core_error)?;
+                T::EffectDispatcher::renew_playbook(id)?;
+                Self::persist(&g)?;
+                Self::drain_events(&mut g)?;
+                Ok(())
+            })
         }
 
         /// Uphold a `delay_once` veto through its live ratify-track review. The
@@ -743,6 +772,21 @@ pub mod pallet {
                 Ok(())
             })
         }
+
+        /// Enable/disable one of the six kernel-enumerated playbooks. This is
+        /// availability only; adding/amending a routine is a runtime change.
+        #[pallet::call_index(7)]
+        #[pallet::weight(T::WeightInfo::set_playbook_registered())]
+        pub fn set_playbook_registered(
+            origin: OriginFor<T>,
+            id: PlaybookId,
+            enabled: bool,
+        ) -> DispatchResult {
+            T::AdminOrigin::ensure_origin(origin)?;
+            PlaybookRegistered::<T>::insert(id, enabled);
+            Self::deposit_event(Event::PlaybookRegistrationSet { id, enabled });
+            Ok(())
+        }
     }
 
     #[pallet::extra_constants]
@@ -766,6 +810,11 @@ pub mod pallet {
         #[pallet::constant_name(ReviewDeadlineEpochs)]
         fn review_deadline_epochs() -> EpochId {
             REVIEW_DEADLINE_EPOCHS
+        }
+        /// 06 §5.2/§6.2/§6.3: hard pallet-level effect backstop.
+        #[pallet::constant_name(PlaybookFreezeWindowBlocks)]
+        fn playbook_freeze_window_blocks() -> BlockNumber {
+            futarchy_primitives::kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS
         }
     }
 
@@ -794,6 +843,9 @@ pub mod pallet {
             // lets it place the exact fronted submission + decision deposits
             // without retaining an extra existential-deposit slice.
             frame_system::Pallet::<T>::inc_providers(&T::SovereignAccount::get());
+            for id in ALL_PLAYBOOKS {
+                PlaybookRegistered::<T>::insert(id, true);
+            }
             if self.members.is_empty() {
                 return;
             }
@@ -1155,6 +1207,12 @@ pub mod pallet {
                         Self::deposit_event(Event::PlaybookRenewed { id });
                     }
                     CoreEvent::PlaybookExpired { id } => {
+                        // Expiry removal/event is durable even if a downstream
+                        // early-clear fails. Each effect also has a lazy
+                        // pallet-level time bound, so failure cannot extend it.
+                        let _ = frame_support::storage::with_storage_layer(|| {
+                            T::EffectDispatcher::revert_playbook(id)
+                        });
                         Self::deposit_event(Event::PlaybookExpired { id });
                     }
                     CoreEvent::ReviewScheduled { action } => {
@@ -1408,7 +1466,10 @@ pub mod pallet {
 
         /// Read helper: is a playbook currently active?
         pub fn playbook_active(id: PlaybookId) -> bool {
-            ActivePlaybooks::<T>::get().iter().any(|p| p.id == id)
+            let now = Self::now();
+            ActivePlaybooks::<T>::get()
+                .iter()
+                .any(|playbook| playbook.id == id && now < playbook.expiry)
         }
 
         /// Rebuild the core aggregate and run its reviewed validator plus the
@@ -1439,6 +1500,13 @@ pub mod pallet {
             ensure!(
                 ReviewFrontingOf::<T>::count() <= MAX_REVIEWS,
                 TryRuntimeError::Other("guardian: ReviewFrontingOf over bound")
+            );
+            ensure!(
+                ALL_PLAYBOOKS
+                    .iter()
+                    .all(PlaybookRegistered::<T>::contains_key)
+                    && PlaybookRegistered::<T>::iter_keys().count() == ALL_PLAYBOOKS.len(),
+                TryRuntimeError::Other("guardian: playbook registry is incomplete")
             );
             if let Some(g) = Self::load() {
                 g.try_state().map_err(|_| {
@@ -1524,6 +1592,7 @@ pub mod pallet {
                 CoreError::DurationTooLong => Error::<T>::DurationTooLong.into(),
                 CoreError::TriggerInactive => Error::<T>::TriggerInactive.into(),
                 CoreError::BadPlaybookTrigger => Error::<T>::BadPlaybookTrigger.into(),
+                CoreError::BadPlaybookTarget => Error::<T>::BadPlaybookTarget.into(),
                 CoreError::AlreadyRerun => Error::<T>::AlreadyRerun.into(),
                 CoreError::NotRerunnable => Error::<T>::NotRerunnable.into(),
                 CoreError::ReviewNotFound => Error::<T>::ReviewNotFound.into(),

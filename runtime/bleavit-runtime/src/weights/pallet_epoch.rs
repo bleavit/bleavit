@@ -914,4 +914,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 			.saturating_add(T::DbWeight::get().writes((16_u64).saturating_mul(n.into())))
 			.saturating_add(Weight::from_parts(0, 35266).saturating_mul(n.into()))
 	}
+	/// B1b v2 benchmark stub: bounded EmergencyPlaybook intake-pause write.
+	fn set_intake_paused() -> Weight {
+		Weight::from_parts(12_000_000, 1_500)
+			.saturating_add(T::DbWeight::get().writes(1))
+	}
 }

@@ -2750,6 +2750,10 @@ fn metadata_generates_and_runtime_constants_are_visible() {
             chain_identity::SS58_PREFIX
         );
         assert_eq!(pallet_guardian::GUARDIAN_SEATS, 7);
+        assert!(encoded
+            .windows(b"PlaybookFreezeWindowBlocks".len())
+            .any(|window| window == b"PlaybookFreezeWindowBlocks"));
+        assert_eq!(kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS, 201_600);
     });
 }
 
@@ -3316,7 +3320,7 @@ fn relay_abort_clears_pending_state_alarms_and_allows_normal_reproposal() {
         assert!(pallet_execution_guard::ScheduledUpgrade::<Runtime>::get().is_none());
         assert!(System::authorized_upgrade().is_none());
         assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
-        assert!(crate::configs::RuntimeGuardianTriggers::current().migration_halt);
+        assert!(!crate::configs::RuntimeGuardianTriggers::current().migration_halt);
         assert!(System::events().iter().any(|record| matches!(
             &record.event,
             crate::RuntimeEvent::ExecutionGuard(pallet_execution_guard::Event::UpgradeAborted {
@@ -6166,6 +6170,35 @@ fn i9_epoch_enqueue_guard_execute_and_epoch_callback_are_real_and_origin_narrow(
         }
 
         System::set_block_number(maturity);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        pallet_welfare::GateBreachFlags::<Runtime>::insert(
+            epoch,
+            pallet_welfare::CoreGateBreachFlags {
+                s_breached: true,
+                c_breached: false,
+                day_bitmap: [1, 0],
+            },
+        );
+        pallet_execution_guard::GateSuspension::<Runtime>::put(epoch);
+        assert!(<crate::configs::RuntimeGuardianState as pallet_execution_guard::GuardianState>::gate_suspended());
+        let queue_before_suspension = pallet_execution_guard::Queue::<Runtime>::get(PID);
+        let suspended = ExecutionGuard::execute(RuntimeOrigin::signed(account(74)), PID);
+        let suspended_error = match suspended {
+            Ok(_) => {
+                assert!(false, "gate-suspended execution must fail");
+                return;
+            }
+            Err(error) => error.error,
+        };
+        assert_eq!(
+            suspended_error,
+            pallet_execution_guard::Error::<Runtime>::GateSuspended.into()
+        );
+        assert_eq!(
+            pallet_execution_guard::Queue::<Runtime>::get(PID),
+            queue_before_suspension
+        );
+        pallet_welfare::GateBreachFlags::<Runtime>::remove(epoch);
         assert_ok!(ExecutionGuard::execute(
             RuntimeOrigin::signed(account(74)),
             PID,
@@ -10582,5 +10615,488 @@ fn futarchy_api_trait_delegates_all_eleven_runtime_views() {
             <ApiRuntime as RuntimeFutarchyApi<crate::Block>>::open_oracle_rounds(),
             crate::views::open_oracle_rounds()
         );
+    });
+}
+
+#[test]
+fn guardian_playbook_routines_construct_exact_emergency_call_sets() {
+    development_ext().execute_with(|| {
+        use pallet_guardian::PlaybookId;
+
+        System::set_block_number(10);
+        let cases = [
+            (PlaybookId::Depeg, None, vec!["Market.freeze_creation"]),
+            (PlaybookId::OracleVoid, Some(7), vec!["Epoch.void_cohort"]),
+            (
+                PlaybookId::HaltIntake,
+                None,
+                vec!["Epoch.set_intake_paused"],
+            ),
+            (
+                PlaybookId::Reserve,
+                None,
+                vec!["ConditionalLedger.set_split_paused"],
+            ),
+            (
+                PlaybookId::LedgerFreeze,
+                None,
+                vec!["ConditionalLedger.set_frozen", "Market.set_frozen"],
+            ),
+        ];
+        for (id, target, expected) in cases {
+            let calls = crate::configs::RuntimeGuardianEffects::playbook_calls(id, 20, target)
+                .unwrap_or_default();
+            let names = calls
+                .iter()
+                .filter_map(|call| match call {
+                    RuntimeCall::Market(pallet_market::Call::freeze_creation { .. }) => {
+                        Some("Market.freeze_creation")
+                    }
+                    RuntimeCall::Market(pallet_market::Call::set_frozen { .. }) => {
+                        Some("Market.set_frozen")
+                    }
+                    RuntimeCall::Epoch(pallet_epoch::Call::void_cohort { .. }) => {
+                        Some("Epoch.void_cohort")
+                    }
+                    RuntimeCall::Epoch(pallet_epoch::Call::set_intake_paused { .. }) => {
+                        Some("Epoch.set_intake_paused")
+                    }
+                    RuntimeCall::ConditionalLedger(
+                        pallet_conditional_ledger::Call::set_split_paused { .. },
+                    ) => Some("ConditionalLedger.set_split_paused"),
+                    RuntimeCall::ConditionalLedger(
+                        pallet_conditional_ledger::Call::set_frozen { .. },
+                    ) => Some("ConditionalLedger.set_frozen"),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                names.len(),
+                calls.len(),
+                "unexpected call in {id:?} routine"
+            );
+            assert_eq!(names, expected, "06 §6.2 call-set drift for {id:?}");
+            for call in calls {
+                assert!(RuntimeBaseCallFilter::contains_for(
+                    ClassOrigin::EmergencyPlaybook,
+                    &call,
+                ));
+                for wrong in [
+                    ClassOrigin::FutarchyParam,
+                    ClassOrigin::ConstitutionalValues,
+                    ClassOrigin::GuardianHold,
+                ] {
+                    assert!(!RuntimeBaseCallFilter::contains_for(wrong, &call));
+                }
+            }
+        }
+        assert!(crate::configs::RuntimeGuardianEffects::playbook_calls(
+            PlaybookId::Migration,
+            20,
+            None,
+        )
+        .is_err());
+        assert!(crate::configs::RuntimeGuardianEffects::playbook_calls(
+            PlaybookId::OracleVoid,
+            20,
+            None,
+        )
+        .is_err());
+        assert!(crate::configs::RuntimeGuardianEffects::playbook_calls(
+            PlaybookId::Depeg,
+            20,
+            Some(7),
+        )
+        .is_err());
+    });
+}
+
+#[test]
+fn emergency_endpoints_accept_only_the_production_playbook_origin() {
+    development_ext().execute_with(|| {
+        System::set_block_number(10);
+        let emergency = || pallet_origins::Origin::EmergencyPlaybook.into();
+        assert_ok!(Epoch::set_intake_paused(emergency(), true, 20));
+        assert_ok!(Epoch::set_intake_paused(emergency(), false, 0));
+        assert_ok!(Market::freeze_creation(emergency(), 20));
+        assert_ok!(Market::set_frozen(emergency(), true));
+        assert_ok!(Market::set_frozen(emergency(), false));
+        assert_ok!(ConditionalLedger::set_split_paused(emergency(), true, 20,));
+        assert_ok!(ConditionalLedger::set_split_paused(emergency(), false, 0,));
+        assert_ok!(ConditionalLedger::set_frozen(emergency(), true));
+        assert_ok!(ConditionalLedger::set_frozen(emergency(), false));
+
+        for origin in [
+            RuntimeOrigin::signed(account(250)),
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            pallet_origins::Origin::GuardianHold.into(),
+        ] {
+            assert_noop!(
+                Epoch::set_intake_paused(origin.clone(), false, 0),
+                DispatchError::BadOrigin
+            );
+            assert_noop!(
+                Market::freeze_creation(origin.clone(), 20),
+                DispatchError::BadOrigin
+            );
+            assert_noop!(
+                Market::set_frozen(origin.clone(), false),
+                DispatchError::BadOrigin
+            );
+            assert_noop!(
+                ConditionalLedger::set_split_paused(origin.clone(), false, 0),
+                DispatchError::BadOrigin
+            );
+            assert_noop!(
+                ConditionalLedger::set_frozen(origin, false),
+                DispatchError::BadOrigin
+            );
+        }
+    });
+}
+
+#[test]
+fn gate_suspension_requires_a_live_breach_and_auto_releases() {
+    use pallet_execution_guard::GuardianState;
+    use pallet_guardian::GuardianEffectDispatcher;
+
+    development_ext().execute_with(|| {
+        System::set_block_number(10);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        assert!(crate::configs::RuntimeGuardianEffects::dispatch(
+            pallet_guardian::GuardianPower::SuspendOnGate,
+            H256::zero().into(),
+        )
+        .is_err());
+        pallet_welfare::GateBreachFlags::<Runtime>::insert(
+            epoch,
+            pallet_welfare::CoreGateBreachFlags {
+                s_breached: true,
+                c_breached: false,
+                day_bitmap: [1, 0],
+            },
+        );
+        assert_ok!(crate::configs::RuntimeGuardianEffects::dispatch(
+            pallet_guardian::GuardianPower::SuspendOnGate,
+            H256::zero().into(),
+        ));
+        assert!(crate::configs::RuntimeGuardianState::gate_suspended());
+
+        pallet_welfare::GateBreachFlags::<Runtime>::remove(epoch);
+        assert!(!crate::configs::RuntimeGuardianState::gate_suspended());
+        pallet_welfare::GateBreachFlags::<Runtime>::insert(
+            epoch,
+            pallet_welfare::CoreGateBreachFlags {
+                s_breached: true,
+                c_breached: false,
+                day_bitmap: [1, 0],
+            },
+        );
+        pallet_epoch::EpochOf::<Runtime>::mutate(|info| info.index = epoch.saturating_add(1));
+        assert!(!crate::configs::RuntimeGuardianState::gate_suspended());
+    });
+}
+
+fn seat_runtime_guardians(first_member_seed: u8) -> [AccountId; pallet_guardian::GUARDIAN_SEATS] {
+    let members = core::array::from_fn(|index| account(first_member_seed + index as u8));
+    for member in &members {
+        assert_ok!(Balances::force_set_balance(
+            RuntimeOrigin::root(),
+            MultiAddress::Id(member.clone()),
+            pallet_guardian::GUARDIAN_BOND.saturating_add(currency::VIT),
+        ));
+    }
+    assert_ok!(Guardian::set_members(
+        crate::track_origins::Origin::GuardianTrack.into(),
+        members.clone(),
+    ));
+    members
+}
+
+fn dispatch_runtime_guardian_power(
+    power: pallet_guardian::GuardianPower,
+    first_member_seed: u8,
+) -> u32 {
+    let members = seat_runtime_guardians(first_member_seed);
+    assert_ok!(Guardian::propose_action(
+        RuntimeOrigin::signed(members[0].clone()),
+        power,
+        H256::repeat_byte(first_member_seed).into(),
+    ));
+    let action = pallet_guardian::NextActionId::<Runtime>::get().saturating_sub(1);
+    for member in members.iter().take(5).skip(1) {
+        assert_ok!(Guardian::approve_action(
+            RuntimeOrigin::signed(member.clone()),
+            action,
+        ));
+    }
+    action
+}
+
+#[test]
+fn five_guardians_pause_intake_until_the_lazy_expiry_boundary() {
+    development_ext().execute_with(|| {
+        System::set_block_number(10);
+        let action = dispatch_runtime_guardian_power(
+            pallet_guardian::GuardianPower::PauseIntake { until: 20 },
+            120,
+        );
+        assert_eq!(pallet_epoch::IntakePausedUntil::<Runtime>::get(), Some(20));
+        assert!(pallet_guardian::ReviewReferenda::<Runtime>::contains_key(
+            action
+        ));
+
+        // 06 §5.2: PauseIntake is limited to one successful dispatch per
+        // rolling four-epoch window. The rejected fifth approval is atomic.
+        let members: [AccountId; pallet_guardian::GUARDIAN_SEATS] =
+            core::array::from_fn(|index| account(120 + index as u8));
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(members[0].clone()),
+            pallet_guardian::GuardianPower::PauseIntake { until: 21 },
+            H256::repeat_byte(121).into(),
+        ));
+        let blocked_action = pallet_guardian::NextActionId::<Runtime>::get().saturating_sub(1);
+        for member in members.iter().take(4).skip(1) {
+            assert_ok!(Guardian::approve_action(
+                RuntimeOrigin::signed(member.clone()),
+                blocked_action,
+            ));
+        }
+        assert_noop!(
+            Guardian::approve_action(RuntimeOrigin::signed(members[4].clone()), blocked_action),
+            pallet_guardian::Error::<Runtime>::AllowanceExhausted
+        );
+        assert_eq!(
+            pallet_guardian::Approvals::<Runtime>::get()
+                .iter()
+                .filter(|(id, _)| *id == blocked_action)
+                .count(),
+            4
+        );
+
+        let proposer = account(130);
+        let batch = pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::default();
+        let bytes = batch.encode();
+        let payload_len = u32::try_from(bytes.len()).unwrap_or_default();
+        let payload_hash = <Preimage as StorePreimage>::note(bytes.into()).unwrap_or_default();
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &proposer,
+            crate::configs::balance_param(b"prop.bond.param").saturating_add(currency::USDC),
+        ));
+        let pid = pallet_epoch::NextProposalId::<Runtime>::get();
+        assert_noop!(
+            Epoch::submit(
+                RuntimeOrigin::signed(proposer.clone()),
+                empty_param_proposal(pid, proposer.clone(), payload_hash, payload_len),
+            ),
+            pallet_epoch::Error::<Runtime>::IntakePaused
+        );
+
+        System::set_block_number(20);
+        assert_ok!(Epoch::submit(
+            RuntimeOrigin::signed(proposer.clone()),
+            empty_param_proposal(pid, proposer, payload_hash, payload_len),
+        ));
+    });
+}
+
+#[test]
+fn halt_intake_playbook_activates_from_gate_breach_and_expiry_reverts() {
+    use frame_support::traits::Hooks;
+
+    development_ext().execute_with(|| {
+        System::set_block_number(10);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        pallet_welfare::GateBreachFlags::<Runtime>::insert(
+            epoch,
+            pallet_welfare::CoreGateBreachFlags {
+                s_breached: true,
+                c_breached: false,
+                day_bitmap: [1, 0],
+            },
+        );
+        let action = dispatch_runtime_guardian_power(
+            pallet_guardian::GuardianPower::ActivatePlaybook {
+                id: pallet_guardian::PlaybookId::HaltIntake,
+                trigger: pallet_guardian::PlaybookTrigger::GateBreach,
+                expiry: 20,
+                target: None,
+            },
+            140,
+        );
+        assert!(Guardian::playbook_active(
+            pallet_guardian::PlaybookId::HaltIntake
+        ));
+        assert_eq!(pallet_epoch::IntakePausedUntil::<Runtime>::get(), Some(20));
+        assert!(pallet_guardian::ReviewReferenda::<Runtime>::contains_key(
+            action
+        ));
+
+        System::set_block_number(20);
+        let _ = Guardian::on_initialize(20);
+        assert!(!Guardian::playbook_active(
+            pallet_guardian::PlaybookId::HaltIntake
+        ));
+        assert_eq!(pallet_epoch::IntakePausedUntil::<Runtime>::get(), None);
+    });
+}
+
+#[test]
+fn guardian_track_admin_controls_registration_and_oracle_void_trigger_stays_fail_closed() {
+    use pallet_guardian::GuardianTriggers;
+
+    development_ext().execute_with(|| {
+        assert_ok!(Guardian::set_playbook_registered(
+            crate::track_origins::Origin::GuardianTrack.into(),
+            pallet_guardian::PlaybookId::Depeg,
+            false,
+        ));
+        assert!(!pallet_guardian::PlaybookRegistered::<Runtime>::get(
+            pallet_guardian::PlaybookId::Depeg
+        ));
+        assert_noop!(
+            Guardian::set_playbook_registered(
+                crate::track_origins::Origin::Ratify.into(),
+                pallet_guardian::PlaybookId::Depeg,
+                true,
+            ),
+            DispatchError::BadOrigin
+        );
+
+        let triggers = crate::configs::RuntimeGuardianTriggers::current();
+        assert!(!triggers.oracle_deadlock);
+        assert!(!triggers.void_in_flight);
+        let oracle_expiry = System::block_number().saturating_add(10);
+        pallet_guardian::ActivePlaybooks::<Runtime>::mutate(|active| {
+            let _ = active.try_push(pallet_guardian::ActivePlaybook {
+                id: pallet_guardian::PlaybookId::OracleVoid,
+                expiry: oracle_expiry,
+                renewals_used: 0,
+            });
+        });
+        assert!(crate::configs::RuntimeGuardianTriggers::current().void_in_flight);
+        System::set_block_number(oracle_expiry);
+        assert!(!Guardian::playbook_active(
+            pallet_guardian::PlaybookId::OracleVoid
+        ));
+        assert!(!crate::configs::RuntimeGuardianTriggers::current().void_in_flight);
+    });
+}
+
+#[test]
+fn oracle_void_unfed_trigger_and_migration_gap_roll_back_fifth_approval() {
+    use frame_support::migrations::FailedMigrationHandler;
+
+    development_ext().execute_with(|| {
+        System::set_block_number(10);
+        let members = seat_runtime_guardians(170);
+
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(members[0].clone()),
+            pallet_guardian::GuardianPower::ActivatePlaybook {
+                id: pallet_guardian::PlaybookId::OracleVoid,
+                trigger: pallet_guardian::PlaybookTrigger::OracleDeadlock,
+                expiry: 20,
+                target: Some(pallet_epoch::CurrentEpoch::<Runtime>::get()),
+            },
+            H256::repeat_byte(170).into(),
+        ));
+        let oracle_action = pallet_guardian::NextActionId::<Runtime>::get().saturating_sub(1);
+        for member in members.iter().take(4).skip(1) {
+            assert_ok!(Guardian::approve_action(
+                RuntimeOrigin::signed(member.clone()),
+                oracle_action,
+            ));
+        }
+        assert_noop!(
+            Guardian::approve_action(RuntimeOrigin::signed(members[4].clone()), oracle_action),
+            pallet_guardian::Error::<Runtime>::TriggerInactive
+        );
+        assert!(!Guardian::playbook_active(
+            pallet_guardian::PlaybookId::OracleVoid
+        ));
+
+        assert_eq!(
+            crate::configs::MigrationFailureToGuard::failed(Some(9)),
+            frame_support::migrations::FailedMigrationHandling::KeepStuck
+        );
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(members[0].clone()),
+            pallet_guardian::GuardianPower::ActivatePlaybook {
+                id: pallet_guardian::PlaybookId::Migration,
+                trigger: pallet_guardian::PlaybookTrigger::MigrationHalt,
+                expiry: 20,
+                target: None,
+            },
+            H256::repeat_byte(171).into(),
+        ));
+        let migration_action = pallet_guardian::NextActionId::<Runtime>::get().saturating_sub(1);
+        for member in members.iter().take(4).skip(1) {
+            assert_ok!(Guardian::approve_action(
+                RuntimeOrigin::signed(member.clone()),
+                migration_action,
+            ));
+        }
+        assert_noop!(
+            Guardian::approve_action(RuntimeOrigin::signed(members[4].clone()), migration_action),
+            DispatchError::Other(
+                "PB-MIGRATION cursor retry has no EmergencyPlaybook-safe runtime call"
+            )
+        );
+        assert!(!Guardian::playbook_active(
+            pallet_guardian::PlaybookId::Migration
+        ));
+        assert_eq!(
+            pallet_guardian::Approvals::<Runtime>::get()
+                .iter()
+                .filter(|(id, _)| *id == migration_action)
+                .count(),
+            4
+        );
+    });
+}
+
+#[test]
+fn ledger_freeze_runtime_effect_renews_both_pallets_once_and_reverts_both() {
+    use pallet_guardian::GuardianEffectDispatcher;
+
+    development_ext().execute_with(|| {
+        System::set_block_number(10);
+        assert_ok!(crate::configs::RuntimeGuardianEffects::dispatch(
+            pallet_guardian::GuardianPower::ActivatePlaybook {
+                id: pallet_guardian::PlaybookId::LedgerFreeze,
+                trigger: pallet_guardian::PlaybookTrigger::LedgerDrift,
+                expiry: 20,
+                target: None,
+            },
+            H256::repeat_byte(180).into(),
+        ));
+        assert!(pallet_conditional_ledger::FrozenUntil::<Runtime>::get().is_some());
+        assert!(pallet_market::FrozenUntil::<Runtime>::get().is_some());
+
+        System::set_block_number(11);
+        assert_ok!(crate::configs::RuntimeGuardianEffects::renew_playbook(
+            pallet_guardian::PlaybookId::LedgerFreeze
+        ));
+        let expected = 11u32.saturating_add(kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS);
+        assert_eq!(
+            pallet_conditional_ledger::FrozenUntil::<Runtime>::get(),
+            Some(expected)
+        );
+        assert_eq!(pallet_market::FrozenUntil::<Runtime>::get(), Some(expected));
+        assert!(crate::configs::RuntimeGuardianEffects::renew_playbook(
+            pallet_guardian::PlaybookId::LedgerFreeze
+        )
+        .is_err());
+
+        assert_ok!(crate::configs::RuntimeGuardianEffects::revert_playbook(
+            pallet_guardian::PlaybookId::LedgerFreeze
+        ));
+        assert_eq!(
+            pallet_conditional_ledger::FrozenUntil::<Runtime>::get(),
+            None
+        );
+        assert_eq!(pallet_market::FrozenUntil::<Runtime>::get(), None);
     });
 }

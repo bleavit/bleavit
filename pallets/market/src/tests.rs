@@ -633,6 +633,110 @@ fn origins_are_narrow_for_trading_and_admin_operations() {
 }
 
 #[test]
+fn emergency_creation_freeze_is_bounded_origin_gated_and_lazily_expires() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(10);
+        let until = 20;
+        assert_ok!(Market::freeze_creation(signed(MARKET_ADMIN), until));
+        assert_noop!(
+            Market::create_market(
+                signed(MARKET_ADMIN),
+                MARKET_ID,
+                BookKind::Decision {
+                    proposal: PROPOSAL,
+                    branch: Branch::Accept,
+                },
+                BOOK,
+                FEES,
+                B,
+            ),
+            E::CreationFrozen
+        );
+        assert_noop!(
+            Market::freeze_creation(signed(ALICE), until),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert_noop!(
+            Market::freeze_creation(
+                signed(MARKET_ADMIN),
+                (10 + futarchy_primitives::kernel::MIN_EPOCH_LENGTH_BLOCKS + 1).into(),
+            ),
+            E::FreezeOutOfBounds
+        );
+
+        System::set_block_number(until);
+        create_decision();
+        assert_ok!(Market::freeze_creation(signed(MARKET_ADMIN), 30));
+        assert_noop!(
+            Market::seed(signed(MARKET_ADMIN), MARKET_ID, TREASURY),
+            E::CreationFrozen
+        );
+        assert_noop!(
+            Market::seed_branch_pair(signed(MARKET_ADMIN), MARKET_ID, 999, TREASURY),
+            E::CreationFrozen
+        );
+        System::set_block_number(30);
+        seed(MARKET_ID);
+        assert_try_state();
+    });
+}
+
+#[test]
+fn ledger_freeze_blocks_trading_but_not_recovery_and_renews_once() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(10);
+        assert_ok!(Market::set_frozen(signed(MARKET_ADMIN), true));
+        assert_noop!(
+            Market::buy(
+                signed(ALICE),
+                MARKET_ID,
+                ScalarSide::Long,
+                TRADE,
+                Balance::MAX,
+            ),
+            E::Frozen
+        );
+        assert_noop!(
+            Market::sell(signed(ALICE), MARKET_ID, ScalarSide::Long, TRADE, 0,),
+            E::Frozen
+        );
+        assert_noop!(Market::crank_observe(signed(BOB), MARKET_ID), E::Frozen);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+
+        assert_ok!(Market::extend_freeze_once());
+        assert_noop!(Market::extend_freeze_once(), E::FreezeRenewalExhausted);
+        System::set_block_number(110);
+        assert_ok!(Market::reap(signed(BOB), MARKET_ID));
+        assert_noop!(
+            Market::set_frozen(signed(ALICE), false),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert_ok!(Market::set_frozen(signed(MARKET_ADMIN), false));
+        assert_try_state();
+    });
+
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(10);
+        assert_ok!(Market::set_frozen(signed(MARKET_ADMIN), true));
+        System::set_block_number(
+            (10 + futarchy_primitives::kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS).into(),
+        );
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        assert_try_state();
+    });
+}
+
+#[test]
 fn baseline_mapping_is_written_and_duplicate_epoch_is_rejected() {
     new_test_ext().execute_with(|| {
         create_baseline();

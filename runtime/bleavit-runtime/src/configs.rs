@@ -1,8 +1,6 @@
 //! Runtime configuration and the B1a fail-closed cross-pallet adapters.
 
-#[cfg(feature = "runtime-benchmarks")]
-use alloc::vec;
-use alloc::{borrow::Cow, boxed::Box, vec::Vec};
+use alloc::{borrow::Cow, boxed::Box, vec, vec::Vec};
 
 use frame_support::{
     derive_impl,
@@ -13,7 +11,7 @@ use frame_support::{
         tokens::Preservation,
         ConstBool, ConstU128, ConstU32, ConstU64, ConstU8, Contains, EqualPrivilegeOnly, Get,
         InstanceFilter, Nothing, OriginTrait, QueryPreimage, StorageInstance, StorePreimage,
-        TransformOrigin, VariantCountOf, WithdrawReasons,
+        TransformOrigin, UnfilteredDispatchable, VariantCountOf, WithdrawReasons,
     },
     weights::{
         constants::{
@@ -41,10 +39,11 @@ use sp_runtime::{
 
 use crate::{
     usdc_location, AccountId, AssetId, Aura, Balance, Balances, Block, BlockNumber,
-    CollatorSelection, ConditionalLedger, ConsensusHook, Epoch, ForeignAssets, FutarchyTreasury,
-    Hash, MessageQueue, Migrations, Nonce, PalletInfo, ParachainSystem, PolkadotXcm, Preimage,
-    Referenda, Runtime, RuntimeCall, RuntimeEvent, RuntimeFreezeReason, RuntimeHoldReason,
-    RuntimeOrigin, RuntimeTask, Scheduler, Session, SessionKeys, System, XcmpQueue, VERSION,
+    CollatorSelection, ConditionalLedger, ConsensusHook, Epoch, ExecutionGuard, ForeignAssets,
+    FutarchyTreasury, Hash, Market, MessageQueue, Migrations, Nonce, PalletInfo, ParachainSystem,
+    PolkadotXcm, Preimage, Referenda, Runtime, RuntimeCall, RuntimeEvent, RuntimeFreezeReason,
+    RuntimeHoldReason, RuntimeOrigin, RuntimeTask, Scheduler, Session, SessionKeys, System,
+    XcmpQueue, VERSION,
 };
 
 const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
@@ -1523,6 +1522,7 @@ impl pallet_conditional_ledger::Config for Runtime {
     type MarketAuthority = EnsureMarketAccount;
     type ResolveAuthority = EnsureEpochAccount;
     type SettleAuthority = EnsureWelfareAccount;
+    type EmergencyPlaybookOrigin = pallet_origins::EnsureEmergencyPlaybook;
     type MinSplit = LedgerMinSplit;
     type PositionDeposit = LedgerPositionDeposit;
     type MaxPositionsPerAccount = ConstU32<{ bounds::MAX_ACCOUNT_POSITIONS }>;
@@ -2359,6 +2359,7 @@ impl pallet_market::Config for Runtime {
     type ObsInterval = MarketObsInterval;
     type Kappa1e9 = MarketKappa;
     type MarketAdmin = EnsureEpochAccount;
+    type EmergencyPlaybookOrigin = pallet_origins::EnsureEmergencyPlaybook;
     type ArchiveDelay = LedgerArchiveDelay;
     type PalletId = MarketPalletId;
     type KeeperRebate = FutarchyTreasury;
@@ -2977,6 +2978,7 @@ impl pallet_epoch::Config for Runtime {
     type GuardianOrigin = pallet_origins::EnsureGuardianHold;
     type ExecutionGuardOrigin = EnsureExecutionGuardAccount;
     type VoidAuthority = pallet_origins::EnsureEmergencyPlaybook;
+    type EmergencyPlaybookOrigin = pallet_origins::EnsureEmergencyPlaybook;
     type ConstitutionalValuesOrigin = pallet_origins::EnsureConstitutionalValues;
     type WeightInfo = crate::weights::pallet_epoch::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
@@ -3548,15 +3550,137 @@ impl pallet_guardian::GuardianTriggers for RuntimeGuardianTriggers {
             dead_man: phase_flags & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED != 0,
             reserve_health: phase_flags & pallet_constitution::PhaseFlagsValue::RESERVE_HEALTH_FLAG
                 != 0,
-            // The relay-abort bit is guardian-visible but deliberately does
-            // not freeze the normal re-proposal lane: Abort preserves the old
-            // code and must not replace one wedge with another.
-            migration_halt: MigrationHaltSources::get() != 0,
+            // A relay abort preserves the old code and is not the 09 §3.2
+            // halt-at-fault trigger. Only the execution-halt projection of a
+            // failed/stalled/applied-invalid migration admits PB-MIGRATION.
+            migration_halt: pallet_execution_guard::MigrationHalt::<Runtime>::get(),
+            void_in_flight: crate::Guardian::playbook_active(
+                pallet_guardian::PlaybookId::OracleVoid,
+            ),
             ..pallet_guardian::TriggerState::none()
         }
     }
 }
 pub struct RuntimeGuardianEffects;
+
+impl RuntimeGuardianEffects {
+    fn dispatch_emergency(call: RuntimeCall) -> Result<(), DispatchError> {
+        frame_support::ensure!(
+            crate::classifier::RuntimeBaseCallFilter::contains_for(
+                origins_core::Origin::EmergencyPlaybook,
+                &call,
+            ),
+            DispatchError::Other("emergency playbook call is not admissible")
+        );
+        call.dispatch_bypass_filter(pallet_origins::Origin::EmergencyPlaybook.into())
+            .map(|_| ())
+            .map_err(|error| error.error)
+    }
+
+    fn dispatch_emergency_all(calls: Vec<RuntimeCall>) -> Result<(), DispatchError> {
+        for call in calls {
+            Self::dispatch_emergency(call)?;
+        }
+        Ok(())
+    }
+
+    /// Kernel-enumerated 06 §6.2 activation routine. Keeping construction
+    /// separate from dispatch gives the conformance suite one exact surface
+    /// to compare with the playbook table.
+    pub(crate) fn playbook_calls(
+        id: pallet_guardian::PlaybookId,
+        expiry: BlockNumber,
+        target: Option<EpochId>,
+    ) -> Result<Vec<RuntimeCall>, DispatchError> {
+        let now = System::block_number();
+        let bounded_expiry = now
+            .checked_add(kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS)
+            .ok_or(DispatchError::Arithmetic(
+                sp_runtime::ArithmeticError::Overflow,
+            ))?;
+        frame_support::ensure!(
+            expiry >= now && expiry <= bounded_expiry,
+            DispatchError::Other("playbook expiry exceeds kernel window")
+        );
+
+        let calls = match id {
+            pallet_guardian::PlaybookId::Depeg => {
+                frame_support::ensure!(
+                    target.is_none(),
+                    DispatchError::Other("unexpected playbook target")
+                );
+                let epoch_bound = now.checked_add(kernel::MIN_EPOCH_LENGTH_BLOCKS).ok_or(
+                    DispatchError::Arithmetic(sp_runtime::ArithmeticError::Overflow),
+                )?;
+                frame_support::ensure!(
+                    expiry <= epoch_bound,
+                    DispatchError::Other("depeg expiry exceeds one epoch")
+                );
+                vec![RuntimeCall::Market(pallet_market::Call::freeze_creation {
+                    expiry,
+                })]
+            }
+            pallet_guardian::PlaybookId::Migration => {
+                frame_support::ensure!(
+                    target.is_none(),
+                    DispatchError::Other("unexpected playbook target")
+                );
+                // stable2603 exposes only Root-only destructive cursor controls.
+                // The safe recovery substrate is the automatic active-cursor
+                // continuation plus source-scoped execution halt and ratified
+                // remediation path above; fabricating Root here would widen
+                // EmergencyPlaybook beyond the pre-ratified 06 §6.2 surface.
+                return Err(DispatchError::Other(
+                    "PB-MIGRATION cursor retry has no EmergencyPlaybook-safe runtime call",
+                ));
+            }
+            pallet_guardian::PlaybookId::OracleVoid => {
+                let epoch = target.ok_or(DispatchError::Other(
+                    "oracle-void playbook requires target epoch",
+                ))?;
+                vec![RuntimeCall::Epoch(pallet_epoch::Call::void_cohort {
+                    epoch,
+                })]
+            }
+            pallet_guardian::PlaybookId::HaltIntake => {
+                frame_support::ensure!(
+                    target.is_none(),
+                    DispatchError::Other("unexpected playbook target")
+                );
+                vec![RuntimeCall::Epoch(pallet_epoch::Call::set_intake_paused {
+                    paused: true,
+                    expiry: expiry.min(bounded_expiry),
+                })]
+            }
+            pallet_guardian::PlaybookId::Reserve => {
+                frame_support::ensure!(
+                    target.is_none(),
+                    DispatchError::Other("unexpected playbook target")
+                );
+                vec![RuntimeCall::ConditionalLedger(
+                    pallet_conditional_ledger::Call::set_split_paused {
+                        paused: true,
+                        expiry,
+                    },
+                )]
+            }
+            pallet_guardian::PlaybookId::LedgerFreeze => {
+                frame_support::ensure!(
+                    target.is_none(),
+                    DispatchError::Other("unexpected playbook target")
+                );
+                vec![
+                    RuntimeCall::ConditionalLedger(pallet_conditional_ledger::Call::set_frozen {
+                        frozen: true,
+                    }),
+                    RuntimeCall::Market(pallet_market::Call::set_frozen { frozen: true }),
+                ]
+            }
+        };
+        Ok(calls)
+    }
+}
+
 impl pallet_guardian::GuardianEffectDispatcher for RuntimeGuardianEffects {
     fn dispatch(
         power: pallet_guardian::GuardianPower,
@@ -3579,16 +3703,66 @@ impl pallet_guardian::GuardianEffectDispatcher for RuntimeGuardianEffects {
             pallet_guardian::GuardianPower::ForceRerun { pid } => {
                 Epoch::force_rerun_from_guardian(pid)
             }
-            // The Track-A pallets do not expose the preimage-committed
-            // pause/playbook effect calls required by 06 §5.2/§6.2. Treat
-            // those powers as unavailable instead of emitting an event-only
-            // success (SQ-144).
-            pallet_guardian::GuardianPower::PauseIntake { .. }
-            | pallet_guardian::GuardianPower::ActivatePlaybook { .. }
-            | pallet_guardian::GuardianPower::SuspendOnGate => Err(DispatchError::Other(
-                "guardian downstream effect is not represented on chain",
-            )),
+            pallet_guardian::GuardianPower::PauseIntake { until } => {
+                Epoch::set_intake_paused_internal(until)
+            }
+            pallet_guardian::GuardianPower::SuspendOnGate => {
+                let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+                let breached = pallet_welfare::GateBreachFlags::<Runtime>::get(epoch)
+                    .is_some_and(|flags| flags.s_breached || flags.c_breached);
+                frame_support::ensure!(
+                    breached,
+                    DispatchError::Other("hard gate breach is not active")
+                );
+                ExecutionGuard::set_gate_suspension(epoch);
+                Ok(())
+            }
+            pallet_guardian::GuardianPower::ActivatePlaybook {
+                id, expiry, target, ..
+            } => Self::dispatch_emergency_all(Self::playbook_calls(id, expiry, target)?),
         }
+    }
+
+    fn revert_playbook(id: pallet_guardian::PlaybookId) -> Result<(), DispatchError> {
+        let calls = match id {
+            pallet_guardian::PlaybookId::Depeg => {
+                Market::clear_creation_freeze();
+                Vec::new()
+            }
+            pallet_guardian::PlaybookId::Migration | pallet_guardian::PlaybookId::OracleVoid => {
+                Vec::new()
+            }
+            pallet_guardian::PlaybookId::HaltIntake => {
+                vec![RuntimeCall::Epoch(pallet_epoch::Call::set_intake_paused {
+                    paused: false,
+                    expiry: 0,
+                })]
+            }
+            pallet_guardian::PlaybookId::Reserve => vec![RuntimeCall::ConditionalLedger(
+                pallet_conditional_ledger::Call::set_split_paused {
+                    paused: false,
+                    expiry: 0,
+                },
+            )],
+            pallet_guardian::PlaybookId::LedgerFreeze => vec![
+                RuntimeCall::ConditionalLedger(pallet_conditional_ledger::Call::set_frozen {
+                    frozen: false,
+                }),
+                RuntimeCall::Market(pallet_market::Call::set_frozen { frozen: false }),
+            ],
+        };
+        Self::dispatch_emergency_all(calls)
+    }
+
+    fn renew_playbook(id: pallet_guardian::PlaybookId) -> Result<(), DispatchError> {
+        frame_support::ensure!(
+            id == pallet_guardian::PlaybookId::LedgerFreeze,
+            DispatchError::Other("only ledger-freeze is renewable")
+        );
+        frame_support::storage::with_storage_layer(|| {
+            ConditionalLedger::extend_freeze_once()?;
+            Market::extend_freeze_once()
+        })
     }
 }
 
@@ -3925,6 +4099,12 @@ impl pallet_execution_guard::GuardianState for RuntimeGuardianState {
     }
     fn ledger_freeze_active() -> bool {
         crate::Guardian::playbook_active(pallet_guardian::PlaybookId::LedgerFreeze)
+    }
+    fn gate_suspended() -> bool {
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        pallet_execution_guard::GateSuspension::<Runtime>::get() == Some(epoch)
+            && pallet_welfare::GateBreachFlags::<Runtime>::get(epoch)
+                .is_some_and(|flags| flags.s_breached || flags.c_breached)
     }
 }
 
@@ -4764,6 +4944,9 @@ impl pallet_guardian::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper 
     }
     fn values() -> RuntimeOrigin {
         pallet_origins::Origin::ConstitutionalValues.into()
+    }
+    fn admin() -> RuntimeOrigin {
+        crate::track_origins::Origin::GuardianTrack.into()
     }
     fn prime_for_worst_case() {
         let who = AccountId32::new([1; 32]);

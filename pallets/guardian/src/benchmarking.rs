@@ -232,6 +232,7 @@ mod benches {
             id: PlaybookId::LedgerFreeze,
             trigger: PlaybookTrigger::LedgerDrift,
             expiry: 100,
+            target: None,
         };
         Pallet::<T>::propose_action(T::BenchmarkHelper::signed([1; 32]), power, H256::default())
             .expect("propose");
@@ -296,6 +297,20 @@ mod benches {
                 .count(),
             GUARDIAN_SEATS - usize::from(GUARDIAN_THRESHOLD)
         );
+    }
+
+    #[benchmark]
+    fn set_playbook_registered() {
+        #[extrinsic_call]
+        _(
+            T::BenchmarkHelper::admin() as T::RuntimeOrigin,
+            PlaybookId::Depeg,
+            false,
+        );
+
+        assert!(!crate::pallet::PlaybookRegistered::<T>::get(
+            PlaybookId::Depeg
+        ));
     }
 
     #[benchmark]

@@ -236,4 +236,9 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 			.saturating_add(T::DbWeight::get().reads(11))
 			.saturating_add(T::DbWeight::get().writes(10))
 	}
+	/// B1b v2 benchmark stub: one bounded playbook-registration write.
+	fn set_playbook_registered() -> Weight {
+		Weight::from_parts(10_000_000, 1_500)
+			.saturating_add(T::DbWeight::get().writes(1))
+	}
 }

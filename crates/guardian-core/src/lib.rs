@@ -15,7 +15,7 @@ pub const GUARDIAN_BOND: Balance = 50_000_000_000_000_000;
 pub const ACTION_EXPIRY_BLOCKS: BlockNumber = 43_200;
 pub const REVIEW_DEADLINE_EPOCHS: EpochId = 2;
 pub const REVIEW_SLASH_PERCENT: u8 = 50;
-pub const HOLD_MAX_BLOCKS: BlockNumber = 201_600;
+pub const HOLD_MAX_BLOCKS: BlockNumber = futarchy_primitives::kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS;
 // 13 §3.4: `frn.window = dec.extension` (shared K).
 pub const FORCE_RERUN_WINDOW_BLOCKS: BlockNumber =
     futarchy_primitives::kernel::DEC_EXTENSION_BLOCKS;
@@ -92,6 +92,15 @@ pub enum PlaybookId {
     LedgerFreeze,
 }
 
+pub const ALL_PLAYBOOKS: [PlaybookId; 6] = [
+    PlaybookId::Depeg,
+    PlaybookId::Migration,
+    PlaybookId::OracleVoid,
+    PlaybookId::HaltIntake,
+    PlaybookId::Reserve,
+    PlaybookId::LedgerFreeze,
+];
+
 #[derive(
     Clone,
     Copy,
@@ -141,6 +150,8 @@ pub enum GuardianPower {
         id: PlaybookId,
         trigger: PlaybookTrigger,
         expiry: BlockNumber,
+        /// PB-ORACLE-VOID cohort target. Every other playbook rejects `Some`.
+        target: Option<EpochId>,
     },
     SuspendOnGate,
 }
@@ -289,6 +300,7 @@ pub enum Error {
     DurationTooLong,
     TriggerInactive,
     BadPlaybookTrigger,
+    BadPlaybookTarget,
     AlreadyRerun,
     NotRerunnable,
     ReviewNotFound,
@@ -669,6 +681,7 @@ impl Guardian {
             id,
             trigger,
             expiry,
+            ..
         } = action.power
         {
             // Upsert by id: re-activation renews the existing record's expiry
@@ -710,7 +723,7 @@ impl Guardian {
         match power {
             GuardianPower::PauseIntake { until } => {
                 ensure!(
-                    until <= now.saturating_add(HOLD_MAX_BLOCKS),
+                    until >= now && until <= now.saturating_add(HOLD_MAX_BLOCKS),
                     Error::DurationTooLong
                 );
                 if self
@@ -761,12 +774,18 @@ impl Guardian {
                 id,
                 trigger,
                 expiry,
+                target,
             } => {
                 ensure!(
-                    expiry <= now.saturating_add(HOLD_MAX_BLOCKS),
+                    expiry >= now && expiry <= now.saturating_add(HOLD_MAX_BLOCKS),
                     Error::DurationTooLong
                 );
                 ensure!(trigger_matches(id, trigger), Error::BadPlaybookTrigger);
+                ensure!(
+                    matches!((id, target), (PlaybookId::OracleVoid, Some(_)))
+                        || (!matches!(id, PlaybookId::OracleVoid) && target.is_none()),
+                    Error::BadPlaybookTarget
+                );
                 ensure!(ctx.triggers.is_active(trigger), Error::TriggerInactive);
             }
             GuardianPower::SuspendOnGate => {
@@ -1101,6 +1120,7 @@ mod tests {
                     id: PlaybookId::LedgerFreeze,
                     trigger: PlaybookTrigger::LedgerDrift,
                     expiry: 100,
+                    target: None,
                 },
                 [1; 32],
                 0,
@@ -1124,6 +1144,7 @@ mod tests {
                     id: PlaybookId::LedgerFreeze,
                     trigger: PlaybookTrigger::LedgerDrift,
                     expiry: 100,
+                    target: None,
                 },
                 [1; 32],
                 2,
@@ -1161,6 +1182,7 @@ mod tests {
                     id: PlaybookId::LedgerFreeze,
                     trigger: PlaybookTrigger::LedgerDrift,
                     expiry: 100,
+                    target: None,
                 },
                 [1; 32],
                 0,
@@ -1176,6 +1198,7 @@ mod tests {
                     id: PlaybookId::LedgerFreeze,
                     trigger: PlaybookTrigger::LedgerDrift,
                     expiry: 200,
+                    target: None,
                 },
                 [1; 32],
                 2,

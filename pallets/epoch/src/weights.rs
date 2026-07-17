@@ -22,6 +22,7 @@ pub trait WeightInfo {
     fn expire_or_stale_queue() -> Weight;
     fn force_reject_process_hold() -> Weight;
     fn void_cohort(items: u32) -> Weight;
+    fn set_intake_paused() -> Weight;
 }
 
 const STATE_POV: u64 = 48_000;
@@ -70,6 +71,9 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     fn void_cohort(items: u32) -> Weight {
         base::<T>(55_000_000, 14, 10)
             .saturating_add(Weight::from_parts(20_000_000, 2_000).saturating_mul(items.into()))
+    }
+    fn set_intake_paused() -> Weight {
+        base::<T>(20_000_000, 2, 1)
     }
 }
 
@@ -121,6 +125,9 @@ impl WeightInfo for () {
     fn void_cohort(items: u32) -> Weight {
         rocks(55_000_000, 14, 10)
             .saturating_add(Weight::from_parts(20_000_000, 2_000).saturating_mul(items.into()))
+    }
+    fn set_intake_paused() -> Weight {
+        rocks(20_000_000, 2, 1)
     }
 }
 

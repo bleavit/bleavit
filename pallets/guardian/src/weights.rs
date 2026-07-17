@@ -26,6 +26,8 @@ pub trait WeightInfo {
     fn uphold_veto() -> Weight;
     /// Weight of a guardian-track recall enactment.
     fn recall() -> Weight;
+    /// Weight of a guardian-track playbook availability toggle.
+    fn set_playbook_registered() -> Weight;
     /// Weight of the per-block maintenance hook (expire playbooks + enforce
     /// review deadlines over the bounded sets).
     fn on_initialize() -> Weight;
@@ -70,6 +72,11 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(14))
             .saturating_add(T::DbWeight::get().writes(14))
     }
+    fn set_playbook_registered() -> Weight {
+        Weight::from_parts(15_000_000, 2_000)
+            .saturating_add(T::DbWeight::get().reads(1))
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
     fn on_initialize() -> Weight {
         Weight::from_parts(40_000_000, 9_000)
             .saturating_add(T::DbWeight::get().reads(9))
@@ -113,6 +120,11 @@ impl WeightInfo for () {
         Weight::from_parts(75_000_000, 9_000)
             .saturating_add(RocksDbWeight::get().reads(14))
             .saturating_add(RocksDbWeight::get().writes(14))
+    }
+    fn set_playbook_registered() -> Weight {
+        Weight::from_parts(15_000_000, 2_000)
+            .saturating_add(RocksDbWeight::get().reads(1))
+            .saturating_add(RocksDbWeight::get().writes(1))
     }
     fn on_initialize() -> Weight {
         Weight::from_parts(40_000_000, 9_000)

@@ -593,6 +593,54 @@ fn submit_and_withdraw_cover_happy_and_shape_error_paths() {
 }
 
 #[test]
+fn intake_pause_is_origin_gated_bounded_and_lazily_expires() {
+    new_test_ext().execute_with(|| {
+        set_block(10);
+        let until = 20;
+        assert_ok!(Epoch::set_intake_paused(
+            RuntimeOrigin::signed(void_authority()),
+            true,
+            until,
+        ));
+        assert_eq!(IntakePausedUntil::<Test>::get(), Some(until));
+        assert_noop!(
+            Epoch::submit(
+                RuntimeOrigin::signed(keeper()),
+                proposal(1, keeper(), ProposalState::Submitted, 0, 10),
+            ),
+            Error::<Test>::IntakePaused
+        );
+
+        set_block(until);
+        assert_ok!(Epoch::submit(
+            RuntimeOrigin::signed(keeper()),
+            proposal(1, keeper(), ProposalState::Submitted, 0, until),
+        ));
+
+        for origin in [
+            RuntimeOrigin::root(),
+            RuntimeOrigin::none(),
+            RuntimeOrigin::signed(nobody()),
+        ] {
+            assert_noop!(
+                Epoch::set_intake_paused(origin, false, 0),
+                DispatchError::BadOrigin
+            );
+        }
+        assert_noop!(
+            Epoch::set_intake_paused(
+                RuntimeOrigin::signed(void_authority()),
+                true,
+                until
+                    .saturating_add(futarchy_primitives::kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS)
+                    .saturating_add(1),
+            ),
+            Error::<Test>::IntakePauseOutOfBounds
+        );
+    });
+}
+
+#[test]
 fn signed_keeper_calls_reject_root_and_none() {
     new_test_ext().execute_with(|| {
         let proposal = proposal(1, keeper(), ProposalState::Submitted, 0, 1);

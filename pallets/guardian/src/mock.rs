@@ -8,7 +8,7 @@
 use crate as pallet_guardian;
 use crate::{
     GuardianEffectDispatcher, GuardianPower, GuardianProposalStatus, GuardianProposalVeto,
-    GuardianRecallScheduler, GuardianReviewScheduler, GuardianTriggers, ProposalStatus,
+    GuardianRecallScheduler, GuardianReviewScheduler, GuardianTriggers, PlaybookId, ProposalStatus,
     TriggerState,
 };
 use frame_support::{derive_impl, parameter_types, traits::EnsureOrigin};
@@ -102,6 +102,14 @@ impl GuardianEffectDispatcher for TestEffects {
     ) -> Result<(), sp_runtime::DispatchError> {
         Ok(())
     }
+
+    fn revert_playbook(_id: PlaybookId) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
+
+    fn renew_playbook(_id: PlaybookId) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
 }
 
 pub struct TestScheduler;
@@ -192,6 +200,9 @@ impl pallet_guardian::BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
         RuntimeOrigin::signed(AccountId32::from(who))
     }
     fn values() -> RuntimeOrigin {
+        RuntimeOrigin::signed(AccountId32::from(VALUES_ACC))
+    }
+    fn admin() -> RuntimeOrigin {
         RuntimeOrigin::signed(AccountId32::from(VALUES_ACC))
     }
     fn prime_for_worst_case() {

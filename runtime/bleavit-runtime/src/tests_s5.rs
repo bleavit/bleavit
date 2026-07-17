@@ -207,8 +207,14 @@ inventory! {
         leaf public => ["set_phase_flag"];
         leaf values => ["set_release_channel"];
     }
-    "ConditionalLedger" { leaf public => ["split", "merge", "split_scalar", "merge_scalar", "split_gate", "merge_gate", "transfer", "split_baseline", "merge_baseline", "resolve", "void", "settle_scalar", "settle_gate", "settle_baseline", "redeem", "redeem_scalar", "redeem_scalar_pair", "redeem_gate", "redeem_void", "redeem_baseline", "redeem_baseline_pair", "sweep_dust", "sweep_dust_baseline"]; }
-    "Market" { leaf public => ["buy", "sell", "crank_observe", "reap"]; }
+    "ConditionalLedger" {
+        leaf public => ["split", "merge", "split_scalar", "merge_scalar", "split_gate", "merge_gate", "transfer", "split_baseline", "merge_baseline", "resolve", "void", "settle_scalar", "settle_gate", "settle_baseline", "redeem", "redeem_scalar", "redeem_scalar_pair", "redeem_gate", "redeem_void", "redeem_baseline", "redeem_baseline_pair", "sweep_dust", "sweep_dust_baseline"];
+        leaf emergency_playbook => ["set_split_paused", "set_frozen"];
+    }
+    "Market" {
+        leaf public => ["buy", "sell", "crank_observe", "reap"];
+        leaf emergency_playbook => ["freeze_creation", "set_frozen"];
+    }
     "Welfare" {
         leaf values => ["register_spec"];
         leaf public => ["record_snapshot", "record_daily_gate"];
@@ -224,7 +230,7 @@ inventory! {
         leaf public => ["claim_stream", "execute_coretime_renewal"];
     }
     "Guardian" {
-        leaf values => ["set_members", "ratify_action", "renew_playbook", "uphold_veto", "recall"];
+        leaf values => ["set_members", "ratify_action", "renew_playbook", "uphold_veto", "recall", "set_playbook_registered"];
         leaf public => ["propose_action", "approve_action"];
     }
     "Attestor" {
@@ -235,7 +241,7 @@ inventory! {
         leaf public => ["submit", "withdraw", "tick", "decide", "settle_cohort", "mark_executed", "mark_failed_executed", "retry_exhausted_to_measurement", "expire_or_stale_queue"];
         leaf values => ["set_next_epoch_length"];
         leaf guardian_hold => ["delay_once", "force_reject_process_hold"];
-        leaf emergency_playbook => ["void_cohort"];
+        leaf emergency_playbook => ["void_cohort", "set_intake_paused"];
     }
     "ExecutionGuard" {
         leaf values => ["ratify"];

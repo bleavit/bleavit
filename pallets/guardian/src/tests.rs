@@ -80,6 +80,98 @@ fn set_members_is_values_origin_only() {
 }
 
 #[test]
+fn all_kernel_playbooks_are_genesis_registered_and_admin_can_fail_closed() {
+    new_test_ext().execute_with(|| {
+        for id in guardian_core::ALL_PLAYBOOKS {
+            assert!(PlaybookRegistered::<Test>::get(id));
+        }
+        assert_eq!(PlaybookRegistered::<Test>::iter_keys().count(), 6);
+        assert_noop!(
+            Guardian::set_playbook_registered(
+                RuntimeOrigin::signed(acct(1)),
+                PlaybookId::Depeg,
+                false,
+            ),
+            DispatchError::BadOrigin
+        );
+        assert_ok!(Guardian::set_playbook_registered(
+            values_origin(),
+            PlaybookId::Depeg,
+            false,
+        ));
+        set_triggers(all_triggers());
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::ActivatePlaybook {
+                id: PlaybookId::Depeg,
+                trigger: PlaybookTrigger::DepegMedian,
+                expiry: 100,
+                target: None,
+            },
+            hash(1),
+        ));
+        for n in 2..=4u8 {
+            assert_ok!(Guardian::approve_action(RuntimeOrigin::signed(acct(n)), 0));
+        }
+        assert_noop!(
+            Guardian::approve_action(RuntimeOrigin::signed(acct(5)), 0),
+            Error::<Test>::PlaybookNotRegistered
+        );
+        assert_ok!(Guardian::set_playbook_registered(
+            values_origin(),
+            PlaybookId::Depeg,
+            true,
+        ));
+        assert_ok!(Guardian::approve_action(RuntimeOrigin::signed(acct(5)), 0));
+        assert!(Guardian::playbook_active(PlaybookId::Depeg));
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
+fn oracle_void_requires_a_target_and_other_playbooks_reject_one() {
+    new_test_ext().execute_with(|| {
+        set_triggers(all_triggers());
+        for (action, power) in [
+            (
+                0,
+                GuardianPower::ActivatePlaybook {
+                    id: PlaybookId::OracleVoid,
+                    trigger: PlaybookTrigger::OracleDeadlock,
+                    expiry: 100,
+                    target: None,
+                },
+            ),
+            (
+                1,
+                GuardianPower::ActivatePlaybook {
+                    id: PlaybookId::Depeg,
+                    trigger: PlaybookTrigger::DepegMedian,
+                    expiry: 100,
+                    target: Some(7),
+                },
+            ),
+        ] {
+            assert_ok!(Guardian::propose_action(
+                RuntimeOrigin::signed(acct(1)),
+                power,
+                hash(1),
+            ));
+            for n in 2..=4u8 {
+                assert_ok!(Guardian::approve_action(
+                    RuntimeOrigin::signed(acct(n)),
+                    action,
+                ));
+            }
+            assert_noop!(
+                Guardian::approve_action(RuntimeOrigin::signed(acct(5)), action),
+                Error::<Test>::BadPlaybookTarget
+            );
+        }
+    });
+}
+
+#[test]
 fn propose_requires_membership() {
     new_test_ext().execute_with(|| {
         let outsider = AccountId32::from([250u8; 32]);
@@ -223,6 +315,7 @@ fn ledger_freeze_requires_drift_and_one_renewal() {
                 id: PlaybookId::LedgerFreeze,
                 trigger: PlaybookTrigger::LedgerDrift,
                 expiry,
+                target: None,
             },
             hash(1)
         ));
@@ -244,6 +337,7 @@ fn ledger_freeze_requires_drift_and_one_renewal() {
                 id: PlaybookId::LedgerFreeze,
                 trigger: PlaybookTrigger::LedgerDrift,
                 expiry: 100,
+                target: None,
             },
             hash(1)
         ));
@@ -266,6 +360,7 @@ fn ledger_freeze_requires_drift_and_one_renewal() {
                 id: PlaybookId::LedgerFreeze,
                 trigger: PlaybookTrigger::LedgerDrift,
                 expiry: 100,
+                target: None,
             },
             hash(1)
         ));
@@ -841,6 +936,7 @@ fn each_playbook_activates_on_its_matching_live_trigger() {
                     id: *pb,
                     trigger: *trig,
                     expiry: 100_000,
+                    target: (*pb == PlaybookId::OracleVoid).then_some(0),
                 },
                 hash(1)
             ));
@@ -873,6 +969,7 @@ fn activate_playbook_rejects_wrong_pairing_and_inactive_trigger() {
                 id: PlaybookId::Depeg,
                 trigger: PlaybookTrigger::LedgerDrift,
                 expiry: 100,
+                target: None,
             },
             hash(1)
         ));
@@ -891,6 +988,7 @@ fn activate_playbook_rejects_wrong_pairing_and_inactive_trigger() {
                 id: PlaybookId::Depeg,
                 trigger: PlaybookTrigger::DepegMedian,
                 expiry: 100,
+                target: None,
             },
             hash(1)
         ));
@@ -979,6 +1077,7 @@ fn all_six_playbooks_fill_and_reactivation_renews_in_place() {
                     id: *pb,
                     trigger: *trig,
                     expiry: 100_000,
+                    target: (*pb == PlaybookId::OracleVoid).then_some(0),
                 },
                 hash(1)
             ));
@@ -995,6 +1094,7 @@ fn all_six_playbooks_fill_and_reactivation_renews_in_place() {
                 id: PlaybookId::Depeg,
                 trigger: PlaybookTrigger::DepegMedian,
                 expiry: 200_000,
+                target: None,
             },
             hash(1)
         ));
@@ -1027,6 +1127,7 @@ fn duplicate_depeg_activations_never_block_ledger_freeze() {
                     id: PlaybookId::Depeg,
                     trigger: PlaybookTrigger::DepegMedian,
                     expiry: 100_000 + round,
+                    target: None,
                 },
                 hash(1)
             ));
@@ -1041,6 +1142,7 @@ fn duplicate_depeg_activations_never_block_ledger_freeze() {
                 id: PlaybookId::LedgerFreeze,
                 trigger: PlaybookTrigger::LedgerDrift,
                 expiry: 100_000,
+                target: None,
             },
             hash(1)
         ));
@@ -1064,6 +1166,7 @@ fn duplicate_active_ledger_freeze_is_rejected_through_the_shell() {
                     id: PlaybookId::LedgerFreeze,
                     trigger: PlaybookTrigger::LedgerDrift,
                     expiry,
+                    target: None,
                 },
                 hash(1)
             ));
@@ -1104,6 +1207,7 @@ fn maintenance_crank_expires_playbook_and_reverts() {
                 id: PlaybookId::LedgerFreeze,
                 trigger: PlaybookTrigger::LedgerDrift,
                 expiry: 5,
+                target: None,
             },
             hash(1)
         ));
@@ -1230,6 +1334,7 @@ fn rng_power(rng: &mut Lcg, now: u32) -> GuardianPower {
                 id,
                 trigger,
                 expiry,
+                target: (id == PlaybookId::OracleVoid).then_some(rng.below(8) as u32),
             }
         }
         _ => GuardianPower::SuspendOnGate,

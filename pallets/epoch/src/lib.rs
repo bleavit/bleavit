@@ -280,6 +280,8 @@ pub mod pallet {
         type GuardianOrigin: EnsureOrigin<Self::RuntimeOrigin>;
         type ExecutionGuardOrigin: EnsureOrigin<Self::RuntimeOrigin>;
         type VoidAuthority: EnsureOrigin<Self::RuntimeOrigin>;
+        /// Kernel-enumerated playbook effect origin (06 §6.2).
+        type EmergencyPlaybookOrigin: EnsureOrigin<Self::RuntimeOrigin>;
         type ConstitutionalValuesOrigin: EnsureOrigin<Self::RuntimeOrigin>;
         type WeightInfo: WeightInfo;
         #[cfg(feature = "runtime-benchmarks")]
@@ -537,6 +539,12 @@ pub mod pallet {
     #[pallet::storage]
     pub type BaselineCarry<T: Config> = StorageValue<_, (EpochId, u8), OptionQuery>;
 
+    /// Intake-only emergency pause. The value is a hard pallet-level backstop:
+    /// a stale guardian maintenance crank cannot keep intake paused once
+    /// `now >= until` (06 §5.2/§6.2).
+    #[pallet::storage]
+    pub type IntakePausedUntil<T: Config> = StorageValue<_, BlockNumber, OptionQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -590,6 +598,12 @@ pub mod pallet {
             reason: RejectReason,
             amount: Balance,
         },
+        /// Operational event outside the frozen 02 ingest schema.
+        IntakePauseSet {
+            until: BlockNumber,
+        },
+        /// Operational event outside the frozen 02 ingest schema.
+        IntakePauseCleared,
     }
 
     #[pallet::error]
@@ -614,6 +628,10 @@ pub mod pallet {
         Welfare,
         TryStateViolation,
         BadProposalShape,
+        /// Intake is paused by a guardian action or PB-HALT-INTAKE.
+        IntakePaused,
+        /// The requested pause is in the past or exceeds the kernel window.
+        IntakePauseOutOfBounds,
     }
 
     #[pallet::hooks]
@@ -652,6 +670,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let now = Self::now();
+            ensure!(!Self::intake_paused(now), Error::<T>::IntakePaused);
             let epoch = EpochOf::<T>::get().index;
             proposal.id = NextProposalId::<T>::get();
             ensure!(
@@ -1146,6 +1165,25 @@ pub mod pallet {
                 Ok(())
             })
         }
+
+        /// PB-HALT-INTAKE effect endpoint (06 §6.2). Clearing ignores the
+        /// supplied expiry; setting is bounded independently of guardian state.
+        #[pallet::call_index(14)]
+        #[pallet::weight(T::WeightInfo::set_intake_paused())]
+        pub fn set_intake_paused(
+            origin: OriginFor<T>,
+            paused: bool,
+            expiry: BlockNumber,
+        ) -> DispatchResult {
+            T::EmergencyPlaybookOrigin::ensure_origin(origin)?;
+            if paused {
+                Self::set_intake_paused_internal(expiry)
+            } else {
+                IntakePausedUntil::<T>::kill();
+                Self::deposit_event(Event::IntakePauseCleared);
+                Ok(())
+            }
+        }
     }
 
     #[pallet::extra_constants]
@@ -1361,6 +1399,28 @@ pub mod pallet {
                 })?;
                 Self::persist(state)
             })
+        }
+
+        /// Runtime-internal producer for the guardian `pause_intake` power.
+        /// The bound is rechecked here so the downstream effect remains safe if
+        /// a caller bypasses the guardian core in a test/runtime adapter.
+        pub fn set_intake_paused_internal(until: BlockNumber) -> DispatchResult {
+            let now = Self::now();
+            ensure!(
+                until >= now
+                    && until.saturating_sub(now)
+                        <= futarchy_primitives::kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS,
+                Error::<T>::IntakePauseOutOfBounds
+            );
+            IntakePausedUntil::<T>::put(until);
+            Self::deposit_event(Event::IntakePauseSet { until });
+            Ok(())
+        }
+
+        /// Lazy expiry predicate. Storage may retain a historical timestamp,
+        /// but it has no effect at or after the boundary.
+        pub fn intake_paused(now: BlockNumber) -> bool {
+            IntakePausedUntil::<T>::get().is_some_and(|until| now < until)
         }
 
         /// Sole T24 producer, called by `guardian.uphold_veto` after its

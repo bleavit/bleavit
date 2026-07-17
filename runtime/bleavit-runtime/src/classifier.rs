@@ -588,6 +588,10 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_conditional_ledger::Call::sweep_dust_baseline { .. } => {
                 leaf(CallDomain::Public)
             }
+            pallet_conditional_ledger::Call::set_split_paused { .. }
+            | pallet_conditional_ledger::Call::set_frozen { .. } => {
+                leaf(CallDomain::EmergencyPlaybook)
+            }
             pallet_conditional_ledger::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::Market(call) => match call {
@@ -595,6 +599,8 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_market::Call::sell { .. }
             | pallet_market::Call::crank_observe { .. }
             | pallet_market::Call::reap { .. } => leaf(CallDomain::Public),
+            pallet_market::Call::freeze_creation { .. }
+            | pallet_market::Call::set_frozen { .. } => leaf(CallDomain::EmergencyPlaybook),
             pallet_market::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::Welfare(call) => match call {
@@ -654,7 +660,10 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_guardian::Call::ratify_action { .. }
             | pallet_guardian::Call::renew_playbook { .. }
             | pallet_guardian::Call::uphold_veto { .. }
-            | pallet_guardian::Call::recall { .. } => leaf(CallDomain::ConstitutionalValues),
+            | pallet_guardian::Call::recall { .. }
+            | pallet_guardian::Call::set_playbook_registered { .. } => {
+                leaf(CallDomain::ConstitutionalValues)
+            }
             pallet_guardian::Call::propose_action { .. }
             | pallet_guardian::Call::approve_action { .. } => leaf(CallDomain::Public),
             pallet_guardian::Call::__Ignore(_, _) => denied(),
@@ -688,7 +697,8 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_epoch::Call::mark_failed_executed { .. }
             | pallet_epoch::Call::retry_exhausted_to_measurement { .. }
             | pallet_epoch::Call::expire_or_stale_queue { .. } => leaf(CallDomain::Public),
-            pallet_epoch::Call::void_cohort { .. } => leaf(CallDomain::EmergencyPlaybook),
+            pallet_epoch::Call::void_cohort { .. }
+            | pallet_epoch::Call::set_intake_paused { .. } => leaf(CallDomain::EmergencyPlaybook),
             pallet_epoch::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::ExecutionGuard(call) => match call {
@@ -812,7 +822,14 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
     fn rederive_call(
         call: &RuntimeCall,
     ) -> Result<pallet_execution_guard::ReDerivedCall, DispatchError> {
-        if live_execution_freeze() {
+        // Preserve the legacy fail-closed classifier rejection for an
+        // unacknowledged breach. Once guardians have explicitly suspended the
+        // current breach, allow domain re-derivation to reach guard check (9),
+        // which reports the more specific GateSuspended reason. Check (10)
+        // and dispatch-time safety filtering remain unchanged.
+        if live_execution_freeze()
+            && !<crate::configs::RuntimeGuardianState as pallet_execution_guard::GuardianState>::gate_suspended()
+        {
             return Err(DispatchError::Other("live execution freeze active"));
         }
         if Self::authorize_upgrade_hash(call).is_some() {
@@ -1002,6 +1019,7 @@ pub fn is_values_enactment_leaf(call: &RuntimeCall) -> bool {
             | RuntimeCall::Guardian(pallet_guardian::Call::renew_playbook { .. })
             | RuntimeCall::Guardian(pallet_guardian::Call::uphold_veto { .. })
             | RuntimeCall::Guardian(pallet_guardian::Call::recall { .. })
+            | RuntimeCall::Guardian(pallet_guardian::Call::set_playbook_registered { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::set_members { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::resolve_challenge { .. })
             | RuntimeCall::Oracle(pallet_oracle::Call::adjudicate { .. })
