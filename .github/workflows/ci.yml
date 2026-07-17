@@ -78,6 +78,54 @@ jobs:
       - name: Check local Markdown links
         run: python3 tools/ci/check-doc-links.py
 
+  weights:
+    name: Weight regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test weight regression gate
+        run: python3 tools/ci/check-weight-regression.py --self-test
+      - name: Check committed weight diffs
+        run: python3 tools/ci/check-weight-regression.py
+
+  benchmark-smoke:
+    name: Benchmark smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # substrate-wasm-builder needs the Wasm runtime target on a clean runner.
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native build dependencies
+        # omni-bencher's dependency tree reaches litep2p, whose build script
+        # needs `protoc`; the workspace build needs libclang (bindgen).
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
+      - name: Install FRAME omni-bencher
+        run: cargo install --locked frame-omni-bencher --version 0.15.0
+      - name: Build benchmark runtime Wasm
+        run: cargo build --locked --release -p bleavit-runtime --features runtime-benchmarks
+      - name: Execute every pallet benchmark
+        # pallet_assets::migration_v2_foreign_asset_set_reserve_weight is the
+        # weight function for pallet-assets's v2 storage migration, which a
+        # chain born at the current storage version never executes. Upstream's
+        # benchmark asserts `Asset::iter_keys().next()` equals its own created
+        # asset — an empty-map assumption the development genesis breaks by
+        # design: it registers the 02 §8 Location-keyed USDC at genesis and the
+        # USDC key hashes before the benchmark's. Every executable call/hook
+        # weight remains covered (15 §4.5).
+        run: >-
+          frame-omni-bencher v1 benchmark pallet
+          --runtime target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
+          --all --steps 2 --repeat 1
+          --exclude-extrinsics pallet_assets::migration_v2_foreign_asset_set_reserve_weight
+
   # B7 environment release artifacts — 15 §4.7; 02 §11.
   environments:
     name: Environment definitions
@@ -91,7 +139,9 @@ jobs:
         with:
           node-version: '22'
       - name: Install environment validator dependencies
-        run: pip install pyyaml==6.0.2
+        run: pip install pyyaml==6.0.2 websockets==15.0.1
+      - name: Compile environment tooling
+        run: python3 -m py_compile tools/env/*.py tools/env/tests/*.py
       - name: Run environment validator tests
         run: python3 -m unittest discover -s tools/env/tests
       - name: Validate committed environment definitions

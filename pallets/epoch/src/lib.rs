@@ -15,7 +15,7 @@ pub use weights::WeightInfo;
 pub mod weights;
 
 #[cfg(feature = "runtime-benchmarks")]
-mod benchmarking;
+pub mod benchmarking;
 #[cfg(test)]
 mod mock;
 #[cfg(test)]
@@ -143,7 +143,11 @@ pub trait ProposalBondCurrency<AccountId> {
 
 pub trait PreimageAccess {
     fn len(hash: H256) -> Option<u32>;
-    fn request(hash: H256);
+    /// Acquire epoch's qualification-to-queue ownership reference. The
+    /// implementation participates in the caller's storage transaction.
+    fn request(hash: H256) -> DispatchResult;
+    /// Release one reference owned by epoch. Implementations must be
+    /// idempotent/fail-safe: a missing underlying request is a no-op.
     fn unrequest(hash: H256);
 }
 
@@ -187,6 +191,7 @@ pub trait LedgerResolution {
 
 #[cfg(feature = "runtime-benchmarks")]
 pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
+    fn prime_submit_epoch(epoch: EpochId);
     fn constitutional_values_origin() -> RuntimeOrigin;
     fn guardian_origin() -> RuntimeOrigin;
     fn execution_guard_origin() -> RuntimeOrigin;
@@ -199,7 +204,11 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
         epoch: EpochId,
     ) -> Proposal<AccountId>;
     fn prime_decision(pid: ProposalId, epoch: EpochId, gates: bool) -> MarketSet;
+    /// Saturate the real execution-guard aggregate before a decision enqueues.
+    fn prime_guard_enqueue(pid: ProposalId);
     fn prime_settlement(epoch: EpochId);
+    fn prime_keeper_rebate() {}
+    fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 }
 
 /// `Get<EpochId>` projection for sibling pallets (treasury/registry/welfare).
@@ -632,6 +641,7 @@ pub mod pallet {
                     && !proposal.rerun
                     && !proposal.extended
                     && !proposal.delayed_once
+                    && proposal.payload_len <= futarchy_primitives::kernel::MAX_BYTES
                     && proposal.markets.is_none()
                     && proposal.maturity.is_none()
                     && proposal.grace_end.is_none()
@@ -750,8 +760,9 @@ pub mod pallet {
                     } else {
                         None
                     };
-                    let preimage_ok =
-                        T::Preimage::len(proposal.payload_hash) == Some(proposal.payload_len);
+                    let preimage_ok = proposal.payload_len
+                        <= futarchy_primitives::kernel::MAX_BYTES
+                        && T::Preimage::len(proposal.payload_hash) == Some(proposal.payload_len);
                     let events_before = state.events.len();
                     let active_metric_spec = T::Constitution::active_metric_spec_version();
                     state.tick(
@@ -926,8 +937,8 @@ pub mod pallet {
                     true
                 };
                 let guards = DecisionGuards {
-                    preimage_ok: T::Preimage::len(proposal.payload_hash)
-                        == Some(proposal.payload_len),
+                    preimage_ok: proposal.payload_len <= futarchy_primitives::kernel::MAX_BYTES
+                        && T::Preimage::len(proposal.payload_hash) == Some(proposal.payload_len),
                     resource_locks_held: state.resource_locks_held(pid),
                     process_hold: T::Oracle::any_open_dispute_touching(proposal.metric_spec)
                         || T::Guardian::hold_active(pid)
@@ -1016,6 +1027,10 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::settle_cohort(*batch))]
         pub fn settle_cohort(origin: OriginFor<T>, epoch: EpochId, batch: u32) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            ensure!(
+                batch > 0 && batch <= futarchy_primitives::kernel::SETTLE_COHORT_MAX_ITEMS,
+                Error::<T>::BatchTooLarge
+            );
             let params = Self::live_params()?;
             let now = Self::now();
             let result = frame_support::storage::with_storage_layer(|| {
@@ -1024,6 +1039,12 @@ pub mod pallet {
                 let baseline_twap =
                     T::Market::twap_full(baseline).ok_or(Error::<T>::BadDecisionInput)?;
                 let mut state = Self::load();
+                let cohort_members = state
+                    .cohorts
+                    .iter()
+                    .find(|cohort| cohort.epoch == epoch)
+                    .map(|cohort| cohort.proposals.clone())
+                    .ok_or(Error::<T>::BadState)?;
                 state.horizon_k = params.horizon_k;
                 state.epoch.next_length = params.epoch_length;
                 Self::sync_clock(&mut state, now).map_err(Self::map_core_error)?;
@@ -1038,6 +1059,11 @@ pub mod pallet {
                         now,
                     )
                     .map_err(Self::map_core_error)?;
+                if !state.cohorts.iter().any(|cohort| cohort.epoch == epoch) {
+                    for pid in cohort_members {
+                        Self::release_qualification_preimage(pid);
+                    }
+                }
                 Self::persist(state)
             });
             if result.is_ok() {
@@ -1382,7 +1408,7 @@ pub mod pallet {
         }
 
         #[cfg(any(test, feature = "runtime-benchmarks"))]
-        pub(crate) fn seed(state: EpochState<T::AccountId>) -> DispatchResult {
+        pub fn seed(state: EpochState<T::AccountId>) -> DispatchResult {
             Self::persist(state)
         }
 
@@ -1400,7 +1426,7 @@ pub mod pallet {
             if QualificationPreimageRequests::<T>::count() >= MAX_LIVE_PROPOSALS_BOUND {
                 return Err(CoreError::TooManyLiveProposals);
             }
-            T::Preimage::request(payload_hash);
+            T::Preimage::request(payload_hash).map_err(|_| CoreError::BadDecisionInput)?;
             QualificationPreimageRequests::<T>::insert(pid, payload_hash);
             Ok(())
         }
