@@ -54,16 +54,19 @@ python3 tools/env/run-evidence.py \
   --commit "$(git rev-parse HEAD)"
 ```
 
-All Chopsticks rows are release-tier and currently have no milestone gate. The
-normative adjacent Markdown card sequences and the mandatory closing try-state
-are not executed by the runner: they remain manual/deferred release obligations
-under 15 §4.7 and 15 §1, logged for ratification. Before each scenario, the
-runner removes its exact database and SQLite sidecars so an interrupted prior
-run cannot contaminate the generated-genesis fork. It removes generated state
-again before evidence is emitted, deletes any prior evidence, requires clean
-committed evidence inputs, and hashes every committed regular file while
-rejecting symlinks. Cherry-picked `--suites` runs are report-only. The
-`run-evidence.json` schema and byte-exact inventory contract are documented in
+The `base` row remains ungated because it attests only boot, injected-state,
+blocks, and live `:code` binding. All 10 scenario rows are evidence-gated on
+SQ-151 card-depth execution: the runner skips them by default and blocks
+evidence while they remain gated. Evidence emission is additionally blocked
+until the mandatory closing try-state leg lands (15 §1; SQ-152). These are the
+connector-review P1 fail-closed enforcements for obligations previously deferred
+by documentation. Before each scenario, the runner removes its exact database
+and SQLite sidecars so an interrupted prior run cannot contaminate the
+generated-genesis fork. It removes generated state again before evidence is
+emitted, deletes any prior evidence, requires clean committed evidence inputs,
+and hashes every committed regular file while rejecting symlinks. Cherry-picked
+`--suites` runs are report-only. The `run-evidence.json` schema and byte-exact
+inventory contract are documented in
 [`tools/release/README.md`](../tools/release/README.md); release assembly remains
 the final gate.
 

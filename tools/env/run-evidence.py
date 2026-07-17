@@ -34,6 +34,8 @@ DEFAULT_ZOMBIENET_BINARY = Path("zombienet/bin/zombienet")
 DEFAULT_NODE_BINARY = Path("target/release/bleavit-node")
 TERMINATE_GRACE_SECONDS = 5.0
 SCRIPT_ROOT = Path(__file__).resolve().parents[2]
+# 15 §1 requires this closing check in every environment job; SQ-152 lands it.
+TRY_STATE_CHECK = "try-state"
 
 
 class EvidenceError(RuntimeError):
@@ -932,6 +934,20 @@ def validate_release_evidence_completeness(
             f"15 §5: evidence for {kind} requires every release-tier suite to be "
             "attempted and passed; missing or non-passing suite(s): "
             + ", ".join(incomplete)
+        )
+    missing_try_state = [
+        row["id"]
+        for row in rows
+        if row["kind"] == kind
+        and row["result"] == "pass"
+        and TRY_STATE_CHECK not in row.get("checks", [])
+    ]
+    if missing_try_state:
+        raise EvidenceError(
+            f"15 §1: evidence for {kind} requires the closing try-state check on "
+            "every passing suite; no driver executes it yet (SQ-152) — evidence "
+            "emission is blocked until the try-runtime-cli leg lands: "
+            + ", ".join(missing_try_state)
         )
 
 

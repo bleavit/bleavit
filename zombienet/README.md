@@ -113,10 +113,10 @@ boot/liveness assertions remain live.
 
 ## Mandatory closing try-state
 
-The evidence runner does not yet execute the mandatory closing try-state. It
-remains the standing “15 §4.7 try-runtime-cli leg” follow-up and a
-release-blocking obligation under 15 §1. With the collator RPC printed by
-Zombienet (replace the port if allocated differently), run it manually:
+The evidence runner does not yet execute the mandatory closing try-state.
+Evidence emission is blocked (15 §1; SQ-152) until the leg lands: the runner
+refuses to emit rather than emitting without it. With the collator RPC printed
+by Zombienet (replace the port if allocated differently), run it manually:
 
 ```bash
 try-runtime \

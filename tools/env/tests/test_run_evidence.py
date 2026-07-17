@@ -21,6 +21,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "tools" / "env" / "run-evidence.py"
 ASSEMBLE_SCRIPT = ROOT / "tools" / "release" / "assemble-release.py"
+RUNNER_SPEC = importlib.util.spec_from_file_location(
+    "run_evidence_for_env_tests", SCRIPT
+)
+assert RUNNER_SPEC is not None and RUNNER_SPEC.loader is not None
+RUNNER = importlib.util.module_from_spec(RUNNER_SPEC)
+sys.modules[RUNNER_SPEC.name] = RUNNER
+RUNNER_SPEC.loader.exec_module(RUNNER)
 ASSEMBLE_SPEC = importlib.util.spec_from_file_location(
     "assemble_release_for_env_tests", ASSEMBLE_SCRIPT
 )
@@ -143,6 +150,29 @@ class RunEvidenceTests(unittest.TestCase):
             scenario, encoding="utf-8"
         )
 
+        chopsticks_scenarios = (
+            "upgrade-transition",
+            "stale-queue",
+            "void-epoch",
+            "precondition-failures",
+            "pb-depeg",
+            "pb-migration",
+            "pb-oracle-void",
+            "pb-halt-intake",
+            "pb-reserve",
+            "pb-ledger-freeze",
+        )
+        for index, name in enumerate(chopsticks_scenarios, start=1):
+            (self.root / "chopsticks" / "scenarios" / f"{name}.yml").write_text(
+                scenario.replace(
+                    f"port: {port}", f"port: {port + index}"
+                ).replace(
+                    "chopsticks/.state/fixture.sqlite",
+                    f"chopsticks/.state/{name}.sqlite",
+                ),
+                encoding="utf-8",
+            )
+
         suites = {
             "schema": "bleavit.env-suites.v1",
             "suites": [
@@ -182,6 +212,18 @@ class RunEvidenceTests(unittest.TestCase):
                     "timeout_seconds": 10,
                     "spec": "15 §4.7; 02 §11",
                 },
+                *[
+                    {
+                        "id": name,
+                        "kind": "chopsticks",
+                        "path": f"chopsticks/scenarios/{name}.yml",
+                        "tier": "release",
+                        "gated_on": ["SQ-151 card-depth execution"],
+                        "timeout_seconds": 10,
+                        "spec": "15 §4.7; 02 §11",
+                    }
+                    for name in chopsticks_scenarios
+                ],
             ],
         }
         (self.root / "tools" / "env" / "suites.json").write_text(
@@ -411,10 +453,49 @@ class RunEvidenceTests(unittest.TestCase):
         for name in ("zombienet", "chopsticks"):
             self.assertFalse((self.root / name / "run-evidence.json").exists())
 
-    @unittest.skipUnless(HAS_WEBSOCKETS_SYNC, "websockets.sync requires websockets 15.x")
+    def synthetic_passing_rows(
+        self, *kinds: str
+    ) -> tuple[list[object], list[dict[str, object]]]:
+        suites = RUNNER.load_manifest(self.root)
+        selected_kinds = set(kinds or RUNNER.KINDS)
+        rows: list[dict[str, object]] = []
+        for suite in suites:
+            if suite.kind not in selected_kinds or suite.tier != "release":
+                continue
+            checks = (
+                ["zndsl"]
+                if suite.kind == "zombienet"
+                else ["boot", "injected-state", "blocks", "code-binding"]
+            )
+            rows.append(
+                {
+                    "id": suite.identifier,
+                    "kind": suite.kind,
+                    "result": "pass",
+                    "duration_seconds": 0.001,
+                    "gated_on": list(suite.gated_on),
+                    "checks": [*checks, RUNNER.TRY_STATE_CHECK],
+                }
+            )
+        return suites, rows
+
+    def emit_synthetic_evidence(
+        self, *kinds: str, commit: str | None = None
+    ) -> list[str]:
+        suites, rows = self.synthetic_passing_rows(*kinds)
+        return RUNNER.emit_evidence(
+            self.root,
+            suites,
+            rows,
+            self.wasm,
+            sha256(self.wasm),
+            commit or self.commit,
+            "release",
+        )
+
     def test_fully_green_run_produces_evidence_accepted_by_real_consumer(self) -> None:
-        result = self.run_runner()
-        self.assertEqual(result.returncode, 0, result.stderr)
+        produced = self.emit_synthetic_evidence()
+        self.assertEqual(produced, ["chopsticks", "zombienet"])
         wasm_hash = sha256(self.wasm)
         for suite in ("zombienet", "chopsticks"):
             directory = self.root / suite
@@ -431,9 +512,15 @@ class RunEvidenceTests(unittest.TestCase):
                 sha256(self.root / "tools" / "env" / "pins.env"),
             )
             expected_checks = (
-                ["zndsl"]
+                ["zndsl", RUNNER.TRY_STATE_CHECK]
                 if suite == "zombienet"
-                else ["boot", "injected-state", "blocks", "code-binding"]
+                else [
+                    "boot",
+                    "injected-state",
+                    "blocks",
+                    "code-binding",
+                    RUNNER.TRY_STATE_CHECK,
+                ]
             )
             self.assertTrue(evidence["suites_run"])
             for row in evidence["suites_run"]:
@@ -442,11 +529,43 @@ class RunEvidenceTests(unittest.TestCase):
                 directory, suite, wasm_hash, self.commit
             )
             self.assertEqual(errors, [], f"{suite}: {errors}")
+
+    def test_fully_green_cli_run_is_blocked_without_try_state(self) -> None:
+        result = self.run_runner("--kind", "zombienet")
+
+        self.assertNotEqual(result.returncode, 0)
+        output = result.stdout + result.stderr
+        self.assertIn("SQ-152", output)
+        self.assertIn("01-smoke, 03-keeper-loss", output)
+        self.assert_no_evidence()
+
+    @unittest.skipUnless(HAS_WEBSOCKETS_SYNC, "websockets.sync requires websockets 15.x")
+    def test_default_chopsticks_release_run_skips_gated_scenarios(self) -> None:
+        result = self.run_runner("--kind", "chopsticks", "--tier", "release")
+
+        self.assertNotEqual(result.returncode, 0)
         rows = self.read_report_rows()
-        self.assertEqual(rows["01-smoke"]["result"], "pass")
-        self.assertEqual(rows["03-keeper-loss"]["result"], "pass")
-        self.assertEqual(rows["09-soak"]["result"], "excluded-tier")
         self.assertEqual(rows["base"]["result"], "pass")
+        scenario_ids = (
+            "upgrade-transition",
+            "stale-queue",
+            "void-epoch",
+            "precondition-failures",
+            "pb-depeg",
+            "pb-migration",
+            "pb-oracle-void",
+            "pb-halt-intake",
+            "pb-reserve",
+            "pb-ledger-freeze",
+        )
+        for identifier in scenario_ids:
+            self.assertEqual(rows[identifier]["result"], "skipped-gated")
+            self.assertEqual(
+                rows[identifier]["gated_on"], ["SQ-151 card-depth execution"]
+            )
+            self.assertIn(identifier, result.stdout + result.stderr)
+        self.assertIn("SQ-151 card-depth execution", result.stdout + result.stderr)
+        self.assert_no_evidence()
 
     def test_failing_suite_returns_nonzero_without_evidence(self) -> None:
         result = self.run_runner(
@@ -588,10 +707,8 @@ class RunEvidenceTests(unittest.TestCase):
             "dirty\n", encoding="utf-8"
         )
 
-        result = self.run_runner("--kind", "zombienet")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("untracked.txt", result.stderr + result.stdout)
+        with self.assertRaisesRegex(RUNNER.EvidenceError, "untracked.txt"):
+            self.emit_synthetic_evidence("zombienet")
         self.assert_no_evidence()
 
     def test_wasm_chain_spec_mismatch_fails_before_a_suite_runs(self) -> None:
@@ -608,15 +725,13 @@ class RunEvidenceTests(unittest.TestCase):
 
     def test_dirty_environment_tree_refuses_evidence(self) -> None:
         (self.root / "chopsticks" / "stray.txt").write_text("dirty\n", encoding="utf-8")
-        result = self.run_runner("--kind", "zombienet")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("stray.txt", result.stderr + result.stdout)
+        with self.assertRaisesRegex(RUNNER.EvidenceError, "stray.txt"):
+            self.emit_synthetic_evidence("zombienet")
         self.assert_no_evidence()
 
     def test_head_must_equal_requested_commit(self) -> None:
-        result = self.run_runner("--kind", "zombienet", commit="b" * 40)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("commit", (result.stderr + result.stdout).lower())
+        with self.assertRaisesRegex(RUNNER.EvidenceError, "does not equal git HEAD"):
+            self.emit_synthetic_evidence("zombienet", commit="b" * 40)
         self.assert_no_evidence()
 
     def test_symlink_in_environment_inventory_refuses_evidence(self) -> None:
@@ -626,17 +741,15 @@ class RunEvidenceTests(unittest.TestCase):
         except OSError as error:
             self.skipTest(f"symlinks unavailable: {error}")
         self.commit = self._commit("add symlink")
-        result = self.run_runner("--kind", "zombienet")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("symlink", (result.stderr + result.stdout).lower())
+        with self.assertRaisesRegex(RUNNER.EvidenceError, "symlink"):
+            self.emit_synthetic_evidence("zombienet")
         self.assert_no_evidence()
 
     def test_cleanup_removes_generated_state_but_preserves_gitignores(self) -> None:
         state = self.root / "chopsticks" / ".state"
         state.mkdir()
         (state / "fixture.sqlite").write_bytes(b"generated")
-        result = self.run_runner("--kind", "zombienet")
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.emit_synthetic_evidence("zombienet")
         self.assertEqual(
             sorted(path.name for path in (self.root / "zombienet" / "bin").iterdir()),
             [".gitignore"],
@@ -856,24 +969,23 @@ class RunEvidenceTests(unittest.TestCase):
         self.assert_no_evidence()
 
     def test_post_suite_chain_spec_mutation_refuses_evidence(self) -> None:
-        result = self.run_runner(
-            "--kind",
-            "zombienet",
-            environment={"FAKE_ZOMBIENET_MUTATE_SPEC": "1"},
+        raw_spec = self.root / "zombienet" / "specs" / "out" / "bleavit-drill-raw.json"
+        raw_spec.write_text(
+            '{"genesis":{"raw":{"top":{"0x3a636f6465":"0x00"}}}}\n',
+            encoding="utf-8",
         )
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(
-            "does not match release runtime.wasm",
-            result.stdout + result.stderr,
-        )
+        with self.assertRaisesRegex(
+            RUNNER.EvidenceError, "does not match release runtime.wasm"
+        ):
+            self.emit_synthetic_evidence("zombienet")
         self.assert_no_evidence()
 
     def test_stale_evidence_is_replaced_without_self_hashing(self) -> None:
         evidence_path = self.root / "zombienet" / "run-evidence.json"
         evidence_path.write_text('{"stale":true}\n', encoding="utf-8")
-        result = self.run_runner("--kind", "zombienet")
-        self.assertEqual(result.returncode, 0, result.stderr)
+        RUNNER.remove_prior_evidence(self.root)
+        self.emit_synthetic_evidence("zombienet")
         evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
         self.assertEqual(evidence["schema"], "bleavit.env-evidence.v1")
         self.assertNotIn("run-evidence.json", evidence["artifact_hashes"])
