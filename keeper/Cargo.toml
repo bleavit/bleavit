@@ -13,7 +13,7 @@ anyhow = "1.0.100"
 clap = { version = "4.5.54", features = ["derive"] }
 futures = "0.3.31"
 parity-scale-codec = { version = "3.7.5", features = ["derive"] }
-prometheus = { version = "0.13.4", default-features = false }
+prometheus = { version = "0.14.0", default-features = false }
 rand = "0.10.2"
 serde = { version = "1.0.228", features = ["derive"] }
 scale-info = { version = "2.11.6", features = ["derive"] }
