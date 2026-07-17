@@ -50,6 +50,12 @@ mod mock;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod property_tests;
+
+#[cfg(test)]
+mod differential_sweep;
+
 #[frame_support::pallet]
 pub mod pallet {
     use crate::weights::WeightInfo;
