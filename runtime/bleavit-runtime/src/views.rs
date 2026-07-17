@@ -150,13 +150,18 @@ fn quote_sentinel(max_trade: Balance) -> QuoteView {
 }
 
 /// Assemble `FutarchyApi::quote` per 02 §3/§4 and 04 §4/§6.
-/// Missing, closed, overflowing, inventory-invalid, or out-of-domain books use
-/// the G-1 zero sentinel; an existing book retains its real `b/4` maximum.
+/// Missing, trade-inadmissible, overflowing, inventory-invalid, or
+/// out-of-domain books use the G-1 zero sentinel; an existing book retains its
+/// real `b/4` maximum. The pallet-owned preflight is the same predicate called
+/// by `buy`/`sell`, including registered-window expiry (04 §6.4).
 pub fn quote(market: MarketId, side: TradeSide, amount: Balance) -> QuoteView {
     let Some(book) = pallet_market::Markets::<Runtime>::get(market) else {
         return quote_sentinel(0);
     };
     let max_trade = pallet_market::core_market::max_trade_amount(book.b);
+    if pallet_market::Pallet::<Runtime>::ensure_trade_admissible(market, &book).is_err() {
+        return quote_sentinel(max_trade);
+    }
     match pallet_market::core_market::quote(
         &book,
         side,
@@ -270,32 +275,45 @@ fn welfare_sentinel(epoch: u32, spec_version: u16, reserve_flag: bool) -> Welfar
     }
 }
 
-/// Assemble `FutarchyApi::welfare_current` per 02 §3/§4 and 05 §4.6.
+/// Assemble `FutarchyApi::welfare_current` per 02 §3/§4 and 05 §4.6/§4.7.
 /// Qualification and this view share the constitution's canonical active-spec
 /// selector, including its fail-closed `None` on a latest-activation tie. Per
 /// 02 §3 and 05 §4.6, two surfaces must never name different active specs.
 /// `spec_version: 0` in the G-1 sentinel means "no active spec"; that lossy
 /// encoding remains an open contract question, so this view does not invent a
-/// second encoding. A missing snapshot also returns the sentinel while keeping
-/// a uniquely selected version. Oracle reserve health is authoritative;
-/// constitution bit 7 is only its 02 §7.3 mirror.
+/// second encoding. The latest finalized snapshot for that spec is selected by
+/// a deterministic O(`MAX_SNAPSHOTS`) scan: production rejects snapshots for
+/// `epoch >= CurrentEpoch`, and `WelfareView.epoch` names the closed epoch whose
+/// pillars and gate flags are returned. A missing finalized snapshot keeps the
+/// uniquely selected version in the sentinel. Its false breach flags are
+/// welfare-core's pre-existing absent-epoch default (SQ-79), not an assertion
+/// that no breach exists. Oracle reserve health is authoritative; constitution
+/// bit 7 is only its 02 §7.3 mirror.
 pub fn welfare_current() -> WelfareView {
-    let epoch = <Runtime as pallet_welfare::Config>::CurrentEpoch::get();
+    let current_epoch = <Runtime as pallet_welfare::Config>::CurrentEpoch::get();
     let reserve_flag = pallet_oracle::Pallet::<Runtime>::reserve_unhealthy();
     let Some(spec_version) =
         <<Runtime as pallet_epoch::Config>::Constitution as pallet_epoch::ConstitutionAccess<
             AccountId,
         >>::active_metric_spec_version()
     else {
-        return welfare_sentinel(epoch, 0, reserve_flag);
+        return welfare_sentinel(current_epoch, 0, reserve_flag);
+    };
+    let Some(latest_finalized_epoch) = pallet_welfare::Snapshots::<Runtime>::iter_keys()
+        .filter_map(|(epoch, version)| {
+            (version == spec_version && epoch < current_epoch).then_some(epoch)
+        })
+        .max()
+    else {
+        return welfare_sentinel(current_epoch, spec_version, reserve_flag);
     };
     match pallet_welfare::Pallet::<Runtime>::welfare_state().current_view(
-        epoch,
+        latest_finalized_epoch,
         spec_version,
         reserve_flag,
     ) {
         Ok(view) => view,
-        Err(_) => welfare_sentinel(epoch, spec_version, reserve_flag),
+        Err(_) => welfare_sentinel(current_epoch, spec_version, reserve_flag),
     }
 }
 

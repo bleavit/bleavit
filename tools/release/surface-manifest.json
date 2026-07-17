@@ -7,6 +7,11 @@
       "id": "b1b.compliance",
       "owner": "B1b",
       "reason": "SQ-140..SQ-150 remain open"
+    },
+    {
+      "id": "treasury.reserve_health_unwired",
+      "owner": "B1a",
+      "reason": "SQ-163: oracle ReserveHealth never reaches treasury set_reserve_impaired — 08 §1.2 fail-static NAV is not enforced"
     }
   ],
   "entries": [
@@ -542,6 +547,48 @@
       }
     },
     {
+      "id": "storage.attestor.members",
+      "kind": "storage",
+      "pallet": "Attestor",
+      "item": "Members",
+      "query": "value",
+      "required": true,
+      "citation": "02 §7.5",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "bounded_collections::bounded_vec::BoundedVec(Vec<attestor_core::AttestorInfo{account:[u8;32],bond:u128,false_count:u8,active:bool}>)"
+      }
+    },
+    {
+      "id": "storage.attestor.attestations",
+      "kind": "storage",
+      "pallet": "Attestor",
+      "item": "Attestations",
+      "query": "value",
+      "required": true,
+      "citation": "02 §7.5",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "bounded_collections::bounded_vec::BoundedVec(Vec<attestor_core::Attestation{id:u32,pid:u64,artifact_hash:[u8;32],statement_hash:[u8;32],attestor:[u8;32],submitted_at:u32,challenge_deadline:u32,challenge:Optionenum[None=0|Some=1(attestor_core::ChallengeStatusenum[Open=0{challenger:[u8;32],evidence_hash:[u8;32],bond:u128}|Upheld=1|Rejected=2])]}>)"
+      }
+    },
+    {
+      "id": "storage.attestor.next_attestation_id",
+      "kind": "storage",
+      "pallet": "Attestor",
+      "item": "NextAttestationId",
+      "query": "value",
+      "required": true,
+      "citation": "02 §7.5",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "u32"
+      }
+    },
+    {
       "id": "storage.system.account",
       "kind": "storage",
       "pallet": "System",
@@ -1031,6 +1078,102 @@
       }
     },
     {
+      "id": "event.ledger.gate_split",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "GateSplit",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "branch",
+            "type": "futarchy_primitives::Branchenum[Accept=0|Reject=1]"
+          },
+          {
+            "name": "gate",
+            "type": "futarchy_primitives::GateTypeenum[Survival=0|Security=1]"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.gate_merged",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "GateMerged",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "branch",
+            "type": "futarchy_primitives::Branchenum[Accept=0|Reject=1]"
+          },
+          {
+            "name": "gate",
+            "type": "futarchy_primitives::GateTypeenum[Survival=0|Security=1]"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.baseline_split",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "BaselineSplit",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.baseline_merged",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "BaselineMerged",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
       "id": "event.ledger.position_transferred",
       "kind": "event",
       "pallet": "ConditionalLedger",
@@ -1159,6 +1302,30 @@
       }
     },
     {
+      "id": "event.ledger.gate_redeemed",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "GateRedeemed",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "gate",
+            "type": "futarchy_primitives::GateTypeenum[Survival=0|Security=1]"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
       "id": "event.ledger.gate_settled",
       "kind": "event",
       "pallet": "ConditionalLedger",
@@ -1182,6 +1349,26 @@
           {
             "name": "outcome",
             "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.baseline_settled",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "BaselineSettled",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "s",
+            "type": "futarchy_primitives::FixedU64(u64)"
           }
         ]
       }
@@ -1231,6 +1418,30 @@
       }
     },
     {
+      "id": "event.ledger.baseline_redeemed",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "BaselineRedeemed",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "side",
+            "type": "futarchy_primitives::ScalarSideenum[Long=0|Short=1]"
+          },
+          {
+            "name": "payout",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
       "id": "event.ledger.vault_reaped",
       "kind": "event",
       "pallet": "ConditionalLedger",
@@ -1242,6 +1453,26 @@
           {
             "name": "pid",
             "type": "u64"
+          },
+          {
+            "name": "residue",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.baseline_vault_reaped",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "BaselineVaultReaped",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
           },
           {
             "name": "residue",

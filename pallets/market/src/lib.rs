@@ -430,7 +430,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let mut book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
-            Self::ensure_registered_window_open(market)?;
+            Self::ensure_trade_admissible(market, &book)?;
             let before = book.clone();
             Self::seal_due_windows(market, &before, Self::now_u64(), false)?;
             Self::accrue_contest(market, &before, Self::now_u64());
@@ -466,7 +466,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let mut book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
-            Self::ensure_registered_window_open(market)?;
+            Self::ensure_trade_admissible(market, &book)?;
             let before = book.clone();
             Self::seal_due_windows(market, &before, Self::now_u64(), false)?;
             Self::accrue_contest(market, &before, Self::now_u64());
@@ -499,13 +499,9 @@ pub mod pallet {
             let mut book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
             // The accumulator is sealed at Close (04 §2): a permissionless keeper must
             // not record observations on a Closed/Settled book (it would mutate the
-            // frozen TWAP). buy/sell already gate on `ensure_trading`; this closes the
-            // standalone crank path.
-            ensure!(
-                matches!(book.phase, MarketPhase::Trading | MarketPhase::Extended),
-                Error::<T>::NotTrading
-            );
-            Self::ensure_registered_window_open(market)?;
+            // frozen TWAP). The shared trade preflight closes the standalone
+            // crank path too.
+            Self::ensure_trade_admissible(market, &book)?;
             let before = book.clone();
             Self::seal_due_windows(market, &before, Self::now_u64(), false)?;
             Self::accrue_contest(market, &before, Self::now_u64());
@@ -1268,7 +1264,14 @@ pub mod pallet {
             Ok(())
         }
 
-        fn ensure_registered_window_open(id: MarketId) -> DispatchResult {
+        /// Read-only trade-admission preflight shared by dispatch and runtime
+        /// views (02 §3; 04 §6.4). Registered decision-window expiry is a
+        /// trading precondition even when a keeper has not moved the stored
+        /// phase out of `Trading`; the core owns the phase predicate.
+        pub fn ensure_trade_admissible(
+            id: MarketId,
+            book: &MarketBook<T::AccountId>,
+        ) -> DispatchResult {
             let windows = DecisionWindows::<T>::get(id);
             if let Some(latest_end) = windows.iter().map(|window| window.end).max() {
                 ensure!(
@@ -1276,6 +1279,7 @@ pub mod pallet {
                     Error::<T>::NotTrading
                 );
             }
+            market_core::ensure_trade_phase(book.phase).map_err(Error::<T>::from)?;
             Ok(())
         }
 

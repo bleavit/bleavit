@@ -637,7 +637,7 @@ pub fn quote<A>(
     amount: Balance,
     fee_bps: u128,
 ) -> Result<QuoteView, Error> {
-    ensure_trading(m.phase)?;
+    ensure_trade_phase(m.phase)?;
     let (post_long, post_short, cost) = match side {
         TradeSide::BuyLong => {
             let post_long = add(m.q_long, amount)?;
@@ -715,7 +715,7 @@ pub fn buy_book<A: Clone + Eq, L: LedgerOps<A>>(
     max_cost: Balance,
     block: u64,
 ) -> Result<Vec<Event<A>>, Error> {
-    ensure_trading(m.phase)?;
+    ensure_trade_phase(m.phase)?;
     ensure_trade_bounds(m.b, amount)?;
     let cost_fx = lmsr_buy_cost(
         fx(m.q_long)?,
@@ -810,7 +810,7 @@ pub fn sell_book<A: Clone + Eq, L: LedgerOps<A>>(
     min_proceeds: Balance,
     block: u64,
 ) -> Result<Vec<Event<A>>, Error> {
-    ensure_trading(m.phase)?;
+    ensure_trade_phase(m.phase)?;
     ensure_trade_bounds(m.b, amount)?;
     let proceeds_fx = lmsr_sell_proceeds(
         fx(m.q_long)?,
@@ -1409,7 +1409,10 @@ fn quantities_within_domain(q_long: Balance, q_short: Balance, b: Balance) -> bo
     let quotient = diff / b;
     quotient < bound || (quotient == bound && diff % b == 0)
 }
-fn ensure_trading(p: MarketPhase) -> Result<(), Error> {
+/// Read-only phase half of trade admission (04 §6.4). FRAME wrappers and
+/// runtime views reuse this predicate so a non-trading book can never quote as
+/// executable while `buy`/`sell` reject it.
+pub fn ensure_trade_phase(p: MarketPhase) -> Result<(), Error> {
     ensure!(
         matches!(p, MarketPhase::Trading | MarketPhase::Extended),
         Error::NotTrading

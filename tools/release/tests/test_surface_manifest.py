@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import struct
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "surface-manifest.json"
+CONTRACT = ROOT.parents[1] / "docs" / "architecture" / "02-integration-contract.md"
 MASK = (1 << 64) - 1
 P1 = 11400714785074694791
 P2 = 14029467366897019727
@@ -123,6 +125,69 @@ class SurfaceManifestTests(unittest.TestCase):
             if entry["id"] == "constant.identity.contract_version"
         )
         self.assertEqual(version["layout"], {"type": "u32", "value": "0x04000000"})
+
+    def test_section_six_ledger_events_and_section_seven_attestor_storage_are_exact(self) -> None:
+        expected_ledger_events = {
+            "Split",
+            "Merged",
+            "ScalarSplit",
+            "ScalarMerged",
+            "GateSplit",
+            "GateMerged",
+            "PositionTransferred",
+            "BaselineSplit",
+            "BaselineMerged",
+            "VaultResolved",
+            "VaultVoided",
+            "ScalarSettlementSet",
+            "GateSettled",
+            "BaselineSettled",
+            "Redeemed",
+            "ScalarRedeemed",
+            "ScalarPairRedeemed",
+            "GateRedeemed",
+            "VoidRedeemed",
+            "BaselineRedeemed",
+            "VaultReaped",
+            "BaselineVaultReaped",
+        }
+        expected_attestor_storage = {
+            "Members",
+            "Attestations",
+            "NextAttestationId",
+        }
+
+        contract = CONTRACT.read_text(encoding="utf-8")
+        ledger_row = next(
+            line
+            for line in contract.splitlines()
+            if line.startswith("| `pallet-conditional-ledger` |")
+        )
+        contract_ledger_events = {
+            declaration.split(maxsplit=1)[0]
+            for declaration in re.findall(r"`([^`]+)`", ledger_row.split("|", 2)[2])
+        }
+        attestor_section = contract.split("### 7.5 `pallet-attestor`", 1)[1].split(
+            "\n---\n", 1
+        )[0]
+        contract_attestor_storage = set(
+            re.findall(r"^\| `([^`]+)` \|", attestor_section, flags=re.MULTILINE)
+        )
+
+        manifest_ledger_events = {
+            entry["event"]
+            for entry in self.entries
+            if entry["kind"] == "event" and entry.get("pallet") == "ConditionalLedger"
+        }
+        manifest_attestor_storage = {
+            entry["item"]
+            for entry in self.entries
+            if entry["kind"] == "storage" and entry.get("pallet") == "Attestor"
+        }
+        self.assertEqual(contract_ledger_events, expected_ledger_events)
+        self.assertEqual(manifest_ledger_events, expected_ledger_events)
+        self.assertEqual(contract_attestor_storage, expected_attestor_storage)
+        self.assertEqual(manifest_attestor_storage, expected_attestor_storage)
 
     def test_newly_wired_v4_constant_layouts_are_frozen(self) -> None:
         expected = {
@@ -264,6 +329,9 @@ class SurfaceManifestTests(unittest.TestCase):
             or "B2 FutarchyApi runtime wiring" in entry.get("blocked_by", "")
         ]
         self.assertEqual(stale, [])
+        # Cross-surface compliance gaps fail the release closed here, because a
+        # surface that records successfully cannot be gated by a per-entry
+        # `blocked_by` (the assembler only reads that for missing recordings).
         self.assertEqual(
             self.manifest["release_blockers"],
             [
@@ -271,7 +339,15 @@ class SurfaceManifestTests(unittest.TestCase):
                     "id": "b1b.compliance",
                     "owner": "B1b",
                     "reason": "SQ-140..SQ-150 remain open",
-                }
+                },
+                {
+                    "id": "treasury.reserve_health_unwired",
+                    "owner": "B1a",
+                    "reason": (
+                        "SQ-163: oracle ReserveHealth never reaches treasury "
+                        "set_reserve_impaired — 08 §1.2 fail-static NAV is not enforced"
+                    ),
+                },
             ],
         )
 

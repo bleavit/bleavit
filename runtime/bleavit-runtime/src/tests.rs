@@ -6989,6 +6989,68 @@ fn view_quote_matches_core_rounding_and_fails_closed() {
 }
 
 #[test]
+fn view_quote_and_buy_share_closed_registered_window_preflight() {
+    use frame_support::{traits::ConstU32, BoundedVec};
+    use futarchy_primitives::{Branch, FixedU64, ScalarSide, TradeSide};
+    use pallet_market::core_market::{BookKind, MarketBook, TwapWindow};
+
+    development_ext().execute_with(|| {
+        const MARKET_ID: u64 = 42;
+        const B: u128 = 10_000_000_000;
+        const WINDOW_END: BlockNumber = 30;
+        let book = MarketBook::open(
+            MARKET_ID,
+            BookKind::Decision {
+                proposal: 7,
+                branch: Branch::Accept,
+            },
+            account(31),
+            account(32),
+            B,
+        );
+        pallet_market::Markets::<Runtime>::insert(MARKET_ID, book);
+        pallet_market::DecisionWindows::<Runtime>::insert(
+            MARKET_ID,
+            BoundedVec::<_, ConstU32<8>>::truncate_from(vec![TwapWindow {
+                start: 10,
+                trailing_start: 20,
+                end: WINDOW_END,
+                observations: 0,
+                stale_events: 0,
+                contest_notional_blocks: 0,
+                contest_accrued_until: WINDOW_END,
+                contest_valid: true,
+                close_spot: None,
+                sealed: false,
+            }]),
+        );
+        System::set_block_number(WINDOW_END.saturating_add(1));
+
+        let max_trade = pallet_market::core_market::max_trade_amount(B);
+        assert_eq!(
+            crate::views::quote(MARKET_ID, TradeSide::BuyLong, kernel::MIN_TRADE_USDC),
+            futarchy_primitives::QuoteView {
+                cost: 0,
+                fee: 0,
+                p_after_1e9: FixedU64(0),
+                max_trade,
+                within_domain: false,
+            }
+        );
+        assert_noop!(
+            Market::buy(
+                RuntimeOrigin::signed(account(33)),
+                MARKET_ID,
+                ScalarSide::Long,
+                kernel::MIN_TRADE_USDC,
+                Balance::MAX,
+            ),
+            pallet_market::Error::<Runtime>::NotTrading
+        );
+    });
+}
+
+#[test]
 fn view_account_positions_uses_vault_order_and_truncates_protocol_accounts() {
     use pallet_conditional_ledger::core_ledger::VaultInfo;
 
@@ -7125,7 +7187,7 @@ fn view_execution_queue_reuses_guard_projection_and_fails_closed() {
 }
 
 #[test]
-fn view_welfare_current_maps_snapshot_and_preserves_g1_context() {
+fn view_welfare_current_returns_latest_finalized_breached_snapshot() {
     use futarchy_primitives::FixedU64;
     use pallet_welfare::{MetricSpec, Pillar, SourceClass};
 
@@ -7153,9 +7215,12 @@ fn view_welfare_current_maps_snapshot_and_preserves_g1_context() {
     }
 
     development_ext().execute_with(|| {
+        const CURRENT_EPOCH: u32 = 2;
+        const LATEST_FINALIZED_EPOCH: u32 = CURRENT_EPOCH.saturating_sub(1);
+        pallet_epoch::EpochOf::<Runtime>::mutate(|info| info.index = CURRENT_EPOCH);
         pallet_oracle::ReserveHealth::<Runtime>::mutate(|health| health.unhealthy = true);
         let sentinel = crate::views::welfare_current();
-        assert_eq!(sentinel.epoch, 0);
+        assert_eq!(sentinel.epoch, CURRENT_EPOCH);
         assert_eq!(sentinel.spec_version, 0);
         assert_eq!(sentinel.w_current_1e9, FixedU64(0));
         assert!(sentinel.reserve_flag);
@@ -7167,13 +7232,32 @@ fn view_welfare_current_maps_snapshot_and_preserves_g1_context() {
         );
         pallet_welfare::MetricSpecs::<Runtime>::insert(
             3,
-            pallet_welfare::pallet::BoundedSpecSet::try_from(vec![spec(3, 1)])
+            pallet_welfare::pallet::BoundedSpecSet::try_from(vec![spec(3, 3)])
                 .expect("one future metric spec fits"),
         );
+        // Production can only record closed epochs (05 §4.6). Keep an older
+        // snapshot to prove the view deterministically selects the greatest
+        // finalized epoch for the canonical active spec.
         pallet_welfare::Snapshots::<Runtime>::insert(
             (0, 2),
             pallet_welfare::pallet::StoredSnapshot {
                 epoch: 0,
+                spec_version: 2,
+                s_pillar: FixedU64(1),
+                c_onchain: FixedU64(2),
+                c_attested: FixedU64(3),
+                p_pillar: FixedU64(4),
+                a_pillar: FixedU64(5),
+                gate_s: FixedU64(6),
+                gate_c: FixedU64(7),
+                welfare: FixedU64(8),
+                components: Default::default(),
+            },
+        );
+        pallet_welfare::Snapshots::<Runtime>::insert(
+            (LATEST_FINALIZED_EPOCH, 2),
+            pallet_welfare::pallet::StoredSnapshot {
+                epoch: LATEST_FINALIZED_EPOCH,
                 spec_version: 2,
                 s_pillar: FixedU64(101),
                 c_onchain: FixedU64(102),
@@ -7187,16 +7271,20 @@ fn view_welfare_current_maps_snapshot_and_preserves_g1_context() {
             },
         );
         pallet_welfare::GateBreachFlags::<Runtime>::insert(
-            0,
+            LATEST_FINALIZED_EPOCH,
             pallet_welfare::CoreGateBreachFlags {
                 s_breached: true,
-                c_breached: false,
-                day_bitmap: [1, 0],
+                c_breached: true,
+                day_bitmap: [1, 1],
             },
         );
+        assert!(!pallet_welfare::Snapshots::<Runtime>::contains_key((
+            CURRENT_EPOCH,
+            2
+        )));
 
         let view = crate::views::welfare_current();
-        assert_eq!(view.epoch, 0);
+        assert_eq!(view.epoch, LATEST_FINALIZED_EPOCH);
         assert_eq!(view.spec_version, 2);
         assert_eq!(view.s_pillar_1e9, FixedU64(101));
         assert_eq!(view.c_onchain_1e9, FixedU64(102));
@@ -7207,7 +7295,7 @@ fn view_welfare_current_maps_snapshot_and_preserves_g1_context() {
         assert_eq!(view.gate_c_1e9, FixedU64(107));
         assert_eq!(view.w_current_1e9, FixedU64(108));
         assert!(view.s_breached);
-        assert!(!view.c_breached);
+        assert!(view.c_breached);
         assert!(view.reserve_flag);
 
         pallet_welfare::MetricSpecs::<Runtime>::insert(
