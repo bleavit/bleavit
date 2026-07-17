@@ -464,6 +464,7 @@ Repo changes outside any milestone (config tweaks, user-driven edits) — one li
 - 2026-07-12 — Added `docs/design/claude-design-kit/` (user-requested): 7-file non-normative context pack for Claude Design (docs 10/11 copied verbatim with derived-copy headers; 00/01–09/13/14/15 distilled read-only) + `PROMPT.md`. Spec untouched; README/AGENTS repo maps updated.
 - 2026-07-13 — Project renamed "Bleevit" → "Bleavit" (user-requested): literal replace across the same 10 living/derived files. `docs/architecture/` still contains zero occurrences, so no frozen-doc amendment was needed.
 - 2026-07-17 — Added `.github/dependabot.yml` (user-requested), then simplified it in a follow-up PR: monthly Cargo updates for the root workspace plus weekly Cargo updates for the keeper workspace and weekly GitHub Actions updates. Specification and milestone status untouched.
+- 2026-07-17 — Documented a `git rerere` recommendation in AGENTS.md R-9 (user-requested): recurring `PLAN.md` merge conflicts across concurrent PRs (every PR touches `Current focus`/`Milestones`/`Session log`) prompted the note to enable `rerere.enabled` locally so repeated conflict shapes auto-resolve. Local git config only — nothing enforceable via a committed file; no spec or milestone status touched.
 
 ## Session log
 
