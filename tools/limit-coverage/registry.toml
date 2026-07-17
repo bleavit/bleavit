@@ -821,9 +821,9 @@ reason = "13 §2: attestation regime description; each independent numeric regis
 
 [[entry]]
 key = "dead-man-switch"
-class = "unwired"
-reason = "13 §2: DEAD_MAN_RELAY_BLOCKS is declared, but no runtime detector converts a 4,800-relay-block finality stall or overdue snapshot into the epoch/guard signal."
-owner = "B10"
+class = "dispatch-limit"
+behavior = "DEAD_MAN_ENGAGED"
+reason = "13 §2: the enforcement consequence is covered — with the flag engaged the real SafetyFilter freezes queued dispatch and the epoch clock pauses/rejects submission (marked runtime + epoch tests). The 4,800-relay-block/overdue-snapshot DETECTOR that raises the flag is still B10 (SQ-150); until it lands the flag is guardian/writer-raised only."
 
 [[entry]]
 key = "StaleEpochBound"
@@ -962,13 +962,15 @@ reason = "13 §4: pallet-migrations per-block service budget, not a dispatch arg
 
 [[entry]]
 key = "MIGRATION_CURSOR_MAX_LEN"
-class = "value"
-reason = "13 §4: cursor-bearing admin calls such as pallet_migrations::force_set_cursor exist, but are Root-gated, SafetyFilter-denied (SQ-104), and SCALE-bounded."
+class = "dispatch-limit"
+behavior = "BoundedVec exceeds its limit"
+reason = "13 §4: a bound+1 cursor on the Root-gated (SafetyFilter-denied, SQ-104) force_set_active_cursor is rejected by the real runtime's UncheckedExtrinsic admission — same behavior class as orc.max_proof_bytes (SQ-151)."
 
 [[entry]]
 key = "MIGRATION_IDENTIFIER_MAX_LEN"
-class = "value"
-reason = "13 §4: identifier-bearing pallet-migrations admin calls exist, but are Root-gated, SafetyFilter-denied (SQ-104), and SCALE-bounded."
+class = "dispatch-limit"
+behavior = "BoundedVec exceeds its limit"
+reason = "13 §4: a bound+1 historic-migration identifier on the Root-gated (SafetyFilter-denied, SQ-104) clear_historic is rejected by the real runtime's UncheckedExtrinsic admission — same behavior class as orc.max_proof_bytes (SQ-151)."
 
 [[entry]]
 key = "Registry filings (Incident/Milestone)"

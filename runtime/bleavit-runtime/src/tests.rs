@@ -682,6 +682,7 @@ fn execution_guard_enqueue_rejects_signed_callers() {
 
 #[test]
 fn guard_rejects_best_effort_wrappers_and_admits_atomic_batch_all() {
+    // limit-coverage: dead-man-switch
     use pallet_execution_guard::BatchDispatcher;
 
     development_ext().execute_with(|| {
@@ -1508,6 +1509,90 @@ fn tick_batch_bound_is_enforced_by_real_runtime_extrinsic_admission() {
     let error = UncheckedExtrinsic::decode(&mut encoded_oversized.as_slice())
         .expect_err("an 11-pid tick batch must fail real runtime extrinsic admission");
     assert!(error.to_string().contains("BoundedVec exceeds its limit"));
+}
+
+/// Shared byte-surgery core of the admission tests above: prove the at-bound
+/// call decodes as a real bare extrinsic, then splice the trailing
+/// `BoundedVec<u8, _>`'s compact length to bound+1 (adding one filler byte)
+/// and return the error the REAL `UncheckedExtrinsic::decode` rejects it
+/// with (each caller asserts the specific message). `tail_len` is the fixed
+/// number of encoded bytes that follow the bounded vec in the call.
+fn trailing_byte_vec_admission_error(call: RuntimeCall, bound: u32, tail_len: usize) -> String {
+    let call_bytes = call.encode();
+    let call_len = call_bytes.len();
+    let encoded_at_bound = UncheckedExtrinsic::new_bare(call).encode();
+    let mut at_bound_input = encoded_at_bound.as_slice();
+    let decoded_at_bound = UncheckedExtrinsic::decode(&mut at_bound_input);
+    assert!(decoded_at_bound.is_ok());
+    assert!(at_bound_input.is_empty());
+
+    let encoded_bound_len = Compact(bound).encode();
+    let items_start = call_bytes
+        .len()
+        .saturating_sub(tail_len)
+        .saturating_sub(bound as usize);
+    let length_start = items_start.saturating_sub(encoded_bound_len.len());
+    assert_eq!(
+        &call_bytes[length_start..items_start],
+        encoded_bound_len.as_slice()
+    );
+    let mut oversized_call = call_bytes;
+    oversized_call.splice(
+        length_start..items_start,
+        Compact(bound.saturating_add(1)).encode(),
+    );
+    oversized_call.insert(items_start, 0);
+
+    let mut inner_at_bound = encoded_at_bound.as_slice();
+    let declared_inner = Compact::<u32>::decode(&mut inner_at_bound)
+        .expect("valid bare extrinsic has a compact length")
+        .0 as usize;
+    assert_eq!(declared_inner, inner_at_bound.len());
+    let preamble_len = inner_at_bound.len().saturating_sub(call_len);
+    let mut oversized_inner = inner_at_bound[..preamble_len].to_vec();
+    oversized_inner.extend(oversized_call);
+    let mut encoded_oversized =
+        Compact(u32::try_from(oversized_inner.len()).expect("test extrinsic length fits u32"))
+            .encode();
+    encoded_oversized.extend(oversized_inner);
+
+    let error = UncheckedExtrinsic::decode(&mut encoded_oversized.as_slice())
+        .expect_err("a bound+1 vec must fail real runtime extrinsic admission");
+    error.to_string()
+}
+
+#[test]
+fn migration_cursor_bound_is_enforced_by_real_runtime_extrinsic_admission() {
+    // limit-coverage: MIGRATION_CURSOR_MAX_LEN
+    let bound = futarchy_primitives::bounds::MIGRATION_CURSOR_MAX_LEN;
+    let inner_cursor =
+        pallet_migrations::RawCursorOf::<Runtime>::try_from(vec![0u8; bound as usize])
+            .expect("the at-bound cursor constructs");
+    let call = RuntimeCall::Migrations(pallet_migrations::Call::force_set_active_cursor {
+        index: 0,
+        inner_cursor: Some(inner_cursor),
+        started_at: None,
+    });
+    // The encoded `started_at: None` is the single byte following the cursor.
+    let error = trailing_byte_vec_admission_error(call, bound, 1);
+    assert!(error.contains("BoundedVec exceeds its limit"));
+}
+
+#[test]
+fn migration_identifier_bound_is_enforced_by_real_runtime_extrinsic_admission() {
+    // limit-coverage: MIGRATION_IDENTIFIER_MAX_LEN
+    use pallet_migrations::HistoricCleanupSelector;
+
+    let bound = futarchy_primitives::bounds::MIGRATION_IDENTIFIER_MAX_LEN;
+    let identifier =
+        pallet_migrations::IdentifierOf::<Runtime>::try_from(vec![0u8; bound as usize])
+            .expect("the at-bound identifier constructs");
+    let call = RuntimeCall::Migrations(pallet_migrations::Call::clear_historic {
+        selector: HistoricCleanupSelector::Specific(vec![identifier]),
+    });
+    // The single identifier's bytes are the encoding's tail.
+    let error = trailing_byte_vec_admission_error(call, bound, 0);
+    assert!(error.contains("BoundedVec exceeds its limit"));
 }
 
 #[test]

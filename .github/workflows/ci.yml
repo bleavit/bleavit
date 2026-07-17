@@ -5,6 +5,11 @@ on:
   push:
     branches: [main]
 
+# Every job only checks out the tree and runs tests/validators — the token
+# never needs write scopes (CodeQL: actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
 jobs:
   rust:
     name: Rust workspace

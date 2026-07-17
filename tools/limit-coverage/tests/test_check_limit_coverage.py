@@ -107,7 +107,12 @@ class LimitCoverageTests(unittest.TestCase):
         self.write("tools/limit-coverage/registry.toml", BASE_MANIFEST)
         self.write("tools/limit-coverage/genesis-keys.json", '["epoch.length"]\n')
         self.write("pallets/epoch/src/tests.rs", BASE_RUST)
-        self.write("PLAN.md", "| ID | Description |\n|---|---|\n| B10 | Wiring |\n")
+        self.write(
+            "PLAN.md",
+            "| ID | Milestone | Spec | Depends | Status | Notes |\n"
+            "|---|---|---|---|---|---|\n"
+            "| B10 | Wiring | 13 | — | ⬜ | pending |\n",
+        )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -328,6 +333,37 @@ class LimitCoverageTests(unittest.TestCase):
         )
         self.write("tools/limit-coverage/registry.toml", manifest)
         self.assert_fails_with("unknown owner 'NOPE'")
+
+    def test_unwired_exemption_expires_when_its_owner_completes(self) -> None:
+        manifest = BASE_MANIFEST.replace(
+            'class = "dispatch-limit"\nerror = "Epoch::IntakeFull"',
+            'class = "unwired"\nreason = "deferred"\nowner = "B10"',
+        )
+        self.write("tools/limit-coverage/registry.toml", manifest)
+        self.assertEqual(self.failures(), [])
+        self.write(
+            "PLAN.md",
+            "| ID | Milestone | Spec | Depends | Status | Notes |\n"
+            "|---|---|---|---|---|---|\n"
+            "| B10 | Wiring | 13 | — | ✅ | done |\n",
+        )
+        self.assert_fails_with("unwired key 'IntakeQueue' names completed owner 'B10'")
+
+    def test_consumer_binding_expires_when_b10_completes(self) -> None:
+        manifest = BASE_MANIFEST.replace(
+            'class = "param-bounds"\ngenesis = true',
+            'class = "param-bounds"\ngenesis = true\n'
+            'consumer_binding = "kernel-constant (B10)"',
+        )
+        self.write("tools/limit-coverage/registry.toml", manifest)
+        self.assertEqual(self.failures(), [])
+        self.write(
+            "PLAN.md",
+            "| ID | Milestone | Spec | Depends | Status | Notes |\n"
+            "|---|---|---|---|---|---|\n"
+            "| B10 | Wiring | 13 | — | ✅ | done |\n",
+        )
+        self.assert_fails_with("consumer_binding defers to B10, which is complete")
 
 
 if __name__ == "__main__":

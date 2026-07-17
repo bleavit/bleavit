@@ -625,17 +625,31 @@ def scan_markers(root: Path) -> tuple[list[MarkerReference], list[str]]:
     return references, failures
 
 
-def load_milestone_ids(path: Path) -> tuple[set[str], list[str]]:
+def load_milestone_ids(path: Path) -> tuple[set[str], set[str], list[str]]:
+    """Return (all milestone ids, ✅-completed milestone ids, failures).
+
+    Completion is read from the Status column (cell 5) of the six-column
+    milestone tables so that an `unwired` exemption mechanically expires: the
+    moment its owner milestone flips ✅ the gate goes red until the surface's
+    real past-limit test replaces the exemption (I-22's "fails CI until the
+    test exists", deferred — never waived)."""
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
-        return set(), [f"cannot load milestone owners from {path}: {error}"]
-    identifiers = set(
-        re.findall(r"^\|\s*([A-Za-z][A-Za-z0-9]*)\s*\|", text, flags=re.MULTILINE)
-    )
+        return set(), set(), [f"cannot load milestone owners from {path}: {error}"]
+    identifiers: set[str] = set()
+    completed: set[str] = set()
+    for line in text.splitlines():
+        match = re.match(r"^\|\s*([A-Za-z][A-Za-z0-9]*)\s*\|", line)
+        if not match:
+            continue
+        identifiers.add(match.group(1))
+        cells = [cell.strip() for cell in line.split("|")]
+        if len(cells) >= 6 and "✅" in cells[5]:
+            completed.add(match.group(1))
     if not identifiers:
-        return set(), [f"PLAN.md contains no milestone table row identifiers"]
-    return identifiers, []
+        return set(), set(), ["PLAN.md contains no milestone table row identifiers"]
+    return identifiers, completed, []
 
 
 def validate(root: Path) -> tuple[list[str], list[InventoryEntry], dict[str, dict[str, Any]]]:
@@ -648,7 +662,9 @@ def validate(root: Path) -> tuple[list[str], list[InventoryEntry], dict[str, dic
 
     manifest, manifest_failures = load_manifest(root / "tools" / "limit-coverage" / "registry.toml")
     failures.extend(manifest_failures)
-    milestone_ids, milestone_failures = load_milestone_ids(root / "PLAN.md")
+    milestone_ids, completed_milestones, milestone_failures = load_milestone_ids(
+        root / "PLAN.md"
+    )
     failures.extend(milestone_failures)
     fixture, fixture_failures = load_fixture(
         root / "tools" / "limit-coverage" / "genesis-keys.json"
@@ -660,10 +676,26 @@ def validate(root: Path) -> tuple[list[str], list[InventoryEntry], dict[str, dic
         owner = entry.get("owner")
         if isinstance(owner, str) and owner not in milestone_ids:
             failures.append(f"manifest key {key!r} has unknown owner {owner!r}")
-        if entry.get("consumer_binding") == CONSUMER_BINDING and "B10" not in milestone_ids:
+        elif (
+            isinstance(owner, str)
+            and entry.get("class") == "unwired"
+            and owner in completed_milestones
+        ):
             failures.append(
-                f"manifest key {key!r} consumer_binding names unknown owner 'B10'"
+                f"unwired key {key!r} names completed owner {owner!r} — the owning "
+                "milestone shipped, so the surface must now carry a real "
+                "dispatch-past-limit test instead of an exemption (15 §4.6 / I-22)"
             )
+        if entry.get("consumer_binding") == CONSUMER_BINDING:
+            if "B10" not in milestone_ids:
+                failures.append(
+                    f"manifest key {key!r} consumer_binding names unknown owner 'B10'"
+                )
+            elif "B10" in completed_milestones:
+                failures.append(
+                    f"manifest key {key!r} consumer_binding defers to B10, which is "
+                    "complete — bind the consumer to live Params and drop the annotation"
+                )
 
     for key in sorted(set(inventory_by_key) - set(manifest)):
         failures.append(f"13 registry key {key!r} is missing from registry.toml")
