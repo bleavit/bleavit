@@ -187,6 +187,72 @@ class SurfaceManifestTests(unittest.TestCase):
         ]
         self.assertEqual(offenders, [])
 
+    def test_b2_api_and_epoch_constant_wiring_blockers_are_cleared(self) -> None:
+        runtime_apis = [
+            entry for entry in self.entries if entry["kind"] == "runtime_api"
+        ]
+        self.assertEqual(len(runtime_apis), 11)
+        for entry in runtime_apis:
+            self.assertNotIn("blocked_by", entry, entry["id"])
+            # Runtime API layout is resolved from released metadata; this
+            # manifest must not guess a portable-registry rendering.
+            self.assertNotIn("layout", entry, entry["id"])
+
+        epoch_constants = [
+            entry
+            for entry in self.entries
+            if entry["kind"] == "constant" and entry.get("pallet") == "Epoch"
+        ]
+        self.assertTrue(epoch_constants)
+        for entry in epoch_constants:
+            self.assertNotIn("blocked_by", entry, entry["id"])
+
+        stale = [
+            entry["id"]
+            for entry in self.entries
+            if "A8 pallet-epoch runtime wiring" in entry.get("blocked_by", "")
+            or "B2 FutarchyApi runtime wiring" in entry.get("blocked_by", "")
+        ]
+        self.assertEqual(stale, [])
+        self.assertEqual(
+            self.manifest["release_blockers"],
+            [
+                {
+                    "id": "b1b.compliance",
+                    "owner": "B1b",
+                    "reason": "SQ-140..SQ-150 remain open",
+                }
+            ],
+        )
+
+    def test_wired_epoch_surfaces_carry_no_per_entry_blocker(self) -> None:
+        # Per-entry `blocked_by` explains why a surface cannot be recorded; it
+        # is inert once the surface records. Epoch storage/events record as
+        # soon as the pallet is in the metadata (B1b wired it at index 61), so
+        # a compliance gap that spans recorded surfaces must fail the release
+        # through `release_blockers`, never through a label the assembler will
+        # not read.
+        recorded_epoch = [
+            entry
+            for entry in self.entries
+            if entry["kind"] in ("storage", "event")
+            and entry["id"].split(".")[1] == "epoch"
+        ]
+        self.assertTrue(recorded_epoch)
+        for entry in recorded_epoch:
+            self.assertNotIn("blocked_by", entry, entry["id"])
+
+    def test_remaining_surface_blockers_are_attributed_to_open_gaps(self) -> None:
+        blockers = {
+            entry["blocked_by"]
+            for entry in self.entries
+            if "blocked_by" in entry
+        }
+        self.assertEqual(
+            blockers,
+            {"SQ-101 (B4 follow-up)"},
+        )
+
     def test_no_speculative_layout_on_blocked_entries(self) -> None:
         sq101 = {
             "storage.foreign_assets.account",

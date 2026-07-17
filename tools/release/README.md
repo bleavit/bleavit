@@ -133,9 +133,10 @@ the resolved layout; a manifest layout mismatch is a strict failure with both
 forms in `fixtures-report.json`.
 
 Layout expectations are frozen only for surface the current runtime actually
-wires (they were validated against a live node). Blocked entries (A8/B2) carry
-no `layout` — a guessed rendering would false-alarm once the owning milestone
-lands; the expectation is frozen from the real runtime at that point. The
+wires. The wired Epoch storage/events carry layouts rendered from the runtime's
+real metadata, like every other live storage/event row. Runtime API entries
+likewise carry no speculative layout expectations: the recorder resolves their
+registered method signatures from the released metadata. The
 deliberate exception is the SQ-101 `ForeignAssets` trio, whose Location-keyed
 expectation must fail strict mode against today's u32-keyed runtime. Two
 renderer caveats are inherent to portable metadata: const-generic
@@ -163,14 +164,18 @@ Strict mode is expected to fail today:
 
 - B7 owns per-release `run-evidence.json` for the committed `zombienet/` and
   `chopsticks/` environment definitions;
-- B2 owns implementation of all 11 `FutarchyApi` methods;
-- A8 owns wiring `pallet-epoch` into the runtime;
 - SQ-101 (B4 follow-up) owns replacing the current `ForeignAssets` `u32` asset
-  key with the frozen XCM `Location` key; the manifest detects this mismatch.
+  key with the frozen XCM `Location` key; the manifest detects this mismatch;
+- B1b's compliance gaps SQ-140…SQ-150 remain release-blocking (canonical
+  resource keys/call effects, values and prize backing, phase/playbook mirrors,
+  and the remaining epoch integration gaps tracked in `PLAN.md`).
 
 These entries remain `required: true` in `surface-manifest.json`. Their
 `blocked_by` fields are diagnostics, not waivers. A tagged workflow uses strict
-mode and therefore cannot publish while any remain.
+mode and therefore cannot publish while any remain. Cross-surface gaps that can
+remain open even when metadata records successfully are listed in the
+manifest's `release_blockers`; the assembler always emits them as readiness
+gaps. B1b removes `b1b.compliance` only when SQ-140…SQ-150 are closed.
 
 ## Local dry-run
 

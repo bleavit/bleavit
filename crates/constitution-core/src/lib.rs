@@ -1851,6 +1851,38 @@ pub mod benchmarking {
 mod tests {
     use super::*;
 
+    #[test]
+    fn param_record_fields_match_contract_02_section_7_3() {
+        use scale_info::TypeDef;
+        // 02 §7.3 freezes `Params: map ParamKey -> ParamRecord` as a surface the
+        // frontend reads directly, and the release manifest freezes this value's
+        // rendered SCALE layout. Adding `last_change_block` (contract v4, so
+        // `ParamView.last_change` can be a real block number) silently changed
+        // that layout and only the release gate would have caught it. Lock the
+        // field names and SCALE order so the surface cannot drift unnoticed
+        // again: a change here MUST be a deliberate contract revision that also
+        // re-freezes `storage.constitution.params` in the surface manifest.
+        const CONTRACT_FIELDS: [&str; 9] = [
+            "key",
+            "value",
+            "min",
+            "max",
+            "max_delta",
+            "cooldown_epochs",
+            "last_changed_epoch",
+            "last_change_block",
+            "class",
+        ];
+        let type_info = ParamRecord::type_info();
+        let names: Vec<&str> = match &type_info.type_def {
+            TypeDef::Composite(c) => c.fields.iter().filter_map(|f| f.name).collect(),
+            _ => panic!("ParamRecord must encode as a SCALE composite type"),
+        };
+        assert_eq!(&names[..CONTRACT_FIELDS.len()], &CONTRACT_FIELDS);
+        // `kernel_bounded` (13 rule 7) trails the contract-visible prefix.
+        assert_eq!(names.last(), Some(&"kernel_bounded"));
+    }
+
     fn release_channel() -> ReleaseChannel {
         let mut bytes = [0u8; RELEASE_CHANNEL_LEN];
         bytes[0] = 1;
