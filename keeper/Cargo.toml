@@ -18,7 +18,7 @@ rand = "0.9.2"
 serde = { version = "1.0.228", features = ["derive"] }
 scale-info = { version = "2.11.6", features = ["derive"] }
 subxt = "0.44.3"
-subxt-signer = { version = "0.44.3", features = ["sr25519", "subxt"] }
+subxt-signer = { version = "0.50.2", features = ["sr25519", "subxt"] }
 tokio = { version = "1.49.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.9.5"
 tracing = "0.1.44"
