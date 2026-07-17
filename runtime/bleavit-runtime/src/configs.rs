@@ -6,13 +6,14 @@ use alloc::{borrow::Cow, vec::Vec};
 
 use frame_support::{
     derive_impl,
-    dispatch::DispatchClass,
+    dispatch::{DispatchClass, DispatchResult},
     parameter_types,
     traits::{
         fungibles::{Inspect, Mutate},
         tokens::Preservation,
         ConstBool, ConstU128, ConstU32, ConstU64, ConstU8, Contains, EqualPrivilegeOnly,
-        InstanceFilter, Nothing, QueryPreimage, TransformOrigin, VariantCountOf, WithdrawReasons,
+        InstanceFilter, Nothing, QueryPreimage, StorageInstance, TransformOrigin, VariantCountOf,
+        WithdrawReasons,
     },
     weights::{
         constants::{
@@ -32,9 +33,7 @@ use futarchy_primitives::{
 };
 #[cfg(feature = "runtime-benchmarks")]
 use futarchy_primitives::{keeper::CrankClass, EpochPhase};
-use parity_scale_codec::Decode;
-#[cfg(feature = "runtime-benchmarks")]
-use parity_scale_codec::Encode;
+use parity_scale_codec::{Decode, Encode};
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 #[cfg(feature = "runtime-benchmarks")]
 use sp_runtime::AccountId32;
@@ -46,11 +45,11 @@ use sp_runtime::{
 #[cfg(feature = "runtime-benchmarks")]
 use crate::Welfare;
 use crate::{
-    AccountId, AssetId, Aura, Balance, Balances, Block, CollatorSelection, ConditionalLedger,
-    ConsensusHook, Epoch, ExecutionGuard, ForeignAssets, FutarchyTreasury, Hash, MessageQueue,
-    Migrations, Nonce, PalletInfo, ParachainSystem, PolkadotXcm, Preimage, Referenda, Runtime,
-    RuntimeCall, RuntimeEvent, RuntimeFreezeReason, RuntimeHoldReason, RuntimeOrigin, RuntimeTask,
-    Scheduler, Session, SessionKeys, System, XcmpQueue, USDC_ASSET_ID, VERSION,
+    AccountId, AssetId, Aura, Balance, Balances, Block, BlockNumber, CollatorSelection,
+    ConditionalLedger, ConsensusHook, Epoch, ExecutionGuard, ForeignAssets, FutarchyTreasury, Hash,
+    MessageQueue, Migrations, Nonce, PalletInfo, ParachainSystem, PolkadotXcm, Preimage, Referenda,
+    Runtime, RuntimeCall, RuntimeEvent, RuntimeFreezeReason, RuntimeHoldReason, RuntimeOrigin,
+    RuntimeTask, Scheduler, Session, SessionKeys, System, XcmpQueue, USDC_ASSET_ID, VERSION,
 };
 
 const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
@@ -429,15 +428,200 @@ impl pallet_multisig::Config for Runtime {
 }
 
 parameter_types! {
-    pub MigrationMaxServiceWeight: Weight = Perbill::from_percent(50) * RuntimeBlockWeights::get().max_block;
+    pub MigrationMaxServiceWeight: Weight = Perbill::from_percent(bounds::MIGRATION_SERVICE_WEIGHT_PERCENT) * RuntimeBlockWeights::get().max_block;
 }
-#[derive_impl(pallet_migrations::config_preludes::TestDefaultConfig)]
+
+// Runtime-internal PB-MIGRATION observability. These aliases deliberately do
+// not join the 02-frozen pallet storage surface; every value is fixed-size and
+// bounded. The cursor itself remains single-sourced in `pallet-migrations`.
+pub struct MigrationHaltSourcesStorage;
+impl StorageInstance for MigrationHaltSourcesStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "HaltSources";
+}
+pub type MigrationHaltSources = frame_support::storage::types::StorageValue<
+    MigrationHaltSourcesStorage,
+    u8,
+    frame_support::pallet_prelude::ValueQuery,
+>;
+
+pub struct MigrationFailedStepStorage;
+impl StorageInstance for MigrationFailedStepStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "FailedStep";
+}
+pub type MigrationFailedStep = frame_support::storage::types::StorageValue<
+    MigrationFailedStepStorage,
+    u32,
+    frame_support::pallet_prelude::OptionQuery,
+>;
+
+pub struct MigrationProgressMarkerStorage;
+impl StorageInstance for MigrationProgressMarkerStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "ProgressMarker";
+}
+pub type MigrationProgressMarker = frame_support::storage::types::StorageValue<
+    MigrationProgressMarkerStorage,
+    ([u8; 32], BlockNumber),
+    frame_support::pallet_prelude::OptionQuery,
+>;
+
+const MIGRATION_FAILURE_HALT: u8 = 0b001;
+const MIGRATION_STALL_HALT: u8 = 0b010;
+const APPLIED_DETECTION_HALT: u8 = 0b100;
+const UPGRADE_ABORT_TRIGGER: u8 = 0b1000;
+const EXECUTION_HALT_SOURCES: u8 =
+    MIGRATION_FAILURE_HALT | MIGRATION_STALL_HALT | APPLIED_DETECTION_HALT;
+
+fn sync_execution_migration_halt(sources: u8) {
+    pallet_execution_guard::MigrationHalt::<Runtime>::put(sources & EXECUTION_HALT_SOURCES != 0);
+}
+
+fn set_migration_halt_source(source: u8) {
+    let sources = MigrationHaltSources::mutate(|sources| {
+        *sources |= source;
+        *sources
+    });
+    sync_execution_migration_halt(sources);
+}
+
+fn clear_migration_halt_sources(mask: u8) {
+    let remaining = MigrationHaltSources::mutate(|sources| {
+        *sources &= !mask;
+        *sources
+    });
+    sync_execution_migration_halt(remaining);
+}
+
+fn active_migration_marker(cursor: &pallet_migrations::ActiveCursorOf<Runtime>) -> [u8; 32] {
+    // `started_at` is lifecycle metadata, not cursor progress. Track the MBM
+    // index and the migration-owned cursor bytes that `step` actually returns.
+    sp_io::hashing::blake2_256(&(cursor.index, &cursor.inner_cursor).encode())
+}
+
+/// PB-MIGRATION remediation support (09 §7): retire the MBM cursor only when
+/// it is genuinely disposable — actually stuck, or an active cursor whose
+/// stall is still live and backed by the migration failure/stall halt sources.
+pub(crate) fn retire_stuck_migration_cursor_for_remediation() -> bool {
+    let retire = match pallet_migrations::Cursor::<Runtime>::get() {
+        Some(pallet_migrations::MigrationCursor::Stuck) => true,
+        Some(pallet_migrations::MigrationCursor::Active(ref cursor)) => {
+            MigrationHaltSources::get() & (MIGRATION_FAILURE_HALT | MIGRATION_STALL_HALT) != 0
+                && active_migration_stall_is_live(cursor)
+        }
+        None => false,
+    };
+    if retire {
+        pallet_migrations::Cursor::<Runtime>::kill();
+        MigrationProgressMarker::kill();
+    }
+    retire
+}
+
+fn active_migration_stall_is_live(cursor: &pallet_migrations::ActiveCursorOf<Runtime>) -> bool {
+    MigrationProgressMarker::get().is_some_and(|(marker, since)| {
+        marker == active_migration_marker(cursor)
+            && System::block_number().saturating_sub(since) > kernel::MIGRATION_STALL_BLOCKS
+    })
+}
+
+fn track_migration_progress() {
+    let now = System::block_number();
+    match pallet_migrations::Cursor::<Runtime>::get() {
+        Some(pallet_migrations::MigrationCursor::Active(cursor)) => {
+            let marker = active_migration_marker(&cursor);
+            match MigrationProgressMarker::get() {
+                Some((previous, since)) if previous == marker => {
+                    // A lawful `SteppedMigration::step` may mutate storage yet
+                    // return identical cursor bytes. Such work lasting >900
+                    // blocks can conservatively false-trigger this bounded,
+                    // deterministic tracker. The halt self-clears when
+                    // `completed()` fires; the normative semantic definition
+                    // of "stalled" remains an open specification question.
+                    if now.saturating_sub(since) > kernel::MIGRATION_STALL_BLOCKS {
+                        set_migration_halt_source(MIGRATION_STALL_HALT);
+                    }
+                }
+                _ => MigrationProgressMarker::put((marker, now)),
+            }
+        }
+        Some(pallet_migrations::MigrationCursor::Stuck) => {
+            // The failure callback normally records this first. Seeing an
+            // externally restored stuck cursor is still a machine trigger.
+            set_migration_halt_source(MIGRATION_FAILURE_HALT);
+            MigrationProgressMarker::kill();
+        }
+        None => MigrationProgressMarker::kill(),
+    }
+}
+
+fn migration_validation_hook_weight() -> Weight {
+    // `remark_with_event` is the stable2603 benchmarked linear hash-of-bytes
+    // path. Charge it at CursorMaxLen plus the hook's bounded worst-case
+    // storage/proof work; this remains conservative until B5 benchmarking.
+    <<Runtime as frame_system::Config>::SystemWeightInfo as frame_system::WeightInfo>::remark_with_event(
+        bounds::MIGRATION_CURSOR_MAX_LEN,
+    )
+    .saturating_add(
+        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(8, 5),
+    )
+    .saturating_add(Weight::from_parts(
+        0,
+        u64::from(bounds::MIGRATION_CURSOR_MAX_LEN),
+    ))
+}
+
+/// PB-MIGRATION signal bridge. A failed step stays stuck (the SDK's
+/// fail-closed transaction pause) and makes the guard's machine trigger live.
+pub struct MigrationFailureToGuard;
+impl frame_support::migrations::FailedMigrationHandler for MigrationFailureToGuard {
+    fn failed(failed_step: Option<u32>) -> frame_support::migrations::FailedMigrationHandling {
+        match failed_step {
+            Some(index) => MigrationFailedStep::put(index),
+            None => MigrationFailedStep::kill(),
+        }
+        set_migration_halt_source(MIGRATION_FAILURE_HALT);
+        frame_support::migrations::FailedMigrationHandling::KeepStuck
+    }
+}
+
+/// A genuinely completed retry is the only SDK status transition that clears
+/// the PB-MIGRATION trigger. Starting a migration never clears an earlier halt.
+pub struct MigrationStatusToGuard;
+impl frame_support::migrations::MigrationStatusHandler for MigrationStatusToGuard {
+    fn started() {
+        MigrationFailedStep::kill();
+        track_migration_progress();
+    }
+
+    fn completed() {
+        MigrationFailedStep::kill();
+        MigrationProgressMarker::kill();
+        // MBM completion clears only migration failure/stall sources. An
+        // applied-code mismatch remains halted until a later valid applied
+        // callback resolves that condition. The additional try-state-before-
+        // lift coupling is intentionally still an open specification question.
+        clear_migration_halt_sources(MIGRATION_FAILURE_HALT | MIGRATION_STALL_HALT);
+    }
+}
+
 impl pallet_migrations::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     #[cfg(not(feature = "runtime-benchmarks"))]
     type Migrations = ();
     #[cfg(feature = "runtime-benchmarks")]
     type Migrations = pallet_migrations::mock_helpers::MockedMigrations;
+    type CursorMaxLen = ConstU32<{ bounds::MIGRATION_CURSOR_MAX_LEN }>;
+    type IdentifierMaxLen = ConstU32<{ bounds::MIGRATION_IDENTIFIER_MAX_LEN }>;
+    type MigrationStatusHandler = MigrationStatusToGuard;
+    type FailedMigrationHandler = MigrationFailureToGuard;
     type MaxServiceWeight = MigrationMaxServiceWeight;
     type WeightInfo = crate::weights::pallet_migrations::WeightInfo<Runtime>;
 }
@@ -456,7 +640,7 @@ parameter_types! {
 impl cumulus_pallet_parachain_system::Config for Runtime {
     type WeightInfo = crate::weights::cumulus_pallet_parachain_system::WeightInfo<Runtime>;
     type RuntimeEvent = RuntimeEvent;
-    type OnSystemEvent = ();
+    type OnSystemEvent = ExecutionGuardSystemEvent;
     type SelfParaId = staging_parachain_info::Pallet<Runtime>;
     type OutboundXcmpMessageSource = XcmpQueue;
     type DmpQueue = frame_support::traits::EnqueueWithOrigin<MessageQueue, RelayOrigin>;
@@ -985,6 +1169,13 @@ pub fn treasury_protocol_account() -> AccountId {
 pub fn epoch_account() -> AccountId {
     EpochPalletId::get().into_account_truncating()
 }
+/// B6's runtime tests drive the guard's `enqueue` through the configured
+/// `EnqueueAuthority`; on this runtime that is the epoch sovereign (I-9).
+#[cfg(test)]
+pub(crate) fn test_execution_enqueue_origin() -> RuntimeOrigin {
+    RuntimeOrigin::signed(epoch_account())
+}
+
 pub fn execution_guard_account() -> AccountId {
     ExecutionGuardPalletId::get().into_account_truncating()
 }
@@ -1262,7 +1453,7 @@ fn epoch_end(epoch: EpochId) -> Option<u32> {
     }
     // There is no epoch-indexed, bounded historical schedule source. Scanning
     // retained proposal schedules would make this signed path unbounded, so a
-    // past/future epoch has no admissible reporting window (SQ-132).
+    // past/future epoch has no admissible reporting window (SQ-141).
     None
 }
 
@@ -1423,7 +1614,7 @@ impl pallet_registry::EpochContext for RuntimeRegistryEpoch {
     fn milestone_target(_: EpochId) -> u32 {
         #[cfg(feature = "runtime-benchmarks")]
         {
-            // The production source is absent (SQ-132); benchmark Wasm supplies
+            // The production source is absent (SQ-141); benchmark Wasm supplies
             // a non-zero frozen target so Milestone aggregation takes its full
             // division/clamp path.
             return registry_core::MILESTONE_TARGET_POINTS;
@@ -1623,8 +1814,10 @@ impl pallet_guardian::GuardianTriggers for RuntimeGuardianTriggers {
         }
         #[cfg(not(feature = "runtime-benchmarks"))]
         {
-            let gate_breach = pallet_welfare::GateBreachFlags::<Runtime>::iter()
-                .any(|(_, flags)| flags.s_breached || flags.c_breached);
+            // Current-epoch record only (06 §5 auto-release; PR #66 Codex P1):
+            // a breached record retained from a prior epoch must not keep
+            // authorizing suspend_on_gate after recovery.
+            let gate_breach = crate::classifier::current_epoch_gate_breach();
             let dead_man = pallet_constitution::PhaseFlags::<Runtime>::get()
                 & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED
                 != 0;
@@ -1637,7 +1830,10 @@ impl pallet_guardian::GuardianTriggers for RuntimeGuardianTriggers {
                 // No price/depeg probe, oracle-deadlock classifier or persisted
                 // ledger-drift flag exists yet; false prevents fabricated powers.
                 depeg: false,
-                migration_halt: pallet_execution_guard::MigrationHalt::<Runtime>::get(),
+                // B6: the halt trigger is sourced from the aggregated halt-sources word
+                // (includes the relay-abort bit; Abort preserves old code and must
+                // not freeze the re-proposal lane).
+                migration_halt: MigrationHaltSources::get() != 0,
                 oracle_deadlock: false,
                 gate_breach,
                 dead_man,
@@ -2205,25 +2401,63 @@ impl pallet_epoch::Config for Runtime {
 }
 
 pub struct RuntimeGuardEpoch;
+/// Test-only: whether `pid` exists in the real epoch pallet. B6's runtime e2e
+/// fixtures drive the guard with synthetic pids committed through the test-only
+/// payload store; for those, the epoch callbacks are no-ops (B6's original
+/// pending-handoff behavior). Any pid with real epoch state takes the full
+/// live path.
+#[cfg(test)]
+fn epoch_has_proposal(pid: ProposalId) -> bool {
+    pallet_epoch::Proposals::<Runtime>::contains_key(pid)
+        || pallet_epoch::IntakeProposals::<Runtime>::contains_key(pid)
+}
+
+#[cfg(test)]
+fn test_pending_epoch_payload(pid: ProposalId) -> Option<H256> {
+    sp_io::storage::get(&pending_epoch_payload_key(pid))
+        .and_then(|bytes| H256::decode(&mut &bytes[..]).ok())
+}
+
 impl pallet_execution_guard::EpochHandoff for RuntimeGuardEpoch {
     fn payload_hash(pid: ProposalId) -> Option<H256> {
-        pallet_epoch::Proposals::<Runtime>::get(pid)
+        let live = pallet_epoch::Proposals::<Runtime>::get(pid)
             .or_else(|| pallet_epoch::IntakeProposals::<Runtime>::get(pid))
-            .map(|proposal| proposal.payload_hash)
+            .map(|proposal| proposal.payload_hash);
+        #[cfg(test)]
+        return live.or_else(|| test_pending_epoch_payload(pid));
+        #[cfg(not(test))]
+        live
     }
     fn mark_executed(pid: ProposalId) -> frame_support::dispatch::DispatchResult {
+        #[cfg(test)]
+        if !epoch_has_proposal(pid) {
+            return Ok(());
+        }
         Epoch::mark_executed(RuntimeOrigin::signed(execution_guard_account()), pid)
     }
     fn mark_failed_executed(pid: ProposalId) -> frame_support::dispatch::DispatchResult {
+        #[cfg(test)]
+        if !epoch_has_proposal(pid) {
+            return Ok(());
+        }
         Epoch::mark_failed_executed(RuntimeOrigin::signed(execution_guard_account()), pid)
     }
     fn retry_exhausted_to_measurement(pid: ProposalId) -> frame_support::dispatch::DispatchResult {
+        #[cfg(test)]
+        if !epoch_has_proposal(pid) {
+            return Ok(());
+        }
         Epoch::retry_exhausted_to_measurement(RuntimeOrigin::signed(execution_guard_account()), pid)
     }
     fn reject_or_stale(
         pid: ProposalId,
         reason: futarchy_primitives::RejectReason,
     ) -> frame_support::dispatch::DispatchResult {
+        #[cfg(test)]
+        if !epoch_has_proposal(pid) {
+            let _ = reason;
+            return Ok(());
+        }
         Epoch::expire_or_stale_queue(
             RuntimeOrigin::signed(execution_guard_account()),
             pid,
@@ -2490,9 +2724,43 @@ impl pallet_execution_guard::ReleaseChannelWriter for RuntimeReleaseChannel {
         pallet_constitution::Pallet::<Runtime>::note_release_channel(bytes)
     }
     fn on_upgrade_applied(target_spec_version: u32) -> frame_support::dispatch::DispatchResult {
-        let mut bytes = pallet_constitution::ReleaseChannel::<Runtime>::get().bytes;
+        // Tolerant clear (G-1/SQ-134, PR #65 P1): an applied upgrade cannot be
+        // retried, so a writer-(b) `set_release_channel` rewrite that no longer
+        // shows this pending upgrade is newer and authoritative — leave it
+        // untouched and let the guard record the application. Only a channel
+        // still showing exactly this pending upgrade is cleared (the
+        // authorize-path already wrote `spec_version = target`).
+        let channel = pallet_constitution::ReleaseChannel::<Runtime>::get();
+        let mut bytes = channel.bytes;
+        let pending_authorized_at =
+            u32::from_le_bytes([bytes[116], bytes[117], bytes[118], bytes[119]]);
+        let spec_version = u32::from_le_bytes([bytes[112], bytes[113], bytes[114], bytes[115]]);
+        if pending_authorized_at == 0 || spec_version != target_spec_version {
+            return Ok(());
+        }
         bytes[108..112].copy_from_slice(&System::block_number().to_le_bytes());
-        bytes[112..116].copy_from_slice(&target_spec_version.to_le_bytes());
+        bytes[116..120].copy_from_slice(&0u32.to_le_bytes());
+        let flags =
+            u32::from_le_bytes([bytes[164], bytes[165], bytes[166], bytes[167]]) & !(1 << 2);
+        bytes[164..168].copy_from_slice(&flags.to_le_bytes());
+        pallet_constitution::Pallet::<Runtime>::note_release_channel(bytes)
+    }
+    fn on_upgrade_aborted(target_spec_version: u32) -> frame_support::dispatch::DispatchResult {
+        // Tolerant clear (G-1/SQ-131 relay-abort ruling): a newer
+        // `set_release_channel` rewrite during the in-flight upgrade is
+        // authoritative — leave it untouched. Only a channel still showing
+        // exactly this pending upgrade is cleared (bump `updated_at`, zero
+        // `pending_authorized_at`, drop the urgent flag; `spec_version` stays
+        // at status quo — the old code keeps running).
+        let channel = pallet_constitution::ReleaseChannel::<Runtime>::get();
+        let mut bytes = channel.bytes;
+        let pending_authorized_at =
+            u32::from_le_bytes([bytes[116], bytes[117], bytes[118], bytes[119]]);
+        let spec_version = u32::from_le_bytes([bytes[112], bytes[113], bytes[114], bytes[115]]);
+        if pending_authorized_at == 0 || spec_version != target_spec_version {
+            return Ok(());
+        }
+        bytes[108..112].copy_from_slice(&System::block_number().to_le_bytes());
         bytes[116..120].copy_from_slice(&0u32.to_le_bytes());
         let flags =
             u32::from_le_bytes([bytes[164], bytes[165], bytes[166], bytes[167]]) & !(1 << 2);
@@ -2507,6 +2775,10 @@ impl pallet_execution_guard::Config for Runtime {
     type Attestations = RuntimeGuardAttestations;
     type Guardian = RuntimeGuardGuardian;
     type Params = RuntimeGuardParams;
+    // B6's two new pallet seams (upgrade path e2e): guard-side capability
+    // projection and the parachain-system upgrade-schedule/migrations bridge.
+    type Capabilities = RuntimeCapabilities;
+    type UpgradeSchedule = RuntimeUpgradeSchedule;
     type Preimages = RuntimeGuardPreimages;
     type ReleaseChannel = RuntimeReleaseChannel;
     type RatifyOrigin = pallet_origins::EnsureConstitutionalValues;
@@ -2517,6 +2789,290 @@ impl pallet_execution_guard::Config for Runtime {
     type WeightInfo = crate::weights::pallet_execution_guard::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
+}
+
+// --- B6 execution-guard production wiring ---------------------------------
+
+/// Test/benchmark-only payload commitment store for the reserved A8 seam.
+/// Production has no key path at all and therefore returns `None` below.
+#[cfg(any(test, feature = "runtime-benchmarks"))]
+fn pending_epoch_payload_key(pid: futarchy_primitives::ProposalId) -> Vec<u8> {
+    let mut key = b":bleavit:b6:epoch-payload:".to_vec();
+    key.extend_from_slice(&pid.to_le_bytes());
+    key
+}
+
+#[cfg(any(test, feature = "runtime-benchmarks"))]
+fn note_pending_epoch_payload(
+    pid: futarchy_primitives::ProposalId,
+    hash: futarchy_primitives::H256,
+) {
+    sp_io::storage::set(&pending_epoch_payload_key(pid), &hash.encode());
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_execution_payload(
+    pid: futarchy_primitives::ProposalId,
+    hash: futarchy_primitives::H256,
+) {
+    note_pending_epoch_payload(pid, hash);
+}
+
+/// Slot 61 is intentionally still empty. This adapter makes every production
+/// enqueue fail its immutable epoch commitment check and makes terminal
+/// callbacks no-ops; only cfg-gated tests/benchmarks can seed a commitment.
+pub struct RuntimeCapabilities;
+impl RuntimeCapabilities {
+    fn enabled(
+        class: futarchy_primitives::ProposalClass,
+        capability: pallet_constitution::Capability,
+    ) -> bool {
+        // `capability_enabled` is intentionally an exact live-table lookup:
+        // an absent `(class, capability)` row is disabled, matching the core.
+        crate::Constitution::capability_enabled(class, capability)
+    }
+
+    fn leaf_enabled(class: futarchy_primitives::ProposalClass, call: &RuntimeCall) -> bool {
+        match call {
+            RuntimeCall::Constitution(pallet_constitution::Call::set_param { key, .. }) => {
+                Self::enabled(class, pallet_constitution::Capability::SetParam(*key))
+            }
+            RuntimeCall::Constitution(pallet_constitution::Call::set_capability { .. }) => {
+                Self::enabled(class, pallet_constitution::Capability::SetCapability)
+            }
+            RuntimeCall::Constitution(pallet_constitution::Call::amend_registry { .. }) => {
+                Self::enabled(class, pallet_constitution::Capability::AmendRegistry)
+            }
+            RuntimeCall::Constitution(pallet_constitution::Call::set_release_channel {
+                ..
+            }) => Self::enabled(class, pallet_constitution::Capability::SetReleaseChannel),
+            RuntimeCall::System(frame_system::Call::authorize_upgrade { .. }) => {
+                Self::enabled(class, pallet_constitution::Capability::AuthorizeUpgrade)
+            }
+            RuntimeCall::FutarchyTreasury(
+                pallet_futarchy_treasury::Call::fund_budget_line { .. }
+                | pallet_futarchy_treasury::Call::spend { .. }
+                | pallet_futarchy_treasury::Call::open_stream { .. }
+                | pallet_futarchy_treasury::Call::cancel_stream { .. }
+                | pallet_futarchy_treasury::Call::issue_vit { .. }
+                | pallet_futarchy_treasury::Call::recover_foreign { .. },
+            ) => Self::enabled(class, pallet_constitution::Capability::TreasurySpend),
+            _ => {
+                let Ok(analysis) =
+                    <crate::classifier::RuntimeDispatcher as pallet_execution_guard::BatchDispatcher<
+                        RuntimeCall,
+                    >>::rederive_call(call)
+                else {
+                    return false;
+                };
+                analysis.domains.iter().all(|domain| match domain {
+                    pallet_execution_guard::CallDomain::Public
+                    | pallet_execution_guard::CallDomain::InternalRootApplyUpgrade => true,
+                    // Wrappers are peeled by `call_enabled`, so this arm only
+                    // sees genuine leaves. EVERY privileged leaf requires an
+                    // exact keyed/variant mapping above — a newly classified
+                    // Treasury/Code/Param/Meta call fails closed until its
+                    // 06 §3.2 capability row is made explicit here (it must
+                    // never inherit a broad capability structurally).
+                    pallet_execution_guard::CallDomain::Param
+                    | pallet_execution_guard::CallDomain::Treasury
+                    | pallet_execution_guard::CallDomain::Code
+                    | pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade
+                    | pallet_execution_guard::CallDomain::Meta => false,
+                })
+            }
+        }
+    }
+}
+
+impl pallet_execution_guard::Capabilities<RuntimeCall> for RuntimeCapabilities {
+    fn call_enabled(class: futarchy_primitives::ProposalClass, call: &RuntimeCall) -> bool {
+        match call {
+            RuntimeCall::Utility(
+                pallet_utility::Call::batch { calls }
+                | pallet_utility::Call::batch_all { calls }
+                | pallet_utility::Call::force_batch { calls },
+            ) => calls.iter().all(|call| Self::call_enabled(class, call)),
+            RuntimeCall::Utility(
+                pallet_utility::Call::as_derivative { call, .. }
+                | pallet_utility::Call::dispatch_as { call, .. }
+                | pallet_utility::Call::with_weight { call, .. },
+            )
+            | RuntimeCall::Proxy(
+                pallet_proxy::Call::proxy { call, .. }
+                | pallet_proxy::Call::proxy_announced { call, .. },
+            )
+            | RuntimeCall::Multisig(
+                pallet_multisig::Call::as_multi { call, .. }
+                | pallet_multisig::Call::as_multi_threshold_1 { call, .. },
+            )
+            | RuntimeCall::Sudo(
+                pallet_sudo::Call::sudo { call }
+                | pallet_sudo::Call::sudo_unchecked_weight { call, .. },
+            ) => Self::call_enabled(class, call),
+            _ => Self::leaf_enabled(class, call),
+        }
+    }
+}
+
+pub struct RuntimeUpgradeSchedule;
+impl pallet_execution_guard::UpgradeSchedule for RuntimeUpgradeSchedule {
+    fn scheduling_performed() -> bool {
+        // A guard pending upgrade exists before application. Scheduling is
+        // proven only once frame-system consumed AuthorizedUpgrade and
+        // Cumulus durably holds the validation function for relay review.
+        cumulus_pallet_parachain_system::PendingValidationCode::<Runtime>::exists()
+            && System::authorized_upgrade().is_none()
+    }
+}
+
+/// Exact stable2603 pre-write checks performed by
+/// `cumulus_pallet_parachain_system::schedule_code_upgrade`. Frame-system
+/// removes `AuthorizedUpgrade` before invoking `OnSetCode`, and a direct
+/// dispatch is not transactional, so every typed Cumulus rejection must be
+/// refused by the filter before frame-system can consume the authorization.
+pub(crate) fn parachain_upgrade_preflight(code: &[u8]) -> DispatchResult {
+    use cumulus_pallet_parachain_system as parachain_system;
+
+    if !parachain_system::ValidationData::<Runtime>::exists() {
+        return Err(parachain_system::Error::<Runtime>::ValidationDataNotAvailable.into());
+    }
+    if parachain_system::UpgradeRestrictionSignal::<Runtime>::get().is_some() {
+        return Err(parachain_system::Error::<Runtime>::ProhibitedByPolkadot.into());
+    }
+    if parachain_system::PendingValidationCode::<Runtime>::exists() {
+        return Err(parachain_system::Error::<Runtime>::OverlappingUpgrades.into());
+    }
+    let host = parachain_system::HostConfiguration::<Runtime>::get()
+        .ok_or(parachain_system::Error::<Runtime>::HostConfigurationNotAvailable)?;
+    let code_len =
+        u32::try_from(code.len()).map_err(|_| parachain_system::Error::<Runtime>::TooBig)?;
+    if code_len > host.max_code_size {
+        return Err(parachain_system::Error::<Runtime>::TooBig.into());
+    }
+    Ok(())
+}
+
+pub(crate) fn direct_system_upgrade_allowed(code: &[u8]) -> bool {
+    let Some(pending) = pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get() else {
+        return false;
+    };
+    if sp_io::hashing::blake2_256(code) != pending.hash {
+        return false;
+    }
+    let Some(observed) =
+        <crate::classifier::RuntimeDispatcher as pallet_execution_guard::BatchDispatcher<
+            RuntimeCall,
+        >>::observed_runtime_version(code)
+    else {
+        return false;
+    };
+    let Some(current) = pallet_execution_guard::CurrentSpecName::<Runtime>::get() else {
+        return false;
+    };
+    let version_matches = observed.spec_name == current.spec_name
+        && observed.spec_version == pending.target_spec_version;
+    #[cfg(not(feature = "runtime-benchmarks"))]
+    let preflight_passes = System::can_set_code(code, true).into_result().is_ok()
+        && parachain_upgrade_preflight(code).is_ok();
+    #[cfg(feature = "runtime-benchmarks")]
+    let preflight_passes = true;
+    version_matches && preflight_passes
+}
+
+fn scheduled_upgrade_aborted() -> bool {
+    use cumulus_primitives_core::relay_chain::UpgradeGoAhead;
+
+    let Some(pending) = pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get() else {
+        return false;
+    };
+    if pallet_execution_guard::ScheduledUpgrade::<Runtime>::get() != Some(pending.hash)
+        || !matches!(
+            cumulus_pallet_parachain_system::UpgradeGoAhead::<Runtime>::get(),
+            Some(UpgradeGoAhead::Abort)
+        )
+        || cumulus_pallet_parachain_system::PendingValidationCode::<Runtime>::exists()
+    {
+        return false;
+    }
+    // The scheduled latch surviving proves `on_validation_code_applied` did
+    // not complete. The installed-code comparison independently separates an
+    // Abort from the GoAhead path that consumed the same Cumulus pending key.
+    sp_io::storage::get(sp_core::storage::well_known_keys::CODE)
+        .map(|code| sp_io::hashing::blake2_256(&code) != pending.hash)
+        .unwrap_or(true)
+}
+
+/// Cumulus calls this only after relay `GoAhead` has written the new `:code`.
+/// Any missing/mismatched guard state raises PB-MIGRATION instead of claiming
+/// that an untracked upgrade applied.
+pub struct ExecutionGuardSystemEvent;
+impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEvent {
+    fn on_validation_data(_: &cumulus_primitives_core::PersistedValidationData) {
+        frame_system::Pallet::<Runtime>::register_extra_weight_unchecked(
+            migration_validation_hook_weight(),
+            DispatchClass::Mandatory,
+        );
+        // Called once by the mandatory parachain inherent before the
+        // executive services the MBM cursor for this block. Comparing with
+        // the prior marker is O(1) storage and bounded by CursorMaxLen.
+        track_migration_progress();
+        if scheduled_upgrade_aborted() {
+            if crate::ExecutionGuard::validation_code_aborted().is_ok() {
+                // Guardian-visible incident trigger, intentionally not an
+                // execution-queue halt: the relay preserved status quo and a
+                // fresh normal proposal must remain possible.
+                set_migration_halt_source(UPGRADE_ABORT_TRIGGER);
+            } else {
+                // A failed status-quo cleanup is itself a halt-worthy applied
+                // boundary mismatch; retain every pending record for review.
+                set_migration_halt_source(UPGRADE_ABORT_TRIGGER | APPLIED_DETECTION_HALT);
+            }
+        }
+    }
+    fn on_validation_code_applied() {
+        let valid =
+            sp_io::storage::get(sp_core::storage::well_known_keys::CODE).is_some_and(|code| {
+                let hash = sp_io::hashing::blake2_256(&code);
+                let observed =
+                    <crate::classifier::RuntimeDispatcher as pallet_execution_guard::BatchDispatcher<
+                        RuntimeCall,
+                    >>::observed_runtime_version(&code);
+                pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_some_and(
+                    |pending| {
+                        let current = pallet_execution_guard::CurrentSpecName::<Runtime>::get();
+                        hash == pending.hash
+                            && observed.is_some_and(|version| {
+                                current.is_some_and(|current| {
+                                    version.spec_name == current.spec_name
+                                        && version.spec_version == pending.target_spec_version
+                                })
+                            })
+                    },
+                )
+            });
+        if !valid || crate::ExecutionGuard::validation_code_applied().is_err() {
+            set_migration_halt_source(APPLIED_DETECTION_HALT);
+        } else {
+            MigrationFailedStep::kill();
+            MigrationProgressMarker::kill();
+            // A valid recovery image may intentionally carry zero MBMs, in
+            // which case `MigrationStatusHandler::completed()` never fires.
+            // Any MBM in the new image that later fails/stalls re-raises its
+            // own source through the normal handlers.
+            clear_migration_halt_sources(
+                MIGRATION_FAILURE_HALT
+                    | MIGRATION_STALL_HALT
+                    | APPLIED_DETECTION_HALT
+                    | UPGRADE_ABORT_TRIGGER,
+            );
+        }
+    }
+    fn on_relay_state_proof(
+        _: &cumulus_pallet_parachain_system::relay_state_snapshot::RelayChainStateProof,
+    ) -> Weight {
+        Weight::zero()
+    }
 }
 
 #[cfg(feature = "runtime-benchmarks")]

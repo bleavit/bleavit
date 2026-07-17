@@ -56,6 +56,14 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// Proof: `Attestor::Members` (`max_values`: Some(1), `max_size`: Some(801), added: 1296, mode: `MaxEncodedLen`)
 	/// Storage: `Attestor::NextAttestationId` (r:1 w:0)
 	/// Proof: `Attestor::NextAttestationId` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::EpochOf` (r:1 w:1)
+	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
+	/// Storage: `Welfare::GateBreachFlags` (r:1 w:0)
+	/// Proof: `Welfare::GateBreachFlags` (`max_values`: None, `max_size`: Some(30), added: 2505, mode: `MaxEncodedLen`)
+	/// Storage: `Constitution::PhaseFlags` (r:1 w:0)
+	/// Proof: `Constitution::PhaseFlags` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `Constitution::Capabilities` (r:1 w:0)
+	/// Proof: `Constitution::Capabilities` (`max_values`: Some(1), `max_size`: Some(1218), added: 1713, mode: `MaxEncodedLen`)
 	/// Storage: `ExecutionGuard::BlockedMeters` (r:1 w:1)
 	/// Proof: `ExecutionGuard::BlockedMeters` (`max_values`: Some(1), `max_size`: Some(129), added: 624, mode: `MaxEncodedLen`)
 	/// Storage: `ExecutionGuard::Expedited` (r:1 w:1)
@@ -72,16 +80,10 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// Proof: `ExecutionGuard::HardGateBreach` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
 	/// Storage: `ExecutionGuard::DeadManFreeze` (r:1 w:1)
 	/// Proof: `ExecutionGuard::DeadManFreeze` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
-	/// Storage: `Constitution::PhaseFlags` (r:1 w:0)
-	/// Proof: `Constitution::PhaseFlags` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Guardian::ActivePlaybooks` (r:1 w:0)
 	/// Proof: `Guardian::ActivePlaybooks` (`max_values`: Some(1), `max_size`: Some(37), added: 532, mode: `MaxEncodedLen`)
 	/// Storage: `ExecutionGuard::MigrationHalt` (r:1 w:1)
 	/// Proof: `ExecutionGuard::MigrationHalt` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
-	/// Storage: `Welfare::GateBreachFlags` (r:1 w:0)
-	/// Proof: `Welfare::GateBreachFlags` (`max_values`: None, `max_size`: Some(30), added: 2505, mode: `MaxEncodedLen`)
-	/// Storage: `Constitution::Capabilities` (r:1 w:0)
-	/// Proof: `Constitution::Capabilities` (`max_values`: Some(1), `max_size`: Some(1218), added: 1713, mode: `MaxEncodedLen`)
 	/// Storage: `ExecutionGuard::PendingUpgrade` (r:1 w:1)
 	/// Proof: `ExecutionGuard::PendingUpgrade` (`max_values`: Some(1), `max_size`: Some(44), added: 539, mode: `MaxEncodedLen`)
 	/// Storage: `System::ParentHash` (r:1 w:0)
@@ -90,8 +92,6 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// Proof: `ExecutionGuard::UpgradeSpacingHistory` (`max_values`: Some(1), `max_size`: Some(2050), added: 2545, mode: `MaxEncodedLen`)
 	/// Storage: `ExecutionGuard::ExecutionRecords` (r:1 w:1)
 	/// Proof: `ExecutionGuard::ExecutionRecords` (`max_values`: Some(1), `max_size`: Some(13058), added: 13553, mode: `MaxEncodedLen`)
-	/// Storage: `Epoch::EpochOf` (r:1 w:1)
-	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
@@ -151,27 +151,25 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 		// Proof Size summary in bytes:
 		//  Measured:  `172262 + c * (9 ±0)`
 		//  Estimated: `183055 + c * (1861 ±158)`
-		// Minimum execution time: 2_270_193_000 picoseconds.
-		Weight::from_parts(2_455_704_940, 0)
+		// Minimum execution time: 2_618_495_000 picoseconds.
+		Weight::from_parts(2_221_255_718, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
-			// Standard Error: 375_830
-			.saturating_add(Weight::from_parts(14_051_778, 0).saturating_mul(c.into()))
+			// Standard Error: 25_409_093
+			.saturating_add(Weight::from_parts(277_941_768, 0).saturating_mul(c.into()))
 			.saturating_add(T::DbWeight::get().reads(271))
 			.saturating_add(T::DbWeight::get().writes(183))
 			.saturating_add(Weight::from_parts(0, 1861).saturating_mul(c.into()))
 	}
-	/// Storage: `ExecutionGuard::PendingUpgrade` (r:1 w:1)
+	/// Storage: `ExecutionGuard::PendingUpgrade` (r:1 w:0)
 	/// Proof: `ExecutionGuard::PendingUpgrade` (`max_values`: Some(1), `max_size`: Some(44), added: 539, mode: `MaxEncodedLen`)
-	/// Storage: `ExecutionGuard::CurrentSpecName` (r:1 w:1)
+	/// Storage: `ExecutionGuard::CurrentSpecName` (r:1 w:0)
 	/// Proof: `ExecutionGuard::CurrentSpecName` (`max_values`: Some(1), `max_size`: Some(37), added: 532, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::EpochOf` (r:1 w:0)
+	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
 	/// Storage: `Welfare::GateBreachFlags` (r:1 w:0)
 	/// Proof: `Welfare::GateBreachFlags` (`max_values`: None, `max_size`: Some(30), added: 2505, mode: `MaxEncodedLen`)
 	/// Storage: `Constitution::PhaseFlags` (r:1 w:0)
 	/// Proof: `Constitution::PhaseFlags` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
-	/// Storage: `System::AuthorizedUpgrade` (r:1 w:1)
-	/// Proof: `System::AuthorizedUpgrade` (`max_values`: Some(1), `max_size`: Some(33), added: 528, mode: `MaxEncodedLen`)
-	/// Storage: `Migrations::Cursor` (r:1 w:0)
-	/// Proof: `Migrations::Cursor` (`max_values`: Some(1), `max_size`: Some(65550), added: 66045, mode: `MaxEncodedLen`)
 	/// Storage: `ParachainSystem::ValidationData` (r:1 w:0)
 	/// Proof: `ParachainSystem::ValidationData` (`max_values`: Some(1), `max_size`: None, mode: `Measured`)
 	/// Storage: `ParachainSystem::UpgradeRestrictionSignal` (r:1 w:0)
@@ -180,26 +178,10 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// Proof: `ParachainSystem::PendingValidationCode` (`max_values`: Some(1), `max_size`: None, mode: `Measured`)
 	/// Storage: `ParachainSystem::HostConfiguration` (r:1 w:0)
 	/// Proof: `ParachainSystem::HostConfiguration` (`max_values`: Some(1), `max_size`: None, mode: `Measured`)
-	/// Storage: `ExecutionGuard::Queue` (r:33 w:32)
-	/// Proof: `ExecutionGuard::Queue` (`max_values`: None, `max_size`: Some(278), added: 2753, mode: `MaxEncodedLen`)
-	/// Storage: `ExecutionGuard::ExecutionRecords` (r:1 w:1)
-	/// Proof: `ExecutionGuard::ExecutionRecords` (`max_values`: Some(1), `max_size`: Some(13058), added: 13553, mode: `MaxEncodedLen`)
-	/// Storage: `ExecutionGuard::HeldResources` (r:1 w:1)
-	/// Proof: `ExecutionGuard::HeldResources` (`max_values`: Some(1), `max_size`: Some(4098), added: 4593, mode: `MaxEncodedLen`)
-	/// Storage: `ExecutionGuard::BlockedMeters` (r:1 w:1)
-	/// Proof: `ExecutionGuard::BlockedMeters` (`max_values`: Some(1), `max_size`: Some(129), added: 624, mode: `MaxEncodedLen`)
-	/// Storage: `ExecutionGuard::HardGateBreach` (r:1 w:1)
-	/// Proof: `ExecutionGuard::HardGateBreach` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
-	/// Storage: `ExecutionGuard::DeadManFreeze` (r:1 w:1)
-	/// Proof: `ExecutionGuard::DeadManFreeze` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
-	/// Storage: `ExecutionGuard::MigrationHalt` (r:1 w:1)
-	/// Proof: `ExecutionGuard::MigrationHalt` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
-	/// Storage: `Constitution::ReleaseChannel` (r:1 w:1)
-	/// Proof: `Constitution::ReleaseChannel` (`max_values`: Some(1), `max_size`: Some(168), added: 663, mode: `MaxEncodedLen`)
-	/// Storage: `ExecutionGuard::CounterForQueue` (r:1 w:1)
-	/// Proof: `ExecutionGuard::CounterForQueue` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
-	/// Storage: `ExecutionGuard::PendingUpgradeCheckpoint` (r:0 w:1)
-	/// Proof: `ExecutionGuard::PendingUpgradeCheckpoint` (`max_values`: Some(1), `max_size`: Some(64), added: 559, mode: `MaxEncodedLen`)
+	/// Storage: `Migrations::Cursor` (r:1 w:0)
+	/// Proof: `Migrations::Cursor` (`max_values`: Some(1), `max_size`: Some(65550), added: 66045, mode: `MaxEncodedLen`)
+	/// Storage: `System::AuthorizedUpgrade` (r:1 w:1)
+	/// Proof: `System::AuthorizedUpgrade` (`max_values`: Some(1), `max_size`: Some(33), added: 528, mode: `MaxEncodedLen`)
 	/// Storage: `ParachainSystem::NewValidationCode` (r:0 w:1)
 	/// Proof: `ParachainSystem::NewValidationCode` (`max_values`: Some(1), `max_size`: None, mode: `Measured`)
 	/// Storage: `ParachainSystem::DidSetValidationCode` (r:0 w:1)
@@ -207,15 +189,15 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// The range of component `b` is `[512, 2097152]`.
 	fn apply_authorized_upgrade(b: u32, ) -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `22231`
-		//  Estimated: `91839`
-		// Minimum execution time: 427_161_000 picoseconds.
-		Weight::from_parts(97_312_021, 0)
-			.saturating_add(Weight::from_parts(0, 91839))
-			// Standard Error: 17
-			.saturating_add(Weight::from_parts(4_454, 0).saturating_mul(b.into()))
-			.saturating_add(T::DbWeight::get().reads(51))
-			.saturating_add(T::DbWeight::get().writes(47))
+		//  Measured:  `756`
+		//  Estimated: `67035`
+		// Minimum execution time: 129_600_000 picoseconds.
+		Weight::from_parts(290_164_034, 0)
+			.saturating_add(Weight::from_parts(0, 67035))
+			// Standard Error: 236
+			.saturating_add(Weight::from_parts(8_825, 0).saturating_mul(b.into()))
+			.saturating_add(T::DbWeight::get().reads(11))
+			.saturating_add(T::DbWeight::get().writes(4))
 	}
 	/// Storage: `ExecutionGuard::Queue` (r:33 w:32)
 	/// Proof: `ExecutionGuard::Queue` (`max_values`: None, `max_size`: Some(278), added: 2753, mode: `MaxEncodedLen`)
@@ -303,8 +285,8 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 		// Proof Size summary in bytes:
 		//  Measured:  `72633`
 		//  Estimated: `183055`
-		// Minimum execution time: 2_178_132_000 picoseconds.
-		Weight::from_parts(2_205_082_000, 0)
+		// Minimum execution time: 3_686_728_000 picoseconds.
+		Weight::from_parts(3_968_770_000, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
 			.saturating_add(T::DbWeight::get().reads(256))
 			.saturating_add(T::DbWeight::get().writes(177))
@@ -339,8 +321,8 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 		// Proof Size summary in bytes:
 		//  Measured:  `22910`
 		//  Estimated: `91839`
-		// Minimum execution time: 410_390_000 picoseconds.
-		Weight::from_parts(417_110_000, 0)
+		// Minimum execution time: 482_761_000 picoseconds.
+		Weight::from_parts(685_931_000, 0)
 			.saturating_add(Weight::from_parts(0, 91839))
 			.saturating_add(T::DbWeight::get().reads(45))
 			.saturating_add(T::DbWeight::get().writes(43))
@@ -431,8 +413,8 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 		// Proof Size summary in bytes:
 		//  Measured:  `72629`
 		//  Estimated: `183055`
-		// Minimum execution time: 2_186_793_000 picoseconds.
-		Weight::from_parts(2_213_122_000, 0)
+		// Minimum execution time: 2_480_506_000 picoseconds.
+		Weight::from_parts(2_618_457_000, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
 			.saturating_add(T::DbWeight::get().reads(256))
 			.saturating_add(T::DbWeight::get().writes(177))

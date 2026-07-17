@@ -111,6 +111,7 @@ Safety rationale (row-wise, carried forward): kernel floors/ceilings exist so no
 | **VOID payout rules** | complete pairs recover par via `merge`/`merge_scalar`/`merge_gate` (100%); `redeem_void`: unpaired branch-USDC pays `floor(a/2)`; unpaired LONG/SHORT **and unpaired gate legs (`GateYes`/`GateNo`)** pay `floor(a/4)` (the consistent gate extension of the D-1 rule, [03](03-conditional-ledger.md) §5.3); residue swept per dust rule | [03](03-conditional-ledger.md), [15](15-invariants-and-testing.md) I-26 |
 | **Scalar redemption rules** | LONG `floor(a·s)`; **unpaired SHORT `floor(a·(1−s))`**; paired via atomic `redeem_scalar_pair` = exactly `a` | [03](03-conditional-ledger.md) |
 | `DescriptorLeadTime` | 43,200 blocks (72 h) between `UpgradeAuthorized` and permissionless application | [09](09-execution-upgrades-and-rollout.md) |
+| `MIGRATION_STALL_BLOCKS` | Active cursor stalled **> 900 blocks** raises the PB-MIGRATION halt | [09](09-execution-upgrades-and-rollout.md) §3.2 |
 | PB-LEDGER-FREEZE | ≤ 14 days, one renewal only (values referendum); admissible only under the I-4 drift flag | [06](06-governance-and-guardians.md), [09](09-execution-upgrades-and-rollout.md) |
 | Expedited CODE lane | 72 h gate market + 3-day fast-track values ratification; admissible only while PB-LEDGER-FREEZE active | [06](06-governance-and-guardians.md), [09](09-execution-upgrades-and-rollout.md) |
 | Watchtower window extension (`orc.ext_window`) | one +48 h (28,800-block) extension per `(component, epoch)` lifecycle if `wt.quorum` acknowledgments absent | [07](07-oracle-and-disputes.md) |
@@ -214,6 +215,9 @@ On-chain results MUST match within the §2 error bound plus one base unit of rou
 | `MetricSpecs` | ≤ 16 versions | `pallet-welfare` | [05](05-welfare-and-decision-engine.md) |
 | Snapshots | ≤ 20 epochs (H + challenge + 12) | `pallet-welfare` | [05](05-welfare-and-decision-engine.md) |
 | `ExecutionRecords` | ring 256 (canonical history is event-derived within the committed window, D-2/D-6 — “pruned to indexer” language deleted) | [09](09-execution-upgrades-and-rollout.md), [02](02-integration-contract.md) |
+| `MIGRATION_SERVICE_WEIGHT_PERCENT` | **50%** of maximum block weight | `pallet-migrations` per-block service budget | [09](09-execution-upgrades-and-rollout.md) §2.1/§3.2 |
+| `MIGRATION_CURSOR_MAX_LEN` | **65,536 bytes** encoded | `pallet-migrations` active cursor | [09](09-execution-upgrades-and-rollout.md) §2.1/§3.2 |
+| `MIGRATION_IDENTIFIER_MAX_LEN` | **256 bytes** encoded | `pallet-migrations` migration identifier | [09](09-execution-upgrades-and-rollout.md) §2.1/§3.2 |
 | Registry filings (Incident/Milestone) | bounded per `pallet-registry` spec | [07](07-oracle-and-disputes.md) |
 | `Params` registry | **128** keys (genesis-fixed set; ≥ the ~87 currently-concrete §1 rows plus headroom for `[VERIFY]`-gated rows as they resolve; the `params()` runtime API keeps its own 64-keys-per-call bound, [02](02-integration-contract.md) §3) | `pallet-constitution` |
 | `Capabilities` table | 64 rows | `pallet-constitution` |

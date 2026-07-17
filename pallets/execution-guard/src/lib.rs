@@ -51,11 +51,11 @@ use futarchy_primitives::{
 };
 
 pub use execution_guard_core::{
-    AttestationView as CoreAttestationView, CallDomain, EpochHandoff as CoreEpochHandoff,
-    Error as CoreError, Event as CoreEvent, ExecutionGuard, GuardOrigin,
-    GuardianView as CoreGuardianView, PendingUpgrade, QueuedExecution, UpgradeAuthorization,
-    DESCRIPTOR_LEAD_TIME, MAX_CALLS, MAX_DECLARED_DOMAINS, MAX_EXECUTION_RECORDS,
-    MAX_PAYLOAD_BYTES, MAX_QUEUE, MAX_RESOURCE_LOCKS, RETRY_WINDOW,
+    domain_allowed, AttestationView as CoreAttestationView, CallDomain,
+    EpochHandoff as CoreEpochHandoff, Error as CoreError, Event as CoreEvent, ExecutionGuard,
+    GuardOrigin, GuardianView as CoreGuardianView, PendingUpgrade, QueuedExecution,
+    UpgradeAuthorization, DESCRIPTOR_LEAD_TIME, MAX_CALLS, MAX_DECLARED_DOMAINS,
+    MAX_EXECUTION_RECORDS, MAX_PAYLOAD_BYTES, MAX_QUEUE, MAX_RESOURCE_LOCKS, RETRY_WINDOW,
 };
 
 pub const MAX_QUEUE_BOUND: u32 = MAX_QUEUE as u32;
@@ -129,6 +129,23 @@ pub trait Params {
     fn code_spacing() -> BlockNumber;
 }
 
+/// Live constitution capability projection for canonical dispatch-time check
+/// 6 (09 §1.2(6)). Static class/domain compatibility is necessary but not
+/// sufficient: values governance can disable a capability after queueing.
+pub trait Capabilities<Call> {
+    /// Re-check the live constitution row(s) required by this exact call.
+    /// Broad call domains are insufficient for keyed capabilities such as
+    /// `SetParam(ParamKey)`, so the runtime adapter receives the decoded call.
+    fn call_enabled(class: ProposalClass, call: &Call) -> bool;
+}
+
+/// Runtime view of the deferred parachain code-scheduling boundary.
+pub trait UpgradeSchedule {
+    /// True only after frame-system consumed the matching authorization and
+    /// Cumulus durably stored a pending validation function.
+    fn scheduling_performed() -> bool;
+}
+
 /// The execution guard is one of the two exhaustive writers of the frozen
 /// 168-byte ReleaseChannel record (02 §12).
 pub trait ReleaseChannelWriter {
@@ -137,6 +154,11 @@ pub trait ReleaseChannelWriter {
         authorized_at: BlockNumber,
     ) -> DispatchResult;
     fn on_upgrade_applied(target_spec_version: u32) -> DispatchResult;
+    /// Relay-Abort status-quo clear (SQ-131). MUST be tolerant: if writer (b)
+    /// lawfully rewrote the channel while the upgrade was in flight, the
+    /// guard's own cleanup still proceeds — a mismatched channel is left
+    /// untouched and this returns Ok, never wedging `PendingUpgrade` (G-1).
+    fn on_upgrade_aborted(target_spec_version: u32) -> DispatchResult;
 }
 
 /// B1a's concrete `RuntimeCall` projection. It must walk the closed wrapper set
@@ -237,6 +259,8 @@ pub mod pallet {
         type Attestations: Attestations;
         type Guardian: GuardianState;
         type Params: Params;
+        type Capabilities: Capabilities<Self::RuntimeCall>;
+        type UpgradeSchedule: UpgradeSchedule;
         type Preimages: Preimages;
         type ReleaseChannel: ReleaseChannelWriter;
         type RatifyOrigin: EnsureOrigin<Self::RuntimeOrigin>;
@@ -404,6 +428,12 @@ pub mod pallet {
     #[pallet::storage]
     pub type PendingUpgradeCheckpoint<T: Config> = StorageValue<_, (H256, H256), OptionQuery>;
 
+    /// The target whose application was successfully scheduled in Cumulus.
+    /// This is deliberately distinct from authorization: relay `Abort` can
+    /// consume the Cumulus pending code only after this latch is present.
+    #[pallet::storage]
+    pub type ScheduledUpgrade<T: Config> = StorageValue<_, H256, OptionQuery>;
+
     /// Queue-time-frozen `(attestation_id, artifact_hash)` commitment. The
     /// frozen Queue layout has no artifact-hash field; this bounded auxiliary
     /// map prevents a mutable id→artifact projection from changing meaning
@@ -449,6 +479,9 @@ pub mod pallet {
             pid: ProposalId,
             payload_hash: H256,
         },
+        UpgradeAborted {
+            code_hash: H256,
+        },
     }
 
     #[pallet::error]
@@ -486,6 +519,25 @@ pub mod pallet {
 
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        fn on_initialize(_: BlockNumberFor<T>) -> Weight {
+            let mut writes = 0;
+            if let Some(pending) = PendingUpgrade::<T>::get() {
+                if ScheduledUpgrade::<T>::get().is_none()
+                    && T::UpgradeSchedule::scheduling_performed()
+                {
+                    ScheduledUpgrade::<T>::put(pending.hash);
+                    writes = 1;
+                }
+            } else if ScheduledUpgrade::<T>::take().is_some() {
+                // A marker without guard ownership can never authorize or
+                // recover anything; remove it fail-closed.
+                writes = 1;
+            }
+            // Worst case: PendingUpgrade + ScheduledUpgrade + the schedule
+            // seam's two proofs (Cumulus pending code + system authorization).
+            T::DbWeight::get().reads_writes(4, writes)
+        }
+
         fn integrity_test() {
             assert_eq!(
                 MAX_QUEUE_BOUND,
@@ -851,6 +903,23 @@ pub mod pallet {
             with_storage_layer(|| Self::do_dequeue_terminal(pid))
         }
 
+        /// Cumulus callback for the relay `GoAhead` boundary. Scheduling an
+        /// authorized validation function is not application: parachain-system
+        /// writes `:code` only after the relay signal, then invokes the
+        /// runtime's `OnSystemEvent::on_validation_code_applied` hook. B6 wires
+        /// that hook here so pending/release state cannot claim application
+        /// before the code is actually installed (09 §2.1(6), §2.3).
+        pub fn validation_code_applied() -> DispatchResult {
+            with_storage_layer(Self::do_validation_code_applied)
+        }
+
+        /// Runtime callback for an explicitly observed relay `Abort`. The
+        /// runtime proves the Cumulus pending code vanished without installing
+        /// the target before invoking this status-quo transition.
+        pub fn validation_code_aborted() -> DispatchResult {
+            with_storage_layer(Self::do_validation_code_aborted)
+        }
+
         pub fn queue_reject_reason(pid: ProposalId) -> Option<RejectReason> {
             let queued = Queue::<T>::get(pid)?;
             let now = Self::now();
@@ -951,7 +1020,9 @@ pub mod pallet {
                     None
                 };
 
-            // (6) class capability envelope frozen in the queue.
+            // (6) static class envelope plus the live constitution capability
+            // table. Queue-time admission never freezes a capability on. The
+            // exact decoded call is required for keyed/variant capabilities.
             ensure!(
                 queued
                     .declared_domains
@@ -959,6 +1030,30 @@ pub mod pallet {
                     .all(|domain| execution_guard_core::domain_allowed(queued.class, *domain)),
                 Error::<T>::CapabilityDenied
             );
+            let calls = Self::decode_batch(&bytes)?;
+            for call in &calls {
+                let analysis = T::Dispatcher::rederive_call(call)
+                    .map_err(|_| Error::<T>::BadDomainDeclaration)?;
+                ensure!(
+                    !analysis.domains.is_empty(),
+                    Error::<T>::BadDomainDeclaration
+                );
+                ensure!(
+                    analysis
+                        .domains
+                        .iter()
+                        .all(|domain| queued.declared_domains.contains(domain)),
+                    Error::<T>::BadDomainDeclaration
+                );
+                ensure!(
+                    analysis
+                        .domains
+                        .iter()
+                        .all(|domain| execution_guard_core::domain_allowed(queued.class, *domain))
+                        && T::Capabilities::call_enabled(queued.class, call),
+                    Error::<T>::CapabilityDenied
+                );
+            }
 
             // (7) rate meters.
             let blocked = BlockedMeters::<T>::get();
@@ -1013,8 +1108,6 @@ pub mod pallet {
                 bytes.len() <= MAX_PAYLOAD_BYTES as usize,
                 Error::<T>::PayloadTooLarge
             );
-            let calls = Self::decode_batch(&bytes)?;
-
             let max_weight = Self::payload_weight_ceiling(T::BlockWeights::get().max_block);
             let mut total_weight = Weight::zero();
             let mut nested_calls = 0u32;
@@ -1045,6 +1138,10 @@ pub mod pallet {
                         Error::<T>::CapabilityDenied
                     );
                 }
+                ensure!(
+                    T::Capabilities::call_enabled(queued.class, call),
+                    Error::<T>::CapabilityDenied
+                );
 
                 if let Some(hash) = T::Dispatcher::authorize_upgrade_hash(call) {
                     ensure!(
@@ -1233,20 +1330,48 @@ pub mod pallet {
                 Error::<T>::UpgradeVersionMismatch
             );
 
-            // All stateless checks precede the internal-Root call.
-            T::Dispatcher::dispatch_apply_authorized_upgrade(code)?;
+            // All stateless checks precede the permissionless system call.
+            // Cumulus only schedules the candidate here. Pending/release state
+            // is cleared by `validation_code_applied` at relay GoAhead.
+            T::Dispatcher::dispatch_apply_authorized_upgrade(code)
+        }
+
+        fn do_validation_code_applied() -> DispatchResult {
+            let now = Self::now();
+            let pending = PendingUpgrade::<T>::get().ok_or(Error::<T>::NoPendingUpgrade)?;
             let mut state = Self::load()?;
             state
                 .complete_upgrade_application(
                     GuardOrigin::Signed,
-                    code_hash,
-                    observed.spec_version,
+                    pending.hash,
+                    pending.target_spec_version,
                     now,
                 )
                 .map_err(Self::map_core_error)?;
-            T::ReleaseChannel::on_upgrade_applied(observed.spec_version)?;
+            T::ReleaseChannel::on_upgrade_applied(pending.target_spec_version)?;
             PendingUpgradeCheckpoint::<T>::kill();
+            ScheduledUpgrade::<T>::kill();
             Self::persist(state)
+        }
+
+        fn do_validation_code_aborted() -> DispatchResult {
+            let pending = PendingUpgrade::<T>::get().ok_or(Error::<T>::NoPendingUpgrade)?;
+            ensure!(
+                ScheduledUpgrade::<T>::get() == Some(pending.hash),
+                Error::<T>::NoPendingUpgrade
+            );
+            // Tolerant writer-(a) clear: bumps `updated_at`, clears
+            // `pending_authorized_at` and URGENT when the channel still shows
+            // this upgrade; a channel writer (b) rewrote meanwhile is left
+            // untouched so the status-quo cleanup can never wedge (G-1).
+            T::ReleaseChannel::on_upgrade_aborted(pending.target_spec_version)?;
+            PendingUpgrade::<T>::kill();
+            PendingUpgradeCheckpoint::<T>::kill();
+            ScheduledUpgrade::<T>::kill();
+            Self::deposit_event(Event::UpgradeAborted {
+                code_hash: pending.hash,
+            });
+            Ok(())
         }
 
         fn do_expire_failed_execution(pid: ProposalId) -> DispatchResult {
@@ -1649,6 +1774,15 @@ pub mod pallet {
                 return Err(TryRuntimeError::Other(
                     "execution guard pending upgrade/checkpoint mismatch",
                 ));
+            }
+            match (PendingUpgrade::<T>::get(), ScheduledUpgrade::<T>::get()) {
+                (Some(pending), Some(scheduled)) if pending.hash == scheduled => {}
+                (Some(_), None) | (None, None) => {}
+                _ => {
+                    return Err(TryRuntimeError::Other(
+                        "execution guard scheduled-upgrade identity is invalid",
+                    ));
+                }
             }
             if let Some(pending) = PendingUpgrade::<T>::get() {
                 let current = Self::current_spec().map_err(|_| {

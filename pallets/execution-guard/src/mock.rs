@@ -262,11 +262,13 @@ parameter_types! {
     pub static Timelock: BlockNumber = 2;
     pub static Grace: BlockNumber = 10;
     pub static CodeSpacing: BlockNumber = 20;
+    pub static AuthorizeCapabilityEnabled: bool = true;
     pub static ReleaseRefuses: bool = false;
     pub static ObservedSpecVersion: Option<u32> = Some(2);
     pub static ObservedSpecName: Vec<u8> = b"test".to_vec();
     pub static Checkpoint: (H256, H256) = ([11; 32], [12; 32]);
     pub static UpgradeDispatchOrigins: Vec<UpgradeDispatchOrigin> = Vec::new();
+    pub static UpgradeSchedulingPerformed: bool = false;
     /// Disabled by default, so the mock behaves like the `()` sink unless a
     /// keeper-rebate regression explicitly enables recording.
     pub static RecordKeeperRebates: bool = false;
@@ -413,6 +415,29 @@ impl Params for TestParams {
     }
 }
 
+pub struct TestCapabilities;
+
+impl Capabilities<RuntimeCall> for TestCapabilities {
+    fn call_enabled(class: ProposalClass, call: &RuntimeCall) -> bool {
+        let Ok(analysis) = TestDispatcher::rederive_call(call) else {
+            return false;
+        };
+        analysis.domains.iter().all(|domain| {
+            execution_guard_core::domain_allowed(class, *domain)
+                && (!matches!(domain, CallDomain::InternalRootAuthorizeUpgrade)
+                    || AuthorizeCapabilityEnabled::get())
+        })
+    }
+}
+
+pub struct TestUpgradeSchedule;
+
+impl UpgradeSchedule for TestUpgradeSchedule {
+    fn scheduling_performed() -> bool {
+        UpgradeSchedulingPerformed::get()
+    }
+}
+
 pub struct TestReleaseChannel;
 
 impl ReleaseChannelWriter for TestReleaseChannel {
@@ -432,6 +457,14 @@ impl ReleaseChannelWriter for TestReleaseChannel {
         if ReleaseRefuses::get() {
             return Err(DispatchError::Other("release channel refused"));
         }
+        pallet_test_dispatch::ReleaseLog::<Test>::mutate(|items| {
+            items.push((target_spec_version, 0, true))
+        });
+        Ok(())
+    }
+    fn on_upgrade_aborted(target_spec_version: u32) -> frame_support::dispatch::DispatchResult {
+        // Tolerant by contract: a refusing channel must not wedge the abort
+        // cleanup; the mock still logs the clear for assertions.
         pallet_test_dispatch::ReleaseLog::<Test>::mutate(|items| {
             items.push((target_spec_version, 0, true))
         });
@@ -943,6 +976,8 @@ impl pallet_execution_guard::Config for Test {
     type Attestations = TestAttestations;
     type Guardian = TestGuardian;
     type Params = TestParams;
+    type Capabilities = TestCapabilities;
+    type UpgradeSchedule = TestUpgradeSchedule;
     type Preimages = TestPreimages;
     type ReleaseChannel = TestReleaseChannel;
     type RatifyOrigin = pallet_origins::EnsureConstitutionalValues;
@@ -1003,6 +1038,8 @@ pub fn reset_statics() {
     Timelock::set(2);
     Grace::set(10);
     CodeSpacing::set(20);
+    AuthorizeCapabilityEnabled::set(true);
+    UpgradeSchedulingPerformed::set(false);
     ReleaseRefuses::set(false);
     ObservedSpecVersion::set(Some(2));
     ObservedSpecName::set(b"test".to_vec());

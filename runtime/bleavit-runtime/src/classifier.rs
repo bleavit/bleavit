@@ -4,11 +4,24 @@ use futarchy_primitives::{kernel, ProposalClass, RuntimeVersionConstraint, H256}
 use origins_core::{BoxedCall, CallDomain, Origin as ClassOrigin, RuntimeCall as FilterCall};
 use pallet_origins::{SafetyClassifier, SafetyFilter};
 use parity_scale_codec::Decode;
-use sp_runtime::DispatchError;
+use sp_runtime::{traits::Dispatchable, DispatchError};
 
-use crate::{
-    configs::execution_guard_account, Runtime, RuntimeCall, RuntimeOrigin, System, VERSION,
-};
+use crate::{Runtime, RuntimeCall, RuntimeOrigin, System, VERSION};
+
+/// Execution-guard-owned upgrade availability seam (09 §2.2).
+pub trait PendingUpgradeProvider {
+    fn applicable_at() -> Option<futarchy_primitives::BlockNumber>;
+}
+
+/// The base filter trusts only the real guard-owned pending-upgrade record.
+pub struct PendingExecutionGuard;
+
+impl PendingUpgradeProvider for PendingExecutionGuard {
+    fn applicable_at() -> Option<futarchy_primitives::BlockNumber> {
+        pallet_execution_guard::pallet::PendingUpgrade::<crate::Runtime>::get()
+            .map(|pending| pending.applicable_at)
+    }
+}
 
 #[derive(Clone, Copy)]
 struct ProjectionBudget {
@@ -108,11 +121,13 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
                 leaf(CallDomain::Public)
             }
             frame_system::Call::authorize_upgrade { .. } => leaf(CallDomain::InternalRoot),
-            // The public apply path is the execution-guard extrinsic, which
-            // re-derives the candidate version and clears guard/release state.
-            // Bare system apply would bypass those checks even when a pending
-            // descriptor is mature, so it is always denied by the base filter.
-            frame_system::Call::apply_authorized_upgrade { .. } => denied(),
+            frame_system::Call::apply_authorized_upgrade { code } => {
+                if pending_upgrade_is_applicable(code) {
+                    leaf(CallDomain::Public)
+                } else {
+                    denied()
+                }
+            }
             frame_system::Call::set_heap_pages { .. }
             | frame_system::Call::set_code { .. }
             | frame_system::Call::set_code_without_checks { .. }
@@ -308,8 +323,8 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             pallet_migrations::Call::force_set_cursor { .. }
             | pallet_migrations::Call::force_set_active_cursor { .. }
             | pallet_migrations::Call::force_onboard_mbms { .. }
-            | pallet_migrations::Call::clear_historic { .. } => leaf(CallDomain::Public),
-            pallet_migrations::Call::__Ignore(_, _) => denied(),
+            | pallet_migrations::Call::clear_historic { .. }
+            | pallet_migrations::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::Sudo(call) => match call {
             // `sudo`/`sudo_unchecked_weight` dispatch the inner call as Root.
@@ -581,6 +596,11 @@ impl SafetyClassifier for BleavitSafetyClassifier {
     }
 }
 
+fn pending_upgrade_is_applicable(code: &[u8]) -> bool {
+    PendingExecutionGuard::applicable_at().is_some_and(|at| System::block_number() >= at)
+        && crate::configs::direct_system_upgrade_allowed(code)
+}
+
 fn guard_domain(domain: CallDomain) -> Option<pallet_execution_guard::CallDomain> {
     match domain {
         CallDomain::Public => Some(pallet_execution_guard::CallDomain::Public),
@@ -647,9 +667,19 @@ fn collect_guard_domains(
 /// after an origin-aware recheck has succeeded.
 pub struct RuntimeDispatcher;
 
+/// A gate breach freezes execution only while the CURRENT epoch's record shows
+/// it (06 §5 auto-release; PR #66 Codex P1): a breached record retained from a
+/// prior epoch (welfare keeps a rolling window and pruning is keeper-driven)
+/// must not latch the freeze after recovery.
+pub(crate) fn current_epoch_gate_breach() -> bool {
+    let current_epoch = pallet_epoch::EpochOf::<Runtime>::get().index;
+    pallet_welfare::GateBreachFlags::<Runtime>::get(current_epoch)
+        .map(|flags| flags.s_breached || flags.c_breached)
+        .unwrap_or(false)
+}
+
 fn live_execution_freeze() -> bool {
-    let gate_breach = pallet_welfare::GateBreachFlags::<Runtime>::iter()
-        .any(|(_, flags)| flags.s_breached || flags.c_breached);
+    let gate_breach = current_epoch_gate_breach();
     let dead_man = pallet_constitution::PhaseFlags::<Runtime>::get()
         & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED
         != 0;
@@ -710,9 +740,11 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
             return Err(DispatchError::Other("live execution freeze active"));
         }
         if Self::authorize_upgrade_hash(call).is_some() {
-            if !capability_enabled_for_call(ProposalClass::Code, call) {
-                return Err(DispatchError::Other("live upgrade capability disabled"));
-            }
+            // Capability enforcement deliberately does NOT live here: the guard
+            // composes `rederive_call` with its own ordered `Capabilities` check
+            // (09 §1.2), so folding it in would surface a disabled capability as
+            // the wrong list item (`BadDomainDeclaration` instead of
+            // `CapabilityDenied`).
             let domains = pallet_execution_guard::ReDerivedDomains::try_from(vec![
                 pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade,
             ])
@@ -733,6 +765,10 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
     }
 
     fn safety_filter(class: ProposalClass, call: &RuntimeCall) -> bool {
+        // The guard groups this filter with `Capabilities::call_enabled` under
+        // one `CapabilityDenied` check item (09 §1.2), so folding capability in
+        // here keeps the reported error right; only `rederive_call` must stay
+        // capability-agnostic (it maps to `BadDomainDeclaration`).
         Self::rederive_call(call).is_ok()
             && capability_enabled_for_call(class, call)
             && ClassOrigin::from_proposal_class(class).is_some_and(|origin| {
@@ -753,7 +789,7 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
         class: ProposalClass,
     ) -> frame_support::dispatch::DispatchResult {
         if !Self::safety_filter(class, &call) {
-            return Err(DispatchError::BadOrigin);
+            return Err(DispatchError::Other("guard dispatch-time safety filter"));
         }
         match call {
             RuntimeCall::Utility(pallet_utility::Call::batch_all { calls }) => {
@@ -792,10 +828,27 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
         if live_execution_freeze() {
             return Err(DispatchError::Other("live execution freeze active"));
         }
-        RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { code })
-            .dispatch_bypass_filter(RuntimeOrigin::signed(execution_guard_account()))
-            .map(|_| ())
-            .map_err(|error| error.error)
+        frame_support::storage::with_storage_layer(|| {
+            crate::configs::parachain_upgrade_preflight(&code)?;
+
+            // PB-MIGRATION's rollback is a forward remediation upgrade (09 §7).
+            // The stock frame-system preflight rejects every non-empty MBM
+            // cursor, so only an actually stuck cursor, or a still-live active
+            // stall backed by the migration failure/stall sources, is retired
+            // before scheduling. Unrelated alarms and resumed/healthy active
+            // work do not make a cursor disposable.
+            if crate::configs::retire_stuck_migration_cursor_for_remediation() {
+                // retired inside the helper
+            } else {
+                #[cfg(not(feature = "runtime-benchmarks"))]
+                System::can_set_code(&code, true).into_result()?;
+            }
+
+            RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { code })
+                .dispatch(RuntimeOrigin::none())
+                .map(|_| ())
+                .map_err(|error| error.error)
+        })
     }
 
     fn observed_runtime_version(code: &[u8]) -> Option<RuntimeVersionConstraint> {
@@ -861,7 +914,7 @@ pub fn is_values_enactment_leaf(call: &RuntimeCall) -> bool {
             | RuntimeCall::Guardian(pallet_guardian::Call::renew_playbook { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::set_members { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::resolve_challenge { .. })
-            | RuntimeCall::Oracle(pallet_oracle::Call::adjudicate { .. }) // A11-wiring: execution_guard.ratify joins this closed list with the pallet.
+            | RuntimeCall::Oracle(pallet_oracle::Call::adjudicate { .. })
             | RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::ratify { .. })
     )
 }

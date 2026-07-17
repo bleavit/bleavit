@@ -157,7 +157,10 @@ fn testnet_genesis(
             start_block: 0,
             ..Default::default()
         },
+        // Seeds CurrentSpecName from the live RuntimeVersion; all other guard
+        // state is empty until the epoch lawfully enqueues a passed proposal.
         execution_guard: ExecutionGuardConfig::default(),
+
         sudo: SudoConfig { key: Some(root) },
     })
 }

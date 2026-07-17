@@ -17,6 +17,11 @@ pub const RELEASE_CHANNEL_STORAGE_KEY: [u8; 32] = [
     0xfe, 0xc7, 0x19, 0x4a, 0x53, 0x68, 0xa5, 0x8e, 0x1f, 0x6b, 0xf5, 0x74, 0x57, 0x13, 0x4a, 0x6c,
 ];
 pub const RELEASE_CHANNEL_LEN: usize = 168;
+pub const RELEASE_CHANNEL_UPDATED_AT: core::ops::Range<usize> = 108..112;
+pub const RELEASE_CHANNEL_SPEC_VERSION: core::ops::Range<usize> = 112..116;
+pub const RELEASE_CHANNEL_PENDING_AUTHORIZED_AT: core::ops::Range<usize> = 116..120;
+pub const RELEASE_CHANNEL_FLAGS: core::ops::Range<usize> = 164..168;
+pub const RELEASE_CHANNEL_FLAG_URGENT_UPGRADE: u32 = 1 << 2;
 pub const MAX_PARAMS: usize = 128;
 pub const MAX_CAPABILITIES: usize = 64;
 pub const MAX_METERS: usize = 16;
@@ -381,16 +386,16 @@ impl ReleaseChannel {
         Ok(Self { bytes })
     }
     pub fn updated_at(&self) -> BlockNumber {
-        le_u32_at(&self.bytes, 108)
+        le_u32_at(&self.bytes, RELEASE_CHANNEL_UPDATED_AT.start)
     }
     pub fn spec_version(&self) -> u32 {
-        le_u32_at(&self.bytes, 112)
+        le_u32_at(&self.bytes, RELEASE_CHANNEL_SPEC_VERSION.start)
     }
     pub fn pending_authorized_at(&self) -> u32 {
-        le_u32_at(&self.bytes, 116)
+        le_u32_at(&self.bytes, RELEASE_CHANNEL_PENDING_AUTHORIZED_AT.start)
     }
     pub fn flags(&self) -> u32 {
-        le_u32_at(&self.bytes, 164)
+        le_u32_at(&self.bytes, RELEASE_CHANNEL_FLAGS.start)
     }
 }
 

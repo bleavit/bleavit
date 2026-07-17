@@ -1049,20 +1049,17 @@ fn upgrade_enforces_lead_time_hash_version_and_release_channel_rollback() {
         ObservedSpecName::set(b"test".to_vec());
         ObservedSpecVersion::set(Some(2));
         ReleaseRefuses::set(true);
-        assert!(GuardPallet::apply_authorized_upgrade(
+        assert_ok!(GuardPallet::apply_authorized_upgrade(
             RuntimeOrigin::signed(keeper()),
             bounded_code(code)
-        )
-        .is_err());
+        ));
+        assert!(GuardPallet::validation_code_applied().is_err());
         assert_eq!(PendingUpgradeStorage::<Test>::get(), Some(pending));
         assert_eq!(CurrentSpecName::<Test>::get(), Some(spec(1)));
         assert_eq!(release_log(), vec![(2, pending.authorized_at, false)]);
 
         ReleaseRefuses::set(false);
-        assert_ok!(GuardPallet::apply_authorized_upgrade(
-            RuntimeOrigin::signed(keeper()),
-            bounded_code(code)
-        ));
+        assert_ok!(GuardPallet::validation_code_applied());
         assert!(PendingUpgradeStorage::<Test>::get().is_none());
         assert!(PendingUpgradeCheckpoint::<Test>::get().is_none());
         assert_eq!(CurrentSpecName::<Test>::get(), Some(spec(2)));
@@ -1073,6 +1070,36 @@ fn upgrade_enforces_lead_time_hash_version_and_release_channel_rollback() {
                 code_hash,
                 spec_version: 2
             }) if code_hash == hash(code)
+        ));
+    });
+}
+
+#[test]
+fn scheduled_upgrade_abort_restores_status_quo_and_emits_distinct_event() {
+    new_test_ext().execute_with(|| {
+        let code = b"relay-aborted-runtime";
+        setup_upgrade(1, code, 7);
+        assert_ok!(GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1));
+        let pending = PendingUpgradeStorage::<Test>::get().expect("pending upgrade");
+        System::set_block_number(pending.applicable_at.into());
+        assert_ok!(GuardPallet::apply_authorized_upgrade(
+            RuntimeOrigin::signed(keeper()),
+            bounded_code(code),
+        ));
+        UpgradeSchedulingPerformed::set(true);
+        let _ = GuardPallet::on_initialize(System::block_number());
+        assert_eq!(ScheduledUpgrade::<Test>::get(), Some(hash(code)));
+
+        assert_ok!(GuardPallet::validation_code_aborted());
+
+        assert!(PendingUpgradeStorage::<Test>::get().is_none());
+        assert!(PendingUpgradeCheckpoint::<Test>::get().is_none());
+        assert!(ScheduledUpgrade::<Test>::get().is_none());
+        assert_eq!(CurrentSpecName::<Test>::get(), Some(spec(1)));
+        assert_eq!(release_log().last(), Some(&(2, 0, true)));
+        assert!(matches!(
+            last_guard_event(),
+            Some(Event::UpgradeAborted { code_hash }) if code_hash == hash(code)
         ));
     });
 }

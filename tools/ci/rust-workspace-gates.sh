@@ -7,7 +7,8 @@ if [[ -z "${LIBCLANG_PATH:-}" ]] && command -v llvm-config >/dev/null 2>&1; then
   export LIBCLANG_PATH="$(llvm-config --libdir)"
 fi
 
-# cargo-audit is deliberately routed to milestone B8; this gate still enforces the lockfile.
+# Networked RustSec checks run in supply-chain-gates.sh; this offline-friendly
+# workspace gate still enforces the committed lockfile on every cargo command.
 member_count=$(cargo metadata --locked --no-deps --format-version=1 | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["workspace_members"]))')
 
 if [[ "$member_count" == "0" ]]; then
@@ -18,6 +19,16 @@ fi
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
+
+# B6 release gate (09 §2.1(5)): compile the deployable runtime and its
+# benchmarking surface, then compile and execute the runtime's genesis-state
+# `TryRuntime_on_runtime_upgrade` + try-state coverage. The live-chain snapshot
+# `try-runtime-cli` leg mandated by 15 §4.7 lands with the B7/B8 environment
+# and release-artifact work; this local leg does not claim snapshot coverage.
+cargo build -p bleavit-runtime --release --locked
+cargo build -p bleavit-runtime --release --features runtime-benchmarks --locked
+cargo build -p bleavit-runtime --features try-runtime --locked
+cargo test -p bleavit-runtime --features try-runtime --locked
 
 # Real no_std build gate: the frame-free math surface (futarchy-primitives,
 # futarchy-fixed) must compile without std (01 §5.2 / rule 9). A --no-default-features

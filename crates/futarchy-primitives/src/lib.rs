@@ -789,6 +789,13 @@ pub mod bounds {
     pub const MAX_LIVE_MARKETS: u32 = 196;
     pub const BOOKS_PER_PROPOSAL: u32 = 6;
     pub const BASELINE_BOOKS: u32 = 4;
+    /// 13 §4: `pallet-migrations` may consume at most half the block service
+    /// weight while a multi-block migration is active.
+    pub const MIGRATION_SERVICE_WEIGHT_PERCENT: u32 = 50;
+    /// 13 §4: maximum encoded multi-block-migration cursor length.
+    pub const MIGRATION_CURSOR_MAX_LEN: u32 = 65_536;
+    /// 13 §4: maximum encoded multi-block-migration identifier length.
+    pub const MIGRATION_IDENTIFIER_MAX_LEN: u32 = 256;
 }
 
 pub mod currency {
@@ -839,6 +846,9 @@ pub mod kernel {
     /// Capture-resistance multiplier `AttackCost >= 3 * InCapPrize` (D-4).
     pub const SECURITY_FACTOR: u128 = 3;
     pub const DESCRIPTOR_LEAD_TIME_BLOCKS: u32 = 43_200;
+    /// 09 §3.2 PB-MIGRATION trigger arm: an unchanged active cursor for more
+    /// than this many blocks raises the migration halt.
+    pub const MIGRATION_STALL_BLOCKS: u32 = 900;
     /// T18→T23 retry interval before the T22 keeper transition (05 §2.1).
     pub const EXECUTION_RETRY_WINDOW_BLOCKS: u32 = 3 * BLOCKS_PER_DAY;
     pub const WATCHTOWER_EXTENSION_BLOCKS: u32 = 28_800;

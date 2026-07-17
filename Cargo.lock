@@ -1297,6 +1297,7 @@ dependencies = [
  "sp-block-builder",
  "sp-consensus-aura",
  "sp-core",
+ "sp-externalities",
  "sp-genesis-builder",
  "sp-inherents",
  "sp-io",
