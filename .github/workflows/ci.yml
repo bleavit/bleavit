@@ -5,6 +5,11 @@ on:
   push:
     branches: [main]
 
+# Every job only reads the repo; none needs a writable GITHUB_TOKEN (CodeQL
+# workflow-permissions finding on PR #89).
+permissions:
+  contents: read
+
 jobs:
   rust:
     name: Rust workspace
