@@ -142,10 +142,28 @@ genesis = true
 reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
 
 [[entry]]
-key = "gate.v_min"
-class = "value"
-genesis = false
-reason = "13 §1: derived 0.1 × dec.v_min(class) at the consuming gate engine; intentionally unseeded and has no independent dispatch limit."
+key = "gate.v_min.param"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; A8 materializes the class-derived default as a live bounded Params record, covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "gate.v_min.trs"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; A8 materializes the class-derived default as a live bounded Params record, covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "gate.v_min.code"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; A8 materializes the class-derived default as a live bounded Params record, covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "gate.v_min.meta"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; A8 materializes the class-derived default as a live bounded Params record, covered by the generated per-key set_param/amend_registry suite."
 
 [[entry]]
 key = "gate.nb_coverage"

@@ -121,6 +121,9 @@ pub fn live_proposal(
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq)]
 pub enum SeamCall {
     OpenMarkets(ProposalId, bool, bool),
+    ExtendMarkets(ProposalId),
+    ForceRerunMarkets(ProposalId),
+    CloseMarkets(ProposalId),
     Enqueue {
         pid: ProposalId,
         payload_hash: H256,
@@ -129,6 +132,7 @@ pub enum SeamCall {
         requires_ratification: bool,
     },
     DequeueTerminal(ProposalId),
+    DequeueForRerun(ProposalId),
     Welfare(EpochId, MetricSpecVersion, SettlementTarget),
     WelfarePrune(EpochId),
     CreateVault(ProposalId, MetricSpecVersion),
@@ -208,7 +212,13 @@ impl GuardStateModel {
         state.queue.push((pid, payload_hash));
         state.held_resources.push((pid, [pid as u8; 8]));
         state.expedited.push(pid);
-        state.pinned_preimages.push((pid, payload_hash));
+        if !state
+            .pinned_preimages
+            .iter()
+            .any(|(owner, hash)| *owner == pid && *hash == payload_hash)
+        {
+            state.pinned_preimages.push((pid, payload_hash));
+        }
         Self::set(state);
         Ok(())
     }
@@ -247,6 +257,16 @@ impl GuardStateModel {
             .pinned_preimages
             .retain(|(candidate, _)| *candidate != pid);
         state.unpinned_preimages.push(payload_hash);
+        Self::set(state);
+    }
+
+    pub fn remove_for_rerun(pid: ProposalId) {
+        let mut state = Self::get();
+        state.queue.retain(|(candidate, _)| *candidate != pid);
+        state
+            .held_resources
+            .retain(|(candidate, _)| *candidate != pid);
+        state.expedited.retain(|candidate| *candidate != pid);
         Self::set(state);
     }
 }
@@ -326,6 +346,22 @@ impl MarketAccess<AccountId32> for TestMarket {
         Ok(markets(proposal.id, proposal.epoch, requires_gate_markets))
     }
 
+    fn extend_markets(proposal: &Proposal<AccountId32>) -> Result<(), DispatchError> {
+        SeamCalls::push(SeamCall::ExtendMarkets(proposal.id))
+    }
+
+    fn force_rerun_markets(proposal: &Proposal<AccountId32>) -> Result<(), DispatchError> {
+        SeamCalls::push(SeamCall::ForceRerunMarkets(proposal.id))
+    }
+
+    fn close_markets(proposal: &Proposal<AccountId32>) -> Result<(), DispatchError> {
+        SeamCalls::push(SeamCall::CloseMarkets(proposal.id))
+    }
+
+    fn seal_decision_window(_proposal: &Proposal<AccountId32>) -> Result<(), DispatchError> {
+        Ok(())
+    }
+
     fn baseline_market(epoch: EpochId) -> Option<MarketId> {
         BaselineAvailable::get().then_some(baseline(epoch))
     }
@@ -335,7 +371,15 @@ impl MarketAccess<AccountId32> for TestMarket {
             .then(|| value_for(market, &TwapOverrides::get()))
     }
 
-    fn twap_trailing(market: MarketId, _window: BlockNumber) -> Option<FixedU64> {
+    fn twap_full_at(market: MarketId, _end: BlockNumber) -> Option<FixedU64> {
+        Self::twap_full(market)
+    }
+
+    fn twap_trailing_at(
+        market: MarketId,
+        _end: BlockNumber,
+        _window: BlockNumber,
+    ) -> Option<FixedU64> {
         (!UnavailableMarkets::get().contains(&market)).then(|| {
             TrailingOverrides::get()
                 .iter()
@@ -344,13 +388,14 @@ impl MarketAccess<AccountId32> for TestMarket {
         })
     }
 
-    fn spot(market: MarketId) -> Option<FixedU64> {
+    fn spot_at(market: MarketId, _end: BlockNumber) -> Option<FixedU64> {
         (!UnavailableMarkets::get().contains(&market))
             .then(|| value_for(market, &SpotOverrides::get()))
     }
 
     fn decision_grade(
         market: MarketId,
+        _end: BlockNumber,
         _role: BookRole,
         _class: ProposalClass,
         _params: &CoreEpochParams,
@@ -418,8 +463,15 @@ impl AttestationAccess for TestAttestation {
 
 pub struct TestConstitution;
 impl ConstitutionAccess<AccountId32> for TestConstitution {
-    fn static_checks_pass(_proposal: &Proposal<AccountId32>) -> bool {
-        StaticChecks::get()
+    fn required_bond(_proposal: &Proposal<AccountId32>) -> Option<Balance> {
+        Some(10)
+    }
+    fn static_check(_proposal: &Proposal<AccountId32>) -> StaticCheckDisposition {
+        if StaticChecks::get() {
+            StaticCheckDisposition::Eligible
+        } else {
+            StaticCheckDisposition::SlashAll(RejectReason::ConstitutionViolation)
+        }
     }
     fn queue_time_check(_proposal: &Proposal<AccountId32>) -> bool {
         QueueTimeCheck::get()
@@ -433,15 +485,30 @@ impl ConstitutionAccess<AccountId32> for TestConstitution {
     fn phase_flags() -> u32 {
         PhaseFlagsValue::get()
     }
-    fn active_metric_spec_version() -> MetricSpecVersion {
-        ActiveMetricSpecVersion::get()
+    fn active_metric_spec_version() -> Option<MetricSpecVersion> {
+        Some(ActiveMetricSpecVersion::get())
     }
     fn treasury_gate_required(_proposal: &Proposal<AccountId32>) -> bool {
         TreasuryGateRequired::get()
     }
+    fn attestation_artifact(proposal: &Proposal<AccountId32>) -> Option<H256> {
+        Some(proposal.payload_hash)
+    }
 }
 
 pub struct TestPreimage;
+
+pub struct TestPreimageRequests;
+
+impl TestPreimageRequests {
+    pub fn count(hash: H256) -> u32 {
+        PreimageRequests::get()
+            .into_iter()
+            .find_map(|(candidate, count)| (candidate == hash).then_some(count))
+            .unwrap_or_default()
+    }
+}
+
 impl PreimageAccess for TestPreimage {
     fn len(hash: H256) -> Option<u32> {
         (PreimageNoted::get()
@@ -512,6 +579,28 @@ impl ExecutionGuardAccess for TestExecutionGuard {
         SeamCalls::push(SeamCall::DequeueTerminal(pid))?;
         GuardStateModel::remove(pid);
         Ok(())
+    }
+
+    fn dequeue_for_rerun(pid: ProposalId) -> frame_support::dispatch::DispatchResult {
+        SeamCalls::push(SeamCall::DequeueForRerun(pid))?;
+        GuardStateModel::remove_for_rerun(pid);
+        Ok(())
+    }
+}
+
+pub struct TestProposalBond;
+impl ProposalBondCurrency<AccountId32> for TestProposalBond {
+    fn hold(_who: &AccountId32, _amount: Balance) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
+    fn release(_who: &AccountId32, _amount: Balance) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
+    fn slash_to_insurance(_amount: Balance) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
+    fn escrow_balance() -> Balance {
+        Balance::MAX
     }
 }
 
@@ -656,6 +745,7 @@ impl pallet_epoch::Config for Test {
     type Guardian = TestGuardian;
     type Attestation = TestAttestation;
     type Constitution = TestConstitution;
+    type ProposalBond = TestProposalBond;
     type Preimage = TestPreimage;
     type ExecutionGuard = TestExecutionGuard;
     type Welfare = TestWelfare;

@@ -687,49 +687,9 @@ fn live_execution_freeze() -> bool {
 }
 
 pub(crate) fn capability_enabled_for_call(class: ProposalClass, call: &RuntimeCall) -> bool {
-    let enabled =
-        |capability| pallet_constitution::Pallet::<Runtime>::capability_enabled(class, capability);
-    match call {
-        RuntimeCall::Utility(pallet_utility::Call::batch_all { calls }) => calls
-            .iter()
-            .all(|call| capability_enabled_for_call(class, call)),
-        RuntimeCall::Constitution(pallet_constitution::Call::set_param { key, .. }) => {
-            enabled(pallet_constitution::Capability::SetParam(*key))
-        }
-        RuntimeCall::Constitution(pallet_constitution::Call::set_capability { .. }) => {
-            enabled(pallet_constitution::Capability::SetCapability)
-        }
-        RuntimeCall::Constitution(pallet_constitution::Call::amend_registry { .. }) => {
-            enabled(pallet_constitution::Capability::AmendRegistry)
-        }
-        RuntimeCall::System(frame_system::Call::authorize_upgrade { .. }) => {
-            // The exact internal-Root upgrade operation is governed by the
-            // CODE row even when a META proposal carries it. This conservative
-            // single-row policy is tracked against the 06/09 ambiguity in
-            // SQ-104; no proposal can create a second upgrade capability lane.
-            pallet_constitution::Pallet::<Runtime>::capability_enabled(
-                ProposalClass::Code,
-                pallet_constitution::Capability::AuthorizeUpgrade,
-            )
-        }
-        _ => {
-            let projected = BleavitSafetyClassifier::project(call);
-            let mut domains = pallet_execution_guard::ReDerivedDomains::default();
-            let mut nested_calls = 0;
-            if collect_guard_domains(&projected, &mut domains, &mut nested_calls).is_err() {
-                return false;
-            }
-            domains.iter().all(|domain| match domain {
-                pallet_execution_guard::CallDomain::Public => true,
-                pallet_execution_guard::CallDomain::Treasury => {
-                    enabled(pallet_constitution::Capability::TreasurySpend)
-                }
-                // Every non-public capability domain needs an explicit typed
-                // match above; an unmapped future call is denied by default.
-                _ => false,
-            })
-        }
-    }
+    <crate::configs::RuntimeCapabilities as pallet_execution_guard::Capabilities<RuntimeCall>>::call_enabled(
+        class, call,
+    )
 }
 
 impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher {

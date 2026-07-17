@@ -105,6 +105,7 @@ pub trait EpochHandoff {
 pub trait Preimages {
     fn len(hash: H256) -> Option<u32>;
     fn fetch(hash: H256, expected_len: u32) -> Option<Vec<u8>>;
+    fn pin(hash: H256) -> DispatchResult;
     fn unpin(hash: H256) -> DispatchResult;
 }
 
@@ -441,6 +442,13 @@ pub mod pallet {
     #[pallet::storage]
     pub type AttestationBindings<T: Config> =
         StorageMap<_, Blake2_128Concat, ProposalId, (u32, H256), OptionQuery>;
+
+    /// Payload pins retained while a queued proposal is in a rerun cycle.
+    /// This internal bounded marker transfers the existing pin back into a
+    /// later queue entry without an unpinned interval or a double request.
+    #[pallet::storage]
+    pub type RerunPins<T: Config> =
+        CountedStorageMap<_, Blake2_128Concat, ProposalId, H256, OptionQuery>;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -826,9 +834,6 @@ pub mod pallet {
                     ),
                     Error::<T>::CapabilityDenied
                 );
-                if execution_guard_core::requires_ratification(item.class) {
-                    ensure!(item.ratify_ref.is_some(), Error::<T>::NotRatified);
-                }
                 let attestation_binding =
                     if matches!(item.class, ProposalClass::Code | ProposalClass::Meta) {
                         let id = item.attestation_id.ok_or(Error::<T>::AttestationMissing)?;
@@ -862,6 +867,7 @@ pub mod pallet {
                 item.cancelled = false;
                 item.failed_at = None;
                 let pid = item.pid;
+                let payload_hash = item.payload_hash;
                 let meters = item.meters_declared.clone();
                 let mut state = Self::load()?;
                 state
@@ -874,6 +880,16 @@ pub mod pallet {
                     );
                     state.held_resources.push((pid, meter));
                 }
+                let retained_pin = RerunPins::<T>::get(pid);
+                ensure!(
+                    retained_pin.is_none() || retained_pin == Some(payload_hash),
+                    Error::<T>::BadPreimage
+                );
+                if retained_pin.is_none() {
+                    T::Preimages::pin(payload_hash)?;
+                } else {
+                    RerunPins::<T>::remove(pid);
+                }
                 Self::persist(state)?;
                 Expedited::<T>::insert(pid, expedited);
                 if let Some(binding) = attestation_binding {
@@ -883,24 +899,30 @@ pub mod pallet {
             })
         }
 
-        /// Epoch-owned cleanup for a proposal that terminates before queue
-        /// admission. Ratification is allowed from Intake onward (06 §2.2),
-        /// so the record may exist without a Queue entry. B1a must invoke this
-        /// from every pre-queue terminal/reap path; it is deliberately not an
-        /// extrinsic and uses the same epoch-only authority as `enqueue`.
+        /// Narrow compatibility helper for explicit pre-queue reaping.
+        /// Production epoch paths use the universal idempotent
+        /// `dequeue_terminal`, which also removes attestation auxiliaries and
+        /// retained rerun pins when no Queue entry exists.
         pub fn reap_prequeue_ratification(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
             T::EnqueueAuthority::ensure_origin(origin)?;
             ensure!(!Queue::<T>::contains_key(pid), Error::<T>::CapabilityDenied);
-            Ratifications::<T>::remove(pid);
-            Ok(())
+            with_storage_layer(|| Self::do_dequeue_terminal(pid))
         }
 
-        /// Idempotent A8→A11 cleanup callback for T15/T16/T22. Epoch is the
-        /// sole proposal-state driver; this method removes the guard queue
+        /// Idempotent A8→A11 cleanup callback for every terminal path. Epoch is
+        /// the sole proposal-state driver; this method removes the guard queue
         /// entry, held resource locks, expedited/attestation/ratification
-        /// auxiliaries and the pinned preimage. A repeated call is a no-op.
+        /// auxiliaries and any queue/rerun preimage pin. It also works for a
+        /// never-queued ratification. A repeated call is a no-op.
         pub fn dequeue_terminal(pid: ProposalId) -> DispatchResult {
             with_storage_layer(|| Self::do_dequeue_terminal(pid))
+        }
+
+        /// Rerun-only dequeue. Queue locks/flags are released, while the
+        /// ratification, attestation binding and exactly one payload pin live
+        /// across the non-terminal cycle.
+        pub fn dequeue_for_rerun(pid: ProposalId) -> DispatchResult {
+            with_storage_layer(|| Self::do_dequeue_for_rerun(pid))
         }
 
         /// Cumulus callback for the relay `GoAhead` boundary. Scheduling an
@@ -1400,10 +1422,6 @@ pub mod pallet {
             let payload_hash = T::Epoch::payload_hash(pid).ok_or(Error::<T>::NotFound)?;
             if let Some(queued) = Queue::<T>::get(pid) {
                 ensure!(queued.payload_hash == payload_hash, Error::<T>::BadPreimage);
-                ensure!(
-                    queued.ratify_ref == Some(referendum_index),
-                    Error::<T>::NotRatified
-                );
                 let mut state = Self::load()?;
                 state
                     .ratify(GuardOrigin::RatifyTrack, pid, referendum_index)
@@ -1439,14 +1457,30 @@ pub mod pallet {
         }
 
         fn do_dequeue_terminal(pid: ProposalId) -> DispatchResult {
-            let Some(queued) = Queue::<T>::get(pid) else {
-                return Ok(());
-            };
-            let mut state = Self::load()?;
-            state.dequeue_terminal(pid);
-            T::Preimages::unpin(queued.payload_hash)?;
+            if let Some(queued) = Queue::<T>::get(pid) {
+                let mut state = Self::load()?;
+                state.dequeue_terminal(pid);
+                T::Preimages::unpin(queued.payload_hash)?;
+                Self::persist(state)?;
+            } else if let Some(payload_hash) = RerunPins::<T>::take(pid) {
+                T::Preimages::unpin(payload_hash)?;
+            }
             Self::cleanup_terminal(pid);
-            Self::persist(state)
+            Ok(())
+        }
+
+        fn do_dequeue_for_rerun(pid: ProposalId) -> DispatchResult {
+            let queued = Queue::<T>::get(pid).ok_or(Error::<T>::NotFound)?;
+            ensure!(
+                !RerunPins::<T>::contains_key(pid) && RerunPins::<T>::count() < MAX_QUEUE_BOUND,
+                Error::<T>::QueueFull
+            );
+            let mut state = Self::load()?;
+            state.dequeue_for_rerun(pid);
+            Self::persist(state)?;
+            Expedited::<T>::remove(pid);
+            RerunPins::<T>::insert(pid, queued.payload_hash);
+            Ok(())
         }
 
         fn cleanup_terminal(pid: ProposalId) {
@@ -1646,11 +1680,14 @@ pub mod pallet {
                 .map_err(|_| TryRuntimeError::Other("execution guard core bounds failed"))?;
             let actual_queue_count = Queue::<T>::iter_keys().count();
             let actual_ratification_count = Ratifications::<T>::iter_keys().count();
+            let actual_rerun_pin_count = RerunPins::<T>::iter_keys().count();
             if Queue::<T>::count() > MAX_QUEUE_BOUND
                 || usize::try_from(Queue::<T>::count()).ok() != Some(actual_queue_count)
                 || Ratifications::<T>::count() > MAX_RATIFICATIONS_BOUND
                 || usize::try_from(Ratifications::<T>::count()).ok()
                     != Some(actual_ratification_count)
+                || RerunPins::<T>::count() > MAX_QUEUE_BOUND
+                || usize::try_from(RerunPins::<T>::count()).ok() != Some(actual_rerun_pin_count)
                 || ExecutionRecords::<T>::get().len() > MAX_EXECUTION_RECORDS
             {
                 return Err(TryRuntimeError::Other(
@@ -1682,8 +1719,8 @@ pub mod pallet {
                 }
                 let requires_ratification =
                     execution_guard_core::requires_ratification(queued.class);
-                if requires_ratification != queued.ratify_ref.is_some()
-                    || (!requires_ratification && queued.ratification_passed)
+                if !requires_ratification
+                    && (queued.ratify_ref.is_some() || queued.ratification_passed)
                 {
                     return Err(TryRuntimeError::Other(
                         "execution guard queue ratification shape is invalid",
@@ -1736,9 +1773,18 @@ pub mod pallet {
                 }
             }
             for (pid, _) in AttestationBindings::<T>::iter() {
-                if !Queue::<T>::contains_key(pid) {
+                if !Queue::<T>::contains_key(pid) && !RerunPins::<T>::contains_key(pid) {
                     return Err(TryRuntimeError::Other(
                         "execution guard orphan attestation binding",
+                    ));
+                }
+            }
+            for (pid, payload_hash) in RerunPins::<T>::iter() {
+                if Queue::<T>::contains_key(pid)
+                    || T::Epoch::payload_hash(pid) != Some(payload_hash)
+                {
+                    return Err(TryRuntimeError::Other(
+                        "execution guard rerun pin is orphaned",
                     ));
                 }
             }

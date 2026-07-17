@@ -7,8 +7,8 @@
 
 use crate as pallet_guardian;
 use crate::{
-    GuardianProposalStatus, GuardianRecallScheduler, GuardianReviewScheduler, GuardianTriggers,
-    ProposalStatus, TriggerState,
+    GuardianEffectDispatcher, GuardianPower, GuardianProposalStatus, GuardianRecallScheduler,
+    GuardianReviewScheduler, GuardianTriggers, ProposalStatus, TriggerState,
 };
 use frame_support::{derive_impl, parameter_types, traits::EnsureOrigin};
 use futarchy_primitives::ProposalId;
@@ -39,6 +39,8 @@ parameter_types! {
     pub static TriggerFeed: TriggerState = TriggerState::none();
     /// Monotonic referendum index handed back by the review scheduler.
     pub static NextReferendum: u32 = 100;
+    pub static ReviewSchedulingFails: bool = false;
+    pub static RecallSchedulingFails: bool = false;
 }
 
 /// The account the mock `ValuesOrigin` accepts as `ConstitutionalValues`.
@@ -79,21 +81,48 @@ impl GuardianTriggers for TestTriggers {
     }
 }
 
+pub struct TestEffects;
+impl GuardianEffectDispatcher for TestEffects {
+    fn dispatch(
+        _power: GuardianPower,
+        _justification_hash: futarchy_primitives::H256,
+    ) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
+}
+
 pub struct TestScheduler;
 impl GuardianReviewScheduler for TestScheduler {
-    fn schedule_review(_action_id: crate::ActionId) -> u32 {
+    fn schedule_review(_action_id: crate::ActionId) -> Result<u32, sp_runtime::DispatchError> {
+        if ReviewSchedulingFails::get() {
+            return Err(sp_runtime::DispatchError::Other(
+                "review scheduler unavailable",
+            ));
+        }
         let n = NextReferendum::get();
         NextReferendum::set(n + 1);
-        n
+        Ok(n)
+    }
+
+    fn refund_review(
+        _action_id: crate::ActionId,
+        _referendum: u32,
+    ) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
     }
 }
 
 pub struct TestRecallScheduler;
 impl GuardianRecallScheduler for TestRecallScheduler {
-    fn schedule_recall(_action_id: crate::ActionId) -> u32 {
+    fn schedule_recall(_action_id: crate::ActionId) -> Result<u32, sp_runtime::DispatchError> {
+        if RecallSchedulingFails::get() {
+            return Err(sp_runtime::DispatchError::Other(
+                "recall scheduler unavailable",
+            ));
+        }
         let n = NextReferendum::get();
         NextReferendum::set(n + 1);
-        n
+        Ok(n)
     }
 }
 
@@ -102,6 +131,7 @@ impl pallet_guardian::Config for Test {
     type CurrentEpoch = CurrentEpochValue;
     type ProposalStatusProvider = TestStatus;
     type TriggerProvider = TestTriggers;
+    type EffectDispatcher = TestEffects;
     type ReviewScheduler = TestScheduler;
     type RecallScheduler = TestRecallScheduler;
     type WeightInfo = ();

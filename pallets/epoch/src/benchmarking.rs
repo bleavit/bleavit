@@ -480,7 +480,7 @@ mod benches {
             payload_hashes.push(proposal.payload_hash);
             T::Preimage::request(proposal.payload_hash)
                 .map_err(|_| BenchmarkError::Stop("tick qualification preimage pin failed"))?;
-            crate::QualificationPins::<T>::insert(pid, proposal.payload_hash);
+            crate::QualificationPreimageRequests::<T>::insert(pid, proposal.payload_hash);
             proposal.class = ProposalClass::Code;
             proposal.decide_at = block_for(
                 TERMINAL_SETTLEMENT_EPOCH,
@@ -549,7 +549,7 @@ mod benches {
         proposal.class = ProposalClass::Code;
         T::Preimage::request(proposal.payload_hash)
             .map_err(|_| BenchmarkError::Stop("decide qualification preimage pin failed"))?;
-        crate::QualificationPins::<T>::insert(pid, proposal.payload_hash);
+        crate::QualificationPreimageRequests::<T>::insert(pid, proposal.payload_hash);
         proposal.markets = Some(T::BenchmarkHelper::prime_decision(pid, 0, true));
         T::BenchmarkHelper::prime_guard_enqueue(pid);
         state.resource_locks = proposal
@@ -891,10 +891,10 @@ mod benches {
         #[extrinsic_call]
         _(origin as T::RuntimeOrigin, 0);
 
-        assert_eq!(
-            crate::Cohorts::<T>::get(0).map(|cohort| cohort.status),
-            Some(CohortStatus::Void)
-        );
+        assert!(!crate::Cohorts::<T>::contains_key(0));
+        assert!(crate::RecentCohortSummaries::<T>::get()
+            .iter()
+            .any(|summary| summary.epoch == 0 && summary.voided));
         Ok(())
     }
 

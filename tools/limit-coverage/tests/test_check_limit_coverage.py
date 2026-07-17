@@ -137,6 +137,10 @@ class LimitCoverageTests(unittest.TestCase):
             ["dec.delta.param", "dec.delta.trs", "dec.delta.code", "dec.delta.meta"],
         )
         self.assertEqual(
+            checker.extract_param_keys("`gate.v_min` 0.1 × `dec.v_min(class)`"),
+            ["gate.v_min.param", "gate.v_min.trs", "gate.v_min.code", "gate.v_min.meta"],
+        )
+        self.assertEqual(
             checker.extract_param_keys(
                 "`res.probe_interval` / `res.probe_timeout` "
                 "(keys: `res.probe_int` / `res.probe_to`)"

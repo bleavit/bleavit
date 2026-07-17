@@ -1266,7 +1266,7 @@ fn rolling_window_with_the_runtime_prune_cutoff_never_jams() {
     // e−20 and older" reading — which must always leave one free slot in the
     // 20-capacity window so the next epoch's snapshot records. A cutoff of
     // current − MAX_SNAPSHOTS_BOUND retains a full window and jams recording
-    // permanently (settlement deadlock → dead-man; PLAN SQ-155).
+    // permanently (settlement deadlock → dead-man; PLAN SQ-200).
     new_test_ext().execute_with(|| {
         // The mock genesis spec activates at epoch 1, so the first recordable
         // snapshot epoch is 1 (clock 2).

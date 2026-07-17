@@ -403,7 +403,11 @@ impl ExecutionGuard {
             .iter_mut()
             .find(|q| q.pid == pid)
             .ok_or(Error::NotFound)?;
-        ensure!(q.ratify_ref == Some(referendum_index), Error::NotRatified);
+        ensure!(
+            q.ratify_ref.is_none() || q.ratify_ref == Some(referendum_index),
+            Error::NotRatified
+        );
+        q.ratify_ref = Some(referendum_index);
         q.ratification_passed = true;
         self.events.push(Event::Ratified {
             pid,
@@ -624,6 +628,13 @@ impl ExecutionGuard {
             self.events
                 .push(Event::PreimageUnpinned { pid, payload_hash });
         }
+        self.held_resources.retain(|(owner, _)| *owner != pid);
+    }
+
+    /// Remove queue-owned state for a rerun while preserving the payload pin
+    /// and governance bindings owned by the FRAME shell.
+    pub fn dequeue_for_rerun(&mut self, pid: ProposalId) {
+        self.queue.retain(|queued| queued.pid != pid);
         self.held_resources.retain(|(owner, _)| *owner != pid);
     }
 

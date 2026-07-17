@@ -185,15 +185,20 @@ proptest! {
             kernel_bounded: false,
         };
         let mut state = ConstitutionState::genesis();
-        state.params = vec![row];
-        state.try_state().unwrap();
+        // Keep the production genesis records so A8's four
+        // dec.v_min↔gate.v_min coupling pairs remain present and valid.  The
+        // synthetic row is independent and exercises only the generic I-6
+        // update envelope.
+        let property_index = state.params.len();
+        state.params.push(row);
+        prop_assert_eq!(state.try_state(), Ok(()));
         let mut epoch = last_changed;
 
         for (advance, candidate_raw) in actions {
             epoch = epoch.saturating_add(advance);
             let next = value(kind, candidate_raw);
             let before = state.clone();
-            let previous = before.params[0];
+            let previous = before.params[property_index];
             let expected = update_allowed(&previous, next, epoch);
             let result = state.set_param(key, next, epoch);
             prop_assert_eq!(
@@ -207,7 +212,7 @@ proptest! {
             if result.is_err() {
                 prop_assert_eq!(&state, &before, "rejected set_param mutated state");
             } else {
-                let stored = state.params[0];
+                let stored = state.params[property_index];
                 prop_assert_eq!(stored.value, next);
                 prop_assert!(stored.value.as_u128() >= previous.min.as_u128());
                 prop_assert!(stored.value.as_u128() <= previous.max.as_u128());

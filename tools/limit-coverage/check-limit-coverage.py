@@ -50,6 +50,7 @@ PER_CLASS_KEYS = {
     "dec.delta": "dec.delta",
     "dec.sigma": "dec.sigma",
     "dec.v_min": "dec.v_min",
+    "gate.v_min": "gate.v_min",
     "prop.bond": "prop.bond",
     "pol.b": "pol.b",
     "exec.timelock": "exec.lock",

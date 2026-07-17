@@ -120,7 +120,7 @@ pub trait EpochContext {
     /// The last block at which a filing for measurement `epoch` is admissible.
     fn filing_window_end(epoch: EpochId) -> BlockNumber;
     /// The frozen MetricSpec version filings for `epoch` must attest under (I-16).
-    fn frozen_spec_version(epoch: EpochId) -> MetricSpecVersion;
+    fn frozen_spec_version(epoch: EpochId) -> Option<MetricSpecVersion>;
     /// The Milestone-instance completion **target** for `epoch` — the
     /// frozen-MetricSpec denominator of `points ÷ target` (07 §7 / 05 §4.4). A
     /// per-spec field (I-16), never a 13/kernel constant. Unused by the Incident
@@ -501,7 +501,8 @@ pub mod pallet {
             // The window and the frozen spec version are trusted per-epoch reads
             // (I-16), never taken from the filer.
             let filing_window_end = T::Epoch::filing_window_end(epoch);
-            let expected_spec = T::Epoch::frozen_spec_version(epoch);
+            let expected_spec =
+                T::Epoch::frozen_spec_version(epoch).ok_or(Error::<T, I>::SpecVersionMismatch)?;
             Self::run_scoped(epoch, |reg| {
                 reg.file(registry_core::FileInput {
                     who: raw,

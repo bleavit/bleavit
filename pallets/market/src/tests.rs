@@ -8,7 +8,8 @@ use crate::{mock::*, BaselineMarketOf, ClosedAt, Error, Event, Markets};
 use frame_support::{assert_err, assert_noop, assert_ok, traits::fungibles::Inspect};
 use frame_system::RawOrigin;
 use futarchy_primitives::{
-    keeper::CrankClass, Balance, Branch, MarketId, PositionId, PositionKind, ScalarSide, TradeSide,
+    keeper::CrankClass, Balance, Branch, FixedU64, MarketId, PositionId, PositionKind, ScalarSide,
+    TradeSide,
 };
 use market_core::{BookKind, MarketBook, MarketPhase, MarketState, MIN_TRADE};
 use pallet_conditional_ledger::core_ledger::{baseline, position, LedgerState};
@@ -101,6 +102,43 @@ fn baseline_seed_is_funded_by_treasury_not_the_book() {
         let short = position_balance(baseline(EPOCH, ScalarSide::Short), BOOK);
         assert_eq!(long, short);
         assert!(long > 0);
+        assert_try_state();
+    });
+}
+
+#[test]
+fn accept_reject_pair_uses_one_dual_mint_split() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        assert_ok!(Market::create_market(
+            signed(MARKET_ADMIN),
+            MARKET_ID + 1,
+            BookKind::Decision {
+                proposal: PROPOSAL,
+                branch: Branch::Reject,
+            },
+            POL,
+            INSURANCE,
+            B,
+        ));
+        assert_ok!(Market::seed_branch_pair(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            MARKET_ID + 1,
+            TREASURY,
+        ));
+        let headroom =
+            position_balance(position(PROPOSAL, Branch::Accept, PositionKind::Long), BOOK);
+        assert!(headroom > 0);
+        assert_eq!(
+            position_balance(position(PROPOSAL, Branch::Reject, PositionKind::Long), POL,),
+            headroom,
+        );
+        assert_eq!(
+            pallet_conditional_ledger::Vaults::<Test>::get(PROPOSAL).map(|vault| vault.escrowed),
+            Some(headroom),
+            "one split funds both branch books; a per-book split doubles escrow",
+        );
         assert_try_state();
     });
 }
@@ -1244,6 +1282,527 @@ fn permissionless_crank_and_reap_accept_any_signed_user() {
         System::set_block_number(ObsInterval::get() + MarketArchiveDelay::get());
         assert_ok!(Market::reap(signed(BOB), MARKET_ID));
         assert!(!Markets::<Test>::contains_key(MARKET_ID));
+        assert_try_state();
+    });
+}
+
+#[test]
+fn registered_window_reads_exact_twap_close_spot_and_time_averaged_contest() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        let interval = u32::try_from(ObsInterval::get()).unwrap_or_default();
+        assert!(interval > 0);
+        let trailing = interval.saturating_mul(2);
+        let end = interval.saturating_mul(3);
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            0,
+            trailing,
+            end,
+        ));
+
+        System::set_block_number(u64::from(interval));
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        System::set_block_number(u64::from(trailing));
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        System::set_block_number(u64::from(end));
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        let observed_close = Market::spot_at(MARKET_ID, end);
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        assert_ok!(Market::buy(
+            signed(BOB),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        assert_ok!(Market::seal_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            end,
+        ));
+
+        assert!(Market::twap_at(MARKET_ID, end, end).is_some());
+        assert!(Market::twap_at(MARKET_ID, end, interval).is_some());
+        assert_ne!(Market::spot_at(MARKET_ID, end), observed_close);
+        assert_eq!(
+            Market::spot_at(MARKET_ID, end),
+            Markets::<Test>::get(MARKET_ID).map(|book| book.last_quote_1e9),
+        );
+        assert_eq!(
+            Market::average_contest_at(MARKET_ID, end, end),
+            TRADE
+                .checked_mul(Balance::from(trailing))
+                .and_then(|value| value.checked_div(Balance::from(end)))
+        );
+        assert!(Market::decision_grade_at(
+            MARKET_ID,
+            end,
+            end,
+            100,
+            FixedU64(1_000_000_000),
+            1,
+            B,
+            true,
+        ));
+
+        System::set_block_number(u64::from(end.saturating_add(1)));
+        assert_noop!(
+            Market::buy(
+                signed(ALICE),
+                MARKET_ID,
+                ScalarSide::Long,
+                TRADE,
+                Balance::MAX,
+            ),
+            E::NotTrading
+        );
+        assert_try_state();
+    });
+}
+
+#[test]
+fn contest_depth_accrues_forward_across_a_pre_observation_round_trip() {
+    // 05 §5.2/§5.6 and 08 §5.2: contest depth is a time integral, so a
+    // position opened one block before the observation boundary may contribute
+    // for that one block only.  The former observation-only accounting charged
+    // the pre-sell quantity backward over the entire ten-block interval.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        let interval = u32::try_from(ObsInterval::get()).unwrap_or_default();
+        assert!(interval > 1);
+        let end = interval.saturating_mul(2);
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            0,
+            interval,
+            end,
+        ));
+
+        System::set_block_number(u64::from(interval));
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+
+        // Hold TRADE for exactly one block, then unwind in the trade that also
+        // records the end observation.  This is the observation-boundary flash
+        // that must not receive backward credit for the preceding interval.
+        System::set_block_number(u64::from(end.saturating_sub(1)));
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        System::set_block_number(u64::from(end));
+        assert_ok!(Market::sell(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            1,
+        ));
+
+        assert_eq!(
+            Market::average_contest_at(MARKET_ID, end, end),
+            TRADE.checked_div(Balance::from(end)),
+            "one-block contest must receive one block of credit, never a full interval",
+        );
+        assert_try_state();
+    });
+}
+
+#[test]
+fn contest_depth_same_block_round_trip_before_observation_matches_empty_book() {
+    // A zero-duration buy+unwind immediately before the observation boundary
+    // has the same time integral as holding nothing.  This guards the exact
+    // flash path called out by the A8 remediation review.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        let interval = u32::try_from(ObsInterval::get()).unwrap_or_default();
+        assert!(interval > 1);
+        let end = interval.saturating_mul(2);
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            0,
+            interval,
+            end,
+        ));
+        System::set_block_number(u64::from(interval));
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+
+        System::set_block_number(u64::from(end.saturating_sub(1)));
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        assert_ok!(Market::sell(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            1,
+        ));
+        System::set_block_number(u64::from(end));
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+
+        assert_eq!(Market::average_contest_at(MARKET_ID, end, end), Some(0));
+        assert_try_state();
+    });
+}
+
+#[test]
+fn contest_depth_held_for_the_whole_window_counts_fully() {
+    // The forward-accrual fix must not undercount genuine persistent contest.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        let interval = u32::try_from(ObsInterval::get()).unwrap_or_default();
+        assert!(interval > 0);
+        let start = 1;
+        let trailing = start + interval;
+        let end = trailing + interval;
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            start,
+            trailing,
+            end,
+        ));
+
+        System::set_block_number(u64::from(start));
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        System::set_block_number(u64::from(trailing));
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        System::set_block_number(u64::from(end));
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+
+        assert_eq!(
+            Market::average_contest_at(MARKET_ID, end, end - start),
+            Some(TRADE),
+            "contest held for every block of the window must count at full notional",
+        );
+        assert_try_state();
+    });
+}
+
+#[test]
+fn close_seals_end_checkpoint_after_an_end_minus_one_dust_trade() {
+    // 04 §7: the end checkpoint is derivable solely from pre-close state.
+    // Missing the exact end-grid observation must not let an end-1 dust trade
+    // deny an otherwise sufficiently covered decision window.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        let interval = u32::try_from(ObsInterval::get()).unwrap_or_default();
+        assert!(interval > 0);
+        // Twenty of twenty-one scheduled observations is still >=95% coverage,
+        // so the deliberately absent observation at `end` is not itself fatal.
+        let scheduled_intervals = 21;
+        let end = interval.saturating_mul(scheduled_intervals);
+        let trailing = interval.saturating_mul(11);
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            0,
+            trailing,
+            end,
+        ));
+
+        for step in 1..scheduled_intervals {
+            System::set_block_number(u64::from(interval.saturating_mul(step)));
+            assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        }
+        let last_observed = end.saturating_sub(interval);
+        assert_eq!(
+            Markets::<Test>::get(MARKET_ID).map(|book| book.last_observed_block),
+            Some(u64::from(last_observed)),
+        );
+
+        System::set_block_number(u64::from(end.saturating_sub(1)));
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            MIN_TRADE,
+            Balance::MAX,
+        ));
+        let close_spot = Markets::<Test>::get(MARKET_ID).map(|book| book.last_quote_1e9);
+        assert!(
+            close_spot.is_some(),
+            "the live market must have a stored pre-close quote",
+        );
+        let Some(close_spot) = close_spot else {
+            return;
+        };
+        assert!(close_spot.0 > 500_000_000);
+
+        System::set_block_number(u64::from(end));
+        assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+
+        // The missing end-grid observation is sealed by carrying the last
+        // recorded observation to the boundary.  The dust trade affects the
+        // close spot, but cannot rewrite the already-recorded TWAP series.
+        assert_eq!(
+            Market::twap_at(MARKET_ID, end, end),
+            Some(FixedU64(500_000_000)),
+        );
+        assert_eq!(Market::spot_at(MARKET_ID, end), Some(close_spot));
+        assert!(Market::decision_grade_at(
+            MARKET_ID,
+            end,
+            end,
+            95,
+            FixedU64(1_000_000_000),
+            0,
+            B,
+            true,
+        ));
+        assert_try_state();
+    });
+}
+
+#[test]
+fn sealed_decision_window_ignores_a_later_trade_in_the_same_end_block() {
+    // 04 §2/§7: sealing is the decision boundary. A trade ordered later in
+    // the same block remains a valid market trade, but it may not rewrite any
+    // checkpoint or the close spot already consumed by the decision engine.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        let interval = u32::try_from(ObsInterval::get()).unwrap_or_default();
+        assert!(interval > 1);
+        let trailing = interval;
+        let end = interval.saturating_mul(2);
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            0,
+            trailing,
+            end,
+        ));
+        System::set_block_number(u64::from(trailing));
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+
+        // Establish a non-neutral pre-close quote without recording another
+        // observation, then seal from precisely that pre-close information.
+        System::set_block_number(u64::from(end.saturating_sub(1)));
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            MIN_TRADE,
+            Balance::MAX,
+        ));
+        System::set_block_number(u64::from(end));
+        assert_ok!(Market::seal_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            end,
+        ));
+
+        let sealed_checkpoints = crate::WindowCheckpoints::<Test>::get(MARKET_ID);
+        let sealed_full_twap = Market::twap_at(MARKET_ID, end, end);
+        let sealed_trailing_twap = Market::twap_at(MARKET_ID, end, interval);
+        let sealed_spot = Market::spot_at(MARKET_ID, end);
+        let quote_at_seal = Markets::<Test>::get(MARKET_ID).map(|book| book.last_quote_1e9);
+        assert!(sealed_full_twap.is_some());
+        assert!(sealed_trailing_twap.is_some());
+        assert_eq!(sealed_spot, quote_at_seal);
+
+        // This trade is ordered strictly after the seal but still in `end`.
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            MIN_TRADE,
+            Balance::MAX,
+        ));
+        let quote_after_trade = Markets::<Test>::get(MARKET_ID).map(|book| book.last_quote_1e9);
+        assert_ne!(
+            quote_after_trade, quote_at_seal,
+            "the interleaved trade must execute"
+        );
+
+        assert_eq!(
+            crate::WindowCheckpoints::<Test>::get(MARKET_ID),
+            sealed_checkpoints,
+            "a post-seal end-block observation must not rewrite checkpoints",
+        );
+        assert_eq!(Market::twap_at(MARKET_ID, end, end), sealed_full_twap);
+        assert_eq!(
+            Market::twap_at(MARKET_ID, end, interval),
+            sealed_trailing_twap,
+        );
+        assert_eq!(
+            Market::spot_at(MARKET_ID, end),
+            sealed_spot,
+            "the post-seal quote is not the decision close spot",
+        );
+        assert_try_state();
+    });
+}
+
+#[test]
+fn shared_baseline_decisions_read_one_sealed_value_across_an_interleaved_trade() {
+    // Two proposal decisions can consume the same Baseline book and end
+    // boundary (04 §8.4). The first decision seals the boundary; a Baseline
+    // trade before the second decision in the same block must not create a
+    // different Baseline fact for that second consumer.
+    new_test_ext().execute_with(|| {
+        create_baseline();
+        seed(BASELINE_ID);
+        let interval = u32::try_from(ObsInterval::get()).unwrap_or_default();
+        assert!(interval > 1);
+        let trailing = interval;
+        let end = interval.saturating_mul(2);
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            BASELINE_ID,
+            0,
+            trailing,
+            end,
+        ));
+        System::set_block_number(u64::from(trailing));
+        assert_ok!(Market::crank_observe(signed(BOB), BASELINE_ID));
+        System::set_block_number(u64::from(end.saturating_sub(1)));
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            BASELINE_ID,
+            ScalarSide::Long,
+            MIN_TRADE,
+            Balance::MAX,
+        ));
+
+        System::set_block_number(u64::from(end));
+        // Logical consumer 1 seals and reads the shared Baseline boundary.
+        assert_ok!(Market::seal_decision_window(
+            signed(MARKET_ADMIN),
+            BASELINE_ID,
+            end,
+        ));
+        let first_checkpoints = crate::WindowCheckpoints::<Test>::get(BASELINE_ID);
+        let first_full_twap = Market::twap_at(BASELINE_ID, end, end);
+        let first_trailing_twap = Market::twap_at(BASELINE_ID, end, interval);
+        let first_spot = Market::spot_at(BASELINE_ID, end);
+        assert!(first_full_twap.is_some());
+        assert!(first_trailing_twap.is_some());
+        assert!(first_spot.is_some());
+
+        assert_ok!(Market::buy(
+            signed(BOB),
+            BASELINE_ID,
+            ScalarSide::Long,
+            MIN_TRADE,
+            Balance::MAX,
+        ));
+
+        // Logical consumer 2 reaches the same seal API after the interleaved
+        // trade. Resealing is idempotent and must return the first decision's
+        // exact shared Baseline values.
+        assert_ok!(Market::seal_decision_window(
+            signed(MARKET_ADMIN),
+            BASELINE_ID,
+            end,
+        ));
+        assert_eq!(
+            crate::WindowCheckpoints::<Test>::get(BASELINE_ID),
+            first_checkpoints,
+        );
+        assert_eq!(Market::twap_at(BASELINE_ID, end, end), first_full_twap);
+        assert_eq!(
+            Market::twap_at(BASELINE_ID, end, interval),
+            first_trailing_twap,
+        );
+        assert_eq!(Market::spot_at(BASELINE_ID, end), first_spot);
+        assert_try_state();
+    });
+}
+
+#[test]
+fn observation_after_window_end_cannot_backfill_close_data() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        let interval = u32::try_from(ObsInterval::get()).unwrap_or_default();
+        assert!(interval > 0);
+        let trailing = interval.saturating_mul(2);
+        let end = interval.saturating_mul(3);
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            0,
+            trailing,
+            end,
+        ));
+        System::set_block_number(u64::from(interval));
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        System::set_block_number(u64::from(trailing));
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        System::set_block_number(u64::from(end.saturating_add(1)));
+        assert_noop!(Market::crank_observe(signed(BOB), MARKET_ID), E::NotTrading);
+        assert_eq!(Market::twap_at(MARKET_ID, end, end), None);
+        assert_eq!(Market::spot_at(MARKET_ID, end), None);
+        assert!(!Market::decision_grade_at(
+            MARKET_ID,
+            end,
+            end,
+            100,
+            FixedU64(1_000_000_000),
+            0,
+            B,
+            true,
+        ));
+        assert_try_state();
+    });
+}
+
+#[test]
+fn delay_rerun_adds_one_original_seed_and_doubles_lmsr_depth_once() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(ObsInterval::get());
+        assert_ok!(Market::reopen_for_rerun(signed(MARKET_ADMIN), MARKET_ID));
+        assert_ok!(Market::seed_rerun(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            TREASURY,
+        ));
+        assert_eq!(
+            Markets::<Test>::get(MARKET_ID).map(|book| book.b),
+            B.checked_mul(2)
+        );
+        assert_noop!(
+            Market::seed_rerun(signed(MARKET_ADMIN), MARKET_ID, TREASURY),
+            E::AlreadySeeded
+        );
         assert_try_state();
     });
 }

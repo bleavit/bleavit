@@ -218,7 +218,7 @@ class RunEvidenceTests(unittest.TestCase):
                         "kind": "chopsticks",
                         "path": f"chopsticks/scenarios/{name}.yml",
                         "tier": "release",
-                        "gated_on": ["SQ-151 card-depth execution"],
+                        "gated_on": ["SQ-203 card-depth execution"],
                         "timeout_seconds": 10,
                         "spec": "15 §4.7; 02 §11",
                     }
@@ -535,7 +535,7 @@ class RunEvidenceTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         output = result.stdout + result.stderr
-        self.assertIn("SQ-152", output)
+        self.assertIn("SQ-204", output)
         self.assertIn("01-smoke, 03-keeper-loss", output)
         self.assert_no_evidence()
 
@@ -561,10 +561,10 @@ class RunEvidenceTests(unittest.TestCase):
         for identifier in scenario_ids:
             self.assertEqual(rows[identifier]["result"], "skipped-gated")
             self.assertEqual(
-                rows[identifier]["gated_on"], ["SQ-151 card-depth execution"]
+                rows[identifier]["gated_on"], ["SQ-203 card-depth execution"]
             )
             self.assertIn(identifier, result.stdout + result.stderr)
-        self.assertIn("SQ-151 card-depth execution", result.stdout + result.stderr)
+        self.assertIn("SQ-203 card-depth execution", result.stdout + result.stderr)
         self.assert_no_evidence()
 
     def test_failing_suite_returns_nonzero_without_evidence(self) -> None:

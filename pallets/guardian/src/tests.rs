@@ -113,6 +113,34 @@ fn five_of_seven_dispatches_schedules_review_with_referendum() {
 }
 
 #[test]
+fn unavailable_review_scheduler_rolls_back_the_dispatching_approval() {
+    new_test_ext().execute_with(|| {
+        set_triggers(guardian_core::TriggerState {
+            gate_breach: true,
+            ..guardian_core::TriggerState::none()
+        });
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::SuspendOnGate,
+            hash(9)
+        ));
+        for n in 2..=4u8 {
+            assert_ok!(Guardian::approve_action(RuntimeOrigin::signed(acct(n)), 0));
+        }
+        let before_events = frame_system::Pallet::<Test>::events();
+        ReviewSchedulingFails::set(true);
+        assert_noop!(
+            Guardian::approve_action(RuntimeOrigin::signed(acct(5)), 0),
+            DispatchError::Other("review scheduler unavailable")
+        );
+        assert!(!PendingActions::<Test>::get()[0].dispatched);
+        assert_eq!(Approvals::<Test>::get().len(), 4);
+        assert!(ReviewDeadlines::<Test>::get().is_empty());
+        assert_eq!(frame_system::Pallet::<Test>::events(), before_events);
+    });
+}
+
+#[test]
 fn force_rerun_pre_execution_only_and_once() {
     new_test_ext().execute_with(|| {
         set_status(ProposalStatus::Executed, false);

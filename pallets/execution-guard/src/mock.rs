@@ -377,6 +377,9 @@ impl Preimages for TestPreimages {
                 (candidate == hash && bytes.len() == expected_len as usize).then_some(bytes)
             })
     }
+    fn pin(_hash: H256) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
     fn unpin(hash: H256) -> frame_support::dispatch::DispatchResult {
         PreimageData::mutate(|items| items.retain(|(candidate, _)| *candidate != hash));
         Unpinned::mutate(|items| items.push(hash));

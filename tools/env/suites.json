@@ -110,7 +110,7 @@
       "path": "chopsticks/scenarios/upgrade-transition.yml",
       "tier": "release",
       "gated_on": [
-        "SQ-151 card-depth execution"
+        "SQ-203 card-depth execution"
       ],
       "timeout_seconds": 300,
       "spec": "15 §4.7; 02 §11"
@@ -121,7 +121,7 @@
       "path": "chopsticks/scenarios/stale-queue.yml",
       "tier": "release",
       "gated_on": [
-        "SQ-151 card-depth execution"
+        "SQ-203 card-depth execution"
       ],
       "timeout_seconds": 300,
       "spec": "15 §4.7; 02 §11"
@@ -132,7 +132,7 @@
       "path": "chopsticks/scenarios/void-epoch.yml",
       "tier": "release",
       "gated_on": [
-        "SQ-151 card-depth execution"
+        "SQ-203 card-depth execution"
       ],
       "timeout_seconds": 300,
       "spec": "15 §4.7; 02 §11"
@@ -143,7 +143,7 @@
       "path": "chopsticks/scenarios/precondition-failures.yml",
       "tier": "release",
       "gated_on": [
-        "SQ-151 card-depth execution"
+        "SQ-203 card-depth execution"
       ],
       "timeout_seconds": 300,
       "spec": "15 §4.7; 02 §11"
@@ -154,7 +154,7 @@
       "path": "chopsticks/scenarios/pb-depeg.yml",
       "tier": "release",
       "gated_on": [
-        "SQ-151 card-depth execution"
+        "SQ-203 card-depth execution"
       ],
       "timeout_seconds": 300,
       "spec": "06 §6.2"
@@ -165,7 +165,7 @@
       "path": "chopsticks/scenarios/pb-migration.yml",
       "tier": "release",
       "gated_on": [
-        "SQ-151 card-depth execution"
+        "SQ-203 card-depth execution"
       ],
       "timeout_seconds": 300,
       "spec": "06 §6.2; 09 §3.2"
@@ -176,7 +176,7 @@
       "path": "chopsticks/scenarios/pb-oracle-void.yml",
       "tier": "release",
       "gated_on": [
-        "SQ-151 card-depth execution"
+        "SQ-203 card-depth execution"
       ],
       "timeout_seconds": 300,
       "spec": "06 §6.2"
@@ -187,7 +187,7 @@
       "path": "chopsticks/scenarios/pb-halt-intake.yml",
       "tier": "release",
       "gated_on": [
-        "SQ-151 card-depth execution"
+        "SQ-203 card-depth execution"
       ],
       "timeout_seconds": 300,
       "spec": "06 §6.2"
@@ -198,7 +198,7 @@
       "path": "chopsticks/scenarios/pb-reserve.yml",
       "tier": "release",
       "gated_on": [
-        "SQ-151 card-depth execution"
+        "SQ-203 card-depth execution"
       ],
       "timeout_seconds": 300,
       "spec": "06 §6.2"
@@ -209,7 +209,7 @@
       "path": "chopsticks/scenarios/pb-ledger-freeze.yml",
       "tier": "release",
       "gated_on": [
-        "SQ-151 card-depth execution"
+        "SQ-203 card-depth execution"
       ],
       "timeout_seconds": 300,
       "spec": "06 §6.2/§6.3; 09 §4"

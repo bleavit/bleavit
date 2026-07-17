@@ -62,8 +62,8 @@ is produced only when every release-tier suite of that kind was attempted and
 passed: G1-tier exclusions are recorded, but a gated release-tier skip blocks
 evidence. The producer self-checks with the assembler's validator, while
 assembly remains the single release-blocking enforcement point.
-Evidence emission is currently blocked fail-closed until the SQ-152 try-state
-leg and the SQ-151 Chopsticks card-depth execution land; the producer still runs
+Evidence emission is currently blocked fail-closed until the SQ-204 try-state
+leg and the SQ-203 Chopsticks card-depth execution land; the producer still runs
 the suites and writes run reports.
 
 Pending SQ-139 ratification, the producer adds consumer-tolerated fields to the

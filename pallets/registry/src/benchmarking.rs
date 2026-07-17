@@ -26,7 +26,7 @@ fn worst_class<T: Config<I>, I: 'static>() -> FilingClass {
 
 fn file_many<T: Config<I>, I: 'static>(filer: &T::AccountId, epoch: EpochId, count: u32) {
     T::BenchmarkHelper::prime_epoch(epoch);
-    let spec = T::Epoch::frozen_spec_version(epoch);
+    let spec = T::Epoch::frozen_spec_version(epoch).unwrap_or_default();
     for index in 0..count {
         let mut evidence = [7u8; 32];
         evidence[..4].copy_from_slice(&index.to_le_bytes());
@@ -101,7 +101,7 @@ mod benches {
         file_many::<T, I>(&caller, EPOCH, T::MaxFilingsPerEpoch::get() - 1);
         fill_other_live_epochs::<T, I>(&caller);
         fill_aggregates::<T, I>(registry_core::MAX_AGGREGATES as u32);
-        let spec = T::Epoch::frozen_spec_version(EPOCH);
+        let spec = T::Epoch::frozen_spec_version(EPOCH).unwrap_or_default();
         let class = worst_class::<T, I>();
 
         #[extrinsic_call]

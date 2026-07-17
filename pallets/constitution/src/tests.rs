@@ -979,9 +979,9 @@ fn extrinsic_value_types_do_not_admit_wrong_kinds_via_scale() {
 fn genesis_registry_matches_13_1_row_encodings() {
     new_test_ext().execute_with(|| {
         // Every 13 §1 row with a scalar concrete default and no open
-        // [VERIFY] tag is seeded (91 total, incl. per-class suffix keys and
+        // [VERIFY] tag is seeded (95 total, incl. per-class suffix keys and
         // rule-6 short keys); spot-pin the unit encodings per kind.
-        assert_eq!(Params::<Test>::count(), 91);
+        assert_eq!(Params::<Test>::count(), 95);
 
         // Per-class suffix keys (13 rule 6) — δ floors, kernel-capped.
         let delta_meta = Params::<Test>::get(key16(b"dec.delta.meta")).unwrap();
@@ -990,6 +990,45 @@ fn genesis_registry_matches_13_1_row_encodings() {
             ParamValue::Fixed(futarchy_primitives::FixedU64(60_000_000))
         );
         assert!(delta_meta.kernel_bounded);
+
+        for (key, value, min, max) in [
+            (
+                b"gate.v_min.param".as_slice(),
+                10_000_000_000,
+                5_000_000_000,
+                50_000_000_000,
+            ),
+            (
+                b"gate.v_min.trs".as_slice(),
+                25_000_000_000,
+                12_500_000_000,
+                125_000_000_000,
+            ),
+            (
+                b"gate.v_min.code".as_slice(),
+                60_000_000_000,
+                30_000_000_000,
+                300_000_000_000,
+            ),
+            (
+                b"gate.v_min.meta".as_slice(),
+                120_000_000_000,
+                60_000_000_000,
+                600_000_000_000,
+            ),
+        ] {
+            assert_eq!(
+                Params::<Test>::get(key16(key))
+                    .map(|record| { (record.value, record.min, record.max, record.class) }),
+                Some((
+                    ParamValue::Balance(value),
+                    ParamValue::Balance(min),
+                    ParamValue::Balance(max),
+                    ParamClass::Meta,
+                )),
+                "{key:?} must be a bounded genesis-seeded META record",
+            );
+        }
 
         // Rule-6 short key for a >16-byte dotted name.
         let slash = Params::<Test>::get(key16(b"intake.slash_pct")).unwrap();
