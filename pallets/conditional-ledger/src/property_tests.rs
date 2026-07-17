@@ -252,6 +252,77 @@ fn amount_strategy() -> impl Strategy<Value = Balance> {
     0u128..=2_000_000u128
 }
 
+#[derive(Clone, Copy, Debug)]
+struct WrapperBuy {
+    branch: Branch,
+    side: ScalarSide,
+    amount: Balance,
+    cost: Balance,
+}
+
+impl WrapperBuy {
+    fn fee(self) -> Balance {
+        // 04 §6.1 / 13 §1: buy fees are ceil(30 bps * cost).  This
+        // property deliberately has no market-core dependency, so it spells
+        // out the wrapper's plain-ledger inputs at the current governed value.
+        (self.cost * 30).div_ceil(10_000)
+    }
+}
+
+fn wrapper_buy_for(branch: Branch, side: ScalarSide) -> impl Strategy<Value = WrapperBuy> {
+    (
+        kernel::MIN_TRADE_USDC..=(2 * kernel::MIN_TRADE_USDC),
+        100_000u128..=900_000u128,
+    )
+        .prop_map(move |(amount, average_price_1e6)| {
+            // An LMSR buy has an average execution price strictly inside
+            // (0,1).  Keep well off the domain endpoints and round cost up as
+            // the maker-adverse wrapper does (04 §4/§6.1).
+            let cost = (amount * average_price_1e6).div_ceil(1_000_000);
+            WrapperBuy {
+                branch,
+                side,
+                amount,
+                cost,
+            }
+        })
+}
+
+fn wrapper_buy_strategy() -> impl Strategy<Value = WrapperBuy> {
+    (
+        branch_strategy(),
+        side_strategy(),
+        kernel::MIN_TRADE_USDC..=(2 * kernel::MIN_TRADE_USDC),
+        100_000u128..=900_000u128,
+    )
+        .prop_map(|(branch, side, amount, average_price_1e6)| {
+            let cost = (amount * average_price_1e6).div_ceil(1_000_000);
+            WrapperBuy {
+                branch,
+                side,
+                amount,
+                cost,
+            }
+        })
+}
+
+fn wrapper_buys_strategy() -> impl Strategy<Value = Vec<WrapperBuy>> {
+    (
+        wrapper_buy_for(Branch::Accept, ScalarSide::Long),
+        wrapper_buy_for(Branch::Accept, ScalarSide::Short),
+        wrapper_buy_for(Branch::Reject, ScalarSide::Long),
+        wrapper_buy_for(Branch::Reject, ScalarSide::Short),
+        prop::collection::vec(wrapper_buy_strategy(), 0..5),
+    )
+        .prop_map(
+            |(accept_long, accept_short, reject_long, reject_short, mut extras)| {
+                let mut buys = vec![accept_long, accept_short, reject_long, reject_short];
+                buys.append(&mut extras);
+                buys
+            },
+        )
+}
+
 /// Scores deliberately hit the two endpoints and k±1 fixed-grid boundaries;
 /// a uniform range alone makes those cases effectively unreachable (03 §11).
 fn score_strategy() -> impl Strategy<Value = u64> {
@@ -537,6 +608,199 @@ fn core_balance(state: &LedgerState<u8>, id: PositionId, owner: u8) -> Balance {
         .iter()
         .find(|record| record.id == id && record.owner == owner)
         .map_or(0, |record| record.balance)
+}
+
+fn wrapper_branch_index(branch: Branch) -> usize {
+    match branch {
+        Branch::Accept => 0,
+        Branch::Reject => 1,
+    }
+}
+
+fn wrapper_mirror(branch: Branch) -> Branch {
+    match branch {
+        Branch::Accept => Branch::Reject,
+        Branch::Reject => Branch::Accept,
+    }
+}
+
+fn wrapper_scalar_kind(side: ScalarSide) -> PositionKind {
+    match side {
+        ScalarSide::Long => PositionKind::Long,
+        ScalarSide::Short => PositionKind::Short,
+    }
+}
+
+fn wrapper_book(branch: Branch) -> u8 {
+    match branch {
+        Branch::Accept => 5,
+        Branch::Reject => 6,
+    }
+}
+
+fn seed_wrapper_books(state: &mut LedgerState<u8>, pid: u64, treasury: u8, inventory: Balance) {
+    for branch in [Branch::Accept, Branch::Reject] {
+        let book = wrapper_book(branch);
+        // This is the decision-book POL seed from 04 §6.3: treasury splits
+        // collateral, transfers the book's branch-USDC, and the book converts
+        // it to complete scalar inventory.  Each branch has its own book.
+        state
+            .split(LedgerOrigin::MarketAuthority, pid, &treasury, inventory)
+            .expect("POL seed split is legal");
+        state
+            .transfer(
+                LedgerOrigin::MarketAuthority,
+                position(pid, branch, PositionKind::BranchUsdc),
+                &treasury,
+                &book,
+                inventory,
+            )
+            .expect("POL seed reaches the branch book");
+        state
+            .split_scalar(LedgerOrigin::MarketAuthority, pid, branch, &book, inventory)
+            .expect("POL seed becomes complete-set inventory");
+    }
+}
+
+fn apply_wrapper_buy(state: &mut LedgerState<u8>, pid: u64, buyer: u8, fees: u8, buy: WrapperBuy) {
+    let book = wrapper_book(buy.branch);
+    let fee = buy.fee();
+    let total = buy.cost + fee;
+
+    // Replicate market-core::buy_branch using only the ledger operations in
+    // 04 §6.1: split cost+fee, route target cost and the complete fee pair,
+    // leave mirror cost with the buyer, recycle book revenue into complete
+    // sets, and deliver the purchased target leg from seeded inventory.
+    state
+        .split(LedgerOrigin::MarketAuthority, pid, &buyer, total)
+        .expect("wrapper split is legal");
+    state
+        .transfer(
+            LedgerOrigin::MarketAuthority,
+            position(pid, buy.branch, PositionKind::BranchUsdc),
+            &buyer,
+            &book,
+            buy.cost,
+        )
+        .expect("target-branch cost reaches book");
+    state
+        .transfer(
+            LedgerOrigin::MarketAuthority,
+            position(pid, buy.branch, PositionKind::BranchUsdc),
+            &buyer,
+            &fees,
+            fee,
+        )
+        .expect("target-branch fee reaches fee account");
+    state
+        .transfer(
+            LedgerOrigin::MarketAuthority,
+            position(pid, wrapper_mirror(buy.branch), PositionKind::BranchUsdc),
+            &buyer,
+            &fees,
+            fee,
+        )
+        .expect("mirror-branch fee reaches fee account");
+    state
+        .split_scalar(
+            LedgerOrigin::MarketAuthority,
+            pid,
+            buy.branch,
+            &book,
+            buy.cost,
+        )
+        .expect("book recycles cost into complete sets");
+    state
+        .transfer(
+            LedgerOrigin::MarketAuthority,
+            position(pid, buy.branch, wrapper_scalar_kind(buy.side)),
+            &book,
+            &buyer,
+            buy.amount,
+        )
+        .expect("book inventory delivers the purchased leg");
+}
+
+fn expected_wrapper_void_recovery(buys: &[WrapperBuy]) -> Balance {
+    let mut branch_usdc = [0u128; 2];
+    let mut long = [0u128; 2];
+    let mut short = [0u128; 2];
+
+    for buy in buys {
+        branch_usdc[wrapper_branch_index(wrapper_mirror(buy.branch))] += buy.cost;
+        let index = wrapper_branch_index(buy.branch);
+        match buy.side {
+            ScalarSide::Long => long[index] += buy.amount,
+            ScalarSide::Short => short[index] += buy.amount,
+        }
+    }
+
+    // 03 §6.4: pair-first recovery is exact at each layer.  Scalar pairs
+    // merge into branch-USDC; branch pairs then merge at par; only residual
+    // branch/scalar claims take the claimant-adverse half/quarter floors.
+    for index in 0..2 {
+        let scalar_pairs = long[index].min(short[index]);
+        long[index] -= scalar_pairs;
+        short[index] -= scalar_pairs;
+        branch_usdc[index] += scalar_pairs;
+    }
+    let branch_pairs = branch_usdc[0].min(branch_usdc[1]);
+    branch_usdc[0] -= branch_pairs;
+    branch_usdc[1] -= branch_pairs;
+
+    branch_pairs
+        + branch_usdc[0] / 2
+        + branch_usdc[1] / 2
+        + long[0] / 4
+        + long[1] / 4
+        + short[0] / 4
+        + short[1] / 4
+}
+
+fn recover_wrapper_buyer(
+    state: &mut LedgerState<u8>,
+    pid: u64,
+    buyer: u8,
+) -> Result<Balance, CoreError> {
+    let before = proposal_escrow(state, pid);
+
+    for branch in [Branch::Accept, Branch::Reject] {
+        let pairs = core_balance(state, position(pid, branch, PositionKind::Long), buyer).min(
+            core_balance(state, position(pid, branch, PositionKind::Short), buyer),
+        );
+        if pairs > 0 {
+            state.merge_scalar(LedgerOrigin::Signed, pid, branch, &buyer, pairs)?;
+        }
+    }
+
+    let branch_pairs = core_balance(
+        state,
+        position(pid, Branch::Accept, PositionKind::BranchUsdc),
+        buyer,
+    )
+    .min(core_balance(
+        state,
+        position(pid, Branch::Reject, PositionKind::BranchUsdc),
+        buyer,
+    ));
+    if branch_pairs > 0 {
+        state.merge(LedgerOrigin::Signed, pid, &buyer, branch_pairs)?;
+    }
+
+    for branch in [Branch::Accept, Branch::Reject] {
+        for kind in [
+            PositionKind::BranchUsdc,
+            PositionKind::Long,
+            PositionKind::Short,
+        ] {
+            let balance = core_balance(state, position(pid, branch, kind), buyer);
+            if balance > 0 {
+                state.redeem_void(pid, branch, kind, &buyer, balance)?;
+            }
+        }
+    }
+
+    Ok(before - proposal_escrow(state, pid))
 }
 
 fn assert_no_undeclared_mint(
@@ -845,10 +1109,11 @@ proptest! {
     }
 
     /// PT-2: the three D-1/D-3 holder profiles use the exact half/quarter/par
-    /// schedule.  Fees are absent in the ledger core; the wrapper charges them.
+    /// schedule, including the real 04 §6.1 buy-wrapper portfolio.
     #[test]
     fn pt2_annulment_profiles_follow_d1_exactly(
-        amount in (4 * kernel::MIN_SPLIT_USDC)..=2_000_000u128
+        amount in (4 * kernel::MIN_SPLIT_USDC)..=2_000_000u128,
+        wrapper_buys in wrapper_buys_strategy(),
     ) {
         // (a) A complete Accept+Reject holder recovers par.
         let mut paired = LedgerState::new();
@@ -859,44 +1124,41 @@ proptest! {
         paired.merge(LedgerOrigin::Signed, 1, &0, amount).unwrap();
         prop_assert_eq!(before - proposal_escrow(&paired, 1), amount);
 
-        // (b) The D-3 wrapper-buyer keeps the mirror.  Re-acquiring the target
-        // branch reconstructs the buyer's original split and merges at par.
+        // (b) Drive several buys on both sides of both branch books through
+        // the exact plain-ledger accounting of 04 §6.1 / market-core's
+        // buy_branch.  No post-VOID transfer supplies a free complement.
+        const BUYER: u8 = 0;
+        const TREASURY: u8 = 1;
+        const FEES: u8 = 7;
         let mut wrapper = LedgerState::new();
         wrapper.create_vault(2, 0).unwrap();
-        wrapper.split(LedgerOrigin::Signed, 2, &0, amount).unwrap();
-        wrapper.transfer(
-            LedgerOrigin::MarketAuthority,
-            position(2, Branch::Accept, PositionKind::BranchUsdc),
-            &0,
-            &5,
-            amount,
-        ).unwrap();
-        wrapper.split_scalar(
-            LedgerOrigin::MarketAuthority, 2, Branch::Accept, &5, amount
-        ).unwrap();
-        wrapper.transfer(
-            LedgerOrigin::MarketAuthority,
-            position(2, Branch::Accept, PositionKind::Long),
-            &5,
-            &0,
-            amount,
-        ).unwrap();
+        wrapper.add_protocol_account(wrapper_book(Branch::Accept));
+        wrapper.add_protocol_account(wrapper_book(Branch::Reject));
+        wrapper.add_protocol_account(FEES);
+        let inventory = wrapper_buys.iter().map(|buy| buy.amount).sum();
+        seed_wrapper_books(&mut wrapper, 2, TREASURY, inventory);
+        for buy in &wrapper_buys {
+            prop_assert!(buy.cost < buy.amount, "LMSR buy cost must be below amount");
+            apply_wrapper_buy(&mut wrapper, 2, BUYER, FEES, *buy);
+        }
+        prop_assert_eq!(wrapper.try_state(), Ok(()));
+
         wrapper.void(LedgerOrigin::ResolveAuthority, 2).unwrap();
-        // Re-acquire the complementary target exposure, climb back to target
-        // branch-USDC, then combine it with the mirror retained at purchase.
-        wrapper.transfer(
-            LedgerOrigin::Signed,
-            position(2, Branch::Accept, PositionKind::Short),
-            &5,
-            &0,
-            amount,
-        ).unwrap();
-        wrapper.merge_scalar(
-            LedgerOrigin::Signed, 2, Branch::Accept, &0, amount
-        ).unwrap();
-        let before = proposal_escrow(&wrapper, 2);
-        wrapper.merge(LedgerOrigin::Signed, 2, &0, amount).unwrap();
-        prop_assert_eq!(before - proposal_escrow(&wrapper, 2), amount);
+        let recovery = recover_wrapper_buyer(&mut wrapper, 2, BUYER)
+            .expect("the buyer's own VOID claims have a terminating recovery path");
+        let expected_recovery = expected_wrapper_void_recovery(&wrapper_buys);
+        prop_assert_eq!(recovery, expected_recovery);
+        prop_assert_eq!(wrapper.try_state(), Ok(()));
+
+        let costs: Balance = wrapper_buys.iter().map(|buy| buy.cost).sum();
+        let fees: Balance = wrapper_buys.iter().map(|buy| buy.fee()).sum();
+        let debited = costs + fees;
+        let neutral_premium_delta = expected_recovery as i128 - costs as i128;
+        prop_assert_eq!(
+            recovery as i128 - debited as i128,
+            neutral_premium_delta - fees as i128,
+            "04 §6.2/03 §6.4 guarantee neutral-prior recovery, net of the chosen market premium and fees",
+        );
 
         // (c) Deliberately unpaired branch claims pay half; scalar/gate legs
         // pay quarter, all with claimant-adverse floors.

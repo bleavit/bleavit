@@ -2,8 +2,9 @@
 (***************************************************************************
  * Bleavit proposal-machine model.
  *
- * Normative sources: 05 §2.1 (T1--T24), §5.4--5.5; 06 §5.2--5.4;
- * 07 §10--11; 09 §1.2(5); 15 §1 (I-9/I-14/I-15/I-18), §4.1.
+ * Normative sources: 05 §2.1 (T1--T24), §5.4--5.5; 06 §5.2--5.4
+ * (including the conditionally modeled §5.3 force_rerun edge); 07 §10--11;
+ * 09 §1.2(5); 15 §1 (I-9/I-14/I-15/I-18), §4.1.
  *
  * `history` contains proposal-machine transitions only.  Environment actions
  * (values ratification, attestation revocation, clocks, and oracle status)
@@ -14,13 +15,18 @@
 
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
-CONSTANTS MUTATE_I14, MUTATE_T16_ENQUEUE
+CONSTANTS MUTATE_I14, MUTATE_T16_ENQUEUE, MUTATE_FORCE_CANCEL_EXECUTE,
+          ForceRerunModeled
 
-ASSUME MUTATE_I14 \in BOOLEAN /\ MUTATE_T16_ENQUEUE \in BOOLEAN
+ASSUME /\ MUTATE_I14 \in BOOLEAN
+       /\ MUTATE_T16_ENQUEUE \in BOOLEAN
+       /\ MUTATE_FORCE_CANCEL_EXECUTE \in BOOLEAN
+       /\ ForceRerunModeled \in BOOLEAN
 
 Rows == {"T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8",
          "T9", "T10", "T11", "T12", "T13", "T14", "T15", "T16",
-         "T17", "T18", "T19", "T20", "T21", "T22", "T23", "T24"}
+         "T17", "T18", "T19", "T20", "T21", "T22", "T23", "T24",
+         "FR"}
 
 ProposalStates ==
     {"Absent", "Submitted", "Screening", "Qualified", "Trading",
@@ -47,8 +53,8 @@ SettlementKinds == {"None", "Money", "Neutral", "Void"}
 
 Actions ==
     {"Submit", "Withdraw", "Tick", "Decide", "GuardianDelay",
-     "GuardianReview", "GuardExecute", "GuardReject", "AutomaticResolve",
-     "SettleCohort"}
+     "GuardianForceRerun", "GuardianReview", "GuardExecute", "GuardReject",
+     "AutomaticResolve", "SettleCohort"}
 
 RejectReasons ==
     {"None", "NotDecisionGrade", "GateVetoSurvival", "GateVetoSecurity",
@@ -81,7 +87,9 @@ MaxMandates == 2
 
 \* Real dispatch/action names used by transition records.  Environment inputs
 \* (clocks, oracle status) are not calls and therefore are not attempt labels.
-AttemptOps == Actions \ {"AutomaticResolve"}
+AttemptOps ==
+    (Actions \ {"AutomaticResolve"})
+    \ IF ForceRerunModeled THEN {} ELSE {"GuardianForceRerun"}
 
 Transition(row, action, fromState, toState, reason, mandate) ==
     [row |-> row, action |-> action, from |-> fromState, to |-> toState,
@@ -135,6 +143,8 @@ Init ==
             extended |-> FALSE,
             delayedOnce |-> FALSE,
             rerun |-> FALSE,
+            guardianRerunUsed |-> FALSE,
+            retrospectiveReviewScheduled |-> FALSE,
             rollovers |-> 0,
             vault |-> "None",
             resolveCount |-> 0,
@@ -144,6 +154,7 @@ Init ==
             executedMandate |-> 0,
             goodMandates |-> {},
             barredMandates |-> {},
+            forceCancelledMandates |-> {},
             ratified |-> "Pending",
             attestationLive |-> FALSE,
             versionInvalidated |-> FALSE,
@@ -372,8 +383,12 @@ DecideEvaluation(welfareResults, earlyReasons, gateInvalidEnabled) ==
 GuardianDelay ==
     /\ p.state = "Queued"
     /\ ~p.delayedOnce
+    /\ ~p.guardianRerunUsed
     /\ ~p.graceExpired
-    /\ p' = [p EXCEPT !.state = "Suspended", !.delayedOnce = TRUE]
+    /\ p' = [p EXCEPT !.state = "Suspended",
+                      !.delayedOnce = TRUE,
+                      !.guardianRerunUsed = TRUE,
+                      !.retrospectiveReviewScheduled = TRUE]
     /\ history' = Append(history,
                           Transition("T11", "GuardianDelay", "Queued",
                                      "Suspended", "None", p.activeMandate))
@@ -397,6 +412,40 @@ OpenRerun ==
                           Transition("T13", "Tick", "Rerun", "Extended",
                                      "None", p.activeMandate))
     /\ UNCHANGED <<decisionHistory, settlementHistory>>
+
+(***************************************************************************
+ * 06 §5.3 force_rerun.  SQ-150 records that these edges are absent from
+ * 05 §2.1's exhaustive T-table, so every edge is gated by the model constant
+ * and carries its own FR label rather than claiming a T-row.
+ *
+ * The proposal enters a final Extended rerun window immediately.  A queued
+ * mandate is cancelled atomically: its id is removed from activeMandate and
+ * retained in both the general barred set and force-specific provenance set.
+ * The guardian-shared rerun budget and retrospective review are consumed at
+ * dispatch.  TWAP/POL/window resets and position preservation are market
+ * effects; the proposal/vault shadow remains untouched here.
+ ***************************************************************************
+*)
+GuardianForceRerun ==
+    /\ ForceRerunModeled
+    /\ p.state \in {"Trading", "Extended", "Queued"}
+    /\ ~p.guardianRerunUsed
+    /\ ~p.rerun
+    /\ LET cancelled == IF p.state = "Queued" THEN p.activeMandate ELSE 0 IN
+        /\ p' = [p EXCEPT !.state = "Extended",
+                          !.extended = TRUE,
+                          !.rerun = TRUE,
+                          !.guardianRerunUsed = TRUE,
+                          !.retrospectiveReviewScheduled = TRUE,
+                          !.activeMandate = 0,
+                          !.barredMandates = AddBarred(cancelled, @),
+                          !.forceCancelledMandates = AddBarred(cancelled, @),
+                          !.graceExpired = FALSE]
+        /\ history' =
+               Append(history,
+                      Transition("FR", "GuardianForceRerun", p.state,
+                                 "Extended", "None", cancelled))
+        /\ UNCHANGED <<decisionHistory, settlementHistory>>
 
 ReviewUpholdsVeto ==
     /\ p.state = "Suspended"
@@ -527,6 +576,35 @@ RetryExhausted ==
                                      p.activeMandate))
     /\ UNCHANGED <<decisionHistory, settlementHistory>>
 
+(***************************************************************************
+ * Deliberate I-15 mutation: after an FR queue cancellation, dispatch the
+ * cancelled mandate directly from Extended.  Enabled only by the dedicated
+ * expected-violation config; production and ordinary witness scopes disable
+ * it.  The resulting T14 edge is intentionally invalid and I-15 must reject
+ * its force-cancellation provenance before any table-shape check is needed.
+ ***************************************************************************
+*)
+MutatedForceCancelledExecute ==
+    /\ MUTATE_FORCE_CANCEL_EXECUTE
+    /\ p.state = "Extended"
+    /\ p.vault = "Open"
+    /\ p.resolveCount = 0
+    /\ \E cancelled \in p.forceCancelledMandates:
+        /\ p' = [p EXCEPT !.state = "Measuring",
+                          !.vault = "ResolvedAccept",
+                          !.resolveCount = 1,
+                          !.resolveMechanism = "T17Accept",
+                          !.executedMandate = cancelled,
+                          !.activeMandate = 0,
+                          !.challenge = "Open",
+                          !.cohort = "Measuring"]
+        /\ history' = history \o
+              <<Transition("T14", "GuardExecute", "Extended", "Executed",
+                           "None", cancelled),
+                Transition("T17", "AutomaticResolve", "Executed",
+                           "Measuring", "None", cancelled)>>
+        /\ UNCHANGED <<decisionHistory, settlementHistory>>
+
 ForceReject ==
     /\ p.state \in PreExecutedNonTerminal
     /\ LET hadVault == p.vault = "Open" IN
@@ -648,6 +726,7 @@ Progress(classes, welfareResults, earlyReasons, gateInvalidEnabled) ==
     \/ GuardianDelay
     \/ ScheduleRerun
     \/ OpenRerun
+    \/ GuardianForceRerun
     \/ ReviewUpholdsVeto
     \/ Execute
     \/ Expire
@@ -655,6 +734,7 @@ Progress(classes, welfareResults, earlyReasons, gateInvalidEnabled) ==
     \/ PayloadReverts
     \/ RetrySucceeds
     \/ RetryExhausted
+    \/ MutatedForceCancelledExecute
     \/ ForceReject
     \/ ValuesRatify
     \/ RatificationFails
@@ -703,6 +783,8 @@ TypeOK ==
     /\ p.extended \in BOOLEAN
     /\ p.delayedOnce \in BOOLEAN
     /\ p.rerun \in BOOLEAN
+    /\ p.guardianRerunUsed \in BOOLEAN
+    /\ p.retrospectiveReviewScheduled \in BOOLEAN
     /\ p.rollovers \in 0..1
     /\ p.vault \in VaultStates
     /\ p.resolveCount \in 0..1
@@ -712,6 +794,7 @@ TypeOK ==
     /\ p.executedMandate \in 0..MaxMandates
     /\ p.goodMandates \subseteq 1..MaxMandates
     /\ p.barredMandates \subseteq 1..MaxMandates
+    /\ p.forceCancelledMandates \subseteq 1..MaxMandates
     /\ p.ratified \in {"Pending", "Passed", "Failed"}
     /\ p.attestationLive \in BOOLEAN
     /\ p.versionInvalidated \in BOOLEAN
@@ -756,6 +839,8 @@ RowEdgeOK(row, tr) ==
       [] row = "T22" -> tr.from = "FailedExecuted" /\ tr.to = "Measuring"
       [] row = "T23" -> tr.from = "FailedExecuted" /\ tr.to = "Executed"
       [] row = "T24" -> tr.from = "Suspended" /\ tr.to = "Rejected"
+      [] row = "FR"  -> tr.from \in {"Trading", "Extended", "Queued"}
+                        /\ tr.to = "Extended"
 
 RowActionOK(row, tr) ==
     CASE row = "T1"  -> tr.action = "Submit"
@@ -769,6 +854,7 @@ RowActionOK(row, tr) ==
       [] row \in {"T17", "T21"} -> tr.action = "AutomaticResolve"
       [] row = "T19" -> tr.action = "SettleCohort"
       [] row = "T24" -> tr.action = "GuardianReview"
+      [] row = "FR" -> tr.action = "GuardianForceRerun"
 
 RowReasonOK(row, tr) ==
     CASE row = "T4"  -> tr.reason = "ConstitutionViolation"
@@ -821,7 +907,7 @@ ExecutionHasSafeEnqueue(execIndex) ==
         /\ history[queueIndex].from \in {"Trading", "Extended"}
         /\ DecisionProvesFullPass(history[execIndex].mandate)
         /\ \A badIndex \in (queueIndex + 1)..(execIndex - 1):
-               history[badIndex].row \in ForbiddenBeforeExecution
+               history[badIndex].row \in ForbiddenBeforeExecution \cup {"FR"}
                => history[badIndex].mandate # history[execIndex].mandate
 
 I15NoRejectedMandateExecutes ==
@@ -838,6 +924,7 @@ I15NoRejectedMandateExecutes ==
     /\ p.executedMandate = 0
        \/ /\ p.executedMandate \in p.goodMandates
           /\ p.executedMandate \notin p.barredMandates
+          /\ p.executedMandate \notin p.forceCancelledMandates
 
 I9OnlyDecideQueuesOnlyGuardExecutes ==
     /\ \A i \in 1..Len(history):
@@ -906,10 +993,22 @@ I18ChallengeClosedSettlement ==
 BudgetsAndRerunFinality ==
     /\ CountRow("T8") <= 1
     /\ CountRow("T11") <= 1
+    /\ CountRow("FR") <= 1
+    /\ CountRow("T11") + CountRow("FR") <= 1
+    /\ p.delayedOnce = (CountRow("T11") = 1)
+    /\ p.guardianRerunUsed =
+          (CountRow("T11") + CountRow("FR") = 1)
+    /\ p.retrospectiveReviewScheduled = p.guardianRerunUsed
+    /\ (p.rerun => /\ p.extended
+                    /\ p.guardianRerunUsed)
     /\ \A i, j \in 1..Len(history):
            /\ i < j
            /\ history[i].row = "T13"
-           => history[j].row \notin {"T8", "T11"}
+           => history[j].row \notin {"T8", "T11", "FR"}
+    /\ \A i, j \in 1..Len(history):
+           /\ i < j
+           /\ history[i].row = "FR"
+           => history[j].row \notin {"T8", "T11", "FR"}
 
 SameBlockT21ExactlyOnce ==
     /\ \A i \in 1..Len(history):
@@ -982,5 +1081,14 @@ NoRerunRaisedHurdleWitness ==
         /\ decisionHistory[i].gate = "NoVeto"
 
 NoTerminalRejectedAttemptWitness == ~attemptAudit.rejected
+
+NoForceRerunWitness == CountRow("FR") = 0
+
+NoForceQueuedCancellationWitness ==
+    ~\E i \in 1..Len(history):
+        /\ history[i].row = "FR"
+        /\ history[i].from = "Queued"
+        /\ history[i].mandate > 0
+        /\ history[i].mandate \in p.forceCancelledMandates
 
 =============================================================================

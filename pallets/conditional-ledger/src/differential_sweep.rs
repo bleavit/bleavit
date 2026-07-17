@@ -232,7 +232,7 @@ fn account(name: &str) -> AccountId {
         "alice" => ALICE,
         "bob" => BOB,
         "carol" => CHARLIE,
-        other => panic!("unknown sweep-vector account {other}"),
+        other => panic!("unknown sweep-vector holder {other}"),
     }
 }
 

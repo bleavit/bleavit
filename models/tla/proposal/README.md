@@ -5,25 +5,49 @@ single-proposal lifecycle in 05 §2.1. It checks I-9, I-14, I-15 and I-18 over
 keeper, guardian, values-ratification, attestation, version invalidation,
 oracle-dispute, VOID, retry and T20 interleavings. `Small.cfg` uses PARAM/CODE
 and the compact welfare outcome set; `Full.cfg` adds TREASURY/META and every
-abstracted 05 §5.5 failure. `Constitutional` is deliberately absent: 05 §1.1
-and §5.6 route those subjects to the values/referenda track with no markets, so
-they do not enter this market proposal machine.
+abstracted 05 §5.5 failure. `ForceRerun.cfg` enables the separately labeled
+06 §5.3 `force_rerun` edges and rechecks the full main invariant/property set.
+`Constitutional` is deliberately absent: 05 §1.1 and §5.6 route those subjects
+to the values/referenda track with no markets, so they do not enter this market
+proposal machine.
 
-Run either scope directly from this directory:
+The force-rerun scope is conditional because of open specification question
+PLAN.md SQ-150: 06 §5.3 requires `Trading/Extended/Queued → Extended`, while
+05 §2.1 calls its T1–T24 table exhaustive and contains no such row. The model
+constant `ForceRerunModeled` is `FALSE` in every pre-existing main, witness and
+mutation config, preserving the strict 05 §2.1 interpretation and its state
+spaces. Only the explicitly named force-rerun configs set it to `TRUE`; they
+prove safety under the 06 §5.3 interpretation pending SQ-150's resolution.
+
+Run any main scope directly from this directory:
 
 ```bash
 java -cp ../../../tools/verify/bin/tla2tools.jar tlc2.TLC \
   -workers 8 -config Small.cfg Proposal.tla
 java -cp ../../../tools/verify/bin/tla2tools.jar tlc2.TLC \
   -workers 8 -config Full.cfg Proposal.tla
+java -cp ../../../tools/verify/bin/tla2tools.jar tlc2.TLC \
+  -workers 8 -config ForceRerun.cfg Proposal.tla
 ```
 
 The repository-wide harness reads `manifest.env`, including the
 `WITNESS_CONFIGS` reachability legs described below. With eight workers Small
 currently reaches 66,709 distinct states in 29 seconds and Full reaches 264,241
-in 1 minute 49 seconds. `MIN_DISTINCT_STATES=33350` is deliberately about half
-the observed Small count, so an accidentally disabled action graph fails even
-when every invariant is vacuously true.
+in 1 minute 49 seconds. The full force-rerun scope reaches 568,235 distinct
+states. `MIN_DISTINCT_STATES=33350` is deliberately about half the observed
+Small count, so an accidentally disabled action graph fails even when every
+invariant is vacuously true.
+
+## Configurations
+
+| Config(s) | `ForceRerunModeled` | Harness role |
+|---|---:|---|
+| `Small.cfg`, `Full.cfg` | `FALSE` | Main strict-05 §2.1 safety scopes |
+| `ForceRerun.cfg` | `TRUE` | Full main invariant/property set under 06 §5.3 |
+| Pre-existing `Witness*.cfg`, `MutationI14.cfg`, `MutationT16.cfg` | `FALSE` | Original reachability/falsifiability scopes, unchanged |
+| `WitnessForceRerun.cfg` | `TRUE` | Expected violation proves an `FR` edge is reachable |
+| `WitnessForceQueuedCancel.cfg` | `TRUE` | Expected violation proves a queued mandate is atomically cancelled and recorded |
+| `MutationForceCancelExecute.cfg` | `TRUE` | Expected I-15 violation if a force-cancelled mandate is dispatched |
 
 ## Transition correspondence
 
@@ -59,6 +83,7 @@ rows in counterexample traces.
 | `RetryExhausted` | T22 | `retry_exhausted_to_measurement` |
 | `RetrySucceeds` | T23 + automatic T17 | `mark_executed` |
 | `ReviewUpholdsVeto` | T24 + automatic T21 | `veto_upheld` |
+| `GuardianForceRerun` | **FR — 06 §5.3, conditional per SQ-150; not a T-row** | guardian `force_rerun` hook into the epoch machine |
 
 Environment-only actions do not change the proposal state and therefore do
 not claim T-rows: `ValuesRatify`, `RatificationFails`, `RevokeAttestation`,
@@ -88,9 +113,11 @@ a proposal edge absent from the exhaustive 05 §2.1 table.
   inferred from this row validator.
 - `I15NoRejectedMandateExecutes` requires T9/full-pass provenance for every
   T14/T23 mandate, rejects a same-mandate T10/T15/T16/T20/T24 predecessor,
-  and forbids any fresh T9 after a terminal failure for the same pid. Mandate
-  ids distinguish the cancelled pre-delay queue entry from the fresh T9 entry
-  after T13.
+  and treats a same-mandate `FR` as an execution-cancelling predecessor while
+  still permitting the fresh T9 required after the rerun. The persistent
+  `forceCancelledMandates` set supplies independent provenance: an id in that
+  set can never become `executedMandate`. Mandate ids distinguish each
+  cancelled queue entry from the fresh T9 entry after T13 or FR.
 - `I9OnlyDecideQueuesOnlyGuardExecutes` checks action provenance directly over
   the T-row history (15 §1 I-9).
 - `I14GateVetoBeforeWelfare` checks every reachable decision record with a gate
@@ -111,11 +138,13 @@ a proposal edge absent from the exhaustive 05 §2.1 table.
   never records a money-moving settlement (05 §7; 07 §10–11; 15 §1 I-18).
 - `BudgetsAndRerunFinality`, `SameBlockT21ExactlyOnce`,
   `VaultCouplingSanity`, `TerminalStatesAbsorb`, and
-  `TerminalAttemptsRejected` check the extension and guardian budgets, T13
-  finality, automatic rejection resolution, authorized branch resolution,
-  T20/no-measurement coupling, terminal-state absorption, and explicit
-  rejected dispatch attempts whose real action name is recorded in the
-  separate audit variable while all protocol state remains unchanged.
+  `TerminalAttemptsRejected` check the ordinary extension budget, the shared
+  one-ever T11/FR guardian-rerun budget, finality after either T13 or FR,
+  mandatory retrospective-review scheduling, automatic rejection resolution,
+  authorized branch resolution, T20/no-measurement coupling, terminal-state
+  absorption, and explicit rejected dispatch attempts whose real action name
+  is recorded in the separate audit variable while all protocol state remains
+  unchanged.
 
 ## Reachability and mutation legs
 
@@ -124,37 +153,43 @@ condition. The repository runner requires TLC to violate every witness
 invariant. The witnesses cover T2; T6+T24; T13+T18+pre-deadline T23; T20 with an
 open vault; a live FailedExecuted state after retry expiry; T22; early
 ratification-Failed T16; gate-veto plus welfare-says-Adopt; the rerun raised
-hurdle; and an explicit rejected terminal attempt. This is the reachability
-counterpart to the main configs' safety invariants.
+hurdle; an explicit rejected terminal attempt; an FR edge; and specifically a
+queued FR whose mandate id is recorded in `forceCancelledMandates`. This is
+the reachability counterpart to the main configs' safety invariants.
 
 `MutationI14.cfg` sets `MUTATE_I14=TRUE`, making shared `DecideOutcome` permit
 welfare-Adopt to override a gate veto; TLC must violate
 `I14GateVetoBeforeWelfare`. `MutationT16.cfg` sets
 `MUTATE_T16_ENQUEUE=TRUE`, making a T16 path manufacture a fresh T9; TLC must
-violate `I15NoRejectedMandateExecutes`. Both mutation constants are FALSE in
-all main and witness configs and exist only to keep these regression mutations
-reproducible.
+violate `I15NoRejectedMandateExecutes`. `MutationForceCancelExecute.cfg` sets
+`ForceRerunModeled=TRUE` and `MUTATE_FORCE_CANCEL_EXECUTE=TRUE`, deliberately
+dispatching the force-cancelled mandate directly from Extended; I-15 must catch
+that trace. All mutation constants are FALSE in every main and ordinary witness
+config and exist only to keep these regression mutations reproducible.
 
-Run the two expected-failure mutation legs directly:
+Run the three expected-failure mutation legs directly:
 
 ```bash
 java -cp ../../../tools/verify/bin/tla2tools.jar tlc2.TLC \
   -workers 8 -config MutationI14.cfg Proposal.tla
 java -cp ../../../tools/verify/bin/tla2tools.jar tlc2.TLC \
   -workers 8 -config MutationT16.cfg Proposal.tla
+java -cp ../../../tools/verify/bin/tla2tools.jar tlc2.TLC \
+  -workers 8 -config MutationForceCancelExecute.cfg Proposal.tla
 ```
 
 ## Abstractions and preservation arguments
 
 | Abstraction | Why the checked invariants survive it |
 |---|---|
-| One proposal, at most two mandate ids | I-9/I-14/I-15 are per-proposal. Two ids are sufficient for the only requeue: initial T9, then T11–T13 and a fresh T9. |
+| One proposal, at most two mandate ids | I-9/I-14/I-15 are per-proposal. Two ids are sufficient for either requeue family: initial T9, then T11–T13 or queued FR, followed by a fresh T9. |
 | Blocks compressed to ordering flags | Exact durations do not affect the safety properties. Separate grace/retry actions preserve every before/after interleaving, including the 72 h T18 window. |
 | Gate and welfare arithmetic drawn together | Exploring both observations over-approximates numeric TWAP results; shared `DecideOutcome` alone imposes the §5.4 order. Earlier failures are recorded as `NotEvaluated`, while a veto record retains the independently drawn welfare result so I-14 is testable. |
 | Gate applicability is class-scoped | CODE/META always carry gates, PARAM does not, and TREASURY nondeterministically represents either side of the 1% NAV threshold (05 §5.1). Constitutional subjects are on the separate no-market values track (05 §1.1/§5.6). |
 | Welfare arithmetic is abstract result families | `Pass`, `RaisedHurdleMiss`, `Insufficient`, `Disagree`, plus named Full failures retain every control-flow/reason family while dropping prices, balances and fixed-point arithmetic irrelevant to these machine invariants. |
-| T13 market economics | The δ+1 pp control-flow effect is modeled explicitly. Reopening at 2× POL and resetting TWAP accumulators are market-state/economic obligations, not proposal-machine state, and remain covered by market/runtime tests rather than this TLA machine. |
-| Bonds, slashes, POL amounts and market positions omitted | None can authorize enqueue/execute, replenish the one-shot budgets, or make contested data challenge-closed. |
+| T13/FR market economics | The δ+1 pp rerun control-flow effect is modeled explicitly. Reopening/resetting books and TWAP accumulators, the FR 3-day window, and T13's 2× POL are market-state/economic obligations, not proposal-machine state. Positions and the vault shadow are untouched by FR, matching 06 §5.3; numeric effects remain covered by market/runtime tests. |
+| Guardian approvals, bonds, slashes, and per-epoch allowance arithmetic omitted | `GuardianForceRerun` represents the already-authorized 5-of-7 dispatch. The one-per-proposal shared rerun budget is explicit, as is mandatory retrospective-review scheduling. Membership aggregation, the one-per-epoch meter, review deposits, and later slash/recall bookkeeping cannot authorize enqueue/execute or replenish that consumed proposal budget. |
+| Proposal ratification and attestation survive reruns | FR changes neither field, matching 06 §5.3's requirement that the records survive; the independent environment actions remain free to change them later where the ordinary guard rules permit. |
 | T17/T21 are atomic with their parent row | 05 §2.1 says T17 is automatic and T21 is same-block. Atomic append removes impossible interleavings without removing a legal one. |
 | T22 tags its ACCEPT resolution as `T17Accept` | T22 normatively resolves Accept itself. The tag factors the same authorized accept-resolution primitive used by T17; history still records T22, never a fictitious T17 edge. |
 | Cohort aggregation and settlement cursor collapsed | A single proposal/input is the minimal witness for an open/closed/contested violation. Batching cannot turn a contested value into a closed one. |

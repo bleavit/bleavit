@@ -90,21 +90,21 @@ fn fixture() -> Fixture {
     .expect("parse shared reference-model vectors")
 }
 
-fn account(name: &str) -> u8 {
+fn holder(name: &str) -> u8 {
     match name {
         "alice" => 1,
         "bob" => 2,
         "carol" => 3,
-        other => panic!("unknown vector account class: {other}"),
+        other => panic!("unknown vector holder class: {other}"),
     }
 }
 
-fn account_name(who: u8) -> &'static str {
+fn holder_label(who: u8) -> &'static str {
     match who {
         1 => "alice",
         2 => "bob",
         3 => "carol",
-        other => panic!("unexpected replay account: {other}"),
+        other => panic!("unexpected replay holder index: {other}"),
     }
 }
 
@@ -204,7 +204,7 @@ fn apply_step(
     step: &Step,
 ) -> Result<Value, Error> {
     let args = &step.args;
-    let who = || account(string(args, "account"));
+    let who = || holder(string(args, "account"));
     let a = || amount(args);
     match step.op.as_str() {
         "split" => {
@@ -267,8 +267,8 @@ fn apply_step(
             state.transfer(
                 LedgerOrigin::Signed,
                 position_arg(args, pid, epoch),
-                &account(string(args, "from")),
-                &account(string(args, "to")),
+                &holder(string(args, "from")),
+                &holder(string(args, "to")),
                 a(),
             )?;
             let Event::PositionTransferred(_, moved) = last_event(state) else {
@@ -676,8 +676,8 @@ fn state_digest(state: &LedgerState<u8>, pid: u64, epoch: u32) -> Value {
         .collect();
     for record in &state.positions {
         balances
-            .get_mut(account_name(record.owner))
-            .expect("known account")
+            .get_mut(holder_label(record.owner))
+            .expect("known holder")
             .insert(position_name(record.id), record.balance);
     }
     let mut positions = state
@@ -685,10 +685,10 @@ fn state_digest(state: &LedgerState<u8>, pid: u64, epoch: u32) -> Value {
         .iter()
         .map(|record| {
             (
-                (account_name(record.owner), position_name(record.id)),
+                (holder_label(record.owner), position_name(record.id)),
                 object(&[
                     ("position", Value::from(position_name(record.id))),
-                    ("owner", Value::from(account_name(record.owner))),
+                    ("owner", Value::from(holder_label(record.owner))),
                     ("balance", number(record.balance)),
                     ("deposit", number(record.deposit)),
                 ]),
@@ -765,7 +765,7 @@ fn state_digest(state: &LedgerState<u8>, pid: u64, epoch: u32) -> Value {
                     .iter()
                     .map(|record| {
                         object(&[
-                            ("owner", Value::from(account_name(record.owner))),
+                            ("owner", Value::from(holder_label(record.owner))),
                             ("count", Value::from(record.count)),
                         ])
                     })
@@ -787,7 +787,7 @@ fn state_digest(state: &LedgerState<u8>, pid: u64, epoch: u32) -> Value {
                 state
                     .protocol_accounts
                     .iter()
-                    .map(|who| Value::from(account_name(*who)))
+                    .map(|who| Value::from(holder_label(*who)))
                     .collect(),
             ),
         ),
