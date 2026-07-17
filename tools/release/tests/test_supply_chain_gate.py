@@ -33,9 +33,31 @@ raise SystemExit(0)
                 encoding="utf-8",
             )
             auditor.chmod(0o755)
+            # Stub the GHSA-only leg's scanner too, so the gate stays hermetic:
+            # without this the script would fetch the pinned osv-scanner binary
+            # over the network. Reporting no findings is the right stub here —
+            # this test covers the cargo-audit summary, and the GHSA-only leg has
+            # its own suite in tools/ci/tests/.
+            osv_scanner = root / "osv-scanner"
+            osv_scanner.write_text(
+                """#!/usr/bin/env python3
+import json
+print(json.dumps({'results': []}))
+raise SystemExit(0)
+""",
+                encoding="utf-8",
+            )
+            osv_scanner.chmod(0o755)
+            # Empty waivers to match the empty scan: the committed waiver file
+            # would (correctly) read as stale against a stub that reports
+            # nothing. Keeps this test independent of what is waived today.
+            ghsa_waivers = root / "ghsa-waivers.toml"
+            ghsa_waivers.write_text("", encoding="utf-8")
             summary = root / "summary.json"
             environment = dict(os.environ)
             environment["BLEAVIT_AUDITOR"] = str(auditor)
+            environment["BLEAVIT_OSV_SCANNER"] = str(osv_scanner)
+            environment["BLEAVIT_GHSA_WAIVERS"] = str(ghsa_waivers)
             completed = subprocess.run(
                 [str(GATE), "--summary-out", str(summary)],
                 cwd=REPO_ROOT,

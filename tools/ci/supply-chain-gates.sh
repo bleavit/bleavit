@@ -50,6 +50,41 @@ assert_lockfile keeper/Cargo.lock
   "$auditor" audit --no-fetch
 )
 
+# cargo-audit only sees what RustSec carries. For crates.io the GitHub Advisory
+# Database is a strict superset — an advisory can have no RUSTSEC id at all, and
+# the leg above is then blind to it rather than merely silent (yamux
+# GHSA-vxx9-2994-q338, a HIGH remote panic, is the worked example). This leg
+# gates exactly that complement via osv-scanner, which aggregates both DBs; see
+# tools/ci/check-ghsa-only.py and tools/ci/ghsa-waivers.toml.
+# shellcheck source=../env/pins.env
+source "$repo_root/tools/env/pins.env"
+# BLEAVIT_OSV_SCANNER is an explicit operator/test override and is trusted as
+# given (same contract as BLEAVIT_AUDITOR above). The digest pin guards the
+# binary this script fetches itself.
+if [[ -n "${BLEAVIT_OSV_SCANNER:-}" ]]; then
+  osv="$BLEAVIT_OSV_SCANNER"
+else
+  osv="$repo_root/target/tools/bin/osv-scanner"
+  if [[ ! -x "$osv" ]] || [[ "$(sha256sum "$osv" | cut -d' ' -f1)" != "$OSV_SCANNER_SHA256" ]]; then
+    mkdir -p "$(dirname "$osv")"
+    curl -fsSL -o "$osv.tmp" \
+      "https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+    actual=$(sha256sum "$osv.tmp" | cut -d' ' -f1)
+    if [[ "$actual" != "$OSV_SCANNER_SHA256" ]]; then
+      rm -f "$osv.tmp"
+      echo "osv-scanner digest mismatch for ${OSV_SCANNER_VERSION}: expected $OSV_SCANNER_SHA256, got $actual" >&2
+      exit 1
+    fi
+    chmod +x "$osv.tmp"
+    mv "$osv.tmp" "$osv"
+  fi
+fi
+python3 "$repo_root/tools/ci/check-ghsa-only.py" \
+  --scanner "$osv" \
+  --waivers "${BLEAVIT_GHSA_WAIVERS:-$repo_root/tools/ci/ghsa-waivers.toml}" \
+  --lockfile "$repo_root/Cargo.lock" \
+  --lockfile "$repo_root/keeper/Cargo.lock"
+
 if [[ -n "$summary_out" ]]; then
   summary_tmp=$(mktemp -d)
   trap 'rm -rf "$summary_tmp"' EXIT

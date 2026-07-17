@@ -77,7 +77,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for suite in tools/deploy/tests tools/reference-model/tests tools/release/tests tools/env/tests; do
+          for suite in tools/deploy/tests tools/reference-model/tests tools/release/tests tools/env/tests tools/ci/tests; do
             if [[ -d "$suite" ]]; then
               python3 -m unittest discover -s "$suite"
             fi
