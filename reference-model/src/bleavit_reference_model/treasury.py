@@ -141,6 +141,15 @@ def _flow_cap(value) -> Decimal:
     return cap
 
 
+def decision_pair_contest_capital(contest_accept, contest_reject) -> Decimal:
+    """04 §7a / 08 §5.2: binding contest capital of a decision pair."""
+    accept = _d(contest_accept)
+    reject = _d(contest_reject)
+    if accept < 0 or reject < 0:
+        raise ValueError("negative decision-book contest capital")
+    return min(accept, reject)
+
+
 def l_hat(pol_depth, contest_capital, flow_cap, b_accept, b_reject) -> Decimal:
     """08 §5.2 L-hat: POL pair depth + the capped non-POL contest term.
 

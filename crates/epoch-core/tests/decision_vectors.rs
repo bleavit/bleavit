@@ -168,7 +168,8 @@ const KNOWN_INPUT_KEYS: &[&str] = &[
     "attestation_ok",
     "b_accept",
     "b_reject",
-    "contest_capital",
+    "contest_accept",
+    "contest_reject",
     "converged",
     "delta",
     "envelope_value",
@@ -190,7 +191,7 @@ const KNOWN_INPUT_KEYS: &[&str] = &[
     "welfare_grade",
 ];
 
-fn replay(row: &Value) -> DecisionOutcome {
+fn replay(row: &Value) -> (DecisionOutcome, u128) {
     let inputs = &row["inputs"];
     for key in inputs.as_object().expect("inputs object").keys() {
         assert!(
@@ -244,9 +245,11 @@ fn replay(row: &Value) -> DecisionOutcome {
             .expect("flow_cap string")
             .parse()
             .expect("flow_cap is a whole multiplier");
+        let pair_contest = exact_usdc(&inputs["contest_accept"], "contest_accept")
+            .min(exact_usdc(&inputs["contest_reject"], "contest_reject"));
         market_core::liquidity_hat(
             exact_usdc(depth, "pol_depth"),
-            exact_usdc(&inputs["contest_capital"], "contest_capital"),
+            pair_contest,
             flow_cap * 1_000_000_000,
             b_sum,
         )
@@ -361,7 +364,7 @@ fn replay(row: &Value) -> DecisionOutcome {
         decision: None,
     });
 
-    state
+    let outcome = state
         .decide_with(
             Origin::Keeper,
             &mut ledger,
@@ -371,7 +374,8 @@ fn replay(row: &Value) -> DecisionOutcome {
             guards,
             &params,
         )
-        .expect("decide_with executes")
+        .expect("decide_with executes");
+    (outcome, measured_depth)
 }
 
 /// 15 §4.4 / G0 corpus-family attestation: replay every `decision_scenarios`
@@ -384,18 +388,25 @@ fn decision_vectors_match_python_reference_model() {
     let scenarios = fixture["decision_scenarios"]
         .as_array()
         .expect("decision_scenarios family present");
-    assert_eq!(scenarios.len(), 20, "decision family cardinality drifted");
+    assert_eq!(scenarios.len(), 21, "decision family cardinality drifted");
     let mut replayed = BTreeSet::new();
 
     for row in scenarios {
         let name = row["name"].as_str().expect("scenario name");
         let expected = expected_outcome(row);
-        let actual = replay(row);
+        let (actual, measured_depth) = replay(row);
         assert_eq!(actual, expected, "{name} outcome mismatch");
+        if let Some(expected_l_hat) = row.get("l_hat") {
+            assert_eq!(
+                measured_depth,
+                exact_usdc(expected_l_hat, "l_hat"),
+                "{name} L-hat mismatch"
+            );
+        }
         assert!(
             replayed.insert(name.to_owned()),
             "duplicate scenario {name}"
         );
     }
-    assert_eq!(replayed.len(), 20, "decision replay executed-count drifted");
+    assert_eq!(replayed.len(), 21, "decision replay executed-count drifted");
 }

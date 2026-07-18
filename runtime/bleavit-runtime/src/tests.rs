@@ -12940,7 +12940,9 @@ fn view_decision_stats_pins_effective_floor_pair_minima_gates_and_convergence() 
                 return;
             }
         };
-        let decision_b = crate::configs::class_pol_floor(ProposalClass::Treasury);
+        // Use depth above the POL floor so the ×7 ceiling does not mask the
+        // asymmetric-book MIN regression below.
+        let decision_b = crate::configs::class_pol_floor(ProposalClass::Treasury).saturating_mul(4);
         let gate_b = crate::configs::balance_param(b"pol.b_gate");
         let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
         let gate_contest = params.gate_v_min[index];
@@ -13111,8 +13113,8 @@ fn view_decision_stats_pins_effective_floor_pair_minima_gates_and_convergence() 
         assert_ne!(interval, 0);
         let expected_observations = params.decision_window / interval;
         let reject_observations = expected_observations.saturating_sub(1);
-        let accept_volume = effective_floor.saturating_mul(3);
-        let reject_volume = effective_floor.saturating_mul(2);
+        let accept_volume = effective_floor.saturating_add(prize);
+        let reject_volume = effective_floor;
         let tune_window = |market: futarchy_primitives::MarketId,
                            observations: u32,
                            volume: Balance,
@@ -13156,6 +13158,60 @@ fn view_decision_stats_pins_effective_floor_pair_minima_gates_and_convergence() 
                 return;
             }
         };
+        let pol_per_book = match pallet_market::core_market::maker_loss_floor(decision_b) {
+            Some(depth) => depth,
+            None => {
+                assert!(false, "bounded POL depth must compute");
+                return;
+            }
+        };
+        let pol_depth = match pol_per_book.checked_mul(2) {
+            Some(depth) => depth,
+            None => {
+                assert!(false, "pair POL depth must fit");
+                return;
+            }
+        };
+        let b_sum = match decision_b.checked_mul(2) {
+            Some(sum) => sum,
+            None => {
+                assert!(false, "pair b must fit");
+                return;
+            }
+        };
+        let expected_min_depth = match pallet_market::core_market::liquidity_hat(
+            pol_depth,
+            reject_volume,
+            crate::configs::sec_flow_cap_1e9(),
+            b_sum,
+        ) {
+            Some(depth) => depth,
+            None => {
+                assert!(false, "MIN-composed depth must fit");
+                return;
+            }
+        };
+        let summed_contest = match accept_volume.checked_add(reject_volume) {
+            Some(sum) => sum,
+            None => {
+                assert!(false, "summed mutant contest must fit");
+                return;
+            }
+        };
+        let sum_mutant_depth = match pallet_market::core_market::liquidity_hat(
+            pol_depth,
+            summed_contest,
+            crate::configs::sec_flow_cap_1e9(),
+            b_sum,
+        ) {
+            Some(depth) => depth,
+            None => {
+                assert!(false, "SUM-mutant depth must fit");
+                return;
+            }
+        };
+        assert_eq!(snapshot.inputs.measured_depth, expected_min_depth);
+        assert_ne!(expected_min_depth, sum_mutant_depth);
         assert_eq!(stats.gate_twaps_1e9, Some(gate_quotes));
         assert_eq!(stats.twap_baseline_1e9, carried_baseline);
         assert_ne!(stats.twap_baseline_1e9, snapshot.inputs.baseline_full);

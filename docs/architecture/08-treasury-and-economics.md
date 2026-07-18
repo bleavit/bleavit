@@ -171,11 +171,11 @@ AttackCost̂(p) = F̂(p) · T_dec                         // USDC
   T_dec  = dec.window / 14,400 blocks-per-day           // = 3 days at default
   F̂(p)   = min( L̂(p)/2 ,  F̂_pub )  per day             // conservative minimum
   L̂(p)   = time-averaged effective POL depth of p's decision pair (2·b·ln 2 as seeded, from I-12 telemetry)
-          + min( non-POL contest capital over the decision window
-                 ([04](04-markets-and-pricing.md) §7a: time-weighted marked net open interest —
-                  the same measure graded against dec.v_min in step 5; SQ-231 amendment:
-                  gross traded notional is manipulable by the attacker's own flow and no
-                  longer feeds the certificate),
+          + min( min(ContestCapital_acc(window), ContestCapital_rej(window))
+                 ([04](04-markets-and-pricing.md) §7a: time-weighted marked net open interest;
+                  the shallower book is binding — the same per-book measure graded against
+                  dec.v_min in step 5; SQ-231 amendment: gross traded notional is manipulable
+                  by the attacker's own flow and no longer feeds the certificate),
                  sec.flow_cap · (b_acc + b_rej) )       // the C_hold wash ceiling, now gate-bearing
   F̂_pub  = the published measured arbitrage-flow parameter (A-2 obligation,
             measured Phases 3–4); until published, F̂ = L̂/2.
@@ -192,6 +192,8 @@ REQUIRE  InCapPrize(p) ≤ AttackCost̂(p) / 3   else Reject(SecuritySizing)
 | CODE / META | max(`ask`, envelope), conservatively floored at `trs.cap_proposal`·NAV for runtime-upgrade payloads — an upgrade is assumed able to reach the full per-proposal outflow cap |
 
 NAV in this computation is `spendable NAV` (§1.2): under the reserve-health flag it is 0 and — consistently — no new adoption passes sizing. All inputs are decide-time on-chain measurements; the cap therefore **scales with the value at stake by construction**, which the flat defaults never did.
+
+The inner pair reduction is normatively **MIN**, never SUM: an attacker can flip through the cheaper, shallower decision book, so counting the deeper book would overstate security. §5.4(b) is the arithmetic lock: both books must individually clear `dec.v_min = 400,000`, yet the worked `L̂` adds one 400,000 term (`34,657 + 400,000 = 434,657`), not 800,000.
 
 ### 5.3 Secondary mechanism: Ask-scaled liquidity (floors = current defaults)
 

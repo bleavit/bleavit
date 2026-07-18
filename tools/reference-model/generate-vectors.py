@@ -43,6 +43,7 @@ from bleavit_reference_model.treasury import (
     attack_cost_hat,
     baseline_commitment,
     dec_v_min,
+    decision_pair_contest_capital,
     decision_delta,
     display_integer,
     in_cap_prize,
@@ -157,15 +158,17 @@ DECISION_SCENARIOS = [
         "inputs": {"queue_time_ok": False},
     },
     # SQ-231: step 9's L-hat from the decomposed 08 §5.2 form — POL depth plus
-    # the 04 §7a contest capital bounded by sec.flow_cap·(b_acc+b_rej). The
-    # numbers reproduce the 08 §5.4(b) treasury example (3P = 600,000).
+    # min(the two books' 04 §7a contest capital), bounded by
+    # sec.flow_cap·(b_acc+b_rej). The equal-book row reproduces the 08 §5.4(b)
+    # treasury example (3P = 600,000).
     {
         "name": "adopt_contest_capital_l_hat",
         "inputs": {
             "proposal_class": "Treasury",
             "ask": "200000",
             "pol_depth": "34657.359028",
-            "contest_capital": "400000",
+            "contest_accept": "400000",
+            "contest_reject": "400000",
             "flow_cap": "8",
             "b_accept": "25000",
             "b_reject": "25000",
@@ -177,7 +180,8 @@ DECISION_SCENARIOS = [
             "proposal_class": "Treasury",
             "ask": "200000",
             "pol_depth": "34657.359028",
-            "contest_capital": "100000",
+            "contest_accept": "100000",
+            "contest_reject": "100000",
             "flow_cap": "8",
             "b_accept": "25000",
             "b_reject": "25000",
@@ -189,8 +193,22 @@ DECISION_SCENARIOS = [
             "proposal_class": "Treasury",
             "ask": "200000",
             "pol_depth": "34657.359028",
-            "contest_capital": "1000000000",
+            "contest_accept": "1000000000",
+            "contest_reject": "1000000000",
             "flow_cap": "7",
+            "b_accept": "25000",
+            "b_reject": "25000",
+        },
+    },
+    {
+        "name": "security_sizing_asymmetric_pair_contest",
+        "inputs": {
+            "proposal_class": "Treasury",
+            "ask": "200000",
+            "pol_depth": "34657.359028",
+            "contest_accept": "400000",
+            "contest_reject": "100000",
+            "flow_cap": "8",
             "b_accept": "25000",
             "b_reject": "25000",
         },
@@ -254,6 +272,20 @@ def _decision_row(scenario):
     if isinstance(replay.get("welfare_grade"), Grade):
         replay["welfare_grade"] = replay["welfare_grade"].value
     row = {"name": scenario["name"], "inputs": _string_tree(replay)}
+    if "contest_accept" in inputs:
+        pair_contest = decision_pair_contest_capital(
+            inputs["contest_accept"], inputs["contest_reject"]
+        )
+        row["l_hat"] = format(
+            l_hat(
+                inputs["pol_depth"],
+                pair_contest,
+                inputs["flow_cap"],
+                inputs["b_accept"],
+                inputs["b_reject"],
+            ),
+            "f",
+        )
     row["outcome"] = decision.outcome.value
     if decision.reason is not None:
         row["reason"] = decision.reason.value

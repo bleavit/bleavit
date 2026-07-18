@@ -6668,7 +6668,7 @@
       "param": "0.003",
       "treasury": "0.005"
     },
-    "source_model_sha256": "685f769186444bfa5dc71ea880b5d2d5d496ce092ed4d3bfdc880ee756fc8487",
+    "source_model_sha256": "4d42fe4bd575288717048cf73f8ba1516895879aee3ebd87166ecd49998cda9b",
     "subsample_size": 24,
     "thin_market_flow_multiplier": "0.72",
     "threshold_max_budget_multiple": "3.00",
@@ -6683,7 +6683,7 @@
       "treasury": "250000"
     }
   },
-  "config_digest": "653e2f23e420fa43fd961878ccee7d3ea6a2d644f7f9d8f181bca7f7cac0622e",
+  "config_digest": "9de53ad125b6e3bcb3da6da520d72cb507f03a4adf212ed29108d6f316b71ac8",
   "gate_veto_counts": {
     "GateVetoSecurity": 406,
     "GateVetoSurvival": 1995

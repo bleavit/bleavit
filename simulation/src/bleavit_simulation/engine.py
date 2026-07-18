@@ -20,6 +20,7 @@ from bleavit_reference_model.treasury import (
     LN2,
     attack_cost_hat,
     dec_v_min,
+    decision_pair_contest_capital,
     decision_delta,
     in_cap_prize,
     l_hat,
@@ -487,9 +488,10 @@ def _evaluate(
     # 08 §5.2 (SQ-231): L̂ = POL pair depth + min(pair contest capital,
     # sec.flow_cap·(b_acc + b_rej)). The pair term is the binding per-book
     # measure (the §5.4 worked rows count exactly one dec.v_min at
-    # exactly-grade volume), so the conservative min over the two books.
+    # exactly-grade volume), so the normative reduction is the shallower book.
     pol_depth = Decimal(2) * b * LN2
-    pair_contest = min(contest_accept, contest_reject)
+    pair_contest = decision_pair_contest_capital(contest_accept, contest_reject)
+    assert pair_contest == min(contest_accept, contest_reject)
     liquidity = l_hat(pol_depth, pair_contest, flow_cap, b, b)
     if prize is None:
         return Decision(Outcome.REJECT, RejectReason.SECURITY_SIZING), Grade.INVALID, liquidity
@@ -530,7 +532,8 @@ def _evaluate(
             else Decimal(0)
         ),
         pol_depth=pol_depth,
-        contest_capital=pair_contest,
+        contest_accept=contest_accept,
+        contest_reject=contest_reject,
         flow_cap=flow_cap,
         b_accept=b,
         b_reject=b,

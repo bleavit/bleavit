@@ -4,7 +4,13 @@ from decimal import Decimal
 from enum import Enum
 from typing import Mapping
 
-from .treasury import attack_cost_hat, in_cap_prize, l_hat, security_sizing_ok
+from .treasury import (
+    attack_cost_hat,
+    decision_pair_contest_capital,
+    in_cap_prize,
+    l_hat,
+    security_sizing_ok,
+)
 
 
 class Outcome(Enum):
@@ -242,7 +248,8 @@ def decide(
     spendable_nav: Decimal = Decimal(0),
     measured_liquidity: Decimal = Decimal(0),
     pol_depth: Decimal | None = None,
-    contest_capital: Decimal | None = None,
+    contest_accept: Decimal | None = None,
+    contest_reject: Decimal | None = None,
     flow_cap: Decimal | None = None,
     b_accept: Decimal | None = None,
     b_reject: Decimal | None = None,
@@ -257,9 +264,10 @@ def decide(
     validity remains a separate step and is never inferred from it.
 
     Step 9's L-hat may be supplied either pre-composed (`measured_liquidity`)
-    or decomposed per 08 §5.2 (`pol_depth` + `contest_capital` bounded by
+    or decomposed per 08 §5.2 (`pol_depth` + the binding
+    `min(contest_accept, contest_reject)` bounded by
     `flow_cap * (b_accept + b_reject)` — the SQ-231 contest-capital form);
-    supplying any of the five decomposed inputs requires all five.
+    supplying any of the six decomposed inputs requires all six.
     """
     a_f = Decimal(accept_full)
     r_f = Decimal(reject_full_effective)
@@ -333,15 +341,25 @@ def decide(
         return Decision(Outcome.REJECT, reason)
 
     # Step 9: 3·InCapPrize <= AttackCost-hat, with treasury rounding.
-    decomposed = (pol_depth, contest_capital, flow_cap, b_accept, b_reject)
+    decomposed = (
+        pol_depth,
+        contest_accept,
+        contest_reject,
+        flow_cap,
+        b_accept,
+        b_reject,
+    )
     if any(part is not None for part in decomposed):
         if any(part is None for part in decomposed):
             raise ValueError(
-                "decomposed L-hat needs pol_depth, contest_capital, "
-                "flow_cap, b_accept and b_reject together"
+                "decomposed L-hat needs pol_depth, contest_accept, "
+                "contest_reject, flow_cap, b_accept and b_reject together"
             )
+        pair_contest = decision_pair_contest_capital(
+            contest_accept, contest_reject
+        )
         measured_liquidity = l_hat(
-            pol_depth, contest_capital, flow_cap, b_accept, b_reject
+            pol_depth, pair_contest, flow_cap, b_accept, b_reject
         )
     prize = in_cap_prize(
         proposal_class,

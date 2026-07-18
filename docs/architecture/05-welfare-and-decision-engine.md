@@ -523,9 +523,10 @@ AttackCost̂ = F̂ · T_dec                          // normative gate input (do
   F̂     = min( L̂/2, F̂_pub ) per day             // conservative minimum
   L̂     = time-averaged effective POL depth of the decision pair (2·b·ln 2 as seeded,
           from I-12 telemetry)
-        + min( non-POL contest capital of the pair over the decision window
-               (doc 04 §7a — the same measure graded against dec.v_min in step 5;
-                SQ-231: gross flow no longer feeds the certificate),
+        + min( min(ContestCapital_acc(window), ContestCapital_rej(window))
+               (doc 04 §7a — the binding shallower book; the same per-book measure
+                graded against dec.v_min in step 5; SQ-231: gross flow no longer
+                feeds the certificate; doc 08 §5.4(b) adds one dec.v_min, not two),
                sec.flow_cap · (b_acc + b_rej) )   // the C_hold ceiling, now also in the gate
   F̂_pub = the published measured arbitrage-flow parameter (A-2 obligation);
           until published, F̂ = L̂/2

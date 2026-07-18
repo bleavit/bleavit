@@ -913,7 +913,8 @@ class ContestCapitalTests(unittest.TestCase):
         )
         decomposed = decide(
             pol_depth=pol_depth,
-            contest_capital=Decimal(400000),
+            contest_accept=Decimal(400000),
+            contest_reject=Decimal(400000),
             flow_cap=Decimal(8),
             b_accept=Decimal(25000),
             b_reject=Decimal(25000),
@@ -921,6 +922,17 @@ class ContestCapitalTests(unittest.TestCase):
         )
         self.assertEqual(composed, decomposed)
         self.assertIs(composed.outcome, Outcome.ADOPT)
+        asymmetric = decide(
+            pol_depth=pol_depth,
+            contest_accept=Decimal(400000),
+            contest_reject=Decimal(100000),
+            flow_cap=Decimal(8),
+            b_accept=Decimal(25000),
+            b_reject=Decimal(25000),
+            **kwargs,
+        )
+        self.assertIs(asymmetric.outcome, Outcome.REJECT)
+        self.assertIs(asymmetric.reason, RejectReason.SECURITY_SIZING)
         with self.assertRaises(ValueError):
             decide(pol_depth=pol_depth, **kwargs)
 

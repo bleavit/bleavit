@@ -2650,14 +2650,14 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
             let _ = pid;
             return Some(currency::USDC.saturating_mul(1_000_000));
         }
-        // 05 §5.6 / 08 §5.2 (SQ-231): `L̂ = Σ pair POL depth + min(pair 04 §7a
-        // contest capital, sec.flow_cap · (b_acc + b_rej))` — the ceiling is
-        // applied once over the PAIR's contest-capital sum, never per book.
+        // 05 §5.6 / 08 §5.2 (SQ-231): `L̂ = Σ pair POL depth +
+        // min(min(contest_acc, contest_rej), sec.flow_cap · (b_acc + b_rej))`.
+        // The shallower book is binding (§5.4); only b remains pair-summed.
         #[cfg(not(feature = "runtime-benchmarks"))]
         pallet_epoch::Proposals::<Runtime>::get(pid).and_then(|proposal| {
             let markets = proposal.markets?;
             let mut pol_depth = 0_u128;
-            let mut pair_contest = 0_u128;
+            let mut pair_contest: Option<Balance> = None;
             let mut b_sum = 0_u128;
             for id in [markets.accept, markets.reject] {
                 if !pallet_market::SeededMarkets::<Runtime>::contains_key(id) {
@@ -2675,12 +2675,15 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
                     window,
                 )?;
                 pol_depth = pol_depth.checked_add(pol)?;
-                pair_contest = pair_contest.checked_add(contest)?;
+                pair_contest = Some(match pair_contest {
+                    Some(binding) => binding.min(contest),
+                    None => contest,
+                });
                 b_sum = b_sum.checked_add(book.b)?;
             }
             pallet_market::core_market::liquidity_hat(
                 pol_depth,
-                pair_contest,
+                pair_contest?,
                 sec_flow_cap_1e9(),
                 b_sum,
             )

@@ -310,13 +310,15 @@
         "ask": "200000",
         "b_accept": "25000",
         "b_reject": "25000",
-        "contest_capital": "400000",
+        "contest_accept": "400000",
+        "contest_reject": "400000",
         "delta": "0.05",
         "flow_cap": "8",
         "pol_depth": "34657.359028",
         "proposal_class": "Treasury",
         "reject_full_effective": "0.50"
       },
+      "l_hat": "434657.359028",
       "name": "adopt_contest_capital_l_hat",
       "outcome": "Adopt"
     },
@@ -326,13 +328,15 @@
         "ask": "200000",
         "b_accept": "25000",
         "b_reject": "25000",
-        "contest_capital": "100000",
+        "contest_accept": "100000",
+        "contest_reject": "100000",
         "delta": "0.05",
         "flow_cap": "8",
         "pol_depth": "34657.359028",
         "proposal_class": "Treasury",
         "reject_full_effective": "0.50"
       },
+      "l_hat": "134657.359028",
       "name": "security_sizing_contest_shortfall",
       "outcome": "Reject",
       "reason": "SecuritySizing"
@@ -343,14 +347,35 @@
         "ask": "200000",
         "b_accept": "25000",
         "b_reject": "25000",
-        "contest_capital": "1000000000",
+        "contest_accept": "1000000000",
+        "contest_reject": "1000000000",
         "delta": "0.05",
         "flow_cap": "7",
         "pol_depth": "34657.359028",
         "proposal_class": "Treasury",
         "reject_full_effective": "0.50"
       },
+      "l_hat": "384657.359028",
       "name": "security_sizing_flow_cap_ceiling",
+      "outcome": "Reject",
+      "reason": "SecuritySizing"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "ask": "200000",
+        "b_accept": "25000",
+        "b_reject": "25000",
+        "contest_accept": "400000",
+        "contest_reject": "100000",
+        "delta": "0.05",
+        "flow_cap": "8",
+        "pol_depth": "34657.359028",
+        "proposal_class": "Treasury",
+        "reject_full_effective": "0.50"
+      },
+      "l_hat": "134657.359028",
+      "name": "security_sizing_asymmetric_pair_contest",
       "outcome": "Reject",
       "reason": "SecuritySizing"
     }
