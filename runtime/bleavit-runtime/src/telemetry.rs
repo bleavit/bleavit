@@ -6,3 +6,330 @@
 //! Solvency-relevant methods MUST read the same quantities the owning pallet's
 //! try-state compares — this module is a window onto audited state, never a
 //! second bookkeeping.
+
+use alloc::{vec, vec::Vec};
+
+use frame_support::traits::{fungibles::Inspect, Get};
+use futarchy_primitives::{bounds, Balance, BoundedVec, PositionId, PositionKind, ScalarSide};
+use futarchy_runtime_api::{
+    CollateralTelemetry, MarketTelemetry, PolTelemetry, StorageUtilizationTelemetry,
+    WindowCoverageTelemetry, MAX_STORAGE_NAME_BYTES, MAX_STORAGE_UTILIZATION_ROWS,
+    MAX_WINDOW_COVERAGE_ROWS,
+};
+use pallet_futarchy_treasury::BudgetLine;
+use pallet_market::core_market::{BookKind, MarketBook};
+
+use crate::{
+    configs::{
+        active_migration_stall_is_live, MarketObsInterval, MigrationHaltSources,
+        MIGRATION_STALL_HALT,
+    },
+    usdc_location, ForeignAssets, FutarchyTreasury, Runtime, System,
+};
+
+fn book_positions(book: &MarketBook<crate::AccountId>) -> (PositionId, PositionId) {
+    match book.kind {
+        BookKind::Decision { proposal, branch } => (
+            PositionId::Proposal {
+                proposal,
+                branch,
+                kind: PositionKind::Long,
+            },
+            PositionId::Proposal {
+                proposal,
+                branch,
+                kind: PositionKind::Short,
+            },
+        ),
+        BookKind::Gate {
+            proposal,
+            branch,
+            gate,
+        } => (
+            PositionId::Proposal {
+                proposal,
+                branch,
+                kind: PositionKind::GateYes(gate),
+            },
+            PositionId::Proposal {
+                proposal,
+                branch,
+                kind: PositionKind::GateNo(gate),
+            },
+        ),
+        BookKind::Baseline { epoch } => (
+            PositionId::Baseline {
+                epoch,
+                side: ScalarSide::Long,
+            },
+            PositionId::Baseline {
+                epoch,
+                side: ScalarSide::Short,
+            },
+        ),
+    }
+}
+
+/// Exact current inventory loss for a seeded book.
+///
+/// At seeding both outcome inventories contain the exact live POL commitment
+/// `H` (normally `seed_headroom(b)`; a rerun commitment preserves the sum of
+/// its two separately rounded seeds). At any later LMSR state, path
+/// independence gives net curve premium
+/// `C(q)-C(0,0)` and the smaller outcome inventory is
+/// `H - [max(q)-premium]`; therefore `H - min(inventory)` is the realized
+/// worst-world maker loss and tends to `b·ln 2`. It is checked against the
+/// canonical `seed_headroom(book.b)` bound. Decision/gate fees live in a
+/// separate fee account. Baseline fees are temporarily held in the book as
+/// either complete sets (buys) or plain USDC (sells), so both the accumulated
+/// fee claim and its plain-USDC realization are removed from the curve P&L.
+fn realized_book_loss(
+    book: &MarketBook<crate::AccountId>,
+    seed_capital: Balance,
+    bound: Balance,
+) -> Option<Balance> {
+    let (long, short) = book_positions(book);
+    let retained_sets =
+        pallet_conditional_ledger::Positions::<Runtime>::get(long, &book.account).min(
+            pallet_conditional_ledger::Positions::<Runtime>::get(short, &book.account),
+        );
+    let (capital, retained) = if matches!(book.kind, BookKind::Baseline { .. }) {
+        let capital = seed_capital.checked_add(book.fees_accrued)?;
+        let plain_usdc =
+            <ForeignAssets as Inspect<crate::AccountId>>::balance(usdc_location(), &book.account);
+        (capital, retained_sets.checked_add(plain_usdc)?)
+    } else {
+        (seed_capital, retained_sets)
+    };
+    let loss = capital.checked_sub(retained).unwrap_or_default();
+    (loss <= bound).then_some(loss)
+}
+
+/// Per-live-book realized maker loss paired with the canonical LMSR bound.
+pub fn market_books() -> Option<BoundedVec<MarketTelemetry, { bounds::MAX_LIVE_MARKETS }>> {
+    let mut rows = BoundedVec::new();
+    // This commitment vector is the market pallet's canonical, sorted index of
+    // seeded books whose settlement obligation is still live. Closed-but-not-
+    // settled books remain correctly visible; unseeded and terminal books do not.
+    for (market, seed_capital) in pallet_market::LivePolCommitments::<Runtime>::get() {
+        let book = pallet_market::Markets::<Runtime>::get(market)?;
+        let bound = pallet_market::core_market::seed_headroom(book.b).ok()?;
+        let expected_seed_capital =
+            if pallet_market::RerunSeededMarkets::<Runtime>::contains_key(market) {
+                let original_b = book.b.checked_div(2)?;
+                pallet_market::core_market::seed_headroom(original_b)
+                    .ok()?
+                    .checked_mul(2)?
+            } else {
+                bound
+            };
+        if seed_capital != expected_seed_capital
+            || !pallet_market::SeededMarkets::<Runtime>::contains_key(market)
+            || pallet_market::SettlementObservedAt::<Runtime>::contains_key(market)
+        {
+            return None;
+        }
+        rows.try_push(MarketTelemetry {
+            market,
+            book_loss_usdc: realized_book_loss(&book, seed_capital, bound)?,
+            lmsr_loss_bound_usdc: bound,
+        })
+        .ok()?;
+    }
+    Some(rows)
+}
+
+/// Project scheduled-observation coverage for every active unsealed window.
+pub fn mid_window_coverage() -> Option<BoundedVec<WindowCoverageTelemetry, MAX_WINDOW_COVERAGE_ROWS>>
+{
+    let now = System::block_number();
+    let interval = u32::try_from(MarketObsInterval::get()).ok()?;
+    if interval == 0 {
+        return None;
+    }
+    let mut windows = pallet_market::DecisionWindows::<Runtime>::iter().collect::<Vec<_>>();
+    windows.sort_unstable_by_key(|(market, _)| *market);
+    let mut rows = Vec::new();
+    for (market, registered) in windows {
+        for window in registered {
+            if window.sealed || now < window.start || now >= window.end {
+                continue;
+            }
+            let elapsed = now.checked_sub(window.start)?;
+            let expected = elapsed.checked_div(interval)?;
+            let coverage = if expected == 0 {
+                100
+            } else {
+                window
+                    .observations
+                    .checked_mul(100)?
+                    .checked_div(expected)?
+                    .min(100)
+            };
+            rows.push(WindowCoverageTelemetry {
+                market,
+                start: window.start,
+                end: window.end,
+                coverage_percent: u8::try_from(coverage).ok()?,
+            });
+        }
+    }
+    rows.sort_unstable_by_key(|row| (row.market, row.start, row.end));
+    BoundedVec::try_from(rows).ok()
+}
+
+/// Combined POL funding versus live obligations plus one standing Baseline seed.
+pub fn pol() -> Option<PolTelemetry> {
+    let effective_pol_usdc = FutarchyTreasury::line_balance(BudgetLine::Pol)
+        .checked_add(FutarchyTreasury::line_balance(BudgetLine::PolBaseline))?;
+    let treasury = FutarchyTreasury::treasury();
+    let live_commitments = treasury
+        .pol_commitments
+        .iter()
+        .try_fold(0_u128, |total, amount| total.checked_add(*amount))?;
+    // Existing Baseline books are already present in `pol_commitments` (08
+    // §1.2). The dedicated line is standing funding: it must also retain the
+    // live-Params capacity to seed the next epoch's mandatory Baseline book,
+    // even when the current epoch has no proposals (08 §4.3).
+    let standing_baseline =
+        pallet_market::core_market::seed_headroom(crate::configs::balance_param(b"pol.b_baseline"))
+            .ok()?;
+    Some(PolTelemetry {
+        effective_pol_usdc,
+        pol_floor_usdc: live_commitments.checked_add(standing_baseline)?,
+    })
+}
+
+/// Ledger custody/liability totals from the pallet's L-2 helper.
+pub fn collateral() -> Option<CollateralTelemetry> {
+    let (custody_usdc, liability_usdc) =
+        pallet_conditional_ledger::Pallet::<Runtime>::collateral_totals().ok()?;
+    // The ledger has no independent dust accumulator: claimant-adverse residue
+    // is transferred out to INSURANCE when a vault is swept. Consequently the
+    // only honest anomalous-dust component is unexplained positive custody
+    // beyond the exact L-2 liability. Undercollateralization remains visible in
+    // the signed drift series itself.
+    let anomalous_rounding_dust_usdc = custody_usdc.checked_sub(liability_usdc).unwrap_or_default();
+    Some(CollateralTelemetry {
+        custody_usdc,
+        liability_usdc,
+        anomalous_rounding_dust_usdc,
+    })
+}
+
+/// Canonical migration stall signal used by PB-MIGRATION.
+pub fn migration_cursor_stalled() -> bool {
+    let halt = MigrationHaltSources::get() & MIGRATION_STALL_HALT != 0;
+    let live = match pallet_migrations::Cursor::<Runtime>::get() {
+        Some(pallet_migrations::MigrationCursor::Active(cursor)) => {
+            active_migration_stall_is_live(&cursor)
+        }
+        Some(pallet_migrations::MigrationCursor::Stuck) | None => false,
+    };
+    halt || live
+}
+
+fn max_len<I>(mut lengths: I) -> Option<u32>
+where
+    I: Iterator<Item = usize>,
+{
+    lengths.try_fold(0_u32, |largest, length| {
+        Some(largest.max(u32::try_from(length).ok()?))
+    })
+}
+
+fn storage_row(map: &'static str, entries: u32, bound: u32) -> Option<StorageUtilizationTelemetry> {
+    if bound == 0 {
+        return None;
+    }
+    Some(StorageUtilizationTelemetry {
+        map: BoundedVec::<u8, MAX_STORAGE_NAME_BYTES>::try_from(map.as_bytes().to_vec()).ok()?,
+        entries,
+        bound,
+    })
+}
+
+/// Bounded storage shapes whose const-generic limits are absent from portable metadata.
+pub fn storage_utilization(
+) -> Option<BoundedVec<StorageUtilizationTelemetry, MAX_STORAGE_UTILIZATION_ROWS>> {
+    let treasury = FutarchyTreasury::treasury();
+    // The runtime-API row bound is derived from the market storage shape in
+    // B13's monitoring surface. Reuse it here so the occupancy denominator and
+    // the returned-collection bound cannot drift independently.
+    let windows_per_market = MAX_WINDOW_COVERAGE_ROWS.checked_div(bounds::MAX_LIVE_MARKETS)?;
+    let rows = vec![
+        storage_row(
+            "market_twap_checkpoints",
+            max_len(pallet_market::TwapCheckpoints::<Runtime>::iter_values().map(|v| v.len()))?,
+            windows_per_market,
+        )?,
+        storage_row(
+            "market_decision_windows",
+            max_len(pallet_market::DecisionWindows::<Runtime>::iter_values().map(|v| v.len()))?,
+            windows_per_market,
+        )?,
+        storage_row(
+            "market_decision_window_owners",
+            max_len(
+                pallet_market::DecisionWindowOwners::<Runtime>::iter_values().map(|v| v.len()),
+            )?,
+            bounds::MAX_LIVE_PROPOSALS.checked_mul(windows_per_market)?,
+        )?,
+        storage_row(
+            "treasury_budget_lines",
+            u32::try_from(treasury.lines.len()).ok()?,
+            pallet_futarchy_treasury::MAX_BUDGET_LINES_BOUND,
+        )?,
+        storage_row(
+            "treasury_streams",
+            u32::try_from(treasury.streams.len()).ok()?,
+            pallet_futarchy_treasury::MAX_STREAMS_BOUND,
+        )?,
+        storage_row(
+            "treasury_pending_outflows",
+            u32::try_from(treasury.pending_outflows.len()).ok()?,
+            pallet_futarchy_treasury::MAX_PENDING_OUTFLOWS_BOUND,
+        )?,
+        storage_row(
+            "treasury_pol_commitments",
+            u32::try_from(treasury.pol_commitments.len()).ok()?,
+            pallet_futarchy_treasury::MAX_POL_COMMITMENTS_BOUND,
+        )?,
+        storage_row(
+            "treasury_vit_budget_lines",
+            u32::try_from(treasury.vit_lines.len()).ok()?,
+            pallet_futarchy_treasury::MAX_BUDGET_LINES_BOUND,
+        )?,
+        storage_row(
+            "treasury_funded_coretime_periods",
+            u32::try_from(treasury.funded_coretime_periods.len()).ok()?,
+            pallet_futarchy_treasury::MAX_FUNDED_CORETIME_BOUND,
+        )?,
+        storage_row(
+            "treasury_coretime_quotes",
+            u32::try_from(treasury.coretime_quotes.len()).ok()?,
+            pallet_futarchy_treasury::MAX_FUNDED_CORETIME_BOUND,
+        )?,
+        storage_row(
+            "epoch_recent_cohort_summaries",
+            u32::try_from(pallet_epoch::RecentCohortSummaries::<Runtime>::get().len()).ok()?,
+            pallet_epoch::RECENT_COHORTS_BOUND,
+        )?,
+        storage_row(
+            "epoch_timings",
+            u32::try_from(pallet_epoch::EpochTimings::<Runtime>::get().len()).ok()?,
+            pallet_epoch::RECENT_COHORTS_BOUND,
+        )?,
+        storage_row(
+            "oracle_rounds",
+            u32::try_from(pallet_oracle::Rounds::<Runtime>::iter().count()).ok()?,
+            pallet_oracle::MAX_ROUNDS_BOUND,
+        )?,
+        storage_row(
+            "oracle_round_schedules",
+            u32::try_from(pallet_oracle::RoundSchedules::<Runtime>::iter().count()).ok()?,
+            pallet_oracle::MAX_ROUNDS_BOUND,
+        )?,
+    ];
+    BoundedVec::try_from(rows).ok()
+}

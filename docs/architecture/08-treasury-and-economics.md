@@ -46,7 +46,7 @@ VIT holdings: marked 0. In-flight XCM: marked 0 until arrival (conservative).
 **Reserve-health haircut (new; B-med “USDC freeze”).** [07](07-oracle-and-disputes.md) defines the deterministic reserve-health sub-metric `R` in `C_onchain`. While the `R` flag is set:
 
 1. the published NAV view carries `reserve_impaired = true` (never silently full-backing);
-2. **spendable NAV for all new commitments is 0**: no new POL seeding, no new outflows, no new stream openings, and every minimum-viable-NAV gate of §4 evaluates as failing (fail-static). Existing books and existing stream claims are unaffected;
+2. **spendable NAV for all new commitments is 0**: no new POL seeding, no new outflows, no new stream openings, and every minimum-viable-NAV gate of §4 evaluates as failing (fail-static). Existing books and existing stream claims are unaffected. One explicit carve-out (D-9, [09](09-execution-upgrades-and-rollout.md) §4): `execute_coretime_renewal`'s `ops.coretime` line debit remains dispatchable under the flag — renewal is maintenance during exactly the degradations the flag accompanies, and NAV carries no DOT term;
 3. playbook `PB-RESERVE` becomes admissible: halts `split` inflows ([03](03-conditional-ledger.md));
 4. event `NavHaircutFlagged { epoch, flag }` is emitted on every flag transition. The FE MUST surface the flag on every NAV render ([10](10-frontend-architecture.md), [11](11-frontend-workflows.md)).
 

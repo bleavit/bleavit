@@ -106,10 +106,7 @@ class CoverageCheckerTests(unittest.TestCase):
             self.assertEqual(failures, [])
 
     def test_seam_expires_when_owner_is_complete(self) -> None:
-        samples = (
-            ("B13", {"b13": "✅"}, "bleavit_market_book_loss_usdc"),
-            ("O3", {"o3": "✅"}, "bleavit_bootnode_browser_dial_success"),
-        )
+        samples = (("O3", {"o3": "✅"}, "bleavit_bootnode_browser_dial_success"),)
         for owner, statuses, series in samples:
             with self.subTest(owner=owner), tempfile.TemporaryDirectory() as directory:
                 root = fixture_root(directory)
