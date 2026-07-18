@@ -74,7 +74,7 @@ pub mod pallet {
         BookKind, MarketBook, MarketParams, MarketPhase, TwapCumulative, TwapWindow,
     };
     use sp_runtime::{
-        traits::{AccountIdConversion, Saturating, UniqueSaturatedInto},
+        traits::{AccountIdConversion, CheckedAdd, Saturating, UniqueSaturatedInto},
         DispatchError,
     };
 
@@ -99,6 +99,9 @@ pub mod pallet {
 
         /// Internal `pallet-epoch` authority for create/seed/close (06 §3.2).
         type MarketAdmin: EnsureOrigin<Self::RuntimeOrigin>;
+
+        /// Kernel-enumerated playbook effect origin (06 §6.2/§6.3).
+        type EmergencyPlaybookOrigin: EnsureOrigin<Self::RuntimeOrigin>;
 
         /// Delay from close until permissionless reaping (04 §2).
         #[pallet::constant]
@@ -230,6 +233,20 @@ pub mod pallet {
         ValueQuery,
     >;
 
+    /// PB-DEPEG backstop: new book creation/seeding is disabled only while
+    /// `now < until` (06 §6.2).
+    #[pallet::storage]
+    pub type CreationFrozenUntil<T: Config> = StorageValue<_, BlockNumberFor<T>, OptionQuery>;
+
+    /// PB-LEDGER-FREEZE backstop for trading/observation calls (06 §6.3).
+    #[pallet::storage]
+    pub type FrozenUntil<T: Config> = StorageValue<_, BlockNumberFor<T>, OptionQuery>;
+
+    /// Pallet-level one-renewal latch. Guardian core independently enforces the
+    /// same invariant; this prevents a miswired runtime adapter extending twice.
+    #[pallet::storage]
+    pub type FreezeRenewed<T: Config> = StorageValue<_, bool, ValueQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -258,6 +275,16 @@ pub mod pallet {
         MarketReaped { market: MarketId },
         /// Append-only operational event; not part of the frozen §5 ingest set.
         Seeded { market: MarketId, headroom: Balance },
+        /// Operational event outside the frozen 02 ingest schema.
+        CreationFreezeSet { until: BlockNumberFor<T> },
+        /// Operational event outside the frozen 02 ingest schema.
+        CreationFreezeCleared,
+        /// Operational event outside the frozen 02 ingest schema.
+        FreezeSet { until: BlockNumberFor<T> },
+        /// Operational event outside the frozen 02 ingest schema.
+        FreezeCleared,
+        /// Operational event outside the frozen 02 ingest schema.
+        FreezeExtended { until: BlockNumberFor<T> },
     }
 
     #[pallet::error]
@@ -279,6 +306,14 @@ pub mod pallet {
         TooManyMarkets,
         /// The book's POL headroom has already been seeded (04 §10, idempotence).
         AlreadySeeded,
+        /// PB-DEPEG blocks book creation/seeding until its bounded expiry.
+        CreationFrozen,
+        /// PB-LEDGER-FREEZE blocks trading/observation until its bounded expiry.
+        Frozen,
+        /// The requested expiry is in the past or beyond its kernel bound.
+        FreezeOutOfBounds,
+        /// The one pallet-level LedgerFreeze renewal was already consumed.
+        FreezeRenewalExhausted,
     }
 
     impl<T: Config> From<market_core::Error> for Error<T> {
@@ -523,6 +558,7 @@ pub mod pallet {
             max_cost: Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
             let mut book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
             Self::ensure_trade_admissible(market, &book)?;
             let before = book.clone();
@@ -559,6 +595,7 @@ pub mod pallet {
             min_proceeds: Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
             let mut book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
             Self::ensure_trade_admissible(market, &book)?;
             let before = book.clone();
@@ -590,6 +627,7 @@ pub mod pallet {
         #[pallet::weight(<T as Config>::WeightInfo::crank_observe())]
         pub fn crank_observe(origin: OriginFor<T>, market: MarketId) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
             let mut book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
             // The accumulator is sealed at Close (04 §2): a permissionless keeper must
             // not record observations on a Closed/Settled book (it would mutate the
@@ -672,6 +710,48 @@ pub mod pallet {
                 Ok(())
             })?;
             <T as Config>::KeeperRebate::rebate(&who, CrankClass::General);
+            Ok(())
+        }
+
+        /// PB-DEPEG effect endpoint: freeze only new market creation/seeding.
+        #[pallet::call_index(4)]
+        #[pallet::weight(<T as Config>::WeightInfo::freeze_creation())]
+        pub fn freeze_creation(origin: OriginFor<T>, expiry: BlockNumberFor<T>) -> DispatchResult {
+            <T as Config>::EmergencyPlaybookOrigin::ensure_origin(origin)?;
+            let now = frame_system::Pallet::<T>::block_number();
+            let max: BlockNumberFor<T> = kernel::MIN_EPOCH_LENGTH_BLOCKS.into();
+            ensure!(
+                expiry >= now && expiry.saturating_sub(now) <= max,
+                Error::<T>::FreezeOutOfBounds
+            );
+            CreationFrozenUntil::<T>::put(expiry);
+            Self::deposit_event(Event::CreationFreezeSet { until: expiry });
+            Ok(())
+        }
+
+        /// PB-LEDGER-FREEZE effect endpoint. `true` installs exactly the
+        /// kernel 14-day backstop; `false` clears early/reverts expiry.
+        #[pallet::call_index(5)]
+        #[pallet::weight(<T as Config>::WeightInfo::set_frozen())]
+        pub fn set_frozen(origin: OriginFor<T>, frozen: bool) -> DispatchResult {
+            <T as Config>::EmergencyPlaybookOrigin::ensure_origin(origin)?;
+            if frozen {
+                let now = frame_system::Pallet::<T>::block_number();
+                ensure!(
+                    FrozenUntil::<T>::get().is_none_or(|until| now >= until),
+                    Error::<T>::Frozen
+                );
+                let until = now
+                    .checked_add(&kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS.into())
+                    .ok_or(Error::<T>::ArithmeticOverflow)?;
+                FrozenUntil::<T>::put(until);
+                FreezeRenewed::<T>::put(false);
+                Self::deposit_event(Event::FreezeSet { until });
+            } else {
+                FrozenUntil::<T>::kill();
+                FreezeRenewed::<T>::put(false);
+                Self::deposit_event(Event::FreezeCleared);
+            }
             Ok(())
         }
     }
@@ -975,6 +1055,7 @@ pub mod pallet {
             treasury: T::AccountId,
         ) -> DispatchResult {
             T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            Self::ensure_creation_open()?;
             ensure!(
                 !SeededMarkets::<T>::contains_key(accept)
                     && !SeededMarkets::<T>::contains_key(reject),
@@ -982,8 +1063,8 @@ pub mod pallet {
             );
             let accept_book = Markets::<T>::get(accept).ok_or(Error::<T>::UnknownMarket)?;
             let reject_book = Markets::<T>::get(reject).ok_or(Error::<T>::UnknownMarket)?;
-            Self::ensure_market_accounts_indexed(&accept_book)?;
-            Self::ensure_market_accounts_indexed(&reject_book)?;
+            Self::ensure_market_book_indexed(&accept_book)?;
+            Self::ensure_market_book_indexed(&reject_book)?;
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
                 let mut ledger = PalletLedger::<T>::new();
                 let headroom = market_core::seed_branch_pair(
@@ -1024,8 +1105,8 @@ pub mod pallet {
             );
             let accept_book = Markets::<T>::get(accept).ok_or(Error::<T>::UnknownMarket)?;
             let reject_book = Markets::<T>::get(reject).ok_or(Error::<T>::UnknownMarket)?;
-            Self::ensure_market_accounts_indexed(&accept_book)?;
-            Self::ensure_market_accounts_indexed(&reject_book)?;
+            Self::ensure_market_book_indexed(&accept_book)?;
+            Self::ensure_market_book_indexed(&reject_book)?;
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
                 let mut ledger = PalletLedger::<T>::new();
                 let headroom = market_core::seed_branch_pair(
@@ -1073,7 +1154,7 @@ pub mod pallet {
                 Error::<T>::AlreadySeeded
             );
             let book = Markets::<T>::get(id).ok_or(Error::<T>::UnknownMarket)?;
-            Self::ensure_market_accounts_indexed(&book)?;
+            Self::ensure_market_book_indexed(&book)?;
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
                 let mut ledger = PalletLedger::<T>::new();
                 let headroom = market_core::seed_book(&book, &mut ledger, &treasury)
@@ -1319,6 +1400,7 @@ pub mod pallet {
             b: Balance,
         ) -> DispatchResult {
             T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            Self::ensure_creation_open()?;
             ensure!(!Markets::<T>::contains_key(id), Error::<T>::DuplicateMarket);
             ensure!(b > 0, Error::<T>::TryStateViolation);
             // I-21: cap the live-book set at dispatch, not only in try_state (which
@@ -1389,6 +1471,7 @@ pub mod pallet {
         /// Internal epoch-authority API: seed worst-case-loss headroom (04 §10).
         pub fn seed(origin: OriginFor<T>, id: MarketId, treasury: T::AccountId) -> DispatchResult {
             T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            Self::ensure_creation_open()?;
             let book = Markets::<T>::get(id).ok_or(Error::<T>::UnknownMarket)?;
             // Seed once: re-seeding splits fresh POL headroom into an already
             // collateralized book (04 §10), double-spending the subsidy.
@@ -1396,7 +1479,7 @@ pub mod pallet {
                 !SeededMarkets::<T>::contains_key(id),
                 Error::<T>::AlreadySeeded
             );
-            Self::ensure_market_accounts_indexed(&book)?;
+            Self::ensure_market_book_indexed(&book)?;
             // Internal (non-`#[pallet::call]`) path: FRAME's per-dispatch storage layer
             // wraps only public extrinsics, so an epoch-tick caller that swallows the
             // error would strand a partial seed (`seed_book` drives several ledger
@@ -1422,6 +1505,50 @@ pub mod pallet {
         pub fn close(origin: OriginFor<T>, id: MarketId) -> DispatchResult {
             T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
             frame_support::storage::with_storage_layer(|| Self::close_book(id))
+        }
+
+        /// Runtime expiry hook for PB-DEPEG. No public origin can call this;
+        /// guardian maintenance reaches it through the effect dispatcher.
+        pub fn clear_creation_freeze() {
+            CreationFrozenUntil::<T>::kill();
+            Self::deposit_event(Event::CreationFreezeCleared);
+        }
+
+        /// Runtime renewal hook for PB-LEDGER-FREEZE. Installs one fresh
+        /// 14-day window from ratification time and never twice.
+        pub fn extend_freeze_once() -> DispatchResult {
+            let now = frame_system::Pallet::<T>::block_number();
+            let current = FrozenUntil::<T>::get().ok_or(Error::<T>::Frozen)?;
+            ensure!(now < current, Error::<T>::Frozen);
+            ensure!(
+                !FreezeRenewed::<T>::get(),
+                Error::<T>::FreezeRenewalExhausted
+            );
+            let until = now
+                .checked_add(&kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS.into())
+                .ok_or(Error::<T>::ArithmeticOverflow)?;
+            FrozenUntil::<T>::put(until);
+            FreezeRenewed::<T>::put(true);
+            Self::deposit_event(Event::FreezeExtended { until });
+            Ok(())
+        }
+
+        fn ensure_creation_open() -> DispatchResult {
+            let now = frame_system::Pallet::<T>::block_number();
+            ensure!(
+                CreationFrozenUntil::<T>::get().is_none_or(|until| now >= until),
+                Error::<T>::CreationFrozen
+            );
+            Ok(())
+        }
+
+        fn ensure_not_frozen() -> DispatchResult {
+            let now = frame_system::Pallet::<T>::block_number();
+            ensure!(
+                FrozenUntil::<T>::get().is_none_or(|until| now >= until),
+                Error::<T>::Frozen
+            );
+            Ok(())
         }
 
         /// Epoch-authority boundary seal for a particular proposal window.
@@ -1569,7 +1696,7 @@ pub mod pallet {
             Ok(())
         }
 
-        fn ensure_market_accounts_indexed(book: &MarketBook<T::AccountId>) -> DispatchResult {
+        fn ensure_market_book_indexed(book: &MarketBook<T::AccountId>) -> DispatchResult {
             ensure!(
                 MarketProtocolAccounts::<T>::contains_key(&book.account)
                     && MarketProtocolAccounts::<T>::contains_key(&book.fees_account),
@@ -1875,7 +2002,7 @@ pub mod pallet {
                 );
             }
             for (id, book) in Markets::<T>::iter() {
-                Self::ensure_market_accounts_indexed(&book)?;
+                Self::ensure_market_book_indexed(&book)?;
                 if let BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. } =
                     book.kind
                 {

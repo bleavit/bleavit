@@ -329,7 +329,7 @@ class SurfaceManifestTests(unittest.TestCase):
                 {
                     "id": "b1b.compliance",
                     "owner": "B1b",
-                    "reason": "SQ-172..SQ-182 remain open",
+                    "reason": "SQ-173..SQ-175, SQ-177, SQ-180..SQ-182 remain open (fail-closed adoption-input backing gaps; per-SQ owners)",
                 },
                 {
                     "id": "treasury.reserve_health_unwired",
@@ -343,7 +343,7 @@ class SurfaceManifestTests(unittest.TestCase):
                     "id": "oracle.bond_custody_absent",
                     "owner": "A9",
                     "reason": (
-                        "SQ-232: oracle and attestor registration bonds have no "
+                        "SQ-254: oracle and attestor registration bonds have no "
                         "economic custody — registration and slashing carry no capital cost"
                     ),
                 },
