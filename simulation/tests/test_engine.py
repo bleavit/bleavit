@@ -4,7 +4,12 @@ import unittest
 
 from bleavit_reference_model.decision import Outcome
 from bleavit_reference_model.treasury import LN2, in_cap_prize, l_hat
-from bleavit_simulation.config import DEFAULT_SEED, SimulationConfig
+from bleavit_simulation.config import (
+    DEFAULT_SEED,
+    GATE_EPS,
+    GATE_P_MAX,
+    SimulationConfig,
+)
 from bleavit_simulation.engine import (
     _extend_gate_books,
     _gate_books,
@@ -112,6 +117,93 @@ class ExecutedEngineTests(unittest.TestCase):
         self.assertEqual(survival.reason, "GateVetoSurvival")
         self.assertEqual(security.reason, "GateVetoSecurity")
         self.assertTrue(all(row.contest > 0 for row in survival.gate_books))
+
+    def test_gated_attacker_suppresses_veto_from_one_shared_budget(self):
+        """Seeded META/TH-4 demo: organic veto -> suppression -> wrong PASS."""
+        config = SimulationConfig(proposal_count=400)
+        proposal = generate_proposal_with_config(DEFAULT_SEED, 5, config)
+        organic = simulate_proposal(
+            proposal,
+            seed=DEFAULT_SEED,
+            config=config,
+            budget_multiple=Decimal(0),
+        )
+        suppressed = simulate_proposal(
+            proposal,
+            seed=DEFAULT_SEED,
+            config=config,
+            budget_multiple=Decimal("0.5"),
+        )
+        adopted = simulate_proposal(
+            proposal,
+            seed=DEFAULT_SEED,
+            config=config,
+            budget_multiple=Decimal(3),
+        )
+
+        self.assertEqual(organic.strategy, "th4_thin_capture")
+        self.assertEqual(organic.reason, "GateVetoSecurity")
+        self.assertEqual(organic.initial_gate_vetoes, ("security",))
+        self.assertEqual(suppressed.initial_gate_vetoes, ())
+        organic_adopt = next(
+            row
+            for row in organic.gate_books
+            if row.gate == "security" and row.branch == "adopt"
+        )
+        suppressed_adopt = next(
+            row
+            for row in suppressed.gate_books
+            if row.gate == "security" and row.branch == "adopt"
+        )
+        suppressed_reject = next(
+            row
+            for row in suppressed.gate_books
+            if row.gate == "security" and row.branch == "reject"
+        )
+        self.assertGreater(organic_adopt.summary.full, GATE_P_MAX)
+        self.assertGreater(suppressed.gate_manipulator_flow, 0)
+        self.assertLess(suppressed_adopt.summary.full, organic_adopt.summary.full)
+        self.assertLessEqual(suppressed_adopt.summary.full, GATE_P_MAX)
+        self.assertLessEqual(
+            suppressed_adopt.summary.full,
+            suppressed_reject.summary.full + GATE_EPS,
+        )
+        self.assertEqual(suppressed.reason, "HurdleNotMet")
+        self.assertEqual(adopted.outcome, "Adopt")
+        self.assertEqual(
+            adopted.decision_attack_budget + adopted.gate_attack_budget,
+            adopted.attacker_budget,
+        )
+        self.assertGreater(adopted.gate_attack_budget, 0)
+        self.assertLessEqual(
+            adopted.realized_manipulation_spend, adopted.attacker_budget
+        )
+        self.assertEqual(
+            suppressed.evidence(),
+            simulate_proposal(
+                proposal,
+                seed=DEFAULT_SEED,
+                config=config,
+                budget_multiple=Decimal("0.5"),
+            ).evidence(),
+        )
+
+    def test_th6_belief_capture_also_funds_gate_suppression(self):
+        config = SimulationConfig(proposal_count=400)
+        proposal = generate_proposal_with_config(DEFAULT_SEED, 34, config)
+        attacked = simulate_proposal(
+            proposal,
+            seed=DEFAULT_SEED,
+            config=config,
+            budget_multiple=Decimal("0.5"),
+        )
+        self.assertEqual(attacked.strategy, "th6_belief_capture")
+        self.assertGreater(attacked.gate_attack_budget, 0)
+        self.assertGreater(attacked.gate_manipulator_flow, 0)
+        self.assertEqual(
+            attacked.decision_attack_budget + attacked.gate_attack_budget,
+            attacked.attacker_budget,
+        )
 
     def test_upgrade_payload_scope_propagates_without_decide_signature_change(self):
         config = SimulationConfig(proposal_count=1)

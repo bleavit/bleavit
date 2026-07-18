@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 import unittest
 from unittest import mock
@@ -79,6 +80,38 @@ class CalibrationBatchTests(unittest.TestCase):
         )
         lower, upper = map(Decimal, bracket["budget_bracket_3p_multiple"])
         self.assertLess(lower, upper)
+
+    def test_gated_wrong_pass_bracket_includes_suppression_budget(self):
+        config = replace(
+            SimulationConfig(proposal_count=400),
+            threshold_relative_tolerance="0.01",
+        )
+        proposal = generate_proposal_with_config(DEFAULT_SEED, 5, config)
+        high = simulate_proposal(
+            proposal,
+            seed=DEFAULT_SEED,
+            config=config,
+            budget_multiple=Decimal(3),
+        )
+        result = _threshold_brackets(
+            [proposal],
+            DEFAULT_SEED,
+            config,
+            Decimal(config.diagnostic_probe_flow_cap),
+            [high],
+        )
+        self.assertEqual(len(result["brackets"]), 1)
+        bracket = result["brackets"][0]
+        lower, upper = map(Decimal, bracket["budget_bracket_3p_multiple"])
+        allocation = bracket["budget_allocation_at_flip"]
+        decision = Decimal(allocation["decision_pair"])
+        gates = Decimal(allocation["gate_books"])
+        total = Decimal(allocation["total"])
+        self.assertGreater(lower, Decimal(1))
+        self.assertLessEqual(upper - lower, Decimal("0.012"))
+        self.assertGreater(gates, 0)
+        self.assertEqual(decision + gates, total)
+        self.assertEqual(bracket["sub_3p_status"], "clean")
 
 
 if __name__ == "__main__":

@@ -135,6 +135,7 @@ class SimulationResult:
     reject: BookSummary
     baseline: BookSummary
     gate_books: tuple[GateBookEvidence, ...]
+    initial_gate_vetoes: tuple[str, ...]
     baseline_valid: bool
     baseline_carried: bool
     attack_cost: Decimal
@@ -144,6 +145,10 @@ class SimulationResult:
     realized_manipulation_spend: Decimal
     manipulator_gross_deployed: Decimal
     manipulator_displacement: Decimal
+    attacker_budget: Decimal
+    decision_attack_budget: Decimal
+    gate_attack_budget: Decimal
+    gate_manipulator_flow: Decimal
     informed_flow: Decimal
     noise_flow: Decimal
     holder_flow: Decimal
@@ -160,6 +165,7 @@ class SimulationResult:
         return {
             "arbitrage_corrective_flow": str(self.arbitrage_flow),
             "attack_cost_hat": str(self.attack_cost),
+            "attacker_budget": str(self.attacker_budget),
             "b": str(self.b),
             "baseline_b": str(self.baseline_b),
             "baseline_carried": self.baseline_carried,
@@ -173,14 +179,18 @@ class SimulationResult:
             "contest_reject": str(self.contest_reject),
             "decidable_harm": self.decidable_harm,
             "delta": str(self.delta),
+            "decision_attack_budget": str(self.decision_attack_budget),
             "extended": self.extended,
             "full_accept": str(self.accept.full),
             "full_reject": str(self.reject.full),
             "gate_books": [row.evidence() for row in self.gate_books],
+            "gate_attack_budget": str(self.gate_attack_budget),
+            "gate_manipulator_flow": str(self.gate_manipulator_flow),
             "holder_flow": str(self.holder_flow),
             "informed_flow": str(self.informed_flow),
             "initial_contest_accept": str(self.initial_contest_accept),
             "initial_contest_reject": str(self.initial_contest_reject),
+            "initial_gate_vetoes": list(self.initial_gate_vetoes),
             "initial_outcome": self.initial_outcome,
             "ledger_conservation_error": str(self.ledger_conservation_error),
             "manip_c_disp": None if self.manip_c_disp is None else [str(value) for value in self.manip_c_disp],
@@ -316,13 +326,13 @@ def _apply_pair_attack(
     proposal: Proposal,
     config: SimulationConfig,
     strategy: str,
-    budget: Decimal,
+    budgets: tuple[Decimal, Decimal],
     accept_truth: Decimal,
     reject_truth: Decimal,
     organic_pair_contest: Decimal,
     reuse_attacker_balance: bool = False,
 ) -> None:
-    if budget <= 0 or strategy == "th7_baseline_suppression":
+    if sum(budgets, Decimal(0)) <= 0 or strategy == "th7_baseline_suppression":
         return
     target_accept, target_reject = _attack_targets(proposal.harmful)
     first_index = 5 if strategy == "th2_late_spike" else 0
@@ -337,23 +347,22 @@ def _apply_pair_attack(
     pair_correction = (
         base_liquidity / Decimal(2) * days * Decimal(config.arbitrage_elasticity)
     )
-    for book in (accept, reject):
+    for book, budget in zip((accept, reject), budgets):
         if not reuse_attacker_balance:
-            book.account("manipulator", budget / Decimal(2))
+            book.account("manipulator", budget)
         _fund(book, "arbitrage", pair_correction / Decimal(2))
-    per_attack = budget / Decimal(2) / Decimal(affected)
     per_correction = pair_correction / Decimal(2) / Decimal(affected)
     for index in range(first_index, len(starts)):
         block = starts[index]
-        for book, attack_target, truth in (
-            (accept, target_accept, accept_truth),
-            (reject, target_reject, reject_truth),
+        for book, attack_target, truth, budget in (
+            (accept, target_accept, accept_truth, budgets[0]),
+            (reject, target_reject, reject_truth, budgets[1]),
         ):
             attacked = execute_toward(
                 book,
                 "manipulator",
                 target=attack_target,
-                gross_notional=per_attack,
+                gross_notional=budget / Decimal(affected),
                 block=block,
                 role="manipulator",
             )
@@ -374,6 +383,212 @@ def _apply_pair_attack(
                 "manipulator",
                 target=attack_target,
                 gross_notional=corrected,
+                block=block,
+                role="manipulator",
+            )
+
+
+def _move_cost(book: ExecutedBook, target: Decimal) -> Decimal:
+    """One-sided LMSR cost to move the current quote to ``target``."""
+    current = book.price
+    target = Decimal(target)
+    if target == current:
+        return Decimal(0)
+    if target > current:
+        return displacement_cost(book.b, current, target)
+    return displacement_cost(book.b, Decimal(1) - current, Decimal(1) - target)
+
+
+def _gate_attack_targets(
+    proposal: Proposal,
+    gate_evidence: tuple[GateBookEvidence, ...],
+    strategy: str,
+) -> dict[str, Decimal]:
+    """Return the ADOPT suppression targets needed to remove organic vetoes.
+
+    TH-1/TH-4/TH-6 are sustained wrong-PASS strategies. TH-2 remains a
+    decision-pair late-spike test and TH-7 remains a Baseline-only test. The
+    organic REJECT books remain the control legs of the relative gate test.
+    """
+    if (
+        not proposal.harmful
+        or not _requires_gate(proposal)
+        or strategy
+        not in {"th1_displace_hold", "th4_thin_capture", "th6_belief_capture"}
+    ):
+        return {}
+    targets: dict[str, Decimal] = {}
+    for gate in ("survival", "security"):
+        adopt = next(
+            row
+            for row in gate_evidence
+            if row.gate == gate and row.branch == "adopt"
+        )
+        reject = next(
+            row
+            for row in gate_evidence
+            if row.gate == gate and row.branch == "reject"
+        )
+        if (
+            adopt.summary.full > GATE_P_MAX
+            or adopt.summary.full > reject.summary.full + GATE_EPS
+        ):
+            targets[f"gate:{gate}:adopt"] = min(
+                GATE_P_MAX, reject.summary.full + GATE_EPS
+            )
+    return targets
+
+
+def _gate_vetoes(
+    gate_evidence: tuple[GateBookEvidence, ...],
+) -> tuple[str, ...]:
+    vetoes = []
+    for gate in ("survival", "security"):
+        rows = [row for row in gate_evidence if row.gate == gate]
+        if not rows:
+            continue
+        adopt = next(row for row in rows if row.branch == "adopt")
+        reject = next(row for row in rows if row.branch == "reject")
+        if (
+            adopt.summary.full > GATE_P_MAX
+            or adopt.summary.full > reject.summary.full + GATE_EPS
+        ):
+            vetoes.append(gate)
+    return tuple(vetoes)
+
+
+def _allocate_attack_budget(
+    accept: ExecutedBook,
+    reject: ExecutedBook,
+    gate_books: tuple[ExecutedBook, ...],
+    *,
+    proposal: Proposal,
+    config: SimulationConfig,
+    strategy: str,
+    total_budget: Decimal,
+    organic_pair_contest: Decimal,
+    gate_evidence: tuple[GateBookEvidence, ...],
+    gate_targets: dict[str, Decimal],
+) -> tuple[tuple[Decimal, Decimal], dict[str, Decimal]]:
+    """Allocate one fixed cash cap by LMSR displacement + correction demand."""
+    total_budget = max(Decimal(0), Decimal(total_budget))
+    if total_budget == 0 or strategy == "th7_baseline_suppression":
+        return (Decimal(0), Decimal(0)), {}
+    days = (
+        Decimal(config.late_spike_blocks) / Decimal(14_400)
+        if strategy == "th2_late_spike"
+        else Decimal(config.decision_window) / Decimal(14_400)
+    )
+    pair_correction = (
+        (Decimal(2) * accept.b * LN2 + organic_pair_contest)
+        / Decimal(2)
+        * days
+        * Decimal(config.arbitrage_elasticity)
+    )
+    accept_target, reject_target = _attack_targets(proposal.harmful)
+    pair_demand = (
+        _move_cost(accept, accept_target)
+        + _move_cost(reject, reject_target)
+        + pair_correction
+    )
+    demands: list[tuple[str, Decimal]] = [("pair", pair_demand)]
+    evidence_by_name = {
+        f"gate:{row.gate}:{row.branch}": row for row in gate_evidence
+    }
+    books_by_name = {book.name: book for book in gate_books}
+    for name, target in gate_targets.items():
+        book = books_by_name[name]
+        correction = (
+            (book.b * LN2 + evidence_by_name[name].contest)
+            / Decimal(2)
+            * Decimal(config.decision_window)
+            / Decimal(14_400)
+            * Decimal(config.arbitrage_elasticity)
+        )
+        demands.append((name, _move_cost(book, target) + correction))
+    demand_total = sum((value for _, value in demands), Decimal(0))
+    if demand_total <= 0:
+        return (Decimal(0), Decimal(0)), {}
+    allocations = {
+        name: total_budget * demand / demand_total for name, demand in demands
+    }
+    # Pin the final account after Decimal context rounding so separately funded
+    # book balances sum to exactly the one authorized budget.
+    last = demands[-1][0]
+    allocations[last] += total_budget - sum(allocations.values(), Decimal(0))
+    pair_budget = allocations["pair"]
+    return (
+        (pair_budget / Decimal(2), pair_budget - pair_budget / Decimal(2)),
+        {name: allocations[name] for name in gate_targets},
+    )
+
+
+def _apply_gate_attack(
+    proposal: Proposal,
+    books: tuple[ExecutedBook, ...],
+    evidence: tuple[GateBookEvidence, ...],
+    *,
+    config: SimulationConfig,
+    targets: dict[str, Decimal],
+    budgets: dict[str, Decimal],
+    reuse_attacker_balance: bool = False,
+) -> None:
+    """Suppress gate ADOPT books against their own depth and corrective flow."""
+    if not targets:
+        return
+    truths = {
+        "gate:survival:adopt": proposal.survival_risk_adopt,
+        "gate:security:adopt": proposal.security_risk_adopt,
+    }
+    contests = {
+        f"gate:{row.gate}:{row.branch}": row.contest for row in evidence
+    }
+    starts = _segment_starts(config)
+    for book in books:
+        if book.name not in targets:
+            continue
+        budget = Decimal(budgets.get(book.name, Decimal(0)))
+        if budget <= 0:
+            continue
+        if not reuse_attacker_balance:
+            book.account("manipulator", budget)
+        correction = (
+            (book.b * LN2 + contests[book.name])
+            / Decimal(2)
+            * Decimal(config.decision_window)
+            / Decimal(14_400)
+            * Decimal(config.arbitrage_elasticity)
+        )
+        _fund(book, "arbitrage", correction)
+        for block in starts:
+            segment_budget = budget / Decimal(len(starts))
+            attacked = execute_toward(
+                book,
+                "manipulator",
+                target=targets[book.name],
+                gross_notional=segment_budget,
+                block=block,
+                role="manipulator",
+            )
+            corrected = execute_toward(
+                book,
+                "arbitrage",
+                target=truths[book.name],
+                # Corrective capital arrives throughout the window while the
+                # displacement is held, including segments where the prior
+                # attack already left the quote at target.
+                gross_notional=correction / Decimal(len(starts)),
+                block=block,
+                role="arbitrage",
+            )
+            execute_toward(
+                book,
+                "manipulator",
+                target=targets[book.name],
+                # Re-suppress only after real corrective flow executes. The
+                # second move is paid from this segment's unused share of the
+                # same funded account; no corrective displacement is free.
+                gross_notional=max(Decimal(0), segment_budget - attacked),
                 block=block,
                 role="manipulator",
             )
@@ -585,6 +800,50 @@ def _gate_books(
     return tuple(books), tuple(evidence)
 
 
+def _refresh_gate_evidence(
+    books: tuple[ExecutedBook, ...],
+    *,
+    config: SimulationConfig,
+    v_min: Decimal,
+    initial: dict[str, tuple[Decimal, Decimal]] | None = None,
+    carried_q: dict[str, tuple[Decimal, Decimal]] | None = None,
+) -> tuple[GateBookEvidence, ...]:
+    """Recompute gate TWAP/validity after attack trades are on the ledgers."""
+    floor = GATE_V_MIN_FRACTION * v_min
+    evidence = []
+    for book in books:
+        _, gate, branch = book.name.split(":")
+        if initial is None:
+            summary = _summary(book, config, initial=Decimal("0.02"))
+        else:
+            observed, quote = initial[book.name]
+            summary = _summary(
+                book, config, initial=observed, initial_quote=quote
+            )
+        if carried_q is None:
+            contest = contest_capital(
+                book, decision_window=config.decision_window
+            )
+        else:
+            q_long, q_short = carried_q[book.name]
+            contest = contest_capital(
+                book,
+                decision_window=config.decision_window,
+                initial_q_long=q_long,
+                initial_q_short=q_short,
+            )
+        evidence.append(
+            GateBookEvidence(
+                gate,
+                branch,
+                contest,
+                _book_valid(summary, contest, floor, config, gate=True),
+                summary,
+            )
+        )
+    return tuple(evidence)
+
+
 def _extend_gate_books(
     proposal: Proposal,
     books: tuple[ExecutedBook, ...],
@@ -593,6 +852,7 @@ def _extend_gate_books(
     seed: int,
     config: SimulationConfig,
     v_min: Decimal,
+    strategy: str | None = None,
 ) -> tuple[tuple[ExecutedBook, ...], tuple[GateBookEvidence, ...]]:
     """Run the shared extension without resetting gate q or participants."""
     if not books:
@@ -605,11 +865,12 @@ def _extend_gate_books(
     }
     floor = GATE_V_MIN_FRACTION * v_min
     formation = _formation_ratio(proposal, seed ^ 0x47415445, config)
-    evidence = []
+    initial = {
+        book.name: (previous.summary.observed_close, previous.summary.spot)
+        for book, previous in zip(books, prior)
+    }
+    carried_q = {book.name: (book.q_long, book.q_short) for book in books}
     for index, (book, previous) in enumerate(zip(books, prior)):
-        initial = previous.summary.observed_close
-        initial_quote = previous.summary.spot
-        carried_q = (book.q_long, book.q_short)
         book.events.clear()
         _execute_organic_window(
             book,
@@ -623,28 +884,41 @@ def _extend_gate_books(
             config=config,
             extension=True,
         )
-        summary = _summary(
-            book,
-            config,
-            initial=initial,
-            initial_quote=initial_quote,
-        )
-        contest = contest_capital(
-            book,
-            decision_window=config.decision_window,
-            initial_q_long=carried_q[0],
-            initial_q_short=carried_q[1],
-        )
-        evidence.append(
-            GateBookEvidence(
-                previous.gate,
-                previous.branch,
-                contest,
-                _book_valid(summary, contest, floor, config, gate=True),
-                summary,
+    evidence = _refresh_gate_evidence(
+        books,
+        config=config,
+        v_min=v_min,
+        initial=initial,
+        carried_q=carried_q,
+    )
+    targets = _gate_attack_targets(proposal, evidence, strategy or "")
+    if targets:
+        budgets = {
+            book.name: (
+                book.participants["manipulator"].cash
+                if "manipulator" in book.participants
+                else Decimal(0)
             )
+            for book in books
+            if book.name in targets
+        }
+        _apply_gate_attack(
+            proposal,
+            books,
+            evidence,
+            config=config,
+            targets=targets,
+            budgets=budgets,
+            reuse_attacker_balance=True,
         )
-    return books, tuple(evidence)
+        evidence = _refresh_gate_evidence(
+            books,
+            config=config,
+            v_min=v_min,
+            initial=initial,
+            carried_q=carried_q,
+        )
+    return books, evidence
 
 
 def _role_notional(books: tuple[ExecutedBook, ...], role: str) -> Decimal:
@@ -713,16 +987,49 @@ def simulate_proposal(
     default_budget = budget_multiple * Decimal(3) * sizing_prize
     direct_budget = default_budget if absolute_direct_budget is None else Decimal(absolute_direct_budget)
     baseline_budget = default_budget if absolute_baseline_budget is None else Decimal(absolute_baseline_budget)
+    gate_ledgers, gate_evidence = _gate_books(
+        proposal,
+        seed=seed,
+        config=config,
+        v_min=v_min,
+        extension=False,
+    )
+    gate_targets = _gate_attack_targets(proposal, gate_evidence, strategy)
+    pair_budgets, gate_budgets = _allocate_attack_budget(
+        accept_book,
+        reject_book,
+        gate_ledgers,
+        proposal=proposal,
+        config=config,
+        strategy=strategy,
+        total_budget=direct_budget,
+        organic_pair_contest=min(
+            initial_contest_accept, initial_contest_reject
+        ),
+        gate_evidence=gate_evidence,
+        gate_targets=gate_targets,
+    )
     _apply_pair_attack(
         accept_book,
         reject_book,
         proposal=proposal,
         config=config,
         strategy=strategy,
-        budget=direct_budget,
+        budgets=pair_budgets,
         accept_truth=accept_truth,
         reject_truth=reject_truth,
         organic_pair_contest=min(initial_contest_accept, initial_contest_reject),
+    )
+    _apply_gate_attack(
+        proposal,
+        gate_ledgers,
+        gate_evidence,
+        config=config,
+        targets=gate_targets,
+        budgets=gate_budgets,
+    )
+    gate_evidence = _refresh_gate_evidence(
+        gate_ledgers, config=config, v_min=v_min
     )
     baseline_truth, previous_baseline, prior_carried = _epoch_baseline_truth(seed, proposal.proposal_id, config)
     baseline_book = ExecutedBook("baseline", baseline_b)
@@ -731,7 +1038,6 @@ def simulate_proposal(
     baseline_formation = Decimal(config.baseline_flow_min_floor) + Decimal(config.baseline_flow_range_floor) * Decimal(str(baseline_rng.random()))
     _execute_organic_window(baseline_book, truth=baseline_truth, desired_contest=baseline_floor * baseline_formation, seed=seed, proposal_id=proposal.proposal_id // config.epoch_slate_size, salt=0x424153, config=config, extension=False)
     _apply_baseline_attack(baseline_book, config=config, strategy=strategy, budget=baseline_budget, truth=baseline_truth, organic_contest=contest_capital(baseline_book, decision_window=config.decision_window))
-    gate_ledgers, gate_evidence = _gate_books(proposal, seed=seed, config=config, v_min=v_min, extension=False)
     accept = _summary(accept_book, config)
     reject = _summary(reject_book, config)
     baseline = _summary(baseline_book, config)
@@ -759,6 +1065,7 @@ def simulate_proposal(
         b=b,
         flow_cap=flow_cap,
     )
+    initial_gate_vetoes = _gate_vetoes(gate_evidence)
     final = initial
     extended = initial.outcome is Outcome.EXTEND
     if extended:
@@ -787,14 +1094,11 @@ def simulate_proposal(
                 initial_q_short=carried_q[book.name][1],
             )
 
-        remaining_direct = sum(
-            (
-                book.participants.get("manipulator").cash
-                if book.participants.get("manipulator") is not None
-                else Decimal(0)
-                for book in (accept_book, reject_book)
-            ),
-            Decimal(0),
+        remaining_pair = tuple(
+            book.participants["manipulator"].cash
+            if "manipulator" in book.participants
+            else Decimal(0)
+            for book in (accept_book, reject_book)
         )
         _apply_pair_attack(
             accept_book,
@@ -802,7 +1106,7 @@ def simulate_proposal(
             proposal=proposal,
             config=config,
             strategy=strategy,
-            budget=remaining_direct,
+            budgets=remaining_pair,
             accept_truth=accept_truth,
             reject_truth=reject_truth,
             organic_pair_contest=min(
@@ -827,6 +1131,7 @@ def simulate_proposal(
             seed=seed,
             config=config,
             v_min=v_min,
+            strategy=strategy,
         )
         final, grade, liquidity = _evaluate(
             proposal=proposal,
@@ -856,6 +1161,7 @@ def simulate_proposal(
     )
     all_books = (accept_book, reject_book, baseline_book) + gate_ledgers
     manipulator_flow = _role_notional(all_books, "manipulator")
+    gate_manipulator_flow = _role_notional(gate_ledgers, "manipulator")
     manipulator_deployed = sum(
         (event.cost + event.fee for book in all_books for event in book.events if event.role == "manipulator" and event.direction == "buy"),
         Decimal(0),
@@ -883,6 +1189,7 @@ def simulate_proposal(
         reject=reject,
         baseline=baseline,
         gate_books=gate_evidence,
+        initial_gate_vetoes=initial_gate_vetoes,
         baseline_valid=baseline_valid,
         baseline_carried=baseline_carried,
         attack_cost=attack_cost,
@@ -892,6 +1199,14 @@ def simulate_proposal(
         realized_manipulation_spend=_attacker_loss(all_books),
         manipulator_gross_deployed=manipulator_deployed,
         manipulator_displacement=displacement,
+        attacker_budget=(
+            baseline_budget
+            if strategy == "th7_baseline_suppression"
+            else direct_budget
+        ),
+        decision_attack_budget=sum(pair_budgets, Decimal(0)),
+        gate_attack_budget=sum(gate_budgets.values(), Decimal(0)),
+        gate_manipulator_flow=gate_manipulator_flow,
         informed_flow=_role_notional(all_books, "informed"),
         noise_flow=_role_notional(all_books, "noise"),
         holder_flow=_role_notional(all_books, "holder"),

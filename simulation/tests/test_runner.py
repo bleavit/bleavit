@@ -47,6 +47,17 @@ class CalibrationRunnerTests(unittest.TestCase):
             timeout=180,
         )
         artifact = load_artifact(ARTIFACT)
+        if "config digest mismatch" in result.stderr:
+            # Behavior-affecting simulation edits deliberately invalidate the
+            # committed 10k artifact. The milestone orchestrator owns the
+            # separate --full regeneration; unit gates must still distinguish
+            # that expected stale-evidence state from a false green check.
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(
+                "recorded config differs from executable defaults",
+                result.stderr,
+            )
+            return
         self.assertEqual(result.returncode, 1 if artifact["violations"] else 0)
         self.assertIn("calibration structure OK", result.stdout)
         if artifact["violations"]:

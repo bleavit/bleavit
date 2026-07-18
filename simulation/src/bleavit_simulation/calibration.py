@@ -341,6 +341,11 @@ def _threshold_brackets(
         )
         row = {
             "attack_cost_hat": str(hi_result.attack_cost),
+            "budget_allocation_at_flip": {
+                "decision_pair": str(hi_result.decision_attack_budget),
+                "gate_books": str(hi_result.gate_attack_budget),
+                "total": str(hi_result.attacker_budget),
+            },
             "budget_bracket_3p_multiple": [str(lo), str(hi)],
             "budget_bracket_usdc": [str(lo * Decimal(3) * (hi_result.prize or Decimal(0))), str(hi * Decimal(3) * (hi_result.prize or Decimal(0)))],
             "class": proposal.proposal_class,
@@ -663,7 +668,7 @@ def run_full_calibration(*, seed: int = DEFAULT_SEED, config: SimulationConfig |
                 "market_formation": [list(row) for row in config.formation_strata],
             },
             "reporting_gate": "Per 15 §4.9 and 08 §5.2/§5.5, publication gates on per-class |true_effect|>=delta harmful proposals and sub-3P brackets; the distribution-weighted aggregate remains reported.",
-            "threshold_search": "Every observed attacked wrong-PASS candidate receives a state-identical zero-budget counterfactual and a binary budget bracket at the configured 5% relative tolerance; a pre-registered beneficial sample supplies griefing diagnostics.",
+            "threshold_search": "Every observed attacked wrong-PASS candidate receives a state-identical zero-budget counterfactual and a binary bracket over one fixed attacker budget at the configured 5% relative tolerance; gated wrong-PASS probes allocate that same budget across the decision pair and real gate-book suppression, so a flip must clear both the welfare hurdle and both ordered veto tests. A pre-registered beneficial sample supplies griefing diagnostics.",
             "envelope_validation": "05 §5.6/08 §5.5 applies only to causal wrong-PASS displacement flips; observed loss non-monotonicity is reported fail-closed as inconclusive rather than inferred from endpoints.",
             "undefined_prize": "An explicit undefined envelope proxy is represented as null and rejects SecuritySizing.",
         },
