@@ -99,8 +99,8 @@ The reserve exists for values-layer continuity (guardian bonds, conviction depth
 
 - HRMP to Asset Hub opens Phase 2 (Paseo) / Phase 3 (Polkadot); initial USDC transferred in before Phase-4 arming (BE §27.4 carried forward).
 - **Funding target: ≥ 25,000,000 USDC before Phase-5 (TREASURY) arming** (D-15). Adequacy arithmetic against the §4 floors:
-  - Phase-4 (binding PARAM): full 5-slot PARAM epoch needs NAV ≥ 5 × 13,863 / 0.75% = **9,241,960 USDC** — the Phase-4 arming floor.
-  - At 25M NAV the per-epoch POL budget is 0.75% × 25M = **187,500 USDC**, which fits a realistic mixed slate: 1 CODE (103,972) + 1 TREASURY (55,452) + 2 PARAM (2 × 13,863) = **187,150 USDC ≤ 187,500** ✔ (the Baseline book is funded outside this budget, §4.3).
+  - Phase-4 (binding PARAM): full 5-slot PARAM epoch needs NAV ≥ 5 × 34,657 / 0.75% ≈ **23,104,906 USDC** — the Phase-4 arming floor.
+  - At 25M NAV the per-epoch POL budget is 0.75% × 25M = **187,500 USDC**, which fits a full five-PARAM slate (**5 × 34,657 ≈ 173,287 USDC**) or a mixed 1 CODE + 2 PARAM slate at the same commitment, both ≤ 187,500 ✔ (the Baseline book is funded outside this budget, §4.3).
   - 25M > 13.87M = the one-CODE floor, so Phase-6 arming is reachable without further funding **if** NAV has not decayed; the §4 gate re-checks at arming time regardless.
 
 **Reporter-stake bootstrap (B-15-adjacent sequencing, D-15).** Phase-3 arming requires ≥ 3 registered reporters with full `orc.reporter_stake` = 100,000 USDC stakes. The treasury MAY extend **recallable USDC loans** (per-reporter ≤ 75,000 USDC, line backstopped by the 10% incentive allocation) held directly as reporter stake, never withdrawable by the reporter. The reporter MUST post ≥ 25% (≥ 25,000 USDC) of own capital, and **slashing consumes the reporter's own tranche first** — a loan with no reporter skin would deter nothing. Loans are recallable by TREASURY decision or automatically on reporter exit/ejection. Bootstrap line sizing: 3–5 reporters × 75,000 = 225,000–375,000 USDC.
@@ -115,7 +115,7 @@ Book inventory per class under the reconciled bound of ≤ 6 books/proposal (2 d
 
 | Class | Books | Commitment formula | Commitment (USDC) |
 |---|---|---|---|
-| PARAM | 2 decision | 2 × 10,000 × ln 2 | **13,863** |
+| PARAM | 2 decision + 4 gate | (2 × 10,000 + 4 × 7,500) × ln 2 = 50,000 × ln 2 | **34,657** |
 | TREASURY (all ask sizes) | 2 decision + 4 gate | (2 × 25,000 + 4 × 7,500) × ln 2 = 80,000 × ln 2 | **55,452** |
 | CODE | 2 decision + 4 gate | (2 × 60,000 + 4 × 7,500) × ln 2 = 150,000 × ln 2 | **103,972** |
 | META | 2 decision + 4 gate | (2 × 100,000 + 4 × 7,500) × ln 2 = 230,000 × ln 2 | **159,424** |
@@ -133,11 +133,11 @@ With `pol.budget_epoch` = 0.75% NAV, seeding one proposal of class K requires NA
 
 | Gate | Requirement | Floor (USDC) |
 |---|---|---|
-| 1 × PARAM | 13,863 / 0.0075 | **1,848,400** |
+| 1 × PARAM | (50,000 × ln 2) / 0.0075 | **~4,620,989** |
 | 1 × TREASURY (all ask sizes) | 55,452 / 0.0075 | **7,393,600** |
 | 1 × CODE | 103,972 / 0.0075 | **13,862,944** (~13.9M — the D-15 “one CODE ⇒ ≥ ~14M”) |
 | 1 × META | 159,424 / 0.0075 | **21,256,533** |
-| Full 5-slot PARAM epoch | 69,315 / 0.0075 | **9,241,960** |
+| Full 5-slot PARAM epoch | (250,000 × ln 2) / 0.0075 | **~23,104,906** |
 | 5 concurrent META (worst slate) | 797,119 / 0.0075 | **106,282,533** (~106M) |
 
 ### 4.2 The gate rule (normative, loud)
@@ -185,7 +185,7 @@ REQUIRE  InCapPrize(p) ≤ AttackCost̂(p) / 3   else Reject(SecuritySizing)
 
 | Class | InCapPrize |
 |---|---|
-| PARAM | certified capability-envelope value of the parameter delta (static classification, [05](05-welfare-and-decision-engine.md)) |
+| PARAM | certified capability-envelope value of the parameter delta ([05](05-welfare-and-decision-engine.md)) |
 | TREASURY | `ask` (already ≤ `trs.cap_proposal`·NAV by the outflow cap) |
 | CODE / META | max(`ask`, envelope), conservatively floored at `trs.cap_proposal`·NAV for runtime-upgrade payloads — an upgrade is assumed able to reach the full per-proposal outflow cap |
 
@@ -230,9 +230,9 @@ i.e., every decision-grade, sizing-passing adoption satisfies `AttackCost̂ ≥ 
 - 3P = 600,000 ≤ 651,986 ✔ (margin 8.7%). Under the old flat defaults this identical proposal had AttackCost ≈ 51,986 vs required 600,000 — an 11.5× shortfall, now closed.
 - **Normative-seeding form (SQ-231 consistency note):** §5.3 scales `b = 25,000 · 200,000/142,329 ≈ 35,130` here, so L̂ = 48,700 + 400,000 = 448,700 and AttackCost̂ = 673,050 (margin 12.2%); the `sec.flow_cap` ceiling at its ×7 minimum is 7 · 70,260 = 491,820 ≥ 400,000 — not binding, per §5.3's non-bindingness bound. The floor-depth arithmetic above is kept as the conservative lower bound the identity already clears.
 
-**(c) PARAM at flat defaults (scaling not binding).** L̂ = 2 × 10,000 × ln 2 + 100,000 = 113,863; AttackCost̂ = 170,794; max passable envelope value = **56,931 USDC**. A PARAM delta whose certified envelope exceeds this must either attract more organic volume or fail sizing — the static-classification escape hatch of BE §13 is thereby bounded, not trusted.
+**(c) PARAM at flat defaults (scaling not binding).** L̂ = 2 × 10,000 × ln 2 + 100,000 = 113,863; AttackCost̂ = 170,794; max passable envelope value = **56,931 USDC**. A PARAM delta whose certified envelope exceeds this must either attract more organic volume or fail sizing. The four PARAM gate books are separate veto inputs and their POL depth is deliberately excluded from `L̂`, exactly as for every other gated class.
 
-**Defaults table `P_ref(class)`** (derived, frozen in [13](13-parameters.md) as derived values): PARAM 56,931 (= 1.5·(13,863 + 100,000)/3); TREASURY 142,329 (= 1.5·(34,657 + 250,000)/3); CODE 341,589 (= 1.5·(83,178 + 600,000)/3); META 669,315 (= 1.5·(138,629 + 1,200,000)/3). Every class term is the **decision-pair** seeded depth `2·b·ln 2` at the [13](13-parameters.md) `pol.b` floors (10k/25k/60k/100k) plus the `dec.v_min` floor — gate-book depth is deliberately excluded from L̂ (§5.2 measures the decision pair only). The superseded PARAM cells (27,726 / 63,863) were a doubling slip: no other row, and no other 08 site (§3 commitments, §4.1 NAV floors), used 4·b·ln 2.
+**Defaults table `P_ref(class)`** (derived, frozen in [13](13-parameters.md) as derived values): PARAM 56,931 (= 1.5·(13,863 + 100,000)/3); TREASURY 142,329 (= 1.5·(34,657 + 250,000)/3); CODE 341,589 (= 1.5·(83,178 + 600,000)/3); META 669,315 (= 1.5·(138,629 + 1,200,000)/3). Every class term is the **decision-pair** seeded depth `2·b·ln 2` at the [13](13-parameters.md) `pol.b` floors (10k/25k/60k/100k) plus the `dec.v_min` floor — gate-book depth is deliberately excluded from L̂ (§5.2 measures the decision pair only). The superseded PARAM decision-depth cells (27,726 / 63,863) were a doubling slip: the decision pair still uses `2·b·ln 2`; §3's larger total PARAM commitment now adds four distinct `pol.b_gate` books and does not alter this security-depth term.
 
 ### 5.5 Honesty clause
 
@@ -318,7 +318,7 @@ Consistent with the [03](03-conditional-ledger.md) per-branch walk (B-4 fix):
 | B-8 (with [05](05-welfare-and-decision-engine.md)) | §5: decide-time `InCapPrize ≤ AttackCost̂/3` cap from measured depth + Ask-scaled `v_min`/`pol.b`/δ with the `v_min = 2P` identity; worked arithmetic shows the 27–290× shortfall closed at defaults |
 | B-13 economic side (with [06](06-governance-and-guardians.md)) | §7: 10% slashes (to INSURANCE) + per-account rate limit priced out — griefing now costs five figures/epoch forfeited vs ~$314 time-value |
 | B-14 / D-15 | §2: VIT 1B/12-dec allocation + vesting + zero-default 2%-capped issuance; ≥ 25M USDC target with adequacy arithmetic; collator comp 2,000; reporter bootstrap loans (recallable, skin-first slashing) |
-| B-18 / D-15 | §3–§4: recomputed commitments (13,863 / 34,657 / 55,452 / 103,972 / 159,424 / 17,329), per-class NAV floors, loud `NavFloorUnmet` arming gate, `SlotsShrunk` event + FE surface, Baseline funded off-budget |
+| B-18 / D-15 | §3–§4: recomputed commitments (34,657 / 55,452 / 103,972 / 159,424 for PARAM/TREASURY/CODE/META; 17,329 Baseline), per-class NAV floors, loud `NavFloorUnmet` arming gate, `SlotsShrunk` event + FE surface, Baseline funded off-budget |
 | X-14 / D-12 | §9: `fee.vit_usdc_rate` key, bounds, USDC-only viability incl. the on-ramp |
 | B-med keeper budget | §6: ≥ 134k/580k crank recomputation, 12,000 USDC budget derivation, tranches, exhaustion alarms, A-1 restated |
 | B-med USDC freeze (with [07](07-oracle-and-disputes.md), [10](10-frontend-architecture.md)) | §1.2: reserve-health haircut flag in `nav()`, spendable-NAV = 0 fail-static, PB-RESERVE hook, FE surfacing |

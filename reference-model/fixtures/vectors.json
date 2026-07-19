@@ -91,11 +91,15 @@
   "decision_scenarios": [
     {
       "inputs": {
-        "accept_full": "0.56",
-        "delta": "0.05",
+        "accept_full": "0.517",
+        "accept_trailing": "0.517",
+        "delta": "0.015",
+        "envelope_value": "100",
+        "measured_liquidity": "1000000",
+        "proposal_class": "Param",
         "reject_full_effective": "0.50"
       },
-      "name": "adopt",
+      "name": "honest_param_adopt",
       "outcome": "Adopt"
     },
     {
@@ -148,27 +152,28 @@
     {
       "inputs": {
         "accept_full": "0.56",
-        "ask": "100",
         "delta": "0.05",
+        "envelope_value": "100",
+        "measured_liquidity": "1000000",
         "p_adopt": {
           "Survival": "0.06"
         },
         "p_reject": {
           "Survival": "0.01"
         },
-        "proposal_class": "Treasury",
-        "reject_full_effective": "0.50",
-        "spendable_nav": "7393600"
+        "proposal_class": "Param",
+        "reject_full_effective": "0.50"
       },
-      "name": "gate_veto_survival",
+      "name": "param_gate_veto_survival",
       "outcome": "Reject",
       "reason": "GateVetoSurvival"
     },
     {
       "inputs": {
         "accept_full": "0.56",
-        "ask": "100",
         "delta": "0.05",
+        "envelope_value": "100",
+        "measured_liquidity": "1000000",
         "p_adopt": {
           "Security": "0.06",
           "Survival": "0.01"
@@ -177,11 +182,10 @@
           "Security": "0.01",
           "Survival": "0.01"
         },
-        "proposal_class": "Treasury",
-        "reject_full_effective": "0.50",
-        "spendable_nav": "7393600"
+        "proposal_class": "Param",
+        "reject_full_effective": "0.50"
       },
-      "name": "gate_veto_security",
+      "name": "param_gate_veto_security",
       "outcome": "Reject",
       "reason": "GateVetoSecurity"
     },
@@ -80892,14 +80896,14 @@
   },
   "treasury_scenarios": [
     {
-      "commitment": "13862.94361119890618834464242916353136151000268720510508241360018986787243939389431211726653992837375",
-      "commitment_display": 13863,
+      "commitment": "34657.35902799726547086160607290882840377500671801276270603400047466968109848473578029316634982093438",
+      "commitment_display": 34657,
       "inputs": {
         "proposal_class": "Param"
       },
       "name": "param_pol",
-      "nav_floor": "1848392.481493187491779285657",
-      "nav_floor_display": 1848392
+      "nav_floor": "4620981.203732968729448214143",
+      "nav_floor_display": 4620981
     },
     {
       "commitment": "55451.77444479562475337856971665412544604001074882042032965440075947148975757557724846906615971349500",

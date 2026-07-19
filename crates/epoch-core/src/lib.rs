@@ -45,7 +45,7 @@ pub const ONE_PP: u64 = futarchy_primitives::kernel::RERUN_HURDLE_BUMP_1E9;
 pub const fn requires_gate_markets(class: ProposalClass) -> bool {
     matches!(
         class,
-        ProposalClass::Treasury | ProposalClass::Code | ProposalClass::Meta
+        ProposalClass::Param | ProposalClass::Treasury | ProposalClass::Code | ProposalClass::Meta
     )
 }
 
@@ -2313,7 +2313,7 @@ mod tests {
             previous_settled_baseline_twap: None,
             survival_grade_ok: true,
             security_grade_ok: true,
-            gate_twaps: None,
+            gate_twaps: Some([FixedU64(0), FixedU64(0), FixedU64(0), FixedU64(0)]),
             measured_depth: 1_000_000,
             published_flow_per_day: None,
             in_cap_prize: Some(100_000),
@@ -2357,8 +2357,8 @@ mod tests {
         s.proposal_mut(1).unwrap().markets = Some(MarketSet {
             accept: 1,
             reject: 2,
-            gates: None,
-            baseline: 3,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
         });
         s.proposal_mut(1).unwrap().decide_at = 10;
         assert_eq!(
@@ -2377,8 +2377,8 @@ mod tests {
         p.markets = Some(MarketSet {
             accept: 1,
             reject: 2,
-            gates: None,
-            baseline: 3,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
         });
         s.proposals.push(p);
         let mut i = pass_input();
@@ -2407,8 +2407,8 @@ mod tests {
         p.markets = Some(MarketSet {
             accept: 1,
             reject: 2,
-            gates: None,
-            baseline: 3,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
         });
         s.proposals.push(p);
         let mut i = pass_input();
@@ -2425,8 +2425,8 @@ mod tests {
         p.markets = Some(MarketSet {
             accept: 1,
             reject: 2,
-            gates: None,
-            baseline: 3,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
         });
         s.proposals.push(p);
         let mut input = pass_input();
@@ -2505,8 +2505,8 @@ mod tests {
         p.markets = Some(MarketSet {
             accept: 1,
             reject: 2,
-            gates: None,
-            baseline: 3,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
         });
         s.proposals.push(p);
         s.force_reject_process_hold(Origin::Keeper, &mut ledger, 1)
@@ -2616,8 +2616,8 @@ mod tests {
         p.markets = Some(MarketSet {
             accept: 1,
             reject: 2,
-            gates: None,
-            baseline: 3,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
         });
         s.proposals.push(p);
         let mut i = pass_input();
@@ -2703,6 +2703,61 @@ mod tests {
         let mut proposal = prop(1, ProposalState::Trading);
         proposal.class = ProposalClass::Treasury;
         proposal.ask = 1;
+        proposal.markets = Some(MarketSet {
+            accept: 1,
+            reject: 2,
+            gates: None,
+            baseline: 3,
+        });
+        state.proposals.push(proposal);
+        assert_eq!(
+            state.decide_engine(1, &pass_input(), &EpochParams::DEFAULT),
+            Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade))
+        );
+    }
+
+    #[test]
+    fn param_requires_gate_books_and_both_vetoes_are_reachable() {
+        for (gate_twaps, expected) in [
+            (
+                [
+                    FixedU64(100_000_000),
+                    FixedU64(100_000_000),
+                    FixedU64(0),
+                    FixedU64(0),
+                ],
+                RejectReason::GateVetoSurvival,
+            ),
+            (
+                [
+                    FixedU64(0),
+                    FixedU64(0),
+                    FixedU64(100_000_000),
+                    FixedU64(100_000_000),
+                ],
+                RejectReason::GateVetoSecurity,
+            ),
+        ] {
+            let mut state = EpochState::<[u8; 32]>::new();
+            let mut proposal = prop(1, ProposalState::Trading);
+            proposal.markets = Some(MarketSet {
+                accept: 1,
+                reject: 2,
+                gates: Some([3, 4, 5, 6]),
+                baseline: 7,
+            });
+            state.proposals.push(proposal);
+            let mut input = pass_input();
+            input.gate_twaps = Some(gate_twaps);
+
+            assert_eq!(
+                state.decide_engine(1, &input, &EpochParams::DEFAULT),
+                Ok(DecisionOutcome::Reject(expected))
+            );
+        }
+
+        let mut state = EpochState::<[u8; 32]>::new();
+        let mut proposal = prop(1, ProposalState::Trading);
         proposal.markets = Some(MarketSet {
             accept: 1,
             reject: 2,
@@ -2839,8 +2894,8 @@ mod tests {
         proposal.markets = Some(MarketSet {
             accept: 1,
             reject: 2,
-            gates: None,
-            baseline: 3,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
         });
         state.proposals.push(proposal);
         let before = state.clone();
@@ -2856,7 +2911,14 @@ mod tests {
     #[test]
     fn injected_params_change_the_hurdle_without_changing_defaults() {
         let mut s = EpochState::<[u8; 32]>::new();
-        s.proposals.push(prop(1, ProposalState::Trading));
+        let mut proposal = prop(1, ProposalState::Trading);
+        proposal.markets = Some(MarketSet {
+            accept: 1,
+            reject: 2,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
+        });
+        s.proposals.push(proposal);
         let mut input = pass_input();
         input.accept_full = FixedU64(517_000_000);
         input.accept_trailing = FixedU64(517_000_000);

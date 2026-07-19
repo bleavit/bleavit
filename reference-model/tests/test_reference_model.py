@@ -535,8 +535,7 @@ class ReferenceModelTests(unittest.TestCase):
         self.assertEqual(result.reason, RejectReason.GATE_VETO_SURVIVAL)
 
     def test_low_ask_treasury_is_gate_bearing_and_both_vetoes_are_reachable(self):
-        self.assertFalse(requires_gate_markets("Param"))
-        for proposal_class in ("Treasury", "Code", "Meta"):
+        for proposal_class in ("Param", "Treasury", "Code", "Meta"):
             with self.subTest(proposal_class=proposal_class):
                 self.assertTrue(requires_gate_markets(proposal_class))
 
@@ -561,6 +560,36 @@ class ReferenceModelTests(unittest.TestCase):
         self.assertLessEqual(inputs["ask"], inputs["spendable_nav"] / Decimal(100))
         self.assertEqual(survival.reason, RejectReason.GATE_VETO_SURVIVAL)
         self.assertEqual(security.reason, RejectReason.GATE_VETO_SECURITY)
+
+    def test_param_gate_vetoes_are_reachable_and_honest_param_adopts(self):
+        inputs = {
+            "accept_full": Decimal("0.517"),
+            "reject_full_effective": Decimal("0.500"),
+            "accept_trailing": Decimal("0.517"),
+            "reject_trailing_effective": Decimal("0.500"),
+            "delta": Decimal("0.015"),
+            "proposal_class": "Param",
+            "envelope_value": Decimal("100"),
+            "measured_liquidity": Decimal("1000000"),
+        }
+        survival = decide(
+            **inputs,
+            p_adopt={"Survival": Decimal("0.06")},
+            p_reject={"Survival": Decimal("0.01")},
+        )
+        security = decide(
+            **inputs,
+            p_adopt={"Survival": Decimal("0.01"), "Security": Decimal("0.06")},
+            p_reject={"Survival": Decimal("0.01"), "Security": Decimal("0.01")},
+        )
+        honest = decide(
+            **inputs,
+            p_adopt={"Survival": Decimal("0.01"), "Security": Decimal("0.01")},
+            p_reject={"Survival": Decimal("0.01"), "Security": Decimal("0.01")},
+        )
+        self.assertEqual(survival.reason, RejectReason.GATE_VETO_SURVIVAL)
+        self.assertEqual(security.reason, RejectReason.GATE_VETO_SECURITY)
+        self.assertEqual(honest.outcome, Outcome.ADOPT)
 
     def test_first_insufficiency_extends_second_rejects(self):
         first = decide(
@@ -731,7 +760,7 @@ class ReferenceModelTests(unittest.TestCase):
 
     def test_pol_commitments_and_nav_floor_worked_numbers(self):
         commitment_cases = [
-            ("Param", 13_863),
+            ("Param", 34_657),
             ("Treasury", 55_452),
             ("Code", 103_972),
             ("Meta", 159_424),
@@ -742,11 +771,11 @@ class ReferenceModelTests(unittest.TestCase):
         self.assertEqual(display_integer(baseline_commitment()), 17_329)
 
         floor_cases = [
-            (("Param", 1), 1_848_400),
+            (("Param", 1), 4_620_989),
             (("Treasury", 1), 7_393_600),
             (("Code", 1), 13_862_944),
             (("Meta", 1), 21_256_533),
-            (("Param", 5), 9_241_960),
+            (("Param", 5), 23_104_906),
             (("Meta", 5), 106_282_533),
         ]
         for (proposal_class, slots), displayed in floor_cases:

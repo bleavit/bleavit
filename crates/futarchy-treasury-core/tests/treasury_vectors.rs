@@ -86,7 +86,7 @@ fn class_of(value: &Value) -> ProposalClass {
 }
 
 /// 08 §3 book inventory: 2 decision books at `pol.b.<class>`, plus the 4 gate
-/// books at `pol.b_gate` for TREASURY, CODE and META.
+/// books at `pol.b_gate` for every market-bearing class.
 fn books_b(class: ProposalClass) -> u128 {
     let decision_b = match class {
         ProposalClass::Param => genesis_balance(b"pol.b.param"),
@@ -97,7 +97,7 @@ fn books_b(class: ProposalClass) -> u128 {
     };
     let gated = matches!(
         class,
-        ProposalClass::Treasury | ProposalClass::Code | ProposalClass::Meta
+        ProposalClass::Param | ProposalClass::Treasury | ProposalClass::Code | ProposalClass::Meta
     );
     2 * decision_b
         + if gated {
@@ -159,7 +159,7 @@ fn assert_nav_floor_row(
     // floor = commitment / pol.budget_epoch, evaluated over the Rust-computed
     // commitment. 08 §4.1's displayed rows inconsistently divide exact and
     // whole-USDC commitments (the SQ-33/SQ-39 rounding-convention gap); the
-    // META and gate-bearing TREASURY rows use the half-up whole-USDC
+    // Gate-bearing PARAM/TREASURY/META rows use the half-up whole-USDC
     // commitment, mirrored by `whole_usdc_commitment`. In the exact branch,
     // the commitment floor loses < 1 base unit, which the Perbill division
     // magnifies to < 1/0.0075 ≈ 134 base units.

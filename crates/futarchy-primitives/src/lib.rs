@@ -1084,7 +1084,7 @@ mod tests {
 
     #[test]
     fn contract_version_is_v5() {
-        // Bumped 4 → 5 for universal TREASURY gate markets and the corresponding
+        // Bumped 4 → 5 for universal market-bearing-class gate markets and the
         // class-floor semantics (02 §4/§13). A frozen-contract change bumps this.
         assert_eq!(INTEGRATION_CONTRACT_VERSION, 5);
     }

@@ -66,7 +66,17 @@ SWEEP_SEED_STEP = 0x9E37_79B9_7F4A_7C15
 SWEEP_STRUCTURED_ROWS = 20
 
 DECISION_SCENARIOS = [
-    {"name": "adopt", "inputs": {}},
+    {
+        "name": "honest_param_adopt",
+        "inputs": {
+            "proposal_class": "Param",
+            "accept_full": "0.517",
+            "accept_trailing": "0.517",
+            "delta": "0.015",
+            "envelope_value": "100",
+            "measured_liquidity": "1000000",
+        },
+    },
     {
         "name": "constitution_violation",
         "inputs": {"preimage_ok": False},
@@ -86,21 +96,21 @@ DECISION_SCENARIOS = [
         },
     },
     {
-        "name": "gate_veto_survival",
+        "name": "param_gate_veto_survival",
         "inputs": {
-            "proposal_class": "Treasury",
-            "ask": "100",
-            "spendable_nav": "7393600",
+            "proposal_class": "Param",
+            "envelope_value": "100",
+            "measured_liquidity": "1000000",
             "p_adopt": {"Survival": "0.06"},
             "p_reject": {"Survival": "0.01"},
         },
     },
     {
-        "name": "gate_veto_security",
+        "name": "param_gate_veto_security",
         "inputs": {
-            "proposal_class": "Treasury",
-            "ask": "100",
-            "spendable_nav": "7393600",
+            "proposal_class": "Param",
+            "envelope_value": "100",
+            "measured_liquidity": "1000000",
             "p_adopt": {"Survival": "0.01", "Security": "0.06"},
             "p_reject": {"Survival": "0.01", "Security": "0.01"},
         },

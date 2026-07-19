@@ -739,9 +739,11 @@ fn empty_param_proposal(
 
 fn fund_param_market_lifecycles(decision_seed_count: u128) {
     let decision_b = crate::configs::balance_param(b"pol.b.param");
+    let gate_b = crate::configs::balance_param(b"pol.b_gate");
     let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
     let decision_headroom =
         pallet_market::core_market::seed_headroom(decision_b).expect("bounded decision b");
+    let gate_headroom = pallet_market::core_market::seed_headroom(gate_b).expect("bounded gate b");
     let baseline_headroom =
         pallet_market::core_market::seed_headroom(baseline_b).expect("bounded baseline b");
     assert_ok!(ForeignAssets::mint_into(
@@ -749,6 +751,7 @@ fn fund_param_market_lifecycles(decision_seed_count: u128) {
         &crate::configs::pol_account(),
         decision_headroom
             .saturating_mul(decision_seed_count)
+            .saturating_add(gate_headroom.saturating_mul(decision_seed_count.saturating_mul(2)),)
             .saturating_add(currency::USDC),
     ));
     assert_ok!(ForeignAssets::mint_into(
@@ -759,6 +762,7 @@ fn fund_param_market_lifecycles(decision_seed_count: u128) {
     pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
         state.main_usdc = decision_headroom
             .saturating_mul(decision_seed_count.saturating_mul(4))
+            .saturating_add(gate_headroom.saturating_mul(decision_seed_count.saturating_mul(8)))
             .saturating_add(baseline_headroom.saturating_mul(4));
     });
 }
@@ -2053,6 +2057,76 @@ fn b10_pol_reader_uses_named_defaults_when_live_records_are_missing() {
         )
         .expect("PARAM proposal retains a default POL seed plan");
         assert_eq!(plan.decision_b, pallet_constitution::POL_B_DEFAULTS[0]);
+        assert_eq!(plan.gate_b, Some(pallet_constitution::POL_GATE_B_DEFAULT));
+    });
+}
+
+#[test]
+fn param_seed_plan_opens_six_proposal_books() {
+    use pallet_epoch::{EpochParamsProvider, MarketAccess, PolBudget};
+
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 99_003;
+        let params = <crate::configs::RuntimeEpochParams as EpochParamsProvider>::get();
+        let decision_b = crate::configs::balance_param(b"pol.b.param");
+        let gate_b = crate::configs::balance_param(b"pol.b_gate");
+        let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
+        let decision_headroom =
+            pallet_market::core_market::seed_headroom(decision_b).expect("bounded decision b");
+        let gate_headroom =
+            pallet_market::core_market::seed_headroom(gate_b).expect("bounded gate b");
+        let baseline_headroom =
+            pallet_market::core_market::seed_headroom(baseline_b).expect("bounded baseline b");
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &crate::configs::pol_account(),
+            decision_headroom
+                .saturating_add(gate_headroom.saturating_mul(2))
+                .saturating_add(currency::USDC),
+        ));
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &crate::configs::pol_baseline_account(),
+            baseline_headroom.saturating_add(currency::USDC),
+        ));
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.main_usdc = decision_headroom
+                .saturating_mul(2)
+                .saturating_add(gate_headroom.saturating_mul(4))
+                .saturating_add(baseline_headroom)
+                .saturating_mul(100);
+        });
+
+        let mut proposal = empty_param_proposal(PID, account(92), H256::zero(), 0);
+        proposal.metric_spec = 1;
+        proposal.state = ProposalState::Qualified;
+        proposal.decide_at = System::block_number().saturating_add(params.decision_window);
+        let plan = <crate::configs::RuntimePolBudget as PolBudget<AccountId>>::proposal_seed_plan(
+            &proposal,
+        )
+        .expect("PARAM proposal retains a POL seed plan");
+        assert_eq!(plan.gate_b, Some(gate_b));
+        let markets =
+            <crate::configs::RuntimeMarketAccess as MarketAccess<AccountId>>::open_markets(
+                &proposal,
+                false,
+                Some(plan),
+            )
+            .expect("PARAM markets open");
+        let gates = markets.gates.expect("PARAM proposal has four gate books");
+        let proposal_books = [
+            markets.accept,
+            markets.reject,
+            gates[0],
+            gates[1],
+            gates[2],
+            gates[3],
+        ];
+        assert_eq!(proposal_books.len(), 6);
+        assert!(proposal_books
+            .iter()
+            .all(pallet_market::Markets::<Runtime>::contains_key));
+        assert_eq!(pallet_market::Markets::<Runtime>::count(), 7);
     });
 }
 
@@ -3119,15 +3193,20 @@ fn pause_across_decision_boundary_resumes_and_decides_at_shifted_window_end() {
         const PID: futarchy_primitives::ProposalId = 8_018;
         let params = <crate::configs::RuntimeEpochParams as EpochParamsProvider>::get();
         let decision_b = crate::configs::balance_param(b"pol.b.param");
+        let gate_b = crate::configs::balance_param(b"pol.b_gate");
         let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
         let decision_headroom =
             pallet_market::core_market::seed_headroom(decision_b).expect("bounded decision b");
+        let gate_headroom =
+            pallet_market::core_market::seed_headroom(gate_b).expect("bounded gate b");
         let baseline_headroom =
             pallet_market::core_market::seed_headroom(baseline_b).expect("bounded baseline b");
         assert_ok!(ForeignAssets::mint_into(
             usdc_location(),
             &crate::configs::pol_account(),
-            decision_headroom.saturating_add(currency::USDC),
+            decision_headroom
+                .saturating_add(gate_headroom.saturating_mul(2))
+                .saturating_add(currency::USDC),
         ));
         assert_ok!(ForeignAssets::mint_into(
             usdc_location(),
@@ -3137,6 +3216,7 @@ fn pause_across_decision_boundary_resumes_and_decides_at_shifted_window_end() {
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
             state.main_usdc = decision_headroom
                 .saturating_mul(4)
+                .saturating_add(gate_headroom.saturating_mul(8))
                 .saturating_add(baseline_headroom.saturating_mul(2));
         });
 
@@ -6267,7 +6347,7 @@ fn epoch_privileged_leaves_reject_every_non_authority_origin() {
     });
 }
 
-fn assert_low_ask_treasury_gate_veto(expected: RejectReason) {
+fn assert_runtime_gate_veto(class: ProposalClass, expected: RejectReason) {
     development_ext().execute_with(|| {
         const PID: futarchy_primitives::ProposalId = 8_099;
         let params =
@@ -6283,11 +6363,11 @@ fn assert_low_ask_treasury_gate_veto(expected: RejectReason) {
         };
         let gates = markets
             .gates
-            .expect("low-ask Treasury fixture has four physical gate ids");
-        let class_index = crate::configs::proposal_class_index(ProposalClass::Treasury);
+            .expect("gate-bearing fixture has four physical gate ids");
+        let class_index = crate::configs::proposal_class_index(class);
         let contest = params.v_min[class_index];
         let gate_contest = params.gate_v_min[class_index];
-        let decision_b = crate::configs::class_pol_floor(ProposalClass::Treasury);
+        let decision_b = crate::configs::class_pol_floor(class);
         let gate_b = crate::configs::balance_param(b"pol.b_gate");
         let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
         let gate_quotes = match expected {
@@ -6429,13 +6509,19 @@ fn assert_low_ask_treasury_gate_veto(expected: RejectReason) {
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
             state.main_usdc = contest.saturating_mul(100);
         });
-        let ask = 1;
+        let ask = if class == ProposalClass::Treasury {
+            1
+        } else {
+            0
+        };
         let spendable_nav = FutarchyTreasury::nav().spendable_nav;
-        assert!(ask <= spendable_nav / 100, "fixture ask is at most 1% NAV");
+        if class == ProposalClass::Treasury {
+            assert!(ask <= spendable_nav / 100, "fixture ask is at most 1% NAV");
+        }
         let proposal = Proposal {
             id: PID,
             proposer: account(70),
-            class: ProposalClass::Treasury,
+            class,
             state: ProposalState::Trading,
             epoch,
             submitted_at: 0,
@@ -6493,12 +6579,22 @@ fn assert_low_ask_treasury_gate_veto(expected: RejectReason) {
 
 #[test]
 fn low_ask_treasury_reaches_survival_veto_through_runtime_epoch() {
-    assert_low_ask_treasury_gate_veto(RejectReason::GateVetoSurvival);
+    assert_runtime_gate_veto(ProposalClass::Treasury, RejectReason::GateVetoSurvival);
 }
 
 #[test]
 fn low_ask_treasury_reaches_security_veto_through_runtime_epoch() {
-    assert_low_ask_treasury_gate_veto(RejectReason::GateVetoSecurity);
+    assert_runtime_gate_veto(ProposalClass::Treasury, RejectReason::GateVetoSecurity);
+}
+
+#[test]
+fn param_reaches_survival_veto_through_runtime_epoch() {
+    assert_runtime_gate_veto(ProposalClass::Param, RejectReason::GateVetoSurvival);
+}
+
+#[test]
+fn param_reaches_security_veto_through_runtime_epoch() {
+    assert_runtime_gate_veto(ProposalClass::Param, RejectReason::GateVetoSecurity);
 }
 
 #[test]
@@ -8873,6 +8969,7 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
         let pid = 8_016;
         let params = <crate::configs::RuntimeEpochParams as EpochParamsProvider>::get();
         let decision_b = crate::configs::balance_param(b"pol.b.param");
+        let gate_b = crate::configs::balance_param(b"pol.b_gate");
         let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
         let decision_headroom = match pallet_market::core_market::seed_headroom(decision_b) {
             Ok(amount) => amount,
@@ -8888,13 +8985,23 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
                 return;
             }
         };
+        let gate_headroom = match pallet_market::core_market::seed_headroom(gate_b) {
+            Ok(amount) => amount,
+            Err(error) => {
+                assert!(false, "gate headroom must be computable: {error:?}");
+                return;
+            }
+        };
         let total = decision_headroom
             .saturating_mul(2)
+            .saturating_add(gate_headroom.saturating_mul(4))
             .saturating_add(baseline_headroom);
         assert_ok!(ForeignAssets::mint_into(
             usdc_location(),
             &crate::configs::pol_account(),
-            decision_headroom.saturating_add(currency::USDC),
+            decision_headroom
+                .saturating_add(gate_headroom.saturating_mul(2))
+                .saturating_add(currency::USDC),
         ));
         assert_ok!(ForeignAssets::mint_into(
             usdc_location(),
@@ -8936,7 +9043,15 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
         let commitments = FutarchyTreasury::treasury().pol_commitments;
         assert_eq!(
             commitments.as_slice(),
-            &[decision_headroom, decision_headroom, baseline_headroom],
+            &[
+                decision_headroom,
+                decision_headroom,
+                gate_headroom,
+                gate_headroom,
+                gate_headroom,
+                gate_headroom,
+                baseline_headroom,
+            ],
             "Baseline is a live-book NAV obligation even though its budget line is separate",
         );
         assert_eq!(
@@ -8986,7 +9101,16 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
                 .decide_at
                 .saturating_add(crate::configs::LedgerArchiveDelay::get()),
         );
-        for market in [markets.accept, markets.reject, markets.baseline] {
+        let gates = markets.gates.expect("PARAM proposal has gate books");
+        for market in [
+            markets.accept,
+            markets.reject,
+            gates[0],
+            gates[1],
+            gates[2],
+            gates[3],
+            markets.baseline,
+        ] {
             assert_ok!(Market::reap(RuntimeOrigin::signed(account(153)), market));
         }
         assert!(FutarchyTreasury::treasury().pol_commitments.is_empty());

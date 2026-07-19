@@ -355,7 +355,7 @@ fn run_decision_seam_differential(case: DifferentialDecisionCase) {
         match case {
             DifferentialDecisionCase::Adopt => {}
             DifferentialDecisionCase::Extend => {
-                MarketGrade::set(false);
+                UngradedMarkets::set(vec![books.accept, books.reject]);
                 input.welfare_grade = WelfareGrade::Insufficient;
                 input.baseline_grade_ok = false;
             }
@@ -1015,6 +1015,71 @@ fn low_ask_treasury_security_gate_can_veto() {
             )))
         );
     });
+}
+
+#[test]
+fn param_seeds_four_gate_books_and_both_vetoes_are_reachable() {
+    new_test_ext().execute_with(|| {
+        let candidate = proposal(999, keeper(), ProposalState::Submitted, 0, 1);
+        assert_ok!(Epoch::submit(RuntimeOrigin::signed(keeper()), candidate));
+        set_block(phase_block(0, phase_offsets::QUALIFY_NUM));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(vec![1]),
+        ));
+        set_block(phase_block(0, phase_offsets::SEED_NUM));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(vec![1]),
+        ));
+        assert!(SeamCalls::get().iter().any(|call| matches!(
+            call,
+            SeamCall::OpenMarkets(1, false, Some(plan)) if plan.gate_b.is_some()
+        )));
+        let gates = Proposals::<Test>::get(1)
+            .and_then(|proposal| proposal.markets)
+            .and_then(|books| books.gates)
+            .expect("PARAM gates were physically deployed at Seed");
+        assert_eq!(gates.len(), 4);
+    });
+
+    for (twaps, expected) in [
+        (
+            [
+                FixedU64(100_000_000),
+                FixedU64(100_000_000),
+                FixedU64(0),
+                FixedU64(0),
+            ],
+            RejectReason::GateVetoSurvival,
+        ),
+        (
+            [
+                FixedU64(0),
+                FixedU64(0),
+                FixedU64(100_000_000),
+                FixedU64(100_000_000),
+            ],
+            RejectReason::GateVetoSecurity,
+        ),
+    ] {
+        new_test_ext().execute_with(|| {
+            let state = decision_state(1, ProposalClass::Param);
+            let gates = state.proposals[0]
+                .markets
+                .and_then(|books| books.gates)
+                .expect("PARAM decision fixture has four gate books");
+            TwapOverrides::set(gates.into_iter().zip(twaps).collect());
+            assert_ok!(Epoch::seed(state));
+
+            assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
+
+            assert_eq!(
+                Proposals::<Test>::get(1).and_then(|proposal| proposal.decision),
+                Some(DecisionOutcome::Reject(expected)),
+            );
+        });
+    }
 }
 
 #[test]
@@ -2442,8 +2507,10 @@ fn first_pass_invalid_welfare_book_rejects_instead_of_extending() {
 fn decision_extension_is_once_only_and_keeps_creation_schedule_frozen() {
     // limit-coverage: dec.extension
     new_test_ext().execute_with(|| {
-        assert_ok!(Epoch::seed(decision_state(1, ProposalClass::Param)));
-        MarketGrade::set(false);
+        let state = decision_state(1, ProposalClass::Param);
+        let books = state.proposals[0].markets.expect("PARAM books exist");
+        UngradedMarkets::set(vec![books.accept, books.reject]);
+        assert_ok!(Epoch::seed(state));
         RecordKeeperRebates::set(true);
         assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
         let extended = Proposals::<Test>::get(1).expect("extended proposal remains live");
@@ -2521,8 +2588,10 @@ fn live_params_flip_changes_the_decision_hurdle() {
 #[test]
 fn market_extension_and_close_registration_failures_are_atomic_g1() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Epoch::seed(decision_state(1, ProposalClass::Param)));
-        MarketGrade::set(false);
+        let state = decision_state(1, ProposalClass::Param);
+        let books = state.proposals[0].markets.expect("PARAM books exist");
+        UngradedMarkets::set(vec![books.accept, books.reject]);
+        assert_ok!(Epoch::seed(state));
         SeamFailure::set(Some(SeamCall::ExtendMarkets(1)));
         let before_state = Epoch::epoch_state().encode();
         let before_events = System::events();
@@ -3642,7 +3711,13 @@ fn randomized_512_step_shell_core_differential_covers_refactored_seams() {
                 let target = oracle.proposals.iter().find(|proposal| proposal.id == pid);
                 let opening = target
                     .filter(|proposal| proposal.state == ProposalState::Qualified)
-                    .map(|proposal| markets(pid, proposal.epoch, false));
+                    .map(|proposal| {
+                        markets(
+                            pid,
+                            proposal.epoch,
+                            epoch_core::requires_gate_markets(proposal.class),
+                        )
+                    });
                 let seed_plan = target
                     .filter(|proposal| proposal.state == ProposalState::Qualified)
                     .and_then(TestPolBudget::proposal_seed_plan);

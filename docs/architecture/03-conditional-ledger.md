@@ -41,7 +41,7 @@ pub enum PositionId {
 }
 ```
 
-- **Proposal instruments**: `2 branches × (1 BranchUsdc + 2 scalar + 2×2 gate) = 14` kinds per vault. Gate kinds exist for every vault but carry non-zero supply only for classes with gate books (CODE, META, and every TREASURY proposal).
+- **Proposal instruments**: `2 branches × (1 BranchUsdc + 2 scalar + 2×2 gate) = 14` kinds per vault. Gate kinds exist for every vault and carry non-zero supply for every market-bearing class (PARAM, TREASURY, CODE, META).
 - **Baseline instruments**: 2 kinds per epoch — LONG/SHORT on the epoch settlement score `s_e`, collateralized in USDC **directly, with no branch layer** (the Baseline market is unconditional).
 
 `PositionId` max encoded length ≤ 16 B; append-only `#[codec(index)]` discipline per BE §7 applies to all enums above.

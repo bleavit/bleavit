@@ -68,6 +68,9 @@ class CalibrationBatchTests(unittest.TestCase):
     def test_threshold_search_returns_a_monotone_five_percent_bracket(self):
         config = SimulationConfig(proposal_count=200, threshold_sample_per_class=8)
         proposal = generate_proposal_with_config(DEFAULT_SEED, 57, config)
+        # Exercise the generic monotone search on its historical decision-pair
+        # fixture; the next test covers gated suppression-budget search.
+        proposal = replace(proposal, gate_exposure="no_gate")
         result = _threshold_brackets(
             [proposal], DEFAULT_SEED, config, Decimal(20)
         )

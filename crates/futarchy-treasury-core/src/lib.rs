@@ -1049,7 +1049,7 @@ impl Treasury {
     }
     pub fn floor(class: ProposalClass) -> Balance {
         match class {
-            ProposalClass::Param => 1_848_400 * USDC,
+            ProposalClass::Param => 4_620_989 * USDC,
             ProposalClass::Treasury => 7_393_600 * USDC,
             ProposalClass::Code => 13_862_944 * USDC,
             ProposalClass::Meta => 21_256_533 * USDC,

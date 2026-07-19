@@ -225,6 +225,7 @@ def _proposal_class(value: ProposalClass | str) -> ProposalClass:
 def requires_gate_markets(value: ProposalClass | str) -> bool:
     """04 §1.1 / 05 §5: class-derived four-book gate applicability."""
     return _proposal_class(value) in (
+        ProposalClass.PARAM,
         ProposalClass.TREASURY,
         ProposalClass.CODE,
         ProposalClass.META,

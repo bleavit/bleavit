@@ -262,7 +262,7 @@ fn r7_baseline_sell_does_not_charge_the_seller() {
 
 #[test]
 fn multi_book_proposal_shares_one_ledger_vault() {
-    // A TREASURY / CODE / META proposal fields 2 decision + 4 gate books, and
+    // Every market-bearing proposal fields 2 decision + 4 gate books, and
     // even a PARAM proposal has a 2-book decision *pair* — all sharing ONE ledger
     // vault (03 §2.1 / 04 §1.1). `create_market` must create the vault once and reuse
     // it; the ledger rejects a duplicate `create_vault`, so a naive per-book create

@@ -39,6 +39,9 @@ class ExecutedEngineTests(unittest.TestCase):
         """
         config = SimulationConfig(proposal_count=200)
         proposal = generate_proposal_with_config(DEFAULT_SEED, 57, config)
+        # This regression isolates the historical decision-pair capture mechanism.
+        # PARAM's production fixture is gated; gate attacks have separate coverage.
+        proposal = replace(proposal, gate_exposure="no_gate")
         zero = simulate_proposal(
             proposal, seed=DEFAULT_SEED, config=config, budget_multiple=Decimal(0)
         )
@@ -146,6 +149,54 @@ class ExecutedEngineTests(unittest.TestCase):
         floor = generate_proposal_with_config(3, 2, config)
         self.assertEqual(floor.regime, "floor")
         self.assertGreaterEqual(floor.nav, Decimal("7393600"))
+
+    def test_param_gate_books_reach_both_vetoes_and_honest_depth_adopts(self):
+        config = SimulationConfig(proposal_count=4)
+        generated = generate_proposal_with_config(6, 0, config)
+        self.assertEqual(generated.proposal_class, "param")
+        honest = replace(
+            generated,
+            envelope=Decimal("300000"),
+            harmful=False,
+            true_effect=Decimal("0.30"),
+            formation_regime="deep",
+            gate_exposure="gate",
+            survival_risk_adopt=Decimal("0.01"),
+            survival_risk_reject=Decimal("0.01"),
+            security_risk_adopt=Decimal("0.01"),
+            security_risk_reject=Decimal("0.01"),
+        )
+        cases = (
+            (honest, "Adopt", None),
+            (
+                replace(honest, survival_risk_adopt=Decimal("0.10")),
+                "Reject",
+                "GateVetoSurvival",
+            ),
+            (
+                replace(honest, security_risk_adopt=Decimal("0.10")),
+                "Reject",
+                "GateVetoSecurity",
+            ),
+        )
+        for proposal, outcome, reason in cases:
+            with self.subTest(reason=reason or outcome):
+                result = simulate_proposal(
+                    proposal,
+                    seed=5,
+                    config=config,
+                    budget_multiple=Decimal(0),
+                )
+                self.assertEqual(len(result.gate_books), 4)
+                self.assertTrue(all(row.valid for row in result.gate_books))
+                self.assertEqual(result.welfare_grade, "Ok")
+                self.assertEqual(result.outcome, outcome)
+                self.assertEqual(result.reason, reason)
+                if outcome == "Adopt":
+                    self.assertGreaterEqual(
+                        min(result.contest_accept, result.contest_reject),
+                        result.v_min,
+                    )
 
     def test_gated_attacker_suppresses_veto_from_one_shared_budget(self):
         """Seeded META/TH-4 demo: organic veto -> suppression -> wrong PASS."""
@@ -267,6 +318,9 @@ class ExecutedEngineTests(unittest.TestCase):
         noisy = replace(quiet, noise_flow_share="0.99")
         p_quiet = generate_proposal_with_config(31, 0, quiet)
         p_noisy = generate_proposal_with_config(31, 0, noisy)
+        # Keep this sensitivity test focused on decision-book noise.
+        p_quiet = replace(p_quiet, gate_exposure="no_gate")
+        p_noisy = replace(p_noisy, gate_exposure="no_gate")
         quiet_result = simulate_proposal(
             p_quiet, seed=31, config=quiet, budget_multiple=Decimal(0)
         )
@@ -320,6 +374,8 @@ class ExecutedEngineTests(unittest.TestCase):
     def test_epsilon_budget_without_fill_is_state_identical(self):
         config = SimulationConfig(proposal_count=10_000)
         proposal = generate_proposal_with_config(DEFAULT_SEED, 6536, config)
+        # Keep this epsilon-fill identity fixture independent of gate arbitrage.
+        proposal = replace(proposal, gate_exposure="no_gate")
         zero = simulate_proposal(
             proposal,
             seed=DEFAULT_SEED,

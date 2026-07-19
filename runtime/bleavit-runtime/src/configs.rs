@@ -6036,8 +6036,8 @@ fn benchmark_epoch_proposal(
         markets: Some(futarchy_primitives::MarketSet {
             accept: 1,
             reject: 2,
-            gates: None,
-            baseline: 3,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
         }),
         maturity: None,
         grace_end: None,

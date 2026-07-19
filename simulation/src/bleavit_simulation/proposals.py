@@ -15,7 +15,7 @@ from .config import CLASSES
 
 MASK64 = (1 << 64) - 1
 NAV_FLOORS = {
-    "param": Decimal("1848400"),
+    "param": Decimal("4620989"),
     "treasury": Decimal("7393600"),
     "code": Decimal("13862944"),
     "meta": Decimal("21256533"),
@@ -188,7 +188,7 @@ def generate_proposal_with_config(
 
     gate_exposure = (
         "gate"
-        if proposal_class in ("treasury", "code", "meta")
+        if proposal_class in ("param", "treasury", "code", "meta")
         else "no_gate"
     )
     correlation = Decimal("0.75") if config is None else Decimal(config.gate_harm_correlation)

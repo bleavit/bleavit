@@ -225,7 +225,7 @@ def decision_delta(proposal_class, prize) -> Decimal:
 def pol_commitment(proposal_class) -> Decimal:
     name = _class_name(proposal_class)
     books_b = Decimal(2) * B_FLOORS[name]
-    if name in ("treasury", "code", "meta"):
+    if name in ("param", "treasury", "code", "meta"):
         books_b += Decimal(4) * GATE_B
     with localcontext() as ctx:
         ctx.prec = WORK_PREC

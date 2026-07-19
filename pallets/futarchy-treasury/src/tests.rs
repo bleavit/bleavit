@@ -1143,9 +1143,9 @@ fn recover_foreign_refuses_protocol_assets() {
 #[test]
 fn nav_floor_gate_is_loud() {
     use futarchy_primitives::ProposalClass;
-    // Fund below the CODE floor (~13.9M) but above the PARAM floor (~1.85M).
+    // Fund below the CODE floor (~13.9M) but above the gated PARAM floor (~4.62M).
     let mut ext = new_test_ext_with(crate::GenesisConfig::<Test> {
-        main_usdc: 2_000_000 * USDC,
+        main_usdc: 5_000_000 * USDC,
         ..Default::default()
     });
     ext.execute_with(|| {
@@ -1165,7 +1165,7 @@ fn nav_floor_gate_is_loud() {
         assert!(crate::Pallet::<Test>::flag_nav_floor(ProposalClass::Code));
         System::assert_last_event(RuntimeEvent::Treasury(Event::NavFloorUnmet {
             class: ProposalClass::Code,
-            nav: 2_000_000 * USDC,
+            nav: 5_000_000 * USDC,
             floor: CoreTreasury::floor(ProposalClass::Code),
         }));
         // Above the floor ⇒ returns false, no event.
