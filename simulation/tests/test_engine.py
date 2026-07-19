@@ -103,6 +103,12 @@ class ExecutedEngineTests(unittest.TestCase):
         )
 
     def test_real_gate_books_reach_both_ordered_vetoes(self):
+        # Seeds are genuinely breach-elevated proposals: seed 3 (survival AND
+        # security elevated ⇒ Survival reported first, the ordering under test)
+        # and seed 7 (security-only). Earlier seeds relied on the neutral-open
+        # TWAP drag that spuriously vetoed *healthy* gates; the faithful
+        # gate-arbitrage formation removes that drag, so a real veto now requires
+        # a real elevated breach probability.
         config = SimulationConfig(proposal_count=1)
         survival = simulate_proposal(
             generate_proposal_with_config(3, 0, config),
@@ -111,8 +117,8 @@ class ExecutedEngineTests(unittest.TestCase):
             budget_multiple=Decimal(0),
         )
         security = simulate_proposal(
-            generate_proposal_with_config(20, 0, config),
-            seed=20,
+            generate_proposal_with_config(7, 0, config),
+            seed=7,
             config=config,
             budget_multiple=Decimal(0),
         )
@@ -125,7 +131,7 @@ class ExecutedEngineTests(unittest.TestCase):
         config = SimulationConfig(proposal_count=4)
         cases = (
             (3, 2, "GateVetoSurvival"),
-            (50, 3, "GateVetoSecurity"),
+            (97, 0, "GateVetoSecurity"),
         )
         for seed, proposal_id, reason in cases:
             with self.subTest(reason=reason):

@@ -245,6 +245,7 @@ def _execute_organic_window(
     salt: int,
     config: SimulationConfig,
     extension: bool,
+    corrective: Decimal = Decimal(0),
 ) -> None:
     starts = _segment_starts(config)
     noise_share = Decimal(config.noise_flow_share)
@@ -253,6 +254,7 @@ def _execute_organic_window(
     informed_name = f"informed:{book.name}"
     noise_name = f"noise:{book.name}"
     holder_name = f"holder:{book.name}"
+    arbitrage_name = f"arbitrage:{book.name}"
     _fund(book, informed_name, informed_total)
     _fund(book, noise_name, noise_total)
     # SQ-231: grading measures held contest capital (04 §7a), not gross flow.
@@ -260,11 +262,31 @@ def _execute_organic_window(
     # pairs topped up to the stratum's target level — on top of the directional
     # informed exposure; churn stays as flow telemetry only.
     _fund(book, holder_name, Decimal(desired_contest))
+    # Gate books (corrective > 0): the neutral 0.5 open is itself a displacement
+    # from the true conditional breach probability. Unlike the slow-diffusion
+    # decision books, a gate's binary breach fact is readily arbitrageable, so
+    # corrective capital — the SAME (b·ln2 + contest)/2·window·elasticity model
+    # the attacker must overcome in `_apply_gate_attack` — drives the open quote
+    # to `truth` and holds it there against block-close noise. Symmetric: it
+    # drives a harmful gate up to its true elevated breach prob just as it drives
+    # a healthy one down to ~0. corrective == 0 leaves the decision/Baseline
+    # books (slow information diffusion) untouched.
+    corrective = Decimal(corrective)
     rng = proposal_rng(seed, proposal_id, salt + (0x4558 if extension else 0))
     arrival = (Decimal("0.45"), Decimal("0.70"), Decimal("0.88"), Decimal("1"), Decimal("1"), Decimal("1"))
     for index, block in enumerate(starts):
         informed_budget = informed_total / Decimal(len(starts))
-        informed_target = _clamp(Decimal("0.5") + (truth - Decimal("0.5")) * arrival[index])
+        # Decision/Baseline books model gradual information diffusion (the
+        # 0.5-anchored arrival ramp). Gate books (corrective > 0) trade a binary
+        # conditional breach fact assessed directly, so their informed leg
+        # targets the true breach probability from the open — consistent with
+        # the corrective arbitrage, avoiding an early ramp-vs-arbitrage tug that
+        # would desettle the TWAP.
+        informed_target = (
+            _clamp(truth)
+            if corrective > 0
+            else _clamp(Decimal("0.5") + (truth - Decimal("0.5")) * arrival[index])
+        )
         used = execute_toward(
             book,
             informed_name,
@@ -302,6 +324,25 @@ def _execute_organic_window(
             role="noise",
             first_side="long" if rng.randrange(2) else "short",
         )
+        if corrective > 0:
+            # Arbitrage corrects the open displacement AND each block's residual
+            # noise back to the true breach probability — executed after noise so
+            # the settled quote (spot) tracks truth alongside the TWAP, the way a
+            # standing arbitrageur removes any mispricing left at the block close.
+            # Corrective capital is available each block (a standing arbitrageur
+            # is not one-shot); execute_toward stops exactly at truth, so the
+            # realized spend is only the block's establishment/re-settling cost,
+            # never the full per-block cap — this keeps near-boundary reject
+            # books (steep LMSR, fixed-delta noise) settled through the close.
+            _fund(book, arbitrage_name, corrective)
+            execute_toward(
+                book,
+                arbitrage_name,
+                target=truth,
+                gross_notional=corrective,
+                block=block,
+                role="arbitrage",
+            )
         execute_hold(
             book,
             holder_name,
@@ -759,6 +800,21 @@ def _evaluate(
     return decision, grade, liquidity
 
 
+def _gate_corrective(
+    b: Decimal, desired_contest: Decimal, config: SimulationConfig
+) -> Decimal:
+    """Arbitrage capital that corrects a gate book's displacement over the
+    window — the same ``(b·ln2 + contest)/2 · window/14400 · elasticity`` model
+    the attacker must overcome in :func:`_apply_gate_attack`, applied here to
+    the neutral-0.5-open displacement during organic formation (04 §7a)."""
+    return (
+        (Decimal(b) * LN2 + Decimal(desired_contest))
+        / Decimal(2)
+        * (Decimal(config.decision_window) / Decimal(14_400))
+        * Decimal(config.arbitrage_elasticity)
+    )
+
+
 def _gate_books(
     proposal: Proposal,
     *,
@@ -779,17 +835,19 @@ def _gate_books(
     evidence = []
     floor = GATE_V_MIN_FRACTION * v_min
     formation = _formation_ratio(proposal, seed ^ 0x47415445, config)
+    desired = floor * formation
     for index, ((gate, branch), truth) in enumerate(truths.items()):
         book = ExecutedBook(f"gate:{gate}:{branch}", GATE_B)
         _execute_organic_window(
             book,
             truth=truth,
-            desired_contest=floor * formation,
+            desired_contest=desired,
             seed=seed,
             proposal_id=proposal.proposal_id,
             salt=0x47415445 + index,
             config=config,
             extension=extension,
+            corrective=_gate_corrective(GATE_B, desired, config),
         )
         summary = _summary(book, config, initial=Decimal("0.02"))
         contest = contest_capital(book, decision_window=config.decision_window)
@@ -871,17 +929,19 @@ def _extend_gate_books(
     carried_q = {book.name: (book.q_long, book.q_short) for book in books}
     for index, (book, previous) in enumerate(zip(books, prior)):
         book.events.clear()
+        extended_desired = (
+            floor * formation * Decimal(config.extension_flow_multiplier)
+        )
         _execute_organic_window(
             book,
             truth=truths[(previous.gate, previous.branch)],
-            desired_contest=(
-                floor * formation * Decimal(config.extension_flow_multiplier)
-            ),
+            desired_contest=extended_desired,
             seed=seed,
             proposal_id=proposal.proposal_id,
             salt=0x47415445 + index,
             config=config,
             extension=True,
+            corrective=_gate_corrective(GATE_B, extended_desired, config),
         )
     evidence = _refresh_gate_evidence(
         books,
