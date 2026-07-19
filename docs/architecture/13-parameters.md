@@ -22,6 +22,8 @@ Normative language: RFC 2119. Blocks at 6 s (14,400/day); USDC 6 decimals, VIT 1
 
 Per-class value lists are ordered **PARAM / TREASURY / CODE / META** unless stated. "vf" = values floor applies.
 
+Scope of the existing gate parameters is **CODE, META, and every TREASURY proposal irrespective of ask/NAV ratio**. The `gate.*` rows and `pol.b_gate` are reused unchanged for all of those classes; PARAM is the sole static-classification market-bearing class for now.
+
 | Key | Type | Unit | Default | Hard min | Hard max | Max Δ/decision | Cooldown | Class | Doc |
 |---|---|---|---|---|---|---|---|---|---|
 | `epoch.length` | u32 | blocks | 302,400 (21 d) | 201,600 (14 d floor) | 604,800 | 10% | 2 epochs | META | [05](05-welfare-and-decision-engine.md) |
@@ -247,7 +249,7 @@ On-chain results MUST match within the §2 error bound plus one base unit of rou
 2. **Vaults:** ≤ 32 live + 4 cohorts × 5 settling = **≤ 52** × **160 B** (measured `VaultInfo` `MaxEncodedLen`, B5 2026-07-17; ~256 B stays the pinned ceiling) ≈ **8.1 KiB**, within the ≤ 13 KiB budget; per-branch supply fields (B-4) add two `Balance` words/vault.
 3. **Positions:** globally priced by the 0.1 USDC deposit (dusting an account to its 64-cap now costs 6.4 USDC/victim-account, cf. threat row in [14](14-threat-model.md)); per-vault reap drains the `(PositionId, *)` prefix in `ReapBatch` = 100 chunks.
 4. **Keeper crank load** (feeds `keeper.budget_epoch`): 31 trading books × (43,200/10) = **133,920 decision-critical** observations/epoch; × (187,200/10) = **580,320 full-window** — derivation and budget fit in [08](08-treasury-and-economics.md) §6. This derivation binds: it assumed `epoch.slots` = 5, books ≤ 6, `mkt.obs_interval` = 10 and `dec.window` = 43,200.
-5. **POL/NAV floors** (feed the [09](09-execution-upgrades-and-rollout.md) phase gates): commitments 13,863 / 34,657 / 55,452 / 103,972 / 159,424 (+ 17,329 Baseline); floors 1.85M / 4.62M / 7.39M / 13.86M / 21.26M; five-META worst slate ≈ 106.3M — arithmetic normative in [08](08-treasury-and-economics.md) §3–4.
+5. **POL/NAV floors** (feed the [09](09-execution-upgrades-and-rollout.md) phase gates): commitments 13,863 / 55,452 / 103,972 / 159,424 for PARAM / TREASURY / CODE / META (+ 17,329 Baseline); floors 1.85M / 7.39M / 13.86M / 21.26M; five-META worst slate ≈ 106.3M — arithmetic normative in [08](08-treasury-and-economics.md) §3–4.
 6. **Parameter-coupling rule (normative):** a decision changing `epoch.slots`, `mkt.obs_interval`, `dec.window`, or `epoch.length` MUST carry re-derivations of items 1–5 in its committed artifact; the classifier tags these keys with a `RederiveBudgets` obligation checked at screening. Books-per-proposal (6) and `MaxLiveProposals` (32) are not keys — changing them is a CODE change that reopens this document.
 7. **Chain-served history budget:** `RecentCohortSummaries` 32 × **81 B** (measured `CohortSummary` `MaxEncodedLen`, B5 2026-07-17) + 8 TWAP checkpoints × 196 markets at the [04 §7](04-markets-and-pricing.md) spec shape (8 × (4 B `u32` block + 32 B two-limb cumulative) + 1 length byte = 289 B/market; the `TwapCheckpoints` series is implemented at exactly this shape — B10, 2026-07-17, measured and asserted in the runtime PoV suite) = **59,236 B ≈ 57.8 KiB** of always-served light-client state, within the ≤ 70 KiB D-6 layer-1 budget stated in [02](02-integration-contract.md).
 

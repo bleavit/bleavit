@@ -1,7 +1,7 @@
 # Data surface, canonical naming & UI-visible parameter values
 
-> **DERIVED, NON-NORMATIVE.** Refreshed 2026-07-17 from the frozen spec —
-> doc 02 (integration contract, frozen, v4) and doc 13 (the single home of parameter values) —
+> **DERIVED, NON-NORMATIVE.** Refreshed 2026-07-19 from the frozen spec —
+> doc 02 (integration contract, frozen, v5) and doc 13 (the single home of parameter values) —
 > for upload to Claude Design. Where this file and the spec disagree, the spec wins. All names
 > below are CANONICAL: use these exact spellings in UI copy, labels and mock data. Values
 > marked [VERIFY] are unresolved in the spec — never invent them.
@@ -20,7 +20,7 @@ Block-time basis for human-time conversions: **6 s/block, 14,400 blocks/day** (1
 | **VIT** (native governance token) | **12 decimals**; total supply 10^9; existential deposit 0.01 VIT |
 | Prices / scores | fixed-point, **1e9 scale** at every API/event boundary; quote clamp [0.001, 0.999]; `p_S = 1 − p_L`; gate books map YES ↦ LONG |
 | Time | all deadlines are block numbers (`decide_at`, `maturity`, `grace_end`, `challenge_deadline`, `next_boundary`) — the UI computes countdowns from them |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 4`, a runtime constant, echoed in `release.json` |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 5`, a runtime constant, echoed in `release.json` |
 
 ### A2. What the UI can read and display (02 §3–§4, §7)
 

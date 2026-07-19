@@ -40,6 +40,15 @@ pub const STALE_EPOCH_BOUND: BlockNumber = futarchy_primitives::kernel::STALE_EP
 pub const ONE: u64 = 1_000_000_000;
 pub const ONE_PP: u64 = futarchy_primitives::kernel::RERUN_HURDLE_BUMP_1E9;
 
+/// Proposal classes whose decision path requires the frozen four-book
+/// Survival/Security gate quartet (05 §5.1).
+pub const fn requires_gate_markets(class: ProposalClass) -> bool {
+    matches!(
+        class,
+        ProposalClass::Treasury | ProposalClass::Code | ProposalClass::Meta
+    )
+}
+
 /// Live 13 §1 epoch/decision parameters captured at one dispatch boundary.
 /// The FRAME shell rebuilds this value from `pallet-constitution::Params`; the
 /// defaults keep the frame-free oracle behavior deterministic in standalone
@@ -941,8 +950,7 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             Error::BadState
         );
         ensure!(
-            !matches!(p.class, ProposalClass::Code | ProposalClass::Meta)
-                || markets.gates.is_some(),
+            !requires_gate_markets(p.class) || markets.gates.is_some(),
             Error::BadDecisionInput
         );
         if p.state == ProposalState::Qualified {
@@ -1751,7 +1759,7 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             if c_adopt.0 > c_p_max.0 || c_adopt.0 > c_reject.0.saturating_add(c_eps.0) {
                 return Ok(DecisionOutcome::Reject(RejectReason::GateVetoSecurity));
             }
-        } else if matches!(class, ProposalClass::Code | ProposalClass::Meta) {
+        } else if requires_gate_markets(class) {
             return Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade));
         }
         // 05 §5.4 step 5: only Insufficient may spend the single shared
@@ -2646,6 +2654,65 @@ mod tests {
         assert_eq!(
             s.decide_engine(1, &i, &EpochParams::DEFAULT),
             Ok(DecisionOutcome::Reject(RejectReason::GateVetoSurvival))
+        );
+    }
+
+    #[test]
+    fn low_ask_treasury_requires_gate_books_and_both_vetoes_are_reachable() {
+        for (gate_twaps, expected) in [
+            (
+                [
+                    FixedU64(100_000_000),
+                    FixedU64(100_000_000),
+                    FixedU64(0),
+                    FixedU64(0),
+                ],
+                RejectReason::GateVetoSurvival,
+            ),
+            (
+                [
+                    FixedU64(0),
+                    FixedU64(0),
+                    FixedU64(100_000_000),
+                    FixedU64(100_000_000),
+                ],
+                RejectReason::GateVetoSecurity,
+            ),
+        ] {
+            let mut state = EpochState::<[u8; 32]>::new();
+            let mut proposal = prop(1, ProposalState::Trading);
+            proposal.class = ProposalClass::Treasury;
+            proposal.ask = 1;
+            proposal.markets = Some(MarketSet {
+                accept: 1,
+                reject: 2,
+                gates: Some([3, 4, 5, 6]),
+                baseline: 7,
+            });
+            state.proposals.push(proposal);
+            let mut input = pass_input();
+            input.gate_twaps = Some(gate_twaps);
+
+            assert_eq!(
+                state.decide_engine(1, &input, &EpochParams::DEFAULT),
+                Ok(DecisionOutcome::Reject(expected))
+            );
+        }
+
+        let mut state = EpochState::<[u8; 32]>::new();
+        let mut proposal = prop(1, ProposalState::Trading);
+        proposal.class = ProposalClass::Treasury;
+        proposal.ask = 1;
+        proposal.markets = Some(MarketSet {
+            accept: 1,
+            reject: 2,
+            gates: None,
+            baseline: 3,
+        });
+        state.proposals.push(proposal);
+        assert_eq!(
+            state.decide_engine(1, &pass_input(), &EpochParams::DEFAULT),
+            Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade))
         );
     }
 

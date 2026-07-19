@@ -296,7 +296,6 @@ parameter_types! {
     pub static LedgerFrozen: bool = false;
     pub static PhaseFlagsValue: u32 = 0;
     pub static ActiveMetricSpecVersion: MetricSpecVersion = 1;
-    pub static TreasuryGateRequired: bool = false;
     pub static PolEpochBudget: Balance = Balance::MAX;
     pub static PolCommitments: Vec<(ProposalId, Balance)> = Vec::new();
     pub static PreimageLen: Option<u32> = Some(32);
@@ -345,8 +344,7 @@ impl PolBudget<AccountId32> for TestPolBudget {
             .iter()
             .find_map(|(pid, amount)| (*pid == proposal.id).then_some(*amount))
             .unwrap_or(0);
-        let gates = matches!(proposal.class, ProposalClass::Code | ProposalClass::Meta)
-            || (proposal.class == ProposalClass::Treasury && TreasuryGateRequired::get());
+        let gates = epoch_core::requires_gate_markets(proposal.class);
         Some(PolSeedPlan {
             commitment: amount,
             decision_b: amount,
@@ -552,9 +550,6 @@ impl ConstitutionAccess<AccountId32> for TestConstitution {
     }
     fn active_metric_spec_version() -> Option<MetricSpecVersion> {
         Some(ActiveMetricSpecVersion::get())
-    }
-    fn treasury_gate_required(_proposal: &Proposal<AccountId32>) -> bool {
-        TreasuryGateRequired::get()
     }
     fn attestation_artifact(proposal: &Proposal<AccountId32>) -> Option<H256> {
         Some(proposal.payload_hash)
@@ -900,7 +895,6 @@ pub fn reset_doubles() {
     LedgerFrozen::set(false);
     PhaseFlagsValue::set(0);
     ActiveMetricSpecVersion::set(1);
-    TreasuryGateRequired::set(false);
     PreimageLen::set(Some(32));
     PreimageNoted::set(true);
     PreimageRequests::set(Vec::new());

@@ -222,10 +222,10 @@ def decision_delta(proposal_class, prize) -> Decimal:
     return min(DELTA_FLOORS[name] * ratio, Decimal("0.10"))
 
 
-def pol_commitment(proposal_class, large_treasury: bool = False) -> Decimal:
+def pol_commitment(proposal_class) -> Decimal:
     name = _class_name(proposal_class)
     books_b = Decimal(2) * B_FLOORS[name]
-    if name in ("code", "meta") or (name == "treasury" and large_treasury):
+    if name in ("treasury", "code", "meta"):
         books_b += Decimal(4) * GATE_B
     with localcontext() as ctx:
         ctx.prec = WORK_PREC
@@ -242,12 +242,11 @@ def nav_floor(
     proposal_class,
     *,
     slots: int = 1,
-    large_treasury: bool = False,
 ) -> Decimal:
     if slots <= 0:
         raise ValueError("slots must be positive")
     name = _class_name(proposal_class)
-    exact = pol_commitment(name, large_treasury) * slots
+    exact = pol_commitment(name) * slots
     # SPEC-NOTE(08 §4.1 rounding convention): displayed rows inconsistently
     # divide exact and whole-USDC commitments. These branches reproduce every
     # displayed row within the mandated 10-USDC tolerance without changing 08.
@@ -257,7 +256,7 @@ def nav_floor(
             if slots == 1
             else exact.to_integral_value(rounding=ROUND_FLOOR)
         )
-    elif name == "treasury" and large_treasury:
+    elif name == "treasury":
         charged = exact.to_integral_value(rounding=ROUND_HALF_UP)
     else:
         charged = exact

@@ -222,6 +222,15 @@ def _proposal_class(value: ProposalClass | str) -> ProposalClass:
     raise ValueError("unknown proposal class")
 
 
+def requires_gate_markets(value: ProposalClass | str) -> bool:
+    """04 §1.1 / 05 §5: class-derived four-book gate applicability."""
+    return _proposal_class(value) in (
+        ProposalClass.TREASURY,
+        ProposalClass.CODE,
+        ProposalClass.META,
+    )
+
+
 def decide(
     accept_full: Decimal,
     reject_full_effective: Decimal,
@@ -233,7 +242,6 @@ def decide(
     preimage_ok: bool = True,
     resource_locks_held: bool = True,
     process_hold: bool = False,
-    requires_gate_markets: bool = False,
     gate_book_valid: bool = True,
     gate_valid: Mapping[Gate | str, bool] | None = None,
     p_adopt: Mapping[Gate | str, Decimal] | None = None,
@@ -297,7 +305,7 @@ def decide(
     # each gate's validity *then* its veto, so a Survival veto is reported before
     # Security's validity is inspected (per-gate `gate_valid` overrides the scalar
     # `gate_book_valid` fallback).
-    if requires_gate_markets:
+    if requires_gate_markets(proposal_class):
         adopt = _decimal_map(p_adopt, Decimal(0))
         reject = _decimal_map(p_reject, Decimal(0))
         maxima = _decimal_map(p_max, DEFAULT_P_MAX)

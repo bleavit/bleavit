@@ -82,11 +82,7 @@ fn decision_state(
     let mut proposal = live_proposal(pid, ProposalState::Trading, 0);
     proposal.proposer = keeper();
     proposal.class = class;
-    proposal.markets = Some(markets(
-        pid,
-        0,
-        matches!(class, ProposalClass::Code | ProposalClass::Meta),
-    ));
+    proposal.markets = Some(markets(pid, 0, epoch_core::requires_gate_markets(class)));
     proposal.decide_at = 1;
     state.resource_locks = proposal
         .resources
@@ -560,7 +556,7 @@ fn genesis_uses_the_frozen_three_field_epoch_shape() {
             <CurrentEpoch<Test> as frame_support::traits::Get<EpochId>>::get(),
             0
         );
-        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 4);
+        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 5);
         assert_ok!(Epoch::do_try_state());
     });
 }
@@ -951,11 +947,10 @@ fn gate_veto_precedes_missing_welfare_twap() {
 }
 
 #[test]
-fn r2_1_seeded_treasury_gate_veto_survives_live_nav_reclassification() {
+fn low_ask_treasury_seeds_four_gate_books_and_survival_vetoes() {
     new_test_ext().execute_with(|| {
         let mut candidate = proposal(999, keeper(), ProposalState::Submitted, 0, 1);
         candidate.class = ProposalClass::Treasury;
-        TreasuryGateRequired::set(true);
         assert_ok!(Epoch::submit(RuntimeOrigin::signed(keeper()), candidate,));
         set_block(phase_block(0, phase_offsets::QUALIFY_NUM));
         assert_ok!(Epoch::tick(
@@ -979,7 +974,6 @@ fn r2_1_seeded_treasury_gate_veto_survives_live_nav_reclassification() {
             (gates[0], FixedU64(100_000_000)),
             (gates[1], FixedU64(100_000_000)),
         ]);
-        TreasuryGateRequired::set(false);
         sync_at(phase_block(0, phase_offsets::TRADE_NUM));
         sync_at(phase_block(0, phase_offsets::DECIDE_NUM));
 
@@ -992,6 +986,34 @@ fn r2_1_seeded_treasury_gate_veto_survives_live_nav_reclassification() {
         assert!(!SeamCalls::get()
             .iter()
             .any(|call| matches!(call, SeamCall::Enqueue { pid: 1, .. })));
+    });
+}
+
+#[test]
+fn low_ask_treasury_security_gate_can_veto() {
+    new_test_ext().execute_with(|| {
+        let mut state = decision_state(1, ProposalClass::Treasury);
+        state.proposals[0].ask = 1;
+        let gates = state.proposals[0]
+            .markets
+            .and_then(|books| books.gates)
+            .expect("Treasury decision fixture has four gate books");
+        TwapOverrides::set(vec![
+            (gates[0], FixedU64(0)),
+            (gates[1], FixedU64(0)),
+            (gates[2], FixedU64(100_000_000)),
+            (gates[3], FixedU64(100_000_000)),
+        ]);
+        assert_ok!(Epoch::seed(state));
+
+        assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
+
+        assert_eq!(
+            Proposals::<Test>::get(1).map(|proposal| proposal.decision),
+            Some(Some(DecisionOutcome::Reject(
+                RejectReason::GateVetoSecurity
+            )))
+        );
     });
 }
 
@@ -1321,17 +1343,18 @@ fn corrupted_rerun_reopened_deadline_fails_try_state() {
 }
 
 #[test]
-fn small_treasury_without_required_gate_books_decides() {
+fn low_ask_treasury_without_gate_books_rejects_not_decision_grade() {
     new_test_ext().execute_with(|| {
         let mut state = decision_state(1, ProposalClass::Treasury);
         state.proposals[0].ask = 1;
         state.proposals[0].markets = Some(markets(1, 0, false));
-        TreasuryGateRequired::set(false);
         assert_ok!(Epoch::seed(state));
         assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
         assert_eq!(
             Proposals::<Test>::get(1).map(|proposal| proposal.decision),
-            Some(Some(DecisionOutcome::Adopt))
+            Some(Some(DecisionOutcome::Reject(
+                RejectReason::NotDecisionGrade
+            )))
         );
     });
 }
@@ -1839,7 +1862,6 @@ fn funded_pol_seed_plan_is_frozen_at_seed_entry() {
         assert_ok!(Epoch::seed(state));
         PolCommitments::set(vec![(1, 1)]);
         PolEpochBudget::set(1);
-        TreasuryGateRequired::set(true);
         set_block(phase_block(0, phase_offsets::SEED_NUM));
 
         // The transition fixes both the funded slot and its predicted gate shape.
@@ -1863,7 +1885,6 @@ fn funded_pol_seed_plan_is_frozen_at_seed_entry() {
         // double-charge the slate nor change the books that seeding will create.
         PolEpochBudget::set(0);
         PolCommitments::set(vec![(1, 99)]);
-        TreasuryGateRequired::set(false);
         assert_ok!(Epoch::tick(
             RuntimeOrigin::signed(keeper()),
             tick_batch(vec![1]),

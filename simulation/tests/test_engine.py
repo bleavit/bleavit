@@ -118,6 +118,35 @@ class ExecutedEngineTests(unittest.TestCase):
         self.assertEqual(security.reason, "GateVetoSecurity")
         self.assertTrue(all(row.contest > 0 for row in survival.gate_books))
 
+    def test_low_ask_treasury_gets_four_gate_books_and_both_vetoes(self):
+        config = SimulationConfig(proposal_count=4)
+        cases = (
+            (3, 2, "GateVetoSurvival"),
+            (50, 3, "GateVetoSecurity"),
+        )
+        for seed, proposal_id, reason in cases:
+            with self.subTest(reason=reason):
+                proposal = generate_proposal_with_config(
+                    seed, proposal_id, config
+                )
+                self.assertEqual(proposal.proposal_class, "treasury")
+                self.assertLessEqual(
+                    proposal.ask, proposal.nav * Decimal("0.01")
+                )
+                self.assertEqual(proposal.gate_exposure, "gate")
+                result = simulate_proposal(
+                    proposal,
+                    seed=seed,
+                    config=config,
+                    budget_multiple=Decimal(0),
+                )
+                self.assertEqual(len(result.gate_books), 4)
+                self.assertEqual(result.reason, reason)
+
+        floor = generate_proposal_with_config(3, 2, config)
+        self.assertEqual(floor.regime, "floor")
+        self.assertGreaterEqual(floor.nav, Decimal("7393600"))
+
     def test_gated_attacker_suppresses_veto_from_one_shared_budget(self):
         """Seeded META/TH-4 demo: organic veto -> suppression -> wrong PASS."""
         config = SimulationConfig(proposal_count=400)

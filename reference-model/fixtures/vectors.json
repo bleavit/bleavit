@@ -134,10 +134,12 @@
     {
       "inputs": {
         "accept_full": "0.56",
+        "ask": "100",
         "delta": "0.05",
         "gate_book_valid": false,
+        "proposal_class": "Treasury",
         "reject_full_effective": "0.50",
-        "requires_gate_markets": true
+        "spendable_nav": "7393600"
       },
       "name": "gate_book_invalid",
       "outcome": "Reject",
@@ -146,6 +148,7 @@
     {
       "inputs": {
         "accept_full": "0.56",
+        "ask": "100",
         "delta": "0.05",
         "p_adopt": {
           "Survival": "0.06"
@@ -153,8 +156,9 @@
         "p_reject": {
           "Survival": "0.01"
         },
+        "proposal_class": "Treasury",
         "reject_full_effective": "0.50",
-        "requires_gate_markets": true
+        "spendable_nav": "7393600"
       },
       "name": "gate_veto_survival",
       "outcome": "Reject",
@@ -163,6 +167,7 @@
     {
       "inputs": {
         "accept_full": "0.56",
+        "ask": "100",
         "delta": "0.05",
         "p_adopt": {
           "Security": "0.06",
@@ -172,8 +177,9 @@
           "Security": "0.01",
           "Survival": "0.01"
         },
+        "proposal_class": "Treasury",
         "reject_full_effective": "0.50",
-        "requires_gate_markets": true
+        "spendable_nav": "7393600"
       },
       "name": "gate_veto_security",
       "outcome": "Reject",
@@ -182,12 +188,14 @@
     {
       "inputs": {
         "accept_full": "0.56",
+        "ask": "100",
         "delta": "0.05",
         "p_adopt": {
           "Survival": "0.06"
         },
+        "proposal_class": "Treasury",
         "reject_full_effective": "0.50",
-        "requires_gate_markets": true,
+        "spendable_nav": "7393600",
         "welfare_grade": "Invalid"
       },
       "name": "gate_veto_precedes_welfare_invalid",
@@ -197,6 +205,7 @@
     {
       "inputs": {
         "accept_full": "0.56",
+        "ask": "100",
         "delta": "0.05",
         "gate_valid": {
           "Security": false,
@@ -208,8 +217,9 @@
         "p_reject": {
           "Survival": "0.01"
         },
+        "proposal_class": "Treasury",
         "reject_full_effective": "0.50",
-        "requires_gate_markets": true
+        "spendable_nav": "7393600"
       },
       "name": "gate_veto_precedes_later_gate_invalid",
       "outcome": "Reject",
@@ -80885,7 +80895,6 @@
       "commitment": "13862.94361119890618834464242916353136151000268720510508241360018986787243939389431211726653992837375",
       "commitment_display": 13863,
       "inputs": {
-        "large_treasury": false,
         "proposal_class": "Param"
       },
       "name": "param_pol",
@@ -80893,24 +80902,12 @@
       "nav_floor_display": 1848392
     },
     {
-      "commitment": "34657.35902799726547086160607290882840377500671801276270603400047466968109848473578029316634982093438",
-      "commitment_display": 34657,
-      "inputs": {
-        "large_treasury": false,
-        "proposal_class": "Treasury"
-      },
-      "name": "treasury_pol",
-      "nav_floor": "4620981.203732968729448214143",
-      "nav_floor_display": 4620981
-    },
-    {
       "commitment": "55451.77444479562475337856971665412544604001074882042032965440075947148975757557724846906615971349500",
       "commitment_display": 55452,
       "inputs": {
-        "large_treasury": true,
         "proposal_class": "Treasury"
       },
-      "name": "treasury_pol_large",
+      "name": "treasury_pol",
       "nav_floor": "7393600",
       "nav_floor_display": 7393600
     },
@@ -80918,7 +80915,6 @@
       "commitment": "103972.0770839917964125848182187264852113250201540382881181020014240090432954542073408794990494628031",
       "commitment_display": 103972,
       "inputs": {
-        "large_treasury": false,
         "proposal_class": "Code"
       },
       "name": "code_pol",
@@ -80929,7 +80925,6 @@
       "commitment": "159423.8515287874211659633879353806106573650309028587084477564021834805330530297845893485652091762981",
       "commitment_display": 159424,
       "inputs": {
-        "large_treasury": false,
         "proposal_class": "Meta"
       },
       "name": "meta_pol",

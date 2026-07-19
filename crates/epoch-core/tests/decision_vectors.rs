@@ -186,8 +186,8 @@ const KNOWN_INPUT_KEYS: &[&str] = &[
     "proposal_class",
     "queue_time_ok",
     "reject_full_effective",
-    "requires_gate_markets",
     "resource_locks_held",
+    "spendable_nav",
     "welfare_grade",
 ];
 
@@ -201,8 +201,7 @@ fn replay(row: &Value) -> (DecisionOutcome, u128) {
     }
     let class = class_of(inputs);
     let extended = bool_input(inputs, "extended", false);
-    let requires_gates = bool_input(inputs, "requires_gate_markets", false)
-        || matches!(class, ProposalClass::Code | ProposalClass::Meta);
+    let requires_gates = epoch_core::requires_gate_markets(class);
 
     let accept_full = exact_1e9(&inputs["accept_full"], "accept_full");
     let reject = exact_1e9(&inputs["reject_full_effective"], "reject_full_effective");
@@ -235,8 +234,7 @@ fn replay(row: &Value) -> (DecisionOutcome, u128) {
 
     // Step-9 inputs: L̂ either pre-composed (`measured_liquidity`) or through
     // the production SQ-231 composition; prize per the 08 §5.2 class table
-    // (spendable NAV is zero in every current row, so the CODE/META
-    // outflow-cap floor term vanishes).
+    // (including the CODE/META outflow-cap floor term when NAV is supplied).
     let measured_depth = if let Some(depth) = inputs.get("pol_depth") {
         let b_sum = exact_usdc(&inputs["b_accept"], "b_accept")
             + exact_usdc(&inputs["b_reject"], "b_reject");
@@ -268,10 +266,24 @@ fn replay(row: &Value) -> (DecisionOutcome, u128) {
         .get("envelope_value")
         .map(|value| exact_usdc(value, "envelope_value"))
         .unwrap_or(0);
+    let spendable_nav = inputs
+        .get("spendable_nav")
+        .map(|value| exact_usdc(value, "spendable_nav"))
+        .unwrap_or(0);
+    if class == ProposalClass::Treasury && inputs.get("spendable_nav").is_some() {
+        assert!(
+            ask.saturating_mul(100) <= spendable_nav,
+            "Treasury gate-vector fixture must remain at or below 1% NAV"
+        );
+    }
+    let nav_cap = spendable_nav
+        .checked_mul(genesis_u128(b"trs.cap_proposal"))
+        .expect("NAV cap multiplication fits")
+        / 100;
     let prize = match class {
         ProposalClass::Treasury => ask,
         ProposalClass::Param => envelope,
-        ProposalClass::Code | ProposalClass::Meta => ask.max(envelope),
+        ProposalClass::Code | ProposalClass::Meta => ask.max(envelope).max(nav_cap),
         ProposalClass::Constitutional => unreachable!("no Constitutional rows"),
     };
 

@@ -86,9 +86,8 @@ fn class_of(value: &Value) -> ProposalClass {
 }
 
 /// 08 §3 book inventory: 2 decision books at `pol.b.<class>`, plus the 4 gate
-/// books at `pol.b_gate` for the gate-bearing configurations (CODE, META,
-/// TREASURY > 1% NAV).
-fn books_b(class: ProposalClass, large_treasury: bool) -> u128 {
+/// books at `pol.b_gate` for TREASURY, CODE and META.
+fn books_b(class: ProposalClass) -> u128 {
     let decision_b = match class {
         ProposalClass::Param => genesis_balance(b"pol.b.param"),
         ProposalClass::Treasury => genesis_balance(b"pol.b.trs"),
@@ -96,8 +95,10 @@ fn books_b(class: ProposalClass, large_treasury: bool) -> u128 {
         ProposalClass::Meta => genesis_balance(b"pol.b.meta"),
         ProposalClass::Constitutional => panic!("no POL inventory for Constitutional"),
     };
-    let gated = matches!(class, ProposalClass::Code | ProposalClass::Meta)
-        || (class == ProposalClass::Treasury && large_treasury);
+    let gated = matches!(
+        class,
+        ProposalClass::Treasury | ProposalClass::Code | ProposalClass::Meta
+    );
     2 * decision_b
         + if gated {
             4 * genesis_balance(b"pol.b_gate")
@@ -186,27 +187,19 @@ fn treasury_vectors_match_python_reference_model() {
     let scenarios = fixture["treasury_scenarios"]
         .as_array()
         .expect("treasury_scenarios family present");
-    assert_eq!(scenarios.len(), 10, "treasury family cardinality drifted");
+    assert_eq!(scenarios.len(), 9, "treasury family cardinality drifted");
     let mut replayed = BTreeSet::new();
 
     for row in scenarios {
         let name = row["name"].as_str().expect("scenario name");
         let inputs = &row["inputs"];
         match name {
-            "param_pol" | "treasury_pol" | "treasury_pol_large" | "code_pol" | "meta_pol" => {
+            "param_pol" | "treasury_pol" | "code_pol" | "meta_pol" => {
                 let class = class_of(&inputs["proposal_class"]);
-                let large = inputs["large_treasury"].as_bool().expect("large_treasury");
-                let books = books_b(class, large);
+                let books = books_b(class);
                 assert_commitment(row, name, books);
-                // `Treasury::floor(Treasury)` carries the conservative
-                // gate-bearing (> 1% NAV) row of 08 §4.1; the small-treasury
-                // row therefore has no Rust constant and binds through the
-                // formula cross-check only.
-                let rust_floor = match (class, large) {
-                    (ProposalClass::Treasury, false) => None,
-                    _ => Some(Treasury::floor(class)),
-                };
-                let whole_usdc_commitment = matches!(name, "treasury_pol_large" | "meta_pol");
+                let rust_floor = Some(Treasury::floor(class));
+                let whole_usdc_commitment = matches!(name, "treasury_pol" | "meta_pol");
                 assert_nav_floor_row(row, name, rust_floor, books, whole_usdc_commitment);
             }
             "baseline_commitment" => {
@@ -366,5 +359,5 @@ fn treasury_vectors_match_python_reference_model() {
             "duplicate scenario {name}"
         );
     }
-    assert_eq!(replayed.len(), 10, "treasury replay executed-count drifted");
+    assert_eq!(replayed.len(), 9, "treasury replay executed-count drifted");
 }

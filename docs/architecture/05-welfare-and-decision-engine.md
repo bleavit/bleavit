@@ -370,7 +370,7 @@ If no parachain block finalizes for 4,800 relay blocks (~8 h) or a snapshot is >
 
 ### 5.1 Gate-veto tests (kernel-ordered, carried forward)
 
-For CODE, META and TREASURY > 1% NAV, four binary gate books per proposal trade the question "conditional on ADOPT (resp. REJECT), will the S (resp. C) daily floor-breach flag be set on ≥ 1 day during epochs e+1…e+2?" (book mechanics: [doc 04](./04-markets-and-pricing.md); settlement source: §4.7).
+For CODE, META and every TREASURY proposal, four binary gate books per proposal trade the question "conditional on ADOPT (resp. REJECT), will the S (resp. C) daily floor-breach flag be set on ≥ 1 day during epochs e+1…e+2?" (book mechanics: [doc 04](./04-markets-and-pricing.md); settlement source: §4.7).
 
 ```
 veto  iff  p̂ᵍ_adopt > p_max(g)              // absolute ruin cap (default 0.05, kernel ceiling 0.10)
@@ -378,12 +378,12 @@ veto  iff  p̂ᵍ_adopt > p_max(g)              // absolute ruin cap (default 0.
        for either g ∈ {S, C}
 ```
 
-No welfare margin overrides a veto (G-4, I-14). PARAM and TREASURY ≤ 1% NAV use conservative static classification (capability envelopes certified below the gate-relevant blast radius; the classification itself META-governed).
+No welfare margin overrides a veto (G-4, I-14). PARAM is the sole static-classification market-bearing class for now (its capability envelopes are certified below the gate-relevant blast radius; the classification itself is META-governed).
 
 ### 5.2 Sanity band and per-book validity (B-med: sanity band)
 
 - **Welfare books** (the decision pair and the Baseline book): decision-grade requires `TWAP ∈ [0.02, 0.98]` (the sanity band), plus coverage ≥ 95% of scheduled observation intervals in the window, staleness clean, time-averaged effective POL ≥ class floor and POL undisturbed, non-POL **contest capital** ([doc 04](./04-markets-and-pricing.md) §7a — the time-weighted marked value of net outstanding trader positions; gross traded notional is *not* the measure, SQ-231 amendment 2026-07-18) ≥ **`dec.v_min(class)` per book** (the per-book resolution of the V_min ambiguity — each of the two decision books MUST individually clear it), and `|spot_close − TWAP| ≤ Δ_max = 0.05`. The **Baseline book carries no proposal class and grades at the TREASURY-tier floor `dec.v_min.trs`** — [doc 08](./08-treasury-and-economics.md) §4.3's mid-class manipulation-resistance rationale is the source of the tier, and the same tier already sizes its `pol.b_baseline` subsidy (SQ-232 resolution, 2026-07-18).
-- **Gate books are exempt from the sanity band** — a healthy gated proposal's gate books legitimately trade near 0. They instead satisfy the **near-boundary validity rule (GB-NB)**: a gate book whose window TWAP lies outside [0.02, 0.98] is decision-grade iff coverage ≥ 98%, zero stale events, and `|spot_close − TWAP| ≤ 0.01` *(keys `gate.nb_coverage`, `gate.nb_conv`: §13)* — a book pinned near a boundary counts only if it is demonstrably alive and converged, not abandoned. Inside the band, gate books use the welfare-book validity checks. Gate books' contest floor is `gate.v_min = 0.1 · dec.v_min(class)` per book *(normative value: §13)*, graded over the same contest-capital measure.
+- **Gate books are exempt from the sanity band** — a healthy gated proposal's gate books legitimately trade near 0. They instead satisfy the **near-boundary validity rule (GB-NB)**: a gate book whose window TWAP lies outside [0.02, 0.98] is decision-grade iff coverage ≥ 98%, zero stale events, and `|spot_close − TWAP| ≤ 0.01` *(keys `gate.nb_coverage`, `gate.nb_conv`: §13)* — a book pinned near a boundary counts only if it is demonstrably alive and converged, not abandoned. Inside the band, gate books use the welfare-book validity checks. For CODE, META and **all TREASURY proposals**, gate books' contest floor is `gate.v_min = 0.1 · dec.v_min(class)` per book *(normative value: §13)*, graded over the same contest-capital measure.
 
 ### 5.3 Baseline consumption (backed by doc 04)
 
@@ -418,7 +418,7 @@ fn decide(pid: ProposalId, now: BlockNumber) -> DecisionOutcome {
     }
 
     // ── 3–4. ruin gates FIRST (kernel ordering: upside is never weighed) ─────
-    if p.requires_gate_markets() {                            // CODE | META | TREASURY > 1% NAV
+    if p.requires_gate_markets() {                            // CODE | META | TREASURY
         let gm = p.gate_markets.ok_or(Reject(NotDecisionGrade))?;
         for g in [Survival, Security] {
             ensure!(gate_decision_grade(gm[g].adopt)          // §5.2: band OR GB-NB rule,

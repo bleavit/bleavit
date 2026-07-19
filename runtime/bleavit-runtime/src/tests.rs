@@ -1783,9 +1783,9 @@ fn identity_and_version_pins_match_the_integration_contract() {
         VERSION.transaction_version,
         futarchy_primitives::INTEGRATION_CONTRACT_VERSION
     );
-    // Contract v4 (the B2 amendment batch); SQ-101 re-keyed USDC to the frozen
-    // 02 §8 XCM Location, so the identity assertion is the encoded location.
-    assert_eq!(VERSION.transaction_version, 4);
+    // The XCM identity spelling originated in contract v4; v5 retains it while
+    // changing Treasury class-floor and gate-market semantics.
+    assert_eq!(VERSION.transaction_version, 5);
     assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
@@ -2053,6 +2053,82 @@ fn b10_pol_reader_uses_named_defaults_when_live_records_are_missing() {
         )
         .expect("PARAM proposal retains a default POL seed plan");
         assert_eq!(plan.decision_b, pallet_constitution::POL_B_DEFAULTS[0]);
+    });
+}
+
+#[test]
+fn low_ask_treasury_seed_plan_opens_six_proposal_books() {
+    use pallet_epoch::{EpochParamsProvider, MarketAccess, PolBudget};
+
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 99_002;
+        let params = <crate::configs::RuntimeEpochParams as EpochParamsProvider>::get();
+        let decision_b = crate::configs::balance_param(b"pol.b.trs");
+        let gate_b = crate::configs::balance_param(b"pol.b_gate");
+        let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
+        let decision_headroom =
+            pallet_market::core_market::seed_headroom(decision_b).expect("bounded decision b");
+        let gate_headroom =
+            pallet_market::core_market::seed_headroom(gate_b).expect("bounded gate b");
+        let baseline_headroom =
+            pallet_market::core_market::seed_headroom(baseline_b).expect("bounded baseline b");
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &crate::configs::pol_account(),
+            decision_headroom
+                .saturating_add(gate_headroom.saturating_mul(2))
+                .saturating_add(currency::USDC),
+        ));
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &crate::configs::pol_baseline_account(),
+            baseline_headroom.saturating_add(currency::USDC),
+        ));
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.main_usdc = decision_headroom
+                .saturating_mul(2)
+                .saturating_add(gate_headroom.saturating_mul(4))
+                .saturating_add(baseline_headroom)
+                .saturating_mul(100);
+        });
+
+        let mut proposal = empty_param_proposal(PID, account(91), H256::zero(), 0);
+        proposal.class = ProposalClass::Treasury;
+        proposal.ask = 1;
+        proposal.metric_spec = 1;
+        proposal.state = ProposalState::Qualified;
+        proposal.decide_at = System::block_number().saturating_add(params.decision_window);
+        let nav = FutarchyTreasury::nav().spendable_nav;
+        assert!(proposal.ask <= nav / 100, "fixture is at most 1% of NAV");
+
+        let plan = <crate::configs::RuntimePolBudget as PolBudget<AccountId>>::proposal_seed_plan(
+            &proposal,
+        )
+        .expect("low-ask Treasury proposal retains a POL seed plan");
+        assert_eq!(plan.gate_b, Some(gate_b));
+        let markets =
+            <crate::configs::RuntimeMarketAccess as MarketAccess<AccountId>>::open_markets(
+                &proposal,
+                false,
+                Some(plan),
+            )
+            .expect("low-ask Treasury markets open");
+        let gates = markets
+            .gates
+            .expect("low-ask Treasury proposal has four gate books");
+        let proposal_books = [
+            markets.accept,
+            markets.reject,
+            gates[0],
+            gates[1],
+            gates[2],
+            gates[3],
+        ];
+        assert_eq!(proposal_books.len(), 6);
+        assert!(proposal_books
+            .iter()
+            .all(pallet_market::Markets::<Runtime>::contains_key));
+        assert_eq!(pallet_market::Markets::<Runtime>::count(), 7);
     });
 }
 
@@ -6191,6 +6267,240 @@ fn epoch_privileged_leaves_reject_every_non_authority_origin() {
     });
 }
 
+fn assert_low_ask_treasury_gate_veto(expected: RejectReason) {
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 8_099;
+        let params =
+            <crate::configs::RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
+        let end = params.decision_window;
+        System::set_block_number(end);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let markets = MarketSet {
+            accept: 80_991,
+            reject: 80_992,
+            gates: Some([80_993, 80_994, 80_995, 80_996]),
+            baseline: 80_997,
+        };
+        let gates = markets
+            .gates
+            .expect("low-ask Treasury fixture has four physical gate ids");
+        let class_index = crate::configs::proposal_class_index(ProposalClass::Treasury);
+        let contest = params.v_min[class_index];
+        let gate_contest = params.gate_v_min[class_index];
+        let decision_b = crate::configs::class_pol_floor(ProposalClass::Treasury);
+        let gate_b = crate::configs::balance_param(b"pol.b_gate");
+        let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
+        let gate_quotes = match expected {
+            RejectReason::GateVetoSurvival => [
+                futarchy_primitives::FixedU64(100_000_000),
+                futarchy_primitives::FixedU64(100_000_000),
+                futarchy_primitives::FixedU64(0),
+                futarchy_primitives::FixedU64(0),
+            ],
+            RejectReason::GateVetoSecurity => [
+                futarchy_primitives::FixedU64(0),
+                futarchy_primitives::FixedU64(0),
+                futarchy_primitives::FixedU64(100_000_000),
+                futarchy_primitives::FixedU64(100_000_000),
+            ],
+            _ => {
+                assert!(false, "fixture supports only Survival/Security vetoes");
+                return;
+            }
+        };
+        for result in [
+            seed_decision_grade_market(
+                markets.accept,
+                pallet_market::core_market::BookKind::Decision {
+                    proposal: PID,
+                    branch: futarchy_primitives::Branch::Accept,
+                },
+                futarchy_primitives::FixedU64(700_000_000),
+                end,
+                (params.decision_window, params.trailing_window),
+                decision_b,
+                contest,
+            ),
+            seed_decision_grade_market(
+                markets.reject,
+                pallet_market::core_market::BookKind::Decision {
+                    proposal: PID,
+                    branch: futarchy_primitives::Branch::Reject,
+                },
+                futarchy_primitives::FixedU64(500_000_000),
+                end,
+                (params.decision_window, params.trailing_window),
+                decision_b,
+                contest,
+            ),
+            seed_decision_grade_market(
+                gates[0],
+                pallet_market::core_market::BookKind::Gate {
+                    proposal: PID,
+                    branch: futarchy_primitives::Branch::Accept,
+                    gate: futarchy_primitives::GateType::Survival,
+                },
+                gate_quotes[0],
+                end,
+                (params.decision_window, params.trailing_window),
+                gate_b,
+                gate_contest,
+            ),
+            seed_decision_grade_market(
+                gates[1],
+                pallet_market::core_market::BookKind::Gate {
+                    proposal: PID,
+                    branch: futarchy_primitives::Branch::Reject,
+                    gate: futarchy_primitives::GateType::Survival,
+                },
+                gate_quotes[1],
+                end,
+                (params.decision_window, params.trailing_window),
+                gate_b,
+                gate_contest,
+            ),
+            seed_decision_grade_market(
+                gates[2],
+                pallet_market::core_market::BookKind::Gate {
+                    proposal: PID,
+                    branch: futarchy_primitives::Branch::Accept,
+                    gate: futarchy_primitives::GateType::Security,
+                },
+                gate_quotes[2],
+                end,
+                (params.decision_window, params.trailing_window),
+                gate_b,
+                gate_contest,
+            ),
+            seed_decision_grade_market(
+                gates[3],
+                pallet_market::core_market::BookKind::Gate {
+                    proposal: PID,
+                    branch: futarchy_primitives::Branch::Reject,
+                    gate: futarchy_primitives::GateType::Security,
+                },
+                gate_quotes[3],
+                end,
+                (params.decision_window, params.trailing_window),
+                gate_b,
+                gate_contest,
+            ),
+            seed_decision_grade_market(
+                markets.baseline,
+                pallet_market::core_market::BookKind::Baseline { epoch },
+                futarchy_primitives::FixedU64(500_000_000),
+                end,
+                (params.decision_window, params.trailing_window),
+                baseline_b,
+                contest,
+            ),
+        ] {
+            assert_ok!(result);
+        }
+        pallet_market::BaselineMarketOf::<Runtime>::insert(epoch, markets.baseline);
+        assert!(gates
+            .iter()
+            .all(pallet_market::Markets::<Runtime>::contains_key));
+
+        let batch =
+            match pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(Vec::new()) {
+                Ok(batch) => batch,
+                Err(_) => {
+                    assert!(false, "empty bounded payload must encode");
+                    return;
+                }
+            };
+        let bytes = batch.encode();
+        let payload_len = match u32::try_from(bytes.len()) {
+            Ok(len) => len,
+            Err(_) => {
+                assert!(false, "bounded payload length fits u32");
+                return;
+            }
+        };
+        let payload_hash = match <Preimage as StorePreimage>::note(bytes.into()) {
+            Ok(hash) => hash,
+            Err(error) => {
+                assert!(false, "payload preimage must be noted: {error:?}");
+                return;
+            }
+        };
+        <Preimage as QueryPreimage>::request(&payload_hash);
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.main_usdc = contest.saturating_mul(100);
+        });
+        let ask = 1;
+        let spendable_nav = FutarchyTreasury::nav().spendable_nav;
+        assert!(ask <= spendable_nav / 100, "fixture ask is at most 1% NAV");
+        let proposal = Proposal {
+            id: PID,
+            proposer: account(70),
+            class: ProposalClass::Treasury,
+            state: ProposalState::Trading,
+            epoch,
+            submitted_at: 0,
+            payload_hash: payload_hash.0,
+            payload_len,
+            ask,
+            bond: Balance::MAX,
+            resources: Default::default(),
+            metric_spec: 1,
+            decide_at: end,
+            rerun: false,
+            extended: false,
+            delayed_once: false,
+            markets: Some(markets),
+            maturity: None,
+            grace_end: None,
+            version_constraint: pallet_execution_guard::CurrentSpecName::<Runtime>::get(),
+            decision: None,
+        };
+        pallet_epoch::Proposals::<Runtime>::insert(PID, proposal);
+        let schedule = pallet_epoch::Schedule::<Runtime>::get();
+        pallet_epoch::ProposalSchedules::<Runtime>::insert(
+            PID,
+            pallet_epoch::ProposalSchedule {
+                epoch,
+                epoch_start_block: schedule.epoch_start_block,
+                epoch_length: schedule.length,
+                decide_at: end,
+                metric_spec: 1,
+            },
+        );
+        pallet_epoch::NextProposalId::<Runtime>::mutate(|next| {
+            *next = (*next).max(PID.saturating_add(1));
+        });
+        pallet_conditional_ledger::Vaults::<Runtime>::insert(
+            PID,
+            pallet_conditional_ledger::core_ledger::VaultInfo::open(1),
+        );
+        let snapshot = match Epoch::decision_input_snapshot(PID) {
+            Some(snapshot) => snapshot,
+            None => {
+                assert!(false, "assembled runtime must expose decision inputs");
+                return;
+            }
+        };
+        assert_eq!(snapshot.inputs.gate_twaps, Some(gate_quotes));
+
+        assert_ok!(Epoch::decide(RuntimeOrigin::signed(account(69)), PID));
+        assert_eq!(
+            pallet_epoch::Proposals::<Runtime>::get(PID).and_then(|proposal| proposal.decision),
+            Some(DecisionOutcome::Reject(expected)),
+        );
+    });
+}
+
+#[test]
+fn low_ask_treasury_reaches_survival_veto_through_runtime_epoch() {
+    assert_low_ask_treasury_gate_veto(RejectReason::GateVetoSurvival);
+}
+
+#[test]
+fn low_ask_treasury_reaches_security_veto_through_runtime_epoch() {
+    assert_low_ask_treasury_gate_veto(RejectReason::GateVetoSecurity);
+}
+
 #[test]
 fn seeded_trading_decision_revalidates_real_payload_before_guard_enqueue() {
     development_ext().execute_with(|| {
@@ -6245,12 +6555,16 @@ fn seeded_trading_decision_revalidates_real_payload_before_guard_enqueue() {
         let ids = MarketSet {
             accept: 81_001,
             reject: 81_002,
-            gates: None,
-            baseline: 81_003,
+            gates: Some([81_003, 81_004, 81_005, 81_006]),
+            baseline: 81_007,
         };
-        let contest = params.v_min[crate::configs::proposal_class_index(ProposalClass::Treasury)];
+        let class_index = crate::configs::proposal_class_index(ProposalClass::Treasury);
+        let contest = params.v_min[class_index];
+        let gate_contest = params.gate_v_min[class_index];
         let decision_b = crate::configs::class_pol_floor(ProposalClass::Treasury);
+        let gate_b = crate::configs::balance_param(b"pol.b_gate");
         let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
+        let gates = ids.gates.expect("Treasury fixture has gate books");
         for result in [
             seed_decision_grade_market(
                 ids.accept,
@@ -6275,6 +6589,58 @@ fn seeded_trading_decision_revalidates_real_payload_before_guard_enqueue() {
                 (params.decision_window, params.trailing_window),
                 decision_b,
                 contest,
+            ),
+            seed_decision_grade_market(
+                gates[0],
+                pallet_market::core_market::BookKind::Gate {
+                    proposal: PID,
+                    branch: futarchy_primitives::Branch::Accept,
+                    gate: futarchy_primitives::GateType::Survival,
+                },
+                futarchy_primitives::FixedU64(0),
+                end,
+                (params.decision_window, params.trailing_window),
+                gate_b,
+                gate_contest,
+            ),
+            seed_decision_grade_market(
+                gates[1],
+                pallet_market::core_market::BookKind::Gate {
+                    proposal: PID,
+                    branch: futarchy_primitives::Branch::Reject,
+                    gate: futarchy_primitives::GateType::Survival,
+                },
+                futarchy_primitives::FixedU64(0),
+                end,
+                (params.decision_window, params.trailing_window),
+                gate_b,
+                gate_contest,
+            ),
+            seed_decision_grade_market(
+                gates[2],
+                pallet_market::core_market::BookKind::Gate {
+                    proposal: PID,
+                    branch: futarchy_primitives::Branch::Accept,
+                    gate: futarchy_primitives::GateType::Security,
+                },
+                futarchy_primitives::FixedU64(0),
+                end,
+                (params.decision_window, params.trailing_window),
+                gate_b,
+                gate_contest,
+            ),
+            seed_decision_grade_market(
+                gates[3],
+                pallet_market::core_market::BookKind::Gate {
+                    proposal: PID,
+                    branch: futarchy_primitives::Branch::Reject,
+                    gate: futarchy_primitives::GateType::Security,
+                },
+                futarchy_primitives::FixedU64(0),
+                end,
+                (params.decision_window, params.trailing_window),
+                gate_b,
+                gate_contest,
             ),
             seed_decision_grade_market(
                 ids.baseline,
@@ -6406,18 +6772,24 @@ fn delayed_decide_uses_own_baseline_window_before_classless_queue_refusal() {
         let early_markets = MarketSet {
             accept: 82_001,
             reject: 82_002,
-            gates: None,
-            baseline: 82_003,
+            gates: Some([82_003, 82_004, 82_005, 82_006]),
+            baseline: 82_007,
         };
         let late_markets = MarketSet {
             accept: 82_011,
             reject: 82_012,
-            gates: None,
+            gates: Some([82_013, 82_014, 82_015, 82_016]),
             baseline: early_markets.baseline,
         };
-        let contest = params.v_min[crate::configs::proposal_class_index(ProposalClass::Treasury)];
+        let class_index = crate::configs::proposal_class_index(ProposalClass::Treasury);
+        let contest = params.v_min[class_index];
+        let gate_contest = params.gate_v_min[class_index];
         let decision_b = crate::configs::class_pol_floor(ProposalClass::Treasury);
+        let gate_b = crate::configs::balance_param(b"pol.b_gate");
         let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
+        let early_gates = early_markets
+            .gates
+            .expect("Treasury fixture has gate books");
         for result in [
             seed_decision_grade_market(
                 early_markets.accept,
@@ -6442,6 +6814,58 @@ fn delayed_decide_uses_own_baseline_window_before_classless_queue_refusal() {
                 (params.decision_window, params.trailing_window),
                 decision_b,
                 contest,
+            ),
+            seed_decision_grade_market(
+                early_gates[0],
+                pallet_market::core_market::BookKind::Gate {
+                    proposal: EARLY_PID,
+                    branch: futarchy_primitives::Branch::Accept,
+                    gate: futarchy_primitives::GateType::Survival,
+                },
+                futarchy_primitives::FixedU64(0),
+                early_end,
+                (params.decision_window, params.trailing_window),
+                gate_b,
+                gate_contest,
+            ),
+            seed_decision_grade_market(
+                early_gates[1],
+                pallet_market::core_market::BookKind::Gate {
+                    proposal: EARLY_PID,
+                    branch: futarchy_primitives::Branch::Reject,
+                    gate: futarchy_primitives::GateType::Survival,
+                },
+                futarchy_primitives::FixedU64(0),
+                early_end,
+                (params.decision_window, params.trailing_window),
+                gate_b,
+                gate_contest,
+            ),
+            seed_decision_grade_market(
+                early_gates[2],
+                pallet_market::core_market::BookKind::Gate {
+                    proposal: EARLY_PID,
+                    branch: futarchy_primitives::Branch::Accept,
+                    gate: futarchy_primitives::GateType::Security,
+                },
+                futarchy_primitives::FixedU64(0),
+                early_end,
+                (params.decision_window, params.trailing_window),
+                gate_b,
+                gate_contest,
+            ),
+            seed_decision_grade_market(
+                early_gates[3],
+                pallet_market::core_market::BookKind::Gate {
+                    proposal: EARLY_PID,
+                    branch: futarchy_primitives::Branch::Reject,
+                    gate: futarchy_primitives::GateType::Security,
+                },
+                futarchy_primitives::FixedU64(0),
+                early_end,
+                (params.decision_window, params.trailing_window),
+                gate_b,
+                gate_contest,
             ),
             seed_two_window_baseline(
                 early_markets.baseline,
@@ -12936,7 +13360,7 @@ fn view_decision_stats_pins_effective_floor_pair_minima_gates_and_convergence() 
         let gates = match markets.gates {
             Some(gates) => gates,
             None => {
-                assert!(false, "Treasury >1%-NAV fixture must carry gate books");
+                assert!(false, "Treasury fixture must carry gate books");
                 return;
             }
         };
@@ -13076,8 +13500,7 @@ fn view_decision_stats_pins_effective_floor_pair_minima_gates_and_convergence() 
                 return;
             }
         };
-        // prize is 4% of spendable NAV: it remains in-cap while legitimately
-        // requiring the 05 §5.1 Treasury gate quartet.
+        // Every Treasury proposal requires the 05 §5.1 gate quartet.
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
             state.main_usdc = prize.saturating_mul(25);
         });

@@ -3290,16 +3290,6 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         pallet_welfare::Pallet::<Runtime>::active_snapshot_spec(epoch)
     }
 
-    fn treasury_gate_required(proposal: &futarchy_primitives::Proposal<AccountId>) -> bool {
-        if !matches!(proposal.class, futarchy_primitives::ProposalClass::Treasury) {
-            return false;
-        }
-        let nav = crate::FutarchyTreasury::nav().spendable_nav;
-        nav.checked_mul(kernel::TREASURY_GATE_NAV_BPS)
-            .and_then(|value| value.checked_div(kernel::BASIS_POINTS_DENOMINATOR))
-            .is_none_or(|threshold| proposal.ask > threshold)
-    }
-
     fn attestation_artifact(
         proposal: &futarchy_primitives::Proposal<AccountId>,
     ) -> Option<futarchy_primitives::H256> {
@@ -3362,12 +3352,7 @@ impl pallet_epoch::PolBudget<AccountId> for RuntimePolBudget {
         let decision = pallet_market::core_market::seed_headroom(b)
             .ok()?
             .checked_mul(2)?;
-        let gate_required = matches!(
-            proposal.class,
-            futarchy_primitives::ProposalClass::Code | futarchy_primitives::ProposalClass::Meta
-        ) || <RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
-            AccountId,
-        >>::treasury_gate_required(proposal);
+        let gate_required = pallet_epoch::requires_gate_markets(proposal.class);
         if gate_required {
             let gate_b = balance_param_or(b"pol.b_gate", pallet_constitution::POL_GATE_B_DEFAULT);
             let gates = pallet_market::core_market::seed_headroom(gate_b)

@@ -79,14 +79,18 @@ DECISION_SCENARIOS = [
     {
         "name": "gate_book_invalid",
         "inputs": {
-            "requires_gate_markets": True,
+            "proposal_class": "Treasury",
+            "ask": "100",
+            "spendable_nav": "7393600",
             "gate_book_valid": False,
         },
     },
     {
         "name": "gate_veto_survival",
         "inputs": {
-            "requires_gate_markets": True,
+            "proposal_class": "Treasury",
+            "ask": "100",
+            "spendable_nav": "7393600",
             "p_adopt": {"Survival": "0.06"},
             "p_reject": {"Survival": "0.01"},
         },
@@ -94,7 +98,9 @@ DECISION_SCENARIOS = [
     {
         "name": "gate_veto_security",
         "inputs": {
-            "requires_gate_markets": True,
+            "proposal_class": "Treasury",
+            "ask": "100",
+            "spendable_nav": "7393600",
             "p_adopt": {"Survival": "0.01", "Security": "0.06"},
             "p_reject": {"Survival": "0.01", "Security": "0.01"},
         },
@@ -102,7 +108,9 @@ DECISION_SCENARIOS = [
     {
         "name": "gate_veto_precedes_welfare_invalid",
         "inputs": {
-            "requires_gate_markets": True,
+            "proposal_class": "Treasury",
+            "ask": "100",
+            "spendable_nav": "7393600",
             "p_adopt": {"Survival": "0.06"},
             "welfare_grade": "Invalid",
         },
@@ -110,7 +118,9 @@ DECISION_SCENARIOS = [
     {
         "name": "gate_veto_precedes_later_gate_invalid",
         "inputs": {
-            "requires_gate_markets": True,
+            "proposal_class": "Treasury",
+            "ask": "100",
+            "spendable_nav": "7393600",
             "gate_valid": {"Survival": True, "Security": False},
             "p_adopt": {"Survival": "0.06"},
             "p_reject": {"Survival": "0.01"},
@@ -1460,33 +1470,15 @@ def _ledger_error_scenarios():
 
 def _treasury_scenarios():
     rows = []
-    for name, large in [
-        ("Param", False),
-        ("Treasury", False),
-        ("Treasury", True),
-        ("Code", False),
-        ("Meta", False),
-    ]:
+    for name in ("Param", "Treasury", "Code", "Meta"):
         rows.append(
             {
-                "name": f"{name.lower()}_pol"
-                + ("_large" if large else ""),
-                "inputs": {
-                    "proposal_class": name,
-                    "large_treasury": large,
-                },
-                "commitment": format(
-                    pol_commitment(name, large_treasury=large), "f"
-                ),
-                "commitment_display": display_integer(
-                    pol_commitment(name, large_treasury=large)
-                ),
-                "nav_floor": format(
-                    nav_floor(name, large_treasury=large), "f"
-                ),
-                "nav_floor_display": display_integer(
-                    nav_floor(name, large_treasury=large)
-                ),
+                "name": f"{name.lower()}_pol",
+                "inputs": {"proposal_class": name},
+                "commitment": format(pol_commitment(name), "f"),
+                "commitment_display": display_integer(pol_commitment(name)),
+                "nav_floor": format(nav_floor(name), "f"),
+                "nav_floor_display": display_integer(nav_floor(name)),
             }
         )
     code_nav = Decimal("13862944")

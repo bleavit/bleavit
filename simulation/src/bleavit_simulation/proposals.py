@@ -20,7 +20,6 @@ NAV_FLOORS = {
     "code": Decimal("13862944"),
     "meta": Decimal("21256533"),
 }
-TREASURY_SMALL_NAV_FLOOR = Decimal("4620981")
 NAV_REGIMES = (
     ("floor", Decimal("1.00")),
     ("growth", Decimal("1.75")),
@@ -122,11 +121,7 @@ def generate_proposal_with_config(
     jitter = jitter_min + Decimal(str(rng.random())) * (jitter_max - jitter_min)
     with localcontext() as ctx:
         ctx.prec = 50
-        base_floor = (
-            TREASURY_SMALL_NAV_FLOOR
-            if proposal_class == "treasury" and regime == "floor"
-            else NAV_FLOORS[proposal_class]
-        )
+        base_floor = NAV_FLOORS[proposal_class]
         nav = min(
             Decimal("100000000"),
             (base_floor * multiplier * jitter).quantize(
@@ -191,9 +186,11 @@ def generate_proposal_with_config(
     )
     formation_row = _weighted_row(rng, formation_rows, 3)
 
-    gate_exposure = "gate" if proposal_class in ("code", "meta") or (
-        proposal_class == "treasury" and ask > nav * Decimal("0.01")
-    ) else "no_gate"
+    gate_exposure = (
+        "gate"
+        if proposal_class in ("treasury", "code", "meta")
+        else "no_gate"
+    )
     correlation = Decimal("0.75") if config is None else Decimal(config.gate_harm_correlation)
     latent = Decimal(str(rng.random()))
     elevated = harmful and latent < correlation

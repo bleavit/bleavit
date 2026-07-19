@@ -1,4 +1,4 @@
-//! Read-only assembly for the contract-v4 `FutarchyApi` surface (02 §3-§4).
+//! Read-only assembly for the contract-v5 `FutarchyApi` surface (02 §3-§4).
 
 use alloc::vec::Vec;
 
@@ -369,7 +369,7 @@ pub fn params(
     out
 }
 
-/// Assemble contract-v4 `FutarchyApi::nav` per 02 §3/§4 and 08
+/// Assemble contract-v5 `FutarchyApi::nav` per 02 §3/§4 and 08
 /// §1.1/§1.2/§4.1. POL includes both proposal and dedicated Baseline
 /// lines. Insurance comes from the actual INSURANCE USDC custody account.
 pub fn nav() -> NavView {

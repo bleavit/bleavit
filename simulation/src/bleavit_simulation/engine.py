@@ -731,7 +731,6 @@ def _evaluate(
         reject_trailing_effective=max(reject.trailing, baseline_trailing - sigma),
         converged=converged,
         extended=extended,
-        requires_gate_markets=_requires_gate(proposal),
         gate_valid=gate_valid,
         p_adopt=p_adopt,
         p_reject=p_reject,

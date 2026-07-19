@@ -31,12 +31,12 @@ use futarchy_primitives::{
 
 pub use epoch_core::{
     attack_cost_hat, decision_converged, effective_baseline_twaps, effective_reject_1e9,
-    CohortInfo as CoreCohortInfo, CohortStatus, DecisionGuards, DecisionInputs,
-    EpochInfo as CoreEpochInfo, EpochParams as CoreEpochParams, EpochState, Error as CoreError,
-    Event as CoreEvent, LedgerOps as CoreLedgerOps, Origin as CoreOrigin, SettlementTarget,
-    StaticCheckDisposition, TickInputs, WelfareGrade, WelfareOps as CoreWelfareOps,
-    MAX_ACTIVE_PER_EPOCH, MAX_INTAKE_QUEUE, MAX_LIVE_PROPOSALS, MAX_NON_TERMINAL_COHORTS,
-    MAX_RESOURCES_PER_PROPOSAL, RECENT_COHORTS,
+    requires_gate_markets, CohortInfo as CoreCohortInfo, CohortStatus, DecisionGuards,
+    DecisionInputs, EpochInfo as CoreEpochInfo, EpochParams as CoreEpochParams, EpochState,
+    Error as CoreError, Event as CoreEvent, LedgerOps as CoreLedgerOps, Origin as CoreOrigin,
+    SettlementTarget, StaticCheckDisposition, TickInputs, WelfareGrade,
+    WelfareOps as CoreWelfareOps, MAX_ACTIVE_PER_EPOCH, MAX_INTAKE_QUEUE, MAX_LIVE_PROPOSALS,
+    MAX_NON_TERMINAL_COHORTS, MAX_RESOURCES_PER_PROPOSAL, RECENT_COHORTS,
 };
 
 pub const MAX_INTAKE_QUEUE_BOUND: u32 = MAX_INTAKE_QUEUE as u32;
@@ -166,7 +166,6 @@ pub trait ConstitutionAccess<AccountId> {
     /// engages; the epoch recovery boundary is the sole clearing caller.
     fn note_dead_man_engaged(engaged: bool) -> DispatchResult;
     fn active_metric_spec_version() -> Option<MetricSpecVersion>;
-    fn treasury_gate_required(proposal: &Proposal<AccountId>) -> bool;
     /// Canonical CODE/META artifact commitment checked by attestors. `None`
     /// is an ambiguous payload and therefore blocks adoption.
     fn attestation_artifact(proposal: &Proposal<AccountId>) -> Option<H256>;

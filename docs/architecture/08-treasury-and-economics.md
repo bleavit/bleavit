@@ -100,7 +100,7 @@ The reserve exists for values-layer continuity (guardian bonds, conviction depth
 - HRMP to Asset Hub opens Phase 2 (Paseo) / Phase 3 (Polkadot); initial USDC transferred in before Phase-4 arming (BE §27.4 carried forward).
 - **Funding target: ≥ 25,000,000 USDC before Phase-5 (TREASURY) arming** (D-15). Adequacy arithmetic against the §4 floors:
   - Phase-4 (binding PARAM): full 5-slot PARAM epoch needs NAV ≥ 5 × 13,863 / 0.75% = **9,241,960 USDC** — the Phase-4 arming floor.
-  - At 25M NAV the per-epoch POL budget is 0.75% × 25M = **187,500 USDC**, which fits a realistic mixed slate: 1 CODE (103,972) + 1 TREASURY>1% (55,452) + 2 PARAM (2 × 13,863) = **187,150 USDC ≤ 187,500** ✔ (the Baseline book is funded outside this budget, §4.3).
+  - At 25M NAV the per-epoch POL budget is 0.75% × 25M = **187,500 USDC**, which fits a realistic mixed slate: 1 CODE (103,972) + 1 TREASURY (55,452) + 2 PARAM (2 × 13,863) = **187,150 USDC ≤ 187,500** ✔ (the Baseline book is funded outside this budget, §4.3).
   - 25M > 13.87M = the one-CODE floor, so Phase-6 arming is reachable without further funding **if** NAV has not decayed; the §4 gate re-checks at arming time regardless.
 
 **Reporter-stake bootstrap (B-15-adjacent sequencing, D-15).** Phase-3 arming requires ≥ 3 registered reporters with full `orc.reporter_stake` = 100,000 USDC stakes. The treasury MAY extend **recallable USDC loans** (per-reporter ≤ 75,000 USDC, line backstopped by the 10% incentive allocation) held directly as reporter stake, never withdrawable by the reporter. The reporter MUST post ≥ 25% (≥ 25,000 USDC) of own capital, and **slashing consumes the reporter's own tranche first** — a loan with no reporter skin would deter nothing. Loans are recallable by TREASURY decision or automatically on reporter exit/ejection. Bootstrap line sizing: 3–5 reporters × 75,000 = 225,000–375,000 USDC.
@@ -116,8 +116,7 @@ Book inventory per class under the reconciled bound of ≤ 6 books/proposal (2 d
 | Class | Books | Commitment formula | Commitment (USDC) |
 |---|---|---|---|
 | PARAM | 2 decision | 2 × 10,000 × ln 2 | **13,863** |
-| TREASURY ≤ 1% NAV | 2 decision | 2 × 25,000 × ln 2 | **34,657** |
-| TREASURY > 1% NAV | 2 decision + 4 gate | (2 × 25,000 + 4 × 7,500) × ln 2 = 80,000 × ln 2 | **55,452** |
+| TREASURY (all ask sizes) | 2 decision + 4 gate | (2 × 25,000 + 4 × 7,500) × ln 2 = 80,000 × ln 2 | **55,452** |
 | CODE | 2 decision + 4 gate | (2 × 60,000 + 4 × 7,500) × ln 2 = 150,000 × ln 2 | **103,972** |
 | META | 2 decision + 4 gate | (2 × 100,000 + 4 × 7,500) × ln 2 = 230,000 × ln 2 | **159,424** |
 | Baseline (per epoch) | 1 | 25,000 × ln 2 (`pol.b_baseline`, §4.3) | **17,329** |
@@ -135,8 +134,7 @@ With `pol.budget_epoch` = 0.75% NAV, seeding one proposal of class K requires NA
 | Gate | Requirement | Floor (USDC) |
 |---|---|---|
 | 1 × PARAM | 13,863 / 0.0075 | **1,848,400** |
-| 1 × TREASURY ≤ 1% | 34,657 / 0.0075 | **4,620,981** |
-| 1 × TREASURY > 1% | 55,452 / 0.0075 | **7,393,600** |
+| 1 × TREASURY (all ask sizes) | 55,452 / 0.0075 | **7,393,600** |
 | 1 × CODE | 103,972 / 0.0075 | **13,862,944** (~13.9M — the D-15 “one CODE ⇒ ≥ ~14M”) |
 | 1 × META | 159,424 / 0.0075 | **21,256,533** |
 | Full 5-slot PARAM epoch | 69,315 / 0.0075 | **9,241,960** |
@@ -148,7 +146,7 @@ With `pol.budget_epoch` = 0.75% NAV, seeding one proposal of class K requires NA
 
 ### 4.3 The Baseline book is funded outside `pol.budget_epoch`
 
-`pol.b_baseline` = **25,000 USDC** (default; **simulation-gated — [VERIFY via Phase-0/3 calibration]**), commitment 17,329 USDC/epoch from the dedicated `POL_BASELINE` line, ≤ 4 concurrently live Baseline books (one per live epoch) ⇒ ≤ 69,315 USDC standing. Rationale: (a) the Baseline TWAP is the reject-leg floor input to **every** decision ([05](05-welfare-and-decision-engine.md)) and must exist even in an epoch with zero qualified proposals, so it MUST NOT compete with proposal subsidies under shrink-to-fit; (b) its manipulation resistance must be at least mid-class, hence the TREASURY-tier `b`. This also keeps the §4.1 floors identical to the review's recomputation (which excluded Baseline). Ledger home and settlement path: [03](03-conditional-ledger.md)/[04](04-markets-and-pricing.md) (B-3).
+`pol.b_baseline` = **25,000 USDC** (default; **simulation-gated — [VERIFY via Phase-0/3 calibration]**), commitment 17,329 USDC/epoch from the dedicated `POL_BASELINE` line, ≤ 4 concurrently live Baseline books (one per live epoch) ⇒ ≤ 69,315 USDC standing. Rationale: (a) the Baseline TWAP is the reject-leg floor input to **every** decision ([05](05-welfare-and-decision-engine.md)) and must exist even in an epoch with zero qualified proposals, so it MUST NOT compete with proposal subsidies under shrink-to-fit; (b) its manipulation resistance must be at least mid-class, hence the TREASURY-tier `b`. This keeps the Baseline commitment outside the §4.1 proposal-class floor arithmetic. Ledger home and settlement path: [03](03-conditional-ledger.md)/[04](04-markets-and-pricing.md) (B-3).
 
 ### 4.4 Slots shrink to fit — with an event
 
@@ -190,6 +188,8 @@ REQUIRE  InCapPrize(p) ≤ AttackCost̂(p) / 3   else Reject(SecuritySizing)
 | PARAM | certified capability-envelope value of the parameter delta (static classification, [05](05-welfare-and-decision-engine.md)) |
 | TREASURY | `ask` (already ≤ `trs.cap_proposal`·NAV by the outflow cap) |
 | CODE / META | max(`ask`, envelope), conservatively floored at `trs.cap_proposal`·NAV for runtime-upgrade payloads — an upgrade is assumed able to reach the full per-proposal outflow cap |
+
+Every TREASURY proposal also undergoes the four gate-book veto checks of [05](05-welfare-and-decision-engine.md) §5, regardless of whether its ask is above or below `trs.stream_threshold`; that threshold continues to govern payout streaming only (§1.3), not gate eligibility.
 
 NAV in this computation is `spendable NAV` (§1.2): under the reserve-health flag it is 0 and — consistently — no new adoption passes sizing. All inputs are decide-time on-chain measurements; the cap therefore **scales with the value at stake by construction**, which the flat defaults never did.
 

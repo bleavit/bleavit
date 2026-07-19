@@ -11,6 +11,7 @@ from bleavit_reference_model.decision import (
     decide,
     gate_decision_grade,
     grade_welfare_book,
+    requires_gate_markets,
 )
 from bleavit_reference_model.ledger import (
     BaselineVault,
@@ -444,21 +445,21 @@ class ReferenceModelTests(unittest.TestCase):
             ({"process_hold": True}, RejectReason.PROCESS_HOLD),
             (
                 {
-                    "requires_gate_markets": True,
+                    "proposal_class": "Treasury",
                     "gate_book_valid": False,
                 },
                 RejectReason.NOT_DECISION_GRADE,
             ),
             (
                 {
-                    "requires_gate_markets": True,
+                    "proposal_class": "Treasury",
                     "p_adopt": {"Survival": Decimal("0.06")},
                 },
                 RejectReason.GATE_VETO_SURVIVAL,
             ),
             (
                 {
-                    "requires_gate_markets": True,
+                    "proposal_class": "Treasury",
                     "p_adopt": {"Security": Decimal("0.06")},
                 },
                 RejectReason.GATE_VETO_SECURITY,
@@ -527,11 +528,39 @@ class ReferenceModelTests(unittest.TestCase):
             Decimal("0.56"),
             Decimal("0.50"),
             Decimal("0.05"),
-            requires_gate_markets=True,
+            proposal_class="Treasury",
             p_adopt={"Survival": Decimal("0.06")},
             welfare_grade=Grade.INVALID,
         )
         self.assertEqual(result.reason, RejectReason.GATE_VETO_SURVIVAL)
+
+    def test_low_ask_treasury_is_gate_bearing_and_both_vetoes_are_reachable(self):
+        self.assertFalse(requires_gate_markets("Param"))
+        for proposal_class in ("Treasury", "Code", "Meta"):
+            with self.subTest(proposal_class=proposal_class):
+                self.assertTrue(requires_gate_markets(proposal_class))
+
+        inputs = {
+            "accept_full": Decimal("0.56"),
+            "reject_full_effective": Decimal("0.50"),
+            "delta": Decimal("0.05"),
+            "proposal_class": "Treasury",
+            "ask": Decimal("100"),
+            "spendable_nav": Decimal("7393600"),
+        }
+        survival = decide(
+            **inputs,
+            p_adopt={"Survival": Decimal("0.06")},
+            p_reject={"Survival": Decimal("0.01")},
+        )
+        security = decide(
+            **inputs,
+            p_adopt={"Survival": Decimal("0.01"), "Security": Decimal("0.06")},
+            p_reject={"Survival": Decimal("0.01"), "Security": Decimal("0.01")},
+        )
+        self.assertLessEqual(inputs["ask"], inputs["spendable_nav"] / Decimal(100))
+        self.assertEqual(survival.reason, RejectReason.GATE_VETO_SURVIVAL)
+        self.assertEqual(security.reason, RejectReason.GATE_VETO_SECURITY)
 
     def test_first_insufficiency_extends_second_rejects(self):
         first = decide(
@@ -702,36 +731,26 @@ class ReferenceModelTests(unittest.TestCase):
 
     def test_pol_commitments_and_nav_floor_worked_numbers(self):
         commitment_cases = [
-            (("Param", False), 13_863),
-            (("Treasury", False), 34_657),
-            (("Treasury", True), 55_452),
-            (("Code", False), 103_972),
-            (("Meta", False), 159_424),
+            ("Param", 13_863),
+            ("Treasury", 55_452),
+            ("Code", 103_972),
+            ("Meta", 159_424),
         ]
-        for (proposal_class, large), displayed in commitment_cases:
-            model = display_integer(
-                pol_commitment(
-                    proposal_class, large_treasury=large
-                )
-            )
+        for proposal_class, displayed in commitment_cases:
+            model = display_integer(pol_commitment(proposal_class))
             self.assertEqual(model, displayed)
         self.assertEqual(display_integer(baseline_commitment()), 17_329)
 
         floor_cases = [
-            (("Param", 1, False), 1_848_400),
-            (("Treasury", 1, False), 4_620_981),
-            (("Treasury", 1, True), 7_393_600),
-            (("Code", 1, False), 13_862_944),
-            (("Meta", 1, False), 21_256_533),
-            (("Param", 5, False), 9_241_960),
-            (("Meta", 5, False), 106_282_533),
+            (("Param", 1), 1_848_400),
+            (("Treasury", 1), 7_393_600),
+            (("Code", 1), 13_862_944),
+            (("Meta", 1), 21_256_533),
+            (("Param", 5), 9_241_960),
+            (("Meta", 5), 106_282_533),
         ]
-        for (proposal_class, slots, large), displayed in floor_cases:
-            model = nav_floor(
-                proposal_class,
-                slots=slots,
-                large_treasury=large,
-            )
+        for (proposal_class, slots), displayed in floor_cases:
+            model = nav_floor(proposal_class, slots=slots)
             self.assertLessEqual(abs(model - displayed), Decimal(10))
 
     def test_security_worked_numbers_and_scaling(self):

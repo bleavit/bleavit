@@ -13,8 +13,7 @@
 | Class | Markets | Books |
 | --- | --- | --- |
 | PARAM | decision pair (ACCEPT-scalar, REJECT-scalar) | 2 |
-| TREASURY ≤ 1% NAV | decision pair | 2 |
-| TREASURY > 1% NAV, CODE, META | decision pair + 4 gate books (S,C)×(adopt,reject) | 6 |
+| TREASURY, CODE, META | decision pair + 4 gate books (S,C)×(adopt,reject) | 6 |
 | Per epoch (unconditional) | Baseline welfare market on `s_e` (§8) | 1 |
 | CONSTITUTIONAL | none (referendum path) | 0 |
 
@@ -28,7 +27,7 @@ Books per proposal ≤ **6** (2 decision + 4 gate). Live Baseline books ≤ **4*
 MaxLiveMarkets = 32·6 + 4 = 196
 ```
 
-Typical per-epoch creation load is `N_active·6 + 1 = 31` books. All PoV/storage budgets derive from the 196 bound (re-derivation table in [13-parameters.md](./13-parameters.md)). The prior 121/225/7-books figures are superseded (D-10).
+Universal TREASURY gating does not change this maximum: six books was already the per-proposal upper bound. Typical per-epoch creation load is `N_active·6 + 1 = 31` books. All PoV/storage budgets derive from the 196 bound (re-derivation table in [13-parameters.md](./13-parameters.md)). The prior 121/225/7-books figures are superseded (D-10).
 
 ---
 
@@ -215,7 +214,7 @@ This is the capture-resistance adaptation of the reject-leg floor: suppressing t
 
 ## 9. Gate markets
 
-For CODE, META, and TREASURY > 1% NAV: **four binary books per proposal** — question: "Conditional on ADOPT (resp. REJECT), will the `g` daily floor-breach flag be set on ≥ 1 day during epochs e+1…e+2?", for `g ∈ {S, C}`.
+For CODE, META, and **every TREASURY proposal irrespective of ask/NAV ratio**: **four binary books per proposal** — question: "Conditional on ADOPT (resp. REJECT), will the `g` daily floor-breach flag be set on ≥ 1 day during epochs e+1…e+2?", for `g ∈ {S, C}`.
 
 - **Instruments.** YES/NO complete sets against branch-USDC in the corresponding branch: `PositionKind::GateYes(g)` / `GateNo(g)` per branch, with per-branch gate-set supplies in `VaultInfo` and the conservation identity extended over the enlarged set — the B-2 ledger fix makes the four-book set representable; normative instrument semantics in [03-conditional-ledger.md](./03-conditional-ledger.md).
 - **Mechanism.** Identical LMSR (§3–§4) with YES ↦ LONG, NO ↦ SHORT; subsidy `b = pol.b_gate` (*value: §13*); same wrapper, recycling, and `b·ln 2` headroom (§6); a complete YES+NO set is worth 1 branch-USDC at either flag outcome.

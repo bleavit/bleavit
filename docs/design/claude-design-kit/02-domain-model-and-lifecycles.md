@@ -73,7 +73,7 @@ pauses — the UI must tolerate a paused clock.
 ## 3. Markets & trading (04)
 
 Per proposal: a **decision pair** (ACCEPT-scalar + REJECT-scalar book); gated classes
-(TREASURY > 1% NAV, CODE, META) add **4 gate books** ((Survival, Security) × (adopt,
+(every TREASURY proposal, CODE, META) add **4 gate books** ((Survival, Security) × (adopt,
 reject)); each epoch has one unconditional **Baseline** book. CONSTITUTIONAL proposals have
 no markets (referendum path). Typical epoch ≈ 31 live books; max 196.
 
