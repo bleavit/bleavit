@@ -151,29 +151,41 @@ Changes from the superseded §6.2: the frame-system "nobody" row is enforced **f
 impl Contains<RuntimeCall> for SafetyFilter {
     fn contains(c: &RuntimeCall) -> bool {
         // ONE budget for the whole evaluation — never reset per wrapper.
-        let mut b = Budget::new(MAX_NESTED_TOTAL, MAX_NESTED);
+        let mut b = Budget::root();          // { depth: 0, calls: 0 }
         Self::check(c, &mut b)
     }
 }
 
 impl SafetyFilter {
+    /// `calls` accumulates over the WHOLE tree and is never restored; `depth`
+    /// IS restored on the way out, so it bounds the longest root-to-leaf path
+    /// rather than the number of siblings.
+    fn nested(b: &mut Budget, f: impl FnOnce(&mut Budget) -> bool) -> bool {
+        if b.enter().is_err() { return false }   // depth ≤ MAX_NESTED = 4
+        let ok = f(b);
+        b.leave();
+        ok
+    }
+
     fn check(c: &RuntimeCall, b: &mut Budget) -> bool {
-        if !b.count_node() { return false }   // every node — wrapper or leaf — costs one
+        if b.count_call().is_err() { return false }  // ≤ 16 nodes, wrappers included
         match c {
             RuntimeCall::Utility(pallet_utility::Call::batch { calls })
             | RuntimeCall::Utility(pallet_utility::Call::batch_all { calls })
             | RuntimeCall::Utility(pallet_utility::Call::force_batch { calls })
-                => b.descend() && calls.iter().all(|c| Self::check(c, b)),
+                => Self::nested(b, |b| calls.iter().all(|c| Self::check(c, b))),
             RuntimeCall::Proxy(pallet_proxy::Call::proxy { call, .. })
             | RuntimeCall::Proxy(pallet_proxy::Call::proxy_announced { call, .. })
             | RuntimeCall::Multisig(pallet_multisig::Call::as_multi { call, .. })
             | RuntimeCall::Multisig(pallet_multisig::Call::as_multi_threshold_1 { call, .. })
-                => !is_privileged_domain(call) && b.descend() && Self::check(call, b),
+                => !is_privileged_domain(call)
+                    && Self::nested(b, |b| Self::check(call, b)),
             RuntimeCall::Utility(pallet_utility::Call::dispatch_as { .. })
             | RuntimeCall::Utility(pallet_utility::Call::as_derivative { .. }) => false,
             #[cfg(feature = "bootstrap")] // compiled out at the Phase-3→4 upgrade
             RuntimeCall::Sudo(sudo_call)
-                => sudo_inner(sudo_call).map_or(true, |c| Self::check(c, b)),
+                => sudo_inner(sudo_call)
+                    .map_or(true, |c| Self::nested(b, |b| Self::check(c, b))),
             RuntimeCall::Scheduler(..) => scheduled_inner_allowed(c), // values-enactment set only
             _ => static_domain_allowed(c),
         }
@@ -183,7 +195,7 @@ impl SafetyFilter {
 
 Nesting depth is bounded (4 levels, ≤ 16 calls total, matching the payload bounds), so filter evaluation weight is bounded.
 
-**What "≤ 16 calls total" counts (normative; SQ-31 resolution, 2026-07-20).** The bound counts **nodes**: every call in the evaluated tree — each wrapper **and** each leaf — consumes one unit of a **single budget shared by the whole filter evaluation**, never reset per wrapper. A `utility.batch` variant with `N` direct children therefore costs `N + 1`. The per-`batch` reading suggested by earlier drafts of the pseudocode above is **not** normative: it bounds no total and so cannot deliver the bounded-evaluation-weight guarantee this section claims. The node reading costs no payload liveness, because the execution-guard payload is a top-level `BoundedVec<RuntimeCall, prop.max_calls>` ([09](./09-execution-upgrades-and-rollout.md) §1.2(11)) and **not** a `utility.batch`: a maximal `prop.max_calls`-call payload costs exactly `prop.max_calls` units and remains executable, and when the guard evaluates such a payload the budget is shared across all of its top-level calls. The one observable consequence is user-facing: a directly submitted `utility.batch` admits at most `prop.max_calls − 1` children.
+**What "≤ 16 calls total" counts (normative; SQ-31 resolution, 2026-07-20).** The bound counts **nodes**: every call in the evaluated tree — each wrapper **and** each leaf — consumes one unit of a **single budget shared by the whole filter evaluation**, never reset per wrapper. A `utility.batch` variant with `N` direct children therefore costs `N + 1`. The per-`batch` reading suggested by earlier drafts of the pseudocode above is **not** normative: it bounds no total and so cannot deliver the bounded-evaluation-weight guarantee this section claims. The node reading costs no payload liveness for the ordinary shape, because the execution-guard payload is a top-level `BoundedVec<RuntimeCall, prop.max_calls>` ([09](./09-execution-upgrades-and-rollout.md) §1.2(11)) and **not** a `utility.batch`: a maximal **flat** `prop.max_calls`-call payload costs exactly `prop.max_calls` units and remains executable, the budget being shared across all of its top-level calls. Two consequences follow and are normative. (i) A directly submitted `utility.batch` admits at most `prop.max_calls − 1` children. (ii) A payload that recurses through `utility.batch_all` — the one wrapper [05](./05-welfare-and-decision-engine.md) §1.4 blesses for nested payloads — spends one unit per wrapper node, so it carries one fewer leaf call per level of nesting. Proposers wanting the full `prop.max_calls` leaf budget MUST submit a flat payload.
 
 **G-5 restated (no-escalation guarantee).** Every privileged effect flows through an enumerated custom origin produced by an enumerated pallet; **no composition of `utility` batch variants, `proxy` variants (`proxy`, `proxy_announced`), `multisig` variants (`as_multi`, `as_multi_threshold_1`, `approve_as_multi`), scheduler agendas, sudo wrappers (Phases 0–3), or XCM messages can produce a custom governance origin or Root, or reach a call in the "nobody" row.** Escalation through `utility.dispatch_as` is prevented by filtering that call entirely; through XCM `Transact` by the barrier refusing `Transact` from all locations ([09](./09-execution-upgrades-and-rollout.md)); through the scheduler because scheduled dispatch re-enters origin checks with the origin captured at scheduling. Enforced by the negative-test suite over all wrapper compositions (I-10/I-11).
 
@@ -282,9 +294,9 @@ Every activation **that dispatches an effect** emits `PlaybookActivated { id, tr
 
 **No-effect activation (normative; SQ-278 resolution, 2026-07-20).** A playbook row whose admissible call set is **empty** has no dispatchable activation: a fifth approval reaching it fails closed, the whole extrinsic reverts, and nothing is recorded — no `PlaybookActivated`, no allowance consumption, no review record. This is the status-quo default (G-1): no effect is dispatched and no origin is widened (R-7). `PB-MIGRATION` is the only such row on stable2606, and its accountability path is therefore **not** the guardian review but the automatic `MigrationHalt` halt-source bridge and that bridge's own event stream ([09](./09-execution-upgrades-and-rollout.md) §3.2). The universal quantifier above ranges over effect-dispatching activations only.
 
-**Activation expiry bounds (normative; SQ-45(a) resolution, 2026-07-20).** The kernel enforces one uniform activation window of 14 days (`pb.ledger_freeze_max`, *(normative value: [13](./13-parameters.md))*) on **every** playbook, and each row's Expiry column binds as an additional, **never weaker**, bound. Two consequences are normative. (i) `PB-DEPEG`'s "≤ 1 epoch" binds as the **kernel epoch floor** (`MIN_EPOCH_LENGTH_BLOCKS`), not the live `epoch.length`, so a governed lengthening of the epoch can never lengthen the playbook. (ii) An **activation record MUST NOT be used as a trigger source** for any other playbook: every trigger is derived from its own underlying on-chain condition, never from the fact that some playbook is currently active. Rule (ii) is what keeps §5.2's "only while that playbook's verified on-chain trigger is active" honest for a one-shot row such as `PB-ORACLE-VOID`, whose activation record necessarily outlives the instantaneous condition that justified it.
+**Activation expiry bounds (normative; SQ-45(a) resolution, 2026-07-20).** The kernel enforces one uniform activation window of 14 days — the same window 13 §2's `PB-LEDGER-FREEZE` row states, applied playbook-neutrally *(normative value: [13](./13-parameters.md))* — on **every** playbook. Each row's Expiry column binds as an additional bound wherever it expresses a **duration**, and where it does so it is never weaker than the uniform window. The two rows whose Expiry is not a duration are governed by the uniform window alone: `PB-MIGRATION` ("until migration resolves") is unbounded in the table and in any case has no dispatchable activation per the rule above — the halt it stands for is the `MigrationHalt` bridge, which carries no activation timer — and `PB-ORACLE-VOID` ("one-shot") names a multiplicity, not a lifetime, its effect being instantaneous. Two further consequences are normative. (i) `PB-DEPEG`'s "≤ 1 epoch" binds as the **kernel epoch floor** (`MIN_EPOCH_LENGTH_BLOCKS`), not the live `epoch.length`, so a governed lengthening of the epoch can never lengthen the playbook. (ii) An **activation record MUST NOT be used as a trigger source** for any other playbook: every trigger is derived from its own underlying on-chain condition, never from the fact that some playbook is currently active. Rule (ii) is what keeps §5.2's "only while that playbook's verified on-chain trigger is active" honest for a one-shot row such as `PB-ORACLE-VOID`, whose activation record necessarily outlives the instantaneous condition that justified it.
 
-**Substrate (B1b).** The six playbooks' effect batches are **kernel-enumerated runtime routines implementing exactly this table** — each activation constructs its row's calls with activation-time arguments (target cohort, `expiry` = activation block + the row's bound) and dispatches them under the `EmergencyPlaybook` origin; a per-playbook conformance test asserts each routine's constructed calls classify into precisely that row's admissible call set (the "checked mechanically against the call-domain classifier" obligation, discharged structurally). The values-governed registry surface is per-playbook **availability**: `guardian.set_playbook_registered(id, enabled)` (`guardian` track, §2.1), with all six registered at genesis — they are ratified by inclusion in this constitution. A *new* playbook, or an amended row, is therefore a CODE/META change to this table plus its routine, values-ratified like any other; the registry toggle alone can only disable or re-enable one of the six. Effect endpoints are expiry-carrying at the *pallet* level too (`epoch.set_intake_paused`, `market.freeze_creation`, `ledger.set_split_paused` carry `expiry`; the §6.3 freezes carry the kernel 14-day window internally), so a stalled guardian crank can delay an explicit revert but can never extend an effect past its kernel bound.
+**Substrate (B1b).** The **five effect-dispatching** playbooks' effect batches are **kernel-enumerated runtime routines implementing exactly this table** (`PB-MIGRATION` has an empty admissible call set and constructs none — see the no-effect rule above) — each activation constructs its row's calls with activation-time arguments (target cohort, `expiry` = activation block + the row's bound) and dispatches them under the `EmergencyPlaybook` origin; a per-playbook conformance test asserts each routine's constructed calls classify into precisely that row's admissible call set (the "checked mechanically against the call-domain classifier" obligation, discharged structurally). The values-governed registry surface is per-playbook **availability**: `guardian.set_playbook_registered(id, enabled)` (`guardian` track, §2.1), with all six registered at genesis — they are ratified by inclusion in this constitution. A *new* playbook, or an amended row, is therefore a CODE/META change to this table plus its routine, values-ratified like any other; the registry toggle alone can only disable or re-enable one of the six. Effect endpoints are expiry-carrying at the *pallet* level too (`epoch.set_intake_paused`, `market.freeze_creation`, `ledger.set_split_paused` carry `expiry`; the §6.3 freezes carry the kernel 14-day window internally), so a stalled guardian crank can delay an explicit revert but can never extend an effect past its kernel bound.
 
 ### 6.3 `PB-LEDGER-FREEZE` (D-9; the emergency brake B-17 lacked)
 

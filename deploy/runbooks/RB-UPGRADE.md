@@ -96,30 +96,45 @@ rewrite, or rollback to old bytes ([12 §6.3](../../docs/architecture/12-release
    Verify the effect, not merely approvals. The current runtime returns an error
    when downstream guardian playbook effects are unavailable; in that state the
    chain is not operationally contained.
-2. Activation and every recovery step must produce the spec trail:
-   `GuardianAction`, `MigrationHalted {cursor, failed_step}`, `PlaybookActivated`,
-   and `ReviewScheduled`, with the justification hash tied to the checkpoint and
-   diagnosis. Preserve equivalent raw proofs if an implementation gap prevents an
-   event, and escalate the gap.
+2. **`PB-MIGRATION` has no dispatchable activation** and therefore produces no
+   guardian trail: its admissible call set is empty, so a fifth approval fails
+   closed and the whole extrinsic reverts, recording no `PlaybookActivated`, no
+   allowance consumption and no review record
+   ([06 §6.2](../../docs/architecture/06-governance-and-guardians.md)). Do not
+   wait for those events and do not treat their absence as an implementation
+   gap. The accountability trail is the automatic `MigrationHalt` halt-source
+   bridge and its own event stream; capture the halt-source bits and the
+   diagnosis as the raw proof. (`MigrationHalted {cursor, failed_step}` is
+   likewise not emitted today — tracked in PLAN.md, do not block on it.)
 3. Decide retry versus rollback within the deadline in [09 §3.2](../../docs/architecture/09-execution-upgrades-and-rollout.md);
-   inaction defaults to rollback initiation. Guardians may freeze and use bounded
-   continuation controls, but cannot install code.
+   inaction defaults to rollback initiation. Guardians cannot install code, and
+   on stable2606 they have **no in-framework retry either**: `pallet-migrations`'
+   continuation controls are Root-only and filtered to the D-13 "nobody" row, so
+   both retry and rollback ride the expedited-CODE lane (SQ-274).
 4. A rollback is a forward upgrade through the normal execution guard, using the
    migration-halt-gated expedited CODE lane. Full attestation, ratification,
    payload checks, and `DescriptorLeadTime` still apply; no privileged shortcut
    exists ([09 §3.1](../../docs/architecture/09-execution-upgrades-and-rollout.md)).
-5. Clear the halt only after migration completion and green `try-state`. Do not
-   unpause because the cursor was manually removed or because a release was merely
-   published.
+5. Lift the **guardian playbook freeze** only after migration completion and a
+   green `try-state` run — that precondition binds the operator freeze, not the
+   on-chain flag, because `try-state` never runs in production block execution
+   ([09 §3.2](../../docs/architecture/09-execution-upgrades-and-rollout.md),
+   amendment (c)). The on-chain `MigrationHalt` clears **mechanically** on
+   migration completion or successful recovery-image application. Do not declare
+   the incident closed because the cursor was manually removed or because a
+   release was merely published.
 
 ## Escalation
 
 Page the Release operations lead, Infrastructure coordinator, guardian council,
 and the owners of the affected pallet immediately after confirmation. The
-release team owns the covering descriptors and repair train; guardians own only
-the scoped `PB-MIGRATION` activation. Every activation auto-schedules a
-retrospective `ratify` review, and an unratified activation carries the guardian
-bond consequence specified by [06 §5.4](../../docs/architecture/06-governance-and-guardians.md).
+release team owns the covering descriptors and repair train. Guardians own no
+`PB-MIGRATION` activation at all on stable2606 (step 2): their role here is to
+initiate the expedited-CODE repair lane, which the halt makes admissible. The
+retrospective-`ratify` review and the unratified-activation bond consequence of
+[06 §5.4](../../docs/architecture/06-governance-and-guardians.md) attach to
+guardian actions that actually dispatch — so they attach to that lane's guardian
+steps, not to a `PB-MIGRATION` activation that cannot occur.
 If descriptor coverage is consuming the lead-time margin, invoke RB-RELEASE's
 descriptor-release leg; never apply code before the on-chain lead-time gate.
 
