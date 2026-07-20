@@ -561,6 +561,18 @@ fn genesis_uses_the_frozen_three_field_epoch_shape() {
     });
 }
 
+/// A chain spec that omits the `epoch` patch section falls back to
+/// `GenesisConfig::default()`. Epoch 0 is the reserved pre-launch sentinel that
+/// `welfare-core` reads to grant the genesis activation relaxation, so the
+/// default must seat the clock on the first *live* epoch instead — otherwise a
+/// live `register_spec` would skip the two-epoch activation lead (I-16). The
+/// mock deliberately boots at the sentinel to exercise the genesis path, so the
+/// default is pinned directly rather than through `new_test_ext`. SQ-82; 05 §4.6.
+#[test]
+fn default_genesis_config_seats_the_clock_on_the_first_live_epoch() {
+    assert_eq!(GenesisConfig::<Test>::default().index, 1);
+}
+
 #[test]
 fn submit_and_withdraw_cover_happy_and_shape_error_paths() {
     new_test_ext().execute_with(|| {

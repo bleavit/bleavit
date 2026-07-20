@@ -1420,7 +1420,15 @@ pub mod pallet {
     impl<T: Config> Default for GenesisConfig<T> {
         fn default() -> Self {
             Self {
-                index: 0,
+                // Live welfare epochs are 1-indexed (05 §4.6: `s` is
+                // deterministically computable *from epoch 1*), and epoch 0 is
+                // the reserved pre-launch sentinel that `welfare-core` reads to
+                // grant the genesis activation relaxation. A chain spec that
+                // omits the `epoch` patch section falls back to this `Default`,
+                // so it must not seat the clock on that sentinel — otherwise a
+                // *live* `register_spec` would inherit the genesis relaxation
+                // and skip the two-epoch activation lead (I-16). SQ-82.
+                index: 1,
                 start_block: 0,
                 _config: PhantomData,
             }
