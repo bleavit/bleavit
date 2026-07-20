@@ -23,7 +23,7 @@ root workspace prevents those dependencies from perturbing the runtime's
   cannot link; its unbounded-recursion decode was hardened separately
   (`kernel::MAX_PAYLOAD_DECODE_DEPTH`, `decode_all_with_depth_limit`) with the
   runtime-crate regression `deep_preimage_batch_decode_fails_closed_at_the_depth_limit`
-  (SQ-135).
+  (SQ-225).
 - `nested_wrapper_filter` generates bounded but limit-crossing call trees and
   checks `SafetyFilter::validate`/`validate_batch` three ways: against an ordered
   structural oracle (agreeing on accept/deny AND the exact error variant), and
