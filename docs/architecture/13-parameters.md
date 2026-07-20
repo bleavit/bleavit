@@ -64,7 +64,7 @@ Scope of the existing gate parameters is **every market-bearing class: PARAM, TR
 | `fee.vit_usdc_rate` (key: `fee.vit_usdc`) | Fixed | USDC/VIT | 1.0 × `fee.vit_usdc_rate_ref` (ref is K, set at genesis from launch price — **[VERIFY at TGE; placeholder ref 0.05 USDC/VIT]**) | **0.1 × ref (K)** | **10 × ref (K)** | ×2 | 1 | PARAM | [08](08-treasury-and-economics.md) §9 |
 | `code.spacing` | u32 | blocks | 30 d | **14 d K floor** | — | — | 2 | META | [09](09-execution-upgrades-and-rollout.md) |
 | `orc.bond_floor` (round-1 floor) | Balance | USDC | 10k | 2.5k | 100k | — | 2 | META | [07](07-oracle-and-disputes.md) §6 |
-| `orc.bond_bps` (value scaling: `B_1 = max(orc.bond_floor, orc.bond_bps × StakeAtRisk)`; `B_r = B_1·2^(r−1)` — [07](07-oracle-and-disputes.md) §6.1) | Perbill | bps | **250** | **150** (hard min — keeps the §6.3 coverage rule ≥ 10.5%) | 1,000 | ×2 | 2 | META | [07](07-oracle-and-disputes.md) §6 |
+| `orc.bond_bps` (value scaling: `B_1 = max(orc.bond_floor, ceil(orc.bond_bps × StakeAtRisk / 10,000))`; `B_r = B_1·2^(r−1)`; both `B_1` and `R_max` freeze per game at round-1 creation — [07](07-oracle-and-disputes.md) §6.1) | Perbill | bps | **250** | **150** (hard min — keeps the §6.3 coverage rule ≥ 10.5%) | 1,000 | ×2 | 2 | META | [07](07-oracle-and-disputes.md) §6 |
 | `orc.rounds` R_max | u8 | — | 3 | 2 | 4 | — | 2 | META | [07](07-oracle-and-disputes.md) |
 | `orc.window` (challenge) | u32 | blocks | **43,200 (72 h — frozen, D-18)** | 43,200 (72 h kernel floor — never lowered) | 72,000 (120 h) | — | 2 | META | [07](07-oracle-and-disputes.md) §5 |
 | `orc.reporter_stake` (key: `orc.rep_stake`) | Balance | USDC | 100k | 25k | 500k | ×2 | 2 | META | [07](07-oracle-and-disputes.md) |

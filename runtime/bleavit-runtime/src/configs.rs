@@ -3920,7 +3920,11 @@ impl pallet_registry::EpochContext for RuntimeRegistryEpoch {
     fn milestone_target(_: EpochId) -> u32 {
         // A8 fail-closed: MetricSpec has no milestone-target field, so the
         // Milestone registry cannot normalize claims — owner MetricSpec schema
-        // amendment/SQ-175. Zero makes filing/close reject.
+        // amendment/SQ-175. Zero makes `file` and `close_epoch` reject with
+        // `MilestoneTargetUnset` (07 §7 *Milestone normalization*: "until the
+        // MetricSpec surface carries the field no milestone component may be
+        // admitted"), so no milestone filing is admitted and no fabricated 0.0
+        // aggregate ever reaches welfare (SQ-288).
         0
     }
 }
