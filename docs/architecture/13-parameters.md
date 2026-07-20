@@ -123,7 +123,7 @@ Safety rationale (row-wise, carried forward): kernel floors/ceilings exist so no
 | `DescriptorLeadTime` | 43,200 blocks (72 h) between `UpgradeAuthorized` and permissionless application | [09](09-execution-upgrades-and-rollout.md) |
 | `MIGRATION_STALL_BLOCKS` | Active cursor stalled **> 900 blocks** raises the PB-MIGRATION halt | [09](09-execution-upgrades-and-rollout.md) §3.2 |
 | PB-LEDGER-FREEZE | ≤ 14 days, one renewal only (values referendum); admissible only under the I-4 drift flag | [06](06-governance-and-guardians.md), [09](09-execution-upgrades-and-rollout.md) |
-| Expedited CODE lane | 72 h gate market + 3-day fast-track values ratification; admissible only while PB-LEDGER-FREEZE active | [06](06-governance-and-guardians.md), [09](09-execution-upgrades-and-rollout.md) |
+| Expedited CODE lane | 72 h gate market + 3-day fast-track values ratification; admissible only while **PB-LEDGER-FREEZE is active or a PB-MIGRATION halt is raised** (both arms normative — 09 §3.1; the second was omitted here and is restored by the SQ-132(d) sweep, 2026-07-20) | [06](06-governance-and-guardians.md), [09](09-execution-upgrades-and-rollout.md) |
 | Watchtower window extension (`orc.ext_window`) | one +48 h (28,800-block) extension per `(component, epoch)` lifecycle if `wt.quorum` acknowledgments absent | [07](07-oracle-and-disputes.md) |
 | `OracleSettleDeadline(m)` | start of epoch(m+1) Housekeeping (**d20** at the default length): any `(component, m)` not challenge-closed settles **neutrally** for every consuming cohort; late verdicts settle bonds only (I-18) | [07](07-oracle-and-disputes.md) §11, [05](05-welfare-and-decision-engine.md) §7 |
 | `orc.max_proof_bytes` | 256 KiB per `recompute_proof` | [07](07-oracle-and-disputes.md) §9 |
