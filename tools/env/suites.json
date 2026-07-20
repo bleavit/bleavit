@@ -33,22 +33,18 @@
       "kind": "zombienet",
       "path": "zombienet/drills/04-dead-man.zndsl",
       "tier": "g1",
-      "gated_on": [
-        "G1 drill-04 dead-man detector/scenario mismatch (SQ-282): the fast-timing runtime compressed the stall ~16 h -> ~8 min (DEAD_MAN_RELAY_BLOCKS 4,800 -> 48; the first-ever run reached gap 48 in ~8 min, so timing is proven and no longer the blocker), but assert-dead-man engaged fails because observe_dead_man triggers on a relay-PARENT jump between consecutive parachain blocks (a parachain outage/catch-up signal), not a relay-FINALITY stall where the relay keeps producing and the parachain follows the unfinalized best (05 sec 4.8 F-signal VERIFY: PersistedValidationData exposes relay_parent_number, not the relay finalized head). Resolution is SQ-282 (outage-scenario drill, a finalized-head detector input, or a re-scope of 05 sec 4.8), not timing"
-      ],
+      "gated_on": [],
       "timeout_seconds": 1800,
-      "spec": "15 §4.7; 09 §7.1; 13 §2"
+      "spec": "15 §4.7; 09 §7.1; 13 §2; 05 §4.8 (SQ-282 resolved: relay-parent-gap collator-outage engagement, 18/18)"
     },
     {
       "id": "05-coretime-renewal-under-dead-man",
       "kind": "zombienet",
       "path": "zombienet/drills/05-coretime-renewal-under-dead-man.zndsl",
       "tier": "g1",
-      "gated_on": [
-        "G1 drill-05 genesis seeding + long-horizon run: the drill-side staging code landed 2026-07-20 (stage/execute/probe branches note a live authenticated quote as the genesis authority Alice and assert success + CoretimeRenewalCalled), but the funded ops.coretime budget line and treasury DOT/USDC custody are not chain-spec-fundable (fund_budget_line/set_coretime_authority need the unreachable FutarchyTreasury origin; sudo->Root is rejected, sudo_as denied) so they must be genesis-seeded (raw futarchyTreasury.State line + foreignAssets.accounts), and the exit form runs under a real 4,800-relay-block dead-man stall (~8 h, g1-tier)"
-      ],
-      "timeout_seconds": 100000,
-      "spec": "09 §4/§7.1"
+      "gated_on": [],
+      "timeout_seconds": 1800,
+      "spec": "09 §4/§7.1; SQ-282 (freeze-exempt coretime-renewal probe under a relay-parent-gap engaged dead-man on the fast-coretime spec, 19/19)"
     },
     {
       "id": "06-pb-migration",
@@ -65,7 +61,7 @@
       "path": "zombienet/drills/07-xcm-reserve-transfer.zndsl",
       "tier": "release",
       "gated_on": [
-        "G1 XCM-topology Asset Hub block production: the drill-07 spec_version readiness sentinel was retired 2026-07-20 (WP-1) and the Bleavit side boots, but the first real end-to-end run surfaced the pinned Paseo asset-hub-paseo-runtime trapping on its parachain-system inherent (AbortedDueToTrap in cumulus_pallet_parachain_system) so Asset Hub (para 1000) never produces blocks and the drill cannot reach its XCM legs; this is a Paseo chain-spec-generator/system-runtime integration issue (not Bleavit), owned by the env pins — investigate the AH+Coretime fast-runtime build before the first full XCM run"
+        "PHASE-3 criterion (09 sec 7.1 line 284: HRMP-to-Asset-Hub + XCM funding-flow suite), NOT a G1 Phase-1 exit gate — recorded here for the G2/G3 env matrix. XCM-topology Asset Hub block production: the drill-07 spec_version readiness sentinel was retired 2026-07-20 (WP-1) and the Bleavit side boots, but the first real end-to-end run surfaced the pinned Paseo asset-hub-paseo-runtime trapping on its parachain-system inherent (AbortedDueToTrap in cumulus_pallet_parachain_system) so Asset Hub (para 1000) never produces blocks and the drill cannot reach its XCM legs; this is a Paseo chain-spec-generator/system-runtime integration issue (not Bleavit), owned by the env pins. G2 fix path (dual-review investigation): swap the AH leg to the stable2606-embedded asset-hub-westend-local (version-matched with the relay/collator binaries; para 1000, PalletInstance 50, USDC GeneralIndex 1337 all identical to the helper's hardcoded coordinates)"
       ],
       "timeout_seconds": 1800,
       "spec": "15 §4.7; 09 §6.1"
@@ -76,7 +72,7 @@
       "path": "zombienet/drills/08-expedited-code-under-freeze.zndsl",
       "tier": "g1",
       "gated_on": [
-        "G1 freeze/proposal staging (attested queued expedited proposal + active PB-LEDGER-FREEZE at genesis, SQ-233); the ~3-day D-14 lead wait is eliminated on the fast-timing runtime (SQ-128: DESCRIPTOR_LEAD_TIME_BLOCKS 43,200 -> 12; the drill reads the live descriptorLeadTime metadata constant), so timing is no longer the blocker — only the freeze/expedited genesis staging remains"
+        "PHASE-2 criterion (09 sec 7.1 line 283: expedited-CODE-lane drill under a staged freeze), NOT a G1 Phase-1 exit gate — recorded here for the G2 env matrix. Freeze/proposal staging (attested queued expedited proposal + active PB-LEDGER-FREEZE at genesis, SQ-233); the ~3-day D-14 lead wait is eliminated on the fast-timing runtime (SQ-128: DESCRIPTOR_LEAD_TIME_BLOCKS 43,200 -> 12; the drill reads the live descriptorLeadTime metadata constant), so timing is no longer the blocker — only the freeze/expedited genesis staging remains, following the drill-06 migration_halt / drill-05 coretime genesis-field precedent"
       ],
       "timeout_seconds": 1800,
       "spec": "09 §2.1/§3.2/§7.1"

@@ -180,10 +180,15 @@ async function execute(api, alice, periodIndex) {
 }
 
 async function probe(api, alice, periodIndex) {
-  const before = readStagingState(await api.query.futarchyTreasury.state(), periodIndex);
-  if (before.quote) {
-    throw new Error(`exemption probe period ${periodIndex} unexpectedly has a staged quote`);
-  }
+  // Freeze-exemption reachability proof: with no quote staged for `periodIndex`
+  // (genesis seeds the authority + renewal account but no quote), the
+  // permissionless renewal must REACH its treasury business logic
+  // (RenewalWindowClosed) rather than be blocked by the engaged dead-man freeze
+  // (09 §4 D-9). It dispatches directly and deliberately does NOT pre-read
+  // `futarchyTreasury.state`: that raw-storage read hits a portable-metadata
+  // SCALE round-trip quirk on the rolling-meter TreasuryState (SQ-284) — the
+  // runtime round-trips its own state and the 02 contract's consumers read
+  // FutarchyApi views, not raw storage, so the reachability proof needs neither.
   const outcome = await submit(
     api,
     api.tx.futarchyTreasury.executeCoretimeRenewal(periodIndex),

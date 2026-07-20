@@ -297,3 +297,53 @@ if [[ ! -s "$out/bleavit-drill-fast.json" ]] || ! python3 -m json.tool "$out/ble
 fi
 python3 "$repo_root/tools/deploy/validate-chain-spec.py" \
   --profile local "$out/bleavit-drill-fast.json"
+
+# G1 drill 05 fast-timing + coretime staging — 09 §4/§7.1; SQ-282. A fast-timing
+# spec (reuses the fast runtime wasm) that additionally seeds the FutarchyTreasury
+# Coretime quote authority + Coretime-side renewal account through the EXISTING
+# genesis fields (`coretime_quote_authority`/`coretime_renewal_account`), so the
+# permissionless `execute_coretime_renewal` call reaches its business logic
+# (`RenewalWindowClosed`) under an engaged dead-man freeze — proving the 09 §4
+# D-9 freeze exemption. The dead-man is engaged by the SAME real relay-parent-gap
+# collator outage drill 04 uses (SQ-282), not a genesis-staged flag. No treasury
+# byte changes: both fields default `None` in every production preset
+# (fail-closed — a chain never boots with a renewal authority), so this is
+# drill-env staging against the byte-identical release runtime (SQ-276 extended).
+coretime_patch="$repo_root/target/env/bleavit-drill-coretime-patch.json"
+python3 - "$drill_patch" "$coretime_patch" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+# //Alice sr25519 public key: the drill quote authority AND a stand-in Coretime
+# renewal account (the freeze-exemption probe never dispatches XCM, so any set
+# 32-byte account seeds reachability; the two must be both-set or both-unset,
+# the treasury try-state pairing invariant). AccountId serialises to SS58; the
+# [u8;32] renewal account to a byte array.
+ALICE_SS58 = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+ALICE_PUB = bytes.fromhex("d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d")
+
+patch = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+treasury = patch.setdefault("futarchyTreasury", {})
+treasury["coretimeQuoteAuthority"] = ALICE_SS58
+treasury["coretimeRenewalAccount"] = list(ALICE_PUB)
+Path(sys.argv[2]).write_text(json.dumps(patch, indent=2) + "\n", encoding="utf-8")
+PY
+rm -f "$out/bleavit-drill-fast-coretime.json"
+"$builder" --chain-spec-path "$out/bleavit-drill-fast-coretime.json" create \
+  --chain-name "Bleavit Local Drills (fast-timing, coretime)" \
+  --chain-id bleavit_local_drills_fast_coretime \
+  -t local \
+  --relay-chain paseo-local \
+  --para-id 4242 \
+  --runtime "$fast_wasm" \
+  --properties "$properties" \
+  --verify \
+  patch "$coretime_patch"
+if [[ ! -s "$out/bleavit-drill-fast-coretime.json" ]] || ! python3 -m json.tool "$out/bleavit-drill-fast-coretime.json" >/dev/null; then
+  rm -f "$out/bleavit-drill-fast-coretime.json"
+  echo "chain-spec-builder did not produce a valid fast-timing coretime drill chain spec" >&2
+  exit 1
+fi
+python3 "$repo_root/tools/deploy/validate-chain-spec.py" \
+  --profile local "$out/bleavit-drill-fast-coretime.json"
