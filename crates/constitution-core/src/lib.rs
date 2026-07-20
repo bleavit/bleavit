@@ -1105,7 +1105,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         ),
         row(
             b"dec.delta.param",
-            ParamValue::Fixed(FixedU64(15_000_000)),
+            ParamValue::Fixed(FixedU64(37_500_000)),
             ParamValue::Fixed(kernel::DECISION_DELTA_FLOOR),
             ParamValue::Fixed(FixedU64(100_000_000)),
             Some(MaxDelta::Absolute(ParamValue::Fixed(FixedU64(5_000_000)))),
@@ -1115,7 +1115,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         ),
         row(
             b"dec.delta.trs",
-            ParamValue::Fixed(FixedU64(25_000_000)),
+            ParamValue::Fixed(FixedU64(37_500_000)),
             ParamValue::Fixed(kernel::DECISION_DELTA_FLOOR),
             ParamValue::Fixed(FixedU64(100_000_000)),
             Some(MaxDelta::Absolute(ParamValue::Fixed(FixedU64(5_000_000)))),
@@ -1125,7 +1125,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         ),
         row(
             b"dec.delta.code",
-            ParamValue::Fixed(FixedU64(40_000_000)),
+            ParamValue::Fixed(FixedU64(60_000_000)),
             ParamValue::Fixed(kernel::DECISION_DELTA_FLOOR),
             ParamValue::Fixed(FixedU64(100_000_000)),
             Some(MaxDelta::Absolute(ParamValue::Fixed(FixedU64(5_000_000)))),
@@ -1135,7 +1135,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         ),
         row(
             b"dec.delta.meta",
-            ParamValue::Fixed(FixedU64(60_000_000)),
+            ParamValue::Fixed(FixedU64(90_000_000)),
             ParamValue::Fixed(kernel::DECISION_DELTA_FLOOR),
             ParamValue::Fixed(FixedU64(100_000_000)),
             Some(MaxDelta::Absolute(ParamValue::Fixed(FixedU64(5_000_000)))),

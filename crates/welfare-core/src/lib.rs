@@ -974,25 +974,27 @@ pub fn compute_welfare(
 }
 
 /// 05 §4.4 (4): `s = exp2((log2 max(W1, eps_W) + log2 max(W2, eps_W)) / 2)`,
-/// eps_W = 1e-9, rounded down to the FixedU64 grid. Evaluated through the
-/// prescribed exp2/log2 pipeline (in the inverse domain, with the halving
-/// ceiled so the score itself rounds down).
+/// eps_W = 1e-9, rounded down to the FixedU64 grid — i.e. the exact
+/// geometric mean of the two epoch welfares, floored to the grid.
+///
+/// 15 §4.4 requires this value bit-identical to the ≥256-bit reference
+/// model, which evaluates the expression exactly and floors. On the 1e9
+/// grid that exact floor is `isqrt(A · B)` in grid units (`s · 1e9 =
+/// sqrt(A · B)` for `A = W1 · 1e9`, `B = W2 · 1e9`), so it is computed as
+/// an integer square root: no transcendental approximation error, monotone
+/// non-decreasing in both arguments, bounded by `s <= max(W1, W2) <= 1`,
+/// and still rounded down (against the claimant) exactly as the spec
+/// prescribes. An approximate exp2/log2 evaluation loses one grid ulp
+/// whenever the true mean lies exactly on the grid (e.g. geomean(0.8, 0.8)
+/// = 0.8), which 15 §4.4 forbids as a divergence from the reference model.
 pub fn settlement_score(w1: FixedU64, w2: FixedU64) -> Result<FixedU64, Error> {
-    let mut exponent = FixedU64x64::ZERO;
-    for value in [w1.0.max(EPSILON.0), w2.0.max(EPSILON.0)] {
-        if value >= ONE {
-            continue;
-        }
-        let inv = FixedU64x64::ONE
-            .checked_div(q64_from_1e9(value)?)
-            .map_err(|_| Error::ArithmeticOverflow)?;
-        let log = inv.log2().map_err(|_| Error::ArithmeticOverflow)?;
-        exponent = exponent
-            .checked_add(log)
-            .map_err(|_| Error::ArithmeticOverflow)?;
-    }
-    let half = FixedU64x64::from_raw(exponent.raw().div_ceil(2));
-    exp2_inverse_down(half)
+    let a = u128::from(w1.0.clamp(EPSILON.0, ONE));
+    let b = u128::from(w2.0.clamp(EPSILON.0, ONE));
+    // a, b <= 1e9 so the product is <= 1e18 (no u128 overflow is reachable)
+    // and its integer square root is <= 1e9, which always fits u64.
+    let product = a.checked_mul(b).ok_or(Error::ArithmeticOverflow)?;
+    let root = u64::try_from(product.isqrt()).map_err(|_| Error::ArithmeticOverflow)?;
+    Ok(FixedU64(root))
 }
 
 pub fn gate(x: FixedU64, lo: FixedU64, hi: FixedU64) -> Result<FixedU64, Error> {
@@ -1389,9 +1391,10 @@ mod tests {
     #[test]
     fn composites_follow_the_normative_exp2_log2_pipeline() {
         // 05 §4.4 (2)/(4): weighted geometric terms evaluate as one
-        // exp2(sum(w * log2(...))) and the settlement score as
-        // exp2((log2 + log2)/2); the crate primitives are <= 2 ulp, so the
-        // 1e9-grid results sit within a couple of units of the exact values.
+        // exp2(sum(w * log2(...))) — the crate primitives are <= 2 ulp, so
+        // those 1e9-grid results sit within a couple of units of the exact
+        // values — while the settlement score is the exact grid floor of
+        // the true geometric mean (integer sqrt; 15 §4.4 bit-identity).
         let within = |actual: FixedU64, expected: u64, tol: u64| {
             assert!(
                 actual.0.abs_diff(expected) <= tol,
@@ -1409,22 +1412,25 @@ mod tests {
             500_000_000,
             2,
         );
-        // settlement: geomean(1, 1) = 1 exactly; geomean(0.64, 0.25) = 0.4.
+        // settlement: exact floor of the true geometric mean (05 §4.4 (4);
+        // 15 §4.4 bit-identity) — on-grid means are exact, never 1 ulp short.
         assert_eq!(
             settlement_score(FixedU64(ONE), FixedU64(ONE)).unwrap(),
             FixedU64(ONE)
         );
-        within(
+        assert_eq!(
             settlement_score(FixedU64(640_000_000), FixedU64(250_000_000)).unwrap(),
-            400_000_000,
-            2,
+            FixedU64(400_000_000)
         );
-        // The eps_W floor keeps a zeroed epoch's log finite:
-        // geomean(1e-9, 0.5) ~= 2.2360679e-5.
-        within(
+        assert_eq!(
+            settlement_score(FixedU64(800_000_000), FixedU64(800_000_000)).unwrap(),
+            FixedU64(800_000_000)
+        );
+        // The eps_W floor keeps a zeroed epoch finite:
+        // geomean(1e-9, 0.5) ~= 2.2360679e-5, floored to the grid.
+        assert_eq!(
             settlement_score(FixedU64(0), FixedU64(500_000_000)).unwrap(),
-            22_360,
-            2,
+            FixedU64(22_360)
         );
     }
 

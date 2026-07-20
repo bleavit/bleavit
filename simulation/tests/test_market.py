@@ -4,11 +4,18 @@ import unittest
 
 from bleavit_reference_model.lmsr import marginal_price_long
 from bleavit_reference_model.lmsr import FEE_RATE, ceil_base
-from bleavit_reference_model.twap import TwapAccumulator
+from bleavit_reference_model.twap import (
+    ContestCapitalAccumulator,
+    TwapAccumulator,
+    marked_open_interest,
+)
 from bleavit_simulation.market import (
     ExecutedBook,
     FastTwapAccumulator,
+    contest_capital,
+    execute_hold,
     execute_toward,
+    execute_turnover,
     fast_lmsr_price,
     simulate_book,
 )
@@ -183,6 +190,134 @@ class FastMarketMathTests(unittest.TestCase):
         self.assertLess(
             book.liquidation_value("manipulator"),
             book.participants["manipulator"].initial_cash,
+        )
+
+    def test_wash_churn_nets_out_of_contest_capital(self):
+        """04 §7a: LMSR path independence removes churn from the measure."""
+        book = ExecutedBook("wash", Decimal("25000"))
+        book.account("noise", Decimal("100000"))
+        for block in (1, 10_001, 30_001):
+            execute_turnover(
+                book,
+                "noise",
+                gross_notional=Decimal("40000"),
+                block=block,
+                role="noise",
+                first_side="long",
+            )
+        self.assertGreater(book.contest_notional(), Decimal("50000"))
+        self.assertEqual(book.q_long, Decimal(0))
+        self.assertEqual(book.q_short, Decimal(0))
+        self.assertEqual(
+            contest_capital(book, decision_window=43_200), Decimal(0)
+        )
+
+    def test_held_pairs_price_capital_times_time(self):
+        """A balanced held pair contributes its size, time-weighted."""
+        window = 43_200
+        early = ExecutedBook("early", Decimal("25000"))
+        early.account("holder", Decimal("120000"))
+        held = execute_hold(
+            early,
+            "holder",
+            target_noi=Decimal("100000"),
+            block=1,
+            role="holder",
+        )
+        self.assertEqual(held, Decimal("100000"))
+        self.assertEqual(early.price, Decimal("0.5"))
+        self.assertEqual(early.cash_conservation_error(), Decimal(0))
+        early_capital = contest_capital(early, decision_window=window)
+        expected_early = Decimal("100000") * Decimal(window - 1) / Decimal(window)
+        self.assertLessEqual(abs(early_capital - expected_early), Decimal(1))
+
+        late = ExecutedBook("late", Decimal("25000"))
+        late.account("holder", Decimal("120000"))
+        execute_hold(
+            late,
+            "holder",
+            target_noi=Decimal("100000"),
+            block=window - 4_320,
+            role="holder",
+        )
+        late_capital = contest_capital(late, decision_window=window)
+        expected_late = Decimal("100000") * Decimal(4_320) / Decimal(window)
+        self.assertLessEqual(abs(late_capital - expected_late), Decimal(1))
+        self.assertLess(late_capital, early_capital / Decimal(5))
+
+    def test_contest_capital_matches_reference_accumulator_replay(self):
+        """The block-grouped replay equals the 04 §7a reference accumulator."""
+        window = 43_200
+        book = ExecutedBook("replay", Decimal("25000"))
+        book.account("informed", Decimal("60000"))
+        book.account("holder", Decimal("40000"))
+        execute_toward(
+            book,
+            "informed",
+            target=Decimal("0.63"),
+            gross_notional=Decimal("30000"),
+            block=1,
+            role="informed",
+        )
+        execute_hold(
+            book,
+            "holder",
+            target_noi=Decimal("35000"),
+            block=7_201,
+            role="holder",
+        )
+        execute_toward(
+            book,
+            "informed",
+            target=Decimal("0.41"),
+            gross_notional=Decimal("15000"),
+            block=28_801,
+            role="informed",
+        )
+        reference = ContestCapitalAccumulator()
+        q_long = q_short = Decimal(0)
+        price = marginal_price_long(book.b, q_long, q_short)
+        by_block: dict[int, list] = {}
+        for event in book.events:
+            by_block.setdefault(event.block, []).append(event)
+        for block in sorted(by_block):
+            reference.observe(block, q_long, q_short, price)
+            for event in by_block[block]:
+                signed = (
+                    event.amount if event.direction == "buy" else -event.amount
+                )
+                if event.side == "long":
+                    q_long += signed
+                else:
+                    q_short += signed
+            price = marginal_price_long(book.b, q_long, q_short)
+        reference.observe(window, q_long, q_short, price)
+        self.assertEqual(
+            contest_capital(book, decision_window=window),
+            reference.mean(0, window),
+        )
+        self.assertGreater(
+            contest_capital(book, decision_window=window), Decimal(0)
+        )
+
+    def test_carried_positions_seed_the_extension_window_measure(self):
+        """An event-free window still measures carried held exposure."""
+        book = ExecutedBook("carried", Decimal("25000"))
+        book.account("holder", Decimal("60000"))
+        execute_hold(
+            book, "holder", target_noi=Decimal("50000"), block=1, role="holder"
+        )
+        carried_q = (book.q_long, book.q_short)
+        book.events.clear()
+        capital = contest_capital(
+            book,
+            decision_window=43_200,
+            initial_q_long=carried_q[0],
+            initial_q_short=carried_q[1],
+        )
+        self.assertEqual(
+            capital,
+            marked_open_interest(carried_q[0], carried_q[1], book.price),
         )
 
     def test_balance_exhaustion_prevents_an_unbacked_fill(self):

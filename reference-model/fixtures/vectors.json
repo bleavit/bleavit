@@ -1,12 +1,105 @@
 {
+  "contest_scenarios": [
+    {
+      "contest_capital_0_20": "0.000000",
+      "inputs": {
+        "observations": [
+          {
+            "block": 10,
+            "price_long": "0.5",
+            "q_long": "0",
+            "q_short": "0"
+          },
+          {
+            "block": 20,
+            "price_long": "0.5",
+            "q_long": "0",
+            "q_short": "0"
+          }
+        ],
+        "q_pol_long": "0",
+        "q_pol_short": "0"
+      },
+      "name": "wash_round_trip_zero",
+      "recorded": [
+        "0.000000",
+        "0.000000"
+      ]
+    },
+    {
+      "contest_capital_0_30": "524.979187",
+      "contest_capital_10_30": "524.979187",
+      "cumulative_at_30": "15749.375610",
+      "inputs": {
+        "observations": [
+          {
+            "block": 10,
+            "price_long": "0.524979187478939986099193182604",
+            "q_long": "1000",
+            "q_short": "0"
+          },
+          {
+            "block": 20,
+            "price_long": "0.524979187478939986099193182604",
+            "q_long": "1000",
+            "q_short": "0"
+          },
+          {
+            "block": 30,
+            "price_long": "0.524979187478939986099193182604",
+            "q_long": "1000",
+            "q_short": "0"
+          }
+        ],
+        "q_pol_long": "0",
+        "q_pol_short": "0"
+      },
+      "name": "held_exposure_marks_capital_times_time",
+      "recorded": [
+        "524.979187",
+        "524.979187",
+        "524.979187"
+      ]
+    },
+    {
+      "contest_capital_0_20": "125.000000",
+      "inputs": {
+        "observations": [
+          {
+            "block": 10,
+            "price_long": "0.5",
+            "q_long": "1000",
+            "q_short": "1000"
+          },
+          {
+            "block": 20,
+            "price_long": "0.5",
+            "q_long": "1500",
+            "q_short": "1000"
+          }
+        ],
+        "q_pol_long": "1000",
+        "q_pol_short": "1000"
+      },
+      "name": "pol_seeded_positions_excluded",
+      "recorded": [
+        "0.000000",
+        "250.000000"
+      ]
+    }
+  ],
   "decision_scenarios": [
     {
       "inputs": {
-        "accept_full": "0.56",
-        "delta": "0.05",
+        "accept_full": "0.517",
+        "accept_trailing": "0.517",
+        "delta": "0.015",
+        "envelope_value": "100",
+        "measured_liquidity": "1000000",
+        "proposal_class": "Param",
         "reject_full_effective": "0.50"
       },
-      "name": "adopt",
+      "name": "honest_param_adopt",
       "outcome": "Adopt"
     },
     {
@@ -45,10 +138,12 @@
     {
       "inputs": {
         "accept_full": "0.56",
+        "ask": "100",
         "delta": "0.05",
         "gate_book_valid": false,
+        "proposal_class": "Treasury",
         "reject_full_effective": "0.50",
-        "requires_gate_markets": true
+        "spendable_nav": "7393600"
       },
       "name": "gate_book_invalid",
       "outcome": "Reject",
@@ -58,16 +153,18 @@
       "inputs": {
         "accept_full": "0.56",
         "delta": "0.05",
+        "envelope_value": "100",
+        "measured_liquidity": "1000000",
         "p_adopt": {
           "Survival": "0.06"
         },
         "p_reject": {
           "Survival": "0.01"
         },
-        "reject_full_effective": "0.50",
-        "requires_gate_markets": true
+        "proposal_class": "Param",
+        "reject_full_effective": "0.50"
       },
-      "name": "gate_veto_survival",
+      "name": "param_gate_veto_survival",
       "outcome": "Reject",
       "reason": "GateVetoSurvival"
     },
@@ -75,6 +172,8 @@
       "inputs": {
         "accept_full": "0.56",
         "delta": "0.05",
+        "envelope_value": "100",
+        "measured_liquidity": "1000000",
         "p_adopt": {
           "Security": "0.06",
           "Survival": "0.01"
@@ -83,22 +182,24 @@
           "Security": "0.01",
           "Survival": "0.01"
         },
-        "reject_full_effective": "0.50",
-        "requires_gate_markets": true
+        "proposal_class": "Param",
+        "reject_full_effective": "0.50"
       },
-      "name": "gate_veto_security",
+      "name": "param_gate_veto_security",
       "outcome": "Reject",
       "reason": "GateVetoSecurity"
     },
     {
       "inputs": {
         "accept_full": "0.56",
+        "ask": "100",
         "delta": "0.05",
         "p_adopt": {
           "Survival": "0.06"
         },
+        "proposal_class": "Treasury",
         "reject_full_effective": "0.50",
-        "requires_gate_markets": true,
+        "spendable_nav": "7393600",
         "welfare_grade": "Invalid"
       },
       "name": "gate_veto_precedes_welfare_invalid",
@@ -108,6 +209,7 @@
     {
       "inputs": {
         "accept_full": "0.56",
+        "ask": "100",
         "delta": "0.05",
         "gate_valid": {
           "Security": false,
@@ -119,8 +221,9 @@
         "p_reject": {
           "Survival": "0.01"
         },
+        "proposal_class": "Treasury",
         "reject_full_effective": "0.50",
-        "requires_gate_markets": true
+        "spendable_nav": "7393600"
       },
       "name": "gate_veto_precedes_later_gate_invalid",
       "outcome": "Reject",
@@ -214,6 +317,81 @@
       "name": "rate_limited",
       "outcome": "Reject",
       "reason": "RateLimited"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "ask": "200000",
+        "b_accept": "25000",
+        "b_reject": "25000",
+        "contest_accept": "400000",
+        "contest_reject": "400000",
+        "delta": "0.05",
+        "flow_cap": "8",
+        "pol_depth": "34657.359028",
+        "proposal_class": "Treasury",
+        "reject_full_effective": "0.50"
+      },
+      "l_hat": "434657.359028",
+      "name": "adopt_contest_capital_l_hat",
+      "outcome": "Adopt"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "ask": "200000",
+        "b_accept": "25000",
+        "b_reject": "25000",
+        "contest_accept": "100000",
+        "contest_reject": "100000",
+        "delta": "0.05",
+        "flow_cap": "8",
+        "pol_depth": "34657.359028",
+        "proposal_class": "Treasury",
+        "reject_full_effective": "0.50"
+      },
+      "l_hat": "134657.359028",
+      "name": "security_sizing_contest_shortfall",
+      "outcome": "Reject",
+      "reason": "SecuritySizing"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "ask": "200000",
+        "b_accept": "25000",
+        "b_reject": "25000",
+        "contest_accept": "1000000000",
+        "contest_reject": "1000000000",
+        "delta": "0.05",
+        "flow_cap": "7",
+        "pol_depth": "34657.359028",
+        "proposal_class": "Treasury",
+        "reject_full_effective": "0.50"
+      },
+      "l_hat": "384657.359028",
+      "name": "security_sizing_flow_cap_ceiling",
+      "outcome": "Reject",
+      "reason": "SecuritySizing"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "ask": "200000",
+        "b_accept": "25000",
+        "b_reject": "25000",
+        "contest_accept": "400000",
+        "contest_reject": "100000",
+        "delta": "0.05",
+        "flow_cap": "8",
+        "pol_depth": "34657.359028",
+        "proposal_class": "Treasury",
+        "reject_full_effective": "0.50"
+      },
+      "l_hat": "134657.359028",
+      "name": "security_sizing_asymmetric_pair_contest",
+      "outcome": "Reject",
+      "reason": "SecuritySizing"
     }
   ],
   "high_precision_corpus": {
@@ -80718,24 +80896,12 @@
   },
   "treasury_scenarios": [
     {
-      "commitment": "13862.94361119890618834464242916353136151000268720510508241360018986787243939389431211726653992837375",
-      "commitment_display": 13863,
-      "inputs": {
-        "large_treasury": false,
-        "proposal_class": "Param"
-      },
-      "name": "param_pol",
-      "nav_floor": "1848392.481493187491779285657",
-      "nav_floor_display": 1848392
-    },
-    {
       "commitment": "34657.35902799726547086160607290882840377500671801276270603400047466968109848473578029316634982093438",
       "commitment_display": 34657,
       "inputs": {
-        "large_treasury": false,
-        "proposal_class": "Treasury"
+        "proposal_class": "Param"
       },
-      "name": "treasury_pol",
+      "name": "param_pol",
       "nav_floor": "4620981.203732968729448214143",
       "nav_floor_display": 4620981
     },
@@ -80743,10 +80909,9 @@
       "commitment": "55451.77444479562475337856971665412544604001074882042032965440075947148975757557724846906615971349500",
       "commitment_display": 55452,
       "inputs": {
-        "large_treasury": true,
         "proposal_class": "Treasury"
       },
-      "name": "treasury_pol_large",
+      "name": "treasury_pol",
       "nav_floor": "7393600",
       "nav_floor_display": 7393600
     },
@@ -80754,7 +80919,6 @@
       "commitment": "103972.0770839917964125848182187264852113250201540382881181020014240090432954542073408794990494628031",
       "commitment_display": 103972,
       "inputs": {
-        "large_treasury": false,
         "proposal_class": "Code"
       },
       "name": "code_pol",
@@ -80765,7 +80929,6 @@
       "commitment": "159423.8515287874211659633879353806106573650309028587084477564021834805330530297845893485652091762981",
       "commitment_display": 159424,
       "inputs": {
-        "large_treasury": false,
         "proposal_class": "Meta"
       },
       "name": "meta_pol",
@@ -80795,13 +80958,37 @@
       "three_prize": "2079441.600000"
     },
     {
-      "delta": "0.08116740799849665762789696008",
+      "delta": "0.10",
       "inputs": {
         "prize": "693147"
       },
       "name": "scaled_defaults",
       "p_ref": "341588.8308335967185650339272874905940845300080616153152472408005696036173181816829363517996197851212",
       "pol_b": "121751.1119977449864418454401"
+    },
+    {
+      "attack_cost": "651986.038542",
+      "inputs": {
+        "b_accept": "25000",
+        "b_reject": "25000",
+        "contest_capital": "400000",
+        "flow_cap": "8",
+        "pol_depth": "34657.359028"
+      },
+      "l_hat": "434657.359028",
+      "name": "l_hat_contest_within_ceiling"
+    },
+    {
+      "attack_cost": "576986.038542",
+      "inputs": {
+        "b_accept": "25000",
+        "b_reject": "25000",
+        "contest_capital": "1000000000",
+        "flow_cap": "7",
+        "pol_depth": "34657.359028"
+      },
+      "l_hat": "384657.359028",
+      "name": "l_hat_flow_cap_ceiling_binds"
     }
   ],
   "twap_scenarios": [
@@ -80906,7 +81093,7 @@
         "S_daily": "0.831250000",
         "W": "0.000000000"
       },
-      "settlement_with_self": "0.000000000"
+      "settlement_with_self": "0.000000001"
     }
   ]
 }

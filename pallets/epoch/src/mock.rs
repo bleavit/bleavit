@@ -284,7 +284,7 @@ parameter_types! {
     pub static SpotOverrides: Vec<(MarketId, FixedU64)> = Vec::new();
     pub static MeasuredDepth: Balance = 1_000_000_000_000;
     pub static PublishedFlow: Option<Balance> = None;
-    pub static SecondInsufficiency: bool = false;
+    pub static WelfareInvalidMarkets: Vec<MarketId> = Vec::new();
     pub static OpenDispute: bool = false;
     pub static GuardianHold: bool = false;
     pub static DeadManEngaged: bool = false;
@@ -296,7 +296,6 @@ parameter_types! {
     pub static LedgerFrozen: bool = false;
     pub static PhaseFlagsValue: u32 = 0;
     pub static ActiveMetricSpecVersion: MetricSpecVersion = 1;
-    pub static TreasuryGateRequired: bool = false;
     pub static PolEpochBudget: Balance = Balance::MAX;
     pub static PolCommitments: Vec<(ProposalId, Balance)> = Vec::new();
     pub static PreimageLen: Option<u32> = Some(32);
@@ -345,8 +344,7 @@ impl PolBudget<AccountId32> for TestPolBudget {
             .iter()
             .find_map(|(pid, amount)| (*pid == proposal.id).then_some(*amount))
             .unwrap_or(0);
-        let gates = matches!(proposal.class, ProposalClass::Code | ProposalClass::Meta)
-            || (proposal.class == ProposalClass::Treasury && TreasuryGateRequired::get());
+        let gates = epoch_core::requires_gate_markets(proposal.class);
         Some(PolSeedPlan {
             commitment: amount,
             decision_b: amount,
@@ -457,8 +455,25 @@ impl MarketAccess<AccountId32> for TestMarket {
         PublishedFlow::get()
     }
 
-    fn second_insufficiency(_pid: ProposalId) -> bool {
-        SecondInsufficiency::get()
+    fn welfare_grade(
+        market: MarketId,
+        end: BlockNumber,
+        class: ProposalClass,
+        params: &CoreEpochParams,
+    ) -> WelfareGrade {
+        // Faithful to the runtime partition: an unavailable/never-gradable
+        // book (or an explicit override) is Invalid; an ungraded-but-readable
+        // book models the remediable shortfalls (Insufficient).
+        if WelfareInvalidMarkets::get().contains(&market)
+            || UnavailableMarkets::get().contains(&market)
+        {
+            return WelfareGrade::Invalid;
+        }
+        if Self::decision_grade(market, end, BookRole::Decision, class, params) {
+            WelfareGrade::Ok
+        } else {
+            WelfareGrade::Insufficient
+        }
     }
 
     fn previous_settled_baseline_twap(_epoch: EpochId) -> Option<FixedU64> {
@@ -535,9 +550,6 @@ impl ConstitutionAccess<AccountId32> for TestConstitution {
     }
     fn active_metric_spec_version() -> Option<MetricSpecVersion> {
         Some(ActiveMetricSpecVersion::get())
-    }
-    fn treasury_gate_required(_proposal: &Proposal<AccountId32>) -> bool {
-        TreasuryGateRequired::get()
     }
     fn attestation_artifact(proposal: &Proposal<AccountId32>) -> Option<H256> {
         Some(proposal.payload_hash)
@@ -871,7 +883,7 @@ pub fn reset_doubles() {
     SpotOverrides::set(Vec::new());
     MeasuredDepth::set(1_000_000_000_000);
     PublishedFlow::set(None);
-    SecondInsufficiency::set(false);
+    WelfareInvalidMarkets::set(Vec::new());
     OpenDispute::set(false);
     GuardianHold::set(false);
     DeadManEngaged::set(false);
@@ -883,7 +895,6 @@ pub fn reset_doubles() {
     LedgerFrozen::set(false);
     PhaseFlagsValue::set(0);
     ActiveMetricSpecVersion::set(1);
-    TreasuryGateRequired::set(false);
     PreimageLen::set(Some(32));
     PreimageNoted::set(true);
     PreimageRequests::set(Vec::new());

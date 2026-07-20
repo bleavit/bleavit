@@ -9,6 +9,9 @@ from bleavit_reference_model.decision import (
     Outcome,
     RejectReason,
     decide,
+    gate_decision_grade,
+    grade_welfare_book,
+    requires_gate_markets,
 )
 from bleavit_reference_model.ledger import (
     BaselineVault,
@@ -30,6 +33,8 @@ from bleavit_reference_model.treasury import (
     attack_cost_hat,
     baseline_commitment,
     dec_v_min,
+    l_hat,
+    manip_floor_hat,
     decision_delta,
     display_integer,
     in_cap_prize,
@@ -40,7 +45,11 @@ from bleavit_reference_model.treasury import (
     pol_commitment,
     security_sizing_ok,
 )
-from bleavit_reference_model.twap import TwapAccumulator
+from bleavit_reference_model.twap import (
+    ContestCapitalAccumulator,
+    TwapAccumulator,
+    marked_open_interest,
+)
 from bleavit_reference_model.welfare import (
     collator_d_eff,
     floor_64x64,
@@ -436,21 +445,21 @@ class ReferenceModelTests(unittest.TestCase):
             ({"process_hold": True}, RejectReason.PROCESS_HOLD),
             (
                 {
-                    "requires_gate_markets": True,
+                    "proposal_class": "Treasury",
                     "gate_book_valid": False,
                 },
                 RejectReason.NOT_DECISION_GRADE,
             ),
             (
                 {
-                    "requires_gate_markets": True,
+                    "proposal_class": "Treasury",
                     "p_adopt": {"Survival": Decimal("0.06")},
                 },
                 RejectReason.GATE_VETO_SURVIVAL,
             ),
             (
                 {
-                    "requires_gate_markets": True,
+                    "proposal_class": "Treasury",
                     "p_adopt": {"Security": Decimal("0.06")},
                 },
                 RejectReason.GATE_VETO_SECURITY,
@@ -519,11 +528,68 @@ class ReferenceModelTests(unittest.TestCase):
             Decimal("0.56"),
             Decimal("0.50"),
             Decimal("0.05"),
-            requires_gate_markets=True,
+            proposal_class="Treasury",
             p_adopt={"Survival": Decimal("0.06")},
             welfare_grade=Grade.INVALID,
         )
         self.assertEqual(result.reason, RejectReason.GATE_VETO_SURVIVAL)
+
+    def test_low_ask_treasury_is_gate_bearing_and_both_vetoes_are_reachable(self):
+        for proposal_class in ("Param", "Treasury", "Code", "Meta"):
+            with self.subTest(proposal_class=proposal_class):
+                self.assertTrue(requires_gate_markets(proposal_class))
+
+        inputs = {
+            "accept_full": Decimal("0.56"),
+            "reject_full_effective": Decimal("0.50"),
+            "delta": Decimal("0.05"),
+            "proposal_class": "Treasury",
+            "ask": Decimal("100"),
+            "spendable_nav": Decimal("7393600"),
+        }
+        survival = decide(
+            **inputs,
+            p_adopt={"Survival": Decimal("0.06")},
+            p_reject={"Survival": Decimal("0.01")},
+        )
+        security = decide(
+            **inputs,
+            p_adopt={"Survival": Decimal("0.01"), "Security": Decimal("0.06")},
+            p_reject={"Survival": Decimal("0.01"), "Security": Decimal("0.01")},
+        )
+        self.assertLessEqual(inputs["ask"], inputs["spendable_nav"] / Decimal(100))
+        self.assertEqual(survival.reason, RejectReason.GATE_VETO_SURVIVAL)
+        self.assertEqual(security.reason, RejectReason.GATE_VETO_SECURITY)
+
+    def test_param_gate_vetoes_are_reachable_and_honest_param_adopts(self):
+        inputs = {
+            "accept_full": Decimal("0.517"),
+            "reject_full_effective": Decimal("0.500"),
+            "accept_trailing": Decimal("0.517"),
+            "reject_trailing_effective": Decimal("0.500"),
+            "delta": Decimal("0.015"),
+            "proposal_class": "Param",
+            "envelope_value": Decimal("100"),
+            "measured_liquidity": Decimal("1000000"),
+        }
+        survival = decide(
+            **inputs,
+            p_adopt={"Survival": Decimal("0.06")},
+            p_reject={"Survival": Decimal("0.01")},
+        )
+        security = decide(
+            **inputs,
+            p_adopt={"Survival": Decimal("0.01"), "Security": Decimal("0.06")},
+            p_reject={"Survival": Decimal("0.01"), "Security": Decimal("0.01")},
+        )
+        honest = decide(
+            **inputs,
+            p_adopt={"Survival": Decimal("0.01"), "Security": Decimal("0.01")},
+            p_reject={"Survival": Decimal("0.01"), "Security": Decimal("0.01")},
+        )
+        self.assertEqual(survival.reason, RejectReason.GATE_VETO_SURVIVAL)
+        self.assertEqual(security.reason, RejectReason.GATE_VETO_SECURITY)
+        self.assertEqual(honest.outcome, Outcome.ADOPT)
 
     def test_first_insufficiency_extends_second_rejects(self):
         first = decide(
@@ -592,8 +658,16 @@ class ReferenceModelTests(unittest.TestCase):
         self.assertEqual(row["S"], Decimal("0.831250000"))
         self.assertTrue(Decimal(0) <= row["W"] <= Decimal(1))
         self.assertNotEqual(row["C"], row["C_daily"])
+        # 05 §4.4(4): the score is idempotent on on-grid values at or above
+        # the eps_W floor; below it the floor binds, so a doubly-zeroed pair
+        # scores exactly eps_W (one base unit), never 0.
         self.assertEqual(
-            settlement_score(row["W"], row["W"]), row["W"]
+            settlement_score(row["W"], row["W"]),
+            max(row["W"], Decimal("1e-9")),
+        )
+        self.assertEqual(
+            settlement_score(Decimal("0.123456789"), Decimal("0.123456789")),
+            Decimal("0.123456789"),
         )
 
     def test_welfare_gate_and_settlement_vectors(self):
@@ -686,36 +760,26 @@ class ReferenceModelTests(unittest.TestCase):
 
     def test_pol_commitments_and_nav_floor_worked_numbers(self):
         commitment_cases = [
-            (("Param", False), 13_863),
-            (("Treasury", False), 34_657),
-            (("Treasury", True), 55_452),
-            (("Code", False), 103_972),
-            (("Meta", False), 159_424),
+            ("Param", 34_657),
+            ("Treasury", 55_452),
+            ("Code", 103_972),
+            ("Meta", 159_424),
         ]
-        for (proposal_class, large), displayed in commitment_cases:
-            model = display_integer(
-                pol_commitment(
-                    proposal_class, large_treasury=large
-                )
-            )
+        for proposal_class, displayed in commitment_cases:
+            model = display_integer(pol_commitment(proposal_class))
             self.assertEqual(model, displayed)
         self.assertEqual(display_integer(baseline_commitment()), 17_329)
 
         floor_cases = [
-            (("Param", 1, False), 1_848_400),
-            (("Treasury", 1, False), 4_620_981),
-            (("Treasury", 1, True), 7_393_600),
-            (("Code", 1, False), 13_862_944),
-            (("Meta", 1, False), 21_256_533),
-            (("Param", 5, False), 9_241_960),
-            (("Meta", 5, False), 106_282_533),
+            (("Param", 1), 4_620_989),
+            (("Treasury", 1), 7_393_600),
+            (("Code", 1), 13_862_944),
+            (("Meta", 1), 21_256_533),
+            (("Param", 5), 23_104_906),
+            (("Meta", 5), 106_282_533),
         ]
-        for (proposal_class, slots, large), displayed in floor_cases:
-            model = nav_floor(
-                proposal_class,
-                slots=slots,
-                large_treasury=large,
-            )
+        for (proposal_class, slots), displayed in floor_cases:
+            model = nav_floor(proposal_class, slots=slots)
             self.assertLessEqual(abs(model - displayed), Decimal(10))
 
     def test_security_worked_numbers_and_scaling(self):
@@ -779,6 +843,296 @@ class ReferenceModelTests(unittest.TestCase):
         # deliberately avoided: it would recreate exception/enum classes and
         # break identity comparisons for the rest of the suite.
         self.assertEqual(getcontext().prec, 28)
+
+
+class ContestCapitalTests(unittest.TestCase):
+    """04 §7a / 05 §5.2 / 08 §5.2 SQ-231 contest-capital semantics."""
+
+    def test_wash_round_trip_inside_one_interval_is_zero(self):
+        # A buy at block 3 unwound at block 7 restores q exactly (LMSR path
+        # independence); every recorded observation samples the previous
+        # block's stored state, which is flat — zero contest capital.
+        accumulator = ContestCapitalAccumulator()
+        for block in (10, 20):
+            noi = accumulator.observe(block, "0", "0", "0.5")
+            self.assertEqual(noi, Decimal(0))
+        self.assertEqual(accumulator.mean(0, 20), Decimal(0))
+        # The same exposure held instead of unwound accrues.
+        held = ContestCapitalAccumulator()
+        self.assertGreater(held.observe(10, "1000", "0", "0.5"), Decimal(0))
+
+    def test_held_exposure_accrues_time_times_marked_value(self):
+        accumulator = ContestCapitalAccumulator()
+        accumulator.observe(10, "1000", "0", "0.5")
+        accumulator.observe(20, "1000", "0", "0.5")
+        # noi = 1000 * 0.5 = 500, backward-weighted over each interval.
+        self.assertEqual(accumulator.mean(0, 20), Decimal(500))
+        # Twice the holding time doubles N; twice the position doubles noi.
+        accumulator.observe(30, "1000", "0", "0.5")
+        accumulator.observe(40, "1000", "0", "0.5")
+        self.assertEqual(
+            accumulator.cumulative_at(40),
+            Decimal(2) * accumulator.cumulative_at(20),
+        )
+        doubled = ContestCapitalAccumulator()
+        self.assertEqual(
+            doubled.observe(10, "2000", "0", "0.5"), Decimal(1000)
+        )
+        # Exposure held only through the second half of the window
+        # contributes exactly half the window mean.
+        late = ContestCapitalAccumulator()
+        late.observe(10, "0", "0", "0.5")
+        late.observe(20, "1000", "0", "0.5")
+        self.assertEqual(late.mean(0, 20), Decimal(250))
+        # Both sides mark at their own price; N is monotone non-decreasing.
+        both = ContestCapitalAccumulator()
+        self.assertEqual(
+            both.observe(10, "1000", "500", "0.6"),
+            Decimal(600) + Decimal(200),
+        )
+        cumulatives = [point.cumulative for point in accumulator.points]
+        self.assertEqual(cumulatives, sorted(cumulatives))
+
+    def test_pol_seeded_positions_are_excluded(self):
+        accumulator = ContestCapitalAccumulator(
+            q_pol_long="1000", q_pol_short="1000"
+        )
+        self.assertEqual(
+            accumulator.observe(10, "1000", "1000", "0.5"), Decimal(0)
+        )
+        # Only the net trader exposure above the recorded POL position marks.
+        self.assertEqual(
+            accumulator.observe(20, "1500", "1000", "0.5"), Decimal(250)
+        )
+        # A trader-side deficit below POL never goes negative (max(., 0)).
+        self.assertEqual(
+            accumulator.observe(30, "400", "1000", "0.5"), Decimal(0)
+        )
+
+    def test_noi_rounds_down_on_the_base_unit_grid(self):
+        self.assertEqual(
+            marked_open_interest("1", "0", "0.1234567"),
+            Decimal("0.123456"),
+        )
+        with self.assertRaises(ValueError):
+            marked_open_interest("1", "0", "1.5")
+
+    def test_l_hat_flow_cap_ceiling_binds(self):
+        pol_depth = Decimal(2) * Decimal(25000) * lmsr.LN2
+        # flow_cap = 8: at the floor b = 25,000 the ×7 kernel minimum would sit
+        # below 2P/(b_acc+b_rej) = 8 for this 08 §5.4(b) proposal — the §5.3
+        # non-bindingness argument assumes the scaled pol.b; the calibrated
+        # flow_cap sits above the minimum.
+        organic = l_hat(pol_depth, "400000", "8", "25000", "25000")
+        self.assertEqual(organic - pol_depth, Decimal(400000))
+        # Contest capital beyond flow_cap*(b_acc+b_rej) is capped at 350,000:
+        # wash inflation of the certificate is bounded by the ceiling.
+        capped = l_hat(pol_depth, "1000000000", "7", "25000", "25000")
+        self.assertEqual(capped - pol_depth, Decimal(350000))
+        # The 08 §5.4(b) treasury example stays intact through the new form.
+        self.assertLessEqual(
+            abs(display_integer(attack_cost_hat(organic)) - 651_986), 10
+        )
+        # And the capped L-hat fails the same proposal's sizing: 3P = 600,000.
+        self.assertFalse(
+            security_sizing_ok(Decimal(200000), attack_cost_hat(capped))
+        )
+        with self.assertRaises(ValueError):
+            l_hat(pol_depth, "400000", "6.999", "25000", "25000")
+        with self.assertRaises(ValueError):
+            manip_floor_hat(
+                [(Decimal(25000), Decimal("0.5"))],
+                Decimal("0.025"),
+                Decimal(400000),
+                Decimal(5),
+            )
+
+    def test_decide_decomposed_l_hat_matches_composed(self):
+        kwargs = dict(
+            accept_full=Decimal("0.56"),
+            reject_full_effective=Decimal("0.50"),
+            delta=Decimal("0.05"),
+            proposal_class="Treasury",
+            ask=Decimal(200000),
+        )
+        pol_depth = Decimal(2) * Decimal(25000) * lmsr.LN2
+        composed = decide(
+            measured_liquidity=pol_depth + Decimal(400000), **kwargs
+        )
+        decomposed = decide(
+            pol_depth=pol_depth,
+            contest_accept=Decimal(400000),
+            contest_reject=Decimal(400000),
+            flow_cap=Decimal(8),
+            b_accept=Decimal(25000),
+            b_reject=Decimal(25000),
+            **kwargs,
+        )
+        self.assertEqual(composed, decomposed)
+        self.assertIs(composed.outcome, Outcome.ADOPT)
+        asymmetric = decide(
+            pol_depth=pol_depth,
+            contest_accept=Decimal(400000),
+            contest_reject=Decimal(100000),
+            flow_cap=Decimal(8),
+            b_accept=Decimal(25000),
+            b_reject=Decimal(25000),
+            **kwargs,
+        )
+        self.assertIs(asymmetric.outcome, Outcome.REJECT)
+        self.assertIs(asymmetric.reason, RejectReason.SECURITY_SIZING)
+        with self.assertRaises(ValueError):
+            decide(pol_depth=pol_depth, **kwargs)
+
+    def test_grading_fails_closed_on_contest_capital_not_gross_notional(self):
+        # The SQ-231 scenario: an attacker churns 1M USDC of gross notional
+        # through the book in round trips that never survive an observation.
+        b = Decimal(10000)
+        gross_notional = Decimal(0)
+        accumulator = ContestCapitalAccumulator()
+        block = 10
+        for _ in range(50):
+            gross_notional += buy_delta_cost(b, 0, 0, "long", 10000)
+            gross_notional += lmsr.sell_delta_proceeds(
+                b, 10000, 0, "long", 10000
+            )
+            accumulator.observe(block, "0", "0", "0.5")
+            block += 10
+        v_min = dec_v_min("Param", Decimal(0))
+        self.assertGreaterEqual(gross_notional, v_min)  # old measure passed
+        contest = accumulator.mean(0, block - 10)
+        self.assertEqual(contest, Decimal(0))  # new measure does not
+        grade = grade_welfare_book(
+            twap=Decimal("0.5"),
+            spot_close=Decimal("0.5"),
+            coverage=Decimal(1),
+            stale_events=0,
+            pol_floor_met=True,
+            pol_undisturbed=True,
+            contest_capital=contest,
+            v_min=v_min,
+        )
+        self.assertIs(grade, Grade.INSUFFICIENT)
+        first = decide(
+            accept_full=Decimal("0.56"),
+            reject_full_effective=Decimal("0.50"),
+            delta=Decimal("0.05"),
+            welfare_grade=grade,
+        )
+        self.assertIs(first.outcome, Outcome.EXTEND)
+        recurred = decide(
+            accept_full=Decimal("0.56"),
+            reject_full_effective=Decimal("0.50"),
+            delta=Decimal("0.05"),
+            welfare_grade=grade,
+            extended=True,
+        )
+        self.assertEqual(
+            recurred,
+            type(recurred)(Outcome.REJECT, RejectReason.NOT_DECISION_GRADE),
+        )
+        # Genuinely held contest capital at the floor grades OK.
+        self.assertIs(
+            grade_welfare_book(
+                twap=Decimal("0.5"),
+                spot_close=Decimal("0.5"),
+                coverage=Decimal(1),
+                stale_events=0,
+                pol_floor_met=True,
+                pol_undisturbed=True,
+                contest_capital=v_min,
+                v_min=v_min,
+            ),
+            Grade.OK,
+        )
+
+    def test_welfare_book_grade_partitions(self):
+        base = dict(
+            spot_close=Decimal("0.5"),
+            coverage=Decimal(1),
+            stale_events=0,
+            pol_floor_met=True,
+            pol_undisturbed=True,
+            contest_capital=Decimal(100000),
+            v_min=Decimal(100000),
+        )
+        self.assertIs(
+            grade_welfare_book(twap=Decimal("0.5"), **base), Grade.OK
+        )
+        self.assertIs(
+            grade_welfare_book(
+                twap=Decimal("0.01"),
+                **{**base, "spot_close": Decimal("0.01")},
+            ),
+            Grade.INVALID,  # sanity band (welfare books only)
+        )
+        self.assertIs(
+            grade_welfare_book(
+                twap=Decimal("0.5"), **{**base, "pol_undisturbed": False}
+            ),
+            Grade.INVALID,
+        )
+        self.assertIs(
+            grade_welfare_book(
+                twap=Decimal("0.5"), **{**base, "stale_events": 1}
+            ),
+            Grade.INSUFFICIENT,  # 04 §7: first stale event extends once
+        )
+        self.assertIs(
+            grade_welfare_book(
+                twap=Decimal("0.5"), **{**base, "stale_events": 2}
+            ),
+            Grade.INVALID,  # second forces reject (status-quo default)
+        )
+        self.assertIs(
+            grade_welfare_book(
+                twap=Decimal("0.5"), **{**base, "coverage": Decimal("0.94")}
+            ),
+            Grade.INSUFFICIENT,
+        )
+        self.assertIs(
+            grade_welfare_book(
+                twap=Decimal("0.5"), **{**base, "spot_close": Decimal("0.56")}
+            ),
+            Grade.INVALID,  # |spot_close - TWAP| > 0.05
+        )
+
+    def test_gate_book_near_boundary_rule(self):
+        base = dict(
+            twap=Decimal("0.005"),
+            spot_close=Decimal("0.006"),
+            coverage=Decimal("0.99"),
+            stale_events=0,
+            pol_floor_met=True,
+            pol_undisturbed=True,
+            contest_capital=Decimal(10000),
+            gate_v_min=Decimal(10000),  # 0.1 * dec.v_min(Param)
+        )
+        self.assertTrue(gate_decision_grade(**base))
+        self.assertFalse(
+            gate_decision_grade(**{**base, "coverage": Decimal("0.97")})
+        )
+        self.assertFalse(gate_decision_grade(**{**base, "stale_events": 1}))
+        self.assertFalse(
+            gate_decision_grade(**{**base, "spot_close": Decimal("0.02")})
+        )
+        # The contest floor is graded over the same measure in both regimes.
+        self.assertFalse(
+            gate_decision_grade(
+                **{**base, "contest_capital": Decimal("9999.999999")}
+            )
+        )
+        # Inside the band the welfare-book validity checks apply instead.
+        in_band = {
+            **base,
+            "twap": Decimal("0.5"),
+            "spot_close": Decimal("0.52"),
+            "coverage": Decimal("0.96"),
+        }
+        self.assertTrue(gate_decision_grade(**in_band))
+        self.assertFalse(
+            gate_decision_grade(**{**in_band, "pol_undisturbed": False})
+        )
 
 
 if __name__ == "__main__":

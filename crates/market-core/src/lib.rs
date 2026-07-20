@@ -248,9 +248,11 @@ pub struct TwapWindow {
     pub end: BlockNumber,
     pub observations: u32,
     pub stale_events: u8,
-    /// Time integral of non-POL contest notional over this full window.
-    pub contest_notional_blocks: u128,
-    /// Last block through which contest notional has been integrated.
+    /// Time integral (04 §7a `N`) of non-POL **contest capital** — the marked
+    /// USDC value of net outstanding trader positions ([`contest_capital`]) —
+    /// over this full window. Monotone non-decreasing (I-13).
+    pub contest_capital_blocks: u128,
+    /// Last block through which contest capital has been integrated.
     pub contest_accrued_until: BlockNumber,
     /// Cleared on any accumulator overflow; an invalid window never grades.
     pub contest_valid: bool,
@@ -408,6 +410,49 @@ pub fn coverage_at_least(
 /// overstates the capital available to absorb manipulation flow.
 pub fn maker_loss_floor(b: Balance) -> Option<Balance> {
     fixed_to_base_units_down(fx(b).ok()?.checked_mul(LN_2).ok()?).ok()
+}
+
+/// 04 §7a contest capital `noi_t`: the marked USDC value of net outstanding
+/// **trader** positions against the maker,
+/// `Σ_branch max(q_branch − q_pol_branch, 0) · price_branch`, evaluated from a
+/// *stored* (previous-block) quantity pair and quote so a trade can never
+/// contribute its own state to the sample that prices it.
+///
+/// `q_pol_branch = 0` by construction in this implementation: POL enters as
+/// complete-set inventory held by the book account (04 §10 seeding —
+/// [`seed_book`]/[`seed_branch_pair`] never touch `q_long`/`q_short`), so the
+/// LMSR cost-function state counts net trader-sold quantity only and the §7a
+/// POL exclusion is structural.
+///
+/// Rounds DOWN on the 1e9 fixed grid (04 §7a: the measure feeds validity
+/// floors and the step-9 certificate; under-counting is the conservative
+/// direction). `None` on arithmetic overflow — callers MUST fail closed
+/// (an unmeasurable window never grades, G-1).
+pub fn contest_capital(q_long: Balance, q_short: Balance, quote_1e9: FixedU64) -> Option<Balance> {
+    let p_long = u128::from(quote_1e9.0.min(PRICE_ONE_1E9));
+    let p_short = u128::from(PRICE_ONE_1E9) - p_long;
+    q_long
+        .checked_mul(p_long)?
+        .checked_add(q_short.checked_mul(p_short)?)
+        .map(|marked| marked / u128::from(PRICE_ONE_1E9))
+}
+
+/// 05 §5.6 / 08 §5.2 measured decision-pair depth
+/// `L̂ = POL depth + min(pair contest capital, sec.flow_cap · (b_acc + b_rej))`
+/// (SQ-231 amendment: the non-POL term is the §7a contest-capital measure under
+/// the `C_hold` wash ceiling, and gross flow no longer feeds the certificate).
+/// The ceiling product rounds DOWN — every approximation error makes step 9
+/// *harder* to pass. `None` on overflow; callers fail closed.
+pub fn liquidity_hat(
+    pol_depth: Balance,
+    pair_contest_capital: Balance,
+    flow_cap_1e9: u64,
+    b_sum: Balance,
+) -> Option<Balance> {
+    let ceiling = b_sum
+        .checked_mul(u128::from(flow_cap_1e9))?
+        .checked_div(u128::from(PRICE_ONE_1E9))?;
+    pol_depth.checked_add(pair_contest_capital.min(ceiling))
 }
 
 /// Exact per-book POL obligation created by seeding, rounded up in the same
@@ -2432,6 +2477,81 @@ mod tests {
         assert_eq!(
             m.create_market(4, BookKind::Baseline { epoch: 42 }, a(7), a(6), B),
             Err(Error::DuplicateBaselineMarket)
+        );
+    }
+
+    #[test]
+    fn contest_capital_marks_both_branches_and_rounds_down() {
+        // 04 §7a: noi_t = Σ_branch max(q − q_pol, 0)·price, previous block's
+        // stored q and quote, rounded DOWN on the 1e9 grid.
+        let mid = FixedU64(500_000_000);
+        // Empty book (or a wash round trip that restored q exactly): zero.
+        assert_eq!(contest_capital(0, 0, mid), Some(0));
+        // One-sided LONG at the mid marks exactly half its quantity.
+        assert_eq!(contest_capital(1_000_000, 0, mid), Some(500_000));
+        // A complete LONG+SHORT pair marks its par value: p + (1−p) = 1.
+        assert_eq!(
+            contest_capital(1_000_000, 1_000_000, FixedU64(730_000_001)),
+            Some(1_000_000)
+        );
+        // SHORT exposure is priced at 1 − p, not at gross quantity.
+        assert_eq!(
+            contest_capital(0, 1_000_000, FixedU64(900_000_000)),
+            Some(100_000)
+        );
+        // Rounds down: 3 units at p = 0.333333333 mark to 0, never 1.
+        assert_eq!(contest_capital(3, 0, FixedU64(333_333_333)), Some(0));
+        // An out-of-range stored quote clamps to the price ceiling instead of
+        // inflating the marked value.
+        assert_eq!(
+            contest_capital(1_000_000, 1_000_000, FixedU64(2_000_000_000)),
+            Some(1_000_000)
+        );
+        // Overflow fails closed for the caller to invalidate the window.
+        assert_eq!(contest_capital(Balance::MAX, 0, mid), None);
+    }
+
+    #[test]
+    fn liquidity_hat_applies_the_flow_cap_ceiling_rounding_down() {
+        // 05 §5.6 / 08 §5.2 (SQ-231): L̂ = POL + min(pair contest capital,
+        // sec.flow_cap·(b_acc + b_rej)); the ceiling product rounds down.
+        let floor_7 = futarchy_primitives::kernel::SEC_FLOW_CAP_FLOOR_1E9;
+        // Below the ceiling the measured contest passes through unchanged.
+        assert_eq!(liquidity_hat(10, 50, floor_7, 10), Some(60));
+        // Above the ceiling the min binds: 7 × (b_acc + b_rej) = 70 < 100.
+        assert_eq!(liquidity_hat(10, 100, floor_7, 10), Some(80));
+        // Fractional multipliers round the ceiling DOWN: 7.5 × 3 = 22.5 → 22.
+        assert_eq!(liquidity_hat(0, 1_000, 7_500_000_000, 3), Some(22));
+        // Overflow fails closed.
+        assert_eq!(liquidity_hat(0, 0, floor_7, Balance::MAX), None);
+        assert_eq!(liquidity_hat(Balance::MAX, 1, floor_7, 1), None);
+    }
+
+    #[test]
+    fn seeding_leaves_lmsr_quantities_untouched_so_pol_is_contest_excluded() {
+        // 04 §7a / §10: q_pol_branch = 0 by construction — POL enters as
+        // complete-set inventory, never as book-sold LONG/SHORT quantity, so
+        // the seeded book's contest capital is structurally zero.
+        let mut ledger = LedgerState::new();
+        ledger.create_vault(1, 0).unwrap();
+        let mut m: MarketState<[u8; 32]> = MarketState::new();
+        m.create_market(
+            7,
+            BookKind::Decision {
+                proposal: 1,
+                branch: Branch::Accept,
+            },
+            a(9),
+            a(8),
+            B,
+        )
+        .unwrap();
+        m.seed(&mut ledger, 7, &a(1)).unwrap();
+        let book = &m.markets[0];
+        assert_eq!((book.q_long, book.q_short), (0, 0));
+        assert_eq!(
+            contest_capital(book.q_long, book.q_short, book.last_quote_1e9),
+            Some(0)
         );
     }
 }

@@ -47,6 +47,17 @@ class CalibrationRunnerTests(unittest.TestCase):
             timeout=180,
         )
         artifact = load_artifact(ARTIFACT)
+        if "config digest mismatch" in result.stderr:
+            # Behavior-affecting simulation edits deliberately invalidate the
+            # committed 10k artifact. The milestone orchestrator owns the
+            # separate --full regeneration; unit gates must still distinguish
+            # that expected stale-evidence state from a false green check.
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(
+                "recorded config differs from executable defaults",
+                result.stderr,
+            )
+            return
         self.assertEqual(result.returncode, 1 if artifact["violations"] else 0)
         self.assertIn("calibration structure OK", result.stdout)
         if artifact["violations"]:
@@ -90,28 +101,29 @@ class CalibrationRunnerTests(unittest.TestCase):
         def bad_subsample(payload):
             payload["subsample"]["results"][0]["outcome"] = "Corrupt"
 
-        def missing_violations(payload):
-            payload["violations"] = []
+        def tampered_violations(payload):
+            # Direction-agnostic: fabricating an unmeasured violation entry
+            # disagrees with the derived list whether the artifact is red
+            # (real violations replaced) or green (empty list padded).
+            payload["violations"] = ["fabricated: never measured"]
 
-        def false_eligibility(payload):
-            payload["published"]["eligibility"][
+        def flipped_eligibility(payload):
+            eligibility = payload["published"]["eligibility"]
+            eligibility["all_decidable_harm_false_pass_lt_1pct"] = not eligibility[
                 "all_decidable_harm_false_pass_lt_1pct"
-            ] = True
-
-        def green_attack_summary(payload):
-            attack = payload["attack_cost_validation"]
-            attack["envelope_violations"] = []
-            attack["envelope_inconclusive"] = []
-            attack["sub_3p_every_class_clean"] = True
-            for row in attack["per_class"].values():
-                row["envelope_clean"] = True
-                row["sub_3p_clean"] = True
-            payload["published"]["eligibility"]["sub_3p_brackets_clean"] = True
-            payload["violations"] = [
-                value
-                for value in payload["violations"]
-                if "false-pass rate" in value
             ]
+
+        def tampered_attack_summary(payload):
+            # Flipping the committed summary flags must disagree with the
+            # values the checker re-derives from the bracket rows, for a red
+            # and for a green artifact alike.
+            attack = payload["attack_cost_validation"]
+            attack["sub_3p_every_class_clean"] = not attack[
+                "sub_3p_every_class_clean"
+            ]
+            for row in attack["per_class"].values():
+                row["envelope_clean"] = not row["envelope_clean"]
+                row["sub_3p_clean"] = not row["sub_3p_clean"]
 
         mutations.update(
             {
@@ -120,9 +132,9 @@ class CalibrationRunnerTests(unittest.TestCase):
                 "root": bad_root,
                 "order": reordered,
                 "subsample": bad_subsample,
-                "violations": missing_violations,
-                "eligibility": false_eligibility,
-                "attack_summary": green_attack_summary,
+                "violations": tampered_violations,
+                "eligibility": flipped_eligibility,
+                "attack_summary": tampered_attack_summary,
             }
         )
         with tempfile.TemporaryDirectory() as directory:

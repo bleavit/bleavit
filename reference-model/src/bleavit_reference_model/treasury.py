@@ -28,14 +28,26 @@ V_MIN_FLOORS = {
     "code": Decimal("600000"),
     "meta": Decimal("1200000"),
 }
+# Phase-0 calibrated dec.delta floors (13 §1; V-12, 2026-07-19), raised from the
+# pre-calibration 0.015/0.025/0.040/0.060 so that every class's decidable-harm
+# false-pass rate is < 1 % and no PROFITABLE manipulation flips a proposal below
+# 3·InCapPrize (15 §4.9). TREASURY/CODE/META took a uniform 1.5x; PARAM took 2.5x
+# — its small floor + unbacked capability-envelope prizes (SQ-173) make marginal
+# near-boundary flips cheap, so it needs the extra margin to reach 0 profitable
+# exploits. The 0.005 kernel floor (DECISION_DELTA_FLOOR) is unchanged.
 DELTA_FLOORS = {
-    "param": Decimal("0.015"),
-    "treasury": Decimal("0.025"),
-    "code": Decimal("0.040"),
-    "meta": Decimal("0.060"),
+    "param": Decimal("0.0375"),
+    "treasury": Decimal("0.0375"),
+    "code": Decimal("0.060"),
+    "meta": Decimal("0.090"),
 }
 GATE_B = Decimal("7500")
 BASELINE_B = Decimal("25000")
+# 13 §1 sec.flow_cap: value is Phase-0 sim-gated ([VERIFY]); 7 is the kernel
+# hard minimum (08 §5.3 — below ×7 the ceiling could reject honest
+# exactly-grade proposals). The model therefore takes flow_cap as an input
+# from its consumers and enforces only the bound.
+FLOW_CAP_MIN = Decimal(7)
 
 
 @dataclass(frozen=True)
@@ -129,6 +141,39 @@ def in_cap_prize(
     return round_up(prize)
 
 
+def _flow_cap(value) -> Decimal:
+    cap = _d(value)
+    if cap < FLOW_CAP_MIN:
+        raise ValueError("sec.flow_cap below its hard minimum of 7 (08 §5.3)")
+    return cap
+
+
+def decision_pair_contest_capital(contest_accept, contest_reject) -> Decimal:
+    """04 §7a / 08 §5.2: binding contest capital of a decision pair."""
+    accept = _d(contest_accept)
+    reject = _d(contest_reject)
+    if accept < 0 or reject < 0:
+        raise ValueError("negative decision-book contest capital")
+    return min(accept, reject)
+
+
+def l_hat(pol_depth, contest_capital, flow_cap, b_accept, b_reject) -> Decimal:
+    """08 §5.2 L-hat: POL pair depth + the capped non-POL contest term.
+
+    The non-POL term is min(contest capital of the decision pair over the
+    decision window (04 §7a — SQ-231: gross traded notional no longer feeds
+    the certificate), sec.flow_cap * (b_acc + b_rej)).
+    """
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        pol_depth = _d(pol_depth)
+        contest = _d(contest_capital)
+        pair_b = _d(b_accept) + _d(b_reject)
+        if pol_depth < 0 or contest < 0 or _d(b_accept) < 0 or _d(b_reject) < 0:
+            raise ValueError("negative security-sizing input")
+        return pol_depth + min(contest, _flow_cap(flow_cap) * pair_b)
+
+
 def attack_cost_hat(
     liquidity,
     *,
@@ -184,10 +229,10 @@ def decision_delta(proposal_class, prize) -> Decimal:
     return min(DELTA_FLOORS[name] * ratio, Decimal("0.10"))
 
 
-def pol_commitment(proposal_class, large_treasury: bool = False) -> Decimal:
+def pol_commitment(proposal_class) -> Decimal:
     name = _class_name(proposal_class)
     books_b = Decimal(2) * B_FLOORS[name]
-    if name in ("code", "meta") or (name == "treasury" and large_treasury):
+    if name in ("param", "treasury", "code", "meta"):
         books_b += Decimal(4) * GATE_B
     with localcontext() as ctx:
         ctx.prec = WORK_PREC
@@ -204,12 +249,11 @@ def nav_floor(
     proposal_class,
     *,
     slots: int = 1,
-    large_treasury: bool = False,
 ) -> Decimal:
     if slots <= 0:
         raise ValueError("slots must be positive")
     name = _class_name(proposal_class)
-    exact = pol_commitment(name, large_treasury) * slots
+    exact = pol_commitment(name) * slots
     # SPEC-NOTE(08 §4.1 rounding convention): displayed rows inconsistently
     # divide exact and whole-USDC commitments. These branches reproduce every
     # displayed row within the mandated 10-USDC tolerance without changing 08.
@@ -219,7 +263,7 @@ def nav_floor(
             if slots == 1
             else exact.to_integral_value(rounding=ROUND_FLOOR)
         )
-    elif name == "treasury" and large_treasury:
+    elif name == "treasury":
         charged = exact.to_integral_value(rounding=ROUND_HALF_UP)
     else:
         charged = exact
@@ -229,10 +273,16 @@ def nav_floor(
 def manip_floor_hat(
     books,
     delta,
-    contest_notional,
+    contest_capital,
     flow_cap,
 ) -> Decimal:
-    """05 §5.6 C_disp+C_hold diagnostic; it never gates."""
+    """05 §5.6 C_disp+C_hold diagnostic; it never gates.
+
+    `contest_capital` is V_win, the 04 §7a time-averaged marked value of net
+    outstanding trader positions over the window (SQ-231 amendment: gross
+    traded notional is not the measure); the sec.flow_cap ceiling bounds
+    wash-trade inflation of it.
+    """
     delta = _d(delta)
     with localcontext() as ctx:
         ctx.prec = WORK_PREC
@@ -249,6 +299,6 @@ def manip_floor_hat(
             )
             c_disp += b * ratio.ln()
             total_b += b
-        held_flow = min(_d(contest_notional), _d(flow_cap) * total_b)
+        held_flow = min(_d(contest_capital), _flow_cap(flow_cap) * total_b)
         c_hold = held_flow * delta
         return round_down(c_disp + c_hold)

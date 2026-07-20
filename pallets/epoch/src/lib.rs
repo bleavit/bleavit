@@ -31,12 +31,12 @@ use futarchy_primitives::{
 
 pub use epoch_core::{
     attack_cost_hat, decision_converged, effective_baseline_twaps, effective_reject_1e9,
-    CohortInfo as CoreCohortInfo, CohortStatus, DecisionGuards, DecisionInputs,
-    EpochInfo as CoreEpochInfo, EpochParams as CoreEpochParams, EpochState, Error as CoreError,
-    Event as CoreEvent, LedgerOps as CoreLedgerOps, Origin as CoreOrigin, SettlementTarget,
-    StaticCheckDisposition, TickInputs, WelfareOps as CoreWelfareOps, MAX_ACTIVE_PER_EPOCH,
-    MAX_INTAKE_QUEUE, MAX_LIVE_PROPOSALS, MAX_NON_TERMINAL_COHORTS, MAX_RESOURCES_PER_PROPOSAL,
-    RECENT_COHORTS,
+    requires_gate_markets, CohortInfo as CoreCohortInfo, CohortStatus, DecisionGuards,
+    DecisionInputs, EpochInfo as CoreEpochInfo, EpochParams as CoreEpochParams, EpochState,
+    Error as CoreError, Event as CoreEvent, LedgerOps as CoreLedgerOps, Origin as CoreOrigin,
+    SettlementTarget, StaticCheckDisposition, TickInputs, WelfareGrade,
+    WelfareOps as CoreWelfareOps, MAX_ACTIVE_PER_EPOCH, MAX_INTAKE_QUEUE, MAX_LIVE_PROPOSALS,
+    MAX_NON_TERMINAL_COHORTS, MAX_RESOURCES_PER_PROPOSAL, RECENT_COHORTS,
 };
 
 pub const MAX_INTAKE_QUEUE_BOUND: u32 = MAX_INTAKE_QUEUE as u32;
@@ -124,9 +124,19 @@ pub trait MarketAccess<AccountId> {
         class: ProposalClass,
         params: &CoreEpochParams,
     ) -> bool;
+    /// 05 §5.2 tri-state decision grade of one welfare (Decision) book:
+    /// `Insufficient` for the remediable-by-time shortfalls (contest capital
+    /// below the class floor, coverage below `dec.coverage`, a first stale
+    /// event), `Invalid` for every other failure — including an unavailable
+    /// or unreadable book (G-1, fail-closed).
+    fn welfare_grade(
+        market: MarketId,
+        end: BlockNumber,
+        class: ProposalClass,
+        params: &CoreEpochParams,
+    ) -> WelfareGrade;
     fn measured_depth(pid: ProposalId) -> Option<Balance>;
     fn published_flow_per_day(pid: ProposalId) -> Option<Balance>;
-    fn second_insufficiency(pid: ProposalId) -> bool;
     /// Previous epoch's finalized Baseline decision-window TWAP (05 §5.3).
     fn previous_settled_baseline_twap(epoch: EpochId) -> Option<FixedU64>;
 }
@@ -156,7 +166,6 @@ pub trait ConstitutionAccess<AccountId> {
     /// engages; the epoch recovery boundary is the sole clearing caller.
     fn note_dead_man_engaged(engaged: bool) -> DispatchResult;
     fn active_metric_spec_version() -> Option<MetricSpecVersion>;
-    fn treasury_gate_required(proposal: &Proposal<AccountId>) -> bool;
     /// Canonical CODE/META artifact commitment checked by attestors. `None`
     /// is an ambiguous payload and therefore blocks adoption.
     fn attestation_artifact(proposal: &Proposal<AccountId>) -> Option<H256>;
@@ -1774,14 +1783,15 @@ pub mod pallet {
             let accept_spot = T::Market::spot_at(markets.accept, end);
             let reject_spot = T::Market::spot_at(markets.reject, end);
 
-            let welfare_grade_ok = [
-                (markets.accept, BookRole::Decision),
-                (markets.reject, BookRole::Decision),
-            ]
-            .iter()
-            .all(|(market, role)| {
-                T::Market::decision_grade(*market, end, *role, proposal.class, &params)
-            });
+            // 05 §5.4 step 5 grades the Accept/Reject pair as one tri-state:
+            // the worst of the two per-book grades (Invalid dominates
+            // Insufficient dominates Ok), so an Invalid book can never hide
+            // behind the other book's remediable shortfall.
+            let welfare_grade = [markets.accept, markets.reject]
+                .iter()
+                .map(|market| T::Market::welfare_grade(*market, end, proposal.class, &params))
+                .max()
+                .unwrap_or(WelfareGrade::Invalid);
             let baseline_grade_ok = T::Market::baseline_market(proposal.epoch)
                 == Some(markets.baseline)
                 && T::Market::decision_grade(
@@ -1805,11 +1815,22 @@ pub mod pallet {
                 }
                 None => (None, true),
             };
-            let gate_grade_ok = markets.gates.is_none_or(|gates| {
-                gates.iter().all(|market| {
+            // 05 §5.4 steps 3-4 assert each gate's validity separately (its
+            // pair of books), so a Survival veto can be reported before
+            // Security's validity is inspected. Gate order is (S,C) ×
+            // (adopt,reject), identical to `MarketSet::gates`.
+            let gate_pair_ok = |pair: [MarketId; 2]| {
+                pair.iter().all(|market| {
                     T::Market::decision_grade(*market, end, BookRole::Gate, proposal.class, &params)
                 })
-            });
+            };
+            let (survival_grade_ok, security_grade_ok) = match markets.gates {
+                Some([s_adopt, s_reject, c_adopt, c_reject]) => (
+                    gate_pair_ok([s_adopt, s_reject]),
+                    gate_pair_ok([c_adopt, c_reject]),
+                ),
+                None => (true, true),
+            };
 
             // 05 §5.6 / 08 §5.2-§5.3: measured decision-pair depth and
             // the same constitution prize proxy feed both security sizing and
@@ -1844,13 +1865,13 @@ pub mod pallet {
                     baseline_trailing: baseline_trailing.unwrap_or(FixedU64(0)),
                     accept_spot: accept_spot.unwrap_or(FixedU64(0)),
                     reject_spot: reject_spot.unwrap_or(FixedU64(0)),
-                    welfare_grade_ok,
+                    welfare_grade,
                     baseline_grade_ok,
                     previous_settled_baseline_twap: T::Market::previous_settled_baseline_twap(
                         proposal.epoch,
                     ),
-                    welfare_second_insufficient: T::Market::second_insufficiency(pid),
-                    gate_grade_ok,
+                    survival_grade_ok,
+                    security_grade_ok,
                     gate_twaps,
                     measured_depth: measured_depth.unwrap_or(0),
                     published_flow_per_day: T::Market::published_flow_per_day(pid),

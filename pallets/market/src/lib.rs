@@ -36,6 +36,33 @@ pub trait BenchmarkHelper {
 #[cfg(feature = "runtime-benchmarks")]
 impl BenchmarkHelper for () {}
 
+/// Raw per-check facts behind the boolean decision grade
+/// (`Pallet::decision_grade_at`). The runtime adapter partitions them into
+/// the 05 §5.2 tri-state welfare-book grade: the remediable-by-time
+/// shortfalls (`!contest_ok`, `!coverage_ok`, `stale_events == 1`) grade
+/// Insufficient; every other failure grades Invalid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DecisionGradeFacts {
+    /// TWAP inside the [0.02, 0.98] sanity band (or the band not required).
+    pub sane: bool,
+    /// The exact decision window record is sealed (I-16 frozen boundary).
+    pub sealed: bool,
+    /// 04 §7 stale observation events inside the window.
+    pub stale_events: u8,
+    /// Scheduled-interval coverage at or above the required percentage.
+    pub coverage_ok: bool,
+    /// Seeded POL present with `b` at or above the class floor (POL floor
+    /// met and undisturbed).
+    pub pol_ok: bool,
+    /// Contest-capital accounting intact (cleared on accumulator overflow;
+    /// an invalid window never grades — G-1).
+    pub contest_valid: bool,
+    /// Time-averaged 04 §7a contest capital at or above the class floor.
+    pub contest_ok: bool,
+    /// `|close spot − TWAP|` within the convergence bound.
+    pub converged: bool,
+}
+
 /// Runtime treasury mirror for 08 §1.2 live-book POL obligations. The market
 /// pallet owns lifecycle timing but remains treasury-free; production binds the
 /// aggregate scan at the runtime boundary. A failed sync is returned to the
@@ -59,6 +86,7 @@ impl PolCommitmentSync for () {
 #[frame_support::pallet]
 pub mod pallet {
     use crate::weights::WeightInfo;
+    use crate::DecisionGradeFacts;
     use crate::PolCommitmentSync;
     use alloc::vec::Vec;
     use core::marker::PhantomData;
@@ -813,7 +841,7 @@ pub mod pallet {
                 end,
                 observations: 0,
                 stale_events: 0,
-                contest_notional_blocks: 0,
+                contest_capital_blocks: 0,
                 contest_accrued_until: start,
                 contest_valid: true,
                 close_spot: None,
@@ -1233,12 +1261,18 @@ pub mod pallet {
                 .find_map(|window| (window.end == end).then_some(window.close_spot).flatten())
         }
 
-        pub fn contest_notional(id: MarketId) -> Option<Balance> {
+        /// Instantaneous gross open interest (`q_long + q_short`), kept as
+        /// telemetry only. Since the SQ-231 amendment gross notional is NOT
+        /// the graded measure and never feeds validity floors or the step-9
+        /// certificate — those consume the 04 §7a contest capital via
+        /// [`Self::average_contest_at`].
+        pub fn gross_open_interest(id: MarketId) -> Option<Balance> {
             let book = Markets::<T>::get(id)?;
             book.q_long.checked_add(book.q_short)
         }
 
-        /// Full-window time-averaged non-POL contest notional, rounded down.
+        /// Full-window time-averaged non-POL contest capital (04 §7a:
+        /// `ContestCapital(w) = (N(end) − N(start)) / blocks`), rounded down.
         pub fn average_contest_at(
             id: MarketId,
             end: BlockNumber,
@@ -1255,13 +1289,63 @@ pub mod pallet {
                 .filter(|record| record.contest_valid)
                 .and_then(|record| {
                     record
-                        .contest_notional_blocks
+                        .contest_capital_blocks
                         .checked_div(u128::from(window))
                 })
         }
 
+        /// Per-check facts behind [`Self::decision_grade_at`], for the
+        /// runtime adapter that needs the 05 §5.2 tri-state welfare-book
+        /// partition (Insufficient vs Invalid) rather than the boolean fold.
+        /// `None` when the book, its TWAP, the exact window record, or the
+        /// observation-interval constant is unavailable (never gradable).
+        #[allow(clippy::too_many_arguments)]
+        pub fn decision_grade_facts_at(
+            id: MarketId,
+            end: BlockNumber,
+            window: BlockNumber,
+            coverage_pct: u8,
+            convergence: FixedU64,
+            contest_floor: Balance,
+            pol_floor: Balance,
+            require_sanity_band: bool,
+        ) -> Option<DecisionGradeFacts> {
+            let book = Markets::<T>::get(id)?;
+            let twap = Self::twap_at(id, end, window)?;
+            let start = end.checked_sub(window)?;
+            let windows = DecisionWindows::<T>::get(id);
+            let stats = windows
+                .iter()
+                .find(|record| record.start == start && record.end == end)?;
+            let interval = u32::try_from(T::ObsInterval::get()).ok()?;
+            Some(DecisionGradeFacts {
+                sane: !require_sanity_band
+                    || (twap.0 >= futarchy_primitives::kernel::DECISION_SANITY_MIN_1E9
+                        && twap.0 <= futarchy_primitives::kernel::DECISION_SANITY_MAX_1E9),
+                sealed: stats.sealed,
+                stale_events: stats.stale_events,
+                coverage_ok: market_core::coverage_at_least(
+                    stats.observations,
+                    window,
+                    interval,
+                    coverage_pct,
+                ),
+                pol_ok: SeededMarkets::<T>::contains_key(id) && book.b >= pol_floor,
+                contest_valid: stats.contest_valid,
+                contest_ok: stats.contest_valid
+                    && stats
+                        .contest_capital_blocks
+                        .checked_div(u128::from(window))
+                        .is_some_and(|contest| contest >= contest_floor),
+                converged: stats
+                    .close_spot
+                    .is_some_and(|spot| spot.0.abs_diff(twap.0) <= convergence.0),
+            })
+        }
+
         /// Coverage/staleness/POL/contest/convergence grade shared by the
-        /// runtime role-specific adapter.
+        /// runtime role-specific adapter: the boolean fold of
+        /// [`Self::decision_grade_facts_at`].
         #[allow(clippy::too_many_arguments)]
         pub fn decision_grade_at(
             id: MarketId,
@@ -1273,48 +1357,26 @@ pub mod pallet {
             pol_floor: Balance,
             require_sanity_band: bool,
         ) -> bool {
-            let Some(book) = Markets::<T>::get(id) else {
-                return false;
-            };
-            let Some(twap) = Self::twap_at(id, end, window) else {
-                return false;
-            };
-            let start = match end.checked_sub(window) {
-                Some(value) => value,
-                None => return false,
-            };
-            let windows = DecisionWindows::<T>::get(id);
-            let Some(stats) = windows
-                .iter()
-                .find(|record| record.start == start && record.end == end)
-            else {
-                return false;
-            };
-            let sane = !require_sanity_band
-                || (twap.0 >= futarchy_primitives::kernel::DECISION_SANITY_MIN_1E9
-                    && twap.0 <= futarchy_primitives::kernel::DECISION_SANITY_MAX_1E9);
-            let interval = match u32::try_from(T::ObsInterval::get()) {
-                Ok(value) => value,
-                Err(_) => return false,
-            };
-            sane && stats.sealed
-                && stats.stale_events == 0
-                && market_core::coverage_at_least(
-                    stats.observations,
-                    window,
-                    interval,
-                    coverage_pct,
-                )
-                && SeededMarkets::<T>::contains_key(id)
-                && book.b >= pol_floor
-                && stats.contest_valid
-                && stats
-                    .contest_notional_blocks
-                    .checked_div(u128::from(window))
-                    .is_some_and(|contest| contest >= contest_floor)
-                && stats
-                    .close_spot
-                    .is_some_and(|spot| spot.0.abs_diff(twap.0) <= convergence.0)
+            Self::decision_grade_facts_at(
+                id,
+                end,
+                window,
+                coverage_pct,
+                convergence,
+                contest_floor,
+                pol_floor,
+                require_sanity_band,
+            )
+            .is_some_and(|facts| {
+                facts.sane
+                    && facts.sealed
+                    && facts.stale_events == 0
+                    && facts.coverage_ok
+                    && facts.pol_ok
+                    && facts.contest_valid
+                    && facts.contest_ok
+                    && facts.converged
+            })
         }
 
         fn insert_checkpoint(id: MarketId, block: BlockNumber, cumulative: TwapCumulative) {
@@ -1766,6 +1828,17 @@ pub mod pallet {
             frame_system::Pallet::<T>::block_number().unique_saturated_into()
         }
 
+        /// Advance every unsealed window's 04 §7a contest-capital integral
+        /// `N += noi_t · Δblocks` through `through`. `book` is the *stored*
+        /// (pre-dispatch) book, so every accrued segment is priced and sized
+        /// from the previous block's stored `q` and quote — a trade can never
+        /// contribute its own state to the segment it closes. The segment grid
+        /// is the exact event grid (finer than the once-per-interval sample of
+        /// 04 §7a, and never larger: a position flashed across an observation
+        /// boundary receives its held blocks only, not a backward interval —
+        /// the A8-review flash-credit fix; under-counting is §7a's stated
+        /// conservative direction). `noi_t` rounds DOWN; any overflow marks
+        /// the window invalid, and an invalid window never grades (G-1).
         fn accrue_contest(id: MarketId, book: &MarketBook<T::AccountId>, through: u64) {
             let Ok(through) = u32::try_from(through) else {
                 DecisionWindows::<T>::mutate(id, |windows| {
@@ -1777,6 +1850,7 @@ pub mod pallet {
                 });
                 return;
             };
+            let noi = market_core::contest_capital(book.q_long, book.q_short, book.last_quote_1e9);
             DecisionWindows::<T>::mutate(id, |windows| {
                 for window in windows.iter_mut() {
                     if window.sealed {
@@ -1788,14 +1862,12 @@ pub mod pallet {
                         continue;
                     }
                     if window.contest_valid {
-                        let addition = book
-                            .q_long
-                            .checked_add(book.q_short)
-                            .and_then(|notional| notional.checked_mul(u128::from(to - from)));
+                        let addition =
+                            noi.and_then(|value| value.checked_mul(u128::from(to - from)));
                         match addition
-                            .and_then(|value| window.contest_notional_blocks.checked_add(value))
+                            .and_then(|value| window.contest_capital_blocks.checked_add(value))
                         {
-                            Some(value) => window.contest_notional_blocks = value,
+                            Some(value) => window.contest_capital_blocks = value,
                             None => window.contest_valid = false,
                         }
                     }
@@ -2099,6 +2171,30 @@ pub mod pallet {
                                 .is_none_or(|spot| spot.0 <= market_core::PRICE_ONE_1E9),
                         Error::<T>::TryStateViolation
                     );
+                    // I-13 accumulator sanity, 04 §7a contest-capital leg:
+                    // the integral cursor stays inside its window, never runs
+                    // ahead of the chain, and a window that has accrued
+                    // nothing holds exactly the zero integral (`N` itself is
+                    // monotone non-decreasing by construction — the cursor
+                    // checks here are the state-observable checkpoint
+                    // discipline of that accumulator).
+                    ensure!(
+                        window.contest_accrued_until >= window.start
+                            && window.contest_accrued_until <= window.end,
+                        Error::<T>::TryStateViolation
+                    );
+                    ensure!(
+                        window.contest_accrued_until == window.start
+                            || window.sealed
+                            || u64::from(window.contest_accrued_until) <= now,
+                        Error::<T>::TryStateViolation
+                    );
+                    if window.contest_accrued_until == window.start {
+                        ensure!(
+                            window.contest_capital_blocks == 0,
+                            Error::<T>::TryStateViolation
+                        );
+                    }
                     if window.sealed {
                         ensure!(
                             window.close_spot.is_some()

@@ -12,7 +12,11 @@ from bleavit_reference_model.lmsr import (
     marginal_price_long,
     sell_delta_proceeds,
 )
-from bleavit_reference_model.twap import STALE_GAP_BLOCKS
+from bleavit_reference_model.twap import (
+    STALE_GAP_BLOCKS,
+    ContestCapitalAccumulator,
+    marked_open_interest,
+)
 
 
 WORK_PREC = 100
@@ -595,6 +599,84 @@ def execute_turnover(
             remaining -= sold.cost
         side = "short" if side == "long" else "long"
     return executed
+
+
+def execute_hold(
+    book: ExecutedBook,
+    participant_name: str,
+    *,
+    target_noi: Decimal,
+    block: int,
+    role: str,
+) -> Decimal:
+    """Raise the book's marked open interest to ``target_noi`` with held pairs.
+
+    A balanced LONG+SHORT pair bought from the maker adds exactly its size to
+    the 04 §7a marked open interest at any price (``A·p + A·(1−p) = A``),
+    costs exactly its size in LMSR cost (``C(q_L+A, q_S+A) = C(q_L, q_S) + A``)
+    and leaves the quote unchanged (the price depends only on ``q_L − q_S``).
+    Held pairs are capital genuinely locked for the window — exactly what the
+    SQ-231 contest-capital measure prices — while wash churn nets out of the
+    measure entirely by LMSR path independence.
+    """
+    current = marked_open_interest(book.q_long, book.q_short, book.price)
+    remaining = floor_base(Decimal(target_noi) - current)
+    executed = Decimal(0)
+    while remaining >= MIN_TRADE:
+        chunk = min(book.max_trade, remaining)
+        long_leg = book.buy(participant_name, "long", chunk, block=block, role=role)
+        if long_leg is None:
+            break
+        short_leg = book.buy(participant_name, "short", chunk, block=block, role=role)
+        if short_leg is None:
+            # Never leave a dangling unbalanced leg behind on cash exhaustion.
+            book.sell(participant_name, "long", chunk, block=block, role=role)
+            break
+        executed += chunk
+        remaining -= chunk
+    return executed
+
+
+def contest_capital(
+    book: ExecutedBook,
+    *,
+    decision_window: int,
+    initial_q_long: Decimal = Decimal(0),
+    initial_q_short: Decimal = Decimal(0),
+) -> Decimal:
+    """04 §7a time-averaged contest capital of the book over the window.
+
+    Replays the executed ledger into the reference model's
+    ``ContestCapitalAccumulator`` with previous-block semantics: the state
+    observed at block ``t`` is the stored maker state after every event of
+    blocks ``< t`` (a trade never contributes its own block's state to the
+    observation recorded at its block), each branch marked at the raw stored
+    quote (LONG at ``p``, SHORT at ``1 − p`` — the κ-clamped observation takes
+    no part).  Because the maker state is piecewise-constant between event
+    blocks, observing at every event boundary reproduces the observation-grid
+    accumulator exactly.  The sim's books carry no protocol-seeded positions
+    (the POL subsidy is depth, not outcome exposure), so ``q_pol`` is zero and
+    the POL term enters step 9 separately as ``2·b·ln 2``.
+    """
+    accumulator = ContestCapitalAccumulator()
+    deltas: dict[int, list[Decimal]] = {}
+    for event in book.events:
+        row = deltas.setdefault(event.block, [Decimal(0), Decimal(0)])
+        signed = event.amount if event.direction == "buy" else -event.amount
+        row[0 if event.side == "long" else 1] += signed
+    q_long = Decimal(initial_q_long)
+    q_short = Decimal(initial_q_short)
+    price = marginal_price_long(book.b, q_long, q_short)
+    for event_block in sorted(deltas):
+        if event_block > accumulator.points[-1].block:
+            accumulator.observe(event_block, q_long, q_short, price)
+        delta_long, delta_short = deltas[event_block]
+        q_long += delta_long
+        q_short += delta_short
+        price = marginal_price_long(book.b, q_long, q_short)
+    if accumulator.points[-1].block < decision_window:
+        accumulator.observe(decision_window, q_long, q_short, price)
+    return accumulator.mean(0, decision_window)
 
 
 def summarize_executed_book(

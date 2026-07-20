@@ -213,13 +213,21 @@ def welfare_value(
 
 
 def settlement_score(w_next, w_next_2) -> Decimal:
-    """05 §4.4(4), evaluated through log2/exp2 and floored to FixedU64."""
+    """05 §4.4(4): exp2((log2 max(W1, eps_W) + log2 max(W2, eps_W)) / 2),
+    i.e. the exact geometric mean sqrt(W1 * W2), floored to FixedU64.
+
+    Evaluated as a correctly-rounded square root rather than a log2/exp2
+    round-trip: the round-trip's residual error (at any finite precision)
+    floors one grid ulp short whenever the true mean lies exactly ON the
+    1e9 grid — including the eps_W corner, where a doubly-zeroed pair's
+    exact score is exactly eps_W = 1e-9 (one base unit), not 0. 15 §4.4
+    requires the exact floor, bit-identical across implementations.
+    """
     with localcontext() as ctx:
         ctx.prec = WORK_PREC
         a = max(floor_fixed(w_next), EPSILON_W)
         b = max(floor_fixed(w_next_2), EPSILON_W)
-        exponent = (_log2(a) + _log2(b)) / Decimal(2)
-        return floor_fixed(_clamp(_exp2(exponent)))
+        return floor_fixed(_clamp((a * b).sqrt()))
 
 
 def full_pipeline(

@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 4;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 5;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -902,6 +902,14 @@ pub mod kernel {
     pub const RERUN_HURDLE_BUMP_1E9: u64 = 10_000_000;
     /// Capture-resistance multiplier `AttackCost >= 3 * InCapPrize` (D-4).
     pub const SECURITY_FACTOR: u128 = 3;
+    /// Kernel hard minimum for `sec.flow_cap` — the `C_hold` wash ceiling on
+    /// the measured non-POL contest-capital depth term, as a multiple of
+    /// `(b_acc + b_rej)` on the contract's 1e9 grid (13 §1; 08 §5.3: below ×7
+    /// the ceiling could reject honest exactly-grade proposals). The published
+    /// value is Phase-0 sim-gated; until published, consumers MUST use exactly
+    /// this floor — the smallest admissible ceiling, never a pass-widening
+    /// default (SQ-231 amendment, 2026-07-18).
+    pub const SEC_FLOW_CAP_FLOOR_1E9: u64 = 7_000_000_000;
     pub const DESCRIPTOR_LEAD_TIME_BLOCKS: u32 = 43_200;
     /// 09 §3.2 PB-MIGRATION trigger arm: an unchanged active cursor for more
     /// than this many blocks raises the migration halt.
@@ -968,8 +976,6 @@ pub mod kernel {
     pub const DECISION_SANITY_MAX_1E9: u64 = 980_000_000;
     /// 06 §4 Treasury proposal bond surcharge: 0.5% of Ask.
     pub const TREASURY_BOND_ASK_BPS: u128 = 50;
-    /// 04 §9 / 05 §5.1 Treasury hard-gate threshold: 1% of spendable NAV.
-    pub const TREASURY_GATE_NAV_BPS: u128 = 100;
     pub const BASIS_POINTS_DENOMINATOR: u128 = 10_000;
     pub const ORC_MAX_PROOF_BYTES: u32 = 256 * 1024;
     pub const REG_MAX_FILINGS_EPOCH: u32 = 64;
@@ -1077,10 +1083,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn contract_version_is_v4() {
-        // Bumped 3 → 4 for the pre-genesis B2 integration-contract amendment
-        // batch (02 §13). A change to §2–§12 of the frozen contract bumps this.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 4);
+    fn contract_version_is_v5() {
+        // Bumped 4 → 5 for universal market-bearing-class gate markets and the
+        // class-floor semantics (02 §4/§13). A frozen-contract change bumps this.
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 5);
     }
 
     #[test]

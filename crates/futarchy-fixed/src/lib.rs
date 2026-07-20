@@ -877,6 +877,59 @@ mod tests {
             );
         }
 
+        // 04 §12 worked ACCEPT-book displacement 0.50 → 0.56 (the maker-loss
+        // narrative example), replayed from the shared corpus family
+        // `lmsr_maker_example` (15 §4.4; G0 corpus-family attestation): the
+        // displacement, its revenue, the manipulator's expected payout and the
+        // maker divergence loss must all agree with the 100-digit reference
+        // within the composed fixed-point bounds at b = 25,000.
+        #[test]
+        fn lmsr_maker_example_matches_reference_model_artifact() {
+            let example = json_container(REFERENCE_VECTORS, "lmsr_maker_example", b'{', b'}');
+            let b_units = json_string(example, "b").parse::<u64>().unwrap();
+            // The family is pinned to the 04 §12 TREASURY-book example; a
+            // regenerated corpus with a different b must fail loudly here, not
+            // silently loosen the tolerance derivation below.
+            assert_eq!(b_units, 25_000, "lmsr_maker_example b drifted");
+            let b = FixedU64x64::from_integer(b_units);
+            let maker_tolerance =
+                (COMPOSED_COST_MAX_ULP as u128) * u128::from(b_units) + USDC_BASE_UNIT_RAW_CEIL;
+            let p = fixed_decimal(example, "p");
+            let zero = FixedU64x64::ZERO;
+
+            let displacement =
+                lmsr_displacement_between_prices(b, FixedU64x64::from_raw(CORPUS_RAW_HALF), p)
+                    .unwrap();
+            assert_raw_within(
+                displacement,
+                fixed_decimal(example, "delta").raw(),
+                maker_tolerance,
+            );
+
+            let revenue = lmsr_buy_cost(zero, zero, b, LmsrSide::Long, displacement).unwrap();
+            assert_raw_within(
+                revenue,
+                fixed_decimal(example, "displacement_revenue").raw(),
+                maker_tolerance,
+            );
+
+            let payout = displacement.checked_mul(p).unwrap();
+            assert_raw_within(
+                payout,
+                fixed_decimal(example, "expected_payout").raw(),
+                maker_tolerance,
+            );
+
+            // 04 §12: realized divergence loss = expected payout − displacement
+            // revenue; the subtraction compounds both operand bounds.
+            let loss = payout.checked_sub(revenue).unwrap();
+            assert_raw_within(
+                loss,
+                fixed_decimal(example, "loss").raw(),
+                2 * maker_tolerance,
+            );
+        }
+
         #[test]
         fn high_precision_lmsr_corpus_matches_reference_model_artifact() {
             let corpus = json_container(REFERENCE_VECTORS, "high_precision_corpus", b'{', b'}');

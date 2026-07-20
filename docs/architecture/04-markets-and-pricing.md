@@ -12,9 +12,7 @@
 
 | Class | Markets | Books |
 | --- | --- | --- |
-| PARAM | decision pair (ACCEPT-scalar, REJECT-scalar) | 2 |
-| TREASURY ≤ 1% NAV | decision pair | 2 |
-| TREASURY > 1% NAV, CODE, META | decision pair + 4 gate books (S,C)×(adopt,reject) | 6 |
+| PARAM, TREASURY, CODE, META | decision pair + 4 gate books (S,C)×(adopt,reject) | 6 |
 | Per epoch (unconditional) | Baseline welfare market on `s_e` (§8) | 1 |
 | CONSTITUTIONAL | none (referendum path) | 0 |
 
@@ -28,7 +26,7 @@ Books per proposal ≤ **6** (2 decision + 4 gate). Live Baseline books ≤ **4*
 MaxLiveMarkets = 32·6 + 4 = 196
 ```
 
-Typical per-epoch creation load is `N_active·6 + 1 = 31` books. All PoV/storage budgets derive from the 196 bound (re-derivation table in [13-parameters.md](./13-parameters.md)). The prior 121/225/7-books figures are superseded (D-10).
+Universal gating of every market-bearing class does not change this maximum: six books was already the per-proposal upper bound. Typical per-epoch creation load is `N_active·6 + 1 = 31` books. All PoV/storage budgets derive from the 196 bound (re-derivation table in [13-parameters.md](./13-parameters.md)). The prior 121/225/7-books figures are superseded (D-10).
 
 ---
 
@@ -162,7 +160,23 @@ Per book: observation `o_t = clamp(p_prev_block, o_{t−1}·(1−κ), o_{t−1}�
 - Staleness: any observation gap > 50 blocks inside the decision window increments `stale_events`; first event extends the pair once by 3 days, second forces reject (status-quo default). Missing cranks produce staleness accounting, never wrong data.
 - Every recorded observation emits `Observed{market, o_t}` (§11).
 
-**Windows and checks (summary; the decision rule owns evaluation — [05-welfare-and-decision-engine.md](./05-welfare-and-decision-engine.md)):** full decision window = final 72 h (`dec.window`); trailing window = final 24 h (`dec.trailing`); convergence `|spot_close − TWAP| ≤ Δ_max = 0.05`; coverage ≥ 95% of scheduled intervals; POL floor met and undisturbed; non-POL contest notional ≥ `V_min(class)` **per book**; sanity band `TWAP ∈ [0.02, 0.98]` applies to **welfare (scalar) books only** — gate books are exempt and carry a near-boundary validity rule instead (doc 05). Invariant I-13: recorded drift per interval ≤ κ; a single block cannot move a decision TWAP by more than κ.
+### 7a. Contest-capital accumulator (SQ-231 amendment, 2026-07-18)
+
+Alongside each price observation, every book records **contest capital** — the marked USDC value of net outstanding **trader** positions against the maker:
+
+```
+noi_t = Σ_branch  max(q_branch − q_pol_branch, 0) · price_branch      // previous block's stored
+                                                                      // q and quote, same discipline
+N    += noi_t · Δblocks                                               // u256 two-limb, same
+                                                                      // checkpoint grid as A
+ContestCapital(w) = (N(end) − N(start)) / blocks                      // O(1) via the §7 checkpoints
+```
+
+When step 9 needs one scalar for a decision pair, the normative reduction is **`PairContestCapital(w) = min(ContestCapital_accept(w), ContestCapital_reject(w))`**: the shallower book is the binding security depth because an attacker can move the cheaper side. The two books are never summed for this term; only the separate flow ceiling retains `b_acc + b_rej`. [08 §5.4(b)](08-treasury-and-economics.md) pins the arithmetic by adding exactly one 400,000 `dec.v_min` term to pair POL depth, yielding `L̂ = 34,657 + 400,000 = 434,657`.
+
+`q_branch` is the maker's net sold quantity per branch (the LMSR cost-function state) — for a binary book the two outcome legs, marked at the **raw previous-block stored quote** (LONG at `p`, SHORT at `1 − p`; the κ-clamped observation `o_t` is a price-series property and takes no part here); `q_pol_branch` is the recorded protocol-seeded position (§10 — the same storage the "POL undisturbed" check reads). The fixed-point grid for `noi_t` is the USDC base-unit grid ([02](./02-integration-contract.md) §8). Because LMSR trading is path-independent, a round-trip trade restores `q` exactly: **churn and wash flow net out of `noi_t` by construction, and the time-weighting prices held exposure in capital × time** — the same units the slew cap κ already enforces for prices. Inflating `ContestCapital` therefore requires genuinely holding net exposure across recorded observations for a sustained fraction of the window, which is precisely the adverse-selection bleed `C_hold` prices ([05](./05-welfare-and-decision-engine.md) §5.6). The accumulator rides the existing observation grid and per-book state — no per-account telemetry. **Accrual-grid admissibility:** the 10-block grid is the *coarsest* admissible recording; an implementation MAY integrate on a finer per-event grid (each segment priced and sized from the previous block's stored state), which is strictly conservative — it only ever under-counts relative to the backward interval sample. The literal backward sample MUST NOT be used to *credit* a position across a boundary it did not span: a 1-block position straddling an observation boundary earning a full backward interval would re-open exactly the flash-inflation this measure exists to close. The runtime uses the per-event integral; the reference accumulator is grid-agnostic (record blocks are caller-supplied), so differential agreement is unaffected. Rounding: `noi_t` rounds **down** on the fixed-point grid (the measure feeds validity floors and the step-9 certificate; under-counting is the conservative direction). Try-state: `N` is monotone non-decreasing and checkpoint-consistent (I-13 accumulator sanity, market pallet).
+
+**Windows and checks (summary; the decision rule owns evaluation — [05-welfare-and-decision-engine.md](./05-welfare-and-decision-engine.md)):** full decision window = final 72 h (`dec.window`); trailing window = final 24 h (`dec.trailing`); convergence `|spot_close − TWAP| ≤ Δ_max = 0.05`; coverage ≥ 95% of scheduled intervals; POL floor met and undisturbed; non-POL **contest capital (§7a)** ≥ `V_min(class)` **per book**; sanity band `TWAP ∈ [0.02, 0.98]` applies to **welfare (scalar) books only** — gate books are exempt and carry a near-boundary validity rule instead (doc 05). Invariant I-13: recorded drift per interval ≤ κ; a single block cannot move a decision TWAP by more than κ; the contest-capital accumulator obeys the same checkpoint discipline.
 
 ---
 
@@ -199,11 +213,12 @@ This is the capture-resistance adaptation of the reject-leg floor: suppressing t
 
 ## 9. Gate markets
 
-For CODE, META, and TREASURY > 1% NAV: **four binary books per proposal** — question: "Conditional on ADOPT (resp. REJECT), will the `g` daily floor-breach flag be set on ≥ 1 day during epochs e+1…e+2?", for `g ∈ {S, C}`.
+For **every market-bearing class — PARAM, TREASURY, CODE, and META**: **four binary books per proposal** — question: "Conditional on ADOPT (resp. REJECT), will the `g` daily floor-breach flag be set on ≥ 1 day during epochs e+1…e+2?", for `g ∈ {S, C}`.
 
 - **Instruments.** YES/NO complete sets against branch-USDC in the corresponding branch: `PositionKind::GateYes(g)` / `GateNo(g)` per branch, with per-branch gate-set supplies in `VaultInfo` and the conservation identity extended over the enlarged set — the B-2 ledger fix makes the four-book set representable; normative instrument semantics in [03-conditional-ledger.md](./03-conditional-ledger.md).
 - **Mechanism.** Identical LMSR (§3–§4) with YES ↦ LONG, NO ↦ SHORT; subsidy `b = pol.b_gate` (*value: §13*); same wrapper, recycling, and `b·ln 2` headroom (§6); a complete YES+NO set is worth 1 branch-USDC at either flag outcome.
 - **Settlement.** On **deterministic daily breach flags computed from `C_onchain`/`S` sub-components only** (D-18 gate split: `C_attested` never drives daily flags or gate settlement). Flag computation is owned by docs 05/07; the market consumes the recorded flags via `settle_gate(pid, gate, outcome)` (doc 03) on the realized branch. Unrealized-branch gate instruments void (pay 0); that branch's branch-USDC refunds principal per the ledger rules. There is no oracle discretion anywhere in gate settlement.
+- **PARAM interpretation.** PARAM books settle on these same system-wide `S_daily`/`C_daily` breach facts. They are a correlated-harm proxy, not an attribution that the parameter delta caused the breach; whether that correlation deters profitable PARAM capture is a simulation hypothesis to be re-calibrated, not a property claimed by this specification.
 - **Consumption.** The veto tests (`p̂ᵍ_adopt > p_max(g)`; `p̂ᵍ_adopt > p̂ᵍ_reject + ε(g)`) read gate-book TWAPs before any welfare comparison — kernel-ordered, owned by doc 05. Healthy gate books trade near the boundary by design and are therefore **exempt from the [0.02, 0.98] sanity band**; their near-boundary validity rule is in doc 05.
 
 ---
@@ -235,9 +250,9 @@ These two events are the frontend's entire price-history pillar (event-derived, 
 
 TREASURY proposal, decision pair, `b = 25,000` USDC/branch. Books open at 0.5/0.5; headroom seeded per book `= 25,000·ln 2 = 17,328.68` USDC of complete sets. Over the **d5–d18** Trading phase, informed flow moves ACCEPT-LONG to 0.560 and REJECT-LONG to 0.520.
 
-- Decision-window TWAPs: `P̄_acc = 0.5585`, `P̄_rej = 0.5210`, Baseline TWAP `= 0.5230`.
-- Reject-leg floor: `r_eff = max(0.5210, 0.5230 − σ=0.005) = 0.5210`. Uplift `= 0.0375 ≥ δ_TREASURY = 0.025` ✔.
-- Trailing 24 h TWAPs 0.5570 / 0.5222 ⇒ uplift 0.0348 ✔; convergence `|0.560 − 0.5585| = 0.0015 ≤ 0.05` ✔.
+- Decision-window TWAPs: `P̄_acc = 0.5620`, `P̄_rej = 0.5210`, Baseline TWAP `= 0.5230`.
+- Reject-leg floor: `r_eff = max(0.5210, 0.5230 − σ=0.005) = 0.5210`. Uplift `= 0.0410 ≥ δ_TREASURY = 0.0375` (V-12) ✔.
+- Trailing 24 h TWAPs 0.5620 / 0.5222 ⇒ uplift 0.0398 ≥ 0.0375 ✔; convergence `|0.560 − 0.5620| = 0.0020 ≤ 0.05` ✔.
 - Gate books: breach TWAPs S: 0.011 acc / 0.009 rej; C: 0.017 / 0.015 — under `p_max = 0.05`, within `ε = 0.02` ✔. **Adopt.**
 - **Maker loss realized (ACCEPT book walked 0.5 → 0.56):** with revenue recycled, expected divergence subsidy at final price `p` is `b·[ln 2 − H(p)]`, `H(p) = −p·ln p − (1−p)·ln(1−p)`:
 

@@ -11,6 +11,7 @@ from bleavit_reference_model.treasury import (
     BASELINE_B,
     B_FLOORS,
     DELTA_FLOORS,
+    FLOW_CAP_MIN,
     V_MIN_FLOORS,
 )
 
@@ -152,6 +153,10 @@ class SimulationConfig:
             raise ValueError("attack strategy weights must sum to one")
         if not Decimal(0) <= Decimal(self.noise_flow_share) <= Decimal(1):
             raise ValueError("noise flow share must be in [0, 1]")
+        if Decimal(self.diagnostic_probe_flow_cap) < FLOW_CAP_MIN:
+            raise ValueError(
+                "probe sec.flow_cap below its 08 §5.3 hard minimum of 7"
+            )
         if not Decimal(0) < Decimal(self.threshold_relative_tolerance) <= Decimal("0.25"):
             raise ValueError("threshold tolerance must be in (0, 0.25]")
 

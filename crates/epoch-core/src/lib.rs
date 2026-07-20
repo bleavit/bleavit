@@ -40,6 +40,15 @@ pub const STALE_EPOCH_BOUND: BlockNumber = futarchy_primitives::kernel::STALE_EP
 pub const ONE: u64 = 1_000_000_000;
 pub const ONE_PP: u64 = futarchy_primitives::kernel::RERUN_HURDLE_BUMP_1E9;
 
+/// Proposal classes whose decision path requires the frozen four-book
+/// Survival/Security gate quartet (05 §5.1).
+pub const fn requires_gate_markets(class: ProposalClass) -> bool {
+    matches!(
+        class,
+        ProposalClass::Param | ProposalClass::Treasury | ProposalClass::Code | ProposalClass::Meta
+    )
+}
+
 /// Live 13 §1 epoch/decision parameters captured at one dispatch boundary.
 /// The FRAME shell rebuilds this value from `pallet-constitution::Params`; the
 /// defaults keep the frame-free oracle behavior deterministic in standalone
@@ -75,10 +84,10 @@ impl EpochParams {
         decision_window: 43_200,
         trailing_window: 14_400,
         delta: [
-            FixedU64(15_000_000),
-            FixedU64(25_000_000),
-            FixedU64(40_000_000),
+            FixedU64(37_500_000),
+            FixedU64(37_500_000),
             FixedU64(60_000_000),
+            FixedU64(90_000_000),
             FixedU64(ONE),
         ],
         sigma: [
@@ -332,6 +341,25 @@ pub struct EpochInfo {
     pub next_length: BlockNumber,
 }
 
+/// 05 §5.2/§5.4 step 5: the tri-state welfare-book decision grade. Only the
+/// remediable-by-time shortfalls (contest capital below `dec.v_min(class)`,
+/// coverage below `dec.coverage`, a first stale event) grade `Insufficient`
+/// and may consume the single shared extension budget; every other failure
+/// (sanity band, POL floor/undisturbed, a second stale event,
+/// non-convergence, or an unreadable book) grades `Invalid` and rejects
+/// immediately with `NotDecisionGrade` (status-quo default, G-1).
+///
+/// The derived `Ord` is severity order (`Ok < Insufficient < Invalid`), so
+/// the worst of the Accept/Reject pair is `max`.
+#[derive(
+    Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, Ord, PartialEq, PartialOrd, TypeInfo,
+)]
+pub enum WelfareGrade {
+    Ok,
+    Insufficient,
+    Invalid,
+}
+
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct DecisionInputs {
     pub accept_full: FixedU64,
@@ -342,11 +370,15 @@ pub struct DecisionInputs {
     pub baseline_trailing: FixedU64,
     pub accept_spot: FixedU64,
     pub reject_spot: FixedU64,
-    pub welfare_grade_ok: bool,
+    /// Worst grade of the Accept/Reject welfare pair (05 §5.4 step 5).
+    pub welfare_grade: WelfareGrade,
     pub baseline_grade_ok: bool,
     pub previous_settled_baseline_twap: Option<FixedU64>,
-    pub welfare_second_insufficient: bool,
-    pub gate_grade_ok: bool,
+    /// 05 §5.4 steps 3-4 are per gate: Survival's validity, then Survival's
+    /// veto, then Security's validity, then Security's veto — a Survival
+    /// veto must be reported before Security's validity is ever inspected.
+    pub survival_grade_ok: bool,
+    pub security_grade_ok: bool,
     pub gate_twaps: Option<[FixedU64; 4]>,
     pub measured_depth: Balance,
     pub published_flow_per_day: Option<Balance>,
@@ -918,8 +950,7 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             Error::BadState
         );
         ensure!(
-            !matches!(p.class, ProposalClass::Code | ProposalClass::Meta)
-                || markets.gates.is_some(),
+            !requires_gate_markets(p.class) || markets.gates.is_some(),
             Error::BadDecisionInput
         );
         if p.state == ProposalState::Qualified {
@@ -1705,32 +1736,41 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         let extended = p.extended;
         let has_gate_markets = p.markets.is_some_and(|markets| markets.gates.is_some());
         if has_gate_markets {
-            if !i.gate_grade_ok {
-                return Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade));
-            }
             let Some([s_adopt, s_reject, c_adopt, c_reject]) = i.gate_twaps else {
                 return Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade));
             };
             let [s_p_max, c_p_max] = params.gate_p_max;
             let [s_eps, c_eps] = params.gate_eps;
-            // 05 §5.1: veto iff adopt TWAP exceeds the absolute ruin cap p_max, or
-            // exceeds the reject TWAP by more than the relative margin eps, for either
-            // gate. Ordered before welfare — no upside overrides a veto (G-4, I-14).
+            // 05 §5.4 steps 3-4, per gate in order (Survival, then Security):
+            // the gate's book validity first, then its veto — a Survival veto
+            // is reported before Security's validity is ever inspected. Veto
+            // iff adopt TWAP exceeds the absolute ruin cap p_max, or exceeds
+            // the reject TWAP by more than the relative margin eps (05 §5.1).
+            // Ordered before welfare — no upside overrides a veto (G-4, I-14).
+            if !i.survival_grade_ok {
+                return Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade));
+            }
             if s_adopt.0 > s_p_max.0 || s_adopt.0 > s_reject.0.saturating_add(s_eps.0) {
                 return Ok(DecisionOutcome::Reject(RejectReason::GateVetoSurvival));
+            }
+            if !i.security_grade_ok {
+                return Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade));
             }
             if c_adopt.0 > c_p_max.0 || c_adopt.0 > c_reject.0.saturating_add(c_eps.0) {
                 return Ok(DecisionOutcome::Reject(RejectReason::GateVetoSecurity));
             }
-        } else if matches!(class, ProposalClass::Code | ProposalClass::Meta) {
+        } else if requires_gate_markets(class) {
             return Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade));
         }
-        if !i.welfare_grade_ok {
-            return Ok(if !extended && !i.welfare_second_insufficient {
-                DecisionOutcome::Extend
-            } else {
-                DecisionOutcome::Reject(RejectReason::NotDecisionGrade)
-            });
+        // 05 §5.4 step 5: only Insufficient may spend the single shared
+        // extension budget; Invalid rejects immediately (a rerun re-enters
+        // Extended with `extended` already true, so it can never re-extend).
+        match i.welfare_grade {
+            WelfareGrade::Ok => {}
+            WelfareGrade::Insufficient if !extended => return Ok(DecisionOutcome::Extend),
+            WelfareGrade::Insufficient | WelfareGrade::Invalid => {
+                return Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade));
+            }
         }
         if !i.baseline_grade_ok {
             let Some(_carried) = i.previous_settled_baseline_twap else {
@@ -2268,12 +2308,12 @@ mod tests {
             baseline_trailing: FixedU64(500_000_000),
             accept_spot: FixedU64(600_000_000),
             reject_spot: FixedU64(500_000_000),
-            welfare_grade_ok: true,
+            welfare_grade: WelfareGrade::Ok,
             baseline_grade_ok: true,
             previous_settled_baseline_twap: None,
-            welfare_second_insufficient: false,
-            gate_grade_ok: true,
-            gate_twaps: None,
+            survival_grade_ok: true,
+            security_grade_ok: true,
+            gate_twaps: Some([FixedU64(0), FixedU64(0), FixedU64(0), FixedU64(0)]),
             measured_depth: 1_000_000,
             published_flow_per_day: None,
             in_cap_prize: Some(100_000),
@@ -2317,8 +2357,8 @@ mod tests {
         s.proposal_mut(1).unwrap().markets = Some(MarketSet {
             accept: 1,
             reject: 2,
-            gates: None,
-            baseline: 3,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
         });
         s.proposal_mut(1).unwrap().decide_at = 10;
         assert_eq!(
@@ -2337,12 +2377,12 @@ mod tests {
         p.markets = Some(MarketSet {
             accept: 1,
             reject: 2,
-            gates: None,
-            baseline: 3,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
         });
         s.proposals.push(p);
         let mut i = pass_input();
-        i.welfare_grade_ok = false;
+        i.welfare_grade = WelfareGrade::Insufficient;
         assert_eq!(
             s.decide(Origin::Keeper, &mut ledger, 1, 0, i).unwrap(),
             DecisionOutcome::Extend
@@ -2367,8 +2407,8 @@ mod tests {
         p.markets = Some(MarketSet {
             accept: 1,
             reject: 2,
-            gates: None,
-            baseline: 3,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
         });
         s.proposals.push(p);
         let mut i = pass_input();
@@ -2385,8 +2425,8 @@ mod tests {
         p.markets = Some(MarketSet {
             accept: 1,
             reject: 2,
-            gates: None,
-            baseline: 3,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
         });
         s.proposals.push(p);
         let mut input = pass_input();
@@ -2465,8 +2505,8 @@ mod tests {
         p.markets = Some(MarketSet {
             accept: 1,
             reject: 2,
-            gates: None,
-            baseline: 3,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
         });
         s.proposals.push(p);
         s.force_reject_process_hold(Origin::Keeper, &mut ledger, 1)
@@ -2499,14 +2539,14 @@ mod tests {
     }
     #[test]
     fn class_hurdle_params_match_spec() {
-        // 13 §1: dec.delta = 0.015/0.025/0.040/0.060 and dec.sigma =
-        // 0.003/0.005/0.008/0.010 for PARAM/TREASURY/CODE/META. CODE and META
-        // must differ (they were conflated at 0.040/0 previously).
+        // 13 §1 (V-12 Phase-0 calibrated): dec.delta = 0.0375/0.0375/0.060/0.090
+        // and dec.sigma = 0.003/0.005/0.008/0.010 for PARAM/TREASURY/CODE/META.
+        // CODE and META must differ (they were conflated at 0.040/0 previously).
         let params = EpochParams::DEFAULT;
-        assert_eq!(params.class_delta(ProposalClass::Param), 15_000_000);
-        assert_eq!(params.class_delta(ProposalClass::Treasury), 25_000_000);
-        assert_eq!(params.class_delta(ProposalClass::Code), 40_000_000);
-        assert_eq!(params.class_delta(ProposalClass::Meta), 60_000_000);
+        assert_eq!(params.class_delta(ProposalClass::Param), 37_500_000);
+        assert_eq!(params.class_delta(ProposalClass::Treasury), 37_500_000);
+        assert_eq!(params.class_delta(ProposalClass::Code), 60_000_000);
+        assert_eq!(params.class_delta(ProposalClass::Meta), 90_000_000);
         assert_eq!(params.class_sigma(ProposalClass::Param), 3_000_000);
         assert_eq!(params.class_sigma(ProposalClass::Treasury), 5_000_000);
         assert_eq!(params.class_sigma(ProposalClass::Code), 8_000_000);
@@ -2525,10 +2565,10 @@ mod tests {
                 decision_window: 43_200,
                 trailing_window: 14_400,
                 delta: [
-                    FixedU64(15_000_000),
-                    FixedU64(25_000_000),
-                    FixedU64(40_000_000),
+                    FixedU64(37_500_000),
+                    FixedU64(37_500_000),
                     FixedU64(60_000_000),
+                    FixedU64(90_000_000),
                     FixedU64(ONE),
                 ],
                 sigma: [
@@ -2567,8 +2607,9 @@ mod tests {
     }
     #[test]
     fn param_hurdle_adopts_at_spec_delta() {
-        // A PARAM margin of 0.017 clears the spec hurdle δ=0.015 (adopt) but would
-        // have failed the old hardcoded δ=0.020. Pins finding #4 into the engine.
+        // A PARAM margin of 0.040 clears the V-12-calibrated spec hurdle δ=0.0375
+        // (adopt), read from Params rather than any hardcoded value. Pins finding
+        // #4 into the engine.
         let mut s = EpochState::new();
         let mut ledger = LedgerState::<[u8; 32]>::new();
         ledger.create_vault(1, 1).unwrap();
@@ -2576,14 +2617,14 @@ mod tests {
         p.markets = Some(MarketSet {
             accept: 1,
             reject: 2,
-            gates: None,
-            baseline: 3,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
         });
         s.proposals.push(p);
         let mut i = pass_input();
-        i.accept_full = FixedU64(517_000_000);
-        i.accept_trailing = FixedU64(517_000_000);
-        i.accept_spot = FixedU64(517_000_000);
+        i.accept_full = FixedU64(540_000_000);
+        i.accept_trailing = FixedU64(540_000_000);
+        i.accept_spot = FixedU64(540_000_000);
         assert_eq!(
             s.decide(Origin::Keeper, &mut ledger, 1, 0, i).unwrap(),
             DecisionOutcome::Adopt
@@ -2614,6 +2655,120 @@ mod tests {
         assert_eq!(
             s.decide_engine(1, &i, &EpochParams::DEFAULT),
             Ok(DecisionOutcome::Reject(RejectReason::GateVetoSurvival))
+        );
+    }
+
+    #[test]
+    fn low_ask_treasury_requires_gate_books_and_both_vetoes_are_reachable() {
+        for (gate_twaps, expected) in [
+            (
+                [
+                    FixedU64(100_000_000),
+                    FixedU64(100_000_000),
+                    FixedU64(0),
+                    FixedU64(0),
+                ],
+                RejectReason::GateVetoSurvival,
+            ),
+            (
+                [
+                    FixedU64(0),
+                    FixedU64(0),
+                    FixedU64(100_000_000),
+                    FixedU64(100_000_000),
+                ],
+                RejectReason::GateVetoSecurity,
+            ),
+        ] {
+            let mut state = EpochState::<[u8; 32]>::new();
+            let mut proposal = prop(1, ProposalState::Trading);
+            proposal.class = ProposalClass::Treasury;
+            proposal.ask = 1;
+            proposal.markets = Some(MarketSet {
+                accept: 1,
+                reject: 2,
+                gates: Some([3, 4, 5, 6]),
+                baseline: 7,
+            });
+            state.proposals.push(proposal);
+            let mut input = pass_input();
+            input.gate_twaps = Some(gate_twaps);
+
+            assert_eq!(
+                state.decide_engine(1, &input, &EpochParams::DEFAULT),
+                Ok(DecisionOutcome::Reject(expected))
+            );
+        }
+
+        let mut state = EpochState::<[u8; 32]>::new();
+        let mut proposal = prop(1, ProposalState::Trading);
+        proposal.class = ProposalClass::Treasury;
+        proposal.ask = 1;
+        proposal.markets = Some(MarketSet {
+            accept: 1,
+            reject: 2,
+            gates: None,
+            baseline: 3,
+        });
+        state.proposals.push(proposal);
+        assert_eq!(
+            state.decide_engine(1, &pass_input(), &EpochParams::DEFAULT),
+            Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade))
+        );
+    }
+
+    #[test]
+    fn param_requires_gate_books_and_both_vetoes_are_reachable() {
+        for (gate_twaps, expected) in [
+            (
+                [
+                    FixedU64(100_000_000),
+                    FixedU64(100_000_000),
+                    FixedU64(0),
+                    FixedU64(0),
+                ],
+                RejectReason::GateVetoSurvival,
+            ),
+            (
+                [
+                    FixedU64(0),
+                    FixedU64(0),
+                    FixedU64(100_000_000),
+                    FixedU64(100_000_000),
+                ],
+                RejectReason::GateVetoSecurity,
+            ),
+        ] {
+            let mut state = EpochState::<[u8; 32]>::new();
+            let mut proposal = prop(1, ProposalState::Trading);
+            proposal.markets = Some(MarketSet {
+                accept: 1,
+                reject: 2,
+                gates: Some([3, 4, 5, 6]),
+                baseline: 7,
+            });
+            state.proposals.push(proposal);
+            let mut input = pass_input();
+            input.gate_twaps = Some(gate_twaps);
+
+            assert_eq!(
+                state.decide_engine(1, &input, &EpochParams::DEFAULT),
+                Ok(DecisionOutcome::Reject(expected))
+            );
+        }
+
+        let mut state = EpochState::<[u8; 32]>::new();
+        let mut proposal = prop(1, ProposalState::Trading);
+        proposal.markets = Some(MarketSet {
+            accept: 1,
+            reject: 2,
+            gates: None,
+            baseline: 3,
+        });
+        state.proposals.push(proposal);
+        assert_eq!(
+            state.decide_engine(1, &pass_input(), &EpochParams::DEFAULT),
+            Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade))
         );
     }
 
@@ -2740,8 +2895,8 @@ mod tests {
         proposal.markets = Some(MarketSet {
             accept: 1,
             reject: 2,
-            gates: None,
-            baseline: 3,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
         });
         state.proposals.push(proposal);
         let before = state.clone();
@@ -2757,17 +2912,26 @@ mod tests {
     #[test]
     fn injected_params_change_the_hurdle_without_changing_defaults() {
         let mut s = EpochState::<[u8; 32]>::new();
-        s.proposals.push(prop(1, ProposalState::Trading));
+        let mut proposal = prop(1, ProposalState::Trading);
+        proposal.markets = Some(MarketSet {
+            accept: 1,
+            reject: 2,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
+        });
+        s.proposals.push(proposal);
         let mut input = pass_input();
-        input.accept_full = FixedU64(517_000_000);
-        input.accept_trailing = FixedU64(517_000_000);
-        input.accept_spot = FixedU64(517_000_000);
+        // Margin 0.040 clears the V-12 DEFAULT δ_PARAM=0.0375 (Adopt) but not a
+        // stricter injected δ=0.045 (Reject).
+        input.accept_full = FixedU64(540_000_000);
+        input.accept_trailing = FixedU64(540_000_000);
+        input.accept_spot = FixedU64(540_000_000);
         assert_eq!(
             s.decide_engine(1, &input, &EpochParams::DEFAULT),
             Ok(DecisionOutcome::Adopt)
         );
         let mut strict = EpochParams::DEFAULT;
-        strict.delta[0] = FixedU64(20_000_000);
+        strict.delta[0] = FixedU64(45_000_000);
         assert_eq!(
             s.decide_engine(1, &input, &strict),
             Ok(DecisionOutcome::Reject(RejectReason::HurdleNotMet))

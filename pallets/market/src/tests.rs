@@ -262,7 +262,7 @@ fn r7_baseline_sell_does_not_charge_the_seller() {
 
 #[test]
 fn multi_book_proposal_shares_one_ledger_vault() {
-    // A TREASURY>1%NAV / CODE / META proposal fields 2 decision + 4 gate books, and
+    // Every market-bearing proposal fields 2 decision + 4 gate books, and
     // even a PARAM proposal has a 2-book decision *pair* — all sharing ONE ledger
     // vault (03 §2.1 / 04 §1.1). `create_market` must create the vault once and reuse
     // it; the ledger rejects a duplicate `create_vault`, so a naive per-book create
@@ -1351,10 +1351,7 @@ fn pause_shift_extends_only_end_and_preserves_accumulated_evidence() {
         assert_eq!(after.end, 8);
         assert_eq!(after.observations, before.observations);
         assert_eq!(after.stale_events, before.stale_events);
-        assert_eq!(
-            after.contest_notional_blocks,
-            before.contest_notional_blocks
-        );
+        assert_eq!(after.contest_capital_blocks, before.contest_capital_blocks);
         assert_eq!(
             Market::registered_window_lengths(MARKET_ID, 8),
             Some((8, 7))
@@ -1784,6 +1781,14 @@ fn registered_window_reads_exact_twap_close_spot_and_time_averaged_contest() {
             TRADE,
             Balance::MAX,
         ));
+        // 04 §7a: contest capital marks the held LONG exposure at the stored
+        // quote, rounded down — not at its gross unpriced quantity.
+        let noi = Markets::<Test>::get(MARKET_ID)
+            .and_then(|book| {
+                market_core::contest_capital(book.q_long, book.q_short, book.last_quote_1e9)
+            })
+            .unwrap_or_default();
+        assert!(noi > 0 && noi < TRADE);
         System::set_block_number(u64::from(trailing));
         assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
         System::set_block_number(u64::from(end));
@@ -1818,8 +1823,7 @@ fn registered_window_reads_exact_twap_close_spot_and_time_averaged_contest() {
         );
         assert_eq!(
             Market::average_contest_at(MARKET_ID, end, end),
-            TRADE
-                .checked_mul(Balance::from(trailing))
+            noi.checked_mul(Balance::from(trailing))
                 .and_then(|value| value.checked_div(Balance::from(end)))
         );
         assert!(Market::decision_grade_at(
@@ -1883,6 +1887,12 @@ fn contest_depth_accrues_forward_across_a_pre_observation_round_trip() {
             TRADE,
             Balance::MAX,
         ));
+        let noi = Markets::<Test>::get(MARKET_ID)
+            .and_then(|book| {
+                market_core::contest_capital(book.q_long, book.q_short, book.last_quote_1e9)
+            })
+            .unwrap_or_default();
+        assert!(noi > 0);
         System::set_block_number(u64::from(end));
         assert_ok!(Market::sell(
             signed(ALICE),
@@ -1894,7 +1904,7 @@ fn contest_depth_accrues_forward_across_a_pre_observation_round_trip() {
 
         assert_eq!(
             Market::average_contest_at(MARKET_ID, end, end),
-            TRADE.checked_div(Balance::from(end)),
+            noi.checked_div(Balance::from(end)),
             "one-block contest must receive one block of credit, never a full interval",
         );
         assert_try_state();
@@ -1974,6 +1984,12 @@ fn contest_depth_held_for_the_whole_window_counts_fully() {
             TRADE,
             Balance::MAX,
         ));
+        let noi = Markets::<Test>::get(MARKET_ID)
+            .and_then(|book| {
+                market_core::contest_capital(book.q_long, book.q_short, book.last_quote_1e9)
+            })
+            .unwrap_or_default();
+        assert!(noi > 0);
         System::set_block_number(u64::from(trailing));
         assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
         System::set_block_number(u64::from(end));
@@ -1981,9 +1997,134 @@ fn contest_depth_held_for_the_whole_window_counts_fully() {
 
         assert_eq!(
             Market::average_contest_at(MARKET_ID, end, end - start),
-            Some(TRADE),
-            "contest held for every block of the window must count at full notional",
+            Some(noi),
+            "exposure held for every block of the window must count at its full marked value",
         );
+        assert_try_state();
+    });
+}
+
+#[test]
+fn sq231_gross_notional_cannot_certify_a_thin_priced_book() {
+    // SQ-231 regression (04 §7a; 05 §5.2): gross outstanding notional is NOT
+    // the graded measure. A book whose gross quantity meets a floor but whose
+    // time-weighted MARKED value (contest capital) sits below it must fail
+    // decision grade — the thin book cannot certify itself with unpriced size.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        let interval = u32::try_from(ObsInterval::get()).unwrap_or_default();
+        assert!(interval > 0);
+        let start = 1;
+        let trailing = start + interval;
+        let end = trailing + interval;
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            PROPOSAL,
+            start,
+            trailing,
+            end,
+        ));
+
+        System::set_block_number(u64::from(start));
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        System::set_block_number(u64::from(trailing));
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        System::set_block_number(u64::from(end));
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        assert_ok!(Market::seal_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            end,
+        ));
+
+        // Gross open interest reads the full unpriced quantity...
+        assert_eq!(Market::gross_open_interest(MARKET_ID), Some(TRADE));
+        // ...but the graded measure marks it near the mid quote, strictly
+        // below gross (rounded down, 04 §7a).
+        let contest = Market::average_contest_at(MARKET_ID, end, end - start)
+            .expect("sealed window with valid accumulator");
+        assert!(contest > 0 && contest < TRADE);
+        // A floor calibrated in gross-notional units must NOT pass...
+        assert!(!Market::decision_grade_at(
+            MARKET_ID,
+            end,
+            end - start,
+            95,
+            FixedU64(1_000_000_000),
+            TRADE,
+            B,
+            true,
+        ));
+        // ...while the identical book grades at its true marked depth.
+        assert!(Market::decision_grade_at(
+            MARKET_ID,
+            end,
+            end - start,
+            95,
+            FixedU64(1_000_000_000),
+            contest,
+            B,
+            true,
+        ));
+        assert_try_state();
+    });
+}
+
+#[test]
+fn pol_seed_accrues_zero_contest_capital() {
+    // 04 §7a POL exclusion: the protocol-seeded complete-set inventory never
+    // enters `q_long`/`q_short`, so a seeded-but-untraded book accrues exactly
+    // zero contest capital across a fully observed window.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        let interval = u32::try_from(ObsInterval::get()).unwrap_or_default();
+        assert!(interval > 0);
+        let start = 1;
+        let trailing = start + interval;
+        let end = trailing + interval;
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            PROPOSAL,
+            start,
+            trailing,
+            end,
+        ));
+        System::set_block_number(u64::from(trailing));
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        System::set_block_number(u64::from(end));
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        assert_ok!(Market::seal_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            end,
+        ));
+
+        // The book holds its full b·ln2 POL headroom, yet contest capital is 0.
+        assert_eq!(
+            Market::average_contest_at(MARKET_ID, end, end - start),
+            Some(0)
+        );
+        // Consequently the POL seed alone can never clear a positive floor.
+        assert!(!Market::decision_grade_at(
+            MARKET_ID,
+            end,
+            end - start,
+            95,
+            FixedU64(1_000_000_000),
+            1,
+            B,
+            true,
+        ));
         assert_try_state();
     });
 }

@@ -2,11 +2,20 @@
 
 This tree implements the doc-15 §4.9 Phase-0 agent-based calibration tier. It
 generates planted-truth proposals across all four market classes and executes
-chronological informed, noise, arbitrage, and manipulator orders against real
-two-outcome LMSR book state. Every fill is MaxTrade-capped, balance-limited,
-charged the doc-13 `mkt.fee` of 30 bps, and retained in an event ledger. Step-5
-contest notional and step-9 measured depth are sums of emitted `Traded.cost`
-magnitudes; attacker and arbitrage fills count exactly like any other fill.
+chronological informed, noise, holder, arbitrage, and manipulator orders
+against real two-outcome LMSR book state. Every fill is MaxTrade-capped,
+balance-limited, charged the doc-13 `mkt.fee` of 30 bps, and retained in an
+event ledger. Per the SQ-231 amendment (04 §7a), step-5 contest grading and
+the step-9 certificate consume **time-averaged contest capital** — the marked
+value of net outstanding trader positions, replayed through the reference
+model's `ContestCapitalAccumulator` with previous-block semantics — bounded in
+step 9 by the `sec.flow_cap` ceiling. Wash churn nets out of the measure by
+LMSR path independence; gross `Traded.cost` sums remain recorded as flow
+telemetry only. Honest formation therefore carries a holding leg: balanced
+maker-bought pairs topped up to the stratum target (settlement-riskless but
+capital locked for the window, counted per the 04 §7a definition) on top of
+directional informed exposure. Attacker and arbitrage held exposure counts
+exactly like any other held exposure.
 
 Run the deterministic full calibration (10,000 proposals):
 
@@ -60,20 +69,21 @@ counterfactuals and 5% relative-width binary brackets. Envelope evidence is
 fail-closed when outcome or realized-loss monotonicity is not demonstrated;
 endpoint losses are never presented as a loss bracket by assumption.
 
-The synthetic Baseline contest floor of 250,000 USDC is a named assumption,
-using the TREASURY-tier scale as an analogy to doc 08 §4.3; it is pending a
-specification question. Phase-0 also names its always-clean scheduled-coverage
-and undisturbed-POL legs as assumptions rather than measured defenses.
+The Baseline contest floor of 250,000 USDC is the TREASURY-tier `dec.v_min.trs`
+that 05 §5.2 mandates for the Baseline book (SQ-232 resolution, 2026-07-18).
+Phase-0 also names its always-clean scheduled-coverage and undisturbed-POL legs
+as assumptions rather than measured defenses.
 
-## Preserved thin-market finding
+## Thin-market promotion under the contest-capital measure
 
-The artifact always records the confirmed seam prominently: attacker and
-arbitrage gross contest flow can promote an initially below-`v_min` book to
-decision grade and simultaneously increase step-9 `L_hat`/`AttackCost_hat`,
-which can license the same flip. Doc 05 §5.6 caps wash flow only inside
-`ManipFloor_hat.C_hold`; it does not cap step-5 grading or step-9 measured
-depth. This finding is retained whether the remediated headline rates pass or
-fail.
+The pre-amendment seam — attack-generated *gross* flow promoting a below-`v_min`
+book while self-funding the step-9 certificate — is closed by SQ-231: churn
+nets out of the 04 §7a measure, so promotion requires genuinely held net
+exposure across the window, and the `sec.flow_cap · (b_acc + b_rej)` ceiling
+now bounds the step-9 `L_hat` contribution. The artifact keeps measuring and
+recording promotion (`thin_market_capture`): attacker plus arbitrage *held*
+capital can still lift a thin book to decision grade, but at genuine
+capital-at-risk the threshold brackets price against `3·InCapPrize`.
 
 `AttackCost_hat` remains the doc-08 upper estimate. The signed, book-specific
 `ManipFloor_hat` envelope is applied only to causal wrong-PASS full+trailing

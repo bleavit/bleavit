@@ -281,7 +281,7 @@ def check_artifact(path: Path) -> dict:
     payload = load_artifact(path)
     errors: list[str] = []
     config = SimulationConfig()
-    if payload.get("schema") != "bleavit.phase0-calibration.v3":
+    if payload.get("schema") != "bleavit.phase0-calibration.v4":
         errors.append("wrong evidence schema")
     if payload.get("seed") != DEFAULT_SEED:
         errors.append("default seed drift")
@@ -342,8 +342,8 @@ def check_artifact(path: Path) -> dict:
     if publication.get("designation") != expected_designation:
         errors.append("publication designation disagrees with gates")
     thin = payload.get("thin_market_capture", {})
-    if "Attack-generated gross attacker+arbitrage flow" not in thin.get("confirmed_spec_seam", ""):
-        errors.append("confirmed thin-market-capture seam is missing")
+    if "contest capital" not in thin.get("mechanism_note", ""):
+        errors.append("thin-market contest-capital mechanism note is missing")
     violations = payload.get("violations")
     if not isinstance(violations, list):
         errors.append("violations must be a list")

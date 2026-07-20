@@ -43,16 +43,21 @@ from bleavit_reference_model.treasury import (
     attack_cost_hat,
     baseline_commitment,
     dec_v_min,
+    decision_pair_contest_capital,
     decision_delta,
     display_integer,
     in_cap_prize,
+    l_hat,
     nav_floor,
     p_ref,
     pol_b,
     pol_commitment,
     security_sizing_ok,
 )
-from bleavit_reference_model.twap import TwapAccumulator
+from bleavit_reference_model.twap import (
+    ContestCapitalAccumulator,
+    TwapAccumulator,
+)
 from bleavit_reference_model.welfare import full_pipeline, settlement_score
 
 SWEEP_SCHEMA = "bleavit.reference-model.v3"
@@ -61,7 +66,17 @@ SWEEP_SEED_STEP = 0x9E37_79B9_7F4A_7C15
 SWEEP_STRUCTURED_ROWS = 20
 
 DECISION_SCENARIOS = [
-    {"name": "adopt", "inputs": {}},
+    {
+        "name": "honest_param_adopt",
+        "inputs": {
+            "proposal_class": "Param",
+            "accept_full": "0.517",
+            "accept_trailing": "0.517",
+            "delta": "0.015",
+            "envelope_value": "100",
+            "measured_liquidity": "1000000",
+        },
+    },
     {
         "name": "constitution_violation",
         "inputs": {"preimage_ok": False},
@@ -74,22 +89,28 @@ DECISION_SCENARIOS = [
     {
         "name": "gate_book_invalid",
         "inputs": {
-            "requires_gate_markets": True,
+            "proposal_class": "Treasury",
+            "ask": "100",
+            "spendable_nav": "7393600",
             "gate_book_valid": False,
         },
     },
     {
-        "name": "gate_veto_survival",
+        "name": "param_gate_veto_survival",
         "inputs": {
-            "requires_gate_markets": True,
+            "proposal_class": "Param",
+            "envelope_value": "100",
+            "measured_liquidity": "1000000",
             "p_adopt": {"Survival": "0.06"},
             "p_reject": {"Survival": "0.01"},
         },
     },
     {
-        "name": "gate_veto_security",
+        "name": "param_gate_veto_security",
         "inputs": {
-            "requires_gate_markets": True,
+            "proposal_class": "Param",
+            "envelope_value": "100",
+            "measured_liquidity": "1000000",
             "p_adopt": {"Survival": "0.01", "Security": "0.06"},
             "p_reject": {"Survival": "0.01", "Security": "0.01"},
         },
@@ -97,7 +118,9 @@ DECISION_SCENARIOS = [
     {
         "name": "gate_veto_precedes_welfare_invalid",
         "inputs": {
-            "requires_gate_markets": True,
+            "proposal_class": "Treasury",
+            "ask": "100",
+            "spendable_nav": "7393600",
             "p_adopt": {"Survival": "0.06"},
             "welfare_grade": "Invalid",
         },
@@ -105,7 +128,9 @@ DECISION_SCENARIOS = [
     {
         "name": "gate_veto_precedes_later_gate_invalid",
         "inputs": {
-            "requires_gate_markets": True,
+            "proposal_class": "Treasury",
+            "ask": "100",
+            "spendable_nav": "7393600",
             "gate_valid": {"Survival": True, "Security": False},
             "p_adopt": {"Survival": "0.06"},
             "p_reject": {"Survival": "0.01"},
@@ -151,6 +176,62 @@ DECISION_SCENARIOS = [
     {
         "name": "rate_limited",
         "inputs": {"queue_time_ok": False},
+    },
+    # SQ-231: step 9's L-hat from the decomposed 08 §5.2 form — POL depth plus
+    # min(the two books' 04 §7a contest capital), bounded by
+    # sec.flow_cap·(b_acc+b_rej). The equal-book row reproduces the 08 §5.4(b)
+    # treasury example (3P = 600,000).
+    {
+        "name": "adopt_contest_capital_l_hat",
+        "inputs": {
+            "proposal_class": "Treasury",
+            "ask": "200000",
+            "pol_depth": "34657.359028",
+            "contest_accept": "400000",
+            "contest_reject": "400000",
+            "flow_cap": "8",
+            "b_accept": "25000",
+            "b_reject": "25000",
+        },
+    },
+    {
+        "name": "security_sizing_contest_shortfall",
+        "inputs": {
+            "proposal_class": "Treasury",
+            "ask": "200000",
+            "pol_depth": "34657.359028",
+            "contest_accept": "100000",
+            "contest_reject": "100000",
+            "flow_cap": "8",
+            "b_accept": "25000",
+            "b_reject": "25000",
+        },
+    },
+    {
+        "name": "security_sizing_flow_cap_ceiling",
+        "inputs": {
+            "proposal_class": "Treasury",
+            "ask": "200000",
+            "pol_depth": "34657.359028",
+            "contest_accept": "1000000000",
+            "contest_reject": "1000000000",
+            "flow_cap": "7",
+            "b_accept": "25000",
+            "b_reject": "25000",
+        },
+    },
+    {
+        "name": "security_sizing_asymmetric_pair_contest",
+        "inputs": {
+            "proposal_class": "Treasury",
+            "ask": "200000",
+            "pol_depth": "34657.359028",
+            "contest_accept": "400000",
+            "contest_reject": "100000",
+            "flow_cap": "8",
+            "b_accept": "25000",
+            "b_reject": "25000",
+        },
     },
 ]
 
@@ -211,6 +292,20 @@ def _decision_row(scenario):
     if isinstance(replay.get("welfare_grade"), Grade):
         replay["welfare_grade"] = replay["welfare_grade"].value
     row = {"name": scenario["name"], "inputs": _string_tree(replay)}
+    if "contest_accept" in inputs:
+        pair_contest = decision_pair_contest_capital(
+            inputs["contest_accept"], inputs["contest_reject"]
+        )
+        row["l_hat"] = format(
+            l_hat(
+                inputs["pol_depth"],
+                pair_contest,
+                inputs["flow_cap"],
+                inputs["b_accept"],
+                inputs["b_reject"],
+            ),
+            "f",
+        )
     row["outcome"] = decision.outcome.value
     if decision.reason is not None:
         row["reason"] = decision.reason.value
@@ -1385,33 +1480,15 @@ def _ledger_error_scenarios():
 
 def _treasury_scenarios():
     rows = []
-    for name, large in [
-        ("Param", False),
-        ("Treasury", False),
-        ("Treasury", True),
-        ("Code", False),
-        ("Meta", False),
-    ]:
+    for name in ("Param", "Treasury", "Code", "Meta"):
         rows.append(
             {
-                "name": f"{name.lower()}_pol"
-                + ("_large" if large else ""),
-                "inputs": {
-                    "proposal_class": name,
-                    "large_treasury": large,
-                },
-                "commitment": format(
-                    pol_commitment(name, large_treasury=large), "f"
-                ),
-                "commitment_display": display_integer(
-                    pol_commitment(name, large_treasury=large)
-                ),
-                "nav_floor": format(
-                    nav_floor(name, large_treasury=large), "f"
-                ),
-                "nav_floor_display": display_integer(
-                    nav_floor(name, large_treasury=large)
-                ),
+                "name": f"{name.lower()}_pol",
+                "inputs": {"proposal_class": name},
+                "commitment": format(pol_commitment(name), "f"),
+                "commitment_display": display_integer(pol_commitment(name)),
+                "nav_floor": format(nav_floor(name), "f"),
+                "nav_floor_display": display_integer(nav_floor(name)),
             }
         )
     code_nav = Decimal("13862944")
@@ -1453,6 +1530,122 @@ def _treasury_scenarios():
                 "p_ref": format(p_ref("Code"), "f"),
             },
         ]
+    )
+    # SQ-231: L-hat's non-POL term is min(contest capital (04 §7a),
+    # sec.flow_cap·(b_acc+b_rej)) — 08 §5.2.
+    treasury_pair = {
+        "pol_depth": "34657.359028",
+        "b_accept": "25000",
+        "b_reject": "25000",
+    }
+    for name, contest, cap in [
+        ("l_hat_contest_within_ceiling", "400000", "8"),
+        ("l_hat_flow_cap_ceiling_binds", "1000000000", "7"),
+    ]:
+        inputs = dict(treasury_pair, contest_capital=contest, flow_cap=cap)
+        liquidity = l_hat(
+            inputs["pol_depth"],
+            inputs["contest_capital"],
+            inputs["flow_cap"],
+            inputs["b_accept"],
+            inputs["b_reject"],
+        )
+        rows.append(
+            {
+                "name": name,
+                "inputs": inputs,
+                "l_hat": format(liquidity, "f"),
+                "attack_cost": format(attack_cost_hat(liquidity), "f"),
+            }
+        )
+    return rows
+
+
+def _contest_scenarios():
+    """04 §7a contest-capital accumulator vectors (SQ-231)."""
+    rows = []
+    wash = ContestCapitalAccumulator()
+    wash_observations = [
+        {"block": 10, "q_long": "0", "q_short": "0", "price_long": "0.5"},
+        {"block": 20, "q_long": "0", "q_short": "0", "price_long": "0.5"},
+    ]
+    wash_recorded = [
+        wash.observe(
+            o["block"], o["q_long"], o["q_short"], o["price_long"]
+        )
+        for o in wash_observations
+    ]
+    rows.append(
+        {
+            "name": "wash_round_trip_zero",
+            "inputs": {
+                "q_pol_long": "0",
+                "q_pol_short": "0",
+                "observations": wash_observations,
+            },
+            "recorded": [format(noi, "f") for noi in wash_recorded],
+            "contest_capital_0_20": format(wash.mean(0, 20), "f"),
+        }
+    )
+    price = fmt(marginal_price_long(10000, 1000, 0))
+    held = ContestCapitalAccumulator()
+    held_observations = [
+        {"block": 10, "q_long": "1000", "q_short": "0", "price_long": price},
+        {"block": 20, "q_long": "1000", "q_short": "0", "price_long": price},
+        {"block": 30, "q_long": "1000", "q_short": "0", "price_long": price},
+    ]
+    held_recorded = [
+        held.observe(
+            o["block"], o["q_long"], o["q_short"], o["price_long"]
+        )
+        for o in held_observations
+    ]
+    rows.append(
+        {
+            "name": "held_exposure_marks_capital_times_time",
+            "inputs": {
+                "q_pol_long": "0",
+                "q_pol_short": "0",
+                "observations": held_observations,
+            },
+            "recorded": [format(noi, "f") for noi in held_recorded],
+            "contest_capital_0_30": format(held.mean(0, 30), "f"),
+            "contest_capital_10_30": format(held.mean(10, 30), "f"),
+            "cumulative_at_30": format(held.cumulative_at(30), "f"),
+        }
+    )
+    pol = ContestCapitalAccumulator(
+        q_pol_long="1000", q_pol_short="1000"
+    )
+    pol_observations = [
+        {
+            "block": 10,
+            "q_long": "1000",
+            "q_short": "1000",
+            "price_long": "0.5",
+        },
+        {
+            "block": 20,
+            "q_long": "1500",
+            "q_short": "1000",
+            "price_long": "0.5",
+        },
+    ]
+    pol_recorded = [
+        pol.observe(o["block"], o["q_long"], o["q_short"], o["price_long"])
+        for o in pol_observations
+    ]
+    rows.append(
+        {
+            "name": "pol_seeded_positions_excluded",
+            "inputs": {
+                "q_pol_long": "1000",
+                "q_pol_short": "1000",
+                "observations": pol_observations,
+            },
+            "recorded": [format(noi, "f") for noi in pol_recorded],
+            "contest_capital_0_20": format(pol.mean(0, 20), "f"),
+        }
     )
     return rows
 
@@ -1857,6 +2050,7 @@ def build():
         "welfare_scenarios": welfare_scenarios,
         "treasury_scenarios": _treasury_scenarios(),
         "twap_scenarios": twap_scenarios,
+        "contest_scenarios": _contest_scenarios(),
     }
 
 

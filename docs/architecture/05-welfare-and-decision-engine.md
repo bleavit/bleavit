@@ -370,7 +370,7 @@ If no parachain block finalizes for 4,800 relay blocks (~8 h) or a snapshot is >
 
 ### 5.1 Gate-veto tests (kernel-ordered, carried forward)
 
-For CODE, META and TREASURY > 1% NAV, four binary gate books per proposal trade the question "conditional on ADOPT (resp. REJECT), will the S (resp. C) daily floor-breach flag be set on ≥ 1 day during epochs e+1…e+2?" (book mechanics: [doc 04](./04-markets-and-pricing.md); settlement source: §4.7).
+For every market-bearing class (`PARAM | TREASURY | CODE | META`), four binary gate books per proposal trade the question "conditional on ADOPT (resp. REJECT), will the S (resp. C) daily floor-breach flag be set on ≥ 1 day during epochs e+1…e+2?" (book mechanics: [doc 04](./04-markets-and-pricing.md); settlement source: §4.7). For PARAM these are the same deterministic system-wide breach facts as for the other classes: `S_gate(pid, branch) = ∃ day ∈ epochs e+1…e+2: S_daily(day) < θS⁻`, and analogously for `C_gate`; this is a correlated-harm proxy, not causal attribution to the parameter delta.
 
 ```
 veto  iff  p̂ᵍ_adopt > p_max(g)              // absolute ruin cap (default 0.05, kernel ceiling 0.10)
@@ -378,12 +378,12 @@ veto  iff  p̂ᵍ_adopt > p_max(g)              // absolute ruin cap (default 0.
        for either g ∈ {S, C}
 ```
 
-No welfare margin overrides a veto (G-4, I-14). PARAM and TREASURY ≤ 1% NAV use conservative static classification (capability envelopes certified below the gate-relevant blast radius; the classification itself META-governed).
+No welfare margin overrides a veto (G-4, I-14). No market-bearing class is exempt through static classification.
 
 ### 5.2 Sanity band and per-book validity (B-med: sanity band)
 
-- **Welfare books** (the decision pair and the Baseline book): decision-grade requires `TWAP ∈ [0.02, 0.98]` (the sanity band), plus coverage ≥ 95% of scheduled observation intervals in the window, staleness clean, time-averaged effective POL ≥ class floor and POL undisturbed, non-POL contest notional ≥ **`dec.v_min(class)` per book** (the per-book resolution of the V_min ambiguity — each of the two decision books MUST individually clear it), and `|spot_close − TWAP| ≤ Δ_max = 0.05`.
-- **Gate books are exempt from the sanity band** — a healthy gated proposal's gate books legitimately trade near 0. They instead satisfy the **near-boundary validity rule (GB-NB)**: a gate book whose window TWAP lies outside [0.02, 0.98] is decision-grade iff coverage ≥ 98%, zero stale events, and `|spot_close − TWAP| ≤ 0.01` *(keys `gate.nb_coverage`, `gate.nb_conv`: §13)* — a book pinned near a boundary counts only if it is demonstrably alive and converged, not abandoned. Inside the band, gate books use the welfare-book validity checks. Gate books' contest floor is `gate.v_min = 0.1 · dec.v_min(class)` per book *(normative value: §13)*.
+- **Welfare books** (the decision pair and the Baseline book): decision-grade requires `TWAP ∈ [0.02, 0.98]` (the sanity band), plus coverage ≥ 95% of scheduled observation intervals in the window, staleness clean, time-averaged effective POL ≥ class floor and POL undisturbed, non-POL **contest capital** ([doc 04](./04-markets-and-pricing.md) §7a — the time-weighted marked value of net outstanding trader positions; gross traded notional is *not* the measure, SQ-231 amendment 2026-07-18) ≥ **`dec.v_min(class)` per book** (the per-book resolution of the V_min ambiguity — each of the two decision books MUST individually clear it), and `|spot_close − TWAP| ≤ Δ_max = 0.05`. The **Baseline book carries no proposal class and grades at the TREASURY-tier floor `dec.v_min.trs`** — [doc 08](./08-treasury-and-economics.md) §4.3's mid-class manipulation-resistance rationale is the source of the tier, and the same tier already sizes its `pol.b_baseline` subsidy (SQ-232 resolution, 2026-07-18).
+- **Gate books are exempt from the sanity band** — a healthy gated proposal's gate books legitimately trade near 0. They instead satisfy the **near-boundary validity rule (GB-NB)**: a gate book whose window TWAP lies outside [0.02, 0.98] is decision-grade iff coverage ≥ 98%, zero stale events, and `|spot_close − TWAP| ≤ 0.01` *(keys `gate.nb_coverage`, `gate.nb_conv`: §13)* — a book pinned near a boundary counts only if it is demonstrably alive and converged, not abandoned. Inside the band, gate books use the welfare-book validity checks. For **every market-bearing class**, gate books' contest floor is `gate.v_min = 0.1 · dec.v_min(class)` per book *(normative value: §13)*, graded over the same contest-capital measure.
 
 ### 5.3 Baseline consumption (backed by doc 04)
 
@@ -418,7 +418,7 @@ fn decide(pid: ProposalId, now: BlockNumber) -> DecisionOutcome {
     }
 
     // ── 3–4. ruin gates FIRST (kernel ordering: upside is never weighed) ─────
-    if p.requires_gate_markets() {                            // CODE | META | TREASURY > 1% NAV
+    if p.requires_gate_markets() {                            // PARAM | TREASURY | CODE | META
         let gm = p.gate_markets.ok_or(Reject(NotDecisionGrade))?;
         for g in [Survival, Security] {
             ensure!(gate_decision_grade(gm[g].adopt)          // §5.2: band OR GB-NB rule,
@@ -433,8 +433,8 @@ fn decide(pid: ProposalId, now: BlockNumber) -> DecisionOutcome {
     }
 
     // ── 5. welfare-book decision grade ───────────────────────────────────────
-    // coverage ≥ 95%, staleness clean, POL floor & undisturbed, contest notional
-    // ≥ dec.v_min(class) PER BOOK, sanity band [0.02, 0.98] (welfare books only), both branches.
+    // coverage ≥ 95%, staleness clean, POL floor & undisturbed, contest capital
+    // (04 §7a) ≥ dec.v_min(class) PER BOOK, sanity band [0.02, 0.98] (welfare books only), both branches.
     match grade_welfare(&p) {
         Grade::Ok => {}
         Grade::Insufficient if !p.extended => return Extend,  // one shared extension budget (T8)
@@ -522,8 +522,12 @@ AttackCost̂ = F̂ · T_dec                          // normative gate input (do
   T_dec = dec.window / 14,400 blocks-per-day     // = 3 days at default
   F̂     = min( L̂/2, F̂_pub ) per day             // conservative minimum
   L̂     = time-averaged effective POL depth of the decision pair (2·b·ln 2 as seeded,
-          from I-12 telemetry) + non-POL contest notional over the decision window
-          (the same measured quantity graded against dec.v_min in step 5)
+          from I-12 telemetry)
+        + min( min(ContestCapital_acc(window), ContestCapital_rej(window))
+               (doc 04 §7a — the binding shallower book; the same per-book measure
+                graded against dec.v_min in step 5; SQ-231: gross flow no longer
+                feeds the certificate; doc 08 §5.4(b) adds one dec.v_min, not two),
+               sec.flow_cap · (b_acc + b_rej) )   // the C_hold ceiling, now also in the gate
   F̂_pub = the published measured arbitrage-flow parameter (A-2 obligation);
           until published, F̂ = L̂/2
 
@@ -553,7 +557,7 @@ C_hold = min(V_win, sec.flow_cap · (b_acc + b_rej)) · δc
          // the sec.flow_cap ceiling bounds wash-trade inflation of V_win (threat row: doc 14)
 ```
 
-`ManipFloor̂` is part of the Phase 3–4 measurement obligation alongside `F̂` (doc 08 §5.5): if published `ManipFloor̂` persistently reads below `3 · InCapPrize` for adopted proposals, the values layer MUST tighten δ and/or the `dec.v_min`/`pol.b` slopes before caps rise — the diagnostic exists precisely because the flow-model gate is an upper bound. Economic derivation, calibration, the worked recomputation at defaults, and the secondary Ask-scaled liquidity mechanism (`pol.b`, `dec.v_min`, δ scaling with `ask`, floors = current defaults) live in [doc 08](./08-treasury-and-economics.md).
+`ManipFloor̂` is part of the Phase 3–4 measurement obligation alongside `F̂` (doc 08 §5.5): if published `ManipFloor̂` persistently reads below `3 · InCapPrize` for adopted proposals, the values layer MUST tighten δ and/or the `dec.v_min`/`pol.b` slopes before caps rise — the diagnostic exists precisely because the flow-model gate is an upper bound. The Phase-0 exit simulation ([15](15-invariants-and-testing.md) §4.9) validates this envelope at the irreducible economic line: it flags a causal wrong-PASS flip as a security failure only when the *realized* attacker cost falls **below the prize** (a profitable capture); an unprofitable flip whose realized cost is ≥ the prize but below `3 · InCapPrize` is deep-pocket griefing (TM-18) that the SF = 3 margin conservatively guards against — recorded as a diagnostic, not a Phase-0 gate failure. Economic derivation, calibration, the worked recomputation at defaults, and the secondary Ask-scaled liquidity mechanism (`pol.b`, `dec.v_min`, δ scaling with `ask`, floors = current defaults) live in [doc 08](./08-treasury-and-economics.md).
 
 ---
 

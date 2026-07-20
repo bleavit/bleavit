@@ -25,6 +25,7 @@ use serde_json::{Map, Value};
 
 #[derive(Deserialize)]
 struct Fixture {
+    ledger_scenarios: Vec<Value>,
     ledger_sequence_scenarios: Vec<Scenario>,
     ledger_score_scenarios: Vec<ScoreScenario>,
     ledger_error_scenarios: Vec<ErrorScenario>,
@@ -948,6 +949,250 @@ fn ledger_score_vectors_cover_endpoints_and_rounding_boundaries() {
         );
         pair.try_state().expect("pair score state remains solvent");
     }
+}
+
+/// The legacy worked-example family `ledger_scenarios` (15 §4.4; G0
+/// corpus-family attestation). Each named row is a fixed operation program
+/// over the Python aggregate reference vault (`Vault`/`BaselineVault`); the
+/// JSON row carries the program's numeric inputs and every expected payout in
+/// USDC base units. This test replays each named program against the Rust
+/// core and asserts every payout byte-exactly (03 §6.3 rounding-against-the-
+/// claimant; D-1 VOID schedule; gate 1:0 settlement; Baseline scalar family).
+/// An unknown or renamed scenario fails loudly — no silent zero-case pass.
+#[test]
+fn ledger_legacy_scenarios_match_python_reference_model() {
+    fn u128_field(row: &Value, key: &str) -> u128 {
+        u128::from(
+            row[key]
+                .as_u64()
+                .unwrap_or_else(|| panic!("legacy field {key} must be a u64")),
+        )
+    }
+
+    fn score_1e9(row: &Value, key: &str) -> FixedU64 {
+        let text = row[key].as_str().expect("score is a decimal string");
+        let (int, frac) = text.split_once('.').unwrap_or((text, ""));
+        assert!(frac.len() <= 9, "score {text} exceeds the 1e9 grid");
+        let mut raw: u64 = int.parse::<u64>().expect("score integer part") * 1_000_000_000;
+        let mut digits = String::from(frac);
+        while digits.len() < 9 {
+            digits.push('0');
+        }
+        raw += digits.parse::<u64>().expect("score fraction part");
+        FixedU64(raw)
+    }
+
+    fn payout_of(state: &LedgerState<u8>) -> u128 {
+        match state.events.last().expect("redemption emits an event") {
+            Event::Redeemed(_, payout)
+            | Event::ScalarPairRedeemed(_, payout)
+            | Event::ScalarRedeemed(_, _, payout)
+            | Event::GateRedeemed(_, _, payout)
+            | Event::VoidRedeemed(_, _, _, payout)
+            | Event::BaselineRedeemed(_, _, payout) => *payout,
+            other => panic!("last event is not a redemption: {other:?}"),
+        }
+    }
+
+    let scenarios = fixture().ledger_scenarios;
+    assert_eq!(scenarios.len(), 5, "legacy family cardinality drifted");
+    let mut replayed = BTreeSet::new();
+
+    for row in &scenarios {
+        let name = row["name"].as_str().expect("scenario name");
+        let inputs = &row["inputs"];
+        assert_eq!(
+            row["unit"].as_str(),
+            Some("USDC base units (1e-6)"),
+            "{name} unit drifted"
+        );
+        match name {
+            "void_branch_and_leg_floors" => {
+                // split E; split_scalar ACCEPT leg; VOID; redeem the intact
+                // REJECT mirror at 1/2 and the unpaired ACCEPT LONG leg at 1/4
+                // (D-1 schedule, both floored against the claimant).
+                let branch_amount = u128_field(inputs, "branch_amount");
+                let leg_amount = u128_field(inputs, "scalar_leg_amount");
+                let mut state = LedgerState::<u8>::new();
+                state.create_vault(1, 0).unwrap();
+                state
+                    .split(LedgerOrigin::Signed, 1, &1, branch_amount)
+                    .unwrap();
+                state
+                    .split_scalar(LedgerOrigin::Signed, 1, Branch::Accept, &1, leg_amount)
+                    .unwrap();
+                state.void(LedgerOrigin::ResolveAuthority, 1).unwrap();
+                state
+                    .redeem_void(
+                        1,
+                        Branch::Reject,
+                        PositionKind::BranchUsdc,
+                        &1,
+                        branch_amount,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    payout_of(&state),
+                    u128_field(row, "branch_payout"),
+                    "{name} branch"
+                );
+                state
+                    .redeem_void(1, Branch::Accept, PositionKind::Long, &1, leg_amount)
+                    .unwrap();
+                assert_eq!(
+                    payout_of(&state),
+                    u128_field(row, "leg_payout"),
+                    "{name} leg"
+                );
+                state.try_state().expect("void scenario stays solvent");
+            }
+            "b5_scalar_fragmentation" => {
+                // The B-5 counterexample: LONG e, then SHORT e/2 twice — each
+                // unpaired floor rounds against the claimant.
+                let escrow = u128_field(inputs, "escrow");
+                let mut state = settled_scalar(score_1e9(inputs, "s").0, escrow);
+                state
+                    .redeem_scalar(1, ScalarSide::Long, &1, escrow)
+                    .unwrap();
+                let long_payout = payout_of(&state);
+                assert_eq!(long_payout, u128_field(row, "long_payout"), "{name} LONG");
+                let expected_shorts = row["short_payouts"]
+                    .as_array()
+                    .expect("short_payouts array")
+                    .iter()
+                    .map(|value| u128::from(value.as_u64().expect("short payout u64")))
+                    .collect::<Vec<_>>();
+                assert_eq!(expected_shorts.len(), 2, "{name} short program shape");
+                let mut total = long_payout;
+                for (index, expected) in expected_shorts.iter().enumerate() {
+                    state
+                        .redeem_scalar(1, ScalarSide::Short, &1, escrow / 2)
+                        .unwrap();
+                    let payout = payout_of(&state);
+                    assert_eq!(payout, *expected, "{name} SHORT {index}");
+                    total += payout;
+                }
+                assert_eq!(total, u128_field(row, "total_payout"), "{name} total");
+                state.try_state().expect("b5 scenario stays solvent");
+            }
+            "scalar_pair_exact" => {
+                // PT-3: a complete pair redeems at exactly `a` per set.
+                let amount = u128_field(inputs, "amount");
+                let mut state = settled_scalar(score_1e9(inputs, "s").0, amount);
+                state.redeem_scalar_pair(1, &1, amount).unwrap();
+                assert_eq!(payout_of(&state), u128_field(row, "payout"), "{name}");
+                state.try_state().expect("pair scenario stays solvent");
+            }
+            "gate_settlement_one_zero" => {
+                // 03 §7: settle_gate pays 1:0 exactly. The escrow amount is not
+                // part of the row's inputs (payouts are escrow-independent); use
+                // the kernel minimum split so the program is legal on-chain.
+                let amount_each = u128_field(inputs, "amount_each");
+                let escrow = kernel::MIN_SPLIT_USDC.max(amount_each);
+                let gate_kind = match inputs["gate"].as_str().expect("gate name") {
+                    "Survival" => GateType::Survival,
+                    "Security" => GateType::Security,
+                    other => panic!("unknown gate {other}"),
+                };
+                let outcome = inputs["outcome"].as_bool().expect("gate outcome");
+                let mut state = LedgerState::<u8>::new();
+                state.create_vault(1, 0).unwrap();
+                state.split(LedgerOrigin::Signed, 1, &1, escrow).unwrap();
+                state
+                    .split_gate(
+                        LedgerOrigin::Signed,
+                        1,
+                        Branch::Accept,
+                        gate_kind,
+                        &1,
+                        escrow,
+                    )
+                    .unwrap();
+                state
+                    .resolve(LedgerOrigin::ResolveAuthority, 1, Branch::Accept)
+                    .unwrap();
+                state
+                    .settle_gate(LedgerOrigin::SettleAuthority, 1, gate_kind, outcome)
+                    .unwrap();
+                state
+                    .settle_scalar(LedgerOrigin::SettleAuthority, 1, FixedU64(500_000_000))
+                    .unwrap();
+                state.redeem_gate(1, gate_kind, &1, amount_each).unwrap();
+                assert_eq!(
+                    payout_of(&state),
+                    u128_field(row, "yes_payout"),
+                    "{name} YES"
+                );
+                // 03 §7 settles gates 1:0. The Python legacy vault models the
+                // losing side as a 0-payout redemption; the Rust core models
+                // the same economics by giving the losing side no redemption
+                // path at all: `redeem_gate` burns only the outcome side.
+                // Witness the 0: drain the remaining winning-side supply, then
+                // a further redemption fails while the holder still owns the
+                // full losing-side balance — it is worth exactly no_payout = 0.
+                assert_eq!(u128_field(row, "no_payout"), 0, "{name} NO expectation");
+                state
+                    .redeem_gate(1, gate_kind, &1, escrow - amount_each)
+                    .unwrap();
+                let before = state.clone();
+                assert_eq!(
+                    state.redeem_gate(1, gate_kind, &1, amount_each),
+                    Err(Error::InsufficientPosition),
+                    "{name} losing side must confer no payout"
+                );
+                assert_eq!(state, before, "{name} failed redemption must not mutate");
+                let losing_kind = if outcome {
+                    PositionKind::GateNo(gate_kind)
+                } else {
+                    PositionKind::GateYes(gate_kind)
+                };
+                let losing = position(1, Branch::Accept, losing_kind);
+                assert_eq!(
+                    state
+                        .positions
+                        .iter()
+                        .find(|record| record.id == losing && record.owner == 1)
+                        .map(|record| record.balance),
+                    Some(escrow),
+                    "{name} losing-side balance must survive worthless"
+                );
+                state.try_state().expect("gate scenario stays solvent");
+            }
+            "baseline_scalar_and_pair" => {
+                let amount = u128_field(inputs, "amount");
+                let epoch = u32::try_from(inputs["epoch"].as_u64().expect("epoch")).unwrap();
+                let mut state = LedgerState::<u8>::new();
+                state.create_baseline_vault(epoch).unwrap();
+                state
+                    .split_baseline(LedgerOrigin::Signed, epoch, &1, 2 * amount)
+                    .unwrap();
+                state
+                    .settle_baseline(LedgerOrigin::SettleAuthority, epoch, score_1e9(inputs, "s"))
+                    .unwrap();
+                state
+                    .redeem_baseline(epoch, ScalarSide::Long, &1, amount)
+                    .unwrap();
+                assert_eq!(
+                    payout_of(&state),
+                    u128_field(row, "long_payout"),
+                    "{name} LONG"
+                );
+                state.redeem_baseline_pair(epoch, &1, amount).unwrap();
+                assert_eq!(
+                    payout_of(&state),
+                    u128_field(row, "pair_payout"),
+                    "{name} pair"
+                );
+                state.try_state().expect("baseline scenario stays solvent");
+            }
+            other => panic!("unknown legacy ledger scenario: {other}"),
+        }
+        assert!(
+            replayed.insert(name.to_owned()),
+            "duplicate scenario {name}"
+        );
+    }
+    assert_eq!(replayed.len(), 5, "legacy replay executed-count drifted");
 }
 
 fn error_witness(operation: &str) -> Error {

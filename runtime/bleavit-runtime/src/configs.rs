@@ -1327,6 +1327,20 @@ fn fixed_param_or(name: &[u8], default: u64) -> u64 {
         },
     }
 }
+/// Live `sec.flow_cap` (13 §1) clamped to its kernel hard minimum ×7.
+///
+/// The row's published value is Phase-0 sim-gated and deliberately absent from
+/// the seeded genesis registry (`sec.*` stay out until calibrated — the same
+/// fail-closed posture as the unpublished `sec.prize.*` floors, which
+/// `in_cap_prize` renders as `None`). A ceiling has the opposite conservative
+/// direction from a floor: `None` here would zero the contest term wrongly,
+/// while any *large* default would widen step 9 — so an unpublished (or
+/// sub-minimum) read collapses to exactly the kernel minimum 7, the smallest
+/// admissible ceiling (08 §5.3; SQ-231).
+pub(crate) fn sec_flow_cap_1e9() -> u64 {
+    fixed_param(b"sec.flow_cap").max(kernel::SEC_FLOW_CAP_FLOOR_1E9)
+}
+
 fn u32_param(name: &[u8]) -> u32 {
     u32_param_or(name, 0)
 }
@@ -1897,7 +1911,7 @@ fn decision_book_window_stats(
         .min(100);
     let coverage_pct = u8::try_from(coverage).ok()?;
     let traded_volume = stats
-        .contest_notional_blocks
+        .contest_capital_blocks
         .checked_div(Balance::from(window))?;
     Some((coverage_pct, traded_volume))
 }
@@ -2557,6 +2571,75 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
         )
     }
 
+    fn welfare_grade(
+        market: futarchy_primitives::MarketId,
+        end: BlockNumber,
+        class: futarchy_primitives::ProposalClass,
+        params: &pallet_epoch::CoreEpochParams,
+    ) -> pallet_epoch::WelfareGrade {
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            let _ = (market, end, class, params);
+            return pallet_epoch::WelfareGrade::Ok;
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        {
+            use pallet_epoch::WelfareGrade;
+            // 05 §5.2 tri-state welfare-book grade over the same facts the
+            // boolean Decision-role grade folds. The reference partition
+            // (reference model `grade_welfare_book`): the remediable-by-time
+            // shortfalls — contest capital below the Ask-scaled class floor,
+            // coverage below `dec.coverage`, a first stale event — grade
+            // Insufficient; every other failure — sanity band, POL floor or
+            // POL disturbed (incl. a voided contest accumulator), a second
+            // stale event, non-convergence, an unsealed window, or any
+            // unavailable read — grades Invalid (G-1, fail-closed).
+            let Some(book) = pallet_market::Markets::<Runtime>::get(market) else {
+                return WelfareGrade::Invalid;
+            };
+            if !matches!(
+                book.kind,
+                pallet_market::core_market::BookKind::Decision { .. }
+            ) {
+                return WelfareGrade::Invalid;
+            }
+            let Some(contest_floor) = contest_floor_for_grade(
+                market,
+                end,
+                pallet_epoch::BookRole::Decision,
+                class,
+                params,
+            ) else {
+                return WelfareGrade::Invalid;
+            };
+            let Some(facts) = pallet_market::Pallet::<Runtime>::decision_grade_facts_at(
+                market,
+                end,
+                params.decision_window,
+                params.coverage_pct,
+                params.delta_max,
+                contest_floor,
+                class_pol_floor(class),
+                true,
+            ) else {
+                return WelfareGrade::Invalid;
+            };
+            if !facts.sane
+                || !facts.sealed
+                || !facts.pol_ok
+                || !facts.contest_valid
+                || facts.stale_events >= 2
+                || !facts.converged
+            {
+                return WelfareGrade::Invalid;
+            }
+            if !facts.contest_ok || !facts.coverage_ok || facts.stale_events == 1 {
+                return WelfareGrade::Insufficient;
+            }
+            WelfareGrade::Ok
+        }
+    }
+
     fn measured_depth(pid: futarchy_primitives::ProposalId) -> Option<Balance> {
         // B5 benchmarks need a realistic, read-free depth; the production path
         // below returns `None` when a backing read is unavailable so the B2
@@ -2567,10 +2650,15 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
             let _ = pid;
             return Some(currency::USDC.saturating_mul(1_000_000));
         }
+        // 05 §5.6 / 08 §5.2 (SQ-231): `L̂ = Σ pair POL depth +
+        // min(min(contest_acc, contest_rej), sec.flow_cap · (b_acc + b_rej))`.
+        // The shallower book is binding (§5.4); only b remains pair-summed.
         #[cfg(not(feature = "runtime-benchmarks"))]
         pallet_epoch::Proposals::<Runtime>::get(pid).and_then(|proposal| {
             let markets = proposal.markets?;
-            let mut total = 0_u128;
+            let mut pol_depth = 0_u128;
+            let mut pair_contest: Option<Balance> = None;
+            let mut b_sum = 0_u128;
             for id in [markets.accept, markets.reject] {
                 if !pallet_market::SeededMarkets::<Runtime>::contains_key(id) {
                     return None;
@@ -2586,9 +2674,19 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
                     proposal.decide_at,
                     window,
                 )?;
-                total = total.checked_add(pol)?.checked_add(contest)?;
+                pol_depth = pol_depth.checked_add(pol)?;
+                pair_contest = Some(match pair_contest {
+                    Some(binding) => binding.min(contest),
+                    None => contest,
+                });
+                b_sum = b_sum.checked_add(book.b)?;
             }
-            Some(total)
+            pallet_market::core_market::liquidity_hat(
+                pol_depth,
+                pair_contest?,
+                sec_flow_cap_1e9(),
+                b_sum,
+            )
         })
     }
 
@@ -2600,11 +2698,6 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
         // A8 fail-closed telemetry deferral: None makes the decision kernel use
         // its specified L/2 fallback (08 §5.2) — owner Phase-3 calibration.
         None
-    }
-
-    fn second_insufficiency(pid: futarchy_primitives::ProposalId) -> bool {
-        pallet_epoch::Proposals::<Runtime>::get(pid)
-            .is_some_and(|proposal| proposal.extended || proposal.rerun)
     }
 
     fn previous_settled_baseline_twap(epoch: EpochId) -> Option<FixedU64> {
@@ -3197,16 +3290,6 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         pallet_welfare::Pallet::<Runtime>::active_snapshot_spec(epoch)
     }
 
-    fn treasury_gate_required(proposal: &futarchy_primitives::Proposal<AccountId>) -> bool {
-        if !matches!(proposal.class, futarchy_primitives::ProposalClass::Treasury) {
-            return false;
-        }
-        let nav = crate::FutarchyTreasury::nav().spendable_nav;
-        nav.checked_mul(kernel::TREASURY_GATE_NAV_BPS)
-            .and_then(|value| value.checked_div(kernel::BASIS_POINTS_DENOMINATOR))
-            .is_none_or(|threshold| proposal.ask > threshold)
-    }
-
     fn attestation_artifact(
         proposal: &futarchy_primitives::Proposal<AccountId>,
     ) -> Option<futarchy_primitives::H256> {
@@ -3269,12 +3352,7 @@ impl pallet_epoch::PolBudget<AccountId> for RuntimePolBudget {
         let decision = pallet_market::core_market::seed_headroom(b)
             .ok()?
             .checked_mul(2)?;
-        let gate_required = matches!(
-            proposal.class,
-            futarchy_primitives::ProposalClass::Code | futarchy_primitives::ProposalClass::Meta
-        ) || <RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
-            AccountId,
-        >>::treasury_gate_required(proposal);
+        let gate_required = pallet_epoch::requires_gate_markets(proposal.class);
         if gate_required {
             let gate_b = balance_param_or(b"pol.b_gate", pallet_constitution::POL_GATE_B_DEFAULT);
             let gates = pallet_market::core_market::seed_headroom(gate_b)
@@ -5958,8 +6036,8 @@ fn benchmark_epoch_proposal(
         markets: Some(futarchy_primitives::MarketSet {
             accept: 1,
             reject: 2,
-            gates: None,
-            baseline: 3,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
         }),
         maturity: None,
         grace_end: None,

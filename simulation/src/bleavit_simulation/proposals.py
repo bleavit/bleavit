@@ -5,7 +5,6 @@ from decimal import Decimal, localcontext
 import random
 
 from bleavit_reference_model.treasury import (
-    decision_delta,
     in_cap_prize,
     p_ref,
 )
@@ -13,14 +12,41 @@ from bleavit_reference_model.treasury import (
 from .config import CLASSES
 
 
+# Characteristic proposal welfare-effect scale per class (s-units), the synthetic
+# population's ANCHOR. Deliberately DECOUPLED from the calibratable `dec.delta`
+# decision margin (13 §1): a proposal's true welfare effect is a fact about the
+# proposal, not about the market's decision threshold. Tying the population to
+# `decision_delta` (as this model originally did) made 15 §4.9's mandated
+# "calibrate δ per class to a false-pass rate < 1 %" a scale-invariant no-op —
+# raising δ rescaled the population identically. Frozen here at the historical
+# dec.delta floors (the effect-scale proxy those floors were chosen against), so
+# the population is byte-identical at that calibration point while δ (dec.delta)
+# becomes a genuine, independently-calibratable decision-margin/decidability lever
+# that flows into `decide()`. The `*_delta` effect-stratum labels are multiples of
+# THIS scale (equal to the floors by construction), not of the live decision δ.
+EFFECT_SCALE_FLOORS = {
+    "param": Decimal("0.015"),
+    "treasury": Decimal("0.025"),
+    "code": Decimal("0.040"),
+    "meta": Decimal("0.060"),
+}
+
+
+def effect_scale(proposal_class: str, prize: Decimal) -> Decimal:
+    """Ask-scaled characteristic effect magnitude of the population (mirrors the
+    `decision_delta` Ask-scaling shape, but off the FROZEN effect-scale floors so
+    δ-calibration cannot rescale the population)."""
+    ratio = max(Decimal(1), Decimal(prize) / p_ref(proposal_class))
+    return min(EFFECT_SCALE_FLOORS[proposal_class] * ratio, Decimal("0.10"))
+
+
 MASK64 = (1 << 64) - 1
 NAV_FLOORS = {
-    "param": Decimal("1848400"),
+    "param": Decimal("4620989"),
     "treasury": Decimal("7393600"),
     "code": Decimal("13862944"),
     "meta": Decimal("21256533"),
 }
-TREASURY_SMALL_NAV_FLOOR = Decimal("4620981")
 NAV_REGIMES = (
     ("floor", Decimal("1.00")),
     ("growth", Decimal("1.75")),
@@ -122,11 +148,7 @@ def generate_proposal_with_config(
     jitter = jitter_min + Decimal(str(rng.random())) * (jitter_max - jitter_min)
     with localcontext() as ctx:
         ctx.prec = 50
-        base_floor = (
-            TREASURY_SMALL_NAV_FLOOR
-            if proposal_class == "treasury" and regime == "floor"
-            else NAV_FLOORS[proposal_class]
-        )
+        base_floor = NAV_FLOORS[proposal_class]
         nav = min(
             Decimal("100000000"),
             (base_floor * multiplier * jitter).quantize(
@@ -168,7 +190,7 @@ def generate_proposal_with_config(
         spendable_nav=nav,
         upgrade_payload=upgrade_payload,
     )
-    effective_delta = decision_delta(proposal_class, prize)
+    effective_delta = effect_scale(proposal_class, prize)
     effect_rows = (
         (("sub_half_delta", "0.00", "0.50", "0.15"),
          ("half_to_one_delta", "0.50", "1.00", "0.15"),
@@ -191,9 +213,11 @@ def generate_proposal_with_config(
     )
     formation_row = _weighted_row(rng, formation_rows, 3)
 
-    gate_exposure = "gate" if proposal_class in ("code", "meta") or (
-        proposal_class == "treasury" and ask > nav * Decimal("0.01")
-    ) else "no_gate"
+    gate_exposure = (
+        "gate"
+        if proposal_class in ("param", "treasury", "code", "meta")
+        else "no_gate"
+    )
     correlation = Decimal("0.75") if config is None else Decimal(config.gate_harm_correlation)
     latent = Decimal(str(rng.random()))
     elevated = harmful and latent < correlation
@@ -242,6 +266,6 @@ def persistent_belief_error(
     )
     return (
         _centered_irwin_hall(rng)
-        * decision_delta(proposal.proposal_class, prize)
+        * effect_scale(proposal.proposal_class, prize)
         * Decimal(scale)
     )

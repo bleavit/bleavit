@@ -4,7 +4,7 @@
 
 **Boundary.** This document owns everything the chain and the canonical frontend must agree on byte-for-byte: shared SCALE types, the `FutarchyApi` runtime API and its view types, the frozen event schema, the storage items and names the frontend reads directly, chain identity constants, the constants-binding rules, the WSS bootnode chain-spec requirement, the backend-published test-artifact feed, and the `ReleaseChannel` raw storage key. It does **not** own the *semantics* behind these surfaces (ledger rules → [03](03-conditional-ledger.md), market mechanics → [04](04-markets-and-pricing.md), decision engine → [05](05-welfare-and-decision-engine.md), oracle game → [07](07-oracle-and-disputes.md), upgrade path → [09](09-execution-upgrades-and-rollout.md)) — but where a name or layout appears both here and there, **this document's spelling is canonical**. Normative language per RFC 2119.
 
-**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 4**. Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
+**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 5**. Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
 
 ---
 
@@ -113,7 +113,7 @@ pub enum TradeSide { BuyLong, BuyShort, SellLong, SellShort }
 
 `Proposal` gains the fields the decision engine reads (`ask: Balance`, `decide_at: BlockNumber` — B-med, semantics in [05](05-welfare-and-decision-engine.md)); `ExecutionRecord.result` is typed `DispatchOutcomeCode` as above. The full `Proposal`/`ExecutionRecord` structs and their ≤ 512 B / bound arguments are owned by [05](05-welfare-and-decision-engine.md)/[09](09-execution-upgrades-and-rollout.md); their SCALE layouts are part of this contract by inclusion in `futarchy-primitives`.
 
-The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 4`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
+The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 5`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
 
 ---
 
@@ -268,9 +268,9 @@ pub struct NavView {
     pub class_floors: [Balance; 4], // 08 §4.1; Param, Treasury, Code, Meta declaration order
 }
 
-// The Treasury class slot uses the conservative >1%-ask arming floor
-// (7,393,600 USDC) implemented by 08 §4.1's class-floor check; the lower
-// ≤1%-ask figure remains proposal-specific and is not a second class slot.
+// Every market-bearing proposal carries gate markets. PARAM uses the ≈4,620,989
+// USDC class floor and Treasury the 7,393,600-USDC class floor implemented by
+// 08 §4.1; the existing four-slot array and optional four-market IDs are unchanged.
 
 /// Stored form == view form (§7.1). FE draft's `DecisionOutcomeCode` is renamed.
 pub struct CohortSummary {
@@ -431,7 +431,7 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 | VIT decimals | 12 |
 | VIT existential deposit | **0.01 VIT** (= 10^10 plancks) |
 | Phase flag storage | `pallet-constitution::PhaseFlags` (§7.3) — the trading-enablement key |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 4` (runtime constant) |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 5` (runtime constant) |
 
 ---
 
@@ -474,7 +474,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 
 | Pallet | Constant name | Type | Value source | Status |
 |---|---|---|---|---|
-| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 4) | Wired |
+| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 5) | Wired |
 | Constitution | `MaxParams` | `u32` | `constitution_core::MAX_PARAMS` (= 128) | Wired |
 | Constitution | `MaxCapabilities` | `u32` | `constitution_core::MAX_CAPABILITIES` (= 64) | Wired |
 | Constitution | `MaxMeters` | `u32` | `constitution_core::MAX_METERS` (= 16) | Wired |
@@ -498,7 +498,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Registry (each instance) | `ArchiveDelay` | `BlockNumber` (`u32`) | live `Params[ledger.archive]` | Wired |
 | Registry (each instance) | `MaxFilingsPerEpoch` | `u32` | `kernel::REG_MAX_FILINGS_EPOCH` (= 64) | Wired |
 | Registry (each instance) | `MaxEvidenceLen` | `u32` | fixed `H256` evidence-hash width (= 32 bytes) | Wired |
-| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 4) | Wired |
+| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 5) | Wired |
 | ExecutionGuard | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) | Wired |
 | ExecutionGuard | `MaxExecutionRecords` | `u32` | `bounds::MAX_EXECUTION_RECORDS` (= 256) | Wired |
 | ExecutionGuard | `MaxCalls` | `u32` | `kernel::MAX_CALLS` (= 16) | Wired |
@@ -507,7 +507,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | ExecutionGuard | `MaxRuntimeCodeBytes` | `u32` | runtime `Config::MaxRuntimeCodeBytes` (`pallet_preimage::MAX_SIZE`) | Wired |
 | ExecutionGuard | `ExecutionTimelockFloor` | `[u32; 4]` | [13 §1](13-parameters.md) `exec.lock.*` K hard minima, `[14,400; 4]` blocks | Wired |
 | ExecutionGuard | `ExecutionGraceFloor` | `u32` | [13 §1](13-parameters.md) `exec.grace` K hard minimum (= 100,800 blocks) | Wired |
-| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 4) | Wired |
+| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 5) | Wired |
 | Epoch | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) | Wired |
 | Epoch | `MaxIntakeQueue` | `u32` | `bounds::INTAKE_QUEUE` (= 64) | Wired |
 | Epoch | `MaxNonTerminalCohorts` | `u32` | `bounds::MAX_NON_TERMINAL_COHORTS` (= 4) | Wired |
@@ -584,6 +584,7 @@ Total **168 bytes** (v1.0 baseline — the pre-freeze 78- and 92-byte drafts in 
 
 **Version history.**
 
+- **v5 (2026-07-19) — universal market-bearing-class gate markets.** Section 4's class-floor semantics change so every market-bearing proposal carries the existing four-book `(S,C)×(adopt,reject)` gate set: Treasury loses its former ask/NAV threshold and uses **7,393,600 USDC**; PARAM loses its former static-classification exception and its existing `NavView.class_floors` slot rises to **≈4,620,989 USDC**. The frozen `MarketSet.gates: Option<[MarketId; 4]>`, `ProposalSummaryView.gate_markets`, `DecisionStatsView.gate_twaps_1e9`, `NavView.class_floors: [Balance; 4]`, and `MaxLiveMarkets = 196` shapes are unchanged. The PARAM extension is folded into the same pre-genesis v5 revision; no v6 is warranted because no separately deployed contract or SCALE shape intervened. **Pre-genesis revision** — no runtime is deployed, so no migration is required and §13's post-genesis append-only/migration clause (point 3) does not apply. Joint backend+frontend sign-off: the user (owner for both sides under R-1), 2026-07-19.
 - **v4 (2026-07-17) — B2 02-amendment batch.** One pre-genesis revision carries the queued SQ-2 residuals — SQ-23's intake representation erratum, SQ-24's phase-fraction representation split, and SQ-26's attestor storage freeze in §7.5 — together with SQ-37's §6 conditional-ledger event completion, SQ-43's 12-entry `CohortSummary.proposals` hard-max bound, SQ-55's three trailing `NavView` fields, SQ-125's phase-fraction metadata-exposure mandate, and SQ-138's frozen metadata-constant names, restricted to genuine kernel values per [13](13-parameters.md) reading rule 7; META-amendable registry bounds bind through `params()`. The batch also lands the storage change the B2 implementation needs to make §4's `ParamView.last_change: BlockNumber` faithful: §7.3's `ParamRecord` gains `last_change_block`, because the record previously stored only `last_changed_epoch` and a block number cannot be reconstructed from an epoch index (historical epoch boundaries are not retained). **Pre-genesis revision** — no runtime is deployed, so §13's post-genesis append-only/migration clause (point 3) does not apply. Joint backend+frontend sign-off: the user (owner for both sides under R-1), 2026-07-17, user-delegated batch.
 - **v3 (2026-07-15) — oracle per-version reconciliation (A5).** 07 §2(4) runs one reporting game per `(component, epoch, frozen spec_version)`, so §7.2 `Rounds`/`ComponentValues` take the **triple key** `(MetricId, EpochId, MetricSpecVersion)`. Contract v2's pair key was self-contradictory — its own bound note said per-version games "append a `RoundState` per frozen version," which a one-value-per-key map cannot do; the triple resolves it. `RoundState` additionally carries the ack-keying/bond-freezing/§5.5-slashing fields the protocol requires, `ReserveHealth` its probe-timing fields, and `OracleRoundView` (§4) gains `spec_version`. **Pre-genesis revision** — no runtime is deployed, so §13's post-genesis append-only/migration clause (point 3) does not apply; the change is a straight restructure. Joint backend+frontend sign-off: the user (owner for both sides under R-1), 2026-07-15.
 - **v2** — the frozen baseline established at D-2 (all FE §30 patch items applied).

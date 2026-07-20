@@ -41,7 +41,7 @@ pub enum PositionId {
 }
 ```
 
-- **Proposal instruments**: `2 branches × (1 BranchUsdc + 2 scalar + 2×2 gate) = 14` kinds per vault. Gate kinds exist for every vault but carry non-zero supply only for classes with gate books (CODE, META, TREASURY > 1% NAV).
+- **Proposal instruments**: `2 branches × (1 BranchUsdc + 2 scalar + 2×2 gate) = 14` kinds per vault. Gate kinds exist for every vault and carry non-zero supply for every market-bearing class (PARAM, TREASURY, CODE, META).
 - **Baseline instruments**: 2 kinds per epoch — LONG/SHORT on the epoch settlement score `s_e`, collateralized in USDC **directly, with no branch layer** (the Baseline market is unconditional).
 
 `PositionId` max encoded length ≤ 16 B; append-only `#[codec(index)]` discipline per BE §7 applies to all enums above.
@@ -263,7 +263,7 @@ equivalently `E = supply(AcceptUsdc) + Q_Acc + G_{Acc,S} + G_{Acc,C} = supply(Re
 
 ### 6.2 The POL seeding flow, re-walked (B-4)
 
-TREASURY > 1% NAV example (6 books). Per branch the seed needs `D = pol.b·ln 2 + headroom_dec` for the decision book (`pol.b = 25,000` ⇒ `D ≈ 17,328.7 + h`) and `G = pol.b_gate·ln 2 + headroom_gate` per gate book (`pol.b_gate = 7,500` ⇒ `G ≈ 5,198.6 + h_g`); values normative in [`13-parameters.md`](./13-parameters.md), headroom sizing in [`04-markets-and-pricing.md`](./04-markets-and-pricing.md). Let `T = D + 2G`.
+TREASURY example (6 books for every ask size). Per branch the seed needs `D = pol.b·ln 2 + headroom_dec` for the decision book (`pol.b = 25,000` ⇒ `D ≈ 17,328.7 + h`) and `G = pol.b_gate·ln 2 + headroom_gate` per gate book (`pol.b_gate = 7,500` ⇒ `G ≈ 5,198.6 + h_g`); values normative in [`13-parameters.md`](./13-parameters.md), headroom sizing in [`04-markets-and-pricing.md`](./04-markets-and-pricing.md). Let `T = D + 2G`.
 
 | Step | Op | E | usdc_Acc | Q_Acc | G_Acc,S | G_Acc,C | usdc_Rej | Q_Rej | G_Rej,S | G_Rej,C | L-1 (Acc / Rej) |
 |---|---|---|---|---|---|---|---|---|---|---|---|

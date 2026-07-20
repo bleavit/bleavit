@@ -150,7 +150,7 @@ fn phase_flag_bit_assignments_match_02_7_3() {
 
 #[test]
 fn contract_version_and_bounds_reexports_hold() {
-    assert_eq!(CONTRACT_VERSION, 4); // v4: pre-genesis B2 contract-amendment batch (02 §13)
+    assert_eq!(CONTRACT_VERSION, 5); // v5: universal market-bearing gates (02 §4/§13)
     assert_eq!(MAX_PARAMS, 128); // 13 §4 registry bound
     assert_eq!(MAX_CAPABILITIES, 64);
     assert_eq!(crate::MAX_METERS, 16);
@@ -987,10 +987,11 @@ fn genesis_registry_matches_13_1_row_encodings() {
         assert_eq!(Params::<Test>::count(), 98);
 
         // Per-class suffix keys (13 rule 6) — δ floors, kernel-capped.
+        // Phase-0-calibrated (V-12): dec.delta.meta 0.090 on the 1e9 grid.
         let delta_meta = Params::<Test>::get(key16(b"dec.delta.meta")).unwrap();
         assert_eq!(
             delta_meta.value,
-            ParamValue::Fixed(futarchy_primitives::FixedU64(60_000_000))
+            ParamValue::Fixed(futarchy_primitives::FixedU64(90_000_000))
         );
         assert!(delta_meta.kernel_bounded);
 

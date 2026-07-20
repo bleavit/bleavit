@@ -20,3 +20,8 @@ std = [
   "scale-info/std",
 ]
 runtime-benchmarks = []
+
+[dev-dependencies]
+constitution-core = { path = "../constitution-core" }
+market-core = { path = "../market-core" }
+serde_json = "1.0.140"

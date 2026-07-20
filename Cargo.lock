@@ -3728,9 +3728,12 @@ name = "epoch-core"
 version = "0.1.0"
 dependencies = [
  "conditional-ledger-core",
+ "constitution-core",
  "futarchy-primitives",
+ "market-core",
  "parity-scale-codec",
  "scale-info",
+ "serde_json",
 ]
 
 [[package]]
@@ -4428,10 +4431,14 @@ dependencies = [
 name = "futarchy-treasury-core"
 version = "0.1.0"
 dependencies = [
+ "constitution-core",
+ "epoch-core",
  "futarchy-primitives",
+ "market-core",
  "origins-core",
  "parity-scale-codec",
  "scale-info",
+ "serde_json",
 ]
 
 [[package]]
@@ -6814,6 +6821,7 @@ dependencies = [
  "parity-scale-codec",
  "proptest",
  "scale-info",
+ "serde_json",
 ]
 
 [[package]]
@@ -16300,6 +16308,7 @@ dependencies = [
  "parity-scale-codec",
  "scale-info",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -82,11 +82,7 @@ fn decision_state(
     let mut proposal = live_proposal(pid, ProposalState::Trading, 0);
     proposal.proposer = keeper();
     proposal.class = class;
-    proposal.markets = Some(markets(
-        pid,
-        0,
-        matches!(class, ProposalClass::Code | ProposalClass::Meta),
-    ));
+    proposal.markets = Some(markets(pid, 0, epoch_core::requires_gate_markets(class)));
     proposal.decide_at = 1;
     state.resource_locks = proposal
         .resources
@@ -344,11 +340,11 @@ fn run_decision_seam_differential(case: DifferentialDecisionCase) {
             baseline_trailing: FixedU64(500_000_000),
             accept_spot: FixedU64(600_000_000),
             reject_spot: FixedU64(500_000_000),
-            welfare_grade_ok: true,
+            welfare_grade: WelfareGrade::Ok,
             baseline_grade_ok: true,
             previous_settled_baseline_twap: None,
-            welfare_second_insufficient: false,
-            gate_grade_ok: true,
+            survival_grade_ok: true,
+            security_grade_ok: true,
             gate_twaps: books.gates.map(|_| [FixedU64(0); 4]),
             measured_depth: MeasuredDepth::get(),
             published_flow_per_day: PublishedFlow::get(),
@@ -359,8 +355,8 @@ fn run_decision_seam_differential(case: DifferentialDecisionCase) {
         match case {
             DifferentialDecisionCase::Adopt => {}
             DifferentialDecisionCase::Extend => {
-                MarketGrade::set(false);
-                input.welfare_grade_ok = false;
+                UngradedMarkets::set(vec![books.accept, books.reject]);
+                input.welfare_grade = WelfareGrade::Insufficient;
                 input.baseline_grade_ok = false;
             }
             DifferentialDecisionCase::GateVeto => {
@@ -560,7 +556,7 @@ fn genesis_uses_the_frozen_three_field_epoch_shape() {
             <CurrentEpoch<Test> as frame_support::traits::Get<EpochId>>::get(),
             0
         );
-        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 4);
+        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 5);
         assert_ok!(Epoch::do_try_state());
     });
 }
@@ -951,11 +947,10 @@ fn gate_veto_precedes_missing_welfare_twap() {
 }
 
 #[test]
-fn r2_1_seeded_treasury_gate_veto_survives_live_nav_reclassification() {
+fn low_ask_treasury_seeds_four_gate_books_and_survival_vetoes() {
     new_test_ext().execute_with(|| {
         let mut candidate = proposal(999, keeper(), ProposalState::Submitted, 0, 1);
         candidate.class = ProposalClass::Treasury;
-        TreasuryGateRequired::set(true);
         assert_ok!(Epoch::submit(RuntimeOrigin::signed(keeper()), candidate,));
         set_block(phase_block(0, phase_offsets::QUALIFY_NUM));
         assert_ok!(Epoch::tick(
@@ -979,7 +974,6 @@ fn r2_1_seeded_treasury_gate_veto_survives_live_nav_reclassification() {
             (gates[0], FixedU64(100_000_000)),
             (gates[1], FixedU64(100_000_000)),
         ]);
-        TreasuryGateRequired::set(false);
         sync_at(phase_block(0, phase_offsets::TRADE_NUM));
         sync_at(phase_block(0, phase_offsets::DECIDE_NUM));
 
@@ -993,6 +987,99 @@ fn r2_1_seeded_treasury_gate_veto_survives_live_nav_reclassification() {
             .iter()
             .any(|call| matches!(call, SeamCall::Enqueue { pid: 1, .. })));
     });
+}
+
+#[test]
+fn low_ask_treasury_security_gate_can_veto() {
+    new_test_ext().execute_with(|| {
+        let mut state = decision_state(1, ProposalClass::Treasury);
+        state.proposals[0].ask = 1;
+        let gates = state.proposals[0]
+            .markets
+            .and_then(|books| books.gates)
+            .expect("Treasury decision fixture has four gate books");
+        TwapOverrides::set(vec![
+            (gates[0], FixedU64(0)),
+            (gates[1], FixedU64(0)),
+            (gates[2], FixedU64(100_000_000)),
+            (gates[3], FixedU64(100_000_000)),
+        ]);
+        assert_ok!(Epoch::seed(state));
+
+        assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
+
+        assert_eq!(
+            Proposals::<Test>::get(1).map(|proposal| proposal.decision),
+            Some(Some(DecisionOutcome::Reject(
+                RejectReason::GateVetoSecurity
+            )))
+        );
+    });
+}
+
+#[test]
+fn param_seeds_four_gate_books_and_both_vetoes_are_reachable() {
+    new_test_ext().execute_with(|| {
+        let candidate = proposal(999, keeper(), ProposalState::Submitted, 0, 1);
+        assert_ok!(Epoch::submit(RuntimeOrigin::signed(keeper()), candidate));
+        set_block(phase_block(0, phase_offsets::QUALIFY_NUM));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(vec![1]),
+        ));
+        set_block(phase_block(0, phase_offsets::SEED_NUM));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(vec![1]),
+        ));
+        assert!(SeamCalls::get().iter().any(|call| matches!(
+            call,
+            SeamCall::OpenMarkets(1, false, Some(plan)) if plan.gate_b.is_some()
+        )));
+        let gates = Proposals::<Test>::get(1)
+            .and_then(|proposal| proposal.markets)
+            .and_then(|books| books.gates)
+            .expect("PARAM gates were physically deployed at Seed");
+        assert_eq!(gates.len(), 4);
+    });
+
+    for (twaps, expected) in [
+        (
+            [
+                FixedU64(100_000_000),
+                FixedU64(100_000_000),
+                FixedU64(0),
+                FixedU64(0),
+            ],
+            RejectReason::GateVetoSurvival,
+        ),
+        (
+            [
+                FixedU64(0),
+                FixedU64(0),
+                FixedU64(100_000_000),
+                FixedU64(100_000_000),
+            ],
+            RejectReason::GateVetoSecurity,
+        ),
+    ] {
+        new_test_ext().execute_with(|| {
+            let state = decision_state(1, ProposalClass::Param);
+            let gates = state.proposals[0]
+                .markets
+                .and_then(|books| books.gates)
+                .expect("PARAM decision fixture has four gate books");
+            TwapOverrides::set(gates.into_iter().zip(twaps).collect());
+            assert_ok!(Epoch::seed(state));
+
+            assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
+
+            assert_eq!(
+                Proposals::<Test>::get(1).and_then(|proposal| proposal.decision),
+                Some(DecisionOutcome::Reject(expected)),
+            );
+        });
+    }
 }
 
 #[test]
@@ -1321,17 +1408,18 @@ fn corrupted_rerun_reopened_deadline_fails_try_state() {
 }
 
 #[test]
-fn small_treasury_without_required_gate_books_decides() {
+fn low_ask_treasury_without_gate_books_rejects_not_decision_grade() {
     new_test_ext().execute_with(|| {
         let mut state = decision_state(1, ProposalClass::Treasury);
         state.proposals[0].ask = 1;
         state.proposals[0].markets = Some(markets(1, 0, false));
-        TreasuryGateRequired::set(false);
         assert_ok!(Epoch::seed(state));
         assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
         assert_eq!(
             Proposals::<Test>::get(1).map(|proposal| proposal.decision),
-            Some(Some(DecisionOutcome::Adopt))
+            Some(Some(DecisionOutcome::Reject(
+                RejectReason::NotDecisionGrade
+            )))
         );
     });
 }
@@ -1839,7 +1927,6 @@ fn funded_pol_seed_plan_is_frozen_at_seed_entry() {
         assert_ok!(Epoch::seed(state));
         PolCommitments::set(vec![(1, 1)]);
         PolEpochBudget::set(1);
-        TreasuryGateRequired::set(true);
         set_block(phase_block(0, phase_offsets::SEED_NUM));
 
         // The transition fixes both the funded slot and its predicted gate shape.
@@ -1863,7 +1950,6 @@ fn funded_pol_seed_plan_is_frozen_at_seed_entry() {
         // double-charge the slate nor change the books that seeding will create.
         PolEpochBudget::set(0);
         PolCommitments::set(vec![(1, 99)]);
-        TreasuryGateRequired::set(false);
         assert_ok!(Epoch::tick(
             RuntimeOrigin::signed(keeper()),
             tick_batch(vec![1]),
@@ -2333,11 +2419,98 @@ fn gate_veto_precedes_a_passing_welfare_margin_i14() {
 }
 
 #[test]
+fn survival_veto_precedes_security_gate_invalidity_and_keeps_the_intake_bond() {
+    // 05 §5.4 steps 3-4 run per gate: Survival's validity, then Survival's
+    // veto, then Security's validity — so a Survival veto is reported even
+    // when the Security gate books are invalid. The distinction is economic:
+    // NotDecisionGrade slashes 10% of the intake bond (06 §4); a gate veto
+    // never does.
+    new_test_ext().execute_with(|| {
+        let books = markets(1, 0, true);
+        let gates = books.gates.expect("code proposal has gates");
+        UngradedMarkets::set(vec![gates[2], gates[3]]);
+        TwapOverrides::set(vec![
+            (gates[0], FixedU64(100_000_000)),
+            (gates[1], FixedU64(100_000_000)),
+        ]);
+        assert_ok!(Epoch::seed(decision_state(1, ProposalClass::Code)));
+        assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
+        assert_eq!(
+            Epoch::epoch_state().proposals[0].decision,
+            Some(DecisionOutcome::Reject(RejectReason::GateVetoSurvival))
+        );
+        assert!(
+            !System::events().iter().any(|record| matches!(
+                record.event,
+                RuntimeEvent::Epoch(Event::IntakeSlashed { .. })
+            )),
+            "a gate veto must not slash the intake bond"
+        );
+    });
+}
+
+#[test]
+fn survival_gate_invalidity_rejects_not_decision_grade_and_slashes_the_bond() {
+    // The step-3 counterpart: an invalid gate book with no preceding veto is
+    // Reject(NotDecisionGrade), which slashes 10% of the intake bond (06 §4).
+    new_test_ext().execute_with(|| {
+        let books = markets(1, 0, true);
+        let gates = books.gates.expect("code proposal has gates");
+        UngradedMarkets::set(vec![gates[0]]);
+        assert_ok!(Epoch::seed(decision_state(1, ProposalClass::Code)));
+        assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
+        assert_eq!(
+            Epoch::epoch_state().proposals[0].decision,
+            Some(DecisionOutcome::Reject(RejectReason::NotDecisionGrade))
+        );
+        assert!(System::events().iter().any(|record| matches!(
+            record.event,
+            RuntimeEvent::Epoch(Event::IntakeSlashed {
+                pid: 1,
+                reason: RejectReason::NotDecisionGrade,
+                amount: 1,
+            })
+        )));
+    });
+}
+
+#[test]
+fn first_pass_invalid_welfare_book_rejects_instead_of_extending() {
+    // 05 §5.4 step 5: only Grade::Insufficient may spend the single shared
+    // extension budget. A first-pass Invalid welfare book (sanity band, POL
+    // floor/undisturbed, second stale event, non-convergence) rejects with
+    // NotDecisionGrade immediately — and therefore slashes (06 §4) — instead
+    // of extending.
+    new_test_ext().execute_with(|| {
+        let books = markets(1, 0, false);
+        WelfareInvalidMarkets::set(vec![books.accept]);
+        assert_ok!(Epoch::seed(decision_state(1, ProposalClass::Param)));
+        assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
+        let proposal = &Epoch::epoch_state().proposals[0];
+        assert_eq!(
+            proposal.decision,
+            Some(DecisionOutcome::Reject(RejectReason::NotDecisionGrade))
+        );
+        assert!(!proposal.extended, "an Invalid grade must never extend");
+        assert!(System::events().iter().any(|record| matches!(
+            record.event,
+            RuntimeEvent::Epoch(Event::IntakeSlashed {
+                pid: 1,
+                reason: RejectReason::NotDecisionGrade,
+                amount: 1,
+            })
+        )));
+    });
+}
+
+#[test]
 fn decision_extension_is_once_only_and_keeps_creation_schedule_frozen() {
     // limit-coverage: dec.extension
     new_test_ext().execute_with(|| {
-        assert_ok!(Epoch::seed(decision_state(1, ProposalClass::Param)));
-        MarketGrade::set(false);
+        let state = decision_state(1, ProposalClass::Param);
+        let books = state.proposals[0].markets.expect("PARAM books exist");
+        UngradedMarkets::set(vec![books.accept, books.reject]);
+        assert_ok!(Epoch::seed(state));
         RecordKeeperRebates::set(true);
         assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
         let extended = Proposals::<Test>::get(1).expect("extended proposal remains live");
@@ -2415,8 +2588,10 @@ fn live_params_flip_changes_the_decision_hurdle() {
 #[test]
 fn market_extension_and_close_registration_failures_are_atomic_g1() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Epoch::seed(decision_state(1, ProposalClass::Param)));
-        MarketGrade::set(false);
+        let state = decision_state(1, ProposalClass::Param);
+        let books = state.proposals[0].markets.expect("PARAM books exist");
+        UngradedMarkets::set(vec![books.accept, books.reject]);
+        assert_ok!(Epoch::seed(state));
         SeamFailure::set(Some(SeamCall::ExtendMarkets(1)));
         let before_state = Epoch::epoch_state().encode();
         let before_events = System::events();
@@ -3536,7 +3711,13 @@ fn randomized_512_step_shell_core_differential_covers_refactored_seams() {
                 let target = oracle.proposals.iter().find(|proposal| proposal.id == pid);
                 let opening = target
                     .filter(|proposal| proposal.state == ProposalState::Qualified)
-                    .map(|proposal| markets(pid, proposal.epoch, false));
+                    .map(|proposal| {
+                        markets(
+                            pid,
+                            proposal.epoch,
+                            epoch_core::requires_gate_markets(proposal.class),
+                        )
+                    });
                 let seed_plan = target
                     .filter(|proposal| proposal.state == ProposalState::Qualified)
                     .and_then(TestPolBudget::proposal_seed_plan);
