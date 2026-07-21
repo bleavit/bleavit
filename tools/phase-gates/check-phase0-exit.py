@@ -772,8 +772,13 @@ def load_calibration_registry(path: Path) -> CalibrationRegistry:
     )
     rule6_match = (
         re.search(
+            # The suffix list is matched structurally (backticked tokens joined
+            # by "/") rather than as "rest of line": rule 6 may legitimately
+            # carry trailing prose after the list — e.g. the `gate.v_min`
+            # rationale added 2026-07-20 (SQ-194) — and a greedy `(.*)$` tail
+            # would swallow it and report phantom suffixes.
             r"\*\*Per-class rows\*\* \((.*?)\) materialize as four keys "
-            r"with the class suffixes (.*)\.$",
+            r"with the class suffixes ((?:`[^`]+`(?:\s*/\s*)?)+)\.",
             rule6_line,
         )
         if rule6_line is not None

@@ -12822,6 +12822,37 @@ fn six_referenda_tracks_have_normative_schedules_and_origins() {
     );
 }
 
+/// 13 §3.4 (SQ-229): `UndecidingTimeout` MUST be at least the longest track
+/// prepare period. `pallet-referenda` times a referendum out once
+/// `submitted + UndecidingTimeout` passes while it is neither deciding nor
+/// queued for a decision slot; if that deadline fell before a track's prepare
+/// period ended, referenda on that track could expire before ever becoming
+/// eligible to decide. The relation binds with zero margin against the 7-day
+/// `entrenched` track, so raising that prepare period without raising this
+/// constant would silently make the entrenched track un-decidable.
+#[test]
+fn undeciding_timeout_covers_the_longest_track_prepare_period() {
+    let undeciding: BlockNumber = <Runtime as pallet_referenda::Config>::UndecidingTimeout::get();
+    let longest_prepare = crate::configs::TRACKS
+        .iter()
+        .map(|track| track.info.prepare_period)
+        .max()
+        .expect("the runtime configures at least one referenda track");
+
+    assert!(
+        undeciding >= longest_prepare,
+        "UndecidingTimeout ({undeciding} blocks) is below the longest track \
+         prepare period ({longest_prepare} blocks): referenda on that track \
+         could time out before becoming eligible to decide (13 §3.4)"
+    );
+
+    // Pin both sides of the zero-margin coupling the spec records, so a change
+    // to either one has to be a deliberate edit of this test.
+    #[cfg(not(feature = "runtime-benchmarks"))]
+    assert_eq!(undeciding, 7 * kernel::BLOCKS_PER_DAY);
+    assert_eq!(longest_prepare, 7 * kernel::BLOCKS_PER_DAY);
+}
+
 #[test]
 fn constitution_track_cannot_amend_entrenched_class_but_entrenched_track_can() {
     development_ext().execute_with(|| {

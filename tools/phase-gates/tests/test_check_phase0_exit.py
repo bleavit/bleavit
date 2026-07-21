@@ -1068,6 +1068,25 @@ class CalibrationTests(PhaseGateTestCase):
         ):
             self.registry()
 
+    def test_rule6_tolerates_trailing_prose_after_the_suffix_list(self) -> None:
+        """Rule 6 may carry a rationale sentence after the suffix list.
+
+        The suffix list is matched structurally rather than as "rest of line",
+        so appending prose (as the 2026-07-20 `gate.v_min` rationale does) must
+        not be read as extra class suffixes. Regression for batch B6.
+        """
+        changed = doc13_fixture().replace(
+            "with the class suffixes `.param` / `.trs` / `.code` / `.meta`.",
+            "with the class suffixes `.param` / `.trs` / `.code` / `.meta`. "
+            "`gate.v_min` is per-class because its default and both its bounds "
+            "are expressed as multiples of `dec.v_min`(class) "
+            "(added 2026-07-20, SQ-194).",
+        )
+        self.doc13.write_text(changed, encoding="utf-8")
+
+        # Must not raise: the trailing sentence is prose, not a suffix.
+        self.registry()
+
     def test_unexpected_phase0_sim_gated_row_fails_loudly(self) -> None:
         unexpected = (
             "| `new.phase0_key` | Fixed | unit | "
