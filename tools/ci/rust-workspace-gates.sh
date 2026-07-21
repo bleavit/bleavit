@@ -19,7 +19,24 @@ fi
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-python3 tools/ci/check-weight-regression.py
+
+# Weight-regression gate (15 §4.5). The authoritative enforcement is the
+# dedicated `Weight regression` CI job, which checks out with `fetch-depth: 0`
+# precisely so the comparison base resolves. It is repeated here so a *local*
+# gate run cannot miss it — batch X wave 1 shipped a red weight gate exactly
+# because this script did not run it and the separate job was not consulted.
+#
+# The checker's default base is `git merge-base HEAD origin/main`, and the Rust
+# CI job uses a shallow single-commit checkout where `origin/main` does not
+# exist. Skip loudly there rather than failing the canonical Rust gate on an
+# unfetched ref — the dedicated job still enforces it.
+if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+  python3 tools/ci/check-weight-regression.py
+else
+  echo "SKIP: weight-regression gate — 'origin/main' is not present in this checkout."
+  echo "      Enforced by the 'Weight regression' CI job (fetch-depth: 0)."
+  echo "      To run it here: git fetch origin main, or pass --base <rev> yourself."
+fi
 
 # B6 release gate (09 §2.1(5)): compile the deployable runtime and its
 # benchmarking surface, then compile and execute the runtime's genesis-state
