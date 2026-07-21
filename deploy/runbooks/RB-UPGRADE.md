@@ -28,9 +28,14 @@ bounded retry or a rollback implemented as a forward upgrade
 |---|---|---|
 | Upgrades | authorized hash, applied version, migration cursor | cursor stalled |
 
-The trigger means the active `Migrations::Cursor` has not advanced under the
-machine stall rule. It does not authorize a force-set of the cursor, storage
-rewrite, or rollback to old bytes ([12 §6.3](../../docs/architecture/12-release-and-operations.md)).
+The trigger means an active `Migrations::Cursor` has been running longer than
+its budget — `now − cursor.started_at > 900` blocks (09 §3.2(d)). It is a **time
+budget, not a progress test**: a lawful migration may return byte-identical
+cursors for hours while doing real work, so "the cursor bytes did not change" is
+not the trigger and must not be treated as one.
+
+The alert does not authorize a force-set of the cursor, a storage
+rewrite, or a rollback to old bytes ([12 §6.3](../../docs/architecture/12-release-and-operations.md)).
 
 ## Diagnosis
 
@@ -38,23 +43,27 @@ rewrite, or rollback to old bytes ([12 §6.3](../../docs/architecture/12-release
    code hash, migration identifier, cursor bytes, failed-step index, and the first
    block at which progress stopped. Preserve raw SCALE as well as decoded state.
 2. Read `Migrations::Cursor` and the runtime-internal
-   `BleavitRuntimeMigration::{HaltSources, FailedStep, ProgressMarker}` values.
-   Confirm repeated finalized samples carry the same active cursor marker, or
-   that the SDK cursor is `Stuck`; rule out a stale monitor or slow but advancing
-   migration.
+   `BleavitRuntimeMigration::{HaltSources, FailedStep}` values. Compute
+   `now − cursor.started_at` and compare it against 900, or confirm the SDK cursor
+   is `Stuck`. **Do not conclude a stall from unchanged cursor bytes** — that
+   predicate was retired by 09 §3.2(d) precisely because it false-raises on a
+   conforming `Cursor = ()` migration. Rule out a stale monitor.
 3. Read `ExecutionGuard::MigrationHalt`, `PendingUpgrade`, `LastUpgradeAuthorized`
    and the relevant `ExecutionGuard::Queue` entry.
    **The 09 §3.2(2) pre-migration anchor is not yet implemented — do not wait for
    it and do not read `PendingUpgradeCheckpoint` expecting to find it.** That item
    is killed at the relay go-ahead callback, one block before any migration can
-   step, and the queue row's `pre_upgrade_checkpoint` is never written at all; both
-   cells are structurally empty at diagnosis time (SQ-127/SQ-144, ruled 2026-07-20
-   — capture moves to code-application time and single-homes in its own storage
-   item; owed as PLAN.md milestone B19). Until it lands, reconstruct the anchor
-   off-chain: take the block at which `UpgradeApplied` was observed, and use the
-   **parent** of that block — its header hash and `state_root` are the
-   last pre-migration state. Record both in the incident log as the audit anchor
-   and note that they were reconstructed, not read from chain
+   step; the queue row's `pre_upgrade_checkpoint` is written at execute but the
+   row itself is deleted on success (09 §1.2(13)). Both cells are therefore empty
+   at diagnosis time (SQ-127/SQ-144, ruled 2026-07-20 — capture moves to
+   code-application time and single-homes in its own storage item; owed as PLAN.md
+   milestone B19). Until it lands, reconstruct the anchor off-chain: **the block in
+   which `UpgradeApplied` was emitted is itself the last pre-migration block** —
+   the go-ahead callback runs in the final old-code block, and the new code takes
+   effect in its successor. Take that block's own header hash and `state_root`
+   (equivalently: the parent of the first block carrying the new `spec_version`).
+   Record both in the incident log as the audit anchor and note that they were
+   reconstructed, not read from chain
    ([09 §3.2](../../docs/architecture/09-execution-upgrades-and-rollout.md)).
 4. Reconstruct `UpgradeAuthorized`, `UpgradeApplied`, `UpgradeAborted`, execution,
    migration, and `GuardianAction` events. The spec also mandates
@@ -67,7 +76,7 @@ rewrite, or rollback to old bytes ([12 §6.3](../../docs/architecture/12-release
    is a separate invariant breach.
 6. Classify the fault from evidence: resource-bounded overrun/transient host
    failure versus logic fault, storage-shape mismatch, or failed retry. Compare
-   halted-state writes with the checkpoint; do not infer the class from an error
+   halted-state writes with the reconstructed anchor; do not infer the class from an error
    string alone.
 7. Check release coupling. From `UpgradeAuthorized`, compare `applicable_at`, the
    covering production descriptor release, `ReleaseChannel`, and the committed
@@ -82,7 +91,7 @@ rewrite, or rollback to old bytes ([12 §6.3](../../docs/architecture/12-release
 
 1. Preserve block production and unaffected services; stop automated execution,
    inflow, and migration-control submissions against the affected surface. Publish
-   the cursor, failed step, checkpoint, and impact boundary for operators.
+   the cursor, failed step, reconstructed anchor, and impact boundary for operators.
 2. Keep ordinary finalized reads, alerting, and release preparation live. Do not
    call `Migrations.force_set_cursor`, `force_set_active_cursor`,
    `force_onboard_mbms`, or `clear_historic`; the runtime classifier denies these
@@ -94,7 +103,7 @@ rewrite, or rollback to old bytes ([12 §6.3](../../docs/architecture/12-release
    snapshot before proposing continuation. The exact upstream control surface is
    still a spec `[VERIFY]`; never improvise a force call.
 4. For every other class, or an exhausted retry path, prepare rollback as a
-   forward CODE upgrade restoring checkpoint semantics for the affected keys.
+   forward CODE upgrade restoring the pre-migration-anchor semantics for the affected keys.
    Build, attest, ratify, and descriptor-cover it through the expedited lane that
    the active migration halt makes admissible.
 
@@ -120,6 +129,15 @@ rewrite, or rollback to old bytes ([12 §6.3](../../docs/architecture/12-release
    on stable2606 they have **no in-framework retry either**: `pallet-migrations`'
    continuation controls are Root-only and filtered to the D-13 "nobody" row, so
    both retry and rollback ride the expedited-CODE lane (SQ-274).
+   **⚠ Know before you plan the repair: while any `Migrations::Cursor` exists the
+   chain is inherent-only.** `MultiStepMigrator::ongoing()` is `Cursor::exists()`
+   and `frame-executive` then rejects every non-inherent extrinsic, so the
+   expedited-CODE lane named above — and `execute(pid)`, guardian calls, and sudo
+   with it — **cannot be included in a block** until the cursor is gone. This is
+   an open spec question (PLAN.md SQ-290), not a settled procedure: escalate to
+   the guardian council and the release lead immediately rather than attempting
+   an on-chain repair that cannot be submitted. A `Stuck` cursor with
+   `FailedMigrationHandling::KeepStuck` has no on-chain exit at present.
 4. A rollback is a forward upgrade through the normal execution guard, using the
    migration-halt-gated expedited CODE lane. Full attestation, ratification,
    payload checks, and `DescriptorLeadTime` still apply; no privileged shortcut
@@ -149,7 +167,8 @@ descriptor-release leg; never apply code before the on-chain lead-time gate.
 
 ## References
 
-- [09 §2 — two-phase upgrade and checkpoint path](../../docs/architecture/09-execution-upgrades-and-rollout.md)
+- [09 §2 — two-phase upgrade path](../../docs/architecture/09-execution-upgrades-and-rollout.md)
+- [09 §3.2(2) — the pre-migration anchor](../../docs/architecture/09-execution-upgrades-and-rollout.md)
 - [09 §3.1–§3.2 — expedited lane and PB-MIGRATION](../../docs/architecture/09-execution-upgrades-and-rollout.md)
 - [06 §5.4/§6.2 — guardian review and playbook scope](../../docs/architecture/06-governance-and-guardians.md)
 - [12 §1/§6.3 — descriptor release coupling and alert](../../docs/architecture/12-release-and-operations.md)

@@ -79,7 +79,7 @@ the final gate.
 | `void-epoch` | 15 I-26/I-27/§4.7 | Voided vault and real redeem inputs on the current ledger | frontend rendering waits Track F |
 | `precondition-failures` | 15 §4.7; 02 §11; 09 §1.2 | Constitution flag injection; B6 wires the live guard refusal surface | A8 wiring to enqueue the otherwise-valid payloads used by the matrix |
 | `pb-depeg` | 06 §6.2 | Accountable Guardian post-entry image; block expiry maintenance runs | downstream `market.freeze_creation`/effect-revert surface |
-| `pb-migration` | 06 §6.2; 09 §3.2 | Accountable Guardian image + coherent paired guard checkpoint; B6 wires migration controls and the halt bridge | SQ-104 migration-control origin bridge; SQ-127 checkpoint lifetime and SQ-132 try-state/halt coupling remain open |
+| `pb-migration` | 06 §6.2; 09 §3.2 | Accountable Guardian image + coherent paired guard checkpoint; B6 wires migration controls and the halt bridge | SQ-104 migration-control origin bridge remains open. **SQ-127/SQ-144 ruled 2026-07-20** — the anchor moves to code-application time, `(block_number, block_hash)`, own storage item, try-state relaxed to a one-way implication; this fixture still images the retired paired form and must be re-imaged when milestone **B19** lands. SQ-132(d) ruled the same day (stall is a `started_at` time budget) |
 | `pb-oracle-void` | 06 §6.2 | Accountable Guardian post-entry image; block expiry maintenance runs | A8 cohort/ResolveAuthority wiring and downstream effect |
 | `pb-halt-intake` | 06 §6.2 | Accountable Guardian image + manufactured machinery bit | A8 wiring and missing intake-pause/effect-revert surface |
 | `pb-reserve` | 06 §6.2 | Accountable Guardian image + manufactured reserve bit | missing split-pause/effect-revert call and trigger adapter |
