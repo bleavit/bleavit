@@ -441,9 +441,6 @@ fn expected_error(class: &str) -> Error {
         "InvalidScore" => Error::InvalidScore,
         "GateAlreadySettled" => Error::GateAlreadySettled,
         "GateNotSettled" => Error::GateNotSettled,
-        // `Error::WrongBranch` is deliberately absent: the core API derives the
-        // winner and no core path can produce it (dead variant — SQ-170), so a
-        // differential witness would have to be fabricated (S1 re-pass finding).
         other => panic!("unknown Python ledger error class: {other}"),
     }
 }

@@ -43,9 +43,12 @@ frame_support::construct_runtime!(
         System: frame_system,
         Balances: pallet_balances,
         Assets: pallet_assets,
-        Ledger: pallet_conditional_ledger,
+        ConditionalLedger: pallet_conditional_ledger,
     }
 );
+
+/// Short test-only alias retained for the existing pallet call fixtures.
+pub type Ledger = ConditionalLedger;
 
 #[derive_impl(frame_system::config_preludes::TestDefaultConfig)]
 impl frame_system::Config for Test {

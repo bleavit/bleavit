@@ -16,6 +16,7 @@ use futarchy_primitives::{
 };
 use market_core::{BookKind, MarketBook, MarketPhase, MarketState, TwapCumulative, MIN_TRADE};
 use pallet_conditional_ledger::core_ledger::{baseline, position, LedgerState};
+use parity_scale_codec::Encode;
 use sp_runtime::traits::Dispatchable;
 
 type E = Error<Test>;
@@ -71,12 +72,16 @@ fn settle_decision() {
 }
 
 fn settle_baseline() {
+    settle_baseline_at(EPOCH);
+}
+
+fn settle_baseline_at(epoch: u32) {
     assert_ok!(Ledger::settle_baseline(
         signed(SETTLER),
-        EPOCH,
+        epoch,
         FixedU64(500_000_000),
     ));
-    assert_ok!(Market::observe_baseline_terminal(EPOCH));
+    assert_ok!(Market::observe_baseline_terminal(epoch));
 }
 
 fn position_balance(id: PositionId, who: AccountId) -> Balance {
@@ -1093,7 +1098,7 @@ fn ledger_reap_before_market_reap_keeps_pol_released_and_book_reapable() {
 }
 
 #[test]
-fn reap_of_baseline_book_prunes_baseline_mapping() {
+fn reap_of_baseline_book_retains_historical_mapping() {
     new_test_ext().execute_with(|| {
         create_baseline();
         seed(BASELINE_ID);
@@ -1107,8 +1112,134 @@ fn reap_of_baseline_book_prunes_baseline_mapping() {
 
         assert!(!Markets::<Test>::contains_key(BASELINE_ID));
         assert!(!ClosedAt::<Test>::contains_key(BASELINE_ID));
-        // 04 §8.3: the epoch→market lookup is reaped with the book.
+        // 02 §7.4 / 04 §8.3: the id remains as historical correlation data
+        // until the matching cohort summary is evicted from epoch's FIFO ring.
+        assert_eq!(BaselineMarketOf::<Test>::get(EPOCH), Some(BASELINE_ID));
+        assert_try_state();
+    });
+}
+
+#[test]
+fn epoch_authority_prunes_historical_baseline_mapping_idempotently() {
+    new_test_ext().execute_with(|| {
+        create_baseline();
+        seed(BASELINE_ID);
+        System::set_block_number(5);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), BASELINE_ID));
+        settle_baseline();
+        System::set_block_number(5 + MarketArchiveDelay::get());
+        assert_ok!(Market::reap(signed(CHARLIE), BASELINE_ID));
+
+        assert_noop!(
+            Market::prune_baseline_market(signed(ALICE), EPOCH),
+            E::BadOrigin
+        );
+        assert_eq!(BaselineMarketOf::<Test>::get(EPOCH), Some(BASELINE_ID));
+        assert_ok!(Market::prune_baseline_market(signed(MARKET_ADMIN), EPOCH));
         assert_eq!(BaselineMarketOf::<Test>::get(EPOCH), None);
+        assert_ok!(Market::prune_baseline_market(signed(MARKET_ADMIN), EPOCH));
+        assert_try_state();
+    });
+}
+
+#[test]
+fn baseline_mapping_ceiling_is_enforced_at_history_plus_live_bound() {
+    new_test_ext().execute_with(|| {
+        let historical = futarchy_primitives::bounds::RECENT_COHORT_SUMMARIES;
+        let live = futarchy_primitives::bounds::BASELINE_BOOKS;
+        let bound = historical.saturating_add(live);
+        for epoch in 0..historical {
+            BaselineMarketOf::<Test>::insert(epoch, MarketId::from(epoch).saturating_add(1_000));
+        }
+        for offset in 0..live {
+            let epoch = historical.saturating_add(offset);
+            let market = MarketId::from(offset).saturating_add(1);
+            assert_ok!(Market::create_market(
+                signed(MARKET_ADMIN),
+                market,
+                BookKind::Baseline { epoch },
+                BOOK,
+                FEES,
+                B,
+            ));
+        }
+        assert_eq!(BaselineMarketOf::<Test>::count(), bound);
+        assert_noop!(
+            Market::create_market(
+                signed(MARKET_ADMIN),
+                MarketId::from(bound).saturating_add(1),
+                BookKind::Baseline { epoch: bound },
+                BOOK,
+                FEES,
+                B,
+            ),
+            E::TooManyMarkets
+        );
+        assert!(!pallet_conditional_ledger::BaselineVaults::<Test>::contains_key(bound));
+        assert_try_state();
+    });
+}
+
+#[test]
+fn live_baseline_book_ceiling_is_enforced_at_creation() {
+    new_test_ext().execute_with(|| {
+        let live = futarchy_primitives::bounds::BASELINE_BOOKS;
+        for epoch in 0..live {
+            assert_ok!(Market::create_market(
+                signed(MARKET_ADMIN),
+                MarketId::from(epoch).saturating_add(1),
+                BookKind::Baseline { epoch },
+                BOOK,
+                FEES,
+                B,
+            ));
+        }
+        assert_noop!(
+            Market::create_market(
+                signed(MARKET_ADMIN),
+                MarketId::from(live).saturating_add(1),
+                BookKind::Baseline { epoch: live },
+                BOOK,
+                FEES,
+                B,
+            ),
+            E::TooManyMarkets
+        );
+        assert_try_state();
+    });
+}
+
+#[test]
+fn settled_unreaped_baselines_do_not_consume_live_epoch_allowance() {
+    new_test_ext().execute_with(|| {
+        let live = futarchy_primitives::bounds::BASELINE_BOOKS;
+        for epoch in 0..live {
+            let market = MarketId::from(epoch).saturating_add(1);
+            assert_ok!(Market::create_market(
+                signed(MARKET_ADMIN),
+                market,
+                BookKind::Baseline { epoch },
+                BOOK,
+                FEES,
+                B,
+            ));
+            assert_ok!(Market::close(signed(MARKET_ADMIN), market));
+            settle_baseline_at(epoch);
+            assert!(Markets::<Test>::contains_key(market));
+            assert_eq!(SettlementObservedAt::<Test>::get(market), Some(1));
+        }
+
+        let next_epoch = live;
+        let next_market = MarketId::from(live).saturating_add(1);
+        assert_ok!(Market::create_market(
+            signed(MARKET_ADMIN),
+            next_market,
+            BookKind::Baseline { epoch: next_epoch },
+            BOOK,
+            FEES,
+            B,
+        ));
+        assert_eq!(BaselineMarketOf::<Test>::get(next_epoch), Some(next_market));
         assert_try_state();
     });
 }
@@ -2449,11 +2580,31 @@ fn do_try_state_rejects_zero_b_book() {
 }
 
 #[test]
-fn do_try_state_rejects_dangling_baseline_mapping() {
+fn do_try_state_accepts_historical_baseline_mapping_without_live_book() {
     new_test_ext().execute_with(|| {
-        // 04 §8.3: `BaselineMarketOf` must resolve to a live Baseline book. A mapping
-        // to a non-existent market is drift the hook must reject.
+        // 04 §8.3: after reap, the retained id is historical correlation data.
         BaselineMarketOf::<Test>::insert(EPOCH, 4242);
+        assert_ok!(Market::do_try_state());
+    });
+}
+
+#[test]
+fn do_try_state_rejects_baseline_mapping_to_wrong_live_book() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        BaselineMarketOf::<Test>::insert(EPOCH, MARKET_ID);
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
+    });
+}
+
+#[test]
+fn do_try_state_rejects_baseline_mapping_counter_drift() {
+    new_test_ext().execute_with(|| {
+        BaselineMarketOf::<Test>::insert(EPOCH, BASELINE_ID);
+        sp_io::storage::set(
+            &BaselineMarketOf::<Test>::counter_storage_final_key(),
+            &0_u32.encode(),
+        );
         assert_err!(Market::do_try_state(), E::TryStateViolation);
     });
 }

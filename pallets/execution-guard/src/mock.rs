@@ -280,7 +280,7 @@ parameter_types! {
     pub static ReleaseRefuses: bool = false;
     pub static ObservedSpecVersion: Option<u32> = Some(2);
     pub static ObservedSpecName: Vec<u8> = b"test".to_vec();
-    pub static Checkpoint: (H256, H256) = ([11; 32], [12; 32]);
+    pub static MigrationCursorExists: bool = false;
     pub static UpgradeDispatchOrigins: Vec<UpgradeDispatchOrigin> = Vec::new();
     pub static UpgradeSchedulingPerformed: bool = false;
     /// Disabled by default, so the mock behaves like the `()` sink unless a
@@ -735,9 +735,13 @@ impl BatchDispatcher<RuntimeCall> for TestDispatcher {
             spec_version,
         })
     }
+}
 
-    fn checkpoint() -> (H256, H256) {
-        Checkpoint::get()
+pub struct TestMigrationStatus;
+
+impl MigrationStatusProvider for TestMigrationStatus {
+    fn cursor_exists() -> bool {
+        MigrationCursorExists::get()
     }
 }
 
@@ -1032,6 +1036,7 @@ impl pallet_execution_guard::Config for Test {
     type Params = TestParams;
     type Capabilities = TestCapabilities;
     type UpgradeSchedule = TestUpgradeSchedule;
+    type MigrationStatus = TestMigrationStatus;
     type Preimages = TestPreimages;
     type ReleaseChannel = TestReleaseChannel;
     type RatifyOrigin = pallet_origins::EnsureConstitutionalValues;
@@ -1125,7 +1130,7 @@ pub fn reset_statics() {
     ReleaseRefuses::set(false);
     ObservedSpecVersion::set(Some(2));
     ObservedSpecName::set(b"test".to_vec());
-    Checkpoint::set(([11; 32], [12; 32]));
+    MigrationCursorExists::set(false);
     UpgradeDispatchOrigins::set(Vec::new());
     RecordKeeperRebates::set(false);
     KeeperRebates::set(Vec::new());

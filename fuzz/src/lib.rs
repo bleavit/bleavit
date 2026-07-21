@@ -636,8 +636,6 @@ fn guard_probe(payload: Payload, committed_hash: [u8; 32]) -> Result<(), GuardEr
         1,
         payload,
         0,
-        [1; 32],
-        [2; 32],
     );
     if result.is_ok() {
         assert_eq!(guard.try_state(), Ok(()));

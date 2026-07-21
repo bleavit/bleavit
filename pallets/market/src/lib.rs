@@ -106,6 +106,9 @@ pub mod pallet {
         DispatchError,
     };
 
+    const MAX_BASELINE_MARKET_MAPPINGS: u32 =
+        bounds::RECENT_COHORT_SUMMARIES.saturating_add(bounds::BASELINE_BOOKS);
+
     #[pallet::config]
     pub trait Config:
         frame_system::Config<RuntimeEvent: From<Event<Self>>> + pallet_conditional_ledger::Config
@@ -184,10 +187,12 @@ pub mod pallet {
         ValueQuery,
     >;
 
-    /// Epoch-to-Baseline-book lookup (02 §7.4, frozen name).
+    /// Epoch-to-Baseline-book lookup (02 §7.4, frozen name). The counter
+    /// dispatch-bounds the retained history to the 32-summary ring plus four
+    /// live epochs; the map's frozen key/value shape is unchanged.
     #[pallet::storage]
     pub type BaselineMarketOf<T: Config> =
-        StorageMap<_, Blake2_128Concat, EpochId, MarketId, OptionQuery>;
+        CountedStorageMap<_, Blake2_128Concat, EpochId, MarketId, OptionQuery>;
 
     /// Block at which a book closed, retained for the frozen integration
     /// surface and lifecycle observability. Reap delay is settlement-anchored.
@@ -716,11 +721,6 @@ pub mod pallet {
                 Error::<T>::NotReapable
             );
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
-                if let BookKind::Baseline { epoch } = book.kind {
-                    if BaselineMarketOf::<T>::get(epoch) == Some(market) {
-                        BaselineMarketOf::<T>::remove(epoch);
-                    }
-                }
                 Markets::<T>::remove(market);
                 ClosedAt::<T>::remove(market);
                 SeededMarkets::<T>::remove(market);
@@ -803,6 +803,15 @@ pub mod pallet {
                 *next = id.checked_add(1).ok_or(Error::<T>::ArithmeticOverflow)?;
                 Ok(id)
             })
+        }
+
+        /// Remove one historical Baseline correlation when epoch evicts the
+        /// matching cohort summary (02 §7.4; 04 §8.3). Missing entries are an
+        /// idempotent no-op so a retry cannot wedge epoch persistence.
+        pub fn prune_baseline_market(origin: OriginFor<T>, epoch: EpochId) -> DispatchResult {
+            T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            BaselineMarketOf::<T>::remove(epoch);
+            Ok(())
         }
 
         /// O(1) lookup consumed by the conditional ledger's deposit exemption.
@@ -1490,6 +1499,21 @@ pub mod pallet {
                     !BaselineMarketOf::<T>::contains_key(epoch),
                     Error::<T>::DuplicateBaselineMarket
                 );
+                ensure!(
+                    BaselineMarketOf::<T>::count() < MAX_BASELINE_MARKET_MAPPINGS,
+                    Error::<T>::TooManyMarkets
+                );
+                let live_baselines = BaselineMarketOf::<T>::iter_values()
+                    .filter(|market| {
+                        Markets::<T>::contains_key(market)
+                            && !SettlementObservedAt::<T>::contains_key(market)
+                    })
+                    .take(bounds::BASELINE_BOOKS.saturating_add(1) as usize)
+                    .count();
+                ensure!(
+                    live_baselines < bounds::BASELINE_BOOKS as usize,
+                    Error::<T>::TooManyMarkets
+                );
             }
 
             let (market_kind, pid, epoch) = Self::describe_kind(kind);
@@ -2126,13 +2150,36 @@ pub mod pallet {
                     previous = Some(id);
                 }
             }
+            let mut baseline_mapping_count = 0_u32;
+            let mut live_baseline_count = 0_u32;
             for (epoch, market) in BaselineMarketOf::<T>::iter() {
-                let book = Markets::<T>::get(market).ok_or(Error::<T>::TryStateViolation)?;
+                baseline_mapping_count = baseline_mapping_count
+                    .checked_add(1)
+                    .ok_or(Error::<T>::TryStateViolation)?;
                 ensure!(
-                    matches!(book.kind, BookKind::Baseline { epoch: e } if e == epoch),
+                    baseline_mapping_count <= MAX_BASELINE_MARKET_MAPPINGS,
                     Error::<T>::TryStateViolation
                 );
+                if let Some(book) = Markets::<T>::get(market) {
+                    if !SettlementObservedAt::<T>::contains_key(market) {
+                        live_baseline_count = live_baseline_count
+                            .checked_add(1)
+                            .ok_or(Error::<T>::TryStateViolation)?;
+                        ensure!(
+                            live_baseline_count <= bounds::BASELINE_BOOKS,
+                            Error::<T>::TryStateViolation
+                        );
+                    }
+                    ensure!(
+                        matches!(book.kind, BookKind::Baseline { epoch: e } if e == epoch),
+                        Error::<T>::TryStateViolation
+                    );
+                }
             }
+            ensure!(
+                BaselineMarketOf::<T>::count() == baseline_mapping_count,
+                Error::<T>::TryStateViolation
+            );
             for (id, checkpoints) in TwapCheckpoints::<T>::iter() {
                 let _book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
                 let windows = DecisionWindows::<T>::get(id);

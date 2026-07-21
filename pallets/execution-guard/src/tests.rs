@@ -10,7 +10,7 @@ use frame_support::{
 };
 use futarchy_primitives::{keeper::CrankClass, DispatchOutcomeCode, RejectReason};
 use parity_scale_codec::Encode;
-use sp_runtime::{traits::Dispatchable, DispatchError};
+use sp_runtime::{traits::Dispatchable, DispatchError, TryRuntimeError};
 
 macro_rules! assert_noop {
     (GuardPallet::execute($($args:tt)*), $error:expr $(,)?) => {{
@@ -1170,6 +1170,8 @@ fn upgrade_enforces_lead_time_hash_version_and_release_channel_rollback() {
         assert_eq!(pending.hash, hash(code));
         assert_eq!(pending.target_spec_version, 2);
         assert_eq!(release_log(), vec![(2, pending.authorized_at, false)]);
+        assert!(!PendingAnchorCapture::<Test>::get());
+        assert!(PreMigrationAnchor::<Test>::get().is_none());
 
         assert_noop!(
             GuardPallet::apply_authorized_upgrade(
@@ -1218,7 +1220,8 @@ fn upgrade_enforces_lead_time_hash_version_and_release_channel_rollback() {
         ReleaseRefuses::set(false);
         assert_ok!(GuardPallet::validation_code_applied());
         assert!(PendingUpgradeStorage::<Test>::get().is_none());
-        assert!(PendingUpgradeCheckpoint::<Test>::get().is_none());
+        assert!(PendingAnchorCapture::<Test>::get());
+        assert!(PreMigrationAnchor::<Test>::get().is_none());
         assert_eq!(CurrentSpecName::<Test>::get(), Some(spec(2)));
         assert_eq!(release_log().last(), Some(&(2, 0, true)));
         assert!(matches!(
@@ -1228,6 +1231,103 @@ fn upgrade_enforces_lead_time_hash_version_and_release_channel_rollback() {
                 spec_version: 2
             }) if code_hash == hash(code)
         ));
+
+        // The production image currently registers no MBMs. The next block
+        // consumes the application latch without leaking an anchor whose
+        // completion callback could never fire.
+        let _ = GuardPallet::on_initialize(System::block_number());
+        assert!(!PendingAnchorCapture::<Test>::get());
+        assert!(PreMigrationAnchor::<Test>::get().is_none());
+    });
+}
+
+#[test]
+fn sq_127_application_anchor_replaces_recovery_anchor_and_survives_until_completion() {
+    new_test_ext().execute_with(|| {
+        let code = b"runtime-v2-with-mbm";
+        setup_upgrade(1, code, 7);
+        assert_ok!(GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1));
+        let pending = PendingUpgradeStorage::<Test>::get().expect("pending upgrade");
+        assert!(PreMigrationAnchor::<Test>::get().is_none());
+
+        System::set_block_number(pending.applicable_at.into());
+        assert_ok!(GuardPallet::apply_authorized_upgrade(
+            RuntimeOrigin::signed(keeper()),
+            bounded_code(code),
+        ));
+
+        // A successful recovery image retires the failed image's anchor at
+        // application, before optionally capturing its own MBM boundary.
+        let old_anchor = (System::block_number().saturating_sub(1), [0x21; 32]);
+        PreMigrationAnchor::<Test>::put(old_anchor);
+        MigrationHalt::<Test>::put(true);
+        MigrationCursorExists::set(true);
+        assert_ok!(GuardPallet::validation_code_applied());
+        assert!(PendingAnchorCapture::<Test>::get());
+        assert!(PreMigrationAnchor::<Test>::get().is_none());
+
+        let capture_block = System::block_number().saturating_add(1);
+        let expected_parent = sp_core::H256::repeat_byte(0x42);
+        System::set_block_number(capture_block);
+        System::set_parent_hash(expected_parent);
+        let _ = GuardPallet::on_initialize(capture_block);
+
+        assert!(!PendingAnchorCapture::<Test>::get());
+        assert_eq!(
+            PreMigrationAnchor::<Test>::get(),
+            Some((capture_block.saturating_sub(1), expected_parent.0))
+        );
+
+        // Later blocks must not drift the application boundary while the MBM
+        // remains active.
+        let later = capture_block.saturating_add(1);
+        System::set_block_number(later);
+        System::set_parent_hash(sp_core::H256::repeat_byte(0x77));
+        let _ = GuardPallet::on_initialize(later);
+        assert_eq!(
+            PreMigrationAnchor::<Test>::get(),
+            Some((capture_block.saturating_sub(1), expected_parent.0))
+        );
+        assert_ok!(GuardPallet::do_try_state());
+
+        MigrationCursorExists::set(false);
+        GuardPallet::migration_completed();
+        MigrationHalt::<Test>::put(false);
+        assert!(PreMigrationAnchor::<Test>::get().is_none());
+        assert_ok!(GuardPallet::do_try_state());
+    });
+}
+
+#[test]
+fn sq_144_try_state_enforces_only_the_anchor_lifetime_direction() {
+    new_test_ext().execute_with(|| {
+        // Authorization without an application anchor is normal and must not
+        // be rejected during DescriptorLeadTime.
+        let code = b"runtime-v2-awaiting-application";
+        setup_upgrade(1, code, 7);
+        assert_ok!(GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1));
+        assert!(PendingUpgradeStorage::<Test>::get().is_some());
+        assert!(PreMigrationAnchor::<Test>::get().is_none());
+        assert_ok!(GuardPallet::do_try_state());
+
+        let anchor = (System::block_number().saturating_sub(1), [0x51; 32]);
+        PreMigrationAnchor::<Test>::put(anchor);
+        let error = GuardPallet::do_try_state().expect_err("orphan anchor must fail closed");
+        assert_eq!(
+            error,
+            TryRuntimeError::Other(
+                "execution guard pre-migration anchor outlived its migration interval"
+            )
+        );
+
+        PendingAnchorCapture::<Test>::put(true);
+        assert_ok!(GuardPallet::do_try_state());
+        PendingAnchorCapture::<Test>::kill();
+        MigrationCursorExists::set(true);
+        assert_ok!(GuardPallet::do_try_state());
+        MigrationCursorExists::set(false);
+        MigrationHalt::<Test>::put(true);
+        assert_ok!(GuardPallet::do_try_state());
     });
 }
 
@@ -1247,10 +1347,16 @@ fn scheduled_upgrade_abort_restores_status_quo_and_emits_distinct_event() {
         let _ = GuardPallet::on_initialize(System::block_number());
         assert_eq!(ScheduledUpgrade::<Test>::get(), Some(hash(code)));
 
+        let old_anchor = (System::block_number().saturating_sub(1), [0x31; 32]);
+        PreMigrationAnchor::<Test>::put(old_anchor);
+        PendingAnchorCapture::<Test>::put(true);
+        MigrationHalt::<Test>::put(true);
+
         assert_ok!(GuardPallet::validation_code_aborted());
 
         assert!(PendingUpgradeStorage::<Test>::get().is_none());
-        assert!(PendingUpgradeCheckpoint::<Test>::get().is_none());
+        assert!(!PendingAnchorCapture::<Test>::get());
+        assert_eq!(PreMigrationAnchor::<Test>::get(), Some(old_anchor));
         assert!(ScheduledUpgrade::<Test>::get().is_none());
         assert_eq!(CurrentSpecName::<Test>::get(), Some(spec(1)));
         assert_eq!(release_log().last(), Some(&(2, 0, true)));
@@ -1258,6 +1364,7 @@ fn scheduled_upgrade_abort_restores_status_quo_and_emits_distinct_event() {
             last_guard_event(),
             Some(Event::UpgradeAborted { code_hash }) if code_hash == hash(code)
         ));
+        assert_ok!(GuardPallet::do_try_state());
     });
 }
 
@@ -1406,7 +1513,6 @@ fn upgrade_authorization_rejects_hash_mismatch_pending_conflict_and_spacing() {
             applicable_at: DESCRIPTOR_LEAD_TIME,
             target_spec_version: 2,
         });
-        PendingUpgradeCheckpoint::<Test>::put(([1; 32], [2; 32]));
         assert_noop!(
             GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
             Error::<Test>::PendingUpgradeExists
@@ -1531,7 +1637,8 @@ fn g1_epoch_and_release_refusals_roll_back_all_runtime_storage() {
         assert!(GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1).is_err());
         assert!(Queue::<Test>::contains_key(1));
         assert!(PendingUpgradeStorage::<Test>::get().is_none());
-        assert!(PendingUpgradeCheckpoint::<Test>::get().is_none());
+        assert!(!PendingAnchorCapture::<Test>::get());
+        assert!(PreMigrationAnchor::<Test>::get().is_none());
         assert!(ExecutionRecords::<Test>::get().is_empty());
         assert!(epoch_calls().is_empty());
         assert!(release_log().is_empty());

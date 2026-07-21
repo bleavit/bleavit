@@ -57,20 +57,14 @@ rewrite, or a rollback to old bytes ([12 §6.3](../../docs/architecture/12-relea
    Confirm `Stuck` separately. Rule out a stale monitor.
 3. Read `ExecutionGuard::MigrationHalt`, `PendingUpgrade`, `LastUpgradeAuthorized`
    and the relevant `ExecutionGuard::Queue` entry.
-   **The 09 §3.2(2) pre-migration anchor is not yet implemented — do not wait for
-   it and do not read `PendingUpgradeCheckpoint` expecting to find it.** That item
-   is killed at the relay go-ahead callback, one block before any migration can
-   step; the queue row's `pre_upgrade_checkpoint` is written at execute but the
-   row itself is deleted on success (09 §1.2(13)). Both cells are therefore empty
-   at diagnosis time (SQ-127/SQ-144, ruled 2026-07-20 — capture moves to
-   code-application time and single-homes in its own storage item; implementation
-   owed, PLAN.md SQ-127/SQ-144 in batch X). Until it lands, reconstruct the anchor off-chain: **the block in
-   which `UpgradeApplied` was emitted is itself the last pre-migration block** —
-   the go-ahead callback runs in the final old-code block, and the new code takes
-   effect in its successor. Take that block's own header hash and `state_root`
-   (equivalently: the parent of the first block carrying the new `spec_version`).
-   Record both in the incident log as the audit anchor and note that they were
-   reconstructed, not read from chain
+   Read `ExecutionGuard.PreMigrationAnchor`. Per 09 §3.2(2), it is captured at
+   code application only when the applied image registers a multi-block migration
+   cursor, and stores `(anchor_block, anchor_hash)` for the last pre-migration
+   block. It is absent during authorization, absent for a zero-MBM image, and
+   cleared by the migration-completion callback. If a live or halted migration
+   has no anchor, preserve the raw cursor and surrounding headers and treat the
+   missing cell as an invariant breach; do not reconstruct a healthy on-chain
+   value by assumption
    ([09 §3.2](../../docs/architecture/09-execution-upgrades-and-rollout.md)).
 4. Reconstruct `UpgradeAuthorized`, `UpgradeApplied`, `UpgradeAborted`, execution,
    migration, and `GuardianAction` events. The spec also mandates

@@ -10,6 +10,7 @@ use crate::{
     ReleaseChannel, ReleaseChannelValue, CONTRACT_VERSION, MAX_CAPABILITIES, MAX_PARAMS,
     RELEASE_CHANNEL_LEN, RELEASE_CHANNEL_STORAGE_KEY,
 };
+use frame_support::dispatch::DispatchResult;
 use frame_support::{assert_noop, assert_ok};
 use sp_runtime::DispatchError;
 
@@ -37,6 +38,39 @@ fn last_event() -> RuntimeEvent {
         .pop()
         .expect("an event was deposited")
         .event
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assert_set_param_matches_core(
+    core: &mut ConstitutionState,
+    account: u64,
+    authority: ConstitutionOrigin,
+    key: ParamKey,
+    value: ParamValue,
+    epoch: u32,
+    block: u32,
+    expected: DispatchResult,
+    step: u32,
+) {
+    set_epoch(epoch);
+    System::set_block_number(block.into());
+    let shell_before = Params::<Test>::get(key);
+    let core_before = core.clone();
+    let events_before = System::events().len();
+    let shell = Constitution::set_param(RuntimeOrigin::signed(account), key, value);
+    let model = core
+        .dispatch_set_param(authority, key, value, epoch, block)
+        .map_err(crate::Pallet::<Test>::map_core_error);
+    assert_eq!(shell, model, "set_param shell/core result diverged");
+    assert_eq!(shell, expected, "unexpected set_param result");
+    if shell.is_err() {
+        assert_eq!(Params::<Test>::get(key), shell_before);
+        assert_eq!(*core, core_before);
+        assert_eq!(System::events().len(), events_before);
+    } else {
+        assert_eq!(System::events().len(), events_before.saturating_add(1));
+    }
+    assert_states_agree(core, step);
 }
 
 // ---------------------------------------------------------------- genesis --
@@ -396,6 +430,267 @@ fn set_param_percent_and_factor_deltas_bind_at_the_boundary() {
             Error::<Test>::DeltaTooLarge
         );
     });
+}
+
+#[test]
+fn welfare_low_knee_direction_matrix_matches_the_core() {
+    for (key_index, key_name) in [b"welfare.thS_lo".as_slice(), b"welfare.thC_lo".as_slice()]
+        .into_iter()
+        .enumerate()
+    {
+        new_test_ext().execute_with(|| {
+            let key = key16(key_name);
+            let mut core = ConstitutionState::genesis();
+            let record = Params::<Test>::get(key);
+            assert!(record.is_some(), "welfare low-knee key must be seeded");
+            let Some(record) = record else {
+                return;
+            };
+            let interval = record.admissible_next_interval();
+            assert!(interval.is_ok(), "welfare low-knee interval must be valid");
+            let Ok((_, upper)) = interval else {
+                return;
+            };
+            assert!(upper > record.value.as_u128());
+            let raised = param_value_from_raw(record.value, upper);
+            assert!(
+                raised.is_some(),
+                "welfare low-knee upper value must preserve its kind"
+            );
+            let Some(raised) = raised else {
+                return;
+            };
+            let base_step = (key_index as u32).saturating_mul(16);
+
+            // Increase matrix: only the constitution track may tighten.
+            assert_set_param_matches_core(
+                &mut core,
+                ENTRENCHED_ACC,
+                ConstitutionOrigin::EntrenchedTrack,
+                key,
+                raised,
+                record.cooldown_epochs,
+                1,
+                Err(DispatchError::BadOrigin),
+                base_step,
+            );
+            assert_set_param_matches_core(
+                &mut core,
+                VALUES_ACC,
+                ConstitutionOrigin::ConstitutionalValues,
+                key,
+                raised,
+                record.cooldown_epochs,
+                2,
+                Err(DispatchError::BadOrigin),
+                base_step.saturating_add(1),
+            );
+            assert_set_param_matches_core(
+                &mut core,
+                CONSTITUTION_ACC,
+                ConstitutionOrigin::ConstitutionTrack,
+                key,
+                raised,
+                record.cooldown_epochs,
+                3,
+                Ok(()),
+                base_step.saturating_add(2),
+            );
+
+            // Decrease matrix: only the entrenched track may un-tighten.
+            let decrease_epoch = record.cooldown_epochs.saturating_mul(2);
+            assert_set_param_matches_core(
+                &mut core,
+                CONSTITUTION_ACC,
+                ConstitutionOrigin::ConstitutionTrack,
+                key,
+                record.value,
+                decrease_epoch,
+                4,
+                Err(DispatchError::BadOrigin),
+                base_step.saturating_add(3),
+            );
+            assert_set_param_matches_core(
+                &mut core,
+                ENTRENCHED_ACC,
+                ConstitutionOrigin::EntrenchedTrack,
+                key,
+                record.value,
+                decrease_epoch,
+                5,
+                Ok(()),
+                base_step.saturating_add(4),
+            );
+
+            // Equality retains the row's CONST-class constitution route and
+            // cannot be used by entrenched or bare values to stamp cooldown.
+            assert_set_param_matches_core(
+                &mut core,
+                CONSTITUTION_ACC,
+                ConstitutionOrigin::ConstitutionTrack,
+                key,
+                record.value,
+                record.cooldown_epochs.saturating_mul(3),
+                6,
+                Ok(()),
+                base_step.saturating_add(5),
+            );
+            assert_set_param_matches_core(
+                &mut core,
+                ENTRENCHED_ACC,
+                ConstitutionOrigin::EntrenchedTrack,
+                key,
+                record.value,
+                record.cooldown_epochs.saturating_mul(4),
+                7,
+                Err(DispatchError::BadOrigin),
+                base_step.saturating_add(6),
+            );
+            assert_set_param_matches_core(
+                &mut core,
+                VALUES_ACC,
+                ConstitutionOrigin::ConstitutionalValues,
+                key,
+                record.value,
+                record.cooldown_epochs.saturating_mul(5),
+                8,
+                Err(DispatchError::BadOrigin),
+                base_step.saturating_add(7),
+            );
+
+            // Entrenchment never authorizes crossing the launch floor.
+            let below_floor_raw = record.min.as_u128().checked_sub(1);
+            assert!(
+                below_floor_raw.is_some(),
+                "welfare launch floor must be non-zero"
+            );
+            let Some(below_floor_raw) = below_floor_raw else {
+                return;
+            };
+            let below_floor = param_value_from_raw(record.value, below_floor_raw);
+            assert!(
+                below_floor.is_some(),
+                "welfare below-floor value must preserve its kind"
+            );
+            let Some(below_floor) = below_floor else {
+                return;
+            };
+            assert_set_param_matches_core(
+                &mut core,
+                ENTRENCHED_ACC,
+                ConstitutionOrigin::EntrenchedTrack,
+                key,
+                below_floor,
+                record.cooldown_epochs.saturating_mul(5),
+                9,
+                Err(Error::<Test>::BelowMin.into()),
+                base_step.saturating_add(8),
+            );
+        });
+    }
+}
+
+#[test]
+fn ordinary_phase_cap_updates_are_tighten_only_in_shell_and_core() {
+    for (key_index, key_name) in [b"phase3.tvl_cap".as_slice(), b"phase3.dep_cap".as_slice()]
+        .into_iter()
+        .enumerate()
+    {
+        new_test_ext().execute_with(|| {
+            let key = key16(key_name);
+            let mut core = ConstitutionState::genesis();
+            let record = Params::<Test>::get(key);
+            assert!(record.is_some(), "phase exposure-cap key must be seeded");
+            let Some(record) = record else {
+                return;
+            };
+            let base_step = 64_u32.saturating_add((key_index as u32).saturating_mul(8));
+
+            // An ordinary META enactment cannot install the phase-gate-owned
+            // unbounded sentinel.
+            assert_set_param_matches_core(
+                &mut core,
+                META_ACC,
+                ConstitutionOrigin::FutarchyMeta,
+                key,
+                record.max,
+                record.cooldown_epochs,
+                10,
+                Err(DispatchError::BadOrigin),
+                base_step,
+            );
+
+            // Equality preserves the existing set_param semantics and emits
+            // the ordinary update event.
+            assert_set_param_matches_core(
+                &mut core,
+                META_ACC,
+                ConstitutionOrigin::FutarchyMeta,
+                key,
+                record.value,
+                record.cooldown_epochs,
+                11,
+                Ok(()),
+                base_step.saturating_add(1),
+            );
+
+            let decreased_raw = record.value.as_u128().checked_sub(1);
+            assert!(
+                decreased_raw.is_some(),
+                "phase exposure cap must be non-zero"
+            );
+            let Some(decreased_raw) = decreased_raw else {
+                return;
+            };
+            let decreased = param_value_from_raw(record.value, decreased_raw);
+            assert!(
+                decreased.is_some(),
+                "phase exposure-cap decrease must preserve its kind"
+            );
+            let Some(decreased) = decreased else {
+                return;
+            };
+            assert_set_param_matches_core(
+                &mut core,
+                META_ACC,
+                ConstitutionOrigin::FutarchyMeta,
+                key,
+                decreased,
+                record.cooldown_epochs,
+                12,
+                Ok(()),
+                base_step.saturating_add(2),
+            );
+
+            let second_decrease_raw = decreased.as_u128().checked_sub(1);
+            assert!(
+                second_decrease_raw.is_some(),
+                "phase exposure cap must admit a second decrease candidate"
+            );
+            let Some(second_decrease_raw) = second_decrease_raw else {
+                return;
+            };
+            let second_decrease = param_value_from_raw(record.value, second_decrease_raw);
+            assert!(
+                second_decrease.is_some(),
+                "phase exposure-cap decrease must preserve its kind"
+            );
+            let Some(second_decrease) = second_decrease else {
+                return;
+            };
+            assert_set_param_matches_core(
+                &mut core,
+                VALUES_ACC,
+                ConstitutionOrigin::ConstitutionalValues,
+                key,
+                second_decrease,
+                record.cooldown_epochs,
+                13,
+                Err(DispatchError::BadOrigin),
+                base_step.saturating_add(3),
+            );
+        });
+    }
 }
 
 // --------------------------------------------------------- set_capability --
@@ -1124,8 +1419,18 @@ fn param_value_from_raw(kind: ParamValue, raw: u128) -> Option<ParamValue> {
     }
 }
 
-fn governance_origin_for(class: ParamClass) -> RuntimeOrigin {
-    let account = match class {
+fn governance_origin_for(record: ParamRecord, next: ParamValue) -> RuntimeOrigin {
+    let welfare_low_knee =
+        record.key == key16(b"welfare.thS_lo") || record.key == key16(b"welfare.thC_lo");
+    if welfare_low_knee {
+        let account = if next.as_u128() < record.value.as_u128() {
+            ENTRENCHED_ACC
+        } else {
+            CONSTITUTION_ACC
+        };
+        return RuntimeOrigin::signed(account);
+    }
+    let account = match record.class {
         ParamClass::Param => PARAM_ACC,
         ParamClass::Treasury => TREASURY_ACC,
         ParamClass::Meta | ParamClass::MetaAndValues => META_ACC,
@@ -1210,7 +1515,7 @@ fn generated_registry_suite_rejects_every_seeded_key_past_its_amendment_limits()
             {
                 assert_noop!(
                     Constitution::set_param(
-                        governance_origin_for(record.class),
+                        governance_origin_for(record, above_max),
                         record.key,
                         above_max
                     ),
@@ -1225,7 +1530,7 @@ fn generated_registry_suite_rejects_every_seeded_key_past_its_amendment_limits()
             {
                 assert_noop!(
                     Constitution::set_param(
-                        governance_origin_for(record.class),
+                        governance_origin_for(record, below_min),
                         record.key,
                         below_min
                     ),
@@ -1240,7 +1545,7 @@ fn generated_registry_suite_rejects_every_seeded_key_past_its_amendment_limits()
                 set_epoch(record.cooldown_epochs);
                 assert_noop!(
                     Constitution::set_param(
-                        governance_origin_for(record.class),
+                        governance_origin_for(record, candidate),
                         record.key,
                         candidate
                     ),
@@ -1265,13 +1570,13 @@ fn generated_registry_suite_rejects_every_seeded_key_past_its_amendment_limits()
             if record.cooldown_epochs > 0 {
                 set_epoch(record.cooldown_epochs);
                 assert_ok!(Constitution::set_param(
-                    governance_origin_for(record.class),
+                    governance_origin_for(record, record.value),
                     record.key,
                     record.value
                 ));
                 assert_noop!(
                     Constitution::set_param(
-                        governance_origin_for(record.class),
+                        governance_origin_for(record, record.value),
                         record.key,
                         record.value
                     ),
@@ -1337,12 +1642,14 @@ fn randomized_differential_covers_errors_origins_and_epochs() {
         let mut rng = XorShift(0x5EED_CAFE_F00D_D00D);
         let mut core = ConstitutionState::genesis();
         let keys: Vec<[u8; 16]> = genesis_params().iter().map(|r| r.key).collect();
-        let origins: [(u64, ConstitutionOrigin); 8] = [
+        let origins: [(u64, ConstitutionOrigin); 10] = [
             (PARAM_ACC, ConstitutionOrigin::FutarchyParam),
             (TREASURY_ACC, ConstitutionOrigin::FutarchyTreasury),
             (CODE_ACC, ConstitutionOrigin::FutarchyCode),
             (META_ACC, ConstitutionOrigin::FutarchyMeta),
             (VALUES_ACC, ConstitutionOrigin::ConstitutionalValues),
+            (CONSTITUTION_ACC, ConstitutionOrigin::ConstitutionTrack),
+            (ENTRENCHED_ACC, ConstitutionOrigin::EntrenchedTrack),
             (GUARDIAN_ACC, ConstitutionOrigin::GuardianHold),
             (PLAYBOOK_ACC, ConstitutionOrigin::EmergencyPlaybook),
             (NOBODY_ACC, ConstitutionOrigin::Signed),
@@ -1356,7 +1663,7 @@ fn randomized_differential_covers_errors_origins_and_epochs() {
             // Epochs advance monotonically but in random strides (incl. 0).
             epoch += (rng.next() % 3) as u32;
             set_epoch(epoch);
-            let (acc, authority) = origins[(rng.next() % 8) as usize];
+            let (acc, authority) = origins[(rng.next() as usize) % origins.len()];
             let (runtime_origin, authority) = if rng.next() % 8 == 0 {
                 (RuntimeOrigin::root(), ConstitutionOrigin::Root)
             } else {

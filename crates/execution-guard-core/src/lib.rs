@@ -330,8 +330,6 @@ pub struct UpgradeAuthorization {
     /// Precomputed before real dispatch by the FRAME shell. Keeping the
     /// overflow check out of terminal bookkeeping is required by G-1.
     pub applicable_at: BlockNumber,
-    pub block_hash: H256,
-    pub state_root: H256,
 }
 
 #[derive(Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, PartialEq, TypeInfo)]
@@ -432,8 +430,6 @@ impl ExecutionGuard {
         pid: ProposalId,
         payload: Payload,
         now: BlockNumber,
-        block_hash: H256,
-        state_root: H256,
     ) -> Result<(), Error> {
         let guardian = InMemoryGuardian {
             guardian,
@@ -441,9 +437,7 @@ impl ExecutionGuard {
         };
         let attestors = InMemoryAttestations(attestors);
         let mut epoch = InMemoryEpochHandoff { epoch, ledger };
-        self.execute_with(
-            origin, &mut epoch, &guardian, &attestors, pid, payload, now, block_hash, state_root,
-        )
+        self.execute_with(origin, &mut epoch, &guardian, &attestors, pid, payload, now)
     }
 
     /// Trait-generic execution entry used by the FRAME shell seam and retained
@@ -459,8 +453,6 @@ impl ExecutionGuard {
         pid: ProposalId,
         payload: Payload,
         now: BlockNumber,
-        block_hash: H256,
-        state_root: H256,
     ) -> Result<(), Error> {
         ensure!(matches!(origin, GuardOrigin::Signed), Error::BadOrigin);
         let idx = self
@@ -470,7 +462,7 @@ impl ExecutionGuard {
             .ok_or(Error::NotFound)?;
         let q = self.queue.get(idx).cloned().ok_or(Error::NotFound)?;
         self.check_dispatch_time_with(&q, guardian, attestors, &payload, now)?;
-        let outcome = self.dispatch_batch(&q, &payload, now, block_hash, state_root)?;
+        let outcome = self.dispatch_batch(&q, &payload, now)?;
         self.complete_prevalidated(origin, epoch, pid, outcome, now, None)
     }
 
@@ -503,15 +495,12 @@ impl ExecutionGuard {
                 Error::BadUpgradePayload
             );
             ensure!(self.pending_upgrade.is_none(), Error::PendingUpgradeExists);
-            Some((
-                PendingUpgrade {
-                    hash: upgrade.hash,
-                    authorized_at: now,
-                    applicable_at: upgrade.applicable_at,
-                    target_spec_version: upgrade.target_spec_version,
-                },
-                (upgrade.block_hash, upgrade.state_root),
-            ))
+            Some(PendingUpgrade {
+                hash: upgrade.hash,
+                authorized_at: now,
+                applicable_at: upgrade.applicable_at,
+                target_spec_version: upgrade.target_spec_version,
+            })
         } else {
             None
         };
@@ -531,17 +520,13 @@ impl ExecutionGuard {
                 self.push_record(record.clone());
                 self.queue.retain(|queued| queued.pid != pid);
                 self.held_resources.retain(|(owner, _)| *owner != pid);
-                if let Some((pending, checkpoint)) = pending {
+                if let Some(pending) = pending {
                     self.pending_upgrade = Some(pending);
                     self.events.push(Event::UpgradeAuthorized {
                         code_hash: pending.hash,
                         authorized_at: pending.authorized_at,
                         applicable_at: pending.applicable_at,
                     });
-                    // The queue item is being removed, so the checkpoint remains
-                    // observable through the event/audit stream and the pending
-                    // record rather than a dangling auxiliary queue entry.
-                    let _ = checkpoint;
                 }
                 self.events.push(Event::PreimageUnpinned {
                     pid,
@@ -818,8 +803,6 @@ impl ExecutionGuard {
         q: &QueuedExecution,
         payload: &Payload,
         now: BlockNumber,
-        block_hash: H256,
-        state_root: H256,
     ) -> Result<DispatchOutcomeCode, Error> {
         for (i, call) in payload.calls.iter().enumerate() {
             if !call.succeeds {
@@ -852,9 +835,6 @@ impl ExecutionGuard {
                 applicable_at,
                 target_spec_version: target,
             });
-            if let Some(queued) = self.queue.iter_mut().find(|x| x.pid == q.pid) {
-                queued.pre_upgrade_checkpoint = Some((block_hash, state_root));
-            }
             self.events.push(Event::UpgradeAuthorized {
                 code_hash: hash,
                 authorized_at: now,
@@ -1245,8 +1225,6 @@ mod tests {
             1,
             pl(calls),
             1_000_010,
-            h(1),
-            h(2),
         )
         .unwrap();
         assert_eq!(g.records.len(), 1);
@@ -1375,10 +1353,11 @@ mod tests {
         g.check_dispatch_time(&g.queue[0], &guardian, &att, &pl(calls.clone()), 43_201)
             .unwrap();
         assert_eq!(
-            g.dispatch_batch(&g.queue[0].clone(), &pl(calls), 43_201, h(1), h(2))
+            g.dispatch_batch(&g.queue[0].clone(), &pl(calls), 43_201)
                 .unwrap(),
             DispatchOutcomeCode::Ok
         );
+        assert!(g.queue[0].pre_upgrade_checkpoint.is_none());
         assert_eq!(
             g.apply_authorized_upgrade(GuardOrigin::Signed, &code, 2, 50_000)
                 .unwrap_err(),
@@ -1515,8 +1494,6 @@ mod tests {
             1,
             pl(vec![failing_call(CallDomain::Param)]),
             1_000_010,
-            h(1),
-            h(2),
         )
         .unwrap();
         assert_eq!(state_of(&e, 1), ProposalState::FailedExecuted);
@@ -1536,8 +1513,6 @@ mod tests {
             1,
             pl(committed),
             1_000_015,
-            h(1),
-            h(2),
         )
         .unwrap();
         assert_eq!(state_of(&e, 1), ProposalState::Measuring);
@@ -1568,8 +1543,6 @@ mod tests {
             1,
             pl(vec![failing_call(CallDomain::Param)]),
             1_000_010,
-            h(1),
-            h(2),
         )
         .unwrap();
         // Within the window the T22 expiry is refused.
@@ -1653,7 +1626,7 @@ mod tests {
         g.check_dispatch_time(&g.queue[0], &guardian, &att, &pl(calls.clone()), 43_201)
             .unwrap();
         assert_eq!(
-            g.dispatch_batch(&g.queue[0].clone(), &pl(calls), 43_201, h(1), h(2))
+            g.dispatch_batch(&g.queue[0].clone(), &pl(calls), 43_201)
                 .unwrap(),
             DispatchOutcomeCode::Ok
         );

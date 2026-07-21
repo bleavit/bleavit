@@ -1268,16 +1268,19 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             }
         }
         for pid in &affected {
-            let proposal = self.proposal_mut(*pid)?;
-            proposal.state = ProposalState::Rejected(RejectReason::ProcessHold);
-            proposal.decision = Some(DecisionOutcome::Reject(RejectReason::ProcessHold));
+            let already_decided = self.proposal(*pid)?.decision.is_some();
+            if !already_decided {
+                let proposal = self.proposal_mut(*pid)?;
+                proposal.state = ProposalState::Rejected(RejectReason::ProcessHold);
+                proposal.decision = Some(DecisionOutcome::Reject(RejectReason::ProcessHold));
+                self.events.push(Event::ProposalForceRejected {
+                    pid: *pid,
+                    reason: RejectReason::ProcessHold,
+                });
+            }
             self.intake_queue.retain(|queued| *queued != *pid);
             self.rollovers.retain(|(proposal, _)| *proposal != *pid);
             self.resource_locks.retain(|(_, owner)| *owner != *pid);
-            self.events.push(Event::ProposalForceRejected {
-                pid: *pid,
-                reason: RejectReason::ProcessHold,
-            });
         }
         self.cohorts[idx].status = CohortStatus::Void;
         // 03 §2.3/§5: an epoch VOID settles the epoch's **Baseline** vault at
@@ -1876,12 +1879,14 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
                 _ => DecisionOutcome::Reject(RejectReason::ConvergenceFailed),
             });
         }
+        let Some(prize) = i.in_cap_prize else {
+            return Ok(DecisionOutcome::Reject(RejectReason::SecuritySizing));
+        };
         let attack = attack_cost_hat(
             i.measured_depth,
             i.published_flow_per_day,
             params.decision_window,
         )?;
-        let prize = i.in_cap_prize.ok_or(Error::BadDecisionInput)?;
         if prize.saturating_mul(futarchy_primitives::kernel::SECURITY_FACTOR) > attack {
             return Ok(DecisionOutcome::Reject(RejectReason::SecuritySizing));
         }
@@ -2017,9 +2022,11 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         self.events.push(Event::ProposalRejected { pid, reason: r });
         if has_markets {
             self.start_measurement(pid)?;
-        } else {
-            self.resource_locks.retain(|(_, owner)| *owner != pid);
         }
+        // T10 is terminal for execution even though T21 immediately retains
+        // the proposal in Measuring for welfare settlement. No rejected
+        // payload can consume its execution-domain lock after this point.
+        self.resource_locks.retain(|(_, owner)| *owner != pid);
         Ok(())
     }
     fn ensure_can_start_measurement(&self, pid: ProposalId) -> Result<(), Error> {
@@ -2476,6 +2483,39 @@ mod tests {
             s.decide(Origin::Keeper, &mut ledger, 1, 0, i).unwrap(),
             DecisionOutcome::Reject(RejectReason::SecuritySizing)
         );
+    }
+    #[test]
+    fn undefined_prize_proxy_is_a_terminal_security_sizing_rejection() {
+        let mut s = EpochState::new();
+        let mut ledger = LedgerState::<[u8; 32]>::new();
+        ledger.create_vault(1, 1).unwrap();
+        let mut p = prop(1, ProposalState::Trading);
+        p.markets = Some(MarketSet {
+            accept: 1,
+            reject: 2,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
+        });
+        let resource = *p.resources.as_slice().first().unwrap();
+        s.resource_locks.push((resource, p.id));
+        s.proposals.push(p);
+        let mut input = pass_input();
+        input.in_cap_prize = None;
+        input.measured_depth = Balance::MAX;
+
+        assert_eq!(
+            s.decide(Origin::Keeper, &mut ledger, 1, 0, input),
+            Ok(DecisionOutcome::Reject(RejectReason::SecuritySizing))
+        );
+        assert_eq!(
+            s.proposal(1).unwrap().decision,
+            Some(DecisionOutcome::Reject(RejectReason::SecuritySizing))
+        );
+        assert!(s.resource_locks.is_empty());
+        assert!(ledger
+            .events
+            .iter()
+            .any(|event| matches!(event, LedgerEvent::VaultResolved(1, Branch::Reject))));
     }
     #[test]
     fn security_sizing_uses_decision_window_days_at_floor() {

@@ -4,8 +4,8 @@ use crate::*;
 use frame_benchmarking::v2::*;
 use frame_support::traits::{fungibles::Mutate, EnsureOrigin, Get};
 use frame_system::RawOrigin;
-use futarchy_primitives::{kernel, Balance, Branch, FixedU64, MarketId, ScalarSide};
-use market_core::{BookKind, MarketPhase};
+use futarchy_primitives::{bounds, kernel, Balance, Branch, FixedU64, MarketId, ScalarSide};
+use market_core::{BookKind, MarketBook, MarketPhase};
 use sp_runtime::traits::Saturating;
 
 const UNIT: Balance = 1_000_000;
@@ -171,24 +171,51 @@ mod benchmarks {
 
     #[benchmark]
     fn create_market() {
+        // Worst-case Baseline path: scan the full retained tail (32 settled,
+        // resident historical books plus three live epochs) before admitting
+        // the fourth live Baseline and 36th total mapping (02 §7.4; 04 §8.3).
+        for epoch in 0..bounds::RECENT_COHORT_SUMMARIES {
+            let id = MarketId::from(epoch).saturating_add(1);
+            let book: T::AccountId = account("historical-book", epoch, 0);
+            let fees: T::AccountId = account("historical-fees", epoch, 0);
+            Markets::<T>::insert(
+                id,
+                MarketBook::open(id, BookKind::Baseline { epoch }, book, fees, B),
+            );
+            BaselineMarketOf::<T>::insert(epoch, id);
+            SettlementObservedAt::<T>::insert(id, frame_system::Pallet::<T>::block_number());
+        }
+        for offset in 0..bounds::BASELINE_BOOKS.saturating_sub(1) {
+            let epoch = bounds::RECENT_COHORT_SUMMARIES.saturating_add(offset);
+            let id = MarketId::from(epoch).saturating_add(1);
+            let book: T::AccountId = account("live-book", offset, 0);
+            let fees: T::AccountId = account("live-fees", offset, 0);
+            Markets::<T>::insert(
+                id,
+                MarketBook::open(id, BookKind::Baseline { epoch }, book, fees, B),
+            );
+            BaselineMarketOf::<T>::insert(epoch, id);
+        }
+        let epoch = bounds::RECENT_COHORT_SUMMARIES
+            .saturating_add(bounds::BASELINE_BOOKS)
+            .saturating_sub(1);
+        let id = MarketId::from(epoch).saturating_add(1);
         let book: T::AccountId = account("book", 0, 0);
         let fees: T::AccountId = account("fees", 0, 0);
         #[block]
         {
             Pallet::<T>::create_market(
                 admin_origin::<T>(),
-                1,
-                BookKind::Decision {
-                    proposal: 1,
-                    branch: Branch::Accept,
-                },
+                id,
+                BookKind::Baseline { epoch },
                 book,
                 fees,
                 B,
             )
             .expect("benchmark market creation succeeds");
         }
-        assert!(Markets::<T>::contains_key(1));
+        assert!(Markets::<T>::contains_key(id));
+        assert_eq!(BaselineMarketOf::<T>::count(), epoch.saturating_add(1));
     }
 
     #[benchmark]

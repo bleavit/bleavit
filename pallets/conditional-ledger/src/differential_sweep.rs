@@ -489,7 +489,7 @@ fn generated_sweep_vectors_match_real_pallet_housekeeping() {
                 .into_iter()
                 .rev()
                 .find_map(|record| match record.event {
-                    RuntimeEvent::Ledger(event) => Some(event),
+                    RuntimeEvent::ConditionalLedger(event) => Some(event),
                     _ => None,
                 })
                 .expect("sweep emits ledger event");

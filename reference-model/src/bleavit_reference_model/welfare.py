@@ -43,6 +43,26 @@ def floor_64x64(value) -> Decimal:
         return raw / Q64_SCALE
 
 
+def _unsigned_q64_div(numerator: Decimal, denominator: Decimal) -> Decimal:
+    """Mirror FixedU64x64::checked_div after 1e9-grid inputs enter Q64."""
+    numerator_raw = int(
+        (floor_fixed(numerator) * Q64_SCALE).to_integral_value(
+            rounding=ROUND_FLOOR
+        )
+    )
+    denominator_raw = int(
+        (floor_fixed(denominator) * Q64_SCALE).to_integral_value(
+            rounding=ROUND_FLOOR
+        )
+    )
+    if numerator_raw < 0 or denominator_raw <= 0:
+        raise ValueError(
+            "unsigned Q64 division needs a non-negative numerator "
+            "and positive denominator"
+        )
+    return Decimal((numerator_raw << 64) // denominator_raw) / Q64_SCALE
+
+
 def _log2(value: Decimal) -> Decimal:
     if value <= 0:
         raise ValueError("log2 domain")
@@ -68,7 +88,7 @@ def weighted_geometric(
         raise ValueError("values and weights must have identical MetricIds")
     with localcontext() as ctx:
         ctx.prec = WORK_PREC
-        total_weight = sum((_d(weights[key]) for key in weights), ZERO)
+        total_weight = sum((floor_fixed(weights[key]) for key in weights), ZERO)
         if total_weight <= 0:
             raise ValueError("weight sum must be positive")
         exponent = ZERO
@@ -76,7 +96,7 @@ def weighted_geometric(
             value = floor_fixed(_clamp(_d(values[metric_id])))
             weight = floor_fixed(_d(weights[metric_id]))
             if renormalize:
-                weight = weight / total_weight
+                weight = _unsigned_q64_div(weight, total_weight)
             term = floor_64x64(weight * _log2(max(value, _d(epsilon))))
             exponent += term
         return floor_fixed(_clamp(_exp2(exponent)))

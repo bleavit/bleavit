@@ -264,8 +264,7 @@ fn replay(row: &Value) -> (DecisionOutcome, u128) {
         .unwrap_or(0);
     let envelope = inputs
         .get("envelope_value")
-        .map(|value| exact_usdc(value, "envelope_value"))
-        .unwrap_or(0);
+        .map(|value| exact_usdc(value, "envelope_value"));
     let spendable_nav = inputs
         .get("spendable_nav")
         .map(|value| exact_usdc(value, "spendable_nav"))
@@ -281,9 +280,11 @@ fn replay(row: &Value) -> (DecisionOutcome, u128) {
         .expect("NAV cap multiplication fits")
         / 100;
     let prize = match class {
-        ProposalClass::Treasury => ask,
+        ProposalClass::Treasury => Some(ask),
         ProposalClass::Param => envelope,
-        ProposalClass::Code | ProposalClass::Meta => ask.max(envelope).max(nav_cap),
+        ProposalClass::Code | ProposalClass::Meta => {
+            envelope.map(|value| ask.max(value).max(nav_cap))
+        }
         ProposalClass::Constitutional => unreachable!("no Constitutional rows"),
     };
 
@@ -330,7 +331,7 @@ fn replay(row: &Value) -> (DecisionOutcome, u128) {
         gate_twaps,
         measured_depth,
         published_flow_per_day: None,
-        in_cap_prize: Some(prize),
+        in_cap_prize: prize,
         attestation_quorate: bool_input(inputs, "attestation_ok", true),
         constitution_queue_ok: bool_input(inputs, "queue_time_ok", true),
     };
@@ -400,7 +401,7 @@ fn decision_vectors_match_python_reference_model() {
     let scenarios = fixture["decision_scenarios"]
         .as_array()
         .expect("decision_scenarios family present");
-    assert_eq!(scenarios.len(), 21, "decision family cardinality drifted");
+    assert_eq!(scenarios.len(), 22, "decision family cardinality drifted");
     let mut replayed = BTreeSet::new();
 
     for row in scenarios {
@@ -420,5 +421,5 @@ fn decision_vectors_match_python_reference_model() {
             "duplicate scenario {name}"
         );
     }
-    assert_eq!(replayed.len(), 21, "decision replay executed-count drifted");
+    assert_eq!(replayed.len(), 22, "decision replay executed-count drifted");
 }

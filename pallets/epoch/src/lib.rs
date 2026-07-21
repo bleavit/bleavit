@@ -85,6 +85,14 @@ pub trait MarketAccess<AccountId> {
         rerun: bool,
         seed_plan: Option<pallet::PolSeedPlan>,
     ) -> Result<MarketSet, DispatchError>;
+    /// Prune the historical epoch-to-Baseline correlation only when the
+    /// matching cohort summary leaves the 32-entry FIFO (02 section 7.4).
+    /// The default keeps frame-only test adapters source-compatible; the
+    /// production runtime must override it with the epoch-authorized market
+    /// call.
+    fn prune_baseline_market(_epoch: EpochId) -> Result<(), DispatchError> {
+        Ok(())
+    }
     /// Register the one permitted decision extension against the existing
     /// books. If an exact fresh window cannot be exposed, the proposal must
     /// not be persisted as Extended (G-1).
@@ -2036,11 +2044,31 @@ pub mod pallet {
             }
         }
 
-        fn persist(mut state: EpochState<T::AccountId>) -> DispatchResult {
+        fn persist(state: EpochState<T::AccountId>) -> DispatchResult {
+            frame_support::storage::with_storage_layer(|| Self::persist_inner(state))
+        }
+
+        fn persist_inner(mut state: EpochState<T::AccountId>) -> DispatchResult {
             Self::reconcile_proposal_bonds(&state)?;
             state.try_state().map_err(Self::map_core_error)?;
             let checked = Self::checked_state(&state)?;
             Self::update_frozen_schedules(&state)?;
+
+            // 02 section 7.4 / 04 section 8.3: the market correlation and the
+            // cohort-history entry form one retention unit. Compare the old
+            // and checked bounded rings before either side is written, and
+            // keep the prune inside this persist transaction so any later
+            // failure restores both storages.
+            let old_recent = RecentCohortSummaries::<T>::get();
+            for summary in old_recent.iter() {
+                if !checked
+                    .recent
+                    .iter()
+                    .any(|retained| retained.epoch == summary.epoch)
+                {
+                    T::Market::prune_baseline_market(summary.epoch)?;
+                }
+            }
 
             let old_intake = IntakeProposals::<T>::iter_keys().collect::<Vec<_>>();
             let old_live = Proposals::<T>::iter_keys().collect::<Vec<_>>();

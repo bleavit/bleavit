@@ -298,8 +298,20 @@
     {
       "inputs": {
         "accept_full": "0.56",
+        "delta": "0.05",
+        "measured_liquidity": "1000000",
+        "reject_full_effective": "0.50"
+      },
+      "name": "undefined_param_prize_proxy",
+      "outcome": "Reject",
+      "reason": "SecuritySizing"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
         "attestation_ok": false,
         "delta": "0.05",
+        "envelope_value": "0",
         "proposal_class": "Code",
         "reject_full_effective": "0.50"
       },
@@ -311,6 +323,7 @@
       "inputs": {
         "accept_full": "0.56",
         "delta": "0.05",
+        "envelope_value": "0",
         "queue_time_ok": false,
         "reject_full_effective": "0.50"
       },
@@ -81087,6 +81100,59 @@
         "A": "0.705647413",
         "C": "0.904379942",
         "C_daily": "0.914793553",
+        "D_eff": "0.831250000",
+        "P": "0.758391065",
+        "S": "0.831250000",
+        "S_daily": "0.831250000",
+        "W": "0.000000000"
+      },
+      "settlement_with_self": "0.000000001"
+    },
+    {
+      "inputs": {
+        "a_components": {
+          "A01": "0.90",
+          "A02": "0.60"
+        },
+        "a_weights": {
+          "A01": "0.40",
+          "A02": "0.60"
+        },
+        "c_attested": {
+          "C03": "0.90"
+        },
+        "c_daily": {
+          "C01": "0.531441",
+          "C02": "1.0"
+        },
+        "c_onchain": {
+          "C01": "0.94",
+          "C02": "0.91"
+        },
+        "c_weights": {
+          "C01": "0.10",
+          "C02": "0.50",
+          "C03": "0.40"
+        },
+        "f": "0.96",
+        "hhi": "0.335",
+        "incident": "0.98",
+        "p_components": {
+          "P01": "0.80",
+          "P02": "0.70"
+        },
+        "p_weights": {
+          "P01": "0.60",
+          "P02": "0.40"
+        },
+        "phase": 2,
+        "u": "0.97"
+      },
+      "name": "full_pipeline_non_binary_daily_weights",
+      "outputs": {
+        "A": "0.705647413",
+        "C": "0.890751497",
+        "C_daily": "0.900000000",
         "D_eff": "0.831250000",
         "P": "0.758391065",
         "S": "0.831250000",

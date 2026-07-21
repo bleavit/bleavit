@@ -14,6 +14,7 @@ use conditional_ledger_core::{
     baseline as baseline_pos, position as pos, BaselineState, LedgerOrigin, LedgerState,
 };
 use frame_support::{
+    __private::metadata::{RuntimeMetadata, RuntimeMetadataPrefixed},
     assert_noop, assert_ok,
     traits::fungibles::{Inspect, Mutate},
 };
@@ -22,6 +23,8 @@ use futarchy_primitives::{
     keeper::CrankClass, kernel, Branch, FixedU64, GateType, MetricSpecVersion, PositionKind,
     ProposalId, ScalarSide,
 };
+use parity_scale_codec::Decode;
+use scale_info::TypeDef;
 
 type E = Error<Test>;
 
@@ -53,7 +56,7 @@ fn ledger_events() -> Vec<Event<Test>> {
     System::events()
         .into_iter()
         .filter_map(|r| match r.event {
-            RuntimeEvent::Ledger(e) => Some(e),
+            RuntimeEvent::ConditionalLedger(e) => Some(e),
             _ => None,
         })
         .collect()
@@ -69,6 +72,76 @@ fn cap_inputs() -> (u128, u128, Vec<(AccountId, u128)>, u128) {
         MockCumulativeDeposits::get(),
         MockDepCap::get(),
     )
+}
+
+#[test]
+fn metadata_exposes_exact_reachable_error_surface() {
+    let version = Test::metadata_versions()
+        .into_iter()
+        .filter(|version| matches!(version, 15 | 16))
+        .max()
+        .expect("stable2606 exposes V15 or V16 metadata");
+    let encoded = Test::metadata_at_version(version)
+        .expect("a reported runtime metadata version is constructible");
+    let prefixed = RuntimeMetadataPrefixed::decode(&mut &encoded[..])
+        .expect("runtime-generated metadata decodes");
+    let expected = [
+        "BadOrigin",
+        "UnknownVault",
+        "UnknownBaselineVault",
+        "WrongVaultState",
+        "BelowMinimum",
+        "ArithmeticOverflow",
+        "InsufficientPosition",
+        "TooManyPositions",
+        "InvalidScore",
+        "GateAlreadySettled",
+        "GateNotSettled",
+        "TryStateViolation",
+        "ReapNotDue",
+        "DepositFailed",
+        "SplitPaused",
+        "Frozen",
+        "FreezeOutOfBounds",
+        "FreezeRenewalExhausted",
+        "InflowCapExceeded",
+    ];
+
+    macro_rules! assert_error_surface {
+        ($metadata:expr) => {{
+            let pallet = $metadata
+                .pallets
+                .iter()
+                .find(|pallet| pallet.name == "ConditionalLedger")
+                .expect("ConditionalLedger pallet is present");
+            let error = pallet
+                .error
+                .as_ref()
+                .expect("ConditionalLedger error metadata exists");
+            let ty = $metadata
+                .types
+                .resolve(error.ty.id)
+                .expect("ConditionalLedger error type resolves");
+            let TypeDef::Variant(variants) = &ty.type_def else {
+                panic!("ConditionalLedger error metadata is not an enum")
+            };
+            let names = variants
+                .variants
+                .iter()
+                .map(|variant| variant.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(names, expected);
+        }};
+    }
+
+    match prefixed.1 {
+        RuntimeMetadata::V15(metadata) => assert_error_surface!(metadata),
+        RuntimeMetadata::V16(metadata) => assert_error_surface!(metadata),
+        metadata => panic!(
+            "requested V{version}, but runtime returned V{}",
+            metadata.version()
+        ),
+    }
 }
 
 fn assert_all_split_paths_proceed(pid: ProposalId, epoch: u32) {
