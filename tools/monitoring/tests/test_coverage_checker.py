@@ -60,7 +60,7 @@ class CoverageCheckerTests(unittest.TestCase):
         failures, rows, inventory = checker.validate(ROOT)
         self.assertEqual(failures, [])
         self.assertEqual(len(rows), 21)
-        self.assertEqual(len(inventory), 35)
+        self.assertEqual(len(inventory), 36)
 
     def test_relay_finality_row_is_bound_to_the_relay_monitor(self) -> None:
         _failures, rows, inventory = checker.validate(ROOT, exported=EXPORTED)
@@ -77,7 +77,14 @@ class CoverageCheckerTests(unittest.TestCase):
         relay = {
             name for name, entry in inventory.items() if entry["source"] == "relay-monitor"
         }
-        self.assertEqual(relay, set(relay_finality_monitor.RELAY_FAMILIES))
+        # The three alert-evaluated families plus the monitor-health gauge the
+        # BleavitRelayMonitorDisconnected rule reads. The gauge is deliberately
+        # NOT a RELAY_FAMILY: degrade() sets it to 0 rather than clearing it, so
+        # it stays loud when the families go absent (SQ-283 review, Finding 1).
+        self.assertEqual(
+            relay,
+            set(relay_finality_monitor.RELAY_FAMILIES) | {"bleavit_relay_monitor_connected"},
+        )
         self.assertTrue(relay <= set(relay_finality_monitor.SERIES))
 
     def test_relay_monitor_registry_is_checked_like_the_other_exporters(self) -> None:
@@ -96,8 +103,11 @@ class CoverageCheckerTests(unittest.TestCase):
             root = fixture_root(directory)
             path = root / "deploy" / "monitoring" / "prometheus" / "rules" / "bleavit-alerts.yml"
             document = path.read_text(encoding="utf-8")
+            # The Relay finality domain carries two rules (the stall detector and
+            # the monitor-health rule); reassign both so the domain is truly
+            # unbound and the "no alert rule" failure is what we exercise.
             path.write_text(
-                document.replace('domain: "Relay finality"', 'domain: "Keepers"', 1),
+                document.replace('domain: "Relay finality"', 'domain: "Keepers"'),
                 encoding="utf-8",
             )
             failures, _, _ = checker.validate(root, exported=EXPORTED)

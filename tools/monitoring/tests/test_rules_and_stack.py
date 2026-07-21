@@ -34,17 +34,31 @@ EXPECTED_EXPRESSIONS = {
     "BleavitDescriptorLeadTimeUncovered": "(bleavit_chain_pending_upgrade_age_blocks > (0.5 * bleavit_chain_descriptor_lead_time_blocks)) and on() (bleavit_release_monitor_covering_release == 0)",
     "BleavitReleaseChannelLagOrSecurityFlip": "bleavit_release_monitor_repoint_channel_lag_blocks > 600 or increase(bleavit_chain_release_channel_security_flips_total[5m]) > 0",
     "BleavitKeeperBudgetHigh": "bleavit_chain_keeper_budget_utilization_ratio > 0.8",
-    "BleavitRelayFinalityStalled": "bleavit_relay_finality_stagnation_seconds > 1800 and on() (bleavit_relay_best_block > bleavit_relay_finalized_block)",
+    "BleavitRelayFinalityStalled": "bleavit_relay_finality_stagnation_seconds > 1800 and (bleavit_relay_best_block > bleavit_relay_finalized_block)",
+    "BleavitRelayMonitorDisconnected": "bleavit_relay_monitor_connected == 0",
 }
 
 
 class RuleAndStackTests(unittest.TestCase):
-    def test_exactly_twenty_one_structured_alert_rules(self) -> None:
+    def test_every_spec_domain_has_a_structured_rule(self) -> None:
         document = yaml.safe_load(RULES.read_text(encoding="utf-8"))
         rules = [rule for group in document["groups"] for rule in group["rules"]]
-        self.assertEqual(len(rules), 21)
-        self.assertEqual(len({rule["alert"] for rule in rules}), 21)
-        self.assertEqual(len({rule["labels"]["domain"] for rule in rules}), 21)
+        # 21 frozen 12 §6.3 domains, 22 rules: the Relay finality domain carries
+        # two — the stall detector and BleavitRelayMonitorDisconnected, the
+        # monitor-health rule that keeps the stall alert from going silent when
+        # collection breaks (SQ-283 review, Finding 1).
+        self.assertEqual(len(rules), 22)
+        self.assertEqual(len({rule["alert"] for rule in rules}), 22)
+        domains = [rule["labels"]["domain"] for rule in rules]
+        spec_domains = {
+            row.domain
+            for row in check_alert_coverage.extract_rows(DOC_12.read_text(encoding="utf-8"))
+        }
+        # Every rule maps to a spec domain and every spec domain is covered.
+        self.assertEqual(set(domains), spec_domains)
+        self.assertEqual(len(spec_domains), 21)
+        duplicated = {domain for domain in domains if domains.count(domain) > 1}
+        self.assertEqual(duplicated, {"Relay finality"})
         for rule in rules:
             self.assertIn("expr", rule)
             self.assertRegex(rule["labels"]["runbook"], r"^RB-[A-Z]+$")

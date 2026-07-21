@@ -146,3 +146,10 @@ source = "relay-monitor"
 [[series]]
 name = "bleavit_relay_finality_stagnation_seconds"
 source = "relay-monitor"
+
+# Monitor-health gauge (set to 0 on every degrade, never cleared) so a broken
+# relay collector is loud in-band via BleavitRelayMonitorDisconnected. Not a
+# RELAY_FAMILY: it stays present when the three families go absent (SQ-283).
+[[series]]
+name = "bleavit_relay_monitor_connected"
+source = "relay-monitor"

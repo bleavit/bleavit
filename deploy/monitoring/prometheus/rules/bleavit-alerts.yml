@@ -169,11 +169,32 @@ groups:
       # byte-equal to the doc 12 §6.3 Relay finality row and to
       # relay_finality_monitor.DEFAULT_STAGNATION_WINDOW_SECONDS.
       # The second conjunct is "unfinalized work exists", deliberately not
-      # "best increased", so a fully halted relay is not silenced by it.
+      # "best increased", so a fully halted relay is not silenced by it. The
+      # `and` deliberately carries NO `on()`: default matching keeps the full
+      # label set (job/instance, __name__ aside), so both conjuncts must hold for
+      # the SAME relay target. With `on()` the empty match set let one RPC's
+      # stagnation pair with a different RPC's best-ahead-of-finalized across the
+      # (≥2) independent relay-finality targets (Finding 2, SQ-283 review).
       - alert: BleavitRelayFinalityStalled
-        expr: bleavit_relay_finality_stagnation_seconds > 1800 and on() (bleavit_relay_best_block > bleavit_relay_finalized_block)
+        expr: bleavit_relay_finality_stagnation_seconds > 1800 and (bleavit_relay_best_block > bleavit_relay_finalized_block)
         labels: {severity: warning, runbook: RB-KEEPER, domain: "Relay finality"}
         annotations:
           summary: "Relay finality: the relay finalized head has not advanced while unfinalized relay blocks are outstanding"
+          key_series: "relay best height, relay finalized height, finality stagnation seconds"
+          threshold: "finalized stagnant > 1800 s [VERIFY] while best is ahead"
+
+      # The stall rule above evaluates three series that degrade() clears to
+      # *absent* when the relay RPC breaks, so a broken-but-scrapeable collector
+      # would leave that rule with an empty vector and it would never fire — the
+      # opposite of fail-closed. This companion fires on the monitor's own health
+      # gauge, which degrade() sets to 0 and never clears, so a disconnected relay
+      # monitor is loud in-band and 12 §6.3's "a broken collector [is] loud" holds
+      # without an exporter change (Finding 1, SQ-283 review). Same domain/runbook
+      # as the stall rule; per-target through the gauge's own job/instance labels.
+      - alert: BleavitRelayMonitorDisconnected
+        expr: bleavit_relay_monitor_connected == 0
+        labels: {severity: warning, runbook: RB-KEEPER, domain: "Relay finality"}
+        annotations:
+          summary: "Relay finality: the independent relay monitor lost its relay RPC, so the finality series are absent and the stall alert cannot fire"
           key_series: "relay best height, relay finalized height, finality stagnation seconds"
           threshold: "finalized stagnant > 1800 s [VERIFY] while best is ahead"
