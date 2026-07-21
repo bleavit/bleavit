@@ -184,11 +184,12 @@ pub trait ReleaseChannelWriter {
         authorized_at: BlockNumber,
     ) -> DispatchResult;
     fn on_upgrade_applied(target_spec_version: u32) -> DispatchResult;
-    /// Relay-Abort status-quo clear (SQ-131). MUST be tolerant: if writer (b)
-    /// lawfully rewrote the channel while the upgrade was in flight, the
-    /// guard's own cleanup still proceeds — a mismatched channel is left
-    /// untouched and this returns Ok, never wedging `PendingUpgrade` (G-1).
+    /// Relay-Abort status-quo clear. Writer (b) cannot alter the guard-owned
+    /// indication, so this clears it unconditionally with the guard state.
     fn on_upgrade_aborted(target_spec_version: u32) -> DispatchResult;
+    /// The guard-owned `pending_authorized_at` and `URGENT_UPGRADE` projection
+    /// from the live channel, used to enforce I-30 in try-state.
+    fn pending_upgrade_indication() -> (BlockNumber, bool);
 }
 
 /// B1a's concrete `RuntimeCall` projection. It must walk the closed wrapper set
@@ -1472,10 +1473,8 @@ pub mod pallet {
                 ScheduledUpgrade::<T>::get() == Some(pending.hash),
                 Error::<T>::NoPendingUpgrade
             );
-            // Tolerant writer-(a) clear: bumps `updated_at`, clears
-            // `pending_authorized_at` and URGENT when the channel still shows
-            // this upgrade; a channel writer (b) rewrote meanwhile is left
-            // untouched so the status-quo cleanup can never wedge (G-1).
+            // Writer-(a) owns and unconditionally clears its pending channel
+            // indication together with the guard state (I-30, G-1).
             T::ReleaseChannel::on_upgrade_aborted(pending.target_spec_version)?;
             PendingUpgrade::<T>::kill();
             PendingUpgradeCheckpoint::<T>::kill();
@@ -1931,6 +1930,15 @@ pub mod pallet {
             {
                 return Err(TryRuntimeError::Other(
                     "execution guard pending upgrade/checkpoint mismatch",
+                ));
+            }
+            let pending_upgrade = PendingUpgrade::<T>::get().is_some();
+            let (pending_authorized_at, urgent_upgrade) =
+                T::ReleaseChannel::pending_upgrade_indication();
+            if pending_upgrade != (pending_authorized_at != 0) || pending_upgrade != urgent_upgrade
+            {
+                return Err(TryRuntimeError::Other(
+                    "execution guard I-30 release-channel indication mismatch",
                 ));
             }
             if !T::PendingOutflowSync::pending_outflows_synced() {

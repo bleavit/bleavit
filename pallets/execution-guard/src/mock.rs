@@ -148,6 +148,9 @@ pub mod pallet_test_dispatch {
     #[pallet::unbounded]
     pub type ReleaseLog<T: Config> = StorageValue<_, Vec<(u32, BlockNumber, bool)>, ValueQuery>;
 
+    #[pallet::storage]
+    pub type ReleasePending<T: Config> = StorageValue<_, (BlockNumber, bool), ValueQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -494,6 +497,7 @@ impl ReleaseChannelWriter for TestReleaseChannel {
         pallet_test_dispatch::ReleaseLog::<Test>::mutate(|items| {
             items.push((target_spec_version, authorized_at, false))
         });
+        pallet_test_dispatch::ReleasePending::<Test>::put((authorized_at, true));
         Ok(())
     }
     fn on_upgrade_applied(target_spec_version: u32) -> frame_support::dispatch::DispatchResult {
@@ -503,6 +507,7 @@ impl ReleaseChannelWriter for TestReleaseChannel {
         pallet_test_dispatch::ReleaseLog::<Test>::mutate(|items| {
             items.push((target_spec_version, 0, true))
         });
+        pallet_test_dispatch::ReleasePending::<Test>::put((0, false));
         Ok(())
     }
     fn on_upgrade_aborted(target_spec_version: u32) -> frame_support::dispatch::DispatchResult {
@@ -511,7 +516,12 @@ impl ReleaseChannelWriter for TestReleaseChannel {
         pallet_test_dispatch::ReleaseLog::<Test>::mutate(|items| {
             items.push((target_spec_version, 0, true))
         });
+        pallet_test_dispatch::ReleasePending::<Test>::put((0, false));
         Ok(())
+    }
+
+    fn pending_upgrade_indication() -> (BlockNumber, bool) {
+        pallet_test_dispatch::ReleasePending::<Test>::get()
     }
 }
 
@@ -1124,6 +1134,7 @@ pub fn reset_statics() {
     pallet_test_dispatch::DispatchFailure::<Test>::put(false);
     pallet_test_dispatch::EpochLog::<Test>::kill();
     pallet_test_dispatch::ReleaseLog::<Test>::kill();
+    pallet_test_dispatch::ReleasePending::<Test>::kill();
 }
 
 pub fn set_dispatch_failure(fails: bool) {

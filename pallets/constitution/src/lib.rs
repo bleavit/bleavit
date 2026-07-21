@@ -354,6 +354,8 @@ pub mod pallet {
         /// scoped constitution track rewrites the D-14 fixed layout on a
         /// canonical repoint, `min_supported_version` bump or key revocation;
         /// internal construction may use bare `ConstitutionalValues`.
+        /// Offsets 112–119 and `URGENT_UPGRADE` are preserved from storage:
+        /// they are owned exclusively by the execution guard (I-30).
         /// No other origin — including bootstrap Root — may dispatch this;
         /// writer (a) is the execution guard's [`Pallet::note_release_channel`].
         #[pallet::call_index(3)]
@@ -367,7 +369,10 @@ pub mod pallet {
                 authority.can_set_release_channel(),
                 DispatchError::BadOrigin
             );
-            Self::write_release_channel(bytes)
+            let channel = ReleaseChannel::<T>::get()
+                .merge_writer_b(bytes)
+                .map_err(Self::map_core_error)?;
+            Self::write_release_channel(channel.bytes)
         }
 
         /// `constitution.amend_registry` — amend one key's governance
@@ -525,7 +530,8 @@ pub mod pallet {
 
     impl<T: Config> Pallet<T> {
         /// 02 §12 writer (a): the execution guard's runtime-internal write
-        /// path (at `UpgradeAuthorized` and applied-upgrade detection).
+        /// path (at `UpgradeAuthorized`, applied-upgrade detection and relay
+        /// abort).
         /// Not an extrinsic — reachable only as a Rust call from a sibling
         /// pallet inside the runtime (A11/B6 wire it); still validates the
         /// frozen layout.

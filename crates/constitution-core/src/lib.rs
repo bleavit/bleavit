@@ -528,6 +528,24 @@ impl ReleaseChannel {
     pub fn flags(&self) -> u32 {
         le_u32_at(&self.bytes, RELEASE_CHANNEL_FLAGS.start)
     }
+
+    /// Apply a 02 §12 writer-(b) update without allowing it to overwrite the
+    /// execution guard's exclusive fields. The caller owns the release
+    /// descriptor, minimum-version/key-revocation tail and flag bits 0–1;
+    /// offsets 112–119 and flag bit 2 remain byte-for-byte guard-owned.
+    pub fn merge_writer_b(&self, bytes: [u8; RELEASE_CHANNEL_LEN]) -> Result<Self, Error> {
+        let caller = Self::new(bytes)?;
+        let mut merged = caller.bytes;
+        merged[RELEASE_CHANNEL_SPEC_VERSION.start..RELEASE_CHANNEL_PENDING_AUTHORIZED_AT.end]
+            .copy_from_slice(
+                &self.bytes
+                    [RELEASE_CHANNEL_SPEC_VERSION.start..RELEASE_CHANNEL_PENDING_AUTHORIZED_AT.end],
+            );
+        let flags = (caller.flags() & !RELEASE_CHANNEL_FLAG_URGENT_UPGRADE)
+            | (self.flags() & RELEASE_CHANNEL_FLAG_URGENT_UPGRADE);
+        merged[RELEASE_CHANNEL_FLAGS].copy_from_slice(&flags.to_le_bytes());
+        Self::new(merged)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
@@ -767,7 +785,7 @@ impl ConstitutionState {
         bytes: [u8; RELEASE_CHANNEL_LEN],
     ) -> Result<(), Error> {
         ensure!(origin.can_set_release_channel(), Error::BadOrigin);
-        self.release_channel = ReleaseChannel::new(bytes)?;
+        self.release_channel = self.release_channel.merge_writer_b(bytes)?;
         Ok(())
     }
 
@@ -2609,6 +2627,21 @@ mod tests {
             state.dispatch_set_release_channel(ConstitutionOrigin::ConstitutionalValues, good),
             Ok(())
         );
+
+        state.release_channel = channel;
+        let mut writer_b = good;
+        writer_b[108..112].copy_from_slice(&43u32.to_le_bytes());
+        writer_b[112..116].copy_from_slice(&99u32.to_le_bytes());
+        writer_b[116..120].copy_from_slice(&0u32.to_le_bytes());
+        writer_b[164..168].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(
+            state.dispatch_set_release_channel(ConstitutionOrigin::ConstitutionalValues, writer_b,),
+            Ok(())
+        );
+        assert_eq!(state.release_channel.updated_at(), 43);
+        assert_eq!(state.release_channel.spec_version(), 7);
+        assert_eq!(state.release_channel.pending_authorized_at(), 11);
+        assert_eq!(state.release_channel.flags(), 6);
     }
 
     #[test]

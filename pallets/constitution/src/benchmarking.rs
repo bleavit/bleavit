@@ -110,7 +110,9 @@ mod benches {
         #[extrinsic_call]
         _(origin as T::RuntimeOrigin, bytes);
 
-        assert_eq!(crate::pallet::ReleaseChannel::<T>::get().spec_version(), 3);
+        let channel = crate::pallet::ReleaseChannel::<T>::get();
+        assert_eq!(channel.updated_at(), 9);
+        assert_eq!(channel.spec_version(), 0);
     }
 
     #[benchmark]

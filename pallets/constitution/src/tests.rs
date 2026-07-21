@@ -121,10 +121,7 @@ fn release_channel_raw_key_and_value_layout_are_frozen() {
             RELEASE_CHANNEL_STORAGE_KEY
         );
         // Raw value: exactly 168 bytes, no SCALE length prefix, offset-parsable.
-        assert_ok!(Constitution::set_release_channel(
-            RuntimeOrigin::signed(VALUES_ACC),
-            channel_bytes()
-        ));
+        assert_ok!(Constitution::note_release_channel(channel_bytes()));
         let raw = sp_io::storage::get(&RELEASE_CHANNEL_STORAGE_KEY)
             .expect("release channel exists under the frozen raw key");
         assert_eq!(raw.len(), RELEASE_CHANNEL_LEN);
@@ -664,16 +661,29 @@ fn set_release_channel_is_constitutional_values_only() {
             Constitution::set_release_channel(RuntimeOrigin::none(), channel_bytes()),
             DispatchError::BadOrigin
         );
+
+        // Seed writer (a)'s fields, then have writer (b) attempt to erase and
+        // replace them while changing its own descriptor metadata.
+        assert_ok!(Constitution::note_release_channel(channel_bytes()));
+        let mut caller = channel_bytes();
+        caller[108..112].copy_from_slice(&43u32.to_le_bytes());
+        caller[112..116].copy_from_slice(&99u32.to_le_bytes());
+        caller[116..120].copy_from_slice(&0u32.to_le_bytes());
+        caller[164..168].copy_from_slice(&2u32.to_le_bytes());
         assert_ok!(Constitution::set_release_channel(
             RuntimeOrigin::signed(VALUES_ACC),
-            channel_bytes()
+            caller
         ));
-        assert_eq!(ReleaseChannel::<Test>::get().spec_version(), 7);
+        let stored = ReleaseChannel::<Test>::get();
+        assert_eq!(stored.updated_at(), 43);
+        assert_eq!(stored.spec_version(), 7);
+        assert_eq!(stored.pending_authorized_at(), 11);
+        assert_eq!(stored.flags(), 6);
         assert_eq!(
             last_event(),
             RuntimeEvent::Constitution(Event::ReleaseChannelSet {
                 spec_version: 7,
-                updated_at: 42,
+                updated_at: 43,
             })
         );
     });
