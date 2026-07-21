@@ -1,6 +1,6 @@
 {
   "schema": "bleavit.critical-surface.v1",
-  "integration_contract_version": 5,
+  "integration_contract_version": 6,
   "description": "Critical chain/frontend surface frozen by architecture 02 sections 3, 6-9, and 12.",
   "release_blockers": [
     {
@@ -382,7 +382,7 @@
           "Blake2_128Concat"
         ],
         "key": "u64",
-        "value": "conditional_ledger_core::VaultInfo{escrowed:u128,branches:[conditional_ledger_core::BranchSupply{usdc:u128,scalar_sets:u128,gate_sets:[u128;2]};2],state:futarchy_primitives::VaultStateenum[Open=0|Resolved=1(futarchy_primitives::Branchenum[Accept=0|Reject=1])|ScalarSettled=2{winner:futarchy_primitives::Branchenum[Accept=0|Reject=1],s:futarchy_primitives::FixedU64(u64)}|Voided=3],gate_outcomes:[Optionenum[None=0|Some=1(bool)];2],spec:u16}"
+        "value": "conditional_ledger_core::VaultInfo{escrowed:u128,branches:[conditional_ledger_core::BranchSupply{usdc:u128,scalar_sets:u128,gate_sets:[u128;2]};2],state:futarchy_primitives::VaultStateenum[Open=0|Resolved=1(futarchy_primitives::Branchenum[Accept=0|Reject=1])|ScalarSettled=2{winner:futarchy_primitives::Branchenum[Accept=0|Reject=1],s:futarchy_primitives::FixedU64(u64)}|Voided=3|BaselineSettled=4{s:futarchy_primitives::FixedU64(u64)}],gate_outcomes:[Optionenum[None=0|Some=1(bool)];2],spec:u16}"
       }
     },
     {
@@ -729,7 +729,7 @@
       "citation": "02 §8; 02 §13",
       "layout": {
         "type": "u32",
-        "value": "0x05000000"
+        "value": "0x06000000"
       }
     },
     {

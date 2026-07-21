@@ -56,7 +56,7 @@ use crate::{
     Referenda, Runtime, RuntimeCall, RuntimeGenesisConfig, RuntimeOrigin, Scheduler, Session, Sudo,
     System, Timestamp, TrackOrigins, TransactionPayment, TxExtension, UncheckedExtrinsic, Utility,
     Vesting, Welfare, XcmpQueue, FEE_VIT_USDC_RATE_KEY, MILLISECS_PER_BLOCK, SS58_PREFIX,
-    USDC_DECIMALS, USDC_LOCATION_ENCODED, VERSION, VIT_DECIMALS,
+    TRANSACTION_VERSION, USDC_DECIMALS, USDC_LOCATION_ENCODED, VERSION, VIT_DECIMALS,
 };
 
 trait SameType<Rhs> {}
@@ -1783,13 +1783,14 @@ fn identity_and_version_pins_match_the_integration_contract() {
     assert_eq!(VERSION.spec_name.as_ref(), "bleavit");
     assert_eq!(VERSION.impl_name.as_ref(), "bleavit-runtime");
     assert_eq!(VERSION.spec_version, 1);
-    assert_eq!(
-        VERSION.transaction_version,
-        futarchy_primitives::INTEGRATION_CONTRACT_VERSION
-    );
-    // The XCM identity spelling originated in contract v4; v5 retains it while
-    // changing Treasury class-floor and gate-market semantics.
-    assert_eq!(VERSION.transaction_version, 5);
+    // 02 §13: `transaction_version` and `INTEGRATION_CONTRACT_VERSION` are
+    // **independent** counters (SQ-102, contract v6). The SDK field denotes
+    // dispatchable compatibility embedded in signed-transaction validity, so an
+    // additive contract bump MUST NOT move it. Pinning both separately is what
+    // makes a future re-coupling fail here.
+    assert_eq!(VERSION.transaction_version, TRANSACTION_VERSION);
+    assert_eq!(VERSION.transaction_version, 1);
+    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 6);
     assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
@@ -4892,11 +4893,11 @@ fn ratification_views_agree_and_never_understate_an_unratified_code_upgrade() {
                 .map(|view| view.ratification)
         };
 
-        // A CODE class requires ratification (06 §2.2); with no record on chain
-        // the summary must not claim otherwise, and must equal the guard view.
+        // A CODE class requires ratification (06 §2.2); with no passed record
+        // on chain both views truthfully report only that observable fact.
         assert_eq!(
             summary_status(PID),
-            Some(RatificationStatus::Failed { referendum: 0 }),
+            Some(RatificationStatus::NoPassedRecord),
         );
         assert_eq!(summary_status(PID), queue_status(PID));
 
@@ -12967,6 +12968,7 @@ fn view_quote_matches_core_rounding_and_fails_closed() {
         .expect("well inside the executable LMSR domain");
         let actual = crate::views::quote(MARKET_ID, TradeSide::BuyLong, amount);
         assert_eq!(actual, expected);
+        assert!(actual.evaluable);
         assert!(actual.within_domain);
         assert!(actual.cost > 0);
         assert!(actual.fee > 0);
@@ -12982,6 +12984,7 @@ fn view_quote_matches_core_rounding_and_fails_closed() {
         .expect("the numerical domain extends beyond the per-trade bound");
         let actual_over = crate::views::quote(MARKET_ID, TradeSide::BuyLong, over_limit);
         assert_eq!(actual_over, expected_over);
+        assert!(actual_over.evaluable);
         // 02 §4 makes this flag only the post-trade LMSR domain predicate;
         // 11 §11.5 P-1 binds the FE to detect the separate trade-size row.
         assert!(actual_over.within_domain);
@@ -12996,6 +12999,7 @@ fn view_quote_matches_core_rounding_and_fails_closed() {
                 p_after_1e9: FixedU64(0),
                 max_trade: 0,
                 within_domain: false,
+                evaluable: false,
             }
         );
         assert_eq!(
@@ -13006,6 +13010,7 @@ fn view_quote_matches_core_rounding_and_fails_closed() {
                 p_after_1e9: FixedU64(0),
                 max_trade,
                 within_domain: false,
+                evaluable: false,
             }
         );
     });
@@ -13058,6 +13063,7 @@ fn view_quote_and_buy_share_closed_registered_window_preflight() {
                 p_after_1e9: FixedU64(0),
                 max_trade,
                 within_domain: false,
+                evaluable: false,
             }
         );
         assert_noop!(
@@ -13115,7 +13121,7 @@ fn view_account_positions_uses_vault_order_and_truncates_protocol_accounts() {
 
 #[test]
 fn view_account_positions_includes_baseline_instruments_and_terminal_state() {
-    use futarchy_primitives::{Branch, FixedU64, ScalarSide, VaultState};
+    use futarchy_primitives::{FixedU64, ScalarSide, VaultState};
     use pallet_conditional_ledger::core_ledger::{BaselineState, BaselineVaultInfo};
 
     development_ext().execute_with(|| {
@@ -13150,8 +13156,7 @@ fn view_account_positions_includes_baseline_instruments_and_terminal_state() {
             ]
         );
         assert!(positions.iter().all(|view| view.vault_state
-            == VaultState::ScalarSettled {
-                winner: Branch::Accept,
+            == VaultState::BaselineSettled {
                 s: FixedU64(700_000_000),
             }));
     });
@@ -13287,11 +13292,12 @@ fn view_welfare_current_returns_latest_finalized_breached_snapshot() {
         assert_eq!(sentinel.epoch, CURRENT_EPOCH);
         assert_eq!(sentinel.spec_version, 0);
         assert_eq!(sentinel.w_current_1e9, FixedU64(0));
+        assert!(!sentinel.active_spec_available);
         assert!(sentinel.reserve_flag);
 
         pallet_welfare::MetricSpecs::<Runtime>::insert(
-            2,
-            pallet_welfare::pallet::BoundedSpecSet::try_from(vec![spec(2, 0)])
+            0,
+            pallet_welfare::pallet::BoundedSpecSet::try_from(vec![spec(0, 0)])
                 .expect("one metric spec fits"),
         );
         pallet_welfare::MetricSpecs::<Runtime>::insert(
@@ -13299,14 +13305,18 @@ fn view_welfare_current_returns_latest_finalized_breached_snapshot() {
             pallet_welfare::pallet::BoundedSpecSet::try_from(vec![spec(3, 3)])
                 .expect("one future metric spec fits"),
         );
+        let selected_without_snapshot = crate::views::welfare_current();
+        assert_eq!(selected_without_snapshot.spec_version, 0);
+        assert!(selected_without_snapshot.active_spec_available);
+        assert_eq!(selected_without_snapshot.w_current_1e9, FixedU64(0));
         // Production can only record closed epochs (05 §4.6). Keep an older
         // snapshot to prove the view deterministically selects the greatest
         // finalized epoch for the canonical active spec.
         pallet_welfare::Snapshots::<Runtime>::insert(
-            (0, 2),
+            (0, 0),
             pallet_welfare::pallet::StoredSnapshot {
                 epoch: 0,
-                spec_version: 2,
+                spec_version: 0,
                 s_pillar: FixedU64(1),
                 c_onchain: FixedU64(2),
                 c_attested: FixedU64(3),
@@ -13319,10 +13329,10 @@ fn view_welfare_current_returns_latest_finalized_breached_snapshot() {
             },
         );
         pallet_welfare::Snapshots::<Runtime>::insert(
-            (LATEST_FINALIZED_EPOCH, 2),
+            (LATEST_FINALIZED_EPOCH, 0),
             pallet_welfare::pallet::StoredSnapshot {
                 epoch: LATEST_FINALIZED_EPOCH,
-                spec_version: 2,
+                spec_version: 0,
                 s_pillar: FixedU64(101),
                 c_onchain: FixedU64(102),
                 c_attested: FixedU64(103),
@@ -13344,12 +13354,13 @@ fn view_welfare_current_returns_latest_finalized_breached_snapshot() {
         );
         assert!(!pallet_welfare::Snapshots::<Runtime>::contains_key((
             CURRENT_EPOCH,
-            2
+            0
         )));
 
         let view = crate::views::welfare_current();
         assert_eq!(view.epoch, LATEST_FINALIZED_EPOCH);
-        assert_eq!(view.spec_version, 2);
+        assert_eq!(view.spec_version, 0);
+        assert!(view.active_spec_available);
         assert_eq!(view.s_pillar_1e9, FixedU64(101));
         assert_eq!(view.c_onchain_1e9, FixedU64(102));
         assert_eq!(view.c_attested_1e9, FixedU64(103));
@@ -13374,11 +13385,11 @@ fn view_welfare_current_returns_latest_finalized_breached_snapshot() {
             None,
             "05 §4.6 / I-16 qualification must fail closed on the latest activation tie"
         );
-        // 02 §3 and 05 §4.6 require the runtime view to use that same
-        // canonical selector. Until the open encoding question is resolved,
-        // sentinel spec_version 0 means "no active spec".
+        // Contract v6 distinguishes selector failure from legal active version
+        // zero with an explicit availability bit.
         let ambiguous = crate::views::welfare_current();
         assert_eq!(ambiguous.spec_version, 0);
+        assert!(!ambiguous.active_spec_available);
         assert_eq!(ambiguous.w_current_1e9, FixedU64(0));
         assert_eq!(ambiguous.s_pillar_1e9, FixedU64(0));
         assert!(!ambiguous.s_breached);
@@ -13433,16 +13444,23 @@ fn view_params_converts_live_records_in_request_order() {
             ]
         );
         assert_eq!(rows[0].max_delta, 30_240);
+        assert_eq!((rows[0].min_next, rows[0].max_next), (272_160, 332_640));
         assert_eq!(rows[0].cooldown_blocks, 604_800);
         assert_eq!(rows[0].class, ProposalClass::Meta);
         assert_eq!(rows[1].value, 5);
         assert_eq!(rows[1].max_delta, 2);
+        assert_eq!((rows[1].min_next, rows[1].max_next), (3, 10));
         assert_eq!(rows[1].cooldown_blocks, 302_400);
         assert_eq!(rows[1].last_change, 99);
         assert_eq!(rows[1].class, ProposalClass::Param);
         assert_eq!(rows[2].max_delta, 2);
+        assert_eq!((rows[2].min_next, rows[2].max_next), (3, 7));
         assert_eq!(rows[2].class, ProposalClass::Meta);
         assert_eq!(rows[3].max_delta, 0);
+        assert_eq!(
+            (rows[3].min_next, rows[3].max_next),
+            (rows[3].min, rows[3].max)
+        );
         assert_eq!(rows[3].cooldown_blocks, 0);
         assert_eq!(rows[3].class, ProposalClass::Constitutional);
         assert_eq!(rows[4].class, ProposalClass::Treasury);
@@ -13471,7 +13489,7 @@ fn view_params_converts_live_records_in_request_order() {
 }
 
 #[test]
-fn view_params_projects_factor_delta_conservatively() {
+fn view_params_projects_factor_delta_conservatively_and_exactly() {
     use pallet_constitution::{key16, MaxDelta};
 
     development_ext().execute_with(|| {
@@ -13501,6 +13519,10 @@ fn view_params_projects_factor_delta_conservatively() {
         assert_eq!(view.as_slice()[0].max_delta, downward.min(upward));
         assert_eq!(view.as_slice()[0].max_delta, downward);
         assert!(view.as_slice()[0].max_delta < upward);
+        assert_eq!(value, 100_800);
+        assert_eq!(record.max.as_u128(), 432_000);
+        assert_eq!(view.as_slice()[0].min_next, 50_400);
+        assert_eq!(view.as_slice()[0].max_next, 201_600);
     });
 }
 
@@ -13758,9 +13780,8 @@ fn view_proposal_summaries_sorts_and_joins_passed_ratification() {
         assert_eq!(view.as_slice()[1].maturity, None);
         // Ratification is class-discriminated, never a blanket `NotRequired`:
         // PARAM/TREASURY need no values referendum (06 §2.2), but the seeded
-        // CODE proposal at id 4 has no `Ratifications` record, so it carries
-        // the guard's fail-closed spelling — the same value `execution_queue`
-        // reports for it.
+        // CODE proposal at id 4 has no passed `Ratifications` record, so it
+        // carries the same agnostic spelling as `execution_queue`.
         assert_eq!(
             view.as_slice()[1].ratification,
             RatificationStatus::NotRequired
@@ -13772,7 +13793,7 @@ fn view_proposal_summaries_sorts_and_joins_passed_ratification() {
         assert_eq!(view.as_slice()[3].class, ProposalClass::Code);
         assert_eq!(
             view.as_slice()[3].ratification,
-            RatificationStatus::Failed { referendum: 0 }
+            RatificationStatus::NoPassedRecord
         );
     });
 }

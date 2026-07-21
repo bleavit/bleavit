@@ -1,13 +1,13 @@
-//! Read-only assembly for the contract-v5 `FutarchyApi` surface (02 §3-§4).
+//! Read-only assembly for the contract-v6 `FutarchyApi` surface (02 §3-§4).
 
 use alloc::vec::Vec;
 
 use frame_support::traits::{fungibles::Inspect, Get};
 use futarchy_primitives::{
-    bounds, AccountId as ViewAccountId, Balance, BoundedVec, Branch, CohortSummaryView,
-    DecisionStatsView, EpochStatusView, FixedU64, MarketId, NavView, OracleRoundView, ParamKey,
-    ParamView, PositionView, ProposalClass, ProposalId, ProposalSummaryView, QueuedExecutionView,
-    QuoteView, RatificationStatus, TradeSide, VaultState, WelfareView,
+    bounds, AccountId as ViewAccountId, Balance, BoundedVec, CohortSummaryView, DecisionStatsView,
+    EpochStatusView, FixedU64, MarketId, NavView, OracleRoundView, ParamKey, ParamView,
+    PositionView, ProposalClass, ProposalId, ProposalSummaryView, QueuedExecutionView, QuoteView,
+    RatificationStatus, TradeSide, VaultState, WelfareView,
 };
 
 use crate::{usdc_location, AccountId, ForeignAssets, Runtime};
@@ -29,9 +29,8 @@ pub fn epoch_status() -> EpochStatusView {
 /// proposal: `Ratifications` is written only by the `RatifyOrigin`-gated
 /// `ratify` call, so a present record is `Passed`; a class that needs no
 /// values ratification is `NotRequired`; and a class that requires it with no
-/// record on chain is the guard's fail-closed `Failed { referendum: 0 }` — the
-/// 06 §2.2 R-1 execute precondition is unmet, and G-1 forbids rendering that
-/// as `NotRequired` (which would read as "no ratification needed").
+/// record on chain is `NoPassedRecord`. That spelling deliberately makes no
+/// claim about a referendum lifecycle that the guard cannot observe.
 pub fn proposal_summaries() -> BoundedVec<ProposalSummaryView, { bounds::MAX_PROPOSAL_SUMMARIES }> {
     let mut proposals = pallet_epoch::Proposals::<Runtime>::iter_values().collect::<Vec<_>>();
     proposals.sort_unstable_by_key(|proposal| proposal.id);
@@ -48,7 +47,7 @@ pub fn proposal_summaries() -> BoundedVec<ProposalSummaryView, { bounds::MAX_PRO
             None if !pallet_execution_guard::requires_ratification(proposal.class) => {
                 RatificationStatus::NotRequired
             }
-            None => RatificationStatus::Failed { referendum: 0 },
+            None => RatificationStatus::NoPassedRecord,
         };
         if out
             .try_push(ProposalSummaryView {
@@ -147,14 +146,17 @@ fn quote_sentinel(max_trade: Balance) -> QuoteView {
         p_after_1e9: FixedU64(0),
         max_trade,
         within_domain: false,
+        evaluable: false,
     }
 }
 
 /// Assemble `FutarchyApi::quote` per 02 §3/§4 and 04 §4/§6.
-/// Missing, trade-inadmissible, overflowing, inventory-invalid, or
-/// out-of-domain books use the G-1 zero sentinel; an existing book retains its
-/// real `b/4` maximum. The pallet-owned preflight is the same predicate called
-/// by `buy`/`sell`, including registered-window expiry (04 §6.4).
+/// Missing, trade-inadmissible, overflowing, or inventory-invalid books use
+/// the G-1 zero sentinel with `evaluable = false`; an existing book retains
+/// its real `b/4` maximum. Successfully computed out-of-domain quotes retain
+/// their real values with `evaluable = true` and `within_domain = false`. The
+/// pallet-owned preflight is the same predicate called by `buy`/`sell`,
+/// including registered-window expiry (04 §6.4).
 pub fn quote(market: MarketId, side: TradeSide, amount: Balance) -> QuoteView {
     let Some(book) = pallet_market::Markets::<Runtime>::get(market) else {
         return quote_sentinel(0);
@@ -222,18 +224,12 @@ pub fn account_positions(
         let Some(vault) = pallet_conditional_ledger::BaselineVaults::<Runtime>::get(epoch) else {
             continue;
         };
-        // 02 §4 freezes PositionView to proposal `VaultState`, while 03 §2.3
-        // gives Baseline vaults the distinct `BaselineState`. Open is exact;
-        // for Settled, preserve terminality and score with Accept as a
-        // representation-only sentinel. Consumers MUST ignore `winner` for a
-        // `PositionId::Baseline` because Baseline instruments have no branch.
+        // Contract v6 gives Baseline settlement a branch-free projection: a
+        // Baseline instrument has no winning proposal branch to publish.
         let state = match vault.state {
             pallet_conditional_ledger::core_ledger::BaselineState::Open => VaultState::Open,
             pallet_conditional_ledger::core_ledger::BaselineState::Settled(s) => {
-                VaultState::ScalarSettled {
-                    winner: Branch::Accept,
-                    s,
-                }
+                VaultState::BaselineSettled { s }
             }
         };
         for position in pallet_conditional_ledger::core_ledger::baseline_positions(epoch) {
@@ -258,7 +254,12 @@ pub fn execution_queue() -> BoundedVec<QueuedExecutionView, { bounds::MAX_LIVE_P
     out
 }
 
-fn welfare_sentinel(epoch: u32, spec_version: u16, reserve_flag: bool) -> WelfareView {
+fn welfare_sentinel(
+    epoch: u32,
+    spec_version: u16,
+    reserve_flag: bool,
+    active_spec_available: bool,
+) -> WelfareView {
     WelfareView {
         epoch,
         spec_version,
@@ -273,6 +274,7 @@ fn welfare_sentinel(epoch: u32, spec_version: u16, reserve_flag: bool) -> Welfar
         s_breached: false,
         c_breached: false,
         reserve_flag,
+        active_spec_available,
     }
 }
 
@@ -280,9 +282,8 @@ fn welfare_sentinel(epoch: u32, spec_version: u16, reserve_flag: bool) -> Welfar
 /// Qualification and this view share the constitution's canonical active-spec
 /// selector, including its fail-closed `None` on a latest-activation tie. Per
 /// 02 §3 and 05 §4.6, two surfaces must never name different active specs.
-/// `spec_version: 0` in the G-1 sentinel means "no active spec"; that lossy
-/// encoding remains an open contract question, so this view does not invent a
-/// second encoding. The latest finalized snapshot for that spec is selected by
+/// `active_spec_available` distinguishes no active spec from the legal active
+/// version zero. The latest finalized snapshot for that spec is selected by
 /// a deterministic O(`MAX_SNAPSHOTS`) scan: production rejects snapshots for
 /// `epoch >= CurrentEpoch`, and `WelfareView.epoch` names the closed epoch whose
 /// pillars and gate flags are returned. A missing finalized snapshot keeps the
@@ -298,7 +299,7 @@ pub fn welfare_current() -> WelfareView {
             AccountId,
         >>::active_metric_spec_version()
     else {
-        return welfare_sentinel(current_epoch, 0, reserve_flag);
+        return welfare_sentinel(current_epoch, 0, reserve_flag, false);
     };
     let Some(latest_finalized_epoch) = pallet_welfare::Snapshots::<Runtime>::iter_keys()
         .filter_map(|(epoch, version)| {
@@ -306,7 +307,7 @@ pub fn welfare_current() -> WelfareView {
         })
         .max()
     else {
-        return welfare_sentinel(current_epoch, spec_version, reserve_flag);
+        return welfare_sentinel(current_epoch, spec_version, reserve_flag, true);
     };
     match pallet_welfare::Pallet::<Runtime>::welfare_state().current_view(
         latest_finalized_epoch,
@@ -314,17 +315,17 @@ pub fn welfare_current() -> WelfareView {
         reserve_flag,
     ) {
         Ok(view) => view,
-        Err(_) => welfare_sentinel(current_epoch, spec_version, reserve_flag),
+        Err(_) => welfare_sentinel(current_epoch, spec_version, reserve_flag, true),
     }
 }
 
 /// Assemble `FutarchyApi::params` per 02 §3/§4 and 13 reading rule 7.
 /// Unknown keys are skipped and found keys retain input order (including
-/// duplicates). `max_delta` is the conservative bidirectional absolute step
-/// from the current value, as single-homed in
-/// `ParamRecord::max_delta_allowance`; zero means no per-step rule. Malformed
-/// records are skipped rather than presented as unbounded. Cooldowns use the
-/// live `epoch.length`, saturating at `u32::MAX`.
+/// duplicates). `max_delta` is the conservative symmetric projection, while
+/// `min_next`/`max_next` are the exact inclusive interval single-homed in
+/// `ParamRecord::admissible_next_interval`. Malformed records are skipped
+/// rather than presented as unbounded. Cooldowns use the live `epoch.length`,
+/// saturating at `u32::MAX`.
 pub fn params(
     keys: BoundedVec<ParamKey, { bounds::MAX_PARAM_KEYS }>,
 ) -> BoundedVec<ParamView, { bounds::MAX_PARAM_KEYS }> {
@@ -340,6 +341,9 @@ pub fn params(
             continue;
         };
         let Ok(max_delta) = record.max_delta_allowance() else {
+            continue;
+        };
+        let Ok((min_next, max_next)) = record.admissible_next_interval() else {
             continue;
         };
         let cooldown_blocks = if record.cooldown_epochs == 0 {
@@ -360,6 +364,8 @@ pub fn params(
                 cooldown_blocks,
                 last_change: record.last_change_block,
                 class: record.class.as_proposal_class(),
+                min_next,
+                max_next,
             })
             .is_err()
         {
@@ -369,7 +375,7 @@ pub fn params(
     out
 }
 
-/// Assemble contract-v5 `FutarchyApi::nav` per 02 §3/§4 and 08
+/// Assemble contract-v6 `FutarchyApi::nav` per 02 §3/§4 and 08
 /// §1.1/§1.2/§4.1. POL includes both proposal and dedicated Baseline
 /// lines. Insurance comes from the actual INSURANCE USDC custody account.
 pub fn nav() -> NavView {

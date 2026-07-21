@@ -111,7 +111,12 @@ pub const SS58_PREFIX: u16 = chain_identity::SS58_PREFIX;
 pub const RUNTIME_SPEC_NAME: &[u8] = b"bleavit";
 pub const RUNTIME_IMPL_NAME: &[u8] = b"bleavit-runtime";
 pub const RUNTIME_SPEC_VERSION: u32 = 1;
-pub const TRANSACTION_VERSION: u32 = futarchy_primitives::INTEGRATION_CONTRACT_VERSION;
+/// SDK dispatchable-compatibility counter, deliberately **independent** of
+/// `INTEGRATION_CONTRACT_VERSION` (02 §13; SQ-102, contract v6). It denotes
+/// compatibility of existing dispatchables as embedded in signed-transaction
+/// validity, so an additive contract bump MUST NOT move it. Re-baselined to 1
+/// pre-genesis; the SDK forbids this counter ever decreasing after genesis.
+pub const TRANSACTION_VERSION: u32 = 1;
 pub const VIT_DECIMALS: u8 = currency::VIT_DECIMALS;
 pub const USDC_DECIMALS: u8 = currency::USDC_DECIMALS;
 
@@ -123,9 +128,10 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_version: 1,
     impl_version: 0,
     apis: apis::RUNTIME_API_VERSIONS,
-    // `runtime_version` requires a literal; an identity test pins this to the
-    // imported `INTEGRATION_CONTRACT_VERSION` (5).
-    transaction_version: 5,
+    // `runtime_version` requires a literal; an identity test pins this to
+    // `TRANSACTION_VERSION` and asserts it is independent of the contract
+    // version (02 §13; SQ-102).
+    transaction_version: 1,
     system_version: 1,
 };
 

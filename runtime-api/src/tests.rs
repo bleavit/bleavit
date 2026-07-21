@@ -98,7 +98,7 @@ fn proposal_summary() -> ProposalSummaryView {
         gate_markets: Some([23, 24, 25, 26]),
         decide_at: 303,
         maturity: Some(404),
-        ratification: RatificationStatus::Pending { referendum: 9 },
+        ratification: RatificationStatus::NoPassedRecord,
     }
 }
 
@@ -109,6 +109,7 @@ fn quote(market: u64, side: TradeSide, amount: u128) -> QuoteView {
         p_after_1e9: FixedU64(510_000_000),
         max_trade: 8_000_000,
         within_domain: side == TradeSide::BuyLong,
+        evaluable: true,
     }
 }
 
@@ -183,6 +184,7 @@ fn welfare() -> WelfareView {
         s_breached: false,
         c_breached: true,
         reserve_flag: false,
+        active_spec_available: true,
     }
 }
 
@@ -196,6 +198,8 @@ fn param(key: ParamKey) -> ParamView {
         cooldown_blocks: 20,
         last_change: 300,
         class: ProposalClass::Param,
+        min_next: 45,
+        max_next: 55,
     }
 }
 

@@ -180,12 +180,10 @@ pub struct ParamRecord {
 
 impl ParamRecord {
     /// Conservative absolute step represented by this record's current
-    /// max-delta rule in both directions. 02 §4 exposes only one scalar and
-    /// does not define which side of an asymmetric rule it means; that lossy
-    /// projection remains an open spec question. R-7 therefore requires the
-    /// smaller allowance, so a frontend `abs(next - value) <= max_delta`
-    /// check can never render a move as admissible when [`Self::checked_update`]
-    /// rejects it.
+    /// max-delta rule in both directions. The v6 `ParamView.max_delta`
+    /// projection is deliberately lossy for factor rules and therefore uses
+    /// the smaller allowance; [`Self::admissible_next_interval`] exposes the
+    /// exact inclusive interval beside it.
     pub fn max_delta_allowance(&self) -> Result<u128, Error> {
         match self.max_delta {
             None => Ok(0),
@@ -222,6 +220,52 @@ impl ParamRecord {
                 Ok(upward.min(downward))
             }
         }
+    }
+
+    /// Exact inclusive interval admitted by the current record bounds and
+    /// max-delta rule. Arithmetic mirrors [`Self::checked_update`]: percent
+    /// allowances floor, factor lower bounds use `ceil(value / factor)`, and
+    /// upward arithmetic saturates.
+    pub fn admissible_next_interval(&self) -> Result<(u128, u128), Error> {
+        ensure!(
+            self.value.same_kind(self.min) && self.value.same_kind(self.max),
+            Error::WrongType
+        );
+        let value = self.value.as_u128();
+        let record_min = self.min.as_u128();
+        let record_max = self.max.as_u128();
+        ensure!(record_min <= record_max, Error::MetaBoundViolation);
+
+        let (delta_min, delta_max) = match self.max_delta {
+            None => (record_min, record_max),
+            Some(MaxDelta::Absolute(bound)) => {
+                ensure!(bound.same_kind(self.value), Error::WrongType);
+                let allowance = bound.as_u128();
+                (
+                    value.saturating_sub(allowance),
+                    value.saturating_add(allowance),
+                )
+            }
+            Some(MaxDelta::Percent(_)) => {
+                let allowance = self.max_delta_allowance()?;
+                (
+                    value.saturating_sub(allowance),
+                    value.saturating_add(allowance),
+                )
+            }
+            Some(MaxDelta::Factor(factor)) => {
+                let factor = u128::from(factor);
+                ensure!(factor >= 1, Error::MetaBoundViolation);
+                let quotient = value / factor;
+                let lower = quotient.saturating_add(u128::from(value % factor != 0));
+                (lower, value.saturating_mul(factor))
+            }
+        };
+
+        let min_next = record_min.max(delta_min);
+        let max_next = record_max.min(delta_max);
+        ensure!(min_next <= max_next, Error::MetaBoundViolation);
+        Ok((min_next, max_next))
     }
 
     pub fn checked_update(
@@ -2158,11 +2202,55 @@ mod tests {
     }
 
     #[test]
-    fn factor_allowance_projects_the_smaller_exec_lock_direction() {
-        // 02 §4 exposes only one scalar although 13 §1's exec.lock.* factor
-        // rule is directional. R-7 requires the projection not to advertise a
-        // move `checked_update` can reject; the encoding remains an open spec
-        // question, so derive both sides from the canonical record itself.
+    fn admissible_next_interval_matches_admission_rounding_and_record_bounds() {
+        let mut record = genesis_params()[0];
+        let value = record.value.as_u128();
+        let allowance = value / 10;
+        assert_eq!(
+            record.admissible_next_interval(),
+            Ok((
+                record.min.as_u128().max(value.saturating_sub(allowance)),
+                record.max.as_u128().min(value.saturating_add(allowance)),
+            ))
+        );
+
+        record.value = ParamValue::Balance(5);
+        record.min = ParamValue::Balance(1);
+        record.max = ParamValue::Balance(9);
+        record.max_delta = Some(MaxDelta::Absolute(ParamValue::Balance(2)));
+        assert_eq!(record.admissible_next_interval(), Ok((3, 7)));
+
+        record.max_delta = None;
+        assert_eq!(record.admissible_next_interval(), Ok((1, 9)));
+
+        record.max_delta = Some(MaxDelta::Factor(2));
+        assert_eq!(record.admissible_next_interval(), Ok((3, 9)));
+        for next in 1..=10 {
+            let admitted = record
+                .checked_update(ParamValue::Balance(next), u32::MAX, 1)
+                .is_ok();
+            assert_eq!(admitted, (3..=9).contains(&next), "next={next}");
+        }
+
+        record.value = ParamValue::Balance(u128::MAX - 1);
+        record.min = ParamValue::Balance(0);
+        record.max = ParamValue::Balance(u128::MAX);
+        assert_eq!(
+            record.admissible_next_interval(),
+            Ok(((u128::MAX - 1).div_ceil(2), u128::MAX))
+        );
+
+        record.max_delta = Some(MaxDelta::Factor(0));
+        assert_eq!(
+            record.admissible_next_interval(),
+            Err(Error::MetaBoundViolation)
+        );
+    }
+
+    #[test]
+    fn factor_allowance_and_exact_interval_project_exec_lock_code() {
+        // Contract v6 retains the conservative scalar and exposes the exact
+        // inclusive interval for the asymmetric exec.lock.* factor rule.
         let record = genesis_params()
             .into_iter()
             .find(|record| record.key == key16(b"exec.lock.code"))
@@ -2181,6 +2269,9 @@ mod tests {
         assert_eq!(record.max_delta_allowance(), Ok(downward.min(upward)));
         assert_eq!(record.max_delta_allowance(), Ok(downward));
         assert!(downward < upward);
+        assert_eq!(value, 100_800);
+        assert_eq!(record.max.as_u128(), 432_000);
+        assert_eq!(record.admissible_next_interval(), Ok((50_400, 201_600)));
     }
 
     #[test]

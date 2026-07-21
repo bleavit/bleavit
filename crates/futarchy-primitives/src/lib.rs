@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 5;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 6;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -348,6 +348,7 @@ pub enum VaultState {
     Resolved(Branch),
     ScalarSettled { winner: Branch, s: FixedU64 },
     Voided,
+    BaselineSettled { s: FixedU64 },
 }
 
 #[derive(
@@ -503,9 +504,8 @@ pub enum DispatchOutcomeCode {
 )]
 pub enum RatificationStatus {
     NotRequired,
-    Pending { referendum: u32 },
+    NoPassedRecord,
     Passed { referendum: u32 },
-    Failed { referendum: u32 },
 }
 
 #[derive(
@@ -674,6 +674,7 @@ pub struct QuoteView {
     pub p_after_1e9: FixedU64,
     pub max_trade: Balance,
     pub within_domain: bool,
+    pub evaluable: bool,
 }
 
 #[derive(
@@ -737,6 +738,7 @@ pub struct WelfareView {
     pub s_breached: bool,
     pub c_breached: bool,
     pub reserve_flag: bool,
+    pub active_spec_available: bool,
 }
 
 #[derive(
@@ -751,6 +753,8 @@ pub struct ParamView {
     pub cooldown_blocks: u32,
     pub last_change: BlockNumber,
     pub class: ProposalClass,
+    pub min_next: u128,
+    pub max_next: u128,
 }
 
 #[derive(
@@ -1149,10 +1153,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn contract_version_is_v5() {
-        // Bumped 4 → 5 for universal market-bearing-class gate markets and the
-        // class-floor semantics (02 §4/§13). A frozen-contract change bumps this.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 5);
+    fn contract_version_is_v6() {
+        // Batch C reconciles the ratified contract surface with the shipped
+        // primitives and runtime views. A frozen-contract change bumps this.
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 6);
     }
 
     #[test]
@@ -1378,6 +1382,119 @@ mod tests {
     }
 
     #[test]
+    fn v6_variant_shapes_and_scale_layout_are_frozen() {
+        use scale_info::TypeDef;
+
+        let vault_names: alloc::vec::Vec<&str> = match &VaultState::type_info().type_def {
+            TypeDef::Variant(variant) => variant.variants.iter().map(|v| v.name).collect(),
+            _ => panic!("VaultState must encode as a SCALE variant type"),
+        };
+        assert_eq!(
+            vault_names,
+            [
+                "Open",
+                "Resolved",
+                "ScalarSettled",
+                "Voided",
+                "BaselineSettled",
+            ]
+        );
+        let baseline = VaultState::BaselineSettled {
+            s: FixedU64(700_000_000),
+        };
+        assert_eq!(baseline.encode()[0], 4);
+        assert_eq!(
+            VaultState::decode(&mut &baseline.encode()[..]).unwrap(),
+            baseline
+        );
+        assert_eq!(VaultState::max_encoded_len(), 10);
+
+        let ratification_names: alloc::vec::Vec<&str> =
+            match &RatificationStatus::type_info().type_def {
+                TypeDef::Variant(variant) => variant.variants.iter().map(|v| v.name).collect(),
+                _ => panic!("RatificationStatus must encode as a SCALE variant type"),
+            };
+        assert_eq!(
+            ratification_names,
+            ["NotRequired", "NoPassedRecord", "Passed"]
+        );
+        assert_eq!(RatificationStatus::NotRequired.encode(), [0]);
+        assert_eq!(RatificationStatus::NoPassedRecord.encode(), [1]);
+        assert_eq!(
+            RatificationStatus::Passed { referendum: 9 }.encode(),
+            [2, 9, 0, 0, 0]
+        );
+        assert_eq!(RatificationStatus::max_encoded_len(), 5);
+    }
+
+    #[test]
+    fn v6_view_appends_preserve_field_order_and_encoded_bounds() {
+        use scale_info::TypeDef;
+
+        fn fields(type_info: &scale_info::Type) -> alloc::vec::Vec<&str> {
+            match &type_info.type_def {
+                TypeDef::Composite(composite) => composite
+                    .fields
+                    .iter()
+                    .filter_map(|field| field.name)
+                    .collect(),
+                _ => panic!("view must encode as a SCALE composite type"),
+            }
+        }
+
+        assert_eq!(
+            fields(&QuoteView::type_info()),
+            [
+                "cost",
+                "fee",
+                "p_after_1e9",
+                "max_trade",
+                "within_domain",
+                "evaluable",
+            ]
+        );
+        assert_eq!(QuoteView::max_encoded_len(), 58);
+
+        assert_eq!(
+            fields(&WelfareView::type_info()),
+            [
+                "epoch",
+                "spec_version",
+                "s_pillar_1e9",
+                "c_onchain_1e9",
+                "c_attested_1e9",
+                "p_pillar_1e9",
+                "a_pillar_1e9",
+                "gate_s_1e9",
+                "gate_c_1e9",
+                "w_current_1e9",
+                "s_breached",
+                "c_breached",
+                "reserve_flag",
+                "active_spec_available",
+            ]
+        );
+        assert_eq!(WelfareView::max_encoded_len(), 74);
+
+        assert_eq!(
+            fields(&ParamView::type_info()),
+            [
+                "key",
+                "value",
+                "min",
+                "max",
+                "max_delta",
+                "cooldown_blocks",
+                "last_change",
+                "class",
+                "min_next",
+                "max_next",
+            ]
+        );
+        assert_eq!(ParamView::max_encoded_len(), 121);
+    }
+
+    #[test]
     fn cohort_summary_v4_bound_and_scale_layout_match_contract_02_section_4() {
         assert_eq!(bounds::MAX_COHORT_PROPOSALS, 12);
         let proposals = (0..bounds::MAX_COHORT_PROPOSALS)
@@ -1513,7 +1630,7 @@ mod tests {
                 QueuedExecutionView::max_encoded_len(),
                 RatificationStatus::max_encoded_len(),
             ),
-            (19, 159, 57, 155, 93, 5)
+            (19, 159, 58, 155, 93, 5)
         );
     }
 

@@ -649,6 +649,7 @@ impl WelfareState {
             s_breached: flags.s_breached,
             c_breached: flags.c_breached,
             reserve_flag,
+            active_spec_available: true,
         })
     }
 

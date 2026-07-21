@@ -886,6 +886,7 @@ pub fn quote<A>(
         p_after_1e9,
         max_trade,
         within_domain,
+        evaluable: true,
     })
 }
 
@@ -1968,9 +1969,11 @@ mod tests {
         // 02 §4 freezes `within_domain` to the post-trade LMSR predicate;
         // 11 §11.5 P-1 makes the per-trade maximum a separate FE check.
         assert!(over_limit.within_domain);
+        assert!(over_limit.evaluable);
         assert!(over_limit.cost > 0);
         assert_eq!(over_limit.max_trade, max_trade_amount(B));
         assert!(max_trade_amount(B) + 1 > over_limit.max_trade);
+
         assert_eq!(
             quote(&book, TradeSide::SellLong, 1, FEE_BPS),
             Err(Error::ArithmeticOverflow)
