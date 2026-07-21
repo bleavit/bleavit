@@ -66,13 +66,17 @@ means pinned/stranded clients may have stale or security-critical recovery data.
 6. For descriptor lead time, locate `UpgradeAuthorized`,
    `ExecutionGuard::PendingUpgrade`, its committed artifact/metadata hashes,
    `applicable_at`, and `ReleaseChannel.pending_authorized_at`. Verify the live
-   production release covers the target `spec_version` and includes both the
-   parachain and required Asset Hub descriptor sets.
+   production release covers the pending target `spec_version` and includes
+   both the parachain and required Asset Hub descriptor sets. Do not read the
+   channel's offset-112 `spec_version` as that target: it always names the
+   currently installed runtime.
 7. For `ReleaseChannel`, compare `version`, `manifest_txid`,
    `release_json_hash`, `updated_at`, `spec_version`, pending authorization,
    minimum supported version, keyring generation, revocation bits, and flags with
    the latest repoint and approved release record. Decode from the frozen raw key,
    not current metadata ([02 §12](../../docs/architecture/02-integration-contract.md)).
+   Verify I-30 explicitly: guard `PendingUpgrade` exists iff
+   `pending_authorized_at != 0` iff `URGENT_UPGRADE` is set.
 8. Audit signer disjointness and ceremony records if a key or ANT action is
    implicated. CI has neither release signing keys nor controller shares; a CI
    artifact alone cannot prove an authorized repoint.
@@ -92,9 +96,13 @@ means pinned/stranded clients may have stale or security-critical recovery data.
    gates, and choose the standard lane unless the delta satisfies the mechanically
    checked descriptor-only lane in [12 §1.5](../../docs/architecture/12-release-and-operations.md).
 4. For a missing channel update without evidence of compromise, prepare the exact
-   `ReleaseChannel` record from the approved release and verify its frozen layout,
-   target version, hashes, and flags before the authorized write. Never clear a
-   `SECURITY` flag merely to silence the alert.
+   writer-(b) `ReleaseChannel` fields from the approved release and verify the
+   frozen layout, hashes, and flags before the authorized write. Preserve offsets
+   112–119 (`spec_version`, `pending_authorized_at`) and flag bit 2
+   (`URGENT_UPGRADE`) byte-for-byte from finalized storage; offset 112 is the
+   currently installed version, never the target. The on-chain merge enforces
+   this ownership, but the prepared record and operator review MUST do so too.
+   Never clear a `SECURITY` flag merely to silence the alert.
 
 The four incident paths below contain privileged release/channel actions. They
 require the quorum and authority defined in [12 §1–§4](../../docs/architecture/12-release-and-operations.md);
@@ -106,7 +114,8 @@ CI and monitoring operators do not sign or repoint.
    immutable TXID; the normative quorum is in [12 §4.2](../../docs/architecture/12-release-and-operations.md).
 2. Update `ReleaseChannel` with the `SECURITY` flag and a
    `min_supported_version` bump so pinned and stranded clients receive the chain
-   warning ([12 §3](../../docs/architecture/12-release-and-operations.md)).
+   warning, while preserving the guard-owned offsets 112–119 and
+   `URGENT_UPGRADE` bit exactly ([12 §3](../../docs/architecture/12-release-and-operations.md)).
 3. If a release signing key is implicated, revoke its index on-chain, advance the
    keyring generation as specified, and re-sign or roll back the production
    release through the applicable release lane ([12 §2.3](../../docs/architecture/12-release-and-operations.md)).

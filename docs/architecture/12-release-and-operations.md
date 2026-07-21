@@ -43,7 +43,7 @@ A repoint of the production name `futarchy` to a new release MUST NOT occur unti
 3. **72 h staging soak** on `staging_futarchy` against the live target network.
 4. **Changelog TX** published; release notes list the immutable TXID, attestation TXIDs, and the multi-gateway URL set.
 5. **3-of-5 ArNS repoint** (§4.2) executed by the controller quorum via one ANT `setRecord`.
-6. **`ReleaseChannel` update** submitted per §3 within 600 blocks of the repoint.
+6. **`ReleaseChannel` update** submitted per §3 within 600 blocks of the repoint; the release author MUST preserve the execution guard's offsets 112–119 and `URGENT_UPGRADE` bit exactly as §3.1 requires.
 
 CI can neither sign nor repoint: CI holds **no** minisign keys and **no** ANT controller shares (verification-protocol check 8 carried forward — CI compromise can block releases but cannot ship one alone).
 
@@ -53,7 +53,7 @@ CI can neither sign nor repoint: CI holds **no** minisign keys and **no** ANT co
 
 A second, faster lane exists. It is **admissible only** for releases whose delta against the incumbent production release is confined to: `packages/descriptors/**` (including the Asset Hub descriptor set), descriptor metadata hashes and the supported `spec_version` range in `release.json`, and release metadata files (changelog, release history data). **Zero app-code delta**: every other file in the built tree MUST be byte-identical to the incumbent release.
 
-Requirements: the same reproducible build and **2 attestations** — where each attestor additionally attests to the **delta scope** (mechanically checked by `verify-release diff-scope --against <incumbent-txid>`, which byte-compares the trees and fails if any out-of-scope file differs) — then a **3-of-5 repoint**. **No staging soak is required.** The `ReleaseChannel` update sets the `EXPEDITED` flag; every expedited release MUST be followed by a retrospective entry in the release log stating why the lane was used.
+Requirements: the same reproducible build and **2 attestations** — where each attestor additionally attests to the **delta scope** (mechanically checked by `verify-release diff-scope --against <incumbent-txid>`, which byte-compares the trees and fails if any out-of-scope file differs) — then a **3-of-5 repoint**. **No staging soak is required.** The `ReleaseChannel` update sets the writer-(b)-owned `EXPEDITED` flag while preserving every guard-owned byte and bit (§3.1); every expedited release MUST be followed by a retrospective entry in the release log stating why the lane was used.
 
 Rationale (honest scope): the soak exists to catch app-behavior regressions; a descriptor-only delta has no app-code surface to regress, while descriptor lateness is itself a live risk (§1.6). Any change touching app code — however small — MUST use the standard lane.
 
@@ -100,12 +100,12 @@ Both: hardware-backed, geographically distributed, documented ceremony, annual r
 
 Old bundles ship their keyring immutably, so revocation MUST NOT depend on shipping new code to the affected users. The path:
 
-1. The compromised key ID is added to the **on-chain revocation set** in `ReleaseChannel` (§3.1: `keyring_generation` is bumped and the key's index is set in `revoked_key_bits`), and the `SECURITY` flag is set if any live release was signed by the revoked key.
+1. The compromised key ID is added to the **on-chain revocation set** in `ReleaseChannel` (§3.1: `keyring_generation` is bumped and the key's index is set in `revoked_key_bits`), and the `SECURITY` flag is set if any live release was signed by the revoked key. The update MUST preserve the guard-owned offsets 112–119 and `URGENT_UPGRADE` bit.
 2. All apps — including pinned and stranded ones, which read `ReleaseChannel` without current metadata — MUST treat a revoked key as invalid for every verification (self-check, update verification, attestation counting) from the moment the revocation is observed at a finalized head.
 3. A new keyring generation is published via the next release and the signer registry (§2.2); `verify-release` fetches the revocation set when a node is reachable and warns loudly when it cannot.
 4. If the revoked key co-signed the *current production* release, the release is re-signed by remaining valid keys (delta scope: release metadata only → expedited lane) or rolled back (§1.7).
 
-Write authority, retro-ratification, and abuse bounds for `ReleaseChannel` are defined in [09](09-execution-upgrades-and-rollout.md) (layout: [02](02-integration-contract.md) §12); the griefing surface (a malicious writer can at most force warnings/signing-friction in old releases, recoverable by opening a newer release) is a [14](14-threat-model.md) row.
+Write authority, retro-ratification, and abuse bounds for `ReleaseChannel` are defined in [09](09-execution-upgrades-and-rollout.md) (layout: [02](02-integration-contract.md) §12). Before contract v6, writer (b) could also suppress a live pending-upgrade indication by replacing the guard fields; exclusive ownership plus the merge and I-30 now close that path. The remaining writer-(b) griefing surface is confined to its own manifest/minimum-version/keyring fields and flag bits 0–1 — false update/security warnings and signing friction in old releases, recoverable through a lawful correcting channel update — and is recorded in [14](14-threat-model.md).
 
 ---
 
@@ -118,6 +118,8 @@ The §24.5 `system.remark` release pointer of FRONTEND_PLAN is **deleted**: a st
 fixed-width, **frozen forever** (any future need is met by appending fields beyond offset 168 with a schema bump, never by changing existing offsets), read at the well-known raw key `twox128("Constitution") ++ twox128("ReleaseChannel")` — 168 bytes:
 
 `schema u8` · `version [u8;32]` (UTF-8 semver, zero-padded) · `manifest_txid [u8;43]` (base64url TXID) · `release_json_hash [u8;32]` · `updated_at u32` · `spec_version u32` · `pending_authorized_at u32` · `min_supported_version [u8;32]` (UTF-8 semver) · `keyring_generation u32` · `revoked_key_bits u64` (bitmask over key indices within the generation's published keyring) · `flags u32` (bit 0 `SECURITY`, bit 1 `EXPEDITED`, bit 2 `URGENT_UPGRADE`, others reserved zero).
+
+**Writer ownership (normative; contract v6).** `spec_version` at offset 112 is always the **currently installed** runtime version, never the authorized target. The execution guard exclusively owns offsets 112–119 and flag bit 2: authorization leaves `spec_version` untouched and sets the pending block/bit; applied-upgrade detection writes the newly installed version and clears them; relay abort clears them while leaving the still-installed version untouched. `constitution.set_release_channel` owns offsets 1–107 and 120–163 and flag bits 0–1, while offset 108 `updated_at` is shared write metadata stamped by each writer. Every release, revocation and recovery author MUST preserve the guard-owned bytes and bit; the on-chain call merges them from the stored record even if a caller supplies different values. The pending indication is coupled by I-30: `ExecutionGuard::PendingUpgrade.is_some() ⇔ pending_authorized_at != 0 ⇔ URGENT_UPGRADE` ([15](15-invariants-and-testing.md)).
 
 Because the key and layout are metadata-independent, **any** shipped release — past, pinned, stranded — can read and decode it via a plain light-client storage read forever.
 
