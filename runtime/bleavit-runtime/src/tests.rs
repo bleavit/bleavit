@@ -14747,3 +14747,27 @@ fn ledger_freeze_runtime_effect_renews_both_pallets_once_and_reverts_both() {
         assert_eq!(pallet_market::FrozenUntil::<Runtime>::get(), None);
     });
 }
+
+/// 07 §7 *Milestone normalization* + SQ-175: the production runtime has no
+/// MetricSpec `target`, so the Milestone registry MUST stay fail-closed — a
+/// zero target refuses `file`/`close_epoch` rather than fabricating a 0.0
+/// aggregate. Under `runtime-benchmarks` the same seam MUST instead be
+/// positive, or every `MilestoneRegistry` benchmark setup aborts with
+/// `MilestoneTargetUnset` before anything is measured and weight generation
+/// for the instance dies silently (Codex review, PR #118).
+#[test]
+fn milestone_target_seam_is_fail_closed_in_production_and_admissible_under_benchmarks() {
+    use pallet_registry::EpochContext as _;
+    let target = crate::configs::RuntimeRegistryEpoch::milestone_target(1);
+    if cfg!(feature = "runtime-benchmarks") {
+        assert!(
+            target > 0,
+            "benchmark builds need a positive milestone target or MilestoneRegistry benchmarks abort"
+        );
+    } else {
+        assert_eq!(
+            target, 0,
+            "production must stay fail-closed until SQ-175 wires a real MetricSpec target"
+        );
+    }
+}

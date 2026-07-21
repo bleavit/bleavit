@@ -28,11 +28,15 @@ bounded retry or a rollback implemented as a forward upgrade
 |---|---|---|
 | Upgrades | authorized hash, applied version, migration cursor | cursor stalled |
 
-The trigger means an active `Migrations::Cursor` has been running longer than
-its budget — `now − cursor.started_at > 900` blocks (09 §3.2(d)). It is a **time
-budget, not a progress test**: a lawful migration may return byte-identical
-cursors for hours while doing real work, so "the cursor bytes did not change" is
-not the trigger and must not be treated as one.
+The trigger *should* mean an active `Migrations::Cursor` has been running longer
+than its budget — `now − cursor.started_at > 900` blocks (09 §3.2(d)); it is a
+**time budget, not a progress test**, because a lawful migration may return
+byte-identical cursors for hours while doing real work. **The deployed runtime
+does not implement that yet**: it still raises on `(index, inner_cursor)`
+byte-equality held for > 900 blocks, so a healthy `Cursor = ()` migration can
+false-raise this alert. Treat a raise as *unconfirmed* until you have checked
+`started_at` by hand (Diagnosis 2). Implementation owed — PLAN.md SQ-132 in
+batch X.
 
 The alert does not authorize a force-set of the cursor, a storage
 rewrite, or a rollback to old bytes ([12 §6.3](../../docs/architecture/12-release-and-operations.md)).
@@ -43,11 +47,14 @@ rewrite, or a rollback to old bytes ([12 §6.3](../../docs/architecture/12-relea
    code hash, migration identifier, cursor bytes, failed-step index, and the first
    block at which progress stopped. Preserve raw SCALE as well as decoded state.
 2. Read `Migrations::Cursor` and the runtime-internal
-   `BleavitRuntimeMigration::{HaltSources, FailedStep}` values. Compute
-   `now − cursor.started_at` and compare it against 900, or confirm the SDK cursor
-   is `Stuck`. **Do not conclude a stall from unchanged cursor bytes** — that
-   predicate was retired by 09 §3.2(d) precisely because it false-raises on a
-   conforming `Cursor = ()` migration. Rule out a stale monitor.
+   `BleavitRuntimeMigration::{HaltSources, FailedStep, ProgressMarker}` values —
+   `ProgressMarker` is still what the deployed detector keys on, so you need it to
+   explain *why* the halt raised. Then compute `now − cursor.started_at` and
+   compare it against 900: that is the normative predicate (09 §3.2(d)) and the
+   one that decides whether this is a real stall. **A halt raised while
+   `now − started_at ≤ 900` is a false raise** — the migration is progressing and
+   returning identical cursor bytes; record it as such and do not begin a repair.
+   Confirm `Stuck` separately. Rule out a stale monitor.
 3. Read `ExecutionGuard::MigrationHalt`, `PendingUpgrade`, `LastUpgradeAuthorized`
    and the relevant `ExecutionGuard::Queue` entry.
    **The 09 §3.2(2) pre-migration anchor is not yet implemented — do not wait for
@@ -56,8 +63,8 @@ rewrite, or a rollback to old bytes ([12 §6.3](../../docs/architecture/12-relea
    step; the queue row's `pre_upgrade_checkpoint` is written at execute but the
    row itself is deleted on success (09 §1.2(13)). Both cells are therefore empty
    at diagnosis time (SQ-127/SQ-144, ruled 2026-07-20 — capture moves to
-   code-application time and single-homes in its own storage item; owed as PLAN.md
-   milestone B19). Until it lands, reconstruct the anchor off-chain: **the block in
+   code-application time and single-homes in its own storage item; implementation
+   owed, PLAN.md SQ-127/SQ-144 in batch X). Until it lands, reconstruct the anchor off-chain: **the block in
    which `UpgradeApplied` was emitted is itself the last pre-migration block** —
    the go-ahead callback runs in the final old-code block, and the new code takes
    effect in its successor. Take that block's own header hash and `state_root`
@@ -134,7 +141,7 @@ rewrite, or a rollback to old bytes ([12 §6.3](../../docs/architecture/12-relea
    and `frame-executive` then rejects every non-inherent extrinsic, so the
    expedited-CODE lane named above — and `execute(pid)`, guardian calls, and sudo
    with it — **cannot be included in a block** until the cursor is gone. This is
-   an open spec question (PLAN.md SQ-290), not a settled procedure: escalate to
+   an open spec question (PLAN.md SQ-299), not a settled procedure: escalate to
    the guardian council and the release lead immediately rather than attempting
    an on-chain repair that cannot be submitted. A `Stuck` cursor with
    `FailedMigrationHandling::KeepStuck` has no on-chain exit at present.

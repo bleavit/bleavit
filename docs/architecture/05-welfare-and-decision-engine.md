@@ -293,7 +293,7 @@ Changes vs. the superseded §12.3: XCM health `X` moves from S into `C_onchain` 
 | **P** (weighted geo) | Fees burned/paid (0.45) | `N(log1p(fees_USDC))`, protocol fee sink | on-chain | carry + flag | costs exactly the fees |
 | | Economically qualified users (0.35) | accounts paying ≥ dust-indexed fee on ≥ 3 distinct days, HLL-estimated, cost-weighted | on-chain sketch | carry + flag | Sybils must pay repeatedly; weight-capped |
 | | Settled value (0.20) | fee-weighted transfer value, self-transfer down-weighted | on-chain | carry + flag | wash routing — fee weighting prices it |
-| **A** (weighted geo) | Shipped audited upgrades (0.40) | milestone points ÷ target, attested MilestoneRegistry ([doc 07](./07-oracle-and-disputes.md)) | attested | 0 if none | scope inflation — enumerated scope classes, challengeable |
+| **A** (weighted geo) | Shipped audited upgrades (0.40) | `min(1, milestone points ÷ target)`, attested MilestoneRegistry ([doc 07](./07-oracle-and-disputes.md) §7 — `target` is a frozen per-MetricSpec field, never a [13](./13-parameters.md) key) | attested | 0 if none | scope inflation — enumerated scope classes, challengeable |
 | | Runtime performance (0.30) | benchmarked weight-per-op regression index, full-epoch continuous sampling | attested reproducible harness | carry | benchmark-day gaming — continuous sampling |
 | | Ecosystem integrations (0.30) | qualified independent integrations passing a 30-day on-chain fee-paying usage bar | attested registry | 0 | shells — usage bar on-chain-verifiable |
 
@@ -331,7 +331,7 @@ P_e      = Π_i max(p_i, ε_P)^{w_i}          A_e = Π_i max(a_i, ε_P)^{w_i}
 
 `I` is a pure multiplier (no weight, no ε-floor): an S1 incident zeroes `C_e`, which the g-gate turns into `W_e = 0` — the incident-multiplied semantics of the source, preserved deliberately.
 
-**Weights live in the MetricSpec.** The `MetricSpec` record gains normative fields: `pillar ∈ {S, C_onchain, C_attested, P, A}`, `weight: FixedU64`, `epsilon_floor: FixedU64`, alongside the existing `{ id, formula_ref, units, repr, source class, cadence, normalization rule, sanity bounds, missing-data rule, gaming vectors + min-cost estimate, challenge procedure, version, activation_epoch ≥ current + 2, in-flight rule }`. Registering a spec whose pillar weights do not sum to 1, or missing the gaming-vector section, MUST be rejected. Open cohorts always settle on their creation-time spec version, weights included (I-16).
+**Weights live in the MetricSpec.** The `MetricSpec` record gains normative fields: `pillar ∈ {S, C_onchain, C_attested, P, A}`, `weight: FixedU64`, `epsilon_floor: FixedU64`, and — for a milestone component of the A pillar — `target` (the divisor of §4.3's `min(1, points ÷ target)`, frozen per version so a live cohort's milestones can never be retroactively renormalized; [07](./07-oracle-and-disputes.md) §7), alongside the existing `{ id, formula_ref, units, repr, source class, cadence, normalization rule, sanity bounds, missing-data rule, gaming vectors + min-cost estimate, challenge procedure, version, activation_epoch ≥ current + 2, in-flight rule }`. Registering a spec whose pillar weights do not sum to 1, missing the gaming-vector section, or declaring a milestone component with no positive `target`, MUST be rejected. Open cohorts always settle on their creation-time spec version, weights included (I-16).
 
 **Determinism discipline (normative):**
 1. All component values are `FixedU64` (1e9) in [0,1] before aggregation.
