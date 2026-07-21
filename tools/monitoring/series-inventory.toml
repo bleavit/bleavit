@@ -134,3 +134,15 @@ source = "chain-exporter"
 [[series]]
 name = "bleavit_chain_keeper_budget_utilization_ratio"
 source = "chain-exporter"
+
+[[series]]
+name = "bleavit_relay_best_block"
+source = "relay-monitor"
+
+[[series]]
+name = "bleavit_relay_finalized_block"
+source = "relay-monitor"
+
+[[series]]
+name = "bleavit_relay_finality_stagnation_seconds"
+source = "relay-monitor"

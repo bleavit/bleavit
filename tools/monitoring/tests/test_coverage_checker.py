@@ -10,12 +10,14 @@ import support  # noqa: F401 - inserts tools/monitoring on sys.path.
 import attestation_monitor
 import chain_alerts_exporter
 import check_alert_coverage as checker
+import relay_finality_monitor
 
 
 ROOT = Path(__file__).resolve().parents[3]
 EXPORTED = {
     "chain-exporter": set(chain_alerts_exporter.SERIES),
     "attestation-monitor": set(attestation_monitor.SERIES),
+    "relay-monitor": set(relay_finality_monitor.SERIES),
 }
 
 
@@ -57,8 +59,52 @@ class CoverageCheckerTests(unittest.TestCase):
     def test_current_tree_is_complete(self) -> None:
         failures, rows, inventory = checker.validate(ROOT)
         self.assertEqual(failures, [])
-        self.assertEqual(len(rows), 20)
-        self.assertEqual(len(inventory), 32)
+        self.assertEqual(len(rows), 21)
+        self.assertEqual(len(inventory), 35)
+
+    def test_relay_finality_row_is_bound_to_the_relay_monitor(self) -> None:
+        _failures, rows, inventory = checker.validate(ROOT, exported=EXPORTED)
+        row = next(row for row in rows if row.domain == "Relay finality")
+        self.assertEqual(row.runbook, "RB-KEEPER")
+        self.assertFalse(row.page_immediately)
+        self.assertEqual(
+            row.key_series,
+            "relay best height, relay finalized height, finality stagnation seconds",
+        )
+        self.assertEqual(
+            row.threshold, "finalized stagnant > 1800 s [VERIFY] while best is ahead"
+        )
+        relay = {
+            name for name, entry in inventory.items() if entry["source"] == "relay-monitor"
+        }
+        self.assertEqual(relay, set(relay_finality_monitor.RELAY_FAMILIES))
+        self.assertTrue(relay <= set(relay_finality_monitor.SERIES))
+
+    def test_relay_monitor_registry_is_checked_like_the_other_exporters(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = fixture_root(directory)
+            broken = {key: set(value) for key, value in EXPORTED.items()}
+            broken["relay-monitor"].remove("bleavit_relay_finality_stagnation_seconds")
+            failures, _, _ = checker.validate(root, exported=broken)
+            self.assertTrue(
+                any("not in the relay-monitor SERIES" in failure for failure in failures),
+                failures,
+            )
+
+    def test_relay_row_without_its_rule_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = fixture_root(directory)
+            path = root / "deploy" / "monitoring" / "prometheus" / "rules" / "bleavit-alerts.yml"
+            document = path.read_text(encoding="utf-8")
+            path.write_text(
+                document.replace('domain: "Relay finality"', 'domain: "Keepers"', 1),
+                encoding="utf-8",
+            )
+            failures, _, _ = checker.validate(root, exported=EXPORTED)
+            self.assertTrue(
+                any("'Relay finality' has no alert rule" in failure for failure in failures),
+                failures,
+            )
 
     def test_strict_extractor_rejects_table_header_drift(self) -> None:
         document = (ROOT / "docs" / "architecture" / "12-release-and-operations.md").read_text(encoding="utf-8")

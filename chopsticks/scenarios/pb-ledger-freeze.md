@@ -33,3 +33,46 @@ registered-playbook/active-hold, early-lift, or downstream effect-revert storage
 renewal/expiry also do not create the 06 §6.3 review. The runtime review
 scheduler is a stub and guardian `CurrentEpoch` stays zero until A8; none of
 those missing cells are fabricated.
+
+<!-- Machine-readable encoding of the steps above; the evidence runner
+     executes it and refuses to name this scenario in
+     bleavit.env-evidence.v1 unless every assertion ran (15 §4.7/§5; SQ-203). -->
+```card-assertions
+- step: 1
+  claim: >-
+    a sovereign-vs-ledger reconciliation drift is manufactured through the
+    real ledger/collateral cells and the runtime's I-4 signal asserts
+    before activation
+  blocked_on: >-
+    there is no stored DriftFlag item to inject — the ledger detects drift
+    in try-state and the reconciliation-trigger adapter is fail-closed
+- step: 2
+  claim: >-
+    ledger.set_frozen(true) and market.set_frozen(true) reject every
+    specified ledger/market call while reconciliation, guardian, values,
+    and oracle paths stay live
+  blocked_on: >-
+    the spec-named ledger/market freeze calls are absent from current
+    metadata
+- step: 3
+  claim: >-
+    while frozen, a funded ops.coretime quote lets signed
+    futarchyTreasury.executeCoretimeRenewal(period_index) succeed, and no
+    other treasury outflow receives the exemption
+  blocked_on: >-
+    needs a signed-extrinsic driver and a funded ops.coretime line, which
+    is not chain-spec-fundable
+- step: 4
+  claim: >-
+    the entry/expiry branch lifts automatically at the real 201,600-block
+    bound and exactly one values-track renewal is possible
+  blocked_on: >-
+    renewal/expiry create no 06 §6.3 review and there is no active-hold
+    storage
+- step: 5
+  claim: >-
+    repairing custody and running reconciliation clears bit 5 and both
+    freezes early, and try-state passes only after the I-4 drift clears
+  blocked_on: >-
+    there is no early-lift or effect-revert storage in the pallet
+```

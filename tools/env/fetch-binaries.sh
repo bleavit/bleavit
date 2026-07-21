@@ -90,3 +90,10 @@ download_pinned \
   "https://github.com/paritytech/zombienet/releases/download/${ZOMBIENET_VERSION}/${zombienet_asset}" \
   "$out/zombienet" \
   "$ZOMBIENET_SHA256"
+
+# try-runtime-cli drives the mandatory closing --checks try-state leg (15 §1;
+# SQ-204). It publishes no .sha256 sidecar, so its digest is pinned in pins.env.
+download_pinned \
+  "https://github.com/paritytech/try-runtime-cli/releases/download/${TRY_RUNTIME_VERSION}/try-runtime-x86_64-unknown-linux-musl" \
+  "$out/try-runtime" \
+  "$TRY_RUNTIME_SHA256"

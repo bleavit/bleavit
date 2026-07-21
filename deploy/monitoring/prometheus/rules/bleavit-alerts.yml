@@ -162,3 +162,18 @@ groups:
           summary: "Keeper budget: current-epoch use exceeds 80% of the live keeper.budget gauge"
           key_series: "metered-budget utilization"
           threshold: "> 80% of keeper.budget"
+
+      # The 1800 s window is [VERIFY] (12 §6.3): a conservative placeholder that
+      # no healthy relay trips, NOT a calibrated figure. Ops must re-derive it
+      # from observed healthy relay behaviour before production and keep it
+      # byte-equal to the doc 12 §6.3 Relay finality row and to
+      # relay_finality_monitor.DEFAULT_STAGNATION_WINDOW_SECONDS.
+      # The second conjunct is "unfinalized work exists", deliberately not
+      # "best increased", so a fully halted relay is not silenced by it.
+      - alert: BleavitRelayFinalityStalled
+        expr: bleavit_relay_finality_stagnation_seconds > 1800 and on() (bleavit_relay_best_block > bleavit_relay_finalized_block)
+        labels: {severity: warning, runbook: RB-KEEPER, domain: "Relay finality"}
+        annotations:
+          summary: "Relay finality: the relay finalized head has not advanced while unfinalized relay blocks are outstanding"
+          key_series: "relay best height, relay finalized height, finality stagnation seconds"
+          threshold: "finalized stagnant > 1800 s [VERIFY] while best is ahead"
