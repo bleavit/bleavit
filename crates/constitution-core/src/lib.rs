@@ -578,7 +578,9 @@ impl ConstitutionOrigin {
     /// `ConstitutionalValues` cannot invoke PARAM/META parameter keys; the
     /// values half of the dual consent is the execute-time ratification check
     /// (06 §2.2, guard step 4), not a direct dispatch path (see PLAN SQ-6).
-    /// CONST/entrenched-class keys are values-layer business (06 §1, §2.4).
+    /// CONST/entrenched-class keys are values-layer business (06 §1, §2.4),
+    /// with the direction-scoped welfare-knee exception enforced by
+    /// [`authorize_param_update`].
     ///
     /// No Root arm: 09 §5.4's bootstrap-sudo power list is exhaustive
     /// ("incident response, arming phase flags, the Phase-3→4 upgrade") and
@@ -642,6 +644,47 @@ impl ConstitutionOrigin {
     pub const fn can_charge_meter(self) -> bool {
         matches!(self, Self::FutarchyTreasury | Self::EmergencyPlaybook)
     }
+}
+
+/// Direction-aware authorization for `constitution.set_param`.
+///
+/// Most rows are authorized solely by [`ParamClass`]. One 13 §1 family is
+/// stricter:
+///
+/// - the welfare low knees tighten through the constitution track and may be
+///   un-tightened only through the entrenched track (05 §4.1; 06 §2.1);
+///
+/// Equality retains the welfare rows' CONST-class route (the constitution
+/// track). The record's normal bounds, delta and cooldown checks still run
+/// afterward.
+pub fn authorize_param_update(
+    origin: ConstitutionOrigin,
+    record: &ParamRecord,
+    next: ParamValue,
+) -> Result<(), Error> {
+    let welfare_low_knee =
+        record.key == key16(b"welfare.thS_lo") || record.key == key16(b"welfare.thC_lo");
+    if welfare_low_knee {
+        ensure!(
+            matches!(
+                origin,
+                ConstitutionOrigin::ConstitutionTrack | ConstitutionOrigin::EntrenchedTrack
+            ),
+            Error::BadOrigin
+        );
+        ensure!(record.value.same_kind(next), Error::WrongType);
+        let current = record.value.as_u128();
+        let proposed = next.as_u128();
+        ensure!(
+            (proposed >= current && matches!(origin, ConstitutionOrigin::ConstitutionTrack))
+                || (proposed < current && matches!(origin, ConstitutionOrigin::EntrenchedTrack)),
+            Error::BadOrigin
+        );
+        return Ok(());
+    }
+
+    ensure!(origin.can_set_param(record.class), Error::BadOrigin);
+    Ok(())
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
@@ -710,13 +753,12 @@ impl ConstitutionState {
         epoch: u32,
         block: BlockNumber,
     ) -> Result<(), Error> {
-        let class = self
+        let record = self
             .params
             .iter()
             .find(|r| r.key == key)
-            .ok_or(Error::UnknownParam)?
-            .class;
-        ensure!(origin.can_set_param(class), Error::BadOrigin);
+            .ok_or(Error::UnknownParam)?;
+        authorize_param_update(origin, record, next)?;
         self.set_param(key, next, epoch, block)
     }
 
@@ -2107,6 +2149,19 @@ mod tests {
         ReleaseChannel::new(bytes).unwrap()
     }
 
+    fn value_from_raw(kind: ParamValue, raw: u128) -> Option<ParamValue> {
+        match kind {
+            ParamValue::U8(_) => u8::try_from(raw).ok().map(ParamValue::U8),
+            ParamValue::U32(_) => u32::try_from(raw).ok().map(ParamValue::U32),
+            ParamValue::Balance(_) => Some(ParamValue::Balance(raw)),
+            ParamValue::Fixed(_) => u64::try_from(raw)
+                .ok()
+                .map(|value| ParamValue::Fixed(FixedU64(value))),
+            ParamValue::Percent(_) => u8::try_from(raw).ok().map(ParamValue::Percent),
+            ParamValue::Perbill(_) => u32::try_from(raw).ok().map(ParamValue::Perbill),
+        }
+    }
+
     #[test]
     fn reexports_kernel_and_contract_version() {
         assert_eq!(
@@ -2482,6 +2537,164 @@ mod tests {
                 .value,
             ParamValue::U32(12)
         );
+    }
+
+    #[test]
+    fn welfare_low_knees_require_the_track_matching_the_direction() {
+        for key_name in [b"welfare.thS_lo".as_slice(), b"welfare.thC_lo".as_slice()] {
+            let key = key16(key_name);
+            let initial = ConstitutionState::genesis();
+            let record = initial.params.iter().find(|record| record.key == key);
+            assert!(record.is_some(), "welfare low-knee key must be seeded");
+            let Some(record) = record else {
+                return;
+            };
+            let interval = record.admissible_next_interval();
+            assert!(interval.is_ok(), "welfare low-knee interval must be valid");
+            let Ok((_, upper)) = interval else {
+                return;
+            };
+            let raised = value_from_raw(record.value, upper);
+            assert!(
+                raised.is_some(),
+                "welfare low-knee upper value must preserve its kind"
+            );
+            let Some(raised) = raised else {
+                return;
+            };
+            assert!(upper > record.value.as_u128());
+
+            // Increase: constitution succeeds; entrenched and the legacy bare
+            // values origin fail without writing.
+            let mut wrong_increase = initial.clone();
+            let before = wrong_increase.clone();
+            assert_eq!(
+                wrong_increase.dispatch_set_param(
+                    ConstitutionOrigin::EntrenchedTrack,
+                    key,
+                    raised,
+                    record.cooldown_epochs,
+                    1,
+                ),
+                Err(Error::BadOrigin)
+            );
+            assert_eq!(wrong_increase, before);
+            let mut bare_values = initial.clone();
+            let before = bare_values.clone();
+            assert_eq!(
+                bare_values.dispatch_set_param(
+                    ConstitutionOrigin::ConstitutionalValues,
+                    key,
+                    raised,
+                    record.cooldown_epochs,
+                    1,
+                ),
+                Err(Error::BadOrigin)
+            );
+            assert_eq!(bare_values, before);
+
+            let mut raised_state = initial.clone();
+            assert_eq!(
+                raised_state.dispatch_set_param(
+                    ConstitutionOrigin::ConstitutionTrack,
+                    key,
+                    raised,
+                    record.cooldown_epochs,
+                    1,
+                ),
+                Ok(())
+            );
+
+            // Decrease from the tightened value: entrenched succeeds and the
+            // constitution track cannot walk its own tightening back.
+            let decrease_epoch = record.cooldown_epochs.saturating_mul(2);
+            let mut wrong_decrease = raised_state.clone();
+            let before = wrong_decrease.clone();
+            assert_eq!(
+                wrong_decrease.dispatch_set_param(
+                    ConstitutionOrigin::ConstitutionTrack,
+                    key,
+                    record.value,
+                    decrease_epoch,
+                    2,
+                ),
+                Err(Error::BadOrigin)
+            );
+            assert_eq!(wrong_decrease, before);
+            assert_eq!(
+                raised_state.dispatch_set_param(
+                    ConstitutionOrigin::EntrenchedTrack,
+                    key,
+                    record.value,
+                    decrease_epoch,
+                    2,
+                ),
+                Ok(())
+            );
+
+            // Equality retains the row's CONST-class constitution route; it
+            // neither grants entrenched authority nor admits bare values.
+            let mut equal = initial.clone();
+            assert_eq!(
+                equal.dispatch_set_param(
+                    ConstitutionOrigin::ConstitutionTrack,
+                    key,
+                    record.value,
+                    record.cooldown_epochs,
+                    3,
+                ),
+                Ok(())
+            );
+            for origin in [
+                ConstitutionOrigin::EntrenchedTrack,
+                ConstitutionOrigin::ConstitutionalValues,
+            ] {
+                let mut refused_equal = initial.clone();
+                let before = refused_equal.clone();
+                assert_eq!(
+                    refused_equal.dispatch_set_param(
+                        origin,
+                        key,
+                        record.value,
+                        record.cooldown_epochs,
+                        3,
+                    ),
+                    Err(Error::BadOrigin)
+                );
+                assert_eq!(refused_equal, before);
+            }
+
+            // The launch floor remains absolute even for the entrenched path.
+            let below_floor_raw = record.min.as_u128().checked_sub(1);
+            assert!(
+                below_floor_raw.is_some(),
+                "welfare launch floor must be non-zero"
+            );
+            let Some(below_floor_raw) = below_floor_raw else {
+                return;
+            };
+            let below_floor = value_from_raw(record.value, below_floor_raw);
+            assert!(
+                below_floor.is_some(),
+                "welfare below-floor value must preserve its kind"
+            );
+            let Some(below_floor) = below_floor else {
+                return;
+            };
+            let mut floor_state = initial.clone();
+            let before = floor_state.clone();
+            assert_eq!(
+                floor_state.dispatch_set_param(
+                    ConstitutionOrigin::EntrenchedTrack,
+                    key,
+                    below_floor,
+                    record.cooldown_epochs,
+                    4,
+                ),
+                Err(Error::BelowMin)
+            );
+            assert_eq!(floor_state, before);
+        }
     }
 
     #[test]

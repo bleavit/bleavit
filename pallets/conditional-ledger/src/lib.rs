@@ -423,8 +423,6 @@ pub mod pallet {
         GateAlreadySettled,
         /// The gate outcome for this gate is not yet recorded.
         GateNotSettled,
-        /// Branch/side mismatch on a redemption.
-        WrongBranch,
         /// A conservation invariant was violated (surfaces only from the core's
         /// internal consistency guards; try-state maps drift to I-4).
         TryStateViolation,
@@ -462,7 +460,6 @@ pub mod pallet {
                 C::InvalidScore => Error::InvalidScore,
                 C::GateAlreadySettled => Error::GateAlreadySettled,
                 C::GateNotSettled => Error::GateNotSettled,
-                C::WrongBranch => Error::WrongBranch,
                 C::TryStateViolation => Error::TryStateViolation,
             }
         }

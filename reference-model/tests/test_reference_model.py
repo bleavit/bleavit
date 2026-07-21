@@ -355,8 +355,6 @@ class ReferenceModelTests(unittest.TestCase):
                 "InvalidScore",
                 "GateAlreadySettled",
                 "GateNotSettled",
-                # WrongBranch deliberately absent: dead core variant, no honest
-                # differential witness exists (SQ-170).
             },
         )
         successful = [row for row in rows if "ok" in row["outcome"]]
@@ -497,6 +495,7 @@ class ReferenceModelTests(unittest.TestCase):
             "accept_full": Decimal("0.56"),
             "reject_full_effective": Decimal("0.50"),
             "delta": Decimal("0.05"),
+            "envelope_value": Decimal(0),
         }
         observed = set()
         for overrides, expected in cases:
@@ -611,7 +610,7 @@ class ReferenceModelTests(unittest.TestCase):
             (Outcome.REJECT, RejectReason.NOT_DECISION_GRADE),
         )
 
-    def test_decision_window_match_and_adoption(self):
+    def test_decision_window_match_requires_a_defined_prize_proxy(self):
         split = decide(
             Decimal("0.56"),
             Decimal("0.50"),
@@ -623,8 +622,18 @@ class ReferenceModelTests(unittest.TestCase):
             Decimal("0.56"),
             Decimal("0.50"),
             Decimal("0.05"),
+            envelope_value=Decimal(0),
         )
         self.assertEqual(adopted.outcome, Outcome.ADOPT)
+        undefined = decide(
+            Decimal("0.56"),
+            Decimal("0.50"),
+            Decimal("0.05"),
+        )
+        self.assertEqual(
+            (undefined.outcome, undefined.reason),
+            (Outcome.REJECT, RejectReason.SECURITY_SIZING),
+        )
 
     def test_welfare_rounding_and_full_pipeline(self):
         product = Decimal("0.333333333333333333") * Decimal(
@@ -707,6 +716,14 @@ class ReferenceModelTests(unittest.TestCase):
         logged = normalize_metric(Decimal("6"), sample, [], log1p=True)
         self.assertTrue(Decimal(0) < logged < Decimal(1))
 
+    def test_daily_c_renormalization_uses_the_q64_quotient_before_products(self):
+        composite = weighted_geometric(
+            {"C01": Decimal("0.531441"), "C02": Decimal("1.0")},
+            {"C01": Decimal("0.1"), "C02": Decimal("0.5")},
+            renormalize=True,
+        )
+        self.assertEqual(composite, Decimal("0.900000000"))
+
     def test_nav_and_security_rounding_directions(self):
         healthy = nav(
             Decimal("100"),
@@ -722,6 +739,11 @@ class ReferenceModelTests(unittest.TestCase):
         self.assertEqual(healthy.spendable_nav, Decimal("80"))
         self.assertEqual(impaired.nav, Decimal("75"))
         self.assertEqual(impaired.spendable_nav, Decimal("0"))
+        self.assertIsNone(in_cap_prize("Param"))
+        self.assertEqual(
+            in_cap_prize("Param", envelope=Decimal(0)),
+            Decimal("0.000000"),
+        )
         self.assertEqual(
             in_cap_prize("Param", envelope=Decimal("1.0000001")),
             Decimal("1.000001"),
@@ -784,7 +806,9 @@ class ReferenceModelTests(unittest.TestCase):
 
     def test_security_worked_numbers_and_scaling(self):
         nav_value = Decimal("13862944")
-        prize = in_cap_prize("Code", spendable_nav=nav_value)
+        prize = in_cap_prize(
+            "Code", envelope=Decimal(0), spendable_nav=nav_value
+        )
         volume = dec_v_min("Code", prize)
         depth = Decimal(2) * Decimal("60000") * lmsr.LN2
         liquidity = depth + volume

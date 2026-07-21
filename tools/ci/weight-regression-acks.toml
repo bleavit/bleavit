@@ -8,3 +8,6 @@
 # runtime/bleavit-runtime/src/weights/pallet_constitution.rs set_param: storage proof grew after adding validation
 # runtime/bleavit-runtime/src/weights/pallet_retired.rs *: pallet retired by approved migration
 #
+runtime/bleavit-runtime/src/weights/pallet_epoch.rs force_reject_process_hold: measurement correction, not a new cost - the benchmark fixture is unchanged from the merge base, so the previously committed number was stale (it predates the guard/schedule terminal-cleanup work it must cover). Re-measured under batch X; tracked as SQ-317
+runtime/bleavit-runtime/src/weights/pallet_epoch.rs settle_cohort: measurement correction, not a new cost - benchmark fixture unchanged from the merge base; the committed number predates the ledger-to-market terminal latching and v4 CohortSummary growth it must cover. Re-measured under batch X; tracked as SQ-317/SQ-323
+runtime/bleavit-runtime/src/weights/pallet_epoch.rs void_cohort: measurement correction, not a new cost - benchmark fixture unchanged from the merge base; the committed number predates the mandatory Baseline settlement added on the epoch-VOID path (SQ-92) and the per-vault market latching. Under-weighting a permissionless crank is a spam surface, so the larger measured value is the safe direction. Re-measured under batch X; tracked as SQ-317

@@ -600,11 +600,21 @@ impl frame_support::migrations::MigrationStatusHandler for MigrationStatusToGuar
     fn completed() {
         MigrationFailedStep::kill();
         MigrationProgressMarker::kill();
+        crate::ExecutionGuard::migration_completed();
         // MBM completion clears only migration failure/stall sources. An
         // applied-code mismatch remains halted until a later valid applied
         // callback resolves that condition. The additional try-state-before-
         // lift coupling is intentionally still an open specification question.
         clear_migration_halt_sources(MIGRATION_FAILURE_HALT | MIGRATION_STALL_HALT);
+    }
+}
+
+/// One-read projection of the SDK-owned multi-block-migration cursor for the
+/// application-time PB-MIGRATION anchor (09 section 3.2(2)).
+pub struct RuntimeMigrationStatus;
+impl pallet_execution_guard::MigrationStatusProvider for RuntimeMigrationStatus {
+    fn cursor_exists() -> bool {
+        pallet_migrations::Cursor::<Runtime>::exists()
     }
 }
 
@@ -1812,12 +1822,11 @@ pub(crate) fn proposal_class_index(class: futarchy_primitives::ProposalClass) ->
 /// every non-TREASURY class) keeps the base `dec.v_min` floor rather than
 /// voiding the grade. The distinction is economic, not cosmetic: a missing
 /// prize is a security-sizing *input* gap, not evidence that the book lacked
-/// coverage or contest depth, and `decide` already fails such a proposal at
-/// the sizing step (`in_cap_prize.ok_or(BadDecisionInput)`) — an error that
-/// leaves the proposal in place, retryable once the prize is backed. Voiding
-/// the grade instead would reach `Reject(NotDecisionGrade)` first and slash
-/// 10% of the proposer's intake bond (06 §4; 08 §7) for an input the chain,
-/// not the proposer, is missing.
+/// coverage or contest depth. At the sizing step, `decide` resolves that gap
+/// through terminal T10 `Reject(SecuritySizing)`, with the intake bond fully
+/// refunded. Voiding the grade instead would reach `Reject(NotDecisionGrade)`
+/// first and slash 10% of the proposer's intake bond (06 §4; 08 §7) for an
+/// input the chain, not the proposer, is missing.
 ///
 /// The `2P` doubling saturates: it can only raise the floor, never wrap it
 /// down into a permissive value.
@@ -5305,6 +5314,7 @@ impl pallet_execution_guard::Config for Runtime {
     type Params = ExecutionParams;
     type Capabilities = RuntimeCapabilities;
     type UpgradeSchedule = RuntimeUpgradeSchedule;
+    type MigrationStatus = RuntimeMigrationStatus;
     type Preimages = RuntimePreimages;
     type ReleaseChannel = RuntimeReleaseChannel;
     type RatifyOrigin = EnsureValuesScoped<RatifyTrack>;
@@ -6109,6 +6119,7 @@ fn benchmark_seed_epoch_queue(
     pid: futarchy_primitives::ProposalId,
     payload_hash: futarchy_primitives::H256,
     payload_len: u32,
+    class: futarchy_primitives::ProposalClass,
     maturity: BlockNumber,
     grace_end: BlockNumber,
     version_constraint: futarchy_primitives::RuntimeVersionConstraint,
@@ -6119,6 +6130,7 @@ fn benchmark_seed_epoch_queue(
         payload_len,
         futarchy_primitives::ProposalState::Queued,
     );
+    proposal.class = class;
     proposal.maturity = Some(maturity);
     proposal.grace_end = Some(grace_end);
     proposal.version_constraint = Some(version_constraint);
@@ -6152,6 +6164,25 @@ fn benchmark_guard_enqueue(
     call: RuntimeCall,
     domain: pallet_execution_guard::CallDomain,
 ) -> Result<BlockNumber, DispatchError> {
+    benchmark_guard_enqueue_for_class(
+        pid,
+        call,
+        domain,
+        futarchy_primitives::ProposalClass::Param,
+        None,
+        false,
+    )
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_guard_enqueue_for_class(
+    pid: futarchy_primitives::ProposalId,
+    call: RuntimeCall,
+    domain: pallet_execution_guard::CallDomain,
+    class: futarchy_primitives::ProposalClass,
+    attestation_id: Option<u32>,
+    ratified: bool,
+) -> Result<BlockNumber, DispatchError> {
     use frame_support::traits::StorePreimage;
 
     if pallet_execution_guard::CurrentSpecName::<Runtime>::get().is_none() {
@@ -6169,20 +6200,12 @@ fn benchmark_guard_enqueue(
 
     let now = System::block_number();
     let maturity = now
-        .checked_add(
-            <ExecutionParams as pallet_execution_guard::Params>::exec_timelock(
-                futarchy_primitives::ProposalClass::Param,
-            ),
-        )
+        .checked_add(<ExecutionParams as pallet_execution_guard::Params>::exec_timelock(class))
         .ok_or(DispatchError::Arithmetic(
             sp_runtime::ArithmeticError::Overflow,
         ))?;
     let grace_end = maturity
-        .checked_add(
-            <ExecutionParams as pallet_execution_guard::Params>::exec_grace(
-                futarchy_primitives::ProposalClass::Param,
-            ),
-        )
+        .checked_add(<ExecutionParams as pallet_execution_guard::Params>::exec_grace(class))
         .ok_or(DispatchError::Arithmetic(
             sp_runtime::ArithmeticError::Overflow,
         ))?;
@@ -6195,6 +6218,7 @@ fn benchmark_guard_enqueue(
         pid,
         hash.0,
         payload_len,
+        class,
         maturity,
         grace_end,
         version_constraint.clone(),
@@ -6205,14 +6229,14 @@ fn benchmark_guard_enqueue(
             pid,
             payload_hash: hash.0,
             payload_len,
-            class: futarchy_primitives::ProposalClass::Param,
+            class,
             maturity,
             grace_end,
             version_constraint,
             meters_declared: Default::default(),
             ratify_ref: None,
             ratification_passed: false,
-            attestation_id: None,
+            attestation_id,
             pre_upgrade_checkpoint: None,
             cancelled: false,
             declared_domains,
@@ -6220,6 +6244,9 @@ fn benchmark_guard_enqueue(
         },
         false,
     )?;
+    if ratified {
+        crate::ExecutionGuard::ratify(pallet_origins::Origin::ConstitutionalValues.into(), pid, 1)?;
+    }
     Ok(maturity)
 }
 
@@ -6243,19 +6270,22 @@ impl pallet_execution_guard::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmark
     }
 
     fn prime_execute(pid: futarchy_primitives::ProposalId, _: u32) {
-        let key = pallet_constitution::key16(b"mkt.obs_interval");
-        let Some(mut record) = pallet_constitution::Params::<Runtime>::get(key) else {
-            return;
-        };
-        record.cooldown_epochs = 0;
-        pallet_constitution::Params::<Runtime>::insert(key, record);
-        let call = RuntimeCall::Constitution(pallet_constitution::Call::set_param {
-            key,
-            value: record.value,
+        System::set_block_number(System::block_number().max(1));
+        let artifact = sp_io::hashing::blake2_256(&pid.encode());
+        benchmark_fill_attestations(pid, artifact);
+        let attestation_id = pallet_attestor::MAX_ATTESTATIONS
+            .saturating_sub(futarchy_primitives::kernel::ATT_QUORUM);
+        let call = RuntimeCall::System(frame_system::Call::authorize_upgrade {
+            code_hash: artifact.into(),
         });
-        if let Ok(maturity) =
-            benchmark_guard_enqueue(pid, call, pallet_execution_guard::CallDomain::Param)
-        {
+        if let Ok(maturity) = benchmark_guard_enqueue_for_class(
+            pid,
+            call,
+            pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade,
+            futarchy_primitives::ProposalClass::Code,
+            Some(attestation_id),
+            true,
+        ) {
             System::set_block_number(maturity);
         }
     }

@@ -318,7 +318,7 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
     let scenarios = fixture["welfare_scenarios"]
         .as_array()
         .expect("welfare_scenarios family present");
-    assert_eq!(scenarios.len(), 3, "welfare family cardinality drifted");
+    assert_eq!(scenarios.len(), 4, "welfare family cardinality drifted");
 
     for row in scenarios {
         let name = row["name"].as_str().expect("scenario name");
@@ -341,7 +341,7 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
                 // one grid ulp (the G0-suite-reported defect, fixed 2026-07-18).
                 assert_eq!(score, FixedU64(expected), "{name}: settlement score");
             }
-            "full_pipeline" => {
+            "full_pipeline" | "full_pipeline_non_binary_daily_weights" => {
                 let parsed = pipeline_inputs(inputs);
                 let outputs = &row["outputs"];
                 // Pin the harness-derived D_eff to the vector before it feeds

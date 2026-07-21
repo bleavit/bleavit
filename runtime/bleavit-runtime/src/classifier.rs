@@ -9,7 +9,7 @@ use pallet_origins::{SafetyClassifier, SafetyFilter};
 use parity_scale_codec::{Decode, Encode};
 use sp_runtime::{traits::Dispatchable, DispatchError};
 
-use crate::{Runtime, RuntimeCall, RuntimeOrigin, System, VERSION};
+use crate::{Runtime, RuntimeCall, RuntimeOrigin, System};
 
 /// Execution-guard-owned upgrade availability seam (09 §2.2).
 pub trait PendingUpgradeProvider {
@@ -964,17 +964,6 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
             spec_name: version.spec_name.as_bytes().to_vec().try_into().ok()?,
             spec_version: version.spec_version,
         })
-    }
-
-    fn checkpoint() -> (H256, H256) {
-        let parent_hash = System::parent_hash().0;
-        let state_root = sp_io::storage::root(VERSION.state_version());
-        #[allow(clippy::manual_unwrap_or, clippy::manual_unwrap_or_default)]
-        let state_root = match <[u8; 32]>::try_from(state_root.as_slice()) {
-            Ok(root) => root,
-            Err(_) => [0; 32],
-        };
-        (parent_hash, state_root)
     }
 }
 

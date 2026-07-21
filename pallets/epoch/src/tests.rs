@@ -1318,22 +1318,24 @@ fn void_cohort_voids_every_vault_and_reaps_the_terminal_working_set() {
 }
 
 #[test]
-fn r2_6_void_cohort_archives_every_terminal_proposal() {
+fn sq314_void_cohort_preserves_decided_outcomes_and_rejects_only_undecided() {
     new_test_ext().execute_with(|| {
         let mut state = EpochState::new();
-        for pid in 1..=2 {
-            state
-                .proposals
-                .push(live_proposal(pid, ProposalState::Measuring, 0));
-        }
+        let mut adopted = live_proposal(1, ProposalState::Measuring, 0);
+        adopted.decision = Some(DecisionOutcome::Adopt);
+        let mut rejected = live_proposal(2, ProposalState::Measuring, 0);
+        rejected.decision = Some(DecisionOutcome::Reject(RejectReason::HurdleNotMet));
+        let undecided = live_proposal(3, ProposalState::Trading, 0);
+        state.proposals.extend([adopted, rejected, undecided]);
         state.cohorts.push(CoreCohort {
             epoch: 0,
             proposals: vec![1, 2],
             status: CohortStatus::Measuring { until_epoch: 2 },
         });
-        state.proposal_id_high_water = 2;
+        state.proposal_id_high_water = 3;
         assert_ok!(Epoch::seed(state));
 
+        let event_start = System::events().len();
         assert_ok!(Epoch::void_cohort(
             RuntimeOrigin::signed(void_authority()),
             0,
@@ -1342,13 +1344,79 @@ fn r2_6_void_cohort_archives_every_terminal_proposal() {
         assert!(!Cohorts::<Test>::contains_key(0));
         assert!(!Proposals::<Test>::contains_key(1));
         assert!(!Proposals::<Test>::contains_key(2));
+        assert!(!Proposals::<Test>::contains_key(3));
         let summary = RecentCohortSummaries::<Test>::get()
             .into_iter()
-            .find(|summary| summary.epoch == 0);
-        assert!(summary.is_some_and(|summary| summary.voided
-            && summary.proposals.iter().all(|(_, _, decision)| {
-                *decision == DecisionOutcome::Reject(RejectReason::ProcessHold)
-            })));
+            .find(|summary| summary.epoch == 0)
+            .expect("voided cohort summary");
+        assert!(summary.voided);
+        assert_eq!(
+            summary
+                .proposals
+                .iter()
+                .map(|(pid, _, decision)| (*pid, *decision))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, DecisionOutcome::Adopt),
+                (2, DecisionOutcome::Reject(RejectReason::HurdleNotMet)),
+                (3, DecisionOutcome::Reject(RejectReason::ProcessHold)),
+            ]
+        );
+        let force_rejections = System::events()
+            .into_iter()
+            .skip(event_start)
+            .filter_map(|record| match record.event {
+                RuntimeEvent::Epoch(Event::ProposalForceRejected { pid, reason }) => {
+                    Some((pid, reason))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            force_rejections,
+            vec![(3, RejectReason::ProcessHold)],
+            "already-decided cohort members must emit no force rejection"
+        );
+        assert_ok!(Epoch::do_try_state());
+    });
+}
+
+#[test]
+fn sq40_undefined_prize_proxy_takes_t10_and_refunds_the_full_bond() {
+    new_test_ext().execute_with(|| {
+        let state = decision_state(1, ProposalClass::Param);
+        let proposer = state.proposals[0].proposer.clone();
+        let bond = state.proposals[0].bond;
+        assert_ok!(Epoch::seed(state));
+        ProposalBonds::<Test>::insert(
+            1,
+            ProposalBond {
+                proposer: proposer.clone(),
+                held: bond,
+            },
+        );
+        InCapPrize::set(None);
+
+        assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
+
+        let decided = Proposals::<Test>::get(1).expect("rejection enters measurement");
+        assert_eq!(decided.state, ProposalState::Measuring);
+        assert_eq!(
+            decided.decision,
+            Some(DecisionOutcome::Reject(RejectReason::SecuritySizing))
+        );
+        assert!(SeamCalls::get().contains(&SeamCall::Resolve(1, Branch::Reject)));
+        assert!(SeamCalls::get().contains(&SeamCall::CloseMarkets(1)));
+        assert!(SeamCalls::get().contains(&SeamCall::DequeueTerminal(1)));
+        assert!(ResourceLocks::<Test>::get()
+            .iter()
+            .any(|(_, owner)| *owner == 1));
+        assert!(!ProposalBonds::<Test>::contains_key(1));
+        assert_eq!(BondReleases::get(), vec![(proposer, bond)]);
+        assert!(!System::events().iter().any(|record| matches!(
+            record.event,
+            RuntimeEvent::Epoch(Event::IntakeSlashed { pid: 1, .. })
+        )));
         assert_ok!(Epoch::do_try_state());
     });
 }
@@ -3511,7 +3579,12 @@ fn forty_void_cohorts_reap_working_storage_and_bound_the_archive_ring() {
 }
 
 #[test]
-fn r2_6_void_cohort_synchronously_cancels_same_epoch_queued_proposals() {
+/// 05 §7(4): the preserved population is the cohort's own members. A same-epoch
+/// proposal that is decided but still pre-Executed (`Queued`, `FailedExecuted`)
+/// is **not** a member and takes T20 — `decision.is_some()` is not the
+/// discriminator, because T9 records `Some(Adopt)` on entry to `Queued`.
+/// Whether T20 is the right record for that population is SQ-319.
+fn sq314_void_cohort_preserves_only_cohort_members_and_t20s_the_rest() {
     new_test_ext().execute_with(|| {
         let mut state = EpochState::new();
         let mut measuring = live_proposal(1, ProposalState::Measuring, 0);
@@ -3552,11 +3625,11 @@ fn r2_6_void_cohort_synchronously_cancels_same_epoch_queued_proposals() {
         assert_eq!(
             summary.map(|summary| summary.proposals.into_inner()),
             Some(vec![
-                (
-                    1,
-                    ProposalClass::Param,
-                    DecisionOutcome::Reject(RejectReason::ProcessHold),
-                ),
+                // pid 1 is the cohort member: its recorded Adopt survives.
+                (1, ProposalClass::Param, DecisionOutcome::Adopt,),
+                // pids 2 and 3 are decided but pre-Executed and outside the
+                // cohort, so they take T20 rather than carrying their vacated
+                // Adopt into the archive.
                 (
                     2,
                     ProposalClass::Param,

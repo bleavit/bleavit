@@ -35,6 +35,8 @@ pub const META_ACC: u64 = 4;
 pub const VALUES_ACC: u64 = 5;
 pub const GUARDIAN_ACC: u64 = 6;
 pub const PLAYBOOK_ACC: u64 = 7;
+pub const CONSTITUTION_ACC: u64 = 8;
+pub const ENTRENCHED_ACC: u64 = 9;
 pub const NOBODY_ACC: u64 = 99;
 
 /// Test stand-in for the runtime's `pallet-origins`-backed resolver (A4/B1a).
@@ -61,6 +63,12 @@ impl EnsureOrigin<RuntimeOrigin> for TestGovernanceOrigin {
             }
             Ok(frame_system::RawOrigin::Signed(PLAYBOOK_ACC)) => {
                 Ok(ConstitutionOrigin::EmergencyPlaybook)
+            }
+            Ok(frame_system::RawOrigin::Signed(CONSTITUTION_ACC)) => {
+                Ok(ConstitutionOrigin::ConstitutionTrack)
+            }
+            Ok(frame_system::RawOrigin::Signed(ENTRENCHED_ACC)) => {
+                Ok(ConstitutionOrigin::EntrenchedTrack)
             }
             Ok(frame_system::RawOrigin::Signed(_)) => Ok(ConstitutionOrigin::Signed),
             Ok(other) => Err(other.into()),
@@ -93,9 +101,9 @@ impl pallet_constitution::BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper
             ConstitutionOrigin::FutarchyTreasury => RuntimeOrigin::signed(TREASURY_ACC),
             ConstitutionOrigin::FutarchyCode => RuntimeOrigin::signed(CODE_ACC),
             ConstitutionOrigin::FutarchyMeta => RuntimeOrigin::signed(META_ACC),
-            ConstitutionOrigin::ConstitutionTrack
-            | ConstitutionOrigin::EntrenchedTrack
-            | ConstitutionOrigin::ConstitutionalValues => RuntimeOrigin::signed(VALUES_ACC),
+            ConstitutionOrigin::ConstitutionTrack => RuntimeOrigin::signed(CONSTITUTION_ACC),
+            ConstitutionOrigin::EntrenchedTrack => RuntimeOrigin::signed(ENTRENCHED_ACC),
+            ConstitutionOrigin::ConstitutionalValues => RuntimeOrigin::signed(VALUES_ACC),
             ConstitutionOrigin::GuardianHold => RuntimeOrigin::signed(GUARDIAN_ACC),
             ConstitutionOrigin::EmergencyPlaybook => RuntimeOrigin::signed(PLAYBOOK_ACC),
             ConstitutionOrigin::Root => RuntimeOrigin::root(),

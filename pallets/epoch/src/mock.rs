@@ -312,6 +312,7 @@ parameter_types! {
     /// keeper-rebate regression explicitly enables recording.
     pub static RecordKeeperRebates: bool = false;
     pub static KeeperRebates: Vec<(AccountId32, CrankClass)> = Vec::new();
+    pub static BondReleases: Vec<(AccountId32, Balance)> = Vec::new();
 }
 
 pub struct TestKeeperRebate;
@@ -655,7 +656,8 @@ impl ProposalBondCurrency<AccountId32> for TestProposalBond {
     fn hold(_who: &AccountId32, _amount: Balance) -> frame_support::dispatch::DispatchResult {
         Ok(())
     }
-    fn release(_who: &AccountId32, _amount: Balance) -> frame_support::dispatch::DispatchResult {
+    fn release(who: &AccountId32, amount: Balance) -> frame_support::dispatch::DispatchResult {
+        BondReleases::mutate(|releases| releases.push((who.clone(), amount)));
         Ok(())
     }
     fn slash_to_insurance(_amount: Balance) -> frame_support::dispatch::DispatchResult {
@@ -911,6 +913,7 @@ pub fn reset_doubles() {
     PreviousBaselineTwap::set(None);
     RecordKeeperRebates::set(false);
     KeeperRebates::set(Vec::new());
+    BondReleases::set(Vec::new());
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

@@ -201,7 +201,6 @@ pub enum Error {
     InvalidScore,
     GateAlreadySettled,
     GateNotSettled,
-    WrongBranch,
     TryStateViolation,
 }
 

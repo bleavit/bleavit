@@ -253,7 +253,7 @@ def decide(
     grade: bool | None = None,
     proposal_class: ProposalClass | str = ProposalClass.PARAM,
     ask: Decimal = Decimal(0),
-    envelope_value: Decimal = Decimal(0),
+    envelope_value: Decimal | None = None,
     spendable_nav: Decimal = Decimal(0),
     measured_liquidity: Decimal = Decimal(0),
     pol_depth: Decimal | None = None,
@@ -381,7 +381,7 @@ def decide(
         published_flow_per_day=published_flow_per_day,
         decision_window=decision_window,
     )
-    if not security_sizing_ok(prize, attack_cost):
+    if prize is None or not security_sizing_ok(prize, attack_cost):
         return Decision(Outcome.REJECT, RejectReason.SECURITY_SIZING)
 
     # Step 10: attestation precedes constitutional meters/spacing.

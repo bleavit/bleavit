@@ -1153,6 +1153,9 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         let p = self.proposal_mut(pid)?;
         ensure!(p.state == ProposalState::Suspended, Error::BadState);
         p.state = ProposalState::Rerun;
+        p.maturity = None;
+        p.grace_end = None;
+        p.decision = None;
         self.events.push(Event::RerunScheduled(pid));
         Ok(())
     }
@@ -1262,22 +1265,35 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             Error::BadState
         );
         let affected = self.void_affected_proposals(epoch)?;
+        // 05 §7(4): the preserved population is the cohort's **own members**,
+        // which by construction reached `Measuring` (`start_measurement` is the
+        // sole writer of `CohortInfo.proposals`). Membership — not
+        // `decision.is_some()` — is the discriminator: T9 records `Some(Adopt)`
+        // on entry to `Queued`, so a decision alone does not mean the market
+        // concluded a measurement. Everything else in the affected set is
+        // non-terminal pre-Executed and takes T20 (05 §2.1). What a decided but
+        // pre-Executed proposal *should* record is SQ-319; this is the
+        // conservative reading, changing nothing but the case SQ-314 named.
+        let members = self.cohorts[idx].proposals.clone();
         for pid in &affected {
             if self.proposal(*pid)?.markets.is_some() {
                 ledger.void(*pid)?;
             }
         }
         for pid in &affected {
-            let proposal = self.proposal_mut(*pid)?;
-            proposal.state = ProposalState::Rejected(RejectReason::ProcessHold);
-            proposal.decision = Some(DecisionOutcome::Reject(RejectReason::ProcessHold));
+            let is_cohort_member = members.contains(pid);
+            if !is_cohort_member {
+                let proposal = self.proposal_mut(*pid)?;
+                proposal.state = ProposalState::Rejected(RejectReason::ProcessHold);
+                proposal.decision = Some(DecisionOutcome::Reject(RejectReason::ProcessHold));
+                self.events.push(Event::ProposalForceRejected {
+                    pid: *pid,
+                    reason: RejectReason::ProcessHold,
+                });
+            }
             self.intake_queue.retain(|queued| *queued != *pid);
             self.rollovers.retain(|(proposal, _)| *proposal != *pid);
             self.resource_locks.retain(|(_, owner)| *owner != *pid);
-            self.events.push(Event::ProposalForceRejected {
-                pid: *pid,
-                reason: RejectReason::ProcessHold,
-            });
         }
         self.cohorts[idx].status = CohortStatus::Void;
         // 03 §2.3/§5: an epoch VOID settles the epoch's **Baseline** vault at
@@ -1876,12 +1892,14 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
                 _ => DecisionOutcome::Reject(RejectReason::ConvergenceFailed),
             });
         }
+        let Some(prize) = i.in_cap_prize else {
+            return Ok(DecisionOutcome::Reject(RejectReason::SecuritySizing));
+        };
         let attack = attack_cost_hat(
             i.measured_depth,
             i.published_flow_per_day,
             params.decision_window,
         )?;
-        let prize = i.in_cap_prize.ok_or(Error::BadDecisionInput)?;
         if prize.saturating_mul(futarchy_primitives::kernel::SECURITY_FACTOR) > attack {
             return Ok(DecisionOutcome::Reject(RejectReason::SecuritySizing));
         }
@@ -2478,6 +2496,39 @@ mod tests {
         );
     }
     #[test]
+    fn undefined_prize_proxy_is_a_terminal_security_sizing_rejection() {
+        let mut s = EpochState::new();
+        let mut ledger = LedgerState::<[u8; 32]>::new();
+        ledger.create_vault(1, 1).unwrap();
+        let mut p = prop(1, ProposalState::Trading);
+        p.markets = Some(MarketSet {
+            accept: 1,
+            reject: 2,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
+        });
+        let resource = *p.resources.as_slice().first().unwrap();
+        s.resource_locks.push((resource, p.id));
+        s.proposals.push(p);
+        let mut input = pass_input();
+        input.in_cap_prize = None;
+        input.measured_depth = Balance::MAX;
+
+        assert_eq!(
+            s.decide(Origin::Keeper, &mut ledger, 1, 0, input),
+            Ok(DecisionOutcome::Reject(RejectReason::SecuritySizing))
+        );
+        assert_eq!(
+            s.proposal(1).unwrap().decision,
+            Some(DecisionOutcome::Reject(RejectReason::SecuritySizing))
+        );
+        assert_eq!(s.resource_locks, alloc::vec![(resource, 1)]);
+        assert!(ledger
+            .events
+            .iter()
+            .any(|event| matches!(event, LedgerEvent::VaultResolved(1, Branch::Reject))));
+    }
+    #[test]
     fn security_sizing_uses_decision_window_days_at_floor() {
         let mut s = EpochState::new();
         let mut p = prop(1, ProposalState::Trading);
@@ -3062,6 +3113,73 @@ mod tests {
         // And no welfare *scoring* — a VOID trusts no measurement.
         assert!(welfare.calls.is_empty());
         assert!(s.cohorts.is_empty());
+    }
+
+    #[test]
+    fn scheduled_rerun_clears_vacated_adopt_before_cohort_void() {
+        let mut s = EpochState::<[u8; 32]>::new();
+        let mut ledger = LedgerState::<[u8; 32]>::new();
+
+        let mut rerun = prop(1, ProposalState::Queued);
+        rerun.markets = Some(MarketSet {
+            accept: 1,
+            reject: 2,
+            gates: Some([3, 4, 5, 6]),
+            baseline: 7,
+        });
+        rerun.maturity = Some(10);
+        rerun.grace_end = Some(20);
+        rerun.decision = Some(DecisionOutcome::Adopt);
+        let mut cohort_member = prop(2, ProposalState::Measuring);
+        cohort_member.markets = Some(MarketSet {
+            accept: 8,
+            reject: 9,
+            gates: Some([10, 11, 12, 13]),
+            baseline: 7,
+        });
+        cohort_member.decision = Some(DecisionOutcome::Adopt);
+        ledger.create_vault(1, 1).unwrap();
+        ledger.create_vault(2, 1).unwrap();
+        s.proposals.extend([rerun, cohort_member]);
+        s.cohorts.push(CohortInfo {
+            epoch: 0,
+            proposals: alloc::vec![2],
+            status: CohortStatus::Measuring { until_epoch: 2 },
+        });
+
+        s.delay_once(Origin::GuardianHold, 1, [7; 32]).unwrap();
+        s.schedule_rerun(Origin::Keeper, 1).unwrap();
+        assert_eq!(s.proposal(1).unwrap().decision, None);
+        assert_eq!(s.proposal(1).unwrap().maturity, None);
+        assert_eq!(s.proposal(1).unwrap().grace_end, None);
+        s.epoch.phase = EpochPhase::Seed;
+        s.open_rerun(Origin::Keeper, 1, 30).unwrap();
+
+        let mut welfare = RecordingWelfare::default();
+        s.void_cohort(Origin::VoidAuthority, &mut ledger, &mut welfare, 0, 100)
+            .unwrap();
+
+        let summary = s.recent.first().unwrap();
+        assert_eq!(
+            summary
+                .proposals
+                .iter()
+                .find_map(|(pid, _, decision)| (*pid == 1).then_some(*decision)),
+            Some(DecisionOutcome::Reject(RejectReason::ProcessHold))
+        );
+        assert_eq!(
+            s.events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::ProposalForceRejected {
+                        pid: 1,
+                        reason: RejectReason::ProcessHold
+                    }
+                ))
+                .count(),
+            1
+        );
     }
 
     #[test]

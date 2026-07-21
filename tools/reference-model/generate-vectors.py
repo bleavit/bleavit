@@ -167,15 +167,20 @@ DECISION_SCENARIOS = [
         },
     },
     {
+        "name": "undefined_param_prize_proxy",
+        "inputs": {"measured_liquidity": "1000000"},
+    },
+    {
         "name": "attestation_missing",
         "inputs": {
             "proposal_class": "Code",
+            "envelope_value": "0",
             "attestation_ok": False,
         },
     },
     {
         "name": "rate_limited",
-        "inputs": {"queue_time_ok": False},
+        "inputs": {"envelope_value": "0", "queue_time_ok": False},
     },
     # SQ-231: step 9's L-hat from the decomposed 08 §5.2 form — POL depth plus
     # min(the two books' 04 §7a contest capital), bounded by
@@ -249,6 +254,12 @@ WELFARE_INPUTS = {
     "a_components": {"A01": "0.90", "A02": "0.60"},
     "a_weights": {"A01": "0.40", "A02": "0.60"},
     "c_daily": {"C01": "0.93", "C02": "0.89"},
+}
+
+WELFARE_NON_BINARY_DAILY_WEIGHTS_INPUTS = {
+    **WELFARE_INPUTS,
+    "c_weights": {"C01": "0.10", "C02": "0.50", "C03": "0.40"},
+    "c_daily": {"C01": "0.531441", "C02": "1.0"},
 }
 
 
@@ -1979,6 +1990,9 @@ def build():
         )
 
     pipeline = full_pipeline(**_decimal_tree(WELFARE_INPUTS))
+    non_binary_pipeline = full_pipeline(
+        **_decimal_tree(WELFARE_NON_BINARY_DAILY_WEIGHTS_INPUTS)
+    )
     welfare_scenarios = [
         {
             "name": "equal_horizons",
@@ -2000,6 +2014,17 @@ def build():
             "outputs": _string_tree(pipeline),
             "settlement_with_self": format(
                 settlement_score(pipeline["W"], pipeline["W"]), "f"
+            ),
+        },
+        {
+            "name": "full_pipeline_non_binary_daily_weights",
+            "inputs": WELFARE_NON_BINARY_DAILY_WEIGHTS_INPUTS,
+            "outputs": _string_tree(non_binary_pipeline),
+            "settlement_with_self": format(
+                settlement_score(
+                    non_binary_pipeline["W"], non_binary_pipeline["W"]
+                ),
+                "f",
             ),
         },
     ]

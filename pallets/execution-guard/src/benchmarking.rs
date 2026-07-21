@@ -37,6 +37,10 @@ mod benches {
             futarchy_primitives::keeper::CrankClass::General,
         );
         assert!(!Queue::<T>::contains_key(pid));
+        // Execute's benchmark fixture is deliberately CODE: authorization is
+        // the maximal guard path and must remain covered even though the
+        // retired full-storage-root checkpoint no longer exists.
+        assert!(PendingUpgrade::<T>::get().is_some());
     }
 
     #[benchmark]

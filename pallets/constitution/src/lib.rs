@@ -254,7 +254,9 @@ pub mod pallet {
         /// TREASURY ⇒ `FutarchyTreasury`; META **and META+values** ⇒
         /// `FutarchyMeta` (06 §1 bars values from parameter keys; the values
         /// half of the dual consent is the guard's execute-time ratification,
-        /// 06 §2.2 — PLAN SQ-6); CONST/entrenched ⇒ `ConstitutionalValues`.
+        /// 06 §2.2 — PLAN SQ-6); CONST/entrenched ⇒ values-layer origins. The
+        /// welfare low knees are direction-scoped further: constitution raises,
+        /// entrenched lowers (05 §4.1).
         /// No Root path — 09 §5.4's bootstrap-sudo scope is exhaustive and
         /// excludes parameter administration (PLAN SQ-11).
         #[pallet::call_index(0)]
@@ -262,10 +264,8 @@ pub mod pallet {
         pub fn set_param(origin: OriginFor<T>, key: ParamKey, value: ParamValue) -> DispatchResult {
             let authority = T::GovernanceOrigin::ensure_origin(origin)?;
             let record = Params::<T>::get(key).ok_or(Error::<T>::UnknownParam)?;
-            ensure!(
-                authority.can_set_param(record.class),
-                DispatchError::BadOrigin
-            );
+            constitution_core::authorize_param_update(authority, &record, value)
+                .map_err(Self::map_core_error)?;
             let updated = record
                 .checked_update(
                     value,

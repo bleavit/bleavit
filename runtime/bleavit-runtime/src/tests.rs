@@ -349,19 +349,37 @@ fn seed_code_decision_markets(
     accept_quote: futarchy_primitives::FixedU64,
     reject_quote: futarchy_primitives::FixedU64,
 ) -> Result<MarketSet, DispatchError> {
+    seed_decision_markets(
+        pid,
+        ProposalClass::Code,
+        end,
+        accept_quote,
+        reject_quote,
+        futarchy_primitives::FixedU64(500_000_000),
+    )
+}
+
+fn seed_decision_markets(
+    pid: futarchy_primitives::ProposalId,
+    class: ProposalClass,
+    end: BlockNumber,
+    accept_quote: futarchy_primitives::FixedU64,
+    reject_quote: futarchy_primitives::FixedU64,
+    gate_quote: futarchy_primitives::FixedU64,
+) -> Result<MarketSet, DispatchError> {
     let proposal = pallet_epoch::Proposals::<Runtime>::get(pid)
-        .ok_or(DispatchError::Other("CODE proposal missing"))?;
+        .ok_or(DispatchError::Other("decision proposal missing"))?;
     let markets = proposal
         .markets
-        .ok_or(DispatchError::Other("CODE market set missing"))?;
+        .ok_or(DispatchError::Other("decision market set missing"))?;
     let gates = markets
         .gates
-        .ok_or(DispatchError::Other("CODE gate set missing"))?;
+        .ok_or(DispatchError::Other("decision gate set missing"))?;
     let params = <crate::configs::RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
-    let index = crate::configs::proposal_class_index(ProposalClass::Code);
+    let index = crate::configs::proposal_class_index(class);
     let decision_contest = params.v_min[index];
     let gate_contest = params.gate_v_min[index];
-    let decision_b = crate::configs::class_pol_floor(ProposalClass::Code);
+    let decision_b = crate::configs::class_pol_floor(class);
     let gate_b = crate::configs::balance_param(b"pol.b_gate");
     let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
     let neutral = futarchy_primitives::FixedU64(500_000_000);
@@ -393,7 +411,7 @@ fn seed_code_decision_markets(
                 branch: futarchy_primitives::Branch::Accept,
                 gate: futarchy_primitives::GateType::Survival,
             },
-            neutral,
+            gate_quote,
             gate_b,
             gate_contest,
         ),
@@ -404,7 +422,7 @@ fn seed_code_decision_markets(
                 branch: futarchy_primitives::Branch::Reject,
                 gate: futarchy_primitives::GateType::Survival,
             },
-            neutral,
+            gate_quote,
             gate_b,
             gate_contest,
         ),
@@ -415,7 +433,7 @@ fn seed_code_decision_markets(
                 branch: futarchy_primitives::Branch::Accept,
                 gate: futarchy_primitives::GateType::Security,
             },
-            neutral,
+            gate_quote,
             gate_b,
             gate_contest,
         ),
@@ -426,7 +444,7 @@ fn seed_code_decision_markets(
                 branch: futarchy_primitives::Branch::Reject,
                 gate: futarchy_primitives::GateType::Security,
             },
-            neutral,
+            gate_quote,
             gate_b,
             gate_contest,
         ),
@@ -5466,7 +5484,6 @@ fn upgrade_path_authorizes_schedules_and_clears_only_after_validation_code_appli
 
         System::set_block_number(maturity);
         let release_before = release_channel_raw();
-        let checkpoint_parent = System::parent_hash();
         assert_ok!(ExecutionGuard::execute(
             RuntimeOrigin::signed(account(75)),
             PID,
@@ -5492,10 +5509,8 @@ fn upgrade_path_authorizes_schedules_and_clears_only_after_validation_code_appli
             pending.target_spec_version,
             VERSION.spec_version.saturating_add(1)
         );
-        let checkpoint = pallet_execution_guard::PendingUpgradeCheckpoint::<Runtime>::get();
-        assert!(checkpoint.is_some_and(|(parent, state_root)| {
-            parent == checkpoint_parent.0 && state_root != [0; 32]
-        }));
+        assert!(pallet_execution_guard::PreMigrationAnchor::<Runtime>::get().is_none());
+        assert!(!pallet_execution_guard::PendingAnchorCapture::<Runtime>::get());
         assert!(System::events().iter().any(|record| matches!(
             &record.event,
             crate::RuntimeEvent::ExecutionGuard(
@@ -5579,7 +5594,28 @@ fn upgrade_path_authorizes_schedules_and_clears_only_after_validation_code_appli
         submit_relay_upgrade_go_ahead();
 
         assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_none());
-        assert!(pallet_execution_guard::PendingUpgradeCheckpoint::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::PreMigrationAnchor::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::PendingAnchorCapture::<Runtime>::get());
+        let application_block = System::block_number();
+        let anchor_hash = System::parent_hash().0;
+        pallet_migrations::Cursor::<Runtime>::put(pallet_migrations::MigrationCursor::Active(
+            pallet_migrations::ActiveCursor {
+                index: 0,
+                inner_cursor: None,
+                started_at: application_block,
+            },
+        ));
+        System::set_block_number(application_block.saturating_add(1));
+        let _ = ExecutionGuard::on_initialize(System::block_number());
+        assert_eq!(
+            pallet_execution_guard::PreMigrationAnchor::<Runtime>::get(),
+            Some((application_block, anchor_hash)),
+        );
+        assert!(!pallet_execution_guard::PendingAnchorCapture::<Runtime>::get());
+        use frame_support::migrations::MigrationStatusHandler;
+        pallet_migrations::Cursor::<Runtime>::kill();
+        crate::configs::MigrationStatusToGuard::completed();
+        assert!(pallet_execution_guard::PreMigrationAnchor::<Runtime>::get().is_none());
         let applied_raw = match release_channel_raw() {
             Some(raw) => raw,
             None => {
@@ -5587,7 +5623,7 @@ fn upgrade_path_authorizes_schedules_and_clears_only_after_validation_code_appli
                 return;
             }
         };
-        assert_eq!(raw_u32(&applied_raw, 108), Some(System::block_number()));
+        assert_eq!(raw_u32(&applied_raw, 108), Some(application_block));
         assert_eq!(
             raw_u32(&applied_raw, 112),
             Some(pending.target_spec_version)
@@ -5677,7 +5713,8 @@ fn relay_abort_clears_pending_state_alarms_and_allows_normal_reproposal() {
             cumulus_pallet_parachain_system::PendingValidationCode::<Runtime>::get().is_empty()
         );
         assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_none());
-        assert!(pallet_execution_guard::PendingUpgradeCheckpoint::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::PreMigrationAnchor::<Runtime>::get().is_none());
+        assert!(!pallet_execution_guard::PendingAnchorCapture::<Runtime>::get());
         assert!(pallet_execution_guard::ScheduledUpgrade::<Runtime>::get().is_none());
         assert!(System::authorized_upgrade().is_none());
         assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
@@ -5816,7 +5853,8 @@ fn writer_b_cannot_hide_a_live_pending_upgrade_before_relay_abort() {
         submit_relay_upgrade_abort();
 
         assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_none());
-        assert!(pallet_execution_guard::PendingUpgradeCheckpoint::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::PreMigrationAnchor::<Runtime>::get().is_none());
+        assert!(!pallet_execution_guard::PendingAnchorCapture::<Runtime>::get());
         assert!(pallet_execution_guard::ScheduledUpgrade::<Runtime>::get().is_none());
         assert!(System::events().iter().any(|record| matches!(
             &record.event,
@@ -5897,7 +5935,8 @@ fn writer_b_cannot_hide_a_live_pending_upgrade_before_application() {
         submit_relay_upgrade_go_ahead();
 
         assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_none());
-        assert!(pallet_execution_guard::PendingUpgradeCheckpoint::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::PreMigrationAnchor::<Runtime>::get().is_none());
+        assert!(pallet_execution_guard::PendingAnchorCapture::<Runtime>::get());
         assert!(pallet_execution_guard::ScheduledUpgrade::<Runtime>::get().is_none());
         assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
         assert!(System::events().iter().any(|record| matches!(
@@ -5993,8 +6032,8 @@ fn system_authorization_survives_cumulus_overlap_preflight_rejection() {
                 return;
             }
         };
-        let checkpoint_before =
-            pallet_execution_guard::PendingUpgradeCheckpoint::<Runtime>::get();
+        let anchor_before = pallet_execution_guard::PreMigrationAnchor::<Runtime>::get();
+        let capture_before = pallet_execution_guard::PendingAnchorCapture::<Runtime>::get();
         let release_before = release_channel_raw();
         System::set_block_number(pending_before.applicable_at);
         seed_parachain_upgrade_boundary(candidate.len());
@@ -6015,8 +6054,12 @@ fn system_authorization_survives_cumulus_overlap_preflight_rejection() {
             Some(pending_before)
         );
         assert_eq!(
-            pallet_execution_guard::PendingUpgradeCheckpoint::<Runtime>::get(),
-            checkpoint_before
+            pallet_execution_guard::PreMigrationAnchor::<Runtime>::get(),
+            anchor_before
+        );
+        assert_eq!(
+            pallet_execution_guard::PendingAnchorCapture::<Runtime>::get(),
+            capture_before
         );
         assert_eq!(release_channel_raw(), release_before);
         assert_eq!(
@@ -6508,9 +6551,11 @@ fn migration_completion_clears_a_migration_failure_halt() {
             frame_support::migrations::FailedMigrationHandling::KeepStuck
         );
         assert!(pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        pallet_execution_guard::PreMigrationAnchor::<Runtime>::put((9, [9; 32]));
         crate::configs::MigrationStatusToGuard::completed();
         assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
         assert!(crate::configs::MigrationFailedStep::get().is_none());
+        assert!(pallet_execution_guard::PreMigrationAnchor::<Runtime>::get().is_none());
     });
 }
 
@@ -6646,6 +6691,10 @@ fn active_migration_cursor_halts_only_after_stall_threshold() {
 
 #[test]
 fn runtime_type_wiring_pins_migration_and_upgrade_event_bridges() {
+    assert_same_type::<
+        <Runtime as pallet_execution_guard::Config>::MigrationStatus,
+        crate::configs::RuntimeMigrationStatus,
+    >();
     assert_same_type::<
         <Runtime as pallet_migrations::Config>::FailedMigrationHandler,
         crate::configs::MigrationFailureToGuard,
@@ -8883,13 +8932,55 @@ fn void_cohort_releases_a_retained_rerun_pin_and_guard_records() {
         let summary = pallet_epoch::RecentCohortSummaries::<Runtime>::get()
             .into_iter()
             .find(|summary| summary.epoch == epoch);
-        assert!(summary.as_ref().is_some_and(|summary| summary.voided));
-        assert!(summary.is_some_and(|summary| {
-            summary.proposals.len() == 2
-                && summary.proposals.iter().all(|(_, _, decision)| {
-                    *decision == DecisionOutcome::Reject(RejectReason::ProcessHold)
-                })
-        }));
+        let summary = match summary {
+            Some(summary) => summary,
+            None => {
+                assert!(false, "voided cohort summary must be retained");
+                return;
+            }
+        };
+        assert!(summary.voided);
+        assert_eq!(summary.proposals.len(), 2, "summary={summary:?}");
+        assert!(
+            summary
+                .proposals
+                .iter()
+                .any(|(pid, _, decision)| *pid == PID && *decision == DecisionOutcome::Adopt),
+            "summary={summary:?}"
+        );
+        // 05 §7(4): membership, not `decision.is_some()`, is the discriminator.
+        // QUEUED_PID is decided but never reached `Measuring`, so it is not a
+        // cohort member and takes T20 — its vacated Adopt does not enter the
+        // archive. Whether T20's record is the *truthful* one for this
+        // population is SQ-319.
+        assert!(
+            summary
+                .proposals
+                .iter()
+                .any(|(pid, _, decision)| *pid == QUEUED_PID
+                    && *decision == DecisionOutcome::Reject(RejectReason::ProcessHold)),
+            "summary={summary:?}"
+        );
+        // The cohort member emits no per-proposal rejection; the T20'd
+        // same-epoch proposal emits exactly one.
+        assert!(!System::events().iter().any(|record| matches!(
+            record.event,
+            crate::RuntimeEvent::Epoch(pallet_epoch::Event::ProposalForceRejected { pid, .. })
+                if pid == PID
+        )));
+        assert_eq!(
+            System::events()
+                .iter()
+                .filter(|record| matches!(
+                    record.event,
+                    crate::RuntimeEvent::Epoch(pallet_epoch::Event::ProposalForceRejected {
+                        pid,
+                        ..
+                    }) if pid == QUEUED_PID
+                ))
+                .count(),
+            1,
+        );
         assert_eq!(
             crate::views::recent_cohorts().as_slice(),
             pallet_epoch::RecentCohortSummaries::<Runtime>::get().as_slice(),
@@ -13785,18 +13876,11 @@ fn view_execution_queue_reuses_guard_projection_and_fails_closed() {
 
 #[test]
 fn unavailable_prize_keeps_the_base_contest_floor_and_never_slashes_the_proposer() {
-    // Codex PR #100 P1 regression. B2 unified the grade adapter and the
-    // `decision_stats` view onto one contest-floor helper, but made it void the
-    // floor when `in_cap_prize` is unavailable. SQ-173 leaves the prize
-    // unbacked for EVERY non-TREASURY class, so every PARAM/CODE/META proposal
-    // would have graded non-decision-grade, extended once, then landed on
-    // `Reject(NotDecisionGrade)` — slashing 10% of the proposer's intake bond
-    // for an input the chain, not the proposer, is missing.
-    //
-    // A missing prize is a security-sizing input gap: `decide` already fails it
-    // at the sizing step (`in_cap_prize.ok_or(BadDecisionInput)`), an error that
-    // leaves the proposal in place and retryable. Grading must stay meaningful
-    // and keep the base `dec.v_min` floor (05 §5.2; 08 §5.3).
+    // The grade remains meaningful even though SQ-40 now makes the later
+    // sizing step a terminal SecuritySizing rejection. Keeping the base floor
+    // prevents the undefined proxy from being misreported as market-grade
+    // failure before that normative T10 path (05 sections 5.2/5.4; 08 section
+    // 5.2).
     development_ext().execute_with(|| {
         let params =
             <crate::configs::RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
@@ -13820,6 +13904,151 @@ fn unavailable_prize_keeps_the_base_contest_floor_and_never_slashes_the_proposer
         assert_ne!(
             params.v_min[param_index], 0,
             "the base floor must remain a real, enforceable contest requirement",
+        );
+    });
+}
+
+#[test]
+fn sq40_undefined_prize_takes_t10_and_refunds_the_full_runtime_bond() {
+    use frame_support::traits::fungibles::Mutate;
+    use pallet_epoch::{MarketAccess, ProposalBondCurrency};
+
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 9_311;
+        let params =
+            <crate::configs::RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
+        let end = params.decision_window;
+        System::set_block_number(end);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let proposer = account(32);
+        let bond = crate::configs::balance_param(b"prop.bond.param");
+        let insurance_before =
+            ForeignAssets::balance(usdc_location(), crate::configs::insurance_account());
+        assert_ok!(ForeignAssets::mint_into(usdc_location(), &proposer, bond,));
+        assert_ok!(
+            <crate::configs::RuntimeProposalBond as ProposalBondCurrency<AccountId>>::hold(
+                &proposer, bond
+            )
+        );
+        pallet_epoch::ProposalBonds::<Runtime>::insert(
+            PID,
+            pallet_epoch::ProposalBond {
+                proposer: proposer.clone(),
+                held: bond,
+            },
+        );
+
+        let batch = pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::default();
+        let bytes = batch.encode();
+        let payload_len = match u32::try_from(bytes.len()) {
+            Ok(len) => len,
+            Err(_) => {
+                assert!(false, "bounded decision payload length must fit u32");
+                return;
+            }
+        };
+        let payload_hash = match <Preimage as StorePreimage>::note(bytes.into()) {
+            Ok(hash) => hash,
+            Err(error) => {
+                assert!(false, "decision payload must be noted: {error:?}");
+                return;
+            }
+        };
+        let markets = MarketSet {
+            accept: 93_101,
+            reject: 93_102,
+            gates: Some([93_103, 93_104, 93_105, 93_106]),
+            baseline: 93_107,
+        };
+        let proposal = Proposal {
+            id: PID,
+            proposer: proposer.clone(),
+            class: ProposalClass::Param,
+            state: ProposalState::Trading,
+            epoch,
+            submitted_at: 0,
+            payload_hash: payload_hash.0,
+            payload_len,
+            ask: 0,
+            bond,
+            resources: Default::default(),
+            metric_spec: 1,
+            decide_at: end,
+            rerun: false,
+            extended: false,
+            delayed_once: false,
+            markets: Some(markets),
+            maturity: None,
+            grace_end: None,
+            version_constraint: pallet_execution_guard::CurrentSpecName::<Runtime>::get(),
+            decision: None,
+        };
+        pallet_epoch::Proposals::<Runtime>::insert(PID, proposal);
+        let schedule = pallet_epoch::Schedule::<Runtime>::get();
+        pallet_epoch::ProposalSchedules::<Runtime>::insert(
+            PID,
+            pallet_epoch::ProposalSchedule {
+                epoch,
+                epoch_start_block: schedule.epoch_start_block,
+                epoch_length: schedule.length,
+                decide_at: end,
+                metric_spec: 1,
+            },
+        );
+        pallet_epoch::NextProposalId::<Runtime>::mutate(|next| {
+            *next = (*next).max(PID.saturating_add(1));
+        });
+        pallet_conditional_ledger::Vaults::<Runtime>::insert(
+            PID,
+            pallet_conditional_ledger::core_ledger::VaultInfo::open(1),
+        );
+        assert_ok!(seed_decision_markets(
+            PID,
+            ProposalClass::Param,
+            end,
+            futarchy_primitives::FixedU64(700_000_000),
+            futarchy_primitives::FixedU64(500_000_000),
+            futarchy_primitives::FixedU64(0),
+        ));
+        let stored = match pallet_epoch::Proposals::<Runtime>::get(PID) {
+            Some(proposal) => proposal,
+            None => {
+                assert!(false, "decision proposal must remain stored");
+                return;
+            }
+        };
+        assert_eq!(
+            <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
+                AccountId,
+            >>::in_cap_prize(&stored),
+            None,
+        );
+
+        assert_ok!(Epoch::decide(RuntimeOrigin::signed(account(33)), PID));
+
+        assert_eq!(
+            pallet_epoch::Proposals::<Runtime>::get(PID)
+                .map(|proposal| (proposal.state, proposal.decision)),
+            Some((
+                ProposalState::Measuring,
+                Some(DecisionOutcome::Reject(RejectReason::SecuritySizing)),
+            )),
+        );
+        assert!(!pallet_epoch::ProposalBonds::<Runtime>::contains_key(PID));
+        assert_eq!(ForeignAssets::balance(usdc_location(), &proposer), bond);
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), crate::configs::insurance_account()),
+            insurance_before,
+        );
+        assert!(!System::events().iter().any(|record| matches!(
+            record.event,
+            crate::RuntimeEvent::Epoch(pallet_epoch::Event::IntakeSlashed { pid: PID, .. })
+        )));
+        assert_eq!(
+            <crate::configs::RuntimeMarketAccess as MarketAccess<AccountId>>::baseline_market(
+                epoch
+            ),
+            Some(markets.baseline),
         );
     });
 }

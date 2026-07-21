@@ -25,8 +25,9 @@ QueuedExecution {
   // (retired 2026-07-20, SQ-127/SQ-144: the PB-MIGRATION anchor is captured at
   //  code *application*, not at execute(), and single-homed in its own guard
   //  storage item — this row is deleted by §1.2(13) before a migration can fail.
-  //  See §3.2(2). NOTE: the shipped struct still carries `pre_upgrade_checkpoint`
-  //  and still writes it; its removal is a coordinated storage change owed under
+  //  See §3.2(2). NOTE: the shipped struct retains an inert
+  //  `pre_upgrade_checkpoint` for the frozen v6 SCALE shape and always writes
+  //  `None`; physical removal remains a coordinated storage change owed under
   //  02 §13(3) and tracked in PLAN.md · Spec questions (SQ-94).)
   cancelled: bool
 }

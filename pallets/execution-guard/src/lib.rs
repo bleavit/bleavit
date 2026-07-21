@@ -176,6 +176,20 @@ pub trait UpgradeSchedule {
     fn scheduling_performed() -> bool;
 }
 
+/// Read-only projection of the SDK multi-block-migration cursor. The guard
+/// needs only presence: cursor contents remain single-sourced and bounded by
+/// `pallet-migrations` (09 §3.2(2)). Runtime implementations must answer with
+/// at most one bounded storage read, which `on_initialize` charges.
+pub trait MigrationStatusProvider {
+    fn cursor_exists() -> bool;
+}
+
+impl MigrationStatusProvider for () {
+    fn cursor_exists() -> bool {
+        false
+    }
+}
+
 /// The execution guard is one of the two exhaustive writers of the frozen
 /// 168-byte ReleaseChannel record (02 §12).
 pub trait ReleaseChannelWriter {
@@ -237,8 +251,6 @@ pub trait BatchDispatcher<Call> {
     /// authorization as a successful dispatch, so the guard must reject a
     /// wrong spec name/version before internal-Root application.
     fn observed_runtime_version(code: &[u8]) -> Option<RuntimeVersionConstraint>;
-    /// Parent block/state-root audit anchor for PB-MIGRATION.
-    fn checkpoint() -> (H256, H256);
 }
 
 #[cfg(feature = "runtime-benchmarks")]
@@ -274,7 +286,10 @@ pub mod pallet {
         DispatchOutcomeCode, ExecutionRecord, RejectReason, INTEGRATION_CONTRACT_VERSION,
     };
     use parity_scale_codec::{Compact, Decode, DecodeLimit, DecodeWithMemTracking, Encode};
-    use sp_runtime::{traits::Hash as HashT, SaturatedConversion, TryRuntimeError};
+    use sp_runtime::{
+        traits::{CheckedSub, Hash as HashT, One},
+        SaturatedConversion, TryRuntimeError,
+    };
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
 
@@ -293,6 +308,7 @@ pub mod pallet {
         type Params: Params;
         type Capabilities: Capabilities<Self::RuntimeCall>;
         type UpgradeSchedule: UpgradeSchedule;
+        type MigrationStatus: MigrationStatusProvider;
         type Preimages: Preimages;
         type ReleaseChannel: ReleaseChannelWriter;
         type RatifyOrigin: EnsureOrigin<Self::RuntimeOrigin>;
@@ -358,7 +374,9 @@ pub mod pallet {
                 ratify_ref: value.ratify_ref,
                 ratification_passed: value.ratification_passed,
                 attestation_id: value.attestation_id,
-                pre_upgrade_checkpoint: value.pre_upgrade_checkpoint,
+                // Retained solely for the frozen v6 SCALE shape. The retired
+                // authorization-time checkpoint has no behavioral meaning.
+                pre_upgrade_checkpoint: None,
                 cancelled: value.cancelled,
                 declared_domains: value.declared_domains.into_inner(),
                 failed_at: value.failed_at,
@@ -382,7 +400,9 @@ pub mod pallet {
                 ratify_ref: value.ratify_ref,
                 ratification_passed: value.ratification_passed,
                 attestation_id: value.attestation_id,
-                pre_upgrade_checkpoint: value.pre_upgrade_checkpoint,
+                // Retained solely for the frozen v6 SCALE shape. New writes
+                // must keep the compatibility field inert.
+                pre_upgrade_checkpoint: None,
                 cancelled: value.cancelled,
                 declared_domains: BoundedVec::try_from(value.declared_domains)
                     .map_err(|_| CoreError::TooManyDomains)?,
@@ -464,9 +484,17 @@ pub mod pallet {
     pub type UpgradeSpacingHistory<T: Config> =
         StorageValue<_, StoredUpgradeSpacingHistory, ValueQuery>;
 
-    /// PB-MIGRATION audit anchor retained while an upgrade is pending.
+    /// One-block application latch. The relay callback runs after the current
+    /// block's initialization, so the next `on_initialize` is the first point
+    /// at which the newly installed runtime's MBM cursor can be observed.
     #[pallet::storage]
-    pub type PendingUpgradeCheckpoint<T: Config> = StorageValue<_, (H256, H256), OptionQuery>;
+    pub type PendingAnchorCapture<T: Config> = StorageValue<_, bool, ValueQuery>;
+
+    /// PB-MIGRATION's application-time anchor: the number and committed hash
+    /// of the last block before the new image's migrations could step.
+    #[pallet::storage]
+    pub type PreMigrationAnchor<T: Config> =
+        StorageValue<_, (BlockNumberFor<T>, H256), OptionQuery>;
 
     /// The target whose application was successfully scheduled in Cumulus.
     /// This is deliberately distinct from authorization: relay `Abort` can
@@ -573,23 +601,37 @@ pub mod pallet {
 
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
-        fn on_initialize(_: BlockNumberFor<T>) -> Weight {
+        fn on_initialize(now: BlockNumberFor<T>) -> Weight {
             let mut writes = 0;
+            if PendingAnchorCapture::<T>::get() {
+                if T::MigrationStatus::cursor_exists() {
+                    if let Some(anchor_block) = now.checked_sub(&One::one()) {
+                        let parent_hash = frame_system::Pallet::<T>::parent_hash().into();
+                        PreMigrationAnchor::<T>::put((anchor_block, parent_hash));
+                        writes += 1;
+                    }
+                }
+                // No cursor means the image registered no MBMs. Either way,
+                // this application boundary is consumed exactly once.
+                PendingAnchorCapture::<T>::kill();
+                writes += 1;
+            }
             if let Some(pending) = PendingUpgrade::<T>::get() {
                 if ScheduledUpgrade::<T>::get().is_none()
                     && T::UpgradeSchedule::scheduling_performed()
                 {
                     ScheduledUpgrade::<T>::put(pending.hash);
-                    writes = 1;
+                    writes += 1;
                 }
             } else if ScheduledUpgrade::<T>::take().is_some() {
                 // A marker without guard ownership can never authorize or
                 // recover anything; remove it fail-closed.
-                writes = 1;
+                writes += 1;
             }
-            // Worst case: PendingUpgrade + ScheduledUpgrade + the schedule
-            // seam's two proofs (Cumulus pending code + system authorization).
-            T::DbWeight::get().reads_writes(4, writes)
+            // Worst case: the capture latch + migration cursor + System parent
+            // hash, PendingUpgrade + ScheduledUpgrade, and the schedule seam's
+            // two proofs (Cumulus pending code + system authorization).
+            T::DbWeight::get().reads_writes(7, writes)
         }
 
         fn integrity_test() {
@@ -1019,6 +1061,12 @@ pub mod pallet {
             with_storage_layer(Self::do_validation_code_aborted)
         }
 
+        /// SDK migration-status callback. A completed MBM has no remaining
+        /// rollback interval, so its application anchor must not outlive it.
+        pub fn migration_completed() {
+            PreMigrationAnchor::<T>::kill();
+        }
+
         pub fn queue_reject_reason(pid: ProposalId) -> Option<RejectReason> {
             let queued = Queue::<T>::get(pid)?;
             let now = Self::now();
@@ -1297,6 +1345,7 @@ pub mod pallet {
             );
 
             // Precompute every fallible authorization field before dispatch.
+            // PB-MIGRATION anchoring occurs only after relay application.
             let (upgrade, next_spacing_history) = if let Some(hash) = upgrade_hash {
                 let target_spec_version = queued
                     .version_constraint
@@ -1306,7 +1355,6 @@ pub mod pallet {
                 let applicable_at = now
                     .checked_add(DESCRIPTOR_LEAD_TIME)
                     .ok_or(Error::<T>::Overflow)?;
-                let (block_hash, state_root) = T::Dispatcher::checkpoint();
                 let enforced_spacing = if Expedited::<T>::get(pid) {
                     0
                 } else {
@@ -1325,8 +1373,6 @@ pub mod pallet {
                         hash,
                         target_spec_version,
                         applicable_at,
-                        block_hash,
-                        state_root,
                     }),
                     Some(history),
                 )
@@ -1367,10 +1413,6 @@ pub mod pallet {
                             UpgradeSpacingHistory::<T>::put(history);
                         }
                         LastUpgradeAuthorized::<T>::put(now);
-                        PendingUpgradeCheckpoint::<T>::put((
-                            upgrade.block_hash,
-                            upgrade.state_root,
-                        ));
                     }
                     T::Preimages::unpin(queued.payload_hash)?;
                     Self::cleanup_terminal(pid);
@@ -1462,7 +1504,12 @@ pub mod pallet {
                 )
                 .map_err(Self::map_core_error)?;
             T::ReleaseChannel::on_upgrade_applied(pending.target_spec_version)?;
-            PendingUpgradeCheckpoint::<T>::kill();
+            // A valid application is also the successful boundary of any
+            // preceding recovery image: retire its old anchor, then let the
+            // next on_initialize capture a fresh one only if this image
+            // actually registered an MBM cursor.
+            PreMigrationAnchor::<T>::kill();
+            PendingAnchorCapture::<T>::put(true);
             ScheduledUpgrade::<T>::kill();
             Self::persist(state)
         }
@@ -1477,7 +1524,10 @@ pub mod pallet {
             // indication together with the guard state (I-30, G-1).
             T::ReleaseChannel::on_upgrade_aborted(pending.target_spec_version)?;
             PendingUpgrade::<T>::kill();
-            PendingUpgradeCheckpoint::<T>::kill();
+            // Abort precedes application. Consume only a defensive stale
+            // latch; an older migration anchor remains the recovery audit
+            // boundary until completion or a valid recovery image applies.
+            PendingAnchorCapture::<T>::kill();
             ScheduledUpgrade::<T>::kill();
             Self::deposit_event(Event::UpgradeAborted {
                 code_hash: pending.hash,
@@ -1806,6 +1856,11 @@ pub mod pallet {
                 ));
             }
             for (pid, queued) in Queue::<T>::iter() {
+                if queued.pre_upgrade_checkpoint.is_some() {
+                    return Err(TryRuntimeError::Other(
+                        "execution guard retired queue checkpoint is not inert",
+                    ));
+                }
                 if T::Epoch::is_terminal(pid) {
                     return Err(TryRuntimeError::Other(
                         "execution guard Queue retains terminal epoch proposal",
@@ -1925,11 +1980,13 @@ pub mod pallet {
                     ));
                 }
             }
-            if PendingUpgrade::<T>::get().is_some()
-                != PendingUpgradeCheckpoint::<T>::get().is_some()
+            if PreMigrationAnchor::<T>::get().is_some()
+                && !PendingAnchorCapture::<T>::get()
+                && !MigrationHalt::<T>::get()
+                && !T::MigrationStatus::cursor_exists()
             {
                 return Err(TryRuntimeError::Other(
-                    "execution guard pending upgrade/checkpoint mismatch",
+                    "execution guard pre-migration anchor outlived its migration interval",
                 ));
             }
             let pending_upgrade = PendingUpgrade::<T>::get().is_some();
