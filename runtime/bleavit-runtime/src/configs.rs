@@ -2943,7 +2943,11 @@ fn derived_treasury_ask(
                     | pallet_futarchy_treasury::Call::cancel_stream { .. }
                     | pallet_futarchy_treasury::Call::issue_vit { .. }
                     | pallet_futarchy_treasury::Call::recover_foreign { .. }
-                    | pallet_futarchy_treasury::Call::set_coretime_authority { .. },
+                    | pallet_futarchy_treasury::Call::set_coretime_authority { .. }
+                    // 05 §1.4 / 08 §1.4: the sweep moves USDC *into* NAV, so its
+                    // derived Treasury ask is exactly zero — one of the two
+                    // admissible zero-outflow Treasury leaves 05 §1.4 names.
+                    | pallet_futarchy_treasury::Call::sweep_insurance { .. },
                 ) => 0,
                 // `claim_stream` is Signed-recipient-only and coretime renewal is
                 // priced from live quote storage. Neither can be committed as a
@@ -5029,7 +5033,13 @@ impl RuntimeCapabilities {
                 | pallet_futarchy_treasury::Call::cancel_stream { .. }
                 | pallet_futarchy_treasury::Call::issue_vit { .. }
                 | pallet_futarchy_treasury::Call::recover_foreign { .. }
-                | pallet_futarchy_treasury::Call::set_coretime_authority { .. },
+                | pallet_futarchy_treasury::Call::set_coretime_authority { .. }
+                // 08 §1.2/§1.4 (SQ-207): the INSURANCE sweep is a TREASURY-class
+                // decision like every other treasury act. Omitting it here made
+                // `call_enabled` fall to the fail-closed `_` arm, which for
+                // `CallDomain::Treasury` is `SlashAll(ConstitutionViolation)` —
+                // a lawful sweep would have confiscated the whole intake bond.
+                | pallet_futarchy_treasury::Call::sweep_insurance { .. },
             ) => Self::enabled(class, pallet_constitution::Capability::TreasurySpend),
             _ => {
                 let Ok(analysis) =
@@ -5929,6 +5939,14 @@ impl pallet_futarchy_treasury::BenchmarkHelper<RuntimeOrigin, AccountId>
     fn prime_pot_funding(amount: Balance) -> DispatchResult {
         let main = TreasuryPalletId::get().into_account_truncating();
         <ForeignAssets as Mutate<AccountId>>::mint_into(usdc_location(), &main, amount).map(|_| ())
+    }
+    fn prime_insurance_custody(amount: Balance) -> DispatchResult {
+        <ForeignAssets as Mutate<AccountId>>::mint_into(
+            usdc_location(),
+            &insurance_account(),
+            amount,
+        )
+        .map(|_| ())
     }
 }
 #[cfg(feature = "runtime-benchmarks")]

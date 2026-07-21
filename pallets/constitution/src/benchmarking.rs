@@ -86,16 +86,20 @@ mod benches {
         // 09 §5.4: bootstrap Root is the only origin-mediated flag writer.
         let origin = authority_origin::<T>(ConstitutionOrigin::Root);
 
+        // Worst case is an **arming** bit, not `SUDO_PRESENT` (SQ-180): bit 3
+        // arms CODE *and* META, so it runs the `PhaseArmingGate` twice, and each
+        // call is a full treasury `State` read. Benchmarking bit 4 would enter
+        // the gate zero times and understate both time and PoV.
         #[extrinsic_call]
         _(
             origin as T::RuntimeOrigin,
-            PhaseFlagsValue::SUDO_PRESENT,
+            PhaseFlagsValue::CODE_META_ARMED,
             true,
         );
 
         assert_eq!(
-            Pallet::<T>::phase_flags() & PhaseFlagsValue::SUDO_PRESENT,
-            PhaseFlagsValue::SUDO_PRESENT
+            Pallet::<T>::phase_flags() & PhaseFlagsValue::CODE_META_ARMED,
+            PhaseFlagsValue::CODE_META_ARMED
         );
     }
 

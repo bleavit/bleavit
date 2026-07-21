@@ -150,6 +150,13 @@ fn derive_resource_inner(
             0x09,
             &pallet_futarchy_treasury::BudgetLine::OpsCoretime.encode(),
         ),
+        // 05 §1.4 family `0x0B` (SQ-207): singleton — the sweep names no
+        // beneficiary and no budget line, and the contended resource is the one
+        // INSURANCE custody balance. Without this arm the leaf was
+        // `Unclassifiable`, so a lawful sweep could never pass T4 screening.
+        RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::sweep_insurance {
+            ..
+        }) => singleton_resource(0x0B),
         RuntimeCall::Utility(pallet_utility::Call::batch_all { calls }) => {
             if !budget.enter() {
                 return Err(FootprintError::Unclassifiable);

@@ -391,7 +391,13 @@ pub mod pallet {
             if enabled {
                 for (bit, class) in Self::armed_bit_classes() {
                     if flag & bit != 0 {
-                        T::PhaseArmingGate::ensure_armable(class)?;
+                        // Map onto this pallet's own error: `set_phase_flag` is a
+                        // constitution dispatch, so a client decoding its failure
+                        // must find a constitution variant. Propagating the
+                        // provider's error verbatim would have left
+                        // `Error::NavFloorUnmet` unreachable dead metadata.
+                        T::PhaseArmingGate::ensure_armable(class)
+                            .map_err(|_| Error::<T>::NavFloorUnmet)?;
                     }
                 }
             }

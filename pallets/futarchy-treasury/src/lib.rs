@@ -234,6 +234,15 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     ) -> frame_support::dispatch::DispatchResult {
         Ok(())
     }
+    /// Seed the real-USDC INSURANCE custody balance the 08 §1.2/§1.4 sweep
+    /// moves. Under 03 §7 R-4 the account is genesis-endowed with `min_balance`
+    /// only, so without this the `Preservation::Preserve` transfer refuses and
+    /// the `sweep_insurance` benchmark cannot execute in the assembled runtime.
+    fn prime_insurance_custody(
+        _: futarchy_primitives::Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
     fn prime_keeper_rebate() {}
     fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 }
@@ -982,10 +991,17 @@ pub mod pallet {
         /// 08 §4.2/§4.4 minimum-viable-NAV arming gate — the **loud** variant:
         /// if spendable NAV is below the class floor it deposits the durable
         /// `NavFloorUnmet { class, nav, floor }` event and returns `true`;
-        /// otherwise returns `false`. `pallet-epoch`'s arming crank (A8) calls
-        /// this on its **`Ok`-returning** path (arming "rejects as deferred",
-        /// 08 §4.4) so the event survives — unlike an `Err`, which FRAME rolls
-        /// back. No balance changes, so nothing is persisted.
+        /// otherwise returns `false`. It is meant for an **`Ok`-returning**
+        /// caller (08 §4.4's "rejects as deferred" shrink path), where the event
+        /// survives — unlike an `Err`, which FRAME rolls back.
+        ///
+        /// **It still has no production caller** (verified 2026-07-21). SQ-180
+        /// wired the *hard* `ensure_nav_floor` into `constitution.set_phase_flag`
+        /// because that call must leave `PhaseFlags` unchanged on refusal, which
+        /// requires an `Err`; so 08 §4.2's "event **and** extrinsic error" is
+        /// currently satisfied only by the error half. An earlier revision of
+        /// this comment claimed `pallet-epoch`'s A8 arming crank calls this —
+        /// it does not. See PLAN SQ-381.
         pub fn flag_nav_floor(class: ProposalClass) -> bool {
             let mut t = Self::load();
             let below = t.ensure_nav_floor(class).is_err();

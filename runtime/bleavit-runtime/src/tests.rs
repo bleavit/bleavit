@@ -724,7 +724,7 @@ fn preimage_request_count(hash: impl Into<H256>) -> u32 {
     }
 }
 
-fn empty_param_proposal(
+pub(crate) fn empty_param_proposal(
     id: futarchy_primitives::ProposalId,
     proposer: AccountId,
     payload_hash: H256,
@@ -972,7 +972,7 @@ fn install_active_x_snapshot_spec(
     Some(())
 }
 
-fn note_runtime_batch(calls: Vec<RuntimeCall>) -> Option<(H256, u32)> {
+pub(crate) fn note_runtime_batch(calls: Vec<RuntimeCall>) -> Option<(H256, u32)> {
     let batch = pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(calls).ok()?;
     let bytes = batch.encode();
     let payload_len = u32::try_from(bytes.len()).ok()?;

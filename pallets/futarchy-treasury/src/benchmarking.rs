@@ -269,13 +269,25 @@ mod benches {
     /// round-trip.
     #[benchmark]
     fn sweep_insurance() {
+        // Worst case is a non-zero sweep off the `funded()` fixture: it exercises
+        // the custody seam *and* the full `State` round-trip. INSURANCE must be
+        // primed first — under 03 §7 R-4 it holds only `min_balance`, so
+        // `Preservation::Preserve` would otherwise refuse and the benchmark
+        // could not execute in the assembled runtime.
+        Pallet::<T>::seed(&funded());
         let origin = T::BenchmarkHelper::treasury_origin();
-        let mut t = Treasury::default();
-        t.main_usdc = 1_000_000;
-        Pallet::<T>::seed(&t);
+        let amount = 100_000 * USDC;
+        let custody_seeded = T::BenchmarkHelper::prime_insurance_custody(amount * 2);
+        assert!(custody_seeded.is_ok());
+        let main_before = Pallet::<T>::treasury().main_usdc;
 
         #[extrinsic_call]
-        _(origin as T::RuntimeOrigin, 1_000u128);
+        _(origin as T::RuntimeOrigin, amount);
+
+        assert_eq!(
+            Pallet::<T>::treasury().main_usdc,
+            main_before.saturating_add(amount)
+        );
     }
 
     impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext(), crate::mock::Test);

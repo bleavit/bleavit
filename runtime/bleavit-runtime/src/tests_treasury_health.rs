@@ -162,12 +162,19 @@ fn sweep_insurance_moves_real_usdc_from_insurance_to_main_and_raises_nav() {
 fn sweep_insurance_is_refused_to_every_non_treasury_origin() {
     development_ext().execute_with(|| {
         let amount: Balance = 1_000 * futarchy_primitives::currency::USDC;
+        // The complete 06 §3.2 matrix row: only the `FutarchyTreasury` column
+        // carries a tick, so every other column — and Root/Signed/none — must be
+        // refused. 08 §1.2: "No guardian power, no playbook and no admin origin
+        // can reach it."
         for bad in [
             RuntimeOrigin::signed(crate::genesis::treasury_account()),
             RuntimeOrigin::root(),
             RuntimeOrigin::none(),
             pallet_origins::Origin::FutarchyParam.into(),
             pallet_origins::Origin::FutarchyCode.into(),
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            pallet_origins::Origin::OracleResolution.into(),
             pallet_origins::Origin::GuardianHold.into(),
             pallet_origins::Origin::EmergencyPlaybook.into(),
         ] {
@@ -238,7 +245,7 @@ fn arming_a_class_below_its_nav_floor_is_refused_and_leaves_flags_unchanged() {
                 pallet_constitution::PhaseFlagsValue::PARAM_ARMED,
                 true
             ),
-            pallet_futarchy_treasury::Error::<Runtime>::NavFloorUnmet
+            pallet_constitution::Error::<Runtime>::NavFloorUnmet
         );
         assert_eq!(Constitution::phase_flags(), flags_before);
     });
@@ -282,7 +289,7 @@ fn arming_is_fail_static_under_the_reserve_health_haircut() {
                 pallet_constitution::PhaseFlagsValue::TREASURY_ARMED,
                 true
             ),
-            pallet_futarchy_treasury::Error::<Runtime>::NavFloorUnmet
+            pallet_constitution::Error::<Runtime>::NavFloorUnmet
         );
         assert_eq!(Constitution::phase_flags(), flags_before);
 
@@ -292,5 +299,124 @@ fn arming_is_fail_static_under_the_reserve_health_haircut() {
             pallet_constitution::PhaseFlagsValue::PARAM_ARMED,
             false
         ));
+    });
+}
+
+// ------------------- SQ-207: the real screening path (spec-review fix) ------
+//
+// The first cut of this file only ever constructed `Origin::FutarchyTreasury`
+// directly, so it never exercised T4 screening — and three exhaustive-match
+// sites had no `sweep_insurance` arm. Each failed *closed*, and the capability
+// one failed closed into `SlashAll(ConstitutionViolation)`: a lawful sweep would
+// have confiscated 100 % of the proposer's intake bond. These tests walk the
+// path a real TREASURY decision takes, so an omitted arm can never pass again.
+
+/// 05 §1.4 family `0x0B`: the leaf must classify, or T4 cancels the payload.
+#[test]
+fn sweep_insurance_derives_its_canonical_resource_key() {
+    development_ext().execute_with(|| {
+        let call = RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::sweep_insurance {
+            amount: 1_000 * futarchy_primitives::currency::USDC,
+        });
+        let footprint = crate::classifier::derive_resource_footprint(&[call]);
+        assert!(
+            footprint.is_ok(),
+            "sweep_insurance must be classifiable (05 §1.4 `0x0B`), not Unclassifiable"
+        );
+        let Ok(footprint) = footprint else { return };
+        assert_eq!(footprint.len(), 1);
+        // Singleton family: the amount must not enter the discriminator, so two
+        // different sweeps contend on the same INSURANCE lock.
+        let other =
+            RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::sweep_insurance {
+                amount: 7 * futarchy_primitives::currency::USDC,
+            });
+        let Ok(other_footprint) = crate::classifier::derive_resource_footprint(&[other]) else {
+            panic!("second sweep must classify");
+        };
+        assert_eq!(footprint[0], other_footprint[0]);
+        assert_eq!(footprint[0][0], 0x0B, "family tag must be 05 §1.4 `0x0B`");
+    });
+}
+
+/// The capability gap that would have slashed the whole bond.
+#[test]
+fn a_treasury_sweep_proposal_passes_static_screening() {
+    development_ext().execute_with(|| {
+        let call = RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::sweep_insurance {
+            amount: 1_000 * futarchy_primitives::currency::USDC,
+        });
+        let Ok(footprint) =
+            crate::classifier::derive_resource_footprint(std::slice::from_ref(&call))
+        else {
+            panic!("sweep must classify");
+        };
+        let Some((payload_hash, payload_len)) = crate::tests::note_runtime_batch(vec![call]) else {
+            panic!("payload must note");
+        };
+
+        let mut proposal = crate::tests::empty_param_proposal(
+            9_301,
+            crate::tests::account(77),
+            payload_hash,
+            payload_len,
+        );
+        proposal.class = ProposalClass::Treasury;
+        proposal.bond = crate::configs::balance_param(b"prop.bond.trs");
+        let Ok(resources) = futarchy_primitives::BoundedVec::try_from(footprint.to_vec()) else {
+            panic!("footprint must fit the 05 §1.4 lock bound");
+        };
+        proposal.resources = resources;
+
+        let disposition =
+            <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
+                AccountId,
+            >>::static_check(&proposal);
+        assert_eq!(
+            disposition,
+            pallet_epoch::StaticCheckDisposition::Eligible,
+            "a lawful INSURANCE sweep must screen clean — an omitted capability \
+             arm previously made this SlashAll(ConstitutionViolation)"
+        );
+    });
+}
+
+/// 05 §1.4 / 08 §1.4: the sweep is an inflow, so its derived ask is zero — and a
+/// `None` ask (the pre-fix behaviour) blocks Adopt at sizing.
+#[test]
+fn sweep_insurance_derives_a_zero_treasury_ask_so_sizing_can_complete() {
+    development_ext().execute_with(|| {
+        let call = RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::sweep_insurance {
+            amount: 4_000 * futarchy_primitives::currency::USDC,
+        });
+        let Ok(footprint) =
+            crate::classifier::derive_resource_footprint(std::slice::from_ref(&call))
+        else {
+            panic!("sweep must classify");
+        };
+        let Some((payload_hash, payload_len)) = crate::tests::note_runtime_batch(vec![call]) else {
+            panic!("payload must note");
+        };
+        let mut proposal = crate::tests::empty_param_proposal(
+            9_302,
+            crate::tests::account(78),
+            payload_hash,
+            payload_len,
+        );
+        proposal.class = ProposalClass::Treasury;
+        proposal.bond = crate::configs::balance_param(b"prop.bond.trs");
+        let Ok(resources) = futarchy_primitives::BoundedVec::try_from(footprint.to_vec()) else {
+            panic!("footprint must fit the 05 §1.4 lock bound");
+        };
+        proposal.resources = resources;
+
+        let prize =
+            <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
+                AccountId,
+            >>::in_cap_prize(&proposal);
+        assert!(
+            prize.is_some(),
+            "a derivable zero-outflow sweep must yield a prize, not None"
+        );
     });
 }
