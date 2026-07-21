@@ -59,6 +59,9 @@ type BenchmarkXcmTraffic = StorageDoubleMap<
 type BenchmarkXcmTrafficEpochs = StorageValue<WelfareXcmTrafficEpochs, Vec<EpochId>, ValueQuery>;
 
 const TERMINAL_SETTLEMENT_EPOCH: EpochId = 1_000;
+/// An epoch `fill_epoch_state` never populates (its proposals live in 0/100+/200
+/// and its cohorts in 100+), so it is orphaned by construction — SQ-320.
+const ORPHAN_BASELINE_EPOCH: EpochId = 50;
 // Benchmark-only mirror of welfare's frozen 21-epoch index capacity. Epoch
 // deliberately has no production dependency on pallet-welfare, so the aliases
 // above cannot name its Rust constant directly.
@@ -845,6 +848,34 @@ mod benches {
         _(origin as T::RuntimeOrigin, 1);
 
         assert!(!crate::Proposals::<T>::contains_key(1));
+        Ok(())
+    }
+
+    /// SQ-320 worst case: a full epoch state (so every `proposals`/`cohorts`/
+    /// `recent` scan runs at its bound) plus a **real** Baseline book and vault
+    /// for the orphaned epoch, so the measured cost includes the settlement leg
+    /// — ledger `settle_baseline`, market close and the terminal latch — and
+    /// not just the no-op early return.
+    #[benchmark]
+    fn finalize_epoch_baseline() -> Result<(), BenchmarkError> {
+        let mut state = EpochState::new();
+        fill_epoch_state::<T>(
+            &mut state,
+            MAX_INTAKE_QUEUE,
+            MAX_LIVE_PROPOSALS,
+            MAX_NON_TERMINAL_COHORTS,
+        );
+        // Strictly past: `fill_epoch_state` stamps its proposals into epochs
+        // 0/100+/200 and its cohorts into 100+, so the orphan epoch carries
+        // neither a proposal nor a cohort nor a summary.
+        state.epoch.index = ORPHAN_BASELINE_EPOCH.saturating_add(1);
+        Pallet::<T>::seed(state)?;
+        T::BenchmarkHelper::prime_settlement(ORPHAN_BASELINE_EPOCH);
+        let caller = T::BenchmarkHelper::account(251);
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller), ORPHAN_BASELINE_EPOCH);
+
         Ok(())
     }
 

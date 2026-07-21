@@ -238,7 +238,7 @@ inventory! {
         leaf public => ["attest", "challenge_attestation"];
     }
     "Epoch" {
-        leaf public => ["submit", "withdraw", "tick", "decide", "settle_cohort", "mark_executed", "mark_failed_executed", "retry_exhausted_to_measurement", "expire_or_stale_queue"];
+        leaf public => ["submit", "withdraw", "tick", "decide", "settle_cohort", "finalize_epoch_baseline", "mark_executed", "mark_failed_executed", "retry_exhausted_to_measurement", "expire_or_stale_queue"];
         leaf values => ["set_next_epoch_length"];
         leaf guardian_hold => ["delay_once", "force_reject_process_hold"];
         leaf emergency_playbook => ["void_cohort", "set_intake_paused"];

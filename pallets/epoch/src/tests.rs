@@ -1559,6 +1559,148 @@ fn sq92_void_cohort_fails_closed_when_the_baseline_settlement_fails() {
     });
 }
 
+/// SQ-320 / 05 §7(6): the orphan the T20 guardian path creates, and the crank
+/// that repairs it. `force_reject_process_hold` against a one-proposal epoch is
+/// the shortest trigger — it terminates the proposal *before* `Measuring`, so
+/// `CohortInfo` is never written and §7(5)'s VOID has nothing to fire on.
+#[test]
+fn sq320_orphaned_epoch_baseline_is_reachable_and_the_crank_settles_it() {
+    new_test_ext().execute_with(|| {
+        let mut state = EpochState::new();
+        state.epoch.index = 3;
+        state
+            .proposals
+            .push(live_proposal(1, ProposalState::Trading, 3));
+        state.proposal_id_high_water = 1;
+        assert_ok!(Epoch::seed(state));
+
+        assert_ok!(Epoch::force_reject_process_hold(
+            RuntimeOrigin::signed(guardian()),
+            1,
+        ));
+        // The orphan: the proposal is terminal, yet no cohort was ever created,
+        // so neither `settle_cohort` nor `void_cohort` can reach the Baseline.
+        assert!(!Cohorts::<Test>::contains_key(3));
+        assert!(!SeamCalls::get()
+            .iter()
+            .any(|call| matches!(call, SeamCall::WelfareVoidBaseline(_))));
+
+        // Roll past the epoch (§7(6) condition 1) and crank permissionlessly.
+        EpochOf::<Test>::mutate(|clock| clock.index = 4);
+        assert_ok!(Epoch::finalize_epoch_baseline(
+            RuntimeOrigin::signed(nobody()),
+            3,
+        ));
+        assert!(SeamCalls::get().contains(&SeamCall::WelfareVoidBaseline(3)));
+        assert_ok!(Epoch::do_try_state());
+    });
+}
+
+#[test]
+fn sq320_finalize_epoch_baseline_emits_no_epoch_event() {
+    // 02 §6 freezes the `pallet-epoch` event schema (X-11d, "full canonical
+    // set"). The crank's canonical signal is the ledger's `BaselineSettled`, so
+    // adding an epoch event here would force a contract bump.
+    new_test_ext().execute_with(|| {
+        let mut state = EpochState::new();
+        state.epoch.index = 4;
+        assert_ok!(Epoch::seed(state));
+        let before = System::events().len();
+
+        assert_ok!(Epoch::finalize_epoch_baseline(
+            RuntimeOrigin::signed(nobody()),
+            3,
+        ));
+
+        assert!(System::events()
+            .into_iter()
+            .skip(before)
+            .all(|record| !matches!(record.event, RuntimeEvent::Epoch(_))));
+    });
+}
+
+#[test]
+fn sq320_finalize_epoch_baseline_survives_a_ledger_freeze() {
+    // 06 §6.3 exempts settlement calls from PB-LEDGER-FREEZE, and it must: the
+    // freeze's own T20 sweep is one of the two ways an epoch is orphaned, so a
+    // freeze that blocked the repair would guarantee the stranding it exists to
+    // contain (05 §7(6)).
+    new_test_ext().execute_with(|| {
+        let mut state = EpochState::new();
+        state.epoch.index = 4;
+        assert_ok!(Epoch::seed(state));
+        LedgerFrozen::set(true);
+
+        assert_ok!(Epoch::finalize_epoch_baseline(
+            RuntimeOrigin::signed(nobody()),
+            3,
+        ));
+        assert!(SeamCalls::get().contains(&SeamCall::WelfareVoidBaseline(3)));
+    });
+}
+
+#[test]
+fn sq320_finalize_epoch_baseline_rejects_root_and_unsigned_origins() {
+    // 06 §3.2 authority matrix: permissionless Signed row. `ensure_signed`
+    // is the whole gate — no Root and no unsigned surface (G-5, I-10).
+    new_test_ext().execute_with(|| {
+        let mut state = EpochState::new();
+        state.epoch.index = 4;
+        assert_ok!(Epoch::seed(state));
+
+        assert_noop!(
+            Epoch::finalize_epoch_baseline(RuntimeOrigin::root(), 3),
+            DispatchError::BadOrigin
+        );
+        assert_noop!(
+            Epoch::finalize_epoch_baseline(RuntimeOrigin::none(), 3),
+            DispatchError::BadOrigin
+        );
+        assert!(!SeamCalls::get()
+            .iter()
+            .any(|call| matches!(call, SeamCall::WelfareVoidBaseline(_))));
+    });
+}
+
+#[test]
+fn sq320_finalize_epoch_baseline_refuses_a_live_or_cohorted_epoch() {
+    // §7(6) conditions 1 and 2, at the dispatch boundary: a premature
+    // finalization would settle a Baseline against an epoch whose cohort is
+    // still reachable — the one way this path could destroy information the
+    // market is still producing.
+    new_test_ext().execute_with(|| {
+        let mut state = EpochState::new();
+        state.epoch.index = 3;
+        assert_ok!(Epoch::seed(state));
+        // Condition 1: the epoch is still live.
+        assert_noop!(
+            Epoch::finalize_epoch_baseline(RuntimeOrigin::signed(nobody()), 3),
+            Error::<Test>::BadState
+        );
+
+        // Condition 2: a cohort exists, so §7(5)/T19 owns this Baseline.
+        let mut state = EpochState::new();
+        state.epoch.index = 4;
+        state
+            .proposals
+            .push(live_proposal(1, ProposalState::Measuring, 3));
+        state.cohorts.push(CoreCohort {
+            epoch: 3,
+            proposals: vec![1],
+            status: CohortStatus::Measuring { until_epoch: 5 },
+        });
+        state.proposal_id_high_water = 1;
+        assert_ok!(Epoch::seed(state));
+        assert_noop!(
+            Epoch::finalize_epoch_baseline(RuntimeOrigin::signed(nobody()), 3),
+            Error::<Test>::BadState
+        );
+        assert!(!SeamCalls::get()
+            .iter()
+            .any(|call| matches!(call, SeamCall::WelfareVoidBaseline(_))));
+    });
+}
+
 #[test]
 fn t20_emits_exactly_one_epoch_terminal_event() {
     new_test_ext().execute_with(|| {
