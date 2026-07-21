@@ -85,7 +85,7 @@ class SurfaceManifestTests(unittest.TestCase):
 
     def test_schema_and_entry_shapes(self) -> None:
         self.assertEqual(self.manifest["schema"], "bleavit.critical-surface.v1")
-        self.assertEqual(self.manifest["integration_contract_version"], 5)
+        self.assertEqual(self.manifest["integration_contract_version"], 6)
         identifiers = [entry["id"] for entry in self.entries]
         self.assertEqual(len(identifiers), len(set(identifiers)))
         for entry in self.entries:
@@ -115,32 +115,136 @@ class SurfaceManifestTests(unittest.TestCase):
             for entry in self.entries
             if entry["id"] == "constant.identity.contract_version"
         )
-        self.assertEqual(version["layout"], {"type": "u32", "value": "0x05000000"})
+        self.assertEqual(version["layout"], {"type": "u32", "value": "0x06000000"})
 
-    def test_section_six_ledger_events_and_section_seven_attestor_storage_are_exact(self) -> None:
-        expected_ledger_events = {
-            "Split",
-            "Merged",
-            "ScalarSplit",
-            "ScalarMerged",
-            "GateSplit",
-            "GateMerged",
-            "PositionTransferred",
-            "BaselineSplit",
-            "BaselineMerged",
-            "VaultResolved",
-            "VaultVoided",
-            "ScalarSettlementSet",
-            "GateSettled",
-            "BaselineSettled",
-            "Redeemed",
-            "ScalarRedeemed",
-            "ScalarPairRedeemed",
-            "GateRedeemed",
-            "VoidRedeemed",
-            "BaselineRedeemed",
-            "VaultReaped",
-            "BaselineVaultReaped",
+    def test_section_six_events_and_section_seven_attestor_storage_are_exact(self) -> None:
+        expected_events = {
+            "pallet-conditional-ledger": {
+                "Split",
+                "Merged",
+                "ScalarSplit",
+                "ScalarMerged",
+                "GateSplit",
+                "GateMerged",
+                "PositionTransferred",
+                "BaselineSplit",
+                "BaselineMerged",
+                "VaultResolved",
+                "VaultVoided",
+                "ScalarSettlementSet",
+                "GateSettled",
+                "BaselineSettled",
+                "Redeemed",
+                "ScalarRedeemed",
+                "ScalarPairRedeemed",
+                "GateRedeemed",
+                "VoidRedeemed",
+                "BaselineRedeemed",
+                "VaultReaped",
+                "BaselineVaultReaped",
+            },
+            "pallet-market": {
+                "Traded",
+                "Observed",
+                "MarketCreated",
+                "MarketClosed",
+                "MarketReaped",
+            },
+            "pallet-epoch": {
+                "ProposalSubmitted",
+                "ProposalWithdrawn",
+                "ScreeningStarted",
+                "ProposalCancelled",
+                "ProposalQualified",
+                "ProposalDeferred",
+                "SlotsShrunk",
+                "MarketsOpened",
+                "DecisionExtended",
+                "ProposalQueued",
+                "ProposalRejected",
+                "ProposalDelayed",
+                "RerunScheduled",
+                "RerunOpened",
+                "MandateExpired",
+                "MeasurementStarted",
+                "CohortSettled",
+                "CohortVoided",
+                "BaselineCarried",
+                "ProposalForceRejected",
+                "IntakeSlashed",
+            },
+            "pallet-execution-guard": {
+                "Executed",
+                "ExecutionFailed",
+                "Ratified",
+                "UpgradeAuthorized",
+                "Enqueued",
+                "Rejected",
+                "UpgradeApplied",
+                "PreimageUnpinned",
+                "UpgradeAborted",
+            },
+            "pallet-oracle": {
+                "ReporterRegistered",
+                "Reported",
+                "Challenged",
+                "RoundEscalated",
+                "RecomputeProven",
+                "AdjudicationRequested",
+                "Adjudicated",
+                "ComponentSettled",
+                "NeutralSettlement",
+                "WindowAcknowledged",
+                "WindowExtended",
+                "QuorumFailed",
+                "ReporterSlashed",
+                "ReporterEjected",
+                "WatchtowerRegistered",
+                "WatchtowerInactive",
+                "WatchtowerSlashed",
+                "ReserveProbeSent",
+                "ReserveProbeResult",
+                "ReserveUnhealthy",
+                "ReserveRecovered",
+            },
+            "pallet-registry": {
+                "IncidentFiled",
+                "MilestoneFiled",
+                "IncidentChallenged",
+                "MilestoneChallenged",
+                "IncidentUpheld",
+                "IncidentRejected",
+                "MilestoneAccepted",
+                "MilestoneRejected",
+                "FilingBondSlashed",
+                "RegistryEpochClosed",
+                "WindowAcknowledged",
+                "WindowExtended",
+            },
+            "pallet-guardian": {
+                "GuardianAction",
+                "ForceRerun",
+                "PlaybookActivated",
+                "PlaybookRenewed",
+                "PlaybookExpired",
+                "ReviewScheduled",
+                "MembersSet",
+                "ActionProposed",
+                "ActionApproved",
+                "ActionRatified",
+                "ReviewFailed",
+                "RecallScheduled",
+                "RecallEnacted",
+                "PlaybookRegistrationSet",
+            },
+            "pallet-attestor": {
+                "MembersSet",
+                "AttestationSubmitted",
+                "AttestationChallenged",
+                "ChallengeResolved",
+                "AttestorEjected",
+            },
+            "frame-system": {"CodeUpdated", "UpgradeAuthorized"},
         }
         expected_attestor_storage = {
             "Members",
@@ -149,15 +253,45 @@ class SurfaceManifestTests(unittest.TestCase):
         }
 
         contract = CONTRACT.read_text(encoding="utf-8")
-        ledger_row = next(
-            line
-            for line in contract.splitlines()
-            if line.startswith("| `pallet-conditional-ledger` |")
-        )
-        contract_ledger_events = {
-            declaration.split(maxsplit=1)[0]
-            for declaration in re.findall(r"`([^`]+)`", ledger_row.split("|", 2)[2])
-        }
+
+        def declared_events(text: str) -> set[str]:
+            names = set(re.findall(r"`([A-Z][A-Za-z0-9_]*)\b[^`]*`", text))
+            # These capitalized code spans are explanatory references in the
+            # event rows, not event declarations.
+            return names - {"DescriptorLeadTime", "FilingId", "R"}
+
+        def event_table_names(text: str) -> set[str]:
+            names: set[str] = set()
+            for line in text.splitlines():
+                if not line.startswith("| `"):
+                    continue
+                cells = line.split("|")
+                names.update(declared_events("|".join(cells[1:3])))
+            return names
+
+        section_six = contract.split("## 6. Frozen event schema", 1)[1].split(
+            "\n---\n", 1
+        )[0]
+        contract_events: dict[str, set[str]] = {}
+        for pallet in expected_events:
+            row = next(
+                line
+                for line in section_six.splitlines()
+                if line.startswith(f"| `{pallet}`")
+            )
+            event_cell = row.split("|", 2)[2]
+            contract_events[pallet] = declared_events(event_cell)
+
+        market_section = contract.split("## 5. pallet-market events", 1)[1].split(
+            "\n---\n", 1
+        )[0]
+        contract_events["pallet-market"] = event_table_names(market_section)
+
+        oracle_events = contract.split("### 7.2 `pallet-oracle`", 1)[1].split(
+            "### 7.3 `pallet-constitution`", 1
+        )[0].split("Events:", 1)[1]
+        contract_events["pallet-oracle"] = event_table_names(oracle_events)
+
         attestor_section = contract.split("### 7.5 `pallet-attestor`", 1)[1].split(
             "\n---\n", 1
         )[0]
@@ -165,20 +299,62 @@ class SurfaceManifestTests(unittest.TestCase):
             re.findall(r"^\| `([^`]+)` \|", attestor_section, flags=re.MULTILINE)
         )
 
-        manifest_ledger_events = {
-            entry["event"]
-            for entry in self.entries
-            if entry["kind"] == "event" and entry.get("pallet") == "ConditionalLedger"
+        manifest_pallet_names = {
+            "ConditionalLedger": "pallet-conditional-ledger",
+            "Market": "pallet-market",
+            "Epoch": "pallet-epoch",
+            "ExecutionGuard": "pallet-execution-guard",
+            "Oracle": "pallet-oracle",
+            "IncidentRegistry": "pallet-registry",
+            "MilestoneRegistry": "pallet-registry",
+            "Guardian": "pallet-guardian",
+            "Attestor": "pallet-attestor",
+            "System": "frame-system",
         }
+        manifest_events = {pallet: set() for pallet in expected_events}
+        for entry in self.entries:
+            if entry["kind"] != "event":
+                continue
+            pallet = manifest_pallet_names.get(entry.get("pallet"))
+            if pallet is not None:
+                manifest_events[pallet].add(entry["event"])
+
         manifest_attestor_storage = {
             entry["item"]
             for entry in self.entries
             if entry["kind"] == "storage" and entry.get("pallet") == "Attestor"
         }
-        self.assertEqual(contract_ledger_events, expected_ledger_events)
-        self.assertEqual(manifest_ledger_events, expected_ledger_events)
+        self.assertEqual(contract_events, expected_events)
+        self.assertEqual(manifest_events, expected_events)
         self.assertEqual(contract_attestor_storage, expected_attestor_storage)
         self.assertEqual(manifest_attestor_storage, expected_attestor_storage)
+
+        by_event = {
+            (entry.get("pallet"), entry.get("event")): entry
+            for entry in self.entries
+            if entry["kind"] == "event"
+        }
+        for event, oracle_fields, registry_fields in (
+            (
+                "WindowAcknowledged",
+                ["component", "epoch", "round", "watchtower"],
+                ["epoch", "filing_id", "watchtower"],
+            ),
+            (
+                "WindowExtended",
+                ["component", "epoch", "round", "new_deadline"],
+                ["epoch", "filing_id", "new_deadline"],
+            ),
+        ):
+            self.assertEqual(
+                [field["name"] for field in by_event[("Oracle", event)]["layout"]["fields"]],
+                oracle_fields,
+            )
+            for pallet in ("IncidentRegistry", "MilestoneRegistry"):
+                self.assertEqual(
+                    [field["name"] for field in by_event[(pallet, event)]["layout"]["fields"]],
+                    registry_fields,
+                )
 
     def test_newly_wired_v4_constant_layouts_are_frozen(self) -> None:
         expected = {

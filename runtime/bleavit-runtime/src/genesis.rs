@@ -210,6 +210,7 @@ fn testnet_genesis(
         },
         constitution: ConstitutionConfig {
             phase_flags: BOOTSTRAP_PHASE_FLAGS,
+            release_channel: genesis_release_channel(),
             ..Default::default()
         },
         epoch: EpochConfig {
@@ -230,6 +231,14 @@ fn testnet_genesis(
 
         sudo: SudoConfig { key: Some(root) },
     })
+}
+
+fn genesis_release_channel() -> Vec<u8> {
+    let mut bytes = [0u8; pallet_constitution::RELEASE_CHANNEL_LEN];
+    bytes[0] = 1;
+    bytes[pallet_constitution::RELEASE_CHANNEL_SPEC_VERSION]
+        .copy_from_slice(&crate::VERSION.spec_version.to_le_bytes());
+    bytes.to_vec()
 }
 
 fn development_genesis() -> Value {

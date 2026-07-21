@@ -180,12 +180,10 @@ pub struct ParamRecord {
 
 impl ParamRecord {
     /// Conservative absolute step represented by this record's current
-    /// max-delta rule in both directions. 02 §4 exposes only one scalar and
-    /// does not define which side of an asymmetric rule it means; that lossy
-    /// projection remains an open spec question. R-7 therefore requires the
-    /// smaller allowance, so a frontend `abs(next - value) <= max_delta`
-    /// check can never render a move as admissible when [`Self::checked_update`]
-    /// rejects it.
+    /// max-delta rule in both directions. The v6 `ParamView.max_delta`
+    /// projection is deliberately lossy for factor rules and therefore uses
+    /// the smaller allowance; [`Self::admissible_next_interval`] exposes the
+    /// exact inclusive interval beside it.
     pub fn max_delta_allowance(&self) -> Result<u128, Error> {
         match self.max_delta {
             None => Ok(0),
@@ -222,6 +220,52 @@ impl ParamRecord {
                 Ok(upward.min(downward))
             }
         }
+    }
+
+    /// Exact inclusive interval admitted by the current record bounds and
+    /// max-delta rule. Arithmetic mirrors [`Self::checked_update`]: percent
+    /// allowances floor, factor lower bounds use `ceil(value / factor)`, and
+    /// upward arithmetic saturates.
+    pub fn admissible_next_interval(&self) -> Result<(u128, u128), Error> {
+        ensure!(
+            self.value.same_kind(self.min) && self.value.same_kind(self.max),
+            Error::WrongType
+        );
+        let value = self.value.as_u128();
+        let record_min = self.min.as_u128();
+        let record_max = self.max.as_u128();
+        ensure!(record_min <= record_max, Error::MetaBoundViolation);
+
+        let (delta_min, delta_max) = match self.max_delta {
+            None => (record_min, record_max),
+            Some(MaxDelta::Absolute(bound)) => {
+                ensure!(bound.same_kind(self.value), Error::WrongType);
+                let allowance = bound.as_u128();
+                (
+                    value.saturating_sub(allowance),
+                    value.saturating_add(allowance),
+                )
+            }
+            Some(MaxDelta::Percent(_)) => {
+                let allowance = self.max_delta_allowance()?;
+                (
+                    value.saturating_sub(allowance),
+                    value.saturating_add(allowance),
+                )
+            }
+            Some(MaxDelta::Factor(factor)) => {
+                let factor = u128::from(factor);
+                ensure!(factor >= 1, Error::MetaBoundViolation);
+                let quotient = value / factor;
+                let lower = quotient.saturating_add(u128::from(value % factor != 0));
+                (lower, value.saturating_mul(factor))
+            }
+        };
+
+        let min_next = record_min.max(delta_min);
+        let max_next = record_max.min(delta_max);
+        ensure!(min_next <= max_next, Error::MetaBoundViolation);
+        Ok((min_next, max_next))
     }
 
     pub fn checked_update(
@@ -484,6 +528,33 @@ impl ReleaseChannel {
     pub fn flags(&self) -> u32 {
         le_u32_at(&self.bytes, RELEASE_CHANNEL_FLAGS.start)
     }
+
+    /// Apply a 02 §12 writer-(b) update without allowing it to overwrite the
+    /// execution guard's exclusive fields. The caller owns the release
+    /// descriptor, minimum-version/key-revocation tail and flag bits 0–1;
+    /// offsets 112–119 and flag bit 2 remain byte-for-byte guard-owned.
+    /// `updated_at` is supplied by the dispatch path, never by the caller's
+    /// bytes: 02 §12 makes offset 108 the block of the last write, and a
+    /// caller-chosen value would let a lawful writer backdate or future-date
+    /// the freshness a stranded reader depends on.
+    pub fn merge_writer_b(
+        &self,
+        bytes: [u8; RELEASE_CHANNEL_LEN],
+        updated_at: u32,
+    ) -> Result<Self, Error> {
+        let caller = Self::new(bytes)?;
+        let mut merged = caller.bytes;
+        merged[RELEASE_CHANNEL_UPDATED_AT].copy_from_slice(&updated_at.to_le_bytes());
+        merged[RELEASE_CHANNEL_SPEC_VERSION.start..RELEASE_CHANNEL_PENDING_AUTHORIZED_AT.end]
+            .copy_from_slice(
+                &self.bytes
+                    [RELEASE_CHANNEL_SPEC_VERSION.start..RELEASE_CHANNEL_PENDING_AUTHORIZED_AT.end],
+            );
+        let flags = (caller.flags() & !RELEASE_CHANNEL_FLAG_URGENT_UPGRADE)
+            | (self.flags() & RELEASE_CHANNEL_FLAG_URGENT_UPGRADE);
+        merged[RELEASE_CHANNEL_FLAGS].copy_from_slice(&flags.to_le_bytes());
+        Self::new(merged)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
@@ -717,13 +788,16 @@ impl ConstitutionState {
         self.phase_flags.set(flag, enabled)
     }
 
+    /// `updated_at` is supplied by the caller's dispatch context (the current
+    /// block), never read out of `bytes` — see [`ReleaseChannelRecord::merge_writer_b`].
     pub fn dispatch_set_release_channel(
         &mut self,
         origin: ConstitutionOrigin,
         bytes: [u8; RELEASE_CHANNEL_LEN],
+        updated_at: u32,
     ) -> Result<(), Error> {
         ensure!(origin.can_set_release_channel(), Error::BadOrigin);
-        self.release_channel = ReleaseChannel::new(bytes)?;
+        self.release_channel = self.release_channel.merge_writer_b(bytes, updated_at)?;
         Ok(())
     }
 
@@ -1983,7 +2057,7 @@ pub mod benchmarking {
         let mut state = ConstitutionState::genesis();
         let mut bytes = [0u8; RELEASE_CHANNEL_LEN];
         bytes[0] = 1;
-        state.dispatch_set_release_channel(ConstitutionOrigin::ConstitutionalValues, bytes)
+        state.dispatch_set_release_channel(ConstitutionOrigin::ConstitutionalValues, bytes, 7)
     }
 }
 
@@ -2158,11 +2232,55 @@ mod tests {
     }
 
     #[test]
-    fn factor_allowance_projects_the_smaller_exec_lock_direction() {
-        // 02 §4 exposes only one scalar although 13 §1's exec.lock.* factor
-        // rule is directional. R-7 requires the projection not to advertise a
-        // move `checked_update` can reject; the encoding remains an open spec
-        // question, so derive both sides from the canonical record itself.
+    fn admissible_next_interval_matches_admission_rounding_and_record_bounds() {
+        let mut record = genesis_params()[0];
+        let value = record.value.as_u128();
+        let allowance = value / 10;
+        assert_eq!(
+            record.admissible_next_interval(),
+            Ok((
+                record.min.as_u128().max(value.saturating_sub(allowance)),
+                record.max.as_u128().min(value.saturating_add(allowance)),
+            ))
+        );
+
+        record.value = ParamValue::Balance(5);
+        record.min = ParamValue::Balance(1);
+        record.max = ParamValue::Balance(9);
+        record.max_delta = Some(MaxDelta::Absolute(ParamValue::Balance(2)));
+        assert_eq!(record.admissible_next_interval(), Ok((3, 7)));
+
+        record.max_delta = None;
+        assert_eq!(record.admissible_next_interval(), Ok((1, 9)));
+
+        record.max_delta = Some(MaxDelta::Factor(2));
+        assert_eq!(record.admissible_next_interval(), Ok((3, 9)));
+        for next in 1..=10 {
+            let admitted = record
+                .checked_update(ParamValue::Balance(next), u32::MAX, 1)
+                .is_ok();
+            assert_eq!(admitted, (3..=9).contains(&next), "next={next}");
+        }
+
+        record.value = ParamValue::Balance(u128::MAX - 1);
+        record.min = ParamValue::Balance(0);
+        record.max = ParamValue::Balance(u128::MAX);
+        assert_eq!(
+            record.admissible_next_interval(),
+            Ok(((u128::MAX - 1).div_ceil(2), u128::MAX))
+        );
+
+        record.max_delta = Some(MaxDelta::Factor(0));
+        assert_eq!(
+            record.admissible_next_interval(),
+            Err(Error::MetaBoundViolation)
+        );
+    }
+
+    #[test]
+    fn factor_allowance_and_exact_interval_project_exec_lock_code() {
+        // Contract v6 retains the conservative scalar and exposes the exact
+        // inclusive interval for the asymmetric exec.lock.* factor rule.
         let record = genesis_params()
             .into_iter()
             .find(|record| record.key == key16(b"exec.lock.code"))
@@ -2181,6 +2299,9 @@ mod tests {
         assert_eq!(record.max_delta_allowance(), Ok(downward.min(upward)));
         assert_eq!(record.max_delta_allowance(), Ok(downward));
         assert!(downward < upward);
+        assert_eq!(value, 100_800);
+        assert_eq!(record.max.as_u128(), 432_000);
+        assert_eq!(record.admissible_next_interval(), Ok((50_400, 201_600)));
     }
 
     #[test]
@@ -2492,7 +2613,7 @@ mod tests {
         assert!(ReleaseChannel::new(all_defined_flags).is_ok());
         let mut state = ConstitutionState::genesis();
         assert_eq!(
-            state.dispatch_set_release_channel(ConstitutionOrigin::Signed, bad),
+            state.dispatch_set_release_channel(ConstitutionOrigin::Signed, bad, 7),
             Err(Error::BadOrigin)
         );
         let mut good = [0u8; RELEASE_CHANNEL_LEN];
@@ -2506,18 +2627,41 @@ mod tests {
             ConstitutionOrigin::Root,
         ] {
             assert_eq!(
-                state.dispatch_set_release_channel(refused, good),
+                state.dispatch_set_release_channel(refused, good, 7),
                 Err(Error::BadOrigin)
             );
         }
         assert_eq!(
-            state.dispatch_set_release_channel(ConstitutionOrigin::ConstitutionTrack, good),
+            state.dispatch_set_release_channel(ConstitutionOrigin::ConstitutionTrack, good, 7),
             Ok(())
         );
         assert_eq!(
-            state.dispatch_set_release_channel(ConstitutionOrigin::ConstitutionalValues, good),
+            state.dispatch_set_release_channel(ConstitutionOrigin::ConstitutionalValues, good, 7),
             Ok(())
         );
+
+        state.release_channel = channel;
+        let mut writer_b = good;
+        writer_b[108..112].copy_from_slice(&43u32.to_le_bytes());
+        writer_b[112..116].copy_from_slice(&99u32.to_le_bytes());
+        writer_b[116..120].copy_from_slice(&0u32.to_le_bytes());
+        writer_b[164..168].copy_from_slice(&2u32.to_le_bytes());
+        // 02 §12: offset 108 is the block of the last write, stamped by the
+        // dispatch path. The caller's 43 MUST be ignored — a lawful writer
+        // must not be able to backdate or future-date the freshness a
+        // stranded reader depends on.
+        assert_eq!(
+            state.dispatch_set_release_channel(
+                ConstitutionOrigin::ConstitutionalValues,
+                writer_b,
+                5_000
+            ),
+            Ok(())
+        );
+        assert_eq!(state.release_channel.updated_at(), 5_000);
+        assert_eq!(state.release_channel.spec_version(), 7);
+        assert_eq!(state.release_channel.pending_authorized_at(), 11);
+        assert_eq!(state.release_channel.flags(), 6);
     }
 
     #[test]

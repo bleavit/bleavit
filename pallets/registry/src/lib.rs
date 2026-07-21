@@ -334,12 +334,9 @@ pub mod pallet {
 
     // -------------------------------------------------------------------- events
 
-    /// Exactly the 10 frozen 02 §6 (pallet-registry row) event names,
-    /// byte-for-byte (07 §7: "MUST NOT drift from it"). The 07 §4 quorum machinery
-    /// (`ack_observed` / the 48 h extension) updates the `Filing` state a client
-    /// reads from `Filings`; it emits **no** registry event, because
-    /// `WindowAcknowledged` / `WindowExtended` are frozen in 02 §7.2 for the
-    /// **oracle**, not the registry (dual-review finding — see PLAN.md SQ).
+    /// The frozen 02 §6 pallet-registry event names, byte-for-byte. The two
+    /// registry window variants are intentionally distinct from the oracle's
+    /// identically named component/round events.
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config<I>, I: 'static = ()> {
@@ -400,6 +397,18 @@ pub mod pallet {
             kind: RegistryKind,
             epoch: EpochId,
             aggregate: FixedU64,
+        },
+        /// A bonded watchtower acknowledged a registry filing window.
+        WindowAcknowledged {
+            epoch: EpochId,
+            filing_id: FilingId,
+            watchtower: T::AccountId,
+        },
+        /// A registry filing received its single quorum-failure extension.
+        WindowExtended {
+            epoch: EpochId,
+            filing_id: FilingId,
+            new_deadline: BlockNumber,
         },
     }
 
@@ -1085,11 +1094,24 @@ pub mod pallet {
                             aggregate,
                         });
                     }
-                    // The 07 §4 ack/extension machinery emits no registry event —
-                    // it lives in 02 §7.2 (oracle), not 02 §6. Clients read the
-                    // acks/extended fields from `Filings` storage. The core still
-                    // logs these internally; the pallet drops them here.
-                    CoreEvent::WindowAcknowledged { .. } | CoreEvent::WindowExtended { .. } => {}
+                    CoreEvent::WindowAcknowledged {
+                        epoch,
+                        filing_id,
+                        watchtower,
+                    } => Self::deposit_event(Event::WindowAcknowledged {
+                        epoch,
+                        filing_id,
+                        watchtower: T::AccountId::from(watchtower),
+                    }),
+                    CoreEvent::WindowExtended {
+                        epoch,
+                        filing_id,
+                        new_deadline,
+                    } => Self::deposit_event(Event::WindowExtended {
+                        epoch,
+                        filing_id,
+                        new_deadline,
+                    }),
                 }
             }
             Ok(())

@@ -1913,12 +1913,20 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
                 );
                 self.intake_queue.push(pid);
             }
+            self.events.push(Event::ProposalDeferred(pid));
         } else {
+            // 05 §2.1 T26: the second deferral is terminal — it cancels with a
+            // full refund. Reporting it as `ProposalDeferred` made
+            // event-derived history claim the proposal was still live
+            // (SQ-166, contract v6).
             self.proposal_mut(pid)?.state = ProposalState::Cancelled;
             self.intake_queue.retain(|queued| *queued != pid);
             self.rollovers.retain(|(proposal, _)| *proposal != pid);
+            self.events.push(Event::ProposalCancelled {
+                pid,
+                reason: RejectReason::RolloverExhausted,
+            });
         }
-        self.events.push(Event::ProposalDeferred(pid));
         Ok(())
     }
 

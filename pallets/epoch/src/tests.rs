@@ -561,7 +561,7 @@ fn genesis_uses_the_frozen_three_field_epoch_shape() {
             <CurrentEpoch<Test> as frame_support::traits::Get<EpochId>>::get(),
             0
         );
-        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 5);
+        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 6);
         assert_ok!(Epoch::do_try_state());
     });
 }
@@ -2197,7 +2197,17 @@ fn lock_conflict_rolls_once_then_refunds() {
         );
         assert!(!IntakeQueue::<Test>::get().contains(&1));
         assert!(RolloverCounts::<Test>::get().is_empty());
-        assert_eq!(last_epoch_event(), Some(Event::ProposalDeferred(1)));
+        // 05 §2.1 T26 (SQ-166, contract v6): the second deferral is terminal —
+        // it cancels with a full refund — so it MUST report a cancellation.
+        // Emitting `ProposalDeferred` made event-derived history claim the
+        // proposal was still live.
+        assert_eq!(
+            last_epoch_event(),
+            Some(Event::ProposalCancelled {
+                pid: 1,
+                reason: RejectReason::RolloverExhausted,
+            })
+        );
     });
 }
 

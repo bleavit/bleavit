@@ -1235,6 +1235,12 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
                     liability = add(liability, leftovers)?;
                     ensure!(info.escrowed >= liability, Error::TryStateViolation);
                 }
+                // `BaselineSettled` is the contract-v6 view projection for a
+                // distinct Baseline vault and is never a legal proposal-vault
+                // storage state.
+                VaultState::BaselineSettled { .. } => {
+                    return Err(Error::TryStateViolation);
+                }
             }
         }
         for v in &self.baseline_vaults {

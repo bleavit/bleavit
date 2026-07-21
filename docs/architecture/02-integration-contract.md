@@ -4,7 +4,7 @@
 
 **Boundary.** This document owns everything the chain and the canonical frontend must agree on byte-for-byte: shared SCALE types, the `FutarchyApi` runtime API and its view types, the frozen event schema, the storage items and names the frontend reads directly, chain identity constants, the constants-binding rules, the WSS bootnode chain-spec requirement, the backend-published test-artifact feed, and the `ReleaseChannel` raw storage key. It does **not** own the *semantics* behind these surfaces (ledger rules → [03](03-conditional-ledger.md), market mechanics → [04](04-markets-and-pricing.md), decision engine → [05](05-welfare-and-decision-engine.md), oracle game → [07](07-oracle-and-disputes.md), upgrade path → [09](09-execution-upgrades-and-rollout.md)) — but where a name or layout appears both here and there, **this document's spelling is canonical**. Normative language per RFC 2119.
 
-**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 5**. Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
+**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 6**. Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
 
 ---
 
@@ -14,7 +14,7 @@
 |---|---|---|---|
 | 1 | Shared SCALE primitives (`futarchy-primitives`) | §2 | BE §7, repaired per D-1/D-3/B-2/B-3/B-med |
 | 2 | `FutarchyApi` — 11 runtime-API methods + view types | §3–§4 | FE §30 P-5/P-7, completed |
-| 3 | Frozen event schema (ledger, market, epoch, oracle, guardian, execution, system) | §5–§6 | FE §15.3 + X-11 fixes |
+| 3 | Frozen event schema (ledger, market, epoch, oracle, registry, guardian, attestor, execution, system) | §5–§6 | FE §15.3 + X-11 fixes |
 | 4 | Storage items the frontend reads (incl. `RecentCohortSummaries`, `BaselineMarketOf`, `PhaseFlags`, oracle and attestor items) | §7 | X-1c, X-10, X-11b/c |
 | 5 | Chain identity constants | §8 | D-17 |
 | 6 | Constants & parameter binding (no FE hardcodes) | §9 | X-11e/h |
@@ -62,9 +62,16 @@ pub enum PositionId {
     Baseline { epoch: EpochId, side: ScalarSide },
 }
 
-/// `Voided` added per D-1; `ScalarSettled` carries the winning branch (B-low)
-/// and the settlement score `s` that redemption needs ([03](03-conditional-ledger.md) §2.3).
-pub enum VaultState { Open, Resolved(Branch), ScalarSettled { winner: Branch, s: FixedU64 }, Voided }
+/// `Voided` added per D-1; proposal vaults use `ScalarSettled`, which carries
+/// the winning branch (B-low) and settlement score `s` that redemption needs.
+/// Baseline epoch vaults have no branch and use `BaselineSettled`.
+pub enum VaultState {
+    Open,
+    Resolved(Branch),
+    ScalarSettled { winner: Branch, s: FixedU64 },
+    Voided,
+    BaselineSettled { s: FixedU64 },
+}
 
 /// Five classes — `Emergency` deleted (D-7).
 pub enum ProposalClass { Param, Treasury, Code, Meta, Constitutional }
@@ -84,6 +91,7 @@ pub enum RejectReason {
     NotRatified,            // D-5: values ratification absent/failed at execute
     SecuritySizing,         // D-4: InCapPrize > AttackCost̂ / 3
     AttestationMissing,     // D-18: bonded kernel attestation quorum absent
+    RolloverExhausted,      // 05 §2.1 T26: second deferral cancels with full refund (v6)
 }
 
 pub enum EpochPhase { Intake, Qualify, Seed, Trade, Decide, Review, Execute, Housekeeping }
@@ -102,24 +110,27 @@ pub enum DispatchOutcomeCode {
 /// Ratification state surfaced on proposal views (D-5, D-11).
 pub enum RatificationStatus {
     NotRequired,
-    Pending { referendum: u32 },
+    NoPassedRecord,
     Passed { referendum: u32 },
-    Failed { referendum: u32 },
 }
 
 /// Trade direction for quotes and `Traded` events.
 pub enum TradeSide { BuyLong, BuyShort, SellLong, SellShort }
 ```
 
+The `MetricId` assignment registry is owned by [05](05-welfare-and-decision-engine.md) §4.3 and mirrored in [13](13-parameters.md) §3.4; this contract freezes the `u16` type and its keyed surfaces without creating a third assignment table.
+
 `Proposal` gains the fields the decision engine reads (`ask: Balance`, `decide_at: BlockNumber` — B-med, semantics in [05](05-welfare-and-decision-engine.md)); `ExecutionRecord.result` is typed `DispatchOutcomeCode` as above. The full `Proposal`/`ExecutionRecord` structs and their ≤ 512 B / bound arguments are owned by [05](05-welfare-and-decision-engine.md)/[09](09-execution-upgrades-and-rollout.md); their SCALE layouts are part of this contract by inclusion in `futarchy-primitives`.
 
-The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 5`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
+Proposal positions MUST project a settled proposal vault as `ScalarSettled { winner, s }`; Baseline positions MUST project a settled epoch vault as `BaselineSettled { s }` and MUST NOT fabricate a proposal branch. `RatificationStatus::NoPassedRecord` means only that the execution guard has no passing ratification record. It is deliberately agnostic between no referendum, an in-flight referendum and a failed referendum; the frontend MUST derive that lifecycle from `pallet-referenda` ([06](06-governance-and-guardians.md) §2.2). `Pending` and `Failed` are removed because the guard cannot truthfully produce them in the deployed design. This `RatificationStatus` restructure is a pre-genesis contract-v6 repair; no deployed SCALE value requires migration.
+
+The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 6`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
 
 ---
 
 ## 3. `FutarchyApi` runtime API (11 methods, normative)
 
-Declared in the `runtime-api/` crate; **the runtime MUST implement all 11 methods**. All view types are plain SCALE structs in `futarchy-primitives` (§4) under the append-only discipline, so the TypeScript side decodes them with generated descriptors. All methods are read-only, executed by callers via `chainHead_call` through the light client — no dispatch weight; implementations MUST be O(bounded-collection) with the bounds shown (every backing map is bounded).
+Declared in the `runtime-api/` crate; **the runtime MUST implement all 11 methods**. All view types are plain SCALE structs in `futarchy-primitives` (§4) under the append-only discipline, so the TypeScript side decodes them with generated descriptors. API collections use the shipped const-generic `futarchy_primitives::BoundedVec<T, N>` composite wrapper (a `Vec<T>` field under that exact type path), not FRAME's `BoundedVec<T, ConstU32<N>>`; the generated metadata path and composite form are part of the freeze. All methods are read-only, executed by callers via `chainHead_call` through the light client — no dispatch weight; implementations MUST be O(bounded-collection) with the bounds shown (every backing map is bounded).
 
 ```rust
 sp_api::decl_runtime_apis! {
@@ -127,28 +138,30 @@ sp_api::decl_runtime_apis! {
         /// Epoch clock: index, phase, boundaries, dead-man, freeze and phase flags.
         fn epoch_status() -> EpochStatusView;                                        // ≤ 128 B
         /// All live proposals with market ids, states, decide_at, maturity, ratification.
-        fn proposal_summaries() -> BoundedVec<ProposalSummaryView, ConstU32<32>>;    // ≤ 32 × 256 B
+        fn proposal_summaries() -> futarchy_primitives::BoundedVec<ProposalSummaryView, 32>; // ≤ 32 × 256 B
         /// Exact quote incl. fee for a hypothetical trade at current book state (USDC-denominated, D-3 wrapper semantics).
         fn quote(market: MarketId, side: TradeSide, amount: Balance) -> QuoteView;   // ≤ 96 B
-        /// Decision statistics exactly as decide() would read them now (incl. D-4 sizing).
+        /// Finalized decision statistics from sealed registered windows (incl. D-4 sizing).
         fn decision_stats(pid: ProposalId) -> Option<DecisionStatsView>;             // ≤ 512 B
         /// All positions of an account across proposal, gate and Baseline instruments.
-        fn account_positions(who: AccountId) -> BoundedVec<PositionView, ConstU32<64>>;
+        fn account_positions(who: AccountId) -> futarchy_primitives::BoundedVec<PositionView, 64>;
         /// Execution queue incl. maturity/grace/version/ratification state.
-        fn execution_queue() -> BoundedVec<QueuedExecutionView, ConstU32<32>>;
+        fn execution_queue() -> futarchy_primitives::BoundedVec<QueuedExecutionView, 32>;
         /// Current welfare pillars, gates, breach + reserve flags, active MetricSpec.
         fn welfare_current() -> WelfareView;                                         // ≤ 1 KiB
         /// Typed constitution params (value + bounds + governance metadata) for ≤ 64 keys.
-        fn params(keys: BoundedVec<ParamKey, ConstU32<64>>) -> BoundedVec<ParamView, ConstU32<64>>;
+        fn params(keys: futarchy_primitives::BoundedVec<ParamKey, 64>) -> futarchy_primitives::BoundedVec<ParamView, 64>;
         /// Treasury NAV components (matches the treasury definition in 08), incl. haircut flag.
         fn nav() -> NavView;                                                         // ≤ 256 B
         /// Ring of the last 32 cohort settlements (mirrors RecentCohortSummaries, §7.1).
-        fn recent_cohorts() -> BoundedVec<CohortSummaryView, ConstU32<32>>;
+        fn recent_cohorts() -> futarchy_primitives::BoundedVec<CohortSummaryView, 32>;
         /// Oracle rounds currently open.
-        fn open_oracle_rounds() -> BoundedVec<OracleRoundView, ConstU32<192>>;       // ≤128 live (16×4×2 per-version); cap 192
+        fn open_oracle_rounds() -> futarchy_primitives::BoundedVec<OracleRoundView, 192>; // ≤128 live (16×4×2 per-version); cap 192
     }
 }
 ```
+
+`decision_stats(pid)` MUST return `None` until the proposal's registered decision windows have been sealed and every input required by the decision path is evaluable. It is a finalized decision-statistics view, not an in-Trade projected TWAP.
 
 **Verification posture.** Runtime calls execute as `chainHead`-scoped calls: smoldot runs the runtime locally against proof-backed storage for the chosen finalized block **[VERIFY smoldot/PAPI route typed runtime-calls through `chainHead_call` pinned to a finalized hash — FE-P2; until verified, every `FutarchyApi` result used on the transaction path MUST be cross-checked against direct storage reads]**. Runtime APIs are an optimization, never a trust root: every value is also recomputable client-side from the storage items of §7.
 
@@ -188,6 +201,7 @@ pub struct QuoteView {
     pub p_after_1e9: FixedU64,    // post-trade instantaneous price
     pub max_trade: Balance,       // current per-trade max for this book
     pub within_domain: bool,      // |q_L − q_S|/b ≤ 48 after the trade
+    pub evaluable: bool,
 }
 
 pub struct DecisionStatsView {
@@ -210,7 +224,7 @@ pub struct DecisionStatsView {
 pub struct PositionView {
     pub position: PositionId,       // proposal, gate or Baseline instrument
     pub balance: Balance,
-    pub vault_state: VaultState,    // of the owning vault (Baseline: its epoch vault)
+    pub vault_state: VaultState,    // proposal: ScalarSettled; Baseline epoch vault: BaselineSettled
 }
 
 pub struct QueuedExecutionView {
@@ -239,17 +253,20 @@ pub struct WelfareView {
     pub s_breached: bool,
     pub c_breached: bool,
     pub reserve_flag: bool,         // reserve-health trigger R (B-med USDC-freeze)
+    pub active_spec_available: bool,
 }
 
 pub struct ParamView {
     pub key: ParamKey,
-    pub value: u128,                // SCALE-encoded per-key scalar, unit per 13
+    pub value: u128,                // raw inner scalar of the stored ParamValue
     pub min: u128,
     pub max: u128,
     pub max_delta: u128,
     pub cooldown_blocks: u32,
     pub last_change: BlockNumber,
     pub class: ProposalClass,
+    pub min_next: u128,
+    pub max_next: u128,
 }
 
 pub struct NavView {
@@ -277,7 +294,7 @@ pub struct CohortSummary {
     pub epoch: EpochId,
     pub s_1e9: FixedU64,
     pub baseline_twap_1e9: FixedU64,
-    pub proposals: BoundedVec<(ProposalId, ProposalClass, DecisionOutcome), ConstU32<12>>,
+    pub proposals: futarchy_primitives::BoundedVec<(ProposalId, ProposalClass, DecisionOutcome), 12>,
     pub voided: bool,
     pub settled_at: BlockNumber,
 }
@@ -298,9 +315,17 @@ pub struct OracleRoundView {
     pub bond: Balance,                    // value-scaled per D-18
     pub challenge_deadline: BlockNumber,
     pub acked_by_watchtowers: u8,         // quorum progress (D-18)
-    pub escalated: bool,
+    pub escalated: bool,                   // round > 1; a prior round advanced the game
 }
 ```
+
+`QuoteView.evaluable` MUST be `true` for every successfully computed quote, including a quote whose post-trade state has `within_domain == false`. It MUST be `false` for a missing, closed, trade-inadmissible, inventory-invalid or overflowing book; in that state every price-like field is non-renderable and non-actionable. `within_domain` retains exactly one meaning: the post-trade `|q_L − q_S| / b ≤ 48` predicate.
+
+`WelfareView.spec_version` is meaningful only when `active_spec_available == true`. A selected `MetricSpecVersion` of zero is legal and MUST still set `active_spec_available`; a false flag means that no unique active spec is available under [05](05-welfare-and-decision-engine.md) §4.6.
+
+`ParamView.value`, `.min` and `.max` carry the raw inner scalar of the stored `ParamValue`: `Fixed` uses the 1e9 grid, `Perbill` uses parts per billion, `Percent` uses integer percent, and integer/balance variants use their native scalar. These fields MUST NOT be interpreted as the human/display unit in [13](13-parameters.md). The canonical `Perbill` → basis-points projection divides by 100,000 and floors; fee recomputation MUST use the frozen `Market::Fee` basis-points constant and cross-check it against the raw `mkt.fee` parameter. `max_delta` remains the conservative symmetric projection `min(upward allowance, downward allowance)` and is intentionally lossy for factor rules. `min_next` and `max_next` are the exact inclusive next-value interval after intersecting the record bounds with its max-Δ rule; no delta rule yields `[min, max]`, and a factor rule rounds the lower end as `ceil(value / factor)` and saturates the upper end as `value × factor`.
+
+`OracleRoundView.escalated` is `round > 1`: it is true iff at least one prior round advanced the game. It MUST be false for a round-1 report even while that round has a live challenger, and MUST NOT be interpreted as “currently challenged”; any future view of that distinct fact requires a separately named field.
 
 ---
 
@@ -322,18 +347,30 @@ The minimal FE ingest set is `Traded` + `Observed`; the lifecycle events bound c
 
 ## 6. Frozen event schema (all pallets the frontend ingests)
 
-Canonical names below are FINAL; the frontend `CRITICAL_SURFACE` list and local-index ingest filter MUST use exactly these. **X-11d fix:** the FE draft's four misnamed epoch events are corrected — `Withdrawn` → **`ProposalWithdrawn`**, `Cancelled` → **`ProposalCancelled`**, `Qualified` → **`ProposalQualified`**, `Deferred` → **`ProposalDeferred`**.
+This section freezes the **names and field shapes of the events the canonical frontend ingests**. It is exhaustive for that ingest set: the frontend `CRITICAL_SURFACE` list and local-index ingest filter MUST use exactly these names. It is not an exhaustive declaration of every event a pallet may emit.
+
+An event MUST appear here if any of the following holds: (a) the canonical frontend ingests it for a workflow in [11](11-frontend-workflows.md); (b) another architecture document **requires the canonical frontend to read or surface it**; or (c) it is the sole on-chain record of a terminal proposal, vault or cohort state transition. An event meeting none of these conditions MAY be emitted as a pallet-local operational diagnostic; it is not contract surface, and adding, changing or removing one does not bump the contract version.
+
+Criterion (b) is deliberately narrower than "another document specifies its fields". A document may fix an event's name and field semantics *without* making it contract surface — [08](08-treasury-and-economics.md) §1.4 does exactly that for `KeeperBudgetLow`/`KeeperBudgetExhausted`, which stay treasury-owned and amendable there without an integration-contract change. What binds an event here is a frontend read obligation, not the existence of a normative field list.
+
+**Off-contract diagnostics are defined by rule, not by enumeration.** A pallet event that fails (a)–(c) is outside this schema whether or not it is named here; the per-pallet rows below are the complete ingest set, and everything else a pallet emits is outside it by construction. Pallets with no row in this section (`pallet-welfare`, `pallet-futarchy-treasury` beyond the row below, `pallet-constitution`) have no event in the ingest set. Shipped examples of the excluded class, given only to make the boundary concrete: `pallet-execution-guard::PendingOutflowSyncFailed`, `pallet-epoch::IntakePauseSet`/`IntakePauseCleared`, and the ledger and market freeze/pause diagnostics.
+
+Canonical names below are FINAL. **X-11d fix:** the FE draft's four misnamed epoch events are corrected — `Withdrawn` → **`ProposalWithdrawn`**, `Cancelled` → **`ProposalCancelled`**, `Qualified` → **`ProposalQualified`**, `Deferred` → **`ProposalDeferred`**.
 
 | Pallet | Events (canonical) |
 |---|---|
 | `pallet-conditional-ledger` | `Split`, `Merged`, `ScalarSplit`, `ScalarMerged`, **`GateSplit { pid: ProposalId, branch: Branch, gate: GateType, amount: Balance }`**, **`GateMerged { pid: ProposalId, branch: Branch, gate: GateType, amount: Balance }`**, `PositionTransferred`, **`BaselineSplit { epoch: EpochId, amount: Balance }`**, **`BaselineMerged { epoch: EpochId, amount: Balance }`**, `VaultResolved { pid, branch }`, **`VaultVoided { pid }`** (D-1, X-11f), `ScalarSettlementSet { pid, branch, s }` (carries winning branch — B-low), `GateSettled { pid, branch, gate, outcome }` (B-2), **`BaselineSettled { epoch: EpochId, s: FixedU64 }`**, `Redeemed`, `ScalarRedeemed`, `ScalarPairRedeemed { pid, amount }` (B-5), **`GateRedeemed { pid: ProposalId, gate: GateType, amount: Balance }`**, **`VoidRedeemed { pid, kind, amount, payout }`** (D-1), **`BaselineRedeemed { epoch: EpochId, side: ScalarSide, payout: Balance }`**, `VaultReaped`, **`BaselineVaultReaped { epoch: EpochId, residue: Balance }`** |
 | `pallet-market` | §5 table |
-| `pallet-epoch` | `ProposalSubmitted`, `ProposalWithdrawn`, `ScreeningStarted`, `ProposalCancelled { reason }`, `ProposalQualified`, `ProposalDeferred`, `MarketsOpened`, `DecisionExtended`, `ProposalQueued { payload_hash, maturity }`, `ProposalRejected { reason }`, `ProposalDelayed { justification_hash }`, `RerunScheduled`, `RerunOpened`, `MandateExpired`, `MeasurementStarted { cohort }`, `CohortSettled { epoch, s }`, **`ProposalForceRejected { pid, reason }`** — emitted by transition T20 (emergency/VOID force-reject), which previously emitted nothing and silently corrupted every event-derived archive (X-11f), `IntakeSlashed { pid, reason, amount }` (accompanies every partial intake-bond slash — [06](06-governance-and-guardians.md) §4) |
-| `pallet-execution-guard` | `Executed { pid, record }`, `ExecutionFailed { pid, outcome: DispatchOutcomeCode }`, `Ratified { pid, referendum_index }` (written by `execution_guard.ratify(proposal_id, referendum_index)`, the sole `ratify`-track governance call — [06](06-governance-and-guardians.md) §2.2), `UpgradeAuthorized { code_hash, authorized_at }` (system-event mirror carrying `authorized_at` for the `DescriptorLeadTime` check, D-14) |
+| `pallet-epoch` | `ProposalSubmitted`, `ProposalWithdrawn`, `ScreeningStarted`, `ProposalCancelled { pid, reason }`, `ProposalQualified`, `ProposalDeferred`, **`SlotsShrunk { epoch: EpochId, requested: u32, funded: u32, dropped: Vec<ProposalId> }`**, `MarketsOpened`, `DecisionExtended`, `ProposalQueued { pid, payload_hash, maturity }`, `ProposalRejected { pid, reason }`, `ProposalDelayed { pid, justification_hash }`, `RerunScheduled`, `RerunOpened`, `MandateExpired`, `MeasurementStarted { cohort }`, `CohortSettled { epoch, s }`, **`CohortVoided { epoch: EpochId }`**, **`BaselineCarried { pid: ProposalId, epoch: EpochId }`**, **`ProposalForceRejected { pid, reason }`** — emitted by transition T20 (emergency/VOID force-reject), which previously emitted nothing and silently corrupted every event-derived archive (X-11f), `IntakeSlashed { pid, reason, amount }` (accompanies every partial intake-bond slash — [06](06-governance-and-guardians.md) §4). In `SlotsShrunk`, `requested` and `funded` are proposal-slot counts, not USDC amounts; USDC determines which qualified entries fit, while these fields report the pre- and post-shrink entry counts. |
+| `pallet-execution-guard` | `Executed { pid, record }`, `ExecutionFailed { pid, outcome: DispatchOutcomeCode }`, `Ratified { pid, referendum_index }` (written by `execution_guard.ratify(proposal_id, referendum_index)`, the sole `ratify`-track governance call — [06](06-governance-and-guardians.md) §2.2), `UpgradeAuthorized { code_hash: H256, authorized_at: BlockNumber }` (system-event mirror carrying `authorized_at` for the `DescriptorLeadTime` check, D-14), **`Enqueued { pid: ProposalId, maturity: BlockNumber }`**, **`Rejected { pid: ProposalId, reason: RejectReason }`**, **`UpgradeApplied { code_hash: H256, spec_version: u32 }`**, **`PreimageUnpinned { pid: ProposalId, payload_hash: H256 }`**, **`UpgradeAborted { code_hash: H256 }`**. `UpgradeAuthorized` remains the two-field public event; `applicable_at` is derived as `authorized_at + DescriptorLeadTime` ([09](09-execution-upgrades-and-rollout.md) §2.1). |
 | `pallet-oracle` | §7.2 table |
-| `pallet-registry` | `IncidentFiled`, `MilestoneFiled`, `IncidentChallenged`, `MilestoneChallenged`, `IncidentUpheld`, `IncidentRejected`, `MilestoneAccepted`, `MilestoneRejected`, `FilingBondSlashed`, `RegistryEpochClosed` (field detail in [07](07-oracle-and-disputes.md); names frozen here) |
-| `pallet-guardian` | `GuardianAction { action_id, power, target, justification_hash }`, `ForceRerun { pid, justification_hash, window_end }`, `PlaybookActivated { id, trigger, expiry }`, `PlaybookRenewed { id }`, `PlaybookExpired { id }`, `ReviewScheduled { action, referendum }` |
+| `pallet-registry` | `IncidentFiled`, `MilestoneFiled`, `IncidentChallenged`, `MilestoneChallenged`, `IncidentUpheld`, `IncidentRejected`, `MilestoneAccepted`, `MilestoneRejected`, `FilingBondSlashed`, `RegistryEpochClosed` (field detail in [07](07-oracle-and-disputes.md); names frozen here), **`WindowAcknowledged { epoch: EpochId, filing_id: FilingId, watchtower: AccountId }`**, **`WindowExtended { epoch: EpochId, filing_id: FilingId, new_deadline: BlockNumber }`**. `FilingId = u32`; these pallet-registry events are distinct from the identically named pallet-oracle events in §7.2, which carry `component`/`round`. |
+| `pallet-guardian` | `GuardianAction { action_id, power, target, justification_hash }`, `ForceRerun { pid, justification_hash, window_end }`, `PlaybookActivated { id, trigger, expiry }`, `PlaybookRenewed { id }`, `PlaybookExpired { id }`, `ReviewScheduled { action, referendum }`, **`MembersSet { members: [AccountId; 7] }`**, **`ActionProposed { action_id: ActionId, power: GuardianPower }`**, **`ActionApproved { action_id: ActionId, who: AccountId, approvals: u8 }`**, **`ActionRatified { action: ActionId }`**, **`ReviewFailed { action: ActionId, slashed_each: Balance }`**, **`RecallScheduled { action: ActionId, referendum: u32 }`**, **`RecallEnacted { action: ActionId, removed: BoundedVec<AccountId, ConstU32<7>> }`**, **`PlaybookRegistrationSet { id: PlaybookId, enabled: bool }`** |
+| `pallet-attestor` | **`MembersSet { members: Vec<AccountId> }`**, **`AttestationSubmitted { attestation_id: AttestationId, pid: ProposalId, artifact_hash: H256, attestor: AccountId }`**, **`AttestationChallenged { attestation_id: AttestationId, challenger: AccountId, evidence_hash: H256 }`**, **`ChallengeResolved { attestation_id: AttestationId, upheld: bool, loser: AccountId, slashed: Balance }`**, **`AttestorEjected { who: AccountId }`** |
+| `pallet-futarchy-treasury` | **`NavHaircutFlagged { epoch: EpochId, flag: bool }`** — emitted on every reserve-health flag transition; in the ingest set under criterion (b) because [08](08-treasury-and-economics.md) §1.2(4) requires the frontend to surface the flag on every NAV render. The line's other events (`Spent`, `StreamOpened`/`Claimed`/`Cancelled`, `BudgetLineFunded`, `VitIssued`, `KeeperBudgetLow`, `KeeperBudgetExhausted`, `NavFloorUnmet`, the coretime events) are **not** in the ingest set and stay treasury-owned per [08](08-treasury-and-economics.md) §1.4 |
 | `frame-system` / upgrade path | `CodeUpdated`, `UpgradeAuthorized` (native), ingested for descriptor switching |
+
+`pallet-execution-guard::PendingOutflowSyncFailed { queued: u32, fail_static: bool }` is deliberately outside the ingest set: it is an operations alarm with no canonical frontend workflow. It carries no monitoring binding in [12](12-release-and-operations.md) §6.3 today; adding one is an operations concern that does not touch this contract.
 
 Every terminal proposal/vault/cohort state transition MUST emit exactly one event (the T20 fix closes the last silent transition), so event-derived history is complete by construction — the load-bearing property behind the D-2/D-6 history model.
 
@@ -350,7 +387,7 @@ Key-hasher choices follow the source pallets (maps `Blake2_128Concat` unless sta
 | `Proposals` | `map ProposalId → Proposal` | ≤ `MaxLiveProposals = 32` *(normative value: [13](13-parameters.md))* |
 | `EpochOf` | `EpochInfo { index, phase, phase_start_block }` | — |
 | `IntakeQueue` | `BoundedVec<ProposalId, 64>` | Pre-qualification scope only (D-10) |
-| **`RecentCohortSummaries`** | **`BoundedVec<CohortSummary, ConstU32<32>>`** | **Ring of the last 32 cohorts** (≈ 5.8 KiB), pushed at `settle_cohort` completion, FIFO-evicted; one push per ~21 days amortized into the existing settle crank — negligible weight, no new hook. This is the P-5 storage-list addition the FE draft omitted from §5.2.3, applied: a fresh browser renders ~22 months of settlement history with zero infrastructure dependency (D-6 layer 1) |
+| **`RecentCohortSummaries`** | **`BoundedVec<CohortSummary, ConstU32<32>>`** | **Ring of the last 32 cohorts** (≈ 4.9 KiB at the current 158-byte `CohortSummary`; exact arithmetic in [13](13-parameters.md) §5), pushed at `settle_cohort` completion, FIFO-evicted; one push per ~21 days amortized into the existing settle crank — negligible weight, no new hook. This is the P-5 storage-list addition the FE draft omitted from §5.2.3, applied: a fresh browser renders ~22 months of settlement history with zero infrastructure dependency (D-6 layer 1) |
 | `Cohorts` | `map EpochId → CohortInfo` | ≤ 4 non-terminal |
 
 ### 7.2 `pallet-oracle` (X-11c — canonical names; [07](07-oracle-and-disputes.md) uses these)
@@ -402,7 +439,8 @@ Events:
 | Item | Type | Notes |
 |---|---|---|
 | **`BaselineMarketOf`** | **`map EpochId → MarketId`** (in **`pallet-market`** — the pallet home per [04 §8.3](04-markets-and-pricing.md)) | **X-10 fix**: the declared backing storage for `baseline_market(epoch)`. Written at Baseline book creation (Seed of each epoch); retained for all epochs still present in the `RecentCohortSummaries` ring plus live epochs; pruned in lockstep with ring eviction (≤ 36 entries) |
-| `Markets` | `map MarketId → MarketState` | ≤ `MaxLiveMarkets = 196` *(normative value: [13](13-parameters.md))* |
+| `Markets` | `map MarketId → MarketBook<AccountId>` | ≤ `MaxLiveMarkets = 196` *(normative value: [13](13-parameters.md))*; `MarketState` is the frame-free core's whole-state aggregate and is not the stored value |
+| `pallet-inflow-caps::CumulativeDeposits` | `map AccountId → u128` | Per-account cumulative XCM USDC inflow meter for the Phase-3 deposit-cap precheck ([09](09-execution-upgrades-and-rollout.md) §5.2) |
 
 `pallet-conditional-ledger::{Vaults, BaselineVaults, Positions, PositionTotals}` — note the **key order of `Positions` is `(PositionId, AccountId)`** (per-vault drainable, B-med); a per-account storage prefix scan is therefore NOT available, and the frontend MUST use `account_positions()` (the runtime API iterates the bounded live-vault set) or the per-account key index maintained by the ledger ([03](03-conditional-ledger.md)). `pallet-execution-guard::{Queue, Ratifications, ExecutionRecords}` (a `RatificationRecord` is written by the frozen governance call `execution_guard.ratify(proposal_id, referendum_index)`, binding `(pid, payload_hash)` — [06 §2.2](06-governance-and-guardians.md)); `pallet-welfare::{Snapshots, MetricSpecs, GateBreachFlags}`; `pallet-guardian` membership/allowances; `System.Account`, `ForeignAssets.Account(USDC_LOCATION, who)` (NOT `Assets.Account(1337, who)` — X-11a; the USDC identifier is the XCM Location of §8).
 
@@ -415,6 +453,8 @@ The shipped pallet uses value storage rather than keyed maps. The item names and
 | `Members` | — | `BoundedVec<AttestorInfo, ConstU32<16>>`, where `AttestorInfo { account: AccountId, bond: Balance, false_count: u8, active: bool }` | Elected bonded member set; value-query default is empty |
 | `Attestations` | — | `BoundedVec<Attestation, ConstU32<256>>`, where `Attestation { id: AttestationId, pid: ProposalId, artifact_hash: H256, statement_hash: H256, attestor: AccountId, submitted_at: BlockNumber, challenge_deadline: BlockNumber, challenge: Option<ChallengeStatus> }` and `ChallengeStatus ∈ { Open { challenger: AccountId, evidence_hash: H256, bond: Balance }, Upheld, Rejected }` | Flat shipped attestation ledger; value-query default is empty |
 | `NextAttestationId` | — | `AttestationId = u32` | Monotone cursor; value-query default is 0 |
+
+Storage items not listed in this section are not contract surface, and their raw decodability through portable metadata is not guaranteed. In particular, every treasury consumer MUST bind `nav()` rather than raw `pallet-futarchy-treasury::State`.
 
 ---
 
@@ -431,7 +471,7 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 | VIT decimals | 12 |
 | VIT existential deposit | **0.01 VIT** (= 10^10 plancks) |
 | Phase flag storage | `pallet-constitution::PhaseFlags` (§7.3) — the trading-enablement key |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 5` (runtime constant) |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 6` (runtime constant) |
 
 ---
 
@@ -455,13 +495,14 @@ Enumeration of every value the frontend's precondition tables re-check (defaults
 | `intake.max_per_account` live rate limit (launch default 4; META-amendable bounds [2, 8]) | `params()` — bind `ParamView.value`, `.min`, and `.max`; no metadata constant | `epoch.submit` account-rate check |
 | `MaxLiveProposals = 32` | metadata constant | discovery bounds |
 | `prop.bond` per class | `params()` | `epoch.submit` |
-| `mkt.fee` (30 bps default) | `params()` | quote display, `buy/sell` cost recompute |
+| `mkt.fee` (30 bps default) | `Market::Fee` for the basis-points projection used by quote recomputation, cross-checked against the raw `Perbill` inner scalar from `params()` (§4) | quote display, `buy/sell` cost recompute |
 | `mkt.obs_interval` (10 blocks) | `params()` | crank staleness check |
-| `dec.window`, `dec.trailing`, `dec.delta`, `dec.sigma`, `dec.coverage`, `dec.v_min`; `dec.extension` (K) | `params()` for tunable values/bounds. Metadata constants exist only for the rule-7 kernel-bounded `dec.window` / `dec.delta` / `dec.sigma` floors and kernel-only `dec.extension`. `dec.trailing` / `dec.coverage` / `dec.v_min` bind through `ParamView.min` / `.max`: respectively 3,600 / 28,800 blocks, 90 / 99 percent, and ×0.1 / ×10 of the per-class schedule; only the effective-v-min `2·InCapPrize` term is K. | decision previews, `decide` crank |
+| `dec.window`, `dec.trailing`, `dec.delta`, `dec.sigma`, `dec.coverage`, `dec.v_min`; `dec.extension` (K) | `params()` for tunable values/bounds. Metadata constants exist only for the rule-7 kernel-bounded `dec.window` / `dec.delta` / `dec.sigma` floors and kernel-only `dec.extension`. `dec.trailing` / `dec.coverage` / `dec.v_min` bind through `ParamView.min` / `.max`: respectively 3,600 / 28,800 blocks, 90 / 99 percent, and ×0.1 / ×10 of the per-class schedule; only the effective-v-min `2·InCapPrize` term is K. | finalized decision statistics, `decide` crank |
 | `gate.p_max`, `gate.eps` | `params()` (0.10 K ceiling as constant) | gate-market screens |
 | `exec.timelock` per class, `exec.grace` | `params()` (K floors as constants) | `execution_guard.execute` |
 | `orc.bond_floor`/`orc.rounds`/`orc.window`, `orc.bond_bps` value scaling, `orc.reporter_stake` | `params()` | `oracle.report/challenge` |
 | `trs.cap_proposal`/`cap_30d`/`cap_180d`, `trs.stream_threshold` | `params()` | treasury proposal screens |
+| Phase-3 deposit caps `phase3.tvl_cap` / `phase3.dep_cap` | `params()` using the canonical keys in [13](13-parameters.md), combined with §7.4 `CumulativeDeposits` | global/per-account deposit-cap precheck |
 | `fee.vit_usdc_rate` | `params()` | fee-currency selector (D-12) |
 | `epoch.length`, `epoch.slots` | `params()` (live values and record bounds) + applicable metadata floor/bound constants | countdowns, phase headers |
 | Phase-offset fractions | `PhaseOffsets` metadata constant only (kernel-fixed `futarchy-primitives::phase_offsets`; never `Params`) | countdowns, phase headers |
@@ -470,56 +511,72 @@ Enumeration of every value the frontend's precondition tables re-check (defaults
 
 ### Frozen metadata-constant names (SQ-138)
 
-The tuple/array orders in this table are part of the freeze. Every per-class array is ordered **Param, Treasury, Code, Meta**. `FixedU64` values use the contract's 1e9 grid; `Balance` values use USDC base units where the row is USDC-denominated. “Wired” means the named constant exists in the shipped pallet today. “Next wiring” means this v4 amendment freezes the name, type and value source now; B2/A8 adds the pallet metadata exposure in the queued follow-up without renaming it.
+The tuple/array orders in this table are part of the freeze. Every per-class array is ordered **Param, Treasury, Code, Meta**. `FixedU64` values use the contract's 1e9 grid; `Balance` values use USDC base units where the row is USDC-denominated.
 
-| Pallet | Constant name | Type | Value source | Status |
-|---|---|---|---|---|
-| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 5) | Wired |
-| Constitution | `MaxParams` | `u32` | `constitution_core::MAX_PARAMS` (= 128) | Wired |
-| Constitution | `MaxCapabilities` | `u32` | `constitution_core::MAX_CAPABILITIES` (= 64) | Wired |
-| Constitution | `MaxMeters` | `u32` | `constitution_core::MAX_METERS` (= 16) | Wired |
-| ConditionalLedger | `MinSplit` | `Balance` | live `Params[ledger.min_split]`, backstopped by `kernel::MIN_SPLIT_USDC` | Wired |
-| ConditionalLedger | `PositionDeposit` | `Balance` | live `Params[ledger.pos_dep]` (launch 0.1 USDC) | Wired |
-| ConditionalLedger | `MaxPositionsPerAccount` | `u32` | `bounds::MAX_ACCOUNT_POSITIONS` (= 64) | Wired |
-| ConditionalLedger | `ArchiveDelay` | `BlockNumber` (`u32`) | live `Params[ledger.archive]` | Wired |
-| ConditionalLedger | `ReapBatch` | `u32` | `kernel::REAP_BATCH` (= 100) | Wired |
-| ConditionalLedger | `MinTransfer` | `Balance` | `kernel::MIN_TRANSFER_USDC` (= 10,000 base units) | Wired |
-| Market | `Fee` | `u128` | live `Params[mkt.fee]`, projected in basis points (launch 30) | Wired |
-| Market | `ObsInterval` | `u64` | live `Params[mkt.obs_interval]`, promoted from `u32` (launch 10 blocks) | Wired |
-| Market | `Kappa1e9` | `u64` | live `Params[mkt.kappa]` on the 1e9 grid (launch 5,000,000) | Wired |
-| Market | `ArchiveDelay` | `BlockNumber` (`u32`) | live `Params[ledger.archive]` | Wired |
-| Market | `MinTrade` | `Balance` | `kernel::MIN_TRADE_USDC` (= 1,000,000 base units) | Wired |
-| Market | `MaxTradeRatio` | `(u32, u32)` | kernel ratio `(1, 4)` (`b/4`) | Wired |
-| Market | `MaxLiveMarkets` | `u32` | `bounds::MAX_LIVE_MARKETS` (= 196) | Wired |
-| Market | `GatePMaxCeiling` | `FixedU64` | `kernel::GATE_P_MAX_CEILING_1E9` (= 100,000,000; 0.10) | Wired |
-| Market | `GateEpsFloor` | `FixedU64` | [13 §1](13-parameters.md) `gate.eps` K floor (= 5,000,000; 0.005) | Wired |
-| Oracle | `MaxRoundCloseBatch` | `u32` | `kernel::TICK_BATCH` (= 10) | Wired |
-| Registry (each instance) | `Kind` | `RegistryKind` | runtime instance `Config::Kind` (`Incident` or `Milestone`) | Wired |
-| Registry (each instance) | `ArchiveDelay` | `BlockNumber` (`u32`) | live `Params[ledger.archive]` | Wired |
-| Registry (each instance) | `MaxFilingsPerEpoch` | `u32` | `kernel::REG_MAX_FILINGS_EPOCH` (= 64) | Wired |
-| Registry (each instance) | `MaxEvidenceLen` | `u32` | fixed `H256` evidence-hash width (= 32 bytes) | Wired |
-| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 5) | Wired |
-| ExecutionGuard | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) | Wired |
-| ExecutionGuard | `MaxExecutionRecords` | `u32` | `bounds::MAX_EXECUTION_RECORDS` (= 256) | Wired |
-| ExecutionGuard | `MaxCalls` | `u32` | `kernel::MAX_CALLS` (= 16) | Wired |
-| ExecutionGuard | `MaxPayloadBytes` | `u32` | `kernel::MAX_BYTES` (= 65,536) | Wired |
-| ExecutionGuard | `DescriptorLeadTime` | `BlockNumber` (`u32`) | `kernel::DESCRIPTOR_LEAD_TIME_BLOCKS` (= 43,200) | Wired |
-| ExecutionGuard | `MaxRuntimeCodeBytes` | `u32` | runtime `Config::MaxRuntimeCodeBytes` (`pallet_preimage::MAX_SIZE`) | Wired |
-| ExecutionGuard | `ExecutionTimelockFloor` | `[u32; 4]` | [13 §1](13-parameters.md) `exec.lock.*` K hard minima, `[14,400; 4]` blocks | Wired |
-| ExecutionGuard | `ExecutionGraceFloor` | `u32` | [13 §1](13-parameters.md) `exec.grace` K hard minimum (= 100,800 blocks) | Wired |
-| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 5) | Wired |
-| Epoch | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) | Wired |
-| Epoch | `MaxIntakeQueue` | `u32` | `bounds::INTAKE_QUEUE` (= 64) | Wired |
-| Epoch | `MaxNonTerminalCohorts` | `u32` | `bounds::MAX_NON_TERMINAL_COHORTS` (= 4) | Wired |
-| Epoch | `RecentCohortSummariesBound` | `u32` | `bounds::RECENT_COHORT_SUMMARIES` (= 32) | Wired |
-| Epoch | `TickBatch` | `u32` | `kernel::TICK_BATCH` (= 10) | Wired |
-| Epoch | `PhaseOffsets` | `[(u32, u32); 7]` | `futarchy_primitives::phase_offsets`: `[(0,21), (3,21), (4,21), (5,21), (15,21), (18,21), (20,21)]` for Intake/Qualify/Seed/Trade/DecideWindow/Decide/Housekeeping | Wired |
-| Epoch | `MaxBooksPerProposal` | `u32` | `bounds::BOOKS_PER_PROPOSAL` (= 6) | Wired |
-| Epoch | `MinEpochLength` | `u32` | `kernel::MIN_EPOCH_LENGTH_BLOCKS` (= 201,600) | Wired |
-| Epoch | `DecisionWindowFloor` | `u32` | [13 §1](13-parameters.md) `dec.window` K hard minimum (= 14,400 blocks) | Wired |
-| Epoch | `DecisionExtension` | `u32` | `kernel::DEC_EXTENSION_BLOCKS` (= 43,200) | Wired |
-| Epoch | `DecisionDeltaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.delta.*` K hard minima (= `[5,000,000; 4]`) | Wired |
-| Epoch | `DecisionSigmaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.sigma.*` K hard minima (= `[0; 4]`) | Wired |
+| Pallet | Constant name | Type | Value source |
+|---|---|---|---|
+| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 6) |
+| Constitution | `MaxParams` | `u32` | `constitution_core::MAX_PARAMS` (= 128) |
+| Constitution | `MaxCapabilities` | `u32` | `constitution_core::MAX_CAPABILITIES` (= 64) |
+| Constitution | `MaxMeters` | `u32` | `constitution_core::MAX_METERS` (= 16) |
+| ConditionalLedger | `MinSplit` | `Balance` | live `Params[ledger.min_split]`, backstopped by `kernel::MIN_SPLIT_USDC` |
+| ConditionalLedger | `PositionDeposit` | `Balance` | live `Params[ledger.pos_dep]` (launch 0.1 USDC) |
+| ConditionalLedger | `MaxPositionsPerAccount` | `u32` | `bounds::MAX_ACCOUNT_POSITIONS` (= 64) |
+| ConditionalLedger | `ArchiveDelay` | `BlockNumber` (`u32`) | live `Params[ledger.archive]` |
+| ConditionalLedger | `ReapBatch` | `u32` | `kernel::REAP_BATCH` (= 100) |
+| ConditionalLedger | `MinTransfer` | `Balance` | `kernel::MIN_TRANSFER_USDC` (= 10,000 base units) |
+| Market | `Fee` | `u128` | live `Params[mkt.fee]`, projected in basis points by flooring raw `Perbill / 100,000` (launch 30) |
+| Market | `ObsInterval` | `u64` | live `Params[mkt.obs_interval]`, promoted from `u32` (launch 10 blocks) |
+| Market | `Kappa1e9` | `u64` | live `Params[mkt.kappa]` on the 1e9 grid (launch 5,000,000) |
+| Market | `ArchiveDelay` | `BlockNumber` (`u32`) | live `Params[ledger.archive]` |
+| Market | `MinTrade` | `Balance` | `kernel::MIN_TRADE_USDC` (= 1,000,000 base units) |
+| Market | `MaxTradeRatio` | `(u32, u32)` | kernel ratio `(1, 4)` (`b/4`) |
+| Market | `MaxLiveMarkets` | `u32` | `bounds::MAX_LIVE_MARKETS` (= 196) |
+| Market | `GatePMaxCeiling` | `FixedU64` | `kernel::GATE_P_MAX_CEILING_1E9` (= 100,000,000; 0.10) |
+| Market | `GateEpsFloor` | `FixedU64` | [13 §1](13-parameters.md) `gate.eps` K floor (= 5,000,000; 0.005) |
+| Oracle | `MaxRoundCloseBatch` | `u32` | `kernel::TICK_BATCH` (= 10) |
+| Registry (each instance) | `Kind` | `RegistryKind` | runtime instance `Config::Kind` (`Incident` or `Milestone`) |
+| Registry (each instance) | `ArchiveDelay` | `BlockNumber` (`u32`) | live `Params[ledger.archive]` |
+| Registry (each instance) | `MaxFilingsPerEpoch` | `u32` | `kernel::REG_MAX_FILINGS_EPOCH` (= 64) |
+| Registry (each instance) | `MaxEvidenceLen` | `u32` | fixed `H256` evidence-hash width (= 32 bytes) |
+| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 6) |
+| ExecutionGuard | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) |
+| ExecutionGuard | `MaxExecutionRecords` | `u32` | `bounds::MAX_EXECUTION_RECORDS` (= 256) |
+| ExecutionGuard | `MaxCalls` | `u32` | `kernel::MAX_CALLS` (= 16) |
+| ExecutionGuard | `MaxPayloadBytes` | `u32` | `kernel::MAX_BYTES` (= 65,536) |
+| ExecutionGuard | `DescriptorLeadTime` | `BlockNumber` (`u32`) | `kernel::DESCRIPTOR_LEAD_TIME_BLOCKS` (= 43,200) |
+| ExecutionGuard | `MaxRuntimeCodeBytes` | `u32` | runtime `Config::MaxRuntimeCodeBytes` (`pallet_preimage::MAX_SIZE`) |
+| ExecutionGuard | `ExecutionTimelockFloor` | `[u32; 4]` | [13 §1](13-parameters.md) `exec.lock.*` K hard minima, `[14,400; 4]` blocks |
+| ExecutionGuard | `ExecutionGraceFloor` | `u32` | [13 §1](13-parameters.md) `exec.grace` K hard minimum (= 100,800 blocks) |
+| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 6) |
+| Epoch | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) |
+| Epoch | `MaxIntakeQueue` | `u32` | `bounds::INTAKE_QUEUE` (= 64) |
+| Epoch | `MaxNonTerminalCohorts` | `u32` | `bounds::MAX_NON_TERMINAL_COHORTS` (= 4) |
+| Epoch | `RecentCohortSummariesBound` | `u32` | `bounds::RECENT_COHORT_SUMMARIES` (= 32) |
+| Epoch | `TickBatch` | `u32` | `kernel::TICK_BATCH` (= 10) |
+| Epoch | `PhaseOffsets` | `[(u32, u32); 7]` | `futarchy_primitives::phase_offsets`: `[(0,21), (3,21), (4,21), (5,21), (15,21), (18,21), (20,21)]` for Intake/Qualify/Seed/Trade/DecideWindow/Decide/Housekeeping |
+| Epoch | `MaxBooksPerProposal` | `u32` | `bounds::BOOKS_PER_PROPOSAL` (= 6) |
+| Epoch | `MinEpochLength` | `u32` | `kernel::MIN_EPOCH_LENGTH_BLOCKS` (= 201,600) |
+| Epoch | `DecisionWindowFloor` | `u32` | [13 §1](13-parameters.md) `dec.window` K hard minimum (= 14,400 blocks) |
+| Epoch | `DecisionExtension` | `u32` | `kernel::DEC_EXTENSION_BLOCKS` (= 43,200) |
+| Epoch | `DecisionDeltaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.delta.*` K hard minima (= `[5,000,000; 4]`) |
+| Epoch | `DecisionSigmaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.sigma.*` K hard minima (= `[0; 4]`) |
+| Welfare | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 6) |
+| Welfare | `MaxMetricSpecs` | `u32` | `welfare_core::MAX_METRIC_SPECS` (= 16) |
+| Welfare | `MaxSnapshots` | `u32` | `welfare_core::MAX_SNAPSHOTS` (= 20) |
+| Welfare | `MaxGateFlags` | `u32` | `welfare_core::MAX_GATE_FLAGS` (= 20) |
+| Welfare | `MaxDailyGateSamples` | `u8` | `welfare_core::MAX_DAILY_GATE_SAMPLES` (= 64) |
+| FutarchyTreasury | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 6) |
+| FutarchyTreasury | `MaxStreams` | `u32` | `futarchy_treasury_core::MAX_STREAMS` (= 128) |
+| FutarchyTreasury | `MaxBudgetLines` | `u32` | `futarchy_treasury_core::MAX_BUDGET_LINES` (= 32) |
+| FutarchyTreasury | `MaxPolCommitments` | `u32` | `futarchy_treasury_core::MAX_POL_COMMITMENTS` (= 196) |
+| Guardian | `GuardianSeats` | `u32` | `guardian_core::GUARDIAN_SEATS` (= 7) |
+| Guardian | `GuardianThreshold` | `u8` | `guardian_core::GUARDIAN_THRESHOLD` (= 5) |
+| Guardian | `GuardianBond` | `Balance` | `guardian_core::GUARDIAN_BOND` (= 50,000 VIT) |
+| Guardian | `PlaybookFreezeWindowBlocks` | `BlockNumber` (`u32`) | `kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS` (= 201,600) |
+| Attestor | `AttMinMembers` | `u32` | `kernel::ATT_MIN_MEMBERS` (= 3) |
+| Attestor | `AttQuorum` | `u32` | `kernel::ATT_QUORUM` (= 2) |
+| Attestor | `ChallengeWindowBlocks` | `BlockNumber` (`u32`) | `attestor_core::CHALLENGE_WINDOW_BLOCKS` (= 43,200) |
 
 The `PalletId` configuration constants exposed by ConditionalLedger, Market and Registry are intentionally absent: they are internal custody identifiers and no frontend workflow binds them. No placeholder names from external release tooling are normative; this table is the canonical name freeze.
 
@@ -569,7 +626,14 @@ Purpose: pinned-release (stranded) frontends must learn "a newer canonical relea
 | 156 | 8 | `revoked_key_bits: u64` LE — bitmask over key indices within the generation's published keyring ([12 §2.3](12-release-and-operations.md)) |
 | 164 | 4 | `flags: u32` LE — bit 0 `SECURITY`, bit 1 `EXPEDITED`, bit 2 `URGENT_UPGRADE`; bits 3–31 reserved zero |
 
-Total **168 bytes** (v1.0 baseline — the pre-freeze 78- and 92-byte drafts in earlier drafts of [09](09-execution-upgrades-and-rollout.md)/[12](12-release-and-operations.md) are superseded by this merged layout; no schema bump, this is the first frozen version). Writers, exhaustively: (a) the **execution guard** at `UpgradeAuthorized` (sets `spec_version` target, `pending_authorized_at`, `URGENT_UPGRADE`) and at applied-upgrade detection (clears the pending fields); (b) the **`ConstitutionalValues` origin** via `constitution.set_release_channel` on each canonical repoint, `min_supported_version` bump or key revocation ([12](12-release-and-operations.md)). No other origin can write it. The layout MUST NEVER change except by appending fields beyond offset 168 with a schema bump; readers parse by offset, never by SCALE metadata. A compromised writer can only cause a false "update available" banner pointing at a TXID users independently verify, or warning/signing friction in old releases ([14](14-threat-model.md)).
+Total **168 bytes** (v1.0 baseline — the pre-freeze 78- and 92-byte drafts in earlier drafts of [09](09-execution-upgrades-and-rollout.md)/[12](12-release-and-operations.md) are superseded by this merged layout; no schema bump, this is the first frozen version). Offset 112 `spec_version` is always the currently installed runtime `spec_version`, never the target of a pending upgrade; a stranded reader uses it to determine compatibility with the runtime that is actually installed.
+
+Post-genesis writers and field ownership are exhaustive:
+
+1. Writer (a), the **execution guard**, exclusively owns offsets 112–119 (`spec_version`, `pending_authorized_at`) and flags bit 2 (`URGENT_UPGRADE`). At `UpgradeAuthorized` it MUST set `pending_authorized_at` and bit 2, stamp `updated_at`, and MUST NOT change `spec_version`. At applied-upgrade detection it MUST set `spec_version` to the newly installed version, clear `pending_authorized_at` and bit 2, and stamp `updated_at`. At relay abort it MUST clear `pending_authorized_at` and bit 2, leave `spec_version` unchanged because the old runtime remains installed, and stamp `updated_at`. Both terminal clears are unconditional on the channel's prior contents.
+2. Writer (b), the **`ConstitutionalValues` origin** via `constitution.set_release_channel`, owns offsets 1–107 and 120–163 plus flags bits 0–1 on each canonical repoint, `min_supported_version` bump or key revocation ([12](12-release-and-operations.md)). It MUST merge its input with the stored record and preserve offsets 112–119 and flags bit 2 byte-for-byte. Offset 108 `updated_at` is shared write metadata and each writer MUST stamp it. Offset 0 remains the fixed schema byte and flags bits 3–31 remain reserved zero.
+
+No other origin can write the record. The layout MUST NEVER change except by appending fields beyond offset 168 with a schema bump; readers parse by offset, never by SCALE metadata. **I-30:** `ExecutionGuard::PendingUpgrade.is_some()` iff channel `pending_authorized_at != 0` iff flags bit 2 is set; runtime `try_state` MUST enforce both equivalences. With writer ownership enforced, a compromised writer (b) can still cause a false "update available" banner pointing at a TXID users independently verify, or warning/signing friction in old releases, but it cannot suppress or fabricate the execution guard's pending-upgrade indication ([14](14-threat-model.md)).
 
 ---
 
@@ -581,9 +645,11 @@ Total **168 bytes** (v1.0 baseline — the pre-freeze 78- and 92-byte drafts in 
 4. **No hardcodes (X-11h).** The frontend binds to the constants API and `params()` for every chain-tunable value (§9); frontend CI enforces the no-literal rule. The 64-position bound and every other formerly hardcoded §21-tunable are chain-read.
 5. **Release coupling.** Backend E15 and frontend FE-R1 are the two ends of this contract; neither side's release gates pass while the other's contract surface is red (§11).
 6. **Contingency.** If a contract regression ships anyway, the frontend degrades to the D-6 layer-1 surface (chain-served `RecentCohortSummaries` + 8-checkpoint TWAP series + direct storage reads) — reduced depth, full correctness; it never falls back to a trusted third-party service.
+7. **Independent counters.** `INTEGRATION_CONTRACT_VERSION` and the SDK's `RuntimeVersion.transaction_version` are independent counters. The contract version is exposed through `futarchy-primitives`, the constants API and `release.json`; `transaction_version` denotes compatibility of existing dispatchables as embedded in signed-transaction validity. An additive contract bump MUST NOT change `transaction_version`.
 
 **Version history.**
 
+- **v6 (2026-07-21) — batch C, the contract-reconciliation revision.** Section 6 defines the exhaustive canonical-frontend ingest set (without claiming to exhaust pallet-local events) and adds the shipped epoch, execution-guard, guardian, registry and attestor event shapes. Section 2 appends branch-free `VaultState::BaselineSettled` and restructures `RatificationStatus` to `NotRequired` / `NoPassedRecord` / `Passed`; §§3–4 freeze the const-generic `futarchy_primitives::BoundedVec` API path, append the exact `ParamView` interval, `QuoteView.evaluable` and `WelfareView.active_spec_available`, and define `ParamView` raw units, `OracleRoundView.escalated` and finalized `decision_stats()` availability. Section 7 corrects `Markets` to `MarketBook<AccountId>`, adds `CumulativeDeposits`, and excludes unlisted raw storage from the contract. Section 9 adds the Phase-3 deposit-cap binding, removes the implementation-status column and completes the freeze with the 16 Welfare/FutarchyTreasury/Guardian/Attestor constants. Section 12 assigns exclusive guard ownership of the pending-upgrade bytes, requires merge-preserving `set_release_channel`, freezes current-not-target `spec_version` semantics and adds I-30; §13 declares the contract and transaction-version counters independent. **Pre-genesis revision** — no runtime is deployed, so no migration is required and §13's post-genesis append-only/migration clause (point 3) does not apply; the `RatificationStatus` restructure is taken under that allowance, as v3 and v4 took theirs. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-21, user-delegated batch.**
 - **v5 (2026-07-19) — universal market-bearing-class gate markets.** Section 4's class-floor semantics change so every market-bearing proposal carries the existing four-book `(S,C)×(adopt,reject)` gate set: Treasury loses its former ask/NAV threshold and uses **7,393,600 USDC**; PARAM loses its former static-classification exception and its existing `NavView.class_floors` slot rises to **≈4,620,989 USDC**. The frozen `MarketSet.gates: Option<[MarketId; 4]>`, `ProposalSummaryView.gate_markets`, `DecisionStatsView.gate_twaps_1e9`, `NavView.class_floors: [Balance; 4]`, and `MaxLiveMarkets = 196` shapes are unchanged. The PARAM extension is folded into the same pre-genesis v5 revision; no v6 is warranted because no separately deployed contract or SCALE shape intervened. **Pre-genesis revision** — no runtime is deployed, so no migration is required and §13's post-genesis append-only/migration clause (point 3) does not apply. Joint backend+frontend sign-off: the user (owner for both sides under R-1), 2026-07-19.
 - **v4 (2026-07-17) — B2 02-amendment batch.** One pre-genesis revision carries the queued SQ-2 residuals — SQ-23's intake representation erratum, SQ-24's phase-fraction representation split, and SQ-26's attestor storage freeze in §7.5 — together with SQ-37's §6 conditional-ledger event completion, SQ-43's 12-entry `CohortSummary.proposals` hard-max bound, SQ-55's three trailing `NavView` fields, SQ-125's phase-fraction metadata-exposure mandate, and SQ-138's frozen metadata-constant names, restricted to genuine kernel values per [13](13-parameters.md) reading rule 7; META-amendable registry bounds bind through `params()`. The batch also lands the storage change the B2 implementation needs to make §4's `ParamView.last_change: BlockNumber` faithful: §7.3's `ParamRecord` gains `last_change_block`, because the record previously stored only `last_changed_epoch` and a block number cannot be reconstructed from an epoch index (historical epoch boundaries are not retained). **Pre-genesis revision** — no runtime is deployed, so §13's post-genesis append-only/migration clause (point 3) does not apply. Joint backend+frontend sign-off: the user (owner for both sides under R-1), 2026-07-17, user-delegated batch.
 - **v3 (2026-07-15) — oracle per-version reconciliation (A5).** 07 §2(4) runs one reporting game per `(component, epoch, frozen spec_version)`, so §7.2 `Rounds`/`ComponentValues` take the **triple key** `(MetricId, EpochId, MetricSpecVersion)`. Contract v2's pair key was self-contradictory — its own bound note said per-version games "append a `RoundState` per frozen version," which a one-value-per-key map cannot do; the triple resolves it. `RoundState` additionally carries the ack-keying/bond-freezing/§5.5-slashing fields the protocol requires, `ReserveHealth` its probe-timing fields, and `OracleRoundView` (§4) gains `spec_version`. **Pre-genesis revision** — no runtime is deployed, so §13's post-genesis append-only/migration clause (point 3) does not apply; the change is a straight restructure. Joint backend+frontend sign-off: the user (owner for both sides under R-1), 2026-07-15.

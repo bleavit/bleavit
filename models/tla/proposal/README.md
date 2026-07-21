@@ -96,7 +96,7 @@ a proposal edge absent from the exhaustive 05 §2.1 table.
 | Environment action | T-row | Implementation correspondence |
 |---|---:|---|
 | `ValuesRatify` | — | execution-guard ratification seam consumed by `mark_executed` / `expire_or_stale_queue` |
-| `RatificationFails` | — | 02 §2 `RatificationStatus::Failed`; permits pre-grace T16 and disables a T23 retry |
+| `RatificationFails` | — | a failed referendum observed from `pallet-referenda`, together with the guard's `RatificationStatus::NoPassedRecord`; permits pre-grace T16 and disables a T23 retry |
 | `RevokeAttestation` | — | 09 §1.2(5) live guard seam in Queued or FailedExecuted; rejection is T16 while Queued and retry re-validation fails after T18 |
 | `InvalidateVersion` | — | 09 §1.2(3) version-constraint mismatch required by `StaleQueue`; also re-checked by T23 |
 | `AdvanceGrace` | — | clock input consumed by `expire_or_stale_queue` for T15/T16 |

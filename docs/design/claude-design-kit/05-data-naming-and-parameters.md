@@ -1,7 +1,7 @@
 # Data surface, canonical naming & UI-visible parameter values
 
-> **DERIVED, NON-NORMATIVE.** Refreshed 2026-07-19 from the frozen spec —
-> doc 02 (integration contract, frozen, v5) and doc 13 (the single home of parameter values) —
+> **DERIVED, NON-NORMATIVE.** Refreshed 2026-07-21 from the frozen spec —
+> doc 02 (integration contract, frozen, v6) and doc 13 (the single home of parameter values) —
 > for upload to Claude Design. Where this file and the spec disagree, the spec wins. All names
 > below are CANONICAL: use these exact spellings in UI copy, labels and mock data. Values
 > marked [VERIFY] are unresolved in the spec — never invent them.
@@ -20,7 +20,7 @@ Block-time basis for human-time conversions: **6 s/block, 14,400 blocks/day** (1
 | **VIT** (native governance token) | **12 decimals**; total supply 10^9; existential deposit 0.01 VIT |
 | Prices / scores | fixed-point, **1e9 scale** at every API/event boundary; quote clamp [0.001, 0.999]; `p_S = 1 − p_L`; gate books map YES ↦ LONG |
 | Time | all deadlines are block numbers (`decide_at`, `maturity`, `grace_end`, `challenge_deadline`, `next_boundary`) — the UI computes countdowns from them |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 5`, a runtime constant, echoed in `release.json` |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 6`, a runtime constant, echoed in `release.json` |
 
 ### A2. What the UI can read and display (02 §3–§4, §7)
 
@@ -42,31 +42,39 @@ Classes: **`Param, Treasury, Code, Meta, Constitutional`** (no Emergency).
 Proposal states: **`Submitted, Screening, Qualified, Trading, Extended, Queued, Suspended,
 Rerun, Rejected(RejectReason), Executed, FailedExecuted, Measuring, Settled, Cancelled,
 Expired`**.
-Ratification badge: `NotRequired` / `Pending { referendum }` / `Passed { referendum }` /
-`Failed { referendum }`.
+Ratification badge: `NotRequired` / `NoPassedRecord` / `Passed { referendum }`.
+`NoPassedRecord` says only that the execution guard has no passing record; derive never
+submitted / ongoing / failed referendum lifecycle from `pallet-referenda`, not this badge.
 
 **Markets & trading** — `quote(market, side, amount)` → `QuoteView`: `cost` (USDC, excl. fee),
-`fee`, `p_after_1e9` (post-trade price), `max_trade`, `within_domain` — an exact pre-trade
-preview panel. Trade directions: `BuyLong, BuyShort, SellLong, SellShort`. Market kinds:
+`fee`, `p_after_1e9` (post-trade price), `max_trade`, `within_domain`, `evaluable` — an exact
+pre-trade preview panel. `evaluable` is true for every successfully computed quote, even when
+`within_domain` is false; when `evaluable` is false, every price-like field is non-renderable
+and nonactionable. Trade directions: `BuyLong, BuyShort, SellLong, SellShort`. Market kinds:
 **`DecisionAccept, DecisionReject, GateS_Adopt, GateS_Reject, GateC_Adopt, GateC_Reject,
 Baseline`**. `BaselineMarketOf(epoch)` finds the Baseline book. Price history is fed
 exclusively by events: `Traded { market, who, side, amount, cost, p_after }` and
 `Observed { market, o_t }` (TWAP observation every 10 blocks); `MarketCreated`/`MarketClosed`
 (books freeze at decision close and never reopen)/`MarketReaped` bound chart ranges.
 
-**Decision dashboard (per proposal)** — `decision_stats(pid)` → `DecisionStatsView`:
+**Finalized decision dashboard (per proposal)** — once the registered decision windows are
+sealed and every decision-path input is evaluable, `decision_stats(pid)` returns
+`DecisionStatsView`:
 `twap_accept_1e9`, `twap_reject_1e9`, `twap_baseline_1e9`, `r_eff_1e9`
 (= max(reject, baseline − σ)), `trailing_accept_1e9`, `trailing_reject_1e9`, `coverage_pct`,
 `traded_volume`, `v_min_required`, `converged`, `gate_twaps_1e9`, `attack_cost_hat`,
-`in_cap_prize` (must be ≤ attack_cost_hat / 3) — everything a "will it pass?" panel needs,
-exactly as the decision engine would read it.
+`in_cap_prize` (must be ≤ attack_cost_hat / 3). Before sealing it returns `None`: this is a
+finalized decision snapshot, not a live "will it pass?" view, and must not drive projected
+uplift or projected PASS/REJECT UI during Trade/Extended.
 
 **Portfolio / ledger** — `account_positions(who)` → up to 64 `PositionView`: `position`,
 `balance`, `vault_state`. `PositionId` = `Proposal { proposal, branch, kind }` or
 `Baseline { epoch, side }`; `PositionKind` = `BranchUsdc, Long, Short, GateYes(GateType),
 GateNo(GateType)`; `Branch` = `Accept | Reject`; `GateType` = `Survival | Security`.
 Vault states (drive redeemability badges): **`Open`, `Resolved(Branch)`,
-`ScalarSettled { winner, s }`, `Voided`**. Balances: `System.Account` (VIT) and
+`ScalarSettled { winner, s }`, `Voided`, `BaselineSettled { s }`**. Proposal positions use
+`ScalarSettled`; Baseline positions use branch-free `BaselineSettled` and never fabricate a
+winning branch. Balances: `System.Account` (VIT) and
 `ForeignAssets.Account(USDC_LOCATION, who)` (USDC).
 
 **Execution queue** — `execution_queue()` → up to 32 `QueuedExecutionView`: `pid`, `class`,
@@ -76,7 +84,8 @@ Vault states (drive redeemability badges): **`Open`, `Resolved(Branch)`,
 **Welfare / gates** — `welfare_current()` → `WelfareView`: `epoch`, `spec_version`, pillar
 values `s_pillar_1e9`, `c_onchain_1e9`, `c_attested_1e9`, `p_pillar_1e9`, `a_pillar_1e9`,
 gate values `gate_s_1e9`, `gate_c_1e9`, composite `w_current_1e9`, flags `s_breached`,
-`c_breached`, `reserve_flag`.
+`c_breached`, `reserve_flag`, `active_spec_available`. `spec_version` is meaningful only
+when `active_spec_available` is true; version zero remains legal when that flag is true.
 
 **Treasury** — `nav()` → `NavView`: `total`, `main`, `pol`, `insurance`, `keeper`, `oracle`,
 `rewards`, `stream_remainders`, `obligations`, `haircut_flag` (exactly 08 §1.2
@@ -94,8 +103,10 @@ infrastructure dependency." `DecisionOutcome` = `Adopt | Reject(RejectReason) | 
 Adjudicated, Neutral`.
 
 **Governance parameters** — `params(keys)` → per key: `value`, `min`, `max`, `max_delta`,
-`cooldown_blocks`, `last_change`, `class` — enough to render a full "constitution browser"
-with editable range and rate-limit context per parameter.
+`cooldown_blocks`, `last_change`, `class`, `min_next`, `max_next` — enough to render a full
+"constitution browser" with editable range and rate-limit context per parameter.
+`min_next`/`max_next` are the exact inclusive next-value interval after intersecting the
+record bounds with the max-delta rule; `value`/`min`/`max` remain raw stored scalars.
 
 **Release/upgrade channel** — `ReleaseChannel` fixed-layout raw storage value (readable even
 without metadata): current canonical frontend `version` (semver), `manifest_txid` (Arweave),
@@ -155,12 +166,13 @@ emits exactly one event — event-derived history is complete by construction.
 `GateVetoSurvival`, `GateVetoSecurity`, `HurdleNotMet`, `ConvergenceFailed`,
 `SecondExtensionFailed`, `ProcessHold`, `ConstitutionViolation`, `ResourceConflict`,
 `RateLimited`, `VetoUpheldByReview`, `StaleQueue`, `PayloadReverted`, `NotRatified`,
-`SecuritySizing`, `AttestationMissing`.
+`SecuritySizing`, `AttestationMissing`, `RolloverExhausted`.
 
 **`DispatchOutcomeCode`** on execution records: `Ok` or `Failed { call_index, error }`.
 **`IntakeFull`**: intake queue overflow (> 64) refuses submission. **Trade domain**: a trade
-pushing the book beyond its price domain is rejected — `QuoteView.within_domain` lets the UI
-disable it beforehand. **Signing-version warning**: releases older than
+pushing the book beyond its price domain is rejected — an evaluable quote with
+`QuoteView.within_domain == false` lets the UI disable it beforehand; an unevaluable quote
+disables action without rendering price-like fields. **Signing-version warning**: releases older than
 `min_supported_version` sign only past a blocking warning. Client-side error codes:
 `FE-BOOT-001..004`, `FE-CHAIN-001..005`, `FE-COMPAT-001..002`, `FE-TX-001..007`,
 `FE-IDX-001..002`, `FE-REL-001..004`, `FE-PROV-001..004`, `FE-UPG-001` — fixed user copy +

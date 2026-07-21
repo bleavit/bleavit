@@ -920,16 +920,12 @@ impl ExecutionGuard {
                 grace_end: q.grace_end,
                 version_constraint: q.version_constraint.clone(),
                 cancelled: q.cancelled,
-                ratification: if !requires_ratification(q.class) {
-                    RatificationStatus::NotRequired
-                } else if let Some(r) = q.ratify_ref {
-                    if q.ratification_passed {
-                        RatificationStatus::Passed { referendum: r }
-                    } else {
-                        RatificationStatus::Pending { referendum: r }
+                ratification: match (requires_ratification(q.class), q.ratify_ref) {
+                    (false, _) => RatificationStatus::NotRequired,
+                    (true, Some(referendum)) if q.ratification_passed => {
+                        RatificationStatus::Passed { referendum }
                     }
-                } else {
-                    RatificationStatus::Failed { referendum: 0 }
+                    (true, _) => RatificationStatus::NoPassedRecord,
                 },
                 meters_clear: q
                     .meters_declared
@@ -1190,6 +1186,36 @@ mod tests {
             decision: None,
         });
         (e, l)
+    }
+
+    #[test]
+    fn queue_view_reports_only_observable_ratification_facts() {
+        let mut guard = ExecutionGuard::new(vc(1));
+        guard.queue.push(queued(ProposalClass::Code));
+        assert_eq!(
+            guard.view()[0].ratification,
+            RatificationStatus::NoPassedRecord
+        );
+
+        // This shape is unreachable through production admission, but the
+        // projection must not resurrect the removed `Pending` claim if corrupt
+        // or synthetic state supplies an index without a passing record.
+        guard.queue[0].ratify_ref = Some(9);
+        assert_eq!(
+            guard.view()[0].ratification,
+            RatificationStatus::NoPassedRecord
+        );
+        guard.queue[0].ratification_passed = true;
+        assert_eq!(
+            guard.view()[0].ratification,
+            RatificationStatus::Passed { referendum: 9 }
+        );
+
+        guard.queue[0] = queued(ProposalClass::Param);
+        assert_eq!(
+            guard.view()[0].ratification,
+            RatificationStatus::NotRequired
+        );
     }
 
     #[test]

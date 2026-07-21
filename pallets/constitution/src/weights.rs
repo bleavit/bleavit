@@ -17,7 +17,7 @@ pub trait WeightInfo {
     fn set_capability() -> Weight;
     /// Weight of `set_phase_flag` (`PhaseFlags` r:1 w:1).
     fn set_phase_flag() -> Weight;
-    /// Weight of `set_release_channel` (`ReleaseChannel` r:0 w:1).
+    /// Weight of `set_release_channel` (`ReleaseChannel` r:1 w:1).
     fn set_release_channel() -> Weight;
     /// Weight of `amend_registry` (`Params` r:1 w:1).
     fn amend_registry() -> Weight;
@@ -43,7 +43,9 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().writes(1))
     }
     fn set_release_channel() -> Weight {
-        Weight::from_parts(20_000_000, 0).saturating_add(T::DbWeight::get().writes(1))
+        Weight::from_parts(20_000_000, 663)
+            .saturating_add(T::DbWeight::get().reads(1))
+            .saturating_add(T::DbWeight::get().writes(1))
     }
     fn amend_registry() -> Weight {
         Weight::from_parts(25_000_000, 3_600)
@@ -70,7 +72,9 @@ impl WeightInfo for () {
             .saturating_add(RocksDbWeight::get().writes(1))
     }
     fn set_release_channel() -> Weight {
-        Weight::from_parts(20_000_000, 0).saturating_add(RocksDbWeight::get().writes(1))
+        Weight::from_parts(20_000_000, 663)
+            .saturating_add(RocksDbWeight::get().reads(1))
+            .saturating_add(RocksDbWeight::get().writes(1))
     }
     fn amend_registry() -> Weight {
         Weight::from_parts(25_000_000, 3_600)

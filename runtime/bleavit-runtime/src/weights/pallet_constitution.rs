@@ -74,15 +74,14 @@ impl<T: frame_system::Config> pallet_constitution::WeightInfo for WeightInfo<T> 
 			.saturating_add(T::DbWeight::get().reads(1))
 			.saturating_add(T::DbWeight::get().writes(1))
 	}
-	/// Storage: `Constitution::ReleaseChannel` (r:0 w:1)
+	/// Storage: `Constitution::ReleaseChannel` (r:1 w:1)
 	/// Proof: `Constitution::ReleaseChannel` (`max_values`: Some(1), `max_size`: Some(168), added: 663, mode: `MaxEncodedLen`)
 	fn set_release_channel() -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `0`
-		//  Estimated: `0`
 		// Minimum execution time: 4_050_000 picoseconds.
 		Weight::from_parts(4_280_000, 0)
-			.saturating_add(Weight::from_parts(0, 0))
+			// Ownership-preserving merge reads the full fixed-width record.
+			.saturating_add(Weight::from_parts(0, 663))
+			.saturating_add(T::DbWeight::get().reads(1))
 			.saturating_add(T::DbWeight::get().writes(1))
 	}
 	/// Storage: `Constitution::Params` (r:1 w:1)

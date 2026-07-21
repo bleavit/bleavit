@@ -28,9 +28,10 @@ use futarchy_primitives::{
 };
 
 /// Maximum number of queued executions returned by [`FutarchyApi::execution_queue`]
-/// (02 §3, `ConstU32<32>`). The queue can never hold more than every live proposal,
-/// so the bound is single-homed to `MaxLiveProposals` (rule 4) — exactly how
-/// `execution-guard-core` derives its `MAX_QUEUE`.
+/// (02 §3, `futarchy_primitives::BoundedVec<QueuedExecutionView, 32>`). The queue
+/// can never hold more than every live proposal, so the bound is single-homed to
+/// `MaxLiveProposals` (rule 4) — exactly how `execution-guard-core` derives its
+/// `MAX_QUEUE`.
 pub const MAX_QUEUED_EXECUTIONS: u32 = bounds::MAX_LIVE_PROPOSALS;
 
 sp_api::decl_runtime_apis! {
@@ -42,7 +43,7 @@ sp_api::decl_runtime_apis! {
         fn proposal_summaries() -> BoundedVec<ProposalSummaryView, { bounds::MAX_PROPOSAL_SUMMARIES }>;
         /// Exact quote incl. fee for a hypothetical trade at current book state (USDC-denominated, D-3 wrapper semantics).
         fn quote(market: MarketId, side: TradeSide, amount: Balance) -> QuoteView;
-        /// Decision statistics exactly as decide() would read them now (incl. D-4 sizing).
+        /// Finalized decision statistics from sealed registered windows (incl. D-4 sizing).
         fn decision_stats(pid: ProposalId) -> Option<DecisionStatsView>;
         /// All positions of an account across proposal, gate and Baseline instruments.
         fn account_positions(who: AccountId) -> BoundedVec<PositionView, { bounds::MAX_ACCOUNT_POSITIONS }>;

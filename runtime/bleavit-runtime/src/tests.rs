@@ -56,7 +56,7 @@ use crate::{
     Referenda, Runtime, RuntimeCall, RuntimeGenesisConfig, RuntimeOrigin, Scheduler, Session, Sudo,
     System, Timestamp, TrackOrigins, TransactionPayment, TxExtension, UncheckedExtrinsic, Utility,
     Vesting, Welfare, XcmpQueue, FEE_VIT_USDC_RATE_KEY, MILLISECS_PER_BLOCK, SS58_PREFIX,
-    USDC_DECIMALS, USDC_LOCATION_ENCODED, VERSION, VIT_DECIMALS,
+    TRANSACTION_VERSION, USDC_DECIMALS, USDC_LOCATION_ENCODED, VERSION, VIT_DECIMALS,
 };
 
 trait SameType<Rhs> {}
@@ -1798,13 +1798,14 @@ fn identity_and_version_pins_match_the_integration_contract() {
     assert_eq!(VERSION.spec_name.as_ref(), "bleavit");
     assert_eq!(VERSION.impl_name.as_ref(), "bleavit-runtime");
     assert_eq!(VERSION.spec_version, 1);
-    assert_eq!(
-        VERSION.transaction_version,
-        futarchy_primitives::INTEGRATION_CONTRACT_VERSION
-    );
-    // The XCM identity spelling originated in contract v4; v5 retains it while
-    // changing Treasury class-floor and gate-market semantics.
-    assert_eq!(VERSION.transaction_version, 5);
+    // 02 §13: `transaction_version` and `INTEGRATION_CONTRACT_VERSION` are
+    // **independent** counters (SQ-102, contract v6). The SDK field denotes
+    // dispatchable compatibility embedded in signed-transaction validity, so an
+    // additive contract bump MUST NOT move it. Pinning both separately is what
+    // makes a future re-coupling fail here.
+    assert_eq!(VERSION.transaction_version, TRANSACTION_VERSION);
+    assert_eq!(VERSION.transaction_version, 1);
+    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 6);
     assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
@@ -5395,11 +5396,11 @@ fn ratification_views_agree_and_never_understate_an_unratified_code_upgrade() {
                 .map(|view| view.ratification)
         };
 
-        // A CODE class requires ratification (06 §2.2); with no record on chain
-        // the summary must not claim otherwise, and must equal the guard view.
+        // A CODE class requires ratification (06 §2.2); with no passed record
+        // on chain both views truthfully report only that observable fact.
         assert_eq!(
             summary_status(PID),
-            Some(RatificationStatus::Failed { referendum: 0 }),
+            Some(RatificationStatus::NoPassedRecord),
         );
         assert_eq!(summary_status(PID), queue_status(PID));
 
@@ -5514,11 +5515,11 @@ fn upgrade_path_authorizes_schedules_and_clears_only_after_validation_code_appli
         };
         assert_eq!(raw.len(), pallet_constitution::RELEASE_CHANNEL_LEN);
         assert_eq!(raw_u32(&raw, 108), Some(maturity));
-        assert_eq!(raw_u32(&raw, 112), Some(pending.target_spec_version));
+        assert_eq!(raw_u32(&raw, 112), Some(VERSION.spec_version));
         assert_eq!(raw_u32(&raw, 116), Some(maturity));
         assert!(raw_u32(&raw, 164).is_some_and(|flags| flags & (1 << 2) != 0));
         if let Some(before) = release_before {
-            assert_raw_unchanged_outside(&before, &raw, &[108..120, 164..168]);
+            assert_raw_unchanged_outside(&before, &raw, &[108..112, 116..120, 164..168]);
             assert_eq!(
                 raw_u32(&before, 164).map(|flags| flags & !(1 << 2)),
                 raw_u32(&raw, 164).map(|flags| flags & !(1 << 2))
@@ -5587,12 +5588,16 @@ fn upgrade_path_authorizes_schedules_and_clears_only_after_validation_code_appli
             }
         };
         assert_eq!(raw_u32(&applied_raw, 108), Some(System::block_number()));
+        assert_eq!(
+            raw_u32(&applied_raw, 112),
+            Some(pending.target_spec_version)
+        );
         assert_eq!(raw_u32(&applied_raw, 116), Some(0));
         assert!(raw_u32(&applied_raw, 164).is_some_and(|flags| flags & (1 << 2) == 0));
         assert_raw_unchanged_outside(
             &authorized_raw,
             &applied_raw,
-            &[108..112, 116..120, 164..168],
+            &[108..120, 164..168],
         );
         assert_eq!(
             raw_u32(&authorized_raw, 164).map(|flags| flags & !(1 << 2)),
@@ -5695,6 +5700,10 @@ fn relay_abort_clears_pending_state_alarms_and_allows_normal_reproposal() {
             Some(System::block_number())
         );
         assert_eq!(raw_u32(&release_after_abort, 116), Some(0));
+        assert_eq!(
+            raw_u32(&release_after_abort, 112),
+            raw_u32(&release_before_abort, 112)
+        );
         assert!(raw_u32(&release_after_abort, 164).is_some_and(|flags| flags & (1 << 2) == 0));
         assert_raw_unchanged_outside(
             &release_before_abort,
@@ -5731,7 +5740,7 @@ fn relay_abort_clears_pending_state_alarms_and_allows_normal_reproposal() {
 }
 
 #[test]
-fn relay_abort_cleanup_survives_a_writer_b_release_channel_rewrite() {
+fn writer_b_cannot_hide_a_live_pending_upgrade_before_relay_abort() {
     upgrade_ext().execute_with(|| {
         const PID: futarchy_primitives::ProposalId = 6_009;
         let candidate = b"bleavit-b6-abort-writer-b-runtime-v2".to_vec();
@@ -5767,18 +5776,20 @@ fn relay_abort_cleanup_survives_a_writer_b_release_channel_rewrite() {
             Some(artifact.0)
         );
 
-        // Writer (b) lawfully repoints the channel mid-flight, zeroing the
-        // guard-owned pending fields (the SQ-134 interaction). The abort
-        // cleanup must tolerate this — never wedge `PendingUpgrade` — and
-        // must leave writer (b)'s newer value byte-identical.
+        // Writer (b) repoints the channel mid-flight and attempts to erase all
+        // guard-owned fields. The merge must publish its own bytes while
+        // preserving the live warning exactly (I-30).
+        let before_writer_b = release_channel_raw().expect("release channel exists");
         let mut rewritten = [0u8; pallet_constitution::RELEASE_CHANNEL_LEN];
-        match release_channel_raw() {
+        match Some(before_writer_b.clone()) {
             Some(raw) if raw.len() == rewritten.len() => rewritten.copy_from_slice(&raw),
             _ => {
                 assert!(false, "writer-b fixture release channel must exist");
                 return;
             }
         }
+        rewritten[1] = 0x5a;
+        rewritten[112..116].copy_from_slice(&999u32.to_le_bytes());
         rewritten[116..120].copy_from_slice(&0u32.to_le_bytes());
         let flags = raw_u32(&rewritten, 164).unwrap_or(0) & !(1 << 2);
         rewritten[164..168].copy_from_slice(&flags.to_le_bytes());
@@ -5786,6 +5797,21 @@ fn relay_abort_cleanup_survives_a_writer_b_release_channel_rewrite() {
             pallet_origins::Origin::ConstitutionalValues.into(),
             rewritten,
         ));
+        let merged = release_channel_raw().expect("merged release channel exists");
+        assert_eq!(merged[1], 0x5a);
+        assert_eq!(raw_u32(&merged, 112), raw_u32(&before_writer_b, 112));
+        assert_eq!(raw_u32(&merged, 116), Some(pending.authorized_at));
+        assert!(raw_u32(&merged, 164).is_some_and(|flags| flags & (1 << 2) != 0));
+        assert!(ExecutionGuard::do_try_state().is_ok());
+
+        // A corrupt/internal bypass in the hidden-live direction is detected
+        // by I-30 even though writer (b) itself cannot create it.
+        assert_ok!(Constitution::note_release_channel(rewritten));
+        assert!(ExecutionGuard::do_try_state().is_err());
+        let mut restored = [0u8; pallet_constitution::RELEASE_CHANNEL_LEN];
+        restored.copy_from_slice(&merged);
+        assert_ok!(Constitution::note_release_channel(restored));
+        assert!(ExecutionGuard::do_try_state().is_ok());
 
         submit_relay_upgrade_abort();
 
@@ -5798,12 +5824,17 @@ fn relay_abort_cleanup_survives_a_writer_b_release_channel_rewrite() {
                 code_hash,
             }) if *code_hash == artifact.0
         )));
-        assert_eq!(release_channel_raw().as_deref(), Some(&rewritten[..]));
+        let after = release_channel_raw().expect("abort release channel exists");
+        assert_eq!(after[1], 0x5a);
+        assert_eq!(raw_u32(&after, 112), Some(VERSION.spec_version));
+        assert_eq!(raw_u32(&after, 116), Some(0));
+        assert!(raw_u32(&after, 164).is_some_and(|flags| flags & (1 << 2) == 0));
+        assert!(ExecutionGuard::do_try_state().is_ok());
     });
 }
 
 #[test]
-fn applied_cleanup_survives_a_writer_b_release_channel_rewrite() {
+fn writer_b_cannot_hide_a_live_pending_upgrade_before_application() {
     upgrade_ext().execute_with(|| {
         const PID: futarchy_primitives::ProposalId = 6_010;
         let candidate = b"bleavit-b6-applied-writer-b-runtime-v2".to_vec();
@@ -5835,20 +5866,20 @@ fn applied_cleanup_survives_a_writer_b_release_channel_rewrite() {
         System::set_block_number(System::block_number().saturating_add(1));
         let _ = ExecutionGuard::on_initialize(System::block_number());
 
-        // Writer (b) lawfully repoints the channel between scheduling and the
-        // relay GoAhead, zeroing the guard-owned pending fields. An applied
-        // upgrade cannot be retried, so the applied cleanup must tolerate the
-        // rewrite (PR #65 P1): guard state records the application, writer
-        // (b)'s newer channel value stays byte-identical, and no halt source
-        // is raised.
+        // Writer (b) attempts the opposite-owner rewrite before relay GoAhead.
+        // Its descriptor change lands, but the live pending indication cannot
+        // be hidden and remains coupled to the guard until application.
+        let before_writer_b = release_channel_raw().expect("release channel exists");
         let mut rewritten = [0u8; pallet_constitution::RELEASE_CHANNEL_LEN];
-        match release_channel_raw() {
+        match Some(before_writer_b.clone()) {
             Some(raw) if raw.len() == rewritten.len() => rewritten.copy_from_slice(&raw),
             _ => {
                 assert!(false, "applied writer-b fixture release channel must exist");
                 return;
             }
         }
+        rewritten[1] = 0xa5;
+        rewritten[112..116].copy_from_slice(&999u32.to_le_bytes());
         rewritten[116..120].copy_from_slice(&0u32.to_le_bytes());
         let flags = raw_u32(&rewritten, 164).unwrap_or(0) & !(1 << 2);
         rewritten[164..168].copy_from_slice(&flags.to_le_bytes());
@@ -5856,6 +5887,12 @@ fn applied_cleanup_survives_a_writer_b_release_channel_rewrite() {
             pallet_origins::Origin::ConstitutionalValues.into(),
             rewritten,
         ));
+        let merged = release_channel_raw().expect("merged release channel exists");
+        assert_eq!(merged[1], 0xa5);
+        assert_eq!(raw_u32(&merged, 112), raw_u32(&before_writer_b, 112));
+        assert_eq!(raw_u32(&merged, 116), Some(pending.authorized_at));
+        assert!(raw_u32(&merged, 164).is_some_and(|flags| flags & (1 << 2) != 0));
+        assert!(ExecutionGuard::do_try_state().is_ok());
 
         submit_relay_upgrade_go_ahead();
 
@@ -5870,7 +5907,52 @@ fn applied_cleanup_survives_a_writer_b_release_channel_rewrite() {
                 ..
             }) if *code_hash == artifact.0
         )));
-        assert_eq!(release_channel_raw().as_deref(), Some(&rewritten[..]));
+        let after = release_channel_raw().expect("applied release channel exists");
+        assert_eq!(after[1], 0xa5);
+        assert_eq!(raw_u32(&after, 112), Some(pending.target_spec_version));
+        assert_eq!(raw_u32(&after, 116), Some(0));
+        assert!(raw_u32(&after, 164).is_some_and(|flags| flags & (1 << 2) == 0));
+        assert!(ExecutionGuard::do_try_state().is_ok());
+    });
+}
+
+#[test]
+fn writer_b_cannot_fabricate_a_phantom_pending_upgrade_while_guard_is_idle() {
+    development_ext().execute_with(|| {
+        assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_none());
+        let before = release_channel_raw().expect("genesis release channel exists");
+        assert_eq!(raw_u32(&before, 112), Some(VERSION.spec_version));
+
+        let mut caller = [0u8; pallet_constitution::RELEASE_CHANNEL_LEN];
+        caller.copy_from_slice(&before);
+        caller[1] = 0x3c;
+        caller[108..112].copy_from_slice(&77u32.to_le_bytes());
+        caller[112..116].copy_from_slice(&999u32.to_le_bytes());
+        caller[116..120].copy_from_slice(&66u32.to_le_bytes());
+        let flags = raw_u32(&caller, 164).unwrap_or(0) | (1 << 2);
+        caller[164..168].copy_from_slice(&flags.to_le_bytes());
+
+        assert_ok!(Constitution::set_release_channel(
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            caller,
+        ));
+        let stored = release_channel_raw().expect("merged release channel exists");
+        assert_eq!(stored[1], 0x3c);
+        // 02 §12: offset 108 is stamped from the current block by the dispatch
+        // path, so writer (b)'s 77 is ignored. The field is last-write
+        // metadata a stranded reader trusts for freshness; a caller-chosen
+        // value would let a lawful writer backdate or future-date it.
+        assert_eq!(raw_u32(&stored, 108), Some(System::block_number()));
+        assert_ne!(raw_u32(&stored, 108), Some(77));
+        assert_eq!(raw_u32(&stored, 112), Some(VERSION.spec_version));
+        assert_eq!(raw_u32(&stored, 116), Some(0));
+        assert!(raw_u32(&stored, 164).is_some_and(|value| value & (1 << 2) == 0));
+        assert!(ExecutionGuard::do_try_state().is_ok());
+
+        // The inverse corrupt/internal bypass is likewise rejected: an idle
+        // guard may not coexist with either pending channel indication.
+        assert_ok!(Constitution::note_release_channel(caller));
+        assert!(ExecutionGuard::do_try_state().is_err());
     });
 }
 
@@ -13455,6 +13537,7 @@ fn view_quote_matches_core_rounding_and_fails_closed() {
         .expect("well inside the executable LMSR domain");
         let actual = crate::views::quote(MARKET_ID, TradeSide::BuyLong, amount);
         assert_eq!(actual, expected);
+        assert!(actual.evaluable);
         assert!(actual.within_domain);
         assert!(actual.cost > 0);
         assert!(actual.fee > 0);
@@ -13470,6 +13553,7 @@ fn view_quote_matches_core_rounding_and_fails_closed() {
         .expect("the numerical domain extends beyond the per-trade bound");
         let actual_over = crate::views::quote(MARKET_ID, TradeSide::BuyLong, over_limit);
         assert_eq!(actual_over, expected_over);
+        assert!(actual_over.evaluable);
         // 02 §4 makes this flag only the post-trade LMSR domain predicate;
         // 11 §11.5 P-1 binds the FE to detect the separate trade-size row.
         assert!(actual_over.within_domain);
@@ -13484,6 +13568,7 @@ fn view_quote_matches_core_rounding_and_fails_closed() {
                 p_after_1e9: FixedU64(0),
                 max_trade: 0,
                 within_domain: false,
+                evaluable: false,
             }
         );
         assert_eq!(
@@ -13494,6 +13579,7 @@ fn view_quote_matches_core_rounding_and_fails_closed() {
                 p_after_1e9: FixedU64(0),
                 max_trade,
                 within_domain: false,
+                evaluable: false,
             }
         );
     });
@@ -13546,6 +13632,7 @@ fn view_quote_and_buy_share_closed_registered_window_preflight() {
                 p_after_1e9: FixedU64(0),
                 max_trade,
                 within_domain: false,
+                evaluable: false,
             }
         );
         assert_noop!(
@@ -13603,7 +13690,7 @@ fn view_account_positions_uses_vault_order_and_truncates_protocol_accounts() {
 
 #[test]
 fn view_account_positions_includes_baseline_instruments_and_terminal_state() {
-    use futarchy_primitives::{Branch, FixedU64, ScalarSide, VaultState};
+    use futarchy_primitives::{FixedU64, ScalarSide, VaultState};
     use pallet_conditional_ledger::core_ledger::{BaselineState, BaselineVaultInfo};
 
     development_ext().execute_with(|| {
@@ -13638,8 +13725,7 @@ fn view_account_positions_includes_baseline_instruments_and_terminal_state() {
             ]
         );
         assert!(positions.iter().all(|view| view.vault_state
-            == VaultState::ScalarSettled {
-                winner: Branch::Accept,
+            == VaultState::BaselineSettled {
                 s: FixedU64(700_000_000),
             }));
     });
@@ -13775,11 +13861,12 @@ fn view_welfare_current_returns_latest_finalized_breached_snapshot() {
         assert_eq!(sentinel.epoch, CURRENT_EPOCH);
         assert_eq!(sentinel.spec_version, 0);
         assert_eq!(sentinel.w_current_1e9, FixedU64(0));
+        assert!(!sentinel.active_spec_available);
         assert!(sentinel.reserve_flag);
 
         pallet_welfare::MetricSpecs::<Runtime>::insert(
-            2,
-            pallet_welfare::pallet::BoundedSpecSet::try_from(vec![spec(2, 0)])
+            0,
+            pallet_welfare::pallet::BoundedSpecSet::try_from(vec![spec(0, 0)])
                 .expect("one metric spec fits"),
         );
         pallet_welfare::MetricSpecs::<Runtime>::insert(
@@ -13787,14 +13874,18 @@ fn view_welfare_current_returns_latest_finalized_breached_snapshot() {
             pallet_welfare::pallet::BoundedSpecSet::try_from(vec![spec(3, 3)])
                 .expect("one future metric spec fits"),
         );
+        let selected_without_snapshot = crate::views::welfare_current();
+        assert_eq!(selected_without_snapshot.spec_version, 0);
+        assert!(selected_without_snapshot.active_spec_available);
+        assert_eq!(selected_without_snapshot.w_current_1e9, FixedU64(0));
         // Production can only record closed epochs (05 §4.6). Keep an older
         // snapshot to prove the view deterministically selects the greatest
         // finalized epoch for the canonical active spec.
         pallet_welfare::Snapshots::<Runtime>::insert(
-            (0, 2),
+            (0, 0),
             pallet_welfare::pallet::StoredSnapshot {
                 epoch: 0,
-                spec_version: 2,
+                spec_version: 0,
                 s_pillar: FixedU64(1),
                 c_onchain: FixedU64(2),
                 c_attested: FixedU64(3),
@@ -13807,10 +13898,10 @@ fn view_welfare_current_returns_latest_finalized_breached_snapshot() {
             },
         );
         pallet_welfare::Snapshots::<Runtime>::insert(
-            (LATEST_FINALIZED_EPOCH, 2),
+            (LATEST_FINALIZED_EPOCH, 0),
             pallet_welfare::pallet::StoredSnapshot {
                 epoch: LATEST_FINALIZED_EPOCH,
-                spec_version: 2,
+                spec_version: 0,
                 s_pillar: FixedU64(101),
                 c_onchain: FixedU64(102),
                 c_attested: FixedU64(103),
@@ -13832,12 +13923,13 @@ fn view_welfare_current_returns_latest_finalized_breached_snapshot() {
         );
         assert!(!pallet_welfare::Snapshots::<Runtime>::contains_key((
             CURRENT_EPOCH,
-            2
+            0
         )));
 
         let view = crate::views::welfare_current();
         assert_eq!(view.epoch, LATEST_FINALIZED_EPOCH);
-        assert_eq!(view.spec_version, 2);
+        assert_eq!(view.spec_version, 0);
+        assert!(view.active_spec_available);
         assert_eq!(view.s_pillar_1e9, FixedU64(101));
         assert_eq!(view.c_onchain_1e9, FixedU64(102));
         assert_eq!(view.c_attested_1e9, FixedU64(103));
@@ -13862,11 +13954,11 @@ fn view_welfare_current_returns_latest_finalized_breached_snapshot() {
             None,
             "05 §4.6 / I-16 qualification must fail closed on the latest activation tie"
         );
-        // 02 §3 and 05 §4.6 require the runtime view to use that same
-        // canonical selector. Until the open encoding question is resolved,
-        // sentinel spec_version 0 means "no active spec".
+        // Contract v6 distinguishes selector failure from legal active version
+        // zero with an explicit availability bit.
         let ambiguous = crate::views::welfare_current();
         assert_eq!(ambiguous.spec_version, 0);
+        assert!(!ambiguous.active_spec_available);
         assert_eq!(ambiguous.w_current_1e9, FixedU64(0));
         assert_eq!(ambiguous.s_pillar_1e9, FixedU64(0));
         assert!(!ambiguous.s_breached);
@@ -13921,16 +14013,23 @@ fn view_params_converts_live_records_in_request_order() {
             ]
         );
         assert_eq!(rows[0].max_delta, 30_240);
+        assert_eq!((rows[0].min_next, rows[0].max_next), (272_160, 332_640));
         assert_eq!(rows[0].cooldown_blocks, 604_800);
         assert_eq!(rows[0].class, ProposalClass::Meta);
         assert_eq!(rows[1].value, 5);
         assert_eq!(rows[1].max_delta, 2);
+        assert_eq!((rows[1].min_next, rows[1].max_next), (3, 10));
         assert_eq!(rows[1].cooldown_blocks, 302_400);
         assert_eq!(rows[1].last_change, 99);
         assert_eq!(rows[1].class, ProposalClass::Param);
         assert_eq!(rows[2].max_delta, 2);
+        assert_eq!((rows[2].min_next, rows[2].max_next), (3, 7));
         assert_eq!(rows[2].class, ProposalClass::Meta);
         assert_eq!(rows[3].max_delta, 0);
+        assert_eq!(
+            (rows[3].min_next, rows[3].max_next),
+            (rows[3].min, rows[3].max)
+        );
         assert_eq!(rows[3].cooldown_blocks, 0);
         assert_eq!(rows[3].class, ProposalClass::Constitutional);
         assert_eq!(rows[4].class, ProposalClass::Treasury);
@@ -13959,7 +14058,7 @@ fn view_params_converts_live_records_in_request_order() {
 }
 
 #[test]
-fn view_params_projects_factor_delta_conservatively() {
+fn view_params_projects_factor_delta_conservatively_and_exactly() {
     use pallet_constitution::{key16, MaxDelta};
 
     development_ext().execute_with(|| {
@@ -13989,6 +14088,10 @@ fn view_params_projects_factor_delta_conservatively() {
         assert_eq!(view.as_slice()[0].max_delta, downward.min(upward));
         assert_eq!(view.as_slice()[0].max_delta, downward);
         assert!(view.as_slice()[0].max_delta < upward);
+        assert_eq!(value, 100_800);
+        assert_eq!(record.max.as_u128(), 432_000);
+        assert_eq!(view.as_slice()[0].min_next, 50_400);
+        assert_eq!(view.as_slice()[0].max_next, 201_600);
     });
 }
 
@@ -14248,9 +14351,8 @@ fn view_proposal_summaries_sorts_and_joins_passed_ratification() {
         assert_eq!(view.as_slice()[1].maturity, None);
         // Ratification is class-discriminated, never a blanket `NotRequired`:
         // PARAM/TREASURY need no values referendum (06 §2.2), but the seeded
-        // CODE proposal at id 4 has no `Ratifications` record, so it carries
-        // the guard's fail-closed spelling — the same value `execution_queue`
-        // reports for it.
+        // CODE proposal at id 4 has no passed `Ratifications` record, so it
+        // carries the same agnostic spelling as `execution_queue`.
         assert_eq!(
             view.as_slice()[1].ratification,
             RatificationStatus::NotRequired
@@ -14262,7 +14364,7 @@ fn view_proposal_summaries_sorts_and_joins_passed_ratification() {
         assert_eq!(view.as_slice()[3].class, ProposalClass::Code);
         assert_eq!(
             view.as_slice()[3].ratification,
-            RatificationStatus::Failed { referendum: 0 }
+            RatificationStatus::NoPassedRecord
         );
     });
 }

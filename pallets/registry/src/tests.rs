@@ -232,6 +232,22 @@ fn ack_requires_registered_watchtower_and_dedups() {
                 (acct(WT1), CrankClass::OracleLine),
             ]
         );
+        assert!(System::events().iter().any(|record| matches!(
+            &record.event,
+            RuntimeEvent::IncidentRegistry(crate::Event::WindowAcknowledged {
+                epoch: 5,
+                filing_id: 0,
+                watchtower,
+            }) if watchtower == &acct(WT1)
+        )));
+        assert!(System::events().iter().any(|record| matches!(
+            &record.event,
+            RuntimeEvent::MilestoneRegistry(crate::Event::WindowAcknowledged {
+                epoch: 6,
+                filing_id: 0,
+                watchtower,
+            }) if watchtower == &acct(WT1)
+        )));
     });
 }
 
@@ -292,6 +308,14 @@ fn crank_close_extends_once_then_rejects_and_refunds() {
             Filings::<Test, IncidentInstance>::get(5, 0).unwrap().state,
             FilingState::Filed { extended: true, .. }
         ));
+        assert!(System::events().iter().any(|record| matches!(
+            record.event,
+            RuntimeEvent::IncidentRegistry(crate::Event::WindowExtended {
+                epoch: 5,
+                filing_id: 0,
+                new_deadline,
+            }) if new_deadline == REG_WINDOW_BLOCKS + REG_EXT_WINDOW_BLOCKS + 1
+        )));
         assert_eq!(
             KeeperRebates::get(),
             vec![(acct(BOB), CrankClass::OracleLine)]

@@ -5033,7 +5033,7 @@ fn write_release_u32(
 pub struct RuntimeReleaseChannel;
 impl pallet_execution_guard::ReleaseChannelWriter for RuntimeReleaseChannel {
     fn on_upgrade_authorized(
-        target_spec_version: u32,
+        _target_spec_version: u32,
         authorized_at: BlockNumber,
     ) -> DispatchResult {
         let channel = pallet_constitution::ReleaseChannel::<Runtime>::get();
@@ -5042,11 +5042,6 @@ impl pallet_execution_guard::ReleaseChannelWriter for RuntimeReleaseChannel {
             &mut bytes,
             pallet_constitution::RELEASE_CHANNEL_UPDATED_AT,
             authorized_at,
-        )?;
-        write_release_u32(
-            &mut bytes,
-            pallet_constitution::RELEASE_CHANNEL_SPEC_VERSION,
-            target_spec_version,
         )?;
         write_release_u32(
             &mut bytes,
@@ -5062,15 +5057,31 @@ impl pallet_execution_guard::ReleaseChannelWriter for RuntimeReleaseChannel {
     }
     fn on_upgrade_applied(target_spec_version: u32) -> DispatchResult {
         let channel = pallet_constitution::ReleaseChannel::<Runtime>::get();
-        // Tolerant clear (G-1/SQ-134, PR #65 P1): the caller has already
-        // verified the installed `:code` hash and version — an applied
-        // upgrade cannot be retried, so a writer-(b) `set_release_channel`
-        // rewrite that no longer shows this pending upgrade must not wedge
-        // `PendingUpgrade`. Writer (b)'s newer value is authoritative; leave
-        // it untouched and let the guard record the application.
-        if channel.pending_authorized_at() == 0 || channel.spec_version() != target_spec_version {
-            return Ok(());
-        }
+        let mut bytes = channel.bytes;
+        write_release_u32(
+            &mut bytes,
+            pallet_constitution::RELEASE_CHANNEL_UPDATED_AT,
+            System::block_number(),
+        )?;
+        write_release_u32(
+            &mut bytes,
+            pallet_constitution::RELEASE_CHANNEL_SPEC_VERSION,
+            target_spec_version,
+        )?;
+        write_release_u32(
+            &mut bytes,
+            pallet_constitution::RELEASE_CHANNEL_PENDING_AUTHORIZED_AT,
+            0,
+        )?;
+        write_release_u32(
+            &mut bytes,
+            pallet_constitution::RELEASE_CHANNEL_FLAGS,
+            channel.flags() & !pallet_constitution::RELEASE_CHANNEL_FLAG_URGENT_UPGRADE,
+        )?;
+        crate::Constitution::note_release_channel(bytes)
+    }
+    fn on_upgrade_aborted(_target_spec_version: u32) -> DispatchResult {
+        let channel = pallet_constitution::ReleaseChannel::<Runtime>::get();
         let mut bytes = channel.bytes;
         write_release_u32(
             &mut bytes,
@@ -5089,34 +5100,13 @@ impl pallet_execution_guard::ReleaseChannelWriter for RuntimeReleaseChannel {
         )?;
         crate::Constitution::note_release_channel(bytes)
     }
-    fn on_upgrade_aborted(target_spec_version: u32) -> DispatchResult {
+
+    fn pending_upgrade_indication() -> (BlockNumber, bool) {
         let channel = pallet_constitution::ReleaseChannel::<Runtime>::get();
-        // Tolerant clear (G-1/SQ-131): a writer-(b) `set_release_channel`
-        // rewrite during the in-flight upgrade is newer and authoritative —
-        // leave it untouched and still let the guard restore its status quo.
-        // Only a channel that still shows exactly this pending upgrade is
-        // cleared (bump `updated_at`, zero pending, drop URGENT — the same
-        // writer-(a) shape as the applied-path clear, SQ-133 offsets).
-        if channel.pending_authorized_at() == 0 || channel.spec_version() != target_spec_version {
-            return Ok(());
-        }
-        let mut bytes = channel.bytes;
-        write_release_u32(
-            &mut bytes,
-            pallet_constitution::RELEASE_CHANNEL_UPDATED_AT,
-            System::block_number(),
-        )?;
-        write_release_u32(
-            &mut bytes,
-            pallet_constitution::RELEASE_CHANNEL_PENDING_AUTHORIZED_AT,
-            0,
-        )?;
-        write_release_u32(
-            &mut bytes,
-            pallet_constitution::RELEASE_CHANNEL_FLAGS,
-            channel.flags() & !pallet_constitution::RELEASE_CHANNEL_FLAG_URGENT_UPGRADE,
-        )?;
-        crate::Constitution::note_release_channel(bytes)
+        (
+            channel.pending_authorized_at(),
+            channel.flags() & pallet_constitution::RELEASE_CHANNEL_FLAG_URGENT_UPGRADE != 0,
+        )
     }
 }
 

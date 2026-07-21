@@ -45,18 +45,22 @@ Design a coherent, interactive multi-screen prototype covering:
    phase of `Intake → Qualify → Seed → Trade → Decide → Review → Execute → Housekeeping`,
    countdown to `next_boundary` in blocks + human time); connection/provenance status; the
    **non-dismissable** "Bootstrap governance: sudo active" banner; verification-panel entry.
-2. **Proposal list + detail (S2)** — lifecycle state badges; on detail: the decision
-   dashboard ("will it pass?"): ACCEPT vs REJECT vs Baseline TWAPs, uplift vs required
+2. **Proposal list + detail (S2)** — lifecycle state badges; on detail: the finalized
+   decision dashboard, available only after the registered windows are sealed: ACCEPT vs
+   REJECT vs Baseline TWAPs, uplift vs required
    hurdle δ, the four gate books vs their 0.05 red line, coverage % vs 95%, volume vs
-   `v_min`, convergence check, `SecuritySizing` status; the ratification panel with its
-   execute-time deadline; committed payload with hash.
+   `v_min`, convergence check, `SecuritySizing` status. During Trade/Extended, do not show
+   projected uplift or projected PASS/REJECT from `decision_stats`; the ratification panel
+   shows its execute-time deadline; committed payload with hash.
 3. **Market trading (S3)** — trade ticket with exact quote preview (`cost`, 30 bps `fee`,
-   post-trade price `p_after`, mandatory `max_cost` slippage bound, `within_domain` guard);
+   post-trade price `p_after`, mandatory `max_cost` slippage bound, `evaluable` and
+   `within_domain` guards; an unevaluable quote renders no price-like fields);
    the mirror-credit explanation ("you also receive N REJECT-USDC — your principal is
    protected if this branch is annulled"); spot vs TWAP chart with the sanity band [0.02,
    0.98] shaded, visible data gaps, and provenance labeling on the series.
-4. **Portfolio (S4)** — positions grouped by proposal and branch; vault-state badges
-   (`Open` / `Resolved` / `ScalarSettled` / `Voided`); redeem flows including the full
+4. **Portfolio (S4)** — positions grouped by proposal and branch, with Baseline positions
+   kept branch-free; vault-state badges (`Open` / `Resolved` / `ScalarSettled` / `Voided` /
+   `BaselineSettled`); proposal and Baseline redeem flows including the full
    **VOID layout**: cross-branch `merge` first as the visually primary action ("100% recovery" —
    ONLY for an Accept+Reject pair; `merge_scalar` pays no USDC and is a consolidation step),
    `redeem_void` secondary with the honest 0.5 / 0.25 rates, mixed-holdings decomposition

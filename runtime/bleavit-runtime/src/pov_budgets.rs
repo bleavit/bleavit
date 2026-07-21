@@ -29,8 +29,6 @@ const KIB: usize = 1024;
 const MAX_LIVE_MARKETS: usize = 196;
 /// 13 §5 item 2: ≤ 32 live + 4 cohorts × 5 settling = 52 vaults.
 const MAX_LIVE_VAULTS: usize = 52;
-/// 13 §4: `RecentCohortSummaries` ring of 32.
-const COHORT_RING: usize = 32;
 /// 04 §7 / 13 §4: `TwapCheckpoints: BoundedVec<(BlockNumber, Cum), 8>` at
 /// its implemented maximum:
 /// 8 × (4 B `u32` block + 32 B u256 two-limb cumulative) + 1 length byte.
@@ -113,6 +111,11 @@ fn chain_served_history_within_13_5_budget() {
         summary <= 256,
         "CohortSummary grew past the 13 §5 ~256 B model: {summary} B"
     );
+    let cohort_history = pallet_epoch::Recent::max_encoded_len();
+    assert_eq!(
+        cohort_history, 5_057,
+        "RecentCohortSummaries measured MaxEncodedLen drifted",
+    );
     type TwapCheckpointRing = frame_support::BoundedVec<
         (
             futarchy_primitives::BlockNumber,
@@ -125,7 +128,8 @@ fn chain_served_history_within_13_5_budget() {
         checkpoints, SPEC_TWAP_CHECKPOINTS_BYTES,
         "TwapCheckpoints measured MaxEncodedLen drifted",
     );
-    let total = COHORT_RING * summary + MAX_LIVE_MARKETS * checkpoints;
+    let total = cohort_history + MAX_LIVE_MARKETS * checkpoints;
+    assert_eq!(total, 61_701, "chain-served history byte model drifted");
     assert!(
         total <= 70 * KIB,
         "chain-served history exceeds the 70 KiB D-6 layer-1 budget: {total} B"

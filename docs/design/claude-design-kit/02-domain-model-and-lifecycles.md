@@ -29,6 +29,11 @@
 | `Resolved(winner)` | winner branch recorded; losing claims frozen (not burned); no unpaired redemption yet | merge (pairs → par), transfer |
 | `ScalarSettled { winner, s }` | terminal; carries winner + settlement score | redemption calls only |
 | `Voided` | terminal annulment | `merge` of an Accept+Reject pair at par, `merge_scalar`/gate-merge as value-neutral consolidation (no USDC paid), transfer, `redeem_void` |
+| `BaselineSettled { s }` | branch-free position-view projection of a settled Baseline vault | `redeem_baseline`, `redeem_baseline_pair` |
+
+`BaselineSettled` is never a proposal-vault storage state and never carries or displays a
+winning branch. Baseline storage has its own `BaselineState`; the shared spelling exists only
+so `PositionView.vault_state` can project proposal and Baseline positions through one type.
 
 **Redemption payout matrix** (all payouts floor against the redeemer):
 
@@ -98,7 +103,11 @@ no markets (referendum path). Typical epoch ≈ 31 live books; max 196.
   δ 0.025 ✓; trailing 0.5570 / 0.5222; convergence 0.0015 ✓; gate TWAPs S 0.011/0.009,
   C 0.017/0.015 ✓ ⇒ **Adopt**.
 
-## 4. The decision rule — what a "will it pass?" panel shows (05 §5)
+## 4. The decision rule — what the finalized decision panel shows (05 §5)
+
+`decision_stats(pid)` is available only after the registered windows are sealed and every
+decision input is evaluable. It is a finalized snapshot, never a live trading preview; while
+it is unavailable, the UI shows no projected uplift or projected PASS/REJECT state.
 
 Kernel-ordered, gates first ("upside is never weighed against ruin"):
 1. State/timing valid; no process hold (open oracle dispute, guardian hold, dead-man).
@@ -112,7 +121,7 @@ Kernel-ordered, gates first ("upside is never weighed against ruin"):
 5. **Security sizing**: `3 × InCapPrize ≤ AttackCost̂` (else `SecuritySizing` reject).
 6. CODE/META: attestation quorum (2-of-3) + values ratification `Passed` (checked at
    execute-time).
-Outcome: `Adopt` / `Extend` (once) / `Reject(reason)` — all 16 `RejectReason`s (kit file 05
+Outcome: `Adopt` / `Extend` (once) / `Reject(reason)` — all 17 `RejectReason`s (kit file 05
 §A4) need human-readable renderings.
 
 ## 5. Welfare metric — the protocol-health dashboard (05 §4)

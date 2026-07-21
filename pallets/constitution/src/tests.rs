@@ -121,10 +121,7 @@ fn release_channel_raw_key_and_value_layout_are_frozen() {
             RELEASE_CHANNEL_STORAGE_KEY
         );
         // Raw value: exactly 168 bytes, no SCALE length prefix, offset-parsable.
-        assert_ok!(Constitution::set_release_channel(
-            RuntimeOrigin::signed(VALUES_ACC),
-            channel_bytes()
-        ));
+        assert_ok!(Constitution::note_release_channel(channel_bytes()));
         let raw = sp_io::storage::get(&RELEASE_CHANNEL_STORAGE_KEY)
             .expect("release channel exists under the frozen raw key");
         assert_eq!(raw.len(), RELEASE_CHANNEL_LEN);
@@ -150,7 +147,7 @@ fn phase_flag_bit_assignments_match_02_7_3() {
 
 #[test]
 fn contract_version_and_bounds_reexports_hold() {
-    assert_eq!(CONTRACT_VERSION, 5); // v5: universal market-bearing gates (02 §4/§13)
+    assert_eq!(CONTRACT_VERSION, 6); // v6: ratified Batch C contract-surface reconciliation
     assert_eq!(MAX_PARAMS, 128); // 13 §4 registry bound
     assert_eq!(MAX_CAPABILITIES, 64);
     assert_eq!(crate::MAX_METERS, 16);
@@ -664,16 +661,33 @@ fn set_release_channel_is_constitutional_values_only() {
             Constitution::set_release_channel(RuntimeOrigin::none(), channel_bytes()),
             DispatchError::BadOrigin
         );
+
+        // Seed writer (a)'s fields, then have writer (b) attempt to erase and
+        // replace them while changing its own descriptor metadata.
+        assert_ok!(Constitution::note_release_channel(channel_bytes()));
+        let mut caller = channel_bytes();
+        caller[108..112].copy_from_slice(&43u32.to_le_bytes());
+        caller[112..116].copy_from_slice(&99u32.to_le_bytes());
+        caller[116..120].copy_from_slice(&0u32.to_le_bytes());
+        caller[164..168].copy_from_slice(&2u32.to_le_bytes());
         assert_ok!(Constitution::set_release_channel(
             RuntimeOrigin::signed(VALUES_ACC),
-            channel_bytes()
+            caller
         ));
-        assert_eq!(ReleaseChannel::<Test>::get().spec_version(), 7);
+        let stored = ReleaseChannel::<Test>::get();
+        // 02 §12: offset 108 is stamped from the current block, so the
+        // caller's 43 is ignored. A lawful writer must not be able to
+        // backdate the freshness a stranded reader depends on.
+        assert_eq!(stored.updated_at(), System::block_number() as u32);
+        assert_ne!(stored.updated_at(), 43);
+        assert_eq!(stored.spec_version(), 7);
+        assert_eq!(stored.pending_authorized_at(), 11);
+        assert_eq!(stored.flags(), 6);
         assert_eq!(
             last_event(),
             RuntimeEvent::Constitution(Event::ReleaseChannelSet {
                 spec_version: 7,
-                updated_at: 42,
+                updated_at: System::block_number() as u32,
             })
         );
     });
@@ -926,6 +940,7 @@ fn shell_and_core_agree_on_the_same_operation_sequence() {
         core.dispatch_set_release_channel(
             ConstitutionOrigin::ConstitutionalValues,
             channel_bytes(),
+            System::block_number() as u32,
         )
         .unwrap();
 
@@ -1481,7 +1496,11 @@ fn randomized_differential_covers_errors_origins_and_epochs() {
                     bytes[112..116].copy_from_slice(&((rng.next() % 90) as u32).to_le_bytes());
                     let shell = Constitution::set_release_channel(runtime_origin, bytes);
                     let model = core
-                        .dispatch_set_release_channel(authority, bytes)
+                        .dispatch_set_release_channel(
+                            authority,
+                            bytes,
+                            System::block_number() as u32,
+                        )
                         .map_err(crate::Pallet::<Test>::map_core_error);
                     assert_eq!(shell, model, "set_release_channel diverged at step {step}");
                 }

@@ -461,6 +461,10 @@ fn proposal_state(state: VaultState) -> Value {
             ("s", Value::from(s.0)),
         ]),
         VaultState::Voided => object(&[("kind", Value::from("Voided"))]),
+        VaultState::BaselineSettled { s } => object(&[
+            ("kind", Value::from("BaselineSettled")),
+            ("s", Value::from(s.0)),
+        ]),
     }
 }
 

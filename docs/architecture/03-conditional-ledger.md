@@ -84,10 +84,21 @@ pub enum VaultState {
     Resolved(Branch),                              // winning branch; losing-branch claims frozen
     ScalarSettled { winner: Branch, s: FixedU64 }, // carries the winner redeem() needs (B-low)
     Voided,                                        // D-1 / X-6
+    BaselineSettled { s: FixedU64 },               // Baseline position-view projection only
 }
 
 pub enum BaselineState { Open, Settled(FixedU64) }
 ```
+
+`BaselineSettled { s }` is the shared [`PositionView`](./02-integration-contract.md) projection
+spelling for a settled Baseline position; proposal-vault storage MUST never enter that variant.
+The storage representation makes Baseline state separate: `BaselineVaults` stores
+`BaselineVaultInfo { state: BaselineState }`, and the runtime maps
+`BaselineState::Settled(s)` to `VaultState::BaselineSettled { s }` only when constructing the
+shared view. The exclusion is not made unrepresentable inside proposal `VaultInfo`, whose
+`state` field uses the shared `VaultState`: instead, the exhaustive proposal transition methods
+below never assign `BaselineSettled`, and ledger `try-state` rejects any proposal-vault record
+that contains it.
 
 Transitions (exhaustive; anything absent is impossible and MUST error):
 
