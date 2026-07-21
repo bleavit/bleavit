@@ -311,7 +311,7 @@ live. For mock data these are the correct realistic values.
 | `ledger.min_split` / `MinTransfer` | 0.01 USDC | split/transfer validation |
 | `ledger.position_deposit` | 0.1 USDC per position entry | deposit line in confirmations |
 | `MaxPositionsPerAccount` | 64 | "62/64 positions" meter |
-| VOID payouts | pairs merge at par (100%); `redeem_void`: unpaired branch-USDC `floor(a/2)`, unpaired LONG/SHORT/gate `floor(a/4)` | VOID redemption dialog |
+| VOID payouts | **cross-branch** Accept+Reject pairs merge at par (100%) — same-branch LONG+SHORT merges pay no USDC and yield one branch-USDC worth `floor(a/2)`; `redeem_void`: unpaired branch-USDC `floor(a/2)`, unpaired LONG/SHORT/gate `floor(a/4)` | VOID redemption dialog |
 | Scalar redemption | LONG `floor(a·s)`; unpaired SHORT `floor(a·(1−s))`; pairs via `redeem_scalar_pair` = exactly `a` | redeem payout preview |
 | Rounding | charges round up, payouts round down (against the claimant) | payout fine print |
 | `RecentCohortSummaries` | ring of 32 (~22 months) | history page range |

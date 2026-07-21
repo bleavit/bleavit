@@ -2197,7 +2197,17 @@ fn lock_conflict_rolls_once_then_refunds() {
         );
         assert!(!IntakeQueue::<Test>::get().contains(&1));
         assert!(RolloverCounts::<Test>::get().is_empty());
-        assert_eq!(last_epoch_event(), Some(Event::ProposalDeferred(1)));
+        // 05 §2.1 T6 (SQ-166, contract v6): the second deferral is terminal —
+        // it cancels with a full refund — so it MUST report a cancellation.
+        // Emitting `ProposalDeferred` made event-derived history claim the
+        // proposal was still live.
+        assert_eq!(
+            last_epoch_event(),
+            Some(Event::ProposalCancelled {
+                pid: 1,
+                reason: RejectReason::RolloverExhausted,
+            })
+        );
     });
 }
 

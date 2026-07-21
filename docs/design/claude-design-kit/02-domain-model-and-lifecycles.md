@@ -28,7 +28,7 @@
 | `Open` | minting + trading live | all split/merge families, transfer |
 | `Resolved(winner)` | winner branch recorded; losing claims frozen (not burned); no unpaired redemption yet | merge (pairs → par), transfer |
 | `ScalarSettled { winner, s }` | terminal; carries winner + settlement score | redemption calls only |
-| `Voided` | terminal annulment | merge at par, transfer, `redeem_void` |
+| `Voided` | terminal annulment | `merge` of an Accept+Reject pair at par, `merge_scalar`/gate-merge as value-neutral consolidation (no USDC paid), transfer, `redeem_void` |
 | `BaselineSettled { s }` | branch-free position-view projection of a settled Baseline vault | `redeem_baseline`, `redeem_baseline_pair` |
 
 `BaselineSettled` is never a proposal-vault storage state and never carries or displays a
@@ -42,7 +42,8 @@ so `PositionView.vault_state` can project proposal and Baseline positions throug
 | `ScalarSettled{w,s}` | winning branch-USDC | `redeem` | 1 |
 | `ScalarSettled` | LONG / SHORT of winner | `redeem_scalar` | `floor(a·s)` / `floor(a·(1−s))` |
 | `ScalarSettled` | LONG+SHORT pair | `redeem_scalar_pair` | exactly `a` |
-| any non-settled | Accept+Reject pair | `merge` | 1 USDC per pair (par) |
+| any non-settled | Accept+Reject pair | `merge` | 1 USDC per pair (par) — the **only** 100 % path under VOID |
+| any non-settled | same-branch LONG+SHORT or YES+NO set | `merge_scalar` / gate-merge | **no USDC**; mints 1 same-branch branch-USDC, worth `floor(a/2)` under VOID until paired across branches |
 | `Voided` | unpaired branch-USDC | `redeem_void` | `floor(a/2)` |
 | `Voided` | unpaired LONG/SHORT/gate leg | `redeem_void` | `floor(a/4)` |
 

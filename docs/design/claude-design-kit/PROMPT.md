@@ -61,7 +61,8 @@ Design a coherent, interactive multi-screen prototype covering:
 4. **Portfolio (S4)** — positions grouped by proposal and branch, with Baseline positions
    kept branch-free; vault-state badges (`Open` / `Resolved` / `ScalarSettled` / `Voided` /
    `BaselineSettled`); proposal and Baseline redeem flows including the full
-   **VOID layout**: merge-pairs-first as the visually primary action ("100% recovery"),
+   **VOID layout**: cross-branch `merge` first as the visually primary action ("100% recovery" —
+   ONLY for an Accept+Reject pair; `merge_scalar` pays no USDC and is a consolidation step),
    `redeem_void` secondary with the honest 0.5 / 0.25 rates, mixed-holdings decomposition
    with total-recovery figure — the spec forbids describing those rates as a penalty.
 5. **Recent settlements (S8)** — the chain-served 32-cohort history (~22 months): per cohort

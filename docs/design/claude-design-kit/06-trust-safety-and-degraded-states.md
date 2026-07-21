@@ -35,9 +35,13 @@ Canonical provenance labels (exact spellings, INV-FE-9): `verified-finalized`, `
 Backend invariants with direct UI consequences (doc 15 §1): **I-25** — no protocol workflow may
 depend on any off-chain service beyond chain P2P + static hosting. **I-26/I-27** — under a
 `Voided` vault, exactly `merge`, `merge_scalar`, gate-set merge, `transfer`, `redeem_void` are
-allowed; the VOID screen may offer only these. **I-2(c)** — the honest annulment statement
-(unpaired holder recovers 0.5 — "not a loss of principal on any protocol path") is the copy
-baseline for VOID messaging.
+allowed; the VOID screen may offer only these. **I-2(c)/(d)** — the honest annulment statement is the copy
+baseline for VOID messaging: under protocol VOID a wrapper buyer's package and a deliberately
+unpaired holder alike receive the **D-1 neutral valuation** (0.5 per branch-USDC, 0.25 per leg).
+No claim is valued below that schedule, but VOID **does not refund a premium** paid over the
+neutral prior — buyer net delta is `neutral recovery − cost − fees`, and it reaches `−fees` only
+if the *realized average execution price* was 0.5. The retired copy "buyers recover par / no loss
+of principal on any protocol path" MUST NOT be used (SQ-171).
 
 ## 2. Threat-model rows that are UI obligations (doc 14)
 
@@ -96,10 +100,10 @@ and depeg risk borne by holders.
   upgrade crank, guardian approval, sudo era, evidence unretrievable, ratification-deadline
   risk. Each row specifies: Visible state · Loading · Available verified data · Unavailable
   convenience data · Failure message · Recovery.
-  ⚠ Numbering caution: doc 15 §3.3 numbers its five added scenarios E15–E19 with DIFFERENT
-  referents than doc 11's E15–E23 (e.g. VOID redemption is E15 in doc 15 but E16 in doc 11).
-  **Follow doc 11's numbering** (it owns the matrix); the scenario *content* of the two lists
-  is equivalent. (Logged as an open spec question in PLAN.md.)
+  Numbering: doc 11 §11.12's E15–E23 is canonical and doc 15 §3.3 is its index, renumbered to
+  match (SQ-1, resolved 2026-07-21 — the two lists previously disagreed, e.g. VOID redemption
+  was E15 in doc 15 and E16 in doc 11). The pinned-release warning is carried-forward **E14**,
+  not a new row.
 
 ## 4. Design principles stated by the spec itself (doc 15 §3.4)
 
