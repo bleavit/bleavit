@@ -27,7 +27,19 @@ HEADERS = (
     ["Domain", "Key series", "Alert (example)", "Runbook"],
     ["Domain", "Key series", "Alert", "Runbook"],
 )
-SOURCES = {"chain-exporter", "keeper", "node", "attestation-monitor", "seam"}
+SOURCES = {
+    "chain-exporter",
+    "keeper",
+    "node",
+    "attestation-monitor",
+    "relay-monitor",
+    "seam",
+}
+MODULE_SOURCES = {
+    "chain-exporter": "chain_alerts_exporter.py",
+    "attestation-monitor": "attestation_monitor.py",
+    "relay-monitor": "relay_finality_monitor.py",
+}
 METRIC_REFERENCE = re.compile(r"\b(?:bleavit|substrate)_[A-Za-z_:][A-Za-z0-9_:]*\b")
 RUNBOOK = re.compile(r"\bRB-[A-Z]+\b")
 
@@ -132,8 +144,8 @@ def extract_rows(document: str) -> list[AlertRow]:
             cursor += 1
         if count == 0:
             raise CoverageError(f"12 §6.3 table {table_index + 1} has no data rows")
-    if len(rows) != 20:
-        raise CoverageError(f"12 §6.3 extracted {len(rows)} rows; frozen O5 inventory requires 20")
+    if len(rows) != 21:
+        raise CoverageError(f"12 §6.3 extracted {len(rows)} rows; frozen O5 inventory requires 21")
     domains = [row.domain for row in rows]
     if len(set(domains)) != len(domains):
         raise CoverageError("12 §6.3 domain names are not unique")
@@ -411,16 +423,16 @@ def validate(
         failures.append(f"inventory metric {name!r} is not referenced by any alert rule")
 
     if exported is None:
-        chain, chain_error = module_series(root / "tools" / "monitoring" / "chain_alerts_exporter.py")
-        monitor, monitor_error = module_series(root / "tools" / "monitoring" / "attestation_monitor.py")
-        if chain_error:
-            failures.append(chain_error)
-        if monitor_error:
-            failures.append(monitor_error)
-        exported = {"chain-exporter": chain, "attestation-monitor": monitor}
+        collected: dict[str, set[str]] = {}
+        for source, filename in sorted(MODULE_SOURCES.items()):
+            series, error = module_series(root / "tools" / "monitoring" / filename)
+            if error:
+                failures.append(error)
+            collected[source] = series
+        exported = collected
     for name, entry in inventory.items():
         source = entry.get("source")
-        if source in {"chain-exporter", "attestation-monitor"} and name not in exported.get(source, set()):
+        if source in MODULE_SOURCES and name not in exported.get(source, set()):
             failures.append(f"inventory metric {name!r} is not in the {source} SERIES registry")
     return failures, rows, inventory
 

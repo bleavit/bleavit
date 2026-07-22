@@ -35,6 +35,16 @@ scrape_configs:
           - attestation-monitor-a.example.invalid:9618
           - attestation-monitor-b.example.invalid:9618
 
+  # Relay finality (SQ-283). Deliberately a separate exporter on a separate
+  # endpoint: a relay GRANDPA stall is invisible to every parachain-anchored
+  # series, so this collector must not share the chain exporter's connection
+  # or failure domain. Run at least two against independent relay RPCs.
+  - job_name: bleavit-relay-finality
+    static_configs:
+      - targets:
+          - relay-finality-a.example.invalid:9620
+          - relay-finality-b.example.invalid:9620
+
   # O3 seam: uncomment only after milestone O3 supplies the browser-context
   # dial/certificate/retention probe exporter and replace the operator target.
   # - job_name: bleavit-browser-dial-probes

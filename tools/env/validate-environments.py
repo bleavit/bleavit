@@ -20,6 +20,9 @@ except ModuleNotFoundError:  # Python 3.10 compatibility for the local quality g
     tomllib = None  # type: ignore[assignment]
 
 
+# The executable encoding of a scenario card's numbered steps (15 §4.7; SQ-203).
+CARD_BLOCK = re.compile(r"^```card-assertions\r?\n(.*?)^```", re.MULTILINE | re.DOTALL)
+
 PIN_KEYS = {
     "ZOMBIENET_VERSION",
     "ZOMBIENET_SHA256",
@@ -35,6 +38,10 @@ PIN_KEYS = {
     # binary backing the GHSA-only leg (tools/ci/supply-chain-gates.sh).
     "OSV_SCANNER_VERSION",
     "OSV_SCANNER_SHA256",
+    # Closing try-state pin (15 §1; SQ-204): the try-runtime-cli that runs the
+    # release-blocking `--checks try-state` leg after every environment suite.
+    "TRY_RUNTIME_VERSION",
+    "TRY_RUNTIME_SHA256",
 }
 
 # Normative inventories: 15 §4.7 + 09 §7.1.
@@ -227,8 +234,78 @@ def validate_inventory(root: Path, failures: list[str]) -> None:
         path = scenarios / name
         if not path.is_file():
             failures.append(f"{citation}: required Chopsticks scenario is missing: {name}")
-        if not path.with_suffix(".md").is_file():
-            failures.append(f"{citation}: scenario step card is missing: {path.with_suffix('.md').name}")
+        card = path.with_suffix(".md")
+        if not card.is_file():
+            failures.append(f"{citation}: scenario step card is missing: {card.name}")
+        else:
+            validate_card_contract(card, citation, failures)
+
+
+def validate_card_contract(card: Path, citation: str, failures: list[str]) -> None:
+    """Every normative card must carry an executable assertion block (SQ-203).
+
+    The evidence runner executes this block and refuses to name the scenario in
+    `bleavit.env-evidence.v1` unless every assertion actually ran, so a card
+    without one — or with a malformed one — is a fail-closed defect here rather
+    than a surprise at release time.
+    """
+    try:
+        text = card.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        failures.append(f"{citation}: cannot read scenario card {card.name}: {error}")
+        return
+    blocks = CARD_BLOCK.findall(text)
+    if len(blocks) != 1:
+        failures.append(
+            f"{citation}: {card.name} must contain exactly one ```card-assertions "
+            f"block (15 §4.7; SQ-203), found {len(blocks)}"
+        )
+        return
+    try:
+        document = yaml.safe_load(blocks[0])
+    except yaml.YAMLError as error:
+        failures.append(
+            f"{citation}: {card.name} card-assertions block is not valid YAML: {error}"
+        )
+        return
+    if not isinstance(document, list) or not document:
+        failures.append(
+            f"{citation}: {card.name} card-assertions must be a non-empty list"
+        )
+        return
+    steps: list[int] = []
+    for index, entry in enumerate(document):
+        where = f"{card.name} card-assertions[{index}]"
+        if not isinstance(entry, dict):
+            failures.append(f"{citation}: {where} must be a mapping")
+            continue
+        step = entry.get("step")
+        if type(step) is not int or step <= 0:
+            failures.append(f"{citation}: {where}.step must be a positive integer")
+        else:
+            steps.append(step)
+        if not isinstance(entry.get("claim"), str) or not entry["claim"].strip():
+            failures.append(f"{citation}: {where}.claim must be non-empty")
+        present = [
+            field
+            for field in ("execute", "blocked_on", "discharged_by")
+            if field in entry
+        ]
+        if len(present) != 1:
+            failures.append(
+                f"{citation}: {where} must carry exactly one of "
+                "execute/blocked_on/discharged_by"
+            )
+        elif present == ["discharged_by"] and entry["discharged_by"] != "try-state":
+            failures.append(
+                f"{citation}: {where}.discharged_by must be 'try-state' (the runner's "
+                "pinned closing leg, SQ-204)"
+            )
+    if steps and sorted(steps) != list(range(1, len(steps) + 1)):
+        failures.append(
+            f"{citation}: {card.name} card-assertions must cover card steps 1..N "
+            f"without gaps, found {sorted(steps)}"
+        )
 
 
 def validate_suites_manifest(root: Path, failures: list[str]) -> None:

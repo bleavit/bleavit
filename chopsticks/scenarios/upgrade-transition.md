@@ -29,3 +29,39 @@ were SCALE-checked against the real pallet types.
 
 NOTE(B7): the cells are inert until A11 occupies runtime slot 62 (B1a
 follow-up). The end-to-end path remains gated on B6 plus that wiring.
+
+<!-- Machine-readable encoding of the steps above; the evidence runner
+     executes it and refuses to name this scenario in
+     bleavit.env-evidence.v1 unless every assertion ran (15 §4.7/§5; SQ-203). -->
+```card-assertions
+- step: 1
+  claim: >-
+    the authorize branch drives a fully attested CODE proposal through
+    execute(pid) and emits UpgradeAuthorized with the imaged pending
+    record
+  blocked_on: >-
+    A8/B6 must enqueue and drive an attested CODE proposal; the imaged
+    paired PendingUpgrade+checkpoint form is also retired by the
+    SQ-127/SQ-144 ruling and awaits re-imaging
+- step: 2
+  claim: >-
+    the apply branch restarts against the candidate try-runtime Wasm with
+    the manufactured pending/checkpoint/authorization-history tuple
+    retained
+  blocked_on: >-
+    requires an active wasm-override candidate build; the runner
+    deliberately refuses configs that define one (release evidence must
+    fork the release Wasm)
+- step: 3
+  claim: >-
+    executionGuard.applyAuthorizedUpgrade(code) at or after applicable_at
+    emits UpgradeApplied and clears the pending cell
+  blocked_on: >-
+    needs a signed-extrinsic driver plus the B6 authorize/apply surface
+- step: 4
+  claim: >-
+    the frontend transition sequence full -> read-only-incompatible ->
+    compatible newer release renders, then the closing try-state passes
+  blocked_on: >-
+    frontend transition assertions wait on Track F
+```
