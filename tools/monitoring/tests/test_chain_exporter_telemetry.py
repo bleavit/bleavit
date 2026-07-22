@@ -80,6 +80,11 @@ class TelemetryExporterTests(unittest.TestCase):
             "storage_utilization": some(
                 [
                     {
+                        "map": list(b"market_active_books"),
+                        "entries": 157,
+                        "bound": 196,
+                    },
+                    {
                         "map": list(b"market_decision_windows"),
                         "entries": 3,
                         "bound": 8,
@@ -128,7 +133,10 @@ class TelemetryExporterTests(unittest.TestCase):
         self.assertEqual(samples(exporter, "bleavit_runtime_migration_cursor_stalled"), {(): 1})
         self.assertEqual(
             samples(exporter, "bleavit_runtime_storage_max_utilization_ratio"),
-            {(("map", "market_decision_windows"),): 3 / 8},
+            {
+                (("map", "market_active_books"),): 157 / 196,
+                (("map", "market_decision_windows"),): 3 / 8,
+            },
         )
         self.assertEqual(
             samples(exporter, "bleavit_runtime_numeric_anomaly_spike"),

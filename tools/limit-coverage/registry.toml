@@ -911,13 +911,19 @@ reason = "13 §4: structural per-proposal book count derived from fixed MarketKi
 [[entry]]
 key = "Baseline books"
 class = "value"
-reason = "13 §4: one-per-live-epoch structural occupancy bound; no dispatch accepts an over-bound collection."
+reason = "13 §4: Baselines have no independent count; each consumes the shared active and retained market dispatch limits."
 
 [[entry]]
 key = "MaxLiveMarkets"
 class = "dispatch-limit"
 error = "Market::TooManyMarkets"
-reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
+reason = "13 §4; 15 §4.6: dispatch-path coverage for the 196-book active/POL envelope."
+
+[[entry]]
+key = "MaxStoredMarkets"
+class = "dispatch-limit"
+error = "Market::TooManyStoredMarkets"
+reason = "13 §4; 15 §4.6: dispatch-path coverage for the 2,240-row retained-book envelope."
 
 [[entry]]
 key = "Concurrently trading books"

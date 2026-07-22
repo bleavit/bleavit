@@ -2015,13 +2015,13 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         ),
         row(
             b"ledger.archive",
-            ParamValue::U32(5_256_000),
+            ParamValue::U32(kernel::MAX_ARCHIVE_DELAY_BLOCKS),
             ParamValue::U32(1_296_000),
-            ParamValue::U32(u32::MAX),
+            ParamValue::U32(kernel::MAX_ARCHIVE_DELAY_BLOCKS),
             None,
             2,
             ParamClass::Meta,
-            false
+            true
         ),
         row(
             // SQ-36 (ruled 2026-07-21): frozen key — max == min == default.

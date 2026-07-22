@@ -444,6 +444,9 @@ pub mod pallet {
         /// New escrow is halted because global USDC issuance or the signer's
         /// cumulative Phase-3 deposit meter is already above its live cap.
         InflowCapExceeded,
+        /// Signed users cannot route positions into deposit-exempt protocol
+        /// custody; only the MarketAuthority wrapper may do so (03 §4/§5.1).
+        ProtocolDestination,
     }
 
     impl<T: Config> From<conditional_ledger_core::Error> for Error<T> {
@@ -630,6 +633,15 @@ pub mod pallet {
         ) -> DispatchResult {
             let from = ensure_signed(origin)?;
             Self::ensure_not_frozen()?;
+            // Protocol accounts are deposit/cap exempt because the trusted market
+            // wrapper owns their bounded inventory. Per-market custody addresses
+            // are permanently reserved, including before creation and after reap;
+            // Signed ingress would otherwise poison a future predictable address
+            // or create inventory outside the fixed market-reap universe.
+            ensure!(
+                !T::ProtocolAccounts::contains(&to),
+                Error::<T>::ProtocolDestination
+            );
             let (pid, epoch, is_proposal) = Self::id_home(position);
             // 03 §7 R-2, both sub-rules enforced at the LIVE `ledger.min_split` (the
             // core only guards the compile-time K floor, which is stale once META
@@ -1203,6 +1215,64 @@ pub mod pallet {
                 baseline_id(epoch, ScalarSide::Long),
                 baseline_id(epoch, ScalarSide::Short),
             ]
+        }
+
+        /// Discard the bounded protocol inventory owned by one proposal-market
+        /// book and fee-account pair immediately before that market row is
+        /// reaped. Claimant positions are deliberately untouched: only accounts
+        /// still recognized by the runtime's protocol-account predicate are
+        /// admissible, and the position universe is the fixed 14 instruments of
+        /// this proposal vault.
+        ///
+        /// This internal boundary is not a dispatchable. It is restricted to
+        /// `MarketAuthority`; `pallet-market` calls it inside the same storage
+        /// transaction that unregisters the accounts, so deposit-free rows can
+        /// never survive their exemption. The market-side terminal latch remains
+        /// authoritative even when a ledger-first sweep already removed its marker.
+        pub fn discard_proposal_protocol_inventory(
+            origin: OriginFor<T>,
+            pid: ProposalId,
+            account: &T::AccountId,
+            fees_account: &T::AccountId,
+        ) -> DispatchResult {
+            T::MarketAuthority::ensure_origin(origin)?;
+            Self::discard_protocol_inventory(Self::proposal_ids(pid), account, fees_account)
+        }
+
+        /// Baseline counterpart of [`Self::discard_proposal_protocol_inventory`].
+        pub fn discard_baseline_protocol_inventory(
+            origin: OriginFor<T>,
+            epoch: EpochId,
+            account: &T::AccountId,
+            fees_account: &T::AccountId,
+        ) -> DispatchResult {
+            T::MarketAuthority::ensure_origin(origin)?;
+            Self::discard_protocol_inventory(
+                Self::baseline_ids(epoch).into_iter(),
+                account,
+                fees_account,
+            )
+        }
+
+        fn discard_protocol_inventory(
+            ids: impl Iterator<Item = PositionId>,
+            account: &T::AccountId,
+            fees_account: &T::AccountId,
+        ) -> DispatchResult {
+            ensure!(
+                Self::is_protocol(account) && Self::is_protocol(fees_account),
+                Error::<T>::TryStateViolation
+            );
+            let sovereign = Self::account_id();
+            for id in ids {
+                for who in [account, fees_account] {
+                    let balance = Positions::<T>::get(id, who);
+                    if balance > 0 {
+                        Self::reap_one(id, who, balance, &sovereign)?;
+                    }
+                }
+            }
+            Ok(())
         }
 
         fn id_home(id: PositionId) -> (ProposalId, EpochId, bool) {

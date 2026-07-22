@@ -241,6 +241,12 @@ Carried forward from BACKEND_PLAN §28 (Prometheus + on-chain-event alerting, ru
 | Storage | per-map counts vs bounds, PoV sizes | > 80% of any bound | RB-STORAGE |
 | Numerics | LMSR domain-rejection count, rounding-dust accumulation | anomaly spike | RB-MARKET |
 
+The Storage series MUST export the two market-capacity dimensions independently:
+`ActiveMarketCount / MaxLiveMarkets` warns before live admission or POL capacity is
+exhausted, while counted `Markets / MaxStoredMarkets` tracks archive-retained book
+occupancy. Combining them under the retained denominator would hide a full live
+envelope at only 8.75% retained utilization.
+
 New rows owned by this document:
 
 | Domain | Key series | Alert | Runbook |

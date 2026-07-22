@@ -101,8 +101,9 @@ denser information, no simplified summaries (11 §11.2).
 - Positions are *conditional*: "1,000 USDC in the ACCEPT branch of proposal #42" — the UI must
   make branch-world thinking effortless (mirror-branch holdings, complete pairs, merge/redeem). (03)
 - Scale bounds (max sustained): ≤ 64 intake-family records, ≤ 32 post-qualification
-  non-terminal proposals, ≤ 196 live books, 64 positions per account, 21-day cycles settling
-  for weeks — a busy but bounded system; no infinite feeds. (13, 02)
+  non-terminal proposals, ≤ 196 active/POL-live books, ≤ 2,240 retained book rows,
+  64 positions per account, 21-day cycles settling for weeks — a busy but bounded system;
+  no infinite feeds. (13, 02)
 - Addresses render as checksummed SS58 (prefix 7777) with identicons. USDC has 6 decimals,
   VIT 12. (02, 11 §11.3)
 

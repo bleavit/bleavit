@@ -1749,6 +1749,9 @@ impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureExecutionGuard
 pub struct ProtocolAccounts;
 impl Contains<AccountId> for ProtocolAccounts {
     fn contains(who: &AccountId) -> bool {
+        if is_reserved_market_account(who) {
+            return true;
+        }
         let accounts = [
             LedgerPalletId::get().into_account_truncating(),
             market_account(),
@@ -1765,9 +1768,9 @@ impl Contains<AccountId> for ProtocolAccounts {
             execution_guard_account(),
         ];
         accounts.contains(who)
-            // Dynamically allocated book and fee custody accounts use the
-            // market pallet's refcounted O(1) membership index. Creation/reap
-            // maintain its 2*MaxLiveMarkets bound transactionally.
+            // The refcounted index records ownership of live/retained market
+            // accounts. Classification does not depend on this index: every
+            // canonical future/present/past address is reserved above.
             || pallet_market::Pallet::<Runtime>::is_market_protocol_account(who)
     }
 }
@@ -1794,12 +1797,42 @@ impl pallet_conditional_ledger::Config for Runtime {
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
 
-fn market_book_account(id: futarchy_primitives::MarketId) -> AccountId {
-    MarketPalletId::get().into_sub_account_truncating((*b"BOOK", id))
+const MARKET_ACCOUNT_PREFIX: [u8; 16] = *b"bleavit/mkt/v1\0\0";
+const MARKET_BOOK_KIND: u8 = b'B';
+const MARKET_FEES_KIND: u8 = b'F';
+
+fn reserved_market_account(kind: u8, id: futarchy_primitives::MarketId) -> AccountId {
+    let mut bytes = [0_u8; 32];
+    bytes[..MARKET_ACCOUNT_PREFIX.len()].copy_from_slice(&MARKET_ACCOUNT_PREFIX);
+    bytes[16] = kind;
+    bytes[17..25].copy_from_slice(&id.to_le_bytes());
+    AccountId::new(bytes)
 }
 
-fn market_fee_account(id: futarchy_primitives::MarketId) -> AccountId {
-    MarketPalletId::get().into_sub_account_truncating((*b"FEES", id))
+pub(crate) fn is_reserved_market_account(who: &AccountId) -> bool {
+    let bytes: &[u8] = who.as_ref();
+    bytes[..MARKET_ACCOUNT_PREFIX.len()] == MARKET_ACCOUNT_PREFIX
+        && matches!(bytes[16], MARKET_BOOK_KIND | MARKET_FEES_KIND)
+        && bytes[25..].iter().all(|byte| *byte == 0)
+}
+
+pub(crate) fn market_book_account(id: futarchy_primitives::MarketId) -> AccountId {
+    reserved_market_account(MARKET_BOOK_KIND, id)
+}
+
+pub(crate) fn market_fee_account(id: futarchy_primitives::MarketId) -> AccountId {
+    reserved_market_account(MARKET_FEES_KIND, id)
+}
+
+pub struct RuntimeMarketAccounts;
+impl pallet_market::MarketAccountProvider<AccountId> for RuntimeMarketAccounts {
+    fn book(id: futarchy_primitives::MarketId) -> AccountId {
+        market_book_account(id)
+    }
+
+    fn fees(id: futarchy_primitives::MarketId) -> AccountId {
+        market_fee_account(id)
+    }
 }
 
 fn epoch_signed_origin() -> RuntimeOrigin {
@@ -2843,6 +2876,7 @@ impl pallet_market::Config for Runtime {
     type EmergencyPlaybookOrigin = pallet_origins::EnsureEmergencyPlaybook;
     type ArchiveDelay = LedgerArchiveDelay;
     type PalletId = MarketPalletId;
+    type MarketAccounts = RuntimeMarketAccounts;
     type KeeperRebate = FutarchyTreasury;
     type InDecisionWindow = RuntimeInDecisionWindow;
     type PolCommitmentSync = RuntimePolCommitmentSync;

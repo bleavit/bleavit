@@ -330,7 +330,7 @@ Import quotas (≤ 400 MB uncompressed, ≤ 4 M rows, streamed, eviction preview
 
 ### 9.1 Load model (F-medium: growth arithmetic)
 
-The reviewed growth table assumed ~20 live books. The chain permits **196** live books (`MaxLiveMarkets` = 32·6 + 4, *normative value: [13-parameters.md](13-parameters.md)*). Budgets are now derived from both a **typical** early-life load and the **maximum sustained** load, and retention is a function of budget, not a promise.
+The reviewed growth table assumed ~20 live books. The chain permits **196 active books** (`MaxLiveMarkets` = 32·6 + 4, *normative value: [13-parameters.md](13-parameters.md)*) and separately retains at most **2,240 readable book rows** (`MaxStoredMarkets`). Terminal observation removes each book's TWAP-checkpoint and decision-window auxiliaries before releasing its active slot, so retained archive rows emit no new observations and do not multiply the ingest/history budget below. Budgets are derived from both a **typical** early-life load and the **maximum sustained active** load, and browser retention is a function of budget, not a promise.
 
 Row-rate model (assumptions labelled): observations 1 per 10 blocks per book during the trading window (d5–d18 = 13 of 21 days ⇒ duty ≈ 0.62); ~120 B effective per row (Dexie overhead included). Sustained average sample rows/day ≈ `books × 890`:
 

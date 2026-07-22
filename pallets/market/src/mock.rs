@@ -9,6 +9,7 @@ use frame_support::{
 };
 use frame_system::{EnsureSigned, RawOrigin};
 use futarchy_primitives::{
+    bounds,
     keeper::{CrankClass, KeeperRebateSink},
     kernel, Balance, MarketId,
 };
@@ -32,6 +33,11 @@ pub const TREASURY: AccountId = 903;
 pub const INSURANCE: AccountId = 904;
 pub const USDC: AssetId = 1337;
 pub const UNIT: Balance = 1_000_000;
+// Benchmark-only ids use unique canonical pairs so the try-state fixture can
+// saturate the 4,480-entry ownership index under this u64-account mock. Normal
+// unit-test ids retain the compact BOOK/FEES fixtures below.
+const BENCHMARK_MARKET_ID_BASE: MarketId = 1 << 32;
+const BENCHMARK_MARKET_ACCOUNT_BASE: AccountId = 1 << 48;
 
 frame_support::construct_runtime!(
     pub enum Test {
@@ -110,9 +116,39 @@ impl EnsureOrigin<RuntimeOrigin> for EnsureMarketPallet {
 pub struct Protocol;
 impl Contains<AccountId> for Protocol {
     fn contains(who: &AccountId) -> bool {
+        let benchmark_account_end = BENCHMARK_MARKET_ACCOUNT_BASE
+            .saturating_add(u64::from(bounds::MAX_STORED_MARKETS).saturating_mul(2));
         matches!(*who, BOOK | FEES | POL | TREASURY | INSURANCE)
             || *who == market_account()
             || *who == ledger_account()
+            || (BENCHMARK_MARKET_ACCOUNT_BASE..benchmark_account_end).contains(who)
+            || crate::MarketProtocolAccounts::<Test>::contains_key(who)
+    }
+}
+
+pub struct TestMarketAccounts;
+impl crate::MarketAccountProvider<AccountId> for TestMarketAccounts {
+    fn book(id: futarchy_primitives::MarketId) -> AccountId {
+        if id >= BENCHMARK_MARKET_ID_BASE {
+            BENCHMARK_MARKET_ACCOUNT_BASE.saturating_add(
+                id.saturating_sub(BENCHMARK_MARKET_ID_BASE)
+                    .saturating_mul(2),
+            )
+        } else if id == 8 {
+            POL
+        } else {
+            BOOK
+        }
+    }
+
+    fn fees(id: futarchy_primitives::MarketId) -> AccountId {
+        if id >= BENCHMARK_MARKET_ID_BASE {
+            Self::book(id).saturating_add(1)
+        } else if id == 8 {
+            INSURANCE
+        } else {
+            FEES
+        }
     }
 }
 
@@ -225,6 +261,7 @@ impl pallet_market::Config for Test {
     type EmergencyPlaybookOrigin = EnsureMarketAdmin;
     type ArchiveDelay = MarketArchiveDelay;
     type PalletId = MarketPalletId;
+    type MarketAccounts = TestMarketAccounts;
     type KeeperRebate = TestKeeperRebate;
     type InDecisionWindow = TestInDecisionWindow;
     type PolCommitmentSync = TestPolCommitmentSync;

@@ -36,6 +36,15 @@ pub trait BenchmarkHelper {
 #[cfg(feature = "runtime-benchmarks")]
 impl BenchmarkHelper for () {}
 
+/// Canonical per-market custody-account derivation. Production uses a
+/// permanently reserved `AccountId32` namespace, so an address is classified
+/// as protocol custody before its market exists and cannot be pre-squatted by
+/// a Signed ledger transfer.
+pub trait MarketAccountProvider<AccountId> {
+    fn book(id: futarchy_primitives::MarketId) -> AccountId;
+    fn fees(id: futarchy_primitives::MarketId) -> AccountId;
+}
+
 /// Raw per-check facts behind the boolean decision grade
 /// (`Pallet::decision_grade_at`). The runtime adapter partitions them into
 /// the 05 §5.2 tri-state welfare-book grade: the remediable-by-time
@@ -87,8 +96,9 @@ impl PolCommitmentSync for () {
 pub mod pallet {
     use crate::weights::WeightInfo;
     use crate::DecisionGradeFacts;
+    use crate::MarketAccountProvider;
     use crate::PolCommitmentSync;
-    use alloc::vec::Vec;
+    use alloc::{collections::BTreeMap, vec::Vec};
     use core::marker::PhantomData;
     use frame_support::{pallet_prelude::*, traits::Contains, PalletId};
     use frame_system::pallet_prelude::*;
@@ -139,6 +149,10 @@ pub mod pallet {
         #[pallet::constant]
         type PalletId: Get<PalletId>;
 
+        /// Canonical book/fee custody accounts. The enclosing runtime's
+        /// `ProtocolAccounts` classifier must recognize both permanently.
+        type MarketAccounts: crate::MarketAccountProvider<Self::AccountId>;
+
         /// Fail-soft keeper rebate endpoint (08 §6.3).
         type KeeperRebate: KeeperRebateSink<Self::AccountId>;
 
@@ -157,18 +171,25 @@ pub mod pallet {
     #[pallet::pallet]
     pub struct Pallet<T>(_);
 
-    /// Live market books (02 §7.4). A `CountedStorageMap` so `create_market` can
-    /// enforce the `kernel::MAX_LIVE_MARKETS = 196` bound in O(1) at dispatch time
-    /// (I-21), not just in `try_state`; each value is statically `MaxEncodedLen`
-    /// bounded. The map key/value shape the frontend reads is unchanged.
+    /// Present market books (02 §7.4), including terminal books retained through
+    /// the archive delay. A `CountedStorageMap` enforces `MaxStoredMarkets = 2240`
+    /// in O(1); [`ActiveMarketCount`] separately enforces the 196-book unsettled
+    /// bound. Each value is statically `MaxEncodedLen` bounded. The map key/value
+    /// shape the frontend reads is unchanged.
     #[pallet::storage]
     pub type Markets<T: Config> =
         CountedStorageMap<_, Blake2_128Concat, MarketId, MarketBook<T::AccountId>, OptionQuery>;
 
+    /// Books whose durable ledger-terminal latch has not yet been observed.
+    /// Creation increments this counter and first terminal observation decrements
+    /// it in the same storage transaction; reap affects only the stored count.
+    #[pallet::storage]
+    pub type ActiveMarketCount<T: Config> = StorageValue<_, u32, ValueQuery>;
+
     /// O(1) membership index for dynamically allocated book and fee custody
     /// accounts. Refcounts make the index correct even when a runtime or test
-    /// deliberately reuses an account across books; the live entry count is
-    /// dispatch-bounded by `2 * MaxLiveMarkets`.
+    /// deliberately reuses an account across books; the retained entry count is
+    /// dispatch-bounded by `2 * MaxStoredMarkets`.
     #[pallet::storage]
     pub type MarketProtocolAccounts<T: Config> =
         CountedStorageMap<_, Blake2_128Concat, T::AccountId, u16, OptionQuery>;
@@ -340,6 +361,8 @@ pub mod pallet {
         NotReapable,
         /// Creating this book would exceed `MaxLiveMarkets = 196` (I-21).
         TooManyMarkets,
+        /// Creating this book would exceed the archive-derived stored-book cap.
+        TooManyStoredMarkets,
         /// The book's POL headroom has already been seeded (04 §10, idempotence).
         AlreadySeeded,
         /// PB-DEPEG blocks book creation/seeding until its bounded expiry.
@@ -350,6 +373,9 @@ pub mod pallet {
         FreezeOutOfBounds,
         /// The one pallet-level LedgerFreeze renewal was already consumed.
         FreezeRenewalExhausted,
+        /// A proposed book/fee address is not the canonical, permanently
+        /// reserved protocol-custody address for this market id.
+        UnreservedProtocolAccount,
     }
 
     impl<T: Config> From<market_core::Error> for Error<T> {
@@ -561,6 +587,11 @@ pub mod pallet {
             bounds::MAX_LIVE_MARKETS
         }
 
+        #[pallet::constant_name(MaxStoredMarkets)]
+        fn max_stored_markets() -> u32 {
+            bounds::MAX_STORED_MARKETS
+        }
+
         #[pallet::constant_name(GatePMaxCeiling)]
         fn gate_p_max_ceiling() -> FixedU64 {
             FixedU64(kernel::GATE_P_MAX_CEILING_1E9)
@@ -716,6 +747,29 @@ pub mod pallet {
                 Error::<T>::NotReapable
             );
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
+                // Book and fee accounts received deposit-free protocol positions.
+                // Before unregistering them, atomically discard only their own
+                // inventory across this vault's fixed position universe (14 for a
+                // proposal, two for Baseline). Claimant rows and vault collateral
+                // remain available to the independently cranked ledger archive.
+                match book.kind {
+                    BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. } => {
+                        pallet_conditional_ledger::Pallet::<T>::discard_proposal_protocol_inventory(
+                            PalletLedger::<T>::authority_origin(),
+                            proposal,
+                            &book.account,
+                            &book.fees_account,
+                        )?;
+                    }
+                    BookKind::Baseline { epoch } => {
+                        pallet_conditional_ledger::Pallet::<T>::discard_baseline_protocol_inventory(
+                            PalletLedger::<T>::authority_origin(),
+                            epoch,
+                            &book.account,
+                            &book.fees_account,
+                        )?;
+                    }
+                }
                 if let BookKind::Baseline { epoch } = book.kind {
                     ensure!(
                         BaselineMarketOf::<T>::get(epoch) == Some(market),
@@ -1480,11 +1534,20 @@ pub mod pallet {
             Self::ensure_creation_open()?;
             ensure!(!Markets::<T>::contains_key(id), Error::<T>::DuplicateMarket);
             ensure!(b > 0, Error::<T>::TryStateViolation);
-            // I-21: cap the live-book set at dispatch, not only in try_state (which
-            // does not run in production blocks). `CountedStorageMap::count()` is O(1).
             ensure!(
-                Markets::<T>::count() < bounds::MAX_LIVE_MARKETS,
+                Self::market_accounts_are_canonical(id, &account, &fees_account),
+                Error::<T>::UnreservedProtocolAccount
+            );
+            // I-21: cap unsettled books independently from archive-retained rows.
+            // Both reads are O(1) and both mutations below share the caller's
+            // storage transaction, so a later ledger/account failure restores them.
+            ensure!(
+                ActiveMarketCount::<T>::get() < bounds::MAX_LIVE_MARKETS,
                 Error::<T>::TooManyMarkets
+            );
+            ensure!(
+                Markets::<T>::count() < bounds::MAX_STORED_MARKETS,
+                Error::<T>::TooManyStoredMarkets
             );
 
             if let BookKind::Baseline { epoch } = kind {
@@ -1533,6 +1596,10 @@ pub mod pallet {
                         Ok(())
                     })?;
                 }
+                ActiveMarketCount::<T>::try_mutate(|count| -> DispatchResult {
+                    *count = count.checked_add(1).ok_or(Error::<T>::ArithmeticOverflow)?;
+                    Ok(())
+                })?;
                 Markets::<T>::insert(id, MarketBook::open(id, kind, account, fees_account, b));
                 Self::deposit_event(Event::MarketCreated {
                     market: id,
@@ -1672,7 +1739,9 @@ pub mod pallet {
                         ensure!(observed == terminal, Error::<T>::TryStateViolation);
                     } else {
                         SettlementObservedAt::<T>::insert(id, terminal);
+                        Self::release_active_market_slot()?;
                     }
+                    Self::clear_terminal_window_state(id);
                     Self::remove_pol_commitment(id);
                 }
                 T::PolCommitmentSync::sync_pol_commitments()
@@ -1706,7 +1775,9 @@ pub mod pallet {
                     ensure!(observed == terminal, Error::<T>::TryStateViolation);
                 } else {
                     SettlementObservedAt::<T>::insert(id, terminal);
+                    Self::release_active_market_slot()?;
                 }
+                Self::clear_terminal_window_state(id);
                 Self::remove_pol_commitment(id);
                 T::PolCommitmentSync::sync_pol_commitments()
             })
@@ -1744,18 +1815,25 @@ pub mod pallet {
             fees_account: &T::AccountId,
         ) -> DispatchResult {
             for who in [account, fees_account] {
+                // Registration is an ownership/refcount index, never the act
+                // that grants deposit exemption. This defense keeps an unsafe
+                // runtime configuration from reclassifying claimant state.
+                ensure!(
+                    T::ProtocolAccounts::contains(who),
+                    Error::<T>::UnreservedProtocolAccount
+                );
                 MarketProtocolAccounts::<T>::try_mutate(who, |references| -> DispatchResult {
                     match references {
                         Some(count) => {
                             *count = count.checked_add(1).ok_or(Error::<T>::ArithmeticOverflow)?;
                         }
                         None => {
-                            let bound = bounds::MAX_LIVE_MARKETS
+                            let bound = bounds::MAX_STORED_MARKETS
                                 .checked_mul(2)
                                 .ok_or(Error::<T>::ArithmeticOverflow)?;
                             ensure!(
                                 MarketProtocolAccounts::<T>::count() < bound,
-                                Error::<T>::TooManyMarkets
+                                Error::<T>::TooManyStoredMarkets
                             );
                             *references = Some(1);
                         }
@@ -1764,6 +1842,35 @@ pub mod pallet {
                 })?;
             }
             Ok(())
+        }
+
+        fn market_accounts_are_canonical(
+            id: MarketId,
+            account: &T::AccountId,
+            fees_account: &T::AccountId,
+        ) -> bool {
+            *account == T::MarketAccounts::book(id)
+                && *fees_account == T::MarketAccounts::fees(id)
+                && account != fees_account
+                && T::ProtocolAccounts::contains(account)
+                && T::ProtocolAccounts::contains(fees_account)
+        }
+
+        fn release_active_market_slot() -> DispatchResult {
+            ActiveMarketCount::<T>::try_mutate(|count| -> DispatchResult {
+                *count = count.checked_sub(1).ok_or(Error::<T>::TryStateViolation)?;
+                Ok(())
+            })
+        }
+
+        fn clear_terminal_window_state(id: MarketId) {
+            // Terminal books remain directly readable until archive reap, but no
+            // decision can consume their accumulator state. Drop the auxiliary
+            // rings at the latch boundary so the always-served history budget is
+            // governed by the 196 active-book envelope, not 2,240 retained rows.
+            TwapCheckpoints::<T>::remove(id);
+            DecisionWindows::<T>::remove(id);
+            DecisionWindowOwners::<T>::remove(id);
         }
 
         fn unregister_market_accounts(book: &MarketBook<T::AccountId>) -> DispatchResult {
@@ -2037,6 +2144,14 @@ pub mod pallet {
         pub fn do_try_state() -> Result<(), DispatchError> {
             let now: u64 = Self::now_u64();
             for (id, book) in Markets::<T>::iter() {
+                // Permanent custody classification is keyed by the market id,
+                // not reconstructed from the mutable ownership index. Catch a
+                // migration or storage corruption that swaps roles or assigns
+                // another market's otherwise-reserved pair (03 §5.4; TH-11).
+                ensure!(
+                    Self::market_accounts_are_canonical(id, &book.account, &book.fees_account,),
+                    Error::<T>::TryStateViolation
+                );
                 if let BookKind::Baseline { epoch } = book.kind {
                     ensure!(
                         BaselineMarketOf::<T>::get(epoch) == Some(id),
@@ -2088,21 +2203,39 @@ pub mod pallet {
                 );
             }
             ensure!(
-                Markets::<T>::count() <= bounds::MAX_LIVE_MARKETS,
+                Markets::<T>::count() <= bounds::MAX_STORED_MARKETS,
                 Error::<T>::TryStateViolation
             );
             ensure!(
-                MarketProtocolAccounts::<T>::count() <= bounds::MAX_LIVE_MARKETS.saturating_mul(2),
+                MarketProtocolAccounts::<T>::count()
+                    <= bounds::MAX_STORED_MARKETS.saturating_mul(2),
+                Error::<T>::TryStateViolation
+            );
+            let mut expected_accounts = BTreeMap::<T::AccountId, u16>::new();
+            let mut expected_active = 0_u32;
+            for (id, book) in Markets::<T>::iter() {
+                if !SettlementObservedAt::<T>::contains_key(id) {
+                    expected_active = expected_active
+                        .checked_add(1)
+                        .ok_or(Error::<T>::TryStateViolation)?;
+                }
+                for who in [&book.account, &book.fees_account] {
+                    let count = expected_accounts.entry(who.clone()).or_default();
+                    *count = count.checked_add(1).ok_or(Error::<T>::TryStateViolation)?;
+                }
+            }
+            ensure!(
+                expected_active == ActiveMarketCount::<T>::get()
+                    && expected_active <= bounds::MAX_LIVE_MARKETS,
+                Error::<T>::TryStateViolation
+            );
+            ensure!(
+                expected_accounts.len() == MarketProtocolAccounts::<T>::count() as usize,
                 Error::<T>::TryStateViolation
             );
             for (who, references) in MarketProtocolAccounts::<T>::iter() {
-                let expected = Markets::<T>::iter_values().try_fold(0_u16, |count, book| {
-                    let additions = u16::from(book.account == who)
-                        .checked_add(u16::from(book.fees_account == who))?;
-                    count.checked_add(additions)
-                });
                 ensure!(
-                    references > 0 && expected == Some(references),
+                    references > 0 && expected_accounts.get(&who) == Some(&references),
                     Error::<T>::TryStateViolation
                 );
             }
@@ -2120,6 +2253,8 @@ pub mod pallet {
             for (proposal, ids) in ProposalMarketIds::<T>::iter() {
                 ensure!(!ids.is_empty(), Error::<T>::TryStateViolation);
                 let mut previous = None;
+                let ledger_terminal =
+                    pallet_conditional_ledger::VaultTerminalAt::<T>::get(proposal);
                 for id in ids {
                     let book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
                     ensure!(
@@ -2131,6 +2266,12 @@ pub mod pallet {
                             ),
                         Error::<T>::TryStateViolation
                     );
+                    if let Some(terminal) = ledger_terminal {
+                        ensure!(
+                            SettlementObservedAt::<T>::get(id) == Some(terminal),
+                            Error::<T>::TryStateViolation
+                        );
+                    }
                     previous = Some(id);
                 }
             }
@@ -2140,6 +2281,14 @@ pub mod pallet {
                     matches!(book.kind, BookKind::Baseline { epoch: e } if e == epoch),
                     Error::<T>::TryStateViolation
                 );
+                if let Some(terminal) =
+                    pallet_conditional_ledger::BaselineTerminalAt::<T>::get(epoch)
+                {
+                    ensure!(
+                        SettlementObservedAt::<T>::get(market) == Some(terminal),
+                        Error::<T>::TryStateViolation
+                    );
+                }
             }
             for (id, checkpoints) in TwapCheckpoints::<T>::iter() {
                 let _book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
@@ -2286,6 +2435,16 @@ pub mod pallet {
                         && !commitments.iter().any(|(market, _)| *market == id)
                         && matches!(book.phase, MarketPhase::Closed)
                         && ClosedAt::<T>::get(id).is_some_and(|closed| closed <= terminal),
+                    Error::<T>::TryStateViolation
+                );
+                // 04 §2 / 13 §5: terminal rows remain directly readable but
+                // must carry no always-served TWAP/window auxiliaries. Without
+                // this identity the 196-book history budget could silently
+                // grow toward the 2,240-row retained-book ceiling.
+                ensure!(
+                    !TwapCheckpoints::<T>::contains_key(id)
+                        && !DecisionWindows::<T>::contains_key(id)
+                        && !DecisionWindowOwners::<T>::contains_key(id),
                     Error::<T>::TryStateViolation
                 );
                 match book.kind {

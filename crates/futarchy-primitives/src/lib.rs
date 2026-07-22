@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 7;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 8;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -828,8 +828,22 @@ pub mod bounds {
     pub const MAX_METERS: u32 = 16;
     pub const INTAKE_QUEUE: u32 = 64;
     pub const MAX_LIVE_PROPOSALS: u32 = 32;
+    /// Books whose ledger terminal latch has not yet been observed. This is
+    /// also the maximum live POL-commitment vector length.
     pub const MAX_LIVE_MARKETS: u32 = 196;
     pub const BOOKS_PER_PROPOSAL: u32 = 6;
+    /// Maximum books opened by one epoch at the registry's maximum slot count.
+    pub const MAX_MARKETS_PER_EPOCH: u32 = MAX_COHORT_PROPOSALS * BOOKS_PER_PROPOSAL + 1;
+    /// Archive batches retained at the worst admissible timing: the ceiling of
+    /// one year divided by the 14-day epoch floor, plus one whole batch so Seed
+    /// can precede same-boundary keeper reaps without wedging healthy work.
+    pub const MAX_ARCHIVE_MARKET_BATCHES: u32 = super::kernel::MAX_ARCHIVE_DELAY_BLOCKS
+        .div_ceil(super::kernel::PRODUCTION_MIN_EPOCH_LENGTH_BLOCKS)
+        + 1;
+    /// All present `Markets` rows, including terminal books awaiting reap.
+    /// 196 + 28 * (12 * 6 + 1) = 2,240.
+    pub const MAX_STORED_MARKETS: u32 =
+        MAX_LIVE_MARKETS + MAX_ARCHIVE_MARKET_BATCHES * MAX_MARKETS_PER_EPOCH;
     /// Maximum TWAP checkpoints and registered decision windows per market
     /// (13 §4). Shared by market storage and the monitoring API row bound.
     pub const MAX_TWAP_WINDOWS_PER_MARKET: u32 = 8;
@@ -910,6 +924,12 @@ pub mod kernel {
     /// Max observation gap before a decision-window staleness event (04 §7; 13 §3.2).
     pub const MKT_STALE_GAP_BLOCKS: u64 = 50;
     pub const POSITION_DEPOSIT_USDC: u128 = 100_000;
+    /// One-year hard ceiling for the shared ledger/market/registry archive
+    /// delay. The ceiling makes every archive-derived storage bound finite.
+    pub const MAX_ARCHIVE_DELAY_BLOCKS: u32 = 5_256_000;
+    /// Release-runtime epoch floor used by archive-capacity derivations. Keep
+    /// this production literal separate from the fast-timing test-only floor.
+    pub const PRODUCTION_MIN_EPOCH_LENGTH_BLOCKS: u32 = 201_600;
     /// Minimum META-amendable epoch length (14 days; 05 §3.1 / 13 §1).
     ///
     /// The default-off `fast-timing` feature (SQ-128) lowers this floor to a
@@ -920,7 +940,7 @@ pub mod kernel {
     /// with it. The `cfg(not(fast-timing))` arm is byte-identical to the frozen
     /// 14-day value; the feature only shrinks a floor for a test wasm (R-7/G-1).
     #[cfg(not(feature = "fast-timing"))]
-    pub const MIN_EPOCH_LENGTH_BLOCKS: u32 = 201_600;
+    pub const MIN_EPOCH_LENGTH_BLOCKS: u32 = PRODUCTION_MIN_EPOCH_LENGTH_BLOCKS;
     #[cfg(feature = "fast-timing")]
     pub const MIN_EPOCH_LENGTH_BLOCKS: u32 = 14 * FAST_DAY_BLOCKS;
     /// Guardian/playbook effect backstop (14 days at six-second blocks).
@@ -1169,10 +1189,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn contract_version_is_v7() {
-        // Batch C reconciles the ratified contract surface with the shipped
-        // primitives and runtime views. A frozen-contract change bumps this.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 7);
+    fn contract_version_is_v8() {
+        // SQ-483 separates the active/POL and retained-book envelopes. A
+        // frozen-contract change bumps this value again.
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 8);
     }
 
     #[test]
@@ -1698,6 +1718,11 @@ mod tests {
     #[test]
     fn production_epoch_timing_floors_are_frozen() {
         assert_eq!(kernel::MIN_EPOCH_LENGTH_BLOCKS, 201_600);
+        assert_eq!(kernel::PRODUCTION_MIN_EPOCH_LENGTH_BLOCKS, 201_600);
+        assert_eq!(kernel::MAX_ARCHIVE_DELAY_BLOCKS, 5_256_000);
+        assert_eq!(bounds::MAX_MARKETS_PER_EPOCH, 73);
+        assert_eq!(bounds::MAX_ARCHIVE_MARKET_BATCHES, 28);
+        assert_eq!(bounds::MAX_STORED_MARKETS, 2_240);
         assert_eq!(kernel::DECISION_WINDOW_FLOOR_BLOCKS, 14_400);
         assert_eq!(kernel::DECISION_WINDOW_FLOOR_BLOCKS, kernel::BLOCKS_PER_DAY);
         // Drill-08 expedited-lane lead and drill-04 dead-man stall threshold: the
@@ -1705,6 +1730,30 @@ mod tests {
         // compression must never leak into production).
         assert_eq!(kernel::DESCRIPTOR_LEAD_TIME_BLOCKS, 43_200);
         assert_eq!(kernel::DEAD_MAN_RELAY_BLOCKS, 4_800);
+    }
+
+    #[test]
+    fn stored_market_capacity_is_derived_separately_from_live_pol_capacity() {
+        assert_eq!(
+            bounds::MAX_MARKETS_PER_EPOCH,
+            bounds::MAX_COHORT_PROPOSALS
+                .saturating_mul(bounds::BOOKS_PER_PROPOSAL)
+                .saturating_add(1),
+        );
+        assert_eq!(
+            bounds::MAX_ARCHIVE_MARKET_BATCHES,
+            kernel::MAX_ARCHIVE_DELAY_BLOCKS
+                .div_ceil(kernel::PRODUCTION_MIN_EPOCH_LENGTH_BLOCKS)
+                .saturating_add(1),
+        );
+        assert_eq!(
+            bounds::MAX_STORED_MARKETS,
+            bounds::MAX_LIVE_MARKETS.saturating_add(
+                bounds::MAX_ARCHIVE_MARKET_BATCHES.saturating_mul(bounds::MAX_MARKETS_PER_EPOCH),
+            ),
+        );
+        assert_eq!(bounds::MAX_LIVE_MARKETS, 196);
+        assert_eq!(bounds::MAX_STORED_MARKETS, 2_240);
     }
 
     /// Under the compressed test build the same floors derive from the single

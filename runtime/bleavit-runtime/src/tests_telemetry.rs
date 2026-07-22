@@ -149,8 +149,8 @@ fn telemetry_market_book_loss_tracks_real_baseline_buy_and_sell_fee_custody(
         const EPOCH: u32 = 9;
 
         let trader = tests::account(41);
-        let book_account = tests::account(42);
-        let fees_account = tests::account(43);
+        let book_account = crate::configs::market_book_account(MARKET);
+        let fees_account = crate::configs::market_fee_account(MARKET);
         let treasury = crate::configs::pol_baseline_account();
         let asset = <Runtime as pallet_conditional_ledger::Config>::UsdcAssetId::get();
         let b = crate::configs::balance_param(b"pol.b_baseline");
@@ -693,6 +693,7 @@ fn telemetry_storage_utilization_reports_inner_maxima_and_live_value_lengths(
             MARKET,
             BoundedVec::truncate_from(vec![(1, 1, 1, 2), (2, 1, 1, 2), (3, 1, 1, 2)]),
         );
+        pallet_market::ActiveMarketCount::<Runtime>::put(7);
 
         let rows = required(
             crate::telemetry::storage_utilization(),
@@ -708,6 +709,10 @@ fn telemetry_storage_utilization_reports_inner_maxima_and_live_value_lengths(
                 .find(|row| row.map.as_slice() == name)
                 .map(|row| (row.entries, row.bound))
         };
+        assert_eq!(
+            find(b"market_active_books"),
+            Some((7, futarchy_primitives::bounds::MAX_LIVE_MARKETS))
+        );
         assert_eq!(find(b"market_twap_checkpoints").map(|row| row.0), Some(2));
         assert_eq!(find(b"market_decision_windows").map(|row| row.0), Some(1));
         assert_eq!(

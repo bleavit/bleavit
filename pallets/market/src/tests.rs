@@ -5,10 +5,14 @@
 //! origin gates, rollback-safe error paths, and shell≡core differential.
 
 use crate::{
-    mock::*, BaselineMarketOf, ClosedAt, DecisionWindowOwners, DecisionWindows, Error, Event,
-    MarketProtocolAccounts, Markets, SettlementObservedAt, TwapCheckpoints,
+    mock::*, ActiveMarketCount, BaselineMarketOf, ClosedAt, DecisionWindowOwners, DecisionWindows,
+    Error, Event, MarketAccountProvider, MarketProtocolAccounts, Markets, SettlementObservedAt,
+    TwapCheckpoints,
 };
-use frame_support::{assert_err, assert_noop, assert_ok, traits::fungibles::Inspect};
+use frame_support::{
+    assert_err, assert_noop, assert_ok,
+    traits::{fungibles::Inspect, Contains},
+};
 use frame_system::RawOrigin;
 use futarchy_primitives::{
     keeper::CrankClass, Balance, Branch, FixedU64, MarketId, PositionId, PositionKind, ScalarSide,
@@ -45,6 +49,20 @@ fn create_decision() {
     ));
 }
 
+fn create_decision_book(id: MarketId, proposal: u64) {
+    assert_ok!(Market::create_market(
+        signed(MARKET_ADMIN),
+        id,
+        BookKind::Decision {
+            proposal,
+            branch: Branch::Accept,
+        },
+        TestMarketAccounts::book(id),
+        TestMarketAccounts::fees(id),
+        B,
+    ));
+}
+
 fn create_baseline() {
     assert_ok!(Market::create_market(
         signed(MARKET_ADMIN),
@@ -77,6 +95,19 @@ fn settle_baseline() {
         FixedU64(500_000_000),
     ));
     assert_ok!(Market::observe_baseline_terminal(EPOCH));
+}
+
+fn sweep_proposal_vault(pid: u64) {
+    for _ in 0..16 {
+        if !pallet_conditional_ledger::Vaults::<Test>::contains_key(pid) {
+            return;
+        }
+        assert_ok!(Ledger::sweep_dust(signed(BOB), pid));
+    }
+    assert!(
+        !pallet_conditional_ledger::Vaults::<Test>::contains_key(pid),
+        "proposal vault must drain within its bounded prefixes",
+    );
 }
 
 fn position_balance(id: PositionId, who: AccountId) -> Balance {
@@ -459,6 +490,7 @@ fn reserve_pause_blocks_market_buys_for_every_book_kind_but_keeps_exits_open() {
             PROPOSAL,
             FixedU64(1_000_000_000),
         ));
+        assert_ok!(Market::observe_proposal_terminal(PROPOSAL));
         assert_ok!(Ledger::redeem(signed(ALICE), PROPOSAL, UNIT));
         assert_try_state();
     });
@@ -661,24 +693,25 @@ fn v6_domain_edge_is_rejected_without_mutation() {
 fn live_market_bound_rejects_the_197th_book() {
     // limit-coverage: MaxLiveMarkets
     new_test_ext().execute_with(|| {
-        create_decision();
-        let template = Markets::<Test>::get(MARKET_ID).expect("created market exists");
-        let mut id = 0u64;
-        while Markets::<Test>::count() < futarchy_primitives::bounds::MAX_LIVE_MARKETS {
-            if !Markets::<Test>::contains_key(id) {
-                let mut book = template;
-                book.id = id;
-                Markets::<Test>::insert(id, book);
-            }
-            id = id.saturating_add(1);
+        for id in 0..u64::from(futarchy_primitives::bounds::MAX_LIVE_MARKETS) {
+            create_decision_book(id, 10_000 + id);
         }
+        assert_eq!(
+            ActiveMarketCount::<Test>::get(),
+            futarchy_primitives::bounds::MAX_LIVE_MARKETS,
+        );
+        assert_eq!(
+            Markets::<Test>::count(),
+            futarchy_primitives::bounds::MAX_LIVE_MARKETS,
+        );
+        assert_try_state();
 
         assert_noop!(
             Market::create_market(
                 signed(MARKET_ADMIN),
-                10_000,
+                100_000,
                 BookKind::Decision {
-                    proposal: 10_000,
+                    proposal: 100_000,
                     branch: Branch::Accept,
                 },
                 BOOK,
@@ -687,10 +720,87 @@ fn live_market_bound_rejects_the_197th_book() {
             ),
             E::TooManyMarkets
         );
+        assert!(!pallet_conditional_ledger::Vaults::<Test>::contains_key(
+            100_000
+        ));
         assert_eq!(
             Markets::<Test>::count(),
             futarchy_primitives::bounds::MAX_LIVE_MARKETS
         );
+        assert_eq!(
+            ActiveMarketCount::<Test>::get(),
+            futarchy_primitives::bounds::MAX_LIVE_MARKETS,
+        );
+        assert_try_state();
+    });
+}
+
+#[test]
+fn stored_market_bound_retains_archives_and_recycles_after_bounded_book_reap() {
+    // limit-coverage: MaxStoredMarkets
+    new_test_ext().execute_with(|| {
+        let mut next_market = 0_u64;
+        let mut next_proposal = 50_000_u64;
+        let first_market = next_market;
+
+        while Markets::<Test>::count() < futarchy_primitives::bounds::MAX_STORED_MARKETS {
+            let remaining = futarchy_primitives::bounds::MAX_STORED_MARKETS
+                .saturating_sub(Markets::<Test>::count());
+            let batch = remaining.min(futarchy_primitives::bounds::BOOKS_PER_PROPOSAL);
+            for _ in 0..batch {
+                create_decision_book(next_market, next_proposal);
+                next_market = next_market.saturating_add(1);
+            }
+            assert_ok!(Ledger::void(signed(RESOLVER), next_proposal));
+            assert_ok!(Market::observe_proposal_terminal(next_proposal));
+            next_proposal = next_proposal.saturating_add(1);
+        }
+
+        assert_eq!(
+            Markets::<Test>::count(),
+            futarchy_primitives::bounds::MAX_STORED_MARKETS,
+        );
+        assert_eq!(ActiveMarketCount::<Test>::get(), 0);
+        assert_try_state();
+
+        assert_noop!(
+            Market::create_market(
+                signed(MARKET_ADMIN),
+                100_000,
+                BookKind::Decision {
+                    proposal: 100_000,
+                    branch: Branch::Accept,
+                },
+                BOOK,
+                FEES,
+                B,
+            ),
+            E::TooManyStoredMarkets
+        );
+        assert_eq!(
+            Markets::<Test>::count(),
+            futarchy_primitives::bounds::MAX_STORED_MARKETS,
+        );
+        assert_eq!(ActiveMarketCount::<Test>::get(), 0);
+        assert!(!pallet_conditional_ledger::Vaults::<Test>::contains_key(
+            100_000
+        ));
+
+        System::set_block_number(1 + MarketArchiveDelay::get());
+        assert_ok!(Market::reap(signed(BOB), first_market));
+        assert_eq!(
+            Markets::<Test>::count(),
+            futarchy_primitives::bounds::MAX_STORED_MARKETS - 1,
+        );
+        assert_eq!(ActiveMarketCount::<Test>::get(), 0);
+
+        create_decision_book(100_000, 100_000);
+        assert_eq!(
+            Markets::<Test>::count(),
+            futarchy_primitives::bounds::MAX_STORED_MARKETS,
+        );
+        assert_eq!(ActiveMarketCount::<Test>::get(), 1);
+        assert_try_state();
     });
 }
 
@@ -846,7 +956,7 @@ fn baseline_mapping_is_written_and_duplicate_epoch_is_rejected() {
                 signed(MARKET_ADMIN),
                 BASELINE_ID + 1,
                 BookKind::Baseline { epoch: EPOCH },
-                POL,
+                BOOK,
                 FEES,
                 B,
             ),
@@ -1012,8 +1122,33 @@ fn reap_respects_archive_delay_then_removes_decision_book() {
         seed(MARKET_ID);
         System::set_block_number(5);
         assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+        // Even empty ValueQuery rows occupy storage; terminal observation must
+        // delete all three auxiliary keys so archived books cannot inflate the
+        // active-only history envelope.
+        TwapCheckpoints::<Test>::insert(MARKET_ID, TwapCheckpoints::<Test>::get(MARKET_ID));
+        DecisionWindows::<Test>::insert(MARKET_ID, DecisionWindows::<Test>::get(MARKET_ID));
+        DecisionWindowOwners::<Test>::insert(
+            MARKET_ID,
+            DecisionWindowOwners::<Test>::get(MARKET_ID),
+        );
         System::set_block_number(9);
         settle_decision();
+        assert_eq!(ActiveMarketCount::<Test>::get(), 0);
+        assert_eq!(Markets::<Test>::count(), 1);
+        assert!(!TwapCheckpoints::<Test>::contains_key(MARKET_ID));
+        assert!(!DecisionWindows::<Test>::contains_key(MARKET_ID));
+        assert!(!DecisionWindowOwners::<Test>::contains_key(MARKET_ID));
+        TwapCheckpoints::<Test>::insert(MARKET_ID, TwapCheckpoints::<Test>::get(MARKET_ID));
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
+        TwapCheckpoints::<Test>::remove(MARKET_ID);
+        assert_try_state();
+        assert_ok!(Market::observe_proposal_terminal(PROPOSAL));
+        assert_eq!(
+            ActiveMarketCount::<Test>::get(),
+            0,
+            "re-observing the same terminal marker must not free a second slot",
+        );
+        assert_eq!(Markets::<Test>::count(), 1);
         let delay = MarketArchiveDelay::get();
 
         // The delay is anchored at the ledger terminal marker, not ClosedAt.
@@ -1060,10 +1195,184 @@ fn protocol_account_index_tracks_create_and_reap_and_try_state_detects_drift() {
 }
 
 #[test]
+fn market_first_reap_discards_only_bounded_protocol_inventory() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        let amount = MinSplit::get().saturating_mul(2);
+        assert_ok!(Ledger::split(signed(BOB), PROPOSAL, amount));
+
+        System::set_block_number(7);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+        assert_ok!(Ledger::void(signed(RESOLVER), PROPOSAL));
+        assert_ok!(Market::observe_proposal_terminal(PROPOSAL));
+
+        // Voided claimant positions remain transferable, but Signed users cannot
+        // inject arbitrary-vault rows into deposit-exempt protocol custody. The
+        // trusted market wrapper is the only ingress, keeping cleanup tied to this
+        // book's fixed owning-vault universe.
+        let accept = position(PROPOSAL, Branch::Accept, PositionKind::BranchUsdc);
+        let protocol_before = position_balance(accept, BOOK);
+        assert_noop!(
+            Ledger::transfer(signed(BOB), accept, BOOK, MinSplit::get()),
+            pallet_conditional_ledger::Error::<Test>::ProtocolDestination
+        );
+        assert_eq!(position_balance(accept, BOOK), protocol_before);
+        let claimant_before: Vec<_> = pallet_conditional_ledger::Positions::<Test>::iter()
+            .filter_map(|(id, who, balance)| (who == BOB).then_some((id, balance)))
+            .collect();
+        assert!(!claimant_before.is_empty());
+
+        System::set_block_number(7 + MarketArchiveDelay::get());
+        assert_ok!(Market::reap(signed(ALICE), MARKET_ID));
+
+        assert!(!Markets::<Test>::contains_key(MARKET_ID));
+        assert!(!Market::is_market_protocol_account(&BOOK));
+        assert!(!Market::is_market_protocol_account(&FEES));
+        assert!(pallet_conditional_ledger::Positions::<Test>::iter()
+            .all(|(_id, who, _balance)| who != BOOK && who != FEES));
+        let claimant_after: Vec<_> = pallet_conditional_ledger::Positions::<Test>::iter()
+            .filter_map(|(id, who, balance)| (who == BOB).then_some((id, balance)))
+            .collect();
+        assert_eq!(claimant_after, claimant_before);
+        assert!(pallet_conditional_ledger::Vaults::<Test>::contains_key(
+            PROPOSAL
+        ));
+        assert!(pallet_conditional_ledger::VaultTerminalAt::<Test>::contains_key(PROPOSAL));
+        assert_try_state();
+    });
+}
+
+#[test]
+fn reserved_protocol_membership_blocks_signed_ingress_before_during_and_after_registration() {
+    new_test_ext().execute_with(|| {
+        const UNRELATED: u64 = 99;
+        assert!(!Market::is_market_protocol_account(&BOOK));
+        assert!(Protocol::contains(&BOOK));
+        assert_ok!(Ledger::create_vault(signed(market_account()), UNRELATED, 0,));
+        let amount = MinSplit::get().saturating_mul(4);
+        assert_ok!(Ledger::split(signed(ALICE), UNRELATED, amount));
+        let unrelated = position(UNRELATED, Branch::Accept, PositionKind::BranchUsdc);
+
+        // The future custody address is reserved before the market exists, so
+        // a claimant cannot poison it and force a deposit-accounting
+        // reclassification (03 §4/§5.4; TH-11).
+        assert_noop!(
+            Ledger::transfer(signed(ALICE), unrelated, BOOK, MinSplit::get()),
+            pallet_conditional_ledger::Error::<Test>::ProtocolDestination
+        );
+        assert_eq!(position_balance(unrelated, BOOK), 0);
+
+        // Creation validates role and market-id binding, not merely generic
+        // protocol membership. Every pair below is wholly or partly reserved;
+        // deleting the exact-pair predicate makes at least one case succeed.
+        for (book, fees) in [
+            (POL, INSURANCE), // another market id's canonical pair
+            (FEES, BOOK),     // correct addresses, swapped roles
+            (BOOK, INSURANCE),
+            (POL, FEES),
+        ] {
+            assert!(Protocol::contains(&book));
+            assert!(Protocol::contains(&fees));
+            assert_noop!(
+                Market::create_market(
+                    signed(MARKET_ADMIN),
+                    MARKET_ID,
+                    BookKind::Decision {
+                        proposal: PROPOSAL,
+                        branch: Branch::Accept,
+                    },
+                    book,
+                    fees,
+                    B,
+                ),
+                E::UnreservedProtocolAccount
+            );
+        }
+        assert!(!pallet_conditional_ledger::Vaults::<Test>::contains_key(
+            PROPOSAL
+        ));
+        assert!(!Markets::<Test>::contains_key(MARKET_ID));
+        assert_eq!(MarketProtocolAccounts::<Test>::count(), 0);
+
+        create_decision();
+        assert!(Market::is_market_protocol_account(&BOOK));
+        assert!(Market::is_market_protocol_account(&FEES));
+        assert_eq!(MarketProtocolAccounts::<Test>::get(BOOK), Some(1));
+        assert_eq!(MarketProtocolAccounts::<Test>::get(FEES), Some(1));
+        seed(MARKET_ID);
+
+        assert_ok!(Ledger::split(signed(ALICE), PROPOSAL, amount));
+        System::set_block_number(7);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+        assert_ok!(Ledger::void(signed(RESOLVER), PROPOSAL));
+        assert_ok!(Market::observe_proposal_terminal(PROPOSAL));
+
+        let accept = position(PROPOSAL, Branch::Accept, PositionKind::BranchUsdc);
+        let alice_before = position_balance(accept, ALICE);
+        let total_before = pallet_conditional_ledger::PositionTotals::<Test>::get(accept);
+        let deposits_before = pallet_conditional_ledger::DepositsHeld::<Test>::get();
+        let events_before = System::events();
+        assert_noop!(
+            Ledger::transfer(signed(ALICE), accept, BOOK, MinSplit::get()),
+            pallet_conditional_ledger::Error::<Test>::ProtocolDestination
+        );
+        assert_eq!(position_balance(accept, ALICE), alice_before);
+        assert_eq!(
+            pallet_conditional_ledger::PositionTotals::<Test>::get(accept),
+            total_before,
+        );
+        assert_eq!(
+            pallet_conditional_ledger::DepositsHeld::<Test>::get(),
+            deposits_before,
+        );
+        assert_eq!(System::events(), events_before);
+
+        // The same destination remains reachable through the trusted wrapper.
+        assert_ok!(Ledger::do_transfer(
+            signed(market_account()),
+            accept,
+            ALICE,
+            BOOK,
+            MinSplit::get(),
+        ));
+        assert_eq!(
+            position_balance(accept, ALICE),
+            alice_before - MinSplit::get()
+        );
+        assert!(position_balance(accept, BOOK) > 0);
+
+        System::set_block_number(7 + MarketArchiveDelay::get());
+        assert_ok!(Market::reap(signed(ALICE), MARKET_ID));
+        assert!(!Market::is_market_protocol_account(&BOOK));
+        assert!(!Market::is_market_protocol_account(&FEES));
+        assert!(Protocol::contains(&BOOK));
+        assert!(Protocol::contains(&FEES));
+        assert_eq!(MarketProtocolAccounts::<Test>::get(BOOK), None);
+        assert_eq!(MarketProtocolAccounts::<Test>::get(FEES), None);
+        assert_eq!(position_balance(accept, BOOK), 0);
+        assert_eq!(
+            position_balance(accept, ALICE),
+            alice_before - MinSplit::get(),
+            "market-first discard must preserve the claimant row",
+        );
+
+        // Unregistration releases ownership/refcounts, not classification.
+        assert_noop!(
+            Ledger::transfer(signed(ALICE), accept, BOOK, MinSplit::get()),
+            pallet_conditional_ledger::Error::<Test>::ProtocolDestination
+        );
+        assert_try_state();
+    });
+}
+
+#[test]
 fn ledger_reap_before_market_reap_keeps_pol_released_and_book_reapable() {
     new_test_ext().execute_with(|| {
         create_decision();
         seed(MARKET_ID);
+        assert!(pallet_conditional_ledger::Positions::<Test>::iter()
+            .any(|(_id, who, balance)| (who == BOOK || who == FEES) && balance > 0));
         System::set_block_number(7);
         assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
         settle_decision();
@@ -1071,14 +1380,11 @@ fn ledger_reap_before_market_reap_keeps_pol_released_and_book_reapable() {
         assert!(Market::live_pol_commitments().is_empty());
 
         System::set_block_number(7 + LedgerArchiveDelay::get() + 1);
-        for _ in 0..8 {
-            if pallet_conditional_ledger::Vaults::<Test>::get(PROPOSAL).is_none() {
-                break;
-            }
-            assert_ok!(Ledger::sweep_dust(signed(BOB), PROPOSAL));
-        }
+        sweep_proposal_vault(PROPOSAL);
         assert!(pallet_conditional_ledger::Vaults::<Test>::get(PROPOSAL).is_none());
         assert!(pallet_conditional_ledger::VaultTerminalAt::<Test>::get(PROPOSAL).is_none());
+        assert!(pallet_conditional_ledger::Positions::<Test>::iter()
+            .all(|(_id, who, _balance)| who != BOOK && who != FEES));
         assert_eq!(SettlementObservedAt::<Test>::get(MARKET_ID), Some(7));
         assert!(!Market::pol_obligation_live(
             MARKET_ID,
@@ -1086,9 +1392,54 @@ fn ledger_reap_before_market_reap_keeps_pol_released_and_book_reapable() {
         ));
         assert_try_state();
 
+        let ledger_before = (
+            pallet_conditional_ledger::Vaults::<Test>::iter().collect::<Vec<_>>(),
+            pallet_conditional_ledger::VaultTerminalAt::<Test>::iter().collect::<Vec<_>>(),
+            pallet_conditional_ledger::Positions::<Test>::iter().collect::<Vec<_>>(),
+            pallet_conditional_ledger::PositionTotals::<Test>::iter().collect::<Vec<_>>(),
+            pallet_conditional_ledger::PositionCount::<Test>::iter().collect::<Vec<_>>(),
+            pallet_conditional_ledger::DepositsHeld::<Test>::get(),
+            usdc(ledger_account()),
+            usdc(INSURANCE),
+        );
         assert_ok!(Market::reap(signed(BOB), MARKET_ID));
         assert!(!Markets::<Test>::contains_key(MARKET_ID));
+        assert_eq!(
+            (
+                pallet_conditional_ledger::Vaults::<Test>::iter().collect::<Vec<_>>(),
+                pallet_conditional_ledger::VaultTerminalAt::<Test>::iter().collect::<Vec<_>>(),
+                pallet_conditional_ledger::Positions::<Test>::iter().collect::<Vec<_>>(),
+                pallet_conditional_ledger::PositionTotals::<Test>::iter().collect::<Vec<_>>(),
+                pallet_conditional_ledger::PositionCount::<Test>::iter().collect::<Vec<_>>(),
+                pallet_conditional_ledger::DepositsHeld::<Test>::get(),
+                usdc(ledger_account()),
+                usdc(INSURANCE),
+            ),
+            ledger_before,
+            "market reap after ledger-first sweep must be ledger-idempotent",
+        );
         assert_try_state();
+    });
+}
+
+#[test]
+fn try_state_rejects_ledger_terminal_markers_without_market_latches() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        assert_ok!(Ledger::void(signed(RESOLVER), PROPOSAL));
+        assert_eq!(SettlementObservedAt::<Test>::get(MARKET_ID), None);
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
+    });
+
+    new_test_ext().execute_with(|| {
+        create_baseline();
+        assert_ok!(Ledger::settle_baseline(
+            signed(SETTLER),
+            EPOCH,
+            FixedU64(500_000_000),
+        ));
+        assert_eq!(SettlementObservedAt::<Test>::get(BASELINE_ID), None);
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
     });
 }
 
@@ -1118,11 +1469,35 @@ fn reap_of_baseline_book_fails_static_on_a_mismatched_mapping() {
     new_test_ext().execute_with(|| {
         create_baseline();
         seed(BASELINE_ID);
+        assert_ok!(Ledger::split_baseline(
+            signed(ALICE),
+            EPOCH,
+            MinSplit::get().saturating_mul(2),
+        ));
         System::set_block_number(5);
         assert_ok!(Market::close(signed(MARKET_ADMIN), BASELINE_ID));
         settle_baseline();
         System::set_block_number(5 + MarketArchiveDelay::get());
         BaselineMarketOf::<Test>::insert(EPOCH, BASELINE_ID + 1);
+
+        // The ledger discard runs before the inverse-mapping check. A failure in
+        // that later market step must restore protocol inventory, claimant rows,
+        // totals, custody, deposits, events, and protocol-account membership.
+        let ledger_before = (
+            pallet_conditional_ledger::BaselineVaults::<Test>::get(EPOCH),
+            pallet_conditional_ledger::BaselineTerminalAt::<Test>::get(EPOCH),
+            pallet_conditional_ledger::Positions::<Test>::iter().collect::<Vec<_>>(),
+            pallet_conditional_ledger::PositionTotals::<Test>::iter().collect::<Vec<_>>(),
+            pallet_conditional_ledger::PositionCount::<Test>::iter().collect::<Vec<_>>(),
+            pallet_conditional_ledger::DepositsHeld::<Test>::get(),
+            usdc(ledger_account()),
+            usdc(INSURANCE),
+        );
+        let refs_before = (
+            MarketProtocolAccounts::<Test>::get(BOOK),
+            MarketProtocolAccounts::<Test>::get(FEES),
+        );
+        let events_before = System::events();
 
         assert_noop!(
             Market::reap(signed(CHARLIE), BASELINE_ID),
@@ -1131,6 +1506,29 @@ fn reap_of_baseline_book_fails_static_on_a_mismatched_mapping() {
         assert!(Markets::<Test>::contains_key(BASELINE_ID));
         assert!(ClosedAt::<Test>::contains_key(BASELINE_ID));
         assert_eq!(BaselineMarketOf::<Test>::get(EPOCH), Some(BASELINE_ID + 1));
+        assert_eq!(
+            (
+                pallet_conditional_ledger::BaselineVaults::<Test>::get(EPOCH),
+                pallet_conditional_ledger::BaselineTerminalAt::<Test>::get(EPOCH),
+                pallet_conditional_ledger::Positions::<Test>::iter().collect::<Vec<_>>(),
+                pallet_conditional_ledger::PositionTotals::<Test>::iter().collect::<Vec<_>>(),
+                pallet_conditional_ledger::PositionCount::<Test>::iter().collect::<Vec<_>>(),
+                pallet_conditional_ledger::DepositsHeld::<Test>::get(),
+                usdc(ledger_account()),
+                usdc(INSURANCE),
+            ),
+            ledger_before,
+        );
+        assert_eq!(
+            (
+                MarketProtocolAccounts::<Test>::get(BOOK),
+                MarketProtocolAccounts::<Test>::get(FEES),
+            ),
+            refs_before,
+        );
+        assert!(Market::is_market_protocol_account(&BOOK));
+        assert!(Market::is_market_protocol_account(&FEES));
+        assert_eq!(System::events(), events_before);
     });
 }
 
@@ -2485,6 +2883,45 @@ fn do_try_state_rejects_baseline_book_without_mapping() {
         create_baseline();
         BaselineMarketOf::<Test>::remove(EPOCH);
 
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
+    });
+}
+
+#[test]
+fn do_try_state_rejects_active_market_counter_drift() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        assert_eq!(ActiveMarketCount::<Test>::get(), 1);
+        assert_try_state();
+
+        ActiveMarketCount::<Test>::put(0);
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
+
+        ActiveMarketCount::<Test>::put(2);
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
+
+        ActiveMarketCount::<Test>::put(1);
+        assert_try_state();
+    });
+}
+
+#[test]
+fn do_try_state_rejects_noncanonical_reserved_custody_even_when_index_matches() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        let mut book = Markets::<Test>::get(MARKET_ID).expect("market exists");
+        book.account = POL;
+        book.fees_account = INSURANCE;
+        Markets::<Test>::insert(MARKET_ID, book);
+        MarketProtocolAccounts::<Test>::remove(BOOK);
+        MarketProtocolAccounts::<Test>::remove(FEES);
+        MarketProtocolAccounts::<Test>::insert(POL, 1);
+        MarketProtocolAccounts::<Test>::insert(INSURANCE, 1);
+
+        // Refcounts and permanent protocol membership are internally coherent;
+        // only the market-id/role binding is corrupt.
+        assert!(Protocol::contains(&POL));
+        assert!(Protocol::contains(&INSURANCE));
         assert_err!(Market::do_try_state(), E::TryStateViolation);
     });
 }

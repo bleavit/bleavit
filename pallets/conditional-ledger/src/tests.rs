@@ -8,7 +8,8 @@
 //! differential check.
 
 use crate::{
-    mock::*, BaselineVaults, DepositsHeld, Error, Event, Positions, VaultTerminalAt, Vaults,
+    mock::*, BaselineVaults, DepositsHeld, Error, Event, PositionCount, PositionTotals, Positions,
+    VaultTerminalAt, Vaults,
 };
 use conditional_ledger_core::{
     baseline as baseline_pos, position as pos, BaselineState, LedgerOrigin, LedgerState,
@@ -105,6 +106,7 @@ fn metadata_exposes_exact_reachable_error_surface() {
         "FreezeOutOfBounds",
         "FreezeRenewalExhausted",
         "InflowCapExceeded",
+        "ProtocolDestination",
     ];
 
     macro_rules! assert_error_surface {
@@ -833,6 +835,285 @@ fn protocol_accounts_exempt_from_cap_and_deposit() {
         }
         assert_eq!(crate::PositionCount::<Test>::get(BOOK), 0); // uncounted
         assert_eq!(DepositsHeld::<Test>::get(), deposits_before); // no deposit taken
+        try_state();
+    });
+}
+
+#[test]
+fn signed_transfer_cannot_inject_positions_into_protocol_custody() {
+    new_test_ext().execute_with(|| {
+        create(1);
+        assert_ok!(Ledger::split(signed(ALICE), 1, 2 * UNIT));
+        assert_ok!(Ledger::void(signed(RESOLVER), 1));
+        let id = pos(1, Branch::Accept, PositionKind::BranchUsdc);
+        let alice_before = Positions::<Test>::get(id, ALICE);
+        let total_before = PositionTotals::<Test>::get(id);
+        let count_before = PositionCount::<Test>::get(ALICE);
+        let deposits_before = DepositsHeld::<Test>::get();
+        let vault_before = Vaults::<Test>::get(1);
+        let balances_before = (usdc(ALICE), usdc(BOOK), usdc(ledger_account()));
+        let events_before = System::events();
+
+        assert_noop!(
+            Ledger::transfer(signed(ALICE), id, BOOK, UNIT),
+            E::ProtocolDestination
+        );
+        assert_eq!(Positions::<Test>::get(id, ALICE), alice_before);
+        assert_eq!(Positions::<Test>::get(id, BOOK), 0);
+        assert_eq!(PositionTotals::<Test>::get(id), total_before);
+        assert_eq!(PositionCount::<Test>::get(ALICE), count_before);
+        assert_eq!(DepositsHeld::<Test>::get(), deposits_before);
+        assert_eq!(Vaults::<Test>::get(1), vault_before);
+        assert_eq!(
+            (usdc(ALICE), usdc(BOOK), usdc(ledger_account())),
+            balances_before
+        );
+        assert_eq!(System::events(), events_before);
+
+        // Calling the internal ingress with a normal Signed origin is equally
+        // inert; only the configured MarketAuthority can reach it.
+        assert_noop!(
+            Ledger::do_transfer(signed(ALICE), id, ALICE, BOOK, UNIT),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert_eq!(Positions::<Test>::get(id, ALICE), alice_before);
+        assert_eq!(Positions::<Test>::get(id, BOOK), 0);
+        assert_eq!(PositionTotals::<Test>::get(id), total_before);
+        assert_eq!(DepositsHeld::<Test>::get(), deposits_before);
+        assert_eq!(System::events(), events_before);
+
+        // The origin-gated market wrapper remains the sole admissible ingress.
+        assert_ok!(Ledger::do_transfer(signed(MARKET), id, ALICE, BOOK, UNIT,));
+        assert_eq!(Positions::<Test>::get(id, BOOK), UNIT);
+        assert_eq!(PositionTotals::<Test>::get(id), total_before);
+        assert_eq!(DepositsHeld::<Test>::get(), deposits_before);
+        try_state();
+    });
+}
+
+fn proposal_positions(pid: ProposalId) -> Vec<futarchy_primitives::PositionId> {
+    [Branch::Accept, Branch::Reject]
+        .into_iter()
+        .flat_map(|branch| {
+            [
+                PositionKind::BranchUsdc,
+                PositionKind::Long,
+                PositionKind::Short,
+                PositionKind::GateYes(GateType::Survival),
+                PositionKind::GateNo(GateType::Survival),
+                PositionKind::GateYes(GateType::Security),
+                PositionKind::GateNo(GateType::Security),
+            ]
+            .into_iter()
+            .map(move |kind| pos(pid, branch, kind))
+        })
+        .collect()
+}
+
+fn fill_proposal_protocol_inventory(pid: ProposalId, who: AccountId) {
+    assert_ok!(Ledger::do_split(signed(MARKET), pid, who, 8 * UNIT));
+    for branch in [Branch::Accept, Branch::Reject] {
+        assert_ok!(Ledger::do_split_scalar(
+            signed(MARKET),
+            pid,
+            branch,
+            who,
+            UNIT,
+        ));
+        for gate in [GateType::Survival, GateType::Security] {
+            assert_ok!(Ledger::do_split_gate(
+                signed(MARKET),
+                pid,
+                branch,
+                gate,
+                who,
+                UNIT,
+            ));
+        }
+    }
+}
+
+#[test]
+fn proposal_inventory_discard_is_authority_gated_bounded_and_claimant_preserving() {
+    new_test_ext().execute_with(|| {
+        create(1);
+        fill_proposal_protocol_inventory(1, BOOK);
+        fill_proposal_protocol_inventory(1, POL);
+        assert_ok!(Ledger::split(signed(ALICE), 1, 3 * UNIT));
+
+        // Inventory in another vault owned by the same protocol account is out
+        // of scope and must survive this book's fixed 14-instrument scan.
+        create(2);
+        assert_ok!(Ledger::do_split(signed(MARKET), 2, BOOK, UNIT));
+        assert_ok!(Ledger::void(signed(RESOLVER), 1));
+
+        let ids = proposal_positions(1);
+        let protocol_cells = ids
+            .iter()
+            .flat_map(|id| [BOOK, POL].map(|who| Positions::<Test>::get(*id, who)))
+            .filter(|balance| *balance > 0)
+            .count();
+        assert_eq!(protocol_cells, 28);
+        let before = ids
+            .iter()
+            .map(|id| {
+                (
+                    *id,
+                    Positions::<Test>::get(*id, BOOK),
+                    Positions::<Test>::get(*id, POL),
+                    Positions::<Test>::get(*id, ALICE),
+                    PositionTotals::<Test>::get(*id),
+                )
+            })
+            .collect::<Vec<_>>();
+        let unrelated = proposal_positions(2)
+            .into_iter()
+            .map(|id| {
+                (
+                    id,
+                    Positions::<Test>::get(id, BOOK),
+                    PositionTotals::<Test>::get(id),
+                )
+            })
+            .collect::<Vec<_>>();
+        let vault_before = Vaults::<Test>::get(1);
+        let deposits_before = DepositsHeld::<Test>::get();
+        let count_before = PositionCount::<Test>::get(ALICE);
+        let balances_before = (
+            usdc(ALICE),
+            usdc(BOOK),
+            usdc(POL),
+            usdc(ledger_account()),
+            usdc(INSURANCE),
+        );
+        let events_before = System::events();
+
+        assert_noop!(
+            Ledger::discard_proposal_protocol_inventory(signed(ALICE), 1, &BOOK, &POL),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        for (id, book, pol, alice, total) in &before {
+            assert_eq!(Positions::<Test>::get(*id, BOOK), *book);
+            assert_eq!(Positions::<Test>::get(*id, POL), *pol);
+            assert_eq!(Positions::<Test>::get(*id, ALICE), *alice);
+            assert_eq!(PositionTotals::<Test>::get(*id), *total);
+        }
+        assert_eq!(System::events(), events_before);
+
+        assert_ok!(Ledger::discard_proposal_protocol_inventory(
+            signed(MARKET),
+            1,
+            &BOOK,
+            &POL,
+        ));
+        for (id, book, pol, alice, total) in before {
+            assert_eq!(Positions::<Test>::get(id, BOOK), 0);
+            assert_eq!(Positions::<Test>::get(id, POL), 0);
+            assert_eq!(Positions::<Test>::get(id, ALICE), alice);
+            let claimant_total = total
+                .checked_sub(book)
+                .and_then(|remaining| remaining.checked_sub(pol))
+                .expect("protocol balances are a subset of the instrument total");
+            assert_eq!(PositionTotals::<Test>::get(id), claimant_total,);
+        }
+        for (id, book, total) in unrelated {
+            assert_eq!(Positions::<Test>::get(id, BOOK), book);
+            assert_eq!(PositionTotals::<Test>::get(id), total);
+        }
+        assert_eq!(Vaults::<Test>::get(1), vault_before);
+        assert_eq!(DepositsHeld::<Test>::get(), deposits_before);
+        assert_eq!(PositionCount::<Test>::get(ALICE), count_before);
+        assert_eq!(PositionCount::<Test>::get(BOOK), 0);
+        assert_eq!(PositionCount::<Test>::get(POL), 0);
+        assert_eq!(
+            (
+                usdc(ALICE),
+                usdc(BOOK),
+                usdc(POL),
+                usdc(ledger_account()),
+                usdc(INSURANCE),
+            ),
+            balances_before,
+        );
+        assert_eq!(System::events(), events_before);
+        try_state();
+    });
+}
+
+#[test]
+fn baseline_inventory_discard_removes_four_protocol_cells_only() {
+    new_test_ext().execute_with(|| {
+        create_base(9);
+        assert_ok!(Ledger::do_split_baseline(signed(MARKET), 9, BOOK, 2 * UNIT,));
+        assert_ok!(Ledger::do_split_baseline(signed(MARKET), 9, POL, 3 * UNIT,));
+        assert_ok!(Ledger::split_baseline(signed(ALICE), 9, 4 * UNIT));
+        assert_ok!(Ledger::settle_baseline(
+            signed(SETTLER),
+            9,
+            FixedU64(500_000_000),
+        ));
+
+        let ids = [
+            baseline_pos(9, ScalarSide::Long),
+            baseline_pos(9, ScalarSide::Short),
+        ];
+        let before = ids.map(|id| {
+            (
+                id,
+                Positions::<Test>::get(id, BOOK),
+                Positions::<Test>::get(id, POL),
+                Positions::<Test>::get(id, ALICE),
+                PositionTotals::<Test>::get(id),
+            )
+        });
+        assert_eq!(
+            before
+                .iter()
+                .flat_map(|(_, book, pol, _, _)| [book, pol])
+                .filter(|balance| **balance > 0)
+                .count(),
+            4,
+        );
+        let vault_before = BaselineVaults::<Test>::get(9);
+        let deposits_before = DepositsHeld::<Test>::get();
+        let balances_before = (
+            usdc(ALICE),
+            usdc(BOOK),
+            usdc(POL),
+            usdc(ledger_account()),
+            usdc(INSURANCE),
+        );
+        let events_before = System::events();
+
+        assert_ok!(Ledger::discard_baseline_protocol_inventory(
+            signed(MARKET),
+            9,
+            &BOOK,
+            &POL,
+        ));
+        for (id, book, pol, alice, total) in before {
+            assert_eq!(Positions::<Test>::get(id, BOOK), 0);
+            assert_eq!(Positions::<Test>::get(id, POL), 0);
+            assert_eq!(Positions::<Test>::get(id, ALICE), alice);
+            let claimant_total = total
+                .checked_sub(book)
+                .and_then(|remaining| remaining.checked_sub(pol))
+                .expect("protocol balances are a subset of the instrument total");
+            assert_eq!(PositionTotals::<Test>::get(id), claimant_total,);
+        }
+        assert_eq!(BaselineVaults::<Test>::get(9), vault_before);
+        assert_eq!(DepositsHeld::<Test>::get(), deposits_before);
+        assert_eq!(
+            (
+                usdc(ALICE),
+                usdc(BOOK),
+                usdc(POL),
+                usdc(ledger_account()),
+                usdc(INSURANCE),
+            ),
+            balances_before,
+        );
+        assert_eq!(System::events(), events_before);
         try_state();
     });
 }

@@ -857,8 +857,8 @@ fn create_synthetic_markets_for_void(
             RuntimeOrigin::signed(crate::configs::epoch_account()),
             id,
             kind,
-            account(160),
-            account(161),
+            crate::configs::market_book_account(id),
+            crate::configs::market_fee_account(id),
             b,
         )
     };
@@ -1823,7 +1823,7 @@ fn identity_and_version_pins_match_the_integration_contract() {
     // makes a future re-coupling fail here.
     assert_eq!(VERSION.transaction_version, TRANSACTION_VERSION);
     assert_eq!(VERSION.transaction_version, 1);
-    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 7);
+    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 8);
     assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
@@ -3103,6 +3103,7 @@ fn last_redeemer_of_last_vault_can_fully_exit() {
         const PID: futarchy_primitives::ProposalId = 14_001;
         const MARKET_ID: futarchy_primitives::MarketId = 14_001;
         let claimant = account(214);
+        let book = crate::configs::market_book_account(MARKET_ID);
         let stake = currency::USDC;
         let position_deposit = crate::configs::LedgerPositionDeposit::get();
         let minimum_balance = ForeignAssets::minimum_balance(usdc_location());
@@ -3114,8 +3115,8 @@ fn last_redeemer_of_last_vault_can_fully_exit() {
                 proposal: PID,
                 branch: Branch::Accept,
             },
-            account(215),
-            account(216),
+            book.clone(),
+            crate::configs::market_fee_account(MARKET_ID),
             crate::configs::balance_param(b"pol.b.param"),
         ));
         assert_ok!(ForeignAssets::mint_into(
@@ -3133,14 +3134,15 @@ fn last_redeemer_of_last_vault_can_fully_exit() {
 
         // The losing claim remains outstanding but is deposit-exempt in a
         // protocol account. The claimant is therefore the sole payable holder.
-        assert_ok!(ConditionalLedger::transfer(
-            RuntimeOrigin::signed(claimant.clone()),
+        assert_ok!(ConditionalLedger::do_transfer(
+            RuntimeOrigin::signed(crate::configs::market_account()),
             PositionId::Proposal {
                 proposal: PID,
                 branch: Branch::Reject,
                 kind: PositionKind::BranchUsdc,
             },
-            crate::configs::insurance_account(),
+            claimant.clone(),
+            book,
             stake,
         ));
         assert_ok!(ConditionalLedger::resolve(
@@ -3262,6 +3264,104 @@ fn r4_account_addresses_are_stable() {
 }
 
 #[test]
+fn market_custody_namespace_prevents_future_address_poisoning() {
+    use frame_support::traits::Contains;
+    use futarchy_primitives::{Branch, PositionId, PositionKind};
+    use pallet_market::core_market::BookKind;
+
+    development_ext().execute_with(|| {
+        const FUTURE_MARKET: futarchy_primitives::MarketId = 88_001;
+        const UNRELATED_PROPOSAL: futarchy_primitives::ProposalId = 88_002;
+        let claimant = account(219);
+        let amount = crate::configs::LedgerMinSplit::get().saturating_mul(2);
+
+        for id in [0, 1, FUTURE_MARKET, u64::MAX] {
+            let book = crate::configs::market_book_account(id);
+            let fees = crate::configs::market_fee_account(id);
+            assert_ne!(book, fees);
+            assert!(crate::configs::is_reserved_market_account(&book));
+            assert!(crate::configs::is_reserved_market_account(&fees));
+            assert!(crate::configs::ProtocolAccounts::contains(&book));
+            assert!(crate::configs::ProtocolAccounts::contains(&fees));
+            assert!(!Market::is_market_protocol_account(&book));
+            assert!(!Market::is_market_protocol_account(&fees));
+
+            let book_raw: &[u8] = book.as_ref();
+            let fees_raw: &[u8] = fees.as_ref();
+            assert_eq!(&book_raw[..16], b"bleavit/mkt/v1\0\0");
+            assert_eq!(&fees_raw[..16], b"bleavit/mkt/v1\0\0");
+            assert_eq!(book_raw[16], b'B');
+            assert_eq!(fees_raw[16], b'F');
+            assert_eq!(&book_raw[17..25], &id.to_le_bytes());
+            assert_eq!(&fees_raw[17..25], &id.to_le_bytes());
+            assert!(book_raw[25..].iter().all(|byte| *byte == 0));
+            assert!(fees_raw[25..].iter().all(|byte| *byte == 0));
+        }
+        assert_ne!(
+            crate::configs::market_book_account(1),
+            crate::configs::market_book_account(2),
+        );
+        assert!(!crate::configs::is_reserved_market_account(&claimant));
+
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &claimant,
+            amount
+                .saturating_add(crate::configs::LedgerPositionDeposit::get().saturating_mul(2))
+                .saturating_add(currency::USDC_CENT),
+        ));
+        assert_ok!(ConditionalLedger::create_vault(
+            RuntimeOrigin::signed(crate::configs::market_account()),
+            UNRELATED_PROPOSAL,
+            0,
+        ));
+        assert_ok!(ConditionalLedger::split(
+            RuntimeOrigin::signed(claimant.clone()),
+            UNRELATED_PROPOSAL,
+            amount,
+        ));
+        let position = PositionId::Proposal {
+            proposal: UNRELATED_PROPOSAL,
+            branch: Branch::Accept,
+            kind: PositionKind::BranchUsdc,
+        };
+        let held_before = pallet_conditional_ledger::DepositsHeld::<Runtime>::get();
+        assert_noop!(
+            ConditionalLedger::transfer(
+                RuntimeOrigin::signed(claimant.clone()),
+                position,
+                crate::configs::market_book_account(FUTURE_MARKET),
+                crate::configs::LedgerMinSplit::get(),
+            ),
+            pallet_conditional_ledger::Error::<Runtime>::ProtocolDestination
+        );
+        assert_eq!(
+            pallet_conditional_ledger::DepositsHeld::<Runtime>::get(),
+            held_before,
+        );
+
+        // Squatting cannot wedge creation: the exact future pair is already
+        // reserved without relying on the ownership/refcount index.
+        assert_ok!(Market::create_market(
+            RuntimeOrigin::signed(crate::configs::epoch_account()),
+            FUTURE_MARKET,
+            BookKind::Decision {
+                proposal: FUTURE_MARKET,
+                branch: Branch::Accept,
+            },
+            crate::configs::market_book_account(FUTURE_MARKET),
+            crate::configs::market_fee_account(FUTURE_MARKET),
+            crate::configs::balance_param(b"pol.b.param"),
+        ));
+        assert!(Market::is_market_protocol_account(
+            &crate::configs::market_book_account(FUTURE_MARKET)
+        ));
+        assert_ok!(ConditionalLedger::do_try_state());
+        assert_ok!(Market::do_try_state());
+    });
+}
+
+#[test]
 fn pol_account_funded_to_exact_seed_amount_can_seed() {
     use pallet_market::core_market::{seed_headroom, BookKind};
 
@@ -3286,8 +3386,8 @@ fn pol_account_funded_to_exact_seed_amount_can_seed() {
                 proposal: PID,
                 branch: futarchy_primitives::Branch::Accept,
             },
-            account(217),
-            account(218),
+            crate::configs::market_book_account(MARKET_ID),
+            crate::configs::market_fee_account(MARKET_ID),
             b,
         ));
         assert_ok!(Market::seed(
@@ -3380,15 +3480,12 @@ fn baseline_seed_survives_pol_baseline_funded_to_exact_headroom() {
 
 #[test]
 fn baseline_book_endowment_is_idempotent() {
-    use sp_runtime::traits::AccountIdConversion;
-
     development_ext().execute_with(|| {
         let first = pallet_market::NextMarketId::<Runtime>::get().max(1);
         let baseline_id = first
             .checked_add(6)
             .expect("the six PARAM proposal books fit before Baseline");
-        let baseline_account = crate::configs::MarketPalletId::get()
-            .into_sub_account_truncating((*b"BOOK", baseline_id));
+        let baseline_account = crate::configs::market_book_account(baseline_id);
         let minimum_balance = ForeignAssets::minimum_balance(usdc_location());
 
         // Model a retry after the best-effort floor has already landed. The
@@ -9167,8 +9264,8 @@ fn sq92_epoch_void_settles_the_baseline_and_unstrands_a_single_sided_holder() {
             RuntimeOrigin::signed(crate::configs::epoch_account()),
             BASELINE_MARKET,
             BookKind::Baseline { epoch },
-            account(192),
-            account(193),
+            crate::configs::market_book_account(BASELINE_MARKET),
+            crate::configs::market_fee_account(BASELINE_MARKET),
             crate::configs::balance_param(b"pol.b_baseline"),
         ));
         assert_eq!(
@@ -9328,8 +9425,8 @@ fn sq92_epoch_void_with_a_live_baseline_book_keeps_market_try_state_green() {
             RuntimeOrigin::signed(crate::configs::epoch_account()),
             BASELINE_MARKET,
             BookKind::Baseline { epoch },
-            account(195),
-            account(196),
+            crate::configs::market_book_account(BASELINE_MARKET),
+            crate::configs::market_fee_account(BASELINE_MARKET),
             crate::configs::balance_param(b"pol.b_baseline"),
         ));
         let stake = 10 * currency::USDC;
@@ -10173,6 +10270,14 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
                 .decide_at
                 .saturating_add(crate::configs::LedgerArchiveDelay::get()),
         );
+        assert_ok!(ConditionalLedger::sweep_dust(
+            RuntimeOrigin::signed(account(153)),
+            pid,
+        ));
+        assert_ok!(ConditionalLedger::sweep_dust_baseline(
+            RuntimeOrigin::signed(account(153)),
+            proposal.epoch,
+        ));
         let gates = markets.gates.expect("PARAM proposal has gate books");
         for market in [
             markets.accept,
@@ -10187,6 +10292,40 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
         }
         assert!(FutarchyTreasury::treasury().pol_commitments.is_empty());
         assert_eq!(pallet_market::Markets::<Runtime>::count(), 0);
+    });
+}
+
+#[test]
+fn market_try_state_rejects_treasury_pol_mirror_drift() {
+    development_ext().execute_with(|| {
+        let markets = open_seeded_param_market_set(8_016)
+            .expect("funded PARAM market set opens through the production adapter");
+        assert!(pallet_market::Markets::<Runtime>::contains_key(
+            markets.accept
+        ));
+        assert!(Market::do_try_state().is_ok());
+        assert!(FutarchyTreasury::do_try_state().is_ok());
+
+        let commitments = pallet_futarchy_treasury::State::<Runtime>::get().pol_commitments;
+        assert!(!commitments.is_empty());
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.pol_commitments.clear();
+        });
+
+        assert!(
+            FutarchyTreasury::do_try_state().is_ok(),
+            "the treasury-local state is bounded but cannot infer the market-owned mirror",
+        );
+        assert!(
+            Market::do_try_state().is_err(),
+            "market try-state must detect cross-pallet POL mirror drift",
+        );
+
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.pol_commitments = commitments;
+        });
+        assert!(Market::do_try_state().is_ok());
+        assert!(FutarchyTreasury::do_try_state().is_ok());
     });
 }
 
@@ -10302,6 +10441,10 @@ fn seeded_force_reject_void_closes_and_reaps_all_proposal_books() {
         System::set_block_number(
             void_block.saturating_add(crate::configs::LedgerArchiveDelay::get()),
         );
+        assert_ok!(ConditionalLedger::sweep_dust(
+            RuntimeOrigin::signed(account(153)),
+            PID,
+        ));
         for id in &proposal_books {
             assert_ok!(Market::reap(RuntimeOrigin::signed(account(153)), *id));
         }

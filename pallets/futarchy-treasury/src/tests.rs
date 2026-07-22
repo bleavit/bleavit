@@ -1385,6 +1385,37 @@ fn nav_nets_pol_and_pending_obligations() {
 }
 
 #[test]
+fn pol_commitment_capacity_tracks_live_not_archive_retained_markets() {
+    funded_ext().execute_with(|| {
+        assert_eq!(
+            futarchy_treasury_core::MAX_POL_COMMITMENTS,
+            futarchy_primitives::bounds::MAX_LIVE_MARKETS as usize,
+        );
+        assert_eq!(futarchy_primitives::bounds::MAX_STORED_MARKETS, 2_240);
+
+        let exact = vec![1; futarchy_treasury_core::MAX_POL_COMMITMENTS];
+        assert_ok!(crate::Pallet::<Test>::set_pol_commitments(exact));
+        assert_eq!(
+            crate::Pallet::<Test>::treasury().pol_commitments.len(),
+            futarchy_treasury_core::MAX_POL_COMMITMENTS,
+        );
+        assert_ok!(crate::Pallet::<Test>::do_try_state());
+
+        let before = crate::State::<Test>::get();
+        assert_noop!(
+            crate::Pallet::<Test>::set_pol_commitments(vec![
+                1;
+                futarchy_treasury_core::MAX_POL_COMMITMENTS
+                    + 1
+            ]),
+            Error::<Test>::TooManyObligations
+        );
+        assert_eq!(crate::State::<Test>::get(), before);
+        assert_ok!(crate::Pallet::<Test>::do_try_state());
+    });
+}
+
+#[test]
 fn nav_moves_by_a_stream_exactly_once() {
     // 08 §1.2: opening a stream reduces NAV by the committed remainder EXACTLY
     // once (the open-time line debit; the escrow asset nets the obligation).

@@ -113,7 +113,7 @@ COUNTED_MAPS = (
     ("Epoch", "Proposals", "Epoch", "MaxLiveProposals"),
     ("Epoch", "IntakeProposals", "Epoch", "MaxIntakeQueue"),
     ("Epoch", "Cohorts", "Epoch", "MaxNonTerminalCohorts"),
-    ("Market", "Markets", "Market", "MaxLiveMarkets"),
+    ("Market", "Markets", "Market", "MaxStoredMarkets"),
     ("ExecutionGuard", "Queue", "ExecutionGuard", "MaxLiveProposals"),
     ("Constitution", "Params", "Constitution", "MaxParams"),
 )

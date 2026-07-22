@@ -1,6 +1,6 @@
 {
   "schema": "bleavit.critical-surface.v1",
-  "integration_contract_version": 7,
+  "integration_contract_version": 8,
   "description": "Critical chain/frontend surface frozen by architecture 02 sections 3, 6-9, and 12.",
   "release_blockers": [
     {
@@ -729,7 +729,7 @@
       "citation": "02 §8; 02 §13",
       "layout": {
         "type": "u32",
-        "value": "0x07000000"
+        "value": "0x08000000"
       }
     },
     {
@@ -814,6 +814,18 @@
       "layout": {
         "type": "u32",
         "value": "0xc4000000"
+      }
+    },
+    {
+      "id": "constant.market.max_stored_markets",
+      "kind": "constant",
+      "pallet": "Market",
+      "constant": "MaxStoredMarkets",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0xc0080000"
       }
     },
     {

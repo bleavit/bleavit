@@ -20,7 +20,7 @@ Block-time basis for human-time conversions: **6 s/block, 14,400 blocks/day** (1
 | **VIT** (native governance token) | **12 decimals**; total supply 10^9; existential deposit 0.01 VIT |
 | Prices / scores | fixed-point, **1e9 scale** at every API/event boundary; quote clamp [0.001, 0.999]; `p_S = 1 − p_L`; gate books map YES ↦ LONG |
 | Time | all deadlines are block numbers (`decide_at`, `maturity`, `grace_end`, `challenge_deadline`, `next_boundary`) — the UI computes countdowns from them |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 7`, a runtime constant, echoed in `release.json` |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 8`, a runtime constant, echoed in `release.json` |
 
 ### A2. What the UI can read and display (02 §3–§4, §7)
 
@@ -233,7 +233,7 @@ live. For mock data these are the correct realistic values.
 | Sanity band | [0.02, 0.98] on welfare books (gate books exempt) | chart band shading |
 | Staleness | price gaps > 50 blocks in decision window ⇒ one 3-day extension, then reject | "market stale" warning |
 | `TwapCheckpoints` | 8 per market (chain-served chart fallback) | degraded-mode charts |
-| Bounds | ≤ 6 books/proposal · Baselines share the ≤ 196 live-market aggregate · ≤ 64 intake-family records · ≤ 32 post-qualification non-terminal proposals | list sizing |
+| Bounds | ≤ 6 books/proposal · Baselines share the ≤ 196 active/POL envelope and ≤ 2,240 retained-book envelope · ≤ 64 intake-family records · ≤ 32 post-qualification non-terminal proposals | list sizing |
 
 ### B3. Decision thresholds (13 §1) — per class PARAM / TREASURY / CODE / META
 

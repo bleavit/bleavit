@@ -286,6 +286,11 @@ pub fn storage_utilization(
     let windows_per_market = MAX_WINDOW_COVERAGE_ROWS.checked_div(bounds::MAX_LIVE_MARKETS)?;
     let rows = vec![
         storage_row(
+            "market_active_books",
+            pallet_market::ActiveMarketCount::<Runtime>::get(),
+            bounds::MAX_LIVE_MARKETS,
+        )?,
+        storage_row(
             "market_twap_checkpoints",
             max_len(pallet_market::TwapCheckpoints::<Runtime>::iter_values().map(|v| v.len()))?,
             windows_per_market,

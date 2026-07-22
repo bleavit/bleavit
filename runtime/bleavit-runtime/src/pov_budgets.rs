@@ -11,7 +11,7 @@
 //!    normal-class block budget at its worst component arguments; and the two
 //!    calls 13 §5 item 1 singles out (`decide`, `settle_cohort`) carry pinned
 //!    proof-size regression ceilings proving per-call PoV stays bounded
-//!    independent of the 196-market map ceiling.
+//!    independent of the retained-market map ceiling.
 
 use crate::configs::RuntimeBlockWeights;
 use crate::{AccountId, Runtime};
@@ -26,7 +26,9 @@ use parity_scale_codec::MaxEncodedLen;
 const KIB: usize = 1024;
 
 /// 13 §4: `MaxLiveMarkets` = 196 = 32·6 + 4.
-const MAX_LIVE_MARKETS: usize = 196;
+const MAX_LIVE_MARKETS: usize = futarchy_primitives::bounds::MAX_LIVE_MARKETS as usize;
+/// 13 §4: archive-derived present `Markets` rows, including terminal books.
+const MAX_STORED_MARKETS: usize = futarchy_primitives::bounds::MAX_STORED_MARKETS as usize;
 /// 13 §5 item 2: ≤ 32 live + 4 cohorts × 5 settling = 52 vaults.
 const MAX_LIVE_VAULTS: usize = 52;
 /// 04 §7 / 13 §4: `TwapCheckpoints: BoundedVec<(BlockNumber, Cum), 8>` at
@@ -69,16 +71,11 @@ fn assert_fits(name: &str, w: Weight) {
 fn market_map_ceiling_within_13_5_budget() {
     let book = market_core::MarketBook::<AccountId>::max_encoded_len();
     assert_eq!(book, 205, "MarketBook measured MaxEncodedLen drifted");
-    // Pinned model: 13 §5 item 1 budgets ~512 B/book; the measured value is
-    // recorded there. Growth past the model reopens the derivation (item 6).
+    assert_eq!(MAX_STORED_MARKETS, 2_240, "stored-market bound drifted");
     assert!(
-        book <= 512,
-        "MarketBook grew past the 13 §5 ~512 B model: {book} B"
-    );
-    assert!(
-        MAX_LIVE_MARKETS * book <= 98 * KIB,
-        "196-market map ceiling exceeds the 98 KiB budget: {} B",
-        MAX_LIVE_MARKETS * book
+        MAX_STORED_MARKETS * book <= 512 * KIB,
+        "stored-market map ceiling exceeds the 512 KiB budget: {} B",
+        MAX_STORED_MARKETS * book
     );
 }
 
@@ -172,7 +169,7 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
     all.extend(
         pallet_call_weights!(pallet_market as pallet_market::WeightInfo {
             buy, sell, crank_observe, reap, freeze_creation, set_frozen,
-            create_market, seed, close, try_state,
+            create_market, seed, close,
         }),
     );
     all.extend(
@@ -233,17 +230,19 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
     all
 }
 
-/// I-20 / 15 §4.5: every futarchy call and hook, at its worst component
-/// arguments, fits the normal dispatch class. A weight that outgrows the class
-/// is un-includable — a liveness failure the weight-regression CI cannot see
-/// on its own (it gates growth, not absolute headroom).
+/// I-20 / 15 §4.5: every production-dispatched futarchy call and block hook, at
+/// its worst component arguments, fits the normal dispatch class. The
+/// `try-runtime`-only market `try_state` hook is deliberately excluded: it is
+/// executed out of band against a state snapshot, never included in a normal
+/// block, and its saturated 2,240-book weight remains generated and regression
+/// gated separately.
 #[test]
 fn every_futarchy_call_and_hook_fits_the_normal_class() {
     let all = all_futarchy_call_weights();
     // Exact count of the 12 futarchy pallets' WeightInfo functions — update
     // in lockstep when a trait gains or loses a function, so a silently
     // dropped inventory entry cannot pass.
-    assert_eq!(all.len(), 106, "call inventory drifted");
+    assert_eq!(all.len(), 105, "call inventory drifted");
     for (name, w) in all {
         assert_fits(name, w);
     }
@@ -252,8 +251,8 @@ fn every_futarchy_call_and_hook_fits_the_normal_class() {
 /// 13 §5 item 1: "`decide(pid)` reads ≤ 6 proposal books + 1 Baseline + O(10)
 /// params — PoV per call bounded regardless of map ceiling." Pinned regression
 /// ceilings (measured 2026-07-17: `decide` 183,055 B; `settle_cohort(5)`
-/// 359,385 B, both dominated by per-key trie overhead, not the 196-market
-/// map): growth past ~2× the measurement reopens the touch-bound derivation.
+/// 359,385 B, both dominated by per-key trie overhead, not the 2,240-row
+/// retained map): growth past ~2× the measurement reopens the touch-bound derivation.
 #[test]
 fn decide_and_settle_cohort_pov_pinned_below_map_scaling() {
     let decide =

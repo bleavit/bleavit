@@ -384,7 +384,6 @@ impl SnapshotExtractor {
         let ledger_archive = self.constant_u64(&at_block, "ConditionalLedger", "ArchiveDelay");
         let tick_batch = resolve_tick_batch(self.constant_u64(&at_block, "Epoch", "TickBatch"));
         let registry_epochs = self.extract_registries(&at_block).await;
-
         let welfare = self
             .extract_welfare(&at_block, epoch.as_ref(), &cohorts)
             .await;
@@ -406,7 +405,7 @@ impl SnapshotExtractor {
             execution_queue: self.extract_execution_queue(&at_block).await,
             coretime: self.extract_coretime(&at_block).await,
             market_reaps: self
-                .extract_reaps(&at_block, "Market", "ClosedAt", market_archive)
+                .extract_reaps(&at_block, "Market", "SettlementObservedAt", market_archive)
                 .await,
             proposal_dust: self
                 .extract_reaps(

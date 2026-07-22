@@ -2,11 +2,14 @@
 //! case per extrinsic and the `sweep_dust` cranks). PoV-calibrated weights are
 //! generated in B5 (15 §4.5); this is the harness the generator consumes.
 
+use crate::core_ledger::{baseline, position};
 use crate::*;
 use frame_benchmarking::v2::*;
 use frame_support::traits::{fungibles::Mutate, EnsureOrigin, Get};
 use frame_system::RawOrigin;
-use futarchy_primitives::{kernel, Balance, Branch, FixedU64, GateType, ProposalId, ScalarSide};
+use futarchy_primitives::{
+    kernel, Balance, Branch, FixedU64, GateType, PositionKind, ProposalId, ScalarSide,
+};
 use sp_runtime::traits::{AccountIdConversion, Saturating};
 
 const UNIT: Balance = 1_000_000;
@@ -57,14 +60,26 @@ fn seeded_baseline<T: Config>(epoch: futarchy_primitives::EpochId, caller: &T::A
 
 fn seeded_vault_reap_batch<T: Config>(pid: ProposalId) {
     Pallet::<T>::create_vault(market_origin::<T>(), pid, 0).expect("create vault");
-    // Each split creates two position entries. Fifty distinct owners therefore
-    // put exactly the 13 §4 `ledger.reap_batch = 100` entries on the prefixes
-    // this measured sweep walks, while remaining below the per-account cap.
+    // Each split creates two entries; move one entire branch to a distinct
+    // peer so the measured 100-row sweep performs owner-specific accounting
+    // for 100 owners, the valid worst distribution (15 §4.5).
     for index in 0..(T::ReapBatch::get() / 2) {
         let who: T::AccountId = account("dust", index, 0);
+        let peer: T::AccountId = account("dust-peer", index, 0);
         fund::<T>(&who, SEED_AMT.saturating_mul(2));
-        Pallet::<T>::split(RawOrigin::Signed(who).into(), pid, SEED_AMT).expect("split");
+        fund::<T>(&peer, SEED_AMT);
+        Pallet::<T>::split(RawOrigin::Signed(who.clone()).into(), pid, SEED_AMT).expect("split");
+        Pallet::<T>::transfer(
+            RawOrigin::Signed(who.clone()).into(),
+            position(pid, Branch::Reject, PositionKind::BranchUsdc),
+            peer.clone(),
+            SEED_AMT,
+        )
+        .expect("move one branch to a distinct sweep owner");
+        assert_eq!(PositionCount::<T>::get(who), 1);
+        assert_eq!(PositionCount::<T>::get(peer), 1);
     }
+    assert_eq!(Positions::<T>::iter().count(), T::ReapBatch::get() as usize);
     fund_sovereign_reserve::<T>();
 }
 
@@ -72,10 +87,22 @@ fn seeded_baseline_reap_batch<T: Config>(epoch: futarchy_primitives::EpochId) {
     Pallet::<T>::create_baseline_vault(market_origin::<T>(), epoch).expect("create baseline");
     for index in 0..(T::ReapBatch::get() / 2) {
         let who: T::AccountId = account("base-dust", index, 0);
+        let peer: T::AccountId = account("base-dust-peer", index, 0);
         fund::<T>(&who, SEED_AMT.saturating_mul(2));
-        Pallet::<T>::split_baseline(RawOrigin::Signed(who).into(), epoch, SEED_AMT)
+        fund::<T>(&peer, SEED_AMT);
+        Pallet::<T>::split_baseline(RawOrigin::Signed(who.clone()).into(), epoch, SEED_AMT)
             .expect("split baseline");
+        Pallet::<T>::transfer(
+            RawOrigin::Signed(who.clone()).into(),
+            baseline(epoch, ScalarSide::Short),
+            peer.clone(),
+            SEED_AMT,
+        )
+        .expect("move one side to a distinct sweep owner");
+        assert_eq!(PositionCount::<T>::get(who), 1);
+        assert_eq!(PositionCount::<T>::get(peer), 1);
     }
+    assert_eq!(Positions::<T>::iter().count(), T::ReapBatch::get() as usize);
     fund_sovereign_reserve::<T>();
 }
 
