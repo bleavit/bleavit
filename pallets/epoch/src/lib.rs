@@ -1362,6 +1362,31 @@ pub mod pallet {
                 Ok(())
             }
         }
+
+        /// 05 §7(6) orphan-epoch Baseline finalization (SQ-320; 03 §5.2).
+        ///
+        /// An epoch that opened a Baseline book but never formed a cohort has
+        /// no producer for its Baseline settlement, so the vault stays `Open`
+        /// forever, every single-sided holder is stranded, and the book keeps
+        /// an un-reapable POL commitment. This crank reaches exactly that case
+        /// — a strictly past, cohort-free, summary-free epoch whose every
+        /// proposal is terminal — and is a harmless no-op when the vault is
+        /// absent or already settled (G-1).
+        ///
+        /// Permissionless `Signed` per the 06 §3.2 authority matrix, and
+        /// deliberately unaffected by `PB-LEDGER-FREEZE` (06 §6.3 exempts
+        /// settlement calls; the freeze's own T20 sweep is one of the two ways
+        /// an epoch is orphaned). Emits no epoch event: the settlement's
+        /// canonical signal is the ledger's frozen `BaselineSettled` (02 §6).
+        #[pallet::call_index(15)]
+        #[pallet::weight(T::WeightInfo::finalize_epoch_baseline())]
+        pub fn finalize_epoch_baseline(origin: OriginFor<T>, epoch: EpochId) -> DispatchResult {
+            ensure_signed(origin)?;
+            Self::mutate(|state, _ledger| {
+                let mut welfare = WelfareAdapter::<T>(PhantomData);
+                state.finalize_epoch_baseline(CoreOrigin::Signed, &mut welfare, epoch)
+            })
+        }
     }
 
     #[pallet::extra_constants]

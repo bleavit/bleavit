@@ -621,19 +621,27 @@ C_hold = min(V_win, sec.flow_cap · (b_acc + b_rej)) · δc
 
 ## 6. SettleAuthority wiring — one path (B-med: SettleAuthority)
 
-The superseded spec both assigned `SettleAuthority` to "pallet-welfare/oracle" and had `pallet-epoch::settle_cohort` drive settlement — contradicting the one-origin-per-path rule. Normative resolution — **exactly one path**:
+The superseded spec both assigned `SettleAuthority` to "pallet-welfare/oracle" and had `pallet-epoch::settle_cohort` drive settlement — contradicting the one-origin-per-path rule. Normative resolution — **exactly one path**, entered only from `pallet-epoch`:
 
 ```
 pallet-epoch::settle_cohort(e, batch)                       [Signed keeper; cursor-resumable]
   └─ for each proposal in cohort e, and for Baseline(e):
-       pallet-welfare::compute_settlement(pid | baseline e)  [callable ONLY from epoch's settle path]
+       pallet-welfare::compute_settlement(pid | baseline e)  [callable ONLY from pallet-epoch]
          ├─ computes s = GeoMean(W_{e+1}, W_{e+2}) on the creation-time MetricSpec (I-16, §4.4)
          ├─ reads GateBreachFlags(e+1, e+2) for gate outcomes (§4.7)
          └─ dispatches with pallet-welfare's SettleAuthority origin:
               ledger.settle_scalar(pid, s)                   (doc 03)
               ledger.settle_gate(pid, gate, outcome)         (doc 03, B-2 instruments)
               ledger.settle_baseline(e, s)                   (doc 03, BaselineVaults, B-3)
+
+pallet-epoch::finalize_epoch_baseline(e)                    [Signed, permissionless; §7(6)]
+  └─ Baseline(e) only, and only for an orphan epoch (§7(6) preconditions):
+       pallet-welfare::settle_baseline_void(e)               [neutral passthrough; reads no welfare state]
+         └─ dispatches with pallet-welfare's SettleAuthority origin:
+              ledger.settle_baseline(e, 0.5)                 (spec-fixed constant; no score computed)
 ```
+
+**Two triggers, one authority (normative; SQ-320).** The `ledger.settle_baseline(e, ·)` terminal is reachable from **exactly two** `pallet-epoch` entry points and from nowhere else: `settle_cohort` → `compute_settlement` (the measured path, which computes `s` and reads the MetricSpec and gate flags) and `finalize_epoch_baseline` → `settle_baseline_void` (the orphan-epoch neutral path of §7(6)). The orphan path does **not** enter `compute_settlement` — it is a distinct neutral passthrough precisely because it computes no score: it carries the spec-fixed `s = 0.5`, so it reads no snapshot, no MetricSpec and no gate flags, and it can settle **only** a Baseline vault, never a proposal vault and never a gate. Both entry points nevertheless dispatch under the same single `SettleAuthority` origin owned by `pallet-welfare`, so the one-origin-per-path rule is unchanged — §7(6) adds a second *trigger* of the shared settlement authority, never a second authority.
 
 Authority-table fragment (full table: [doc 06](./06-governance-and-guardians.md)):
 
@@ -643,7 +651,7 @@ Authority-table fragment (full table: [doc 06](./06-governance-and-guardians.md)
 | `void(pid)` | `ResolveAuthority` = pallet-epoch | T20 / PB-ORACLE-VOID path ([doc 06](./06-governance-and-guardians.md)) |
 | `settle_scalar(pid, s)` | `SettleAuthority` = **pallet-welfare only** | `compute_settlement`, itself reachable only via `pallet-epoch::settle_cohort` |
 | `settle_gate(pid, gate, outcome)` | `SettleAuthority` = pallet-welfare only | same path |
-| `settle_baseline(epoch, s)` | `SettleAuthority` = pallet-welfare only | same path |
+| `settle_baseline(epoch, s)` | `SettleAuthority` = pallet-welfare only | `compute_settlement` via `pallet-epoch::settle_cohort` (measured `s`) **or** `settle_baseline_void` via `pallet-epoch::finalize_epoch_baseline` (neutral `s = 0.5`, §7(6); no `compute_settlement`, no welfare read) |
 
 No other pallet, origin, playbook, or values track can invoke any settlement call. Oracle outcomes influence settlement exclusively through the components `pallet-welfare` reads (with challenge windows closed — I-18); `pallet-oracle` holds no ledger authority.
 
@@ -665,7 +673,21 @@ Any queued execution is cancelled in the same transaction for **both** populatio
 
 Membership, **not** the mere presence of a recorded outcome, is the discriminator: T9 records `Some(Adopt)` on entry to `Queued`, so a decided-but-pre-Executed proposal (`Queued`, `Suspended`, `Rerun`, `FailedExecuted`) carries an outcome the market reached but never saw executed or measured. Those proposals take T20, which is the conservative reading — it changes nothing but the `Measuring` case SQ-314 named. Whether T20's `Reject(ProcessHold)` is the *truthful* archive record for that population, given that a real `Adopt` is thereby overwritten, is deliberately left open as **SQ-319**.
 
-5. **The one settlement a VOID still performs.** Skipping the score does **not** skip the epoch's **Baseline** vault. Per [doc 03](./03-conditional-ledger.md) §2.3/§5 the void path settles it at the fixed neutral `s = 0.5` under the same SettleAuthority, in the same transaction that voids the cohort. This is a terminal transition carrying a spec-fixed constant, not a computation — which is exactly why it survives a VOID, where no measurement is trustworthy. It is **mandatory, not optional**: `BaselineState` has no `Voided` variant ([doc 03](./03-conditional-ledger.md) §6.4) precisely because this settlement always happens, and both Baseline redemption calls require `Settled`. Omitting it leaves the vault `Open` forever and strands every single-sided Baseline holder of the voided epoch, while full-pair holders exit at par via `merge_baseline` and mask the defect from every solvency invariant. Owning transition: the epoch-VOID path (T20 cohort void), **not** T21 and not per-proposal `void(pid)` — per-proposal vault voiding is a different VOID and settles no Baseline.
+5. **The one settlement a VOID still performs.** Skipping the score does **not** skip the epoch's **Baseline** vault. Per [doc 03](./03-conditional-ledger.md) §2.3/§5 the void path settles it at the fixed neutral `s = 0.5` under the same SettleAuthority, in the same transaction that voids the cohort. This is a terminal transition carrying a spec-fixed constant, not a computation — which is exactly why it survives a VOID, where no measurement is trustworthy. It is **mandatory, not optional**: `BaselineState` has no `Voided` variant ([doc 03](./03-conditional-ledger.md) §6.4) precisely because this settlement always happens, and both Baseline redemption calls require `Settled`. Omitting it leaves the vault `Open` forever and strands every single-sided Baseline holder of the voided epoch, while full-pair holders exit at par via `merge_baseline` and mask the defect from every solvency invariant. Owning transition: the epoch-VOID path (T20 cohort void), **not** T21 and not per-proposal `void(pid)` — per-proposal vault voiding is a different VOID and settles no Baseline, because an individual T20 leaves the epoch's sibling proposals live and its cohort still able to form. This path is **one of exactly two** transitions that settle an epoch Baseline vault neutrally; the other is the orphan-epoch finalization of §7(6) below, which covers the disjoint case in which no cohort ever forms at all.
+
+6. **Orphan-epoch Baseline finalization (normative; SQ-320).** §7(5) settles the Baseline vault of an epoch whose cohort **voided**. An epoch whose cohort **never formed** is a distinct case and needs its own transition. If every market-bearing proposal of epoch `e` leaves the non-terminal working set before any of them reaches `Measuring`, then no `CohortInfo(e)` is ever created and no `CohortSummary(e)` is ever archived, so §7(5) has nothing to fire on and T19 is unreachable. The shortest trigger is a **single guardian force-rejection** (T20) against a one-proposal epoch; the broadest is the `PB-LEDGER-FREEZE` sweep, which force-rejects every live non-terminal proposal at once ([doc 06](./06-governance-and-guardians.md) §6.3). Neither a ledger freeze nor a stalled clock is *required* to reach the state.
+
+   Left alone, the epoch's Baseline vault stays `Open` forever. It records no terminal block, so neither the [doc 03](./03-conditional-ledger.md) §5.4 Baseline sweep (which requires a terminal vault) nor the [doc 04](./04-markets-and-pricing.md) §2 book reap (which requires the terminal-block latch that only `settle_baseline` writes) can ever run — the book and its POL stay un-reapable — and because both Baseline redemption calls require `Settled` ([doc 03](./03-conditional-ledger.md) §5.3) **every single-sided Baseline holder of that epoch is stranded**, while full-pair holders exit at par via `merge_baseline` and mask the defect from every conservation invariant, exactly as in §7(5). Under R-7 the reading that strands a claim is the one that must be excluded.
+
+   Normatively: **`pallet-epoch::finalize_epoch_baseline(epoch)` is a permissionless `Signed` call** — any account, a stranded holder included — that settles epoch `e`'s Baseline vault at the same spec-fixed neutral `s = 0.5`, through the same single SettleAuthority chain of §6, and **only** when all three of the following hold at dispatch:
+
+   1. **The epoch is strictly in the past** (`e <` the current epoch index), so no proposal can still qualify into it.
+   2. **No cohort ever formed for it** — no `CohortInfo(e)` exists **and** no `CohortSummary(e)` is archived in `RecentCohortSummaries`. A cohort that formed and voided is §7(5)'s case; a cohort that formed and settled took T19.
+   3. **No proposal of epoch `e` is still live** — the bounded non-terminal working set (≤ `MaxLiveProposals`, I-21) holds no proposal with `epoch == e`, so none can still reach `Measuring` and form the cohort after the fact (terminal states: §2.1).
+
+   All three MUST be re-checked at dispatch and the call MUST fail without state change if any of them fails: a premature finalization would settle a Baseline against an epoch whose cohort is still reachable, which is the one way this path could destroy information the market is still producing. The call MUST be **idempotent and no-op-safe** in exactly the shape §7(5) already requires — an epoch with no Baseline vault, and a Baseline vault already `Settled`, are both no-ops returning `Ok` rather than failures (§2.1's keeper-idempotency rule; G-1). That clause is also what makes the path well-defined however the Baseline book is provisioned: an epoch that opens no Baseline book at all is simply a no-op. And it is what keeps condition 2 safe against ring eviction — once `CohortSummary(e)` ages out of the 32-cohort ring, condition 2 admits an epoch that *did* settle normally, but its vault is by then `Settled` or reaped, so the call is a harmless no-op and never a second settlement.
+
+   The call carries **no new event**: the settlement it performs emits the frozen ledger `BaselineSettled { epoch, s }` ([doc 02](./02-integration-contract.md) §6), and there is nothing further to announce. It introduces no storage item, no view type and no `FutarchyApi` method, so it leaves the [doc 02](./02-integration-contract.md) contract surface untouched. Its weight is `O(MaxLiveProposals)` — the working-set scan of condition 3 — against exactly one Baseline vault, so it needs no cursor and no batch bound. It MUST remain callable while `PB-LEDGER-FREEZE` is active, consistent with [doc 06](./06-governance-and-guardians.md) §6.3's exemption of settlement calls from the freeze: the freeze's own T20 sweep is one of the two ways an epoch is orphaned, so a freeze that also blocked the repair would guarantee the stranding it exists to contain.
 
 ---
 
@@ -681,7 +703,7 @@ Membership, **not** the mere presence of a recorded outcome, is the discriminato
 | D-7 | §1.1: `Emergency` deleted from class enum, classifier, and every state-machine/parameter row; guardian playbooks ([doc 06](./06-governance-and-guardians.md)) own emergencies; ADR-3 completeness satisfiable |
 | B-med: sanity band | §5.2: [0.02, 0.98] applies to welfare books only; gate books get the GB-NB near-boundary validity rule; `V_min` resolved to per-book (`dec.v_min` per decision book; `gate.v_min` per gate book) |
 | B-med: epoch.length | §3.1/§3.2: phase offsets are kernel fractions n/21 of `epoch.length` (floor 14 d); length changes effective next epoch; in-flight cohorts keep creation-time absolute schedules |
-| B-med: SettleAuthority | §6: single path `pallet-epoch::settle_cohort → pallet-welfare::compute_settlement → ledger` under welfare's SettleAuthority origin; authority fragment updated |
+| B-med: SettleAuthority | §6: single path `pallet-epoch → pallet-welfare::compute_settlement → ledger` under welfare's SettleAuthority origin; authority fragment updated (§7(6) adds a second epoch-side *trigger*, `finalize_epoch_baseline`, under the same single origin — SQ-320) |
 | B-med: collator-D cap | §4.5: phase-scheduled `n_cap` ∈ {5, 6, 7, 8} in `D_eff`; monotone, phase-gate-stepped, creation-time-frozen per cohort (D-15) |
 | B-med: C/P/A aggregation | §4.4: full weighted-geometric formulas with ε-floors, weights/pillar/ε carried in MetricSpec, normative evaluation order and rounding — two conforming implementations compute identical W_e and s (G-7) |
 | B-med: decide() fields | §1.2/§1.3: `Proposal` gains `ask`, `decide_at` (+ `rerun`); canonical `DecisionOutcome` defined (name per [doc 02](./02-integration-contract.md)) |

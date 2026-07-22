@@ -6912,13 +6912,14 @@ fn epoch_call_samples() -> Vec<RuntimeCall> {
         }),
         RuntimeCall::Epoch(pallet_epoch::Call::force_reject_process_hold { pid: 0 }),
         RuntimeCall::Epoch(pallet_epoch::Call::void_cohort { epoch: 0 }),
+        RuntimeCall::Epoch(pallet_epoch::Call::finalize_epoch_baseline { epoch: 0 }),
     ]
 }
 
 #[test]
 fn epoch_classifier_rows_and_closed_privileged_wrappers_match_the_authority_matrix() {
     let calls = epoch_call_samples();
-    assert_eq!(calls.len(), 13);
+    assert_eq!(calls.len(), 14);
 
     for call in &calls[0..5] {
         assert!(RuntimeBaseCallFilter::contains(call));
@@ -6926,6 +6927,12 @@ fn epoch_classifier_rows_and_closed_privileged_wrappers_match_the_authority_matr
     for call in &calls[7..11] {
         assert!(RuntimeBaseCallFilter::contains(call));
     }
+    // 06 §3.2: the SQ-320 orphan-Baseline crank sits on the permissionless
+    // Signed row, so it passes the bare base filter and — unlike the privileged
+    // leaves below — needs no class origin. Its `leaf public` classifier
+    // projection is pinned by the S5 inventory.
+    let finalize = &calls[13];
+    assert!(RuntimeBaseCallFilter::contains(finalize));
 
     let values = &calls[5];
     assert!(crate::classifier::is_values_enactment_leaf(values));
@@ -10197,6 +10204,228 @@ fn seeded_force_reject_void_closes_and_reaps_all_proposal_books() {
         assert_eq!(pallet_market::Markets::<Runtime>::count(), 1);
         assert!(Market::do_try_state().is_ok());
         assert!(FutarchyTreasury::do_try_state().is_ok());
+    });
+}
+
+/// SQ-320 · 03 §2.3/§5.2 · 05 §7(5): an epoch that **opens a Baseline book but
+/// never forms a cohort** strands its Baseline holders forever.
+///
+/// Reachability (the shortest trigger): a one-proposal epoch whose sole
+/// market-bearing proposal is force-rejected *pre-measurement*. Seeding the
+/// proposal's markets creates the epoch's Baseline vault (03 §2.2), but
+/// `start_measurement` — the sole writer of `CohortInfo` — is never reached, so
+/// no `CohortInfo` and no `CohortSummary` for the epoch ever exists. The two
+/// producers of a Baseline settlement both key off a cohort (`settle_cohort`'s
+/// `SettlementTarget::Baseline` and `void_cohort`'s neutral VOID), so neither
+/// can ever fire. The vault stays `Open`, both redemption calls of 03 §5.3
+/// require `Settled`, and the book stays open, tradeable and unprunable.
+///
+/// `finalize_epoch_baseline` is the permissionless self-help crank that reaches
+/// exactly this case: a strictly past, cohort-free, summary-free epoch all of
+/// whose proposals are terminal.
+#[test]
+fn sq320_orphaned_epoch_baseline_is_settled_by_the_permissionless_crank() {
+    use futarchy_primitives::{PositionId, ScalarSide};
+    use pallet_conditional_ledger::core_ledger::BaselineState;
+    use pallet_epoch::{EpochParamsProvider, MarketAccess};
+
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 320_001;
+        System::set_block_number(1);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let holder = account(230);
+        let counterparty = account(231);
+        let cranker = account(232);
+        let short = PositionId::Baseline {
+            epoch,
+            side: ScalarSide::Short,
+        };
+
+        let params = <crate::configs::RuntimeEpochParams as EpochParamsProvider>::get();
+        let decision_b = crate::configs::balance_param(b"pol.b.code");
+        let gate_b = crate::configs::balance_param(b"pol.b_gate");
+        let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
+        let decision_headroom =
+            pallet_market::core_market::seed_headroom(decision_b).expect("bounded decision b");
+        let gate_headroom =
+            pallet_market::core_market::seed_headroom(gate_b).expect("bounded gate b");
+        let baseline_headroom =
+            pallet_market::core_market::seed_headroom(baseline_b).expect("bounded baseline b");
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &crate::configs::pol_account(),
+            decision_headroom
+                .saturating_add(gate_headroom.saturating_mul(2))
+                .saturating_add(currency::USDC),
+        ));
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &crate::configs::pol_baseline_account(),
+            baseline_headroom.saturating_add(currency::USDC),
+        ));
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.main_usdc = decision_headroom
+                .saturating_mul(2)
+                .saturating_add(gate_headroom.saturating_mul(4))
+                .saturating_add(baseline_headroom)
+                .saturating_mul(2);
+        });
+
+        // The epoch's single market-bearing proposal. Seeding its books is what
+        // creates the epoch's Baseline vault and book.
+        let mut proposal = empty_param_proposal(PID, account(233), H256::zero(), 0);
+        proposal.class = ProposalClass::Code;
+        proposal.metric_spec = 1;
+        proposal.state = ProposalState::Trading;
+        proposal.decide_at = System::block_number().saturating_add(params.decision_window);
+        let seed_plan = <crate::configs::RuntimePolBudget as pallet_epoch::PolBudget<
+            AccountId,
+        >>::proposal_seed_plan(&proposal)
+        .expect("CODE seed plan");
+        let markets =
+            <crate::configs::RuntimeMarketAccess as MarketAccess<AccountId>>::open_markets(
+                &proposal,
+                false,
+                Some(seed_plan),
+            )
+            .expect("seeded market set");
+        proposal.markets = Some(markets);
+        pallet_epoch::Proposals::<Runtime>::insert(PID, proposal.clone());
+        let schedule = pallet_epoch::Schedule::<Runtime>::get();
+        pallet_epoch::ProposalSchedules::<Runtime>::insert(
+            PID,
+            pallet_epoch::ProposalSchedule {
+                epoch: proposal.epoch,
+                epoch_start_block: schedule.epoch_start_block,
+                epoch_length: schedule.length,
+                decide_at: proposal.decide_at,
+                metric_spec: proposal.metric_spec,
+            },
+        );
+        pallet_epoch::NextProposalId::<Runtime>::mutate(|next| {
+            *next = (*next).max(PID.saturating_add(1));
+        });
+
+        // A single-sided Baseline holder: split, then dispose of the SHORT leg,
+        // so `merge_baseline` can no longer take this holder back to par.
+        let stake = 10 * currency::USDC;
+        let deposit = crate::configs::LedgerPositionDeposit::get();
+        let funding = stake.saturating_mul(4);
+        assert_ok!(ForeignAssets::mint_into(usdc_location(), &holder, funding));
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &counterparty,
+            funding
+        ));
+        assert_ok!(ConditionalLedger::split_baseline(
+            RuntimeOrigin::signed(holder.clone()),
+            epoch,
+            stake,
+        ));
+        assert_ok!(ConditionalLedger::transfer(
+            RuntimeOrigin::signed(holder.clone()),
+            short,
+            counterparty.clone(),
+            stake,
+        ));
+
+        // T20 pre-measurement force-reject of the epoch's only proposal.
+        assert_ok!(Epoch::force_reject_process_hold(
+            pallet_origins::Origin::GuardianHold.into(),
+            PID,
+        ));
+
+        // The orphan. No cohort was ever created, so no cohort can ever be
+        // settled or voided, and the Baseline vault is unreachable.
+        assert!(
+            !pallet_epoch::Cohorts::<Runtime>::contains_key(epoch),
+            "the defect requires an epoch that never formed a cohort",
+        );
+        assert!(
+            !pallet_epoch::RecentCohortSummaries::<Runtime>::get()
+                .iter()
+                .any(|summary| summary.epoch == epoch),
+            "no archived summary either",
+        );
+        assert_eq!(
+            pallet_conditional_ledger::BaselineVaults::<Runtime>::get(epoch)
+                .map(|vault| vault.state),
+            Some(BaselineState::Open),
+        );
+        assert_noop!(
+            ConditionalLedger::redeem_baseline(
+                RuntimeOrigin::signed(holder.clone()),
+                epoch,
+                ScalarSide::Long,
+                stake,
+            ),
+            pallet_conditional_ledger::Error::<Runtime>::WrongVaultState
+        );
+
+        // 05 §7(6) condition 1: while the epoch is live a later proposal could
+        // still qualify into it, so the crank must refuse until it is past.
+        assert!(
+            Epoch::finalize_epoch_baseline(RuntimeOrigin::signed(cranker.clone()), epoch).is_err()
+        );
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| clock.index = epoch.saturating_add(1));
+
+        // The repair, dispatched permissionlessly by an account with no role in
+        // the epoch at all (06 §3.2: Signed row).
+        assert_ok!(Epoch::finalize_epoch_baseline(
+            RuntimeOrigin::signed(cranker.clone()),
+            epoch,
+        ));
+
+        // 03 §2.3 `Baseline Open → Settled(s)`, at the kernel constant.
+        assert_eq!(
+            pallet_conditional_ledger::BaselineVaults::<Runtime>::get(epoch)
+                .map(|vault| vault.state),
+            Some(BaselineState::Settled(kernel::VOID_BASELINE_SCORE)),
+        );
+
+        // The book is closed and durably latched by the same call — the second
+        // half of the defect (an orphaned book stays open, tradeable, and its
+        // `BaselineMarketOf` mapping can never be pruned).
+        let book = pallet_market::Markets::<Runtime>::get(markets.baseline)
+            .expect("orphaned Baseline book");
+        assert_eq!(book.phase, pallet_market::core_market::MarketPhase::Closed);
+        assert!(pallet_market::SettlementObservedAt::<Runtime>::get(markets.baseline).is_some());
+        assert!(!pallet_market::Pallet::<Runtime>::pol_obligation_live(
+            markets.baseline,
+            &book
+        ));
+
+        // The stranded holder can now redeem. Payouts derive from the kernel
+        // constant, never hand-computed (03 §5.3/§6.3).
+        let scale = u128::from(kernel::SCORE_SCALE);
+        let s = u128::from(kernel::VOID_BASELINE_SCORE.0);
+        let long_payout = stake.saturating_mul(s) / scale;
+        let holder_before = ForeignAssets::balance(usdc_location(), &holder);
+        assert_ok!(ConditionalLedger::redeem_baseline(
+            RuntimeOrigin::signed(holder.clone()),
+            epoch,
+            ScalarSide::Long,
+            stake,
+        ));
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &holder).saturating_sub(holder_before),
+            long_payout.saturating_add(deposit),
+        );
+
+        // §7(6): a second crank is a harmless no-op, never an error (G-1).
+        assert_ok!(Epoch::finalize_epoch_baseline(
+            RuntimeOrigin::signed(cranker),
+            epoch,
+        ));
+        assert_eq!(
+            pallet_conditional_ledger::BaselineVaults::<Runtime>::get(epoch)
+                .map(|vault| vault.state),
+            Some(BaselineState::Settled(kernel::VOID_BASELINE_SCORE)),
+        );
+
+        assert!(Epoch::do_try_state().is_ok());
+        assert!(ConditionalLedger::do_try_state().is_ok());
+        assert!(Market::do_try_state().is_ok());
     });
 }
 

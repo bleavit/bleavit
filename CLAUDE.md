@@ -40,8 +40,12 @@ Everything above (imported from AGENTS.md) is binding. Below is the Claude-Code-
 > There is no longer any write guard on `docs/architecture/`. The spec is editable;
 > change it deliberately per rule R-1 (AGENTS.md · *Changing the specification*).
 
-Permissions: common read-only git and cargo commands are pre-allowed; `git push`
-always asks.
+Permissions: common read-only git and cargo commands are pre-allowed. The `ask`
+list is empty as of 2026-07-21 — the standing `Bash(git push*)` prompt was
+removed by the user, so pushes are no longer gated by a permission prompt.
+AGENTS.md R-9 still governs the *judgement*: commit and push only when the user
+has asked or given standing instructions, and never publish or tag without an
+explicit ask. Removing the prompt removed the reminder, not the rule.
 
 ## Memory notes
 

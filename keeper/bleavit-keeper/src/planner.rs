@@ -27,7 +27,12 @@ pub const PRIORITY_EXECUTE: u16 = 700;
 pub const PRIORITY_REGISTRY_CLOSE: u16 = 650;
 pub const PRIORITY_RENEWAL: u16 = 600;
 pub const PRIORITY_OBSERVE: u16 = 500;
+/// Above `PRIORITY_CLEANUP` on purpose: `finalize_epoch_baseline` writes the
+/// terminal-block latch that the Baseline dust sweep and the book reap both
+/// require (05 §7(6)), so it has to land before the cleanup work it unblocks.
+pub const PRIORITY_BASELINE_FINALIZE: u16 = 150;
 pub const PRIORITY_CLEANUP: u16 = 100;
+const _: () = assert!(PRIORITY_BASELINE_FINALIZE > PRIORITY_CLEANUP);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlannedCrank {
@@ -79,6 +84,7 @@ pub fn plan(snapshot: &ChainSnapshot, config: &PlannerConfig) -> Vec<PlannedCran
     plan_decisions(snapshot, config, &mut cranks);
     plan_oracle(snapshot, config, &mut cranks);
     plan_settlement(snapshot, config, &mut cranks);
+    plan_baseline_finalization(snapshot, config, &mut cranks);
     plan_welfare(snapshot, config, &mut cranks);
     plan_execution(snapshot, config, &mut cranks);
     plan_registries(snapshot, config, &mut cranks);
@@ -287,6 +293,72 @@ fn plan_settlement(
             ));
         }
     }
+}
+
+/// 05 §7(6) `Epoch::finalize_epoch_baseline` — the permissionless repair for an
+/// epoch that opened a Baseline vault but never formed a cohort, so the measured
+/// e+3 settlement is never scheduled and every single-sided Baseline holder is
+/// stranded (SQ-320). It rides `Role::Settle` because 05 §6 makes it the second
+/// `pallet-epoch` trigger of the one `compute_settlement → settle_baseline`
+/// chain that `settle_cohort` already drives, under the same single
+/// SettleAuthority origin — a second trigger, never a second authority.
+///
+/// The call is idempotent and no-op-safe, so planning it on a vault that needs
+/// nothing would be a permanent per-block no-op submission. The guard below is
+/// the shipped three-part precondition, narrowed by the one cheap read that is
+/// necessary for the call to change anything at all: the vault must still be
+/// `Open`.
+fn plan_baseline_finalization(
+    snapshot: &ChainSnapshot,
+    config: &PlannerConfig,
+    cranks: &mut Vec<PlannedCrank>,
+) {
+    if !enabled(config, Role::Settle) || !snapshot.has_call("Epoch", "finalize_epoch_baseline") {
+        return;
+    }
+    let Some(epoch) = &snapshot.epoch else {
+        return;
+    };
+    for vault in &snapshot.baseline_vaults {
+        // A `Settled` vault is the documented no-op; skipping it is also what
+        // makes the missing `RecentCohortSummaries` read sound. `settle_cohort`
+        // settles Baseline(e) as the last cursor target and only then archives
+        // the summary and drops `CohortInfo`, so no reachable state has an
+        // archived summary over a still-`Open` vault.
+        if !vault.open
+            // (1) strictly past — while the epoch is live a proposal can still
+            // qualify into it and form the very cohort this call assumes away.
+            || vault.epoch >= epoch.index
+            // (2) no cohort ever formed: a live `CohortInfo` means the measured
+            // §7(5)/T19 producers own this Baseline and must not be raced.
+            || snapshot
+                .cohorts
+                .iter()
+                .any(|cohort| cohort.epoch == vault.epoch)
+            // (3) no proposal of the epoch is still live, so none can reach
+            // `Measuring` and form the cohort after the fact.
+            || snapshot.proposals.iter().any(|proposal| {
+                proposal.epoch == Some(vault.epoch) && !proposal_terminal(&proposal.state)
+            })
+        {
+            continue;
+        }
+        cranks.push(crank(
+            Role::Settle,
+            "Epoch",
+            "finalize_epoch_baseline",
+            [("epoch", number(vault.epoch))],
+            PRIORITY_BASELINE_FINALIZE,
+        ));
+    }
+}
+
+/// `epoch_core::is_terminal_state` (05 §2.1), the predicate 05 §7(6) condition 3
+/// names. Deliberately **not** the negation of `is_live_state`: that reports
+/// `Submitted`/`Screening` terminal, yet a proposal keeps its stamped epoch
+/// across a boundary, so the crank would fire while the cohort could still form.
+fn proposal_terminal(state: &str) -> bool {
+    matches!(state, "Settled" | "Cancelled" | "Expired" | "Rejected")
 }
 
 fn plan_welfare(snapshot: &ChainSnapshot, config: &PlannerConfig, cranks: &mut Vec<PlannedCrank>) {
@@ -617,9 +689,9 @@ mod tests {
 
     use super::*;
     use crate::snapshot::{
-        BookSnapshot, CohortSnapshot, CoretimeQuoteSnapshot, CoretimeSnapshot, EpochSnapshot,
-        ExecutionSnapshot, OracleRoundSnapshot, ProposalSnapshot, ReapSnapshot,
-        RegistryFilingSnapshot, ReserveHealthSnapshot, WelfareSnapshot,
+        BaselineVaultSnapshot, BookSnapshot, CohortSnapshot, CoretimeQuoteSnapshot,
+        CoretimeSnapshot, EpochSnapshot, ExecutionSnapshot, OracleRoundSnapshot, ProposalSnapshot,
+        ReapSnapshot, RegistryFilingSnapshot, ReserveHealthSnapshot, WelfareSnapshot,
     };
 
     fn snapshot() -> ChainSnapshot {
@@ -642,6 +714,7 @@ mod tests {
                 "Epoch.tick",
                 "Epoch.decide",
                 "Epoch.settle_cohort",
+                "Epoch.finalize_epoch_baseline",
                 "Market.crank_observe",
                 "Market.reap",
                 "Oracle.crank_round_close",
@@ -746,6 +819,13 @@ mod tests {
                 archive_delay: Some(50),
             }],
             baseline_dust: Vec::new(),
+            // Open, strictly past, every proposal of it terminal — and blocked
+            // only by the live `Measuring` cohort for the same epoch, which is
+            // exactly the race 05 §7(6) condition 2 excludes.
+            baseline_vaults: vec![BaselineVaultSnapshot {
+                epoch: 2,
+                open: true,
+            }],
             welfare: Some(WelfareSnapshot {
                 active_spec_version: Some(2),
                 recorded_snapshots: BTreeSet::new(),
@@ -1065,6 +1145,111 @@ mod tests {
             .available_calls
             .remove("FutarchyTreasury.prune_coretime_quote");
         assert!(plan(&snapshot, &config_for(Role::Renewal)).is_empty());
+    }
+
+    /// The SQ-320 trigger condition: 05 §7(6)'s three preconditions plus the
+    /// `Open`-vault necessary condition, each blocking on its own.
+    #[test]
+    fn orphan_epoch_baseline_is_finalized_only_when_no_cohort_can_still_form() {
+        let mut due = snapshot();
+        // The fixture's vault is blocked solely by the live cohort for epoch 2.
+        assert!(!plan(&due, &config_for(Role::Settle))
+            .iter()
+            .any(|crank| crank.call == "finalize_epoch_baseline"));
+        due.cohorts.clear();
+        let planned = plan(&due, &config_for(Role::Settle));
+        let finalize = planned
+            .iter()
+            .find(|crank| crank.call == "finalize_epoch_baseline")
+            .expect("an orphaned past epoch is finalizable");
+        assert_eq!(finalize.role, Role::Settle);
+        assert_eq!(finalize.pallet, "Epoch");
+        assert_eq!(
+            finalize.args.values().next().and_then(Value::as_u128),
+            Some(2)
+        );
+
+        let blocked = |mutate: &dyn Fn(&mut ChainSnapshot)| {
+            let mut snapshot = due.clone();
+            mutate(&mut snapshot);
+            !plan(&snapshot, &config_for(Role::Settle))
+                .iter()
+                .any(|crank| crank.call == "finalize_epoch_baseline")
+        };
+
+        // Already `Settled` — the documented no-op must never be submitted.
+        assert!(blocked(&|snapshot| snapshot.baseline_vaults[0].open = false));
+        // (1) not strictly past: the epoch is still live at index 2.
+        assert!(blocked(&|snapshot| snapshot
+            .epoch
+            .as_mut()
+            .expect("fixture epoch")
+            .index = 2));
+        // (2) a cohort formed for it.
+        assert!(blocked(&|snapshot| snapshot.cohorts =
+            vec![CohortSnapshot {
+                epoch: 2,
+                status: "Settling".to_owned(),
+                until_epoch: None,
+                cursor: Some(0),
+                metric_spec: None,
+            }]));
+        // (3) a proposal of that epoch is still live.
+        assert!(blocked(&|snapshot| snapshot.proposals[0].epoch = Some(2)));
+        // The call itself must be on-chain before it is ever planned.
+        assert!(blocked(&|snapshot| {
+            snapshot
+                .available_calls
+                .remove("Epoch.finalize_epoch_baseline");
+        }));
+    }
+
+    /// 05 §7(6) condition 3 uses `is_terminal_state`, so terminal proposals of
+    /// the orphaned epoch do not block, while every live state does.
+    #[test]
+    fn only_non_terminal_proposals_of_the_epoch_block_finalization() {
+        let mut snapshot = snapshot();
+        snapshot.cohorts.clear();
+        for state in ["Settled", "Cancelled", "Expired", "Rejected"] {
+            snapshot.proposals[0].state = state.to_owned();
+            snapshot.proposals[0].epoch = Some(2);
+            assert!(
+                plan(&snapshot, &config_for(Role::Settle))
+                    .iter()
+                    .any(|crank| crank.call == "finalize_epoch_baseline"),
+                "terminal state {state} must not block finalization"
+            );
+        }
+        // `Submitted`/`Screening` are exactly the states the rejected
+        // `is_live_state` reading would have treated as terminal.
+        for state in ["Submitted", "Screening", "Trading", "Queued", "Measuring"] {
+            snapshot.proposals[0].state = state.to_owned();
+            assert!(
+                !plan(&snapshot, &config_for(Role::Settle))
+                    .iter()
+                    .any(|crank| crank.call == "finalize_epoch_baseline"),
+                "live state {state} must block finalization"
+            );
+        }
+    }
+
+    /// The finalization writes the terminal latch the Baseline sweep and book
+    /// reap need, so it must sort ahead of the cleanup it unblocks.
+    #[test]
+    fn baseline_finalization_outranks_the_cleanup_it_unblocks() {
+        let mut snapshot = snapshot();
+        snapshot.cohorts.clear();
+        let planned = plan(&snapshot, &PlannerConfig::default());
+        let finalize = planned
+            .iter()
+            .position(|crank| crank.call == "finalize_epoch_baseline")
+            .expect("fixture has an orphaned past epoch");
+        let cleanup = planned
+            .iter()
+            .position(|crank| crank.role == Role::Cleanup)
+            .expect("fixture has cleanup work");
+        assert!(finalize < cleanup);
+        assert_eq!(planned[finalize].priority, PRIORITY_BASELINE_FINALIZE);
     }
 
     #[test]
