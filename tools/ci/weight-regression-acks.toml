@@ -8,4 +8,3 @@
 # runtime/bleavit-runtime/src/weights/pallet_constitution.rs set_param: storage proof grew after adding validation
 # runtime/bleavit-runtime/src/weights/pallet_retired.rs *: pallet retired by approved migration
 #
-runtime/bleavit-runtime/src/weights/pallet_constitution.rs set_phase_flag: SQ-180 added the 08 §4.2 PhaseArmingGate, so an arming bit now performs up to two treasury State reads (bit 3 arms CODE and META). The previous figures benchmarked SUDO_PRESENT, which enters the gate zero times and therefore understated the real worst case; the benchmark was re-pointed at CODE_META_ARMED. Conservative placeholder pending B5 regeneration.

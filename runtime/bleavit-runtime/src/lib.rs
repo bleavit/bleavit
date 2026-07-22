@@ -57,6 +57,7 @@ mod apis;
 mod classifier;
 mod configs;
 mod genesis;
+pub mod migrations;
 pub mod telemetry;
 pub mod track_origins;
 pub mod views;
@@ -68,6 +69,8 @@ mod pov_budgets;
 mod tests;
 #[cfg(test)]
 mod tests_constitution_params;
+#[cfg(test)]
+mod tests_migration_guard;
 #[cfg(test)]
 mod tests_s5;
 #[cfg(test)]

@@ -17,7 +17,8 @@ spec_refs:
 ## Purpose
 
 This runbook is the operational face of `PB-MIGRATION`. It covers a multi-block
-migration cursor that has stopped making progress: the affected surface must
+migration cursor that has exceeded its declared time budget or entered `Stuck`:
+the affected surface must
 fail-stop while block production and unaffected work continue, and recovery is a
 bounded retry or a rollback implemented as a forward upgrade
 ([09 §2/§3.2](../../docs/architecture/09-execution-upgrades-and-rollout.md)).
@@ -28,15 +29,12 @@ bounded retry or a rollback implemented as a forward upgrade
 |---|---|---|
 | Upgrades | authorized hash, applied version, migration cursor | cursor stalled |
 
-The trigger *should* mean an active `Migrations::Cursor` has been running longer
-than its budget — `now − cursor.started_at > 900` blocks (09 §3.2(d)); it is a
-**time budget, not a progress test**, because a lawful migration may return
-byte-identical cursors for hours while doing real work. **The deployed runtime
-does not implement that yet**: it still raises on `(index, inner_cursor)`
-byte-equality held for > 900 blocks, so a healthy `Cursor = ()` migration can
-false-raise this alert. Treat a raise as *unconfirmed* until you have checked
-`started_at` by hand (Diagnosis 2). Implementation owed — PLAN.md SQ-132 in
-batch X.
+The live trigger means an active `Migrations::Cursor` has been running longer
+than its budget — `now − cursor.started_at > 900` blocks (09 §3.2(d)) — or the
+cursor is `Stuck`. It is a **time budget, not a progress test**, because a lawful
+migration may return byte-identical cursors for hours while doing real work.
+The runtime reads the SDK cursor's own `started_at`; the retired
+`BleavitRuntimeMigration::ProgressMarker` is not an evidence source.
 
 The alert does not authorize a force-set of the cursor, a storage
 rewrite, or a rollback to old bytes ([12 §6.3](../../docs/architecture/12-release-and-operations.md)).
@@ -45,16 +43,15 @@ rewrite, or a rollback to old bytes ([12 §6.3](../../docs/architecture/12-relea
 
 1. Record a finalized block hash, current and target `spec_version`, authorized
    code hash, migration identifier, cursor bytes, failed-step index, and the first
-   block at which progress stopped. Preserve raw SCALE as well as decoded state.
+   block at which the cursor became active (`cursor.started_at`). Preserve raw
+   SCALE as well as decoded state.
 2. Read `Migrations::Cursor` and the runtime-internal
-   `BleavitRuntimeMigration::{HaltSources, FailedStep, ProgressMarker}` values —
-   `ProgressMarker` is still what the deployed detector keys on, so you need it to
-   explain *why* the halt raised. Then compute `now − cursor.started_at` and
-   compare it against 900: that is the normative predicate (09 §3.2(d)) and the
-   one that decides whether this is a real stall. **A halt raised while
-   `now − started_at ≤ 900` is a false raise** — the migration is progressing and
-   returning identical cursor bytes; record it as such and do not begin a repair.
-   Confirm `Stuck` separately. Rule out a stale monitor.
+   `BleavitRuntimeMigration::{HaltSources, FailedStep}` values. Compute
+   `now − cursor.started_at` and compare it against 900: that is the normative
+   predicate (09 §3.2(d)). Confirm `Stuck` separately. If the stall halt is set
+   while `now − started_at ≤ 900` and the cursor is not `Stuck`, preserve the raw
+   state and treat the detector/signal disagreement as an invariant breach; do
+   not infer progress or rewrite the cursor. Rule out a stale monitor.
 3. Read `ExecutionGuard::MigrationHalt`, `PendingUpgrade`, `LastUpgradeAuthorized`
    and the relevant `ExecutionGuard::Queue` entry.
    Read `ExecutionGuard.PreMigrationAnchor`. Per 09 §3.2(2), it is captured at
@@ -67,10 +64,17 @@ rewrite, or a rollback to old bytes ([12 §6.3](../../docs/architecture/12-relea
    value by assumption
    ([09 §3.2](../../docs/architecture/09-execution-upgrades-and-rollout.md)).
 4. Reconstruct `UpgradeAuthorized`, `UpgradeApplied`, `UpgradeAborted`, execution,
-   migration, and `GuardianAction` events. The spec also mandates
-   `MigrationHalted {cursor, failed_step}`. If the deployed runtime does not emit
-   it, preserve the raw cursor/failed-step proof and record the missing event as a
-   compliance gap; absence of the event is not evidence that no halt exists.
+   migration, and `GuardianAction` events. Locate the first
+   `MigrationHalted {cursor, failed_step}` for this halt-source activation. Treat
+   those fields as the machine trigger's snapshot and compare them with a state
+   proof at the event block/phase, not merely with current storage. On a failed
+   migration step the handler emits while the SDK cursor is still `Active`, after
+   which the SDK writes `Stuck`; on a stall, later execution in the same block may
+   also advance or replace the live cursor. Those expected transitions do not make
+   a different current cursor an evidence mismatch. The event is emitted once on
+   the first machine-trigger halt; a later halt source does not emit it again. If
+   that first event is absent, preserve the raw cursor/failed-step proof and record
+   a compliance gap; absence of the event is not evidence that no halt exists.
 5. Confirm halt-at-fault behavior: blocks finalize and unaffected calls remain
    usable, while the affected transaction surface, execution queue, and new
    ledger/market inflows fail-stop. Any half-migrated layout exposed to user calls
@@ -122,9 +126,8 @@ rewrite, or a rollback to old bytes ([12 §6.3](../../docs/architecture/12-relea
    ([06 §6.2](../../docs/architecture/06-governance-and-guardians.md)). Do not
    wait for those events and do not treat their absence as an implementation
    gap. The accountability trail is the automatic `MigrationHalt` halt-source
-   bridge and its own event stream; capture the halt-source bits and the
-   diagnosis as the raw proof. (`MigrationHalted {cursor, failed_step}` is
-   likewise not emitted today — tracked in PLAN.md, do not block on it.)
+   bridge, the first `MigrationHalted {cursor, failed_step}` event, and the raw
+   state proof; capture all three.
 3. Decide retry versus rollback within the deadline in [09 §3.2](../../docs/architecture/09-execution-upgrades-and-rollout.md);
    inaction defaults to rollback initiation. Guardians cannot install code, and
    on stable2606 they have **no in-framework retry either**: `pallet-migrations`'
@@ -134,11 +137,13 @@ rewrite, or a rollback to old bytes ([12 §6.3](../../docs/architecture/12-relea
    chain is inherent-only.** `MultiStepMigrator::ongoing()` is `Cursor::exists()`
    and `frame-executive` then rejects every non-inherent extrinsic, so the
    expedited-CODE lane named above — and `execute(pid)`, guardian calls, and sudo
-   with it — **cannot be included in a block** until the cursor is gone. This is
-   an open spec question (PLAN.md SQ-309), not a settled procedure: escalate to
-   the guardian council and the release lead immediately rather than attempting
-   an on-chain repair that cannot be submitted. A `Stuck` cursor with
-   `FailedMigrationHandling::KeepStuck` has no on-chain exit at present.
+   with it — **cannot be included in a block** until the cursor is gone. SQ-309 is
+   ruled but its pre-authorized inherent-applied recovery image is not yet
+   implemented, so production builds prohibit registering any multi-block
+   migration. A live cursor therefore indicates a non-production build or a
+   bypass of that integrity lock: escalate to the guardian council and release
+   lead immediately. Do not attempt an on-chain extrinsic repair that cannot be
+   submitted; relay `force_set_current_code` remains break-glass only.
 4. A rollback is a forward upgrade through the normal execution guard, using the
    migration-halt-gated expedited CODE lane. Full attestation, ratification,
    payload checks, and `DescriptorLeadTime` still apply; no privileged shortcut
