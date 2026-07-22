@@ -233,7 +233,7 @@ inventory! {
         leaf public => ["file", "challenge_filing", "ack_observed", "crank_close", "close_epoch", "reap_epoch"];
     }
     "FutarchyTreasury" {
-        leaf treasury => ["fund_budget_line", "spend", "open_stream", "cancel_stream", "issue_vit", "recover_foreign", "set_coretime_authority"];
+        leaf treasury => ["fund_budget_line", "spend", "open_stream", "cancel_stream", "issue_vit", "recover_foreign", "set_coretime_authority", "sweep_insurance"];
         leaf public => ["claim_stream", "execute_coretime_renewal", "note_coretime_quote", "prune_coretime_quote"];
     }
     "Guardian" {

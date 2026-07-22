@@ -23,8 +23,8 @@ use sp_runtime::{
 use crate::{
     classifier::{is_values_enactment_leaf, BleavitSafetyClassifier, RuntimeBaseCallFilter},
     tests::{
-        account, development_ext, remark, seed_parachain_upgrade_boundary, set_pending_upgrade,
-        upgrade_ext,
+        account, development_ext, empty_param_proposal, note_runtime_batch, remark,
+        seed_parachain_upgrade_boundary, set_pending_upgrade, upgrade_ext,
     },
     tests_s5::{
         ConditionalKind, ExpectedTreatment, InventoryRow, RuntimeMetadataModel, WrapperShape,
@@ -691,6 +691,25 @@ fn amend_registry_call(
     })
 }
 
+fn amend_registry_static_disposition(
+    proposal_id: u64,
+    call: RuntimeCall,
+) -> pallet_epoch::StaticCheckDisposition {
+    let footprint = crate::classifier::derive_resource_footprint(core::slice::from_ref(&call))
+        .expect("amend_registry must have a parameter-record footprint");
+    let (payload_hash, payload_len) =
+        note_runtime_batch(vec![call]).expect("amend_registry payload must note");
+    let mut proposal = empty_param_proposal(proposal_id, account(97), payload_hash, payload_len);
+    proposal.class = futarchy_primitives::ProposalClass::Meta;
+    proposal.bond = crate::configs::balance_param(b"prop.bond.meta");
+    proposal.resources = futarchy_primitives::BoundedVec::try_from(footprint.to_vec())
+        .expect("one resource must fit the 05 §1.4 lock bound");
+
+    <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
+        crate::AccountId,
+    >>::static_check(&proposal)
+}
+
 fn expected_param_domain(class: pallet_constitution::ParamClass) -> CallDomain {
     match class {
         pallet_constitution::ParamClass::Param => CallDomain::Param,
@@ -1158,10 +1177,96 @@ fn sq_150_kernel_bounded_rows_are_immutable_to_every_origin_in_the_runtime() {
     });
 }
 
+/// 05 §1.4 T4 / 13 rule 7: target-independent META classification does not
+/// make every amendment admissible. Static screening validates the committed
+/// metadata against the live row, so an immutable kernel row or a malformed
+/// non-kernel amendment is confiscated before slot or market allocation.
+#[test]
+fn sq_150_amend_registry_target_constraints_bind_at_static_screening() {
+    development_ext().execute_with(|| {
+        use frame_support::assert_ok;
+        use pallet_epoch::StaticCheckDisposition;
+
+        // The capability table is deliberately sparse at genesis. Exercise
+        // the live policy path before screening amendment targets.
+        assert_ok!(crate::Constitution::set_capability(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::CapabilityRecord {
+                class: futarchy_primitives::ProposalClass::Meta,
+                capability: pallet_constitution::Capability::AmendRegistry,
+                enabled: true,
+            },
+        ));
+
+        let (kernel_key, kernel_record) = pallet_constitution::Params::<Runtime>::iter()
+            .find(|(_, record)| record.kernel_bounded)
+            .expect("genesis must contain a kernel-bounded row");
+        assert_eq!(
+            amend_registry_static_disposition(
+                9_501,
+                amend_registry_call(kernel_key, kernel_record),
+            ),
+            StaticCheckDisposition::SlashAll(
+                futarchy_primitives::RejectReason::ConstitutionViolation,
+            ),
+            "kernel-bounded amendments must fail at T4, not guarded dispatch",
+        );
+
+        let (ordinary_key, ordinary_record) = pallet_constitution::Params::<Runtime>::iter()
+            .find(|(_, record)| {
+                !record.kernel_bounded && record.min.as_u128() < record.max.as_u128()
+            })
+            .expect("genesis must contain a non-kernel row with a non-empty range");
+        assert_eq!(
+            amend_registry_static_disposition(
+                9_502,
+                amend_registry_call(ordinary_key, ordinary_record),
+            ),
+            StaticCheckDisposition::Eligible,
+            "a valid non-kernel META amendment must remain eligible",
+        );
+
+        let malformed = RuntimeCall::Constitution(pallet_constitution::Call::amend_registry {
+            key: ordinary_key,
+            min: ordinary_record.max,
+            max: ordinary_record.min,
+            max_delta: ordinary_record.max_delta,
+            cooldown_epochs: ordinary_record.cooldown_epochs,
+        });
+        assert_eq!(
+            amend_registry_static_disposition(9_503, malformed),
+            StaticCheckDisposition::SlashAll(
+                futarchy_primitives::RejectReason::ConstitutionViolation,
+            ),
+            "malformed registry metadata must fail at T4",
+        );
+
+        let unknown_key = pallet_constitution::key16(b"missing.registry");
+        assert!(!pallet_constitution::Params::<Runtime>::contains_key(
+            unknown_key
+        ));
+        let unknown = RuntimeCall::Constitution(pallet_constitution::Call::amend_registry {
+            key: unknown_key,
+            min: ordinary_record.min,
+            max: ordinary_record.max,
+            max_delta: ordinary_record.max_delta,
+            cooldown_epochs: ordinary_record.cooldown_epochs,
+        });
+        assert_eq!(
+            amend_registry_static_disposition(9_504, unknown),
+            StaticCheckDisposition::SlashAll(
+                futarchy_primitives::RejectReason::ConstitutionViolation,
+            ),
+            "unknown registry keys must fail at T4",
+        );
+    });
+}
+
 /// SQ-150 classifier leg: `amend_registry` projects to the FutarchyMeta domain
-/// for **every** registry row (kernel or not — the classifier is not
-/// target-aware; immutability binds at dispatch), is NOT a values-enactment
-/// leaf, and is denied by the origin-blind base filter (belief-side).
+/// for **every** registry row (kernel or not — the classifier itself is not
+/// target-aware; `RuntimeCapabilities` binds row validity at static screening),
+/// is NOT a values-enactment leaf, and is denied by the origin-blind base filter
+/// (belief-side).
 #[test]
 fn sq_150_amend_registry_projects_meta_and_is_not_a_values_leaf() {
     development_ext().execute_with(|| {

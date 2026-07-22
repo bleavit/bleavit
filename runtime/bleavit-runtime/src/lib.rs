@@ -75,6 +75,8 @@ mod tests_s5_behavior;
 #[cfg(test)]
 mod tests_telemetry;
 #[cfg(test)]
+mod tests_treasury_health;
+#[cfg(test)]
 mod tests_welfare_inputs;
 
 use alloc::borrow::Cow;

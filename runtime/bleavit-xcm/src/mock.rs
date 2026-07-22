@@ -119,6 +119,7 @@ impl pallet_oracle::Config for Test {
     type MaxRoundCloseBatch = MaxRoundCloseBatch;
     type ProbeDispatch = TestProbeDispatcher;
     type ProbeTimeoutSink = ();
+    type ReserveHealthSink = ();
     type KeeperRebate = ();
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
@@ -198,6 +199,7 @@ impl pallet_futarchy_treasury::Config for Test {
     type CurrentEpoch = CurrentEpoch;
     type RenewalDispatch = TestRenewalDispatcher;
     type PotFunding = ();
+    type InsuranceSweep = ();
     type RebatePayout = ();
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]

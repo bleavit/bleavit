@@ -179,6 +179,24 @@ impl<AccountId> PotFunding<AccountId> for () {
     }
 }
 
+/// Runtime custody seam for the 08 §1.2/§1.4 INSURANCE → `MAIN` sweep (SQ-207).
+///
+/// Implementations MUST move the real USDC with `Preservation::Preserve`:
+/// INSURANCE is a genesis-endowed permanent custody account under 03 §7 R-4, so
+/// at most `balance − min_balance` is sweepable and an over-large `amount` MUST
+/// fail whole rather than reap the account (G-1).
+pub trait InsuranceSweep {
+    fn sweep(amount: futarchy_primitives::Balance) -> frame_support::dispatch::DispatchResult;
+}
+
+/// Custody-free test environments may use the unit implementation. Production
+/// binds the real INSURANCE-to-MAIN USDC transfer at the runtime boundary.
+impl InsuranceSweep for () {
+    fn sweep(_: futarchy_primitives::Balance) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
+}
+
 /// B4/B1a seam (09 §4): dispatch the DOT funding transfer for a renewal the
 /// accounting just committed. An `Err` rolls back the whole extrinsic (quote
 /// restored, period not funded) so the keeper can retry — bounded retry via
@@ -212,6 +230,15 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     /// pot funding path. Custody-free pallet mocks may keep the no-op default;
     /// the assembled runtime mints its benchmark fixture into `ForeignAssets`.
     fn prime_pot_funding(
+        _: futarchy_primitives::Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
+    /// Seed the real-USDC INSURANCE custody balance the 08 §1.2/§1.4 sweep
+    /// moves. Under 03 §7 R-4 the account is genesis-endowed with `min_balance`
+    /// only, so without this the `Preservation::Preserve` transfer refuses and
+    /// the `sweep_insurance` benchmark cannot execute in the assembled runtime.
+    fn prime_insurance_custody(
         _: futarchy_primitives::Balance,
     ) -> frame_support::dispatch::DispatchResult {
         Ok(())
@@ -279,6 +306,9 @@ pub mod pallet {
         /// Runtime custody adapter which atomically moves real USDC from MAIN
         /// into the KEEPER/ORACLE payout pot when its budget line is funded.
         type PotFunding: PotFunding<Self::AccountId>;
+
+        /// Custody seam for the 08 §1.2/§1.4 INSURANCE → `MAIN` sweep (SQ-207).
+        type InsuranceSweep: InsuranceSweep;
 
         /// Weight information for extrinsics.
         type WeightInfo: WeightInfo;
@@ -426,6 +456,8 @@ pub mod pallet {
             quote_authority: T::AccountId,
             renewal_account: [u8; 32],
         },
+        /// INSURANCE was swept into `MAIN` by a TREASURY decision (08 §1.2/§1.4).
+        InsuranceSwept { amount: Balance },
     }
 
     /// 1:1 with [`CoreError`]; `CoreError::BadOrigin` maps to
@@ -724,6 +756,37 @@ pub mod pallet {
             });
             Ok(())
         }
+
+        /// `treasury.sweep_insurance(amount)` — the sole admissible outflow of
+        /// the INSURANCE account (08 §1.2/§1.4, SQ-207).
+        ///
+        /// Origin: `FutarchyTreasury` only, i.e. a passed TREASURY-class
+        /// decision — no guardian power, playbook or admin origin can reach it.
+        /// Destination: `MAIN`, and only `MAIN`; the sweep never pays a third
+        /// party, so every existing control (budget lines, §1.3 rolling meters,
+        /// stream thresholds, the reserve-health flag) governs the funds
+        /// afterwards. Takes no budget line by design — it is an inbound
+        /// transfer *to* `MAIN`, and 08 §1.2 rejected a `BudgetLine::Insurance`
+        /// outright.
+        ///
+        /// INSURANCE sits outside NAV (08 §1.2), so a sweep raises NAV by
+        /// exactly `amount`. Custody moves under `Preservation::Preserve`: at
+        /// most `balance − min_balance` is sweepable and an over-large request
+        /// fails whole rather than reaping this 03 §7 R-4 permanent account
+        /// (G-1). Accounting is credited first and custody second, so a custody
+        /// refusal rolls the credit back with the dispatch.
+        #[pallet::call_index(11)]
+        #[pallet::weight(T::WeightInfo::sweep_insurance())]
+        pub fn sweep_insurance(origin: OriginFor<T>, amount: Balance) -> DispatchResult {
+            T::TreasuryOrigin::ensure_origin(origin)?;
+            Self::mutate(|t| t.sweep_insurance(Origin::FutarchyTreasury, amount))?;
+            // Zero keeps the core's bookkeeping/event semantics but has no
+            // custody to move; skipping the seam cannot strand value.
+            if amount != 0 {
+                T::InsuranceSweep::sweep(amount)?;
+            }
+            Ok(())
+        }
     }
 
     #[pallet::extra_constants]
@@ -812,14 +875,20 @@ pub mod pallet {
         // ---- runtime-internal (non-extrinsic) entry points -----------------
 
         /// 07 §8 / 08 §1.2: the oracle's reserve-health probe sets/clears the
-        /// haircut flag `R`. Runtime-internal (a sibling-pallet Rust call, wired
-        /// at B1a); emits `NavHaircutFlagged` on every transition.
-        pub fn set_reserve_impaired(flag: bool) {
+        /// haircut flag `R`. Runtime-internal (a sibling-pallet Rust call);
+        /// emits `NavHaircutFlagged` on every transition.
+        ///
+        /// **Fallible on purpose (SQ-205).** It is reached from the oracle's
+        /// `ReserveHealthSink` inside that pallet's storage layer, and 08 §1.2
+        /// ties `spendable_nav = 0` to exactly this flag. Swallowing a persist
+        /// failure here would let the oracle transition and the constitution
+        /// bit-7 mirror commit while NAV kept reporting full backing — the one
+        /// split-brain the seam exists to prevent. Propagating instead unwinds
+        /// all three writes (G-1).
+        pub fn set_reserve_impaired(flag: bool) -> DispatchResult {
             let mut t = Self::load();
             t.set_reserve_impaired(T::CurrentEpoch::get(), flag);
-            // `set_reserve_impaired` only flips the flag / pushes an event; the
-            // conversion cannot exceed a bound, but persist defensively anyway.
-            let _ = Self::persist(t);
+            Self::persist(t)
         }
 
         /// Infallible, fail-soft keeper rebate endpoint (08 §6.3 / 07).
@@ -907,10 +976,14 @@ pub mod pallet {
 
         /// 08 §4.2 minimum-viable-NAV arming gate — the **hard** variant: returns
         /// `Err(NavFloorUnmet)` when spendable NAV is below the class floor, and
-        /// emits **no** event. A caller that propagates this `Err` fails its
-        /// dispatch, which rolls back any event anyway; so the loud event is the
-        /// caller's job via [`Self::flag_nav_floor`] (Codex review). Under the
-        /// reserve haircut spendable NAV is 0, so every class fails.
+        /// emits **no** event. This `Err` *is* 08 §4.2's loud signal (SQ-381
+        /// resolution): it fails the caller's dispatch — surfaced durably as
+        /// `system::ExtrinsicFailed`, or as the dispatching pallet's captured-`Err`
+        /// result event (bootstrap sudo's `Sudid` on the 09 §5.4 arming path) —
+        /// while leaving the arming bits exactly as they were (fail-static). A
+        /// pallet event cannot also survive the `Err` (FRAME rolls it back), so the
+        /// field-carrying event is [`Self::flag_nav_floor`]'s job on an `Ok` path.
+        /// Under the reserve haircut spendable NAV is 0, so every class fails.
         pub fn ensure_nav_floor(class: ProposalClass) -> DispatchResult {
             ensure!(
                 Self::nav().spendable_nav >= Treasury::floor(class),
@@ -919,13 +992,22 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 08 §4.2/§4.4 minimum-viable-NAV arming gate — the **loud** variant:
-        /// if spendable NAV is below the class floor it deposits the durable
-        /// `NavFloorUnmet { class, nav, floor }` event and returns `true`;
-        /// otherwise returns `false`. `pallet-epoch`'s arming crank (A8) calls
-        /// this on its **`Ok`-returning** path (arming "rejects as deferred",
-        /// 08 §4.4) so the event survives — unlike an `Err`, which FRAME rolls
-        /// back. No balance changes, so nothing is persisted.
+        /// 08 §4.2/§4.4 minimum-viable-NAV arming gate — the **non-blocking**
+        /// diagnostic variant: if spendable NAV is below the class floor it
+        /// deposits the durable `NavFloorUnmet { class, nav, floor }` event and
+        /// returns `true`; otherwise returns `false`. It is meant for an
+        /// **`Ok`-returning** caller (08 §4.4's "rejects as deferred" shrink path,
+        /// or a FE/keeper pre-check), where the field-carrying event survives —
+        /// unlike an `Err`, which FRAME rolls back.
+        ///
+        /// **It has no production caller** (verified 2026-07-22), and that is now
+        /// spec-legitimate, not a gap: SQ-381 resolved 08 §4.2 so the *blocking*
+        /// arming path's loud signal is the extrinsic failure of the hard
+        /// [`Self::ensure_nav_floor`] (which `constitution.set_phase_flag` uses,
+        /// because it must leave `PhaseFlags` unchanged on refusal — an `Err`).
+        /// This soft variant emits the richer event but arms nothing and is not on
+        /// the `set_phase_flag` blocking path. An earlier revision of this comment
+        /// wrongly claimed `pallet-epoch`'s A8 arming crank calls it — it does not.
         pub fn flag_nav_floor(class: ProposalClass) -> bool {
             let mut t = Self::load();
             let below = t.ensure_nav_floor(class).is_err();
@@ -1152,6 +1234,7 @@ pub mod pallet {
                 CoreEvent::KeeperBudgetExhausted { epoch, spent } => {
                     Event::KeeperBudgetExhausted { epoch, spent }
                 }
+                CoreEvent::InsuranceSwept { amount } => Event::InsuranceSwept { amount },
             };
             Self::deposit_event(fe);
         }

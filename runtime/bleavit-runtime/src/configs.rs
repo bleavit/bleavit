@@ -1238,10 +1238,31 @@ impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for ConstitutionGovernan
         Ok(pallet_origins::Origin::FutarchyParam.into())
     }
 }
+/// 08 §4.2 minimum-viable-NAV admission for the 02 §7.3 arming bits (SQ-180).
+///
+/// The hard `ensure_nav_floor` variant is the right one here (SQ-381 resolution):
+/// on a below-floor arming attempt 08 §4.2's loud signal *is* the extrinsic
+/// failure carrying `NavFloorUnmet` — the `Err` fails the dispatch (surfaced
+/// durably as `system::ExtrinsicFailed`, or bootstrap sudo's `Sudid { Err(..) }`
+/// on the 09 §5.4 arming path) while leaving `PhaseFlags` unchanged (fail-static).
+/// A pallet event cannot also survive the `Err` (FRAME rolls it back), and the
+/// unchanged-flags requirement is exactly what mandates the `Err`. The
+/// field-carrying `NavFloorUnmet { class, nav, floor }` event stays available on
+/// the non-blocking, `Ok`-returning `flag_nav_floor` diagnostic variant (08 §4.4).
+pub struct TreasuryPhaseArmingGate;
+impl pallet_constitution::PhaseArmingGate for TreasuryPhaseArmingGate {
+    fn ensure_armable(
+        class: futarchy_primitives::ProposalClass,
+    ) -> frame_support::dispatch::DispatchResult {
+        FutarchyTreasury::ensure_nav_floor(class)
+    }
+}
+
 impl pallet_constitution::Config for Runtime {
     type GovernanceOrigin = ConstitutionGovernanceOrigin;
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
     type WeightInfo = crate::weights::pallet_constitution::WeightInfo<Runtime>;
+    type PhaseArmingGate = TreasuryPhaseArmingGate;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
@@ -2980,14 +3001,18 @@ fn derived_treasury_ask(
                     | pallet_futarchy_treasury::Call::cancel_stream { .. }
                     | pallet_futarchy_treasury::Call::issue_vit { .. }
                     | pallet_futarchy_treasury::Call::recover_foreign { .. }
-                    | pallet_futarchy_treasury::Call::set_coretime_authority { .. },
+                    | pallet_futarchy_treasury::Call::set_coretime_authority { .. }
+                    // 05 §1.4 / 08 §1.4: the sweep moves USDC *into* NAV, so its
+                    // derived Treasury ask is exactly zero — one of the two
+                    // admissible zero-outflow Treasury leaves 05 §1.4 names.
+                    | pallet_futarchy_treasury::Call::sweep_insurance { .. },
                 ) => 0,
                 // 05 §1.4 ask derivation (SQ-244/SQ-316): `claim_assets` moves
                 // already-owned assets out of the trap register and creates **no**
-                // treasury outflow, so its derived ask is exactly zero. This is the
-                // one admissible zero-outflow Treasury leaf and MUST NOT be
-                // generalized into "unknown leaves ask zero" — every other unknown
-                // call still fails closed at the `_` arm below.
+                // treasury outflow, so its derived ask is exactly zero. This is
+                // one of the two admissible zero-outflow Treasury leaves and MUST
+                // NOT be generalized into "unknown leaves ask zero" — every other
+                // unknown call still fails closed at the `_` arm below.
                 RuntimeCall::PolkadotXcm(pallet_xcm::Call::claim_assets { .. }) => 0,
                 // `claim_stream` is Signed-recipient-only and coretime renewal is
                 // priced from live quote storage. Neither can be committed as a
@@ -3990,6 +4015,7 @@ impl pallet_oracle::Config for Runtime {
     // reaches its documented post-commit rebate path.
     type ProbeDispatch = RuntimeProbeDispatch;
     type ProbeTimeoutSink = OracleProbeTimeoutToWelfare;
+    type ReserveHealthSink = RuntimeReserveHealthSink;
     type KeeperRebate = FutarchyTreasury;
     type MaxRoundCloseBatch = ConstU32<{ kernel::TICK_BATCH }>;
     type WeightInfo = crate::weights::pallet_oracle::WeightInfo<Runtime>;
@@ -4005,6 +4031,53 @@ impl pallet_oracle::ProbeTimeoutSink for OracleProbeTimeoutToWelfare {
         <XcmTrafficRecorder as bleavit_xcm::health::LocalXcmHealthSink>::note_probe_timeout();
     }
 }
+
+/// 07 §8 / 08 §1.2 (SQ-205): carry a reserve-health transition to both owners of
+/// its consequences — the constitution's 02 §7.3 bit-7 mirror and the treasury's
+/// fail-static NAV haircut — as one indivisible act.
+///
+/// Ordering is deliberate but not load-bearing: the oracle invokes this inside
+/// an explicit storage layer, so if the treasury write fails the constitution
+/// write and the oracle transition unwind with it. 08 §1.2 ties `spendable_nav`
+/// to exactly this flag, so a half-applied transition would leave `PhaseFlags`
+/// and NAV disagreeing about solvency (R-7).
+///
+/// Unused outside `cfg(test)` on purpose — see `RuntimeReserveHealthSink` below
+/// for why production still binds `()`. The `allow` is the marker of that
+/// deliberate gap, not of dead code nobody noticed.
+#[allow(dead_code)]
+pub struct ReserveHealthToConstitutionAndTreasury;
+impl pallet_oracle::ReserveHealthSink for ReserveHealthToConstitutionAndTreasury {
+    fn reserve_health_changed(unhealthy: bool) -> frame_support::dispatch::DispatchResult {
+        crate::Constitution::note_reserve_health(unhealthy)?;
+        crate::FutarchyTreasury::set_reserve_impaired(unhealthy)?;
+        Ok(())
+    }
+}
+
+/// **Deliberately unbound in production (SQ-205 / SQ-380).** The seam above is
+/// complete and tested, but binding it live today would arm a permanent,
+/// permissionless treasury halt rather than the 08 §1.2 fail-static haircut:
+///
+/// * `RuntimeProbeDispatch = ()` outside benchmarks (below), so no probe is ever
+///   *sent*; and `XcmConfig::ResponseHandler = PolkadotXcm` rather than
+///   `bleavit_xcm::probe::ProbeAwareResponseHandler`, so no probe response is
+///   ever *routed* — `Pallet::reserve_probe_result` has no production caller.
+/// * `crank_reserve_probe` nevertheless commits `pending_since` regardless of
+///   `ProbeDispatch::live()`, so its timeout folds still latch consecutive
+///   fails. Any signed keeper reaches `ReserveUnhealthy` in ~2 probe intervals.
+/// * Recovery needs `res.recover_threshold` consecutive *passes*, which arrive
+///   only through the unrouted response path. The latch is therefore one-way.
+///
+/// Wired live, that is `spendable_nav = 0` chain-wide, forever, at any keeper's
+/// option. The blocker is the probe feed, not this seam; SQ-380 tracks it and
+/// the release blocker `treasury.reserve_health_unwired` stays open until then.
+/// Tests bind the real sink so the composition above is proven and the
+/// production switch is a one-line change.
+#[cfg(not(test))]
+type RuntimeReserveHealthSink = ();
+#[cfg(test)]
+type RuntimeReserveHealthSink = ReserveHealthToConstitutionAndTreasury;
 
 #[cfg(feature = "runtime-benchmarks")]
 pub struct BenchmarkProbeDispatch;
@@ -4226,6 +4299,27 @@ impl pallet_futarchy_treasury::PotFunding<AccountId> for TreasuryPotFunding {
         .map(|_| ())
     }
 }
+/// 08 §1.2/§1.4 (SQ-207): the custody half of `sweep_insurance` — INSURANCE →
+/// `MAIN`, and nowhere else.
+///
+/// `Preservation::Preserve` is normative, not defensive: INSURANCE is a
+/// genesis-endowed permanent custody account under 03 §7 R-4, so at most
+/// `balance − min_balance` is sweepable and an over-large request fails whole
+/// instead of reaping the account (G-1).
+pub struct TreasuryInsuranceSweep;
+impl pallet_futarchy_treasury::InsuranceSweep for TreasuryInsuranceSweep {
+    fn sweep(amount: Balance) -> frame_support::dispatch::DispatchResult {
+        <ForeignAssets as Mutate<AccountId>>::transfer(
+            usdc_location(),
+            &insurance_account(),
+            &crate::genesis::treasury_account(),
+            amount,
+            Preservation::Preserve,
+        )
+        .map(|_| ())
+    }
+}
+
 #[cfg(all(not(feature = "runtime-benchmarks"), not(test)))]
 pub struct CoretimeTreasuryLocation;
 #[cfg(all(not(feature = "runtime-benchmarks"), not(test)))]
@@ -4334,6 +4428,7 @@ impl pallet_futarchy_treasury::Config for Runtime {
     type RenewalDispatch = RuntimeRenewalDispatch;
     type RebatePayout = TreasuryRebatePayout;
     type PotFunding = TreasuryPotFunding;
+    type InsuranceSweep = TreasuryInsuranceSweep;
     type WeightInfo = crate::weights::pallet_futarchy_treasury::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
@@ -5028,8 +5123,24 @@ impl RuntimeCapabilities {
             RuntimeCall::Constitution(pallet_constitution::Call::set_capability { .. }) => {
                 Self::enabled(class, pallet_constitution::Capability::SetCapability)
             }
-            RuntimeCall::Constitution(pallet_constitution::Call::amend_registry { .. }) => {
+            RuntimeCall::Constitution(pallet_constitution::Call::amend_registry {
+                key,
+                min,
+                max,
+                max_delta,
+                cooldown_epochs,
+            }) => {
+                // 05 §1.4 T4 / 13 rule 7 (SQ-150): registry amendment is
+                // META-only, but the capability row alone is insufficient.
+                // Unknown keys, kernel-bounded rows and malformed metadata are
+                // verifiable constitution violations and must fail at static
+                // screening rather than survive until guarded dispatch.
                 Self::enabled(class, pallet_constitution::Capability::AmendRegistry)
+                    && pallet_constitution::Params::<Runtime>::get(*key).is_some_and(|record| {
+                        record
+                            .checked_amend(*min, *max, *max_delta, *cooldown_epochs)
+                            .is_ok()
+                    })
             }
             RuntimeCall::Constitution(pallet_constitution::Call::set_release_channel {
                 ..
@@ -5044,7 +5155,13 @@ impl RuntimeCapabilities {
                 | pallet_futarchy_treasury::Call::cancel_stream { .. }
                 | pallet_futarchy_treasury::Call::issue_vit { .. }
                 | pallet_futarchy_treasury::Call::recover_foreign { .. }
-                | pallet_futarchy_treasury::Call::set_coretime_authority { .. },
+                | pallet_futarchy_treasury::Call::set_coretime_authority { .. }
+                // 08 §1.2/§1.4 (SQ-207): the INSURANCE sweep is a TREASURY-class
+                // decision like every other treasury act. Omitting it here made
+                // `call_enabled` fall to the fail-closed `_` arm, which for
+                // `CallDomain::Treasury` is `SlashAll(ConstitutionViolation)` —
+                // a lawful sweep would have confiscated the whole intake bond.
+                | pallet_futarchy_treasury::Call::sweep_insurance { .. },
             ) => Self::enabled(class, pallet_constitution::Capability::TreasurySpend),
             // 05 §1.4 class safety (SQ-244/SQ-316): the base call-filter projection
             // of `claim_assets` stays **Public** — a Signed origin reclaiming its own
@@ -5836,6 +5953,18 @@ impl pallet_constitution::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHel
             }
         }
     }
+
+    fn prime_phase_arming() -> DispatchResult {
+        benchmark_ensure_usdc();
+        let amount =
+            FutarchyTreasury::floor(futarchy_primitives::ProposalClass::Meta).saturating_mul(4);
+        <ForeignAssets as Mutate<AccountId>>::mint_into(
+            usdc_location(),
+            &insurance_account(),
+            amount,
+        )?;
+        FutarchyTreasury::sweep_insurance(pallet_origins::Origin::FutarchyTreasury.into(), amount)
+    }
 }
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_welfare::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
@@ -5956,6 +6085,14 @@ impl pallet_futarchy_treasury::BenchmarkHelper<RuntimeOrigin, AccountId>
     fn prime_pot_funding(amount: Balance) -> DispatchResult {
         let main = TreasuryPalletId::get().into_account_truncating();
         <ForeignAssets as Mutate<AccountId>>::mint_into(usdc_location(), &main, amount).map(|_| ())
+    }
+    fn prime_insurance_custody(amount: Balance) -> DispatchResult {
+        <ForeignAssets as Mutate<AccountId>>::mint_into(
+            usdc_location(),
+            &insurance_account(),
+            amount,
+        )
+        .map(|_| ())
     }
 }
 #[cfg(feature = "runtime-benchmarks")]

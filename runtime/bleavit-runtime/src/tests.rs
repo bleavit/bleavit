@@ -724,7 +724,7 @@ fn preimage_request_count(hash: impl Into<H256>) -> u32 {
     }
 }
 
-fn empty_param_proposal(
+pub(crate) fn empty_param_proposal(
     id: futarchy_primitives::ProposalId,
     proposer: AccountId,
     payload_hash: H256,
@@ -972,7 +972,7 @@ fn install_active_x_snapshot_spec(
     Some(())
 }
 
-fn note_runtime_batch(calls: Vec<RuntimeCall>) -> Option<(H256, u32)> {
+pub(crate) fn note_runtime_batch(calls: Vec<RuntimeCall>) -> Option<(H256, u32)> {
     let batch = pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(calls).ok()?;
     let bytes = batch.encode();
     let payload_len = u32::try_from(bytes.len()).ok()?;
@@ -4567,7 +4567,7 @@ fn coretime_liveness_calls_dispatch_while_ledger_freeze_playbook_is_active() {
 fn coretime_liveness_calls_dispatch_while_reserve_health_flag_is_set() {
     development_ext().execute_with(|| {
         assert_coretime_liveness_calls_dispatch_during(91, || {
-            FutarchyTreasury::set_reserve_impaired(true);
+            assert_ok!(FutarchyTreasury::set_reserve_impaired(true));
             assert!(FutarchyTreasury::treasury().reserve_impaired);
             assert_eq!(FutarchyTreasury::nav().spendable_nav, 0);
         });
@@ -12866,7 +12866,7 @@ fn canonical_resource_key_universe_has_no_semantic_collisions() {
             }
         }
 
-        for singleton in [0x03, 0x04, 0x05, 0x0A] {
+        for singleton in [0x03, 0x04, 0x05, 0x0A, 0x0B] {
             insert_distinct(&mut keys, expected_resource_key(singleton, None));
         }
         for instance in [0_u8, 1_u8] {

@@ -1945,6 +1945,80 @@ fn amend_registry_cannot_unlock_a_value_change_beyond_kernel_bounds() {
     });
 }
 
+// -------------------------------- 08 §4.2 arming NAV gate (SQ-180) ---------
+//
+// "Arming a proposal class REQUIRES published spendable NAV ≥ the class floor
+// of 08 §4.1", and under the 08 §1.2 reserve-health flag spendable NAV is 0 so
+// every class fails (fail-static). The refusal must leave `PhaseFlags` intact.
+
+#[test]
+fn arming_below_the_class_nav_floor_is_refused_with_flags_unchanged() {
+    new_test_ext().execute_with(|| {
+        UnarmableClasses::set(vec![ProposalClass::Param]);
+        assert_noop!(
+            Constitution::set_phase_flag(RuntimeOrigin::root(), PhaseFlagsValue::PARAM_ARMED, true),
+            Error::<Test>::NavFloorUnmet
+        );
+        assert_eq!(PhaseFlags::<Test>::get(), 0);
+        assert_ok!(Constitution::do_try_state());
+    });
+}
+
+#[test]
+fn arming_at_or_above_the_floor_succeeds_and_consults_the_gate() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Constitution::set_phase_flag(
+            RuntimeOrigin::root(),
+            PhaseFlagsValue::TREASURY_ARMED,
+            true
+        ));
+        assert_eq!(PhaseFlags::<Test>::get(), PhaseFlagsValue::TREASURY_ARMED);
+        assert_eq!(ArmingGateCalls::get(), vec![ProposalClass::Treasury]);
+        assert_ok!(Constitution::do_try_state());
+    });
+}
+
+#[test]
+fn code_meta_bit_is_gated_on_both_classes_so_the_higher_floor_binds() {
+    new_test_ext().execute_with(|| {
+        // Bit 3 arms CODE *and* META (08 §4.1 floors 13,862,944 / 21,256,533),
+        // so a NAV that clears CODE but not META must still refuse.
+        UnarmableClasses::set(vec![ProposalClass::Meta]);
+        assert_noop!(
+            Constitution::set_phase_flag(
+                RuntimeOrigin::root(),
+                PhaseFlagsValue::CODE_META_ARMED,
+                true
+            ),
+            Error::<Test>::NavFloorUnmet
+        );
+        assert_eq!(PhaseFlags::<Test>::get(), 0);
+        assert_eq!(
+            ArmingGateCalls::get(),
+            vec![ProposalClass::Code, ProposalClass::Meta]
+        );
+        assert_ok!(Constitution::do_try_state());
+    });
+}
+
+#[test]
+fn a_multi_bit_arming_write_is_refused_whole_when_any_class_is_below_floor() {
+    new_test_ext().execute_with(|| {
+        // G-1: partial arming would be worse than none — the write is atomic.
+        UnarmableClasses::set(vec![ProposalClass::Treasury]);
+        assert_noop!(
+            Constitution::set_phase_flag(
+                RuntimeOrigin::root(),
+                PhaseFlagsValue::PARAM_ARMED | PhaseFlagsValue::TREASURY_ARMED,
+                true
+            ),
+            Error::<Test>::NavFloorUnmet
+        );
+        assert_eq!(PhaseFlags::<Test>::get(), 0);
+        assert_ok!(Constitution::do_try_state());
+    });
+}
+
 // ------------------------------- A13 · constitution/params cluster (batch X) --
 
 /// SQ-36 (ruled 2026-07-21): `ledger.pos_dep` is frozen — the registry maximum
@@ -1981,6 +2055,35 @@ fn sq_36_ledger_position_deposit_is_frozen_at_its_kernel_floor() {
     });
 }
 
+#[test]
+fn disarming_is_never_gated_even_below_the_floor() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Constitution::set_phase_flag(
+            RuntimeOrigin::root(),
+            PhaseFlagsValue::PARAM_ARMED,
+            true
+        ));
+        // NAV then collapses (e.g. the reserve-health haircut lands).
+        UnarmableClasses::set(vec![
+            ProposalClass::Param,
+            ProposalClass::Treasury,
+            ProposalClass::Code,
+            ProposalClass::Meta,
+        ]);
+        ArmingGateCalls::set(Vec::new());
+        // Clearing a bit only removes capability; gating it would strand the
+        // chain armed below its own floor.
+        assert_ok!(Constitution::set_phase_flag(
+            RuntimeOrigin::root(),
+            PhaseFlagsValue::PARAM_ARMED,
+            false
+        ));
+        assert_eq!(PhaseFlags::<Test>::get(), 0);
+        assert!(ArmingGateCalls::get().is_empty());
+        assert_ok!(Constitution::do_try_state());
+    });
+}
+
 /// SQ-117 (ruled 2026-07-21): `keeper.rebate` is seeded at genesis from the
 /// 08 §6.2 crank-fee basis, so B9's rebate pipeline stops paying zero. The
 /// basis itself stays `[VERIFY]`-tagged in 13 §1 until launch benchmarking
@@ -2001,6 +2104,27 @@ fn sq_117_keeper_rebate_is_seeded_within_its_13_bounds() {
         assert!(value > 0, "a zero seed leaves the A-1 incentive inert");
         assert_eq!(value, min.saturating_mul(3));
         assert_eq!(record.max.as_u128(), min.saturating_mul(10));
+        assert_ok!(Constitution::do_try_state());
+    });
+}
+
+#[test]
+fn non_class_arming_bits_carry_no_nav_floor() {
+    new_test_ext().execute_with(|| {
+        // Bits 0 (shadow) and 4 (sudo-present) admit no proposal class, so they
+        // are armable regardless of NAV.
+        UnarmableClasses::set(vec![
+            ProposalClass::Param,
+            ProposalClass::Treasury,
+            ProposalClass::Code,
+            ProposalClass::Meta,
+        ]);
+        assert_ok!(Constitution::set_phase_flag(
+            RuntimeOrigin::root(),
+            PhaseFlagsValue::SHADOW_MODE | PhaseFlagsValue::SUDO_PRESENT,
+            true
+        ));
+        assert!(ArmingGateCalls::get().is_empty());
         assert_ok!(Constitution::do_try_state());
     });
 }
@@ -2031,6 +2155,25 @@ fn sq_158_dis_merit_min_is_seeded_as_an_independent_meta_lever() {
             key16(b"dis.merit_min"),
             ParamValue::Balance(record.value.as_u128().saturating_mul(2)),
         ));
+        assert_ok!(Constitution::do_try_state());
+    });
+}
+
+#[test]
+fn arming_gate_runs_after_the_origin_check_so_misuse_still_reports_bad_origin() {
+    new_test_ext().execute_with(|| {
+        UnarmableClasses::set(vec![ProposalClass::Param]);
+        // A non-Root origin must fail on authority, never leak the NAV state.
+        assert_noop!(
+            Constitution::set_phase_flag(
+                RuntimeOrigin::signed(PARAM_ACC),
+                PhaseFlagsValue::PARAM_ARMED,
+                true
+            ),
+            DispatchError::BadOrigin
+        );
+        assert!(ArmingGateCalls::get().is_empty());
+        assert_eq!(PhaseFlags::<Test>::get(), 0);
         assert_ok!(Constitution::do_try_state());
     });
 }

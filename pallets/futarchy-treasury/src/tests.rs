@@ -293,7 +293,7 @@ fn reserve_haircut_zeroes_spendable_nav_and_blocks_new_commitments() {
     funded_ext().execute_with(|| {
         // The haircut event is stamped with the live epoch from Config::CurrentEpoch.
         set_epoch(5);
-        crate::Pallet::<Test>::set_reserve_impaired(true);
+        assert_ok!(crate::Pallet::<Test>::set_reserve_impaired(true));
         System::assert_last_event(RuntimeEvent::Treasury(Event::NavHaircutFlagged {
             epoch: 5,
             flag: true,
@@ -711,6 +711,7 @@ mod renewal_dispatch_seam {
         type RenewalDispatch = RecordingRenewalDispatch;
         type RebatePayout = ();
         type PotFunding = ();
+        type InsuranceSweep = ();
         type WeightInfo = ();
         #[cfg(feature = "runtime-benchmarks")]
         type BenchmarkHelper = DispatchBenchmarkHelper;
@@ -1160,9 +1161,11 @@ fn nav_floor_gate_is_loud() {
             crate::Pallet::<Test>::ensure_nav_floor(ProposalClass::Code),
             Error::<Test>::NavFloorUnmet
         );
-        // Loud variant: below the floor ⇒ deposits the DURABLE NavFloorUnmet
-        // (08 §4.2/§4.4 "reject as deferred") and returns true; A8's arming
-        // crank calls this on its Ok path so the event survives.
+        // Non-blocking diagnostic variant: below the floor ⇒ deposits the DURABLE
+        // NavFloorUnmet (08 §4.2/§4.4 "reject as deferred") and returns true. This
+        // is an Ok path, so the field-carrying event survives — unlike the hard
+        // ensure_nav_floor Err above, which is the blocking arming path's loud
+        // signal (SQ-381). flag_nav_floor has no production caller yet.
         assert!(crate::Pallet::<Test>::flag_nav_floor(ProposalClass::Code));
         System::assert_last_event(RuntimeEvent::Treasury(Event::NavFloorUnmet {
             class: ProposalClass::Code,
@@ -1664,5 +1667,100 @@ fn shell_matches_core_over_a_randomized_op_stream() {
             );
         }
         assert_ok!(crate::Pallet::<Test>::do_try_state());
+    });
+}
+
+// --------------------------------- sweep_insurance (08 §1.2/§1.4, SQ-207) --
+//
+// The single admissible outflow of the INSURANCE account. INSURANCE is outside
+// NAV, so a sweep raises NAV by exactly the swept amount; custody preserves,
+// and the origin is a passed TREASURY decision and nothing else.
+
+#[test]
+fn sweep_insurance_credits_main_raises_nav_and_emits() {
+    funded_ext().execute_with(|| {
+        let nav_before = Treasury::nav().nav;
+        let main_before = Treasury::treasury().main_usdc;
+
+        assert_ok!(Treasury::sweep_insurance(to(), 750_000 * USDC));
+
+        // 08 §1.2: "raising it by exactly that amount".
+        assert_eq!(Treasury::treasury().main_usdc, main_before + 750_000 * USDC);
+        assert_eq!(Treasury::nav().nav, nav_before + 750_000 * USDC);
+        // Custody moved once, for the same amount.
+        assert_eq!(insurance_sweeps(), vec![750_000 * USDC]);
+        System::assert_last_event(RuntimeEvent::Treasury(Event::InsuranceSwept {
+            amount: 750_000 * USDC,
+        }));
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
+fn sweep_insurance_rejects_every_origin_but_futarchy_treasury() {
+    funded_ext().execute_with(|| {
+        let main_before = Treasury::treasury().main_usdc;
+        for bad in [
+            RuntimeOrigin::signed(nobody()),
+            RuntimeOrigin::none(),
+            RuntimeOrigin::root(),
+        ] {
+            assert_noop!(
+                Treasury::sweep_insurance(bad, 1_000 * USDC),
+                sp_runtime::DispatchError::BadOrigin
+            );
+        }
+        // No guardian/playbook/admin path exists, and nothing moved.
+        assert_eq!(Treasury::treasury().main_usdc, main_before);
+        assert!(insurance_sweeps().is_empty());
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
+fn sweep_insurance_that_would_reap_the_account_fails_whole() {
+    funded_ext().execute_with(|| {
+        let main_before = Treasury::treasury().main_usdc;
+        let nav_before = Treasury::nav().nav;
+
+        // 03 §7 R-4 / 08 §1.4: `Preservation::Preserve` refuses a request above
+        // `balance - min_balance` rather than reaping INSURANCE (G-1).
+        set_insurance_sweep_failure(true);
+        assert_noop!(
+            Treasury::sweep_insurance(to(), 10_000_000 * USDC),
+            sp_runtime::DispatchError::Other("insurance sweep would reap the account")
+        );
+
+        // The accounting credit rolled back with the custody refusal — NAV must
+        // never record USDC the treasury did not actually receive.
+        assert_eq!(Treasury::treasury().main_usdc, main_before);
+        assert_eq!(Treasury::nav().nav, nav_before);
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
+fn sweep_insurance_of_zero_is_a_bookkeeping_noop_without_custody() {
+    funded_ext().execute_with(|| {
+        let main_before = Treasury::treasury().main_usdc;
+        assert_ok!(Treasury::sweep_insurance(to(), 0));
+        assert_eq!(Treasury::treasury().main_usdc, main_before);
+        // No custody adapter call for a zero move.
+        assert!(insurance_sweeps().is_empty());
+        System::assert_last_event(RuntimeEvent::Treasury(Event::InsuranceSwept { amount: 0 }));
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
+fn swept_funds_land_in_main_and_stay_under_every_existing_control() {
+    funded_ext().execute_with(|| {
+        // 08 §1.2: once in MAIN the funds are ordinary treasury credit. The
+        // reserve-health flag still zeroes spendable NAV over them.
+        assert_ok!(Treasury::sweep_insurance(to(), 1_000_000 * USDC));
+        assert!(Treasury::nav().spendable_nav > 0);
+        assert_ok!(crate::Pallet::<Test>::set_reserve_impaired(true));
+        assert_eq!(Treasury::nav().spendable_nav, 0);
+        assert_ok!(Treasury::do_try_state());
     });
 }

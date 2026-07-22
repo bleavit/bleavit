@@ -109,6 +109,38 @@ std::thread_local! {
     static FAIL_REBATE_PAYOUT: Cell<bool> = const { Cell::new(false) };
     static POT_FUNDING_CALLS: RefCell<Vec<(PayoutLine, u128)>> = const { RefCell::new(Vec::new()) };
     static FAIL_POT_FUNDING: Cell<bool> = const { Cell::new(false) };
+    static INSURANCE_SWEEPS: RefCell<Vec<u128>> = const { RefCell::new(Vec::new()) };
+    static FAIL_INSURANCE_SWEEP: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Stand-in for the runtime's INSURANCE → `MAIN` USDC custody move (08 §1.4).
+/// `set_insurance_sweep_failure` models the `Preservation::Preserve` refusal
+/// that an over-large sweep must produce.
+pub struct MockInsuranceSweep;
+
+impl crate::InsuranceSweep for MockInsuranceSweep {
+    fn sweep(amount: u128) -> frame_support::pallet_prelude::DispatchResult {
+        INSURANCE_SWEEPS.with(|calls| calls.borrow_mut().push(amount));
+        if FAIL_INSURANCE_SWEEP.with(Cell::get) {
+            return Err(sp_runtime::DispatchError::Other(
+                "insurance sweep would reap the account",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn insurance_sweeps() -> Vec<u128> {
+    INSURANCE_SWEEPS.with(|calls| calls.borrow().clone())
+}
+
+pub fn set_insurance_sweep_failure(fail: bool) {
+    FAIL_INSURANCE_SWEEP.with(|value| value.set(fail));
+}
+
+pub fn reset_insurance_sweeps() {
+    INSURANCE_SWEEPS.with(|calls| calls.borrow_mut().clear());
+    set_insurance_sweep_failure(false);
 }
 
 pub struct MockPotFunding;
@@ -222,6 +254,7 @@ impl pallet_futarchy_treasury::Config for Test {
     type RenewalDispatch = ();
     type RebatePayout = RecordingRebatePayout;
     type PotFunding = MockPotFunding;
+    type InsuranceSweep = MockInsuranceSweep;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestBenchmarkHelper;
@@ -269,6 +302,7 @@ pub fn new_test_ext_with(
         CoretimeQuoteTtl::set(100);
         reset_rebate_payout();
         reset_pot_funding();
+        reset_insurance_sweeps();
     });
     ext
 }

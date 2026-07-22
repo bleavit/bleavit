@@ -183,4 +183,12 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 			.saturating_add(Weight::from_parts(0, 6200))
 			.saturating_add(T::DbWeight::get().writes(2))
 	}
+	/// SQ-207: conservative placeholder covering the `State` round-trip plus one
+	/// INSURANCE→MAIN `ForeignAssets` transfer. Regenerate with B5's runner.
+	fn sweep_insurance() -> Weight {
+		Weight::from_parts(175_000_000, 0)
+			.saturating_add(Weight::from_parts(0, 26782))
+			.saturating_add(T::DbWeight::get().reads(6))
+			.saturating_add(T::DbWeight::get().writes(4))
+	}
 }

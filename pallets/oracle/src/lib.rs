@@ -56,8 +56,13 @@
 //! - The reserve probe advances *state only* here (no `xcm` imports — I-24, rule 7);
 //!   the XCM send and the `QueryResponse` handler [`Pallet::reserve_probe_result`]
 //!   are wired in B4. The `ReserveUnhealthy`/`ReserveRecovered` mirror to
-//!   `constitution.PhaseFlags` bit 7 and the `PB-RESERVE` split-inflow halt are
-//!   B1a/guardian wiring.
+//!   `constitution.PhaseFlags` bit 7 and the 08 §1.2 treasury NAV haircut now
+//!   travel together through the fallible [`ReserveHealthSink`] (SQ-205), applied
+//!   on the flag's edge inside this pallet's storage layer so all three writes
+//!   commit or none do. **The production runtime still binds `()`**: the probe
+//!   feed itself is unwired and its state machine is one-way, so arming the sink
+//!   would mean a permanent chain-wide `spendable_nav = 0` — see PLAN SQ-380.
+//!   The `PB-RESERVE` split-inflow halt remains guardian wiring.
 //! - Economic custody (reserving USDC stakes/bonds, routing the 40/60 slash) is a
 //!   B-track runtime concern: the core models bond/stake amounts as `Balance`
 //!   fields, matching every other frame-free core (and A1).
@@ -66,6 +71,8 @@
 //!   core carries the 13 defaults for fallback and standalone use.
 
 extern crate alloc;
+
+use frame_support::pallet_prelude::DispatchResult;
 
 pub use pallet::*;
 pub use weights::WeightInfo;
@@ -184,6 +191,31 @@ impl ProbeTimeoutSink for () {
     fn probe_timed_out() {}
 }
 
+/// 07 §8 / 08 §1.2 seam: carries a **transition** of the reserve-health flag `R`
+/// to the sibling pallets that own its consequences — the constitution's 02 §7.3
+/// bit-7 mirror and the treasury's fail-static NAV haircut.
+///
+/// Deliberately **fallible**, unlike [`ProbeDispatch`]/[`ProbeTimeoutSink`]. A
+/// partial application is the one outcome that must never commit: 08 §1.2 makes
+/// `spendable_nav` zero exactly while the flag is set, so a run where the
+/// constitution mirror moved and the treasury haircut did not would leave
+/// `PhaseFlags` and NAV disagreeing about solvency. Returning `Err` here fails
+/// the calling dispatch, and FRAME rolls back the oracle transition together
+/// with whatever the sink already wrote — all three writes commit or none do
+/// (G-1 status quo, R-7).
+///
+/// Fired only on an actual edge (`before.unhealthy != after.unhealthy`), so a
+/// steady-state crank costs nothing.
+pub trait ReserveHealthSink {
+    fn reserve_health_changed(unhealthy: bool) -> DispatchResult;
+}
+
+impl ReserveHealthSink for () {
+    fn reserve_health_changed(_: bool) -> DispatchResult {
+        Ok(())
+    }
+}
+
 /// Constructs a runtime origin resolving to a given authority so benchmarks can
 /// drive the privileged `adjudicate` call with its exact 07 §5.4 origin.
 #[cfg(feature = "runtime-benchmarks")]
@@ -250,6 +282,11 @@ pub mod pallet {
         /// Infallible local-health observer invoked once per committed timeout
         /// fold (07 §8; 09 §6.4). It never changes dispatch results.
         type ProbeTimeoutSink: ProbeTimeoutSink;
+
+        /// Fallible sibling-pallet sink for reserve-health **transitions**
+        /// (07 §8; 08 §1.2). Applied inside the same dispatch as the oracle
+        /// transition, so an `Err` rolls the transition back with it.
+        type ReserveHealthSink: ReserveHealthSink;
 
         /// Infallible, fail-soft rebate sink for useful oracle cranks (07 §13,
         /// 08 §6.3). Oracle work is paid from the separate ORACLE budget line.
@@ -989,20 +1026,34 @@ pub mod pallet {
         fn mutate_core_with_rebate_progress(
             op: impl FnOnce(&mut Oracle) -> Result<(), CoreError>,
         ) -> Result<bool, DispatchError> {
-            let before = Self::load();
-            let mut oracle = before.clone();
-            op(&mut oracle).map_err(Self::map_core_error)?;
-            let rebate_progress = oracle.events.iter().any(|event| {
-                matches!(
-                    event,
-                    CoreEvent::RoundEscalated { .. }
-                        | CoreEvent::ComponentSettled { .. }
-                        | CoreEvent::WindowExtended { .. }
-                )
-            });
-            Self::persist(&before, &oracle);
-            Self::deposit_core_events(core::mem::take(&mut oracle.events));
-            Ok(rebate_progress)
+            // The explicit layer — rather than relying on the caller's dispatch
+            // rollback — is what makes the 07 §8 / 08 §1.2 reserve-health sink
+            // atomic for *every* entry point, including the runtime-internal
+            // `reserve_probe_result` the XCM `QueryResponse` router calls
+            // outside any extrinsic (R-7; G-1 status quo on every failure).
+            frame_support::storage::with_storage_layer(|| {
+                let before = Self::load();
+                let mut oracle = before.clone();
+                op(&mut oracle).map_err(Self::map_core_error)?;
+                let rebate_progress = oracle.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        CoreEvent::RoundEscalated { .. }
+                            | CoreEvent::ComponentSettled { .. }
+                            | CoreEvent::WindowExtended { .. }
+                    )
+                });
+                Self::persist(&before, &oracle);
+                // 08 §1.2 makes `spendable_nav` zero exactly while `R` is set, so
+                // the constitution mirror and the treasury haircut must move with
+                // the transition or not at all: an `Err` here unwinds the oracle
+                // write above together with whatever the sink already wrote.
+                if before.reserve_health.unhealthy != oracle.reserve_health.unhealthy {
+                    T::ReserveHealthSink::reserve_health_changed(oracle.reserve_health.unhealthy)?;
+                }
+                Self::deposit_core_events(core::mem::take(&mut oracle.events));
+                Ok(rebate_progress)
+            })
         }
 
         /// Write only what changed between `before` and `after` (minimal storage

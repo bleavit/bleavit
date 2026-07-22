@@ -367,6 +367,11 @@ pub enum Event {
         epoch: EpochId,
         spent: Balance,
     },
+    /// 08 §1.2/§1.4: INSURANCE swept into `MAIN` by a TREASURY decision. Not
+    /// 02 §6 ingest surface — the treasury owns it per 08 §1.4.
+    InsuranceSwept {
+        amount: Balance,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
@@ -834,6 +839,26 @@ impl Treasury {
             .map(|(_, b)| *b)
             .unwrap_or(0)
     }
+    /// 08 §1.2/§1.4 `sweep_insurance(amount)` — the one admissible outflow of
+    /// the INSURANCE account, and the internal half of it.
+    ///
+    /// INSURANCE is **outside** NAV (08 §1.2), so crediting `main_usdc` raises
+    /// NAV by exactly `amount` — the effect 08 §1.2 specifies. Deliberately
+    /// takes **no** budget line: the sweep is an inbound transfer *to* `MAIN`,
+    /// not an outflow *from* it, and 08 §1.2 explicitly rejected a dedicated
+    /// `BudgetLine::Insurance` because modelling an inflow-fed reserve as a line
+    /// inverts the direction of every §1.1 control.
+    ///
+    /// Origin is `FutarchyTreasury` only — a passed TREASURY decision. No
+    /// guardian power, playbook or admin origin can reach it. The custody half
+    /// (`Preservation::Preserve` on the real USDC) is the pallet's job.
+    pub fn sweep_insurance(&mut self, origin: Origin, amount: Balance) -> Result<(), Error> {
+        ensure!(origin == Origin::FutarchyTreasury, Error::BadOrigin);
+        self.main_usdc = self.main_usdc.checked_add(amount).ok_or(Error::Overflow)?;
+        self.events.push(Event::InsuranceSwept { amount });
+        Ok(())
+    }
+
     pub fn recover_foreign(
         &mut self,
         origin: Origin,

@@ -38,8 +38,11 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().writes(1))
     }
     fn set_phase_flag() -> Weight {
-        Weight::from_parts(20_000_000, 1_600)
-            .saturating_add(T::DbWeight::get().reads(1))
+        // SQ-180: an arming bit runs the `PhaseArmingGate`, and bit 3 runs it
+        // twice (CODE + META). Each call reads the whole treasury `State`, whose
+        // bounded encoding dominates the PoV. B5 regenerates from the benchmark.
+        Weight::from_parts(60_000_000, 26_000)
+            .saturating_add(T::DbWeight::get().reads(3))
             .saturating_add(T::DbWeight::get().writes(1))
     }
     fn set_release_channel() -> Weight {
@@ -67,8 +70,11 @@ impl WeightInfo for () {
             .saturating_add(RocksDbWeight::get().writes(1))
     }
     fn set_phase_flag() -> Weight {
-        Weight::from_parts(20_000_000, 1_600)
-            .saturating_add(RocksDbWeight::get().reads(1))
+        // SQ-180: an arming bit runs the `PhaseArmingGate`, and bit 3 runs it
+        // twice (CODE + META). Each call reads the whole treasury `State`, whose
+        // bounded encoding dominates the PoV. B5 regenerates from the benchmark.
+        Weight::from_parts(60_000_000, 26_000)
+            .saturating_add(RocksDbWeight::get().reads(3))
             .saturating_add(RocksDbWeight::get().writes(1))
     }
     fn set_release_channel() -> Weight {

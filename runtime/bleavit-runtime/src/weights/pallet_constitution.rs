@@ -64,14 +64,15 @@ impl<T: frame_system::Config> pallet_constitution::WeightInfo for WeightInfo<T> 
 	}
 	/// Storage: `Constitution::PhaseFlags` (r:1 w:1)
 	/// Proof: `Constitution::PhaseFlags` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `FutarchyTreasury::State` (r:1) — the SQ-180 `PhaseArmingGate`,
+	/// run once per arming class (twice for bit 3: CODE + META).
+	/// SQ-180: conservative placeholder pending B5 regeneration on the arming
+	/// path; the previous figures benchmarked `SUDO_PRESENT`, which never enters
+	/// the gate and therefore understated both time and PoV.
 	fn set_phase_flag() -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `172`
-		//  Estimated: `1489`
-		// Minimum execution time: 6_700_000 picoseconds.
-		Weight::from_parts(6_860_000, 0)
-			.saturating_add(Weight::from_parts(0, 1489))
-			.saturating_add(T::DbWeight::get().reads(1))
+		Weight::from_parts(60_000_000, 0)
+			.saturating_add(Weight::from_parts(0, 26782))
+			.saturating_add(T::DbWeight::get().reads(3))
 			.saturating_add(T::DbWeight::get().writes(1))
 	}
 	/// Storage: `Constitution::ReleaseChannel` (r:1 w:1)
