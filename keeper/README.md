@@ -100,6 +100,18 @@ The exact role names used by configuration, logs, and metric labels are `tick`, 
 `decide`, `settle`, `execute`, `oracle-close`, `registry-close`, `cleanup`, `renewal`, and
 `welfare`. All are enabled by default, subject to live-metadata capability detection.
 
+The `settle` role drives both `pallet-epoch` entry points into the one
+`compute_settlement → settle_baseline` chain of 05 §6: `settle_cohort` on the measured path, and
+the permissionless `finalize_epoch_baseline` of 05 §7(6) — the repair for an epoch that opened a
+Baseline vault but never formed a cohort, so the measured e+3 settlement is never scheduled and its
+single-sided holders would otherwise be stranded forever (SQ-320). Both are triggers of the same
+single SettleAuthority origin, never a second authority, which is why they share one role and one
+set of metric labels. Because the call is idempotent and no-op-safe, it is planned only against a
+Baseline vault that is still `Open` **and** whose epoch satisfies all three §7(6) preconditions
+(strictly past, no `CohortInfo`, no non-terminal proposal of that epoch) — never as a standing
+per-block no-op. It is prioritized above `cleanup` because it writes the terminal-block latch that
+the Baseline dust sweep and the book reap both require.
+
 Some roles are deliberately conservative. `record_snapshot` is submitted only when the active
 welfare specification and a missing completed-epoch snapshot are directly visible. For every live
 cohort, the extractor also follows its frozen `CohortSchedules` metric specification and catches up

@@ -1,6 +1,5 @@
 {
   "permissions": {
-    "ask": ["Bash(git push*)"],
     "allow": [
       "Bash(cargo fmt*)",
       "Bash(cargo clippy*)",
@@ -17,7 +16,8 @@
       "Bash(ls*)",
       "Bash(rg*)",
       "Bash(wc*)"
-    ]
+    ],
+    "ask": []
   },
   "hooks": {
     "SessionStart": [

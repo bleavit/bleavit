@@ -641,9 +641,10 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
         },
         RuntimeCall::IncidentRegistry(call) => match call {
             // `resolve_challenge` is gated on `EnsureOracleResolution` by both
-            // instances (`registry_config!`), so its authority-matrix row is the
-            // same as `oracle.adjudicate`'s — not `Public` (SQ-295). Classifying
-            // it `Public` admitted it for every origin and, being
+            // instances (`registry_config!`), so its configured pallet origin
+            // and classifier domain match `oracle.adjudicate` — not `Public`.
+            // Open SQ-295 tracks the remaining normative authority-matrix
+            // reconciliation. Classifying it `Public` admitted it for every origin and, being
             // non-privileged, carried it through the proxy/multisig wrapper set
             // that rejects the oracle's terminal call.
             pallet_registry::Call::resolve_challenge { .. } => leaf(CallDomain::OracleResolution),
@@ -711,7 +712,10 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_epoch::Call::withdraw { .. }
             | pallet_epoch::Call::tick { .. }
             | pallet_epoch::Call::decide { .. }
-            | pallet_epoch::Call::settle_cohort { .. } => leaf(CallDomain::Public),
+            | pallet_epoch::Call::settle_cohort { .. }
+            // 06 §3.2 authority matrix: the SQ-320 orphan-Baseline crank is a
+            // permissionless Signed row, alongside the other epoch cranks.
+            | pallet_epoch::Call::finalize_epoch_baseline { .. } => leaf(CallDomain::Public),
             pallet_epoch::Call::set_next_epoch_length { .. } => {
                 leaf(CallDomain::ConstitutionalValues)
             }
@@ -1014,7 +1018,10 @@ pub fn is_values_enactment_leaf(call: &RuntimeCall) -> bool {
             // the bare scheduler leaf must clear the origin-blind base filter
             // or the configured values path is unreachable.
             | RuntimeCall::Epoch(pallet_epoch::Call::set_next_epoch_length { .. })
-            | RuntimeCall::Constitution(pallet_constitution::Call::amend_registry { .. })
+            // SQ-150 (ruled 2026-07-21): `amend_registry` is FutarchyMeta-only,
+            // a belief-side call — NOT a values-enactment leaf. Removing it here
+            // closes the I-8 crossing (the call previously sat in both the
+            // values set and the FutarchyMeta projection below).
             | RuntimeCall::Constitution(pallet_constitution::Call::set_release_channel { .. })
             // `referenda.cancel`/`kill` are ConstitutionalValues-domain (the
             // runtime's `CancelOrigin`/`KillOrigin`), so a values referendum

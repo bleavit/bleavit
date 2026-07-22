@@ -13,7 +13,6 @@ use crate::{Runtime, RuntimeCall};
 pub(crate) enum ConditionalKind {
     ParamKeyClass,
     PendingUpgrade,
-    AmendRegistryScope,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -202,8 +201,10 @@ inventory! {
     "Session" { leaf public => ["set_keys", "purge_keys"]; }
     "Constitution" {
         conditional ParamKeyClass => ["set_param"];
-        conditional AmendRegistryScope => ["amend_registry"];
-        leaf meta => ["set_capability"];
+        // SQ-150 (ruled 2026-07-21): amend_registry is a plain FutarchyMeta
+        // leaf — non-kernel rows META-only, kernel rows immutable at dispatch —
+        // no longer a contested scope conditional.
+        leaf meta => ["set_capability", "amend_registry"];
         leaf public => ["set_phase_flag"];
         leaf values => ["set_release_channel"];
     }
@@ -244,7 +245,7 @@ inventory! {
         leaf public => ["attest", "challenge_attestation"];
     }
     "Epoch" {
-        leaf public => ["submit", "withdraw", "tick", "decide", "settle_cohort", "mark_executed", "mark_failed_executed", "retry_exhausted_to_measurement", "expire_or_stale_queue"];
+        leaf public => ["submit", "withdraw", "tick", "decide", "settle_cohort", "finalize_epoch_baseline", "mark_executed", "mark_failed_executed", "retry_exhausted_to_measurement", "expire_or_stale_queue"];
         leaf values => ["set_next_epoch_length"];
         leaf guardian_hold => ["delay_once", "force_reject_process_hold"];
         leaf emergency_playbook => ["void_cohort", "set_intake_paused"];

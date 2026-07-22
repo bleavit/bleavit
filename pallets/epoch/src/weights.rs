@@ -23,6 +23,7 @@ pub trait WeightInfo {
     fn force_reject_process_hold() -> Weight;
     fn void_cohort(items: u32) -> Weight;
     fn set_intake_paused() -> Weight;
+    fn finalize_epoch_baseline() -> Weight;
 }
 
 const STATE_POV: u64 = 48_000;
@@ -74,6 +75,9 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     }
     fn set_intake_paused() -> Weight {
         base::<T>(20_000_000, 2, 1)
+    }
+    fn finalize_epoch_baseline() -> Weight {
+        base::<T>(40_000_000, 12, 10)
     }
 }
 
@@ -128,6 +132,9 @@ impl WeightInfo for () {
     }
     fn set_intake_paused() -> Weight {
         rocks(20_000_000, 2, 1)
+    }
+    fn finalize_epoch_baseline() -> Weight {
+        rocks(40_000_000, 12, 10)
     }
 }
 

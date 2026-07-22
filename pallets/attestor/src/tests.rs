@@ -6,6 +6,7 @@ use crate::mock::*;
 use crate::{pallet::*, Error, Event};
 use attestor_core::{
     AttestorParams, ChallengeStatus, ATTESTOR_BOND, CHALLENGE_BOND, CHALLENGE_WINDOW_BLOCKS,
+    FALSE_EJECTION_THRESHOLD,
 };
 use frame_support::{assert_noop, assert_ok};
 use sp_runtime::DispatchError;
@@ -55,6 +56,22 @@ fn genesis_seeds_members_and_try_state_holds() {
         assert!(Attestations::<Test>::get().is_empty());
         assert_eq!(NextAttestationId::<Test>::get(), 0);
         assert_ok!(Attestor::do_try_state());
+    });
+}
+
+#[test]
+fn try_state_rejects_an_ejected_member_marked_active() {
+    new_test_ext().execute_with(|| {
+        Members::<Test>::mutate(|members| {
+            let member = members
+                .iter_mut()
+                .next()
+                .expect("genesis seeds three attestors");
+            member.false_count = FALSE_EJECTION_THRESHOLD;
+            member.active = true;
+        });
+
+        assert!(Attestor::do_try_state().is_err());
     });
 }
 

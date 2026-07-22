@@ -16,11 +16,14 @@
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS MUTATE_I14, MUTATE_T16_ENQUEUE, MUTATE_FORCE_CANCEL_EXECUTE,
+          MUTATE_ORPHAN_BASELINE, MUTATE_BASELINE_LIVE_STATE,
           ForceRerunModeled
 
 ASSUME /\ MUTATE_I14 \in BOOLEAN
        /\ MUTATE_T16_ENQUEUE \in BOOLEAN
        /\ MUTATE_FORCE_CANCEL_EXECUTE \in BOOLEAN
+       /\ MUTATE_ORPHAN_BASELINE \in BOOLEAN
+       /\ MUTATE_BASELINE_LIVE_STATE \in BOOLEAN
        /\ ForceRerunModeled \in BOOLEAN
 
 Rows == {"T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8",
@@ -50,6 +53,34 @@ ResolveMechanisms == {"None", "T17Accept", "T21Reject"}
 ChallengeStates == {"None", "Open", "Closed", "Contested"}
 CohortStates == {"None", "Measuring", "Settled", "Void"}
 SettlementKinds == {"None", "Money", "Neutral", "Void"}
+
+(***************************************************************************
+ * The epoch's Baseline vault (03 §2.2/§5.2; 05 §7(5)--(6); 15 §4.1).
+ *
+ * Modelled only to the depth the 15 §4.1 liveness obligation needs: the vault
+ * has no `Voided` variant (03 §6.4) because every discharge is a settlement,
+ * so two states suffice.  `via` records WHICH of the three normative
+ * transitions settled it, and exists so the reachability witnesses can prove
+ * each discharge path has a concrete trace rather than only a spec sentence.
+ *
+ * Scope: this is a single-proposal model, so the modelled epoch owns exactly
+ * one proposal and `p.cohort` doubles as the epoch's `CohortInfo`.  The vault
+ * is `Open` in `Init` -- the strongest reading of "every epoch that opens a
+ * Baseline vault", and one that costs no branching.  It over-approximates the
+ * shipped runtime, which seeds the Baseline book and vault lazily inside
+ * `open_markets` at T7, so an epoch whose only proposal ends before `Trading`
+ * has no vault at all.  Sound, because 03 §5.2 and 05 §7(6) both make "no
+ * Baseline vault for the epoch" an explicit no-op -- assuming one always
+ * exists can only make the property harder to satisfy -- but it means a
+ * counterexample trace may strand a vault after a T2/T4 termination the chain
+ * would never have opened one for.  The 08 §4.3 zero-qualified-proposal epoch
+ * is likewise NOT covered: `Absent` is not a terminal proposal state, so the
+ * crank stays blocked while `p` is `Absent`.  Both directions are conservative
+ * -- they can only hide a discharge, never a stranding.
+ ***************************************************************************
+*)
+BaselineStates == {"Open", "Settled"}
+BaselineVias == {"None", "Cohort", "Void", "Crank"}
 
 Actions ==
     {"Submit", "Withdraw", "Tick", "Decide", "GuardianDelay",
@@ -120,9 +151,14 @@ SettlementType ==
      originStatus: {"Closed", "Contested"},
      outcome: {"Money", "Neutral", "Void"}]
 
-VARIABLES p, history, decisionHistory, settlementHistory, attemptAudit
+VARIABLES p, history, decisionHistory, settlementHistory, attemptAudit, bl
 
-vars == <<p, history, decisionHistory, settlementHistory, attemptAudit>>
+vars == <<p, history, decisionHistory, settlementHistory, attemptAudit, bl>>
+
+\* Everything the proposal machine owns.  The epoch-level Baseline actions
+\* leave all of it untouched, which is what keeps every pre-existing invariant
+\* and `TerminalStatesAbsorb` valid across the enlarged model.
+proposalVars == <<p, history, decisionHistory, settlementHistory>>
 
 PreExecutedNonTerminal ==
     {"Submitted", "Screening", "Qualified", "Trading", "Extended",
@@ -172,6 +208,10 @@ Init ==
     /\ decisionHistory = <<>>
     /\ settlementHistory = <<>>
     /\ attemptAudit = [op |-> "None", rejected |-> FALSE]
+    /\ bl = [state |-> "Open",
+             via |-> "None",
+             epochPast |-> FALSE,
+             doubleSettle |-> FALSE]
 
 Submit(classes) ==
     /\ p.state = "Absent"
@@ -682,6 +722,22 @@ NeutralizeContest ==
     /\ p' = [p EXCEPT !.challenge = "Closed", !.neutralized = TRUE]
     /\ UNCHANGED <<history, decisionHistory, settlementHistory>>
 
+(***************************************************************************
+ * The Baseline leg every cohort-settling transaction carries (05 §7(5); 03
+ * §5.2).  It is mandatory and unconditional on that path, and it is the same
+ * `settle_baseline` endpoint the §7(6) crank routes through.
+ *
+ * Finding the vault already `Settled` is recorded rather than ignored:
+ * settling a Baseline before its cohort could still form is the failure mode
+ * 05 §7(6) condition 3 exists to exclude, and it strands the whole cohort
+ * instead of one holder.  `MutationBaselineLiveState.cfg` reaches it.
+ ***************************************************************************
+*)
+SettleBaselineLeg(via) ==
+    IF bl.state = "Open"
+       THEN [bl EXCEPT !.state = "Settled", !.via = via]
+       ELSE [bl EXCEPT !.doubleSettle = TRUE]
+
 VoidContest ==
     /\ p.state = "Measuring"
     /\ p.cohort = "Measuring"
@@ -692,6 +748,8 @@ VoidContest ==
     /\ settlementHistory' =
            Append(settlementHistory,
                   Settlement("Contested", "Contested", "Void"))
+    \* 05 §7(5): the one settlement a VOID still performs, at neutral s = 0.5.
+    /\ bl' = SettleBaselineLeg("Void")
     /\ UNCHANGED <<history, decisionHistory>>
 
 SettleCohort ==
@@ -712,9 +770,76 @@ SettleCohort ==
                                     THEN "Contested"
                                     ELSE "Closed",
                                  kind))
+        \* 05 §6: `settle_cohort` settles Baseline(e) on the same measured pass.
+        /\ bl' = SettleBaselineLeg("Cohort")
         /\ UNCHANGED decisionHistory
 
-Progress(classes, welfareResults, earlyReasons, gateInvalidEnabled) ==
+(***************************************************************************
+ * Epoch-level Baseline transitions (05 §7(6); 03 §5.2).  None of them is a
+ * proposal-machine transition, so none appends to `history`: 05 §2.1's T-table
+ * has no row for them and `TransitionTableExhaustive` requires every row to
+ * match exactly one T-row.  For the same reason `finalize_epoch_baseline` is
+ * deliberately NOT in `AttemptOps` -- that audit asserts a dispatch is
+ * REJECTED once the proposal is terminal, and this call is specified to be
+ * admissible exactly then.
+ ***************************************************************************
+*)
+
+\* The modelled epoch becomes strictly past (§7(6) condition 1).  Monotone, and
+\* unconditionally enabled while the vault is still `Open`, so the `epochPast`
+\* slice is always one admissible step away from any reachable state -- which
+\* is what lets the safety invariant below stand in for the AG EF statement.
+\* Freezing it once the vault settles is a pure state-space reduction: no
+\* property reads `epochPast` outside the `bl.state = "Open"` case.
+AdvanceEpoch ==
+    /\ bl.state = "Open"
+    /\ ~bl.epochPast
+    /\ bl' = [bl EXCEPT !.epochPast = TRUE]
+    /\ UNCHANGED proposalVars
+
+(***************************************************************************
+ * §7(6) condition 3, rendered over this model's single proposal.
+ *
+ * The shipped predicate is `epoch_core::is_terminal_state` -- deliberately
+ * neither the model's `Terminal` nor the negation of `is_live_state`.  The
+ * mutation reproduces the rejected `is_live_state` reading, which reports
+ * `Submitted`/`Screening` terminal even though a proposal stamped with this
+ * epoch keeps that stamp across the boundary and can still form the cohort.
+ ***************************************************************************
+*)
+TerminalForCrank ==
+    \/ p.state \in {"Settled", "Cancelled", "Expired", "Rejected"}
+    \/ /\ MUTATE_BASELINE_LIVE_STATE
+       /\ p.state \in {"Submitted", "Screening"}
+
+\* All three §7(6) preconditions, re-checked at dispatch.  Condition 2 is
+\* `p.cohort = "None"`: cohort state is set only together with `Measuring` and
+\* never returns to "None", so it covers the live `CohortInfo` and the archived
+\* `CohortSummary` alike.  The mutation removes the call from the machine
+\* entirely, which is what the pre-SQ-320 chain was.
+CrankAdmissible ==
+    /\ ~MUTATE_ORPHAN_BASELINE
+    /\ bl.epochPast
+    /\ p.cohort = "None"
+    /\ TerminalForCrank
+
+\* 05 §7(6) `pallet-epoch::finalize_epoch_baseline(e)`, permissionless.  The
+\* "already `Settled` is a no-op returning Ok" clause is modelled by leaving the
+\* action disabled there: a no-op changes no state.
+FinalizeEpochBaseline ==
+    /\ bl.state = "Open"
+    /\ CrankAdmissible
+    /\ bl' = [bl EXCEPT !.state = "Settled", !.via = "Crank"]
+    /\ UNCHANGED proposalVars
+
+EpochBaselineStep ==
+    \/ AdvanceEpoch
+    \/ FinalizeEpochBaseline
+
+\* Every proposal-machine transition that does not touch the epoch's Baseline
+\* vault.  `VoidContest` and `SettleCohort` are the two that do (05 §7(5)) and
+\* are pulled out below so they can carry their own `bl'`.
+PlainProgress(classes, welfareResults, earlyReasons, gateInvalidEnabled) ==
     \/ Submit(classes)
     \/ Withdraw
     \/ StartScreening
@@ -745,6 +870,11 @@ Progress(classes, welfareResults, earlyReasons, gateInvalidEnabled) ==
     \/ CloseChallenge
     \/ ContestValue
     \/ NeutralizeContest
+
+Progress(classes, welfareResults, earlyReasons, gateInvalidEnabled) ==
+    \/ /\ PlainProgress(classes, welfareResults, earlyReasons,
+                        gateInvalidEnabled)
+       /\ UNCHANGED bl
     \/ VoidContest
     \/ SettleCohort
 
@@ -752,21 +882,33 @@ TerminalRejectedAttempt ==
     /\ Terminal
     /\ \E op \in AttemptOps:
          /\ attemptAudit' = [op |-> op, rejected |-> TRUE]
-         /\ UNCHANGED <<p, history, decisionHistory, settlementHistory>>
+         /\ UNCHANGED <<p, history, decisionHistory, settlementHistory, bl>>
 
+(***************************************************************************
+ * The epoch-level Baseline step is available in BOTH regions -- including the
+ * absorbing `Terminal` one, which is the whole point of 05 §7(6): the epoch
+ * whose every proposal took T20 is exactly an epoch whose proposal machine has
+ * stopped.  Gating it behind `~Terminal`, as the proposal transitions are,
+ * would make the crank unreachable in the only region where it matters.
+ ***************************************************************************
+*)
 SmallNext ==
-    IF Terminal
-       THEN TerminalRejectedAttempt
-       ELSE /\ Progress(SmallClasses, SmallWelfareResults,
-                         SmallEarlyReasons, FALSE)
-            /\ UNCHANGED attemptAudit
+    \/ /\ IF Terminal
+             THEN TerminalRejectedAttempt
+             ELSE /\ Progress(SmallClasses, SmallWelfareResults,
+                               SmallEarlyReasons, FALSE)
+                  /\ UNCHANGED attemptAudit
+    \/ /\ EpochBaselineStep
+       /\ UNCHANGED attemptAudit
 
 FullNext ==
-    IF Terminal
-       THEN TerminalRejectedAttempt
-       ELSE /\ Progress(AllClasses, FullWelfareResults,
-                         FullEarlyReasons, TRUE)
-            /\ UNCHANGED attemptAudit
+    \/ /\ IF Terminal
+             THEN TerminalRejectedAttempt
+             ELSE /\ Progress(AllClasses, FullWelfareResults,
+                               FullEarlyReasons, TRUE)
+                  /\ UNCHANGED attemptAudit
+    \/ /\ EpochBaselineStep
+       /\ UNCHANGED attemptAudit
 
 SmallSpec == Init /\ [][SmallNext]_vars
 FullSpec == Init /\ [][FullNext]_vars
@@ -810,6 +952,10 @@ TypeOK ==
     /\ p.t20HadVault \in BOOLEAN
     /\ attemptAudit.op \in AttemptOps \cup {"None"}
     /\ attemptAudit.rejected \in BOOLEAN
+    /\ bl.state \in BaselineStates
+    /\ bl.via \in BaselineVias
+    /\ bl.epochPast \in BOOLEAN
+    /\ bl.doubleSettle \in BOOLEAN
     /\ history \in Seq(TransitionType)
     /\ decisionHistory \in Seq(DecisionType)
     /\ settlementHistory \in Seq(SettlementType)
@@ -1052,6 +1198,78 @@ VaultCouplingSanity ==
 TerminalStatesAbsorb == [] (Terminal => []Terminal)
 
 (***************************************************************************
+ * Baseline settlement liveness (15 §4.1, NORMATIVE; SQ-320).
+ *
+ * The obligation is that "no reachable state leaves an epoch's Baseline vault
+ * permanently unsettleable: for every epoch that opens a Baseline vault, some
+ * admissible continuation reaches `BaselineState::Settled`".
+ *
+ * That is a POSSIBILITY statement -- AG EF Settled -- which is branching-time
+ * and has no direct expression in TLC's linear-time property language.  It is
+ * discharged here as an equivalent safety invariant over this model, resting
+ * on two structural facts each TLC run establishes independently:
+ *
+ *   (i) `Terminal` is the only absorbing region of the proposal machine
+ *       (`TerminalStatesAbsorb`), TLC's deadlock check proves every reachable
+ *       state has a successor, and `Terminal` is reachable from everywhere:
+ *       T20 `ForceReject` is enabled on the whole of `PreExecutedNonTerminal`
+ *       and lands in `Rejected` in one step, and the `Measuring` region closes
+ *       through CloseChallenge/Neutralize/Void into `SettleCohort`/`VoidContest`.
+ *  (ii) `AdvanceEpoch` is unconditionally enabled whenever the vault is still
+ *       `Open` and never reverts, so the `bl.epochPast` slice is one step away
+ *       from every reachable state with an open vault.
+ *
+ * So the only way to strand the vault is to sit in `Terminal` with the epoch
+ * past, the vault `Open`, and no discharge enabled -- which is precisely what
+ * the invariant forbids.  Its four cases carry real content, one per member of
+ * `Terminal`: `Cancelled` and T20-`Rejected` are discharged by the §7(6)
+ * crank, p-`Settled` by the T19 leg having already settled it, and
+ * `Measuring`/`Void` by the §7(5) void leg having already settled it.
+ *
+ * Anti-vacuity is proved in both directions by the runner (15 §4.1):
+ * `MutationOrphanBaseline.cfg` deletes the §7(6) crank and MUST violate this
+ * invariant on the T20 interleaving 15 §4.1 names explicitly, and
+ * `WitnessBaselineOrphanCrank.cfg` MUST violate its negation, proving that
+ * interleaving is genuinely reachable rather than absent by construction.
+ ***************************************************************************
+*)
+BaselineNeverStranded ==
+    (bl.state = "Open" /\ bl.epochPast /\ Terminal) => CrankAdmissible
+
+(***************************************************************************
+ * Fact (i) of that reduction, made mechanical instead of left as prose.
+ *
+ * Every reachable non-`Terminal` state belongs to one of the three families
+ * whose closure into `Terminal` is an admissible continuation of one or a few
+ * steps: `Absent` (Submit is enabled), `PreExecutedNonTerminal` (T20
+ * `ForceReject` is enabled on ALL of it and lands in `Rejected` in one step),
+ * or `Measuring` (which closes through CloseChallenge / NeutralizeContest /
+ * VoidContest into `SettleCohort` or the cohort void).  The T17/T21
+ * intermediates `Executed`, `Expired` and resolved-`Rejected` are atomic with
+ * their parent row and never persist, so nothing reachable escapes the three.
+ *
+ * A later edit that introduces a persistent state outside them -- the way a
+ * stranded Baseline vault itself was introduced -- breaks this invariant loudly
+ * instead of silently weakening `BaselineNeverStranded` into a statement about
+ * a region the machine no longer has to pass through.
+ ***************************************************************************
+*)
+TerminalityAlwaysReachable ==
+    ~Terminal => p.state \in {"Absent", "Measuring"} \cup PreExecutedNonTerminal
+
+\* The converse guard.  A Baseline vault settles exactly once, by exactly one
+\* of the three normative transitions, and never before its cohort could still
+\* form -- 05 §7(6) condition 3.  Settling early does not strand one holder, it
+\* strands the whole cohort, because the later `settle_cohort` leg then has an
+\* already-`Settled` vault to settle.  `MutationBaselineLiveState.cfg` reaches
+\* exactly that state through the rejected `is_live_state` reading.
+BaselineSettledExactlyOnce ==
+    /\ ~bl.doubleSettle
+    /\ (bl.state = "Settled") = (bl.via # "None")
+    /\ bl.via = "Cohort" => CountRow("T19") = 1
+    /\ bl.via = "Crank" => p.cohort = "None"
+
+(***************************************************************************
  * Reachability witnesses.  Each Witness*.cfg installs one of these negated
  * conditions as an invariant.  TLC must violate it (runner contract), proving
  * the named behavior has a concrete trace instead of only a table row.
@@ -1101,5 +1319,20 @@ NoForceQueuedCancellationWitness ==
         /\ history[i].from = "Queued"
         /\ history[i].mandate > 0
         /\ history[i].mandate \in p.forceCancelledMandates
+
+\* One witness per normative Baseline discharge (03 §5.2; 05 §7(5)--(6)), so
+\* that `BaselineNeverStranded` cannot pass by having no reachable discharge at
+\* all.  The first is the interleaving 15 §4.1 names verbatim: the epoch's
+\* proposal is force-rejected (T20) before it ever reaches `Measuring`, so no
+\* cohort forms, T19 never fires, and only the §7(6) crank can settle the vault.
+NoOrphanCrankSettlementWitness ==
+    ~(/\ CountRow("T20") > 0
+      /\ CountRow("T19") = 0
+      /\ bl.state = "Settled"
+      /\ bl.via = "Crank")
+
+NoMeasuredBaselineSettlementWitness == bl.via # "Cohort"
+
+NoVoidBaselineSettlementWitness == bl.via # "Void"
 
 =============================================================================

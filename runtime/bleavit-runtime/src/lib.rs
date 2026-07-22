@@ -67,11 +67,15 @@ mod pov_budgets;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_constitution_params;
+#[cfg(test)]
 mod tests_s5;
 #[cfg(test)]
 mod tests_s5_behavior;
 #[cfg(test)]
 mod tests_telemetry;
+#[cfg(test)]
+mod tests_welfare_inputs;
 
 use alloc::borrow::Cow;
 // `impl_opaque_keys!` references a bare `Vec` — resolved by the std prelude in

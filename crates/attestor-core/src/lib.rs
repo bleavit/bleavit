@@ -689,6 +689,15 @@ mod tests {
     }
 
     #[test]
+    fn try_state_rejects_an_ejected_member_marked_active() {
+        let mut r = AttestorRegistry::new(members(), params()).unwrap();
+        r.members[0].false_count = FALSE_EJECTION_THRESHOLD;
+        r.members[0].active = true;
+
+        assert_eq!(r.try_state(), Err(Error::EjectedMemberActive));
+    }
+
+    #[test]
     fn worst_case_liability_scan_stays_within_bound() {
         // Mirrors the `pallet-attestor` `set_members` worst-case benchmark
         // (Finding 1). `set_members` runs one `has_unsettled_liability` scan

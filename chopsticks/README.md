@@ -39,28 +39,34 @@ their writers as dispatchable calls.
 
 [`tools/env/run-evidence.py`](../tools/env/run-evidence.py) starts each committed
 YAML through the Chopsticks version sourced from
-[`tools/env/pins.env`](../tools/env/pins.env). A runner pass currently attests
-that the scenario booted as a fork from the release-Wasm-bound raw spec, every
-injected storage cell was verified byte-exactly over localhost JSON-RPC, two
-blocks were produced with an advancing header, and the live `:code` bytes
-remained bound to the release Wasm before and after those blocks. After
-generating the chain specs and building the release Wasm, run:
+[`tools/env/pins.env`](../tools/env/pins.env). A runner pass attests that the
+scenario booted as a fork from the release-Wasm-bound raw spec, every injected
+storage cell was verified byte-exactly over localhost JSON-RPC, two blocks were
+produced with an advancing header, the live `:code` bytes remained bound to the
+release Wasm before and after those blocks, **the scenario's normative card
+executed**, and **the mandatory closing try-state check passed**. After
+generating the chain specs, building the release Wasm and the `try-runtime`-feature
+Wasm, and fetching the pinned binaries, run:
 
 ```bash
 python3 tools/env/run-evidence.py \
   --kind chopsticks \
   --tier release \
   --wasm release-work/runtime/runtime.wasm \
+  --try-runtime-wasm target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm \
   --commit "$(git rev-parse HEAD)"
 ```
 
-The `base` row remains ungated because it attests only boot, injected-state,
-blocks, and live `:code` binding. All 10 scenario rows are evidence-gated on
-SQ-203 card-depth execution: the runner skips them by default and blocks
-evidence while they remain gated. Evidence emission is additionally blocked
-until the mandatory closing try-state leg lands (15 §1; SQ-204). These are the
-connector-review P1 fail-closed enforcements for obligations previously deferred
-by documentation. Before each scenario, the runner removes its exact database
+The `base` row is the plain generated-genesis fork and carries no card, so it
+attests boot, injected-state, blocks, live `:code` binding, and try-state. Every
+row under `scenarios/` additionally carries the `card` check: the runner parses
+the adjacent Markdown card's `card-assertions` block, executes it, and
+**refuses to name the scenario in `bleavit.env-evidence.v1` unless every
+assertion ran** (15 §4.7/§5; SQ-203). A card step that cannot execute yet
+declares `blocked_on` with the concrete missing surface, which fails the card
+closed — so `--include-gated` can no longer promote a card-less pass into
+evidence, and each gate expires mechanically once its surface lands. Before each
+scenario, the runner removes its exact database
 and SQLite sidecars so an interrupted prior run cannot contaminate the
 generated-genesis fork. It removes generated state again before evidence is
 emitted, deletes any prior evidence, requires clean committed evidence inputs,
@@ -86,7 +92,13 @@ the final gate.
 | `pb-ledger-freeze` | 06 §6.2/§6.3; 09 §3.1/§4 | Accountable Guardian/phase image; block expiry maintenance runs | I-4 trigger adapter, missing freeze/effect-revert calls, renewal XCM dispatcher |
 
 The adjacent Markdown card is the normative execution/assertion sequence for
-each YAML. NOTE(B7): `Epoch` exists as a production pallet but is not
+each YAML. Its prose remains normative; the trailing `card-assertions` block is
+that prose's machine-readable encoding, one entry per numbered step, each
+carrying exactly one of `execute` (a program the runner runs over the live
+Chopsticks JSON-RPC), `blocked_on` (the concrete unwired surface that prevents
+it), or `discharged_by: try-state` (the card's own closing step, run by the
+pinned try-runtime leg). `tools/env/validate-environments.py` enforces the block's
+shape; the evidence runner executes it. NOTE(B7): `Epoch` exists as a production pallet but is not
 instantiated in the current runtime; B6 now instantiates `ExecutionGuard` at
 slot 62. Several 06 §6.2 call names still have no implemented
 extrinsic/storage surface. Gated cards remain complete release definitions and
@@ -102,9 +114,14 @@ block-number expiry now runs because `Guardian::load()` can succeed.
 
 ## Mandatory closing try-state
 
-The evidence runner does not execute this check. For every scenario, after
-repairing any deliberately manufactured invalid precondition, manually run the
-release-blocking 15 §1 check against the local endpoint:
+The evidence runner executes this check (15 §1; SQ-204). Because the runner owns
+the Chopsticks process lifetime, it runs the release-blocking check against the
+scenario's own configured port before tearing the fork down, using the
+`try-runtime-cli` pinned as `TRY_RUNTIME_VERSION`/`TRY_RUNTIME_SHA256` in
+[`tools/env/pins.env`](../tools/env/pins.env) and installed by
+`tools/env/fetch-binaries.sh`. In evidence mode the binary's SHA-256 must match
+that pin, and `--try-runtime-binary` forces report-only. The equivalent manual
+command, for debugging a single scenario:
 
 ```bash
 try-runtime \
@@ -115,4 +132,5 @@ try-runtime \
 
 Use the scenario's configured port instead of `8000`. Upgrade scenarios point
 `--runtime` at the candidate Wasm; all others use the release Wasm built with
-the `try-runtime` feature. Any failure blocks release.
+the `try-runtime` feature, which is what `--try-runtime-wasm` names. Any failure
+fails the suite and blocks evidence.
