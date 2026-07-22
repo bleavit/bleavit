@@ -1318,6 +1318,88 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             .retain(|(_, pid)| !affected.contains(pid));
         Ok(())
     }
+    /// 05 §7(6) orphan-epoch Baseline finalization (normative; SQ-320).
+    ///
+    /// `start_measurement` is the sole writer of `CohortInfo`, so an epoch
+    /// whose every market-bearing proposal left the non-terminal working set
+    /// *before* reaching `Measuring` never gets a cohort. The shortest trigger
+    /// is a single guardian `force_reject_process_hold` (T20) against a
+    /// one-proposal epoch; the broadest is the 06 §6.3 `PB-LEDGER-FREEZE`
+    /// sweep, which force-rejects every live non-terminal proposal at once.
+    /// §7(5)'s cohort VOID then has nothing to fire on and T19 is unreachable,
+    /// so the Baseline vault stays `Open` forever: both redemption calls
+    /// require `Settled` (03 §5.3), stranding every single-sided holder, and no
+    /// terminal-block latch is written, so neither the 03 §5.4 Baseline sweep
+    /// nor the 04 §2 book reap can ever run.
+    ///
+    /// This is the second of exactly two neutral-settlement transitions
+    /// (03 §5.2): a permissionless `Signed` call carrying the same spec-fixed
+    /// `s = 0.5` through the same single SettleAuthority chain (05 §6, 06 §3.1).
+    /// It emits no epoch event — the settlement's canonical signal is the
+    /// ledger's frozen `BaselineSettled { epoch, s }` (02 §6) — and it stays
+    /// callable under `PB-LEDGER-FREEZE`, because the freeze's own sweep is one
+    /// of the two ways an epoch is orphaned (06 §6.3 exempts settlement calls).
+    pub fn finalize_epoch_baseline<W: WelfareOps>(
+        &mut self,
+        origin: Origin,
+        welfare: &mut W,
+        epoch: EpochId,
+    ) -> Result<(), Error> {
+        ensure!(
+            matches!(origin, Origin::Signed | Origin::Keeper),
+            Error::BadOrigin
+        );
+        // §7(6) condition 1 — strictly past. While the epoch is live a proposal
+        // can still qualify into it and reach `Measuring`, creating the very
+        // cohort this call assumes cannot exist. `self.epoch.index` is the
+        // persisted index, never a forward-synced one, so the check errs late
+        // (G-1).
+        ensure!(epoch < self.epoch.index, Error::BadState);
+        // §7(6) condition 2 — no cohort ever formed. A live `CohortInfo` means
+        // the §7(5)/T19 producers own this Baseline and this crank must not
+        // race them; an archived `CohortSummary` means one of them already ran.
+        // Once the summary ages out of the bounded ring this admits an epoch
+        // that settled normally — deliberately safe, because the vault is by
+        // then `Settled` or reaped and the settlement below is a no-op.
+        ensure!(
+            !self.cohorts.iter().any(|cohort| cohort.epoch == epoch),
+            Error::BadState
+        );
+        ensure!(
+            !self.recent.iter().any(|summary| summary.epoch == epoch),
+            Error::BadState
+        );
+        // §7(6) condition 3 — the bounded non-terminal working set (I-21) holds
+        // no proposal of the epoch, so none can still reach `Measuring` and
+        // form the cohort after the fact. O(MaxLiveProposals), no cursor.
+        //
+        // The terminal predicate is deliberately neither `!is_live_state`
+        // (which reports `Submitted`/`Screening` terminal, yet a submitted
+        // proposal keeps its stamped epoch across boundaries — only rollover
+        // re-stamps it — so it can still qualify into this past epoch) nor
+        // `!is_force_rejectable_state` (which admits `Executed`/`Measuring`).
+        // Settling early against either would leave the later `settle_cohort`
+        // unable to settle an already-`Settled` vault, stranding the whole
+        // cohort. `submit` stamps the *current* index and rollover the *next*
+        // one, so no future proposal can join a past epoch: once this predicate
+        // holds it holds forever.
+        ensure!(
+            !self
+                .proposals
+                .iter()
+                .any(|proposal| proposal.epoch == epoch && !is_terminal_state(proposal.state)),
+            Error::BadState
+        );
+        // Idempotent and no-op-safe in exactly §7(5)'s shape: an epoch with no
+        // Baseline vault, and one already `Settled`, both return `Ok` rather
+        // than failing (§7(6); G-1). Routed through the SettleAuthority chain
+        // so `settle_baseline` writes the terminal-block latch the 04 §2 book
+        // reap requires — a direct vault mutation would free redemption but
+        // leave the book permanently un-reapable with its POL still committed.
+        welfare.settle_baseline_void(epoch)?;
+        Ok(())
+    }
+
     /// T24 guardian review callback.
     pub fn veto_upheld<L: LedgerOps<AccountId>>(
         &mut self,
@@ -2258,6 +2340,24 @@ fn is_live_state(state: ProposalState) -> bool {
             | ProposalState::Expired
     )
 }
+/// A proposal state from which no transition can ever reach `Measuring` again.
+///
+/// Deliberately narrower than `!is_live_state`, which also reports
+/// `Submitted`/`Screening` — both of which can still qualify — and narrower
+/// than `!is_force_rejectable_state`, which admits `Executed`/`Measuring`.
+/// `Rejected(_)` is terminal in storage because `reject_to_measurement`
+/// overwrites it with `Measuring` in the same call whenever the proposal
+/// carries markets; a persisted `Rejected(_)` therefore never re-enters the
+/// machine.
+fn is_terminal_state(state: ProposalState) -> bool {
+    matches!(
+        state,
+        ProposalState::Settled
+            | ProposalState::Cancelled
+            | ProposalState::Expired
+            | ProposalState::Rejected(_)
+    )
+}
 fn is_force_rejectable_state(state: ProposalState) -> bool {
     !matches!(
         state,
@@ -3113,6 +3213,222 @@ mod tests {
         // And no welfare *scoring* — a VOID trusts no measurement.
         assert!(welfare.calls.is_empty());
         assert!(s.cohorts.is_empty());
+    }
+
+    /// 05 §7(6) fixture: a strictly past epoch that opened a Baseline book but
+    /// never formed a cohort, with `pid` left in `state`.
+    fn orphan_state(state: ProposalState) -> EpochState<[u8; 32]> {
+        let mut s = EpochState::<[u8; 32]>::new();
+        s.epoch.index = 8;
+        let mut p = prop(1, state);
+        p.epoch = 7;
+        p.markets = Some(MarketSet {
+            accept: 1,
+            reject: 2,
+            gates: None,
+            baseline: 5,
+        });
+        s.proposals.push(p);
+        s
+    }
+
+    #[test]
+    fn sq320_finalize_settles_an_orphaned_epoch_baseline() {
+        // 05 §7(6): the epoch's only proposal was force-rejected before it ever
+        // reached `Measuring`, so no `CohortInfo(7)` and no `CohortSummary(7)`
+        // ever existed and §7(5)'s VOID has nothing to fire on. The crank is
+        // the only transition that can reach this Baseline vault.
+        let mut s = orphan_state(ProposalState::Rejected(RejectReason::ProcessHold));
+        let mut welfare = RecordingWelfare::default();
+
+        s.finalize_epoch_baseline(Origin::Signed, &mut welfare, 7)
+            .unwrap();
+
+        assert_eq!(welfare.void_settlements, vec![7]);
+        // Neutral settlement only — the orphan path computes no score.
+        assert!(welfare.calls.is_empty());
+        // No epoch event: the canonical signal is the ledger's frozen
+        // `BaselineSettled { epoch, s }` (02 §6), so the 02 event schema for
+        // `pallet-epoch` stays byte-identical.
+        assert!(s.events.is_empty());
+    }
+
+    #[test]
+    fn sq320_finalize_is_idempotent() {
+        // §7(6): a second call is a harmless no-op, never an error (G-1). The
+        // seam itself returns `Ok` once the vault is no longer `Open`.
+        let mut s = orphan_state(ProposalState::Cancelled);
+        let mut welfare = RecordingWelfare::default();
+
+        s.finalize_epoch_baseline(Origin::Signed, &mut welfare, 7)
+            .unwrap();
+        s.finalize_epoch_baseline(Origin::Signed, &mut welfare, 7)
+            .unwrap();
+
+        assert_eq!(welfare.void_settlements, vec![7, 7]);
+    }
+
+    #[test]
+    fn sq320_finalize_stays_callable_under_a_ledger_freeze() {
+        // §7(6) + 06 §6.3: the freeze's own T20 sweep is one of the two ways an
+        // epoch is orphaned, so a freeze that also blocked the repair would
+        // guarantee the stranding it exists to contain. Settlement calls are
+        // exempt from the freeze.
+        let mut s = orphan_state(ProposalState::Rejected(RejectReason::ProcessHold));
+        s.ledger_frozen = true;
+        let mut welfare = RecordingWelfare::default();
+
+        s.finalize_epoch_baseline(Origin::Signed, &mut welfare, 7)
+            .unwrap();
+
+        assert_eq!(welfare.void_settlements, vec![7]);
+    }
+
+    #[test]
+    fn sq320_finalize_after_summary_ring_eviction_is_a_benign_no_op() {
+        // §7(6) condition 2 admits an epoch that settled normally once its
+        // `CohortSummary` ages out of the bounded ring (~1.8 y, longer than
+        // `RedemptionArchiveDelay`). That is deliberately safe rather than an
+        // error path: the vault is by then `Settled` or reaped, so the
+        // settlement seam no-ops instead of double-settling.
+        let mut s = orphan_state(ProposalState::Settled);
+        let mut welfare = RecordingWelfare::default();
+
+        assert_eq!(
+            s.finalize_epoch_baseline(Origin::Signed, &mut welfare, 7),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn sq320_finalize_refuses_a_live_epoch() {
+        // §7(6) condition 1: while the epoch is live a proposal can still
+        // qualify into it and form the cohort.
+        let mut s = orphan_state(ProposalState::Rejected(RejectReason::ProcessHold));
+        s.epoch.index = 7;
+        let mut welfare = RecordingWelfare::default();
+
+        assert_eq!(
+            s.finalize_epoch_baseline(Origin::Signed, &mut welfare, 7),
+            Err(Error::BadState)
+        );
+        assert!(welfare.void_settlements.is_empty());
+    }
+
+    #[test]
+    fn sq320_finalize_refuses_when_a_cohort_exists() {
+        // §7(6) condition 2: a live cohort belongs to §7(5)/T19, not here.
+        let mut s = orphan_state(ProposalState::Rejected(RejectReason::ProcessHold));
+        s.cohorts.push(CohortInfo {
+            epoch: 7,
+            proposals: alloc::vec![1],
+            status: CohortStatus::Measuring { until_epoch: 9 },
+        });
+        let mut welfare = RecordingWelfare::default();
+
+        assert_eq!(
+            s.finalize_epoch_baseline(Origin::Signed, &mut welfare, 7),
+            Err(Error::BadState)
+        );
+        assert!(welfare.void_settlements.is_empty());
+    }
+
+    #[test]
+    fn sq320_finalize_refuses_when_a_summary_is_archived() {
+        // §7(6) condition 2: an archived summary means the cohort formed and
+        // already reached a terminal settlement, which settled the Baseline.
+        let mut s = orphan_state(ProposalState::Rejected(RejectReason::ProcessHold));
+        s.recent.push(CohortSummary {
+            epoch: 7,
+            s_1e9: FixedU64(500_000_000),
+            baseline_twap_1e9: FixedU64(500_000_000),
+            proposals: futarchy_primitives::BoundedVec::new(),
+            voided: false,
+            settled_at: 1,
+        });
+        let mut welfare = RecordingWelfare::default();
+
+        assert_eq!(
+            s.finalize_epoch_baseline(Origin::Signed, &mut welfare, 7),
+            Err(Error::BadState)
+        );
+        assert!(welfare.void_settlements.is_empty());
+    }
+
+    #[test]
+    fn sq320_finalize_refuses_while_any_proposal_can_still_reach_measurement() {
+        // §7(6) condition 3, over the bounded non-terminal working set. Every
+        // one of these states can still create `CohortInfo(7)`:
+        //
+        // - `Measuring` and `Executed` are exactly the two that
+        //   `is_force_rejectable_state` reports false for, so reusing it here
+        //   would wave them through;
+        // - `Submitted`/`Screening` are the two that `!is_live_state` reports
+        //   terminal, yet a submitted proposal keeps its stamped epoch across
+        //   boundaries (only rollover re-stamps it) and can still qualify;
+        // - the rest are the ordinary force-rejectable live states.
+        for state in [
+            ProposalState::Measuring,
+            ProposalState::Executed,
+            ProposalState::Submitted,
+            ProposalState::Screening,
+            ProposalState::Qualified,
+            ProposalState::Trading,
+            ProposalState::Extended,
+            ProposalState::Queued,
+            ProposalState::Suspended,
+            ProposalState::Rerun,
+            ProposalState::FailedExecuted,
+        ] {
+            let mut s = orphan_state(state);
+            let mut welfare = RecordingWelfare::default();
+
+            assert_eq!(
+                s.finalize_epoch_baseline(Origin::Signed, &mut welfare, 7),
+                Err(Error::BadState),
+                "{state:?} can still reach Measuring and must block finalization",
+            );
+            assert!(welfare.void_settlements.is_empty());
+        }
+    }
+
+    #[test]
+    fn sq320_finalize_ignores_terminal_proposals_of_other_epochs() {
+        // Only epoch `e`'s own working set gates the call; a live proposal of a
+        // *different* epoch is irrelevant to `CohortInfo(e)`.
+        let mut s = orphan_state(ProposalState::Rejected(RejectReason::ProcessHold));
+        let mut other = prop(2, ProposalState::Trading);
+        other.epoch = 8;
+        s.proposals.push(other);
+        let mut welfare = RecordingWelfare::default();
+
+        s.finalize_epoch_baseline(Origin::Signed, &mut welfare, 7)
+            .unwrap();
+
+        assert_eq!(welfare.void_settlements, vec![7]);
+    }
+
+    #[test]
+    fn sq320_finalize_rejects_a_non_permissionless_origin() {
+        // 06 §3.2 puts the crank on the permissionless Signed row: it is
+        // neither a guardian nor a void-authority nor a Root surface.
+        for origin in [
+            Origin::Root,
+            Origin::GuardianHold,
+            Origin::GuardianReview,
+            Origin::ExecutionGuard,
+            Origin::VoidAuthority,
+        ] {
+            let mut s = orphan_state(ProposalState::Rejected(RejectReason::ProcessHold));
+            let mut welfare = RecordingWelfare::default();
+
+            assert_eq!(
+                s.finalize_epoch_baseline(origin, &mut welfare, 7),
+                Err(Error::BadOrigin),
+                "{origin:?} must not reach the SettleAuthority chain",
+            );
+            assert!(welfare.void_settlements.is_empty());
+        }
     }
 
     #[test]

@@ -36,6 +36,35 @@ TERMINATE_GRACE_SECONDS = 5.0
 SCRIPT_ROOT = Path(__file__).resolve().parents[2]
 # 15 §1 requires this closing check in every environment job; SQ-204 lands it.
 TRY_STATE_CHECK = "try-state"
+# 15 §4.7/§5 require the normative Chopsticks card to have executed before the
+# evidence bundle may name its scenario; SQ-203 lands it.
+CARD_CHECK = "card"
+DEFAULT_TRY_RUNTIME_BINARY = Path("zombienet/bin/try-runtime")
+# The closing check runs `on-runtime-upgrade --checks try-state` over a state
+# snapshot pulled from the live endpoint, exactly as the env READMEs mandate.
+TRY_STATE_BLOCKTIME_MS = "6000"
+TRY_STATE_TIMEOUT_SECONDS = 1800
+# Chopsticks card contract: the adjacent Markdown card carries a machine-readable
+# encoding of its numbered steps so the runner can execute them rather than
+# attest a boot. Each entry binds one card step to either an executable program
+# or the concrete unwired surface that blocks it (fail-closed, expires
+# mechanically once the surface lands).
+CARD_BLOCK = re.compile(r"^```card-assertions\r?\n(.*?)^```", re.MULTILINE | re.DOTALL)
+CARD_STEP_KINDS = (
+    "storage_equals",
+    "storage_absent",
+    "new_block",
+    "storage_changed",
+    "storage_unchanged",
+)
+ZOMBIENET_NETWORK_SPEC = "zombie.json"
+# The pinned Zombienet (tools/env/pins.env) exposes `--monitor` on `spawn` only —
+# `test` has no keep-alive flag but accepts a running-network spec as its second
+# positional. Holding the network up for the closing try-state check therefore
+# means spawn --monitor, test against that spec, check, then tear the group down.
+ZOMBIENET_RPC_PORT = re.compile(
+    r"^[ \t]*rpc_port\s*=\s*(\d[\d_]*)\s*(?:#.*)?$", re.MULTILINE
+)
 ZOMBIENET_NETWORK_HEADER = re.compile(r"^Network:\s*(\S+)\s*$", re.MULTILINE)
 # Accept every TOML integer spelling (plain, underscored, hex/octal/binary) so
 # a formatting-only change cannot hide a pinned port from the collision checks.
@@ -107,6 +136,21 @@ def parse_args() -> argparse.Namespace:
         "--node-binary",
         type=Path,
         default=None,
+    )
+    parser.add_argument(
+        "--try-runtime-binary",
+        type=Path,
+        default=None,
+        help="pinned try-runtime-cli (defaults to zombienet/bin/try-runtime)",
+    )
+    parser.add_argument(
+        "--try-runtime-wasm",
+        type=Path,
+        default=None,
+        help=(
+            "runtime Wasm built with the try-runtime feature; required for the "
+            "mandatory closing --checks try-state leg (15 §1)"
+        ),
     )
     return parser.parse_args()
 
@@ -384,6 +428,11 @@ def validate_prerequisites(
                 require_file(specs / name, f"generated XCM chain spec {name}")
     if chopsticks_suites:
         validate_node_version(root)
+        # Parse every selected scenario's card up front so a malformed normative
+        # card fails the run before any environment is started (SQ-203).
+        for suite in chopsticks_suites:
+            if requires_card(suite):
+                load_card(root, suite)
 
 
 def require_free_zombienet_ports(root: Path, suites: list[Suite]) -> None:
@@ -490,37 +539,187 @@ def append_runner_log(path: Path, message: str) -> None:
         handle.write(f"\n[run-evidence] {message}\n")
 
 
+def zombienet_topology(root: Path, suite: Suite) -> Path:
+    try:
+        drill = (root / suite.path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise EvidenceError(f"15 §4.7: cannot inspect {suite.path}: {error}") from error
+    match = ZOMBIENET_NETWORK_HEADER.search(drill)
+    if match is None:
+        raise EvidenceError(f"15 §4.7: {suite.path} has no Network header")
+    return root / Path(match.group(1).removeprefix("./"))
+
+
+def zombienet_rpc_uri(root: Path, suite: Suite) -> str:
+    """Resolve the closing check's endpoint from the drill's own topology.
+
+    The collator's `rpc_port` must be pinned in the topology: a randomly
+    allocated port cannot be addressed by the closing check, and guessing one
+    would attest try-state against the wrong node (15 §1).
+    """
+    topology = zombienet_topology(root, suite)
+    try:
+        text = topology.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise EvidenceError(f"15 §4.7: cannot inspect {topology}: {error}") from error
+    ports = [int(value.replace("_", "")) for value in ZOMBIENET_RPC_PORT.findall(text)]
+    if not ports:
+        raise EvidenceError(
+            f"15 §1: {topology.relative_to(root)} pins no collator rpc_port, so the "
+            "closing try-state endpoint cannot be resolved; pin one to run this suite"
+        )
+    if len(set(ports)) != 1:
+        raise EvidenceError(
+            f"15 §1: {topology.relative_to(root)} pins several rpc_port values "
+            f"({sorted(set(ports))}); the closing try-state endpoint is ambiguous"
+        )
+    return f"ws://127.0.0.1:{ports[0]}"
+
+
+def wait_for_zombienet_spec(
+    process: subprocess.Popen[Any], spec: Path, deadline: float
+) -> None:
+    while time.monotonic() < deadline:
+        returncode = process.poll()
+        if returncode is not None:
+            raise EvidenceError(
+                f"Zombienet spawn exited with status {returncode} before the network "
+                f"spec {spec.name} appeared"
+            )
+        if spec.is_file() and spec.stat().st_size > 0:
+            return
+        time.sleep(0.5)
+    raise EvidenceError(
+        f"Zombienet spawn did not publish {spec.name} before the suite timeout"
+    )
+
+
 def run_zombienet(
-    root: Path, suite: Suite, binary: Path, log_path: Path
-) -> tuple[bool, str | None]:
-    command = [str(binary), "-p", "native", "test", suite.path.as_posix()]
+    root: Path,
+    suite: Suite,
+    binary: Path,
+    log_path: Path,
+    try_runtime_binary: Path | None,
+    try_runtime_wasm: Path | None,
+    network_dir: Path,
+) -> tuple[bool, str | None, list[str]]:
+    """Spawn the topology as a monitor, run the drill, then close with try-state.
+
+    The pinned Zombienet exposes `--monitor` ("do not auto cleanup network") on
+    `spawn` only; `test` takes a running-network spec as its second positional.
+    That pair is what holds the node up for the mandatory closing check (15 §1;
+    SQ-204) — `zombienet test` alone tears the network down on completion.
+    """
+    checks: list[str] = []
+    try:
+        uri = zombienet_rpc_uri(root, suite)
+    except EvidenceError as error:
+        append_runner_log(log_path, str(error))
+        return False, str(error), checks
+    if network_dir.exists():
+        shutil.rmtree(network_dir, ignore_errors=True)
+    network_dir.parent.mkdir(parents=True, exist_ok=True)
+    spec = network_dir / ZOMBIENET_NETWORK_SPEC
+    topology = zombienet_topology(root, suite)
+    spawn = [
+        str(binary),
+        "-p",
+        "native",
+        "-d",
+        str(network_dir),
+        "spawn",
+        topology.relative_to(root).as_posix(),
+        "--monitor",
+    ]
+    deadline = time.monotonic() + suite.timeout_seconds
     process: subprocess.Popen[Any] | None = None
     with log_path.open("wb") as log:
         try:
             try:
                 process = subprocess.Popen(
-                    command,
+                    spawn,
                     cwd=root,
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
                 )
             except OSError as error:
-                return False, f"could not start Zombienet: {error}"
+                return False, f"could not start Zombienet: {error}", checks
             try:
-                returncode = process.wait(timeout=suite.timeout_seconds)
-            except subprocess.TimeoutExpired:
+                wait_for_zombienet_spec(process, spec, deadline)
+            except EvidenceError as error:
+                append_runner_log(log_path, str(error))
+                return False, str(error), checks
+            test = [
+                str(binary),
+                "-p",
+                "native",
+                "test",
+                suite.path.as_posix(),
+                str(spec),
+            ]
+            append_runner_log(log_path, "drill: " + " ".join(test))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 detail = (
-                    f"timed out after {suite.timeout_seconds} seconds; process group killed"
+                    f"timed out after {suite.timeout_seconds} seconds before the drill ran"
                 )
                 append_runner_log(log_path, detail)
-                return False, detail
+                return False, detail, checks
+            drill: subprocess.Popen[Any] | None = None
+            try:
+                with log_path.open("ab") as drill_log:
+                    try:
+                        drill = subprocess.Popen(
+                            test,
+                            cwd=root,
+                            stdout=drill_log,
+                            stderr=subprocess.STDOUT,
+                            # Own session so a SIGTERM-ignoring descendant of the
+                            # drill is still reachable by the group kill below.
+                            start_new_session=True,
+                        )
+                    except OSError as error:
+                        return (
+                            False,
+                            f"could not start the Zombienet drill: {error}",
+                            checks,
+                        )
+                    try:
+                        returncode = drill.wait(timeout=remaining)
+                    except subprocess.TimeoutExpired:
+                        detail = (
+                            f"timed out after {suite.timeout_seconds} seconds; "
+                            "process group killed"
+                        )
+                        append_runner_log(log_path, detail)
+                        return False, detail, checks
+            finally:
+                if drill is not None:
+                    terminate_process_group(drill)
+            if returncode != 0:
+                return (
+                    False,
+                    f"Zombienet exited with status {returncode}",
+                    checks,
+                )
+            checks.append("zndsl")
+            if process.poll() is not None:
+                detail = "Zombienet network exited before the closing try-state check"
+                append_runner_log(log_path, detail)
+                return False, detail, checks
+            reason = run_try_state(
+                root, try_runtime_binary, try_runtime_wasm, uri, log_path
+            )
+            if reason is not None:
+                append_runner_log(log_path, reason)
+                return False, reason, checks
+            checks.append(TRY_STATE_CHECK)
         finally:
             if process is not None:
                 terminate_process_group(process)
-    if returncode != 0:
-        return False, f"Zombienet exited with status {returncode}"
-    return True, None
+            shutil.rmtree(network_dir, ignore_errors=True)
+    return True, None, checks
 
 
 def rpc_call(connection: Any, method: str, params: list[Any], deadline: float) -> Any:
@@ -731,21 +930,351 @@ def validate_live_runtime_code(
         )
 
 
+def card_path(root: Path, suite: Suite) -> Path:
+    return root / suite.path.with_suffix(".md")
+
+
+def requires_card(suite: Suite) -> bool:
+    """Every Chopsticks *scenario* carries a normative card; the base fork does not.
+
+    `chopsticks/bleavit.yml` is the plain generated-genesis fork with no
+    manufactured-state sequence (chopsticks/README.md); everything under
+    `chopsticks/scenarios/` is a 15 §4.7 scenario whose card must execute.
+    """
+    return suite.kind == "chopsticks" and suite.path.parts[:2] == (
+        "chopsticks",
+        "scenarios",
+    )
+
+
+def load_card(root: Path, suite: Suite) -> list[dict[str, Any]]:
+    """Parse a scenario card's machine-readable assertion block (15 §4.7; SQ-203).
+
+    The prose card stays the normative sequence; this block is its executable
+    encoding. A missing or malformed block is fail-closed: the scenario cannot
+    be named in evidence until its assertions are expressed and executed.
+    """
+    path = card_path(root, suite)
+    label = path.name
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise EvidenceError(
+            f"15 §4.7; SQ-203: cannot read the normative card for {suite.identifier}: {error}"
+        ) from error
+    matches = CARD_BLOCK.findall(text)
+    if len(matches) != 1:
+        raise EvidenceError(
+            f"15 §4.7; SQ-203: {label} must contain exactly one ```card-assertions "
+            f"block, found {len(matches)}"
+        )
+    try:
+        document = yaml.safe_load(matches[0])
+    except yaml.YAMLError as error:
+        raise EvidenceError(
+            f"15 §4.7; SQ-203: {label} card-assertions block is not valid YAML: {error}"
+        ) from error
+    if not isinstance(document, list) or not document:
+        raise EvidenceError(
+            f"15 §4.7; SQ-203: {label} card-assertions must be a non-empty list"
+        )
+    seen: set[int] = set()
+    for index, entry in enumerate(document):
+        where = f"{label} card-assertions[{index}]"
+        if not isinstance(entry, dict):
+            raise EvidenceError(f"15 §4.7; SQ-203: {where} must be a mapping")
+        unknown = sorted(
+            set(entry) - {"step", "claim", "execute", "blocked_on", "discharged_by"}
+        )
+        if unknown:
+            raise EvidenceError(
+                f"15 §4.7; SQ-203: {where} has unsupported field(s): {', '.join(unknown)}"
+            )
+        step = entry.get("step")
+        if type(step) is not int or step <= 0:
+            raise EvidenceError(f"15 §4.7; SQ-203: {where}.step must be a positive integer")
+        if step in seen:
+            raise EvidenceError(f"15 §4.7; SQ-203: {where} repeats card step {step}")
+        seen.add(step)
+        claim = entry.get("claim")
+        if not isinstance(claim, str) or not claim.strip():
+            raise EvidenceError(f"15 §4.7; SQ-203: {where}.claim must be non-empty")
+        present = [
+            field
+            for field in ("execute", "blocked_on", "discharged_by")
+            if field in entry
+        ]
+        if len(present) != 1:
+            raise EvidenceError(
+                f"15 §4.7; SQ-203: {where} must carry exactly one of "
+                "execute/blocked_on/discharged_by"
+            )
+        if "discharged_by" in entry:
+            # The card's own closing "run try-state" step is executed by the
+            # runner's pinned try-runtime leg (15 §1; SQ-204), not by the card
+            # executor — the row only records try-state when that leg passed.
+            if entry["discharged_by"] != TRY_STATE_CHECK:
+                raise EvidenceError(
+                    f"15 §4.7; SQ-203: {where}.discharged_by must be "
+                    f"{TRY_STATE_CHECK!r}"
+                )
+            continue
+        has_blocked = "blocked_on" in entry
+        if has_blocked:
+            blocked = entry["blocked_on"]
+            if not isinstance(blocked, str) or not blocked.strip():
+                raise EvidenceError(
+                    f"15 §4.7; SQ-203: {where}.blocked_on must name the missing surface"
+                )
+            continue
+        program = entry["execute"]
+        if not isinstance(program, list) or not program:
+            raise EvidenceError(
+                f"15 §4.7; SQ-203: {where}.execute must be a non-empty list of steps"
+            )
+        for position, action in enumerate(program):
+            validate_card_action(action, f"{where}.execute[{position}]")
+    if sorted(seen) != list(range(1, len(seen) + 1)):
+        raise EvidenceError(
+            f"15 §4.7; SQ-203: {label} card-assertions must cover card steps 1..N "
+            f"without gaps, found {sorted(seen)}"
+        )
+    return document
+
+
+def validate_card_action(action: Any, where: str) -> tuple[str, dict[str, Any]]:
+    if not isinstance(action, dict) or len(action) != 1:
+        raise EvidenceError(
+            f"15 §4.7; SQ-203: {where} must be a single-key step mapping"
+        )
+    kind, body = next(iter(action.items()))
+    if kind not in CARD_STEP_KINDS:
+        raise EvidenceError(
+            f"15 §4.7; SQ-203: {where} has unsupported step kind {kind!r}; "
+            f"supported: {', '.join(CARD_STEP_KINDS)}"
+        )
+    if not isinstance(body, dict):
+        raise EvidenceError(f"15 §4.7; SQ-203: {where} {kind} body must be a mapping")
+    if kind == "new_block":
+        count = body.get("count")
+        if sorted(body) != ["count"] or type(count) is not int or count <= 0:
+            raise EvidenceError(
+                f"15 §4.7; SQ-203: {where} new_block requires a positive integer count"
+            )
+        return kind, body
+    key = body.get("key")
+    storage_bytes(key, f"{where} {kind} key")
+    if key is None:
+        raise EvidenceError(f"15 §4.7; SQ-203: {where} {kind} requires a key")
+    if kind == "storage_equals":
+        if sorted(body) != ["key", "value"]:
+            raise EvidenceError(
+                f"15 §4.7; SQ-203: {where} storage_equals requires exactly key and value"
+            )
+        storage_bytes(body.get("value"), f"{where} storage_equals value")
+    elif kind == "storage_absent":
+        if sorted(body) != ["key"]:
+            raise EvidenceError(
+                f"15 §4.7; SQ-203: {where} storage_absent requires exactly a key"
+            )
+    else:
+        blocks = body.get("blocks")
+        if sorted(body) != ["blocks", "key"] or type(blocks) is not int or blocks <= 0:
+            raise EvidenceError(
+                f"15 §4.7; SQ-203: {where} {kind} requires a key and a positive blocks count"
+            )
+    return kind, body
+
+
+def produce_block(connection: Any, deadline: float) -> int:
+    rpc_call(connection, "dev_newBlock", [{"count": 1}], deadline)
+    return header_number(rpc_call(connection, "chain_getHeader", [], deadline))
+
+
+def execute_card_action(
+    connection: Any, kind: str, body: dict[str, Any], where: str, deadline: float
+) -> None:
+    if kind == "new_block":
+        previous = header_number(rpc_call(connection, "chain_getHeader", [], deadline))
+        for index in range(body["count"]):
+            current = produce_block(connection, deadline)
+            if current <= previous:
+                raise EvidenceError(
+                    f"{where}: dev_newBlock #{index + 1} did not advance the header "
+                    f"({previous} -> {current})"
+                )
+            previous = current
+        return
+    key = body["key"]
+    if kind in ("storage_equals", "storage_absent"):
+        actual = storage_bytes(
+            rpc_call(connection, "state_getStorage", [key], deadline),
+            f"{where} state_getStorage({key})",
+        )
+        expected = (
+            storage_bytes(body["value"], f"{where} expected value")
+            if kind == "storage_equals"
+            else None
+        )
+        if actual != expected:
+            raise EvidenceError(
+                f"{where}: state_getStorage({key}) does not match the card assertion"
+            )
+        return
+    before = storage_bytes(
+        rpc_call(connection, "state_getStorage", [key], deadline),
+        f"{where} state_getStorage({key})",
+    )
+    for _ in range(body["blocks"]):
+        produce_block(connection, deadline)
+    after = storage_bytes(
+        rpc_call(connection, "state_getStorage", [key], deadline),
+        f"{where} state_getStorage({key})",
+    )
+    if kind == "storage_changed" and before == after:
+        raise EvidenceError(
+            f"{where}: {key} did not change over {body['blocks']} block(s); the card "
+            "asserts maintenance runs"
+        )
+    if kind == "storage_unchanged" and before != after:
+        raise EvidenceError(
+            f"{where}: {key} changed over {body['blocks']} block(s); the card asserts "
+            "it is inert"
+        )
+
+
+def execute_card(
+    connection: Any, card: list[dict[str, Any]], label: str, deadline: float
+) -> None:
+    """Execute every card assertion, refusing the card if any step is blocked.
+
+    A card whose normative assertions cannot all execute must not be attested:
+    15 §5 evidence may only name a scenario whose card actually ran (SQ-203).
+    """
+    blocked = [
+        f"step {entry['step']} ({entry['claim']}): {entry['blocked_on']}"
+        for entry in card
+        if "blocked_on" in entry
+    ]
+    if blocked:
+        raise EvidenceError(
+            f"15 §4.7; §5: {label} card assertions did not execute — "
+            + "; ".join(blocked)
+        )
+    for entry in card:
+        for position, action in enumerate(entry.get("execute", ())):
+            kind, body = validate_card_action(
+                action, f"{label} step {entry['step']} execute[{position}]"
+            )
+            execute_card_action(
+                connection,
+                kind,
+                body,
+                f"{label} step {entry['step']}",
+                deadline,
+            )
+
+
+def try_runtime_command(
+    root: Path,
+    binary: Path,
+    try_runtime_wasm: Path,
+    uri: str,
+) -> list[str]:
+    return [
+        str(binary),
+        "--runtime",
+        str(try_runtime_wasm),
+        "on-runtime-upgrade",
+        "--checks",
+        TRY_STATE_CHECK,
+        "--blocktime",
+        TRY_STATE_BLOCKTIME_MS,
+        "live",
+        "--uri",
+        uri,
+    ]
+
+
+def run_try_state(
+    root: Path,
+    binary: Path | None,
+    try_runtime_wasm: Path | None,
+    uri: str,
+    log_path: Path,
+) -> str | None:
+    """Run the mandatory closing try-state check (15 §1; SQ-204).
+
+    Returns None on success or a fail-closed reason. Evidence stays blocked while
+    this returns a reason, because the check is release-blocking in both env
+    READMEs and 15 §1 requires it in every environment job.
+    """
+    if try_runtime_wasm is None:
+        return (
+            "15 §1: the closing try-state check needs --try-runtime-wasm (the runtime "
+            "built with the try-runtime feature); evidence stays blocked without it"
+        )
+    if binary is None or not binary.is_file() or not os.access(binary, os.X_OK):
+        return (
+            f"15 §1: pinned try-runtime binary is missing or not executable: {binary}; "
+            "run tools/env/fetch-binaries.sh"
+        )
+    if not try_runtime_wasm.is_file():
+        return f"15 §1: try-runtime runtime Wasm is missing: {try_runtime_wasm}"
+    command = try_runtime_command(root, binary, try_runtime_wasm, uri)
+    append_runner_log(log_path, "closing try-state: " + " ".join(command))
+    try:
+        with log_path.open("ab") as log:
+            completed = subprocess.run(
+                command,
+                cwd=root,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                check=False,
+                timeout=TRY_STATE_TIMEOUT_SECONDS,
+            )
+    except OSError as error:
+        return f"15 §1: could not start try-runtime: {error}"
+    except subprocess.TimeoutExpired:
+        return (
+            f"15 §1: closing try-state timed out after {TRY_STATE_TIMEOUT_SECONDS} seconds"
+        )
+    if completed.returncode != 0:
+        return f"15 §1: closing try-state failed with status {completed.returncode}"
+    return None
+
+
+def validate_try_runtime_pin(root: Path, binary: Path) -> None:
+    expected = parse_pins(root).get("TRY_RUNTIME_SHA256")
+    if expected is None:
+        raise EvidenceError("15 §1: pins.env has no TRY_RUNTIME_SHA256")
+    actual = sha256_file(binary)
+    if actual != expected:
+        raise EvidenceError(
+            f"15 §1: try-runtime binary sha256 {actual} does not match "
+            f"tools/env/pins.env TRY_RUNTIME_SHA256 {expected}"
+        )
+
+
 def run_chopsticks(
     root: Path,
     suite: Suite,
     command_prefix: list[str],
     log_path: Path,
     expected_wasm_sha256: str | None,
-) -> tuple[bool, str | None]:
+    try_runtime_binary: Path | None,
+    try_runtime_wasm: Path | None,
+) -> tuple[bool, str | None, list[str]]:
     config_path = root / suite.path
+    checks: list[str] = []
     try:
         port, database, storage = load_chopsticks_config(root, config_path)
         require_free_chopsticks_port(port)
         cleanup_chopsticks_database(database)
+        card = load_card(root, suite) if requires_card(suite) else None
     except EvidenceError as error:
         append_runner_log(log_path, str(error))
-        return False, str(error)
+        return False, str(error), checks
     command = [*command_prefix, "--config", suite.path.as_posix()]
     process: subprocess.Popen[Any] | None = None
     connection = None
@@ -761,8 +1290,9 @@ def run_chopsticks(
                     start_new_session=True,
                 )
             except OSError as error:
-                return False, f"could not start Chopsticks: {error}"
+                return False, f"could not start Chopsticks: {error}", checks
             connection = connect_chopsticks(f"ws://127.0.0.1:{port}", process, deadline)
+            checks.append("boot")
             if expected_wasm_sha256 is not None:
                 validate_live_runtime_code(connection, expected_wasm_sha256, deadline)
             for index, (key, expected) in enumerate(storage):
@@ -774,6 +1304,7 @@ def run_chopsticks(
                         f"state_getStorage({key}) does not match "
                         f"import-storage[{index}] byte-for-byte"
                     )
+            checks.append("injected-state")
             previous = header_number(rpc_call(connection, "chain_getHeader", [], deadline))
             for index in range(2):
                 rpc_call(connection, "dev_newBlock", [{"count": 1}], deadline)
@@ -786,17 +1317,34 @@ def run_chopsticks(
                         f"({previous} -> {current})"
                     )
                 previous = current
+            checks.append("blocks")
             if expected_wasm_sha256 is not None:
                 validate_live_runtime_code(connection, expected_wasm_sha256, deadline)
+                checks.append("code-binding")
+            if card is not None:
+                execute_card(connection, card, card_path(root, suite).name, deadline)
+                checks.append(CARD_CHECK)
             if process.poll() is not None:
                 raise EvidenceError(
                     "Chopsticks process exited before the final RPC checks completed"
                 )
-        return True, None
+            # The runner owns the Chopsticks lifetime, so the mandatory closing
+            # check (15 §1) runs against the still-live endpoint before teardown.
+            reason = run_try_state(
+                root,
+                try_runtime_binary,
+                try_runtime_wasm,
+                f"ws://127.0.0.1:{port}",
+                log_path,
+            )
+            if reason is not None:
+                raise EvidenceError(reason)
+            checks.append(TRY_STATE_CHECK)
+        return True, None, checks
     except Exception as error:
         detail = str(error) or error.__class__.__name__
         append_runner_log(log_path, detail)
-        return False, detail
+        return False, detail, checks
     finally:
         if connection is not None:
             try:
@@ -1002,9 +1550,23 @@ def validate_release_evidence_completeness(
     if missing_try_state:
         raise EvidenceError(
             f"15 §1: evidence for {kind} requires the closing try-state check on "
-            "every passing suite; no driver executes it yet (SQ-204) — evidence "
-            "emission is blocked until the try-runtime-cli leg lands: "
+            "every passing suite; it did not execute for: "
             + ", ".join(missing_try_state)
+        )
+    by_suite = {suite.identifier: suite for suite in suites}
+    missing_card = [
+        row["id"]
+        for row in rows
+        if row["kind"] == kind
+        and row["result"] == "pass"
+        and row["id"] in by_suite
+        and requires_card(by_suite[row["id"]])
+        and CARD_CHECK not in row.get("checks", [])
+    ]
+    if missing_card:
+        raise EvidenceError(
+            "15 §4.7; §5: evidence may not name a scenario whose normative card "
+            "assertions did not execute (SQ-203): " + ", ".join(missing_card)
         )
 
 
@@ -1122,10 +1684,18 @@ def run() -> int:
     custom_zombienet_binary = args.zombienet_binary is not None
     custom_chopsticks_command = args.chopsticks_command is not None
     custom_node_binary = args.node_binary is not None
+    custom_try_runtime_binary = args.try_runtime_binary is not None
     zombienet_binary = rooted(
         root, args.zombienet_binary or DEFAULT_ZOMBIENET_BINARY
     ).resolve()
     node_binary = rooted(root, args.node_binary or DEFAULT_NODE_BINARY).resolve()
+    try_runtime_binary = rooted(
+        root, args.try_runtime_binary or DEFAULT_TRY_RUNTIME_BINARY
+    ).resolve()
+    try_runtime_wasm = (
+        rooted(root, args.try_runtime_wasm).resolve() if args.try_runtime_wasm else None
+    )
+    network_dir = (log_dir / "networks").resolve()
     wasm = rooted(root, args.wasm).resolve() if args.wasm else None
 
     if not args.no_evidence and wasm is None:
@@ -1158,6 +1728,10 @@ def run() -> int:
         report_only_reasons.append("--chopsticks-command")
     if custom_node_binary:
         report_only_reasons.append("--node-binary")
+    if custom_try_runtime_binary:
+        # An unpinned try-runtime could attest try-state with a different
+        # checker than the one tools/env/pins.env fixes.
+        report_only_reasons.append("--try-runtime-binary")
     evidence_enabled = not report_only_reasons
 
     runtime_wasm_sha256: str | None = None
@@ -1173,6 +1747,10 @@ def run() -> int:
     if evidence_enabled:
         require_executable(zombienet_binary, "Zombienet binary")
         validate_zombienet_binary_pin(root, zombienet_binary)
+        # The closing try-state leg is release-blocking (15 §1), so in evidence
+        # mode the checker itself must be the pinned one.
+        require_executable(try_runtime_binary, "try-runtime binary")
+        validate_try_runtime_pin(root, try_runtime_binary)
     if any(suite.kind == "chopsticks" for suite in selected):
         # Chopsticks persists its fork database. A failed or interrupted prior
         # run must never turn the next release check into a continuation from
@@ -1190,14 +1768,24 @@ def run() -> int:
         log_path = log_dir / f"{suite.identifier}.log"
         started = time.monotonic()
         if suite.kind == "zombienet":
-            passed, detail = run_zombienet(root, suite, zombienet_binary, log_path)
+            passed, detail, checks = run_zombienet(
+                root,
+                suite,
+                zombienet_binary,
+                log_path,
+                try_runtime_binary,
+                try_runtime_wasm,
+                network_dir / suite.identifier,
+            )
         else:
-            passed, detail = run_chopsticks(
+            passed, detail, checks = run_chopsticks(
                 root,
                 suite,
                 chopsticks_command,
                 log_path,
                 runtime_wasm_sha256,
+                try_runtime_binary,
+                try_runtime_wasm,
             )
         row: dict[str, Any] = {
             "id": suite.identifier,
@@ -1206,14 +1794,9 @@ def run() -> int:
             "duration_seconds": round(time.monotonic() - started, 3),
             "log": str(log_path),
             "gated_on": list(suite.gated_on),
-            "checks": (
-                ["zndsl"]
-                if suite.kind == "zombienet"
-                # The live :code binding only runs when a wasm hash is known;
-                # a --no-evidence run without --wasm must not claim it.
-                else ["boot", "injected-state", "blocks"]
-                + (["code-binding"] if runtime_wasm_sha256 is not None else [])
-            ),
+            # Checks are recorded by the runner that actually executed them, so a
+            # row can never claim a leg (card, try-state) that did not run.
+            "checks": checks,
         }
         if detail is not None:
             row["detail"] = detail

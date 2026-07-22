@@ -51,6 +51,14 @@ parameter_types! {
     pub static ProbeDispatches: Vec<(u64, Balance)> = Vec::new();
     /// Whether the mock models a live XCM probe route.
     pub static ProbeDispatchLive: bool = false;
+    /// Reserve-health transitions the sibling-pallet sink was handed (07 §8).
+    /// Deliberately *not* storage, so it survives the rollback the failing-sink
+    /// test triggers: the SQ-205 atomicity assertions need to see that the sink
+    /// really ran while the oracle's `ReserveHealth` storage still unwound.
+    pub static ReserveHealthSinkCalls: Vec<bool> = Vec::new();
+    /// Makes the mock sink fail, standing in for a treasury/constitution write
+    /// that cannot commit.
+    pub static ReserveHealthSinkFails: bool = false;
     /// Keeper-batch cap for `crank_round_close`.
     pub const MaxRoundCloseBatch: u32 = 20;
 }
@@ -82,6 +90,24 @@ pub struct TestProbeTimeoutSink;
 impl pallet_oracle::ProbeTimeoutSink for TestProbeTimeoutSink {
     fn probe_timed_out() {
         ProbeTimeoutCount::mutate(|count| *count = count.saturating_add(1));
+    }
+}
+
+/// Stands in for the runtime's constitution+treasury reserve-health sink
+/// (07 §8 / 08 §1.2). `ReserveHealthSinkFails` models a sibling-pallet write
+/// that cannot commit, so the SQ-205 tests can prove the oracle transition
+/// unwinds with it.
+pub struct TestReserveHealthSink;
+
+impl pallet_oracle::ReserveHealthSink for TestReserveHealthSink {
+    fn reserve_health_changed(unhealthy: bool) -> frame_support::pallet_prelude::DispatchResult {
+        ReserveHealthSinkCalls::mutate(|calls| calls.push(unhealthy));
+        if ReserveHealthSinkFails::get() {
+            return Err(frame_support::pallet_prelude::DispatchError::Other(
+                "reserve health sink refused",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -147,6 +173,7 @@ impl pallet_oracle::Config for Test {
     type MaxRoundCloseBatch = MaxRoundCloseBatch;
     type ProbeDispatch = TestProbeDispatch;
     type ProbeTimeoutSink = TestProbeTimeoutSink;
+    type ReserveHealthSink = TestReserveHealthSink;
     type KeeperRebate = ();
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
@@ -175,6 +202,8 @@ pub fn new_test_ext_with(oracle: pallet_oracle::GenesisConfig<Test>) -> sp_io::T
     ParamsValue::set(OracleParams::DEFAULT);
     ProbeDispatches::set(Vec::new());
     ProbeDispatchLive::set(false);
+    ReserveHealthSinkCalls::set(Vec::new());
+    ReserveHealthSinkFails::set(false);
     let storage = RuntimeGenesisConfig {
         system: Default::default(),
         oracle,

@@ -724,7 +724,7 @@ fn preimage_request_count(hash: impl Into<H256>) -> u32 {
     }
 }
 
-fn empty_param_proposal(
+pub(crate) fn empty_param_proposal(
     id: futarchy_primitives::ProposalId,
     proposer: AccountId,
     payload_hash: H256,
@@ -972,7 +972,7 @@ fn install_active_x_snapshot_spec(
     Some(())
 }
 
-fn note_runtime_batch(calls: Vec<RuntimeCall>) -> Option<(H256, u32)> {
+pub(crate) fn note_runtime_batch(calls: Vec<RuntimeCall>) -> Option<(H256, u32)> {
     let batch = pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(calls).ok()?;
     let bytes = batch.encode();
     let payload_len = u32::try_from(bytes.len()).ok()?;
@@ -2689,33 +2689,43 @@ fn production_xcm_global_cap_refuses_before_minting_or_trapping() {
 }
 
 #[test]
-fn production_xcm_account_cap_traps_and_asset_hub_origin_can_recover() {
+fn production_xcm_account_cap_refuses_before_mint_and_never_traps() {
     // limit-coverage: phase3.dep_cap
+    //
+    // 09 §5.2 (normative, SQ-129 resolution 2026-07-20): BOTH caps bind before any
+    // local mint, and a cap refusal leaves nothing minted and nothing trapped. An
+    // inbound trap is keyed under the *sending* chain (Asset Hub), so a beneficiary
+    // could never self-claim it; trapping on a cap refusal would convert a
+    // recoverable upstream failure into a permanently stranded one (09 §6.1).
     use staging_xcm::latest::prelude::*;
 
     development_ext().execute_with(|| {
         System::set_block_number(1);
         let refused_beneficiary = account(56);
-        let recovery_beneficiary = account(57);
         let amount = 20 * currency::USDC;
         let issuance_before = ForeignAssets::total_issuance(usdc_location());
         set_balance_param_value(b"phase3.tvl_cap", issuance_before.saturating_add(amount));
         set_balance_param_value(b"phase3.dep_cap", 1);
 
         let outcome = execute_production_inbound_usdc(amount, &refused_beneficiary, 56);
-        assert!(matches!(
-            outcome,
-            Outcome::Incomplete {
-                error: InstructionError {
-                    index: 3,
-                    error: XcmError::FailedToTransactAsset("USDC inflow cap exceeded"),
-                },
-                ..
-            }
-        ));
-        let issuance_after_trap = ForeignAssets::total_issuance(usdc_location());
-        assert!(issuance_after_trap > issuance_before);
-        assert!(issuance_after_trap <= issuance_before.saturating_add(amount));
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Incomplete {
+                    error: InstructionError {
+                        error: XcmError::Barrier,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "a per-account cap breach must be refused before the mint: {outcome:?}"
+        );
+        assert_eq!(
+            ForeignAssets::total_issuance(usdc_location()),
+            issuance_before,
+            "nothing may be minted on a per-account cap refusal"
+        );
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &refused_beneficiary),
             0
@@ -2724,9 +2734,129 @@ fn production_xcm_account_cap_traps_and_asset_hub_origin_can_recover() {
             pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&refused_beneficiary),
             0
         );
+        assert!(
+            latest_production_xcm_trap().is_none(),
+            "a cap refusal must never produce a remote-keyed trap"
+        );
+
+        // The key's *other* live enforcement point: 09 §5.2's mint-step scope
+        // (SQ-253) exempts trapped-imbalance reconstruction from the prospective
+        // gate, so a `ClaimAsset` recovery is not refused before the mint — its
+        // beneficiary deposit leg is metered instead, and an over-cap recovery
+        // fails there with "USDC inflow cap exceeded", leaving the trap intact.
+        let owner = account(58);
+        let owner_location = local_xcm_account(&owner);
+        let Some((hash, trapped)) = create_local_production_xcm_trap(&owner_location, amount, 58)
+        else {
+            return;
+        };
+        set_balance_param_value(
+            b"phase3.tvl_cap",
+            ForeignAssets::total_issuance(usdc_location()),
+        );
+        set_balance_param_value(b"phase3.dep_cap", amount.saturating_sub(1));
+        let latest_assets: Assets = match trapped.clone().try_into() {
+            Ok(assets) => assets,
+            Err(()) => {
+                assert!(false, "trapped assets must decode as latest");
+                return;
+            }
+        };
+        let ticket = Location::new(0, [GeneralIndex(u128::from(trapped.identify_version()))]);
+        let weight_limit = production_xcm_weight_limit();
+        let recovery = Xcm(vec![
+            ClaimAsset {
+                assets: latest_assets,
+                ticket,
+            },
+            DepositAsset {
+                assets: Wild(AllCounted(1)),
+                beneficiary: owner_location,
+            },
+        ]);
+        let mut recovery_id = [58; 32];
+        let recovery_outcome =
+            <crate::configs::xcm_config::Executor as ExecuteXcm<RuntimeCall>>::prepare_and_execute(
+                local_xcm_account(&owner),
+                recovery,
+                &mut recovery_id,
+                weight_limit,
+                weight_limit,
+            );
+        assert!(
+            matches!(
+                recovery_outcome,
+                Outcome::Incomplete {
+                    error: InstructionError {
+                        error: XcmError::FailedToTransactAsset("USDC inflow cap exceeded"),
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "an over-cap recovery must fail at the metered deposit leg: {recovery_outcome:?}"
+        );
+        assert_eq!(
+            PolkadotXcm::asset_trap(&hash),
+            1,
+            "a refused recovery leaves the self-keyed trap reclaimable"
+        );
+        assert_eq!(
+            pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&owner),
+            0
+        );
+    });
+}
+
+#[test]
+fn production_xcm_remote_keyed_trap_is_recoverable_only_by_asset_hub_claim() {
+    // 09 §6.1 trapped-assets row: a trap keyed to a *remote* origin is recoverable
+    // only by an inbound `ClaimAsset` program from that origin. The trap here arises
+    // from leftover holding (an inbound program with no deposit leg) — cap refusals
+    // can no longer produce one (§5.2, SQ-129).
+    use staging_xcm::latest::prelude::*;
+
+    development_ext().execute_with(|| {
+        System::set_block_number(1);
+        let stranded_claimant = account(56);
+        let recovery_beneficiary = account(57);
+        let amount = 20 * currency::USDC;
+        let issuance_before = ForeignAssets::total_issuance(usdc_location());
+        set_balance_param_value(b"phase3.tvl_cap", issuance_before.saturating_add(amount));
+        set_balance_param_value(b"phase3.dep_cap", amount);
+
+        let incoming = XcmAsset {
+            id: XcmAssetId(usdc_location()),
+            fun: Fungibility::Fungible(amount),
+        };
+        let weight_limit = production_xcm_weight_limit();
+        // No `DepositAsset`: the executor traps the leftover holding under the
+        // sending chain's origin.
+        let orphaned = Xcm(vec![
+            ReserveAssetDeposited(Assets::from(incoming.clone())),
+            ClearOrigin,
+            BuyExecution {
+                fees: incoming,
+                weight_limit: Limited(weight_limit),
+            },
+        ]);
+        let mut message_id = [56; 32];
+        let outcome =
+            <crate::configs::xcm_config::Executor as ExecuteXcm<RuntimeCall>>::prepare_and_execute(
+                bleavit_xcm::identity::asset_hub_location(),
+                orphaned,
+                &mut message_id,
+                weight_limit,
+                XcmWeight::zero(),
+            );
+        assert!(outcome.ensure_complete().is_ok());
+
+        let issuance_after_trap = ForeignAssets::total_issuance(usdc_location());
+        assert!(issuance_after_trap > issuance_before);
+        assert!(issuance_after_trap <= issuance_before.saturating_add(amount));
 
         let Some((hash, trap_origin, versioned_assets)) = latest_production_xcm_trap() else {
-            assert!(false, "deposit-cap refusal must trap its minted holding");
+            assert!(false, "leftover holding must trap");
             return;
         };
         assert_eq!(trap_origin, bleavit_xcm::identity::asset_hub_location());
@@ -2740,7 +2870,7 @@ fn production_xcm_account_cap_traps_and_asset_hub_origin_can_recover() {
         });
         assert!(RuntimeBaseCallFilter::contains(&local_claim));
         assert!(PolkadotXcm::claim_assets(
-            RuntimeOrigin::signed(refused_beneficiary.clone()),
+            RuntimeOrigin::signed(stranded_claimant.clone()),
             Box::new(versioned_assets.clone()),
             Box::new(VersionedLocation::from(local_xcm_account(
                 &recovery_beneficiary,
@@ -3944,8 +4074,13 @@ fn treasury_rebate_payout_moves_real_usdc_from_the_selected_pot() {
     use pallet_futarchy_treasury::{PayoutLine, RebatePayout, TreasuryParams as _};
 
     development_ext().execute_with(|| {
-        // `keeper.rebate` is deliberately unseeded until B5 calibration.
-        assert_eq!(crate::configs::TreasuryParams::keeper_rebate(), 0);
+        // SQ-117: `keeper.rebate` is now genesis-seeded from the 08 §6.2 fee
+        // basis at 3× (value still [VERIFY] pending launch fee.vit_usdc_rate),
+        // so the rebate pipeline reads a positive amount rather than zero.
+        assert_eq!(
+            crate::configs::TreasuryParams::keeper_rebate(),
+            kernel::KEEPER_REBATE_FEE_BASIS_USDC.saturating_mul(3)
+        );
         assert_eq!(
             crate::configs::TreasuryParams::keeper_budget_epoch(),
             12_000 * currency::USDC
@@ -4432,7 +4567,7 @@ fn coretime_liveness_calls_dispatch_while_ledger_freeze_playbook_is_active() {
 fn coretime_liveness_calls_dispatch_while_reserve_health_flag_is_set() {
     development_ext().execute_with(|| {
         assert_coretime_liveness_calls_dispatch_during(91, || {
-            FutarchyTreasury::set_reserve_impaired(true);
+            assert_ok!(FutarchyTreasury::set_reserve_impaired(true));
             assert!(FutarchyTreasury::treasury().reserve_impaired);
             assert_eq!(FutarchyTreasury::nav().spendable_nav, 0);
         });
@@ -6906,13 +7041,14 @@ fn epoch_call_samples() -> Vec<RuntimeCall> {
         }),
         RuntimeCall::Epoch(pallet_epoch::Call::force_reject_process_hold { pid: 0 }),
         RuntimeCall::Epoch(pallet_epoch::Call::void_cohort { epoch: 0 }),
+        RuntimeCall::Epoch(pallet_epoch::Call::finalize_epoch_baseline { epoch: 0 }),
     ]
 }
 
 #[test]
 fn epoch_classifier_rows_and_closed_privileged_wrappers_match_the_authority_matrix() {
     let calls = epoch_call_samples();
-    assert_eq!(calls.len(), 13);
+    assert_eq!(calls.len(), 14);
 
     for call in &calls[0..5] {
         assert!(RuntimeBaseCallFilter::contains(call));
@@ -6920,6 +7056,12 @@ fn epoch_classifier_rows_and_closed_privileged_wrappers_match_the_authority_matr
     for call in &calls[7..11] {
         assert!(RuntimeBaseCallFilter::contains(call));
     }
+    // 06 §3.2: the SQ-320 orphan-Baseline crank sits on the permissionless
+    // Signed row, so it passes the bare base filter and — unlike the privileged
+    // leaves below — needs no class origin. Its `leaf public` classifier
+    // projection is pinned by the S5 inventory.
+    let finalize = &calls[13];
+    assert!(RuntimeBaseCallFilter::contains(finalize));
 
     let values = &calls[5];
     assert!(crate::classifier::is_values_enactment_leaf(values));
@@ -10179,6 +10321,228 @@ fn seeded_force_reject_void_closes_and_reaps_all_proposal_books() {
     });
 }
 
+/// SQ-320 · 03 §2.3/§5.2 · 05 §7(5): an epoch that **opens a Baseline book but
+/// never forms a cohort** strands its Baseline holders forever.
+///
+/// Reachability (the shortest trigger): a one-proposal epoch whose sole
+/// market-bearing proposal is force-rejected *pre-measurement*. Seeding the
+/// proposal's markets creates the epoch's Baseline vault (03 §2.2), but
+/// `start_measurement` — the sole writer of `CohortInfo` — is never reached, so
+/// no `CohortInfo` and no `CohortSummary` for the epoch ever exists. The two
+/// producers of a Baseline settlement both key off a cohort (`settle_cohort`'s
+/// `SettlementTarget::Baseline` and `void_cohort`'s neutral VOID), so neither
+/// can ever fire. The vault stays `Open`, both redemption calls of 03 §5.3
+/// require `Settled`, and the book stays open, tradeable and unprunable.
+///
+/// `finalize_epoch_baseline` is the permissionless self-help crank that reaches
+/// exactly this case: a strictly past, cohort-free, summary-free epoch all of
+/// whose proposals are terminal.
+#[test]
+fn sq320_orphaned_epoch_baseline_is_settled_by_the_permissionless_crank() {
+    use futarchy_primitives::{PositionId, ScalarSide};
+    use pallet_conditional_ledger::core_ledger::BaselineState;
+    use pallet_epoch::{EpochParamsProvider, MarketAccess};
+
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 320_001;
+        System::set_block_number(1);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let holder = account(230);
+        let counterparty = account(231);
+        let cranker = account(232);
+        let short = PositionId::Baseline {
+            epoch,
+            side: ScalarSide::Short,
+        };
+
+        let params = <crate::configs::RuntimeEpochParams as EpochParamsProvider>::get();
+        let decision_b = crate::configs::balance_param(b"pol.b.code");
+        let gate_b = crate::configs::balance_param(b"pol.b_gate");
+        let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
+        let decision_headroom =
+            pallet_market::core_market::seed_headroom(decision_b).expect("bounded decision b");
+        let gate_headroom =
+            pallet_market::core_market::seed_headroom(gate_b).expect("bounded gate b");
+        let baseline_headroom =
+            pallet_market::core_market::seed_headroom(baseline_b).expect("bounded baseline b");
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &crate::configs::pol_account(),
+            decision_headroom
+                .saturating_add(gate_headroom.saturating_mul(2))
+                .saturating_add(currency::USDC),
+        ));
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &crate::configs::pol_baseline_account(),
+            baseline_headroom.saturating_add(currency::USDC),
+        ));
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.main_usdc = decision_headroom
+                .saturating_mul(2)
+                .saturating_add(gate_headroom.saturating_mul(4))
+                .saturating_add(baseline_headroom)
+                .saturating_mul(2);
+        });
+
+        // The epoch's single market-bearing proposal. Seeding its books is what
+        // creates the epoch's Baseline vault and book.
+        let mut proposal = empty_param_proposal(PID, account(233), H256::zero(), 0);
+        proposal.class = ProposalClass::Code;
+        proposal.metric_spec = 1;
+        proposal.state = ProposalState::Trading;
+        proposal.decide_at = System::block_number().saturating_add(params.decision_window);
+        let seed_plan = <crate::configs::RuntimePolBudget as pallet_epoch::PolBudget<
+            AccountId,
+        >>::proposal_seed_plan(&proposal)
+        .expect("CODE seed plan");
+        let markets =
+            <crate::configs::RuntimeMarketAccess as MarketAccess<AccountId>>::open_markets(
+                &proposal,
+                false,
+                Some(seed_plan),
+            )
+            .expect("seeded market set");
+        proposal.markets = Some(markets);
+        pallet_epoch::Proposals::<Runtime>::insert(PID, proposal.clone());
+        let schedule = pallet_epoch::Schedule::<Runtime>::get();
+        pallet_epoch::ProposalSchedules::<Runtime>::insert(
+            PID,
+            pallet_epoch::ProposalSchedule {
+                epoch: proposal.epoch,
+                epoch_start_block: schedule.epoch_start_block,
+                epoch_length: schedule.length,
+                decide_at: proposal.decide_at,
+                metric_spec: proposal.metric_spec,
+            },
+        );
+        pallet_epoch::NextProposalId::<Runtime>::mutate(|next| {
+            *next = (*next).max(PID.saturating_add(1));
+        });
+
+        // A single-sided Baseline holder: split, then dispose of the SHORT leg,
+        // so `merge_baseline` can no longer take this holder back to par.
+        let stake = 10 * currency::USDC;
+        let deposit = crate::configs::LedgerPositionDeposit::get();
+        let funding = stake.saturating_mul(4);
+        assert_ok!(ForeignAssets::mint_into(usdc_location(), &holder, funding));
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &counterparty,
+            funding
+        ));
+        assert_ok!(ConditionalLedger::split_baseline(
+            RuntimeOrigin::signed(holder.clone()),
+            epoch,
+            stake,
+        ));
+        assert_ok!(ConditionalLedger::transfer(
+            RuntimeOrigin::signed(holder.clone()),
+            short,
+            counterparty.clone(),
+            stake,
+        ));
+
+        // T20 pre-measurement force-reject of the epoch's only proposal.
+        assert_ok!(Epoch::force_reject_process_hold(
+            pallet_origins::Origin::GuardianHold.into(),
+            PID,
+        ));
+
+        // The orphan. No cohort was ever created, so no cohort can ever be
+        // settled or voided, and the Baseline vault is unreachable.
+        assert!(
+            !pallet_epoch::Cohorts::<Runtime>::contains_key(epoch),
+            "the defect requires an epoch that never formed a cohort",
+        );
+        assert!(
+            !pallet_epoch::RecentCohortSummaries::<Runtime>::get()
+                .iter()
+                .any(|summary| summary.epoch == epoch),
+            "no archived summary either",
+        );
+        assert_eq!(
+            pallet_conditional_ledger::BaselineVaults::<Runtime>::get(epoch)
+                .map(|vault| vault.state),
+            Some(BaselineState::Open),
+        );
+        assert_noop!(
+            ConditionalLedger::redeem_baseline(
+                RuntimeOrigin::signed(holder.clone()),
+                epoch,
+                ScalarSide::Long,
+                stake,
+            ),
+            pallet_conditional_ledger::Error::<Runtime>::WrongVaultState
+        );
+
+        // 05 §7(6) condition 1: while the epoch is live a later proposal could
+        // still qualify into it, so the crank must refuse until it is past.
+        assert!(
+            Epoch::finalize_epoch_baseline(RuntimeOrigin::signed(cranker.clone()), epoch).is_err()
+        );
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| clock.index = epoch.saturating_add(1));
+
+        // The repair, dispatched permissionlessly by an account with no role in
+        // the epoch at all (06 §3.2: Signed row).
+        assert_ok!(Epoch::finalize_epoch_baseline(
+            RuntimeOrigin::signed(cranker.clone()),
+            epoch,
+        ));
+
+        // 03 §2.3 `Baseline Open → Settled(s)`, at the kernel constant.
+        assert_eq!(
+            pallet_conditional_ledger::BaselineVaults::<Runtime>::get(epoch)
+                .map(|vault| vault.state),
+            Some(BaselineState::Settled(kernel::VOID_BASELINE_SCORE)),
+        );
+
+        // The book is closed and durably latched by the same call — the second
+        // half of the defect (an orphaned book stays open, tradeable, and its
+        // `BaselineMarketOf` mapping can never be pruned).
+        let book = pallet_market::Markets::<Runtime>::get(markets.baseline)
+            .expect("orphaned Baseline book");
+        assert_eq!(book.phase, pallet_market::core_market::MarketPhase::Closed);
+        assert!(pallet_market::SettlementObservedAt::<Runtime>::get(markets.baseline).is_some());
+        assert!(!pallet_market::Pallet::<Runtime>::pol_obligation_live(
+            markets.baseline,
+            &book
+        ));
+
+        // The stranded holder can now redeem. Payouts derive from the kernel
+        // constant, never hand-computed (03 §5.3/§6.3).
+        let scale = u128::from(kernel::SCORE_SCALE);
+        let s = u128::from(kernel::VOID_BASELINE_SCORE.0);
+        let long_payout = stake.saturating_mul(s) / scale;
+        let holder_before = ForeignAssets::balance(usdc_location(), &holder);
+        assert_ok!(ConditionalLedger::redeem_baseline(
+            RuntimeOrigin::signed(holder.clone()),
+            epoch,
+            ScalarSide::Long,
+            stake,
+        ));
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &holder).saturating_sub(holder_before),
+            long_payout.saturating_add(deposit),
+        );
+
+        // §7(6): a second crank is a harmless no-op, never an error (G-1).
+        assert_ok!(Epoch::finalize_epoch_baseline(
+            RuntimeOrigin::signed(cranker),
+            epoch,
+        ));
+        assert_eq!(
+            pallet_conditional_ledger::BaselineVaults::<Runtime>::get(epoch)
+                .map(|vault| vault.state),
+            Some(BaselineState::Settled(kernel::VOID_BASELINE_SCORE)),
+        );
+
+        assert!(Epoch::do_try_state().is_ok());
+        assert!(ConditionalLedger::do_try_state().is_ok());
+        assert!(Market::do_try_state().is_ok());
+    });
+}
+
 #[test]
 fn two_sequential_guardian_reruns_prune_terminal_baseline_windows() {
     use pallet_epoch::MarketAccess;
@@ -10652,12 +11016,27 @@ fn sq75_both_registry_instances_are_base_filter_public_and_resolve_is_origin_gat
         .into_iter()
         .map(RuntimeCall::MilestoneRegistry)
         .collect();
-    for call in incident.iter().chain(milestone.iter()) {
+    // Index 4 is `resolve_challenge`, the one governance-gated call in the set:
+    // both instances bind it to `EnsureOracleResolution`, so since SQ-295 it
+    // carries that authority in the classifier rather than `Public`. It stays
+    // base-filter admissible as a bare leaf (`is_values_enactment_leaf`, the
+    // SQ-32 scheduler accommodation) but, being privileged, is no longer
+    // carried by the closed wrapper set — parity with `oracle.adjudicate`.
+    const RESOLVE: usize = 4;
+    for (index, call) in incident
+        .iter()
+        .enumerate()
+        .chain(milestone.iter().enumerate())
+    {
         assert!(RuntimeBaseCallFilter::contains(call));
         let wrapped = RuntimeCall::Utility(pallet_utility::Call::batch {
             calls: vec![call.clone()],
         });
-        assert!(RuntimeBaseCallFilter::contains(&wrapped));
+        assert_eq!(
+            RuntimeBaseCallFilter::contains(&wrapped),
+            index != RESOLVE,
+            "wrapper admissibility must follow the call's real authority (SQ-295)"
+        );
     }
 
     development_ext().execute_with(|| {
@@ -12471,7 +12850,7 @@ fn canonical_resource_key_universe_has_no_semantic_collisions() {
             }
         }
 
-        for singleton in [0x03, 0x04, 0x05] {
+        for singleton in [0x03, 0x04, 0x05, 0x0A, 0x0B] {
             insert_distinct(&mut keys, expected_resource_key(singleton, None));
         }
         for instance in [0_u8, 1_u8] {
@@ -13499,7 +13878,11 @@ fn undeciding_timeout_covers_the_longest_track_prepare_period() {
 }
 
 #[test]
-fn constitution_track_cannot_amend_entrenched_class_but_entrenched_track_can() {
+fn entrenched_class_set_param_is_track_scoped_but_amend_registry_is_meta_only() {
+    // `set_param` on an entrenched-class key stays direction-/track-scoped
+    // (constitution cannot, entrenched can), but SQ-150 (ruled 2026-07-21) makes
+    // `amend_registry` FutarchyMeta-only: NEITHER the constitution nor the
+    // entrenched track may amend a registry row's governance metadata anymore.
     development_ext().execute_with(|| {
         let key = pallet_constitution::key16(b"att.bond");
         let record = pallet_constitution::Params::<Runtime>::get(key);
@@ -13508,15 +13891,18 @@ fn constitution_track_cannot_amend_entrenched_class_but_entrenched_track_can() {
             return;
         };
         assert_eq!(record.class, pallet_constitution::ParamClass::Entrenched);
+        assert!(!record.kernel_bounded, "att.bond is a non-kernel row");
         pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
             clock.index = clock.index.saturating_add(record.cooldown_epochs)
         });
 
         let constitution_origin: RuntimeOrigin = crate::track_origins::Origin::Constitution.into();
         let entrenched_origin: RuntimeOrigin = crate::track_origins::Origin::Entrenched.into();
+        let meta_origin: RuntimeOrigin = pallet_origins::Origin::FutarchyMeta.into();
         let next = pallet_constitution::ParamValue::Balance(
             record.value.as_u128().saturating_add(currency::VIT),
         );
+        // set_param authority is unchanged (entrenched-class → entrenched track).
         assert_noop!(
             Constitution::set_param(constitution_origin.clone(), key, next),
             DispatchError::BadOrigin
@@ -13527,6 +13913,7 @@ fn constitution_track_cannot_amend_entrenched_class_but_entrenched_track_can() {
             next
         ));
 
+        // amend_registry: both values tracks are now refused; only META amends.
         assert_noop!(
             Constitution::amend_registry(
                 constitution_origin,
@@ -13538,8 +13925,19 @@ fn constitution_track_cannot_amend_entrenched_class_but_entrenched_track_can() {
             ),
             DispatchError::BadOrigin
         );
+        assert_noop!(
+            Constitution::amend_registry(
+                entrenched_origin,
+                key,
+                record.min,
+                record.max,
+                record.max_delta,
+                record.cooldown_epochs,
+            ),
+            DispatchError::BadOrigin
+        );
         assert_ok!(Constitution::amend_registry(
-            entrenched_origin,
+            meta_origin,
             key,
             record.min,
             record.max,
@@ -15604,4 +16002,459 @@ fn milestone_target_seam_is_fail_closed_in_production_and_admissible_under_bench
             "production must stay fail-closed until SQ-175 wires a real MetricSpec target"
         );
     }
+}
+
+// -------------------------------------------------------------------------
+// XCM trap recovery through the proposal lifecycle (05 §1.4 `0x0A`; 09 §6.1;
+// 06 §3.2) — SQ-244 / SQ-316
+// -------------------------------------------------------------------------
+
+/// Build the canonical protocol-keyed trap plus the TREASURY recovery call.
+fn protocol_trap_recovery_call(amount: Balance, message_byte: u8) -> Option<(H256, RuntimeCall)> {
+    let protocol = crate::configs::treasury_protocol_account();
+    let protocol_location = local_xcm_account(&protocol);
+    let (hash, assets) =
+        create_local_production_xcm_trap(&protocol_location, amount, message_byte)?;
+    let issuance_with_trap = ForeignAssets::total_issuance(usdc_location());
+    set_balance_param_value(b"phase3.tvl_cap", issuance_with_trap);
+    set_balance_param_value(b"phase3.dep_cap", amount);
+    Some((
+        hash,
+        RuntimeCall::PolkadotXcm(pallet_xcm::Call::claim_assets {
+            assets: Box::new(assets),
+            beneficiary: Box::new(VersionedLocation::from(protocol_location)),
+        }),
+    ))
+}
+
+#[test]
+fn trap_recovery_payload_derives_the_singleton_resource_family() {
+    // 05 §1.4: `0x0A` is a singleton family — no discriminator bytes.
+    development_ext().execute_with(|| {
+        let amount = 20 * currency::USDC;
+        let Some((_hash, claim)) = protocol_trap_recovery_call(amount, 70) else {
+            return;
+        };
+        assert_eq!(
+            derived_single_resource(claim),
+            Some(expected_resource_key(0x0A, None)),
+        );
+    });
+}
+
+#[test]
+fn trap_recovery_payload_screens_qualifies_and_executes_end_to_end() {
+    // 09 §6.1 mandates protocol-keyed traps be reclaimed by a TREASURY-class call.
+    // B10 proved the dispatcher; this drives the whole lifecycle (SQ-244/SQ-316).
+    use pallet_epoch::ExecutionGuardAccess;
+
+    development_ext().execute_with(|| {
+        assert!(install_single_active_metric_spec(28).is_some());
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| state.main_usdc = 10);
+        let protocol = crate::configs::treasury_protocol_account();
+        let amount = 20 * currency::USDC;
+        let protocol_before = ForeignAssets::balance(usdc_location(), &protocol);
+        let Some((hash, claim)) = protocol_trap_recovery_call(amount, 71) else {
+            return;
+        };
+        let resource = expected_resource_key(0x0A, None);
+        let Some((payload_hash, payload_len)) = note_runtime_batch(vec![claim]) else {
+            assert!(false, "trap-recovery fixture must encode");
+            return;
+        };
+
+        let proposer = account(243);
+        let pid = pallet_epoch::NextProposalId::<Runtime>::get();
+        let mut submitted = empty_param_proposal(pid, proposer.clone(), payload_hash, payload_len);
+        submitted.class = ProposalClass::Treasury;
+        submitted.bond = crate::configs::balance_param(b"prop.bond.trs");
+        submitted.resources = match futarchy_primitives::BoundedVec::try_from(vec![resource]) {
+            Ok(resources) => resources,
+            Err(_) => {
+                assert!(false, "one trap-recovery resource must fit");
+                return;
+            }
+        };
+        // 05 §1.4: recovery moves already-owned assets out of the trap register and
+        // creates no treasury outflow, so the derived ask is exactly zero.
+        assert_eq!(submitted.ask, 0);
+        assert_eq!(
+            <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
+                AccountId,
+            >>::in_cap_prize(&submitted),
+            Some(0),
+        );
+        let disposition =
+            <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
+                AccountId,
+            >>::static_check(&submitted);
+        assert!(
+            matches!(disposition, pallet_epoch::StaticCheckDisposition::Eligible),
+            "trap-recovery payload must pass static screening: {disposition:?}",
+        );
+
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &proposer,
+            submitted.bond,
+        ));
+        assert_ok!(Epoch::submit(RuntimeOrigin::signed(proposer), submitted));
+        assert!(tick_qualification(vec![pid]).is_some());
+        assert_eq!(stored_proposal_state(pid), Some(ProposalState::Qualified));
+        assert_eq!(
+            pallet_epoch::ResourceLocks::<Runtime>::get().into_inner(),
+            vec![(resource, pid)],
+        );
+
+        let proposal = match pallet_epoch::Proposals::<Runtime>::get(pid) {
+            Some(proposal) => proposal,
+            None => {
+                assert!(false, "qualified proposal must be live");
+                return;
+            }
+        };
+        let maturity = System::block_number().saturating_add(
+            <crate::configs::ExecutionParams as pallet_execution_guard::Params>::exec_timelock(
+                ProposalClass::Treasury,
+            ),
+        );
+        let grace = <crate::configs::ExecutionParams as pallet_execution_guard::Params>::exec_grace(
+            ProposalClass::Treasury,
+        );
+        assert_ok!(
+            <crate::configs::RuntimeEpochExecutionGuard as ExecutionGuardAccess>::enqueue(
+                pid,
+                proposal.payload_hash,
+                proposal.version_constraint.clone(),
+                maturity,
+                grace,
+                false,
+            )
+        );
+        pallet_epoch::Proposals::<Runtime>::mutate(pid, |stored| {
+            if let Some(stored) = stored {
+                stored.state = ProposalState::Queued;
+                stored.maturity = Some(maturity);
+                stored.grace_end = Some(maturity.saturating_add(grace));
+                stored.decision = Some(DecisionOutcome::Adopt);
+                stored.markets = Some(MarketSet {
+                    accept: pid.saturating_mul(10).saturating_add(1),
+                    reject: pid.saturating_mul(10).saturating_add(2),
+                    gates: None,
+                    baseline: pid.saturating_mul(10).saturating_add(3),
+                });
+            }
+        });
+        pallet_conditional_ledger::Vaults::<Runtime>::insert(
+            pid,
+            pallet_conditional_ledger::core_ledger::VaultInfo::open(1),
+        );
+        System::set_block_number(maturity);
+        assert_ok!(ExecutionGuard::execute(
+            RuntimeOrigin::signed(account(244)),
+            pid,
+        ));
+        assert_eq!(stored_proposal_state(pid), Some(ProposalState::Measuring));
+        assert_eq!(
+            PolkadotXcm::asset_trap(&hash),
+            0,
+            "the trap must be cleared"
+        );
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &protocol),
+            protocol_before.saturating_add(amount),
+        );
+    });
+}
+
+#[test]
+fn trap_recovery_is_payload_admissible_only_for_the_treasury_class() {
+    // 05 §1.4 class safety: without an explicit Treasury-only rule the footprint
+    // arm would let PARAM/CODE/META inherit the generic Public allowance — exactly
+    // the 06 §1 / I-8 class confusion the values-scope exclusion forbids.
+    use pallet_execution_guard::Capabilities;
+
+    development_ext().execute_with(|| {
+        let amount = 20 * currency::USDC;
+        let Some((_hash, claim)) = protocol_trap_recovery_call(amount, 72) else {
+            return;
+        };
+        assert!(
+            crate::configs::RuntimeCapabilities::call_enabled(ProposalClass::Treasury, &claim),
+            "TREASURY must be able to carry the 09 §6.1 recovery call"
+        );
+        for class in [
+            ProposalClass::Param,
+            ProposalClass::Code,
+            ProposalClass::Meta,
+        ] {
+            assert!(
+                !crate::configs::RuntimeCapabilities::call_enabled(class, &claim),
+                "{class:?} must not be able to carry a trap-recovery payload"
+            );
+        }
+    });
+}
+
+#[test]
+fn trap_recovery_without_the_treasury_spend_capability_is_refused() {
+    // The Treasury-only rule is capability-gated, not class-gated alone (06 §3.2).
+    use pallet_execution_guard::Capabilities;
+
+    development_ext().execute_with(|| {
+        let amount = 20 * currency::USDC;
+        let Some((_hash, claim)) = protocol_trap_recovery_call(amount, 73) else {
+            return;
+        };
+        assert_ok!(Constitution::set_capability(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::CapabilityRecord {
+                class: ProposalClass::Treasury,
+                capability: pallet_constitution::Capability::TreasurySpend,
+                enabled: false,
+            },
+        ));
+        assert!(!crate::configs::RuntimeCapabilities::call_enabled(
+            ProposalClass::Treasury,
+            &claim
+        ));
+    });
+}
+
+#[test]
+fn trap_recovery_with_a_mismatched_resource_declaration_is_slashed() {
+    // 05 §1.4 screening rule: declared `resources` must equal the derived footprint
+    // as a set; inequality in either direction is a false resource declaration (T4).
+    development_ext().execute_with(|| {
+        assert!(install_single_active_metric_spec(29).is_some());
+        let amount = 20 * currency::USDC;
+        let Some((_hash, claim)) = protocol_trap_recovery_call(amount, 74) else {
+            return;
+        };
+        let Some((payload_hash, payload_len)) = note_runtime_batch(vec![claim]) else {
+            assert!(false, "trap-recovery fixture must encode");
+            return;
+        };
+        let proposer = account(245);
+        let pid = pallet_epoch::NextProposalId::<Runtime>::get();
+        let mut submitted = empty_param_proposal(pid, proposer.clone(), payload_hash, payload_len);
+        submitted.class = ProposalClass::Treasury;
+        submitted.bond = crate::configs::balance_param(b"prop.bond.trs");
+        // Declare the runtime-code singleton instead of the trap-recovery one.
+        submitted.resources = match futarchy_primitives::BoundedVec::try_from(vec![
+            expected_resource_key(0x03, None),
+        ]) {
+            Ok(resources) => resources,
+            Err(_) => {
+                assert!(false, "one resource must fit");
+                return;
+            }
+        };
+        let disposition =
+            <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
+                AccountId,
+            >>::static_check(&submitted);
+        assert!(
+            matches!(
+                disposition,
+                pallet_epoch::StaticCheckDisposition::SlashAll(
+                    futarchy_primitives::RejectReason::ConstitutionViolation
+                )
+            ),
+            "a false resource declaration must slash: {disposition:?}",
+        );
+    });
+}
+
+// -------------------------------------------------------------------------
+// Screening mirrors the guard's enqueue domain preconditions (09 §1.1) — SQ-308
+// -------------------------------------------------------------------------
+
+/// The payload 05 §96 blesses structurally but 09 §2.1 does not intend: an
+/// upgrade authorization nested inside `utility.batch_all`. The top-level-only
+/// matcher projects it to `InternalRootApplyUpgrade`, which the guard refuses.
+fn nested_authorize_upgrade_batch() -> RuntimeCall {
+    RuntimeCall::Utility(pallet_utility::Call::batch_all {
+        calls: vec![RuntimeCall::System(frame_system::Call::authorize_upgrade {
+            code_hash: sp_core::H256::repeat_byte(0xAB),
+        })],
+    })
+}
+
+#[test]
+fn nested_authorize_upgrade_projects_to_the_domain_the_guard_refuses() {
+    // Pins the mechanism: the classifier matches `authorize_upgrade` only at top
+    // level (`is_sub_type`), so nested it becomes the *apply* domain, which
+    // `enqueue` rejects outright (pallets/execution-guard/src/lib.rs `enqueue`).
+    use pallet_execution_guard::BatchDispatcher;
+
+    development_ext().execute_with(|| {
+        let analysis = match crate::classifier::RuntimeDispatcher::rederive_call(
+            &nested_authorize_upgrade_batch(),
+        ) {
+            Ok(analysis) => analysis,
+            Err(error) => {
+                assert!(false, "nested batch must re-derive: {error:?}");
+                return;
+            }
+        };
+        assert!(
+            analysis
+                .domains
+                .contains(&pallet_execution_guard::CallDomain::InternalRootApplyUpgrade),
+            "nested authorize_upgrade must project to the apply domain: {:?}",
+            analysis.domains,
+        );
+        // The guard's own precondition refuses exactly this domain.
+        assert!(!analysis.domains.iter().all(|domain| {
+            pallet_execution_guard::domain_allowed(ProposalClass::Code, *domain)
+                && !matches!(
+                    domain,
+                    pallet_execution_guard::CallDomain::InternalRootApplyUpgrade
+                )
+        }));
+    });
+}
+
+#[test]
+fn screening_refuses_payloads_the_guard_enqueue_would_reject() {
+    // 09 §1.1: queue-time preconditions are "enforced by the decision path
+    // **before** `enqueue` succeeds". Screening must therefore be a superset of
+    // the guard's domain preconditions, or an Adopted proposal can make
+    // `epoch.decide(pid)` revert permanently (SQ-308).
+    development_ext().execute_with(|| {
+        let Some((payload_hash, payload_len)) =
+            note_runtime_batch(vec![nested_authorize_upgrade_batch()])
+        else {
+            assert!(false, "nested upgrade fixture must encode");
+            return;
+        };
+        let proposer = account(246);
+        let pid = pallet_epoch::NextProposalId::<Runtime>::get();
+        let mut submitted = empty_param_proposal(pid, proposer, payload_hash, payload_len);
+        submitted.class = ProposalClass::Code;
+        submitted.bond = crate::configs::balance_param(b"prop.bond.code");
+        submitted.resources = match futarchy_primitives::BoundedVec::try_from(vec![
+            expected_resource_key(0x03, None),
+        ]) {
+            Ok(resources) => resources,
+            Err(_) => {
+                assert!(false, "one resource must fit");
+                return;
+            }
+        };
+        let disposition =
+            <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
+                AccountId,
+            >>::static_check(&submitted);
+        assert!(
+            matches!(
+                disposition,
+                pallet_epoch::StaticCheckDisposition::Refund(
+                    futarchy_primitives::RejectReason::ProcessHold
+                )
+            ),
+            // 05 §2.1: confiscation requires a verified culpable act; this failure is
+            // in neither slash arm, so the default refund arm governs.
+            "a payload the guard would refuse must be cancelled and refunded: {disposition:?}",
+        );
+        assert!(
+            !<crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
+                AccountId,
+            >>::queue_time_check(&submitted),
+            "queue_time_check must mirror the guard's enqueue preconditions",
+        );
+    });
+}
+
+#[test]
+fn top_level_authorize_upgrade_still_screens_and_enqueues() {
+    // The mirror must not over-reject: the canonical CODE upgrade payload, and a
+    // multi-item batch of *top-level* calls (09 §2.1), stay admissible.
+    development_ext().execute_with(|| {
+        let Some((payload_hash, payload_len)) = note_runtime_batch(vec![RuntimeCall::System(
+            frame_system::Call::authorize_upgrade {
+                code_hash: sp_core::H256::repeat_byte(0xCD),
+            },
+        )]) else {
+            assert!(false, "top-level upgrade fixture must encode");
+            return;
+        };
+        let proposer = account(247);
+        let pid = pallet_epoch::NextProposalId::<Runtime>::get();
+        let mut submitted = empty_param_proposal(pid, proposer, payload_hash, payload_len);
+        submitted.class = ProposalClass::Code;
+        submitted.bond = crate::configs::balance_param(b"prop.bond.code");
+        submitted.resources = match futarchy_primitives::BoundedVec::try_from(vec![
+            expected_resource_key(0x03, None),
+        ]) {
+            Ok(resources) => resources,
+            Err(_) => {
+                assert!(false, "one resource must fit");
+                return;
+            }
+        };
+        let disposition =
+            <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
+                AccountId,
+            >>::static_check(&submitted);
+        assert!(
+            matches!(disposition, pallet_epoch::StaticCheckDisposition::Eligible),
+            "the canonical top-level upgrade payload must stay eligible: {disposition:?}",
+        );
+    });
+}
+
+#[test]
+fn false_footprint_is_slashed_even_when_also_domain_inadmissible() {
+    // A proposal that is simultaneously (a) domain-inadmissible — nested
+    // `authorize_upgrade` inside `utility.batch_all`, which `domains_admissible`
+    // refunds — and (b) false-footprint — declared resources ≠ derived footprint —
+    // must be SLASHED for the false declaration, not refunded for the domain fault.
+    // A verified false footprint is a culpable act (05 §2.1 T4); a proposer must not
+    // escape the 100% false-declaration slash by *also* committing a co-occurring
+    // refundable fault. The footprint-equality check therefore precedes the
+    // domain/ask refunds in `static_check` (SQ-480 review round on SQ-308).
+    development_ext().execute_with(|| {
+        let Some((payload_hash, payload_len)) =
+            note_runtime_batch(vec![nested_authorize_upgrade_batch()])
+        else {
+            assert!(false, "nested upgrade fixture must encode");
+            return;
+        };
+        let proposer = account(248);
+        let pid = pallet_epoch::NextProposalId::<Runtime>::get();
+        let mut submitted = empty_param_proposal(pid, proposer, payload_hash, payload_len);
+        submitted.class = ProposalClass::Code;
+        submitted.bond = crate::configs::balance_param(b"prop.bond.code");
+        // The derived footprint is the singleton apply resource `[0x03]`. Declaring a
+        // *different* resource (`0x01`, a param/registry key) is a false claim — the
+        // culpable act the slash arm exists for.
+        submitted.resources = match futarchy_primitives::BoundedVec::try_from(vec![
+            expected_resource_key(0x01, None),
+        ]) {
+            Ok(resources) => resources,
+            Err(_) => {
+                assert!(false, "one resource must fit");
+                return;
+            }
+        };
+        let disposition =
+            <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
+                AccountId,
+            >>::static_check(&submitted);
+        assert!(
+            matches!(
+                disposition,
+                pallet_epoch::StaticCheckDisposition::SlashAll(
+                    futarchy_primitives::RejectReason::ConstitutionViolation
+                )
+            ),
+            // Before the SQ-480 reorder this returned `Refund(ProcessHold)`: the
+            // `domains_admissible` refund fired first and the false footprint went
+            // unpunished.
+            "a false footprint must be slashed even when the payload is also \
+             domain-inadmissible: {disposition:?}",
+        );
+    });
 }

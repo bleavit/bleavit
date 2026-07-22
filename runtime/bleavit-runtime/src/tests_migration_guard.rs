@@ -12,6 +12,7 @@ use frame_support::{
     BoundedVec,
 };
 use futarchy_primitives::kernel;
+use parity_scale_codec::MaxEncodedLen;
 
 use crate::{tests, ExecutionGuard, Runtime, RuntimeEvent, System};
 
@@ -84,6 +85,19 @@ fn registered_mbms_obey_the_b16_lockdown() {
     assert!(
         aggregate < u64::from(kernel::MIGRATION_STALL_BLOCKS),
         "the aggregate MBM run budget must be strictly < MIGRATION_STALL_BLOCKS (09 §3.2(d)(iii))",
+    );
+}
+
+/// 09 §3.2(4) requires the diagnostic to carry the SDK cursor's exact bytes.
+/// `CursorMaxLen` bounds only the migration-owned inner cursor, so the event
+/// envelope must also cover the outer enum/index/option/length/block fields.
+#[test]
+fn migration_halted_cursor_bound_covers_the_full_sdk_cursor_encoding() {
+    let sdk_max = <pallet_migrations::CursorOf<Runtime> as MaxEncodedLen>::max_encoded_len();
+    assert!(
+        sdk_max <= pallet_execution_guard::MAX_MIGRATION_HALT_CURSOR_BOUND as usize,
+        "MigrationHalted cursor bound must cover the full encoded SDK cursor: {sdk_max} > {}",
+        pallet_execution_guard::MAX_MIGRATION_HALT_CURSOR_BOUND,
     );
 }
 

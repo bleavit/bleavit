@@ -198,7 +198,7 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
         pallet_call_weights!(pallet_futarchy_treasury as pallet_futarchy_treasury::WeightInfo {
             spend, open_stream, claim_stream, cancel_stream, fund_budget_line, issue_vit,
             recover_foreign, execute_coretime_renewal, note_coretime_quote,
-            prune_coretime_quote, set_coretime_authority,
+            prune_coretime_quote, set_coretime_authority, sweep_insurance,
         }),
     );
     all.extend(
@@ -216,7 +216,7 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
         pallet_call_weights!(pallet_epoch as pallet_epoch::WeightInfo {
             submit, withdraw, decide, set_next_epoch_length, delay_once,
             mark_executed, mark_failed_executed, retry_exhausted_to_measurement,
-            expire_or_stale_queue, force_reject_process_hold,
+            expire_or_stale_queue, force_reject_process_hold, finalize_epoch_baseline,
             tick(TICK_BATCH_BOUND),
             settle_cohort(MAX_COHORT_PROPOSALS_BOUND),
             void_cohort(MAX_COHORT_PROPOSALS_BOUND),
@@ -243,7 +243,7 @@ fn every_futarchy_call_and_hook_fits_the_normal_class() {
     // Exact count of the 12 futarchy pallets' WeightInfo functions — update
     // in lockstep when a trait gains or loses a function, so a silently
     // dropped inventory entry cannot pass.
-    assert_eq!(all.len(), 104, "call inventory drifted");
+    assert_eq!(all.len(), 106, "call inventory drifted");
     for (name, w) in all {
         assert_fits(name, w);
     }

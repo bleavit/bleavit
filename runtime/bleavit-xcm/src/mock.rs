@@ -119,6 +119,7 @@ impl pallet_oracle::Config for Test {
     type MaxRoundCloseBatch = MaxRoundCloseBatch;
     type ProbeDispatch = TestProbeDispatcher;
     type ProbeTimeoutSink = ();
+    type ReserveHealthSink = ();
     type KeeperRebate = ();
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
@@ -198,6 +199,7 @@ impl pallet_futarchy_treasury::Config for Test {
     type CurrentEpoch = CurrentEpoch;
     type RenewalDispatch = TestRenewalDispatcher;
     type PotFunding = ();
+    type InsuranceSweep = ();
     type RebatePayout = ();
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
@@ -363,6 +365,16 @@ impl InflowCaps<AccountId> for TestCaps {
             .ok_or(())
     }
 
+    fn usdc_inflow_admissible(who: &AccountId, amount: u128) -> Result<(), ()> {
+        ACCOUNT_INFLOWS.with(|inflows| {
+            let previous = inflows.borrow().get(who).copied().unwrap_or_default();
+            let next = previous.checked_add(amount).ok_or(())?;
+            (next <= ACCOUNT_CAP.with(|cap| *cap.borrow()))
+                .then_some(())
+                .ok_or(())
+        })
+    }
+
     fn note_usdc_inflow(who: &AccountId, amount: u128) -> Result<(), ()> {
         ACCOUNT_INFLOWS.with(|inflows| {
             let mut inflows = inflows.borrow_mut();
@@ -407,7 +419,14 @@ pub type TestAssetTransactors =
 pub type TestCappedAssets =
     CappedInflows<TestAssetTransactors, TestCaps, TestLocationToAccountId, AccountId>;
 pub type TestResponseHandler = ProbeAwareResponseHandler<PalletXcm, OracleProbeSink>;
-pub type TestBarrier = BleavitBarrier<TestResponseHandler, UniversalLocation, MaxPrefixes>;
+pub type TestBarrier = BleavitBarrier<
+    TestResponseHandler,
+    UniversalLocation,
+    MaxPrefixes,
+    TestCaps,
+    TestLocationToAccountId,
+    AccountId,
+>;
 pub type TestRouter = HealthTrackingRouter<RecordingSender, TestHealthSink>;
 pub type TestProbeDispatcher =
     XcmProbeDispatcher<TestRouter, ProbeExecWeightBudget, ProbeMaxResponseWeight, OurParaId>;
@@ -562,4 +581,11 @@ impl OnResponse for KnownResponse {
     }
 }
 
-pub type BarrierWithKnownResponse = BleavitBarrier<KnownResponse, UniversalLocation, MaxPrefixes>;
+pub type BarrierWithKnownResponse = BleavitBarrier<
+    KnownResponse,
+    UniversalLocation,
+    MaxPrefixes,
+    TestCaps,
+    TestLocationToAccountId,
+    AccountId,
+>;

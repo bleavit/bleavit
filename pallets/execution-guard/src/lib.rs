@@ -21,9 +21,13 @@
 //! - 09 §1.4 lists `utility.batch`/`force_batch` among recursively inspected
 //!   wrappers, but their best-effort semantics contradict 09 §1.2(12)'s atomic
 //!   dispatch requirement; B1a must reject them and admit only `batch_all`.
-//! - 09 §1.2(5) says attestation presence is rechecked, while I-19 and 06 §7
-//!   imply live quorum after queue admission; this implementation fails closed
-//!   by rechecking both presence and quorum.
+//! - 09 §1.2(5) once read as narrowing the dispatch-time attestation check to
+//!   the committed record alone, against I-19 and 06 §7's live-quorum reading;
+//!   this implementation fails closed by rechecking both presence and quorum.
+//!   No longer a conflict: 06 §7 and 09 §1.2(5)/§2.4 now state that the SQ-97
+//!   relaxation is NOT in force until a cause-carrying removal surface exists
+//!   (02 §7.5 provides none), so the live-registry check this pallet performs
+//!   *is* the normative behaviour. See PLAN.md SQ-97/SQ-312.
 
 extern crate alloc;
 
@@ -65,6 +69,13 @@ pub const MAX_CALLS_BOUND: u32 = MAX_CALLS as u32;
 pub const MAX_DOMAINS_BOUND: u32 = MAX_DECLARED_DOMAINS as u32;
 pub const MAX_LOCKS_PER_PROPOSAL_BOUND: u32 = MAX_RESOURCE_LOCKS as u32;
 pub const MAX_HELD_RESOURCES_BOUND: u32 = MAX_QUEUE_BOUND * MAX_LOCKS_PER_PROPOSAL_BOUND;
+/// Encoded `pallet-migrations::MigrationCursor` envelope: the configured inner
+/// cursor bound plus SCALE's enum/index/option/length/block-number overhead.
+/// This is a derived type bound, not a protocol parameter; the runtime test pins
+/// it against `CursorOf<Runtime>::max_encoded_len()` so the exact-byte diagnostic
+/// cannot silently truncate after an SDK type change.
+pub const MAX_MIGRATION_HALT_CURSOR_BOUND: u32 =
+    futarchy_primitives::bounds::MIGRATION_CURSOR_MAX_LEN + 16;
 pub const MAX_RATIFICATIONS_BOUND: u32 =
     futarchy_primitives::bounds::INTAKE_QUEUE + futarchy_primitives::bounds::MAX_LIVE_PROPOSALS;
 
@@ -337,13 +348,11 @@ pub mod pallet {
         BoundedVec<(ProposalId, ResourceId), ConstU32<MAX_HELD_RESOURCES_BOUND>>;
     pub type StoredUpgradeSpacingHistory =
         BoundedVec<(BlockNumber, BlockNumber), ConstU32<MAX_RECORDS_BOUND>>;
-    /// Bound for the diagnostic cursor bytes carried by [`Event::MigrationHalted`]
-    /// (09 §3.2(4)). Matches the runtime `pallet-migrations` `CursorMaxLen`
-    /// (`MIGRATION_CURSOR_MAX_LEN`) so a real cursor's exact bytes always fit; the
-    /// runtime truncates defensively rather than fail if that pathological max is
-    /// ever met.
-    pub type MigrationHaltCursor =
-        BoundedVec<u8, ConstU32<{ futarchy_primitives::bounds::MIGRATION_CURSOR_MAX_LEN }>>;
+    /// Bound for the exact diagnostic cursor bytes carried by
+    /// [`Event::MigrationHalted`] (09 §3.2(4)). It covers the configured inner
+    /// cursor plus the SDK cursor's SCALE envelope; a runtime regression pins the
+    /// relationship against the SDK type's `MaxEncodedLen`.
+    pub type MigrationHaltCursor = BoundedVec<u8, ConstU32<MAX_MIGRATION_HALT_CURSOR_BOUND>>;
     pub type RuntimeBatch<T> =
         BoundedVec<<T as frame_system::Config>::RuntimeCall, ConstU32<MAX_CALLS_BOUND>>;
     pub type RuntimeCode<T> = BoundedVec<u8, <T as Config>::MaxRuntimeCodeBytes>;
@@ -571,10 +580,11 @@ pub mod pallet {
             fail_static: bool,
         },
         /// PB-MIGRATION machine-trigger diagnostic (09 §3.2(4)): emitted on the
-        /// first activation of a migration halt source (failed step, stall, or
-        /// applied-code mismatch). `cursor` carries the SDK cursor's exact bytes
-        /// (empty for a source-less halt); `failed_step` is the SDK-reported step
-        /// index. This is an operator/monitoring diagnostic (12 §6.3, RB-UPGRADE),
+        /// first activation of a migration halt source (failed step, stall,
+        /// applied-code mismatch, or failed abort cleanup). `cursor` carries the
+        /// SDK cursor's exact bytes (empty for a source-less halt); `failed_step`
+        /// is the SDK-reported step index. This is an operator/monitoring
+        /// diagnostic (12 §6.3, RB-UPGRADE),
         /// **outside** the frozen 02 §6 ingest set by that section's (a)-(c) rule
         /// — the same off-contract class as `PendingOutflowSyncFailed`, so it
         /// carries no `INTEGRATION_CONTRACT_VERSION` bump.

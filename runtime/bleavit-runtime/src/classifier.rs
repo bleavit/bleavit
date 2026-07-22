@@ -150,6 +150,19 @@ fn derive_resource_inner(
             0x09,
             &pallet_futarchy_treasury::BudgetLine::OpsCoretime.encode(),
         ),
+        // 05 §1.4 family `0x0B` (SQ-207): singleton — the sweep names no
+        // beneficiary and no budget line, and the contended resource is the one
+        // INSURANCE custody balance. Without this arm the leaf was
+        // `Unclassifiable`, so a lawful sweep could never pass T4 screening.
+        RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::sweep_insurance {
+            ..
+        }) => singleton_resource(0x0B),
+        // 05 §1.4 `0x0A`: XCM trap recovery is a **singleton** family. A key derived
+        // from the versioned `(assets, beneficiary)` pair could let two distinct traps
+        // share a truncated digest through an encoding or XCM-version alias, and an
+        // under-locked trap is a safety cost; serialising all recoveries behind one
+        // lock costs only liveness, which is the G-1 direction.
+        RuntimeCall::PolkadotXcm(pallet_xcm::Call::claim_assets { .. }) => singleton_resource(0x0A),
         RuntimeCall::Utility(pallet_utility::Call::batch_all { calls }) => {
             if !budget.enter() {
                 return Err(FootprintError::Unclassifiable);
@@ -640,21 +653,29 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             pallet_oracle::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::IncidentRegistry(call) => match call {
+            // `resolve_challenge` is gated on `EnsureOracleResolution` by both
+            // instances (`registry_config!`), so its configured pallet origin
+            // and classifier domain match `oracle.adjudicate` — not `Public`.
+            // Open SQ-295 tracks the remaining normative authority-matrix
+            // reconciliation. Classifying it `Public` admitted it for every origin and, being
+            // non-privileged, carried it through the proxy/multisig wrapper set
+            // that rejects the oracle's terminal call.
+            pallet_registry::Call::resolve_challenge { .. } => leaf(CallDomain::OracleResolution),
             pallet_registry::Call::file { .. }
             | pallet_registry::Call::challenge_filing { .. }
             | pallet_registry::Call::ack_observed { .. }
             | pallet_registry::Call::crank_close { .. }
-            | pallet_registry::Call::resolve_challenge { .. }
             | pallet_registry::Call::close_epoch { .. }
             | pallet_registry::Call::reap_epoch { .. } => leaf(CallDomain::Public),
             pallet_registry::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::MilestoneRegistry(call) => match call {
+            // Same authority as the Incident instance (SQ-295).
+            pallet_registry::Call::resolve_challenge { .. } => leaf(CallDomain::OracleResolution),
             pallet_registry::Call::file { .. }
             | pallet_registry::Call::challenge_filing { .. }
             | pallet_registry::Call::ack_observed { .. }
             | pallet_registry::Call::crank_close { .. }
-            | pallet_registry::Call::resolve_challenge { .. }
             | pallet_registry::Call::close_epoch { .. }
             | pallet_registry::Call::reap_epoch { .. } => leaf(CallDomain::Public),
             pallet_registry::Call::__Ignore(_, _) => denied(),
@@ -666,7 +687,10 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_futarchy_treasury::Call::cancel_stream { .. }
             | pallet_futarchy_treasury::Call::issue_vit { .. }
             | pallet_futarchy_treasury::Call::recover_foreign { .. }
-            | pallet_futarchy_treasury::Call::set_coretime_authority { .. } => {
+            | pallet_futarchy_treasury::Call::set_coretime_authority { .. }
+            // 08 §1.2/§1.4 (SQ-207): `FutarchyTreasury` origin only — a passed
+            // TREASURY decision, never a guardian, playbook or admin path.
+            | pallet_futarchy_treasury::Call::sweep_insurance { .. } => {
                 leaf(CallDomain::Treasury)
             }
             pallet_futarchy_treasury::Call::claim_stream { .. }
@@ -704,7 +728,10 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_epoch::Call::withdraw { .. }
             | pallet_epoch::Call::tick { .. }
             | pallet_epoch::Call::decide { .. }
-            | pallet_epoch::Call::settle_cohort { .. } => leaf(CallDomain::Public),
+            | pallet_epoch::Call::settle_cohort { .. }
+            // 06 §3.2 authority matrix: the SQ-320 orphan-Baseline crank is a
+            // permissionless Signed row, alongside the other epoch cranks.
+            | pallet_epoch::Call::finalize_epoch_baseline { .. } => leaf(CallDomain::Public),
             pallet_epoch::Call::set_next_epoch_length { .. } => {
                 leaf(CallDomain::ConstitutionalValues)
             }
@@ -1007,7 +1034,10 @@ pub fn is_values_enactment_leaf(call: &RuntimeCall) -> bool {
             // the bare scheduler leaf must clear the origin-blind base filter
             // or the configured values path is unreachable.
             | RuntimeCall::Epoch(pallet_epoch::Call::set_next_epoch_length { .. })
-            | RuntimeCall::Constitution(pallet_constitution::Call::amend_registry { .. })
+            // SQ-150 (ruled 2026-07-21): `amend_registry` is FutarchyMeta-only,
+            // a belief-side call — NOT a values-enactment leaf. Removing it here
+            // closes the I-8 crossing (the call previously sat in both the
+            // values set and the FutarchyMeta projection below).
             | RuntimeCall::Constitution(pallet_constitution::Call::set_release_channel { .. })
             // `referenda.cancel`/`kill` are ConstitutionalValues-domain (the
             // runtime's `CancelOrigin`/`KillOrigin`), so a values referendum
@@ -1026,6 +1056,15 @@ pub fn is_values_enactment_leaf(call: &RuntimeCall) -> bool {
             | RuntimeCall::Attestor(pallet_attestor::Call::set_members { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::resolve_challenge { .. })
             | RuntimeCall::Oracle(pallet_oracle::Call::adjudicate { .. })
+            // Both registry instances gate `resolve_challenge` on
+            // `EnsureOracleResolution` (SQ-295). Now that the classifier states
+            // that authority, the bare leaf must be admitted here too — a
+            // privileged leaf is otherwise rejected by the origin-blind base
+            // filter at scheduler dispatch, before the pallet's own
+            // `ResolutionAuthority` check runs, leaving the configured values
+            // path unreachable (the SQ-32 stock-scheduler accommodation).
+            | RuntimeCall::IncidentRegistry(pallet_registry::Call::resolve_challenge { .. })
+            | RuntimeCall::MilestoneRegistry(pallet_registry::Call::resolve_challenge { .. })
             | RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::ratify { .. })
     )
 }

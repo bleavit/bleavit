@@ -52,6 +52,7 @@ pub struct ChainSnapshot {
     pub market_reaps: Vec<ReapSnapshot>,
     pub proposal_dust: Vec<ReapSnapshot>,
     pub baseline_dust: Vec<ReapSnapshot>,
+    pub baseline_vaults: Vec<BaselineVaultSnapshot>,
     pub welfare: Option<WelfareSnapshot>,
 }
 
@@ -107,6 +108,16 @@ pub struct ProposalSnapshot {
     pub maturity: Option<u64>,
     pub grace_end: Option<u64>,
     pub market_ids: Vec<u64>,
+}
+
+/// One `ConditionalLedger::BaselineVaults` entry (03 §2.2). Only the epoch key
+/// and whether the vault is still `Open` matter to the planner: an `Open` vault
+/// is the necessary condition for 05 §7(6)'s `finalize_epoch_baseline` to do
+/// anything at all, and the call is a documented no-op once it is `Settled`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BaselineVaultSnapshot {
+    pub epoch: u64,
+    pub open: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -257,8 +268,8 @@ impl SnapshotExtractor {
             ),
             capability(
                 Role::Settle,
-                has_call("Epoch", "settle_cohort"),
-                "Epoch.settle_cohort absent",
+                has_call("Epoch", "settle_cohort") || has_call("Epoch", "finalize_epoch_baseline"),
+                "Epoch settlement calls absent",
             ),
             capability(
                 Role::Execute,
@@ -405,6 +416,7 @@ impl SnapshotExtractor {
                     ledger_archive,
                 )
                 .await,
+            baseline_vaults: self.extract_baseline_vaults(&at_block).await,
             welfare,
         };
         if self.transport_failed.swap(false, Ordering::Relaxed) {
@@ -710,6 +722,26 @@ impl SnapshotExtractor {
             quotes,
             funded_periods,
         })
+    }
+
+    /// `ConditionalLedger::BaselineVaults` (03 §2.2), the epoch-keyed Baseline
+    /// vault map. Fails closed: an absent storage entry or an undecodable
+    /// `state` field yields no candidate, so the 05 §7(6) crank is never
+    /// planned on a guess.
+    async fn extract_baseline_vaults(
+        &self,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
+    ) -> Vec<BaselineVaultSnapshot> {
+        self.iter_values(at_block, "ConditionalLedger", "BaselineVaults")
+            .await
+            .into_iter()
+            .filter_map(|(keys, value)| {
+                Some(BaselineVaultSnapshot {
+                    epoch: keys.first().and_then(as_u64)?,
+                    open: variant_name(value.at("state")?)? == "Open",
+                })
+            })
+            .collect()
     }
 
     async fn extract_reaps(

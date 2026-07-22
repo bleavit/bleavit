@@ -6,12 +6,12 @@
     {
       "id": "b1b.compliance",
       "owner": "B1b",
-      "reason": "SQ-173..SQ-175, SQ-177, SQ-180..SQ-182 remain open (fail-closed adoption-input backing gaps; per-SQ owners)"
+      "reason": "SQ-173..SQ-175, SQ-181, SQ-182 remain open (fail-closed adoption-input backing gaps; per-SQ owners). SQ-177 and SQ-180 are resolved and no longer block."
     },
     {
       "id": "treasury.reserve_health_unwired",
       "owner": "B1a",
-      "reason": "SQ-205: oracle ReserveHealth never reaches treasury set_reserve_impaired — 08 §1.2 fail-static NAV is not enforced"
+      "reason": "SQ-205: the ReserveHealthSink seam exists but the runtime binds () — 08 §1.2 fail-static NAV is still not enforced. Blocked on SQ-380 (the probe feed is unwired and its latch is one-way), not on the seam."
     },
     {
       "id": "oracle.bond_custody_absent",

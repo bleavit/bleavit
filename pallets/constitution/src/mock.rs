@@ -3,6 +3,7 @@
 use crate as pallet_constitution;
 use crate::ConstitutionOrigin;
 use frame_support::{derive_impl, parameter_types, traits::EnsureOrigin};
+use futarchy_primitives::ProposalClass;
 use sp_runtime::BuildStorage;
 
 type Block = frame_system::mocking::MockBlock<Test>;
@@ -23,6 +24,24 @@ impl frame_system::Config for Test {
 
 parameter_types! {
     pub static CurrentEpochValue: u32 = 0;
+    /// Proposal classes the mock 08 §4.2 arming gate refuses (SQ-180). Empty by
+    /// default so every pre-existing test keeps its old behavior.
+    pub static UnarmableClasses: Vec<ProposalClass> = Vec::new();
+    /// Classes the mock gate was asked about, in call order.
+    pub static ArmingGateCalls: Vec<ProposalClass> = Vec::new();
+}
+
+/// Test stand-in for the runtime's treasury-backed 08 §4.2 NAV-floor gate.
+pub struct TestPhaseArmingGate;
+
+impl pallet_constitution::PhaseArmingGate for TestPhaseArmingGate {
+    fn ensure_armable(class: ProposalClass) -> frame_support::pallet_prelude::DispatchResult {
+        ArmingGateCalls::mutate(|calls| calls.push(class));
+        if UnarmableClasses::get().contains(&class) {
+            return Err(crate::Error::<Test>::NavFloorUnmet.into());
+        }
+        Ok(())
+    }
 }
 
 /// Accounts the test resolver maps onto the 06 §3 authority-matrix origins;
@@ -86,6 +105,7 @@ impl pallet_constitution::Config for Test {
     type GovernanceOrigin = TestGovernanceOrigin;
     type CurrentEpoch = CurrentEpochValue;
     type WeightInfo = ();
+    type PhaseArmingGate = TestPhaseArmingGate;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestBenchmarkHelper;
 }
@@ -121,6 +141,8 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 pub fn new_test_ext_with(
     constitution: pallet_constitution::GenesisConfig<Test>,
 ) -> sp_io::TestExternalities {
+    UnarmableClasses::set(Vec::new());
+    ArmingGateCalls::set(Vec::new());
     let storage = RuntimeGenesisConfig {
         system: Default::default(),
         constitution,

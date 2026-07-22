@@ -73,6 +73,7 @@ python3 tools/env/run-evidence.py \
   --kind zombienet \
   --tier release \
   --wasm release-work/runtime/runtime.wasm \
+  --try-runtime-wasm target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm \
   --commit "$(git rev-parse HEAD)"
 ```
 
@@ -143,10 +144,23 @@ supported boot/liveness assertions remain live.
 
 ## Mandatory closing try-state
 
-The evidence runner does not yet execute the mandatory closing try-state.
-Evidence emission is blocked (15 §1; SQ-204) until the leg lands: the runner
-refuses to emit rather than emitting without it. With the collator RPC printed
-by Zombienet (replace the port if allocated differently), run it manually:
+The evidence runner executes the mandatory closing try-state (15 §1; SQ-204).
+`zombienet test` tears its network down on completion, so the runner drives the
+pinned Zombienet in two phases: `spawn --monitor` (the pinned CLI's "do not auto
+cleanup network" flag, available on `spawn` only) publishes `zombie.json` into a
+run directory and holds the topology up, then `test <drill.zndsl> <zombie.json>`
+runs the drill against that already-running network. The node therefore survives
+the drill, the closing check runs against it, and only then is the process group
+torn down. The endpoint is resolved from the drill's own topology: a collator
+`rpc_port` must be pinned there, because a randomly allocated port cannot be
+addressed and guessing one would attest try-state against the wrong node —
+`bleavit-xcm.toml` pins none today, so drill 07 fails closed until it does.
+
+The checker is the `try-runtime-cli` pinned as `TRY_RUNTIME_VERSION` /
+`TRY_RUNTIME_SHA256` in [`tools/env/pins.env`](../tools/env/pins.env) and
+installed by `tools/env/fetch-binaries.sh`; in evidence mode its SHA-256 must
+match that pin, and `--try-runtime-binary` forces report-only. The equivalent
+manual command, against a network you spawned yourself:
 
 ```bash
 try-runtime \
@@ -156,4 +170,5 @@ try-runtime \
 ```
 
 Build that Wasm with the runtime's `try-runtime` feature before executing the
-command. The same closing command applies to every drill, including smoke.
+command; it is what `--try-runtime-wasm` names. The same closing command applies
+to every drill, including smoke.

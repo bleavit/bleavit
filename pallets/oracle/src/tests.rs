@@ -1671,6 +1671,7 @@ mod probe_dispatch_seam {
         type MaxRoundCloseBatch = MaxRoundCloseBatch;
         type ProbeDispatch = RecordingProbeDispatch;
         type ProbeTimeoutSink = RecordingProbeTimeoutSink;
+        type ReserveHealthSink = ();
         type KeeperRebate = RecordingKeeperRebate;
         type WeightInfo = ();
         #[cfg(feature = "runtime-benchmarks")]
@@ -1951,6 +1952,7 @@ mod probe_dispatch_seam {
             type MaxRoundCloseBatch = MaxRoundCloseBatch;
             type ProbeDispatch = ();
             type ProbeTimeoutSink = ();
+            type ReserveHealthSink = ();
             type KeeperRebate = RecordingKeeperRebate;
             type WeightInfo = ();
             #[cfg(feature = "runtime-benchmarks")]
@@ -3073,6 +3075,122 @@ fn offense_against_an_ejected_reporter_does_not_strand_a_valid_recompute() {
             proof_arg(disproof)
         ));
         assert!(Oracle::settled_component(30, E, V).is_some());
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+// ------------------------------------- reserve-health sink (SQ-205) --------
+//
+// 07 §8 hands the reserve-health flag `R` to 08 §1.2, which makes
+// `spendable_nav` zero exactly while it is set. The seam is therefore fallible
+// and edge-triggered, and a sink failure MUST leave the oracle transition
+// unwritten — otherwise `PhaseFlags` and NAV can disagree about solvency.
+
+#[test]
+fn reserve_health_sink_fires_once_per_transition_not_per_probe() {
+    new_test_ext().execute_with(|| {
+        let mut amended = ParamsValue::get();
+        amended.fail_threshold = 1;
+        amended.recover_threshold = 1;
+        ParamsValue::set(amended);
+
+        // Healthy → unhealthy: exactly one edge.
+        set_block(RES_PROBE_INTERVAL);
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        assert_ok!(Oracle::reserve_probe_result(1, false));
+        assert!(Oracle::reserve_unhealthy());
+        assert_eq!(ReserveHealthSinkCalls::get(), vec![true]);
+
+        // A second failing probe keeps the flag set — no new edge, no new call.
+        set_block(RES_PROBE_INTERVAL * 2);
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        assert_ok!(Oracle::reserve_probe_result(2, false));
+        assert!(Oracle::reserve_unhealthy());
+        assert_eq!(ReserveHealthSinkCalls::get(), vec![true]);
+
+        // Unhealthy → healthy: the clearing edge is delivered too.
+        set_block(RES_PROBE_INTERVAL * 3);
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        assert_ok!(Oracle::reserve_probe_result(3, true));
+        assert!(!Oracle::reserve_unhealthy());
+        assert_eq!(ReserveHealthSinkCalls::get(), vec![true, false]);
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+#[test]
+fn failing_reserve_health_sink_rolls_back_the_oracle_transition() {
+    new_test_ext().execute_with(|| {
+        let mut amended = ParamsValue::get();
+        amended.fail_threshold = 1;
+        ParamsValue::set(amended);
+
+        set_block(RES_PROBE_INTERVAL);
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        let before = ReserveHealth::<Test>::get();
+
+        // The sibling-pallet write refuses (a treasury/constitution failure).
+        ReserveHealthSinkFails::set(true);
+        assert_noop!(
+            Oracle::reserve_probe_result(1, false),
+            DispatchError::Other("reserve health sink refused")
+        );
+
+        // The sink really ran (the thread-local witness survives the rollback)…
+        assert_eq!(ReserveHealthSinkCalls::get(), vec![true]);
+        // …but nothing about the oracle transition committed: the flag is still
+        // clear and the whole `ReserveHealth` record is byte-identical.
+        assert!(!Oracle::reserve_unhealthy());
+        assert_eq!(ReserveHealth::<Test>::get(), before);
+        assert_ok!(Oracle::do_try_state());
+
+        // With the sink healthy again the same transition applies normally,
+        // proving the rollback left no poisoned state behind.
+        ReserveHealthSinkFails::set(false);
+        assert_ok!(Oracle::reserve_probe_result(1, false));
+        assert!(Oracle::reserve_unhealthy());
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+#[test]
+fn failing_reserve_health_sink_rolls_back_a_timeout_fold_crank() {
+    new_test_ext().execute_with(|| {
+        let mut amended = ParamsValue::get();
+        amended.fail_threshold = 1;
+        ParamsValue::set(amended);
+
+        set_block(RES_PROBE_INTERVAL);
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        let before = ReserveHealth::<Test>::get();
+
+        // The other edge producer: a keeper crank folding an unanswered probe.
+        ReserveHealthSinkFails::set(true);
+        set_block(RES_PROBE_INTERVAL + RES_PROBE_TIMEOUT);
+        assert_noop!(
+            Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))),
+            DispatchError::Other("reserve health sink refused")
+        );
+        assert_eq!(ReserveHealthSinkCalls::get(), vec![true]);
+        assert!(!Oracle::reserve_unhealthy());
+        assert_eq!(ReserveHealth::<Test>::get(), before);
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+#[test]
+fn reserve_probe_crank_rejects_unsigned_and_root_origins() {
+    new_test_ext().execute_with(|| {
+        set_block(RES_PROBE_INTERVAL);
+        assert_noop!(
+            Oracle::crank_reserve_probe(RuntimeOrigin::none()),
+            DispatchError::BadOrigin
+        );
+        assert_noop!(
+            Oracle::crank_reserve_probe(RuntimeOrigin::root()),
+            DispatchError::BadOrigin
+        );
+        assert_eq!(ReserveHealth::<Test>::get().last_query_id, 0);
         assert_ok!(Oracle::do_try_state());
     });
 }

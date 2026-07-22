@@ -59,12 +59,38 @@ pub use constitution_core::{
 };
 pub use futarchy_primitives::kernel;
 
+use frame_support::pallet_prelude::DispatchResult;
+use futarchy_primitives::ProposalClass;
+
 /// Storage-bound forms of the core limits (13 §4 / core constants).
 pub const MAX_PARAMS_BOUND: u32 = MAX_PARAMS as u32;
 /// See [`MAX_PARAMS_BOUND`].
 pub const MAX_CAPABILITIES_BOUND: u32 = MAX_CAPABILITIES as u32;
 /// See [`MAX_PARAMS_BOUND`].
 pub const MAX_METERS_BOUND: u32 = MAX_METERS as u32;
+
+/// 08 §4.2 minimum-viable-NAV admission for the 02 §7.3 arming bits (SQ-180).
+///
+/// "Arming a proposal class REQUIRES published `spendable NAV` ≥ the class floor
+/// of 08 §4.1", and under the 08 §1.2 reserve-health flag `spendable NAV` is 0
+/// so every class fails (fail-static). The check lives behind this seam because
+/// the floors and NAV are treasury-owned; the constitution only knows which bit
+/// means which class.
+///
+/// Bounded by construction: at most the three arming bits are consulted per
+/// call, each resolving to a fixed, non-recursive treasury read.
+pub trait PhaseArmingGate {
+    /// `Ok(())` iff `class` may be armed now. Implementations MUST NOT mutate.
+    fn ensure_armable(class: ProposalClass) -> DispatchResult;
+}
+
+/// Permissive default for mocks and for runtimes that have not bound the
+/// treasury yet. Production binds the real gate.
+impl PhaseArmingGate for () {
+    fn ensure_armable(_: ProposalClass) -> DispatchResult {
+        Ok(())
+    }
+}
 
 /// Maps an authority-matrix origin to a concrete runtime origin so benchmarks
 /// can exercise every call with its exact 06 §3.2 authority.
@@ -73,6 +99,15 @@ pub trait BenchmarkHelper<RuntimeOrigin> {
     /// Return a runtime origin that [`Config::GovernanceOrigin`] resolves to
     /// `authority`.
     fn origin(authority: ConstitutionOrigin) -> RuntimeOrigin;
+
+    /// Prime runtime-owned state required by the worst-case arming benchmark.
+    ///
+    /// The production runtime funds treasury MAIN through the real INSURANCE
+    /// sweep so the benchmark reaches both NAV-floor reads instead of failing
+    /// during setup. Pallet-only mocks need no extra state.
+    fn prime_phase_arming() -> DispatchResult {
+        Ok(())
+    }
 }
 
 #[frame_support::pallet]
@@ -109,6 +144,11 @@ pub mod pallet {
 
         /// Weight information for extrinsics.
         type WeightInfo: WeightInfo;
+
+        /// 08 §4.2 minimum-viable-NAV admission consulted before an arming bit
+        /// is enabled (SQ-180). The runtime binds it to the treasury; mocks may
+        /// use the permissive `()`.
+        type PhaseArmingGate: PhaseArmingGate;
 
         /// Origin construction for benchmarking (see [`BenchmarkHelper`]).
         #[cfg(feature = "runtime-benchmarks")]
@@ -232,6 +272,11 @@ pub mod pallet {
         MetaBoundViolation,
         /// Core state validator rejected the aggregate (try-state only).
         TryStateViolation,
+        /// 08 §4.2 (SQ-180): arming a proposal class was refused because
+        /// published spendable NAV is below that class's 08 §4.1 floor — which
+        /// includes the fail-static case where the 08 §1.2 reserve-health flag
+        /// has zeroed spendable NAV outright. `PhaseFlags` is left unchanged.
+        NavFloorUnmet,
     }
 
     #[pallet::hooks]
@@ -347,6 +392,28 @@ pub mod pallet {
                 flag & !PhaseFlagsValue::SUDO_ARMABLE_MASK == 0,
                 Error::<T>::FlagNotArmable
             );
+            // 08 §4.2 (SQ-180): arming a proposal class REQUIRES spendable NAV
+            // at or above its 08 §4.1 floor. Checked before any write, so a
+            // refusal leaves `PhaseFlags` exactly as it was (G-1). The returned
+            // `Err` is 08 §4.2's loud signal (SQ-381 resolution): FRAME surfaces
+            // it durably as `system::ExtrinsicFailed` (or bootstrap sudo's
+            // `Sudid { Err(..) }`), so a below-floor arming is loud, never silent
+            // — a pallet event cannot also survive the `Err`. Disarming is never
+            // gated — clearing a bit only ever removes capability, and blocking
+            // it would strand the chain armed below its own floor.
+            if enabled {
+                for (bit, class) in Self::armed_bit_classes() {
+                    if flag & bit != 0 {
+                        // Map onto this pallet's own error: `set_phase_flag` is a
+                        // constitution dispatch, so a client decoding its failure
+                        // must find a constitution variant. Propagating the
+                        // provider's error verbatim would have left
+                        // `Error::NavFloorUnmet` unreachable dead metadata.
+                        T::PhaseArmingGate::ensure_armable(class)
+                            .map_err(|_| Error::<T>::NavFloorUnmet)?;
+                    }
+                }
+            }
             Self::write_phase_flag(flag, enabled)
         }
 
@@ -384,16 +451,20 @@ pub mod pallet {
 
         /// `constitution.amend_registry` — amend one key's governance
         /// metadata (bounds / max-Δ / cooldown), never its value, class or
-        /// key set (06 §2.1 constitution track; 06 §3.2 row 4; 13 rule 2/7).
+        /// key set (06 §3.2 row 4; 13 rule 7).
         ///
-        /// Origins: the class-matched constitution/entrenched track, internal
-        /// bare `ConstitutionalValues`, or `FutarchyMeta` (META-amendable
-        /// within meta-bounds).
-        /// Kernel-bounded rows keep their bounds genesis-fixed; every
-        /// amendment must keep `min ≤ value ≤ max`, preserve the value kind,
-        /// and keep `cooldown ≤ 8` epochs. Registry rows are never inserted
-        /// or removed on-chain — new keys arrive with runtime upgrades
-        /// (13 §4: the key set is genesis-fixed).
+        /// Origin: **`FutarchyMeta` only** (SQ-150 ruling 2026-07-21) — non-kernel
+        /// rows are META-amendable within meta-bounds; the former
+        /// `ConstitutionalValues`/track paths are removed so no values path can
+        /// retune metadata the classifier already treats as a belief-side call.
+        /// Kernel-bounded rows are **immutable**: `checked_amend` refuses them
+        /// with `KernelBoundImmutable` even under `FutarchyMeta`, so the two
+        /// error surfaces are `BadOrigin` (any non-META origin) and
+        /// `KernelBoundImmutable` (META on a kernel row). Every accepted
+        /// amendment keeps `min ≤ value ≤ max`, preserves the value kind, and
+        /// keeps `cooldown ≤ 8` epochs. Registry rows are never inserted or
+        /// removed on-chain — new keys arrive with runtime upgrades (13 §4: the
+        /// key set is genesis-fixed).
         #[pallet::call_index(4)]
         #[pallet::weight(T::WeightInfo::amend_registry())]
         pub fn amend_registry(
@@ -591,6 +662,20 @@ pub mod pallet {
                 spent,
             });
             Ok(())
+        }
+
+        /// The 02 §7.3 arming bits paired with the 08 §4.1 proposal classes they
+        /// admit. Bit 3 arms CODE **and** META, so both floors are consulted —
+        /// the higher (META) therefore binds, which is the fail-static direction
+        /// (08 §4.2). Bits 0 (shadow) and 4 (sudo-present) arm no class and
+        /// carry no floor, so they are deliberately absent.
+        fn armed_bit_classes() -> [(u32, ProposalClass); 4] {
+            [
+                (PhaseFlagsValue::PARAM_ARMED, ProposalClass::Param),
+                (PhaseFlagsValue::TREASURY_ARMED, ProposalClass::Treasury),
+                (PhaseFlagsValue::CODE_META_ARMED, ProposalClass::Code),
+                (PhaseFlagsValue::CODE_META_ARMED, ProposalClass::Meta),
+            ]
         }
 
         fn write_phase_flag(flag: u32, enabled: bool) -> DispatchResult {

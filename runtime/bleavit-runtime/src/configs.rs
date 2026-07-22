@@ -493,8 +493,9 @@ fn emit_migration_halted() {
     let cursor_bytes = pallet_migrations::Cursor::<Runtime>::get()
         .map(|cursor| cursor.encode())
         .unwrap_or_default();
-    // `truncate_from` only truncates in the pathological CursorMaxLen case; a
-    // real cursor's exact bytes fit. A source-less halt yields empty bytes.
+    // The B16 type-bound regression proves the SDK cursor's MaxEncodedLen fits
+    // this derived envelope, so `truncate_from` cannot truncate a real cursor.
+    // A source-less halt yields empty bytes.
     let cursor = pallet_execution_guard::pallet::MigrationHaltCursor::truncate_from(cursor_bytes);
     crate::ExecutionGuard::note_migration_halted(cursor, MigrationFailedStep::get());
 }
@@ -702,8 +703,14 @@ pub(crate) mod xcm_config {
         LocationToAccountId,
         AccountId,
     >;
-    pub type Barrier =
-        bleavit_xcm::barrier::BleavitBarrier<PolkadotXcm, UniversalLocation, MaxPrefixes>;
+    pub type Barrier = bleavit_xcm::barrier::BleavitBarrier<
+        PolkadotXcm,
+        UniversalLocation,
+        MaxPrefixes,
+        PhaseInflowCaps,
+        LocationToAccountId,
+        AccountId,
+    >;
     pub type RelayRouter = cumulus_primitives_utility::ParentAsUmp<
         ParachainSystem,
         PolkadotXcm,
@@ -1235,10 +1242,31 @@ impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for ConstitutionGovernan
         Ok(pallet_origins::Origin::FutarchyParam.into())
     }
 }
+/// 08 §4.2 minimum-viable-NAV admission for the 02 §7.3 arming bits (SQ-180).
+///
+/// The hard `ensure_nav_floor` variant is the right one here (SQ-381 resolution):
+/// on a below-floor arming attempt 08 §4.2's loud signal *is* the extrinsic
+/// failure carrying `NavFloorUnmet` — the `Err` fails the dispatch (surfaced
+/// durably as `system::ExtrinsicFailed`, or bootstrap sudo's `Sudid { Err(..) }`
+/// on the 09 §5.4 arming path) while leaving `PhaseFlags` unchanged (fail-static).
+/// A pallet event cannot also survive the `Err` (FRAME rolls it back), and the
+/// unchanged-flags requirement is exactly what mandates the `Err`. The
+/// field-carrying `NavFloorUnmet { class, nav, floor }` event stays available on
+/// the non-blocking, `Ok`-returning `flag_nav_floor` diagnostic variant (08 §4.4).
+pub struct TreasuryPhaseArmingGate;
+impl pallet_constitution::PhaseArmingGate for TreasuryPhaseArmingGate {
+    fn ensure_armable(
+        class: futarchy_primitives::ProposalClass,
+    ) -> frame_support::dispatch::DispatchResult {
+        FutarchyTreasury::ensure_nav_floor(class)
+    }
+}
+
 impl pallet_constitution::Config for Runtime {
     type GovernanceOrigin = ConstitutionGovernanceOrigin;
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
     type WeightInfo = crate::weights::pallet_constitution::WeightInfo<Runtime>;
+    type PhaseArmingGate = TreasuryPhaseArmingGate;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
@@ -1317,6 +1345,12 @@ impl bleavit_xcm::caps::InflowCaps<AccountId> for PhaseInflowCaps {
 
     fn note_usdc_inflow(who: &AccountId, amount: u128) -> Result<(), ()> {
         pallet_inflow_caps::Pallet::<Runtime>::note_inflow(who, amount)
+    }
+
+    fn usdc_inflow_admissible(who: &AccountId, amount: u128) -> Result<(), ()> {
+        pallet_inflow_caps::Pallet::<Runtime>::inflow_admissible(who, amount)
+            .then_some(())
+            .ok_or(())
     }
 }
 
@@ -2824,7 +2858,7 @@ impl pallet_epoch::OracleAccess for RuntimeEpochOracle {
         pallet_oracle::Rounds::<Runtime>::iter().any(|(_, round)| {
             round.spec_version == spec
                 && round.challenger.is_some()
-                && pallet_oracle::RoundSchedules::<Runtime>::get((
+                && match pallet_oracle::RoundSchedules::<Runtime>::get((
                     round.component,
                     round.epoch,
                     round.spec_version,
@@ -2832,8 +2866,17 @@ impl pallet_epoch::OracleAccess for RuntimeEpochOracle {
                 .and_then(|schedule| {
                     pallet_oracle::stored_round_bond(schedule.round_one_bond, 1, schedule.round_cap)
                         .ok()
-                })
-                .is_none_or(|floor| round.bond >= floor)
+                }) {
+                    // Malformed frozen schedule ⇒ the game's own B_1 is
+                    // uncomputable; G-1 conservatively holds the decision.
+                    None => true,
+                    // 07 §12 merit floor = max(live `dis.merit_min`, frozen
+                    // B_1) (SQ-158): the independent META lever can raise the
+                    // bar above the game's B_1, but the `max` keeps it from ever
+                    // dropping below the round-1 bond the challenger posted, so a
+                    // lowering can never make censorship cheaper (R-7).
+                    Some(frozen_b1) => round.bond >= frozen_b1.max(balance_param(b"dis.merit_min")),
+                }
         })
     }
 }
@@ -2891,6 +2934,41 @@ fn proposal_calls(
     runtime_batch(proposal.payload_hash, proposal.payload_len)
 }
 
+/// Re-derive every call's guard domains and require each to be admissible for the
+/// proposal's class — byte-for-byte the precondition the execution guard applies
+/// inside `enqueue`.
+///
+/// 09 §1.1 states queue-time preconditions are "enforced by the decision path
+/// **before** `enqueue` succeeds". Screening must therefore be a **superset** of
+/// the guard's: otherwise a payload can pass screening, win Adopt, and then make
+/// `epoch.decide(pid)` fail inside `with_storage_layer`, reverting the entire
+/// decide on every attempt until the T20 stale path force-rejects it — 13 days of
+/// market and a decided Adopt lost (SQ-308). Mirroring the check here makes
+/// `decide` total.
+///
+/// `InternalRootApplyUpgrade` is excluded exactly as the guard excludes it: the
+/// classifier matches `system.authorize_upgrade` only at top level, so nested in a
+/// `utility.batch_all` it projects to the *apply* domain. 09 §2.1's multi-item
+/// upgrade payload is expressible as multiple **top-level** calls, so the nested
+/// form need not be admitted at all.
+fn domains_admissible(
+    class: futarchy_primitives::ProposalClass,
+    calls: &pallet_execution_guard::pallet::RuntimeBatch<Runtime>,
+) -> bool {
+    use pallet_execution_guard::BatchDispatcher;
+    calls.iter().all(|call| {
+        crate::classifier::RuntimeDispatcher::rederive_call(call).is_ok_and(|analysis| {
+            analysis.domains.iter().all(|domain| {
+                pallet_execution_guard::domain_allowed(class, *domain)
+                    && !matches!(
+                        domain,
+                        pallet_execution_guard::CallDomain::InternalRootApplyUpgrade
+                    )
+            })
+        })
+    })
+}
+
 fn runtime_batch(
     payload_hash: futarchy_primitives::H256,
     payload_len: u32,
@@ -2927,8 +3005,19 @@ fn derived_treasury_ask(
                     | pallet_futarchy_treasury::Call::cancel_stream { .. }
                     | pallet_futarchy_treasury::Call::issue_vit { .. }
                     | pallet_futarchy_treasury::Call::recover_foreign { .. }
-                    | pallet_futarchy_treasury::Call::set_coretime_authority { .. },
+                    | pallet_futarchy_treasury::Call::set_coretime_authority { .. }
+                    // 05 §1.4 / 08 §1.4: the sweep moves USDC *into* NAV, so its
+                    // derived Treasury ask is exactly zero — one of the two
+                    // admissible zero-outflow Treasury leaves 05 §1.4 names.
+                    | pallet_futarchy_treasury::Call::sweep_insurance { .. },
                 ) => 0,
+                // 05 §1.4 ask derivation (SQ-244/SQ-316): `claim_assets` moves
+                // already-owned assets out of the trap register and creates **no**
+                // treasury outflow, so its derived ask is exactly zero. This is
+                // one of the two admissible zero-outflow Treasury leaves and MUST
+                // NOT be generalized into "unknown leaves ask zero" — every other
+                // unknown call still fails closed at the `_` arm below.
+                RuntimeCall::PolkadotXcm(pallet_xcm::Call::claim_assets { .. }) => 0,
                 // `claim_stream` is Signed-recipient-only and coretime renewal is
                 // priced from live quote storage. Neither can be committed as a
                 // statically-sized Treasury proposal outflow.
@@ -3251,12 +3340,14 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
                 futarchy_primitives::RejectReason::ConstitutionViolation,
             );
         }
-        if matches!(proposal.class, futarchy_primitives::ProposalClass::Treasury)
-            && (derived_treasury_ask(&calls) != Some(proposal.ask)
-                || Self::in_cap_prize(proposal).is_none())
-        {
-            return StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold);
-        }
+        // A verified false footprint is a culpable act (05 §2.1 T4) and is slashed
+        // regardless of any co-occurring refundable fault. It is evaluated BEFORE the
+        // refundable domain/ask arms below so a proposer cannot escape the 100%
+        // false-declaration slash by *also* committing a refundable domain violation
+        // (e.g. a domain-inadmissible payload that would otherwise refund at
+        // `domains_admissible`): the false declaration is slashed first, and the
+        // refundable arms are only reached once the declaration is known truthful
+        // (SQ-480).
         let footprint = match footprint {
             Ok(footprint) => footprint,
             Err(error) => return footprint_failure(error),
@@ -3275,6 +3366,28 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
             return StaticCheckDisposition::SlashAll(
                 futarchy_primitives::RejectReason::ConstitutionViolation,
             );
+        }
+        // Mirror the guard's own `enqueue` domain preconditions so `decide` is total
+        // (09 §1.1; SQ-308).
+        //
+        // Disposition is **refund**, not slash. 05 §2.1's T4 taxonomy is explicit
+        // that "confiscation requires a verified culpable act" and that "the refund
+        // arm is the default and the two slash arms are the enumerated exceptions".
+        // This failure is in neither exception: the footprint has been verified to
+        // match (checked just above), the capability check passed, and the call
+        // re-derived cleanly. The only fault is a classifier projection artifact —
+        // `authorize_upgrade` is matched by `is_sub_type` at top level only, so
+        // nesting it inside the `utility.batch_all` wrapper that 05 §1.4 explicitly
+        // blesses collapses it onto the *apply* domain. Slashing a proposer 100% for
+        // using a permitted wrapper would be confiscation without a culpable act.
+        if !domains_admissible(proposal.class, &calls) {
+            return StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold);
+        }
+        if matches!(proposal.class, futarchy_primitives::ProposalClass::Treasury)
+            && (derived_treasury_ask(&calls) != Some(proposal.ask)
+                || Self::in_cap_prize(proposal).is_none())
+        {
+            return StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold);
         }
         StaticCheckDisposition::Eligible
     }
@@ -3471,7 +3584,15 @@ impl pallet_epoch::WelfareSettlement for RuntimeEpochWelfare {
 
     fn prune_xcm_traffic(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
         let cutoff = current_epoch.saturating_sub(pallet_welfare::MAX_SNAPSHOTS_BOUND);
-        pallet_welfare::Pallet::<Runtime>::prune_xcm_traffic(cutoff)
+        pallet_welfare::Pallet::<Runtime>::prune_xcm_traffic(cutoff)?;
+        // SQ-201 / 05 §3.3: cohort reap is not the only prune trigger. Tick
+        // invokes this seam on every successful roll — including rolls that
+        // settle no cohort — so it is the epoch-roll hook the snapshot/gate
+        // window needs. The cutoff is the same `current - 19` used by `prune`
+        // above, so this retires strictly nothing that reap would have kept.
+        let history_cutoff =
+            current_epoch.saturating_sub(pallet_welfare::MAX_SNAPSHOTS_BOUND.saturating_sub(1));
+        pallet_welfare::Pallet::<Runtime>::prune_epoch_roll(history_cutoff)
     }
 }
 
@@ -3898,6 +4019,7 @@ impl pallet_oracle::Config for Runtime {
     // reaches its documented post-commit rebate path.
     type ProbeDispatch = RuntimeProbeDispatch;
     type ProbeTimeoutSink = OracleProbeTimeoutToWelfare;
+    type ReserveHealthSink = RuntimeReserveHealthSink;
     type KeeperRebate = FutarchyTreasury;
     type MaxRoundCloseBatch = ConstU32<{ kernel::TICK_BATCH }>;
     type WeightInfo = crate::weights::pallet_oracle::WeightInfo<Runtime>;
@@ -3913,6 +4035,53 @@ impl pallet_oracle::ProbeTimeoutSink for OracleProbeTimeoutToWelfare {
         <XcmTrafficRecorder as bleavit_xcm::health::LocalXcmHealthSink>::note_probe_timeout();
     }
 }
+
+/// 07 §8 / 08 §1.2 (SQ-205): carry a reserve-health transition to both owners of
+/// its consequences — the constitution's 02 §7.3 bit-7 mirror and the treasury's
+/// fail-static NAV haircut — as one indivisible act.
+///
+/// Ordering is deliberate but not load-bearing: the oracle invokes this inside
+/// an explicit storage layer, so if the treasury write fails the constitution
+/// write and the oracle transition unwind with it. 08 §1.2 ties `spendable_nav`
+/// to exactly this flag, so a half-applied transition would leave `PhaseFlags`
+/// and NAV disagreeing about solvency (R-7).
+///
+/// Unused outside `cfg(test)` on purpose — see `RuntimeReserveHealthSink` below
+/// for why production still binds `()`. The `allow` is the marker of that
+/// deliberate gap, not of dead code nobody noticed.
+#[allow(dead_code)]
+pub struct ReserveHealthToConstitutionAndTreasury;
+impl pallet_oracle::ReserveHealthSink for ReserveHealthToConstitutionAndTreasury {
+    fn reserve_health_changed(unhealthy: bool) -> frame_support::dispatch::DispatchResult {
+        crate::Constitution::note_reserve_health(unhealthy)?;
+        crate::FutarchyTreasury::set_reserve_impaired(unhealthy)?;
+        Ok(())
+    }
+}
+
+/// **Deliberately unbound in production (SQ-205 / SQ-380).** The seam above is
+/// complete and tested, but binding it live today would arm a permanent,
+/// permissionless treasury halt rather than the 08 §1.2 fail-static haircut:
+///
+/// * `RuntimeProbeDispatch = ()` outside benchmarks (below), so no probe is ever
+///   *sent*; and `XcmConfig::ResponseHandler = PolkadotXcm` rather than
+///   `bleavit_xcm::probe::ProbeAwareResponseHandler`, so no probe response is
+///   ever *routed* — `Pallet::reserve_probe_result` has no production caller.
+/// * `crank_reserve_probe` nevertheless commits `pending_since` regardless of
+///   `ProbeDispatch::live()`, so its timeout folds still latch consecutive
+///   fails. Any signed keeper reaches `ReserveUnhealthy` in ~2 probe intervals.
+/// * Recovery needs `res.recover_threshold` consecutive *passes*, which arrive
+///   only through the unrouted response path. The latch is therefore one-way.
+///
+/// Wired live, that is `spendable_nav = 0` chain-wide, forever, at any keeper's
+/// option. The blocker is the probe feed, not this seam; SQ-380 tracks it and
+/// the release blocker `treasury.reserve_health_unwired` stays open until then.
+/// Tests bind the real sink so the composition above is proven and the
+/// production switch is a one-line change.
+#[cfg(not(test))]
+type RuntimeReserveHealthSink = ();
+#[cfg(test)]
+type RuntimeReserveHealthSink = ReserveHealthToConstitutionAndTreasury;
 
 #[cfg(feature = "runtime-benchmarks")]
 pub struct BenchmarkProbeDispatch;
@@ -4053,10 +4222,12 @@ impl pallet_futarchy_treasury::TreasuryParams for TreasuryParams {
         balance_param(b"keeper.budget")
     }
     fn keeper_rebate() -> Balance {
-        // 13 §1 marks this as a benchmark-time formula, so genesis Params
-        // deliberately omits it. Unlike the other adapters, do not consult
-        // `genesis_params()` as a fallback: absent/wrong-kind means zero until
-        // B5 installs a calibrated raw row (conservative no-outflow default).
+        // SQ-117 (ruled 2026-07-21): the row is now genesis-seeded from the
+        // 08 §6.2 fee basis (`kernel::KEEPER_REBATE_FEE_BASIS_USDC`), so the
+        // rebate pipeline pays a real amount rather than zero. The seed value
+        // still carries a 13 §1 `[VERIFY]` tag pending launch benchmarking. The
+        // absent/wrong-kind fallback stays a conservative no-outflow zero (G-1)
+        // rather than consulting `genesis_params()`, exactly as before.
         let key = pallet_constitution::key16(b"keeper.rebate");
         match live_param(key) {
             Some(pallet_constitution::ParamValue::Balance(value)) => value,
@@ -4132,6 +4303,27 @@ impl pallet_futarchy_treasury::PotFunding<AccountId> for TreasuryPotFunding {
         .map(|_| ())
     }
 }
+/// 08 §1.2/§1.4 (SQ-207): the custody half of `sweep_insurance` — INSURANCE →
+/// `MAIN`, and nowhere else.
+///
+/// `Preservation::Preserve` is normative, not defensive: INSURANCE is a
+/// genesis-endowed permanent custody account under 03 §7 R-4, so at most
+/// `balance − min_balance` is sweepable and an over-large request fails whole
+/// instead of reaping the account (G-1).
+pub struct TreasuryInsuranceSweep;
+impl pallet_futarchy_treasury::InsuranceSweep for TreasuryInsuranceSweep {
+    fn sweep(amount: Balance) -> frame_support::dispatch::DispatchResult {
+        <ForeignAssets as Mutate<AccountId>>::transfer(
+            usdc_location(),
+            &insurance_account(),
+            &crate::genesis::treasury_account(),
+            amount,
+            Preservation::Preserve,
+        )
+        .map(|_| ())
+    }
+}
+
 #[cfg(all(not(feature = "runtime-benchmarks"), not(test)))]
 pub struct CoretimeTreasuryLocation;
 #[cfg(all(not(feature = "runtime-benchmarks"), not(test)))]
@@ -4240,6 +4432,7 @@ impl pallet_futarchy_treasury::Config for Runtime {
     type RenewalDispatch = RuntimeRenewalDispatch;
     type RebatePayout = TreasuryRebatePayout;
     type PotFunding = TreasuryPotFunding;
+    type InsuranceSweep = TreasuryInsuranceSweep;
     type WeightInfo = crate::weights::pallet_futarchy_treasury::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
@@ -4746,6 +4939,13 @@ impl pallet_epoch::ExecutionGuardAccess for RuntimeEpochExecutionGuard {
             .ok_or(DispatchError::Other("epoch payload preimage missing"))?;
         let calls = pallet_execution_guard::Pallet::<Runtime>::decode_batch(&bytes)
             .map_err(|_| DispatchError::Other("epoch payload batch invalid"))?;
+        // The same mirror screening applies (SQ-308). Screening should already have
+        // rejected such a payload; failing here too keeps the adapter honest if a
+        // future path reaches it without screening.
+        frame_support::ensure!(
+            domains_admissible(proposal.class, &calls),
+            DispatchError::Other("epoch payload domain inadmissible for class")
+        );
         let mut declared_domains = pallet_execution_guard::pallet::StoredDomains::default();
         let mut artifact = None;
         for call in &calls {
@@ -4927,8 +5127,24 @@ impl RuntimeCapabilities {
             RuntimeCall::Constitution(pallet_constitution::Call::set_capability { .. }) => {
                 Self::enabled(class, pallet_constitution::Capability::SetCapability)
             }
-            RuntimeCall::Constitution(pallet_constitution::Call::amend_registry { .. }) => {
+            RuntimeCall::Constitution(pallet_constitution::Call::amend_registry {
+                key,
+                min,
+                max,
+                max_delta,
+                cooldown_epochs,
+            }) => {
+                // 05 §1.4 T4 / 13 rule 7 (SQ-150): registry amendment is
+                // META-only, but the capability row alone is insufficient.
+                // Unknown keys, kernel-bounded rows and malformed metadata are
+                // verifiable constitution violations and must fail at static
+                // screening rather than survive until guarded dispatch.
                 Self::enabled(class, pallet_constitution::Capability::AmendRegistry)
+                    && pallet_constitution::Params::<Runtime>::get(*key).is_some_and(|record| {
+                        record
+                            .checked_amend(*min, *max, *max_delta, *cooldown_epochs)
+                            .is_ok()
+                    })
             }
             RuntimeCall::Constitution(pallet_constitution::Call::set_release_channel {
                 ..
@@ -4943,8 +5159,26 @@ impl RuntimeCapabilities {
                 | pallet_futarchy_treasury::Call::cancel_stream { .. }
                 | pallet_futarchy_treasury::Call::issue_vit { .. }
                 | pallet_futarchy_treasury::Call::recover_foreign { .. }
-                | pallet_futarchy_treasury::Call::set_coretime_authority { .. },
+                | pallet_futarchy_treasury::Call::set_coretime_authority { .. }
+                // 08 §1.2/§1.4 (SQ-207): the INSURANCE sweep is a TREASURY-class
+                // decision like every other treasury act. Omitting it here made
+                // `call_enabled` fall to the fail-closed `_` arm, which for
+                // `CallDomain::Treasury` is `SlashAll(ConstitutionViolation)` —
+                // a lawful sweep would have confiscated the whole intake bond.
+                | pallet_futarchy_treasury::Call::sweep_insurance { .. },
             ) => Self::enabled(class, pallet_constitution::Capability::TreasurySpend),
+            // 05 §1.4 class safety (SQ-244/SQ-316): the base call-filter projection
+            // of `claim_assets` stays **Public** — a Signed origin reclaiming its own
+            // self-keyed trap is 09 §6.1's ordinary path and must not need governance.
+            // Belief-execution admission is gated separately and narrowly: the leaf is
+            // payload-admissible only for TREASURY carrying the Treasury-spend
+            // capability (06 §3.2). Without this explicit arm the call would fall to
+            // the generic Public allowance below and let a PARAM/CODE/META payload
+            // carry it — precisely the 06 §1 / I-8 class confusion.
+            RuntimeCall::PolkadotXcm(pallet_xcm::Call::claim_assets { .. }) => {
+                matches!(class, futarchy_primitives::ProposalClass::Treasury)
+                    && Self::enabled(class, pallet_constitution::Capability::TreasurySpend)
+            }
             _ => {
                 let Ok(analysis) =
                     <crate::classifier::RuntimeDispatcher as pallet_execution_guard::BatchDispatcher<
@@ -5227,8 +5461,9 @@ impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEven
             DispatchClass::Mandatory,
         );
         // Called once by the mandatory parachain inherent before the
-        // executive services the MBM cursor for this block. Comparing with
-        // the prior marker is O(1) storage and bounded by CursorMaxLen.
+        // executive services the MBM cursor for this block. Reading the
+        // cursor's persisted start block is O(1) storage and bounded by
+        // CursorMaxLen.
         track_migration_progress();
         let now = frame_system::Pallet::<Runtime>::block_number();
         let snapshot_overdue = pallet_welfare::Pallet::<Runtime>::snapshot_overdue(now)
@@ -5722,6 +5957,18 @@ impl pallet_constitution::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHel
             }
         }
     }
+
+    fn prime_phase_arming() -> DispatchResult {
+        benchmark_ensure_usdc();
+        let amount =
+            FutarchyTreasury::floor(futarchy_primitives::ProposalClass::Meta).saturating_mul(4);
+        <ForeignAssets as Mutate<AccountId>>::mint_into(
+            usdc_location(),
+            &insurance_account(),
+            amount,
+        )?;
+        FutarchyTreasury::sweep_insurance(pallet_origins::Origin::FutarchyTreasury.into(), amount)
+    }
 }
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_welfare::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
@@ -5842,6 +6089,14 @@ impl pallet_futarchy_treasury::BenchmarkHelper<RuntimeOrigin, AccountId>
     fn prime_pot_funding(amount: Balance) -> DispatchResult {
         let main = TreasuryPalletId::get().into_account_truncating();
         <ForeignAssets as Mutate<AccountId>>::mint_into(usdc_location(), &main, amount).map(|_| ())
+    }
+    fn prime_insurance_custody(amount: Balance) -> DispatchResult {
+        <ForeignAssets as Mutate<AccountId>>::mint_into(
+            usdc_location(),
+            &insurance_account(),
+            amount,
+        )
+        .map(|_| ())
     }
 }
 #[cfg(feature = "runtime-benchmarks")]

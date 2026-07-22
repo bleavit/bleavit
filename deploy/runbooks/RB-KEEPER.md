@@ -13,6 +13,8 @@ alerts:
     trigger: "no crank 1 h"
   - domain: Keeper budget
     trigger: "> 80% of keeper.budget"
+  - domain: Relay finality
+    trigger: "finalized stagnant > 1800 s [VERIFY] while best is ahead"
 spec_refs:
   - docs/architecture/01-system-overview.md
   - docs/architecture/04-markets-and-pricing.md
@@ -36,12 +38,22 @@ by fabricating observations or forcing a decision.
 | TWAP | coverage %, stale events, spot-vs-TWAP dispersion | coverage < 96% mid-window |
 | Keepers | rebate claims per role, inactivity | no crank 1 h |
 | Keeper budget | metered-budget utilization | > 80% of `keeper.budget` |
+| Relay finality | relay best height, relay finalized height, finality stagnation seconds | finalized stagnant > 1800 s [VERIFY] while best is ahead |
 
 Tick lag means finalized chain time has passed work which `epoch.tick` should have advanced.
 Low mid-window coverage is decision-critical because gaps can make a book fail grade. Inactivity
 means no successful sanctioned crank is visible for the affected role, not merely that one daemon
 lost a race. Budget utilization warns that the on-chain rebate meter is nearing its payment latch;
 it does not disable any crank.
+
+Relay finality is the one row here that does **not** describe keeper behaviour. It fires when the
+relay chain keeps producing blocks that GRANDPA is not finalizing, and it exists because the relay
+finalized head is not parachain-runtime-observable: during such a stall the parachain finalized head
+stops advancing too, so every other series in this runbook — tick lag included — freezes at its last
+value instead of alerting. A relay finality alert therefore **invalidates the silence** of the other
+four rows rather than adding to it; treat their quiet as uninformative until finality recovers. Its
+`1800 s` window is `[VERIFY]` and must be recalibrated by Ops from observed healthy relay behaviour
+([12 §6.3](../../docs/architecture/12-release-and-operations.md)).
 
 ## Diagnosis
 
@@ -79,6 +91,20 @@ it does not disable any crank.
 8. Confirm the failure is not only rebate custody: payout or line-funding failure returns zero
    without charging the meter and cannot roll back the useful crank. Distinguish that from an
    exhausted meter by the on-chain events and meter flags.
+9. For relay finality, read `bleavit_relay_best_block`, `bleavit_relay_finalized_block`, and
+   `bleavit_relay_finality_stagnation_seconds` from the relay finality monitor
+   ([`relay_finality_monitor.py`](../../tools/monitoring/relay_finality_monitor.py)). Classify first:
+   best advancing with finalized flat is a **relay GRANDPA stall**; both flat is a **relay halt**;
+   the three series **absent** with `bleavit_relay_monitor_connected` at 0 and
+   `bleavit_relay_monitor_errors_total` rising is a **monitor or relay-RPC failure**, not evidence
+   about the relay — the row fails closed, so absence never means healthy. Confirm any of the three
+   against a second, independently operated relay endpoint before escalating; the monitor's endpoint
+   is deliberately separate from the parachain exporter's, and a single-endpoint reading cannot
+   distinguish a stalled relay from an unreachable one.
+10. Once a relay stall is confirmed, treat every parachain-derived series in this runbook as stale
+    rather than healthy, and check the relay-side validator/GRANDPA telemetry and the relay's own
+    release/incident channels. Nothing on this chain can advance relay finality, and the collator
+    fleet is not the fault domain.
 
 ## Remediation
 
@@ -97,6 +123,14 @@ it does not disable any crank.
 4. If the chain itself is stalled or dead-man is engaged, do not replay stale work against an
    unfinalized head. Restore finality first; the epoch clock and decision windows apply their
    specified pause/recovery behavior.
+5. Under a confirmed relay finality stall there is no permissionless remediation on this chain:
+   keep the keeper fleet running and idle rather than resubmitting against the unfinalized head, and
+   do not attempt to compensate for the stall by widening timeouts or forcing cranks. Every crank is
+   idempotent, so the backlog drains on its own once finality resumes. If the relay-parent gap grows
+   past its trigger the dead-man engages by design — that is the specified protective behavior, not
+   an incident to work around ([05 §4.6](../../docs/architecture/05-welfare-and-decision-engine.md)).
+   Restore the monitor itself promptly if the alert was a collection failure: while the relay series
+   are absent this chain has no independent finality observer at all.
 
 ### Privileged
 
@@ -117,7 +151,14 @@ it does not disable any crank.
 Page the Keeper coordinator first. Page the Infrastructure coordinator when finalized-head or
 RPC/archive evidence points outside the fleet, the Oracle operations coordinator for stalled
 oracle/registry roles, and the Monitoring coordinator when alert/event ingestion disagrees with
-direct finalized storage ([12 §6.1](../../docs/architecture/12-release-and-operations.md)). If a
+direct finalized storage ([12 §6.1](../../docs/architecture/12-release-and-operations.md)). The
+**Relay finality** row escalates to the **Infrastructure coordinator** specifically, and does so
+immediately rather than after keeper triage: the fault domain is the relay chain and the RPC/archive
+estate that observes it, never the keeper fleet, so the Keeper coordinator holds this row only long
+enough to confirm the classification in Diagnosis step 9. When that step attributes the alert to the
+monitor or its relay endpoint rather than to the relay, it is the **Monitoring coordinator** who
+owns restoring the observer, with the Infrastructure coordinator supplying a second independent
+relay endpoint. If a
 verified dead-man, reserve, migration, or ledger-drift trigger is present, hand off to its named
 guardian playbook runbook; keeper budget exhaustion alone activates none. Record decision-window
 coverage loss, affected proposals/books, unpaid continuity duration, and funding used in the
