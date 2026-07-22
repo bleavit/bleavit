@@ -9,7 +9,7 @@ configuration for the controller-disjoint out-of-band attestation monitor.
 
 Replace every `*.example.invalid` target and webhook while rendering the files
 into the operator's secret/configuration system. Webhook credentials must not
-be committed. Then start the two Python exporters (Python 3.12; live WebSocket
+be committed. Then start the three Python exporters (Python 3.12; live WebSocket
 operation additionally needs the repository pin `websockets==15.0.1`):
 
 ```sh
@@ -17,7 +17,16 @@ python3 tools/monitoring/chain_alerts_exporter.py \
   --url wss://YOUR_FINALIZED_NODE --bind 127.0.0.1:9617 --interval 30
 python3 tools/monitoring/attestation_monitor.py \
   --config /etc/bleavit/attestation-monitor.toml
+python3 tools/monitoring/relay_finality_monitor.py \
+  --relay-url wss://YOUR_RELAY_RPC --bind 127.0.0.1:9620 --interval 30
 ```
+
+The relay finality monitor is deliberately a **separate process on a separate
+relay endpoint** (SQ-283): a relay GRANDPA stall freezes every parachain-anchored
+series, including the chain exporter's own finalized-head loop, so it must not
+share that connection or failure domain. Run at least two against independent
+relay RPCs. Its `--stagnation-window` default is `[VERIFY]` — Ops must calibrate
+it from observed healthy relay behaviour before production.
 
 Use `--once` for drills. The chain exporter prints one Prometheus scrape and
 returns 0/2 (success/operational failure). The attestation monitor returns 0
@@ -128,6 +137,7 @@ not part of `check_alert_coverage.py`.
 | Descriptor lead time | chain exporter + attestation monitor | live |
 | ReleaseChannel | chain exporter + attestation monitor | live |
 | Keeper budget | chain exporter live Params + metadata-decoded keeper meter | live |
+| Relay finality | relay finality monitor (independent relay RPC) | live; persistence window `[VERIFY]` |
 
 ## Ownership seams
 

@@ -135,8 +135,10 @@ class RunEvidenceTests(unittest.TestCase):
         (self.root / "chopsticks" / "README.md").write_text(
             "fixture chopsticks definitions\n", encoding="utf-8"
         )
+        # The closing try-state endpoint is resolved from the topology's pinned
+        # collator rpc_port (15 §1; SQ-204), so the fixture must pin one.
         (self.root / "zombienet" / "networks" / "bleavit-local.toml").write_text(
-            "[relaychain]\nchain = 'fixture'\n", encoding="utf-8"
+            "[relaychain]\nchain = 'fixture'\nrpc_port = 19944\n", encoding="utf-8"
         )
         for name in ("01-smoke", "03-keeper-loss", "09-soak"):
             (self.root / "zombienet" / "drills" / f"{name}.zndsl").write_text(
@@ -282,13 +284,39 @@ class RunEvidenceTests(unittest.TestCase):
             encoding="utf-8",
         )
         fake_zombienet = self.root / "zombienet" / "bin" / "zombienet"
+        # The runner drives the pinned Zombienet in two phases (SQ-204): `spawn
+        # --monitor` holds the network up (it publishes zombie.json and keeps
+        # running until the runner kills its group) and `test <drill> <spec>`
+        # runs the drill against it, leaving the node alive for try-state.
         self._write_executable(
             fake_zombienet,
             textwrap.dedent(
                 f"""\
                 #!/bin/sh
+                phase=""
+                network_dir=""
+                previous=""
+                for argument in "$@"; do
+                    case "$argument" in
+                      spawn|test) [ -z "$phase" ] && phase="$argument" ;;
+                    esac
+                    case "$previous" in
+                      -d) network_dir="$argument" ;;
+                    esac
+                    previous="$argument"
+                done
                 if [ -n "${{FAKE_ZOMBIENET_MARKER:-}}" ]; then
-                    printf 'run\\n' >> "$FAKE_ZOMBIENET_MARKER"
+                    printf '%s\\n' "$phase" >> "$FAKE_ZOMBIENET_MARKER"
+                fi
+                if [ "$phase" = spawn ]; then
+                    if [ "${{FAKE_ZOMBIENET_SPAWN_MODE:-pass}}" = nospec ]; then
+                        exit 0
+                    fi
+                    mkdir -p "$network_dir"
+                    printf '{{"fixture":"network"}}\\n' > "$network_dir/zombie.json"
+                    "{sys.executable}" "{child}" &
+                    wait $!
+                    exit 0
                 fi
                 if [ "${{FAKE_ZOMBIENET_MUTATE_SPEC:-0}}" = 1 ]; then
                     printf '{{"genesis":{{"raw":{{"top":{{"0x3a636f6465":"0x00"}}}}}}}}\\n' \
@@ -305,9 +333,26 @@ class RunEvidenceTests(unittest.TestCase):
                 """
             ),
         )
+        self.try_runtime_wasm = self.root / "release-work" / "runtime" / "try-runtime.wasm"
+        self.try_runtime_wasm.parent.mkdir(parents=True, exist_ok=True)
+        self.try_runtime_wasm.write_bytes(b"fixture try-runtime runtime")
+        fake_try_runtime = self.root / "zombienet" / "bin" / "try-runtime"
+        self._write_executable(
+            fake_try_runtime,
+            textwrap.dedent(
+                """\
+                #!/bin/sh
+                if [ -n "${FAKE_TRY_RUNTIME_MARKER:-}" ]; then
+                    printf '%s\\n' "$*" >> "$FAKE_TRY_RUNTIME_MARKER"
+                fi
+                exit "${FAKE_TRY_RUNTIME_STATUS:-0}"
+                """
+            ),
+        )
         (self.root / "tools" / "env" / "pins.env").write_text(
             "CHOPSTICKS_VERSION=fixture-version\n"
-            f"ZOMBIENET_SHA256={sha256(fake_zombienet)}\n",
+            f"ZOMBIENET_SHA256={sha256(fake_zombienet)}\n"
+            f"TRY_RUNTIME_SHA256={sha256(fake_try_runtime)}\n",
             encoding="utf-8",
         )
         for name in (
@@ -424,6 +469,7 @@ class RunEvidenceTests(unittest.TestCase):
         environment: dict[str, str] | None = None,
         commit: str | None = None,
         timeout: float = 30,
+        try_runtime_wasm: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         command = [
             sys.executable,
@@ -438,6 +484,11 @@ class RunEvidenceTests(unittest.TestCase):
             str(self.logs),
             "--report-out",
             str(self.report),
+            *(
+                ["--try-runtime-wasm", str(self.try_runtime_wasm)]
+                if try_runtime_wasm
+                else []
+            ),
             *arguments,
         ]
         process_environment = dict(os.environ)
@@ -480,6 +531,8 @@ class RunEvidenceTests(unittest.TestCase):
                 if suite.kind == "zombienet"
                 else ["boot", "injected-state", "blocks", "code-binding"]
             )
+            if RUNNER.requires_card(suite):
+                checks.append(RUNNER.CARD_CHECK)
             rows.append(
                 {
                     "id": suite.identifier,
@@ -524,33 +577,108 @@ class RunEvidenceTests(unittest.TestCase):
                 evidence["pins_env_sha256"],
                 sha256(self.root / "tools" / "env" / "pins.env"),
             )
-            expected_checks = (
-                ["zndsl", RUNNER.TRY_STATE_CHECK]
+            base_checks = (
+                ["zndsl"]
                 if suite == "zombienet"
-                else [
-                    "boot",
-                    "injected-state",
-                    "blocks",
-                    "code-binding",
-                    RUNNER.TRY_STATE_CHECK,
-                ]
+                else ["boot", "injected-state", "blocks", "code-binding"]
             )
+            by_identifier = {row.identifier: row for row in RUNNER.load_manifest(self.root)}
             self.assertTrue(evidence["suites_run"])
             for row in evidence["suites_run"]:
+                # Scenarios additionally carry the executed normative card (SQ-203).
+                expected_checks = list(base_checks)
+                if RUNNER.requires_card(by_identifier[row["name"]]):
+                    expected_checks.append(RUNNER.CARD_CHECK)
+                expected_checks.append(RUNNER.TRY_STATE_CHECK)
                 self.assertEqual(row["checks"], expected_checks)
             errors = ASSEMBLE.validate_run_evidence(
                 directory, suite, wasm_hash, self.commit
             )
             self.assertEqual(errors, [], f"{suite}: {errors}")
 
-    def test_fully_green_cli_run_is_blocked_without_try_state(self) -> None:
-        result = self.run_runner("--kind", "zombienet")
+    def test_run_without_try_runtime_wasm_fails_closed(self) -> None:
+        """15 §1: no closing try-state input means no pass and no evidence (SQ-204)."""
+        result = self.run_runner("--kind", "zombienet", try_runtime_wasm=False)
 
         self.assertNotEqual(result.returncode, 0)
-        output = result.stdout + result.stderr
-        self.assertIn("SQ-204", output)
-        self.assertIn("01-smoke, 03-keeper-loss", output)
         self.assert_no_evidence()
+        rows = [row for row in self.read_report_rows().values() if row["kind"] == "zombienet"]
+        self.assertTrue(rows)
+        for row in rows:
+            if row["result"] == "excluded-tier":
+                continue
+            self.assertEqual(row["result"], "fail")
+            self.assertIn("--try-runtime-wasm", row["detail"])
+            self.assertNotIn(RUNNER.TRY_STATE_CHECK, row["checks"])
+
+    def test_closing_try_state_runs_against_the_pinned_topology_endpoint(self) -> None:
+        """The closing check must reach the drill's own pinned collator RPC."""
+        marker = self.root / "target" / "env" / "try-runtime-invocations"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        result = self.run_runner(
+            "--kind",
+            "zombienet",
+            environment={"FAKE_TRY_RUNTIME_MARKER": str(marker)},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        invocations = marker.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(invocations), 2)
+        for invocation in invocations:
+            self.assertIn("on-runtime-upgrade", invocation)
+            self.assertIn(f"--checks {RUNNER.TRY_STATE_CHECK}", invocation)
+            # Resolved from bleavit-local.toml's pinned collator rpc_port.
+            self.assertIn("--uri ws://127.0.0.1:19944", invocation)
+        for row in self.read_report_rows().values():
+            if row["result"] != "pass":
+                continue
+            self.assertEqual(row["checks"], ["zndsl", RUNNER.TRY_STATE_CHECK])
+
+    def test_failing_try_state_fails_the_suite_and_blocks_evidence(self) -> None:
+        result = self.run_runner(
+            "--kind",
+            "zombienet",
+            environment={"FAKE_TRY_RUNTIME_STATUS": "3"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_no_evidence()
+        rows = [row for row in self.read_report_rows().values() if row["kind"] == "zombienet"]
+        self.assertTrue(rows)
+        for row in rows:
+            if row["result"] == "excluded-tier":
+                continue
+            self.assertEqual(row["result"], "fail")
+            self.assertIn("closing try-state failed with status 3", row["detail"])
+            # The drill itself passed; only the closing leg is missing.
+            self.assertEqual(row["checks"], ["zndsl"])
+
+    def test_zombienet_runs_spawn_monitor_then_test_against_the_running_network(
+        self,
+    ) -> None:
+        """SQ-204 keep-alive: `zombienet test` alone tears the network down."""
+        result = self.run_runner("--kind", "zombienet", "--suites", "01-smoke")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.invocations.read_text(encoding="utf-8").splitlines(),
+            ["spawn", "test"],
+        )
+
+    def test_missing_network_spec_fails_the_suite(self) -> None:
+        result = self.run_runner(
+            "--kind",
+            "zombienet",
+            "--suites",
+            "01-smoke",
+            environment={"FAKE_ZOMBIENET_SPAWN_MODE": "nospec"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_no_evidence()
+        row = self.read_report_rows()["01-smoke"]
+        self.assertEqual(row["result"], "fail")
+        self.assertIn("zombie.json", row["detail"])
 
     @unittest.skipUnless(
         HAS_CHOPSTICKS_TEST_SUPPORT,
@@ -1062,6 +1190,311 @@ class RunEvidenceTests(unittest.TestCase):
             self.root / "zombienet", "zombienet", sha256(self.wasm), self.commit
         )
         self.assertEqual(errors, [])
+
+
+class FakeChopsticksConnection:
+    """Minimal JSON-RPC peer for the card executor (no websockets dependency)."""
+
+    def __init__(self, storage: dict[str, str | None], mutate_on_block: str | None = None):
+        self.storage = dict(storage)
+        self.mutate_on_block = mutate_on_block
+        self.block = 10
+        self.blocks_produced = 0
+        self._pending: str | None = None
+
+    def send(self, payload: str) -> None:
+        request = json.loads(payload)
+        method, params = request["method"], request.get("params", [])
+        if method == "state_getStorage":
+            result = self.storage.get(params[0])
+        elif method == "dev_newBlock":
+            self.block += 1
+            self.blocks_produced += 1
+            if self.mutate_on_block is not None:
+                self.storage[self.mutate_on_block] = "0x%04x" % self.block
+            result = True
+        elif method == "chain_getHeader":
+            result = {"number": hex(self.block)}
+        else:
+            raise AssertionError(f"unexpected RPC {method}")
+        self._pending = json.dumps(
+            {"jsonrpc": "2.0", "id": request["id"], "result": result}
+        )
+
+    def recv(self, timeout: float | None = None) -> str:
+        assert self._pending is not None
+        payload, self._pending = self._pending, None
+        return payload
+
+
+class CardContractTests(unittest.TestCase):
+    """SQ-203: normative Chopsticks cards must parse and execute, or fail closed."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        (self.root / "chopsticks" / "scenarios").mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def suite(self, name: str = "fixture") -> object:
+        return RUNNER.Suite(
+            identifier=name,
+            kind="chopsticks",
+            path=Path("chopsticks") / "scenarios" / f"{name}.yml",
+            tier="release",
+            gated_on=(),
+            timeout_seconds=10,
+            spec="15 §4.7",
+        )
+
+    def write_card(self, body: str, name: str = "fixture") -> object:
+        (self.root / "chopsticks" / "scenarios" / f"{name}.md").write_text(
+            f"# fixture card\n\n```card-assertions\n{textwrap.dedent(body)}```\n",
+            encoding="utf-8",
+        )
+        return self.suite(name)
+
+    def test_every_committed_scenario_card_parses(self) -> None:
+        for suite in RUNNER.load_manifest(ROOT):
+            if not RUNNER.requires_card(suite):
+                continue
+            card = RUNNER.load_card(ROOT, suite)
+            self.assertTrue(card, suite.identifier)
+            for entry in card:
+                self.assertEqual(
+                    1,
+                    sum(
+                        field in entry
+                        for field in ("execute", "blocked_on", "discharged_by")
+                    ),
+                    f"{suite.identifier} step {entry['step']}",
+                )
+
+    def test_base_fork_needs_no_card(self) -> None:
+        base = RUNNER.Suite(
+            identifier="base",
+            kind="chopsticks",
+            path=Path("chopsticks") / "bleavit.yml",
+            tier="release",
+            gated_on=(),
+            timeout_seconds=10,
+            spec="15 §4.7",
+        )
+        self.assertFalse(RUNNER.requires_card(base))
+
+    def test_missing_card_is_fail_closed(self) -> None:
+        with self.assertRaises(RUNNER.EvidenceError) as caught:
+            RUNNER.load_card(self.root, self.suite())
+        self.assertIn("SQ-203", str(caught.exception))
+
+    def test_card_without_assertion_block_is_rejected(self) -> None:
+        (self.root / "chopsticks" / "scenarios" / "fixture.md").write_text(
+            "# prose only\n", encoding="utf-8"
+        )
+        with self.assertRaises(RUNNER.EvidenceError) as caught:
+            RUNNER.load_card(self.root, self.suite())
+        self.assertIn("exactly one ```card-assertions", str(caught.exception))
+
+    def test_step_numbering_must_be_gapless(self) -> None:
+        suite = self.write_card(
+            """\
+            - step: 1
+              claim: first
+              blocked_on: nothing yet
+            - step: 3
+              claim: third
+              blocked_on: nothing yet
+            """
+        )
+        with self.assertRaises(RUNNER.EvidenceError) as caught:
+            RUNNER.load_card(self.root, suite)
+        self.assertIn("without gaps", str(caught.exception))
+
+    def test_step_must_carry_exactly_one_disposition(self) -> None:
+        suite = self.write_card(
+            """\
+            - step: 1
+              claim: ambiguous
+              blocked_on: nothing yet
+              execute:
+                - new_block:
+                    count: 1
+            """
+        )
+        with self.assertRaises(RUNNER.EvidenceError) as caught:
+            RUNNER.load_card(self.root, suite)
+        self.assertIn("exactly one of", str(caught.exception))
+
+    def test_unsupported_step_kind_is_rejected(self) -> None:
+        suite = self.write_card(
+            """\
+            - step: 1
+              claim: invented
+              execute:
+                - submit_extrinsic:
+                    call: "0x00"
+            """
+        )
+        with self.assertRaises(RUNNER.EvidenceError) as caught:
+            RUNNER.load_card(self.root, suite)
+        self.assertIn("unsupported step kind", str(caught.exception))
+
+    def test_blocked_card_refuses_to_execute(self) -> None:
+        card = [{"step": 1, "claim": "needs a surface", "blocked_on": "call is absent"}]
+        connection = FakeChopsticksConnection({})
+        with self.assertRaises(RUNNER.EvidenceError) as caught:
+            RUNNER.execute_card(connection, card, "fixture.md", time.monotonic() + 5)
+        message = str(caught.exception)
+        self.assertIn("did not execute", message)
+        self.assertIn("call is absent", message)
+
+    def test_executable_card_runs_every_step(self) -> None:
+        card = [
+            {
+                "step": 1,
+                "claim": "the injected cell is present",
+                "execute": [
+                    {"storage_equals": {"key": "0x0102", "value": "0xaabb"}},
+                    {"storage_absent": {"key": "0x0304"}},
+                ],
+            },
+            {
+                "step": 2,
+                "claim": "maintenance advances the cursor",
+                "execute": [
+                    {"new_block": {"count": 2}},
+                    {"storage_changed": {"key": "0x0506", "blocks": 1}},
+                ],
+            },
+            {"step": 3, "claim": "closing check", "discharged_by": "try-state"},
+        ]
+        connection = FakeChopsticksConnection(
+            {"0x0102": "0xaabb", "0x0506": "0x0000"}, mutate_on_block="0x0506"
+        )
+        RUNNER.execute_card(connection, card, "fixture.md", time.monotonic() + 5)
+        self.assertEqual(connection.blocks_produced, 3)
+
+    def test_storage_mismatch_fails_the_card(self) -> None:
+        card = [
+            {
+                "step": 1,
+                "claim": "the injected cell is present",
+                "execute": [{"storage_equals": {"key": "0x0102", "value": "0xaabb"}}],
+            }
+        ]
+        connection = FakeChopsticksConnection({"0x0102": "0xffff"})
+        with self.assertRaises(RUNNER.EvidenceError) as caught:
+            RUNNER.execute_card(connection, card, "fixture.md", time.monotonic() + 5)
+        self.assertIn("does not match the card assertion", str(caught.exception))
+
+    def test_storage_changed_fails_when_state_is_inert(self) -> None:
+        card = [
+            {
+                "step": 1,
+                "claim": "maintenance runs",
+                "execute": [{"storage_changed": {"key": "0x0506", "blocks": 2}}],
+            }
+        ]
+        connection = FakeChopsticksConnection({"0x0506": "0x0000"})
+        with self.assertRaises(RUNNER.EvidenceError) as caught:
+            RUNNER.execute_card(connection, card, "fixture.md", time.monotonic() + 5)
+        self.assertIn("did not change", str(caught.exception))
+
+
+class TryStateLegTests(unittest.TestCase):
+    """SQ-204: the closing check is pinned, executed, and fail-closed."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.log = self.root / "suite.log"
+        self.log.write_text("", encoding="utf-8")
+        self.wasm = self.root / "try-runtime.wasm"
+        self.wasm.write_bytes(b"fixture")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def binary(self, status: int = 0) -> Path:
+        path = self.root / "try-runtime"
+        path.write_text(f"#!/bin/sh\nexit {status}\n", encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def test_missing_wasm_blocks_the_leg(self) -> None:
+        reason = RUNNER.run_try_state(
+            self.root, self.binary(), None, "ws://127.0.0.1:9944", self.log
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("--try-runtime-wasm", reason or "")
+
+    def test_missing_binary_blocks_the_leg(self) -> None:
+        reason = RUNNER.run_try_state(
+            self.root,
+            self.root / "absent",
+            self.wasm,
+            "ws://127.0.0.1:9944",
+            self.log,
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("fetch-binaries.sh", reason or "")
+
+    def test_nonzero_status_blocks_the_leg(self) -> None:
+        reason = RUNNER.run_try_state(
+            self.root, self.binary(4), self.wasm, "ws://127.0.0.1:9944", self.log
+        )
+        self.assertIn("status 4", reason or "")
+
+    def test_successful_leg_returns_no_reason(self) -> None:
+        self.assertIsNone(
+            RUNNER.run_try_state(
+                self.root, self.binary(0), self.wasm, "ws://127.0.0.1:9944", self.log
+            )
+        )
+
+    def test_command_matches_the_readme_contract(self) -> None:
+        command = RUNNER.try_runtime_command(
+            self.root, Path("try-runtime"), self.wasm, "ws://127.0.0.1:8000"
+        )
+        self.assertEqual(
+            command[1:],
+            [
+                "--runtime",
+                str(self.wasm),
+                "on-runtime-upgrade",
+                "--checks",
+                "try-state",
+                "--blocktime",
+                "6000",
+                "live",
+                "--uri",
+                "ws://127.0.0.1:8000",
+            ],
+        )
+
+    def test_topology_without_a_pinned_rpc_port_fails_closed(self) -> None:
+        (self.root / "zombienet" / "networks").mkdir(parents=True)
+        (self.root / "zombienet" / "drills").mkdir(parents=True)
+        (self.root / "zombienet" / "networks" / "topology.toml").write_text(
+            "[relaychain]\nchain = 'fixture'\n", encoding="utf-8"
+        )
+        (self.root / "zombienet" / "drills" / "drill.zndsl").write_text(
+            "Network: ./zombienet/networks/topology.toml\n", encoding="utf-8"
+        )
+        suite = RUNNER.Suite(
+            identifier="drill",
+            kind="zombienet",
+            path=Path("zombienet") / "drills" / "drill.zndsl",
+            tier="release",
+            gated_on=(),
+            timeout_seconds=10,
+            spec="15 §4.7",
+        )
+        with self.assertRaises(RUNNER.EvidenceError) as caught:
+            RUNNER.zombienet_rpc_uri(self.root, suite)
+        self.assertIn("pins no collator rpc_port", str(caught.exception))
 
 
 if __name__ == "__main__":

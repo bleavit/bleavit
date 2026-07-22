@@ -165,6 +165,9 @@ pub enum Error {
     QuorumMissing,
     /// The referenced attestation exists but has no open challenge to resolve.
     NoOpenChallenge,
+    /// try-state only: a member at or past the ejection threshold is still
+    /// marked active (06 §7 ejection is terminal while the strike count stands).
+    EjectedMemberActive,
     Overflow,
 }
 
@@ -186,20 +189,84 @@ impl AttestorRegistry {
             events: Vec::new(),
         })
     }
+    /// Install the values-elected roster (06 §7).
+    ///
+    /// Seating is **not** a wholesale rewrite of the member table (SQ-262):
+    ///
+    /// * `bond` re-binds to the live `att.bond` for every seated member — 13 §1's
+    ///   `att.bond` row (SQ-248) makes an amendment reach a member exactly at
+    ///   their next seating.
+    /// * `false_count` is **carried forward** for a continuing member. Nothing in
+    ///   06 §7 resets strikes, and resetting them made one no-op re-election wipe
+    ///   the ejection threshold, so the "ejection on the second adjudicated-false
+    ///   attestation" discipline was unreachable in practice.
+    /// * A departing member that still carries an **unsettled liability** — an
+    ///   open challenge, or an attestation whose challenge window has not closed
+    ///   — is **retained as an inactive row**. Governance authority ends
+    ///   immediately (an inactive member cannot attest and never counts toward
+    ///   quorum or the active registry floor), but the slash basis the adverse
+    ///   verdict reads survives until the record settles. Dropping the row
+    ///   instead left the challenge permanently unresolvable (`NotMember` on the
+    ///   adverse branch), which both suppressed the attestation from quorum
+    ///   forever and shielded the attestor from the strike a for-cause recall is
+    ///   meant to record.
+    ///
+    /// Retention is bounded by open windows, so retained rows drain on their own;
+    /// a seating whose result would exceed the registry's storage bound is
+    /// rejected whole by the FRAME shell (G-1).
     pub fn set_members(
         &mut self,
         origin: AttestorOrigin,
         members: Vec<AccountId>,
+        now: BlockNumber,
         params: AttestorParams,
     ) -> Result<(), Error> {
         ensure!(
             matches!(origin, AttestorOrigin::ConstitutionalValues),
             Error::BadOrigin
         );
-        let infos = validate_and_infos(members.clone(), params.bond)?;
+        let mut infos = validate_and_infos(members.clone(), params.bond)?;
+        for info in infos.iter_mut() {
+            if let Some(previous) = self
+                .members
+                .iter()
+                .find(|member| member.account == info.account)
+            {
+                info.false_count = previous.false_count;
+                // An attestor already ejected for cause stays ejected: seating
+                // MUST NOT launder the ejection the core records at
+                // `FALSE_EJECTION_THRESHOLD`.
+                info.active = previous.false_count < FALSE_EJECTION_THRESHOLD;
+            }
+        }
+        for previous in self.members.iter() {
+            let seated = infos.iter().any(|info| info.account == previous.account);
+            if seated || !self.has_unsettled_liability(previous.account, now) {
+                continue;
+            }
+            let mut retained = *previous;
+            retained.active = false;
+            infos.push(retained);
+        }
         self.members = infos;
         self.events.push(Event::MembersSet { members });
         Ok(())
+    }
+
+    /// Whether `who` still backs a record that can move against their bond: an
+    /// open challenge, or an attestation still inside its challenge window. A
+    /// settled record (`Upheld`/`Rejected`) carries no further liability, and a
+    /// closed window can never be challenged again (`challenge_attestation` is
+    /// deadline-barred), so neither retains a basis.
+    fn has_unsettled_liability(&self, who: AccountId, now: BlockNumber) -> bool {
+        self.attestations
+            .iter()
+            .filter(|attestation| attestation.attestor == who)
+            .any(|attestation| match attestation.challenge {
+                Some(ChallengeStatus::Open { .. }) => true,
+                None => now <= attestation.challenge_deadline,
+                Some(ChallengeStatus::Upheld) | Some(ChallengeStatus::Rejected) => false,
+            })
     }
     pub fn attest(
         &mut self,
@@ -396,6 +463,31 @@ impl AttestorRegistry {
         // seated turned a valid recall-after-attest into a spurious,
         // release-blocking try_state failure (06 §7; A10 spec-reviewer major).
         // Reaping dead records is the B2-deferred map (PLAN SQ-2).
+        //
+        // Ejection is terminal while the strike count stands (06 §7): reaching
+        // `FALSE_EJECTION_THRESHOLD` clears `active` in `resolve_challenge`, and
+        // seating preserves that (SQ-262). An ejected-but-active row would let a
+        // disqualified signer attest and count toward the CODE/META gate.
+        for member in self.members.iter() {
+            ensure!(
+                member.false_count < FALSE_EJECTION_THRESHOLD || !member.active,
+                Error::EjectedMemberActive
+            );
+        }
+        // Every open challenge must still have a slash basis to resolve against
+        // (SQ-262): seating retains a liable member as an inactive row, so an
+        // `Open` challenge whose attestor has no row at all is unresolvable on
+        // its adverse branch and would strand the record permanently.
+        for attestation in self.attestations.iter() {
+            if matches!(attestation.challenge, Some(ChallengeStatus::Open { .. })) {
+                ensure!(
+                    self.members
+                        .iter()
+                        .any(|member| member.account == attestation.attestor),
+                    Error::NotMember
+                );
+            }
+        }
         Ok(())
     }
     fn attestation_counts(&self, att: &Attestation, now: BlockNumber) -> bool {
@@ -432,12 +524,12 @@ fn validate_and_infos(
             ensure!(members[i] != members[j], Error::DuplicateMember);
         }
     }
-    // KNOWN LIMITATION (deferred to the real per-account bond system, B-track —
-    // Codex finding): re-electing the same roster recreates every member with a
-    // full bond and `false_count = 0`, so a continuing attestor's strike count
-    // resets and unsettled challenge liabilities are dropped. The `fungible`
-    // bond ledger must preserve bond/strike state for continuing members and
-    // keep departing members liable until their open challenges settle.
+    // Fresh rows only. `set_members` is the sole production caller and layers
+    // the continuity rules of SQ-262 on top of this: it carries `false_count`
+    // forward for continuing members and retains departing members that still
+    // carry an unsettled liability. What remains deferred to the real
+    // per-account bond system (B-track, PLAN SQ-263/SQ-293) is *custody* —
+    // `bond` here is still an arithmetic magnitude, not value held.
     Ok(members
         .into_iter()
         .map(|account| AttestorInfo {
@@ -490,7 +582,7 @@ mod tests {
         );
         let mut r = AttestorRegistry::new(members(), params()).unwrap();
         assert_eq!(
-            r.set_members(AttestorOrigin::Signed, members(), params()),
+            r.set_members(AttestorOrigin::Signed, members(), 0, params()),
             Err(Error::BadOrigin)
         );
     }
@@ -594,5 +686,94 @@ mod tests {
         // Two counting attestations from distinct active members, but the active
         // registry is below MIN_MEMBERS ⇒ the CODE/META gate has no quorum.
         assert!(!r.has_quorum(9, [7; 32], CHALLENGE_WINDOW_BLOCKS + 1));
+    }
+
+    #[test]
+    fn try_state_rejects_an_ejected_member_marked_active() {
+        let mut r = AttestorRegistry::new(members(), params()).unwrap();
+        r.members[0].false_count = FALSE_EJECTION_THRESHOLD;
+        r.members[0].active = true;
+
+        assert_eq!(r.try_state(), Err(Error::EjectedMemberActive));
+    }
+
+    #[test]
+    fn worst_case_liability_scan_stays_within_bound() {
+        // Mirrors the `pallet-attestor` `set_members` worst-case benchmark
+        // (Finding 1). `set_members` runs one `has_unsettled_liability` scan
+        // per departing member over the whole flat ledger, so the cost is
+        // O(members × attestations). This pins the top of that envelope — a full
+        // 16-member roster, a full 256-record ledger, the sole unsettled record
+        // owned by a departing member and placed LAST so its scan traverses the
+        // entire ledger (no early `any()` exit) — and asserts the seating still
+        // completes, retains exactly the liable member (SQ-262), and stays
+        // within the 16-member storage bound the pallet enforces.
+        const ROSTER_BOUND: usize = 16; // pallet `MAX_ATTESTORS`
+        const LEDGER_BOUND: u32 = 256; // pallet `MAX_ATTESTATIONS`
+        const SENTINEL: AccountId = [180; 32]; // never a member
+
+        let previous: Vec<AttestorInfo> = (1..=ROSTER_BOUND as u8)
+            .map(|i| AttestorInfo {
+                account: acct(i),
+                bond: ATTESTOR_BOND,
+                false_count: 0,
+                active: true,
+            })
+            .collect();
+        let mut attestations = Vec::new();
+        for id in 0..LEDGER_BOUND - 1 {
+            // Sentinel-owned: matches no departing member, so every member's
+            // scan runs to the end of the ledger.
+            attestations.push(Attestation {
+                id,
+                pid: id as ProposalId,
+                artifact_hash: [id as u8; 32],
+                statement_hash: [7; 32],
+                attestor: SENTINEL,
+                submitted_at: 0,
+                challenge_deadline: CHALLENGE_WINDOW_BLOCKS,
+                challenge: None,
+            });
+        }
+        attestations.push(Attestation {
+            id: LEDGER_BOUND - 1,
+            pid: (LEDGER_BOUND - 1) as ProposalId,
+            artifact_hash: [255; 32],
+            statement_hash: [7; 32],
+            attestor: acct(1),
+            submitted_at: 0,
+            challenge_deadline: CHALLENGE_WINDOW_BLOCKS,
+            challenge: Some(ChallengeStatus::Open {
+                challenger: acct(250),
+                evidence_hash: [9; 32],
+                bond: CHALLENGE_BOND,
+            }),
+        });
+        let mut r = AttestorRegistry {
+            members: previous,
+            attestations,
+            next_attestation_id: LEDGER_BOUND,
+            events: Vec::new(),
+        };
+
+        // New roster disjoint from [1..=16], so all 16 are departing and rescanned.
+        let fresh: Vec<AccountId> = (17u8..=31).map(acct).collect();
+        assert_eq!(fresh.len(), ROSTER_BOUND - 1);
+        r.set_members(AttestorOrigin::ConstitutionalValues, fresh, 0, params())
+            .unwrap();
+
+        // 15 new + exactly the one liable departing member, retained inactive.
+        assert_eq!(r.members.len(), ROSTER_BOUND);
+        let retained = r
+            .members
+            .iter()
+            .find(|m| m.account == acct(1))
+            .expect("liable departing member is retained");
+        assert!(!retained.active);
+        // A liability-free departing member is dropped, not retained.
+        assert!(!r.members.iter().any(|m| m.account == acct(2)));
+        // Bounded and valid: retention keeps the open challenge resolvable.
+        assert!(r.members.len() <= ROSTER_BOUND);
+        assert!(r.try_state().is_ok());
     }
 }

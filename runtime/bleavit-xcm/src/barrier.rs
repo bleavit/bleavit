@@ -205,6 +205,10 @@ struct LocalInflow {
     /// register back into holding for a later deposit, so its presence forbids any
     /// fee subtraction.
     refund_surplus_seen: bool,
+    /// Whether an error-handler or appendix contains a locally-metered deposit.
+    /// Either fallback can run before a later top-level `PayFees` removes anything,
+    /// so such a target must be bounded against the full pre-fee holding (R-7).
+    fallback_deposit_seen: bool,
 }
 
 impl<Caps, LocationToAccountId, AccountId> DenyOverCapInflows<Caps, LocationToAccountId, AccountId>
@@ -236,8 +240,9 @@ where
     ///   * no `RefundSurplus` executes locally — it merges the unspent fee register
     ///     back into holding, where a later deposit can still move it;
     ///   * that `PayFees` is a *top-level* instruction paid in USDC with no deposit
-    ///     target ordered before it — a deposit before the fee meters the full pre-fee
-    ///     holding, whereas an appendix/error-handler deposit always runs after it.
+    ///     target ordered before it;
+    ///   * no error-handler or appendix contains a local deposit target — either can
+    ///     run after an earlier failure, before the top-level fee removes anything.
     ///
     /// `BuyExecution` never contributes: the executor refunds its unspent portion
     /// straight back to holding (`PayFees` routes it to the separate fees register).
@@ -245,7 +250,7 @@ where
         instructions: &[Instruction<Call>],
         found: &LocalInflow,
     ) -> u128 {
-        if found.refund_surplus_seen || found.pay_fees_count != 1 {
+        if found.refund_surplus_seen || found.fallback_deposit_seen || found.pay_fees_count != 1 {
             return 0;
         }
         let mut seen_target = false;
@@ -309,9 +314,11 @@ where
                 }
                 Instruction::DepositAsset { beneficiary, .. } => {
                     found.targets.push(beneficiary.clone());
+                    found.fallback_deposit_seen |= depth > 0;
                 }
                 Instruction::DepositReserveAsset { dest, .. } => {
                     found.targets.push(dest.clone());
+                    found.fallback_deposit_seen |= depth > 0;
                 }
                 Instruction::PayFees { .. } => {
                     found.pay_fees_count = found.pay_fees_count.saturating_add(1);

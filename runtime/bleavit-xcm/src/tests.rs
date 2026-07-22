@@ -1384,6 +1384,46 @@ fn caps_group_pre_mint_gate_ignores_a_refundable_pay_fees() {
     });
 }
 
+#[test]
+fn caps_group_pre_mint_gate_ignores_fee_when_error_handler_can_deposit_full_holding() {
+    // A failing `PayFees` transfers nothing to the fee register and immediately runs
+    // the installed error handler. If that handler contains a local deposit, it can
+    // therefore meter the full pre-fee holding. The pre-mint gate must not subtract
+    // the nominal fee and admit a mint that can only fail later at the deposit leg.
+    new_test_ext().execute_with(|| {
+        set_caps(u128::MAX, 90);
+        let incoming = asset(usdc_location(), 100);
+        let program: Xcm<()> = Xcm(vec![
+            ReserveAssetDeposited(Assets::from(incoming)),
+            ClearOrigin,
+            SetErrorHandler(Xcm(vec![DepositAsset {
+                assets: AssetFilter::Wild(WildAsset::AllCounted(1)),
+                beneficiary: account_location(ALICE_BYTES),
+            }])),
+            PayFees {
+                // More than holding: this instruction fails without removing any
+                // USDC, then the error handler attempts to deposit all 100.
+                asset: asset(usdc_location(), 110),
+            },
+        ]);
+        let outcome = execute_inbound_program(program, 64);
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Incomplete {
+                    error: InstructionError {
+                        error: XcmError::Barrier,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "a fallback deposit must be bounded against the full holding: {outcome:?}"
+        );
+        assert_eq!(trapped_assets_events(), 0);
+    });
+}
+
 // -------------------------------------------------------------------------
 // Health tracking (09 §6.4; I-24)
 // -------------------------------------------------------------------------

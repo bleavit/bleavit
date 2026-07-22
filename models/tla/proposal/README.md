@@ -3,7 +3,10 @@
 `Proposal.tla` is the bounded exhaustive model required by 15 §4.1 for the
 single-proposal lifecycle in 05 §2.1. It checks I-9, I-14, I-15 and I-18 over
 keeper, guardian, values-ratification, attestation, version invalidation,
-oracle-dispute, VOID, retry and T20 interleavings. `Small.cfg` uses PARAM/CODE
+oracle-dispute, VOID, retry and T20 interleavings, and it carries the separate
+**normative** 15 §4.1 obligation added by SQ-320: no reachable state leaves an
+epoch's Baseline vault permanently unsettleable (`BaselineNeverStranded`).
+`Small.cfg` uses PARAM/CODE
 and the compact welfare outcome set; `Full.cfg` adds TREASURY/META and every
 abstracted 05 §5.5 failure. `ForceRerun.cfg` enables the separately labeled
 06 §5.3 `force_rerun` edges and rechecks the full main invariant/property set.
@@ -32,9 +35,10 @@ java -cp ../../../tools/verify/bin/tla2tools.jar tlc2.TLC \
 
 The repository-wide harness reads `manifest.env`, including the
 `WITNESS_CONFIGS` reachability legs described below. With eight workers Small
-currently reaches 66,709 distinct states in 29 seconds and Full reaches 264,241
-in 1 minute 49 seconds. The full force-rerun scope reaches 568,235 distinct
-states. `MIN_DISTINCT_STATES=33350` is deliberately about half the observed
+currently reaches 141,218 distinct states in 22 seconds and Full reaches 545,562.
+The full force-rerun scope reaches 1,169,316 distinct states. The SQ-320
+Baseline sub-machine roughly doubled each scope (66,709 / 264,241 / 568,235
+before it). `MIN_DISTINCT_STATES=70600` is deliberately about half the observed
 Small count, so an accidentally disabled action graph fails even when every
 invariant is vacuously true.
 
@@ -48,6 +52,9 @@ invariant is vacuously true.
 | `WitnessForceRerun.cfg` | `TRUE` | Expected violation proves an `FR` edge is reachable |
 | `WitnessForceQueuedCancel.cfg` | `TRUE` | Expected violation proves a queued mandate is atomically cancelled and recorded |
 | `MutationForceCancelExecute.cfg` | `TRUE` | Expected I-15 violation if a force-cancelled mandate is dispatched |
+| `WitnessBaselineOrphanCrank.cfg`, `WitnessBaselineMeasured.cfg`, `WitnessBaselineVoid.cfg` | `FALSE` | Expected violations prove each of the three Baseline discharge paths is reachable (15 §4.1) |
+| `MutationOrphanBaseline.cfg` | `FALSE` | Expected `BaselineNeverStranded` violation with 05 §7(6)'s crank deleted — the pre-SQ-320 machine |
+| `MutationBaselineLiveState.cfg` | `FALSE` | Expected `BaselineSettledExactlyOnce` violation when the crank reuses the rejected `is_live_state` terminal reading |
 
 ## Transition correspondence
 
@@ -103,7 +110,9 @@ a proposal edge absent from the exhaustive 05 §2.1 table.
 | `AdvanceRetryDeadline` | — | clock input consumed by `retry_exhausted_to_measurement` for T22 |
 | `CloseChallenge`, `ContestValue` | — | welfare/oracle input seam consumed by `settle_cohort` |
 | `NeutralizeContest` | — | 07 §10–11 force-neutralization before `settle_cohort` |
-| `VoidContest` | — | cohort/vault shadow of `void_cohort`; no 05 §2.1 proposal row is claimed |
+| `VoidContest` | — | cohort/vault shadow of `void_cohort`; no 05 §2.1 proposal row is claimed. Also carries the 05 §7(5) Baseline leg |
+| `AdvanceEpoch` | — | the modelled epoch becoming strictly past; 05 §7(6) condition 1 |
+| `FinalizeEpochBaseline` | **not a T-row — 03 §5.2 / 05 §7(6)** | `finalize_epoch_baseline` (epoch-level, permissionless; no proposal transition, so it appends no `history` row) |
 
 ## Property correspondence
 
@@ -145,6 +154,38 @@ a proposal edge absent from the exhaustive 05 §2.1 table.
   absorption, and explicit rejected dispatch attempts whose real action name
   is recorded in the separate audit variable while all protocol state remains
   unchanged.
+- `BaselineNeverStranded` discharges the **normative** 15 §4.1 Baseline
+  settlement liveness obligation (SQ-320): no reachable state leaves an epoch's
+  Baseline vault permanently unsettleable. That obligation is a possibility
+  statement — `AG EF Settled` — which is branching-time and has no direct
+  expression in TLC's linear-time property language, so it is checked as an
+  equivalent safety invariant resting on two facts each run establishes
+  independently: (i) `Terminal` is the machine's only absorbing region
+  (`TerminalStatesAbsorb`), TLC's deadlock check proves every reachable state
+  has a successor, and `Terminal` is reachable from everywhere — T20
+  `ForceReject` is enabled on all of `PreExecutedNonTerminal` and lands in
+  `Rejected` in one step, and `Measuring` closes through
+  CloseChallenge/Neutralize/Void into `SettleCohort`/`VoidContest`; and (ii)
+  `AdvanceEpoch` is unconditionally enabled while the vault is `Open` and never
+  reverts. So the only way to strand the vault is to sit in `Terminal` with the
+  epoch past, the vault `Open`, and no discharge enabled — exactly what the
+  invariant forbids, one case per member of `Terminal`. **This is the only
+  detector available:** a stranded Baseline vault is fully collateralized,
+  satisfies I-1 and I-4, and lets full-pair holders exit at par via
+  `merge_baseline`, so no conservation invariant can see it.
+- `TerminalityAlwaysReachable` is fact (i) of that reduction, checked rather
+  than argued: every reachable non-`Terminal` state is `Absent`, in
+  `PreExecutedNonTerminal`, or `Measuring` — the three families whose closure
+  into `Terminal` is an admissible continuation. The T17/T21 intermediates
+  (`Executed`, `Expired`, resolved-`Rejected`) are atomic with their parent row
+  and never persist. A later edit that adds a persistent state outside those
+  families breaks this invariant loudly instead of quietly narrowing the region
+  `BaselineNeverStranded` constrains.
+- `BaselineSettledExactlyOnce` is the converse guard: the vault settles once,
+  by exactly one of the three normative transitions (03 §5.2; 05 §7(5)–(6)),
+  and never before its cohort could still form. Settling early strands the whole
+  cohort rather than one holder, because the later `settle_cohort` leg then
+  finds an already-`Settled` vault.
 
 ## Reachability and mutation legs
 
@@ -154,8 +195,11 @@ invariant. The witnesses cover T2; T6+T24; T13+T18+pre-deadline T23; T20 with an
 open vault; a live FailedExecuted state after retry expiry; T22; early
 ratification-Failed T16; gate-veto plus welfare-says-Adopt; the rerun raised
 hurdle; an explicit rejected terminal attempt; an FR edge; and specifically a
-queued FR whose mandate id is recorded in `forceCancelledMandates`. This is
-the reachability counterpart to the main configs' safety invariants.
+queued FR whose mandate id is recorded in `forceCancelledMandates`; and each of
+the three Baseline discharges — the measured T19 leg, the §7(5) void leg, and
+the §7(6) orphan crank reached on the T20-before-`Measuring` interleaving 15
+§4.1 names verbatim. This is the reachability counterpart to the main configs'
+safety invariants.
 
 `MutationI14.cfg` sets `MUTATE_I14=TRUE`, making shared `DecideOutcome` permit
 welfare-Adopt to override a gate veto; TLC must violate
@@ -164,10 +208,18 @@ welfare-Adopt to override a gate veto; TLC must violate
 violate `I15NoRejectedMandateExecutes`. `MutationForceCancelExecute.cfg` sets
 `ForceRerunModeled=TRUE` and `MUTATE_FORCE_CANCEL_EXECUTE=TRUE`, deliberately
 dispatching the force-cancelled mandate directly from Extended; I-15 must catch
-that trace. All mutation constants are FALSE in every main and ordinary witness
-config and exist only to keep these regression mutations reproducible.
+that trace. `MutationOrphanBaseline.cfg` sets `MUTATE_ORPHAN_BASELINE=TRUE`,
+deleting 05 §7(6)'s permissionless crank to reproduce the pre-SQ-320 machine;
+TLC must violate `BaselineNeverStranded`. `MutationBaselineLiveState.cfg` sets
+`MUTATE_BASELINE_LIVE_STATE=TRUE`, giving the crank the rejected `is_live_state`
+terminal reading in which `Submitted`/`Screening` count as terminal even though
+a proposal keeps its stamped epoch across a boundary; TLC must violate
+`BaselineSettledExactlyOnce` on the trace where the crank settles the Baseline
+and the later cohort settlement finds it already `Settled`. All mutation
+constants are FALSE in every main and ordinary witness config and exist only to
+keep these regression mutations reproducible.
 
-Run the three expected-failure mutation legs directly:
+Run the five expected-failure mutation legs directly:
 
 ```bash
 java -cp ../../../tools/verify/bin/tla2tools.jar tlc2.TLC \
@@ -176,6 +228,10 @@ java -cp ../../../tools/verify/bin/tla2tools.jar tlc2.TLC \
   -workers 8 -config MutationT16.cfg Proposal.tla
 java -cp ../../../tools/verify/bin/tla2tools.jar tlc2.TLC \
   -workers 8 -config MutationForceCancelExecute.cfg Proposal.tla
+java -cp ../../../tools/verify/bin/tla2tools.jar tlc2.TLC \
+  -workers 8 -config MutationOrphanBaseline.cfg Proposal.tla
+java -cp ../../../tools/verify/bin/tla2tools.jar tlc2.TLC \
+  -workers 8 -config MutationBaselineLiveState.cfg Proposal.tla
 ```
 
 ## Abstractions and preservation arguments
@@ -194,6 +250,10 @@ java -cp ../../../tools/verify/bin/tla2tools.jar tlc2.TLC \
 | T22 tags its ACCEPT resolution as `T17Accept` | T22 normatively resolves Accept itself. The tag factors the same authorized accept-resolution primitive used by T17; history still records T22, never a fictitious T17 edge. |
 | Cohort aggregation and settlement cursor collapsed | A single proposal/input is the minimal witness for an open/closed/contested violation. Batching cannot turn a contested value into a closed one. |
 | Oracle VOID leaves proposal state unchanged | It changes the independent cohort/vault shadow to absorbing `Void`, so no absent 05 §2.1 proposal transition is invented and no later T19 is possible. |
+| Baseline vault reduced to `Open`/`Settled` + `via` | 03 §6.4 gives `BaselineState` no `Voided` variant precisely because every discharge is a settlement, so two states are exhaustive. `via` exists only so each of the three normative discharge paths gets its own reachability witness; escrow, sets and the score `s` are ledger conservation obligations, already covered by the ledger model and the differential vectors. |
+| The epoch's Baseline vault is `Open` in `Init` | The strongest reading of "for every epoch that opens a Baseline vault" (15 §4.1), and it costs no branching. It deliberately **over-approximates** the shipped runtime, which creates the Baseline book and vault lazily inside `open_markets` at T7, so an epoch whose only proposal ends before `Trading` has no Baseline vault at all. The over-approximation is sound — 03 §5.2 and 05 §7(6) both make "no Baseline vault for the epoch" an explicit no-op, so assuming one always exists can only make the property harder to satisfy. **Read counterexample traces with this in mind:** a mutation trace may strand a vault after a T2 withdrawal or T4 screening cancellation, which the shipped chain would never produce, because it never opened the vault. The 08 §4.3 zero-qualified-proposal epoch is likewise **not** covered: `Absent` is not a terminal proposal state, so the crank stays blocked while `p` is `Absent`. Both directions are conservative — they can hide a discharge, never a stranding. |
+| One proposal per epoch, so `p.cohort` is the epoch's `CohortInfo` | 05 §7(6) condition 2 rejects on *any* cohort for the epoch, and condition 3 on *any* live proposal of it; with one proposal both quantifiers collapse to `p`. Extra siblings can only add blockers, never remove one, so a single proposal is the permissive case and cannot hide a stranding. Cohort state is set only together with `Measuring` and never returns to `"None"`, so `p.cohort = "None"` covers the live `CohortInfo` and the archived `CohortSummary` alike. |
+| `AdvanceEpoch` frozen once the vault settles | Pure state-space reduction: no property reads `epochPast` outside the `bl.state = "Open"` case, and the crank is disabled on a settled vault regardless. |
 | T4 static failures use `ConstitutionViolation` as representative | All T4 reasons have the same Cancelled/no-vault control flow and cannot affect the four checked invariants. |
 
 ### T15/T16 precedence decision

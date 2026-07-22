@@ -38,18 +38,34 @@ pub struct WeightInfo<T>(PhantomData<T>);
 impl<T: frame_system::Config> pallet_attestor::WeightInfo for WeightInfo<T> {
 	/// Storage: `Attestor::Members` (r:1 w:1)
 	/// Proof: `Attestor::Members` (`max_values`: Some(1), `max_size`: Some(801), added: 1296, mode: `MaxEncodedLen`)
-	/// Storage: `Attestor::NextAttestationId` (r:0 w:1)
-	/// Proof: `Attestor::NextAttestationId` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
-	/// Storage: `Attestor::Attestations` (r:0 w:1)
+	/// Storage: `Attestor::Attestations` (r:1 w:1)
 	/// Proof: `Attestor::Attestations` (`max_values`: Some(1), `max_size`: Some(50690), added: 51185, mode: `MaxEncodedLen`)
+	/// Storage: `Attestor::NextAttestationId` (r:1 w:1)
+	/// Proof: `Attestor::NextAttestationId` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	fn set_members() -> Weight {
+		// CONSERVATIVE HAND-SET BOUND — not a reference-host measurement (PR #130
+		// Finding 1). The 2026-07-16 omni-bencher fixture benchmarked an EMPTY
+		// registry, so `load` short-circuited before reading `Attestations` and
+		// the generated weight measured neither the full ledger read/write nor
+		// the SQ-262 O(members × attestations) = 16 × 256 unsettled-liability
+		// scan. The benchmark fixture now constructs that worst case, but a real
+		// re-bench must run on the reference host that produced the sibling calls
+		// (regenerating here would perturb `attest`/`challenge_attestation`/
+		// `resolve_challenge` against the committed msi baseline). Until that
+		// sweep, this bound is hand-set to dominate the worst case:
+		//  * proof size = the sibling `attest`/`challenge_attestation` estimate,
+		//    which read the same full `Members` + `Attestations` + `NextAttestationId`;
+		//  * reads = 3 (the three storages `load` reads; the empty-case fixture
+		//    recorded 1, never reaching the `Attestations`/`NextAttestationId` load);
+		//  * ref-time ≈ 4.5× the `attest` measurement, covering the 16× growth in
+		//    the per-member ledger scan on top of the shared full-ledger decode.
+		// Tracked in tools/ci/weight-regression-acks.toml and PLAN.md decision log.
+		//
 		// Proof Size summary in bytes:
-		//  Measured:  `4`
-		//  Estimated: `2286`
-		// Minimum execution time: 7_830_000 picoseconds.
-		Weight::from_parts(8_010_000, 0)
-			.saturating_add(Weight::from_parts(0, 2286))
-			.saturating_add(T::DbWeight::get().reads(1))
+		//  Estimated: `52175`
+		Weight::from_parts(250_000_000, 0)
+			.saturating_add(Weight::from_parts(0, 52175))
+			.saturating_add(T::DbWeight::get().reads(3))
 			.saturating_add(T::DbWeight::get().writes(3))
 	}
 	/// Storage: `Attestor::Members` (r:1 w:1)
