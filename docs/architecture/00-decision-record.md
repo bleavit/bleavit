@@ -28,6 +28,7 @@ Conventions: **D-n** = a decision made here. Finding IDs (X-n, B-n, F-n) refer t
 - **Contract v4 (2026-07-17, B2 amendment batch):** the queued intake/phase-representation and attestor-storage reconciliations, conditional-ledger event completion, 12-entry cohort fallback bound, three trailing NAV fields, phase-fraction exposure mandate and frozen metadata-constant names landed together; `INTEGRATION_CONTRACT_VERSION` bumped 3 → 4. This is a **pre-genesis** revision, jointly signed off by the user (owner for both sides under R-1, user-delegated batch). Detail in 02 §13 version history.
 - **Contract v5 (2026-07-19, G0 universal market-bearing-class gating):** §4's class-floor semantics use gate-bearing floors for **every** PARAM, TREASURY, CODE, and META proposal; `INTEGRATION_CONTRACT_VERSION` remains 5 after the PARAM extension was folded into the same pre-genesis revision. No SCALE shape changed: the existing optional four-ID gate array and four-slot class-floor array already represent the result. This is a **pre-genesis** revision with no migration, jointly signed off by the user (owner for both backend and frontend sides under R-1). Detail in 02 §13 version history.
 - **Contract v6 (2026-07-21, batch C contract reconciliation):** the contract's frontend-ingested event boundary and the epoch/guard/guardian/registry/attestor event set were made exhaustive; the Baseline vault and ratification projections were corrected; parameter, quote and welfare views gained the exact missing availability/range fields and their ambiguous semantics were fixed; storage/constants inventory and `ReleaseChannel` writer ownership were reconciled to the shipped runtime; and the integration-contract and SDK transaction-version counters were made explicitly independent. `INTEGRATION_CONTRACT_VERSION` bumped 5 → 6. This is a **pre-genesis** revision — no runtime is deployed, so no migration is required and the post-genesis append-only clause does not apply; the `RatificationStatus` restructure is taken under that allowance. Jointly signed off by the user (owner for both backend and frontend sides under R-1, user-delegated batch). Detail in 02 §13 version history.
+- **Contract v7 (2026-07-22, SQ-66/SQ-320):** `BaselineMarketOf` retention now follows the referenced Baseline book's lifetime and is removed atomically only with successful reap, preserving discovery until orphan settlement can write the terminal latch. The map shares the 196-market aggregate rather than carrying the stale cohort-ring/≤36 bound; the separate unenforced four-Baseline claim is retired across the specification. `INTEGRATION_CONTRACT_VERSION` bumped 6 → 7; no SCALE shape or transaction-validity rule changed. Pre-genesis, no migration required. Jointly signed off by the user (owner for both backend and frontend sides under R-1, standing autonomous-resolution delegation). Detail in 02 §13 version history and PLAN.md Decision log.
 
 ### D-3. Trade denomination: branch-USDC books with an auto-split wrapper; buyers keep the mirror (B-7)
 
@@ -72,8 +73,8 @@ Books close at branch resolution; no post-resolution reopening. Removes the un-m
 
 ### D-10. Bounds reconciled (B-batch, X-11h)
 
-- `IntakeQueue = 64` (pre-qualification only) and `MaxLiveProposals = 32` (Screening→Settled) are **both kept, with disjoint scopes** — the "(all states)" qualifier is deleted.
-- Books per proposal ≤ **6** (2 decision + 4 gate); Baseline books ≤ 4 live (one per live epoch). `MaxLiveMarkets = 32·6 + 4 = 196`. All PoV/storage budgets are re-derived from this one table in `13-parameters.md`.
+- The intake-family bound is **64** and `MaxLiveProposals = 32`; the two bounded storage maps have **disjoint scopes**. The frozen direct-read `IntakeQueue` contains only Submitted IDs, while the internal `IntakeProposals` map retains Submitted/Screening records plus current-epoch Cancelled admission records under the same 64 cap. `Proposals` is the post-qualification non-terminal working set under the 32 cap. The old "(all states)" qualifier and the misleading Screening→Settled shorthand are deleted.
+- Books per proposal ≤ **6** (2 decision + 4 gate); Baseline books share the aggregate market capacity rather than carrying a separate count cap. `MaxLiveMarkets = 196`, sized to admit 32 fully expanded proposals plus four Baselines but enforced over the actual mix. All PoV/storage budgets are re-derived from this one table in `13-parameters.md`.
 
 ### D-11. The canonical frontend serves the values layer and operator workflows (X-2, X-12)
 
@@ -88,7 +89,7 @@ New FE epic **FE-14 (Governance surface)**: referenda list/detail, vote/delegate
 ### D-13. Phase-3 insider risk contained (X-9)
 
 - The dangerous frame-system calls (`set_storage`, `kill_storage`, `kill_prefix`, `set_code_without_checks`, `authorize_upgrade_without_checks`) are filtered **from genesis** for all origins including sudo (not "post-bootstrap").
-- **`sudo.sudo_as` is denied entirely during Phases 0–3** (narrowing; SQ-99). Unlike `sudo`/`sudo_unchecked_weight`, which dispatch as Root and are contained by recursing their inner call, `sudo_as` dispatches as a caller-chosen `Signed(who)` — it can forge any signed origin, including a protocol sovereign, defeating the one-path SettleAuthority rule of [06](06-governance-and-guardians.md) §3.1. Root-dispatching `sudo` covers the entire legitimate bootstrap surface, so denial costs nothing.
+- **`sudo.sudo_as` is denied entirely during Phases 0–3** (narrowing; SQ-99). Unlike `sudo`/`sudo_unchecked_weight`, which dispatch as Root and are contained by recursing their inner call, `sudo_as` dispatches as a caller-chosen `Signed(who)` — it can forge any signed origin, including a protocol sovereign, defeating the closed welfare-owned SettleAuthority boundary of [06](06-governance-and-guardians.md) §3.1. Root-dispatching `sudo` covers the entire legitimate bootstrap surface, so denial costs nothing.
 - Phase 3 runs under a **real-USDC exposure cap**: global TVL cap + per-account deposit cap (constitution keys, raised only by phase gates).
 - The founding multisig is added to the §22 adversary model with a threat row.
 - The FE renders a persistent **"bootstrap governance (sudo active)"** banner during Phases 0–3 (chain-read from the phase flag), so sudo-era state is never presented as trust-equivalent to post-sudo state.
@@ -168,7 +169,7 @@ Every DESIGN_REVIEW.md finding, its resolution, and the owning component documen
 | X-15 | D-2: published test artifacts | 02, 15; corpus schema: 04 §5 |
 | B-1 | D-1 | 03 |
 | B-2 | Gate instruments representable: `PositionKind` gains `GateYes(gate)`, `GateNo(gate)` per branch; `VaultInfo` gains per-branch gate-set supplies; `settle_gate(pid, gate, outcome)` call; conservation identity extended per-branch over the enlarged set | 03 |
-| B-3 | Baseline market gets a ledger home: epoch-keyed `BaselineVaults`, `PositionId::Baseline{epoch, Long/Short}`, `pol.b_baseline` param, settlement path via SettleAuthority at epoch settlement | 03, 04 |
+| B-3 | Baseline market gets a ledger home: epoch-keyed `BaselineVaults`, `PositionId::Baseline{epoch, Long/Short}`, `pol.b_baseline` param, measured settlement via SettleAuthority at epoch settlement plus the neutral cohort-VOID and orphan-epoch paths | 03, 04, 05 |
 | B-4 | Per-branch supply fields; per-branch identity `escrowed == supply(bUSDC_b) + Q_b` checked for both branches; POL seeding flow re-walked | 03 |
 | B-5 | Unpaired SHORT redeems `floor(a·(1−s))`; new atomic `redeem_scalar_pair` pays exactly `a` per pair | 03 |
 | B-6 | V1 = **512.494795136**, V5 net = **−3.074969**; §11.6 vectors regenerated from the reference model in CI | 04 |
@@ -193,7 +194,7 @@ Every DESIGN_REVIEW.md finding, its resolution, and the owning component documen
 | B-med: Positions map | Key order `(PositionId, AccountId)` (per-vault drainable); per-account bound via counter; deposit 0.1 USDC/entry; protocol accounts exempt from the 64-position cap | 03 |
 | B-med: Emergency class | D-7 deleted | 05, 06 |
 | B-med: epoch.length | Phase offsets become fractions of epoch length; changes effective next epoch; in-flight cohorts keep creation-time schedule; floor 14 days | 05 |
-| B-med: SettleAuthority | One path: `pallet-epoch::settle_cohort` → `pallet-welfare::compute_settlement` → ledger via welfare's SettleAuthority origin; §6.1 table updated | 05 |
+| B-med: SettleAuthority | One welfare-owned authority boundary, reached only from pallet-epoch through three explicit paths: measured `settle_cohort` → `compute_settlement` → ledger, neutral cohort-VOID `void_cohort` → `settle_baseline_void` → ledger, and neutral orphan-epoch `finalize_epoch_baseline` → `settle_baseline_void` → ledger (SQ-320); §6.1 table updated | 05 |
 | B-med: force_rerun | Defined: pre-execution only; TWAP reset, books reopen for 3-day Extended, positions intact, one decide re-run | 06 |
 | B-med: EmergencyPlaybook calls | Admissible call set enumerated in the §6.2-equivalent capability table | 06 |
 | B-med: Incident/MilestoneRegistry | New `pallet-registry`: bonded filings, challenge windows, slashing, bounds, weights; feeds C_attested | 07 |
@@ -258,7 +259,7 @@ Every DESIGN_REVIEW.md finding, its resolution, and the owning component documen
 
 ### Frozen shared constants (no document may restate different values)
 
-- Block time 6 s; epoch 21 days = 302,400 blocks; Trading **d5–d18** (offsets 72,000–259,200; 13 days); decide d18; measurement k = 2 epochs; settle e+3; maturity example B+288,000.
+- Block time 6 s; epoch 21 days = 302,400 blocks; Trading **d5–d18** (offsets 72,000–259,200; 13 days); decide d18; measurement k = 2 epochs; measured cohort settles e+3; maturity example B+288,000.
 - Oracle: report window per §15; challenge window **72h** (43,200 blocks) with watchtower quorum; dispute latency table reconciled in 07.
 - `IntakeQueue = 64`; `MaxLiveProposals = 32`; books/proposal ≤ 6; `MaxLiveMarkets = 196`; `RecentCohortSummaries` ring = 32; `MaxPositionsPerAccount = 64` (protocol accounts exempt); Positions deposit 0.1 USDC; key order `(PositionId, AccountId)`.
 - LMSR: V1 = **512.494795136** USDC; V5 net = **−3.074969**; V2–V4 unchanged; maker worst-case loss `b·ln 2`; §11.10 maker-loss example ≈ 180 USDC; TWAP slew cap per **10-block** observation interval.

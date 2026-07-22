@@ -717,9 +717,11 @@ pub mod pallet {
             );
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
                 if let BookKind::Baseline { epoch } = book.kind {
-                    if BaselineMarketOf::<T>::get(epoch) == Some(market) {
-                        BaselineMarketOf::<T>::remove(epoch);
-                    }
+                    ensure!(
+                        BaselineMarketOf::<T>::get(epoch) == Some(market),
+                        Error::<T>::TryStateViolation
+                    );
+                    BaselineMarketOf::<T>::remove(epoch);
                 }
                 Markets::<T>::remove(market);
                 ClosedAt::<T>::remove(market);
@@ -2035,6 +2037,12 @@ pub mod pallet {
         pub fn do_try_state() -> Result<(), DispatchError> {
             let now: u64 = Self::now_u64();
             for (id, book) in Markets::<T>::iter() {
+                if let BookKind::Baseline { epoch } = book.kind {
+                    ensure!(
+                        BaselineMarketOf::<T>::get(epoch) == Some(id),
+                        Error::<T>::TryStateViolation
+                    );
+                }
                 ensure!(book.b > 0, Error::<T>::TryStateViolation);
                 let domain = book
                     .b

@@ -238,21 +238,20 @@ pub trait WelfareOps {
         target: SettlementTarget,
     ) -> Result<FixedU64, Error>;
 
-    /// Settle the epoch's Baseline vault at the fixed neutral VOID score
+    /// Settle the epoch's Baseline vault at the fixed neutral score
     /// (`futarchy_primitives::kernel::VOID_BASELINE_SCORE`).
     ///
-    /// 03 §2.3/§5 make this mandatory and give it no other owner: the epoch
-    /// VOID path is the *only* producer of a Baseline settlement that is not a
-    /// welfare computation, and 03 §6.4 justifies `BaselineState` having no
-    /// `Voided` variant *precisely because* this settlement always happens.
-    /// Without it the vault stays `Open` forever and single-sided Baseline
-    /// holders — whose redemption calls require `Settled` — can never redeem.
+    /// 03 §2.3/§5 give neutral Baseline settlement exactly two owners: the
+    /// cohort-VOID path and 05 §7(6)'s permissionless orphan-epoch finalizer.
+    /// Neither is a welfare computation. Without this passthrough the vault can
+    /// stay `Open` forever and single-sided Baseline holders — whose redemption
+    /// calls require `Settled` — can never redeem.
     ///
-    /// No welfare data is read: a VOID means the measurement is unusable, so
-    /// this is a settlement-authority passthrough carrying a spec-fixed score,
-    /// not a computation. Implementations MUST be a no-op (`Ok`) when the
-    /// epoch has no Baseline vault or it is already settled — an epoch VOID
-    /// must never fail on the settlement leg (G-1).
+    /// No welfare data is read: both neutral paths lack a usable measurement,
+    /// so this is a settlement-authority passthrough carrying a spec-fixed
+    /// score, not a computation. Implementations MUST be a no-op (`Ok`) when
+    /// the epoch has no Baseline vault or it is already settled — neither
+    /// neutral path may fail on that benign settlement leg (G-1).
     fn settle_baseline_void(&mut self, cohort_epoch: EpochId) -> Result<(), Error>;
 }
 
@@ -1334,11 +1333,12 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
     ///
     /// This is the second of exactly two neutral-settlement transitions
     /// (03 §5.2): a permissionless `Signed` call carrying the same spec-fixed
-    /// `s = 0.5` through the same single SettleAuthority chain (05 §6, 06 §3.1).
+    /// `s = 0.5` through the welfare-owned SettleAuthority boundary (05 §6,
+    /// 06 §3.1).
     /// It emits no epoch event — the settlement's canonical signal is the
     /// ledger's frozen `BaselineSettled { epoch, s }` (02 §6) — and it stays
     /// callable under `PB-LEDGER-FREEZE`, because the freeze's own sweep is one
-    /// of the two ways an epoch is orphaned (06 §6.3 exempts settlement calls).
+    /// broad way an epoch can be orphaned (06 §6.3 exempts settlement calls).
     pub fn finalize_epoch_baseline<W: WelfareOps>(
         &mut self,
         origin: Origin,
@@ -1369,9 +1369,12 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             !self.recent.iter().any(|summary| summary.epoch == epoch),
             Error::BadState
         );
-        // §7(6) condition 3 — the bounded non-terminal working set (I-21) holds
-        // no proposal of the epoch, so none can still reach `Measuring` and
-        // form the cohort after the fact. O(MaxLiveProposals), no cursor.
+        // §7(6) condition 3 — neither bounded half of the non-terminal working
+        // set holds a proposal of the epoch, so none can still reach
+        // `Measuring` and form the cohort after the fact. The shell merges the
+        // internal `IntakeProposals` and `Proposals` storage halves before
+        // entering the core; together they contribute at most 64 + 32 entries to the
+        // bounded epoch-state scan, with no cursor.
         //
         // The terminal predicate is deliberately neither `!is_live_state`
         // (which reports `Submitted`/`Screening` terminal, yet a submitted
@@ -3076,7 +3079,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingWelfare {
         calls: Vec<(EpochId, MetricSpecVersion, SettlementTarget)>,
-        /// Epochs whose Baseline vault was settled through the VOID path.
+        /// Epochs whose Baseline vault was settled through a neutral passthrough.
         void_settlements: Vec<EpochId>,
     }
 
@@ -3270,8 +3273,8 @@ mod tests {
 
     #[test]
     fn sq320_finalize_stays_callable_under_a_ledger_freeze() {
-        // §7(6) + 06 §6.3: the freeze's own T20 sweep is one of the two ways an
-        // epoch is orphaned, so a freeze that also blocked the repair would
+        // §7(6) + 06 §6.3: the freeze's own T20 sweep is one broad way an epoch
+        // can be orphaned, so a freeze that also blocked the repair would
         // guarantee the stranding it exists to contain. Settlement calls are
         // exempt from the freeze.
         let mut s = orphan_state(ProposalState::Rejected(RejectReason::ProcessHold));

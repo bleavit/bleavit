@@ -1823,7 +1823,7 @@ fn identity_and_version_pins_match_the_integration_contract() {
     // makes a future re-coupling fail here.
     assert_eq!(VERSION.transaction_version, TRANSACTION_VERSION);
     assert_eq!(VERSION.transaction_version, 1);
-    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 6);
+    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 7);
     assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
@@ -9217,7 +9217,7 @@ fn sq92_epoch_void_settles_the_baseline_and_unstrands_a_single_sided_holder() {
             BASELINE_MARKET,
         ));
 
-        // The epoch VOID (05 §7(5) cohort void, T20).
+        // The epoch VOID (05 §7(5) `void_cohort`; T20 applies to affected nonmembers).
         let proposals = match BoundedVec::try_from(Vec::new()) {
             Ok(proposals) => proposals,
             Err(_) => {
@@ -10321,7 +10321,7 @@ fn seeded_force_reject_void_closes_and_reaps_all_proposal_books() {
     });
 }
 
-/// SQ-320 · 03 §2.3/§5.2 · 05 §7(5): an epoch that **opens a Baseline book but
+/// SQ-320 · 03 §2.3/§5.2 · 05 §7(6): an epoch that **opens a Baseline book but
 /// never forms a cohort** strands its Baseline holders forever.
 ///
 /// Reachability (the shortest trigger): a one-proposal epoch whose sole
@@ -10329,7 +10329,7 @@ fn seeded_force_reject_void_closes_and_reaps_all_proposal_books() {
 /// proposal's markets creates the epoch's Baseline vault (03 §2.2), but
 /// `start_measurement` — the sole writer of `CohortInfo` — is never reached, so
 /// no `CohortInfo` and no `CohortSummary` for the epoch ever exists. The two
-/// producers of a Baseline settlement both key off a cohort (`settle_cohort`'s
+/// pre-existing producers of a Baseline settlement both key off a cohort (`settle_cohort`'s
 /// `SettlementTarget::Baseline` and `void_cohort`'s neutral VOID), so neither
 /// can ever fire. The vault stays `Open`, both redemption calls of 03 §5.3
 /// require `Settled`, and the book stays open, tradeable and unprunable.
@@ -13623,7 +13623,7 @@ fn sudo_as_is_denied_so_the_founding_multisig_cannot_impersonate_accounts() {
     // `Signed(who)` for a CHOSEN `who`, so recursing it would let the founding
     // multisig forge any signed origin — steal VIT (`transfer`) or, worse,
     // impersonate the welfare settlement account to drive ledger settlement,
-    // defeating 06 §3.1's "SettleAuthority reachable through exactly one path".
+    // defeating 06 §3.1's closed welfare-owned SettleAuthority boundary.
     // `sudo_as` is denied outright; `sudo`/`sudo_unchecked_weight` (Root
     // dispatch) stay recursed.
     let victim_transfer = RuntimeCall::Balances(pallet_balances::Call::transfer_keep_alive {

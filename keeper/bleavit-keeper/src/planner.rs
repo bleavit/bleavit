@@ -298,10 +298,14 @@ fn plan_settlement(
 /// 05 §7(6) `Epoch::finalize_epoch_baseline` — the permissionless repair for an
 /// epoch that opened a Baseline vault but never formed a cohort, so the measured
 /// e+3 settlement is never scheduled and every single-sided Baseline holder is
-/// stranded (SQ-320). It rides `Role::Settle` because 05 §6 makes it the second
-/// `pallet-epoch` trigger of the one `compute_settlement → settle_baseline`
-/// chain that `settle_cohort` already drives, under the same single
-/// SettleAuthority origin — a second trigger, never a second authority.
+/// stranded (SQ-320). It rides `Role::Settle` because 05 §6 places all three
+/// epoch entry paths behind the same welfare-owned SettleAuthority boundary.
+/// The keeper drives `settle_cohort → compute_settlement` for measured
+/// settlement and this crank's
+/// `finalize_epoch_baseline → settle_baseline_void` neutral passthrough; the
+/// separate `void_cohort → settle_baseline_void` transition is the other
+/// neutral producer. This is the third total path and second neutral path,
+/// never a second authority.
 ///
 /// The call is idempotent and no-op-safe, so planning it on a vault that needs
 /// nothing would be a permanent per-block no-op submission. The guard below is
@@ -313,7 +317,14 @@ fn plan_baseline_finalization(
     config: &PlannerConfig,
     cranks: &mut Vec<PlannedCrank>,
 ) {
-    if !enabled(config, Role::Settle) || !snapshot.has_call("Epoch", "finalize_epoch_baseline") {
+    if !enabled(config, Role::Settle)
+        || !snapshot.has_call("Epoch", "finalize_epoch_baseline")
+        // This crank depends on proving that both bounded proposal maps contain
+        // no non-terminal entry and that no live cohort exists. A partial
+        // decode of any of those maps cannot prove absence.
+        || snapshot.proposal_snapshot_incomplete
+        || snapshot.cohort_snapshot_incomplete
+    {
         return;
     }
     let Some(epoch) = &snapshot.epoch else {
@@ -763,6 +774,7 @@ mod tests {
                 grace_end: None,
                 market_ids: vec![7],
             }],
+            proposal_snapshot_incomplete: false,
             cohorts: vec![CohortSnapshot {
                 epoch: 2,
                 status: "Measuring".to_owned(),
@@ -770,6 +782,7 @@ mod tests {
                 cursor: None,
                 metric_spec: Some(2),
             }],
+            cohort_snapshot_incomplete: false,
             oracle_rounds: vec![OracleRoundSnapshot {
                 component: 1,
                 epoch: 4,

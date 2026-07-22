@@ -561,7 +561,7 @@ fn genesis_uses_the_frozen_three_field_epoch_shape() {
             <CurrentEpoch<Test> as frame_support::traits::Get<EpochId>>::get(),
             0
         );
-        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 6);
+        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 7);
         assert_ok!(Epoch::do_try_state());
     });
 }
@@ -1437,7 +1437,7 @@ fn void_cohort_rejects_non_authority_origin() {
 // --------------------------- 03 §2.3/§5.2 · 05 §7(5) epoch-VOID Baseline leg
 //
 // 05 §7(5): "The one settlement a VOID still performs … Owning transition: the
-// epoch-VOID path (T20 cohort void), **not** T21 and not per-proposal
+// cohort-VOID (`void_cohort`) path, **not** T21 and not per-proposal
 // `void(pid)` — per-proposal vault voiding is a different VOID and settles no
 // Baseline." 03 §5.2 makes the same scoping normative and mandatory. SQ-92.
 
@@ -1620,9 +1620,54 @@ fn sq320_finalize_epoch_baseline_emits_no_epoch_event() {
 }
 
 #[test]
+fn sq320_finalize_epoch_baseline_rebates_general_once_only_for_useful_work() {
+    // 08 §6.3: this permissionless crank is outside the closed
+    // decision-critical list, so useful work draws from the general tranche.
+    // The §7(6) absent/already-settled no-ops stay callable but must never be a
+    // rebate-drain surface, however often an adversarial caller repeats them.
+    new_test_ext().execute_with(|| {
+        let mut state = EpochState::new();
+        state.epoch.index = 4;
+        assert_ok!(Epoch::seed(state));
+        RecordKeeperRebates::set(true);
+
+        for _ in 0..3 {
+            assert_ok!(Epoch::finalize_epoch_baseline(
+                RuntimeOrigin::signed(nobody()),
+                2,
+            ));
+        }
+        assert!(KeeperRebates::get().is_empty());
+
+        OpenBaselineVaults::set(vec![3]);
+        assert_ok!(Epoch::finalize_epoch_baseline(
+            RuntimeOrigin::signed(nobody()),
+            3,
+        ));
+        assert_eq!(KeeperRebates::get(), vec![(nobody(), CrankClass::General)]);
+
+        for _ in 0..3 {
+            assert_ok!(Epoch::finalize_epoch_baseline(
+                RuntimeOrigin::signed(nobody()),
+                3,
+            ));
+        }
+        assert_eq!(KeeperRebates::get(), vec![(nobody(), CrankClass::General)]);
+
+        OpenBaselineVaults::set(vec![1]);
+        SeamFailure::set(Some(SeamCall::WelfareVoidBaseline(1)));
+        assert_noop!(
+            Epoch::finalize_epoch_baseline(RuntimeOrigin::signed(nobody()), 1),
+            Error::<Test>::Welfare
+        );
+        assert_eq!(KeeperRebates::get(), vec![(nobody(), CrankClass::General)]);
+    });
+}
+
+#[test]
 fn sq320_finalize_epoch_baseline_survives_a_ledger_freeze() {
     // 06 §6.3 exempts settlement calls from PB-LEDGER-FREEZE, and it must: the
-    // freeze's own T20 sweep is one of the two ways an epoch is orphaned, so a
+    // freeze's own T20 sweep is one broad way an epoch can be orphaned, so a
     // freeze that blocked the repair would guarantee the stranding it exists to
     // contain (05 §7(6)).
     new_test_ext().execute_with(|| {
@@ -1647,6 +1692,7 @@ fn sq320_finalize_epoch_baseline_rejects_root_and_unsigned_origins() {
         let mut state = EpochState::new();
         state.epoch.index = 4;
         assert_ok!(Epoch::seed(state));
+        RecordKeeperRebates::set(true);
 
         assert_noop!(
             Epoch::finalize_epoch_baseline(RuntimeOrigin::root(), 3),
@@ -1659,6 +1705,7 @@ fn sq320_finalize_epoch_baseline_rejects_root_and_unsigned_origins() {
         assert!(!SeamCalls::get()
             .iter()
             .any(|call| matches!(call, SeamCall::WelfareVoidBaseline(_))));
+        assert!(KeeperRebates::get().is_empty());
     });
 }
 
@@ -1672,6 +1719,7 @@ fn sq320_finalize_epoch_baseline_refuses_a_live_or_cohorted_epoch() {
         let mut state = EpochState::new();
         state.epoch.index = 3;
         assert_ok!(Epoch::seed(state));
+        RecordKeeperRebates::set(true);
         // Condition 1: the epoch is still live.
         assert_noop!(
             Epoch::finalize_epoch_baseline(RuntimeOrigin::signed(nobody()), 3),
@@ -1698,6 +1746,7 @@ fn sq320_finalize_epoch_baseline_refuses_a_live_or_cohorted_epoch() {
         assert!(!SeamCalls::get()
             .iter()
             .any(|call| matches!(call, SeamCall::WelfareVoidBaseline(_))));
+        assert!(KeeperRebates::get().is_empty());
     });
 }
 

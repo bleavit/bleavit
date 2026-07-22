@@ -155,8 +155,9 @@ pub mod pallet {
         /// Internal — `pallet-epoch` only: `resolve()` and `void()` (03 §5.2).
         type ResolveAuthority: EnsureOrigin<Self::RuntimeOrigin>;
 
-        /// Internal — the single welfare→ledger settlement path:
-        /// `settle_scalar`/`settle_gate`/`settle_baseline` (03 §5.2).
+        /// Internal — the single welfare-owned authority boundary for measured
+        /// settlement and both neutral Baseline paths:
+        /// `settle_scalar`/`settle_gate`/`settle_baseline` (03 §5.2; 05 §6).
         type SettleAuthority: EnsureOrigin<Self::RuntimeOrigin>;
 
         /// Kernel-enumerated playbook effect origin (06 §6.2/§6.3).

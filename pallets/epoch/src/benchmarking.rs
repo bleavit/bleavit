@@ -851,11 +851,12 @@ mod benches {
         Ok(())
     }
 
-    /// SQ-320 worst case: a full epoch state (so every `proposals`/`cohorts`/
-    /// `recent` scan runs at its bound) plus a **real** Baseline book and vault
-    /// for the orphaned epoch, so the measured cost includes the settlement leg
-    /// — ledger `settle_baseline`, market close and the terminal latch — and
-    /// not just the no-op early return.
+    /// SQ-320 worst case: both proposal-storage halves are full
+    /// (`MAX_INTAKE_QUEUE + MAX_LIVE_PROPOSALS`), as are `cohorts` and `recent`,
+    /// plus a **real** Baseline book and vault for the orphaned epoch. The
+    /// measured cost therefore includes the settlement leg — ledger
+    /// `settle_baseline`, market close and the terminal latch — and not just
+    /// the no-op early return.
     #[benchmark]
     fn finalize_epoch_baseline() -> Result<(), BenchmarkError> {
         let mut state = EpochState::new();
@@ -871,11 +872,15 @@ mod benches {
         state.epoch.index = ORPHAN_BASELINE_EPOCH.saturating_add(1);
         Pallet::<T>::seed(state)?;
         T::BenchmarkHelper::prime_settlement(ORPHAN_BASELINE_EPOCH);
+        T::BenchmarkHelper::prime_keeper_rebate();
         let caller = T::BenchmarkHelper::account(251);
 
         #[extrinsic_call]
         _(RawOrigin::Signed(caller), ORPHAN_BASELINE_EPOCH);
 
+        T::BenchmarkHelper::assert_keeper_rebate_paid(
+            futarchy_primitives::keeper::CrankClass::General,
+        );
         Ok(())
     }
 

@@ -43,7 +43,13 @@ pub struct ChainSnapshot {
     pub epoch: Option<EpochSnapshot>,
     pub books: Vec<BookSnapshot>,
     pub proposals: Vec<ProposalSnapshot>,
+    /// True when either epoch proposal map could not be read or decoded in
+    /// full. Absence-dependent planning must fail closed when this is set.
+    pub proposal_snapshot_incomplete: bool,
     pub cohorts: Vec<CohortSnapshot>,
+    /// True when the live cohort map could not be read or decoded in full.
+    /// The orphan finalizer also depends on proving cohort absence.
+    pub cohort_snapshot_incomplete: bool,
     pub oracle_rounds: Vec<OracleRoundSnapshot>,
     pub reserve_health: Option<ReserveHealthSnapshot>,
     pub registry_epochs: Vec<RegistryEpochSnapshot>,
@@ -361,8 +367,8 @@ impl SnapshotExtractor {
         };
         let live_params = self.extract_live_planner_params(&at_block).await;
         let epoch = self.extract_epoch(&at_block).await;
-        let proposals = self.extract_proposals(&at_block).await;
-        let cohorts = self.extract_cohorts(&at_block).await;
+        let (proposals, proposal_snapshot_incomplete) = self.extract_proposals(&at_block).await;
+        let (cohorts, cohort_snapshot_incomplete) = self.extract_cohorts(&at_block).await;
         let mut books = self.extract_books(&at_block).await;
         mark_decision_window(
             current_block,
@@ -391,7 +397,9 @@ impl SnapshotExtractor {
             epoch,
             books,
             proposals,
+            proposal_snapshot_incomplete,
             cohorts,
+            cohort_snapshot_incomplete,
             oracle_rounds: self.extract_oracle_rounds(&at_block).await,
             reserve_health: self.extract_reserve_health(&at_block).await,
             registry_epochs,
@@ -485,38 +493,24 @@ impl SnapshotExtractor {
     async fn extract_proposals(
         &self,
         at_block: &OnlineClientAtBlock<PolkadotConfig>,
-    ) -> Vec<ProposalSnapshot> {
-        self.iter_values(at_block, "Epoch", "Proposals")
-            .await
-            .into_iter()
-            .filter_map(|(keys, value)| {
-                let proposal_id = value
-                    .at("id")
-                    .and_then(as_u64)
-                    .or_else(|| keys.first().and_then(as_u64))?;
-                let state = value.at("state").and_then(variant_name)?.to_owned();
-                let market_ids = value
-                    .at("markets")
-                    .and_then(option_inner)
-                    .map(market_set_ids)
-                    .unwrap_or_default();
-                Some(ProposalSnapshot {
-                    proposal_id,
-                    state,
-                    epoch: value.at("epoch").and_then(as_u64),
-                    decide_at: nonzero(value.at("decide_at").and_then(as_u64)),
-                    maturity: value.at("maturity").and_then(option_u64),
-                    grace_end: value.at("grace_end").and_then(option_u64),
-                    market_ids,
-                })
-            })
-            .collect()
+    ) -> (Vec<ProposalSnapshot>, bool) {
+        let (intake, intake_incomplete) = self
+            .iter_values_checked(at_block, "Epoch", "IntakeProposals")
+            .await;
+        let (live, live_incomplete) = self
+            .iter_values_checked(at_block, "Epoch", "Proposals")
+            .await;
+        let (proposals, merge_incomplete) = merge_proposal_entries(intake, live);
+        (
+            proposals,
+            intake_incomplete || live_incomplete || merge_incomplete,
+        )
     }
 
     async fn extract_cohorts(
         &self,
         at_block: &OnlineClientAtBlock<PolkadotConfig>,
-    ) -> Vec<CohortSnapshot> {
+    ) -> (Vec<CohortSnapshot>, bool) {
         let schedules = self
             .iter_values(at_block, "Epoch", "CohortSchedules")
             .await
@@ -529,25 +523,10 @@ impl SnapshotExtractor {
                 Some((epoch, value.at("specs").and_then(single_cohort_spec)))
             })
             .collect::<BTreeMap<_, _>>();
-        self.iter_values(at_block, "Epoch", "Cohorts")
-            .await
-            .into_iter()
-            .filter_map(|(keys, value)| {
-                let epoch = value
-                    .at("epoch")
-                    .and_then(as_u64)
-                    .or_else(|| keys.first().and_then(as_u64))?;
-                let status_value = value.at("status")?;
-                let status = variant_name(status_value)?.to_owned();
-                Some(CohortSnapshot {
-                    epoch,
-                    status,
-                    until_epoch: variant_field(status_value, "until_epoch").and_then(as_u64),
-                    cursor: variant_field(status_value, "cursor").and_then(as_u64),
-                    metric_spec: schedules.get(&epoch).copied().flatten(),
-                })
-            })
-            .collect()
+        let (entries, iteration_incomplete) =
+            self.iter_values_checked(at_block, "Epoch", "Cohorts").await;
+        let (cohorts, decode_incomplete) = decode_cohort_entries(entries, &schedules);
+        (cohorts, iteration_incomplete || decode_incomplete)
     }
 
     async fn extract_books(
@@ -924,15 +903,29 @@ impl SnapshotExtractor {
         pallet: &str,
         storage_name: &str,
     ) -> Vec<(Vec<Value<()>>, Value<()>)> {
+        self.iter_values_checked(at_block, pallet, storage_name)
+            .await
+            .0
+    }
+
+    /// Return every decoded map entry plus a fail-closed completeness bit.
+    /// Most planners act only on entries that are present, but the orphan
+    /// Baseline crank depends on proving an entry is absent from two maps.
+    async fn iter_values_checked(
+        &self,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
+        pallet: &str,
+        storage_name: &str,
+    ) -> (Vec<(Vec<Value<()>>, Value<()>)>, bool) {
         if !self.has_storage(pallet, storage_name) {
-            return Vec::new();
+            return (Vec::new(), true);
         }
         let address = dynamic::storage::<Vec<Value<()>>, Value<()>>(pallet, storage_name);
         let entry = match at_block.storage().entry(address) {
             Ok(entry) => entry,
             Err(error) => {
                 warn!(pallet, storage = storage_name, %error, "dynamic storage entry unavailable");
-                return Vec::new();
+                return (Vec::new(), true);
             }
         };
         let mut entries = match entry.iter(Vec::<Value<()>>::new()).await {
@@ -941,10 +934,11 @@ impl SnapshotExtractor {
                 let error = subxt::Error::from(error);
                 self.note_transport_error(&error);
                 warn!(pallet, storage = storage_name, %error, "dynamic storage iteration failed");
-                return Vec::new();
+                return (Vec::new(), true);
             }
         };
         let mut values = Vec::new();
+        let mut incomplete = false;
         while let Some(entry) = entries.next().await {
             match entry {
                 Ok(entry) => {
@@ -952,28 +946,33 @@ impl SnapshotExtractor {
                         Ok(keys) => keys,
                         Err(error) => {
                             warn!(pallet, storage = storage_name, %error, "dynamic storage key decode failed");
+                            incomplete = true;
                             break;
                         }
                     };
                     match entry.value().decode() {
                         Ok(value) => values.push((keys, value)),
-                        Err(error) => warn!(
-                            pallet,
-                            storage = storage_name,
-                            %error,
-                            "dynamic storage item decode failed"
-                        ),
+                        Err(error) => {
+                            incomplete = true;
+                            warn!(
+                                pallet,
+                                storage = storage_name,
+                                %error,
+                                "dynamic storage item decode failed"
+                            );
+                        }
                     }
                 }
                 Err(error) => {
                     let error = subxt::Error::from(error);
                     self.note_transport_error(&error);
                     warn!(pallet, storage = storage_name, %error, "dynamic storage item read failed");
+                    incomplete = true;
                     break;
                 }
             }
         }
-        values
+        (values, incomplete)
     }
 
     fn has_storage(&self, pallet: &str, storage_name: &str) -> bool {
@@ -1162,6 +1161,103 @@ fn mark_decision_window(
     }
 }
 
+fn decode_proposal_entry(keys: &[Value<()>], value: &Value<()>) -> Option<ProposalSnapshot> {
+    let proposal_id = value
+        .at("id")
+        .and_then(as_u64)
+        .or_else(|| keys.first().and_then(as_u64))?;
+    let state = value.at("state").and_then(variant_name)?.to_owned();
+    // Baseline finalization is absence-dependent: without the proposal's
+    // epoch the keeper cannot prove that this entry belongs to some other
+    // epoch. Treat a missing or undecodable epoch as an incomplete snapshot.
+    let epoch = value.at("epoch").and_then(as_u64)?;
+    let market_ids = value
+        .at("markets")
+        .and_then(option_inner)
+        .map(market_set_ids)
+        .unwrap_or_default();
+    Some(ProposalSnapshot {
+        proposal_id,
+        state,
+        epoch: Some(epoch),
+        decide_at: nonzero(value.at("decide_at").and_then(as_u64)),
+        maturity: value.at("maturity").and_then(option_u64),
+        grace_end: value.at("grace_end").and_then(option_u64),
+        market_ids,
+    })
+}
+
+/// Merge the epoch pallet's disjoint proposal maps into the keeper's canonical
+/// view. The maps are invariant-disjoint, so a duplicate id is corrupt state.
+/// A duplicate or undecodable entry makes the view incomplete, which suppresses
+/// absence-dependent planning. On a duplicate, retain a non-terminal entry if
+/// either map has one so other planners also take the conservative view. The
+/// `BTreeMap` makes de-duplication and output order independent of iteration.
+fn merge_proposal_entries(
+    intake: impl IntoIterator<Item = (Vec<Value<()>>, Value<()>)>,
+    live: impl IntoIterator<Item = (Vec<Value<()>>, Value<()>)>,
+) -> (Vec<ProposalSnapshot>, bool) {
+    let mut proposals = BTreeMap::new();
+    let mut incomplete = false;
+    for (keys, value) in intake.into_iter().chain(live) {
+        if let Some(proposal) = decode_proposal_entry(&keys, &value) {
+            match proposals.entry(proposal.proposal_id) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(proposal);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    incomplete = true;
+                    if proposal_snapshot_terminal(entry.get())
+                        && !proposal_snapshot_terminal(&proposal)
+                    {
+                        entry.insert(proposal);
+                    }
+                }
+            }
+        } else {
+            incomplete = true;
+        }
+    }
+    (proposals.into_values().collect(), incomplete)
+}
+
+fn proposal_snapshot_terminal(proposal: &ProposalSnapshot) -> bool {
+    matches!(
+        proposal.state.as_str(),
+        "Settled" | "Cancelled" | "Expired" | "Rejected"
+    )
+}
+
+fn decode_cohort_entries(
+    entries: impl IntoIterator<Item = (Vec<Value<()>>, Value<()>)>,
+    schedules: &BTreeMap<u64, Option<u64>>,
+) -> (Vec<CohortSnapshot>, bool) {
+    let mut cohorts = Vec::new();
+    let mut incomplete = false;
+    for (keys, value) in entries {
+        let decoded = (|| {
+            let epoch = value
+                .at("epoch")
+                .and_then(as_u64)
+                .or_else(|| keys.first().and_then(as_u64))?;
+            let status_value = value.at("status")?;
+            Some(CohortSnapshot {
+                epoch,
+                status: variant_name(status_value)?.to_owned(),
+                until_epoch: variant_field(status_value, "until_epoch").and_then(as_u64),
+                cursor: variant_field(status_value, "cursor").and_then(as_u64),
+                metric_spec: schedules.get(&epoch).copied().flatten(),
+            })
+        })();
+        if let Some(cohort) = decoded {
+            cohorts.push(cohort);
+        } else {
+            incomplete = true;
+        }
+    }
+    (cohorts, incomplete)
+}
+
 fn market_set_ids<C>(value: &Value<C>) -> Vec<u64> {
     let mut ids = Vec::new();
     for name in ["accept", "reject", "baseline"] {
@@ -1342,6 +1438,7 @@ fn nonzero(value: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::planner::{plan, PlannerConfig};
     use scale_info::TypeInfo;
     use subxt::ext::{codec::Encode, scale_decode::DecodeAsType, scale_value::Value};
 
@@ -1391,6 +1488,220 @@ mod tests {
         last_change_block: u32,
         class: EncodedParamClass,
         kernel_bounded: bool,
+    }
+
+    fn proposal_value(proposal_id: u64, state: &str, epoch: u64, decide_at: u64) -> Value<()> {
+        Value::named_composite([
+            ("id", Value::u128(u128::from(proposal_id))),
+            ("state", Value::unnamed_variant(state, [])),
+            ("epoch", Value::u128(u128::from(epoch))),
+            ("decide_at", Value::u128(u128::from(decide_at))),
+            ("maturity", Value::unnamed_variant("None", [])),
+            ("grace_end", Value::unnamed_variant("None", [])),
+            ("markets", Value::unnamed_variant("None", [])),
+        ])
+    }
+
+    fn proposal_entry(proposal_id: u64, state: &str) -> (Vec<Value<()>>, Value<()>) {
+        (
+            vec![Value::u128(u128::from(proposal_id))],
+            proposal_value(proposal_id, state, 3, 50),
+        )
+    }
+
+    #[test]
+    fn merged_proposals_include_intake_only_submitted_and_screening_entries() {
+        let (proposals, incomplete) = merge_proposal_entries(
+            vec![
+                proposal_entry(2, "Screening"),
+                proposal_entry(1, "Submitted"),
+            ],
+            Vec::new(),
+        );
+
+        assert!(!incomplete);
+        assert_eq!(
+            proposals
+                .iter()
+                .map(|proposal| (proposal.proposal_id, proposal.state.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "Submitted"), (2, "Screening")]
+        );
+    }
+
+    #[test]
+    fn merged_proposals_include_ordinary_live_entries() {
+        let (proposals, incomplete) = merge_proposal_entries(
+            Vec::new(),
+            vec![proposal_entry(9, "Trading"), proposal_entry(7, "Qualified")],
+        );
+
+        assert!(!incomplete);
+        assert_eq!(
+            proposals
+                .iter()
+                .map(|proposal| (proposal.proposal_id, proposal.state.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(7, "Qualified"), (9, "Trading")]
+        );
+    }
+
+    #[test]
+    fn corrupt_collision_prefers_non_terminal_and_blocks_finalization() {
+        let intake = vec![(vec![Value::u128(11)], proposal_value(11, "Settled", 3, 50))];
+        let live = vec![(vec![Value::u128(11)], proposal_value(11, "Trading", 3, 75))];
+        let (proposals, incomplete) = merge_proposal_entries(intake, live);
+
+        assert!(incomplete);
+        assert_eq!(
+            proposals,
+            vec![ProposalSnapshot {
+                proposal_id: 11,
+                state: "Trading".to_owned(),
+                epoch: Some(3),
+                decide_at: Some(75),
+                maturity: None,
+                grace_end: None,
+                market_ids: Vec::new(),
+            }]
+        );
+
+        let snapshot = ChainSnapshot {
+            available_calls: BTreeSet::from(["Epoch.finalize_epoch_baseline".to_owned()]),
+            epoch: Some(EpochSnapshot {
+                index: 4,
+                phase: "Intake".to_owned(),
+                phase_start_block: 100,
+                epoch_start_block: None,
+                length: None,
+                next_boundary: None,
+            }),
+            proposals,
+            proposal_snapshot_incomplete: incomplete,
+            baseline_vaults: vec![BaselineVaultSnapshot {
+                epoch: 3,
+                open: true,
+            }],
+            ..ChainSnapshot::default()
+        };
+        assert!(!plan(&snapshot, &PlannerConfig::default())
+            .iter()
+            .any(|crank| crank.call == "finalize_epoch_baseline"));
+    }
+
+    #[test]
+    fn malformed_proposal_entries_mark_snapshot_incomplete_and_block_finalization() {
+        let missing_id = (
+            Vec::new(),
+            Value::named_composite([("state", Value::unnamed_variant("Submitted", []))]),
+        );
+        let malformed_state = (
+            vec![Value::u128(2)],
+            Value::named_composite([("id", Value::u128(2)), ("state", Value::u128(99))]),
+        );
+
+        let (proposals, incomplete) = merge_proposal_entries(
+            vec![missing_id, proposal_entry(3, "Settled")],
+            vec![malformed_state, proposal_entry(4, "Cancelled")],
+        );
+        assert!(incomplete);
+        assert_eq!(
+            proposals
+                .iter()
+                .map(|proposal| proposal.proposal_id)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+
+        let snapshot = ChainSnapshot {
+            available_calls: BTreeSet::from(["Epoch.finalize_epoch_baseline".to_owned()]),
+            epoch: Some(EpochSnapshot {
+                index: 4,
+                phase: "Intake".to_owned(),
+                phase_start_block: 100,
+                epoch_start_block: None,
+                length: None,
+                next_boundary: None,
+            }),
+            proposals,
+            proposal_snapshot_incomplete: incomplete,
+            baseline_vaults: vec![BaselineVaultSnapshot {
+                epoch: 3,
+                open: true,
+            }],
+            ..ChainSnapshot::default()
+        };
+        assert!(!plan(&snapshot, &PlannerConfig::default())
+            .iter()
+            .any(|crank| crank.call == "finalize_epoch_baseline"));
+    }
+
+    #[test]
+    fn proposal_missing_epoch_marks_snapshot_incomplete_and_blocks_finalization() {
+        let missing_epoch = (
+            vec![Value::u128(2)],
+            Value::named_composite([
+                ("id", Value::u128(2)),
+                ("state", Value::unnamed_variant("Screening", [])),
+            ]),
+        );
+        let (proposals, incomplete) = merge_proposal_entries(vec![missing_epoch], Vec::new());
+        assert!(proposals.is_empty());
+        assert!(incomplete);
+
+        let snapshot = ChainSnapshot {
+            available_calls: BTreeSet::from(["Epoch.finalize_epoch_baseline".to_owned()]),
+            epoch: Some(EpochSnapshot {
+                index: 4,
+                phase: "Intake".to_owned(),
+                phase_start_block: 100,
+                epoch_start_block: None,
+                length: None,
+                next_boundary: None,
+            }),
+            proposals,
+            proposal_snapshot_incomplete: incomplete,
+            baseline_vaults: vec![BaselineVaultSnapshot {
+                epoch: 3,
+                open: true,
+            }],
+            ..ChainSnapshot::default()
+        };
+        assert!(!plan(&snapshot, &PlannerConfig::default())
+            .iter()
+            .any(|crank| crank.call == "finalize_epoch_baseline"));
+    }
+
+    #[test]
+    fn malformed_cohort_entry_marks_snapshot_incomplete_and_blocks_finalization() {
+        let malformed = (
+            vec![Value::u128(3)],
+            Value::named_composite([("epoch", Value::u128(3)), ("status", Value::u128(99))]),
+        );
+        let (cohorts, incomplete) = decode_cohort_entries(vec![malformed], &BTreeMap::new());
+        assert!(cohorts.is_empty());
+        assert!(incomplete);
+
+        let snapshot = ChainSnapshot {
+            available_calls: BTreeSet::from(["Epoch.finalize_epoch_baseline".to_owned()]),
+            epoch: Some(EpochSnapshot {
+                index: 4,
+                phase: "Intake".to_owned(),
+                phase_start_block: 100,
+                epoch_start_block: None,
+                length: None,
+                next_boundary: None,
+            }),
+            cohort_snapshot_incomplete: incomplete,
+            baseline_vaults: vec![BaselineVaultSnapshot {
+                epoch: 3,
+                open: true,
+            }],
+            ..ChainSnapshot::default()
+        };
+        assert!(!plan(&snapshot, &PlannerConfig::default())
+            .iter()
+            .any(|crank| crank.call == "finalize_epoch_baseline"));
     }
 
     #[test]

@@ -477,7 +477,7 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             // via `balances.transfer`) or a protocol sovereign such as the
             // welfare settlement account, which would forge the SettleAuthority
             // and drive ledger settlement directly. 06 §3.1 makes SettleAuthority
-            // "reachable through exactly one path" (welfare→ledger) and D-13
+            // closed welfare-owned SettleAuthority boundary and D-13
             // bounds the founding multisig's worst case; impersonation defeats
             // both. `sudo_as` has no bootstrap use the Root-dispatching `sudo`
             // does not already cover (09 §5.3), so it is denied outright. R-1

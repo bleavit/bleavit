@@ -166,7 +166,7 @@ Phase offsets are stored as rational fractions of `epoch.length` (B-med fix), so
 | Execute | per-proposal maturity, within `exec.grace` | — | — |
 | Housekeeping | [20/21, 1) | 288,000 – 302,400 | d20–d21 |
 
-Related frozen values: measurement horizon k = 2 epochs; settlement at e+3; ≤ 4 non-terminal cohorts; **maturity worked example B+288,000** (corrected from B+287,000); capital duration example ~63–66 days.
+Related frozen values: measurement horizon k = 2 epochs; measured cohort settlement at e+3; ≤ 4 non-terminal cohorts; **maturity worked example B+288,000** (corrected from B+287,000); capital duration example ~63–66 days.
 
 ### 3.2 Markets and TWAP
 
@@ -225,11 +225,11 @@ The heading's ownership applies to the identity/supply table. The genesis protoc
 
 | Bound | Value | Scope (the reconciliation) | Doc |
 |---|---|---|---|
-| `IntakeQueue` | **64** | **pre-qualification only** (Submitted, awaiting Screening); overflow ⇒ `IntakeFull`, bond refused | [06](06-governance-and-guardians.md) |
-| `MaxLiveProposals` | **32** | **Screening → Settled** — the “(all states)” qualifier is deleted; the two bounds have disjoint scopes and are both kept | [05](05-welfare-and-decision-engine.md) |
+| `IntakeQueue` | **64** | intake-family cap and metadata-constant name: the frozen direct-read `IntakeQueue` contains Submitted IDs; internal `IntakeProposals` contains Submitted/Screening records plus current-epoch Cancelled admission records; overflow ⇒ `IntakeFull`, bond refused | [05](05-welfare-and-decision-engine.md), [06](06-governance-and-guardians.md) |
+| `MaxLiveProposals` | **32** | internal/frozen `Proposals`: post-qualification non-terminal working set; disjoint from `IntakeProposals` | [05](05-welfare-and-decision-engine.md) |
 | Books per proposal | **≤ 6** (2 decision + 4 gate; the old “7 + margin” is deleted) | per proposal | [04](04-markets-and-pricing.md) |
-| Baseline books | ≤ 4 live (one per live epoch) | per chain | [04](04-markets-and-pricing.md) |
-| `MaxLiveMarkets` | **196 = 32·6 + 4** (replaces both “≈225 = 32·7+1” and “≤121”) | per chain | [04](04-markets-and-pricing.md) |
+| Baseline books | no independent count; consume the shared market/POL capacities | per chain | [04](04-markets-and-pricing.md) |
+| `MaxLiveMarkets` | **196**, design-sized as `32·6 + 4` but enforced over the actual proposal/Baseline mix (replaces both “≈225 = 32·7+1” and “≤121”) | per chain | [04](04-markets-and-pricing.md) |
 | Concurrently *trading* books | 31 = 5·6 + 1 (forecast trading cut, D-8) | per epoch | [04](04-markets-and-pricing.md) |
 | `RecentCohortSummaries` ring | **32** cohorts (chain-served history, layer 1 of D-6) | `pallet-epoch` | [02](02-integration-contract.md) |
 | `TwapCheckpoints` | 8 per market | `pallet-market` | [04](04-markets-and-pricing.md) |
@@ -256,7 +256,7 @@ The heading's ownership applies to the identity/supply table. The genesis protoc
 | Treasury POL commitments | **196** = `MaxLiveMarkets` — one live-book subsidy obligation per market that NAV nets against (§1.2/§8.2) | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §8) |
 | Treasury coretime obligations | **8** each: ≤ 8 funded-period idempotency keys **and** ≤ 8 open renewal quotes (two separately-bounded collections, D-9); ~8 renewal periods of retained history | `pallet-futarchy-treasury` ([09](09-execution-upgrades-and-rollout.md) §4) |
 
-**Why 64 and 32 are jointly satisfiable:** intake admits ≤ 64 candidates per epoch *before* Screening; qualification passes ≤ `epoch.slots` = 5 per epoch into the live pipeline. Live occupancy = 5 trading + ≤ 20 in measurement/settlement (5 × 4 cohort stages) + extended/suspended/rerun/queued stragglers ≤ 7 of margin ⇒ 32 suffices with headroom; 64 merely prices the pre-qualification waiting room (bonds + slash, [08](08-treasury-and-economics.md) §7).
+**Why 64 and 32 are jointly satisfiable:** the intake family admits ≤ 64 candidates per epoch across Submitted/Screening bookkeeping (and preserves current-epoch Cancelled records solely for the admission counter); qualification passes ≤ `epoch.slots` = 5 per epoch into the post-qualification non-terminal pipeline. Live occupancy = 5 trading + ≤ 20 in measurement/settlement (5 × 4 cohort stages) + extended/suspended/rerun/queued stragglers ≤ 7 of margin ⇒ 32 suffices with headroom; the 64 cap prices the intake waiting room and its screening bookkeeping (bonds + slash, [08](08-treasury-and-economics.md) §7).
 
 ---
 
@@ -276,7 +276,7 @@ The heading's ownership applies to the identity/supply table. The genesis protoc
 
 | Finding | Resolution in this document |
 |---|---|
-| B-med IntakeQueue vs MaxLive / D-10 | §4: 64 = pre-qualification, 32 = Screening→Settled, disjoint scopes; joint-satisfiability argument; `MaxLiveMarkets` 196 = 32·6+4 replaces 225/121/“6-vs-7” — every budget re-derived in §5 |
+| B-med IntakeQueue vs MaxLive / D-10 | §4: 64 = Submitted/Screening intake bookkeeping, 32 = post-qualification non-terminal working set, disjoint internal maps; frozen direct-read `IntakeQueue` remains Submitted-only; joint-satisfiability argument; `MaxLiveMarkets` 196 = 32·6+4 replaces 225/121/“6-vs-7” — every budget re-derived in §5 |
 | X-11h (backend side; with X-11e) | Reading rules: every FE-rechecked value (position bound, per-trade min/max, `MinSplit`, all §1 keys, all K constants) is constants-API- or storage-readable per [02](02-integration-contract.md); the FE hardcodes nothing |
 | B-6 (owned by [04](04-markets-and-pricing.md)) | §3.3: V1 = 512.494795136, V5 = −3.074969 frozen; CI regeneration required |
 | B-low drift batch | §3.1 Trade = d5–d18 with fractional offsets; §3.1 maturity B+288,000; §3.2 κ per 10-block interval (ADR-11 corrected), maker-loss ≈ 180 USDC; §3.4 latency reconciliation pointer |

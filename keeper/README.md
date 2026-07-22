@@ -100,13 +100,17 @@ The exact role names used by configuration, logs, and metric labels are `tick`, 
 `decide`, `settle`, `execute`, `oracle-close`, `registry-close`, `cleanup`, `renewal`, and
 `welfare`. All are enabled by default, subject to live-metadata capability detection.
 
-The `settle` role drives both `pallet-epoch` entry points into the one
-`compute_settlement → settle_baseline` chain of 05 §6: `settle_cohort` on the measured path, and
-the permissionless `finalize_epoch_baseline` of 05 §7(6) — the repair for an epoch that opened a
+On chain, 05 §6 admits exactly three `pallet-epoch` entry paths into one welfare-owned
+SettleAuthority boundary. The `settle` keeper role drives the two permissionless ones:
+`settle_cohort → compute_settlement` on the measured path, and the
+permissionless `finalize_epoch_baseline → settle_baseline_void` neutral passthrough of 05 §7(6) —
+the repair for an epoch that opened a
 Baseline vault but never formed a cohort, so the measured e+3 settlement is never scheduled and its
-single-sided holders would otherwise be stranded forever (SQ-320). Both are triggers of the same
-single SettleAuthority origin, never a second authority, which is why they share one role and one
-set of metric labels. Because the call is idempotent and no-op-safe, it is planned only against a
+single-sided holders would otherwise be stranded forever (SQ-320). The third entry path is the
+cohort-VOID transition `void_cohort → settle_baseline_void` of 05 §7(5); it is not a standing keeper
+crank. All three share the same SettleAuthority origin, never a second authority; the two
+permissionless paths therefore share one role and one set of metric labels. Because the orphan call
+is idempotent and no-op-safe, it is planned only against a
 Baseline vault that is still `Open` **and** whose epoch satisfies all three §7(6) preconditions
 (strictly past, no `CohortInfo`, no non-terminal proposal of that epoch) — never as a standing
 per-block no-op. It is prioritized above `cleanup` because it writes the terminal-block latch that

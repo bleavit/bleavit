@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 6;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 7;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -830,7 +830,6 @@ pub mod bounds {
     pub const MAX_LIVE_PROPOSALS: u32 = 32;
     pub const MAX_LIVE_MARKETS: u32 = 196;
     pub const BOOKS_PER_PROPOSAL: u32 = 6;
-    pub const BASELINE_BOOKS: u32 = 4;
     /// Maximum TWAP checkpoints and registered decision windows per market
     /// (13 §4). Shared by market storage and the monitoring API row bound.
     pub const MAX_TWAP_WINDOWS_PER_MARKET: u32 = 8;
@@ -880,7 +879,8 @@ pub mod chain_identity {
 pub mod kernel {
     /// Fixed-point scale of a settlement score `s` (`FixedU64`, 1e9).
     pub const SCORE_SCALE: u64 = 1_000_000_000;
-    /// The neutral Baseline score an **epoch VOID** settles at (03 §2.3
+    /// The neutral Baseline score a cohort VOID or orphan-epoch finalization
+    /// settles at (03 §2.3
     /// transition table; 03 §5). For a branch-free scalar vault `s = 0.5` is
     /// identical in payout to D-1's neutral ½ valuation, which is precisely
     /// why `BaselineState` carries no `Voided` variant (03 §6.4) — the VOID is
@@ -1169,10 +1169,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn contract_version_is_v6() {
+    fn contract_version_is_v7() {
         // Batch C reconciles the ratified contract surface with the shipped
         // primitives and runtime views. A frozen-contract change bumps this.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 6);
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 7);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/11-frontend-workflows.md` (the frozen source of truth),
-> regenerated 2026-07-21 from integration contract v6 (batch C), on top of batch D's refresh at
+> regenerated 2026-07-22 from integration contract v7 (SQ-66/SQ-320), on top of batch D's refresh at
 > commit `a893790`, for upload to Claude Design. If this copy and the source ever differ, the
 > source wins. Regenerate by re-copying the source file.
 
@@ -109,7 +109,7 @@ Each row = the exact re-reads at B′. `[C]` marks a constants-API read; everyth
 | # | Tx | Preconditions re-read at B′ |
 |---|---|---|
 | P-1 | `market.buy/sell` (decision & gate books) | owning proposal state ∈ {`Trading`, `Extended`} — **only**; market phase Open; book `q_L, q_S, b` (recompute cost via client LMSR using the frozen `Market::Fee` bps metadata constant; cross-check it against raw `params(mkt.fee)` by floored `Perbill / 100,000`; recheck `max_cost`/`min_proceeds` still satisfiable); `quote()` vs. client recompute agree within the fixed-point bounds (else `FE-CHAIN-005`, trading blocked); user USDC balance (buy) / position balance (sell); per-trade min/max `[C]`; `Constitution.PhaseFlags` trading-enabled bit set; no PB-LEDGER-FREEZE active ([06](06-governance-and-guardians.md)) |
-| P-2 | `market.buy/sell` (**Baseline book**) | `BaselineMarketOf(epoch)` exists (D-2/X-10) **and its `Markets[id]` book still exists** — the mapping outlives the book, so a resolvable id whose book has been reaped is historical correlation data only and MUST block trading (SQ-304, [04](04-markets-and-pricing.md) §8.3); epoch trading window open — Trade phase d5–d18 *(normative value: [13](13-parameters.md))* **or** any epoch-e decision pair still in `Extended` (the Baseline book stays open through the last epoch-e decision incl. per-pair extensions, [04](04-markets-and-pricing.md) §8.4); `BaselineVaults(epoch)` open ([03](03-conditional-ledger.md)); book state + slippage recheck as P-1; per-trade min/max `[C]`; PhaseFlags trading-enabled; no PB-LEDGER-FREEZE |
+| P-2 | `market.buy/sell` (**Baseline book**) | `BaselineMarketOf(epoch)` exists (D-2/X-10) and its contract-v7-coincident `Markets[id]` Baseline book exists; either absent blocks trading (SQ-304, [04](04-markets-and-pricing.md) §8.3); epoch trading window open — Trade phase d5–d18 *(normative value: [13](13-parameters.md))* **or** any epoch-e decision pair still in `Extended` (the Baseline book stays open through the last epoch-e decision incl. per-pair extensions, [04](04-markets-and-pricing.md) §8.4); `BaselineVaults(epoch)` open ([03](03-conditional-ledger.md)); book state + slippage recheck as P-1; per-trade min/max `[C]`; PhaseFlags trading-enabled; no PB-LEDGER-FREEZE |
 | P-3 | `ledger.split` / `split_scalar` | vault `Open`; USDC balance ≥ amount + fee headroom (in selected fee asset); `MinSplit` `[C]`; caller position count < `MaxPositionsPerAccount` `[C]` for each newly created position key; no PB-LEDGER-FREEZE |
 | P-4 | `ledger.merge` / `merge_scalar` | vault ∈ {`Open`, `Resolved`, **`Voided`**} (merge is available in every non-`ScalarSettled` state — the D-1 par path, [03](03-conditional-ledger.md) §5.1); user holds ≥ amount of the complete pair being merged (both sides re-read); payout = amount USDC at par, displayed |
 | P-5 | `ledger.redeem` (branch-USDC) | vault `ScalarSettled{winner, s}` **only** — `Resolved` admits no unpaired redemption (outflow monotonicity, [03](03-conditional-ledger.md) §2.3; `merge` is the par path there, row P-4); user holds winning-branch USDC ≥ amount; payout 1:1 displayed. *(Not applicable under `Voided` — see §11.6; the old "winning-position balance" requirement is deleted for VOID.)* |
@@ -149,7 +149,7 @@ The FE renders each of the 14 checks as a named row with expected/actual; any fa
 
 ---
 
-**Reaped Baseline books (normative; SQ-304).** When `BaselineMarketOf(e)` resolves but `Markets[id]` is absent, the epoch's Baseline book has been reaped and the id is historical-correlation data only. The UI MUST label the book **reaped/archived**, MUST NOT render the fail-closed zero quote as a market price, and MUST disable every trade action on it; cohort history for that epoch continues to render from `RecentCohortSummaries`. Redemption of already-held Baseline positions is unaffected — it reads the vault, not the book.
+**Reaped Baseline books (normative; SQ-304; contract v7).** Successful reap removes the Baseline book and its `BaselineMarketOf(e)` entry atomically. When cohort history identifies epoch `e` but that mapping is absent, the UI MUST label the book **reaped/archived**, MUST NOT render a missing or fail-closed zero quote as a market price, and MUST disable every trade action on it; cohort history continues to render from `RecentCohortSummaries`. A present mapping with an absent or mismatched book is corrupt chain state and triggers the compatibility hard block. Redemption of already-held Baseline positions is unaffected — it reads the vault, not the book.
 
 ## 11.6 VOID redemption workflow (X-6, D-1)
 

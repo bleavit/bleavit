@@ -153,7 +153,7 @@ fn sq201_a_backlog_is_drained_across_rolls_not_in_one_call() {
 // ---------------------------------------------------------------- SQ-79
 //
 // The runtime binds `RuntimeEpochWelfare::compute_settlement` to the welfare
-// pallet's single settlement path (05 §6). A cohort whose e+1…e+2 gate window
+// pallet's measured settlement path (05 §6). A cohort whose e+1…e+2 gate window
 // carries no observation at all must fail there, holding the ledger at the
 // status quo, rather than settling gate books at "no breach".
 

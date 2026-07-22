@@ -224,17 +224,21 @@ pub trait ExecutionGuardAccess {
     fn dequeue_for_rerun(pid: ProposalId) -> DispatchResult;
 }
 
-/// Sole settlement hand-off (05 §6). The implementation is pallet-welfare,
-/// which alone owns ledger SettleAuthority.
+/// The two welfare settlement methods underlying 05 §6's three epoch entry
+/// paths. Pallet-welfare alone owns ledger SettleAuthority: measured cohort
+/// targets use `compute_settlement`, while cohort VOID and orphan-epoch
+/// finalization share the welfare-state-free `settle_baseline_void`
+/// passthrough.
 pub trait WelfareSettlement {
     fn compute_settlement(
         cohort_epoch: EpochId,
         spec: MetricSpecVersion,
         target: SettlementTarget,
     ) -> Result<FixedU64, DispatchError>;
-    /// Settle a voided epoch's Baseline vault at the neutral score (03 §2.3/§5).
+    /// Settle a cohort-VOID or orphan epoch's Baseline vault at the neutral
+    /// score (03 §2.3/§5; 05 §7(5)–(6)).
     /// Implementations are no-ops when the epoch has no Baseline vault or it is
-    /// already settled — an epoch VOID must never fail here (G-1).
+    /// already settled — neither neutral path may fail here (G-1).
     fn settle_baseline_void(cohort_epoch: EpochId) -> DispatchResult;
     /// Retire welfare history after the completed cohort has been reaped.
     /// The implementation derives its bounded rolling-window cutoff from the
@@ -550,7 +554,7 @@ pub mod pallet {
     pub type FundedPolSlotSet =
         BoundedVec<(ProposalId, PolSeedPlan), ConstU32<MAX_COHORT_PROPOSALS_BOUND>>;
 
-    /// Frozen 02 §7.1 live proposal map (Screening→settled pipeline only).
+    /// Frozen 02 §7.1 post-qualification non-terminal proposal map.
     #[pallet::storage]
     pub type Proposals<T: Config> =
         CountedStorageMap<_, Blake2_128Concat, ProposalId, Proposal<T::AccountId>, OptionQuery>;
@@ -1370,22 +1374,34 @@ pub mod pallet {
         /// forever, every single-sided holder is stranded, and the book keeps
         /// an un-reapable POL commitment. This crank reaches exactly that case
         /// — a strictly past, cohort-free, summary-free epoch whose every
-        /// proposal is terminal — and is a harmless no-op when the vault is
-        /// absent or already settled (G-1).
+        /// proposal is terminal across both bounded storage halves
+        /// (`IntakeProposals` and `Proposals`) — and is a harmless no-op when
+        /// the vault is absent or already settled (G-1).
         ///
         /// Permissionless `Signed` per the 06 §3.2 authority matrix, and
         /// deliberately unaffected by `PB-LEDGER-FREEZE` (06 §6.3 exempts
-        /// settlement calls; the freeze's own T20 sweep is one of the two ways
-        /// an epoch is orphaned). Emits no epoch event: the settlement's
+        /// settlement calls; the freeze's own T20 sweep is one broad way an
+        /// epoch can be orphaned). Emits no epoch event: the settlement's
         /// canonical signal is the ledger's frozen `BaselineSettled` (02 §6).
         #[pallet::call_index(15)]
         #[pallet::weight(T::WeightInfo::finalize_epoch_baseline())]
         pub fn finalize_epoch_baseline(origin: OriginFor<T>, epoch: EpochId) -> DispatchResult {
-            ensure_signed(origin)?;
-            Self::mutate(|state, _ledger| {
+            let who = ensure_signed(origin)?;
+            // A real neutral settlement emits the frozen ledger
+            // `BaselineSettled`; the two mandated no-ops return before any
+            // event. Since the welfare seam intentionally returns only
+            // `DispatchResult`, this delta is the authoritative useful-work
+            // signal and prevents absent/already-settled rebate draining.
+            let events_before = frame_system::Pallet::<T>::event_count();
+            let result = Self::mutate(|state, _ledger| {
                 let mut welfare = WelfareAdapter::<T>(PhantomData);
                 state.finalize_epoch_baseline(CoreOrigin::Signed, &mut welfare, epoch)
-            })
+            });
+            if result.is_ok() && frame_system::Pallet::<T>::event_count() > events_before {
+                // Not one of 08 §6.3's five closed decision-critical families.
+                T::KeeperRebate::rebate(&who, CrankClass::General);
+            }
+            result
         }
     }
 
@@ -2237,7 +2253,8 @@ pub mod pallet {
                     // Preserve current-epoch cancellations internally so a
                     // withdrawal/static-check failure cannot reset the per-account
                     // admission counter. These records never enter the frozen
-                    // `Proposals` map or IntakeQueue and are reaped next epoch.
+                    // `Proposals` map or the frozen Submitted-only IntakeQueue
+                    // and are reaped next epoch.
                     intake.push((proposal.id, proposal.clone()));
                 } else if !matches!(
                     proposal.state,

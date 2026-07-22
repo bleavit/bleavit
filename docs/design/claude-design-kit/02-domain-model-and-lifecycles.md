@@ -1,6 +1,7 @@
 # Domain model & lifecycles — what every screen's objects are
 
-> **DERIVED, NON-NORMATIVE.** Distilled 2026-07-12 (commit `9f250be`) from the frozen spec —
+> **DERIVED, NON-NORMATIVE.** Distilled 2026-07-12 (commit `9f250be`) and refreshed
+> 2026-07-22 for SQ-320 from the frozen spec —
 > docs 03 (conditional ledger), 04 (markets & pricing), 05 (welfare & decision engine),
 > 06 (governance & guardians), 07 (oracle & disputes), 08 (treasury & economics),
 > 09 (execution & upgrades) — for upload to Claude Design. Where this file and the spec
@@ -61,6 +62,13 @@ cohort e−3, reaping). Several cohorts are always in flight:
 epoch:      e        e+1      e+2      e+3
 cohort e:   trade →  measure  measure  settle   (capital committed ≈ 63–66 days)
 ```
+
+That timeline is the **measured** path. A cohort VOID settles its Baseline vault neutrally at
+`s = 0.5` when the VOID fires; if no cohort ever formed, the permissionless
+`finalize_epoch_baseline` crank performs the same neutral closeout once the epoch is strictly past
+and no proposal can still form a cohort. These two neutral transitions and the measured path are
+the three epoch entry paths into one welfare-owned SettleAuthority boundary; neither neutral path
+computes a welfare score.
 
 **Proposal lifecycle** (states the UI badges): `Submitted → Screening → Qualified → Trading
 → [Extended] → Queued → Executed → Measuring → Settled`, with branches to `Cancelled`

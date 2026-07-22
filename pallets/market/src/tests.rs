@@ -1114,6 +1114,27 @@ fn reap_of_baseline_book_prunes_baseline_mapping() {
 }
 
 #[test]
+fn reap_of_baseline_book_fails_static_on_a_mismatched_mapping() {
+    new_test_ext().execute_with(|| {
+        create_baseline();
+        seed(BASELINE_ID);
+        System::set_block_number(5);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), BASELINE_ID));
+        settle_baseline();
+        System::set_block_number(5 + MarketArchiveDelay::get());
+        BaselineMarketOf::<Test>::insert(EPOCH, BASELINE_ID + 1);
+
+        assert_noop!(
+            Market::reap(signed(CHARLIE), BASELINE_ID),
+            E::TryStateViolation
+        );
+        assert!(Markets::<Test>::contains_key(BASELINE_ID));
+        assert!(ClosedAt::<Test>::contains_key(BASELINE_ID));
+        assert_eq!(BaselineMarketOf::<Test>::get(EPOCH), Some(BASELINE_ID + 1));
+    });
+}
+
+#[test]
 fn reap_of_trading_book_is_rejected_not_reapable() {
     new_test_ext().execute_with(|| {
         create_decision();
@@ -2454,6 +2475,16 @@ fn do_try_state_rejects_dangling_baseline_mapping() {
         // 04 §8.3: `BaselineMarketOf` must resolve to a live Baseline book. A mapping
         // to a non-existent market is drift the hook must reject.
         BaselineMarketOf::<Test>::insert(EPOCH, 4242);
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
+    });
+}
+
+#[test]
+fn do_try_state_rejects_baseline_book_without_mapping() {
+    new_test_ext().execute_with(|| {
+        create_baseline();
+        BaselineMarketOf::<Test>::remove(EPOCH);
+
         assert_err!(Market::do_try_state(), E::TryStateViolation);
     });
 }

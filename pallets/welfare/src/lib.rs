@@ -7,8 +7,9 @@
 //! core. The pallet owns the bounded runtime storage and authority seams while
 //! delegating all welfare arithmetic and validation to the core.
 //!
-//! Spec: `docs/architecture/05` (§4 welfare/gates, §6 the single settlement
-//! path, §7 cohorts), `02 §4/§7.4` (view and frozen storage names), `06 §3.2`
+//! Spec: `docs/architecture/05` (§4 welfare/gates, §6 the single
+//! settlement-authority boundary with three epoch entry paths, §7 cohorts),
+//! `02 §4/§7.4` (view and frozen storage names), `06 §3.2`
 //! (metric authority), `13 §1/§4` (live parameters and bounds), and `15 §1/§4`
 //! (try-state and differential verification).
 //!
@@ -130,8 +131,8 @@ pub trait LedgerSettlement {
     fn settle_gate(pid: ProposalId, gate: GateKind, breached: bool) -> DispatchResult;
     fn settle_baseline(epoch: EpochId, score: FixedU64) -> DispatchResult;
     /// True when `epoch` has a Baseline vault still in `BaselineState::Open`,
-    /// i.e. a settlement would have something to do. It lets the epoch-VOID
-    /// path stay infallible (G-1) by pre-filtering the two benign
+    /// i.e. a settlement would have something to do. It lets both neutral
+    /// paths stay infallible (G-1) by pre-filtering the two benign
     /// not-applicable cases — no vault, or already settled — instead of
     /// swallowing a `settle_baseline` error and hiding a genuine failure.
     fn baseline_open(epoch: EpochId) -> bool;
@@ -183,7 +184,9 @@ pub mod pallet {
         type Params: WelfareParamsProvider;
         /// Normalized epoch and daily component inputs.
         type MetricInputs: MetricInputs;
-        /// Conditional-ledger settlement seam used only by `compute_settlement`.
+        /// Conditional-ledger settlement seam used by the measured
+        /// `compute_settlement` path and the neutral `settle_baseline_void`
+        /// passthrough (05 §6).
         type Ledger: LedgerSettlement;
         /// Current epoch clock used by metric registration.
         type CurrentEpoch: Get<EpochId>;
@@ -692,8 +695,9 @@ pub mod pallet {
             (!ambiguous).then_some(selected?.1)
         }
 
-        /// The one 05 §6 settlement endpoint. It is runtime-internal (not a
-        /// call); B1a exposes it only through `pallet-epoch::settle_cohort`.
+        /// The measured/scored 05 §6 settlement endpoint. It is
+        /// runtime-internal (not a call); B1a exposes it only through
+        /// `pallet-epoch::settle_cohort`.
         // B1a: the SettleAuthority-trusted epoch caller supplies the proposal's
         // creation-time `spec_version` (Proposal.metric_spec, I-16) and whether
         // its class/ask created gate books.
@@ -742,19 +746,21 @@ pub mod pallet {
             Ok(score)
         }
 
-        /// The 03 §2.3/§5 epoch-VOID Baseline settlement.
+        /// The 03 §2.3/§5 neutral Baseline-settlement passthrough shared by
+        /// cohort VOID and 05 §7(6)'s orphan-epoch finalizer.
         ///
-        /// A VOID means no measurement is trusted, so unlike `compute_settlement`
-        /// this reads **no** welfare state and computes nothing — it applies the
-        /// spec-fixed neutral score under the same SettleAuthority. It exists
-        /// because the Baseline vault has no `Voided` state (03 §6.4): without
-        /// this call the vault stays `Open` forever and single-sided holders,
-        /// whose redemptions require `Settled`, are stranded (SQ-92).
+        /// Neither path has a usable measurement, so unlike
+        /// `compute_settlement` this reads **no** welfare state and computes
+        /// nothing — it applies the spec-fixed neutral score under the same
+        /// SettleAuthority. It exists because the Baseline vault has no
+        /// `Voided` state (03 §6.4): without this call the vault can stay `Open`
+        /// forever and single-sided holders, whose redemptions require
+        /// `Settled`, are stranded (SQ-92/SQ-320).
         ///
         /// Infallible by construction on the two benign paths (G-1): an epoch
         /// with no Baseline vault, or one already settled, is a silent no-op.
-        /// Anything else still propagates — a VOID must not mask a real ledger
-        /// failure.
+        /// Anything else still propagates — a neutral closeout must not mask a
+        /// real ledger failure.
         pub fn settle_baseline_void(cohort_epoch: EpochId) -> DispatchResult {
             if !T::Ledger::baseline_open(cohort_epoch) {
                 return Ok(());

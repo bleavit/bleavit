@@ -308,6 +308,11 @@ parameter_types! {
     pub static RetryExhausted: bool = false;
     pub static WelfareScore: FixedU64 = FixedU64(500_000_000);
     pub static PreviousBaselineTwap: Option<FixedU64> = None;
+    /// Epochs whose mock Baseline vault is still open. Consuming one emits a
+    /// non-epoch event, mirroring the real ledger's frozen
+    /// `BaselineSettled` useful-work signal without extending epoch's event
+    /// schema in the pallet-only runtime.
+    pub static OpenBaselineVaults: Vec<EpochId> = Vec::new();
     /// Disabled by default, so the mock behaves like the `()` sink unless a
     /// keeper-rebate regression explicitly enables recording.
     pub static RecordKeeperRebates: bool = false;
@@ -680,7 +685,16 @@ impl WelfareSettlement for TestWelfare {
     }
 
     fn settle_baseline_void(cohort_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
-        SeamCalls::push(SeamCall::WelfareVoidBaseline(cohort_epoch))
+        SeamCalls::push(SeamCall::WelfareVoidBaseline(cohort_epoch))?;
+        OpenBaselineVaults::mutate(|epochs| {
+            if let Some(position) = epochs.iter().position(|epoch| *epoch == cohort_epoch) {
+                epochs.remove(position);
+                System::deposit_event(frame_system::Event::NewAccount {
+                    account: account(250),
+                });
+            }
+        });
+        Ok(())
     }
 
     fn prune(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
@@ -872,8 +886,9 @@ impl BenchmarkHelper<RuntimeOrigin, AccountId32> for TestBenchmarkHelper {
         markets(pid, epoch, gates)
     }
     fn prime_guard_enqueue(_pid: ProposalId) {}
-    fn prime_settlement(_epoch: EpochId) {
+    fn prime_settlement(epoch: EpochId) {
         WelfareScore::set(FixedU64(500_000_000));
+        OpenBaselineVaults::set(vec![epoch]);
     }
 }
 
@@ -911,6 +926,7 @@ pub fn reset_doubles() {
     RetryExhausted::set(false);
     WelfareScore::set(FixedU64(500_000_000));
     PreviousBaselineTwap::set(None);
+    OpenBaselineVaults::set(Vec::new());
     RecordKeeperRebates::set(false);
     KeeperRebates::set(Vec::new());
     BondReleases::set(Vec::new());

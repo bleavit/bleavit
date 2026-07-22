@@ -1029,6 +1029,15 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 			.saturating_add(Weight::from_parts(0, 0))
 			.saturating_add(T::DbWeight::get().writes(1))
 	}
+	// Only `finalize_epoch_baseline` was regenerated on 2026-07-22 with
+	// frame-omni-bencher 58.0.0 on `msi-pro-b650-s`
+	// (`AMD Ryzen 9 7950X3D 16-Core Processor`), using 50 steps x 20 repeats:
+	// `frame-omni-bencher v1 benchmark pallet --runtime
+	// target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
+	// --pallets pallet_epoch --extrinsic finalize_epoch_baseline --steps 50
+	// --repeat 20 --min-duration 0 --output /tmp/pallet_epoch_finalize_sq320.rs`.
+	// The file-level 2026-07-21 header remains the provenance of the prior
+	// full-pallet generation; the function below is the targeted SQ-320 replacement.
 	/// Storage: `Epoch::EpochOf` (r:1 w:1)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
@@ -1059,7 +1068,7 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::StaleEpochCutoff` (`max_values`: Some(1), `max_size`: Some(8), added: 503, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::BaselineCarry` (r:1 w:1)
 	/// Proof: `Epoch::BaselineCarry` (`max_values`: Some(1), `max_size`: Some(5), added: 500, mode: `MaxEncodedLen`)
-	/// Storage: `Constitution::Params` (r:39 w:0)
+	/// Storage: `Constitution::Params` (r:41 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::BaselineVaults` (r:1 w:1)
 	/// Proof: `ConditionalLedger::BaselineVaults` (`max_values`: None, `max_size`: Some(61), added: 2536, mode: `MaxEncodedLen`)
@@ -1091,18 +1100,22 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::CounterForProposals` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::CounterForCohorts` (r:1 w:1)
 	/// Proof: `Epoch::CounterForCohorts` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
+	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
+	/// Storage: `ForeignAssets::Account` (r:2 w:2)
+	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	/// Storage: `Market::ClosedAt` (r:0 w:1)
 	/// Proof: `Market::ClosedAt` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::BaselineTerminalAt` (r:0 w:1)
 	/// Proof: `ConditionalLedger::BaselineTerminalAt` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
 	fn finalize_epoch_baseline() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `53385`
+		//  Measured:  `54912`
 		//  Estimated: `183055`
-		// Minimum execution time: 1_668_622_000 picoseconds.
-		Weight::from_parts(1_718_432_000, 0)
+		// Minimum execution time: 1_746_750_000 picoseconds.
+		Weight::from_parts(1_829_960_000, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
-			.saturating_add(T::DbWeight::get().reads(206))
-			.saturating_add(T::DbWeight::get().writes(123))
+			.saturating_add(T::DbWeight::get().reads(211))
+			.saturating_add(T::DbWeight::get().writes(126))
 	}
 }

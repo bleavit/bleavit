@@ -1,7 +1,7 @@
 # Data surface, canonical naming & UI-visible parameter values
 
-> **DERIVED, NON-NORMATIVE.** Refreshed 2026-07-21 from the frozen spec —
-> doc 02 (integration contract, frozen, v6) and doc 13 (the single home of parameter values) —
+> **DERIVED, NON-NORMATIVE.** Refreshed 2026-07-22 from the frozen spec —
+> doc 02 (integration contract, frozen, v7) and doc 13 (the single home of parameter values) —
 > for upload to Claude Design. Where this file and the spec disagree, the spec wins. All names
 > below are CANONICAL: use these exact spellings in UI copy, labels and mock data. Values
 > marked [VERIFY] are unresolved in the spec — never invent them.
@@ -20,7 +20,7 @@ Block-time basis for human-time conversions: **6 s/block, 14,400 blocks/day** (1
 | **VIT** (native governance token) | **12 decimals**; total supply 10^9; existential deposit 0.01 VIT |
 | Prices / scores | fixed-point, **1e9 scale** at every API/event boundary; quote clamp [0.001, 0.999]; `p_S = 1 − p_L`; gate books map YES ↦ LONG |
 | Time | all deadlines are block numbers (`decide_at`, `maturity`, `grace_end`, `challenge_deadline`, `next_boundary`) — the UI computes countdowns from them |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 6`, a runtime constant, echoed in `release.json` |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 7`, a runtime constant, echoed in `release.json` |
 
 ### A2. What the UI can read and display (02 §3–§4, §7)
 
@@ -127,13 +127,15 @@ URGENT_UPGRADE) — the "update available" banner source.
 `guardian.approve_action` etc. · `welfare.snapshot(epoch)` ·
 `system.apply_authorized_upgrade` · `conviction_voting.vote/delegate/undelegate/remove_vote/
 unlock` · `referenda.submit/place_decision_deposit/refund_*` · cranks: `epoch.tick`,
-`market.crank_observe`, `market.reap`, `epoch.settle_cohort`, `decide`.
+`market.crank_observe`, `market.reap`, `epoch.settle_cohort`,
+`epoch.finalize_epoch_baseline`, `decide`.
 
 **Events (activity feed / notification vocabulary):**
 - ledger: `Split`, `Merged`, `ScalarSplit`, `ScalarMerged`, `PositionTransferred`,
   `VaultResolved { pid, branch }`, `Redeemed`, `ScalarSettlementSet { pid, branch, s }`,
   `ScalarRedeemed`, `ScalarPairRedeemed`, `GateSettled { pid, branch, gate, outcome }`,
-  `VaultVoided { pid }`, `VoidRedeemed { pid, kind, amount, payout }`, `VaultReaped`
+  `VaultVoided { pid }`, `VoidRedeemed { pid, kind, amount, payout }`,
+  `BaselineSettled { epoch, s }`, `VaultReaped`
 - market: `Traded`, `Observed`, `MarketCreated`, `MarketClosed`, `MarketReaped`
 - epoch: `ProposalSubmitted`, `ProposalWithdrawn`, `ScreeningStarted`,
   `ProposalCancelled { reason }`, `ProposalQualified`, `ProposalDeferred`, `MarketsOpened`,
@@ -214,7 +216,7 @@ live. For mock data these are the correct realistic values.
 | Review | day 18 + per-class timelock | queue ETA |
 | Execute | per-proposal maturity within grace | execution queue |
 | Housekeeping | days 20–21 (settlement/cleanup) | phase header |
-| Capital duration | settles at epoch e+3 ≈ **63–66 days** | position detail |
+| Capital duration | measured path settles at epoch e+3 ≈ **63–66 days**; cohort-VOID/orphan Baselines close neutrally when their transition fires | position detail |
 
 ### B2. Markets, trading, LMSR liquidity (13 §1–§3.2)
 
@@ -231,7 +233,7 @@ live. For mock data these are the correct realistic values.
 | Sanity band | [0.02, 0.98] on welfare books (gate books exempt) | chart band shading |
 | Staleness | price gaps > 50 blocks in decision window ⇒ one 3-day extension, then reject | "market stale" warning |
 | `TwapCheckpoints` | 8 per market (chain-served chart fallback) | degraded-mode charts |
-| Bounds | ≤ 6 books/proposal · ≤ 4 Baseline books · ≤ 196 live markets · ≤ 32 live proposals | list sizing |
+| Bounds | ≤ 6 books/proposal · Baselines share the ≤ 196 live-market aggregate · ≤ 64 intake-family records · ≤ 32 post-qualification non-terminal proposals | list sizing |
 
 ### B3. Decision thresholds (13 §1) — per class PARAM / TREASURY / CODE / META
 
@@ -256,7 +258,8 @@ live. For mock data these are the correct realistic values.
 | `prop.bond` | 1k / 5k+0.5%·Ask / 25k / 50k USDC per class | "bond required" in submit form |
 | `intake.max_per_account` | 4 per epoch | "3 of 4 submissions used" |
 | `intake.slash_fraction` | 10% of bond (to INSURANCE) on non-decision-grade / missing preimage | submission warning; `IntakeSlashed` toast |
-| `IntakeQueue` | 64; overflow ⇒ `IntakeFull` | queue page "full" state |
+| `IntakeQueue` | 64; frozen direct read contains Submitted IDs; overflow ⇒ `IntakeFull` | queue page "full" state |
+| `MaxLiveProposals` | 32; post-qualification non-terminal `Proposals` map | proposal discovery bound |
 | `trs.proposer_reward` | PARAM 500 USDC; TREASURY/CODE min(0.05%·Ask, 25k); META 25k | "potential reward" |
 | Payload limits | ≤ 16 calls / 64 KiB / 25% block weight; nesting ≤ 4 | payload builder validation |
 
