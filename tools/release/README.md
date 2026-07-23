@@ -123,9 +123,11 @@ uses `--no-default-features`, then passes the row's complete ordered feature
 list explicitly. `release_default` is the reviewed tag-build selection.
 A manual workflow chooses one of the two primary profiles; CI automatically
 builds its required paired recovery profile. `normal` means the base runtime's
-ordinary migration registration applies, but the current integrity gate still
-requires that registration to be empty until a release-specific cutpoint-total
-repair exists.
+ordinary migration registration applies. The current primary registers exactly
+the bounded conditional-ledger mirror backfill; its paired recovery profile
+registers zero SDK migrations and carries the release-specific, exhaustively
+tested cutpoint-total restart repair. Any additional primary migration remains
+forbidden until it supplies the same evidence.
 
 Assembly requires all four files for both halves (`runtime.wasm`,
 `metadata.scale`, `runtime-info.json`, `build-info.json`). Both Wasm files are
@@ -248,9 +250,10 @@ Strict mode is expected to fail today:
   open under `treasury.reserve_probe_unverified`. That blocker also requires an
   armed probe with a timely authenticated pass, the local F+R line runway, the
   separate remote sovereign USDC plus F+R DOT envelopes/refill margin, and the
-  positive TREASURY reserve-line funding handover before Phase 4. SQ-484 keeps
-  the missing runway/remote-inventory monitoring and alerts explicit; SQ-485
-  keeps the five structurally unsafe zero parameter floors explicit.
+  positive TREASURY reserve-line funding handover before Phase 4. SQ-484's
+  local-runway/remote-inventory monitoring and RB-XCM alerts and SQ-485's
+  nonzero immutable control floors are implemented; live Asset Hub calibration,
+  inventory provisioning and the governed handover remain release evidence.
 
 Two previously-listed blockers are cleared: **B2** implemented all 11
 `FutarchyApi` methods and the remaining metadata constants (contract v4), and

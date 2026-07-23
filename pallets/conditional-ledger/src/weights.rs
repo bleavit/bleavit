@@ -35,6 +35,9 @@ pub trait WeightInfo {
     fn sweep_dust_baseline() -> Weight;
     fn set_split_paused() -> Weight;
     fn set_frozen() -> Weight;
+    fn reconcile() -> Weight;
+    fn migration_step_row() -> Weight;
+    fn migration_step_terminal() -> Weight;
 }
 
 /// A conservative reference weight (03 §5 weight drivers: a handful of map
@@ -96,4 +99,7 @@ ref_impl!(
     sweep_dust_baseline,
     set_split_paused,
     set_frozen,
+    reconcile,
+    migration_step_row,
+    migration_step_terminal,
 );

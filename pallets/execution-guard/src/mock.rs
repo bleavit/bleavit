@@ -1210,6 +1210,38 @@ impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
         .expect("benchmark Phase-4 queue ratification must succeed");
         run_to_maturity(pid);
     }
+    fn prime_recovery_application() -> (H256, RuntimeVersionConstraint) {
+        benchmark_fill_queue();
+        benchmark_fill_records();
+        let current = CurrentSpecName::<Test>::get().unwrap_or_else(|| spec(1));
+        let primary_hash = [0x51; 32];
+        let recovery_hash = [0x52; 32];
+        let target_spec_version = current.spec_version.saturating_add(2);
+        crate::pallet::PendingUpgrade::<Test>::put(execution_guard_core::PendingUpgrade {
+            hash: primary_hash,
+            authorized_at: 1,
+            applicable_at: 1,
+            target_spec_version: current.spec_version.saturating_add(1),
+        });
+        RecoveryImage::<Test>::put(crate::RecoveryImageCommitment {
+            pid: 1,
+            primary_hash,
+            hash: recovery_hash,
+            len: 512,
+            target_spec_version,
+            attestation_id: 8,
+            committed_at: 1,
+        });
+        RecoveryPins::mutate(|pins| pins.push(recovery_hash));
+        PreimageData::mutate(|items| items.push((recovery_hash, vec![0x52; 512])));
+        (
+            recovery_hash,
+            RuntimeVersionConstraint {
+                spec_name: current.spec_name,
+                spec_version: target_spec_version,
+            },
+        )
+    }
     fn prime_failed(pid: ProposalId) {
         benchmark_enqueue(
             pid,

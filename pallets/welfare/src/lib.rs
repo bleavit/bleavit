@@ -746,6 +746,14 @@ pub mod pallet {
             Ok(score)
         }
 
+        /// Narrow, O(1) observation-presence read for epoch's target-specific
+        /// PB-ORACLE-VOID producer. `GateBreachFlags` is written on the first
+        /// successful daily sample whether or not that sample breached, so
+        /// key presence is exactly the 05 §4.7 predicate (SQ-233).
+        pub fn gate_window_sampled(epoch: EpochId) -> bool {
+            GateBreachFlags::<T>::contains_key(epoch)
+        }
+
         /// The 03 §2.3/§5 neutral Baseline-settlement passthrough shared by
         /// cohort VOID and 05 §7(6)'s orphan-epoch finalizer.
         ///

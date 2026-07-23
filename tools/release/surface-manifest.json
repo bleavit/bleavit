@@ -16,7 +16,7 @@
     {
       "id": "treasury.reserve_probe_unverified",
       "owner": "B15",
-      "reason": "07 §8 live Asset Hub fee/barrier/response + bidirectional-HRMP calibration remains release-blocking: probe armed with a timely authenticated pass, local F+R line runway, remote sovereign USDC plus F+R DOT envelopes/refill margin, and positive TREASURY reserve-line funding handover before Phase 4; SQ-484 monitoring/alerts and SQ-485 nonzero parameter floors remain open; SQ-205/SQ-380 production health/feed wiring is complete"
+      "reason": "07 §8 live Asset Hub fee/barrier/response + bidirectional-HRMP calibration remains release-blocking: probe armed with a timely authenticated pass, provisioned local F+R line runway, provisioned remote sovereign USDC plus F+R DOT envelopes/refill margin, and positive TREASURY reserve-line funding handover before Phase 4; SQ-484 monitoring/alerts, SQ-485 nonzero parameter floors, and SQ-205/SQ-380 production health/feed wiring are implemented"
     },
     {
       "id": "oracle.bond_custody_absent",

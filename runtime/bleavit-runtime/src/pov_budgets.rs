@@ -170,9 +170,18 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
             split_baseline, merge_baseline, resolve, void, settle_scalar, settle_gate,
             settle_baseline, redeem, redeem_scalar, redeem_scalar_pair, redeem_gate,
             redeem_void, redeem_baseline, redeem_baseline_pair, sweep_dust,
-            sweep_dust_baseline, set_split_paused, set_frozen,
+            sweep_dust_baseline, set_split_paused, set_frozen, reconcile,
         }),
     );
+    all.push((
+        "pallet_conditional_ledger::migration_step",
+        <crate::weights::pallet_conditional_ledger::WeightInfo<Runtime> as
+            pallet_conditional_ledger::WeightInfo>::migration_step_row()
+        .max(
+            <crate::weights::pallet_conditional_ledger::WeightInfo<Runtime> as
+                pallet_conditional_ledger::WeightInfo>::migration_step_terminal(),
+        ),
+    ));
     all.extend(
         pallet_call_weights!(pallet_market as pallet_market::WeightInfo {
             buy, sell, crank_observe, reap, freeze_creation, set_frozen,
@@ -250,7 +259,7 @@ fn every_futarchy_call_and_hook_fits_the_normal_class() {
     // Exact count of the 12 futarchy pallets' WeightInfo functions — update
     // in lockstep when a trait gains or loses a function, so a silently
     // dropped inventory entry cannot pass.
-    assert_eq!(all.len(), 107, "call inventory drifted");
+    assert_eq!(all.len(), 109, "call inventory drifted");
     for (name, w) in all {
         assert_fits(name, w);
     }

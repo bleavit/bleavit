@@ -586,6 +586,19 @@ fn plan_cleanup(snapshot: &ChainSnapshot, config: &PlannerConfig, cranks: &mut V
     if !enabled(config, Role::Cleanup) {
         return;
     }
+    // I-4 custody reconciliation has no trustworthy state-change precursor:
+    // the anomaly may be an out-of-band balance change. Poll it through the
+    // ordinary per-call cooldown; unchanged comparisons emit no edge and earn
+    // no rebate (the exact sample itself is still refreshed).
+    if snapshot.has_call("ConditionalLedger", "reconcile") {
+        cranks.push(crank(
+            Role::Cleanup,
+            "ConditionalLedger",
+            "reconcile",
+            core::iter::empty::<(&str, Value<()>)>(),
+            PRIORITY_CLEANUP,
+        ));
+    }
     for candidate in &snapshot.market_reaps {
         if snapshot.has_call("Market", "reap")
             && reap_due(
@@ -756,6 +769,7 @@ mod tests {
                 "IncidentRegistry.reap_epoch",
                 "ConditionalLedger.sweep_dust",
                 "ConditionalLedger.sweep_dust_baseline",
+                "ConditionalLedger.reconcile",
                 "ExecutionGuard.execute",
                 "ExecutionGuard.expire_failed_execution",
                 "ExecutionGuard.qualify_recovery_image",
@@ -1067,6 +1081,11 @@ mod tests {
             .clear();
         for role in Role::ALL {
             let planned = plan(&snapshot, &config_for(role));
+            if role == Role::Cleanup {
+                assert_eq!(planned.len(), 1);
+                assert_eq!(planned[0].call, "reconcile");
+                continue;
+            }
             assert!(
                 planned.is_empty(),
                 "expected no not-due {role} cranks; got {planned:?}"

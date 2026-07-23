@@ -553,6 +553,70 @@ pub type RecoveryCodeApplied = frame_support::storage::types::StorageValue<
     frame_support::pallet_prelude::ValueQuery,
 >;
 
+#[cfg(feature = "recovery")]
+pub struct RecoveryLedgerCursorStorage;
+#[cfg(feature = "recovery")]
+impl StorageInstance for RecoveryLedgerCursorStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "RecoveryLedgerCursor";
+}
+#[cfg(feature = "recovery")]
+pub type RecoveryLedgerCursor = frame_support::storage::types::StorageValue<
+    RecoveryLedgerCursorStorage,
+    pallet_conditional_ledger::migration::BackfillCursor,
+    frame_support::pallet_prelude::OptionQuery,
+>;
+
+#[cfg(feature = "recovery")]
+pub struct RecoveryLedgerRepairActiveStorage;
+#[cfg(feature = "recovery")]
+impl StorageInstance for RecoveryLedgerRepairActiveStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "RecoveryLedgerRepairActive";
+}
+#[cfg(feature = "recovery")]
+pub type RecoveryLedgerRepairActive = frame_support::storage::types::StorageValue<
+    RecoveryLedgerRepairActiveStorage,
+    bool,
+    frame_support::pallet_prelude::ValueQuery,
+>;
+
+#[cfg(feature = "recovery")]
+pub struct RecoveryLedgerRepairStepsStorage;
+#[cfg(feature = "recovery")]
+impl StorageInstance for RecoveryLedgerRepairStepsStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "RecoveryLedgerRepairSteps";
+}
+#[cfg(feature = "recovery")]
+pub type RecoveryLedgerRepairSteps = frame_support::storage::types::StorageValue<
+    RecoveryLedgerRepairStepsStorage,
+    u32,
+    frame_support::pallet_prelude::ValueQuery,
+>;
+
+#[cfg(feature = "recovery")]
+pub struct RecoveryLedgerRepairFailedStorage;
+#[cfg(feature = "recovery")]
+impl StorageInstance for RecoveryLedgerRepairFailedStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "RecoveryLedgerRepairFailed";
+}
+#[cfg(feature = "recovery")]
+pub type RecoveryLedgerRepairFailed = frame_support::storage::types::StorageValue<
+    RecoveryLedgerRepairFailedStorage,
+    bool,
+    frame_support::pallet_prelude::ValueQuery,
+>;
+
 pub struct PhaseTransitionLockStorage;
 impl StorageInstance for PhaseTransitionLockStorage {
     fn pallet_prefix() -> &'static str {
@@ -579,6 +643,106 @@ pub type PhaseTransitionApplied = frame_support::storage::types::StorageValue<
     frame_support::pallet_prelude::ValueQuery,
 >;
 
+#[cfg(feature = "recovery")]
+pub(crate) fn recovery_ledger_bookkeeping_weight() -> Weight {
+    // Runtime-local recovery state is outside the pallet benchmark's storage
+    // inventory. Charge its fixed reads/writes plus a conservative 16 KiB
+    // proof envelope in addition to the generated ledger row/terminal weight.
+    <Runtime as frame_system::Config>::DbWeight::get()
+        .reads_writes(8, 8)
+        .saturating_add(Weight::from_parts(0, 16 * 1024))
+}
+
+#[cfg(feature = "recovery")]
+pub(crate) fn recovery_guard_finalization_weight() -> Weight {
+    // This executable benchmark saturates the 32-entry Queue and measures the
+    // exact guard recovery-application path, including full load/clear/reinsert,
+    // pending-outflow sync, release-channel update and recovery-image unpin.
+    // Precharge it on every step because discovering that the ledger cursor is
+    // terminal requires the benchmarked storage read itself.
+    <crate::weights::pallet_execution_guard::WeightInfo<Runtime> as
+        pallet_execution_guard::WeightInfo>::finalize_recovery_application()
+}
+
+pub(crate) fn recovery_aware_migration_detector_weight() -> Weight {
+    // `step` must first discriminate the runtime-local repair/failure/lock
+    // branches before delegating to FRAME's migrator. Charge all three
+    // ValueQuery reads on every branch, including the persistent fail-locked
+    // branch, plus a fixed proof envelope for their runtime-local keys.
+    <Runtime as frame_system::Config>::DbWeight::get()
+        .reads(3)
+        .saturating_add(Weight::from_parts(0, 8 * 1024))
+}
+
+#[cfg(feature = "recovery")]
+fn step_ledger_recovery() -> Weight {
+    use frame_support::{
+        migrations::SteppedMigration,
+        storage::with_storage_layer,
+        traits::{GetStorageVersion, StorageVersion},
+        weights::WeightMeter,
+    };
+
+    let mut meter = WeightMeter::with_limit(
+        MigrationMaxServiceWeight::get().saturating_sub(recovery_aware_migration_detector_weight()),
+    );
+    let overhead =
+        recovery_ledger_bookkeeping_weight().saturating_add(recovery_guard_finalization_weight());
+    let outcome = with_storage_layer(|| {
+        meter
+            .try_consume(overhead)
+            .map_err(|_| DispatchError::Other("ledger recovery bookkeeping exceeds weight"))?;
+        frame_support::ensure!(
+            RecoveryLedgerRepairActive::get()
+                && RecoveryLockdown::get()
+                && RecoveryCodeApplied::get()
+                && !RecoveryLedgerRepairFailed::get(),
+            DispatchError::Other("ledger recovery state is not active")
+        );
+        let steps = RecoveryLedgerRepairSteps::get();
+        frame_support::ensure!(
+            steps < pallet_conditional_ledger::migration::MAX_BACKFILL_STEPS,
+            DispatchError::Other("ledger recovery exceeded its release bound")
+        );
+        let cursor = RecoveryLedgerCursor::get();
+        let next = <pallet_conditional_ledger::migration::BackfillTotalEscrowedV1<
+            Runtime,
+        > as SteppedMigration>::transactional_step(cursor, &mut meter)
+        .map_err(|_| DispatchError::Other("ledger recovery step failed"))?;
+        let next_steps = steps
+            .checked_add(1)
+            .ok_or(DispatchError::Other("ledger recovery step count overflow"))?;
+
+        if let Some(cursor) = next {
+            RecoveryLedgerCursor::put(cursor);
+            RecoveryLedgerRepairSteps::put(next_steps);
+            return Ok(());
+        }
+
+        frame_support::ensure!(
+            ConditionalLedger::on_chain_storage_version() == StorageVersion::new(1)
+                && pallet_conditional_ledger::TotalEscrowed::<Runtime>::exists(),
+            DispatchError::Other("ledger recovery terminal state is incomplete")
+        );
+        let recovery = pallet_execution_guard::RecoveryImage::<Runtime>::get().ok_or(
+            DispatchError::Other("ledger recovery commitment is missing"),
+        )?;
+        let mut installed = pallet_execution_guard::CurrentSpecName::<Runtime>::get().ok_or(
+            DispatchError::Other("ledger recovery current spec is missing"),
+        )?;
+        installed.spec_version = recovery.target_spec_version;
+        crate::ExecutionGuard::recovery_code_applied(recovery.hash, installed)?;
+        complete_terminal_recovery_state();
+        Ok::<(), DispatchError>(())
+    });
+
+    if outcome.is_err() {
+        RecoveryLedgerRepairFailed::put(true);
+        note_phase_transition_failure();
+    }
+    meter.consumed()
+}
+
 /// Keeps FRAME in `OnlyInherents` after the stuck cursor is transactionally
 /// retired for code scheduling and until relay GoAhead installs the recovery
 /// image. `RecoveryBypass` is scoped to the internal frame-system call only;
@@ -595,10 +759,20 @@ impl frame_support::migrations::MultiStepMigrator for RecoveryAwareMigrations {
     }
 
     fn step() -> Weight {
+        let detector = recovery_aware_migration_detector_weight();
+        #[cfg(feature = "recovery")]
+        if RecoveryLedgerRepairActive::get() {
+            if RecoveryLedgerRepairFailed::get() {
+                return detector;
+            }
+            return detector.saturating_add(step_ledger_recovery());
+        }
         if RecoveryLockdown::get() || PhaseTransitionLock::get() {
-            Weight::zero()
+            detector
         } else {
-            <Migrations as frame_support::migrations::MultiStepMigrator>::step()
+            detector.saturating_add(
+                <Migrations as frame_support::migrations::MultiStepMigrator>::step(),
+            )
         }
     }
 }
@@ -645,6 +819,10 @@ pub(crate) fn note_phase_transition_failure() {
 pub(crate) fn complete_terminal_recovery_state() {
     RecoveryScheduledHash::kill();
     RetiredMigrationCursor::kill();
+    RecoveryLedgerCursor::kill();
+    RecoveryLedgerRepairActive::kill();
+    RecoveryLedgerRepairSteps::kill();
+    RecoveryLedgerRepairFailed::kill();
     RecoveryLockdown::kill();
     RecoveryAborted::kill();
     RecoveryCodeApplied::kill();
@@ -792,7 +970,9 @@ impl pallet_execution_guard::MigrationStatusProvider for RuntimeMigrationStatus 
 
 impl pallet_migrations::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
-    #[cfg(not(feature = "runtime-benchmarks"))]
+    #[cfg(all(not(feature = "runtime-benchmarks"), not(feature = "recovery")))]
+    type Migrations = (pallet_conditional_ledger::migration::BackfillTotalEscrowedV1<Runtime>,);
+    #[cfg(all(not(feature = "runtime-benchmarks"), feature = "recovery"))]
     type Migrations = ();
     #[cfg(feature = "runtime-benchmarks")]
     type Migrations = pallet_migrations::mock_helpers::MockedMigrations;
@@ -3961,6 +4141,10 @@ impl pallet_epoch::PreimageAccess for RuntimeEpochPreimages {
 
 pub struct RuntimeEpochWelfare;
 impl pallet_epoch::WelfareSettlement for RuntimeEpochWelfare {
+    fn gate_window_sampled(epoch: EpochId) -> bool {
+        pallet_welfare::Pallet::<Runtime>::gate_window_sampled(epoch)
+    }
+
     fn compute_settlement(
         cohort_epoch: EpochId,
         spec: futarchy_primitives::MetricSpecVersion,
@@ -4967,13 +5151,15 @@ impl pallet_guardian::GuardianTriggers for RuntimeGuardianTriggers {
             dead_man: phase_flags & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED != 0,
             reserve_health: phase_flags & pallet_constitution::PhaseFlagsValue::RESERVE_HEALTH_FLAG
                 != 0,
+            ledger_drift: pallet_conditional_ledger::Pallet::<Runtime>::ledger_drifted(),
             // A relay abort preserves the old code and is not the 09 §3.2
             // halt-at-fault trigger. Only the execution-halt projection of a
             // failed/stalled/applied-invalid migration admits PB-MIGRATION.
             migration_halt: pallet_execution_guard::MigrationHalt::<Runtime>::get(),
-            void_in_flight: crate::Guardian::playbook_active(
-                pallet_guardian::PlaybookId::OracleVoid,
-            ),
+            // An activation record is authorization state, never a trigger
+            // source (06 §6.2). The target-specific pending VOID latch is read
+            // by `oracle_deadlock` below.
+            void_in_flight: pallet_epoch::PendingOracleVoids::<Runtime>::count() > 0,
             ..pallet_guardian::TriggerState::none()
         };
         // Benchmark Wasm must exercise every verified-trigger branch, but the
@@ -4983,6 +5169,7 @@ impl pallet_guardian::GuardianTriggers for RuntimeGuardianTriggers {
         // those reads at the next weight regeneration.
         #[cfg(feature = "runtime-benchmarks")]
         {
+            let _production_reads = state;
             state = pallet_guardian::TriggerState {
                 depeg: true,
                 migration_halt: true,
@@ -4995,6 +5182,18 @@ impl pallet_guardian::GuardianTriggers for RuntimeGuardianTriggers {
             };
         }
         state
+    }
+
+    fn oracle_deadlock(epoch: EpochId) -> bool {
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            let _ = epoch;
+            true
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        {
+            pallet_epoch::PendingOracleVoids::<Runtime>::contains_key(epoch)
+        }
     }
 }
 pub struct RuntimeGuardianEffects;
@@ -5155,7 +5354,24 @@ impl pallet_guardian::GuardianEffectDispatcher for RuntimeGuardianEffects {
             }
             pallet_guardian::GuardianPower::ActivatePlaybook {
                 id, expiry, target, ..
-            } => Self::dispatch_emergency_all(Self::playbook_calls(id, expiry, target)?),
+            } => {
+                if id == pallet_guardian::PlaybookId::OracleVoid {
+                    let epoch = target.ok_or(DispatchError::Other(
+                        "oracle-void playbook requires target epoch",
+                    ))?;
+                    frame_support::ensure!(
+                        pallet_epoch::PendingOracleVoids::<Runtime>::contains_key(epoch),
+                        DispatchError::Other("oracle-void target has no pending deadlock")
+                    );
+                }
+                let calls = Self::playbook_calls(id, expiry, target)?;
+                if id == pallet_guardian::PlaybookId::LedgerFreeze {
+                    let _ = calls;
+                    Self::set_live_conditioned_playbook(id, true)
+                } else {
+                    Self::dispatch_emergency_all(calls)
+                }
+            }
         }
     }
 
@@ -5180,12 +5396,9 @@ impl pallet_guardian::GuardianEffectDispatcher for RuntimeGuardianEffects {
                     expiry: 0,
                 },
             )],
-            pallet_guardian::PlaybookId::LedgerFreeze => vec![
-                RuntimeCall::ConditionalLedger(pallet_conditional_ledger::Call::set_frozen {
-                    frozen: false,
-                }),
-                RuntimeCall::Market(pallet_market::Call::set_frozen { frozen: false }),
-            ],
+            pallet_guardian::PlaybookId::LedgerFreeze => {
+                return Self::set_live_conditioned_playbook(id, false);
+            }
         };
         Self::dispatch_emergency_all(calls)
     }
@@ -5195,10 +5408,60 @@ impl pallet_guardian::GuardianEffectDispatcher for RuntimeGuardianEffects {
             id == pallet_guardian::PlaybookId::LedgerFreeze,
             DispatchError::Other("only ledger-freeze is renewable")
         );
+        if !<RuntimeGuardianTriggers as pallet_guardian::GuardianTriggers>::current().ledger_drift {
+            return Self::set_live_conditioned_playbook(id, false);
+        }
+        if !Self::playbook_effect_matches(id, true) {
+            return Self::set_live_conditioned_playbook(id, true);
+        }
         frame_support::storage::with_storage_layer(|| {
             ConditionalLedger::extend_freeze_once()?;
             Market::extend_freeze_once()
         })
+    }
+
+    fn set_live_conditioned_playbook(
+        id: pallet_guardian::PlaybookId,
+        applied: bool,
+    ) -> Result<(), DispatchError> {
+        frame_support::ensure!(
+            id == pallet_guardian::PlaybookId::LedgerFreeze,
+            DispatchError::Other("playbook is not live-conditioned")
+        );
+        frame_support::storage::with_storage_layer(|| {
+            let now = System::block_number();
+            let ledger_applied = pallet_conditional_ledger::FrozenUntil::<Runtime>::get()
+                .is_some_and(|until| now < until);
+            let market_applied =
+                pallet_market::FrozenUntil::<Runtime>::get().is_some_and(|until| now < until);
+            let mut calls = Vec::new();
+            if ledger_applied != applied {
+                calls.push(RuntimeCall::ConditionalLedger(
+                    pallet_conditional_ledger::Call::set_frozen { frozen: applied },
+                ));
+            }
+            if market_applied != applied {
+                calls.push(RuntimeCall::Market(pallet_market::Call::set_frozen {
+                    frozen: applied,
+                }));
+            }
+            Self::dispatch_emergency_all(calls)?;
+            crate::Constitution::note_ledger_frozen(applied)
+        })
+    }
+
+    fn playbook_effect_matches(id: pallet_guardian::PlaybookId, applied: bool) -> bool {
+        if id != pallet_guardian::PlaybookId::LedgerFreeze {
+            return false;
+        }
+        let now = System::block_number();
+        let ledger = pallet_conditional_ledger::FrozenUntil::<Runtime>::get()
+            .is_some_and(|until| now < until);
+        let market = pallet_market::FrozenUntil::<Runtime>::get().is_some_and(|until| now < until);
+        let constitution = crate::Constitution::phase_flags()
+            & pallet_constitution::PhaseFlagsValue::LEDGER_FROZEN
+            != 0;
+        ledger == applied && market == applied && constitution == applied
     }
 }
 
@@ -5578,7 +5841,9 @@ impl pallet_execution_guard::GuardianState for RuntimeGuardianState {
         })
     }
     fn ledger_freeze_active() -> bool {
-        crate::Guardian::playbook_active(pallet_guardian::PlaybookId::LedgerFreeze)
+        pallet_constitution::PhaseFlags::<Runtime>::get()
+            & pallet_constitution::PhaseFlagsValue::LEDGER_FROZEN
+            != 0
     }
     fn dead_man_freeze_active() -> bool {
         pallet_constitution::PhaseFlags::<Runtime>::get()
@@ -7824,6 +8089,71 @@ impl pallet_execution_guard::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmark
                 System::set_block_number(maturity);
             }
         }
+    }
+
+    fn prime_recovery_application() -> (
+        futarchy_primitives::H256,
+        futarchy_primitives::RuntimeVersionConstraint,
+    ) {
+        use frame_support::traits::QueryPreimage;
+        use pallet_execution_guard::ReleaseChannelWriter;
+
+        System::set_block_number(System::block_number().max(1));
+        if pallet_execution_guard::CurrentSpecName::<Runtime>::get().is_none() {
+            pallet_execution_guard::CurrentSpecName::<Runtime>::put(benchmark_runtime_version());
+        }
+        let current = pallet_execution_guard::CurrentSpecName::<Runtime>::get()
+            .unwrap_or_else(benchmark_runtime_version);
+        for pid in 10_000..10_000u64.saturating_add(pallet_execution_guard::MAX_QUEUE_BOUND.into())
+        {
+            let _ = benchmark_guard_enqueue(
+                pid,
+                RuntimeCall::System(frame_system::Call::remark {
+                    remark: alloc::vec![0x52; 32],
+                }),
+                pallet_execution_guard::CallDomain::Public,
+            );
+        }
+        let primary_hash = [0x51; 32];
+        let recovery = benchmark_recovery_image(1, primary_hash).unwrap_or(
+            pallet_execution_guard::RecoveryImageDescriptor {
+                hash: [0x52; 32],
+                len: 512,
+                target_spec_version: current.spec_version.saturating_add(2),
+                attestation_id: 8,
+            },
+        );
+        <Preimage as QueryPreimage>::request(&Hash::from(recovery.hash));
+        pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::put(
+            pallet_execution_guard::PendingUpgrade {
+                hash: primary_hash,
+                authorized_at: System::block_number(),
+                applicable_at: System::block_number(),
+                target_spec_version: current.spec_version.saturating_add(1),
+            },
+        );
+        pallet_execution_guard::RecoveryImage::<Runtime>::put(
+            pallet_execution_guard::RecoveryImageCommitment {
+                pid: 1,
+                primary_hash,
+                hash: recovery.hash,
+                len: recovery.len,
+                target_spec_version: recovery.target_spec_version,
+                attestation_id: recovery.attestation_id,
+                committed_at: System::block_number(),
+            },
+        );
+        let _ = RuntimeReleaseChannel::on_upgrade_authorized(
+            current.spec_version.saturating_add(1),
+            System::block_number(),
+        );
+        (
+            recovery.hash,
+            futarchy_primitives::RuntimeVersionConstraint {
+                spec_name: current.spec_name,
+                spec_version: recovery.target_spec_version,
+            },
+        )
     }
 
     fn prime_failed(pid: futarchy_primitives::ProposalId) {

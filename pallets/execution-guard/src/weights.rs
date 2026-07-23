@@ -23,6 +23,7 @@ pub trait WeightInfo {
     fn reject_stale() -> Weight;
     fn commit_recovery_image() -> Weight;
     fn authorize_phase_four() -> Weight;
+    fn finalize_recovery_application() -> Weight;
     fn qualify_recovery_image(bytes: u32) -> Weight;
 }
 
@@ -53,6 +54,9 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     }
     fn authorize_phase_four() -> Weight {
         base::<T>(20_000_000, 3, 2)
+    }
+    fn finalize_recovery_application() -> Weight {
+        base::<T>(900_000_000, 128, 72)
     }
     fn qualify_recovery_image(bytes: u32) -> Weight {
         base::<T>(180_000_000, 16, 3)
@@ -89,6 +93,9 @@ impl WeightInfo for () {
     }
     fn authorize_phase_four() -> Weight {
         rocks(20_000_000, 3, 2)
+    }
+    fn finalize_recovery_application() -> Weight {
+        rocks(900_000_000, 128, 72)
     }
     fn qualify_recovery_image(bytes: u32) -> Weight {
         rocks(180_000_000, 16, 3)

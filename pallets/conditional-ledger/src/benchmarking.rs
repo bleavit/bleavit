@@ -5,7 +5,11 @@
 use crate::core_ledger::{baseline, position};
 use crate::*;
 use frame_benchmarking::v2::*;
-use frame_support::traits::{fungibles::Mutate, EnsureOrigin, Get};
+use frame_support::{
+    migrations::SteppedMigration,
+    traits::{fungibles::Mutate, EnsureOrigin, Get, GetStorageVersion, StorageVersion},
+    weights::{Weight, WeightMeter},
+};
 use frame_system::RawOrigin;
 use futarchy_primitives::{
     kernel, Balance, Branch, FixedU64, GateType, PositionKind, ProposalId, ScalarSide,
@@ -459,6 +463,79 @@ mod benchmarks {
         _(origin as T::RuntimeOrigin, true);
         assert!(FrozenUntil::<T>::get().is_some());
         Ok(())
+    }
+
+    #[benchmark]
+    fn reconcile() {
+        let caller: T::AccountId = whitelisted_caller();
+        let (custody, _) = Pallet::<T>::maintained_collateral_totals()
+            .expect("benchmark custody balance is readable");
+        TotalEscrowed::<T>::put(custody.saturating_add(1));
+        LastReconciliation::<T>::put(ReconciliationSample {
+            liability: 0,
+            custody: 0,
+            at: frame_system::Pallet::<T>::block_number(),
+        });
+        T::BenchmarkHelper::prime_keeper_rebate();
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller.clone()));
+        assert!(LedgerDrifted::<T>::get());
+        let sample = LastReconciliation::<T>::get().expect("reconciliation sample stored");
+        assert!(sample.liability > sample.custody);
+        T::BenchmarkHelper::assert_keeper_rebate_paid(
+            futarchy_primitives::keeper::CrankClass::General,
+        );
+    }
+
+    #[benchmark]
+    fn migration_step_row() {
+        StorageVersion::new(0).put::<Pallet<T>>();
+        TotalEscrowed::<T>::kill();
+        let mut vault = conditional_ledger_core::VaultInfo::open(0);
+        vault.escrowed = SEED_AMT;
+        Vaults::<T>::insert(1, vault);
+        let mut meter = WeightMeter::with_limit(Weight::MAX);
+
+        #[block]
+        {
+            let next =
+                migration::BackfillTotalEscrowedV1::<T>::transactional_step(None, &mut meter)
+                    .expect("valid benchmark row");
+            assert!(matches!(
+                next,
+                Some(migration::BackfillCursor::Proposals {
+                    total: SEED_AMT,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[benchmark]
+    fn migration_step_terminal() {
+        StorageVersion::new(0).put::<Pallet<T>>();
+        TotalEscrowed::<T>::kill();
+        let cursor = migration::BackfillCursor::Baselines {
+            last: None,
+            total: SEED_AMT,
+        };
+        let mut meter = WeightMeter::with_limit(Weight::MAX);
+
+        #[block]
+        {
+            let next = migration::BackfillTotalEscrowedV1::<T>::transactional_step(
+                Some(cursor),
+                &mut meter,
+            )
+            .expect("valid terminal benchmark step");
+            assert!(next.is_none());
+        }
+
+        assert_eq!(TotalEscrowed::<T>::get(), SEED_AMT);
+        assert_eq!(
+            Pallet::<T>::on_chain_storage_version(),
+            StorageVersion::new(1)
+        );
     }
 
     impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext(), crate::mock::Test);

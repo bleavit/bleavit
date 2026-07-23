@@ -459,6 +459,49 @@ fn ledger_freeze_requires_drift_and_one_renewal() {
 }
 
 #[test]
+fn ledger_freeze_effect_lifts_and_reengages_with_live_drift_without_deleting_record() {
+    new_test_ext().execute_with(|| {
+        set_triggers(TriggerState {
+            ledger_drift: true,
+            ..TriggerState::none()
+        });
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::ActivatePlaybook {
+                id: PlaybookId::LedgerFreeze,
+                trigger: PlaybookTrigger::LedgerDrift,
+                expiry: 100,
+                target: None,
+            },
+            hash(33),
+        ));
+        approve_to_dispatch();
+        assert!(LedgerFreezeEffect::get());
+        assert_eq!(ActivePlaybooks::<Test>::get().len(), 1);
+
+        set_triggers(TriggerState::none());
+        run_to_block(2);
+        assert!(!LedgerFreezeEffect::get());
+        assert_eq!(ActivePlaybooks::<Test>::get().len(), 1);
+        assert!(!last_events()
+            .iter()
+            .any(|event| matches!(event, Event::PlaybookExpired { .. })));
+
+        set_triggers(TriggerState {
+            ledger_drift: true,
+            ..TriggerState::none()
+        });
+        run_to_block(3);
+        assert!(LedgerFreezeEffect::get());
+        assert_eq!(ActivePlaybooks::<Test>::get().len(), 1);
+        assert_eq!(
+            LedgerFreezeEffectTransitions::get(),
+            vec![true, false, true]
+        );
+    });
+}
+
+#[test]
 fn delay_once_allowance_resets_across_epochs() {
     new_test_ext().execute_with(|| {
         set_status(ProposalStatus::Queued, false);

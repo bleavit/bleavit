@@ -617,9 +617,8 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_conditional_ledger::Call::redeem_baseline { .. }
             | pallet_conditional_ledger::Call::redeem_baseline_pair { .. }
             | pallet_conditional_ledger::Call::sweep_dust { .. }
-            | pallet_conditional_ledger::Call::sweep_dust_baseline { .. } => {
-                leaf(CallDomain::Public)
-            }
+            | pallet_conditional_ledger::Call::sweep_dust_baseline { .. }
+            | pallet_conditional_ledger::Call::reconcile { .. } => leaf(CallDomain::Public),
             pallet_conditional_ledger::Call::set_split_paused { .. }
             | pallet_conditional_ledger::Call::set_frozen { .. } => {
                 leaf(CallDomain::EmergencyPlaybook)

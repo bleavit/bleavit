@@ -34,7 +34,9 @@ use frame_support::{
 };
 
 #[cfg(feature = "try-runtime")]
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
+#[cfg(feature = "recovery")]
+use parity_scale_codec::DecodeAll;
 #[cfg(feature = "try-runtime")]
 use parity_scale_codec::{Decode, Encode};
 
@@ -82,13 +84,10 @@ impl UncheckedOnRuntimeUpgrade for RetireB16StateInner {
         // Record presence so an operator reading the try-runtime log can see the
         // before-state. On a real chain both are absent; a try-runtime harness
         // may have seeded them (the dedicated runtime test does exactly that).
-        let mut present = Vec::with_capacity(2);
-        present.push(u8::from(sp_io::storage::exists(
-            &retired::blocked_meters_key(),
-        )));
-        present.push(u8::from(sp_io::storage::exists(
-            &retired::progress_marker_key(),
-        )));
+        let present = vec![
+            u8::from(sp_io::storage::exists(&retired::blocked_meters_key())),
+            u8::from(sp_io::storage::exists(&retired::progress_marker_key())),
+        ];
         Ok(present)
     }
 
@@ -511,6 +510,17 @@ impl OnRuntimeUpgrade for MigrateConstitutionProbeControlsV2 {
 /// row from leaving a partially advanced v1 state.
 pub struct MigrateConstitutionReserveProbeV2;
 
+#[cfg(feature = "try-runtime")]
+type ConstitutionReserveProbeV2PreState = (
+    frame_support::traits::StorageVersion,
+    Option<pallet_constitution::ParamRecord>,
+    Option<pallet_constitution::ParamRecord>,
+    [pallet_constitution::ParamRecord; 5],
+    pallet_constitution::ParamRecord,
+    pallet_constitution::ParamRecord,
+    [pallet_constitution::ParamRecord; 5],
+);
+
 impl OnRuntimeUpgrade for MigrateConstitutionReserveProbeV2 {
     fn on_runtime_upgrade() -> Weight {
         use frame_support::traits::{GetStorageVersion, StorageVersion};
@@ -630,15 +640,8 @@ impl OnRuntimeUpgrade for MigrateConstitutionReserveProbeV2 {
     fn post_upgrade(state: Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
         use frame_support::traits::{GetStorageVersion, StorageVersion};
 
-        let (version, fee_before, rate_before, controls_before, fee, rate, controls): (
-            StorageVersion,
-            Option<pallet_constitution::ParamRecord>,
-            Option<pallet_constitution::ParamRecord>,
-            [pallet_constitution::ParamRecord; 5],
-            pallet_constitution::ParamRecord,
-            pallet_constitution::ParamRecord,
-            [pallet_constitution::ParamRecord; 5],
-        ) = Decode::decode(&mut &state[..]).map_err(|_| {
+        let (version, fee_before, rate_before, controls_before, fee, rate, controls):
+            ConstitutionReserveProbeV2PreState = Decode::decode(&mut &state[..]).map_err(|_| {
             sp_runtime::TryRuntimeError::Other(
                 "constitution v2 migration: invalid composite pre-upgrade state",
             )
@@ -834,20 +837,58 @@ impl frame_support::traits::OnRuntimeUpgrade for PhaseFourTransition {
 #[cfg(feature = "recovery")]
 pub struct TerminalRecoveryTransition;
 
-/// Release-specific cutpoint repair for an ordinary failed MBM. The current
-/// runtime registers no production MBMs, so there is no truthful generic
-/// rollback to perform. A future MBM-bearing primary MUST replace this body in
-/// its paired N+2 recovery profile with a bounded, cutpoint-total repair and
-/// the corresponding exhaustive tests. Returning an error here is deliberate:
-/// it preserves `OnlyInherents` rather than reopening transactions against a
-/// half-migrated layout.
+/// Initialize the release-specific cutpoint-total repair for the sole primary
+/// MBM in this release. The backfill is read-only until its terminal
+/// mirror/version pair, so the safest repair for every valid cutpoint is to
+/// validate the retired SDK cursor and restart the bounded scan from its
+/// beginning. The recovery profile itself registers zero SDK MBMs; its
+/// runtime-local cursor is serviced under `RecoveryLockdown`, and ordinary
+/// calls remain impossible until the exact total commits.
 #[cfg(feature = "recovery")]
 fn repair_retired_mbm(
-    _cursor: &pallet_migrations::CursorOf<Runtime>,
+    cursor: &pallet_migrations::CursorOf<Runtime>,
 ) -> Result<(), sp_runtime::DispatchError> {
-    Err(sp_runtime::DispatchError::Other(
-        "ordinary MBM recovery repair is not configured",
-    ))
+    use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+    frame_support::ensure!(
+        crate::ConditionalLedger::on_chain_storage_version() == StorageVersion::new(0)
+            && !pallet_conditional_ledger::TotalEscrowed::<Runtime>::exists(),
+        sp_runtime::DispatchError::Other("ledger recovery source version is not exact")
+    );
+    frame_support::ensure!(
+        !crate::configs::RecoveryLedgerRepairActive::get()
+            && !crate::configs::RecoveryLedgerCursor::exists()
+            && crate::configs::RecoveryLedgerRepairSteps::get() == 0
+            && !crate::configs::RecoveryLedgerRepairFailed::get(),
+        sp_runtime::DispatchError::Other("ledger recovery cursor already exists")
+    );
+
+    match cursor {
+        pallet_migrations::MigrationCursor::Active(active) => {
+            frame_support::ensure!(
+                active.index == 0,
+                sp_runtime::DispatchError::Other("ledger recovery segment index is invalid")
+            );
+            if let Some(inner) = active.inner_cursor.as_ref() {
+                pallet_conditional_ledger::migration::BackfillCursor::decode_all(&mut &inner[..])
+                    .map_err(|_| {
+                    sp_runtime::DispatchError::Other("ledger recovery cursor is malformed")
+                })?;
+            }
+        }
+        pallet_migrations::MigrationCursor::Stuck => {
+            frame_support::ensure!(
+                crate::configs::MigrationFailedStep::get() == Some(0),
+                sp_runtime::DispatchError::Other("ledger recovery failed segment is invalid")
+            );
+        }
+    }
+
+    crate::configs::RecoveryLedgerCursor::kill();
+    crate::configs::RecoveryLedgerRepairSteps::kill();
+    crate::configs::RecoveryLedgerRepairFailed::kill();
+    crate::configs::RecoveryLedgerRepairActive::put(true);
+    Ok(())
 }
 
 #[cfg(feature = "recovery")]
@@ -900,15 +941,14 @@ impl frame_support::traits::OnRuntimeUpgrade for TerminalRecoveryTransition {
                     }
                 };
                 transition_phase_four(plan)?;
+                crate::ExecutionGuard::recovery_code_applied(installed_hash, installed_version)?;
+                crate::configs::complete_terminal_recovery_state();
             } else {
                 let cursor = crate::configs::RetiredMigrationCursor::get().ok_or(
                     sp_runtime::DispatchError::Other("terminal recovery cause missing"),
                 )?;
                 repair_retired_mbm(&cursor)?;
             }
-
-            crate::ExecutionGuard::recovery_code_applied(installed_hash, installed_version)?;
-            crate::configs::complete_terminal_recovery_state();
             Ok::<(), sp_runtime::DispatchError>(())
         });
         if completed.is_err() {
@@ -937,15 +977,16 @@ impl frame_support::traits::OnRuntimeUpgrade for TerminalRecoveryTransition {
 
     #[cfg(feature = "try-runtime")]
     fn post_upgrade(state: Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
-        frame_support::ensure!(
-            !crate::configs::RecoveryCodeApplied::get()
-                && !crate::configs::RecoveryLockdown::get()
-                && !crate::configs::RecoveryScheduledHash::exists()
-                && !crate::configs::RetiredMigrationCursor::exists()
-                && !pallet_execution_guard::RecoveryImage::<Runtime>::exists(),
-            "terminal recovery migration: recovery state survived completion"
-        );
         if state.as_slice() == [1] {
+            frame_support::ensure!(
+                !crate::configs::RecoveryCodeApplied::get()
+                    && !crate::configs::RecoveryLockdown::get()
+                    && !crate::configs::RecoveryScheduledHash::exists()
+                    && !crate::configs::RetiredMigrationCursor::exists()
+                    && !pallet_execution_guard::RecoveryImage::<Runtime>::exists()
+                    && !crate::configs::RecoveryLedgerRepairActive::get(),
+                "terminal recovery migration: phase recovery state survived completion"
+            );
             frame_support::ensure!(
                 pallet_constitution::PhaseFlags::<Runtime>::get()
                     == pallet_constitution::PhaseFlagsValue::PARAM_ARMED
@@ -955,6 +996,17 @@ impl frame_support::traits::OnRuntimeUpgrade for TerminalRecoveryTransition {
                         pallet_execution_guard::PhaseFourBridgeState::Consumed
                     ),
                 "terminal recovery migration: Phase-4 repair is incomplete"
+            );
+        } else {
+            frame_support::ensure!(
+                crate::configs::RecoveryCodeApplied::get()
+                    && crate::configs::RecoveryLockdown::get()
+                    && crate::configs::RecoveryScheduledHash::exists()
+                    && crate::configs::RetiredMigrationCursor::exists()
+                    && pallet_execution_guard::RecoveryImage::<Runtime>::exists()
+                    && crate::configs::RecoveryLedgerRepairActive::get()
+                    && !crate::configs::RecoveryLedgerRepairFailed::get(),
+                "terminal recovery migration: ledger repair was not initialized"
             );
         }
         Ok(())

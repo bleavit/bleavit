@@ -384,6 +384,7 @@ pub trait BenchmarkHelper<RuntimeOrigin> {
     fn prime_recovery_commit(pid: ProposalId) -> RecoveryImageDescriptor;
     fn prime_recovery_qualification(pid: ProposalId, bytes: u32);
     fn prime_phase_four(pid: ProposalId);
+    fn prime_recovery_application() -> (H256, RuntimeVersionConstraint);
     fn prime_failed(pid: ProposalId);
     fn prime_pending_upgrade(bytes: u32) -> Vec<u8>;
     fn prime_stale(pid: ProposalId);

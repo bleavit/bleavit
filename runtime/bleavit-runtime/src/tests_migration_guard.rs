@@ -20,6 +20,12 @@ use frame_support::{
 };
 use futarchy_primitives::kernel;
 use pallet_execution_guard::PhaseState;
+#[cfg(not(any(
+    feature = "runtime-benchmarks",
+    feature = "try-runtime",
+    feature = "recovery"
+)))]
+use parity_scale_codec::Encode;
 use parity_scale_codec::MaxEncodedLen;
 use sp_runtime::traits::Header as _;
 
@@ -29,6 +35,101 @@ use frame_support::traits::EnsureOrigin;
 use frame_support::traits::{QueryPreimage, StorePreimage};
 
 use crate::{tests, Constitution, ExecutionGuard, Oracle, Runtime, RuntimeEvent, System};
+
+#[cfg(not(any(
+    feature = "runtime-benchmarks",
+    feature = "try-runtime",
+    feature = "recovery"
+)))]
+use frame_support::storage::StoragePrefixedMap;
+
+#[cfg(not(any(
+    feature = "runtime-benchmarks",
+    feature = "try-runtime",
+    feature = "recovery"
+)))]
+#[test]
+fn ledger_backfill_completes_through_the_real_migration_framework() {
+    tests::development_ext().execute_with(|| {
+        let mut proposal = conditional_ledger_core::VaultInfo::open(0);
+        proposal.escrowed = 7;
+        pallet_conditional_ledger::Vaults::<Runtime>::insert(41, proposal);
+        let mut baseline = conditional_ledger_core::BaselineVaultInfo::open();
+        baseline.escrowed = 11;
+        pallet_conditional_ledger::BaselineVaults::<Runtime>::insert(9, baseline);
+        pallet_conditional_ledger::TotalEscrowed::<Runtime>::kill();
+        StorageVersion::new(0).put::<crate::ConditionalLedger>();
+
+        let _ = <pallet_migrations::Pallet<Runtime> as OnRuntimeUpgrade>::on_runtime_upgrade();
+        assert!(matches!(
+            pallet_migrations::Cursor::<Runtime>::get(),
+            Some(pallet_migrations::MigrationCursor::Active(_))
+        ));
+
+        for block in 2..=8 {
+            System::set_block_number(block);
+            let _ = <pallet_migrations::Pallet<Runtime> as MultiStepMigrator>::step();
+            if !pallet_migrations::Cursor::<Runtime>::exists() {
+                break;
+            }
+        }
+
+        assert!(!pallet_migrations::Cursor::<Runtime>::exists());
+        assert_eq!(
+            crate::ConditionalLedger::on_chain_storage_version(),
+            StorageVersion::new(1)
+        );
+        assert_eq!(
+            pallet_conditional_ledger::TotalEscrowed::<Runtime>::get(),
+            18
+        );
+        assert_eq!(crate::configs::MigrationHaltSources::get(), 0);
+    });
+}
+
+#[cfg(not(any(
+    feature = "runtime-benchmarks",
+    feature = "try-runtime",
+    feature = "recovery"
+)))]
+#[test]
+fn corrupt_ledger_row_sticks_the_real_migration_and_raises_the_halt() {
+    tests::development_ext().execute_with(|| {
+        StorageVersion::new(0).put::<crate::ConditionalLedger>();
+        pallet_conditional_ledger::TotalEscrowed::<Runtime>::kill();
+
+        let mut malformed = <pallet_conditional_ledger::Vaults<Runtime> as StoragePrefixedMap<
+            conditional_ledger_core::VaultInfo,
+        >>::final_prefix()
+        .to_vec();
+        malformed.push(0xff);
+        unhashed::put_raw(
+            &malformed,
+            &conditional_ledger_core::VaultInfo::open(0).encode(),
+        );
+
+        let _ = <pallet_migrations::Pallet<Runtime> as OnRuntimeUpgrade>::on_runtime_upgrade();
+        System::set_block_number(2);
+        let _ = <pallet_migrations::Pallet<Runtime> as MultiStepMigrator>::step();
+
+        assert!(matches!(
+            pallet_migrations::Cursor::<Runtime>::get(),
+            Some(pallet_migrations::MigrationCursor::Stuck)
+        ));
+        assert_eq!(crate::configs::MigrationFailedStep::get(), Some(0));
+        assert!(crate::configs::MigrationHaltSources::get() != 0);
+        assert!(pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        assert_eq!(
+            crate::ConditionalLedger::on_chain_storage_version(),
+            StorageVersion::new(0)
+        );
+        assert_eq!(
+            pallet_conditional_ledger::TotalEscrowed::<Runtime>::get(),
+            0
+        );
+        assert!(unhashed::exists(&malformed));
+    });
+}
 
 /// SQ-132(d): "stalled" is a pure function of the SDK cursor's own `started_at`,
 /// never of the cursor bytes failing to change. The retired byte-equality
@@ -63,20 +164,18 @@ fn stall_is_derived_from_started_at_not_cursor_bytes() {
     });
 }
 
-/// SQ-309 / SQ-132(d)(ii)/(iii): ordinary MBMs stay prohibited until a future
-/// release provides and tests a cutpoint-total repair for each registration.
-/// The bounds below remain the release-time requirements once that deliberate
-/// profile-specific repair exists. Gated to the production `Migrations`
-/// config (benchmarking swaps in `MockedMigrations`).
-#[cfg(not(feature = "runtime-benchmarks"))]
+/// SQ-309 / SQ-132(d)(ii)/(iii): this primary is the first profile allowed to
+/// register an MBM because its paired recovery image carries the
+/// release-specific cutpoint-total ledger repair.
+#[cfg(all(not(feature = "runtime-benchmarks"), not(feature = "recovery")))]
 #[test]
 fn registered_mbms_obey_the_b16_lockdown() {
     type Migrations = <Runtime as pallet_migrations::Config>::Migrations;
 
     assert_eq!(
         <Migrations as SteppedMigrations>::len(),
-        0,
-        "a primary profile must not register an MBM without a cutpoint-total paired recovery repair",
+        1,
+        "this primary release must register exactly its paired ledger backfill",
     );
     let mut aggregate: u64 = 0;
     for i in 0..<Migrations as SteppedMigrations>::len() {
@@ -1092,7 +1191,7 @@ fn phase_transition_terminal_recovery_applies_the_committed_plan_and_unlocks() {
 
 #[cfg(feature = "recovery")]
 #[test]
-fn terminal_recovery_without_a_release_specific_mbm_repair_fails_closed() {
+fn terminal_recovery_with_a_malformed_retired_cursor_fails_closed() {
     let recovery = b"terminal-recovery-with-unrepairable-retired-cursor".to_vec();
     tests::upgrade_ext_with_artifact_versions(vec![(recovery.clone(), crate::VERSION)])
         .execute_with(|| {
@@ -1152,7 +1251,7 @@ fn recovery_lockdown_persists_only_inherents_after_cursor_retirement() {
         assert!(crate::configs::RecoveryAwareMigrations::ongoing());
         assert_eq!(
             crate::configs::RecoveryAwareMigrations::step(),
-            frame_support::weights::Weight::zero(),
+            crate::configs::recovery_aware_migration_detector_weight(),
         );
         assert!(crate::configs::RecoveryLockdown::get());
 
