@@ -27,11 +27,13 @@
 //!
 //! ## Origins (08 §1.1)
 //!
-//! Every outflow call (`spend`, `open_stream`, `cancel_stream`,
+//! Every ordinary outflow call (`spend`, `open_stream`, `cancel_stream`,
 //! `fund_budget_line`, `issue_vit`, `recover_foreign`) requires the
 //! `FutarchyTreasury` origin, dispatched by the execution guard when a
-//! TREASURY-class decision executes (06 §3 / 09). `claim_stream` is a Signed
-//! recipient call; `execute_coretime_renewal` is a permissionless Signed keeper
+//! TREASURY-class decision executes (06 §3 / 09). The bounded Phase-4
+//! community-distribution call is the one exception: it requires the
+//! `FutarchyParam` origin after the transition has recorded its arming block.
+//! `claim_stream` is a Signed recipient call; `execute_coretime_renewal` is a permissionless Signed keeper
 //! call, freeze-exempt (D-9). While the one-way bootstrap latch is open, the
 //! stored ops multisig may also top up only `OpsReserveProbe` to the live
 //! fail-plus-recovery runway ceiling; the first successful positive
@@ -90,6 +92,33 @@ pub const MAX_FUNDED_CORETIME_BOUND: u32 = MAX_FUNDED_CORETIME_PERIODS as u32;
 /// Rollout-phase seam for the Phase≤4 ops-multisig funding path (08 §2.1).
 pub trait TreasuryPhase {
     fn treasury_armed() -> bool;
+}
+
+/// Runtime custody adapter for the Phase-4 community-distribution path.
+/// The treasury pallet deliberately does not depend on `pallet-vesting` or on
+/// the runtime's native currency implementation. The runtime binds this seam
+/// to the SDK pallet's `VestedTransfer` implementation, while pallet tests use
+/// a recording adapter. An error must leave the pot and schedule unchanged.
+pub trait CommunityVesting<AccountId, BlockNumber> {
+    fn vested_transfer(
+        source: &AccountId,
+        beneficiary: &AccountId,
+        amount: futarchy_primitives::Balance,
+        per_block: futarchy_primitives::Balance,
+        starting_block: BlockNumber,
+    ) -> frame_support::dispatch::DispatchResult;
+}
+
+impl<AccountId, BlockNumber> CommunityVesting<AccountId, BlockNumber> for () {
+    fn vested_transfer(
+        _: &AccountId,
+        _: &AccountId,
+        _: futarchy_primitives::Balance,
+        _: futarchy_primitives::Balance,
+        _: BlockNumber,
+    ) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
 }
 
 /// Exact live cap for the temporary signed reserve-probe top-up path. `None`
@@ -255,6 +284,8 @@ impl RenewalDispatch for () {
 pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     /// A runtime origin that [`Config::TreasuryOrigin`] admits.
     fn treasury_origin() -> RuntimeOrigin;
+    /// A runtime origin that [`Config::CommunityDistributionOrigin`] admits.
+    fn community_origin() -> RuntimeOrigin;
     /// A funded keeper/recipient account for Signed calls.
     fn account(seed: u8) -> AccountId;
     /// Seed the real-USDC `MAIN` custody balance used by the dedicated payout
@@ -286,7 +317,7 @@ pub mod pallet {
     use frame_support::traits::EnsureOrigin;
     use frame_system::pallet_prelude::*;
     use parity_scale_codec::{Decode, Encode};
-    use sp_runtime::traits::SaturatedConversion;
+    use sp_runtime::traits::{SaturatedConversion, Zero};
     use sp_runtime::TryRuntimeError;
 
     use futarchy_primitives::{
@@ -294,9 +325,9 @@ pub mod pallet {
         Balance, BlockNumber, EpochId, ProposalClass,
     };
 
-    /// v1 adds the irreversible bootstrap-ops-funding closure latch. The
-    /// migration initializes it from the already-stored TREASURY phase bit.
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+    /// v2 adds the one-shot community-distribution allocation state. The
+    /// migration seeds its remaining amount from the fixed genesis allocation.
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(2);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -314,6 +345,30 @@ pub mod pallet {
         /// (A4/B1a); no signed or unsigned origin may satisfy it. Narrow by
         /// construction (rule 6): a mis-wired origin cannot reach an outflow.
         type TreasuryOrigin: EnsureOrigin<Self::RuntimeOrigin>;
+
+        /// Admits the passed PARAM decision that allocates one bounded
+        /// community-distribution tranche after Phase-4 arming (08 §2.1).
+        /// This remains separate from `TreasuryOrigin`: TREASURY is not armed
+        /// at Phase 4, while the community pot must become usable there.
+        type CommunityDistributionOrigin: EnsureOrigin<Self::RuntimeOrigin>;
+
+        /// SDK vesting adapter for the community pot transfer.
+        type CommunityVesting: CommunityVesting<Self::AccountId, BlockNumberFor<Self>>;
+
+        /// Derived keyless source account holding the genesis community VIT.
+        type CommunityPot: Get<Self::AccountId>;
+
+        /// 08 §2.1's fixed community allocation (25% of total VIT supply).
+        type CommunityDistributionAmount: Get<Balance>;
+
+        /// 08 §2.1's 24-month vesting horizon in para-blocks.
+        type CommunityVestingDuration: Get<BlockNumberFor<Self>>;
+
+        /// 13's minimum community tranche (the SDK's 1-VIT minimum).
+        type CommunityMinVestedTransfer: Get<Balance>;
+
+        /// 13 §4 bound on the number of community schedules.
+        type MaxCommunitySchedules: Get<u32>;
 
         /// Live 13 §1 treasury tunables, read from `pallet-constitution::Params`
         /// (rule 4). See [`TreasuryParams`].
@@ -438,6 +493,20 @@ pub mod pallet {
     #[pallet::storage]
     pub type BootstrapOpsFundingClosed<T: Config> = StorageValue<_, bool, ValueQuery>;
 
+    /// Block at which the Phase-3→4 transition armed community distribution.
+    /// Absence is the fail-closed pre-Phase-4 state.
+    #[pallet::storage]
+    pub type CommunityDistributionArmedAt<T: Config> =
+        StorageValue<_, BlockNumberFor<T>, OptionQuery>;
+
+    /// Undistributed amount remaining in the derived community pot.
+    #[pallet::storage]
+    pub type CommunityDistributionRemaining<T: Config> = StorageValue<_, Balance, ValueQuery>;
+
+    /// Number of successful bounded community schedules created.
+    #[pallet::storage]
+    pub type CommunityScheduleCount<T: Config> = StorageValue<_, u32, ValueQuery>;
+
     /// Ops-operated account funded on the Coretime chain (09 §4).
     #[pallet::storage]
     pub type CoretimeRenewalAccount<T: Config> = StorageValue<_, [u8; 32], OptionQuery>;
@@ -506,6 +575,16 @@ pub mod pallet {
         },
         /// INSURANCE was swept into `MAIN` by a TREASURY decision (08 §1.2/§1.4).
         InsuranceSwept { amount: Balance },
+        /// A bounded Phase-4 community tranche was transferred into an SDK
+        /// vesting schedule. This is treasury-owned operational history, not a
+        /// frozen integration-contract event.
+        CommunityScheduleCreated {
+            beneficiary: T::AccountId,
+            amount: Balance,
+            start: BlockNumberFor<T>,
+            per_block: Balance,
+            remaining: Balance,
+        },
     }
 
     /// 1:1 with [`CoreError`]; `CoreError::BadOrigin` maps to
@@ -579,6 +658,19 @@ pub mod pallet {
         QuoteTtlUnset,
         /// Stored quote timestamp is ahead of the current block.
         QuoteTimestampInFuture,
+        /// Community distribution has not reached Phase-4 arming.
+        CommunityDistributionNotArmed,
+        /// The requested tranche is below the 13 minimum.
+        CommunityDistributionAmountTooSmall,
+        /// The requested tranche exceeds the undistributed community pot.
+        CommunityDistributionExhausted,
+        /// The bounded community-schedule count is full.
+        TooManyCommunitySchedules,
+        /// The 24-month duration is zero or cannot yield a positive per-block
+        /// unlock rate for a minimum-sized tranche.
+        CommunityVestingDurationInvalid,
+        /// A beneficiary may not be the source pot itself.
+        CommunityBeneficiaryIsPot,
     }
 
     #[pallet::hooks]
@@ -589,10 +681,15 @@ pub mod pallet {
                 return T::DbWeight::get().reads(1);
             }
 
-            BootstrapOpsFundingClosed::<T>::put(T::TreasuryPhase::treasury_armed());
+            if on_chain < StorageVersion::new(1) {
+                BootstrapOpsFundingClosed::<T>::put(T::TreasuryPhase::treasury_armed());
+            }
+            if on_chain < StorageVersion::new(2) && !CommunityDistributionRemaining::<T>::exists() {
+                CommunityDistributionRemaining::<T>::put(T::CommunityDistributionAmount::get());
+            }
             STORAGE_VERSION.put::<Pallet<T>>();
-            // StorageVersion + live PhaseFlags; closure latch + version.
-            T::DbWeight::get().reads_writes(2, 2)
+            // StorageVersion + live PhaseFlags; closure latch, allocation and version.
+            T::DbWeight::get().reads_writes(2, 3)
         }
 
         // 15 §1 try-state coverage: the core validator (bounded collections,
@@ -618,21 +715,26 @@ pub mod pallet {
         fn post_upgrade(state: Vec<u8>) -> Result<(), TryRuntimeError> {
             let (migrated, treasury_was_armed, closed_before): (bool, bool, bool) =
                 Decode::decode(&mut &state[..]).map_err(|_| {
-                    TryRuntimeError::Other("treasury v1 migration: invalid pre-upgrade state")
+                    TryRuntimeError::Other("treasury v2 migration: invalid pre-upgrade state")
                 })?;
             if migrated {
                 frame_support::ensure!(
                     StorageVersion::get::<Pallet<T>>() == STORAGE_VERSION,
-                    "treasury v1 migration: storage version was not advanced"
+                    "treasury v2 migration: storage version was not advanced"
                 );
                 frame_support::ensure!(
                     BootstrapOpsFundingClosed::<T>::get() == treasury_was_armed,
-                    "treasury v1 migration: closure does not match existing phase"
+                    "treasury v2 migration: closure does not match existing phase"
+                );
+                frame_support::ensure!(
+                    CommunityDistributionRemaining::<T>::get()
+                        == T::CommunityDistributionAmount::get(),
+                    "treasury v2 migration: community allocation was not initialized"
                 );
             } else {
                 frame_support::ensure!(
                     BootstrapOpsFundingClosed::<T>::get() == closed_before,
-                    "treasury v1 migration: current-version latch changed"
+                    "treasury v2 migration: current-version latch changed"
                 );
             }
             Ok(())
@@ -921,6 +1023,64 @@ pub mod pallet {
             }
             Ok(())
         }
+
+        /// `treasury.create_community_schedule(beneficiary, amount)` — the
+        /// bounded Phase-4 distribution mechanism (08 §2.1, 09 §7). A passed
+        /// PARAM decision authorizes one transfer from the keyless community
+        /// pot. The starting block is the exact block recorded by the Phase-4
+        /// transition; `per_block` is floor-rounded so the claimant can never
+        /// unlock ahead of the 24-month horizon. The SDK adapter moves custody
+        /// and installs the lock before the remaining pot is reduced.
+        #[pallet::call_index(12)]
+        #[pallet::weight(T::WeightInfo::create_community_schedule())]
+        pub fn create_community_schedule(
+            origin: OriginFor<T>,
+            beneficiary: T::AccountId,
+            amount: Balance,
+        ) -> DispatchResult {
+            T::CommunityDistributionOrigin::ensure_origin(origin)?;
+            let start = CommunityDistributionArmedAt::<T>::get()
+                .ok_or(Error::<T>::CommunityDistributionNotArmed)?;
+            let pot = T::CommunityPot::get();
+            ensure!(beneficiary != pot, Error::<T>::CommunityBeneficiaryIsPot);
+            ensure!(
+                amount >= T::CommunityMinVestedTransfer::get(),
+                Error::<T>::CommunityDistributionAmountTooSmall
+            );
+            let remaining = CommunityDistributionRemaining::<T>::get();
+            ensure!(
+                amount <= remaining,
+                Error::<T>::CommunityDistributionExhausted
+            );
+            let count = CommunityScheduleCount::<T>::get();
+            ensure!(
+                count < T::MaxCommunitySchedules::get(),
+                Error::<T>::TooManyCommunitySchedules
+            );
+            let duration = T::CommunityVestingDuration::get();
+            let duration_balance = duration.saturated_into::<Balance>();
+            ensure!(
+                !duration.is_zero() && duration_balance > 0,
+                Error::<T>::CommunityVestingDurationInvalid
+            );
+            let per_block = amount / duration_balance;
+            ensure!(per_block > 0, Error::<T>::CommunityVestingDurationInvalid);
+
+            T::CommunityVesting::vested_transfer(&pot, &beneficiary, amount, per_block, start)?;
+            let next_remaining = remaining
+                .checked_sub(amount)
+                .ok_or(Error::<T>::CommunityDistributionExhausted)?;
+            CommunityDistributionRemaining::<T>::put(next_remaining);
+            CommunityScheduleCount::<T>::put(count.saturating_add(1));
+            Self::deposit_event(Event::CommunityScheduleCreated {
+                beneficiary,
+                amount,
+                start,
+                per_block,
+                remaining: next_remaining,
+            });
+            Ok(())
+        }
     }
 
     #[pallet::extra_constants]
@@ -996,6 +1156,8 @@ pub mod pallet {
             // `try_state` above proves every collection is within bound, so the
             // truncating conversion drops nothing.
             State::<T>::put(TreasuryState::truncating_from_core(&t));
+            CommunityDistributionRemaining::<T>::put(T::CommunityDistributionAmount::get());
+            STORAGE_VERSION.put::<Pallet<T>>();
             if let Some(authority) = self.coretime_quote_authority.clone() {
                 CoretimeQuoteAuthority::<T>::put(authority);
             }
@@ -1007,6 +1169,15 @@ pub mod pallet {
 
     impl<T: Config> Pallet<T> {
         // ---- runtime-internal (non-extrinsic) entry points -----------------
+
+        /// Arm community distribution at the exact Phase-3→4 application
+        /// block. Idempotent so recovery/replay paths cannot move the start
+        /// forward or create a second allocation.
+        pub fn note_phase_four_arming() {
+            if !CommunityDistributionArmedAt::<T>::exists() {
+                CommunityDistributionArmedAt::<T>::put(frame_system::Pallet::<T>::block_number());
+            }
+        }
 
         /// 07 §8 / 08 §1.2: the oracle's reserve-health probe sets/clears the
         /// haircut flag `R`. Runtime-internal (a sibling-pallet Rust call);
@@ -1416,7 +1587,18 @@ pub mod pallet {
         pub fn do_try_state() -> Result<(), TryRuntimeError> {
             if StorageVersion::get::<Pallet<T>>() != STORAGE_VERSION {
                 return Err(TryRuntimeError::Other(
-                    "treasury: on-chain storage version is not v1",
+                    "treasury: on-chain storage version is not v2",
+                ));
+            }
+            let community_remaining = CommunityDistributionRemaining::<T>::get();
+            if community_remaining > T::CommunityDistributionAmount::get() {
+                return Err(TryRuntimeError::Other(
+                    "treasury: remaining community allocation exceeds genesis allocation",
+                ));
+            }
+            if CommunityScheduleCount::<T>::get() > T::MaxCommunitySchedules::get() {
+                return Err(TryRuntimeError::Other(
+                    "treasury: community schedule count exceeds its bound",
                 ));
             }
             let t = Self::load();

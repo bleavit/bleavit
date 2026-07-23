@@ -107,6 +107,7 @@ New FE epic **FE-14 (Governance surface)**: referenda list/detail, vote/delegate
 
 - **VIT**: total supply 1,000,000,000 (12 decimals). Allocation: 30% treasury reserve; 25% community distribution (vested); 20% founding team (4-year vest, 1-year cliff); 15% ecosystem/ops fund; 10% Phase 3–4 incentive programs. `iss.inflation_cap = 2%/yr`, issuance mechanism specified in `08`.
 - **USDC treasury**: initial funding target **≥ 25M USDC** before Phase 5 arming; published **minimum-viable NAV per class** gates phase advancement (one CODE ⇒ NAV ≥ ~14M at floor liquidity; the gate is explicit and loud, not silent).
+- **Phase-4 community distribution (B20 / SQ-107)**: the 250M-VIT community pot is released only through the bounded PARAM-origin `create_community_schedule` path, armed at the exact Phase-3→4 application block and backed by the fixed 24-month SDK vesting schedule, with the 4,096 lifetime schedule bound and claimant-adverse per-block floor.
 - **Collator compensation**: treasury ops line, 2,000 USDC/collator/epoch initial (PARAM-adjustable).
 - **Welfare cold start (B-15)**: genesis ships `PriorBounds` (declared from Phase-2 shadow data); epochs 1–12 winsorize against `prior ∪ available` — `s` is deterministically computable from epoch 1.
 - **Reporter-stake sequencing**: Phase-3 arming requires ≥3 registered reporters with full stakes; the incentive-program allocation funds reporter-stake bootstrapping loans (recallable).

@@ -38,6 +38,9 @@ pub trait WeightInfo {
     fn set_coretime_authority() -> Weight;
     /// Weight of `sweep_insurance` (`State` r:1 w:1 + one USDC custody move).
     fn sweep_insurance() -> Weight;
+    /// Weight of `create_community_schedule` (bounded allocation state plus
+    /// the SDK vesting/currency adapter).
+    fn create_community_schedule() -> Weight;
 }
 
 /// Placeholder proof size covering the worst-case bounded `State` encoding
@@ -106,6 +109,11 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(3))
             .saturating_add(T::DbWeight::get().writes(3))
     }
+    fn create_community_schedule() -> Weight {
+        Weight::from_parts(45_000_000, STATE_POV)
+            .saturating_add(T::DbWeight::get().reads(4))
+            .saturating_add(T::DbWeight::get().writes(3))
+    }
 }
 
 // For tests and backwards compatibility.
@@ -166,6 +174,11 @@ impl WeightInfo for () {
     fn sweep_insurance() -> Weight {
         Weight::from_parts(45_000_000, STATE_POV)
             .saturating_add(RocksDbWeight::get().reads(3))
+            .saturating_add(RocksDbWeight::get().writes(3))
+    }
+    fn create_community_schedule() -> Weight {
+        Weight::from_parts(45_000_000, STATE_POV)
+            .saturating_add(RocksDbWeight::get().reads(4))
             .saturating_add(RocksDbWeight::get().writes(3))
     }
 }

@@ -244,6 +244,7 @@ inventory! {
     "FutarchyTreasury" {
         leaf treasury => ["fund_budget_line", "spend", "open_stream", "cancel_stream", "issue_vit", "recover_foreign", "set_coretime_authority", "sweep_insurance"];
         leaf public => ["claim_stream", "execute_coretime_renewal", "note_coretime_quote", "prune_coretime_quote"];
+        leaf param => ["create_community_schedule"];
     }
     "Guardian" {
         leaf values => ["set_members", "ratify_action", "renew_playbook", "uphold_veto", "recall", "set_playbook_registered"];

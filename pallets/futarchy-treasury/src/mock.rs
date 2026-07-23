@@ -73,6 +73,11 @@ parameter_types! {
     // Configurable stand-ins for the real KEEPER__/ORACLE__ USDC custody pots.
     pub static KeeperRebatePotBalance: u128 = 0;
     pub static OracleRebatePotBalance: u128 = 0;
+    pub CommunityPot: AccountId32 = AccountId32::new([77u8; 32]);
+    pub static CommunityDistributionAmount: u128 = 250_000_000 * futarchy_treasury_core::VIT;
+    pub static CommunityVestingDuration: u64 = 100;
+    pub static CommunityMinVestedTransfer: u128 = futarchy_treasury_core::VIT;
+    pub static MaxCommunitySchedules: u32 = 2;
 }
 
 pub struct TestTreasuryPhase;
@@ -132,6 +137,8 @@ impl TreasuryParams for TestParams {
     }
 }
 
+type CommunityVestingCall = (AccountId32, AccountId32, u128, u128, u64);
+
 std::thread_local! {
     static REBATE_PAYOUTS: RefCell<Vec<(AccountId32, u128, PayoutLine)>> = const { RefCell::new(Vec::new()) };
     static FAIL_REBATE_PAYOUT: Cell<bool> = const { Cell::new(false) };
@@ -139,6 +146,47 @@ std::thread_local! {
     static FAIL_POT_FUNDING: Cell<bool> = const { Cell::new(false) };
     static INSURANCE_SWEEPS: RefCell<Vec<u128>> = const { RefCell::new(Vec::new()) };
     static FAIL_INSURANCE_SWEEP: Cell<bool> = const { Cell::new(false) };
+    static COMMUNITY_VESTING_CALLS: RefCell<Vec<CommunityVestingCall>> = const { RefCell::new(Vec::new()) };
+    static FAIL_COMMUNITY_VESTING: Cell<bool> = const { Cell::new(false) };
+}
+
+pub struct RecordingCommunityVesting;
+
+impl pallet_futarchy_treasury::CommunityVesting<AccountId32, u64> for RecordingCommunityVesting {
+    fn vested_transfer(
+        source: &AccountId32,
+        beneficiary: &AccountId32,
+        amount: u128,
+        per_block: u128,
+        starting_block: u64,
+    ) -> frame_support::dispatch::DispatchResult {
+        if FAIL_COMMUNITY_VESTING.with(Cell::get) {
+            return Err(sp_runtime::DispatchError::Other("community vesting failed"));
+        }
+        COMMUNITY_VESTING_CALLS.with(|calls| {
+            calls.borrow_mut().push((
+                source.clone(),
+                beneficiary.clone(),
+                amount,
+                per_block,
+                starting_block,
+            ));
+        });
+        Ok(())
+    }
+}
+
+pub fn community_vesting_calls() -> Vec<(AccountId32, AccountId32, u128, u128, u64)> {
+    COMMUNITY_VESTING_CALLS.with(|calls| calls.borrow().clone())
+}
+
+pub fn set_community_vesting_failure(fail: bool) {
+    FAIL_COMMUNITY_VESTING.with(|value| value.set(fail));
+}
+
+pub fn reset_community_vesting() {
+    COMMUNITY_VESTING_CALLS.with(|calls| calls.borrow_mut().clear());
+    set_community_vesting_failure(false);
 }
 
 /// Stand-in for the runtime's INSURANCE → `MAIN` USDC custody move (08 §1.4).
@@ -277,6 +325,13 @@ impl EnsureOrigin<RuntimeOrigin> for TestTreasuryOrigin {
 
 impl pallet_futarchy_treasury::Config for Test {
     type TreasuryOrigin = TestTreasuryOrigin;
+    type CommunityDistributionOrigin = TestTreasuryOrigin;
+    type CommunityVesting = RecordingCommunityVesting;
+    type CommunityPot = CommunityPot;
+    type CommunityDistributionAmount = CommunityDistributionAmount;
+    type CommunityVestingDuration = CommunityVestingDuration;
+    type CommunityMinVestedTransfer = CommunityMinVestedTransfer;
+    type MaxCommunitySchedules = MaxCommunitySchedules;
     type Params = TestParams;
     type CurrentEpoch = CurrentEpochValue;
     type TreasuryPhase = TestTreasuryPhase;
@@ -296,6 +351,9 @@ pub struct TestBenchmarkHelper;
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_futarchy_treasury::BenchmarkHelper<RuntimeOrigin, AccountId32> for TestBenchmarkHelper {
     fn treasury_origin() -> RuntimeOrigin {
+        RuntimeOrigin::signed(treasury_acc())
+    }
+    fn community_origin() -> RuntimeOrigin {
         RuntimeOrigin::signed(treasury_acc())
     }
     fn account(seed: u8) -> AccountId32 {
@@ -338,6 +396,7 @@ pub fn new_test_ext_with(
         reset_rebate_payout();
         reset_pot_funding();
         reset_insurance_sweeps();
+        reset_community_vesting();
     });
     ext
 }

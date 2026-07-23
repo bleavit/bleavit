@@ -237,4 +237,14 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 			.saturating_add(T::DbWeight::get().reads(9))
 			.saturating_add(T::DbWeight::get().writes(4))
 	}
+	/// Storage: `FutarchyTreasury::CommunityDistributionArmedAt` (r:1 w:0)
+	/// Storage: `FutarchyTreasury::CommunityDistributionRemaining` (r:1 w:1)
+	/// Storage: `FutarchyTreasury::CommunityScheduleCount` (r:1 w:1)
+	/// The native vesting adapter additionally touches the source and beneficiary
+	/// `System::Account` rows; the generated benchmark will replace this envelope.
+	fn create_community_schedule() -> Weight {
+		Weight::from_parts(60_000_000, 32_000)
+			.saturating_add(T::DbWeight::get().reads(7))
+			.saturating_add(T::DbWeight::get().writes(5))
+	}
 }

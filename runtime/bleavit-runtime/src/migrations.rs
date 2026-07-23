@@ -695,6 +695,7 @@ fn apply_phase_four_plan(plan: pallet_execution_guard::PhaseFourPlan) -> Dispatc
 #[cfg(any(feature = "phase-four", feature = "recovery"))]
 fn transition_phase_four(plan: pallet_execution_guard::PhaseFourPlan) -> DispatchResult {
     apply_phase_four_plan(plan)?;
+    crate::FutarchyTreasury::note_phase_four_arming();
     sp_io::storage::clear(&sudo_key_storage_key());
     pallet_constitution::PhaseFlags::<Runtime>::put(
         pallet_constitution::PhaseFlagsValue::PARAM_ARMED,

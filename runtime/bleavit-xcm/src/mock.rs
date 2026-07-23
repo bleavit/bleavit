@@ -17,7 +17,7 @@ use crate::{
 };
 use frame_support::{
     derive_impl, parameter_types,
-    traits::{AsEnsureOriginWithArg, Everything, NeverEnsureOrigin, Nothing},
+    traits::{AsEnsureOriginWithArg, Everything, Get, NeverEnsureOrigin, Nothing},
     weights::Weight,
 };
 use frame_system::EnsureSigned;
@@ -90,6 +90,17 @@ parameter_types! {
     pub static ExpectedComponents: Vec<(MetricId, MetricSpecVersion)> = vec![];
     pub static StakeAtRiskValue: Balance = 400_000_000_000;
     pub const MaxRoundCloseBatch: u32 = 20;
+    pub const TestCommunityDistributionAmount: Balance = 250_000_000;
+    pub const TestCommunityVestingDuration: BlockNumber = 1;
+    pub const TestCommunityMinVestedTransfer: Balance = 1;
+    pub const TestMaxCommunitySchedules: u32 = 4_096;
+}
+
+pub struct TestCommunityPot;
+impl Get<AccountId> for TestCommunityPot {
+    fn get() -> AccountId {
+        AccountId::from([9; 32])
+    }
 }
 
 pub struct TestReporting;
@@ -202,6 +213,13 @@ impl pallet_futarchy_treasury::TreasuryParams for TestTreasuryParams {
 
 impl pallet_futarchy_treasury::Config for Test {
     type TreasuryOrigin = EnsureSigned<AccountId>;
+    type CommunityDistributionOrigin = EnsureSigned<AccountId>;
+    type CommunityVesting = ();
+    type CommunityPot = TestCommunityPot;
+    type CommunityDistributionAmount = TestCommunityDistributionAmount;
+    type CommunityVestingDuration = TestCommunityVestingDuration;
+    type CommunityMinVestedTransfer = TestCommunityMinVestedTransfer;
+    type MaxCommunitySchedules = TestMaxCommunitySchedules;
     type Params = TestTreasuryParams;
     type CurrentEpoch = CurrentEpoch;
     type TreasuryPhase = ();

@@ -248,7 +248,7 @@ fn ops_multisig_zero_and_checked_add_overflow_are_exact_noops() {
 // ---- genesis (08 §2.1) ------------------------------------------------------
 
 #[test]
-fn storage_v1_initializes_bootstrap_closure_from_both_existing_phase_states() {
+fn storage_v2_initializes_bootstrap_closure_and_community_allocation() {
     for treasury_armed in [false, true] {
         new_test_ext().execute_with(|| {
             StorageVersion::new(0).put::<Treasury>();
@@ -257,10 +257,14 @@ fn storage_v1_initializes_bootstrap_closure_from_both_existing_phase_states() {
 
             let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
 
-            assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(1));
+            assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(2));
             assert_eq!(
                 crate::BootstrapOpsFundingClosed::<Test>::get(),
                 treasury_armed,
+            );
+            assert_eq!(
+                crate::CommunityDistributionRemaining::<Test>::get(),
+                CommunityDistributionAmount::get()
             );
             if treasury_armed {
                 TreasuryArmedValue::set(false);
@@ -272,7 +276,7 @@ fn storage_v1_initializes_bootstrap_closure_from_both_existing_phase_states() {
 
 #[cfg(feature = "try-runtime")]
 #[test]
-fn storage_v1_try_runtime_checks_phase_derived_bootstrap_closure() {
+fn storage_v2_try_runtime_checks_phase_derived_bootstrap_closure_and_allocation() {
     for treasury_armed in [false, true] {
         new_test_ext().execute_with(|| {
             StorageVersion::new(0).put::<Treasury>();
@@ -291,7 +295,7 @@ fn storage_v1_try_runtime_checks_phase_derived_bootstrap_closure() {
 
 #[cfg(feature = "try-runtime")]
 #[test]
-fn storage_v1_try_runtime_current_version_is_an_idempotent_latch_noop() {
+fn storage_v2_try_runtime_current_version_is_an_idempotent_latch_noop() {
     new_test_ext().execute_with(|| {
         TreasuryArmedValue::set(false);
         crate::BootstrapOpsFundingClosed::<Test>::put(true);
@@ -300,7 +304,7 @@ fn storage_v1_try_runtime_current_version_is_an_idempotent_latch_noop() {
             let state = <Treasury as Hooks<u64>>::pre_upgrade().expect("pre-upgrade state");
             let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
             <Treasury as Hooks<u64>>::post_upgrade(state).expect("post-upgrade checks");
-            assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(1));
+            assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(2));
             assert!(crate::BootstrapOpsFundingClosed::<Test>::get());
         }
     });
@@ -315,6 +319,99 @@ fn default_genesis_is_empty_and_solvent() {
         assert!(t.lines.is_empty());
         assert_eq!(t.next_stream_id, 0);
         assert_ok!(crate::Pallet::<Test>::do_try_state());
+    });
+}
+
+#[test]
+fn community_distribution_is_phase_armed_bounded_and_floor_rounded() {
+    new_test_ext().execute_with(|| {
+        assert_eq!(
+            crate::CommunityDistributionRemaining::<Test>::get(),
+            CommunityDistributionAmount::get()
+        );
+        assert_noop!(
+            Treasury::create_community_schedule(to(), acc(1), 10 * VIT),
+            Error::<Test>::CommunityDistributionNotArmed
+        );
+
+        frame_system::Pallet::<Test>::set_block_number(42);
+        Treasury::note_phase_four_arming();
+        let amount = 10 * VIT;
+        assert_ok!(Treasury::create_community_schedule(to(), acc(1), amount));
+        assert_eq!(
+            community_vesting_calls(),
+            vec![(
+                CommunityPot::get(),
+                acc(1),
+                amount,
+                amount / CommunityVestingDuration::get() as u128,
+                42,
+            )]
+        );
+        assert_eq!(
+            crate::CommunityDistributionRemaining::<Test>::get(),
+            CommunityDistributionAmount::get() - amount
+        );
+        assert_eq!(crate::CommunityScheduleCount::<Test>::get(), 1);
+        assert!(System::events().iter().any(|record| matches!(
+            &record.event,
+            RuntimeEvent::Treasury(Event::CommunityScheduleCreated {
+                beneficiary,
+                amount: event_amount,
+                start: 42,
+                ..
+            }) if *beneficiary == acc(1) && *event_amount == amount
+        )));
+    });
+}
+
+#[test]
+fn community_distribution_rejects_invalid_origin_amount_and_bound_without_mutation() {
+    // limit-coverage: Community distribution schedules
+    new_test_ext().execute_with(|| {
+        Treasury::note_phase_four_arming();
+        let before = crate::CommunityDistributionRemaining::<Test>::get();
+        assert_noop!(
+            Treasury::create_community_schedule(RuntimeOrigin::root(), acc(1), VIT),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert_noop!(
+            Treasury::create_community_schedule(to(), acc(1), VIT - 1),
+            Error::<Test>::CommunityDistributionAmountTooSmall
+        );
+        assert_noop!(
+            Treasury::create_community_schedule(to(), CommunityPot::get(), VIT),
+            Error::<Test>::CommunityBeneficiaryIsPot
+        );
+        assert_noop!(
+            Treasury::create_community_schedule(to(), acc(2), before + 1),
+            Error::<Test>::CommunityDistributionExhausted
+        );
+        assert_eq!(crate::CommunityDistributionRemaining::<Test>::get(), before);
+
+        assert_ok!(Treasury::create_community_schedule(to(), acc(1), VIT));
+        assert_ok!(Treasury::create_community_schedule(to(), acc(2), VIT));
+        assert_noop!(
+            Treasury::create_community_schedule(to(), acc(3), VIT),
+            Error::<Test>::TooManyCommunitySchedules
+        );
+    });
+}
+
+#[test]
+fn community_distribution_adapter_failure_is_atomic_and_arming_is_idempotent() {
+    new_test_ext().execute_with(|| {
+        frame_system::Pallet::<Test>::set_block_number(9);
+        Treasury::note_phase_four_arming();
+        frame_system::Pallet::<Test>::set_block_number(10);
+        Treasury::note_phase_four_arming();
+        assert_eq!(crate::CommunityDistributionArmedAt::<Test>::get(), Some(9));
+        let before = crate::CommunityDistributionRemaining::<Test>::get();
+        set_community_vesting_failure(true);
+        assert!(Treasury::create_community_schedule(to(), acc(1), VIT).is_err());
+        assert_eq!(crate::CommunityDistributionRemaining::<Test>::get(), before);
+        assert_eq!(crate::CommunityScheduleCount::<Test>::get(), 0);
+        assert!(community_vesting_calls().is_empty());
     });
 }
 
@@ -959,10 +1056,22 @@ mod renewal_dispatch_seam {
 
     parameter_types! {
         pub const CurrentEpoch: u32 = 0;
+        pub DispatchCommunityPot: AccountId32 = AccountId32::new([77u8; 32]);
+        pub const DispatchCommunityAmount: u128 = 250_000_000 * VIT;
+        pub const DispatchCommunityDuration: u64 = 100;
+        pub const DispatchCommunityMin: u128 = VIT;
+        pub const DispatchMaxCommunitySchedules: u32 = 4_096;
     }
 
     impl pallet_futarchy_treasury::Config for DispatchTest {
         type TreasuryOrigin = frame_system::EnsureRoot<AccountId32>;
+        type CommunityDistributionOrigin = frame_system::EnsureRoot<AccountId32>;
+        type CommunityVesting = ();
+        type CommunityPot = DispatchCommunityPot;
+        type CommunityDistributionAmount = DispatchCommunityAmount;
+        type CommunityVestingDuration = DispatchCommunityDuration;
+        type CommunityMinVestedTransfer = DispatchCommunityMin;
+        type MaxCommunitySchedules = DispatchMaxCommunitySchedules;
         type Params = DispatchParams;
         type CurrentEpoch = CurrentEpoch;
         type TreasuryPhase = ();
@@ -984,6 +1093,10 @@ mod renewal_dispatch_seam {
         for DispatchBenchmarkHelper
     {
         fn treasury_origin() -> RuntimeOrigin {
+            RuntimeOrigin::root()
+        }
+
+        fn community_origin() -> RuntimeOrigin {
             RuntimeOrigin::root()
         }
 
@@ -1786,7 +1899,7 @@ fn try_state_reconciles_rebate_lines_against_real_custody_pots() {
 }
 
 #[test]
-fn try_state_requires_v1_and_allows_armed_open_handover() {
+fn try_state_requires_v2_and_allows_armed_open_handover() {
     new_test_ext().execute_with(|| {
         TreasuryArmedValue::set(true);
         crate::BootstrapOpsFundingClosed::<Test>::put(false);
@@ -1794,7 +1907,7 @@ fn try_state_requires_v1_and_allows_armed_open_handover() {
 
         StorageVersion::new(0).put::<Treasury>();
         assert!(Treasury::do_try_state().is_err());
-        StorageVersion::new(1).put::<Treasury>();
+        StorageVersion::new(2).put::<Treasury>();
         assert_ok!(Treasury::do_try_state());
     });
 }

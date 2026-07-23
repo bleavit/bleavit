@@ -1057,6 +1057,12 @@ error = "Vesting::AtMaxVestingSchedules"
 reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
 
 [[entry]]
+key = "Community distribution schedules"
+class = "dispatch-limit"
+error = "Treasury::TooManyCommunitySchedules"
+reason = "13 §4 / 08 §2.1: the bounded PARAM-origin community schedule path rejects the 4,097th lifetime schedule; completed schedules do not replenish the bound."
+
+[[entry]]
 key = "Treasury Streams"
 class = "dispatch-limit"
 error = "Treasury::TooManyStreams"

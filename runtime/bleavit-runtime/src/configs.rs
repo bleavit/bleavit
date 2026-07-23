@@ -11,7 +11,7 @@ use frame_support::{
         tokens::{Fortitude, Preservation},
         Bounded, ConstBool, ConstU128, ConstU32, ConstU64, ConstU8, Contains, EqualPrivilegeOnly,
         Get, InstanceFilter, Nothing, OriginTrait, QueryPreimage, StorageInstance, StorePreimage,
-        TransformOrigin, UnfilteredDispatchable, VariantCountOf, WithdrawReasons,
+        TransformOrigin, UnfilteredDispatchable, VariantCountOf, VestedTransfer, WithdrawReasons,
     },
     weights::{
         constants::{
@@ -43,7 +43,7 @@ use crate::{
     FutarchyTreasury, Hash, Market, MessageQueue, Migrations, Nonce, PalletInfo, ParachainSystem,
     PolkadotXcm, Preimage, Referenda, Runtime, RuntimeCall, RuntimeEvent, RuntimeFreezeReason,
     RuntimeHoldReason, RuntimeOrigin, RuntimeTask, Scheduler, Session, SessionKeys, System,
-    XcmpQueue, VERSION,
+    Vesting, XcmpQueue, VERSION,
 };
 
 const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
@@ -169,6 +169,40 @@ impl pallet_vesting::Config for Runtime {
     // therefore unlock later, never earlier, which is conservative under R-7.
     type BlockNumberProvider = frame_system::Pallet<Runtime>;
     const MAX_VESTING_SCHEDULES: u32 = 8;
+}
+
+parameter_types! {
+    /// 08 §2.1: the keyless genesis community pot.
+    pub CommunityDistributionPot: AccountId = crate::genesis::community_account();
+    /// 08 §2.1: 250 million VIT held in that pot at genesis.
+    pub CommunityDistributionAmount: Balance = crate::genesis::COMMUNITY_DISTRIBUTION;
+    /// 08 §2.1: two nominal 365-day years at the 6-second block cadence.
+    pub CommunityVestingDuration: BlockNumber = 2 * crate::genesis::BLOCKS_PER_YEAR;
+    /// 13 §1/§3: the SDK's one-VIT minimum transfer.
+    pub CommunityMinVestedTransfer: Balance = currency::VIT;
+    /// 13 §4: bounded distribution state.
+    pub MaxCommunitySchedules: u32 = bounds::MAX_COMMUNITY_SCHEDULES;
+}
+
+pub struct RuntimeCommunityVesting;
+impl pallet_futarchy_treasury::CommunityVesting<AccountId, BlockNumber>
+    for RuntimeCommunityVesting
+{
+    fn vested_transfer(
+        source: &AccountId,
+        beneficiary: &AccountId,
+        amount: Balance,
+        per_block: Balance,
+        starting_block: BlockNumber,
+    ) -> DispatchResult {
+        <Vesting as VestedTransfer<AccountId>>::vested_transfer(
+            source,
+            beneficiary,
+            amount,
+            per_block,
+            starting_block,
+        )
+    }
 }
 
 parameter_types! {
@@ -5104,6 +5138,13 @@ impl pallet_futarchy_treasury::TreasuryPhase for RuntimeTreasuryPhase {
 
 impl pallet_futarchy_treasury::Config for Runtime {
     type TreasuryOrigin = pallet_origins::EnsureFutarchyTreasury;
+    type CommunityDistributionOrigin = pallet_origins::EnsureFutarchyParam;
+    type CommunityVesting = RuntimeCommunityVesting;
+    type CommunityPot = CommunityDistributionPot;
+    type CommunityDistributionAmount = CommunityDistributionAmount;
+    type CommunityVestingDuration = CommunityVestingDuration;
+    type CommunityMinVestedTransfer = CommunityMinVestedTransfer;
+    type MaxCommunitySchedules = MaxCommunitySchedules;
     type Params = TreasuryParams;
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
     type TreasuryPhase = RuntimeTreasuryPhase;
@@ -6087,6 +6128,9 @@ impl RuntimeCapabilities {
                 matches!(class, futarchy_primitives::ProposalClass::Code | futarchy_primitives::ProposalClass::Meta)
                     && Self::enabled(class, pallet_constitution::Capability::AuthorizeUpgrade)
             }
+            RuntimeCall::FutarchyTreasury(
+                pallet_futarchy_treasury::Call::create_community_schedule { .. },
+            ) => matches!(class, futarchy_primitives::ProposalClass::Param),
             RuntimeCall::FutarchyTreasury(
                 pallet_futarchy_treasury::Call::fund_budget_line { .. }
                 | pallet_futarchy_treasury::Call::spend { .. }
@@ -7474,6 +7518,9 @@ impl pallet_futarchy_treasury::BenchmarkHelper<RuntimeOrigin, AccountId>
 
     fn treasury_origin() -> RuntimeOrigin {
         pallet_origins::Origin::FutarchyTreasury.into()
+    }
+    fn community_origin() -> RuntimeOrigin {
+        pallet_origins::Origin::FutarchyParam.into()
     }
     fn account(seed: u8) -> AccountId {
         AccountId32::new([seed; 32])

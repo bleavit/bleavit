@@ -1,7 +1,7 @@
 # Domain model & lifecycles — what every screen's objects are
 
 > **DERIVED, NON-NORMATIVE.** Distilled 2026-07-12 (commit `9f250be`) and refreshed
-> 2026-07-22 for SQ-320 and the reserve-probe/I-24 amendments from the frozen spec —
+> 2026-07-23 for B20/SQ-107 and the reserve-probe/I-24 amendments from the frozen spec —
 > docs 03 (conditional ledger), 04 (markets & pricing), 05 (welfare & decision engine),
 > 06 (governance & guardians), 07 (oracle & disputes), 08 (treasury & economics),
 > 09 (execution & upgrades) — for upload to Claude Design. Where this file and the spec
@@ -224,6 +224,10 @@ resolves deterministic disputes mechanically. Evidence is content-addressed
   irreversibly; the handover must finish before Phase-4 sudo removal.
 - **Streams**: linear vesting grants, recipient-claimable (`claim_stream`); mandatory for
   grants > 1% NAV; cancellable by a later TREASURY decision.
+- **Phase-4 community distribution**: the derived `communty` VIT pot is released only by
+  the bounded PARAM-origin `create_community_schedule` path after the exact Phase-4
+  arming block; the fixed 24-month schedule and 4,096 lifetime bound are chain rules, not
+  frontend assumptions.
 - **Meters** (gauges in the UI): per-proposal ≤ 5% NAV; 30-day ≤ 10%; 180-day ≤ 30%; VIT
   issuance ≤ 2%/yr. `SlotsShrunk` (slate reduced to fit the POL budget) must appear on the
   epoch dashboard.

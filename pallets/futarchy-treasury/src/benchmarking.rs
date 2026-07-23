@@ -10,6 +10,7 @@ use super::*;
 use crate::pallet::Pallet;
 
 use frame_benchmarking::v2::*;
+use frame_support::traits::Get;
 use frame_system::RawOrigin;
 use futarchy_treasury_core::{CoretimeQuote, Stream, Treasury, USDC};
 
@@ -288,6 +289,17 @@ mod benches {
             Pallet::<T>::treasury().main_usdc,
             main_before.saturating_add(amount)
         );
+    }
+
+    #[benchmark]
+    fn create_community_schedule() {
+        let beneficiary: T::AccountId = T::BenchmarkHelper::account(9);
+        let amount = 1_000_000 * VIT;
+        Pallet::<T>::note_phase_four_arming();
+        CommunityDistributionRemaining::<T>::put(T::CommunityDistributionAmount::get());
+
+        #[extrinsic_call]
+        _(T::BenchmarkHelper::community_origin(), beneficiary, amount);
     }
 
     impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext(), crate::mock::Test);

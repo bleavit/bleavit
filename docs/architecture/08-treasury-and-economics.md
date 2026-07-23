@@ -88,6 +88,8 @@ Unless a call below says otherwise it requires its stated protocol origin. `fund
 
 ---
 
+**Phase-4 community distribution (B20 / SQ-107).** `create_community_schedule(beneficiary, amount)` is the one bounded exception to the ordinary treasury-outflow origin: it is a PARAM leaf, admitted only after the Phase-3→4 arming transition records its exact block, and dispatched with `FutarchyParam`. The source is the genesis-derived `communty` pot; the beneficiary MUST differ from that pot, `amount` MUST be at least the 13 §3.5 minimum vested transfer and no greater than the stored undistributed allocation, and the lifetime successful-schedule count MUST remain below the 13 §4 bound. The runtime calls the SDK `pallet-vesting` `vested_transfer` adapter atomically before decrementing the remaining allocation and incrementing the count. The fixed duration is 24 months in para-blocks; `per_block = floor(amount / duration)` and a zero result fails, so unlocks can never run ahead of the horizon. The arming block is an exact start (no caller-selected start), arming is idempotent, and failures leave both custody and counters unchanged. No direct `vesting.force_*`, signer impersonation, treasury stream, or unbounded schedule list may be used; the per-schedule counter is a lifetime admission bound, not a promise that old completed schedules are deleted.
+
 ## 2. Genesis economics (B-14, D-15)
 
 ### 2.1 VIT supply and allocation

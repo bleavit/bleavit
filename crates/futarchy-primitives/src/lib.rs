@@ -847,6 +847,8 @@ pub mod bounds {
     /// Maximum TWAP checkpoints and registered decision windows per market
     /// (13 §4). Shared by market storage and the monitoring API row bound.
     pub const MAX_TWAP_WINDOWS_PER_MARKET: u32 = 8;
+    /// 13 §4: maximum successful Phase-4 community vesting schedules.
+    pub const MAX_COMMUNITY_SCHEDULES: u32 = 4_096;
     /// 13 §4: `pallet-migrations` may consume at most half the block service
     /// weight while a multi-block migration is active.
     pub const MIGRATION_SERVICE_WEIGHT_PERCENT: u32 = 50;
