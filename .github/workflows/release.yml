@@ -185,6 +185,7 @@ jobs:
           fi
           python3 tools/release/record-chainhead-fixtures.py \
             --metadata "$RELEASE_WORK/runtime/metadata.scale" \
+            --recovery-metadata "$RELEASE_WORK/runtime/recovery/metadata.scale" \
             --out-dir "$RELEASE_WORK/chainhead" \
             "${recorder_args[@]}"
       - name: Verify committed reference-model corpus freshness

@@ -426,6 +426,7 @@ fn plan_execution(
                 proposal.state.as_str(),
                 "Submitted" | "Screening" | "Qualified" | "Trading" | "Extended"
             ) && matches!(proposal.class.as_str(), "Code" | "Meta")
+                && proposal.recovery_qualification_required
                 && !snapshot
                     .qualified_recovery_proposals
                     .contains(&proposal.proposal_id)
@@ -791,6 +792,9 @@ mod tests {
                 class: "Param".to_owned(),
                 state: "Trading".to_owned(),
                 epoch: Some(5),
+                payload_hash: [0; 32],
+                payload_len: 0,
+                recovery_qualification_required: false,
                 decide_at: Some(999),
                 maturity: None,
                 grace_end: None,
@@ -999,6 +1003,9 @@ mod tests {
                 class: "Param".to_owned(),
                 state: "Submitted".to_owned(),
                 epoch: Some(5),
+                payload_hash: [0; 32],
+                payload_len: 0,
+                recovery_qualification_required: false,
                 decide_at: None,
                 maturity: None,
                 grace_end: None,
@@ -1373,6 +1380,9 @@ mod tests {
             class: "Meta".to_owned(),
             state: "Submitted".to_owned(),
             epoch: Some(5),
+            payload_hash: [44; 32],
+            payload_len: 128,
+            recovery_qualification_required: true,
             decide_at: None,
             maturity: None,
             grace_end: None,
@@ -1383,6 +1393,27 @@ mod tests {
         assert_eq!(planned[0].call, "qualify_recovery_image");
 
         snapshot.qualified_recovery_proposals.insert(44);
+        assert!(plan(&snapshot, &config_for(Role::Execute)).is_empty());
+    }
+
+    #[test]
+    fn ordinary_meta_without_a_recovery_descriptor_is_not_planned() {
+        let mut snapshot = snapshot();
+        snapshot.execution_queue.clear();
+        snapshot.proposals = vec![ProposalSnapshot {
+            proposal_id: 45,
+            class: "Meta".to_owned(),
+            state: "Submitted".to_owned(),
+            epoch: Some(5),
+            payload_hash: [45; 32],
+            payload_len: 64,
+            recovery_qualification_required: false,
+            decide_at: None,
+            maturity: None,
+            grace_end: None,
+            market_ids: Vec::new(),
+        }];
+
         assert!(plan(&snapshot, &config_for(Role::Execute)).is_empty());
     }
 

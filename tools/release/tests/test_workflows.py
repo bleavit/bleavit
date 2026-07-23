@@ -134,6 +134,10 @@ class WorkflowContractTests(unittest.TestCase):
             'tools/release/build-runtime.sh "$RELEASE_WORK/runtime/recovery" "$recovery_profile"',
             workflow,
         )
+        self.assertIn(
+            '--recovery-metadata "$RELEASE_WORK/runtime/recovery/metadata.scale"',
+            workflow,
+        )
 
     def test_standing_gate_runs_explicit_runtime_profile_matrix(self) -> None:
         script = (ROOT / "tools/ci/rust-workspace-gates.sh").read_text(

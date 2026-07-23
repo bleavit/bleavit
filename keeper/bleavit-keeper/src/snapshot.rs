@@ -10,10 +10,11 @@ use subxt::{
     config::HashFor,
     dynamic,
     ext::{
+        codec::{Compact, Decode},
         scale_decode::DecodeAsType,
         scale_value::{At, Value, ValueDef},
     },
-    ArcMetadata, OnlineClient, OnlineClientAtBlock, PolkadotConfig,
+    ArcMetadata, Metadata, OnlineClient, OnlineClientAtBlock, PolkadotConfig,
 };
 use tracing::{debug, warn};
 
@@ -112,6 +113,12 @@ pub struct ProposalSnapshot {
     pub class: String,
     pub state: String,
     pub epoch: Option<u64>,
+    pub payload_hash: [u8; 32],
+    pub payload_len: u32,
+    /// True only when the committed proposal preimage contains the exact
+    /// top-level primary-authorization and recovery-descriptor pair consumed
+    /// by `ExecutionGuard.qualify_recovery_image`.
+    pub recovery_qualification_required: bool,
     pub decide_at: Option<u64>,
     pub maturity: Option<u64>,
     pub grace_end: Option<u64>,
@@ -287,8 +294,8 @@ impl SnapshotExtractor {
                     "reject_stale",
                     "qualify_recovery_image",
                 ]
-                    .iter()
-                    .any(|call| has_call("ExecutionGuard", call)),
+                .iter()
+                .any(|call| has_call("ExecutionGuard", call)),
                 "ExecutionGuard keeper calls absent",
             ),
             capability(
@@ -512,11 +519,50 @@ impl SnapshotExtractor {
         let (live, live_incomplete) = self
             .iter_values_checked(at_block, "Epoch", "Proposals")
             .await;
-        let (proposals, merge_incomplete) = merge_proposal_entries(intake, live);
+        let (mut proposals, merge_incomplete) = merge_proposal_entries(intake, live);
+        for proposal in &mut proposals {
+            if matches!(
+                proposal.state.as_str(),
+                "Submitted" | "Screening" | "Qualified" | "Trading" | "Extended"
+            ) && matches!(proposal.class.as_str(), "Code" | "Meta")
+            {
+                proposal.recovery_qualification_required = self
+                    .proposal_preimage_requires_recovery(at_block, proposal)
+                    .await;
+            }
+        }
         (
             proposals,
             intake_incomplete || live_incomplete || merge_incomplete,
         )
+    }
+
+    async fn proposal_preimage_requires_recovery(
+        &self,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
+        proposal: &ProposalSnapshot,
+    ) -> bool {
+        let hash = Value::unnamed_composite(
+            proposal
+                .payload_hash
+                .iter()
+                .map(|byte| Value::u128(u128::from(*byte))),
+        );
+        let key = Value::unnamed_composite([hash, Value::u128(u128::from(proposal.payload_len))]);
+        let Some(encoded) = self
+            .fetch_value_with_keys(at_block, "Preimage", "PreimageFor", vec![key])
+            .await
+            .and_then(|value| bytes_from_value(&value))
+        else {
+            return false;
+        };
+        let Some(max_calls) = self
+            .constant_u64(at_block, "ExecutionGuard", "MaxCalls")
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            return false;
+        };
+        batch_has_recovery_descriptor(&encoded, at_block.metadata_ref(), max_calls)
     }
 
     async fn extract_cohorts(
@@ -1184,6 +1230,8 @@ fn decode_proposal_entry(keys: &[Value<()>], value: &Value<()>) -> Option<Propos
     // epoch the keeper cannot prove that this entry belongs to some other
     // epoch. Treat a missing or undecodable epoch as an incomplete snapshot.
     let epoch = value.at("epoch").and_then(as_u64)?;
+    let payload_hash = value.at("payload_hash").and_then(fixed_32_from_value)?;
+    let payload_len = u32::try_from(value.at("payload_len").and_then(as_u64)?).ok()?;
     let market_ids = value
         .at("markets")
         .and_then(option_inner)
@@ -1194,6 +1242,9 @@ fn decode_proposal_entry(keys: &[Value<()>], value: &Value<()>) -> Option<Propos
         class,
         state,
         epoch: Some(epoch),
+        payload_hash,
+        payload_len,
+        recovery_qualification_required: false,
         decide_at: nonzero(value.at("decide_at").and_then(as_u64)),
         maturity: value.at("maturity").and_then(option_u64),
         grace_end: value.at("grace_end").and_then(option_u64),
@@ -1416,6 +1467,78 @@ fn composite_values<C>(value: &Value<C>) -> impl Iterator<Item = &Value<C>> {
     .flatten()
 }
 
+fn fixed_32_from_value<C>(value: &Value<C>) -> Option<[u8; 32]> {
+    composite_values(value)
+        .map(|byte| u8::try_from(as_u64(byte)?).ok())
+        .collect::<Option<Vec<_>>>()?
+        .try_into()
+        .ok()
+}
+
+fn bytes_from_value<C>(value: &Value<C>) -> Option<Vec<u8>> {
+    composite_values(value)
+        .map(|byte| u8::try_from(as_u64(byte)?).ok())
+        .collect()
+}
+
+fn variant_child<C>(value: &Value<C>) -> Option<&Value<C>> {
+    match &value.value {
+        ValueDef::Variant(variant) => variant.values.values().next(),
+        _ => None,
+    }
+}
+
+fn runtime_call_name<C>(value: &Value<C>) -> Option<(&str, &str)> {
+    let pallet = variant_name(value)?;
+    let call = variant_child(value).and_then(variant_name)?;
+    Some((pallet, call))
+}
+
+fn record_recovery_leaf<C>(
+    call: &Value<C>,
+    authorize_upgrade: &mut bool,
+    commit_recovery_image: &mut bool,
+) -> bool {
+    match runtime_call_name(call) {
+        Some(("System", "authorize_upgrade")) if !*authorize_upgrade => {
+            *authorize_upgrade = true;
+            true
+        }
+        Some(("ExecutionGuard", "commit_recovery_image")) if !*commit_recovery_image => {
+            *commit_recovery_image = true;
+            true
+        }
+        Some(("System", "authorize_upgrade"))
+        | Some(("ExecutionGuard", "commit_recovery_image")) => false,
+        _ => true,
+    }
+}
+
+/// Decode the committed `Vec<RuntimeCall>` with live metadata and recognize the
+/// exact two top-level leaves required by the recovery qualifier. Any malformed,
+/// oversized, or trailing-byte payload fails closed and is never planned.
+fn batch_has_recovery_descriptor(bytes: &[u8], metadata: &Metadata, max_calls: u32) -> bool {
+    let mut input = bytes;
+    let Ok(Compact(call_count)) = Compact::<u32>::decode(&mut input) else {
+        return false;
+    };
+    if call_count > max_calls {
+        return false;
+    }
+    let call_ty = metadata.outer_enums().call_enum_ty();
+    let mut authorize_upgrade = false;
+    let mut commit_recovery_image = false;
+    for _ in 0..call_count {
+        let Ok(call) = Value::decode_as_type(&mut input, call_ty, metadata.types()) else {
+            return false;
+        };
+        if !record_recovery_leaf(&call, &mut authorize_upgrade, &mut commit_recovery_image) {
+            return false;
+        }
+    }
+    input.is_empty() && authorize_upgrade && commit_recovery_image
+}
+
 fn variant_name<C>(value: &Value<C>) -> Option<&str> {
     match &value.value {
         ValueDef::Variant(variant) => Some(variant.name.as_str()),
@@ -1510,11 +1633,55 @@ mod tests {
             ("class", Value::unnamed_variant("Param", [])),
             ("state", Value::unnamed_variant(state, [])),
             ("epoch", Value::u128(u128::from(epoch))),
+            (
+                "payload_hash",
+                Value::unnamed_composite((0u8..32).map(|byte| Value::u128(u128::from(byte)))),
+            ),
+            ("payload_len", Value::u128(0)),
             ("decide_at", Value::u128(u128::from(decide_at))),
             ("maturity", Value::unnamed_variant("None", [])),
             ("grace_end", Value::unnamed_variant("None", [])),
             ("markets", Value::unnamed_variant("None", [])),
         ])
+    }
+
+    #[test]
+    fn recovery_leaf_detection_requires_one_exact_top_level_pair() {
+        let authorize =
+            Value::unnamed_variant("System", [Value::unnamed_variant("authorize_upgrade", [])]);
+        let recovery = Value::unnamed_variant(
+            "ExecutionGuard",
+            [Value::unnamed_variant("commit_recovery_image", [])],
+        );
+        let ordinary_meta = Value::unnamed_variant(
+            "Constitution",
+            [Value::unnamed_variant("amend_registry", [])],
+        );
+
+        let mut saw_authorize = false;
+        let mut saw_recovery = false;
+        assert!(record_recovery_leaf(
+            &ordinary_meta,
+            &mut saw_authorize,
+            &mut saw_recovery
+        ));
+        assert!(!saw_authorize && !saw_recovery);
+        assert!(record_recovery_leaf(
+            &authorize,
+            &mut saw_authorize,
+            &mut saw_recovery
+        ));
+        assert!(record_recovery_leaf(
+            &recovery,
+            &mut saw_authorize,
+            &mut saw_recovery
+        ));
+        assert!(saw_authorize && saw_recovery);
+        assert!(!record_recovery_leaf(
+            &recovery,
+            &mut saw_authorize,
+            &mut saw_recovery
+        ));
     }
 
     fn proposal_entry(proposal_id: u64, state: &str) -> (Vec<Value<()>>, Value<()>) {
@@ -1575,6 +1742,9 @@ mod tests {
                 class: "Param".to_owned(),
                 state: "Trading".to_owned(),
                 epoch: Some(3),
+                payload_hash: core::array::from_fn(|index| index as u8),
+                payload_len: 0,
+                recovery_qualification_required: false,
                 decide_at: Some(75),
                 maturity: None,
                 grace_end: None,

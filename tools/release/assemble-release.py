@@ -397,6 +397,7 @@ def validate_fixture_binding(
     report: dict[str, Any],
     surface_manifest_path: Path,
     metadata_path: Path,
+    recovery_metadata_path: Path,
     fixtures_dir: Path,
 ) -> list[str]:
     """Bind a fixture report to this release's runtime and full critical surface.
@@ -471,6 +472,55 @@ def validate_fixture_binding(
                 + ", ".join(extra[:8])
                 + ("…" if len(extra) > 8 else "")
             )
+    if recovery_metadata_path.is_file():
+        recovery_metadata_actual = sha256_file(recovery_metadata_path)
+        if report.get("recovery_metadata_sha256") != recovery_metadata_actual:
+            errors.append(
+                "fixture report recovery_metadata_sha256 "
+                f"{report.get('recovery_metadata_sha256')!r} does not match shipped "
+                f"recovery metadata.scale sha256 {recovery_metadata_actual} — the "
+                "recovery surface was checked against a different runtime"
+            )
+        expected_recovery_ids = {
+            entry["id"]
+            for entry in manifest["entries"]
+            if entry["kind"] not in ("raw_storage", "properties")
+        }
+        recovery_recorded = report.get("recovery_recorded")
+        recovery_missing = report.get("recovery_missing")
+        if not isinstance(recovery_recorded, list) or not isinstance(
+            recovery_missing, list
+        ):
+            errors.append(
+                "fixture report recovery_recorded/recovery_missing must be arrays"
+            )
+        else:
+            recovery_covered = {
+                item for item in recovery_recorded if isinstance(item, str)
+            }
+            recovery_covered |= {
+                item.get("surface")
+                for item in recovery_missing
+                if isinstance(item, dict)
+                and isinstance(item.get("surface"), str)
+            }
+            if recovery_covered != expected_recovery_ids:
+                unreported = sorted(expected_recovery_ids - recovery_covered)
+                unknown = sorted(recovery_covered - expected_recovery_ids)
+                if unreported:
+                    errors.append(
+                        "fixture report does not cover the full recovery metadata "
+                        "surface; unreported: "
+                        + ", ".join(unreported[:8])
+                        + ("…" if len(unreported) > 8 else "")
+                    )
+                if unknown:
+                    errors.append(
+                        "fixture report names recovery surface absent from the "
+                        "metadata-dependent manifest: "
+                        + ", ".join(unknown[:8])
+                        + ("…" if len(unknown) > 8 else "")
+                    )
     return errors
 
 
@@ -885,6 +935,7 @@ def main() -> int:
                 fixtures_report,
                 args.surface_manifest,
                 args.runtime_dir / "metadata.scale",
+                args.runtime_dir / "recovery" / "metadata.scale",
                 args.fixtures_dir,
             ):
                 add_corruption(corruptions, "chainhead.binding", error)
@@ -896,6 +947,16 @@ def main() -> int:
                         f"chainhead.{item.get('surface', 'unknown')}",
                         milestone_from_blocker(blocker),
                         f"{item.get('reason', 'not recorded')}" + (f" ({blocker})" if blocker else ""),
+                    )
+            for item in fixtures_report.get("recovery_missing", []):
+                if item.get("required"):
+                    blocker = item.get("blocked_by")
+                    add_gap(
+                        gaps,
+                        f"chainhead.recovery.{item.get('surface', 'unknown')}",
+                        milestone_from_blocker(blocker),
+                        f"{item.get('reason', 'not present in recovery metadata')}"
+                        + (f" ({blocker})" if blocker else ""),
                     )
             if fixtures_report.get("mode") != "chainHead-v1":
                 add_gap(gaps, "chainhead.transport", "B8", "recorder ran without chainHead websocket coverage")

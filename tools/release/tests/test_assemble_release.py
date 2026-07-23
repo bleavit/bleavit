@@ -221,6 +221,20 @@ class AssembleReleaseTests(unittest.TestCase):
         (recovery / "runtime-info.json").write_text(
             json.dumps(runtime_info), encoding="utf-8"
         )
+        fixture_report_path = self.fixtures / "fixtures-report.json"
+        fixture_report = json.loads(
+            fixture_report_path.read_text(encoding="utf-8")
+        )
+        fixture_report.update(
+            {
+                "recovery_metadata_sha256": sha256(metadata),
+                "recovery_recorded": ["storage.constitution.phase_flags"],
+                "recovery_missing": [],
+            }
+        )
+        fixture_report_path.write_text(
+            json.dumps(fixture_report), encoding="utf-8"
+        )
         return recovery
 
     def tearDown(self) -> None:
@@ -321,6 +335,50 @@ class AssembleReleaseTests(unittest.TestCase):
         self.assertIn(
             "runtime.recovery.commit_binding",
             {item["id"] for item in manifest["readiness"]["corruption"]},
+        )
+
+    def test_paired_recovery_fixture_metadata_mismatch_is_corruption(self) -> None:
+        self.install_recovery_pair()
+        fixture_report_path = self.fixtures / "fixtures-report.json"
+        fixture_report = json.loads(
+            fixture_report_path.read_text(encoding="utf-8")
+        )
+        fixture_report["recovery_metadata_sha256"] = "0" * 64
+        fixture_report_path.write_text(
+            json.dumps(fixture_report), encoding="utf-8"
+        )
+        output = self.root / "recovery-fixture-metadata-corrupt"
+        result = self.run_assemble(output, allow_missing=True)
+        self.assertNotEqual(result.returncode, 0)
+        manifest = json.loads((output / "release-manifest.json").read_text())
+        reasons = [
+            item["reason"] for item in manifest["readiness"]["corruption"]
+        ]
+        self.assertTrue(
+            any("recovery_metadata_sha256" in reason for reason in reasons),
+            reasons,
+        )
+
+    def test_paired_recovery_fixture_must_cover_frozen_surface(self) -> None:
+        self.install_recovery_pair()
+        fixture_report_path = self.fixtures / "fixtures-report.json"
+        fixture_report = json.loads(
+            fixture_report_path.read_text(encoding="utf-8")
+        )
+        fixture_report["recovery_recorded"] = []
+        fixture_report_path.write_text(
+            json.dumps(fixture_report), encoding="utf-8"
+        )
+        output = self.root / "recovery-fixture-surface-corrupt"
+        result = self.run_assemble(output, allow_missing=True)
+        self.assertNotEqual(result.returncode, 0)
+        manifest = json.loads((output / "release-manifest.json").read_text())
+        reasons = [
+            item["reason"] for item in manifest["readiness"]["corruption"]
+        ]
+        self.assertTrue(
+            any("full recovery metadata surface" in reason for reason in reasons),
+            reasons,
         )
 
     def test_allow_missing_lists_gaps_and_hashes_content(self) -> None:
