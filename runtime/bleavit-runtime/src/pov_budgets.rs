@@ -268,19 +268,32 @@ fn recovery_qualifier_and_mandatory_hooks_fit_absolute_class_budgets() {
         "recovery qualifier {qualifier:?} exceeds Operational {operational:?}",
     );
 
+    let generated_schedule_floor = qualifier
+        .saturating_add(
+            <<Runtime as frame_system::Config>::SystemWeightInfo as frame_system::WeightInfo>::authorize_upgrade(),
+        )
+        .saturating_add(
+            <<Runtime as frame_system::Config>::SystemWeightInfo as frame_system::WeightInfo>::apply_authorized_upgrade(),
+        );
+    let charged_schedule = crate::configs::recovery_schedule_hook_weight(RUNTIME_CODE_BYTES_BOUND);
+    assert!(
+        generated_schedule_floor.all_lte(charged_schedule),
+        "mandatory recovery schedule {charged_schedule:?} omits generated qualification/authorize/apply floor {generated_schedule_floor:?}",
+    );
+
     let mandatory = RuntimeBlockWeights::get().max_block;
     for (name, weight) in [
         (
             "combined recovery validation-data mandatory path",
             crate::configs::migration_validation_hook_weight()
                 .saturating_add(crate::configs::dead_man_detector_hook_weight())
-                .saturating_add(crate::configs::recovery_hook_weight(
+                .saturating_add(crate::configs::recovery_schedule_hook_weight(
                     RUNTIME_CODE_BYTES_BOUND,
                 ))
                 // Cumulus may call `on_validation_code_applied` and then
-                // `on_validation_data` in one inherent. A still-live recovery
-                // trigger can therefore register the full bounded Wasm path
-                // twice in the same mandatory block.
+                // `on_validation_data` in one inherent. The application
+                // callback therefore adds the bounded installed-code
+                // read/hash path to the full scheduling charge.
                 .saturating_add(crate::configs::recovery_hook_weight(
                     RUNTIME_CODE_BYTES_BOUND,
                 )),

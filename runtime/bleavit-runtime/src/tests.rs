@@ -1344,7 +1344,7 @@ pub(crate) fn seed_parachain_upgrade_boundary(candidate_len: usize) {
     cumulus_pallet_parachain_system::UpgradeRestrictionSignal::<Runtime>::kill();
 }
 
-fn submit_relay_upgrade_go_ahead() {
+pub(crate) fn submit_relay_upgrade_go_ahead() {
     submit_relay_upgrade_signal(cumulus_primitives_core::relay_chain::UpgradeGoAhead::GoAhead);
 }
 

@@ -5922,7 +5922,15 @@ pub(crate) fn direct_system_upgrade_allowed(code: &[u8]) -> bool {
         && parachain_upgrade_preflight(code).is_ok();
     #[cfg(feature = "runtime-benchmarks")]
     let preflight_passes = true;
-    version_matches && preflight_passes
+    let bridge_matches = match pallet_execution_guard::PhaseFourBridge::<Runtime>::get() {
+        pallet_execution_guard::PhaseFourBridgeState::Pending { code_hash, .. } => {
+            code_hash == pending.hash
+        }
+        pallet_execution_guard::PhaseFourBridgeState::Scheduled { .. } => false,
+        pallet_execution_guard::PhaseFourBridgeState::Unused
+        | pallet_execution_guard::PhaseFourBridgeState::Consumed => true,
+    };
+    version_matches && preflight_passes && bridge_matches
 }
 
 fn scheduled_upgrade_abort_candidate() -> Option<futarchy_primitives::H256> {
@@ -5987,6 +5995,31 @@ pub(crate) fn recovery_hook_weight(bytes: u32) -> Weight {
     // hook moves with the committed benchmark artifact and its >10% regression
     // gate instead of carrying an unmeasured runtime-local constant.
     <crate::weights::pallet_execution_guard::WeightInfo<Runtime> as pallet_execution_guard::WeightInfo>::qualify_recovery_image(bytes)
+}
+
+pub(crate) fn recovery_schedule_hook_weight(bytes: u32) -> Weight {
+    // `schedule_committed_recovery_image` performs the full bounded
+    // qualification/preimage path, then FRAME authorization and Cumulus code
+    // scheduling, plus the runtime-local lockdown/cursor/receipt writes. The
+    // mandatory inherent must pre-charge all of it (I-20); charging only the
+    // qualifier undercounts a 4 MiB application by roughly an order of
+    // magnitude. The final term conservatively covers the additional fixed
+    // runtime-local reads/writes and the retired cursor proof not present in
+    // the generated dispatch weights.
+    recovery_hook_weight(bytes)
+        .saturating_add(
+            <<Runtime as frame_system::Config>::SystemWeightInfo as frame_system::WeightInfo>::authorize_upgrade(),
+        )
+        .saturating_add(
+            <<Runtime as frame_system::Config>::SystemWeightInfo as frame_system::WeightInfo>::apply_authorized_upgrade(),
+        )
+        .saturating_add(
+            <Runtime as frame_system::Config>::DbWeight::get().reads_writes(8, 8),
+        )
+        .saturating_add(Weight::from_parts(
+            0,
+            u64::from(bounds::MIGRATION_CURSOR_MAX_LEN),
+        ))
 }
 
 fn schedule_committed_recovery_image() -> DispatchResult {
@@ -6139,7 +6172,7 @@ impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEven
         if let Some(recovery) = pallet_execution_guard::RecoveryImage::<Runtime>::get() {
             if recovery_trigger().is_some() {
                 frame_system::Pallet::<Runtime>::register_extra_weight_unchecked(
-                    recovery_hook_weight(recovery.len.min(pallet_preimage::MAX_SIZE)),
+                    recovery_schedule_hook_weight(recovery.len.min(pallet_preimage::MAX_SIZE)),
                     DispatchClass::Mandatory,
                 );
                 if schedule_committed_recovery_image().is_err() {
@@ -6180,12 +6213,13 @@ impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEven
             }
             return;
         }
-        let phase_transition = PhaseTransitionLock::get();
-        let valid = installed_code_identity().is_some_and(|(hash, observed)| {
+        let installed_identity = installed_code_identity();
+        let installed_hash = installed_identity.as_ref().map(|(hash, _)| *hash);
+        let valid = installed_identity.as_ref().is_some_and(|(hash, observed)| {
             pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_some_and(
                 |pending| {
                     let current = pallet_execution_guard::CurrentSpecName::<Runtime>::get();
-                    hash == pending.hash
+                    *hash == pending.hash
                         && current.is_some_and(|current| {
                             observed.spec_name == current.spec_name
                                 && observed.spec_version == pending.target_spec_version
@@ -6193,17 +6227,50 @@ impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEven
                 },
             )
         });
-        if phase_transition {
-            if valid {
-                // Cumulus invokes this hook in the old runtime after writing
-                // `:code`. The no-Sudo image's one-shot migration runs only at
-                // the next block's `on_runtime_upgrade`, so preserve the
-                // OnlyInherents lock and leave guard pending state intact for
-                // that atomic transition.
+        let bridge = pallet_execution_guard::PhaseFourBridge::<Runtime>::get();
+        if matches!(
+            bridge,
+            pallet_execution_guard::PhaseFourBridgeState::Pending { code_hash, .. }
+                if installed_hash == Some(code_hash)
+        ) {
+            if !valid
+                || frame_support::storage::with_storage_layer(|| {
+                    let hash = installed_hash
+                        .ok_or(DispatchError::Other("phase-four installed code missing"))?;
+                    crate::ExecutionGuard::phase_four_scheduled(hash)?;
+                    PhaseTransitionLock::put(true);
+                    PhaseTransitionApplied::put(true);
+                    Ok::<(), DispatchError>(())
+                })
+                .is_err()
+            {
+                set_migration_halt_source(APPLIED_DETECTION_HALT);
+            }
+            return;
+        }
+        if matches!(
+            bridge,
+            pallet_execution_guard::PhaseFourBridgeState::Scheduled { code_hash, .. }
+                if installed_hash == Some(code_hash)
+        ) || PhaseTransitionLock::get()
+        {
+            if valid && PhaseTransitionLock::get() {
+                // The no-Sudo image's one-shot migration runs only at the next
+                // block's `on_runtime_upgrade`, so preserve the OnlyInherents
+                // lock and leave guard pending state intact for that atomic
+                // transition.
                 PhaseTransitionApplied::put(true);
             } else {
                 set_migration_halt_source(APPLIED_DETECTION_HALT);
             }
+            return;
+        }
+        if matches!(
+            bridge,
+            pallet_execution_guard::PhaseFourBridgeState::Pending { .. }
+                | pallet_execution_guard::PhaseFourBridgeState::Scheduled { .. }
+        ) {
+            set_migration_halt_source(APPLIED_DETECTION_HALT);
             return;
         }
         if !valid || crate::ExecutionGuard::validation_code_applied().is_err() {

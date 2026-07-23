@@ -10,6 +10,8 @@ use alloc::borrow::Cow;
 #[cfg(feature = "bootstrap")]
 use core::sync::atomic::Ordering;
 
+#[cfg(all(feature = "phase-four", not(feature = "recovery")))]
+use frame_support::traits::Hooks;
 use frame_support::{
     migrations::{FailedMigrationHandler, MultiStepMigrator, SteppedMigrations},
     storage::unhashed,
@@ -665,13 +667,12 @@ fn exact_phase_four_meta_payload_queues_and_commits_both_cap_raises() {
     });
 }
 
-/// The phase transition must lock transaction execution at the exact boundary
-/// where Cumulus accepts the validation code. A merely authorized bridge is
-/// still relay-abortable and must not lock; a durably scheduled one must become
-/// `Scheduled` and force `OnlyInherents` before the next block.
+/// Cumulus retaining the candidate is still relay-abortable. The bridge stays
+/// pending and unlocked until the relay applies the exact code; the
+/// `OnSystemEvent` callback owns the atomic Pending→Scheduled + lock boundary.
 #[cfg(feature = "bootstrap")]
 #[test]
-fn real_upgrade_dispatcher_schedules_and_locks_the_phase_four_bridge_atomically() {
+fn real_upgrade_dispatcher_preserves_abortable_bridge_until_relay_application() {
     tests::upgrade_ext().execute_with(|| {
         type Dispatcher = crate::classifier::RuntimeDispatcher;
 
@@ -721,7 +722,7 @@ fn real_upgrade_dispatcher_schedules_and_locks_the_phase_four_bridge_atomically(
         );
         assert_eq!(
             pallet_execution_guard::PhaseFourBridge::<Runtime>::get(),
-            pallet_execution_guard::PhaseFourBridgeState::Scheduled {
+            pallet_execution_guard::PhaseFourBridgeState::Pending {
                 pid: 4_004,
                 code_hash: candidate_hash,
                 plan: pallet_execution_guard::PhaseFourPlan {
@@ -730,9 +731,171 @@ fn real_upgrade_dispatcher_schedules_and_locks_the_phase_four_bridge_atomically(
                 },
             },
         );
-        assert!(crate::configs::PhaseTransitionLock::get());
-        assert!(crate::configs::RecoveryAwareMigrations::ongoing());
+        assert!(!crate::configs::PhaseTransitionLock::get());
+        assert!(!crate::configs::RecoveryAwareMigrations::ongoing());
     });
+}
+
+/// Regression for the canonical public application surface in 09 §2.1(4).
+///
+/// A Phase-3→4 bridge cannot rely on the execution-guard wrapper being called:
+/// `System::apply_authorized_upgrade` is itself public and is the normative
+/// application call. Relay GoAhead must therefore turn that direct schedule
+/// into a locked `Scheduled` bridge before the configured `on_runtime_upgrade`
+/// chain consumes the transition atomically.
+#[cfg(all(feature = "phase-four", not(feature = "recovery")))]
+#[test]
+fn direct_system_apply_then_go_ahead_completes_phase_four_transition() {
+    let candidate = b"phase-four-direct-system-apply".to_vec();
+    let mut candidate_version = crate::VERSION;
+    candidate_version.spec_version = candidate_version.spec_version.saturating_add(1);
+    let current_spec_version = candidate_version.spec_version.saturating_sub(1);
+    tests::upgrade_ext_with_artifact_versions(vec![(candidate.clone(), candidate_version.clone())])
+        .execute_with(|| {
+            let candidate_hash = sp_io::hashing::blake2_256(&candidate);
+            let current = futarchy_primitives::RuntimeVersionConstraint {
+                spec_name: candidate_version
+                    .spec_name
+                    .as_bytes()
+                    .to_vec()
+                    .try_into()
+                    .expect("frozen spec name fits"),
+                spec_version: current_spec_version,
+            };
+            pallet_execution_guard::CurrentSpecName::<Runtime>::put(current);
+
+            let source_flags = pallet_constitution::PhaseFlagsValue::SHADOW_MODE
+                | pallet_constitution::PhaseFlagsValue::SUDO_PRESENT;
+            pallet_constitution::PhaseFlags::<Runtime>::put(source_flags);
+            let mut sudo_key = [0u8; 32];
+            sudo_key[..16].copy_from_slice(&sp_io::hashing::twox_128(b"Sudo"));
+            sudo_key[16..].copy_from_slice(&sp_io::hashing::twox_128(b"Key"));
+            sp_io::storage::set(&sudo_key, &[1]);
+
+            let tvl_key = pallet_constitution::key16(b"phase3.tvl_cap");
+            let deposit_key = pallet_constitution::key16(b"phase3.dep_cap");
+            let tvl_cap = pallet_constitution::Params::<Runtime>::get(tvl_key)
+                .expect("TVL cap is registered")
+                .value
+                .as_u128()
+                .saturating_add(1);
+            let deposit_cap = pallet_constitution::Params::<Runtime>::get(deposit_key)
+                .expect("deposit cap is registered")
+                .value
+                .as_u128()
+                .saturating_add(1);
+            let plan = pallet_execution_guard::PhaseFourPlan {
+                tvl_cap,
+                deposit_cap,
+            };
+            pallet_execution_guard::PhaseFourBridge::<Runtime>::put(
+                pallet_execution_guard::PhaseFourBridgeState::Pending {
+                    pid: 4_004,
+                    code_hash: candidate_hash,
+                    plan,
+                },
+            );
+            pallet_execution_guard::RecoveryImage::<Runtime>::put(
+                pallet_execution_guard::RecoveryImageCommitment {
+                    pid: 4_004,
+                    primary_hash: candidate_hash,
+                    hash: [0x55; 32],
+                    len: 1,
+                    target_spec_version: candidate_version.spec_version.saturating_add(1),
+                    attestation_id: 7,
+                    committed_at: System::block_number(),
+                },
+            );
+            pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::put(
+                pallet_execution_guard::PendingUpgrade {
+                    hash: candidate_hash,
+                    authorized_at: System::block_number(),
+                    applicable_at: System::block_number(),
+                    target_spec_version: candidate_version.spec_version,
+                },
+            );
+
+            assert!(
+                <crate::classifier::RuntimeDispatcher as pallet_execution_guard::BatchDispatcher<
+                    crate::RuntimeCall,
+                >>::dispatch_authorize_upgrade(candidate_hash)
+                .is_ok()
+            );
+            tests::seed_parachain_upgrade_boundary(candidate.len());
+            assert!(
+                System::apply_authorized_upgrade(
+                    crate::RuntimeOrigin::signed(tests::account(0x44)),
+                    candidate.clone(),
+                )
+                .is_ok(),
+                "the exact public FRAME application call must schedule the authorized image",
+            );
+
+            assert_eq!(
+                pallet_execution_guard::PhaseFourBridge::<Runtime>::get(),
+                pallet_execution_guard::PhaseFourBridgeState::Pending {
+                    pid: 4_004,
+                    code_hash: candidate_hash,
+                    plan,
+                },
+                "code scheduling alone is still relay-abortable and must preserve the pending bridge",
+            );
+            assert!(!crate::configs::PhaseTransitionLock::get());
+            assert!(!crate::configs::PhaseTransitionApplied::get());
+
+            System::set_block_number(System::block_number().saturating_add(1));
+            let _ = ExecutionGuard::on_initialize(System::block_number());
+            assert_eq!(
+                pallet_execution_guard::ScheduledUpgrade::<Runtime>::get(),
+                Some(candidate_hash),
+                "the ordinary next-block hook must observe the Cumulus schedule for Abort handling",
+            );
+
+            tests::submit_relay_upgrade_go_ahead();
+            assert!(
+                crate::configs::PhaseTransitionApplied::get(),
+                "relay GoAhead must mark the installed Phase-4 image for the next runtime-upgrade hook",
+            );
+            assert!(
+                crate::configs::PhaseTransitionLock::get(),
+                "the GoAhead callback must arm OnlyInherents before on_runtime_upgrade",
+            );
+            assert_eq!(
+                pallet_execution_guard::PhaseFourBridge::<Runtime>::get(),
+                pallet_execution_guard::PhaseFourBridgeState::Scheduled {
+                    pid: 4_004,
+                    code_hash: candidate_hash,
+                    plan,
+                },
+                "the GoAhead callback must schedule the bridge before on_runtime_upgrade",
+            );
+
+            let _ = crate::Executive::execute_on_runtime_upgrade();
+
+            assert!(!sp_io::storage::exists(&sudo_key));
+            assert_eq!(
+                pallet_constitution::PhaseFlags::<Runtime>::get(),
+                pallet_constitution::PhaseFlagsValue::PARAM_ARMED,
+            );
+            assert_eq!(
+                pallet_constitution::Params::<Runtime>::get(tvl_key)
+                    .map(|record| record.value.as_u128()),
+                Some(tvl_cap),
+            );
+            assert_eq!(
+                pallet_constitution::Params::<Runtime>::get(deposit_key)
+                    .map(|record| record.value.as_u128()),
+                Some(deposit_cap),
+            );
+            assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_none());
+            assert_eq!(
+                pallet_execution_guard::PhaseFourBridge::<Runtime>::get(),
+                pallet_execution_guard::PhaseFourBridgeState::Consumed,
+            );
+            assert!(!crate::configs::PhaseTransitionApplied::get());
+            assert!(!crate::configs::PhaseTransitionLock::get());
+            assert!(crate::configs::RuntimePhaseState::exact_phase_four());
+        });
 }
 
 /// The pallet-removal image consumes the exact Phase-3 source state once. The

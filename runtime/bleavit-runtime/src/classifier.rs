@@ -1058,7 +1058,6 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
         }
         frame_support::storage::with_storage_layer(|| {
             crate::configs::parachain_upgrade_preflight(&code)?;
-            let candidate_hash = sp_io::hashing::blake2_256(&code);
 
             // A normal extrinsic must never retire a migration cursor: doing
             // so would reopen transactions against a half-migrated layout in
@@ -1070,14 +1069,6 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
             RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { code })
                 .dispatch(RuntimeOrigin::none())
                 .map_err(|error| error.error)?;
-            if matches!(
-                pallet_execution_guard::PhaseFourBridge::<Runtime>::get(),
-                pallet_execution_guard::PhaseFourBridgeState::Pending { code_hash, .. }
-                    if code_hash == candidate_hash
-            ) {
-                crate::ExecutionGuard::phase_four_scheduled(candidate_hash)?;
-                crate::configs::PhaseTransitionLock::put(true);
-            }
             Ok(())
         })
     }

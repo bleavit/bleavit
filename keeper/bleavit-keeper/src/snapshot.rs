@@ -542,13 +542,7 @@ impl SnapshotExtractor {
         at_block: &OnlineClientAtBlock<PolkadotConfig>,
         proposal: &ProposalSnapshot,
     ) -> bool {
-        let hash = Value::unnamed_composite(
-            proposal
-                .payload_hash
-                .iter()
-                .map(|byte| Value::u128(u128::from(*byte))),
-        );
-        let key = Value::unnamed_composite([hash, Value::u128(u128::from(proposal.payload_len))]);
+        let key = preimage_for_storage_key(&proposal.payload_hash, proposal.payload_len);
         let Some(encoded) = self
             .fetch_value_with_keys(at_block, "Preimage", "PreimageFor", vec![key])
             .await
@@ -1481,6 +1475,11 @@ fn bytes_from_value<C>(value: &Value<C>) -> Option<Vec<u8>> {
         .collect()
 }
 
+fn preimage_for_storage_key(hash: &[u8; 32], len: u32) -> Value<()> {
+    let hash = Value::unnamed_composite(hash.iter().map(|byte| Value::u128(u128::from(*byte))));
+    Value::unnamed_composite([hash, Value::u128(u128::from(len))])
+}
+
 fn variant_child<C>(value: &Value<C>) -> Option<&Value<C>> {
     match &value.value {
         ValueDef::Variant(variant) => variant.values.values().next(),
@@ -1515,8 +1514,10 @@ fn record_recovery_leaf<C>(
 }
 
 /// Decode the committed `Vec<RuntimeCall>` with live metadata and recognize the
-/// exact two top-level leaves required by the recovery qualifier. Any malformed,
-/// oversized, or trailing-byte payload fails closed and is never planned.
+/// two distinct top-level leaves required by the recovery qualifier. Other
+/// calls remain legal in the bounded upgrade batch (for example the committed
+/// release-channel/cap updates); duplicate descriptor leaves, malformed,
+/// oversized, or trailing-byte payloads fail closed and are never planned.
 fn batch_has_recovery_descriptor(bytes: &[u8], metadata: &Metadata, max_calls: u32) -> bool {
     let mut input = bytes;
     let Ok(Compact(call_count)) = Compact::<u32>::decode(&mut input) else {
@@ -1577,7 +1578,9 @@ mod tests {
     use super::*;
     use crate::planner::{plan, PlannerConfig};
     use scale_info::TypeInfo;
-    use subxt::ext::{codec::Encode, scale_decode::DecodeAsType, scale_value::Value};
+    use subxt::ext::{
+        codec::Encode, scale_decode::DecodeAsType, scale_encode::EncodeAsType, scale_value::Value,
+    };
 
     #[allow(dead_code)]
     #[derive(Encode, TypeInfo)]
@@ -1643,6 +1646,132 @@ mod tests {
             ("grace_end", Value::unnamed_variant("None", [])),
             ("markets", Value::unnamed_variant("None", [])),
         ])
+    }
+
+    fn actual_runtime_metadata() -> Metadata {
+        // Extracted from this repository's bootstrap runtime Wasm with:
+        // `subwasm metadata --format scale`. Keeping the SCALE artifact in the
+        // keeper workspace exercises Subxt against the production outer-call
+        // and Preimage storage types without coupling its isolated dependency
+        // graph to the runtime workspace.
+        let encoded = include_bytes!("../tests/fixtures/runtime-metadata.scale");
+        Metadata::decode(&mut &encoded[..]).expect("actual runtime metadata decodes for Subxt")
+    }
+
+    fn hash_value(byte: u8) -> Value<()> {
+        Value::unnamed_composite(
+            [byte; 32]
+                .into_iter()
+                .map(|byte| Value::u128(u128::from(byte))),
+        )
+    }
+
+    fn encode_runtime_batch(
+        metadata: &Metadata,
+        calls: impl IntoIterator<Item = Value<()>>,
+    ) -> Vec<u8> {
+        let calls = calls.into_iter().collect::<Vec<_>>();
+        let mut encoded =
+            Compact(u32::try_from(calls.len()).expect("test batch fits u32")).encode();
+        let call_ty = metadata.outer_enums().call_enum_ty();
+        for call in calls {
+            encoded.extend(
+                call.encode_as_type(call_ty, metadata.types())
+                    .expect("call shape follows actual runtime metadata"),
+            );
+        }
+        encoded
+    }
+
+    fn authorize_upgrade_call() -> Value<()> {
+        Value::unnamed_variant(
+            "System",
+            [Value::named_variant(
+                "authorize_upgrade",
+                [("code_hash", hash_value(0x11))],
+            )],
+        )
+    }
+
+    fn commit_recovery_image_call() -> Value<()> {
+        Value::unnamed_variant(
+            "ExecutionGuard",
+            [Value::named_variant(
+                "commit_recovery_image",
+                [
+                    ("hash", hash_value(0x22)),
+                    ("len", Value::u128(1_024)),
+                    ("target_spec_version", Value::u128(43)),
+                    ("attestation_id", Value::u128(7)),
+                ],
+            )],
+        )
+    }
+
+    fn ordinary_meta_call() -> Value<()> {
+        Value::unnamed_variant(
+            "Constitution",
+            [Value::named_variant(
+                "set_phase_flag",
+                [
+                    ("flag", Value::u128(1 << 3)),
+                    ("enabled", Value::bool(true)),
+                ],
+            )],
+        )
+    }
+
+    #[test]
+    fn actual_runtime_metadata_decodes_exact_recovery_preimage_and_rejects_meta_or_malformed() {
+        let metadata = actual_runtime_metadata();
+        let exact = encode_runtime_batch(
+            &metadata,
+            [authorize_upgrade_call(), commit_recovery_image_call()],
+        );
+        assert!(batch_has_recovery_descriptor(&exact, &metadata, 16));
+
+        let ordinary_meta = encode_runtime_batch(&metadata, [ordinary_meta_call()]);
+        assert!(!batch_has_recovery_descriptor(
+            &ordinary_meta,
+            &metadata,
+            16
+        ));
+
+        let mixed = encode_runtime_batch(
+            &metadata,
+            [
+                authorize_upgrade_call(),
+                commit_recovery_image_call(),
+                ordinary_meta_call(),
+            ],
+        );
+        assert!(
+            batch_has_recovery_descriptor(&mixed, &metadata, 16),
+            "the required pair may coexist with other bounded upgrade calls"
+        );
+
+        let mut malformed = exact;
+        malformed.push(0xff);
+        assert!(!batch_has_recovery_descriptor(&malformed, &metadata, 16));
+    }
+
+    #[test]
+    fn actual_runtime_preimage_key_is_one_scale_tuple_key() {
+        let metadata = actual_runtime_metadata();
+        let entry = metadata
+            .pallet_by_name("Preimage")
+            .and_then(|pallet| pallet.storage())
+            .and_then(|storage| storage.entry_by_name("PreimageFor"))
+            .expect("actual runtime exposes Preimage.PreimageFor");
+        let keys = entry.keys().collect::<Vec<_>>();
+        assert_eq!(keys.len(), 1, "PreimageFor is keyed by one tuple");
+
+        let hash = [0x42; 32];
+        let len = 2_048;
+        let dynamically_encoded = preimage_for_storage_key(&hash, len)
+            .encode_as_type(keys[0].key_id, metadata.types())
+            .expect("snapshot key follows actual PreimageFor tuple metadata");
+        assert_eq!(dynamically_encoded, (hash, len).encode());
     }
 
     #[test]
