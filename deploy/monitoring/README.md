@@ -14,7 +14,12 @@ operation additionally needs the repository pin `websockets==15.0.1`):
 
 ```sh
 python3 tools/monitoring/chain_alerts_exporter.py \
-  --url wss://YOUR_FINALIZED_NODE --bind 127.0.0.1:9617 --interval 30
+  --url wss://YOUR_FINALIZED_NODE \
+  --asset-hub-url wss://YOUR_INDEPENDENT_ASSET_HUB_NODE \
+  --dot-refill-margin-planck YOUR_POSITIVE_DOT_MARGIN \
+  --asset-hub-stale-seconds YOUR_POSITIVE_STALE_WINDOW \
+  --asset-hub-genesis-hash 0xYOUR_CANONICAL_ASSET_HUB_GENESIS_HASH \
+  --bind 127.0.0.1:9617 --interval 30
 python3 tools/monitoring/attestation_monitor.py \
   --config /etc/bleavit/attestation-monitor.toml
 python3 tools/monitoring/relay_finality_monitor.py \
@@ -80,6 +85,9 @@ The chain exporter serves `bleavit_chain_*` series in these families:
   `DescriptorLeadTime` and queue/map bounds from portable metadata constants;
 - metadata-driven storage: keeper-meter use, bounded map counts, and
   `PolkadotXcm.AssetTraps` occupancy;
+- reserve-probe runway: the monitoring-only local line plus independently
+  decoded, genesis/para-id-pinned Asset Hub USDC and usable-DOT balances,
+  live requirements, readiness, and fail-closed collection health;
 - finalized events: Guardian actions, upgrade authorization/application, and
   keeper-budget-low counters;
 - frozen `ReleaseChannel`: version labels, manifest TXID, spec version,
@@ -125,7 +133,7 @@ not part of `check_alert_coverage.py`.
 | Oracle | chain exporter (`open_oracle_rounds`) | live |
 | Collateralization | runtime-side escrow/custody reconciliation (`TelemetryApi`) | live; page |
 | Treasury | chain exporter (`nav`) | live |
-| XCM | chain exporter trap count; node/runtime send/fail detail remains operational context | live alert threshold |
+| XCM | chain exporter trap count plus local/independent-Asset-Hub reserve-probe runway; node/runtime send/fail detail remains operational context | live alert threshold |
 | Keepers | existing keeper daemon series | live |
 | Guardian | chain exporter finalized events | live |
 | Upgrades | canonical runtime migration-stall detector (`TelemetryApi`) | live; page |

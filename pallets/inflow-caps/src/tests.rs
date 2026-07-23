@@ -154,3 +154,31 @@ fn inflow_admissible_honours_the_unbounded_sentinel_and_saturating_edges() {
         assert!(InflowCaps::inflow_admissible(&1, 0));
     });
 }
+
+#[test]
+fn protocol_accounts_bypass_only_the_per_account_meter() {
+    new_test_ext().execute_with(|| {
+        DepositCap::set(10);
+
+        assert!(InflowCaps::inflow_admissible(&99, u128::MAX));
+        assert_ok!(InflowCaps::note_inflow(&99, u128::MAX));
+        assert!(!CumulativeDeposits::<Test>::contains_key(99));
+        assert!(InflowCaps::escrow_admissible(&99));
+
+        // A retained pre-exemption entry is never read or extended.
+        CumulativeDeposits::<Test>::insert(99, u128::MAX);
+        assert!(InflowCaps::inflow_admissible(&99, u128::MAX));
+        assert_ok!(InflowCaps::note_inflow(&99, 1));
+        assert_eq!(CumulativeDeposits::<Test>::get(99), u128::MAX);
+        assert_ok!(InflowCaps::do_try_state());
+        CumulativeDeposits::<Test>::insert(99, 0);
+        assert_ok!(InflowCaps::do_try_state());
+
+        // The exemption does not weaken the system-wide TVL ceiling.
+        TvlCap::set(999);
+        UsdcIssuance::set(1_000);
+        assert!(!InflowCaps::escrow_admissible(&99));
+        assert_eq!(InflowCaps::mint_admissible(1), Err(()));
+        assert!(InflowCaps::do_try_state().is_err());
+    });
+}

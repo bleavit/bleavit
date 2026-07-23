@@ -281,6 +281,35 @@ fn unrelated_constitution_params() -> Vec<(
         .collect()
 }
 
+fn legacy_probe_control_records() -> [pallet_constitution::ParamRecord; 5] {
+    let mut records = crate::migrations::reserve_probe_control_param_records()
+        .expect("reserve control rows exist in the registry template");
+    for record in &mut records {
+        record.min = match record.value {
+            pallet_constitution::ParamValue::U32(_) => pallet_constitution::ParamValue::U32(0),
+            pallet_constitution::ParamValue::U8(_) => pallet_constitution::ParamValue::U8(0),
+            pallet_constitution::ParamValue::Balance(_) => {
+                pallet_constitution::ParamValue::Balance(0)
+            }
+            _ => panic!("unexpected reserve control value kind"),
+        };
+        record.kernel_bounded = false;
+    }
+    records
+}
+
+fn unrelated_to_probe_controls() -> Vec<(
+    futarchy_primitives::ParamKey,
+    pallet_constitution::ParamRecord,
+)> {
+    let keys = crate::migrations::reserve_probe_control_param_records()
+        .expect("reserve control rows exist")
+        .map(|record| record.key);
+    pallet_constitution::Params::<Runtime>::iter()
+        .filter(|(key, _)| !keys.contains(key))
+        .collect()
+}
+
 #[test]
 fn constitution_v1_migration_inserts_only_missing_exact_probe_rows() {
     tests::development_ext().execute_with(|| {
@@ -332,6 +361,104 @@ fn constitution_v1_migration_is_atomic_on_one_mismatched_existing_row() {
         assert!(pallet_constitution::Params::<Runtime>::get(fee.key).is_none());
         assert_eq!(pallet_constitution::Params::<Runtime>::get(rate.key), Some(rate));
         assert_eq!(unrelated_constitution_params(), unrelated_before);
+    });
+}
+
+#[test]
+fn constitution_v2_migration_preserves_values_history_and_unrelated_rows() {
+    tests::development_ext().execute_with(|| {
+        StorageVersion::new(1).put::<Constitution>();
+        let mut legacy = legacy_probe_control_records();
+        for (index, record) in legacy.iter_mut().enumerate() {
+            record.last_changed_epoch = 10 + index as u32;
+            record.last_change_block = 100 + index as u32;
+            pallet_constitution::Params::<Runtime>::insert(record.key, *record);
+        }
+        let unrelated_before = unrelated_to_probe_controls();
+        let expected = crate::migrations::reserve_probe_control_param_records().unwrap();
+
+        let _ = <crate::migrations::MigrateConstitutionReserveProbeV2 as OnRuntimeUpgrade>::on_runtime_upgrade();
+
+        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(2));
+        for (index, definition) in expected.into_iter().enumerate() {
+            let actual = pallet_constitution::Params::<Runtime>::get(definition.key).unwrap();
+            assert_eq!(actual.value, legacy[index].value);
+            assert_eq!(actual.last_changed_epoch, legacy[index].last_changed_epoch);
+            assert_eq!(actual.last_change_block, legacy[index].last_change_block);
+            assert_eq!(actual.min, definition.min);
+            assert_eq!(actual.max, definition.max);
+            assert_eq!(actual.max_delta, definition.max_delta);
+            assert_eq!(actual.cooldown_epochs, definition.cooldown_epochs);
+            assert_eq!(actual.class, definition.class);
+            assert!(actual.kernel_bounded);
+        }
+        assert_eq!(unrelated_to_probe_controls(), unrelated_before);
+    });
+}
+
+#[test]
+fn constitution_v2_migration_is_atomic_on_zero_missing_or_wrong_kind_rows() {
+    for defect in 0..3 {
+        tests::development_ext().execute_with(|| {
+            StorageVersion::new(1).put::<Constitution>();
+            let legacy = legacy_probe_control_records();
+            for record in legacy {
+                pallet_constitution::Params::<Runtime>::insert(record.key, record);
+            }
+            let key = legacy[0].key;
+            match defect {
+                0 => pallet_constitution::Params::<Runtime>::mutate(key, |record| {
+                    record.as_mut().unwrap().value = pallet_constitution::ParamValue::U32(0);
+                }),
+                1 => pallet_constitution::Params::<Runtime>::remove(key),
+                2 => pallet_constitution::Params::<Runtime>::mutate(key, |record| {
+                    record.as_mut().unwrap().value = pallet_constitution::ParamValue::U8(1);
+                }),
+                _ => unreachable!(),
+            }
+            let before: Vec<_> = pallet_constitution::Params::<Runtime>::iter().collect();
+
+            let _ = <crate::migrations::MigrateConstitutionReserveProbeV2 as OnRuntimeUpgrade>::on_runtime_upgrade();
+
+            assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(1));
+            assert_eq!(pallet_constitution::Params::<Runtime>::iter().collect::<Vec<_>>(), before);
+        });
+    }
+}
+
+#[test]
+fn constitution_composite_v0_migration_is_atomic_before_pricing_insertion() {
+    tests::development_ext().execute_with(|| {
+        StorageVersion::new(0).put::<Constitution>();
+        let (fee, rate) = crate::migrations::reserve_probe_param_records().unwrap();
+        pallet_constitution::Params::<Runtime>::remove(fee.key);
+        pallet_constitution::Params::<Runtime>::remove(rate.key);
+        let legacy = legacy_probe_control_records();
+        for record in legacy {
+            pallet_constitution::Params::<Runtime>::insert(record.key, record);
+        }
+        pallet_constitution::Params::<Runtime>::mutate(legacy[0].key, |record| {
+            record.as_mut().unwrap().value = pallet_constitution::ParamValue::U8(1);
+        });
+        let before: Vec<_> = pallet_constitution::Params::<Runtime>::iter().collect();
+
+        let _ = <crate::migrations::MigrateConstitutionReserveProbeV2 as OnRuntimeUpgrade>::on_runtime_upgrade();
+
+        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(0));
+        assert_eq!(pallet_constitution::Params::<Runtime>::iter().collect::<Vec<_>>(), before);
+        assert!(!pallet_constitution::Params::<Runtime>::contains_key(fee.key));
+        assert!(!pallet_constitution::Params::<Runtime>::contains_key(rate.key));
+    });
+}
+
+#[test]
+fn constitution_v2_migration_is_an_idempotent_current_version_noop() {
+    tests::development_ext().execute_with(|| {
+        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(2));
+        let before: Vec<_> = pallet_constitution::Params::<Runtime>::iter().collect();
+        let _ = <crate::migrations::MigrateConstitutionReserveProbeV2 as OnRuntimeUpgrade>::on_runtime_upgrade();
+        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(2));
+        assert_eq!(pallet_constitution::Params::<Runtime>::iter().collect::<Vec<_>>(), before);
     });
 }
 
@@ -458,7 +585,7 @@ fn composed_runtime_upgrade_migrates_all_reserve_probe_v0_state_and_passes_try_s
         assert!(!unhashed::exists(&progress_marker));
         assert_eq!(
             StorageVersion::get::<Constitution>(),
-            StorageVersion::new(1)
+            StorageVersion::new(2)
         );
         assert_eq!(
             pallet_constitution::Params::<Runtime>::get(fee.key),
@@ -499,6 +626,45 @@ fn composed_runtime_upgrade_migrates_all_reserve_probe_v0_state_and_passes_try_s
             )
             .is_ok()
         );
+    });
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn composed_runtime_upgrade_migrates_constitution_v1_to_v2() {
+    use parity_scale_codec::{Decode, Encode};
+
+    tests::development_ext().execute_with(|| {
+        StorageVersion::new(1).put::<Constitution>();
+        let mut legacy = legacy_probe_control_records();
+        for (index, record) in legacy.iter_mut().enumerate() {
+            record.last_changed_epoch = 20 + index as u32;
+            record.last_change_block = 200 + index as u32;
+            pallet_constitution::Params::<Runtime>::insert(record.key, *record);
+        }
+
+        let input = frame_try_runtime::UpgradeCheckSelect::All.encode();
+        let output = crate::apis::api::dispatch("TryRuntime_on_runtime_upgrade", &input)
+            .expect("TryRuntime runtime API method");
+        let (used, maximum) = <(
+            frame_support::weights::Weight,
+            frame_support::weights::Weight,
+        ) as Decode>::decode(&mut &output[..])
+        .expect("TryRuntime result");
+        assert!(used.all_lte(maximum));
+        assert_eq!(
+            StorageVersion::get::<Constitution>(),
+            StorageVersion::new(2)
+        );
+        assert!(pallet_constitution::Pallet::<Runtime>::do_try_state().is_ok());
+        for record in legacy {
+            let migrated = pallet_constitution::Params::<Runtime>::get(record.key).unwrap();
+            assert_eq!(migrated.value, record.value);
+            assert_eq!(migrated.last_changed_epoch, record.last_changed_epoch);
+            assert_eq!(migrated.last_change_block, record.last_change_block);
+            assert_eq!(migrated.min.as_u128(), 1);
+            assert!(migrated.kernel_bounded);
+        }
     });
 }
 

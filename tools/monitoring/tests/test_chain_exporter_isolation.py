@@ -91,6 +91,7 @@ class ChainExporterIsolationTests(unittest.TestCase):
             "_descriptor_lead_time",
             "_storage_counts",
             "_xcm_traps",
+            "_reserve_probe_runway",
         ):
             setattr(exporter, method, lambda *_args: None)
 
@@ -123,6 +124,7 @@ class ChainExporterIsolationTests(unittest.TestCase):
             "descriptor lead time": "_descriptor_lead_time",
             "storage": "_storage_counts",
             "xcm traps": "_xcm_traps",
+            "reserve runway": "_reserve_probe_runway",
         }
         for failed_domain, failed_method in method_by_domain.items():
             with self.subTest(domain=failed_domain):
@@ -144,7 +146,10 @@ class ChainExporterIsolationTests(unittest.TestCase):
                 present = family_names(exporter.store)
                 self.assertFalse(complete)
                 for family in exporter_module.FULL_DOMAIN_FAMILIES[failed_domain]:
-                    self.assertNotIn(family, present)
+                    if failed_domain == "reserve runway" and family == "bleavit_reserve_probe_collection_ok":
+                        self.assertEqual(metric_value(exporter.store, family), 0)
+                    else:
+                        self.assertNotIn(family, present)
                 surviving_domain = next(
                     domain
                     for domain in method_by_domain

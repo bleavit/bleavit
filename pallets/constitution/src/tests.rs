@@ -1058,13 +1058,21 @@ fn try_state_rejects_reserved_flags_overspent_meters_and_overflown_registry() {
 }
 
 #[test]
-fn try_state_requires_v1_and_both_probe_pricing_rows() {
+fn try_state_requires_v2_and_all_probe_rows() {
     new_test_ext().execute_with(|| {
         StorageVersion::new(0).put::<Constitution>();
         assert!(Constitution::do_try_state().is_err());
-        StorageVersion::new(1).put::<Constitution>();
+        StorageVersion::new(2).put::<Constitution>();
 
-        for name in [b"ops.probe_fee".as_slice(), b"ops.probe_rate".as_slice()] {
+        for name in [
+            b"ops.probe_fee".as_slice(),
+            b"ops.probe_rate".as_slice(),
+            b"res.probe_int".as_slice(),
+            b"res.probe_to".as_slice(),
+            b"res.probe_amount".as_slice(),
+            b"res.fail_thr".as_slice(),
+            b"res.recover_thr".as_slice(),
+        ] {
             let key = key16(name);
             let record = Params::<Test>::get(key).expect("probe pricing row");
             Params::<Test>::remove(key);
@@ -2059,6 +2067,60 @@ fn a_multi_bit_arming_write_is_refused_whole_when_any_class_is_below_floor() {
 }
 
 // ------------------------------- A13 · constitution/params cluster (batch X) --
+
+#[test]
+fn sq_485_reserve_probe_controls_have_immutable_nonzero_floors() {
+    new_test_ext().execute_with(|| {
+        for (name, minimum, origin) in [
+            (b"res.probe_int".as_slice(), ParamValue::U32(1), PARAM_ACC),
+            (b"res.probe_to".as_slice(), ParamValue::U32(1), PARAM_ACC),
+            (
+                b"res.probe_amount".as_slice(),
+                ParamValue::Balance(1),
+                PARAM_ACC,
+            ),
+            (b"res.fail_thr".as_slice(), ParamValue::U8(1), META_ACC),
+            (b"res.recover_thr".as_slice(), ParamValue::U8(1), META_ACC),
+        ] {
+            let key = key16(name);
+            let before = Params::<Test>::get(key).unwrap();
+            assert_eq!(before.min, minimum);
+            assert!(before.kernel_bounded);
+            let zero = match minimum {
+                ParamValue::U32(_) => ParamValue::U32(0),
+                ParamValue::U8(_) => ParamValue::U8(0),
+                ParamValue::Balance(_) => ParamValue::Balance(0),
+                _ => unreachable!(),
+            };
+            assert_noop!(
+                Constitution::set_param(RuntimeOrigin::signed(origin), key, zero),
+                Error::<Test>::BelowMin
+            );
+            assert_eq!(Params::<Test>::get(key), Some(before));
+
+            set_epoch(before.cooldown_epochs);
+            assert_ok!(Constitution::set_param(
+                RuntimeOrigin::signed(origin),
+                key,
+                minimum
+            ));
+            assert_eq!(Params::<Test>::get(key).unwrap().value, minimum);
+
+            assert_noop!(
+                Constitution::amend_registry(
+                    RuntimeOrigin::signed(META_ACC),
+                    key,
+                    zero,
+                    before.max,
+                    before.max_delta,
+                    before.cooldown_epochs,
+                ),
+                Error::<Test>::KernelBoundImmutable
+            );
+        }
+        assert_ok!(Constitution::do_try_state());
+    });
+}
 
 /// SQ-36 (ruled 2026-07-21): `ledger.pos_dep` is frozen — the registry maximum
 /// equals its minimum and default, so no governance path can raise the deposit

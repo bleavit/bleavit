@@ -22,7 +22,7 @@ EXPECTED_EXPRESSIONS = {
     "BleavitOracleRoundThreeOpened": "bleavit_chain_oracle_max_round_depth >= 3",
     "BleavitCollateralizationDrift": "bleavit_ledger_collateral_drift_usdc != 0",
     "BleavitTreasuryMeterHigh": "bleavit_chain_treasury_meter_utilization_bps > 8000",
-    "BleavitXcmAssetTrap": "bleavit_chain_xcm_trapped_assets > 0",
+    "BleavitXcmReadiness": "bleavit_chain_xcm_trapped_assets > 0 or bleavit_reserve_probe_collection_ok == 0 or bleavit_reserve_probe_ready == 0 or bleavit_reserve_probe_local_usdc < bleavit_reserve_probe_local_required_usdc or bleavit_reserve_probe_remote_usdc < bleavit_reserve_probe_remote_required_usdc or bleavit_reserve_probe_remote_dot_planck < bleavit_reserve_probe_remote_required_dot_planck or bleavit_reserve_probe_dot_refill_margin_planck <= 0",
     "BleavitKeeperInactive": "(time() - bleavit_keeper_last_successful_crank_timestamp_seconds) > 3600 and bleavit_keeper_last_successful_crank_timestamp_seconds > 0 and bleavit_keeper_planned_total > 0 and on() bleavit_keeper_connected == 1",
     "BleavitGuardianAction": "increase(bleavit_chain_guardian_actions_total[5m]) > 0",
     "BleavitMigrationCursorStalled": "bleavit_runtime_migration_cursor_stalled > 0",

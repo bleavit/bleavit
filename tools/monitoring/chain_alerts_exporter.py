@@ -9,9 +9,12 @@ registry.  The sole metadata-independent value decoder is the frozen 168-byte
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
+import math
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -42,6 +45,10 @@ LOG = logging.getLogger("bleavit-chain-alerts")
 
 # Operational resource bound for one catch-up pass; this is not a protocol parameter.
 MAX_EVENT_CATCH_UP_BLOCKS = 512
+USDC_ASSET_ID = 1337
+ASSET_HUB_PARA_ID = 1000
+RATE_SCALE = 10_000_000_000
+U128_MAX = (1 << 128) - 1
 
 
 def _series(name: str, kind: str, help_text: str, *labels: str) -> SeriesDefinition:
@@ -86,6 +93,15 @@ SERIES: dict[str, SeriesDefinition] = {
         _series("bleavit_chain_keeper_budget_spent", "gauge", "Current-epoch keeper meter spend in chain balance base units."),
         _series("bleavit_chain_keeper_budget_utilization_ratio", "gauge", "Current keeper spend divided by the live keeper.budget Param."),
         _series("bleavit_chain_xcm_trapped_assets", "gauge", "Count of PolkadotXcm AssetTraps keys."),
+        _series("bleavit_reserve_probe_collection_ok", "gauge", "Whether the local and independent Asset Hub runway collection succeeded."),
+        _series("bleavit_reserve_probe_ready", "gauge", "Whether all local and remote reserve-probe funding requirements are met."),
+        _series("bleavit_reserve_probe_local_usdc", "gauge", "Local ops.reserve_probe balance in USDC base units."),
+        _series("bleavit_reserve_probe_local_required_usdc", "gauge", "Local USDC required for fail and recovery probe envelopes."),
+        _series("bleavit_reserve_probe_remote_usdc", "gauge", "USDC balance of Bleavit's independently queried Asset Hub sovereign account."),
+        _series("bleavit_reserve_probe_remote_required_usdc", "gauge", "Remote USDC required for one reserve probe."),
+        _series("bleavit_reserve_probe_remote_dot_planck", "gauge", "Usable DOT balance of Bleavit's independently queried Asset Hub sovereign account."),
+        _series("bleavit_reserve_probe_remote_required_dot_planck", "gauge", "Remote DOT required for fail and recovery envelopes plus refill margin."),
+        _series("bleavit_reserve_probe_dot_refill_margin_planck", "gauge", "Configured positive operations refill margin in DOT plancks."),
         _series("bleavit_chain_storage_map_entries", "gauge", "Counted map occupancy for a metadata-discovered prefix.", "pallet", "item"),
         _series("bleavit_chain_storage_map_bound", "gauge", "Metadata constant bound paired with a counted map.", "pallet", "item"),
         _series("bleavit_chain_guardian_actions_total", "counter", "Finalized GuardianAction events."),
@@ -183,8 +199,41 @@ FULL_DOMAIN_FAMILIES = {
         "bleavit_chain_storage_map_bound",
     ),
     "xcm traps": ("bleavit_chain_xcm_trapped_assets",),
+    "reserve runway": (
+        "bleavit_reserve_probe_collection_ok",
+        "bleavit_reserve_probe_ready",
+        "bleavit_reserve_probe_local_usdc",
+        "bleavit_reserve_probe_local_required_usdc",
+        "bleavit_reserve_probe_remote_usdc",
+        "bleavit_reserve_probe_remote_required_usdc",
+        "bleavit_reserve_probe_remote_dot_planck",
+        "bleavit_reserve_probe_remote_required_dot_planck",
+        "bleavit_reserve_probe_dot_refill_margin_planck",
+    ),
 }
 DOMAIN_ERRORS = (MonitoringError, ScaleValueError, MetadataDecodeError, ValueError)
+
+
+def _clear_reserve_runway_unhealthy(store: MetricStore) -> None:
+    for family in FULL_DOMAIN_FAMILIES["reserve runway"]:
+        store.clear_family(family)
+    store.set("bleavit_reserve_probe_collection_ok", 0)
+
+
+def _clear_xcm_unhealthy(store: MetricStore) -> None:
+    store.clear_family("bleavit_chain_xcm_trapped_assets")
+    _clear_reserve_runway_unhealthy(store)
+
+
+class AssetHubTransportError(Exception):
+    pass
+
+
+@dataclass
+class AssetHubFinalityTracker:
+    head: str | None = None
+    number: int | None = None
+    advanced_at: float | None = None
 
 
 def encode_param_keys(keys: list[str]) -> bytes:
@@ -209,6 +258,48 @@ def _integer_field(value: Any, field: str, source: str) -> int:
     if isinstance(candidate, bool) or not isinstance(candidate, int):
         raise MonitoringError(f"{source} has no integer {field} field")
     return candidate
+
+
+def _checked_u128(value: int, source: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= U128_MAX:
+        raise MonitoringError(f"{source} is outside u128")
+    return value
+
+
+def _checked_mul(left: int, right: int, source: str) -> int:
+    return _checked_u128(left * right, source)
+
+
+def _checked_add(left: int, right: int, source: str) -> int:
+    return _checked_u128(left + right, source)
+
+
+def _blake2_128_concat(value: bytes) -> bytes:
+    return hashlib.blake2b(value, digest_size=16).digest() + value
+
+
+def _portable_key_shape(type_id: int, metadata: Mapping[str, Any]) -> object:
+    item = metadata.get("types", {}).get(type_id)
+    definition = item.get("definition") if isinstance(item, dict) else None
+    if not isinstance(definition, dict):
+        raise MonitoringError("Asset Hub map key type is absent from portable metadata")
+    kind = definition.get("kind")
+    if kind == "primitive" and definition.get("primitive") == "u32":
+        return "u32"
+    if kind == "array" and definition.get("length") == 32:
+        child = metadata.get("types", {}).get(definition.get("type_id"))
+        child_definition = child.get("definition") if isinstance(child, dict) else None
+        if child_definition == {"kind": "primitive", "primitive": "u8"}:
+            return "account32"
+    if kind == "composite":
+        fields = definition.get("fields")
+        if isinstance(fields, list) and len(fields) == 1:
+            return _portable_key_shape(fields[0].get("type_id"), metadata)
+    if kind == "tuple":
+        children = definition.get("type_ids")
+        if isinstance(children, list):
+            return tuple(_portable_key_shape(child, metadata) for child in children)
+    raise MonitoringError("Asset Hub map key type has an unsupported portable shape")
 
 
 def _boolean_field(value: Any, field: str, source: str) -> bool:
@@ -240,22 +331,48 @@ def _bounded_ascii(value: Any, source: str) -> str:
 
 
 class ChainExporter:
-    def __init__(self, rpc: WsRpc, store: MetricStore | None = None):
+    def __init__(
+        self,
+        rpc: WsRpc,
+        store: MetricStore | None = None,
+        *,
+        asset_hub_rpc: WsRpc | None = None,
+        dot_refill_margin_planck: int | None = None,
+        asset_hub_stale_seconds: float | None = None,
+        asset_hub_genesis_hash: str | None = None,
+        asset_hub_tracker: AssetHubFinalityTracker | None = None,
+    ):
         self.rpc = rpc
+        self.asset_hub_rpc = asset_hub_rpc
+        self.dot_refill_margin_planck = dot_refill_margin_planck
+        self.asset_hub_stale_seconds = asset_hub_stale_seconds
+        self.asset_hub_genesis_hash = asset_hub_genesis_hash
+        self.asset_hub_tracker = asset_hub_tracker or AssetHubFinalityTracker()
         self.store = store or MetricStore(SERIES)
         self.metadata: dict[str, Any] | None = None
         self.metadata_spec_version: int | None = None
+        self.asset_hub_metadata: dict[str, Any] | None = None
+        self.asset_hub_metadata_spec_version: int | None = None
         self.last_event_block: int | None = None
         self.previous_security: bool | None = None
         self.security_flips_total = 0
         self.event_totals = {name: 0 for name in EVENT_FAMILIES}
         self.store.set("bleavit_chain_connected", 1)
+        self.store.set("bleavit_reserve_probe_collection_ok", 0)
         for counter in (
             "bleavit_chain_scrape_errors_total",
             *EVENT_FAMILIES,
             "bleavit_chain_release_channel_security_flips_total",
         ):
             self.store.set(counter, 0)
+
+    def _asset_hub_call(self, method: str, params: list[object] | None = None) -> Any:
+        if self.asset_hub_rpc is None:
+            raise MonitoringError("Asset Hub RPC is not configured")
+        try:
+            return self.asset_hub_rpc.call(method, params or [])
+        except Exception as error:
+            raise AssetHubTransportError(f"Asset Hub {method} failed: {error}") from error
 
     def _load_metadata(self, block_hash: str, force: bool = False) -> dict[str, Any]:
         if self.metadata is not None and not force:
@@ -370,6 +487,78 @@ class ChainExporter:
         )
         if raw is None:
             raw = item["default"]
+        return decode_typed_bytes(raw, item["value_type"], metadata)
+
+    def _load_asset_hub_metadata(self, block_hash: str) -> dict[str, Any]:
+        if self.asset_hub_rpc is None:
+            raise MonitoringError("Asset Hub RPC is not configured")
+        version = self._asset_hub_call("state_getRuntimeVersion", [block_hash])
+        spec_version = version.get("specVersion") if isinstance(version, dict) else None
+        if not isinstance(spec_version, int):
+            raise MonitoringError("Asset Hub runtime version has no integer specVersion")
+        if self.asset_hub_metadata is None or self.asset_hub_metadata_spec_version != spec_version:
+            raw = hex_bytes(
+                self._asset_hub_call("state_getMetadata", [block_hash]),
+                "Asset Hub state_getMetadata",
+            )
+            assert raw is not None
+            self.asset_hub_metadata = decode_metadata(raw)
+            self.asset_hub_metadata_spec_version = spec_version
+        return self.asset_hub_metadata
+
+    def _asset_hub_map(
+        self,
+        pallet: str,
+        item_name: str,
+        encoded_keys: tuple[bytes, ...],
+        block_hash: str,
+    ) -> Any | None:
+        if self.asset_hub_rpc is None:
+            raise MonitoringError("Asset Hub RPC is not configured")
+        metadata = self._load_asset_hub_metadata(block_hash)
+        pallet_meta = metadata.get("pallets", {}).get(pallet)
+        storage = pallet_meta.get("storage") if isinstance(pallet_meta, dict) else None
+        item = storage.get("entries", {}).get(item_name) if isinstance(storage, dict) else None
+        if not isinstance(item, dict) or item.get("kind") != "map":
+            raise MonitoringError(f"Asset Hub metadata has no {pallet}.{item_name} map")
+        hashers = item.get("hashers")
+        if hashers != ["Blake2_128Concat"] * len(encoded_keys):
+            raise MonitoringError(f"Asset Hub {pallet}.{item_name} has unexpected key hashers")
+        expected_shapes = {
+            ("Assets", "Asset"): "u32",
+            ("Assets", "Account"): ("u32", "account32"),
+            ("System", "Account"): "account32",
+        }
+        expected_shape = expected_shapes.get((pallet, item_name))
+        if expected_shape is None or _portable_key_shape(item.get("key_type"), metadata) != expected_shape:
+            raise MonitoringError(f"Asset Hub {pallet}.{item_name} has an unexpected key type")
+        prefix = bytes.fromhex(storage_prefix(storage["prefix"], item_name)[2:])
+        key = "0x" + (
+            prefix + b"".join(_blake2_128_concat(value) for value in encoded_keys)
+        ).hex()
+        raw = hex_bytes(
+            self._asset_hub_call("state_getStorage", [key, block_hash]),
+            f"Asset Hub {pallet}.{item_name}",
+            optional=True,
+        )
+        if raw is None:
+            return None
+        return decode_typed_bytes(raw, item["value_type"], metadata)
+
+    def _asset_hub_storage(self, pallet: str, item_name: str, block_hash: str) -> Any:
+        metadata = self._load_asset_hub_metadata(block_hash)
+        pallet_meta = metadata.get("pallets", {}).get(pallet)
+        storage = pallet_meta.get("storage") if isinstance(pallet_meta, dict) else None
+        item = storage.get("entries", {}).get(item_name) if isinstance(storage, dict) else None
+        if not isinstance(item, dict) or item.get("kind") != "plain":
+            raise MonitoringError(f"Asset Hub metadata has no {pallet}.{item_name} plain storage")
+        raw = hex_bytes(
+            self._asset_hub_call(
+                "state_getStorage", [storage_prefix(storage["prefix"], item_name), block_hash]
+            ),
+            f"Asset Hub {pallet}.{item_name}",
+        )
+        assert raw is not None
         return decode_typed_bytes(raw, item["value_type"], metadata)
 
     def _count_prefix(self, pallet: str, item_name: str, block_hash: str) -> int:
@@ -537,6 +726,165 @@ class ChainExporter:
             "bleavit_chain_xcm_trapped_assets",
             self._count_prefix("PolkadotXcm", "AssetTraps", block_hash),
         )
+
+    def _reserve_probe_runway(self, block_hash: str) -> None:
+        if self.asset_hub_rpc is None:
+            raise MonitoringError("Asset Hub RPC is not configured")
+        margin = self.dot_refill_margin_planck
+        if isinstance(margin, bool) or not isinstance(margin, int) or margin <= 0:
+            raise MonitoringError("DOT refill margin must be a positive integer")
+        margin = _checked_u128(margin, "DOT refill margin")
+
+        keys = [
+            "ops.probe_fee",
+            "ops.probe_rate",
+            "res.probe_amount",
+            "res.fail_thr",
+            "res.recover_thr",
+        ]
+        rows = self._runtime_api("params", encode_param_keys(keys), block_hash)
+        if not isinstance(rows, list) or len(rows) != len(keys):
+            raise MonitoringError("params returned an incomplete reserve-probe set")
+        params: dict[str, int] = {}
+        for row in rows:
+            key = _bounded_ascii(
+                row.get("key") if isinstance(row, dict) else None,
+                "reserve-probe ParamView key",
+            ).rstrip("\0")
+            if key not in keys or key in params:
+                raise MonitoringError("params returned an unknown or duplicate reserve-probe key")
+            value = _integer_field(row, "value", f"{key} ParamView")
+            if value <= 0:
+                raise MonitoringError(f"{key} ParamView must be positive")
+            params[key] = _checked_u128(value, f"{key} ParamView")
+        if set(params) != set(keys):
+            raise MonitoringError("params omitted a reserve-probe key")
+
+        fee_product = _checked_mul(
+            params["ops.probe_fee"], params["ops.probe_rate"], "probe fee conversion"
+        )
+        local_debit = fee_product // RATE_SCALE
+        if fee_product % RATE_SCALE != 0:
+            local_debit = _checked_add(local_debit, 1, "probe fee ceil quotient")
+        envelopes = _checked_add(
+            params["res.fail_thr"], params["res.recover_thr"], "probe envelopes"
+        )
+        local_required = _checked_mul(local_debit, envelopes, "local probe runway")
+        remote_required_dot = _checked_add(
+            _checked_mul(params["ops.probe_fee"], envelopes, "remote DOT envelopes"),
+            margin,
+            "remote DOT requirement",
+        )
+        local_line = self._telemetry_api("reserve_probe_line_balance", block_hash)
+        local_line = _checked_u128(local_line, "reserve-probe line balance")
+
+        para_id = self._storage("ParachainInfo", "ParachainId", block_hash)
+        if isinstance(para_id, bool) or not isinstance(para_id, int) or not 0 <= para_id <= 0xFFFFFFFF:
+            raise MonitoringError("ParachainInfo.ParachainId is not a u32")
+        sovereign = b"sibl" + para_id.to_bytes(4, "little") + bytes(24)
+        asset_hub_hash = self._asset_hub_call("chain_getFinalizedHead")
+        if not isinstance(asset_hub_hash, str):
+            raise MonitoringError("Asset Hub finalized head returned no hash")
+        expected_genesis = self.asset_hub_genesis_hash
+        actual_genesis = hex_bytes(
+            self._asset_hub_call("chain_getBlockHash", [0]), "Asset Hub genesis hash"
+        )
+        configured_genesis = hex_bytes(expected_genesis, "configured Asset Hub genesis hash")
+        if actual_genesis != configured_genesis:
+            raise MonitoringError("Asset Hub genesis hash does not match the configured chain")
+        asset_hub_number = header_number(
+            self._asset_hub_call("chain_getHeader", [asset_hub_hash])
+        )
+        stale_seconds = self.asset_hub_stale_seconds
+        if (
+            isinstance(stale_seconds, bool)
+            or not isinstance(stale_seconds, (int, float))
+            or not math.isfinite(stale_seconds)
+            or stale_seconds <= 0
+        ):
+            raise MonitoringError("Asset Hub stale window must be positive")
+        now = time.monotonic()
+        tracker = self.asset_hub_tracker
+        if tracker.number is None:
+            tracker.head = asset_hub_hash
+            tracker.number = asset_hub_number
+            tracker.advanced_at = now
+        elif asset_hub_number < tracker.number:
+            raise MonitoringError("Asset Hub finalized height regressed")
+        elif asset_hub_number == tracker.number and asset_hub_hash != tracker.head:
+            raise MonitoringError("Asset Hub finalized hash changed at the same height")
+        elif asset_hub_number > tracker.number:
+            tracker.head = asset_hub_hash
+            tracker.number = asset_hub_number
+            tracker.advanced_at = now
+        elif (
+            tracker.advanced_at is None
+            or now - tracker.advanced_at >= stale_seconds
+        ):
+            raise MonitoringError("Asset Hub finalized head is stale")
+        remote_para_id = self._asset_hub_storage(
+            "ParachainInfo", "ParachainId", asset_hub_hash
+        )
+        if remote_para_id != ASSET_HUB_PARA_ID:
+            raise MonitoringError("remote endpoint is not canonical Asset Hub para 1000")
+        asset_row = self._asset_hub_map(
+            "Assets", "Asset", (USDC_ASSET_ID.to_bytes(4, "little"),), asset_hub_hash
+        )
+        usdc_row = self._asset_hub_map(
+            "Assets", "Account", (USDC_ASSET_ID.to_bytes(4, "little"), sovereign), asset_hub_hash
+        )
+        asset_status = variant_name(asset_row.get("status")) if isinstance(asset_row, dict) else None
+        account_status = variant_name(usdc_row.get("status")) if isinstance(usdc_row, dict) else None
+        if asset_row is not None and asset_status not in {"Live", "Frozen", "Destroying"}:
+            raise MonitoringError("Asset Hub Assets.Asset has an unknown status")
+        if usdc_row is not None and account_status not in {"Liquid", "Frozen", "Blocked"}:
+            raise MonitoringError("Asset Hub Assets.Account has an unknown status")
+        if asset_row is None:
+            raise MonitoringError("canonical Asset Hub USDC asset definition is absent")
+        asset_live = asset_status == "Live"
+        account_liquid = account_status == "Liquid"
+        remote_usdc = 0 if usdc_row is None else _integer_field(
+            usdc_row, "balance", "Asset Hub Assets.Account"
+        )
+        if not asset_live or not account_liquid:
+            remote_usdc = 0
+        system_row = self._asset_hub_map(
+            "System", "Account", (sovereign,), asset_hub_hash
+        )
+        if system_row is None:
+            remote_dot = 0
+        else:
+            data = system_row.get("data") if isinstance(system_row, dict) else None
+            free = _integer_field(data, "free", "Asset Hub System.Account.data")
+            frozen = _integer_field(data, "frozen", "Asset Hub System.Account.data")
+            remote_dot = max(0, free - frozen)
+        remote_usdc = _checked_u128(remote_usdc, "remote USDC balance")
+        remote_dot = _checked_u128(remote_dot, "remote usable DOT balance")
+        remote_required_usdc = params["res.probe_amount"]
+        ready = (
+            local_line >= local_required
+            and remote_usdc >= remote_required_usdc
+            and remote_dot >= remote_required_dot
+            and asset_live
+            and account_liquid
+        )
+        values = {
+            "bleavit_reserve_probe_local_usdc": local_line,
+            "bleavit_reserve_probe_local_required_usdc": local_required,
+            "bleavit_reserve_probe_remote_usdc": remote_usdc,
+            "bleavit_reserve_probe_remote_required_usdc": remote_required_usdc,
+            "bleavit_reserve_probe_remote_dot_planck": remote_dot,
+            "bleavit_reserve_probe_remote_required_dot_planck": remote_required_dot,
+            "bleavit_reserve_probe_dot_refill_margin_planck": margin,
+            "bleavit_reserve_probe_ready": int(ready),
+            "bleavit_reserve_probe_collection_ok": 1,
+        }
+        for name, value in values.items():
+            self.store.set(name, value)
+
+    def _xcm(self, block_hash: str) -> None:
+        self._xcm_traps(block_hash)
+        self._reserve_probe_runway(block_hash)
 
     def _epoch_status(self, block_hash: str, block: int) -> None:
         epoch = self._runtime_api("epoch_status", b"", block_hash)
@@ -809,8 +1157,11 @@ class ChainExporter:
             scrape()
             return True
         except DOMAIN_ERRORS as error:
-            for family in families:
-                self.store.clear_family(family)
+            if domain == "reserve runway":
+                _clear_reserve_runway_unhealthy(self.store)
+            else:
+                for family in families:
+                    self.store.clear_family(family)
             self.store.inc("bleavit_chain_scrape_errors_total")
             LOG.error("%s scrape domain rejected: %s", domain, error)
             return False
@@ -864,6 +1215,7 @@ class ChainExporter:
             ("descriptor lead time", lambda: self._descriptor_lead_time(block_hash)),
             ("storage", lambda: self._storage_counts(block_hash)),
             ("xcm traps", lambda: self._xcm_traps(block_hash)),
+            ("reserve runway", lambda: self._reserve_probe_runway(block_hash)),
         )
         for domain, scrape_domain in domains:
             complete = self._run_domain(
@@ -879,12 +1231,47 @@ class ChainExporter:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export finalized Bleavit chain alert series.")
     parser.add_argument("--url", required=True, help="node WebSocket endpoint (ws:// or wss://)")
+    parser.add_argument(
+        "--asset-hub-url",
+        required=True,
+        help="independent Polkadot Asset Hub WebSocket endpoint",
+    )
+    parser.add_argument(
+        "--dot-refill-margin-planck",
+        required=True,
+        type=int,
+        help="positive operations refill margin added to remote DOT runway",
+    )
+    parser.add_argument(
+        "--asset-hub-stale-seconds",
+        required=True,
+        type=float,
+        help="positive maximum age of an unchanged Asset Hub finalized head",
+    )
+    parser.add_argument(
+        "--asset-hub-genesis-hash",
+        required=True,
+        help="expected 32-byte genesis hash of the canonical Asset Hub chain",
+    )
     parser.add_argument("--bind", default="127.0.0.1:9617", help="Prometheus listen HOST:PORT")
     parser.add_argument("--interval", type=float, default=30.0, help="full poll cadence in seconds")
     parser.add_argument("--once", action="store_true", help="scrape once to stdout and exit")
     args = parser.parse_args(argv)
     if not args.url.startswith(("ws://", "wss://")):
         parser.error("--url must start with ws:// or wss://")
+    if not args.asset_hub_url.startswith(("ws://", "wss://")):
+        parser.error("--asset-hub-url must start with ws:// or wss://")
+    if not 0 < args.dot_refill_margin_planck <= U128_MAX:
+        parser.error("--dot-refill-margin-planck must fit positive u128")
+    if not math.isfinite(args.asset_hub_stale_seconds) or args.asset_hub_stale_seconds <= 0:
+        parser.error("--asset-hub-stale-seconds must be positive and finite")
+    try:
+        genesis_hash = hex_bytes(args.asset_hub_genesis_hash, "--asset-hub-genesis-hash")
+    except ValueError as error:
+        parser.error(str(error))
+    if genesis_hash is None or len(genesis_hash) != 32:
+        parser.error("--asset-hub-genesis-hash must contain exactly 32 bytes")
+    args.asset_hub_genesis_hash = "0x" + genesis_hash.hex()
     if args.interval <= 0:
         parser.error("--interval must be positive")
     return args
@@ -892,15 +1279,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def run(args: argparse.Namespace) -> int:
     store = MetricStore(SERIES)
+    _clear_xcm_unhealthy(store)
     if not args.once:
         serve_metrics(store, args.bind)
     backoff = 1.0
+    asset_hub_tracker = AssetHubFinalityTracker()
     while True:
         rpc: WsRpc | None = None
+        asset_hub_rpc: WsRpc | None = None
         try:
             rpc = WsRpc(args.url)
-            exporter = ChainExporter(rpc, store)
+            exporter = ChainExporter(
+                rpc,
+                store,
+                asset_hub_rpc=None,
+                dot_refill_margin_planck=args.dot_refill_margin_planck,
+                asset_hub_stale_seconds=args.asset_hub_stale_seconds,
+                asset_hub_genesis_hash=args.asset_hub_genesis_hash,
+                asset_hub_tracker=asset_hub_tracker,
+            )
             if args.once:
+                try:
+                    asset_hub_rpc = WsRpc(args.asset_hub_url)
+                    exporter.asset_hub_rpc = asset_hub_rpc
+                except Exception as error:
+                    LOG.error("initial Asset Hub connection failure: %s", error)
                 complete = exporter.scrape()
                 sys.stdout.write(store.render())
                 return 0 if complete else 2
@@ -919,6 +1322,13 @@ def run(args: argparse.Namespace) -> int:
                     # buffered notifications cannot collapse onto the newest head.
                     block = header_number(header)
                     block_hash = exporter._block_hash(block)
+                if exporter.asset_hub_rpc is None:
+                    try:
+                        asset_hub_rpc = WsRpc(args.asset_hub_url)
+                        exporter.asset_hub_rpc = asset_hub_rpc
+                    except Exception as error:
+                        _clear_reserve_runway_unhealthy(store)
+                        LOG.error("Asset Hub reconnect failure: %s", error)
                 try:
                     full = now - last_full >= args.interval
                     exporter.process_finalized(
@@ -928,13 +1338,27 @@ def run(args: argparse.Namespace) -> int:
                     )
                     if full and exporter.last_event_block == block:
                         last_full = now
+                except AssetHubTransportError as error:
+                    _clear_reserve_runway_unhealthy(store)
+                    LOG.error("%s; reconnecting Asset Hub independently", error)
+                    if asset_hub_rpc is not None:
+                        try:
+                            asset_hub_rpc.close()
+                        except Exception:
+                            pass
+                    asset_hub_rpc = None
+                    exporter.asset_hub_rpc = None
                 except (MonitoringError, ScaleValueError, MetadataDecodeError, ValueError) as error:
                     store.inc("bleavit_chain_scrape_errors_total")
                     LOG.error("finalized scrape rejected: %s", error)
         except KeyboardInterrupt:
             return 0
         except Exception as error:  # transport libraries expose several exception classes.
-            store.set("bleavit_chain_connected", 0)
+            if isinstance(error, AssetHubTransportError):
+                _clear_reserve_runway_unhealthy(store)
+            else:
+                _clear_xcm_unhealthy(store)
+                store.set("bleavit_chain_connected", 0)
             store.inc("bleavit_chain_scrape_errors_total")
             LOG.error("connection/scrape failure: %s; reconnecting in %.0fs", error, backoff)
             if args.once:
@@ -945,6 +1369,11 @@ def run(args: argparse.Namespace) -> int:
             if rpc is not None:
                 try:
                     rpc.close()
+                except Exception:
+                    pass
+            if asset_hub_rpc is not None:
+                try:
+                    asset_hub_rpc.close()
                 except Exception:
                     pass
 

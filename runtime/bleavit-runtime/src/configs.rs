@@ -80,7 +80,7 @@ parameter_types! {
 // `OnlyInherents` multi-block-migration lockdown (09 §3.2).
 type SingleBlockMigrations = (
     crate::migrations::RetireB16State,
-    crate::migrations::MigrateConstitutionProbeParamsV1,
+    crate::migrations::MigrateConstitutionReserveProbeV2,
     crate::migrations::MigrateOracleReserveProbeV1,
 );
 
@@ -1405,6 +1405,7 @@ impl frame_support::traits::Get<u128> for ForeignUsdcIssuance {
 impl pallet_inflow_caps::Config for Runtime {
     type CapParams = ConstitutionInflowCapParams;
     type UsdcIssuance = ForeignUsdcIssuance;
+    type ProtocolAccounts = InflowCapProtocolAccounts;
 }
 
 /// 09 §5.2 XCM adapter over the shared on-chain meters.
@@ -1817,28 +1818,41 @@ impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureExecutionGuard
         Ok(RuntimeOrigin::signed(execution_guard_account()))
     }
 }
+fn is_canonical_protocol_account(who: &AccountId) -> bool {
+    if is_reserved_market_account(who) {
+        return true;
+    }
+    let accounts = [
+        LedgerPalletId::get().into_account_truncating(),
+        market_account(),
+        book_account(),
+        pol_account(),
+        pol_baseline_account(),
+        fee_account(),
+        treasury_protocol_account(),
+        insurance_account(),
+        IncidentPalletId::get().into_account_truncating(),
+        MilestonePalletId::get().into_account_truncating(),
+        welfare_settlement_account(),
+        epoch_account(),
+        execution_guard_account(),
+    ];
+    accounts.contains(who)
+}
+
+/// Pure canonical predicate used inside the XCM inflow precheck. It performs
+/// no storage reads, so the barrier's fixed execution budget remains honest.
+pub struct InflowCapProtocolAccounts;
+impl Contains<AccountId> for InflowCapProtocolAccounts {
+    fn contains(who: &AccountId) -> bool {
+        is_canonical_protocol_account(who)
+    }
+}
+
 pub struct ProtocolAccounts;
 impl Contains<AccountId> for ProtocolAccounts {
     fn contains(who: &AccountId) -> bool {
-        if is_reserved_market_account(who) {
-            return true;
-        }
-        let accounts = [
-            LedgerPalletId::get().into_account_truncating(),
-            market_account(),
-            book_account(),
-            pol_account(),
-            pol_baseline_account(),
-            fee_account(),
-            treasury_protocol_account(),
-            insurance_account(),
-            IncidentPalletId::get().into_account_truncating(),
-            MilestonePalletId::get().into_account_truncating(),
-            welfare_settlement_account(),
-            epoch_account(),
-            execution_guard_account(),
-        ];
-        accounts.contains(who)
+        is_canonical_protocol_account(who)
             // The refcounted index records ownership of live/retained market
             // accounts. Classification does not depend on this index: every
             // canonical future/present/past address is reserved above.

@@ -122,7 +122,7 @@ pub mod pallet {
     use futarchy_primitives::{EpochId, ParamKey, ProposalClass};
 
     /// The in-code storage version of this pallet.
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(2);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -729,7 +729,7 @@ pub mod pallet {
         pub fn do_try_state() -> Result<(), TryRuntimeError> {
             if StorageVersion::get::<Pallet<T>>() != STORAGE_VERSION {
                 return Err(TryRuntimeError::Other(
-                    "constitution: on-chain storage version is not v1",
+                    "constitution: on-chain storage version is not v2",
                 ));
             }
             if !Params::<T>::contains_key(key16(b"ops.probe_fee"))
@@ -738,6 +738,43 @@ pub mod pallet {
                 return Err(TryRuntimeError::Other(
                     "constitution: reserve-probe pricing rows are absent",
                 ));
+            }
+            for name in [
+                b"res.probe_int".as_slice(),
+                b"res.probe_to".as_slice(),
+                b"res.probe_amount".as_slice(),
+                b"res.fail_thr".as_slice(),
+                b"res.recover_thr".as_slice(),
+            ] {
+                let key = key16(name);
+                let Some(expected) = genesis_params()
+                    .into_iter()
+                    .find(|record| record.key == key)
+                else {
+                    return Err(TryRuntimeError::Other(
+                        "constitution: reserve-probe control definition is absent",
+                    ));
+                };
+                let Some(actual) = Params::<T>::get(key) else {
+                    return Err(TryRuntimeError::Other(
+                        "constitution: reserve-probe control row is absent",
+                    ));
+                };
+                if actual.key != expected.key
+                    || actual.min != expected.min
+                    || actual.max != expected.max
+                    || actual.max_delta != expected.max_delta
+                    || actual.cooldown_epochs != expected.cooldown_epochs
+                    || actual.class != expected.class
+                    || actual.kernel_bounded != expected.kernel_bounded
+                    || !actual.value.same_kind(expected.value)
+                    || actual.value.as_u128() < expected.min.as_u128()
+                    || actual.value.as_u128() > expected.max.as_u128()
+                {
+                    return Err(TryRuntimeError::Other(
+                        "constitution: reserve-probe control row differs from v2 definition",
+                    ));
+                }
             }
             let phase_flags = PhaseFlagsValue::from_bits(PhaseFlags::<T>::get())
                 .map_err(|_| TryRuntimeError::Other("PhaseFlags: reserved bits set (02 §7.3)"))?;

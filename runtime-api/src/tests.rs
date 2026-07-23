@@ -10,7 +10,10 @@ use futarchy_primitives::{
 use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use sp_runtime::traits::Block as BlockT;
 
-use super::{runtime_decl_for_futarchy_api, FutarchyApi, MAX_QUEUED_EXECUTIONS};
+use super::{
+    runtime_decl_for_futarchy_api, runtime_decl_for_telemetry_api, FutarchyApi,
+    MAX_QUEUED_EXECUTIONS,
+};
 
 struct MockApi;
 type Block = sp_runtime::generic::Block<sp_runtime::testing::Header, sp_runtime::OpaqueExtrinsic>;
@@ -312,6 +315,7 @@ fn runtime_api_id_and_version_are_frozen() {
         [52, 172, 53, 103, 236, 227, 15, 254]
     );
     assert_eq!(runtime_decl_for_futarchy_api::VERSION, 1);
+    assert_eq!(runtime_decl_for_telemetry_api::VERSION, 2);
 }
 
 #[test]

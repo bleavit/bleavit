@@ -6,7 +6,7 @@ funding_line: ops.monitoring
 page_immediately: false
 alerts:
   - domain: XCM
-    trigger: any trap
+    trigger: any trap or probe runway unready/unobservable
 spec_refs:
   - docs/architecture/02-integration-contract.md
   - docs/architecture/06-governance-and-guardians.md
@@ -29,10 +29,15 @@ protocol-owned reserve probe `R`.
 
 | Domain | Key series | Trigger |
 |---|---|---|
-| XCM | send/fail/timeout counters, trapped assets | any trap |
+| XCM | send/fail/timeout counters, trapped assets, probe funding readiness | any trap or probe runway unready/unobservable |
 
 The trigger means `PolkadotXcm::AssetsTrapped` or the corresponding trapped-asset
-state exists, even if balances appear small or a later send succeeds. Every trap
+state exists, or the independently collected reserve-probe runway is insufficient
+or unavailable. Configure the exporter with an independently operated Asset Hub
+RPC, a positive `--dot-refill-margin-planck`, and a positive
+`--asset-hub-stale-seconds`; pin the canonical chain with
+`--asset-hub-genesis-hash`. Absence, malformed metadata, a stale finalized head,
+or disconnect is unhealthy and must never be interpreted as a healthy zero. Every trap
 requires an ownership-safe disposition and an auditable recovery record
 ([09 §6.1](../../docs/architecture/09-execution-upgrades-and-rollout.md)).
 

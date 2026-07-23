@@ -2650,6 +2650,44 @@ fn production_xcm_under_caps_mints_deposits_and_records_the_beneficiary() {
 }
 
 #[test]
+fn production_xcm_protocol_inflow_bypasses_only_the_account_cap() {
+    development_ext().execute_with(|| {
+        let beneficiary = crate::configs::treasury_protocol_account();
+        let amount = 20 * currency::USDC;
+        let issuance_before = ForeignAssets::total_issuance(usdc_location());
+        set_balance_param_value(b"phase3.tvl_cap", issuance_before.saturating_add(amount));
+        set_balance_param_value(b"phase3.dep_cap", 1);
+
+        assert!(execute_production_inbound_usdc(amount, &beneficiary, 61)
+            .ensure_complete()
+            .is_ok());
+        assert_eq!(
+            pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&beneficiary),
+            0
+        );
+        pallet_inflow_caps::CumulativeDeposits::<Runtime>::insert(&beneficiary, 0);
+        assert_ok!(InflowCaps::do_try_state());
+        pallet_inflow_caps::CumulativeDeposits::<Runtime>::remove(&beneficiary);
+
+        // The exemption never weakens the system-wide issuance ceiling.
+        let issuance_at_cap = ForeignAssets::total_issuance(usdc_location());
+        assert!(issuance_at_cap > issuance_before);
+        set_balance_param_value(b"phase3.tvl_cap", issuance_at_cap);
+        assert!(execute_production_inbound_usdc(1, &beneficiary, 62)
+            .ensure_complete()
+            .is_err());
+        assert_eq!(
+            ForeignAssets::total_issuance(usdc_location()),
+            issuance_at_cap
+        );
+        assert_eq!(
+            pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&beneficiary),
+            0
+        );
+    });
+}
+
+#[test]
 fn production_xcm_global_cap_refuses_before_minting_or_trapping() {
     // limit-coverage: phase3.tvl_cap
     use staging_xcm::latest::{Error as XcmError, InstructionError, Outcome};
@@ -3036,7 +3074,7 @@ fn production_xcm_treasury_class_can_recover_only_the_protocol_keyed_trap() {
         };
         let issuance_with_trap = ForeignAssets::total_issuance(usdc_location());
         set_balance_param_value(b"phase3.tvl_cap", issuance_with_trap);
-        set_balance_param_value(b"phase3.dep_cap", amount);
+        set_balance_param_value(b"phase3.dep_cap", 1);
 
         let claim = RuntimeCall::PolkadotXcm(pallet_xcm::Call::claim_assets {
             assets: Box::new(assets),
@@ -3057,7 +3095,8 @@ fn production_xcm_treasury_class_can_recover_only_the_protocol_keyed_trap() {
         );
         assert_eq!(
             pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&protocol),
-            amount
+            0,
+            "canonical protocol inflows bypass the per-account Phase-3 meter"
         );
         assert_eq!(
             ForeignAssets::total_issuance(usdc_location()),

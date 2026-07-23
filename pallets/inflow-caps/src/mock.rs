@@ -1,7 +1,7 @@
 //! Mock runtime for `pallet-inflow-caps` (`15 §4.1`).
 
 use crate as pallet_inflow_caps;
-use frame_support::{derive_impl, parameter_types};
+use frame_support::{derive_impl, parameter_types, traits::Contains};
 use sp_runtime::BuildStorage;
 
 type Block = frame_system::mocking::MockBlock<Test>;
@@ -35,9 +35,17 @@ impl pallet_inflow_caps::InflowCapParams for TestCapParams {
     }
 }
 
+pub struct ProtocolAccounts;
+impl Contains<u64> for ProtocolAccounts {
+    fn contains(who: &u64) -> bool {
+        *who == 99
+    }
+}
+
 impl pallet_inflow_caps::Config for Test {
     type CapParams = TestCapParams;
     type UsdcIssuance = UsdcIssuance;
+    type ProtocolAccounts = ProtocolAccounts;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

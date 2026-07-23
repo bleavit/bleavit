@@ -1834,52 +1834,52 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"res.probe_int",
             ParamValue::U32(14_400),
-            ParamValue::U32(0),
+            ParamValue::U32(1),
             ParamValue::U32(u32::MAX),
             None,
             1,
             ParamClass::Param,
-            false
+            true
         ),
         row(
             b"res.probe_to",
             ParamValue::U32(600),
-            ParamValue::U32(0),
+            ParamValue::U32(1),
             ParamValue::U32(u32::MAX),
             None,
             1,
             ParamClass::Param,
-            false
+            true
         ),
         row(
             b"res.probe_amount",
             ParamValue::Balance(100_000),
-            ParamValue::Balance(0),
+            ParamValue::Balance(1),
             ParamValue::Balance(u128::MAX),
             None,
             1,
             ParamClass::Param,
-            false
+            true
         ),
         row(
             b"res.fail_thr",
             ParamValue::U8(2),
-            ParamValue::U8(0),
+            ParamValue::U8(1),
             ParamValue::U8(u8::MAX),
             None,
             2,
             ParamClass::Meta,
-            false
+            true
         ),
         row(
             b"res.recover_thr",
             ParamValue::U8(3),
-            ParamValue::U8(0),
+            ParamValue::U8(1),
             ParamValue::U8(u8::MAX),
             None,
             2,
             ParamClass::Meta,
-            false
+            true
         ),
         row(
             b"grd.review_dl",
