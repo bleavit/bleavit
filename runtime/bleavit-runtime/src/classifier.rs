@@ -738,6 +738,7 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_epoch::Call::tick { .. }
             | pallet_epoch::Call::decide { .. }
             | pallet_epoch::Call::settle_cohort { .. }
+            | pallet_epoch::Call::bind_ratification { .. }
             // 06 §3.2 authority matrix: the SQ-320 orphan-Baseline crank is a
             // permissionless Signed row, alongside the other epoch cranks.
             | pallet_epoch::Call::finalize_epoch_baseline { .. } => leaf(CallDomain::Public),

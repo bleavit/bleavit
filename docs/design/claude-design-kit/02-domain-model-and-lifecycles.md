@@ -161,8 +161,11 @@ disputed cohort began has zero weight — the UI shows each voter's snapshot-eli
 
 **Ratification** (CODE/META): a `ratify` referendum can be submitted any time after the
 artifact hash is committed, runs concurrently with trading/timelock, and is checked only at
-`execute()` dispatch. Missing ⇒ proposal stays Queued (retry until `grace_end`), then
-`Rejected(NotRatified)` with bond refund.
+`execute()` dispatch. After submission, the proposer freezes the exact referendum index with
+`epoch.bind_ratification`; a proposal with no submitted referendum may queue without a binding,
+but the queue never invents or replaces one, and an unbound referendum cannot dispatch the
+guard's `ratify` call. Missing/unfinished ratification ⇒ proposal stays Queued (retry until
+`grace_end`), then `Rejected(NotRatified)` with bond refund.
 
 ## 7. Guardians, playbooks, attestors (06 §5–§7)
 

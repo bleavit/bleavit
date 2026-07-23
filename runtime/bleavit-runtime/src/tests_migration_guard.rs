@@ -705,6 +705,7 @@ fn exact_phase_four_meta_payload_queues_and_commits_both_cap_raises() {
             false,
         )
         .is_ok());
+        assert!(crate::ExecutionGuard::bind_ratification(PID, RATIFY_REF).is_ok());
         assert!(crate::ExecutionGuard::ratify(
             pallet_origins::Origin::ConstitutionalValues.into(),
             PID,

@@ -9,8 +9,8 @@ use frame_support::{
     traits::{
         fungibles::{Inspect, Mutate},
         tokens::{Fortitude, Preservation},
-        ConstBool, ConstU128, ConstU32, ConstU64, ConstU8, Contains, EqualPrivilegeOnly, Get,
-        InstanceFilter, Nothing, OriginTrait, QueryPreimage, StorageInstance, StorePreimage,
+        Bounded, ConstBool, ConstU128, ConstU32, ConstU64, ConstU8, Contains, EqualPrivilegeOnly,
+        Get, InstanceFilter, Nothing, OriginTrait, QueryPreimage, StorageInstance, StorePreimage,
         TransformOrigin, UnfilteredDispatchable, VariantCountOf, WithdrawReasons,
     },
     weights::{
@@ -28,7 +28,7 @@ use frame_system::{
 #[cfg(feature = "runtime-benchmarks")]
 use futarchy_primitives::keeper::CrankClass;
 use futarchy_primitives::{bounds, chain_identity, currency, kernel, EpochId, FixedU64, ParamKey};
-use parity_scale_codec::Encode;
+use parity_scale_codec::{DecodeAll, Encode};
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 #[cfg(feature = "runtime-benchmarks")]
 use sp_runtime::AccountId32;
@@ -3363,10 +3363,21 @@ impl pallet_epoch::GuardianAccess for RuntimeEpochGuardian {
             != 0
     }
 
-    fn review_window_closed(pid: futarchy_primitives::ProposalId) -> bool {
-        let current = pallet_epoch::CurrentEpoch::<Runtime>::get();
-        pallet_epoch::GuardianReviewDeadlines::<Runtime>::get(pid)
-            .is_some_and(|deadline| current >= deadline)
+    fn review_window_closed(
+        pid: futarchy_primitives::ProposalId,
+        epoch: futarchy_primitives::EpochId,
+        phase: futarchy_primitives::EpochPhase,
+    ) -> bool {
+        // The purpose-specific window is the only admissible source. Missing
+        // post-B18 state fails closed; falling back to `grd.review_dl` would
+        // silently restore the pre-B18 coupling.
+        phase == futarchy_primitives::EpochPhase::Seed
+            && pallet_epoch::GuardianReviewWindows::<Runtime>::get(pid)
+                .is_some_and(|window| epoch >= window)
+    }
+
+    fn close_review_window(pid: futarchy_primitives::ProposalId) -> DispatchResult {
+        pallet_guardian::Pallet::<Runtime>::close_review_window(pid)
     }
 }
 
@@ -5333,7 +5344,12 @@ impl pallet_guardian::GuardianEffectDispatcher for RuntimeGuardianEffects {
                     .ok_or(DispatchError::Arithmetic(
                         sp_runtime::ArithmeticError::Overflow,
                     ))?;
-                Epoch::note_guardian_review_deadline(pid, deadline)
+                let window = pallet_epoch::CurrentEpoch::<Runtime>::get()
+                    .checked_add(1)
+                    .ok_or(DispatchError::Arithmetic(
+                        sp_runtime::ArithmeticError::Overflow,
+                    ))?;
+                Epoch::note_guardian_review_window(pid, deadline, window)
             }
             pallet_guardian::GuardianPower::ForceRerun { pid } => {
                 Epoch::force_rerun_from_guardian(pid)
@@ -5617,6 +5633,17 @@ impl pallet_execution_guard::EpochHandoff for RuntimeEpochHandoff {
             .or_else(|| pallet_epoch::IntakeProposals::<Runtime>::get(pid))
             .map(|proposal| proposal.payload_hash)
     }
+    fn requires_ratification(pid: futarchy_primitives::ProposalId) -> Option<bool> {
+        pallet_epoch::Proposals::<Runtime>::get(pid)
+            .or_else(|| pallet_epoch::IntakeProposals::<Runtime>::get(pid))
+            .map(|proposal| {
+                matches!(
+                    proposal.class,
+                    futarchy_primitives::ProposalClass::Code
+                        | futarchy_primitives::ProposalClass::Meta
+                )
+            })
+    }
     fn recovery_qualification_context(
         pid: futarchy_primitives::ProposalId,
     ) -> Option<(
@@ -5670,6 +5697,103 @@ impl pallet_execution_guard::EpochHandoff for RuntimeEpochHandoff {
 
 pub struct RuntimeEpochExecutionGuard;
 impl pallet_epoch::ExecutionGuardAccess for RuntimeEpochExecutionGuard {
+    fn bind_ratification(
+        pid: futarchy_primitives::ProposalId,
+        referendum_index: u32,
+    ) -> DispatchResult {
+        let proposal = pallet_epoch::Proposals::<Runtime>::get(pid)
+            .or_else(|| pallet_epoch::IntakeProposals::<Runtime>::get(pid))
+            .ok_or(DispatchError::Other(
+                "epoch proposal missing for ratification",
+            ))?;
+        frame_support::ensure!(
+            matches!(
+                proposal.class,
+                futarchy_primitives::ProposalClass::Code | futarchy_primitives::ProposalClass::Meta
+            ),
+            DispatchError::Other("ratification binding requires CODE or META")
+        );
+
+        // A passed record is the only terminal form of this identity.  It is
+        // enough to make a repeated proposer call idempotent; the original
+        // referendum preimage was already checked when the record was enacted.
+        if let Some(record) = pallet_execution_guard::Ratifications::<Runtime>::get(pid) {
+            frame_support::ensure!(
+                record.payload_hash == proposal.payload_hash
+                    && record.referendum_index == referendum_index,
+                DispatchError::Other("ratification binding mismatch")
+            );
+            return pallet_execution_guard::Pallet::<Runtime>::bind_ratification(
+                pid,
+                referendum_index,
+            );
+        }
+
+        let info = pallet_referenda::ReferendumInfoFor::<Runtime>::get(referendum_index)
+            .ok_or(DispatchError::Other("ratification referendum missing"))?;
+        let status = match info {
+            pallet_referenda::ReferendumInfo::Ongoing(status) => status,
+            _ => {
+                return Err(DispatchError::Other(
+                    "ratification referendum is not ongoing",
+                ))
+            }
+        };
+        frame_support::ensure!(
+            status.track == 4,
+            DispatchError::Other("ratification referendum is not on the ratify track")
+        );
+        let expected_origin = RuntimeOrigin::from(crate::track_origins::Origin::Ratify)
+            .caller()
+            .clone();
+        frame_support::ensure!(
+            status.origin == expected_origin,
+            DispatchError::Other("ratification referendum origin is not scoped")
+        );
+
+        let decode_call = |bytes: &[u8]| {
+            // Referenda lookup preimages are backed by the generic 4 MiB
+            // pallet-preimage bound, while this adapter's fixed weight only
+            // covers the protocol's 64 KiB payload ceiling.  Reject oversized
+            // bytes before SCALE decoding so a proposer cannot turn G-9 into
+            // an undercharged multi-megabyte storage read/allocation.
+            frame_support::ensure!(
+                bytes.len() <= pallet_execution_guard::MAX_PAYLOAD_BYTES as usize,
+                DispatchError::Other("ratification preimage too large")
+            );
+            RuntimeCall::decode_all(&mut &bytes[..])
+                .map_err(|_| DispatchError::Other("ratification preimage is not exact"))
+        };
+        let call = match &status.proposal {
+            Bounded::Inline(bytes) => decode_call(bytes.as_ref())?,
+            Bounded::Lookup { hash, len } => {
+                frame_support::ensure!(
+                    *len <= pallet_execution_guard::MAX_PAYLOAD_BYTES,
+                    DispatchError::Other("ratification preimage too large")
+                );
+                let bytes = <Preimage as QueryPreimage>::fetch(hash, Some(*len))
+                    .map_err(|_| DispatchError::Other("ratification preimage unavailable"))?;
+                decode_call(bytes.as_ref())?
+            }
+            Bounded::Legacy { .. } => {
+                return Err(DispatchError::Other(
+                    "legacy ratification preimage is not admissible",
+                ))
+            }
+        };
+        frame_support::ensure!(
+            matches!(
+                call,
+                RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::ratify {
+                    pid: call_pid,
+                    referendum_index: call_index,
+                }) if call_pid == pid && call_index == referendum_index
+            ),
+            DispatchError::Other("ratification referendum call does not bind proposal")
+        );
+        pallet_execution_guard::Pallet::<Runtime>::bind_ratification(pid, referendum_index)
+    }
+
     fn enqueue(
         pid: futarchy_primitives::ProposalId,
         payload_hash: futarchy_primitives::H256,

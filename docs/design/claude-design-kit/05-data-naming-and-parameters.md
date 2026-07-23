@@ -44,7 +44,8 @@ Rerun, Rejected(RejectReason), Executed, FailedExecuted, Measuring, Settled, Can
 Expired`**.
 Ratification badge: `NotRequired` / `NoPassedRecord` / `Passed { referendum }`.
 `NoPassedRecord` says only that the execution guard has no passing record; derive never
-submitted / ongoing / failed referendum lifecycle from `pallet-referenda`, not this badge.
+submitted / submitted-but-unbound / ongoing / failed referendum lifecycle from `pallet-referenda`,
+not this badge. The pending proposer binding is internal until the queue's `ratify_ref` is readable.
 
 **Markets & trading** — `quote(market, side, amount)` → `QuoteView`: `cost` (USDC, excl. fee),
 `fee`, `p_after_1e9` (post-trade price), `max_trade`, `within_domain`, `evaluable` — an exact
@@ -120,7 +121,7 @@ URGENT_UPGRADE) — the "update available" banner source.
 **Extrinsics:** `market.buy` / `market.sell` · `ledger.split` / `ledger.merge` /
 `ledger.split_scalar` / `ledger.merge_scalar` / `ledger.merge_gate` / `ledger.transfer` /
 `ledger.redeem` / `ledger.redeem_scalar` / `ledger.redeem_scalar_pair` / `ledger.redeem_void` ·
-`epoch.submit` / `epoch.withdraw` · `oracle.register_reporter` / `oracle.report` /
+`epoch.submit` / `epoch.withdraw` / `epoch.bind_ratification` · `oracle.register_reporter` / `oracle.report` /
 `oracle.challenge` / `oracle.recompute_proof` · `registry.file_incident` /
 `registry.file_milestone` / `registry.challenge` · `execution_guard.execute` /
 `execution_guard.ratify(proposal_id, referendum_index)` · `futarchy_treasury.claim_stream` ·

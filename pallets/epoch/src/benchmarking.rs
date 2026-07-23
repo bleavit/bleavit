@@ -885,6 +885,31 @@ mod benches {
     }
 
     #[benchmark]
+    fn bind_ratification() -> Result<(), BenchmarkError> {
+        let caller = T::BenchmarkHelper::account(1);
+        let mut state = EpochState::new();
+        let mut proposal = benchmark_proposal::<T>(1, ProposalState::Qualified, 0);
+        proposal.proposer = caller.clone();
+        proposal.class = ProposalClass::Code;
+        state.proposals.push(proposal);
+        fill_epoch_state::<T>(
+            &mut state,
+            MAX_INTAKE_QUEUE,
+            // `state` already contains the bound target proposal; reserve one
+            // live slot for it so `seed` exercises the saturated admissible
+            // aggregate rather than constructing an impossible 33-entry map.
+            MAX_LIVE_PROPOSALS - 1,
+            MAX_NON_TERMINAL_COHORTS,
+        );
+        Pallet::<T>::seed(state)?;
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller), 1, 77);
+
+        Ok(())
+    }
+
+    #[benchmark]
     fn void_cohort(n: Linear<1, MAX_COHORT_PROPOSALS_BOUND>) -> Result<(), BenchmarkError> {
         let mut state = EpochState::new();
         let mut ids = Vec::new();
