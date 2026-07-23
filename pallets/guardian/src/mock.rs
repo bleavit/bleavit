@@ -12,7 +12,7 @@ use crate::{
     ReviewVerdict, TriggerState,
 };
 use frame_support::{derive_impl, parameter_types, traits::EnsureOrigin};
-use futarchy_primitives::ProposalId;
+use futarchy_primitives::{EpochId, ProposalId};
 use sp_core::crypto::AccountId32;
 use sp_runtime::{traits::IdentityLookup, BuildStorage};
 
@@ -47,6 +47,8 @@ parameter_types! {
     pub static StatusFeed: (ProposalStatus, bool) = (ProposalStatus::Queued, false);
     /// Global verified-trigger feed.
     pub static TriggerFeed: TriggerState = TriggerState::none();
+    pub static LedgerFreezeEffect: bool = false;
+    pub static LedgerFreezeEffectTransitions: Vec<bool> = Vec::new();
     /// Monotonic referendum index handed back by the review scheduler.
     pub static NextReferendum: u32 = 100;
     pub static ReviewSchedulingFails: bool = false;
@@ -97,23 +99,57 @@ impl GuardianTriggers for TestTriggers {
     fn current() -> TriggerState {
         TriggerFeed::get()
     }
+
+    fn oracle_deadlock(_epoch: EpochId) -> bool {
+        TriggerFeed::get().oracle_deadlock
+    }
 }
 
 pub struct TestEffects;
 impl GuardianEffectDispatcher for TestEffects {
     fn dispatch(
-        _power: GuardianPower,
+        power: GuardianPower,
         _justification_hash: futarchy_primitives::H256,
     ) -> Result<(), sp_runtime::DispatchError> {
+        if matches!(
+            power,
+            GuardianPower::ActivatePlaybook {
+                id: PlaybookId::LedgerFreeze,
+                ..
+            }
+        ) {
+            Self::set_live_conditioned_playbook(PlaybookId::LedgerFreeze, true)?;
+        }
         Ok(())
     }
 
-    fn revert_playbook(_id: PlaybookId) -> Result<(), sp_runtime::DispatchError> {
+    fn revert_playbook(id: PlaybookId) -> Result<(), sp_runtime::DispatchError> {
+        if id == PlaybookId::LedgerFreeze && LedgerFreezeEffect::get() {
+            Self::set_live_conditioned_playbook(id, false)?;
+        }
         Ok(())
     }
 
     fn renew_playbook(_id: PlaybookId) -> Result<(), sp_runtime::DispatchError> {
         Ok(())
+    }
+
+    fn set_live_conditioned_playbook(
+        id: PlaybookId,
+        applied: bool,
+    ) -> Result<(), sp_runtime::DispatchError> {
+        if id != PlaybookId::LedgerFreeze {
+            return Err(sp_runtime::DispatchError::Other(
+                "playbook is not live-conditioned",
+            ));
+        }
+        LedgerFreezeEffect::set(applied);
+        LedgerFreezeEffectTransitions::mutate(|transitions| transitions.push(applied));
+        Ok(())
+    }
+
+    fn playbook_effect_matches(id: PlaybookId, applied: bool) -> bool {
+        id == PlaybookId::LedgerFreeze && LedgerFreezeEffect::get() == applied
     }
 }
 
@@ -296,7 +332,12 @@ pub fn new_test_ext_with(
     .build_storage()
     .expect("mock genesis must build");
     let mut ext = sp_io::TestExternalities::new(storage);
-    ext.execute_with(|| System::set_block_number(1));
+    ext.execute_with(|| {
+        System::set_block_number(1);
+        TriggerFeed::set(TriggerState::none());
+        LedgerFreezeEffect::set(false);
+        LedgerFreezeEffectTransitions::set(Vec::new());
+    });
     ext
 }
 

@@ -41,6 +41,8 @@ for profile in "${profiles[@]}"; do
 
   recovery=$(python3 "$profile_tool" --profile "$profile" --field recovery)
   if [[ "$recovery" == "true" ]]; then
+    cargo test -p bleavit-runtime --lib --no-default-features \
+      --features "$test_features" --locked tests_b15_recovery
     verification_log=$(mktemp)
     trap 'rm -f "$verification_log"' EXIT
     cargo test -p bleavit-runtime --no-default-features \

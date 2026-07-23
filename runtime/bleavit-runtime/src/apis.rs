@@ -165,6 +165,10 @@ impl_runtime_apis! {
             crate::telemetry::collateral()
         }
 
+        fn reserve_probe_line_balance() -> futarchy_primitives::Balance {
+            crate::telemetry::reserve_probe_line_balance()
+        }
+
         fn migration_cursor_stalled() -> bool {
             crate::telemetry::migration_cursor_stalled()
         }

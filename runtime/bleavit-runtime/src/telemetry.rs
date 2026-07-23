@@ -243,6 +243,11 @@ pub fn collateral() -> Option<CollateralTelemetry> {
     })
 }
 
+/// Local funding available to the reserve-probe dispatcher.
+pub fn reserve_probe_line_balance() -> Balance {
+    FutarchyTreasury::line_balance(BudgetLine::OpsReserveProbe)
+}
+
 /// Canonical migration stall signal used by PB-MIGRATION.
 pub fn migration_cursor_stalled() -> bool {
     let halt = MigrationHaltSources::get() & MIGRATION_STALL_HALT != 0;

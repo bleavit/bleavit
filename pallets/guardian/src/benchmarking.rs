@@ -320,6 +320,7 @@ mod benches {
     #[benchmark]
     fn on_initialize() -> Result<(), BenchmarkError> {
         seed_council::<T>();
+        T::BenchmarkHelper::prime_for_worst_case();
         let overdue = action_at_four::<T>(GuardianPower::DelayOnce { pid: 1 });
         Pallet::<T>::approve_action(T::BenchmarkHelper::signed([5; 32]), overdue)
             .map_err(|_| BenchmarkError::Stop("dispatch"))?;
@@ -355,6 +356,13 @@ mod benches {
             }
         });
         fill_playbooks::<T>(0);
+        ActivePlaybooks::<T>::mutate(|playbooks| {
+            let ledger = playbooks
+                .iter_mut()
+                .find(|playbook| playbook.id == PlaybookId::LedgerFreeze)
+                .expect("ledger freeze fixture exists");
+            ledger.expiry = u32::MAX;
+        });
         fill_reruns::<T>(MAX_RERUN_USED);
         NextActionId::<T>::put(MAX_PENDING_ACTIONS);
 
@@ -363,7 +371,8 @@ mod benches {
             Pallet::<T>::on_initialize(frame_system::Pallet::<T>::block_number());
         }
 
-        assert!(ActivePlaybooks::<T>::get().is_empty());
+        assert_eq!(ActivePlaybooks::<T>::get().len(), 1);
+        assert_eq!(ActivePlaybooks::<T>::get()[0].id, PlaybookId::LedgerFreeze);
         assert!(PendingActions::<T>::get().is_empty());
         assert!(ReviewDeadlines::<T>::get().is_empty());
         let failed = FailedActions::<T>::get(overdue).expect("overdue review settled");

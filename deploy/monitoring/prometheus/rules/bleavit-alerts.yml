@@ -65,13 +65,13 @@ groups:
           key_series: "NAV, meter utilization, stream schedule"
           threshold: "meter > 80%"
 
-      - alert: BleavitXcmAssetTrap
-        expr: bleavit_chain_xcm_trapped_assets > 0
+      - alert: BleavitXcmReadiness
+        expr: bleavit_chain_xcm_trapped_assets > 0 or bleavit_reserve_probe_collection_ok == 0 or bleavit_reserve_probe_ready == 0 or bleavit_reserve_probe_local_usdc < bleavit_reserve_probe_local_required_usdc or bleavit_reserve_probe_remote_usdc < bleavit_reserve_probe_remote_required_usdc or bleavit_reserve_probe_remote_dot_planck < bleavit_reserve_probe_remote_required_dot_planck or bleavit_reserve_probe_dot_refill_margin_planck <= 0
         labels: {severity: warning, runbook: RB-XCM, domain: "XCM"}
         annotations:
-          summary: "XCM: at least one trapped-asset key is live"
-          key_series: "send/fail/timeout counters, trapped assets"
-          threshold: "any trap"
+          summary: "XCM: trapped assets or reserve-probe funding runway is unsafe"
+          key_series: "send/fail/timeout counters, trapped assets, probe funding readiness"
+          threshold: "any trap or probe runway unready/unobservable"
 
       - alert: BleavitKeeperInactive
         expr: (time() - bleavit_keeper_last_successful_crank_timestamp_seconds) > 3600 and bleavit_keeper_last_successful_crank_timestamp_seconds > 0 and bleavit_keeper_planned_total > 0 and on() bleavit_keeper_connected == 1

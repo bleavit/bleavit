@@ -28,11 +28,17 @@ use crate::Runtime;
 #[cfg(any(feature = "phase-four", feature = "recovery"))]
 use frame_support::dispatch::DispatchResult;
 use frame_support::{
-    migrations::VersionedMigration, traits::UncheckedOnRuntimeUpgrade, weights::Weight,
+    migrations::VersionedMigration,
+    traits::{OnRuntimeUpgrade, UncheckedOnRuntimeUpgrade},
+    weights::Weight,
 };
 
 #[cfg(feature = "try-runtime")]
 use alloc::{vec, vec::Vec};
+#[cfg(feature = "recovery")]
+use parity_scale_codec::DecodeAll;
+#[cfg(feature = "try-runtime")]
+use parity_scale_codec::{Decode, Encode};
 
 /// Raw 32-byte keys of the retired `StorageValue`s, computed from their frozen
 /// prefixes so the migration is self-contained and does not depend on the type
@@ -112,6 +118,565 @@ pub type RetireB16State = VersionedMigration<
     <Runtime as frame_system::Config>::DbWeight,
 >;
 
+/// v0 reserve-probe state could contain a query id/pending attempt created
+/// while production's dispatcher and response sink were both inert. Retire
+/// that impossible response identity and old cadence anchor, leave the new
+/// readiness latch unarmed, and reconcile both health mirrors to the preserved
+/// adverse `unhealthy` value. Direct bounded storage writes make this migration
+/// infallible and avoid pretending the dispatch-time fallible sink is an
+/// upgrade-safe API.
+pub struct MigrateOracleReserveProbeV1Inner;
+
+impl UncheckedOnRuntimeUpgrade for MigrateOracleReserveProbeV1Inner {
+    fn on_runtime_upgrade() -> Weight {
+        let mut health = pallet_oracle::ReserveHealth::<Runtime>::get();
+        let unhealthy = health.unhealthy;
+        health.last_query_id = 0;
+        health.pending_since = None;
+        health.last_probe_at = 0;
+        pallet_oracle::ReserveHealth::<Runtime>::put(health);
+        pallet_oracle::ReserveProbeArmed::<Runtime>::kill();
+
+        pallet_constitution::PhaseFlags::<Runtime>::mutate(|bits| {
+            if unhealthy {
+                *bits |= pallet_constitution::PhaseFlagsValue::RESERVE_HEALTH_FLAG;
+            } else {
+                *bits &= !pallet_constitution::PhaseFlagsValue::RESERVE_HEALTH_FLAG;
+            }
+        });
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.reserve_impaired = unhealthy;
+        });
+
+        // ReserveHealth, PhaseFlags and Treasury State reads; those three
+        // writes plus the explicit latch clear. VersionedMigration separately
+        // accounts for its StorageVersion read/write.
+        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(3, 4)
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn pre_upgrade() -> Result<Vec<u8>, sp_runtime::TryRuntimeError> {
+        Ok((
+            pallet_oracle::ReserveHealth::<Runtime>::get(),
+            pallet_constitution::PhaseFlags::<Runtime>::get(),
+            pallet_futarchy_treasury::State::<Runtime>::get().reserve_impaired,
+        )
+            .encode())
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn post_upgrade(state: Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+        let (mut expected, _, _): (pallet_oracle::ReserveHealthValue, u32, bool) =
+            Decode::decode(&mut &state[..]).map_err(|_| {
+                sp_runtime::TryRuntimeError::Other("oracle v1 migration: invalid pre-upgrade state")
+            })?;
+        expected.last_query_id = 0;
+        expected.pending_since = None;
+        expected.last_probe_at = 0;
+        let unhealthy = expected.unhealthy;
+        frame_support::ensure!(
+            pallet_oracle::ReserveHealth::<Runtime>::get() == expected,
+            "oracle v1 migration: health changed beyond legacy query/cadence retirement"
+        );
+        frame_support::ensure!(
+            !pallet_oracle::ReserveProbeArmed::<Runtime>::get(),
+            "oracle v1 migration: legacy state incorrectly implied arming"
+        );
+        frame_support::ensure!(
+            (pallet_constitution::PhaseFlags::<Runtime>::get()
+                & pallet_constitution::PhaseFlagsValue::RESERVE_HEALTH_FLAG
+                != 0)
+                == unhealthy,
+            "oracle v1 migration: constitution health mirror diverges"
+        );
+        frame_support::ensure!(
+            pallet_futarchy_treasury::State::<Runtime>::get().reserve_impaired == unhealthy,
+            "oracle v1 migration: treasury health mirror diverges"
+        );
+        Ok(())
+    }
+}
+
+pub type MigrateOracleReserveProbeV1 = VersionedMigration<
+    0,
+    1,
+    MigrateOracleReserveProbeV1Inner,
+    crate::Oracle,
+    <Runtime as frame_system::Config>::DbWeight,
+>;
+
+pub(crate) fn reserve_probe_param_records() -> Option<(
+    pallet_constitution::ParamRecord,
+    pallet_constitution::ParamRecord,
+)> {
+    let fee_key = pallet_constitution::key16(b"ops.probe_fee");
+    let rate_key = pallet_constitution::key16(b"ops.probe_rate");
+    let mut fee = None;
+    let mut rate = None;
+    for record in pallet_constitution::genesis_params() {
+        if record.key == fee_key {
+            fee = Some(record);
+        } else if record.key == rate_key {
+            rate = Some(record);
+        }
+    }
+    fee.zip(rate)
+}
+
+fn valid_probe_record(
+    expected_key: futarchy_primitives::ParamKey,
+    record: &pallet_constitution::ParamRecord,
+) -> bool {
+    record.key == expected_key
+        && record.value.same_kind(record.min)
+        && record.value.same_kind(record.max)
+        && record.min.as_u128() <= record.value.as_u128()
+        && record.value.as_u128() <= record.max.as_u128()
+        && record.cooldown_epochs <= pallet_constitution::META_MAX_COOLDOWN_EPOCHS
+        && record.admissible_next_interval().is_ok()
+}
+
+/// Newest-main v0 state predates the two reserve-probe pricing records, while
+/// `Params` is otherwise genesis-fixed. Insert the exact registry definitions
+/// iff absent. A mismatched pre-existing row is fail-closed: do not overwrite
+/// it and do not advance the storage version, so the migration remains visibly
+/// incomplete and try-runtime rejects the release.
+pub struct MigrateConstitutionProbeParamsV1;
+
+impl OnRuntimeUpgrade for MigrateConstitutionProbeParamsV1 {
+    fn on_runtime_upgrade() -> Weight {
+        use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+        if crate::Constitution::on_chain_storage_version() != StorageVersion::new(0) {
+            return <Runtime as frame_system::Config>::DbWeight::get().reads(1);
+        }
+        let Some((fee, rate)) = reserve_probe_param_records() else {
+            return <Runtime as frame_system::Config>::DbWeight::get().reads(1);
+        };
+        let fee_before = pallet_constitution::Params::<Runtime>::get(fee.key);
+        let rate_before = pallet_constitution::Params::<Runtime>::get(rate.key);
+        if fee_before.as_ref().is_some_and(|record| record != &fee)
+            || rate_before.as_ref().is_some_and(|record| record != &rate)
+        {
+            return <Runtime as frame_system::Config>::DbWeight::get().reads(3);
+        }
+        if fee_before.is_none() {
+            pallet_constitution::Params::<Runtime>::insert(fee.key, fee);
+        }
+        if rate_before.is_none() {
+            pallet_constitution::Params::<Runtime>::insert(rate.key, rate);
+        }
+        StorageVersion::new(1).put::<crate::Constitution>();
+
+        // Worst case: version + two row reads + two counted-map counter reads;
+        // two row/counter writes and the version write.
+        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(7, 5)
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn pre_upgrade() -> Result<Vec<u8>, sp_runtime::TryRuntimeError> {
+        use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+        let (fee, rate) =
+            reserve_probe_param_records().ok_or(sp_runtime::TryRuntimeError::Other(
+                "constitution v1 migration: registry definitions are absent",
+            ))?;
+        let version = crate::Constitution::on_chain_storage_version();
+        let fee_before = pallet_constitution::Params::<Runtime>::get(fee.key);
+        let rate_before = pallet_constitution::Params::<Runtime>::get(rate.key);
+        let needs_migration = version == StorageVersion::new(0);
+        if needs_migration {
+            frame_support::ensure!(
+                fee_before.as_ref().is_none_or(|record| record == &fee)
+                    && rate_before.as_ref().is_none_or(|record| record == &rate),
+                "constitution v1 migration: mismatched pre-existing probe record"
+            );
+        } else {
+            frame_support::ensure!(
+                fee_before.is_some() && rate_before.is_some(),
+                "constitution v1 migration: current-version probe row absent"
+            );
+        }
+        Ok((needs_migration, version, fee_before, rate_before, fee, rate).encode())
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn post_upgrade(state: Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+        use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+        let (needs_migration, version_before, fee_before, rate_before, fee, rate): (
+            bool,
+            StorageVersion,
+            Option<pallet_constitution::ParamRecord>,
+            Option<pallet_constitution::ParamRecord>,
+            pallet_constitution::ParamRecord,
+            pallet_constitution::ParamRecord,
+        ) = Decode::decode(&mut &state[..]).map_err(|_| {
+            sp_runtime::TryRuntimeError::Other(
+                "constitution v1 migration: invalid pre-upgrade state",
+            )
+        })?;
+        if needs_migration {
+            frame_support::ensure!(
+                crate::Constitution::on_chain_storage_version() == StorageVersion::new(1),
+                "constitution v1 migration: storage version was not advanced"
+            );
+            frame_support::ensure!(
+                pallet_constitution::Params::<Runtime>::get(fee.key) == Some(fee)
+                    && pallet_constitution::Params::<Runtime>::get(rate.key) == Some(rate),
+                "constitution v1 migration: probe rows differ from registry definitions"
+            );
+        } else {
+            frame_support::ensure!(
+                crate::Constitution::on_chain_storage_version() == version_before,
+                "constitution v1 migration: no-op changed storage version"
+            );
+            frame_support::ensure!(
+                pallet_constitution::Params::<Runtime>::get(fee.key) == fee_before
+                    && pallet_constitution::Params::<Runtime>::get(rate.key) == rate_before,
+                "constitution v1 migration: no-op changed lawful live records"
+            );
+        }
+        let fee_after = pallet_constitution::Params::<Runtime>::get(fee.key);
+        let rate_after = pallet_constitution::Params::<Runtime>::get(rate.key);
+        frame_support::ensure!(
+            fee_after
+                .as_ref()
+                .is_some_and(|record| valid_probe_record(fee.key, record))
+                && rate_after
+                    .as_ref()
+                    .is_some_and(|record| valid_probe_record(rate.key, record)),
+            "constitution v1 migration: post-upgrade probe row is absent or invalid"
+        );
+        Ok(())
+    }
+}
+
+pub(crate) fn reserve_probe_control_param_records() -> Option<[pallet_constitution::ParamRecord; 5]>
+{
+    let params = pallet_constitution::genesis_params();
+    let find = |name: &[u8]| {
+        let key = pallet_constitution::key16(name);
+        params.iter().find(|record| record.key == key).copied()
+    };
+    Some([
+        find(b"res.probe_int")?,
+        find(b"res.probe_to")?,
+        find(b"res.probe_amount")?,
+        find(b"res.fail_thr")?,
+        find(b"res.recover_thr")?,
+    ])
+}
+
+fn migrate_probe_control_record(
+    live: pallet_constitution::ParamRecord,
+    expected: pallet_constitution::ParamRecord,
+) -> Option<pallet_constitution::ParamRecord> {
+    if live.key != expected.key
+        || !live.value.same_kind(expected.value)
+        || live.value.as_u128() < expected.min.as_u128()
+        || live.value.as_u128() > expected.max.as_u128()
+    {
+        return None;
+    }
+    Some(pallet_constitution::ParamRecord {
+        min: expected.min,
+        max: expected.max,
+        max_delta: expected.max_delta,
+        cooldown_epochs: expected.cooldown_epochs,
+        class: expected.class,
+        kernel_bounded: expected.kernel_bounded,
+        ..live
+    })
+}
+
+/// Constitution v1 admitted zero-valued reserve-probe controls and allowed a
+/// later registry amendment to restore those zero minima. Validate all five
+/// live rows before writing anything, preserve their governed value/history,
+/// then install the exact v2 structural metadata. A malformed or zero live row
+/// leaves both data and storage version untouched (R-7).
+pub struct MigrateConstitutionProbeControlsV2;
+
+impl OnRuntimeUpgrade for MigrateConstitutionProbeControlsV2 {
+    fn on_runtime_upgrade() -> Weight {
+        use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+        if crate::Constitution::on_chain_storage_version() != StorageVersion::new(1) {
+            return <Runtime as frame_system::Config>::DbWeight::get().reads(1);
+        }
+        let Some(expected) = reserve_probe_control_param_records() else {
+            return <Runtime as frame_system::Config>::DbWeight::get().reads(1);
+        };
+        let mut migrated = expected;
+        for (index, definition) in expected.into_iter().enumerate() {
+            let Some(live) = pallet_constitution::Params::<Runtime>::get(definition.key) else {
+                return <Runtime as frame_system::Config>::DbWeight::get().reads(6);
+            };
+            let Some(next) = migrate_probe_control_record(live, definition) else {
+                return <Runtime as frame_system::Config>::DbWeight::get().reads(6);
+            };
+            migrated[index] = next;
+        }
+        for record in migrated {
+            pallet_constitution::Params::<Runtime>::insert(record.key, record);
+        }
+        StorageVersion::new(2).put::<crate::Constitution>();
+        // Version + five row reads, then `CountedStorageMap::insert` performs
+        // one existence read per replacement; five row writes + version.
+        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(11, 6)
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn pre_upgrade() -> Result<Vec<u8>, sp_runtime::TryRuntimeError> {
+        use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+        let version = crate::Constitution::on_chain_storage_version();
+        let expected =
+            reserve_probe_control_param_records().ok_or(sp_runtime::TryRuntimeError::Other(
+                "constitution v2 migration: registry definitions are absent",
+            ))?;
+        let mut before = expected;
+        for (index, definition) in expected.into_iter().enumerate() {
+            let live = pallet_constitution::Params::<Runtime>::get(definition.key).ok_or(
+                sp_runtime::TryRuntimeError::Other(
+                    "constitution v2 migration: reserve control row is absent",
+                ),
+            )?;
+            if version == StorageVersion::new(1) {
+                frame_support::ensure!(
+                    migrate_probe_control_record(live, definition).is_some(),
+                    "constitution v2 migration: reserve control row is not migratable"
+                );
+            }
+            before[index] = live;
+        }
+        Ok((version, before, expected).encode())
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn post_upgrade(state: Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+        use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+        let (version_before, before, expected): (
+            StorageVersion,
+            [pallet_constitution::ParamRecord; 5],
+            [pallet_constitution::ParamRecord; 5],
+        ) = Decode::decode(&mut &state[..]).map_err(|_| {
+            sp_runtime::TryRuntimeError::Other(
+                "constitution v2 migration: invalid pre-upgrade state",
+            )
+        })?;
+        if version_before == StorageVersion::new(1) {
+            frame_support::ensure!(
+                crate::Constitution::on_chain_storage_version() == StorageVersion::new(2),
+                "constitution v2 migration: storage version was not advanced"
+            );
+            for (index, definition) in expected.into_iter().enumerate() {
+                let live = pallet_constitution::Params::<Runtime>::get(definition.key).ok_or(
+                    sp_runtime::TryRuntimeError::Other(
+                        "constitution v2 migration: migrated row is absent",
+                    ),
+                )?;
+                let wanted = migrate_probe_control_record(before[index], definition).ok_or(
+                    sp_runtime::TryRuntimeError::Other(
+                        "constitution v2 migration: pre-upgrade row became invalid",
+                    ),
+                )?;
+                frame_support::ensure!(
+                    live == wanted,
+                    "constitution v2 migration: value/history or metadata diverged"
+                );
+            }
+        } else {
+            frame_support::ensure!(
+                crate::Constitution::on_chain_storage_version() == version_before,
+                "constitution v2 migration: no-op changed storage version"
+            );
+            for record in before {
+                frame_support::ensure!(
+                    pallet_constitution::Params::<Runtime>::get(record.key) == Some(record),
+                    "constitution v2 migration: no-op changed a control row"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Atomic Constitution migration for the complete reserve-probe parameter
+/// family. Predecessor v0 may lack the two pricing rows; v1 already has them.
+/// Both paths validate the pricing and five control records before performing
+/// any write, then advance directly to v2. This prevents a corrupt v0 control
+/// row from leaving a partially advanced v1 state.
+pub struct MigrateConstitutionReserveProbeV2;
+
+#[cfg(feature = "try-runtime")]
+type ConstitutionReserveProbeV2PreState = (
+    frame_support::traits::StorageVersion,
+    Option<pallet_constitution::ParamRecord>,
+    Option<pallet_constitution::ParamRecord>,
+    [pallet_constitution::ParamRecord; 5],
+    pallet_constitution::ParamRecord,
+    pallet_constitution::ParamRecord,
+    [pallet_constitution::ParamRecord; 5],
+);
+
+impl OnRuntimeUpgrade for MigrateConstitutionReserveProbeV2 {
+    fn on_runtime_upgrade() -> Weight {
+        use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+        let version = crate::Constitution::on_chain_storage_version();
+        if version != StorageVersion::new(0) && version != StorageVersion::new(1) {
+            return <Runtime as frame_system::Config>::DbWeight::get().reads(1);
+        }
+        let Some((fee, rate)) = reserve_probe_param_records() else {
+            return <Runtime as frame_system::Config>::DbWeight::get().reads(1);
+        };
+        let Some(controls) = reserve_probe_control_param_records() else {
+            return <Runtime as frame_system::Config>::DbWeight::get().reads(1);
+        };
+        let fee_before = pallet_constitution::Params::<Runtime>::get(fee.key);
+        let rate_before = pallet_constitution::Params::<Runtime>::get(rate.key);
+        let pricing_valid = if version == StorageVersion::new(0) {
+            fee_before.as_ref().is_none_or(|record| record == &fee)
+                && rate_before.as_ref().is_none_or(|record| record == &rate)
+        } else {
+            fee_before
+                .as_ref()
+                .is_some_and(|record| valid_probe_record(fee.key, record))
+                && rate_before
+                    .as_ref()
+                    .is_some_and(|record| valid_probe_record(rate.key, record))
+        };
+        if !pricing_valid {
+            return <Runtime as frame_system::Config>::DbWeight::get().reads(8);
+        }
+        let mut migrated = controls;
+        for (index, definition) in controls.into_iter().enumerate() {
+            let Some(live) = pallet_constitution::Params::<Runtime>::get(definition.key) else {
+                return <Runtime as frame_system::Config>::DbWeight::get().reads(8);
+            };
+            let Some(next) = migrate_probe_control_record(live, definition) else {
+                return <Runtime as frame_system::Config>::DbWeight::get().reads(8);
+            };
+            migrated[index] = next;
+        }
+
+        if fee_before.is_none() {
+            pallet_constitution::Params::<Runtime>::insert(fee.key, fee);
+        }
+        if rate_before.is_none() {
+            pallet_constitution::Params::<Runtime>::insert(rate.key, rate);
+        }
+        for record in migrated {
+            pallet_constitution::Params::<Runtime>::insert(record.key, record);
+        }
+        StorageVersion::new(2).put::<crate::Constitution>();
+        // Version + seven row reads; up to seven CountedStorageMap existence
+        // reads. Worst writes: seven rows, two new-row counters, and version.
+        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(15, 10)
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn pre_upgrade() -> Result<Vec<u8>, sp_runtime::TryRuntimeError> {
+        use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+        let version = crate::Constitution::on_chain_storage_version();
+        let (fee, rate) =
+            reserve_probe_param_records().ok_or(sp_runtime::TryRuntimeError::Other(
+                "constitution v2 migration: pricing definitions are absent",
+            ))?;
+        let controls =
+            reserve_probe_control_param_records().ok_or(sp_runtime::TryRuntimeError::Other(
+                "constitution v2 migration: control definitions are absent",
+            ))?;
+        let fee_before = pallet_constitution::Params::<Runtime>::get(fee.key);
+        let rate_before = pallet_constitution::Params::<Runtime>::get(rate.key);
+        if version == StorageVersion::new(0) {
+            frame_support::ensure!(
+                fee_before.as_ref().is_none_or(|record| record == &fee)
+                    && rate_before.as_ref().is_none_or(|record| record == &rate),
+                "constitution v2 migration: mismatched v0 pricing row"
+            );
+        } else if version == StorageVersion::new(1) {
+            frame_support::ensure!(
+                fee_before
+                    .as_ref()
+                    .is_some_and(|record| valid_probe_record(fee.key, record))
+                    && rate_before
+                        .as_ref()
+                        .is_some_and(|record| valid_probe_record(rate.key, record)),
+                "constitution v2 migration: absent or invalid v1 pricing row"
+            );
+        }
+        let mut controls_before = controls;
+        for (index, definition) in controls.into_iter().enumerate() {
+            let live = pallet_constitution::Params::<Runtime>::get(definition.key).ok_or(
+                sp_runtime::TryRuntimeError::Other(
+                    "constitution v2 migration: reserve control row is absent",
+                ),
+            )?;
+            if version == StorageVersion::new(0) || version == StorageVersion::new(1) {
+                frame_support::ensure!(
+                    migrate_probe_control_record(live, definition).is_some(),
+                    "constitution v2 migration: reserve control row is not migratable"
+                );
+            }
+            controls_before[index] = live;
+        }
+        Ok((
+            version,
+            fee_before,
+            rate_before,
+            controls_before,
+            fee,
+            rate,
+            controls,
+        )
+            .encode())
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn post_upgrade(state: Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+        use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+        let (version, fee_before, rate_before, controls_before, fee, rate, controls):
+            ConstitutionReserveProbeV2PreState = Decode::decode(&mut &state[..]).map_err(|_| {
+            sp_runtime::TryRuntimeError::Other(
+                "constitution v2 migration: invalid composite pre-upgrade state",
+            )
+        })?;
+        if version == StorageVersion::new(0) || version == StorageVersion::new(1) {
+            frame_support::ensure!(
+                crate::Constitution::on_chain_storage_version() == StorageVersion::new(2),
+                "constitution v2 migration: storage version was not advanced"
+            );
+            frame_support::ensure!(
+                pallet_constitution::Params::<Runtime>::get(fee.key)
+                    == Some(fee_before.unwrap_or(fee))
+                    && pallet_constitution::Params::<Runtime>::get(rate.key)
+                        == Some(rate_before.unwrap_or(rate)),
+                "constitution v2 migration: pricing rows were not preserved/inserted"
+            );
+            for (index, definition) in controls.into_iter().enumerate() {
+                let wanted = migrate_probe_control_record(controls_before[index], definition)
+                    .ok_or(sp_runtime::TryRuntimeError::Other(
+                        "constitution v2 migration: pre-upgrade control became invalid",
+                    ))?;
+                frame_support::ensure!(
+                    pallet_constitution::Params::<Runtime>::get(definition.key) == Some(wanted),
+                    "constitution v2 migration: control value/history or metadata diverged"
+                );
+            }
+        } else {
+            frame_support::ensure!(
+                crate::Constitution::on_chain_storage_version() == version,
+                "constitution v2 migration: no-op changed storage version"
+            );
+        }
+        Ok(())
+    }
+}
 #[cfg(any(feature = "phase-four", feature = "recovery"))]
 fn apply_phase_four_plan(plan: pallet_execution_guard::PhaseFourPlan) -> DispatchResult {
     let origin: crate::RuntimeOrigin = pallet_origins::Origin::FutarchyMeta.into();
@@ -272,20 +837,58 @@ impl frame_support::traits::OnRuntimeUpgrade for PhaseFourTransition {
 #[cfg(feature = "recovery")]
 pub struct TerminalRecoveryTransition;
 
-/// Release-specific cutpoint repair for an ordinary failed MBM. The current
-/// runtime registers no production MBMs, so there is no truthful generic
-/// rollback to perform. A future MBM-bearing primary MUST replace this body in
-/// its paired N+2 recovery profile with a bounded, cutpoint-total repair and
-/// the corresponding exhaustive tests. Returning an error here is deliberate:
-/// it preserves `OnlyInherents` rather than reopening transactions against a
-/// half-migrated layout.
+/// Initialize the release-specific cutpoint-total repair for the sole primary
+/// MBM in this release. The backfill is read-only until its terminal
+/// mirror/version pair, so the safest repair for every valid cutpoint is to
+/// validate the retired SDK cursor and restart the bounded scan from its
+/// beginning. The recovery profile itself registers zero SDK MBMs; its
+/// runtime-local cursor is serviced under `RecoveryLockdown`, and ordinary
+/// calls remain impossible until the exact total commits.
 #[cfg(feature = "recovery")]
 fn repair_retired_mbm(
-    _cursor: &pallet_migrations::CursorOf<Runtime>,
+    cursor: &pallet_migrations::CursorOf<Runtime>,
 ) -> Result<(), sp_runtime::DispatchError> {
-    Err(sp_runtime::DispatchError::Other(
-        "ordinary MBM recovery repair is not configured",
-    ))
+    use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+    frame_support::ensure!(
+        crate::ConditionalLedger::on_chain_storage_version() == StorageVersion::new(0)
+            && !pallet_conditional_ledger::TotalEscrowed::<Runtime>::exists(),
+        sp_runtime::DispatchError::Other("ledger recovery source version is not exact")
+    );
+    frame_support::ensure!(
+        !crate::configs::RecoveryLedgerRepairActive::get()
+            && !crate::configs::RecoveryLedgerCursor::exists()
+            && crate::configs::RecoveryLedgerRepairSteps::get() == 0
+            && !crate::configs::RecoveryLedgerRepairFailed::get(),
+        sp_runtime::DispatchError::Other("ledger recovery cursor already exists")
+    );
+
+    match cursor {
+        pallet_migrations::MigrationCursor::Active(active) => {
+            frame_support::ensure!(
+                active.index == 0,
+                sp_runtime::DispatchError::Other("ledger recovery segment index is invalid")
+            );
+            if let Some(inner) = active.inner_cursor.as_ref() {
+                pallet_conditional_ledger::migration::BackfillCursor::decode_all(&mut &inner[..])
+                    .map_err(|_| {
+                    sp_runtime::DispatchError::Other("ledger recovery cursor is malformed")
+                })?;
+            }
+        }
+        pallet_migrations::MigrationCursor::Stuck => {
+            frame_support::ensure!(
+                crate::configs::MigrationFailedStep::get() == Some(0),
+                sp_runtime::DispatchError::Other("ledger recovery failed segment is invalid")
+            );
+        }
+    }
+
+    crate::configs::RecoveryLedgerCursor::kill();
+    crate::configs::RecoveryLedgerRepairSteps::kill();
+    crate::configs::RecoveryLedgerRepairFailed::kill();
+    crate::configs::RecoveryLedgerRepairActive::put(true);
+    Ok(())
 }
 
 #[cfg(feature = "recovery")]
@@ -338,15 +941,14 @@ impl frame_support::traits::OnRuntimeUpgrade for TerminalRecoveryTransition {
                     }
                 };
                 transition_phase_four(plan)?;
+                crate::ExecutionGuard::recovery_code_applied(installed_hash, installed_version)?;
+                crate::configs::complete_terminal_recovery_state();
             } else {
                 let cursor = crate::configs::RetiredMigrationCursor::get().ok_or(
                     sp_runtime::DispatchError::Other("terminal recovery cause missing"),
                 )?;
                 repair_retired_mbm(&cursor)?;
             }
-
-            crate::ExecutionGuard::recovery_code_applied(installed_hash, installed_version)?;
-            crate::configs::complete_terminal_recovery_state();
             Ok::<(), sp_runtime::DispatchError>(())
         });
         if completed.is_err() {
@@ -375,15 +977,16 @@ impl frame_support::traits::OnRuntimeUpgrade for TerminalRecoveryTransition {
 
     #[cfg(feature = "try-runtime")]
     fn post_upgrade(state: Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
-        frame_support::ensure!(
-            !crate::configs::RecoveryCodeApplied::get()
-                && !crate::configs::RecoveryLockdown::get()
-                && !crate::configs::RecoveryScheduledHash::exists()
-                && !crate::configs::RetiredMigrationCursor::exists()
-                && !pallet_execution_guard::RecoveryImage::<Runtime>::exists(),
-            "terminal recovery migration: recovery state survived completion"
-        );
         if state.as_slice() == [1] {
+            frame_support::ensure!(
+                !crate::configs::RecoveryCodeApplied::get()
+                    && !crate::configs::RecoveryLockdown::get()
+                    && !crate::configs::RecoveryScheduledHash::exists()
+                    && !crate::configs::RetiredMigrationCursor::exists()
+                    && !pallet_execution_guard::RecoveryImage::<Runtime>::exists()
+                    && !crate::configs::RecoveryLedgerRepairActive::get(),
+                "terminal recovery migration: phase recovery state survived completion"
+            );
             frame_support::ensure!(
                 pallet_constitution::PhaseFlags::<Runtime>::get()
                     == pallet_constitution::PhaseFlagsValue::PARAM_ARMED
@@ -393,6 +996,17 @@ impl frame_support::traits::OnRuntimeUpgrade for TerminalRecoveryTransition {
                         pallet_execution_guard::PhaseFourBridgeState::Consumed
                     ),
                 "terminal recovery migration: Phase-4 repair is incomplete"
+            );
+        } else {
+            frame_support::ensure!(
+                crate::configs::RecoveryCodeApplied::get()
+                    && crate::configs::RecoveryLockdown::get()
+                    && crate::configs::RecoveryScheduledHash::exists()
+                    && crate::configs::RetiredMigrationCursor::exists()
+                    && pallet_execution_guard::RecoveryImage::<Runtime>::exists()
+                    && crate::configs::RecoveryLedgerRepairActive::get()
+                    && !crate::configs::RecoveryLedgerRepairFailed::get(),
+                "terminal recovery migration: ledger repair was not initialized"
             );
         }
         Ok(())

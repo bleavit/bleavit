@@ -79,15 +79,23 @@ parameter_types! {
 // and creates **no** `pallet-migrations` cursor, so it never engages the
 // `OnlyInherents` multi-block-migration lockdown (09 §3.2).
 #[cfg(all(not(feature = "phase-four"), not(feature = "recovery")))]
-type SingleBlockMigrations = (crate::migrations::RetireB16State,);
+type SingleBlockMigrations = (
+    crate::migrations::RetireB16State,
+    crate::migrations::MigrateConstitutionReserveProbeV2,
+    crate::migrations::MigrateOracleReserveProbeV1,
+);
 #[cfg(all(feature = "phase-four", not(feature = "recovery")))]
 type SingleBlockMigrations = (
     crate::migrations::RetireB16State,
+    crate::migrations::MigrateConstitutionReserveProbeV2,
+    crate::migrations::MigrateOracleReserveProbeV1,
     crate::migrations::PhaseFourTransition,
 );
 #[cfg(feature = "recovery")]
 type SingleBlockMigrations = (
     crate::migrations::RetireB16State,
+    crate::migrations::MigrateConstitutionReserveProbeV2,
+    crate::migrations::MigrateOracleReserveProbeV1,
     crate::migrations::TerminalRecoveryTransition,
 );
 
@@ -545,6 +553,70 @@ pub type RecoveryCodeApplied = frame_support::storage::types::StorageValue<
     frame_support::pallet_prelude::ValueQuery,
 >;
 
+#[cfg(feature = "recovery")]
+pub struct RecoveryLedgerCursorStorage;
+#[cfg(feature = "recovery")]
+impl StorageInstance for RecoveryLedgerCursorStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "RecoveryLedgerCursor";
+}
+#[cfg(feature = "recovery")]
+pub type RecoveryLedgerCursor = frame_support::storage::types::StorageValue<
+    RecoveryLedgerCursorStorage,
+    pallet_conditional_ledger::migration::BackfillCursor,
+    frame_support::pallet_prelude::OptionQuery,
+>;
+
+#[cfg(feature = "recovery")]
+pub struct RecoveryLedgerRepairActiveStorage;
+#[cfg(feature = "recovery")]
+impl StorageInstance for RecoveryLedgerRepairActiveStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "RecoveryLedgerRepairActive";
+}
+#[cfg(feature = "recovery")]
+pub type RecoveryLedgerRepairActive = frame_support::storage::types::StorageValue<
+    RecoveryLedgerRepairActiveStorage,
+    bool,
+    frame_support::pallet_prelude::ValueQuery,
+>;
+
+#[cfg(feature = "recovery")]
+pub struct RecoveryLedgerRepairStepsStorage;
+#[cfg(feature = "recovery")]
+impl StorageInstance for RecoveryLedgerRepairStepsStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "RecoveryLedgerRepairSteps";
+}
+#[cfg(feature = "recovery")]
+pub type RecoveryLedgerRepairSteps = frame_support::storage::types::StorageValue<
+    RecoveryLedgerRepairStepsStorage,
+    u32,
+    frame_support::pallet_prelude::ValueQuery,
+>;
+
+#[cfg(feature = "recovery")]
+pub struct RecoveryLedgerRepairFailedStorage;
+#[cfg(feature = "recovery")]
+impl StorageInstance for RecoveryLedgerRepairFailedStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "RecoveryLedgerRepairFailed";
+}
+#[cfg(feature = "recovery")]
+pub type RecoveryLedgerRepairFailed = frame_support::storage::types::StorageValue<
+    RecoveryLedgerRepairFailedStorage,
+    bool,
+    frame_support::pallet_prelude::ValueQuery,
+>;
+
 pub struct PhaseTransitionLockStorage;
 impl StorageInstance for PhaseTransitionLockStorage {
     fn pallet_prefix() -> &'static str {
@@ -571,6 +643,106 @@ pub type PhaseTransitionApplied = frame_support::storage::types::StorageValue<
     frame_support::pallet_prelude::ValueQuery,
 >;
 
+#[cfg(feature = "recovery")]
+pub(crate) fn recovery_ledger_bookkeeping_weight() -> Weight {
+    // Runtime-local recovery state is outside the pallet benchmark's storage
+    // inventory. Charge its fixed reads/writes plus a conservative 16 KiB
+    // proof envelope in addition to the generated ledger row/terminal weight.
+    <Runtime as frame_system::Config>::DbWeight::get()
+        .reads_writes(8, 8)
+        .saturating_add(Weight::from_parts(0, 16 * 1024))
+}
+
+#[cfg(feature = "recovery")]
+pub(crate) fn recovery_guard_finalization_weight() -> Weight {
+    // This executable benchmark saturates the 32-entry Queue and measures the
+    // exact guard recovery-application path, including full load/clear/reinsert,
+    // pending-outflow sync, release-channel update and recovery-image unpin.
+    // Precharge it on every step because discovering that the ledger cursor is
+    // terminal requires the benchmarked storage read itself.
+    <crate::weights::pallet_execution_guard::WeightInfo<Runtime> as
+        pallet_execution_guard::WeightInfo>::finalize_recovery_application()
+}
+
+pub(crate) fn recovery_aware_migration_detector_weight() -> Weight {
+    // `step` must first discriminate the runtime-local repair/failure/lock
+    // branches before delegating to FRAME's migrator. Charge all three
+    // ValueQuery reads on every branch, including the persistent fail-locked
+    // branch, plus a fixed proof envelope for their runtime-local keys.
+    <Runtime as frame_system::Config>::DbWeight::get()
+        .reads(3)
+        .saturating_add(Weight::from_parts(0, 8 * 1024))
+}
+
+#[cfg(feature = "recovery")]
+fn step_ledger_recovery() -> Weight {
+    use frame_support::{
+        migrations::SteppedMigration,
+        storage::with_storage_layer,
+        traits::{GetStorageVersion, StorageVersion},
+        weights::WeightMeter,
+    };
+
+    let mut meter = WeightMeter::with_limit(
+        MigrationMaxServiceWeight::get().saturating_sub(recovery_aware_migration_detector_weight()),
+    );
+    let overhead =
+        recovery_ledger_bookkeeping_weight().saturating_add(recovery_guard_finalization_weight());
+    let outcome = with_storage_layer(|| {
+        meter
+            .try_consume(overhead)
+            .map_err(|_| DispatchError::Other("ledger recovery bookkeeping exceeds weight"))?;
+        frame_support::ensure!(
+            RecoveryLedgerRepairActive::get()
+                && RecoveryLockdown::get()
+                && RecoveryCodeApplied::get()
+                && !RecoveryLedgerRepairFailed::get(),
+            DispatchError::Other("ledger recovery state is not active")
+        );
+        let steps = RecoveryLedgerRepairSteps::get();
+        frame_support::ensure!(
+            steps < pallet_conditional_ledger::migration::MAX_BACKFILL_STEPS,
+            DispatchError::Other("ledger recovery exceeded its release bound")
+        );
+        let cursor = RecoveryLedgerCursor::get();
+        let next = <pallet_conditional_ledger::migration::BackfillTotalEscrowedV1<
+            Runtime,
+        > as SteppedMigration>::transactional_step(cursor, &mut meter)
+        .map_err(|_| DispatchError::Other("ledger recovery step failed"))?;
+        let next_steps = steps
+            .checked_add(1)
+            .ok_or(DispatchError::Other("ledger recovery step count overflow"))?;
+
+        if let Some(cursor) = next {
+            RecoveryLedgerCursor::put(cursor);
+            RecoveryLedgerRepairSteps::put(next_steps);
+            return Ok(());
+        }
+
+        frame_support::ensure!(
+            ConditionalLedger::on_chain_storage_version() == StorageVersion::new(1)
+                && pallet_conditional_ledger::TotalEscrowed::<Runtime>::exists(),
+            DispatchError::Other("ledger recovery terminal state is incomplete")
+        );
+        let recovery = pallet_execution_guard::RecoveryImage::<Runtime>::get().ok_or(
+            DispatchError::Other("ledger recovery commitment is missing"),
+        )?;
+        let mut installed = pallet_execution_guard::CurrentSpecName::<Runtime>::get().ok_or(
+            DispatchError::Other("ledger recovery current spec is missing"),
+        )?;
+        installed.spec_version = recovery.target_spec_version;
+        crate::ExecutionGuard::recovery_code_applied(recovery.hash, installed)?;
+        complete_terminal_recovery_state();
+        Ok::<(), DispatchError>(())
+    });
+
+    if outcome.is_err() {
+        RecoveryLedgerRepairFailed::put(true);
+        note_phase_transition_failure();
+    }
+    meter.consumed()
+}
+
 /// Keeps FRAME in `OnlyInherents` after the stuck cursor is transactionally
 /// retired for code scheduling and until relay GoAhead installs the recovery
 /// image. `RecoveryBypass` is scoped to the internal frame-system call only;
@@ -587,10 +759,20 @@ impl frame_support::migrations::MultiStepMigrator for RecoveryAwareMigrations {
     }
 
     fn step() -> Weight {
+        let detector = recovery_aware_migration_detector_weight();
+        #[cfg(feature = "recovery")]
+        if RecoveryLedgerRepairActive::get() {
+            if RecoveryLedgerRepairFailed::get() {
+                return detector;
+            }
+            return detector.saturating_add(step_ledger_recovery());
+        }
         if RecoveryLockdown::get() || PhaseTransitionLock::get() {
-            Weight::zero()
+            detector
         } else {
-            <Migrations as frame_support::migrations::MultiStepMigrator>::step()
+            detector.saturating_add(
+                <Migrations as frame_support::migrations::MultiStepMigrator>::step(),
+            )
         }
     }
 }
@@ -637,6 +819,10 @@ pub(crate) fn note_phase_transition_failure() {
 pub(crate) fn complete_terminal_recovery_state() {
     RecoveryScheduledHash::kill();
     RetiredMigrationCursor::kill();
+    RecoveryLedgerCursor::kill();
+    RecoveryLedgerRepairActive::kill();
+    RecoveryLedgerRepairSteps::kill();
+    RecoveryLedgerRepairFailed::kill();
     RecoveryLockdown::kill();
     RecoveryAborted::kill();
     RecoveryCodeApplied::kill();
@@ -784,7 +970,9 @@ impl pallet_execution_guard::MigrationStatusProvider for RuntimeMigrationStatus 
 
 impl pallet_migrations::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
-    #[cfg(not(feature = "runtime-benchmarks"))]
+    #[cfg(all(not(feature = "runtime-benchmarks"), not(feature = "recovery")))]
+    type Migrations = (pallet_conditional_ledger::migration::BackfillTotalEscrowedV1<Runtime>,);
+    #[cfg(all(not(feature = "runtime-benchmarks"), feature = "recovery"))]
     type Migrations = ();
     #[cfg(feature = "runtime-benchmarks")]
     type Migrations = pallet_migrations::mock_helpers::MockedMigrations;
@@ -829,7 +1017,7 @@ impl staging_parachain_info::Config for Runtime {}
 pub(crate) mod xcm_config {
     use super::*;
     use staging_xcm::latest::prelude::*;
-    use staging_xcm_builder::{FixedWeightBounds, FrameTransactionalProcessor};
+    use staging_xcm_builder::{FixedWeightBounds, FrameTransactionalProcessor, WithUniqueTopic};
     use staging_xcm_executor::XcmExecutor;
 
     parameter_types! {
@@ -864,8 +1052,10 @@ pub(crate) mod xcm_config {
         LocationToAccountId,
         AccountId,
     >;
+    pub type ResponseHandler =
+        bleavit_xcm::probe::ProbeAwareResponseHandler<PolkadotXcm, super::RuntimeOracleProbeSink>;
     pub type Barrier = bleavit_xcm::barrier::BleavitBarrier<
-        PolkadotXcm,
+        ResponseHandler,
         UniversalLocation,
         MaxPrefixes,
         PhaseInflowCaps,
@@ -877,7 +1067,15 @@ pub(crate) mod xcm_config {
         PolkadotXcm,
         polkadot_runtime_common::xcm_sender::NoPriceForMessageDelivery<()>,
     >;
-    pub type Router = bleavit_xcm::health::HealthTrackingRouter<RelayRouter, XcmTrafficRecorder>;
+    /// Parent traffic routes by UMP; sibling traffic (including the reserve
+    /// probe to Asset Hub) routes by XCMP. The previous Parent-only sender made
+    /// every sibling probe fail local validation (SQ-380).
+    pub type NetworkRouter = (RelayRouter, XcmpQueue);
+    pub type TopicRouter = WithUniqueTopic<NetworkRouter>;
+    pub type Router = bleavit_xcm::health::HealthTrackingRouter<TopicRouter, XcmTrafficRecorder>;
+    pub type BaseWeigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
+    pub type Weigher =
+        bleavit_xcm::probe::ProbeAwareWeightBounds<BaseWeigher, super::RuntimeProbeCallbackWeight>;
 
     /// Maps the Treasury-class execution origin to the protocol custody
     /// location under which protocol-owned local traps are keyed (09 §6.1).
@@ -918,11 +1116,11 @@ pub(crate) mod xcm_config {
         type IsTeleporter = ();
         type UniversalLocation = UniversalLocation;
         type Barrier = Barrier;
-        type Weigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
+        type Weigher = Weigher;
         // Unrefunded fees use payer-adverse disposal until treasury revenue
         // routing is wired; this cannot create an unbacked claim.
         type Trader = bleavit_xcm::trader::GovernedWeightTrader<ConstitutionTraderRates, ()>;
-        type ResponseHandler = PolkadotXcm;
+        type ResponseHandler = ResponseHandler;
         type AssetTrap = PolkadotXcm;
         type SubscriptionService = PolkadotXcm;
         type PalletInstancesInfo = crate::AllPalletsWithSystem;
@@ -1017,11 +1215,7 @@ impl pallet_xcm::Config for Runtime {
     type XcmExecutor = xcm_config::TrapRecoveryExecutor;
     type XcmTeleportFilter = Nothing;
     type XcmReserveTransferFilter = bleavit_xcm::filter::ReserveTransferFilter;
-    type Weigher = staging_xcm_builder::FixedWeightBounds<
-        xcm_config::UnitWeightCost,
-        RuntimeCall,
-        xcm_config::MaxInstructions,
-    >;
+    type Weigher = xcm_config::Weigher;
     type UniversalLocation = xcm_config::UniversalLocation;
     type RuntimeOrigin = RuntimeOrigin;
     type RuntimeCall = RuntimeCall;
@@ -1441,6 +1635,67 @@ fn default_param(key: ParamKey) -> Option<pallet_constitution::ParamValue> {
 fn live_param(key: ParamKey) -> Option<pallet_constitution::ParamValue> {
     pallet_constitution::Params::<Runtime>::get(key).map(|record| record.value)
 }
+fn live_balance_param(name: &[u8]) -> Option<Balance> {
+    match live_param(pallet_constitution::key16(name)) {
+        Some(pallet_constitution::ParamValue::Balance(value)) => Some(value),
+        _ => None,
+    }
+}
+fn live_u32_param(name: &[u8]) -> Option<u32> {
+    match live_param(pallet_constitution::key16(name)) {
+        Some(pallet_constitution::ParamValue::U32(value)) => Some(value),
+        _ => None,
+    }
+}
+fn live_u8_param(name: &[u8]) -> Option<u8> {
+    match live_param(pallet_constitution::key16(name)) {
+        Some(pallet_constitution::ParamValue::U8(value)) => Some(value),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LiveReserveProbeEnvelope {
+    fee: Balance,
+    rate: Balance,
+    interval: u32,
+    timeout: u32,
+    amount: Balance,
+    fail_threshold: u8,
+    recover_threshold: u8,
+    runway: Balance,
+}
+
+fn live_reserve_probe_envelope() -> Option<LiveReserveProbeEnvelope> {
+    let fee = live_balance_param(b"ops.probe_fee")?;
+    let rate = live_balance_param(b"ops.probe_rate")?;
+    let interval = live_u32_param(b"res.probe_int")?;
+    let timeout = live_u32_param(b"res.probe_to")?;
+    let amount = live_balance_param(b"res.probe_amount")?;
+    let fail_threshold = live_u8_param(b"res.fail_thr")?;
+    let recover_threshold = live_u8_param(b"res.recover_thr")?;
+    if interval == 0 || timeout == 0 || amount == 0 || fail_threshold == 0 || recover_threshold == 0
+    {
+        return None;
+    }
+    let runway = pallet_futarchy_treasury::reserve_probe_runway_debit(
+        fee,
+        rate,
+        fail_threshold,
+        recover_threshold,
+    )
+    .ok()?;
+    Some(LiveReserveProbeEnvelope {
+        fee,
+        rate,
+        interval,
+        timeout,
+        amount,
+        fail_threshold,
+        recover_threshold,
+        runway,
+    })
+}
 pub(crate) fn balance_param(name: &[u8]) -> Balance {
     balance_param_or(name, 0)
 }
@@ -1495,6 +1750,7 @@ impl frame_support::traits::Get<u128> for ForeignUsdcIssuance {
 impl pallet_inflow_caps::Config for Runtime {
     type CapParams = ConstitutionInflowCapParams;
     type UsdcIssuance = ForeignUsdcIssuance;
+    type ProtocolAccounts = InflowCapProtocolAccounts;
 }
 
 /// 09 §5.2 XCM adapter over the shared on-chain meters.
@@ -1908,28 +2164,41 @@ impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureExecutionGuard
         Ok(RuntimeOrigin::signed(execution_guard_account()))
     }
 }
+fn is_canonical_protocol_account(who: &AccountId) -> bool {
+    if is_reserved_market_account(who) {
+        return true;
+    }
+    let accounts = [
+        LedgerPalletId::get().into_account_truncating(),
+        market_account(),
+        book_account(),
+        pol_account(),
+        pol_baseline_account(),
+        fee_account(),
+        treasury_protocol_account(),
+        insurance_account(),
+        IncidentPalletId::get().into_account_truncating(),
+        MilestonePalletId::get().into_account_truncating(),
+        welfare_settlement_account(),
+        epoch_account(),
+        execution_guard_account(),
+    ];
+    accounts.contains(who)
+}
+
+/// Pure canonical predicate used inside the XCM inflow precheck. It performs
+/// no storage reads, so the barrier's fixed execution budget remains honest.
+pub struct InflowCapProtocolAccounts;
+impl Contains<AccountId> for InflowCapProtocolAccounts {
+    fn contains(who: &AccountId) -> bool {
+        is_canonical_protocol_account(who)
+    }
+}
+
 pub struct ProtocolAccounts;
 impl Contains<AccountId> for ProtocolAccounts {
     fn contains(who: &AccountId) -> bool {
-        if is_reserved_market_account(who) {
-            return true;
-        }
-        let accounts = [
-            LedgerPalletId::get().into_account_truncating(),
-            market_account(),
-            book_account(),
-            pol_account(),
-            pol_baseline_account(),
-            fee_account(),
-            treasury_protocol_account(),
-            insurance_account(),
-            IncidentPalletId::get().into_account_truncating(),
-            MilestonePalletId::get().into_account_truncating(),
-            welfare_settlement_account(),
-            epoch_account(),
-            execution_guard_account(),
-        ];
-        accounts.contains(who)
+        is_canonical_protocol_account(who)
             // The refcounted index records ownership of live/retained market
             // accounts. Classification does not depend on this index: every
             // canonical future/present/past address is reserved above.
@@ -3872,6 +4141,10 @@ impl pallet_epoch::PreimageAccess for RuntimeEpochPreimages {
 
 pub struct RuntimeEpochWelfare;
 impl pallet_epoch::WelfareSettlement for RuntimeEpochWelfare {
+    fn gate_window_sampled(epoch: EpochId) -> bool {
+        pallet_welfare::Pallet::<Runtime>::gate_window_sampled(epoch)
+    }
+
     fn compute_settlement(
         cohort_epoch: EpochId,
         spec: futarchy_primitives::MetricSpecVersion,
@@ -4334,9 +4607,6 @@ impl pallet_oracle::Config for Runtime {
     type AdjudicationOrigin = pallet_origins::EnsureOracleResolution;
     type Reporting = RuntimeReporting;
     type Params = RuntimeOracleParams;
-    // Production remains fail-static until the B4 XCM dispatcher is wired.
-    // Benchmark Wasm uses a live no-op sender so the reserve-probe benchmark
-    // reaches its documented post-commit rebate path.
     type ProbeDispatch = RuntimeProbeDispatch;
     type ProbeTimeoutSink = OracleProbeTimeoutToWelfare;
     type ReserveHealthSink = RuntimeReserveHealthSink;
@@ -4356,6 +4626,102 @@ impl pallet_oracle::ProbeTimeoutSink for OracleProbeTimeoutToWelfare {
     }
 }
 
+/// Authenticated Asset Hub response sink for the production XCM executor
+/// (07 §8, SQ-380). Only the exact outstanding unflagged oracle id is exposed;
+/// `ProbeAwareResponseHandler` additionally authenticates the sibling origin,
+/// querier and high-bit partition before calling this sink.
+pub struct RuntimeOracleProbeSink;
+impl bleavit_xcm::probe::ProbeSink for RuntimeOracleProbeSink {
+    fn pending_query_id() -> Option<u64> {
+        let health = pallet_oracle::ReserveHealth::<Runtime>::get();
+        health.pending_since.map(|_| health.last_query_id)
+    }
+
+    fn probe_result(query_id: u64, passed: bool) -> Weight {
+        // A sibling-write refusal leaves the pending query and all three health
+        // records unchanged inside the oracle's explicit storage layer. The
+        // response then degrades through the ordinary timeout path (G-1).
+        let _ = crate::Oracle::reserve_probe_result(query_id, passed);
+        RuntimeProbeCallbackWeight::get()
+    }
+}
+
+/// Pre-dispatch accounting for one bounded reserve-probe DOT envelope
+/// (07 §8 / 08 §1.1, SQ-114). The XCM dispatcher wraps this debit and local
+/// send validation in one storage layer: insufficient funding refuses the
+/// send, while a locally rejected message rolls the debit back.
+pub struct RuntimeProbeBudget;
+impl bleavit_xcm::probe::ProbeBudget for RuntimeProbeBudget {
+    fn ready_to_arm(params: &pallet_oracle::OracleParams) -> bool {
+        let Some(live) = live_reserve_probe_envelope() else {
+            return false;
+        };
+        // Require the exact live records consumed by the oracle snapshot. A
+        // missing/wrongly-typed row must not arm through the provider's benign
+        // standalone fallback defaults.
+        if live.interval != params.probe_interval
+            || live.timeout != params.probe_timeout
+            || live.amount != params.probe_amount
+            || live.fail_threshold != params.fail_threshold
+            || live.recover_threshold != params.recover_threshold
+        {
+            return false;
+        }
+        crate::FutarchyTreasury::line_balance(pallet_futarchy_treasury::BudgetLine::OpsReserveProbe)
+            >= live.runway
+    }
+
+    fn reserve_fee(probe_amount: Balance) -> Result<Balance, DispatchError> {
+        // Post-arm attempts remain fail-static, but a malformed live envelope
+        // must still refuse the actual debit/send instead of composing the
+        // provider's benign fallback values into an unauthorized program.
+        let live = live_reserve_probe_envelope()
+            .filter(|live| live.amount == probe_amount)
+            .ok_or(DispatchError::Other("reserve probe envelope unavailable"))?;
+        crate::FutarchyTreasury::charge_reserve_probe_fee(live.fee, live.rate)?;
+        Ok(live.fee)
+    }
+}
+
+pub struct RuntimeBootstrapOpsFundingPolicy;
+impl pallet_futarchy_treasury::BootstrapOpsFundingPolicy for RuntimeBootstrapOpsFundingPolicy {
+    fn reserve_probe_ceiling() -> Option<Balance> {
+        live_reserve_probe_envelope().map(|live| live.runway)
+    }
+}
+
+pub struct RuntimeParaId;
+impl Get<u32> for RuntimeParaId {
+    fn get() -> u32 {
+        staging_parachain_info::Pallet::<Runtime>::parachain_id().into()
+    }
+}
+
+pub struct ProbeExecWeightBudget;
+impl Get<Weight> for ProbeExecWeightBudget {
+    fn get() -> Weight {
+        xcm_config::UnitWeightCost::get()
+            .saturating_mul(u64::from(xcm_config::MaxInstructions::get()))
+    }
+}
+
+pub struct ProbeMaxResponseWeight;
+impl Get<Weight> for ProbeMaxResponseWeight {
+    fn get() -> Weight {
+        RuntimeProbeCallbackWeight::get()
+    }
+}
+
+/// Generated worst-case oracle callback plus both authentication reads: the
+/// barrier's `expecting_response` check and the executor's `on_response` route.
+pub struct RuntimeProbeCallbackWeight;
+impl Get<Weight> for RuntimeProbeCallbackWeight {
+    fn get() -> Weight {
+        <crate::weights::pallet_oracle::WeightInfo<Runtime> as pallet_oracle::WeightInfo>::reserve_probe_result()
+            .saturating_add(<Runtime as frame_system::Config>::DbWeight::get().reads(2))
+    }
+}
+
 /// 07 §8 / 08 §1.2 (SQ-205): carry a reserve-health transition to both owners of
 /// its consequences — the constitution's 02 §7.3 bit-7 mirror and the treasury's
 /// fail-static NAV haircut — as one indivisible act.
@@ -4366,10 +4732,6 @@ impl pallet_oracle::ProbeTimeoutSink for OracleProbeTimeoutToWelfare {
 /// to exactly this flag, so a half-applied transition would leave `PhaseFlags`
 /// and NAV disagreeing about solvency (R-7).
 ///
-/// Unused outside `cfg(test)` on purpose — see `RuntimeReserveHealthSink` below
-/// for why production still binds `()`. The `allow` is the marker of that
-/// deliberate gap, not of dead code nobody noticed.
-#[allow(dead_code)]
 pub struct ReserveHealthToConstitutionAndTreasury;
 impl pallet_oracle::ReserveHealthSink for ReserveHealthToConstitutionAndTreasury {
     fn reserve_health_changed(unhealthy: bool) -> frame_support::dispatch::DispatchResult {
@@ -4379,44 +4741,16 @@ impl pallet_oracle::ReserveHealthSink for ReserveHealthToConstitutionAndTreasury
     }
 }
 
-/// **Deliberately unbound in production (SQ-205 / SQ-380).** The seam above is
-/// complete and tested, but binding it live today would arm a permanent,
-/// permissionless treasury halt rather than the 08 §1.2 fail-static haircut:
-///
-/// * `RuntimeProbeDispatch = ()` outside benchmarks (below), so no probe is ever
-///   *sent*; and `XcmConfig::ResponseHandler = PolkadotXcm` rather than
-///   `bleavit_xcm::probe::ProbeAwareResponseHandler`, so no probe response is
-///   ever *routed* — `Pallet::reserve_probe_result` has no production caller.
-/// * `crank_reserve_probe` nevertheless commits `pending_since` regardless of
-///   `ProbeDispatch::live()`, so its timeout folds still latch consecutive
-///   fails. Any signed keeper reaches `ReserveUnhealthy` in ~2 probe intervals.
-/// * Recovery needs `res.recover_threshold` consecutive *passes*, which arrive
-///   only through the unrouted response path. The latch is therefore one-way.
-///
-/// Wired live, that is `spendable_nav = 0` chain-wide, forever, at any keeper's
-/// option. The blocker is the probe feed, not this seam; SQ-380 tracks it and
-/// the release blocker `treasury.reserve_health_unwired` stays open until then.
-/// Tests bind the real sink so the composition above is proven and the
-/// production switch is a one-line change.
-#[cfg(not(test))]
-type RuntimeReserveHealthSink = ();
-#[cfg(test)]
 type RuntimeReserveHealthSink = ReserveHealthToConstitutionAndTreasury;
 
-#[cfg(feature = "runtime-benchmarks")]
-pub struct BenchmarkProbeDispatch;
-#[cfg(feature = "runtime-benchmarks")]
-impl pallet_oracle::ProbeDispatch for BenchmarkProbeDispatch {
-    fn live() -> bool {
-        true
-    }
-
-    fn probe_due(_: u64, _: Balance) {}
-}
-#[cfg(feature = "runtime-benchmarks")]
-type RuntimeProbeDispatch = BenchmarkProbeDispatch;
-#[cfg(not(feature = "runtime-benchmarks"))]
-type RuntimeProbeDispatch = ();
+type RuntimeProbeDispatch = bleavit_xcm::probe::XcmProbeDispatcher<
+    xcm_config::TopicRouter,
+    RuntimeProbeBudget,
+    ProbeExecWeightBudget,
+    ProbeMaxResponseWeight,
+    RuntimeParaId,
+    XcmTrafficRecorder,
+>;
 
 pub struct RegistryParams;
 impl pallet_registry::RegistryParams for RegistryParams {
@@ -4557,6 +4891,10 @@ impl pallet_futarchy_treasury::TreasuryParams for TreasuryParams {
 
     fn coretime_dot_rate() -> Balance {
         balance_param(b"ops.ct_dot_rate")
+    }
+
+    fn reserve_probe_dot_rate() -> Balance {
+        balance_param(b"ops.probe_rate")
     }
 
     fn coretime_fee_dot() -> Balance {
@@ -4745,10 +5083,20 @@ type RuntimeRenewalDispatch = ProductionRenewalDispatch;
 #[cfg(all(not(feature = "runtime-benchmarks"), test))]
 type RuntimeRenewalDispatch = TestRenewalDispatch;
 
+pub struct RuntimeTreasuryPhase;
+impl pallet_futarchy_treasury::TreasuryPhase for RuntimeTreasuryPhase {
+    fn treasury_armed() -> bool {
+        crate::Constitution::phase_flags() & pallet_constitution::PhaseFlagsValue::TREASURY_ARMED
+            != 0
+    }
+}
+
 impl pallet_futarchy_treasury::Config for Runtime {
     type TreasuryOrigin = pallet_origins::EnsureFutarchyTreasury;
     type Params = TreasuryParams;
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
+    type TreasuryPhase = RuntimeTreasuryPhase;
+    type BootstrapOpsFundingPolicy = RuntimeBootstrapOpsFundingPolicy;
     type RenewalDispatch = RuntimeRenewalDispatch;
     type RebatePayout = TreasuryRebatePayout;
     type PotFunding = TreasuryPotFunding;
@@ -4803,13 +5151,15 @@ impl pallet_guardian::GuardianTriggers for RuntimeGuardianTriggers {
             dead_man: phase_flags & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED != 0,
             reserve_health: phase_flags & pallet_constitution::PhaseFlagsValue::RESERVE_HEALTH_FLAG
                 != 0,
+            ledger_drift: pallet_conditional_ledger::Pallet::<Runtime>::ledger_drifted(),
             // A relay abort preserves the old code and is not the 09 §3.2
             // halt-at-fault trigger. Only the execution-halt projection of a
             // failed/stalled/applied-invalid migration admits PB-MIGRATION.
             migration_halt: pallet_execution_guard::MigrationHalt::<Runtime>::get(),
-            void_in_flight: crate::Guardian::playbook_active(
-                pallet_guardian::PlaybookId::OracleVoid,
-            ),
+            // An activation record is authorization state, never a trigger
+            // source (06 §6.2). The target-specific pending VOID latch is read
+            // by `oracle_deadlock` below.
+            void_in_flight: pallet_epoch::PendingOracleVoids::<Runtime>::count() > 0,
             ..pallet_guardian::TriggerState::none()
         };
         // Benchmark Wasm must exercise every verified-trigger branch, but the
@@ -4819,6 +5169,7 @@ impl pallet_guardian::GuardianTriggers for RuntimeGuardianTriggers {
         // those reads at the next weight regeneration.
         #[cfg(feature = "runtime-benchmarks")]
         {
+            let _production_reads = state;
             state = pallet_guardian::TriggerState {
                 depeg: true,
                 migration_halt: true,
@@ -4831,6 +5182,18 @@ impl pallet_guardian::GuardianTriggers for RuntimeGuardianTriggers {
             };
         }
         state
+    }
+
+    fn oracle_deadlock(epoch: EpochId) -> bool {
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            let _ = epoch;
+            true
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        {
+            pallet_epoch::PendingOracleVoids::<Runtime>::contains_key(epoch)
+        }
     }
 }
 pub struct RuntimeGuardianEffects;
@@ -4991,7 +5354,24 @@ impl pallet_guardian::GuardianEffectDispatcher for RuntimeGuardianEffects {
             }
             pallet_guardian::GuardianPower::ActivatePlaybook {
                 id, expiry, target, ..
-            } => Self::dispatch_emergency_all(Self::playbook_calls(id, expiry, target)?),
+            } => {
+                if id == pallet_guardian::PlaybookId::OracleVoid {
+                    let epoch = target.ok_or(DispatchError::Other(
+                        "oracle-void playbook requires target epoch",
+                    ))?;
+                    frame_support::ensure!(
+                        pallet_epoch::PendingOracleVoids::<Runtime>::contains_key(epoch),
+                        DispatchError::Other("oracle-void target has no pending deadlock")
+                    );
+                }
+                let calls = Self::playbook_calls(id, expiry, target)?;
+                if id == pallet_guardian::PlaybookId::LedgerFreeze {
+                    let _ = calls;
+                    Self::set_live_conditioned_playbook(id, true)
+                } else {
+                    Self::dispatch_emergency_all(calls)
+                }
+            }
         }
     }
 
@@ -5016,12 +5396,9 @@ impl pallet_guardian::GuardianEffectDispatcher for RuntimeGuardianEffects {
                     expiry: 0,
                 },
             )],
-            pallet_guardian::PlaybookId::LedgerFreeze => vec![
-                RuntimeCall::ConditionalLedger(pallet_conditional_ledger::Call::set_frozen {
-                    frozen: false,
-                }),
-                RuntimeCall::Market(pallet_market::Call::set_frozen { frozen: false }),
-            ],
+            pallet_guardian::PlaybookId::LedgerFreeze => {
+                return Self::set_live_conditioned_playbook(id, false);
+            }
         };
         Self::dispatch_emergency_all(calls)
     }
@@ -5031,10 +5408,60 @@ impl pallet_guardian::GuardianEffectDispatcher for RuntimeGuardianEffects {
             id == pallet_guardian::PlaybookId::LedgerFreeze,
             DispatchError::Other("only ledger-freeze is renewable")
         );
+        if !<RuntimeGuardianTriggers as pallet_guardian::GuardianTriggers>::current().ledger_drift {
+            return Self::set_live_conditioned_playbook(id, false);
+        }
+        if !Self::playbook_effect_matches(id, true) {
+            return Self::set_live_conditioned_playbook(id, true);
+        }
         frame_support::storage::with_storage_layer(|| {
             ConditionalLedger::extend_freeze_once()?;
             Market::extend_freeze_once()
         })
+    }
+
+    fn set_live_conditioned_playbook(
+        id: pallet_guardian::PlaybookId,
+        applied: bool,
+    ) -> Result<(), DispatchError> {
+        frame_support::ensure!(
+            id == pallet_guardian::PlaybookId::LedgerFreeze,
+            DispatchError::Other("playbook is not live-conditioned")
+        );
+        frame_support::storage::with_storage_layer(|| {
+            let now = System::block_number();
+            let ledger_applied = pallet_conditional_ledger::FrozenUntil::<Runtime>::get()
+                .is_some_and(|until| now < until);
+            let market_applied =
+                pallet_market::FrozenUntil::<Runtime>::get().is_some_and(|until| now < until);
+            let mut calls = Vec::new();
+            if ledger_applied != applied {
+                calls.push(RuntimeCall::ConditionalLedger(
+                    pallet_conditional_ledger::Call::set_frozen { frozen: applied },
+                ));
+            }
+            if market_applied != applied {
+                calls.push(RuntimeCall::Market(pallet_market::Call::set_frozen {
+                    frozen: applied,
+                }));
+            }
+            Self::dispatch_emergency_all(calls)?;
+            crate::Constitution::note_ledger_frozen(applied)
+        })
+    }
+
+    fn playbook_effect_matches(id: pallet_guardian::PlaybookId, applied: bool) -> bool {
+        if id != pallet_guardian::PlaybookId::LedgerFreeze {
+            return false;
+        }
+        let now = System::block_number();
+        let ledger = pallet_conditional_ledger::FrozenUntil::<Runtime>::get()
+            .is_some_and(|until| now < until);
+        let market = pallet_market::FrozenUntil::<Runtime>::get().is_some_and(|until| now < until);
+        let constitution = crate::Constitution::phase_flags()
+            & pallet_constitution::PhaseFlagsValue::LEDGER_FROZEN
+            != 0;
+        ledger == applied && market == applied && constitution == applied
     }
 }
 
@@ -5414,7 +5841,9 @@ impl pallet_execution_guard::GuardianState for RuntimeGuardianState {
         })
     }
     fn ledger_freeze_active() -> bool {
-        crate::Guardian::playbook_active(pallet_guardian::PlaybookId::LedgerFreeze)
+        pallet_constitution::PhaseFlags::<Runtime>::get()
+            & pallet_constitution::PhaseFlagsValue::LEDGER_FROZEN
+            != 0
     }
     fn dead_man_freeze_active() -> bool {
         pallet_constitution::PhaseFlags::<Runtime>::get()
@@ -6776,6 +7205,22 @@ impl pallet_oracle::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
     fn adjudication_origin() -> RuntimeOrigin {
         pallet_origins::Origin::OracleResolution.into()
     }
+    fn prime_reserve_probe() {
+        ParachainSystem::open_outbound_hrmp_channel_for_benchmarks_or_tests(
+            cumulus_primitives_core::ParaId::from(chain_identity::ASSET_HUB_PARA_ID),
+        );
+        let Some(envelope) = live_reserve_probe_envelope() else {
+            return;
+        };
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.main_usdc = state.main_usdc.saturating_add(envelope.runway);
+        });
+        let _ = crate::FutarchyTreasury::fund_budget_line(
+            pallet_origins::Origin::FutarchyTreasury.into(),
+            pallet_futarchy_treasury::BudgetLine::OpsReserveProbe,
+            envelope.runway,
+        );
+    }
     fn prime_reporting(component: u16, epoch: EpochId, version: u16) {
         pallet_epoch::EpochOf::<Runtime>::mutate(|info| info.index = epoch);
         pallet_epoch::Schedule::<Runtime>::mutate(|schedule| {
@@ -7644,6 +8089,71 @@ impl pallet_execution_guard::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmark
                 System::set_block_number(maturity);
             }
         }
+    }
+
+    fn prime_recovery_application() -> (
+        futarchy_primitives::H256,
+        futarchy_primitives::RuntimeVersionConstraint,
+    ) {
+        use frame_support::traits::QueryPreimage;
+        use pallet_execution_guard::ReleaseChannelWriter;
+
+        System::set_block_number(System::block_number().max(1));
+        if pallet_execution_guard::CurrentSpecName::<Runtime>::get().is_none() {
+            pallet_execution_guard::CurrentSpecName::<Runtime>::put(benchmark_runtime_version());
+        }
+        let current = pallet_execution_guard::CurrentSpecName::<Runtime>::get()
+            .unwrap_or_else(benchmark_runtime_version);
+        for pid in 10_000..10_000u64.saturating_add(pallet_execution_guard::MAX_QUEUE_BOUND.into())
+        {
+            let _ = benchmark_guard_enqueue(
+                pid,
+                RuntimeCall::System(frame_system::Call::remark {
+                    remark: alloc::vec![0x52; 32],
+                }),
+                pallet_execution_guard::CallDomain::Public,
+            );
+        }
+        let primary_hash = [0x51; 32];
+        let recovery = benchmark_recovery_image(1, primary_hash).unwrap_or(
+            pallet_execution_guard::RecoveryImageDescriptor {
+                hash: [0x52; 32],
+                len: 512,
+                target_spec_version: current.spec_version.saturating_add(2),
+                attestation_id: 8,
+            },
+        );
+        <Preimage as QueryPreimage>::request(&Hash::from(recovery.hash));
+        pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::put(
+            pallet_execution_guard::PendingUpgrade {
+                hash: primary_hash,
+                authorized_at: System::block_number(),
+                applicable_at: System::block_number(),
+                target_spec_version: current.spec_version.saturating_add(1),
+            },
+        );
+        pallet_execution_guard::RecoveryImage::<Runtime>::put(
+            pallet_execution_guard::RecoveryImageCommitment {
+                pid: 1,
+                primary_hash,
+                hash: recovery.hash,
+                len: recovery.len,
+                target_spec_version: recovery.target_spec_version,
+                attestation_id: recovery.attestation_id,
+                committed_at: System::block_number(),
+            },
+        );
+        let _ = RuntimeReleaseChannel::on_upgrade_authorized(
+            current.spec_version.saturating_add(1),
+            System::block_number(),
+        );
+        (
+            recovery.hash,
+            futarchy_primitives::RuntimeVersionConstraint {
+                spec_name: current.spec_name,
+                spec_version: recovery.target_spec_version,
+            },
+        )
     }
 
     fn prime_failed(pid: futarchy_primitives::ProposalId) {

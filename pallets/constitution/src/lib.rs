@@ -52,9 +52,9 @@ pub use constitution_core::{
     CapabilityRecord, ConstitutionOrigin, ConstitutionState, Error as CoreError, MaxDelta, Meter,
     ParamClass, ParamRecord, ParamValue, PhaseFlags as PhaseFlagsValue,
     ReleaseChannel as ReleaseChannelValue, CONTRACT_VERSION, MAX_CAPABILITIES, MAX_METERS,
-    MAX_PARAMS, POL_BUDGET_EPOCH_DEFAULT_PPB, POL_B_DEFAULTS, POL_GATE_B_DEFAULT,
-    RELEASE_CHANNEL_FLAGS, RELEASE_CHANNEL_FLAG_URGENT_UPGRADE, RELEASE_CHANNEL_LEN,
-    RELEASE_CHANNEL_PENDING_AUTHORIZED_AT, RELEASE_CHANNEL_SPEC_VERSION,
+    MAX_PARAMS, META_MAX_COOLDOWN_EPOCHS, POL_BUDGET_EPOCH_DEFAULT_PPB, POL_B_DEFAULTS,
+    POL_GATE_B_DEFAULT, RELEASE_CHANNEL_FLAGS, RELEASE_CHANNEL_FLAG_URGENT_UPGRADE,
+    RELEASE_CHANNEL_LEN, RELEASE_CHANNEL_PENDING_AUTHORIZED_AT, RELEASE_CHANNEL_SPEC_VERSION,
     RELEASE_CHANNEL_STORAGE_KEY, RELEASE_CHANNEL_UPDATED_AT,
 };
 pub use futarchy_primitives::kernel;
@@ -122,7 +122,7 @@ pub mod pallet {
     use futarchy_primitives::{EpochId, ParamKey, ProposalClass};
 
     /// The in-code storage version of this pallet.
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(2);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -599,6 +599,11 @@ pub mod pallet {
                 }
             }
 
+            // FRAME's aggregate genesis builder stamps pallet storage versions
+            // after individual pallet genesis hooks. Stamp ours before the
+            // local ordinary try-state assertion so that assertion exercises
+            // the same v1 invariant as post-genesis checks.
+            STORAGE_VERSION.put::<Pallet<T>>();
             assert!(
                 Pallet::<T>::do_try_state().is_ok(),
                 "constitution genesis violates I-6/I-7/I-17"
@@ -722,6 +727,55 @@ pub mod pallet {
         /// Rebuild the functional-core aggregate from storage and run its
         /// reviewed validator, plus the FRAME-side shape checks (15 §1).
         pub fn do_try_state() -> Result<(), TryRuntimeError> {
+            if StorageVersion::get::<Pallet<T>>() != STORAGE_VERSION {
+                return Err(TryRuntimeError::Other(
+                    "constitution: on-chain storage version is not v2",
+                ));
+            }
+            if !Params::<T>::contains_key(key16(b"ops.probe_fee"))
+                || !Params::<T>::contains_key(key16(b"ops.probe_rate"))
+            {
+                return Err(TryRuntimeError::Other(
+                    "constitution: reserve-probe pricing rows are absent",
+                ));
+            }
+            for name in [
+                b"res.probe_int".as_slice(),
+                b"res.probe_to".as_slice(),
+                b"res.probe_amount".as_slice(),
+                b"res.fail_thr".as_slice(),
+                b"res.recover_thr".as_slice(),
+            ] {
+                let key = key16(name);
+                let Some(expected) = genesis_params()
+                    .into_iter()
+                    .find(|record| record.key == key)
+                else {
+                    return Err(TryRuntimeError::Other(
+                        "constitution: reserve-probe control definition is absent",
+                    ));
+                };
+                let Some(actual) = Params::<T>::get(key) else {
+                    return Err(TryRuntimeError::Other(
+                        "constitution: reserve-probe control row is absent",
+                    ));
+                };
+                if actual.key != expected.key
+                    || actual.min != expected.min
+                    || actual.max != expected.max
+                    || actual.max_delta != expected.max_delta
+                    || actual.cooldown_epochs != expected.cooldown_epochs
+                    || actual.class != expected.class
+                    || actual.kernel_bounded != expected.kernel_bounded
+                    || !actual.value.same_kind(expected.value)
+                    || actual.value.as_u128() < expected.min.as_u128()
+                    || actual.value.as_u128() > expected.max.as_u128()
+                {
+                    return Err(TryRuntimeError::Other(
+                        "constitution: reserve-probe control row differs from v2 definition",
+                    ));
+                }
+            }
             let phase_flags = PhaseFlagsValue::from_bits(PhaseFlags::<T>::get())
                 .map_err(|_| TryRuntimeError::Other("PhaseFlags: reserved bits set (02 §7.3)"))?;
             let mut params = Vec::new();

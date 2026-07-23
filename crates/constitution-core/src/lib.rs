@@ -1834,52 +1834,52 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"res.probe_int",
             ParamValue::U32(14_400),
-            ParamValue::U32(0),
+            ParamValue::U32(1),
             ParamValue::U32(u32::MAX),
             None,
             1,
             ParamClass::Param,
-            false
+            true
         ),
         row(
             b"res.probe_to",
             ParamValue::U32(600),
-            ParamValue::U32(0),
+            ParamValue::U32(1),
             ParamValue::U32(u32::MAX),
             None,
             1,
             ParamClass::Param,
-            false
+            true
         ),
         row(
             b"res.probe_amount",
             ParamValue::Balance(100_000),
-            ParamValue::Balance(0),
+            ParamValue::Balance(1),
             ParamValue::Balance(u128::MAX),
             None,
             1,
             ParamClass::Param,
-            false
+            true
         ),
         row(
             b"res.fail_thr",
             ParamValue::U8(2),
-            ParamValue::U8(0),
+            ParamValue::U8(1),
             ParamValue::U8(u8::MAX),
             None,
             2,
             ParamClass::Meta,
-            false
+            true
         ),
         row(
             b"res.recover_thr",
             ParamValue::U8(3),
-            ParamValue::U8(0),
+            ParamValue::U8(1),
             ParamValue::U8(u8::MAX),
             None,
             2,
             ParamClass::Meta,
-            false
+            true
         ),
         row(
             b"grd.review_dl",
@@ -1968,6 +1968,34 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             ParamValue::Balance(5_000_000_000),
             ParamValue::Balance(100_000_000),
             ParamValue::Balance(100_000_000_000),
+            Some(MaxDelta::Factor(2)),
+            1,
+            ParamClass::Treasury,
+            false
+        ),
+        row(
+            // SQ-114: bounded DOT held by one reserve probe for Asset Hub
+            // execution + response delivery. The launch placeholder inherits
+            // the already-conservative two-leg Coretime envelope and retains
+            // its [VERIFY] status pending live Asset Hub fee calibration.
+            b"ops.probe_fee",
+            ParamValue::Balance(5_000_000_000),
+            ParamValue::Balance(100_000_000),
+            ParamValue::Balance(100_000_000_000),
+            Some(MaxDelta::Factor(2)),
+            1,
+            ParamClass::Treasury,
+            false
+        ),
+        row(
+            // Dedicated reserve-probe DOT→USDC accounting rate. It starts at
+            // the same conservative placeholder as Coretime but remains an
+            // independently governed key so repricing one maintenance route
+            // cannot silently resize the other (SQ-114).
+            b"ops.probe_rate",
+            ParamValue::Balance(5_000_000),
+            ParamValue::Balance(500_000),
+            ParamValue::Balance(500_000_000),
             Some(MaxDelta::Factor(2)),
             1,
             ParamClass::Treasury,
@@ -2411,6 +2439,8 @@ mod tests {
             b"keeper.budget".as_slice(),
             b"ops.ct_dot_rate".as_slice(),
             b"ops.ct_fee_dot".as_slice(),
+            b"ops.probe_fee".as_slice(),
+            b"ops.probe_rate".as_slice(),
             b"ops.ct_quote_ttl".as_slice(),
             b"xcm.dot_per_sec".as_slice(),
             b"xcm.dot_per_mb".as_slice(),
@@ -2434,6 +2464,18 @@ mod tests {
                 5_000_000_000,
                 100_000_000,
                 100_000_000_000,
+            ),
+            (
+                b"ops.probe_fee".as_slice(),
+                5_000_000_000,
+                100_000_000,
+                100_000_000_000,
+            ),
+            (
+                b"ops.probe_rate".as_slice(),
+                5_000_000,
+                500_000,
+                500_000_000,
             ),
         ] {
             let Some(record) = params.iter().find(|record| record.key == key16(name)) else {

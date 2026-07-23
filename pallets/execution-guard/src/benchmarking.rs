@@ -153,6 +153,21 @@ mod benches {
         ));
     }
 
+    #[benchmark]
+    fn finalize_recovery_application() -> Result<(), BenchmarkError> {
+        let (installed_hash, installed_version) = T::BenchmarkHelper::prime_recovery_application();
+
+        #[block]
+        {
+            Pallet::<T>::recovery_code_applied(installed_hash, installed_version)
+                .map_err(|_| BenchmarkError::Stop("recovery application fixture is invalid"))?;
+        }
+
+        assert!(RecoveryImage::<T>::get().is_none());
+        assert_eq!(Queue::<T>::count(), crate::MAX_QUEUE_BOUND);
+        Ok(())
+    }
+
     #[benchmark(pov_mode = Measured)]
     fn qualify_recovery_image(b: Linear<512, BENCHMARK_RUNTIME_CODE_BYTES_BOUND>) {
         let pid = 1;

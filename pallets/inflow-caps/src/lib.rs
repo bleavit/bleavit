@@ -27,7 +27,10 @@ pub trait InflowCapParams {
 #[frame_support::pallet]
 pub mod pallet {
     use super::InflowCapParams;
-    use frame_support::{pallet_prelude::*, traits::Get};
+    use frame_support::{
+        pallet_prelude::*,
+        traits::{Contains, Get},
+    };
     use frame_system::pallet_prelude::*;
     use sp_runtime::TryRuntimeError;
 
@@ -43,6 +46,9 @@ pub mod pallet {
         type CapParams: InflowCapParams;
         /// Provider for total local `ForeignAssets` USDC issuance.
         type UsdcIssuance: Get<u128>;
+        /// Canonical protocol accounts, exempt from the per-account Phase-3
+        /// meter. The global issuance cap still applies to their inflows.
+        type ProtocolAccounts: Contains<Self::AccountId>;
     }
 
     /// Per-account cumulative XCM USDC inflow over Phase 3 (`09 §5.2`).
@@ -74,6 +80,10 @@ pub mod pallet {
                 return false;
             }
 
+            if T::ProtocolAccounts::contains(who) {
+                return true;
+            }
+
             let deposit_cap = T::CapParams::deposit_cap_usdc();
             deposit_cap == u128::MAX || CumulativeDeposits::<T>::get(who) <= deposit_cap
         }
@@ -102,6 +112,9 @@ pub mod pallet {
         /// local mint (`09 §5.2`, SQ-129 resolution). The recording write stays
         /// at the deposit leg; this read reserves nothing.
         pub fn inflow_admissible(who: &T::AccountId, amount: u128) -> bool {
+            if T::ProtocolAccounts::contains(who) {
+                return true;
+            }
             let cap = T::CapParams::deposit_cap_usdc();
             if cap == u128::MAX || amount == 0 {
                 return true;
@@ -118,6 +131,9 @@ pub mod pallet {
         /// neither read nor extended.
         #[allow(clippy::result_unit_err)]
         pub fn note_inflow(who: &T::AccountId, amount: u128) -> Result<(), ()> {
+            if T::ProtocolAccounts::contains(who) {
+                return Ok(());
+            }
             let cap = T::CapParams::deposit_cap_usdc();
             if cap == u128::MAX {
                 return Ok(());
@@ -144,7 +160,13 @@ pub mod pallet {
                 TryRuntimeError::Other("inflow-caps: total USDC issuance exceeds live cap")
             );
             let cap = T::CapParams::deposit_cap_usdc();
-            for (_, cumulative) in CumulativeDeposits::<T>::iter() {
+            for (who, cumulative) in CumulativeDeposits::<T>::iter() {
+                // Entries retained from before the protocol-account exemption
+                // are inert and deliberately ignored. New protocol inflows do
+                // not extend them.
+                if T::ProtocolAccounts::contains(&who) {
+                    continue;
+                }
                 ensure!(
                     cumulative != 0,
                     TryRuntimeError::Other("inflow-caps: zero cumulative entry")

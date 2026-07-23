@@ -107,6 +107,11 @@ pub trait GuardianProposalStatus {
 pub trait GuardianTriggers {
     /// The current [`TriggerState`].
     fn current() -> TriggerState;
+
+    /// Target-specific PB-ORACLE-VOID predicate. Implementations must bind the
+    /// trigger to the cohort named by the pending guardian action; a global
+    /// deadlock bit would let one failed cohort authorize VOID of another.
+    fn oracle_deadlock(epoch: EpochId) -> bool;
 }
 
 /// Atomic downstream effect of a fifth-approved guardian action. The runtime
@@ -123,6 +128,18 @@ pub trait GuardianEffectDispatcher {
 
     /// Atomic LedgerFreeze renewal extension across all downstream pallets.
     fn renew_playbook(id: PlaybookId) -> Result<(), sp_runtime::DispatchError>;
+
+    /// Apply or lift the effects of a live-condition-governed playbook without
+    /// mutating its guardian authorization/review record (06 §6.3).
+    fn set_live_conditioned_playbook(
+        id: PlaybookId,
+        applied: bool,
+    ) -> Result<(), sp_runtime::DispatchError>;
+
+    /// Whether the complete downstream effect tuple already equals `applied`.
+    /// Production binds LedgerFreeze to both pallet freezes and Constitution
+    /// `PhaseFlags` bit 5, not to authorization-record presence.
+    fn playbook_effect_matches(id: PlaybookId, applied: bool) -> bool;
 }
 
 /// Narrow T24 producer seam. The runtime implementation calls the epoch
@@ -1456,7 +1473,18 @@ pub mod pallet {
         /// from [`Config::TriggerProvider`], and (for pid-targeted powers) the
         /// proposal status from [`Config::ProposalStatusProvider`].
         fn dispatch_context_for(g: &Guardian, action_id: ActionId) -> DispatchContext {
-            let triggers = T::TriggerProvider::current();
+            let pending = g.pending.iter().find(|action| action.id == action_id);
+            let mut triggers = T::TriggerProvider::current();
+            if let Some(epoch) = pending.and_then(|action| match action.power {
+                GuardianPower::ActivatePlaybook {
+                    id: PlaybookId::OracleVoid,
+                    target: Some(epoch),
+                    ..
+                } => Some(epoch),
+                _ => None,
+            }) {
+                triggers.oracle_deadlock = T::TriggerProvider::oracle_deadlock(epoch);
+            }
             let (proposal_status, in_rerun) = g
                 .pending
                 .iter()
@@ -1545,6 +1573,7 @@ pub mod pallet {
             let _ = frame_support::storage::with_storage_layer(|| -> DispatchResult {
                 if let Some(mut g) = Self::load() {
                     let before = g.clone();
+                    Self::sync_live_conditioned_playbooks(&g)?;
                     g.expire_playbooks(Self::now());
                     g.reap_terminal(Self::now());
                     if !(g.events.is_empty()
@@ -1562,6 +1591,27 @@ pub mod pallet {
                 Self::reap_failed_actions();
                 Ok(())
             });
+        }
+
+        /// Reconcile the applied LedgerFreeze effect with its live trigger while
+        /// preserving the bounded authorization/review record. This also repairs
+        /// an orphan applied bit after record expiry/corruption in the safe
+        /// direction. At most one singleton record is inspected (06 §6.2).
+        fn sync_live_conditioned_playbooks(g: &Guardian) -> DispatchResult {
+            let now = Self::now();
+            let authorized = g
+                .active_playbooks
+                .iter()
+                .any(|p| p.id == PlaybookId::LedgerFreeze && now < p.expiry);
+            let should_apply = authorized && T::TriggerProvider::current().ledger_drift;
+            if !T::EffectDispatcher::playbook_effect_matches(PlaybookId::LedgerFreeze, should_apply)
+            {
+                T::EffectDispatcher::set_live_conditioned_playbook(
+                    PlaybookId::LedgerFreeze,
+                    should_apply,
+                )?;
+            }
+            Ok(())
         }
 
         fn outstanding_fronting(who: &T::AccountId) -> futarchy_primitives::Balance {

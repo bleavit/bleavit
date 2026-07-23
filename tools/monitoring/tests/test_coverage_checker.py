@@ -60,7 +60,7 @@ class CoverageCheckerTests(unittest.TestCase):
         failures, rows, inventory = checker.validate(ROOT)
         self.assertEqual(failures, [])
         self.assertEqual(len(rows), 21)
-        self.assertEqual(len(inventory), 36)
+        self.assertEqual(len(inventory), 45)
 
     def test_relay_finality_row_is_bound_to_the_relay_monitor(self) -> None:
         _failures, rows, inventory = checker.validate(ROOT, exported=EXPORTED)

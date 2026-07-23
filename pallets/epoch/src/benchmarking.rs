@@ -913,12 +913,14 @@ mod benches {
             MAX_NON_TERMINAL_COHORTS,
         );
         Pallet::<T>::seed(state)?;
+        crate::PendingOracleVoids::<T>::insert(0, ());
         let origin = T::BenchmarkHelper::void_authority_origin();
 
         #[extrinsic_call]
         _(origin as T::RuntimeOrigin, 0);
 
         assert!(!crate::Cohorts::<T>::contains_key(0));
+        assert!(!crate::PendingOracleVoids::<T>::contains_key(0));
         assert!(crate::RecentCohortSummaries::<T>::get()
             .iter()
             .any(|summary| summary.epoch == 0 && summary.voided));

@@ -9,7 +9,7 @@ use crate as pallet_conditional_ledger;
 use conditional_ledger_core::MAX_POSITIONS_PER_ACCOUNT;
 use frame_support::{
     derive_impl, parameter_types,
-    traits::{AsEnsureOriginWithArg, Contains, EnsureOrigin},
+    traits::{AsEnsureOriginWithArg, Contains, EnsureOrigin, StorageVersion},
     PalletId,
 };
 use frame_system::{EnsureSigned, RawOrigin};
@@ -230,6 +230,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     let mut ext = sp_io::TestExternalities::new(t);
     ext.execute_with(|| {
         System::set_block_number(1);
+        StorageVersion::new(1).put::<pallet_conditional_ledger::Pallet<Test>>();
         ReapBatch::set(kernel::REAP_BATCH);
         RecordKeeperRebates::set(false);
         KeeperRebates::set(Vec::new());

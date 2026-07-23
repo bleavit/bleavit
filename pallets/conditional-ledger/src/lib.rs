@@ -96,7 +96,7 @@ pub mod pallet {
         traits::{
             fungibles::{self, Mutate},
             tokens::Preservation,
-            Contains,
+            Contains, StorageVersion,
         },
         weights::Weight,
         PalletId,
@@ -118,6 +118,27 @@ pub mod pallet {
     pub type AssetIdOf<T> = <<T as Config>::Collateral as fungibles::Inspect<
         <T as frame_system::Config>::AccountId,
     >>::AssetId;
+
+    /// Exact sample persisted by the permissionless I-4 reconciliation crank.
+    /// The latch is checked against this sample in `try_state`; live custody may
+    /// legitimately change after the sample and is observed by the next crank.
+    #[derive(
+        Clone,
+        Copy,
+        Decode,
+        DecodeWithMemTracking,
+        Encode,
+        Eq,
+        MaxEncodedLen,
+        PartialEq,
+        Debug,
+        TypeInfo,
+    )]
+    pub struct ReconciliationSample<BlockNumber> {
+        pub liability: Balance,
+        pub custody: Balance,
+        pub at: BlockNumber,
+    }
 
     /// Per-proposal instrument fan-out (03 §2.1): 2 branches × 7 kinds = 14 ids.
     pub(crate) const KINDS: [PositionKind; 7] = [
@@ -215,7 +236,10 @@ pub mod pallet {
         type BenchmarkHelper: crate::BenchmarkHelper;
     }
 
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     // ------------------------------------------------------------------ storage
@@ -262,6 +286,23 @@ pub mod pallet {
     /// accounted strictly outside `escrowed` (03 §4, L-2/L-6).
     #[pallet::storage]
     pub type DepositsHeld<T: Config> = StorageValue<_, Balance, ValueQuery>;
+
+    /// Checked O(1) mirror of every proposal and Baseline vault's `escrowed`
+    /// field. Every escrow delta and terminal reap updates this in the same
+    /// storage transaction as the real USDC move (03 §5.4, I-4).
+    #[pallet::storage]
+    pub type TotalEscrowed<T: Config> = StorageValue<_, Balance, ValueQuery>;
+
+    /// Persistent exact I-4 undercollateralization latch. `true` means the last
+    /// reconciliation observed `liability > custody`; surplus is healthy.
+    #[pallet::storage]
+    pub type LedgerDrifted<T: Config> = StorageValue<_, bool, ValueQuery>;
+
+    /// Last exact comparison, retained so `try_state` can prove the latch was
+    /// derived from the specified inequality rather than an arbitrary writer.
+    #[pallet::storage]
+    pub type LastReconciliation<T: Config> =
+        StorageValue<_, ReconciliationSample<BlockNumberFor<T>>, OptionQuery>;
 
     /// Block at which a proposal vault entered a terminal state, for the
     /// `sweep_dust` archive-delay gate (03 §4/§5.4). Ledger-internal; not a FE
@@ -394,6 +435,18 @@ pub mod pallet {
         FreezeCleared,
         /// Operational event outside the frozen 02 ingest schema.
         FreezeExtended { until: BlockNumberFor<T> },
+        /// The reconciliation crank crossed from healthy to undercollateralized.
+        /// Operational edge event outside the frozen 02 ingest schema.
+        LedgerDriftDetected {
+            liability: Balance,
+            custody: Balance,
+        },
+        /// The reconciliation crank crossed from undercollateralized to healthy.
+        /// Operational edge event outside the frozen 02 ingest schema.
+        LedgerDriftCleared {
+            liability: Balance,
+            custody: Balance,
+        },
     }
 
     // -------------------------------------------------------------------- errors
@@ -970,6 +1023,36 @@ pub mod pallet {
             }
             Ok(())
         }
+
+        /// Permissionless O(1) I-4 reconciliation crank (03 §5.4).
+        ///
+        /// `TotalEscrowed` is transactionally maintained by every escrow delta;
+        /// `try_state` independently re-sums the unbounded claimant-retained vault
+        /// maps. This dispatch therefore never performs an unbounded scan.
+        #[pallet::call_index(25)]
+        #[pallet::weight(T::WeightInfo::reconcile())]
+        pub fn reconcile(origin: OriginFor<T>) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let (custody, liability) = Self::maintained_collateral_totals()?;
+            let drifted = liability > custody;
+            let was_drifted = LedgerDrifted::<T>::get();
+
+            LastReconciliation::<T>::put(ReconciliationSample {
+                liability,
+                custody,
+                at: frame_system::Pallet::<T>::block_number(),
+            });
+            if drifted != was_drifted {
+                LedgerDrifted::<T>::put(drifted);
+                if drifted {
+                    Self::deposit_event(Event::LedgerDriftDetected { liability, custody });
+                } else {
+                    Self::deposit_event(Event::LedgerDriftCleared { liability, custody });
+                }
+                T::KeeperRebate::rebate(&who, CrankClass::General);
+            }
+            Ok(())
+        }
     }
 
     // ------------------------------------------- internal MarketAuthority API (§5.5)
@@ -992,6 +1075,11 @@ pub mod pallet {
             FreezeRenewed::<T>::put(true);
             Self::deposit_event(Event::FreezeExtended { until });
             Ok(())
+        }
+
+        /// Current persisted I-4 trigger consumed by guardian wiring.
+        pub fn ledger_drifted() -> bool {
+            LedgerDrifted::<T>::get()
         }
 
         fn ensure_splits_open() -> DispatchResult {
@@ -1534,6 +1622,7 @@ pub mod pallet {
             after: Balance,
         ) -> DispatchResult {
             let sovereign = Self::account_id();
+            Self::adjust_total_escrowed(before, after)?;
             if after > before {
                 T::Collateral::transfer(
                     Self::usdc(),
@@ -1552,6 +1641,24 @@ pub mod pallet {
                 )?;
             }
             Ok(())
+        }
+
+        fn adjust_total_escrowed(before: Balance, after: Balance) -> DispatchResult {
+            if after == before {
+                return Ok(());
+            }
+            TotalEscrowed::<T>::try_mutate(|total| -> DispatchResult {
+                *total = if after > before {
+                    total
+                        .checked_add(after.saturating_sub(before))
+                        .ok_or(Error::<T>::ArithmeticOverflow)?
+                } else {
+                    total
+                        .checked_sub(before.saturating_sub(after))
+                        .ok_or(Error::<T>::ArithmeticOverflow)?
+                };
+                Ok(())
+            })
         }
 
         /// Move position-storage deposits for each account whose live-entry count
@@ -1717,6 +1824,7 @@ pub mod pallet {
                 Self::proposal_ids(pid).all(|id| Positions::<T>::iter_prefix(id).next().is_none());
             if fully_drained {
                 let residue = Vaults::<T>::get(pid).map_or(0, |v| v.escrowed);
+                Self::adjust_total_escrowed(residue, 0)?;
                 if residue > 0 {
                     T::Collateral::transfer(
                         Self::usdc(),
@@ -1759,6 +1867,7 @@ pub mod pallet {
                 .all(|id| Positions::<T>::iter_prefix(id).next().is_none());
             if fully_drained {
                 let residue = BaselineVaults::<T>::get(epoch).map_or(0, |v| v.escrowed);
+                Self::adjust_total_escrowed(residue, 0)?;
                 if residue > 0 {
                     T::Collateral::transfer(
                         Self::usdc(),
@@ -1840,6 +1949,21 @@ pub mod pallet {
                     .ok_or(Error::<T>::ArithmeticOverflow)?;
             }
             let liability = escrow
+                .checked_add(DepositsHeld::<T>::get())
+                .ok_or(Error::<T>::ArithmeticOverflow)?;
+            let custody = <T::Collateral as fungibles::Inspect<T::AccountId>>::balance(
+                Self::usdc(),
+                &Self::account_id(),
+            );
+            Ok((custody, liability))
+        }
+
+        /// O(1) custody and liability quantities used by the permissionless
+        /// reconciliation call. `do_try_state` proves the maintained escrow total
+        /// equals a complete map re-sum.
+        pub fn maintained_collateral_totals(
+        ) -> Result<(Balance, Balance), sp_runtime::DispatchError> {
+            let liability = TotalEscrowed::<T>::get()
                 .checked_add(DepositsHeld::<T>::get())
                 .ok_or(Error::<T>::ArithmeticOverflow)?;
             let custody = <T::Collateral as fungibles::Inspect<T::AccountId>>::balance(
@@ -1933,6 +2057,278 @@ pub mod pallet {
             // helper is the single checked definition shared with telemetry.
             let (custody, liability) = Self::collateral_totals()?;
             ensure!(liability <= custody, Error::<T>::TryStateViolation);
+
+            // During the v0 multi-block backfill the full legacy-map audit above
+            // remains authoritative, but the v1 mirror is deliberately not
+            // published until the terminal cursor step. Per-block try-state must
+            // therefore accept that bounded intermediate state.
+            if Pallet::<T>::on_chain_storage_version() >= STORAGE_VERSION {
+                let tracked = TotalEscrowed::<T>::get();
+                let audited_escrow = liability
+                    .checked_sub(DepositsHeld::<T>::get())
+                    .ok_or(Error::<T>::ArithmeticOverflow)?;
+                ensure!(tracked == audited_escrow, Error::<T>::TryStateViolation);
+
+                match LastReconciliation::<T>::get() {
+                    Some(sample) => ensure!(
+                        LedgerDrifted::<T>::get() == (sample.liability > sample.custody),
+                        Error::<T>::TryStateViolation
+                    ),
+                    None => ensure!(!LedgerDrifted::<T>::get(), Error::<T>::TryStateViolation),
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Versioned multi-block backfill for the maintained `TotalEscrowed` mirror.
+///
+/// Existing state predates that mirror, so defaulting the value to zero would
+/// make the first payout underflow and would fail the map/mirror try-state
+/// equality. The upgrade therefore computes the exact pre-upgrade vault sum
+/// through a weight-metered cursor before any v1 call can execute. The
+/// permissionless reconciliation path remains O(1); only this versioned,
+/// OnlyInherents-gated upgrade scans the legacy maps.
+pub mod migration {
+    use crate::weights::WeightInfo as _;
+    use crate::{BaselineVaults, Config, Pallet, TotalEscrowed, Vaults};
+    use conditional_ledger_core::{BaselineVaultInfo, VaultInfo};
+    use frame_support::{
+        migrations::{SteppedMigration, SteppedMigrationError},
+        pallet_prelude::{ConstU32, Decode, Encode, MaxEncodedLen, TypeInfo},
+        storage::StoragePrefixedMap,
+        traits::{GetStorageVersion, StorageVersion},
+        weights::{Weight, WeightMeter},
+        BoundedVec,
+    };
+    use futarchy_primitives::{kernel, Balance};
+    use parity_scale_codec::DecodeAll;
+
+    const PROPOSAL_RAW_KEY_LEN: usize = 32 + 16 + core::mem::size_of::<u64>();
+    const BASELINE_RAW_KEY_LEN: usize = 32 + 16 + core::mem::size_of::<u32>();
+    type RawKey = BoundedVec<u8, ConstU32<{ PROPOSAL_RAW_KEY_LEN as u32 }>>;
+
+    /// The primary image must finish strictly before B16's 900-block stall
+    /// budget. Two steps are always needed to cross the proposal/baseline
+    /// boundary and to commit the terminal mirror/version pair.
+    pub const MAX_BACKFILL_STEPS: u32 = kernel::MIGRATION_STALL_BLOCKS - 1;
+    pub const MAX_BACKFILL_ROWS: u32 = MAX_BACKFILL_STEPS - 2;
+
+    /// Bounded progress state for the legacy-vault backfill. `pallet-migrations`
+    /// persists this cursor and keeps the runtime in its OnlyInherents posture
+    /// until the final storage-version write commits.
+    #[derive(Clone, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+    pub enum BackfillCursor {
+        Proposals {
+            last: Option<RawKey>,
+            total: Balance,
+        },
+        Baselines {
+            last: Option<RawKey>,
+            total: Balance,
+        },
+    }
+
+    pub struct BackfillTotalEscrowedV1<T>(core::marker::PhantomData<T>);
+
+    impl<T: Config> BackfillTotalEscrowedV1<T> {
+        // Every invocation reserves the greater of the generated one-row scan
+        // and terminal mirror/version paths before its first storage access.
+        fn step_weight() -> Weight {
+            T::WeightInfo::migration_step_row().max(T::WeightInfo::migration_step_terminal())
+        }
+
+        fn proposal_prefix() -> [u8; 32] {
+            <Vaults<T> as StoragePrefixedMap<VaultInfo>>::final_prefix()
+        }
+
+        fn baseline_prefix() -> [u8; 32] {
+            <BaselineVaults<T> as StoragePrefixedMap<BaselineVaultInfo>>::final_prefix()
+        }
+
+        fn next_raw_row<V: DecodeAll>(
+            prefix: &[u8; 32],
+            expected_key_len: usize,
+            last: Option<&RawKey>,
+        ) -> Result<Option<(RawKey, V)>, SteppedMigrationError> {
+            let after = last.map_or(prefix.as_slice(), |key| key.as_slice());
+            let Some(key) = sp_io::storage::next_key(after) else {
+                return Ok(None);
+            };
+            if !key.starts_with(prefix) {
+                return Ok(None);
+            }
+            if key.len() != expected_key_len {
+                return Err(SteppedMigrationError::Failed);
+            }
+
+            // Both maps use Blake2_128Concat. Validate the concat hash rather
+            // than accepting arbitrary same-length bytes under the prefix.
+            let hash_at = prefix.len();
+            let encoded_key_at = hash_at + 16;
+            if sp_io::hashing::blake2_128(&key[encoded_key_at..]) != key[hash_at..encoded_key_at] {
+                return Err(SteppedMigrationError::Failed);
+            }
+
+            let raw_value = sp_io::storage::get(&key).ok_or(SteppedMigrationError::Failed)?;
+            let value =
+                V::decode_all(&mut &raw_value[..]).map_err(|_| SteppedMigrationError::Failed)?;
+            let bounded_key: RawKey = key.try_into().map_err(|_| SteppedMigrationError::Failed)?;
+            Ok(Some((bounded_key, value)))
+        }
+
+        #[cfg(feature = "try-runtime")]
+        fn strict_legacy_sum() -> Result<Balance, sp_runtime::TryRuntimeError> {
+            let mut total: Balance = 0;
+            let mut rows = 0u32;
+            let mut last = None;
+            while let Some((key, vault)) = Self::next_raw_row::<VaultInfo>(
+                &Self::proposal_prefix(),
+                PROPOSAL_RAW_KEY_LEN,
+                last.as_ref(),
+            )
+            .map_err(|_| "conditional-ledger v1 migration: malformed proposal row")?
+            {
+                total = total
+                    .checked_add(vault.escrowed)
+                    .ok_or("conditional-ledger v1 migration: proposal sum overflow")?;
+                rows = rows
+                    .checked_add(1)
+                    .ok_or("conditional-ledger v1 migration: row count overflow")?;
+                frame_support::ensure!(
+                    rows <= MAX_BACKFILL_ROWS,
+                    "conditional-ledger v1 migration: legacy row count exceeds the release bound"
+                );
+                last = Some(key);
+            }
+
+            let mut last = None;
+            while let Some((key, vault)) = Self::next_raw_row::<BaselineVaultInfo>(
+                &Self::baseline_prefix(),
+                BASELINE_RAW_KEY_LEN,
+                last.as_ref(),
+            )
+            .map_err(|_| "conditional-ledger v1 migration: malformed baseline row")?
+            {
+                total = total
+                    .checked_add(vault.escrowed)
+                    .ok_or("conditional-ledger v1 migration: baseline sum overflow")?;
+                rows = rows
+                    .checked_add(1)
+                    .ok_or("conditional-ledger v1 migration: row count overflow")?;
+                frame_support::ensure!(
+                    rows <= MAX_BACKFILL_ROWS,
+                    "conditional-ledger v1 migration: legacy row count exceeds the release bound"
+                );
+                last = Some(key);
+            }
+            Ok(total)
+        }
+    }
+
+    impl<T: Config> SteppedMigration for BackfillTotalEscrowedV1<T> {
+        type Cursor = BackfillCursor;
+        type Identifier = [u8; 16];
+
+        fn id() -> Self::Identifier {
+            *b"ledger-total-v01"
+        }
+
+        fn max_steps() -> Option<u32> {
+            Some(MAX_BACKFILL_STEPS)
+        }
+
+        fn step(
+            cursor: Option<Self::Cursor>,
+            meter: &mut WeightMeter,
+        ) -> Result<Option<Self::Cursor>, SteppedMigrationError> {
+            let required = Self::step_weight();
+            meter
+                .try_consume(required)
+                .map_err(|_| SteppedMigrationError::InsufficientWeight { required })?;
+
+            if Pallet::<T>::on_chain_storage_version() != StorageVersion::new(0) {
+                return Ok(None);
+            }
+
+            match cursor.unwrap_or(BackfillCursor::Proposals {
+                last: None,
+                total: 0,
+            }) {
+                BackfillCursor::Proposals { last, total } => {
+                    if let Some((key, vault)) = Self::next_raw_row::<VaultInfo>(
+                        &Self::proposal_prefix(),
+                        PROPOSAL_RAW_KEY_LEN,
+                        last.as_ref(),
+                    )? {
+                        let total = total
+                            .checked_add(vault.escrowed)
+                            .ok_or(SteppedMigrationError::Failed)?;
+                        Ok(Some(BackfillCursor::Proposals {
+                            last: Some(key),
+                            total,
+                        }))
+                    } else {
+                        Ok(Some(BackfillCursor::Baselines { last: None, total }))
+                    }
+                }
+                BackfillCursor::Baselines { last, total } => {
+                    if let Some((key, vault)) = Self::next_raw_row::<BaselineVaultInfo>(
+                        &Self::baseline_prefix(),
+                        BASELINE_RAW_KEY_LEN,
+                        last.as_ref(),
+                    )? {
+                        let total = total
+                            .checked_add(vault.escrowed)
+                            .ok_or(SteppedMigrationError::Failed)?;
+                        Ok(Some(BackfillCursor::Baselines {
+                            last: Some(key),
+                            total,
+                        }))
+                    } else {
+                        TotalEscrowed::<T>::put(total);
+                        StorageVersion::new(1).put::<Pallet<T>>();
+                        Ok(None)
+                    }
+                }
+            }
+        }
+
+        #[cfg(feature = "try-runtime")]
+        fn pre_upgrade() -> Result<alloc::vec::Vec<u8>, sp_runtime::TryRuntimeError> {
+            use parity_scale_codec::Encode;
+
+            let version = Pallet::<T>::on_chain_storage_version();
+            let migrating = version == StorageVersion::new(0);
+            let expected = if migrating {
+                Self::strict_legacy_sum()?
+            } else {
+                TotalEscrowed::<T>::get()
+            };
+            Ok((version, expected).encode())
+        }
+
+        #[cfg(feature = "try-runtime")]
+        fn post_upgrade(state: alloc::vec::Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+            use parity_scale_codec::Decode;
+
+            let (version_before, expected) =
+                <(StorageVersion, Balance)>::decode(&mut &state[..])
+                    .map_err(|_| "conditional-ledger v1 migration: invalid pre-state")?;
+            let expected_version = if version_before == StorageVersion::new(0) {
+                StorageVersion::new(1)
+            } else {
+                version_before
+            };
+            frame_support::ensure!(
+                Pallet::<T>::on_chain_storage_version() == expected_version,
+                "conditional-ledger v1 migration: storage version transition is invalid"
+            );
+            frame_support::ensure!(
+                TotalEscrowed::<T>::get() == expected,
+                "conditional-ledger v1 migration: maintained total differs from legacy vault sum"
+            );
             Ok(())
         }
     }

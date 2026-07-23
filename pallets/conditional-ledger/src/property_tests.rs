@@ -2096,6 +2096,7 @@ fn operation_generator_is_complete_against_call_metadata() {
             expiry: 0,
         },
         LedgerCall::set_frozen { frozen: false },
+        LedgerCall::reconcile {},
     ];
 
     let metadata = <LedgerCall as GetCallName>::get_call_names();
@@ -2154,9 +2155,9 @@ fn call_tag(call: &crate::pallet::Call<Test>) -> Option<OpTag> {
         crate::pallet::Call::redeem_baseline_pair { .. } => OpTag::RedeemBaselinePair,
         crate::pallet::Call::sweep_dust { .. } => OpTag::SweepDust,
         crate::pallet::Call::sweep_dust_baseline { .. } => OpTag::SweepDustBaseline,
-        crate::pallet::Call::set_split_paused { .. } | crate::pallet::Call::set_frozen { .. } => {
-            return None
-        }
+        crate::pallet::Call::set_split_paused { .. }
+        | crate::pallet::Call::set_frozen { .. }
+        | crate::pallet::Call::reconcile { .. } => return None,
         crate::pallet::Call::__Ignore(_, _) => unreachable!("FRAME ignore variant is uninhabited"),
     };
     Some(tag)

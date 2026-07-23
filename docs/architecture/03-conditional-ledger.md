@@ -213,6 +213,40 @@ The D-1 quarter-value rule is stated for LONG/SHORT; its application to `GateYes
 | Call | Origin | Preconditions | Effect | Event |
 |---|---|---|---|---|
 | `sweep_dust(pid)` / `sweep_dust_baseline(epoch)` | Signed (keeper) | vault terminal + `RedemptionArchiveDelay` elapsed (hard maximum one year) | drain ≤ `ReapBatch(=100)` claimant `Positions` entries per call across the vault's 14 (resp. 2) `PositionId` prefixes; refund deposits to entry owners; residual escrow → INSURANCE; storage and terminal marker reaped when drained. This cleanup is independent of the owning market-book reap | `VaultReaped { pid, residue }` (proposal crank) / `BaselineVaultReaped { epoch, residue }` (Baseline crank) — each identifies its vault; only the name `VaultReaped` is frozen in [`02-integration-contract.md`](./02-integration-contract.md) §6 (fields open) |
+| `reconcile()` | Signed (keeper) | checked `TotalEscrowed + DepositsHeld` succeeds | compare the O(1) maintained liability with the sovereign's actual USDC custody; set the persistent I-4 drift latch iff `liability > custody`; record the exact sample. Emit only on a latch edge | `LedgerDriftDetected { liability, custody }` / `LedgerDriftCleared { liability, custody }` |
+
+**Reconciliation accounting is exact and bounded (normative).** `TotalEscrowed` is a
+checked maintained total over every proposal and Baseline vault's `escrowed` field. Every
+escrow delta updates it in the same storage transaction as the vault post-image and real
+USDC transfer; terminal reap subtracts the residue in that same transaction. `reconcile`
+therefore performs O(1) storage work and never scans claimant-retained vaults, whose count is
+not structurally bounded after their owning market is reaped. The full `try-state` audit still
+re-sums both vault maps and requires equality with `TotalEscrowed`, so the bounded crank is
+not a second or weaker accounting definition. Its liability is
+`TotalEscrowed + DepositsHeld`, using checked arithmetic. The R-4 genesis endowment and any
+swept/direct-transfer dust are lawful surplus: they are neither subtracted nor used to demand
+equality. The exact I-4 anomaly is only `liability > custody`.
+
+**Legacy backfill is multi-block (normative).** The runtime upgrade that first introduces
+`TotalEscrowed` MUST NOT scan either unbounded vault map in `on_runtime_upgrade`. It runs as a
+weight-metered `pallet-migrations` cursor over proposal vaults and then Baseline vaults, carrying
+only the last key and checked partial sum. The chain remains in the migration framework's
+`OnlyInherents` posture until the final total and storage-version write commit atomically; no v1
+ledger call can observe the default zero mirror. Every row step pre-charges a conservative
+ref-time and proof-size bound, and insufficient weight makes no progress rather than overrunning
+the block. The release declares a finite step ceiling strictly below
+`MIGRATION_STALL_BLOCKS`; pre-upgrade verification rejects a legacy row population that would
+exceed that ceiling.
+
+The paired terminal-recovery profile registers zero SDK migrations. Because this particular
+backfill is read-only before its terminal write, its release-specific repair validates that the
+retired cursor names this sole segment, discards the untrusted partial sum, and restarts the same
+bounded scan from the beginning under a runtime-local recovery cursor. `OnlyInherents` remains
+set across every repair block. The recovery image clears its locks and commitment only in the
+same transaction that writes the exact mirror and storage version; malformed rows, overflow,
+wrong segment identity or bound exhaustion leave the chain locked. The release gate exercises
+the start, every proposal/Baseline cutpoint, the phase boundary, the terminal boundary and the
+framework's `Stuck` form.
 
 **Terminal markers are swept state (normative).** A vault's terminal markers exist to gate this housekeeping and are removed by it; they are therefore **not** a durable signal any other pallet may key on for long-lived POL accounting. Every transition that records a terminal block — `void`, `settle_scalar`, `settle_baseline` — MUST, in the same atomic storage layer, latch that block into the owning market for each of the vault's books, release the active-market/POL slot and delete that terminal book's auxiliary checkpoint/window state, so the durable market latch survives this sweep. Latching MUST be idempotent, and marker, latch, active-slot release and POL release MUST commit or roll back together — a latch failure rolls the terminal transition back (status-quo default, G-1) rather than leaving a marker this sweep would later delete. The inverse identity is also machine-checked while both sides remain: every retained owning book named by a ledger terminal marker MUST carry the same latch. The obligation binds the **runtime composition** that wires ledger to market, not this pallet's dispatchables in isolation, which write only the marker.
 
@@ -383,7 +417,7 @@ Carried forward from BE §10.4 with amendments:
 | ID | Invariant |
 |---|---|
 | L-1 | Per-branch conservation: ∀ vault in `Open`/`Resolved`/`Voided`-pre-redemption bookkeeping: `escrowed == usdc_b + Q_b + G_{b,S} + G_{b,C}` for **both** branches; Baseline: `E_base == sets` while `Open`. Supply fields ≡ `PositionTotals` ≡ Σ `Positions` per instrument. |
-| L-2 | `Σ_pid escrowed + Σ_e E_base ≤ balance(sovereign) − held_deposits` (equality up to genesis endowment + swept dust) — this is I-1/I-4 of BE §23, restated over both vault families. |
+| L-2 | `TotalEscrowed == Σ_pid escrowed + Σ_e E_base` and `TotalEscrowed + held_deposits ≤ balance(sovereign)` (equality is not required: the R-4 genesis endowment and swept/direct-transfer dust are lawful surplus). The permissionless reconciliation latch equals the comparison recorded by its last exact sample; the live I-4 drift condition is `TotalEscrowed + held_deposits > balance(sovereign)`. |
 | L-3 | Terminal valuation bound (integer forms): `ScalarSettled`: `E·10^9 ≥ supply(usdc_w)·10^9 + supply(L_w)·s + supply(S_w)·(10^9−s) + Σ_g supply(winning gate leg g)·10^9`. `Voided`: `4·E ≥ Σ_b [ 2·usdc_b + supply(L_b) + supply(S_b) + Σ_g (supply(Yes_{b,g}) + supply(No_{b,g})) ]`. |
 | L-4 | Paired-supply equality in `Open`: `supply(L_b) == supply(S_b) == Q_b`, `supply(Yes_{b,g}) == supply(No_{b,g}) == G_{b,g}`. |
 | L-5 | State legality: no vault in a state outside §2.3's transition table; terminal states admit no mint ops (D-8); `resolve`/`void`/`settle_*` each at most once per target. |
@@ -393,7 +427,7 @@ Carried forward from BE §10.4 with amendments:
 
 ## 10. Hooks and weights
 
-**Hooks: none.** The pallet does no automatic work (I-20 trivially satisfied); all cleanup is keeper-cranked (`sweep_dust*` and the `MarketAuthority` inventory discard inside `market.reap`). Weight functions are benchmarked per call; drivers listed in §5. `sweep_dust` weight is linear in drained entries, bounded by `ReapBatch = 100`; market reap's ledger work is bounded by 28 proposal or four Baseline cells.
+**Hooks: none.** The pallet does no automatic work (I-20 trivially satisfied); all cleanup and reconciliation are keeper-cranked (`sweep_dust*`, `reconcile`, and the `MarketAuthority` inventory discard inside `market.reap`). Weight functions are benchmarked per call; drivers listed in §5. `sweep_dust` weight is linear in drained entries, bounded by `ReapBatch = 100`; market reap's ledger work is bounded by 28 proposal or four Baseline cells. `reconcile` is O(1): two maintained counters, one collateral-balance read, the prior sample/latch, and at most the edge writes/event/rebate. No vault scan or cursor is permitted on its dispatch path.
 
 ---
 
@@ -409,6 +443,7 @@ Consolidated registry: [`15-invariants-and-testing.md`](./15-invariants-and-test
 - **PT-6 (VOID reachability and conservation, X-6):** from `Open` and `Resolved` — the two states §2.3 admits `void` from — `void` succeeds; `void` from `ScalarSettled` and repeat `void` in `Voided` always error without state change (both are terminal, §2.3; the superseded "from every non-`ScalarSettled` state" quantifier wrongly included `Voided` — SQ-165). In `Voided`, every holder class has a terminating recovery path (merge or `redeem_void`), any interleaving of the I-27 call surface pays out ≤ `E`, and first-redeemer strategies gain nothing beyond claimant-adverse rounding residue. End-to-end: FE precondition rows exist for both recovery actions (owned by [`11-frontend-workflows.md`](./11-frontend-workflows.md)).
 - **PT-7 (pair and gate exactness):** `redeem_scalar_pair`/`redeem_baseline_pair` pay exactly `a`; unpaired leg-by-leg redemption of the same holdings pays ≤ the pair payout. Per branch, gate-set mint/merge/settle preserves the §6.1 identity for every gate, and `settle_gate` outcomes pay 1:0 exactly.
 - **PT-8 (key order / bounds):** per-vault reap drains exactly the vault's prefixes and nothing else; `PositionCount` accounting exact under transfer/churn; cap enforced for non-protocol accounts, never for protocol accounts.
+- **I-4 reconciliation regression:** every escrow-changing operation and both terminal reaps keep `TotalEscrowed` equal to a full map re-sum; reconciliation sets the latch only for `liability > custody`, treats endowment/dust surplus as healthy, emits/rebates only on edges, and records a sample whose comparison equals the latch. A clean sample after a deficit clears the latch; while the same guardian authorization record remains live, the bounded guardian maintenance tests MUST prove that ledger/market effects and `PhaseFlags` bit 5 lift on that clear and re-engage on a later deficit.
 - **Differential tests** vs the Python reference model (BE §24.4) extended to gate, Baseline, VOID and pair-redemption paths; **fuzz** on rounding at `MinSplit` boundaries and `s` near 0, 1, and `k/10^9 ± 1`; **TLA⁺ ledger model** (BE §24.5) re-run with the enlarged state machine proving I-3, L-5 and the §6.5 induction over all interleavings including guardian, oracle-dispute and VOID events.
 
 ---

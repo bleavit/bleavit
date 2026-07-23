@@ -674,7 +674,35 @@ impl ProposalBondCurrency<AccountId32> for TestProposalBond {
 }
 
 pub struct TestWelfare;
+
+/// Optional gate-sample override for oracle-deadlock regressions. With no
+/// override, existing epoch tests model healthy, fully sampled windows.
+pub struct GateSamples;
+
+impl GateSamples {
+    const KEY: &'static [u8] = b":test:epoch:gate-samples";
+
+    pub fn get() -> Option<Vec<EpochId>> {
+        sp_io::storage::get(Self::KEY).and_then(|encoded| {
+            let mut input: &[u8] = encoded.as_ref();
+            Vec::<EpochId>::decode(&mut input).ok()
+        })
+    }
+
+    pub fn set(epochs: Vec<EpochId>) {
+        sp_io::storage::set(Self::KEY, &epochs.encode());
+    }
+
+    pub fn contains(epoch: EpochId) -> bool {
+        Self::get().is_none_or(|epochs| epochs.contains(&epoch))
+    }
+}
+
 impl WelfareSettlement for TestWelfare {
+    fn gate_window_sampled(epoch: EpochId) -> bool {
+        GateSamples::contains(epoch)
+    }
+
     fn compute_settlement(
         cohort_epoch: EpochId,
         spec: MetricSpecVersion,

@@ -218,7 +218,7 @@ inventory! {
         leaf values => ["set_release_channel"];
     }
     "ConditionalLedger" {
-        leaf public => ["split", "merge", "split_scalar", "merge_scalar", "split_gate", "merge_gate", "transfer", "split_baseline", "merge_baseline", "resolve", "void", "settle_scalar", "settle_gate", "settle_baseline", "redeem", "redeem_scalar", "redeem_scalar_pair", "redeem_gate", "redeem_void", "redeem_baseline", "redeem_baseline_pair", "sweep_dust", "sweep_dust_baseline"];
+        leaf public => ["split", "merge", "split_scalar", "merge_scalar", "split_gate", "merge_gate", "transfer", "split_baseline", "merge_baseline", "resolve", "void", "settle_scalar", "settle_gate", "settle_baseline", "redeem", "redeem_scalar", "redeem_scalar_pair", "redeem_gate", "redeem_void", "redeem_baseline", "redeem_baseline_pair", "sweep_dust", "sweep_dust_baseline", "reconcile"];
         leaf emergency_playbook => ["set_split_paused", "set_frozen"];
     }
     "Market" {

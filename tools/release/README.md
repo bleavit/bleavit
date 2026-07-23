@@ -123,9 +123,11 @@ uses `--no-default-features`, then passes the row's complete ordered feature
 list explicitly. `release_default` is the reviewed tag-build selection.
 A manual workflow chooses one of the two primary profiles; CI automatically
 builds its required paired recovery profile. `normal` means the base runtime's
-ordinary migration registration applies, but the current integrity gate still
-requires that registration to be empty until a release-specific cutpoint-total
-repair exists.
+ordinary migration registration applies. The current primary registers exactly
+the bounded conditional-ledger mirror backfill; its paired recovery profile
+registers zero SDK migrations and carries the release-specific, exhaustively
+tested cutpoint-total restart repair. Any additional primary migration remains
+forbidden until it supplies the same evidence.
 
 Assembly requires all four files for both halves (`runtime.wasm`,
 `metadata.scale`, `runtime-info.json`, `build-info.json`). Both Wasm files are
@@ -236,14 +238,22 @@ Strict mode is expected to fail today:
 - B7 owns the per-release `run-evidence.json` for the committed `zombienet/`
   and `chopsticks/` environment definitions;
 - the residual adoption-input gaps from B1b's compliance review (SQ-173…SQ-175,
-  SQ-177, SQ-180…SQ-182: values/prize backing, oracle VaR snapshot, MetricSpec
+  SQ-181…SQ-182: values/prize backing, oracle VaR snapshot, MetricSpec
   targets, P_ref simulation, POL budget, telemetry sources — tracked in
   `PLAN.md`; SQ-172/176/178 themselves were resolved by the B1b completion)
   remain release-blocking — enforced by
   the manifest's `release_blockers` row `b1b.compliance`;
-- SQ-205 (owner B1a): the oracle's authoritative reserve health never reaches
-  `treasury::set_reserve_impaired`, so 08 §1.2's fail-static NAV is not
-  enforced — enforced by the `treasury.reserve_health_unwired` row.
+- The reserve-health sink, production dispatcher and authenticated response
+  route are wired (SQ-205/SQ-380). SQ-195's day-resolved welfare input remains
+  open under the A12-owned `welfare.reserve_daily_unbound` blocker. Separately,
+  live Asset Hub fee/barrier/response and bidirectional-HRMP calibration remain
+  open under `treasury.reserve_probe_unverified`. That blocker also requires an
+  armed probe with a timely authenticated pass, the local F+R line runway, the
+  separate remote sovereign USDC plus F+R DOT envelopes/refill margin, and the
+  positive TREASURY reserve-line funding handover before Phase 4. SQ-484's
+  local-runway/remote-inventory monitoring and RB-XCM alerts and SQ-485's
+  nonzero immutable control floors are implemented; live Asset Hub calibration,
+  inventory provisioning and the governed handover remain release evidence.
 
 Two previously-listed blockers are cleared: **B2** implemented all 11
 `FutarchyApi` methods and the remaining metadata constants (contract v4), and

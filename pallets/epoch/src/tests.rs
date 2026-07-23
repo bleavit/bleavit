@@ -3573,6 +3573,134 @@ fn settlement_is_cursor_resumable_and_welfare_is_the_only_settlement_seam() {
 }
 
 #[test]
+fn unsampled_gate_window_latches_once_and_clears_when_observations_recover() {
+    new_test_ext().execute_with(|| {
+        let mut state = cohort_state(1, 0, CohortStatus::Measuring { until_epoch: 2 });
+        state.proposals[0].markets = Some(markets(1, 0, true));
+        assert_ok!(Epoch::seed(state));
+        GateSamples::set(Vec::new());
+        set_block(phase_block(3, phase_offsets::HOUSEKEEPING_NUM));
+        RecordKeeperRebates::set(true);
+
+        assert_ok!(Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1));
+        assert!(PendingOracleVoids::<Test>::contains_key(0));
+        assert_ok!(Epoch::do_try_state());
+        assert!(SeamCalls::get().is_empty());
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(keeper(), CrankClass::DecisionCritical)]
+        );
+
+        // Polling an unchanged incident is not useful work and earns no rebate.
+        assert_ok!(Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(keeper(), CrankClass::DecisionCritical)]
+        );
+
+        GateSamples::set(vec![1, 2]);
+        assert_ok!(Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1));
+        assert!(!PendingOracleVoids::<Test>::contains_key(0));
+        assert_eq!(
+            Cohorts::<Test>::get(0).map(|cohort| cohort.status),
+            Some(CohortStatus::Settling { cursor: 1 })
+        );
+        assert_ok!(Epoch::do_try_state());
+    });
+}
+
+#[test]
+fn exactly_one_missing_gate_window_latches_but_scalar_only_cohorts_do_not() {
+    new_test_ext().execute_with(|| {
+        let mut gated = cohort_state(1, 0, CohortStatus::Measuring { until_epoch: 2 });
+        gated.proposals[0].markets = Some(markets(1, 0, true));
+        assert_ok!(Epoch::seed(gated));
+        GateSamples::set(vec![1]);
+        set_block(phase_block(3, phase_offsets::HOUSEKEEPING_NUM));
+
+        assert_ok!(Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1));
+        assert!(PendingOracleVoids::<Test>::contains_key(0));
+        assert!(SeamCalls::get().is_empty());
+    });
+
+    new_test_ext().execute_with(|| {
+        let scalar_only = cohort_state(2, 4, CohortStatus::Measuring { until_epoch: 6 });
+        assert_ok!(Epoch::seed(scalar_only));
+        GateSamples::set(Vec::new());
+        set_block(phase_block(7, phase_offsets::HOUSEKEEPING_NUM));
+
+        assert_ok!(Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 4, 1));
+        assert!(!PendingOracleVoids::<Test>::contains_key(4));
+        assert_eq!(
+            Cohorts::<Test>::get(4).map(|cohort| cohort.status),
+            Some(CohortStatus::Settling { cursor: 1 })
+        );
+    });
+}
+
+#[test]
+fn void_cohort_consumes_the_exact_oracle_deadlock_latch() {
+    new_test_ext().execute_with(|| {
+        let mut state = cohort_state(1, 0, CohortStatus::AwaitingOracle);
+        state.proposals[0].markets = Some(markets(1, 0, true));
+        assert_ok!(Epoch::seed(state));
+        GateSamples::set(Vec::new());
+        set_block(phase_block(3, phase_offsets::HOUSEKEEPING_NUM));
+
+        assert_ok!(Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1));
+        assert!(PendingOracleVoids::<Test>::contains_key(0));
+        assert_ok!(Epoch::do_try_state());
+
+        assert_ok!(Epoch::void_cohort(
+            RuntimeOrigin::signed(void_authority()),
+            0,
+        ));
+        assert!(!PendingOracleVoids::<Test>::contains_key(0));
+        assert!(!Cohorts::<Test>::contains_key(0));
+        assert_ok!(Epoch::do_try_state());
+    });
+}
+
+#[test]
+fn unsampled_gate_window_cannot_latch_before_housekeeping() {
+    new_test_ext().execute_with(|| {
+        let mut state = cohort_state(1, 0, CohortStatus::Measuring { until_epoch: 2 });
+        state.proposals[0].markets = Some(markets(1, 0, true));
+        assert_ok!(Epoch::seed(state));
+        GateSamples::set(Vec::new());
+        set_block(phase_block(3, phase_offsets::TRADE_NUM));
+        RecordKeeperRebates::set(true);
+
+        assert_noop!(
+            Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1),
+            Error::<Test>::BadPhase
+        );
+        assert!(!PendingOracleVoids::<Test>::contains_key(0));
+        assert!(KeeperRebates::get().is_empty());
+    });
+}
+
+#[test]
+fn an_existing_oracle_deadlock_latch_survives_out_of_phase_polling() {
+    new_test_ext().execute_with(|| {
+        let mut state = cohort_state(1, 0, CohortStatus::AwaitingOracle);
+        state.proposals[0].markets = Some(markets(1, 0, true));
+        assert_ok!(Epoch::seed(state));
+        GateSamples::set(Vec::new());
+        set_block(phase_block(3, phase_offsets::HOUSEKEEPING_NUM));
+        assert_ok!(Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1));
+        assert!(PendingOracleVoids::<Test>::contains_key(0));
+
+        set_block(phase_block(4, phase_offsets::TRADE_NUM));
+        assert_noop!(
+            Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1),
+            Error::<Test>::BadPhase
+        );
+        assert!(PendingOracleVoids::<Test>::contains_key(0));
+    });
+}
+
+#[test]
 fn next_epoch_length_uses_values_origin_and_live_params() {
     new_test_ext().execute_with(|| {
         let mut params = ParamsValue::get();

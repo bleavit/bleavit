@@ -78,8 +78,6 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// Proof: `ExecutionGuard::HardGateBreach` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
 	/// Storage: `ExecutionGuard::DeadManFreeze` (r:1 w:1)
 	/// Proof: `ExecutionGuard::DeadManFreeze` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
-	/// Storage: `Guardian::ActivePlaybooks` (r:1 w:0)
-	/// Proof: `Guardian::ActivePlaybooks` (`max_values`: Some(1), `max_size`: Some(37), added: 532, mode: `MaxEncodedLen`)
 	/// Storage: `ExecutionGuard::MigrationHalt` (r:1 w:1)
 	/// Proof: `ExecutionGuard::MigrationHalt` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
 	/// Storage: `ExecutionGuard::PendingUpgrade` (r:1 w:1)
@@ -126,6 +124,10 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// Proof: `ConditionalLedger::PositionTotals` (`max_values`: None, `max_size`: Some(44), added: 2519, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::ProposalBonds` (r:1 w:0)
 	/// Proof: `Epoch::ProposalBonds` (`max_values`: None, `max_size`: Some(72), added: 2547, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::CounterForPendingOracleVoids` (r:1 w:0)
+	/// Proof: `Epoch::CounterForPendingOracleVoids` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::PendingOracleVoids` (r:1 w:0)
+	/// Proof: `Epoch::PendingOracleVoids` (`max_values`: None, `max_size`: Some(20), added: 2495, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::ProposalSchedules` (r:2 w:0)
 	/// Proof: `Epoch::ProposalSchedules` (`max_values`: None, `max_size`: Some(42), added: 2517, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::CohortSchedules` (r:2 w:1)
@@ -155,14 +157,14 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// The range of component `c` is `[2, 16]`.
 	fn execute(c: u32, ) -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `48970 + c * (35 ±0)`
+		//  Measured:  `48994 + c * (35 ±0)`
 		//  Estimated: `110484 + c * (35 ±0)`
-		// Minimum execution time: 764_411_000 picoseconds.
-		Weight::from_parts(800_168_481, 0)
+		// Minimum execution time: 803_679_000 picoseconds.
+		Weight::from_parts(856_012_460, 0)
 			.saturating_add(Weight::from_parts(0, 110484))
-			// Standard Error: 64_012
-			.saturating_add(Weight::from_parts(6_151_196, 0).saturating_mul(c.into()))
-			.saturating_add(T::DbWeight::get().reads(116))
+			// Standard Error: 49_359
+			.saturating_add(Weight::from_parts(8_236_736, 0).saturating_mul(c.into()))
+			.saturating_add(T::DbWeight::get().reads(117))
 			.saturating_add(T::DbWeight::get().writes(56))
 			.saturating_add(Weight::from_parts(0, 35).saturating_mul(c.into()))
 	}
@@ -184,6 +186,8 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// Proof: `ParachainSystem::PendingValidationCode` (`max_values`: Some(1), `max_size`: None, mode: `Measured`)
 	/// Storage: `ParachainSystem::HostConfiguration` (r:1 w:0)
 	/// Proof: `ParachainSystem::HostConfiguration` (`max_values`: Some(1), `max_size`: None, mode: `Measured`)
+	/// Storage: `ExecutionGuard::PhaseFourBridge` (r:1 w:0)
+	/// Proof: `ExecutionGuard::PhaseFourBridge` (`max_values`: Some(1), `max_size`: Some(73), added: 568, mode: `MaxEncodedLen`)
 	/// Storage: `System::AuthorizedUpgrade` (r:1 w:1)
 	/// Proof: `System::AuthorizedUpgrade` (`max_values`: Some(1), `max_size`: Some(33), added: 528, mode: `MaxEncodedLen`)
 	/// Storage: UNKNOWN KEY `0x34c4cb57d8624f331fd8e098702dc9763747254acd30df50f2b3643d4dd7e58c` (r:1 w:0)
@@ -194,8 +198,6 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// Proof: UNKNOWN KEY `0x34c4cb57d8624f331fd8e098702dc9761baad8690ca3d90677e8be829ad60d0c` (r:1 w:0)
 	/// Storage: `Migrations::Cursor` (r:1 w:0)
 	/// Proof: `Migrations::Cursor` (`max_values`: Some(1), `max_size`: Some(65550), added: 66045, mode: `MaxEncodedLen`)
-	/// Storage: `ExecutionGuard::PhaseFourBridge` (r:1 w:0)
-	/// Proof: `ExecutionGuard::PhaseFourBridge` (`max_values`: Some(1), `max_size`: Some(73), added: 568, mode: `MaxEncodedLen`)
 	/// Storage: `ParachainSystem::NewValidationCode` (r:0 w:1)
 	/// Proof: `ParachainSystem::NewValidationCode` (`max_values`: Some(1), `max_size`: None, mode: `Measured`)
 	/// Storage: `ParachainSystem::DidSetValidationCode` (r:0 w:1)
@@ -205,11 +207,11 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 		// Proof Size summary in bytes:
 		//  Measured:  `596`
 		//  Estimated: `67035`
-		// Minimum execution time: 47_110_000 picoseconds.
-		Weight::from_parts(47_490_000, 0)
+		// Minimum execution time: 50_160_000 picoseconds.
+		Weight::from_parts(50_700_000, 0)
 			.saturating_add(Weight::from_parts(0, 67035))
-			// Standard Error: 21
-			.saturating_add(Weight::from_parts(6_679, 0).saturating_mul(b.into()))
+			// Standard Error: 7
+			.saturating_add(Weight::from_parts(5_716, 0).saturating_mul(b.into()))
 			.saturating_add(T::DbWeight::get().reads(15))
 			.saturating_add(T::DbWeight::get().writes(4))
 	}
@@ -287,6 +289,10 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// Proof: `ExecutionGuard::Ratifications` (`max_values`: None, `max_size`: Some(64), added: 2539, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::ProposalBonds` (r:1 w:0)
 	/// Proof: `Epoch::ProposalBonds` (`max_values`: None, `max_size`: Some(72), added: 2547, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::CounterForPendingOracleVoids` (r:1 w:0)
+	/// Proof: `Epoch::CounterForPendingOracleVoids` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::PendingOracleVoids` (r:1 w:0)
+	/// Proof: `Epoch::PendingOracleVoids` (`max_values`: None, `max_size`: Some(20), added: 2495, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::ProposalSchedules` (r:2 w:0)
 	/// Proof: `Epoch::ProposalSchedules` (`max_values`: None, `max_size`: Some(42), added: 2517, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::CohortSchedules` (r:2 w:1)
@@ -307,12 +313,12 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// Proof: `ExecutionGuard::Expedited` (`max_values`: None, `max_size`: Some(25), added: 2500, mode: `MaxEncodedLen`)
 	fn expire_failed_execution() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `17512`
+		//  Measured:  `17578`
 		//  Estimated: `107877`
-		// Minimum execution time: 539_920_000 picoseconds.
-		Weight::from_parts(551_810_000, 0)
+		// Minimum execution time: 537_570_000 picoseconds.
+		Weight::from_parts(547_089_000, 0)
 			.saturating_add(Weight::from_parts(0, 107877))
-			.saturating_add(T::DbWeight::get().reads(103))
+			.saturating_add(T::DbWeight::get().reads(105))
 			.saturating_add(T::DbWeight::get().writes(51))
 	}
 	/// Storage: `ExecutionGuard::Ratifications` (r:1 w:1)
@@ -329,8 +335,8 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 		// Proof Size summary in bytes:
 		//  Measured:  `540`
 		//  Estimated: `3791`
-		// Minimum execution time: 20_650_000 picoseconds.
-		Weight::from_parts(21_920_000, 0)
+		// Minimum execution time: 20_940_000 picoseconds.
+		Weight::from_parts(21_880_000, 0)
 			.saturating_add(Weight::from_parts(0, 3791))
 			.saturating_add(T::DbWeight::get().reads(5))
 			.saturating_add(T::DbWeight::get().writes(2))
@@ -409,6 +415,10 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// Proof: `ExecutionGuard::Ratifications` (`max_values`: None, `max_size`: Some(64), added: 2539, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::ProposalBonds` (r:1 w:0)
 	/// Proof: `Epoch::ProposalBonds` (`max_values`: None, `max_size`: Some(72), added: 2547, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::CounterForPendingOracleVoids` (r:1 w:0)
+	/// Proof: `Epoch::CounterForPendingOracleVoids` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::PendingOracleVoids` (r:1 w:0)
+	/// Proof: `Epoch::PendingOracleVoids` (`max_values`: None, `max_size`: Some(20), added: 2495, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::ProposalSchedules` (r:2 w:0)
 	/// Proof: `Epoch::ProposalSchedules` (`max_values`: None, `max_size`: Some(42), added: 2517, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::CohortSchedules` (r:2 w:1)
@@ -429,12 +439,12 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// Proof: `ExecutionGuard::Expedited` (`max_values`: None, `max_size`: Some(25), added: 2500, mode: `MaxEncodedLen`)
 	fn reject_stale() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `17346`
+		//  Measured:  `17412`
 		//  Estimated: `107877`
-		// Minimum execution time: 539_001_000 picoseconds.
-		Weight::from_parts(552_290_000, 0)
+		// Minimum execution time: 537_639_000 picoseconds.
+		Weight::from_parts(547_449_000, 0)
 			.saturating_add(Weight::from_parts(0, 107877))
-			.saturating_add(T::DbWeight::get().reads(103))
+			.saturating_add(T::DbWeight::get().reads(105))
 			.saturating_add(T::DbWeight::get().writes(51))
 	}
 	/// Storage: `ExecutionGuard::ExecutingUpgrade` (r:1 w:0)
@@ -453,8 +463,8 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 		// Proof Size summary in bytes:
 		//  Measured:  `31175`
 		//  Estimated: `52175`
-		// Minimum execution time: 106_370_000 picoseconds.
-		Weight::from_parts(113_170_000, 0)
+		// Minimum execution time: 117_570_000 picoseconds.
+		Weight::from_parts(121_299_000, 0)
 			.saturating_add(Weight::from_parts(0, 52175))
 			.saturating_add(T::DbWeight::get().reads(6))
 			.saturating_add(T::DbWeight::get().writes(2))
@@ -505,8 +515,6 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// Proof: `ExecutionGuard::HardGateBreach` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
 	/// Storage: `ExecutionGuard::DeadManFreeze` (r:1 w:1)
 	/// Proof: `ExecutionGuard::DeadManFreeze` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
-	/// Storage: `Guardian::ActivePlaybooks` (r:1 w:0)
-	/// Proof: `Guardian::ActivePlaybooks` (`max_values`: Some(1), `max_size`: Some(37), added: 532, mode: `MaxEncodedLen`)
 	/// Storage: `ExecutionGuard::MigrationHalt` (r:1 w:1)
 	/// Proof: `ExecutionGuard::MigrationHalt` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
 	/// Storage: `ExecutionGuard::PendingUpgrade` (r:1 w:1)
@@ -553,6 +561,10 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// Proof: `ConditionalLedger::PositionTotals` (`max_values`: None, `max_size`: Some(44), added: 2519, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::ProposalBonds` (r:1 w:0)
 	/// Proof: `Epoch::ProposalBonds` (`max_values`: None, `max_size`: Some(72), added: 2547, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::CounterForPendingOracleVoids` (r:1 w:0)
+	/// Proof: `Epoch::CounterForPendingOracleVoids` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::PendingOracleVoids` (r:1 w:0)
+	/// Proof: `Epoch::PendingOracleVoids` (`max_values`: None, `max_size`: Some(20), added: 2495, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::ProposalSchedules` (r:2 w:0)
 	/// Proof: `Epoch::ProposalSchedules` (`max_values`: None, `max_size`: Some(42), added: 2517, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::CohortSchedules` (r:2 w:1)
@@ -577,13 +589,67 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	/// Proof: `System::AuthorizedUpgrade` (`max_values`: Some(1), `max_size`: Some(33), added: 528, mode: `MaxEncodedLen`)
 	fn authorize_phase_four() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `48603`
+		//  Measured:  `48627`
 		//  Estimated: `4197809`
-		// Minimum execution time: 788_741_000 picoseconds.
-		Weight::from_parts(806_151_000, 0)
+		// Minimum execution time: 809_759_000 picoseconds.
+		Weight::from_parts(823_719_000, 0)
 			.saturating_add(Weight::from_parts(0, 4197809))
-			.saturating_add(T::DbWeight::get().reads(115))
+			.saturating_add(T::DbWeight::get().reads(116))
 			.saturating_add(T::DbWeight::get().writes(54))
+	}
+	/// Storage: `ExecutionGuard::RecoveryImage` (r:1 w:1)
+	/// Proof: `ExecutionGuard::RecoveryImage` (`max_values`: Some(1), `max_size`: Some(88), added: 583, mode: `MaxEncodedLen`)
+	/// Storage: `Migrations::Cursor` (r:1 w:0)
+	/// Proof: `Migrations::Cursor` (`max_values`: Some(1), `max_size`: Some(65550), added: 66045, mode: `MaxEncodedLen`)
+	/// Storage: `ExecutionGuard::CurrentSpecName` (r:1 w:1)
+	/// Proof: `ExecutionGuard::CurrentSpecName` (`max_values`: Some(1), `max_size`: Some(37), added: 532, mode: `MaxEncodedLen`)
+	/// Storage: `ExecutionGuard::PendingUpgrade` (r:1 w:1)
+	/// Proof: `ExecutionGuard::PendingUpgrade` (`max_values`: Some(1), `max_size`: Some(44), added: 539, mode: `MaxEncodedLen`)
+	/// Storage: `ExecutionGuard::Queue` (r:33 w:32)
+	/// Proof: `ExecutionGuard::Queue` (`max_values`: None, `max_size`: Some(278), added: 2753, mode: `MaxEncodedLen`)
+	/// Storage: `ExecutionGuard::ExecutionRecords` (r:1 w:1)
+	/// Proof: `ExecutionGuard::ExecutionRecords` (`max_values`: Some(1), `max_size`: Some(13058), added: 13553, mode: `MaxEncodedLen`)
+	/// Storage: `ExecutionGuard::HeldResources` (r:1 w:1)
+	/// Proof: `ExecutionGuard::HeldResources` (`max_values`: Some(1), `max_size`: Some(4098), added: 4593, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::EpochOf` (r:1 w:0)
+	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
+	/// Storage: `ExecutionGuard::GateSuspension` (r:1 w:0)
+	/// Proof: `ExecutionGuard::GateSuspension` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `ExecutionGuard::HardGateBreach` (r:1 w:1)
+	/// Proof: `ExecutionGuard::HardGateBreach` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
+	/// Storage: `ExecutionGuard::DeadManFreeze` (r:1 w:1)
+	/// Proof: `ExecutionGuard::DeadManFreeze` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
+	/// Storage: `ExecutionGuard::MigrationHalt` (r:1 w:1)
+	/// Proof: `ExecutionGuard::MigrationHalt` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
+	/// Storage: `Constitution::ReleaseChannel` (r:1 w:1)
+	/// Proof: `Constitution::ReleaseChannel` (`max_values`: Some(1), `max_size`: Some(168), added: 663, mode: `MaxEncodedLen`)
+	/// Storage: `ExecutionGuard::PhaseFourBridge` (r:1 w:0)
+	/// Proof: `ExecutionGuard::PhaseFourBridge` (`max_values`: Some(1), `max_size`: Some(73), added: 568, mode: `MaxEncodedLen`)
+	/// Storage: `Preimage::StatusFor` (r:1 w:0)
+	/// Proof: `Preimage::StatusFor` (`max_values`: None, `max_size`: Some(91), added: 2566, mode: `MaxEncodedLen`)
+	/// Storage: `Preimage::RequestStatusFor` (r:1 w:1)
+	/// Proof: `Preimage::RequestStatusFor` (`max_values`: None, `max_size`: Some(91), added: 2566, mode: `MaxEncodedLen`)
+	/// Storage: `ExecutionGuard::CounterForQueue` (r:1 w:1)
+	/// Proof: `ExecutionGuard::CounterForQueue` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `FutarchyTreasury::State` (r:1 w:1)
+	/// Proof: `FutarchyTreasury::State` (`max_values`: Some(1), `max_size`: Some(25361), added: 25856, mode: `MaxEncodedLen`)
+	/// Storage: `Constitution::Params` (r:5 w:0)
+	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
+	/// Storage: `ExecutionGuard::PendingAnchorCapture` (r:0 w:1)
+	/// Proof: `ExecutionGuard::PendingAnchorCapture` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
+	/// Storage: `ExecutionGuard::ScheduledUpgrade` (r:0 w:1)
+	/// Proof: `ExecutionGuard::ScheduledUpgrade` (`max_values`: Some(1), `max_size`: Some(32), added: 527, mode: `MaxEncodedLen`)
+	/// Storage: `ExecutionGuard::PreMigrationAnchor` (r:0 w:1)
+	/// Proof: `ExecutionGuard::PreMigrationAnchor` (`max_values`: Some(1), `max_size`: Some(36), added: 531, mode: `MaxEncodedLen`)
+	fn finalize_recovery_application() -> Weight {
+		// Proof Size summary in bytes:
+		//  Measured:  `15681`
+		//  Estimated: `91839`
+		// Minimum execution time: 510_379_000 picoseconds.
+		Weight::from_parts(519_299_000, 0)
+			.saturating_add(Weight::from_parts(0, 91839))
+			.saturating_add(T::DbWeight::get().reads(55))
+			.saturating_add(T::DbWeight::get().writes(47))
 	}
 	/// Storage: `ExecutionGuard::Queue` (r:1 w:0)
 	/// Proof: `ExecutionGuard::Queue` (`max_values`: None, `max_size`: Some(278), added: 2753, mode: `Measured`)
@@ -613,12 +679,12 @@ impl<T: frame_system::Config> pallet_execution_guard::WeightInfo for WeightInfo<
 	fn qualify_recovery_image(b: u32, ) -> Weight {
 		// Proof Size summary in bytes:
 		//  Measured:  `97189 + b * (1 ±0)`
-		//  Estimated: `103129 + b * (1 ±0)`
-		// Minimum execution time: 252_520_000 picoseconds.
-		Weight::from_parts(253_500_000, 0)
-			.saturating_add(Weight::from_parts(0, 103129))
-			// Standard Error: 18
-			.saturating_add(Weight::from_parts(2_557, 0).saturating_mul(b.into()))
+		//  Estimated: `103128 + b * (1 ±0)`
+		// Minimum execution time: 262_310_000 picoseconds.
+		Weight::from_parts(264_270_000, 0)
+			.saturating_add(Weight::from_parts(0, 103128))
+			// Standard Error: 12
+			.saturating_add(Weight::from_parts(2_682, 0).saturating_mul(b.into()))
 			.saturating_add(T::DbWeight::get().reads(15))
 			.saturating_add(T::DbWeight::get().writes(3))
 			.saturating_add(Weight::from_parts(0, 1).saturating_mul(b.into()))

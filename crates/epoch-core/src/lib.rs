@@ -1260,7 +1260,10 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             .position(|cohort| cohort.epoch == epoch)
             .ok_or(Error::BadState)?;
         ensure!(
-            matches!(self.cohorts[idx].status, CohortStatus::Measuring { .. }),
+            matches!(
+                self.cohorts[idx].status,
+                CohortStatus::Measuring { .. } | CohortStatus::AwaitingOracle
+            ),
             Error::BadState
         );
         let affected = self.void_affected_proposals(epoch)?;

@@ -42,6 +42,42 @@ name = "bleavit_chain_xcm_trapped_assets"
 source = "chain-exporter"
 
 [[series]]
+name = "bleavit_reserve_probe_collection_ok"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_reserve_probe_ready"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_reserve_probe_local_usdc"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_reserve_probe_local_required_usdc"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_reserve_probe_remote_usdc"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_reserve_probe_remote_required_usdc"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_reserve_probe_remote_dot_planck"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_reserve_probe_remote_required_dot_planck"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_reserve_probe_dot_refill_margin_planck"
+source = "chain-exporter"
+
+[[series]]
 name = "bleavit_keeper_last_successful_crank_timestamp_seconds"
 source = "keeper"
 

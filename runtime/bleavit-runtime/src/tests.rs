@@ -144,6 +144,21 @@ pub(crate) fn development_ext() -> sp_io::TestExternalities {
     sp_io::TestExternalities::new(storage)
 }
 
+pub(crate) fn fund_reserve_probe_line() {
+    // The development fixture keeps treasury accounting empty; prime the core
+    // MAIN mirror only for this maintenance-line test, then exercise the real
+    // governed line-funding call. This helper is profile-neutral because B16's
+    // runtime-profile gate compiles the common test suite without pallet-sudo.
+    pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+        state.main_usdc = state.main_usdc.saturating_add(100 * currency::USDC);
+    });
+    assert_ok!(FutarchyTreasury::fund_budget_line(
+        pallet_origins::Origin::FutarchyTreasury.into(),
+        pallet_futarchy_treasury::BudgetLine::OpsReserveProbe,
+        100 * currency::USDC,
+    ));
+}
+
 struct CandidateRuntimeVersion {
     fallback: Vec<u8>,
     artifacts: Vec<(Vec<u8>, Vec<u8>)>,
@@ -2756,6 +2771,44 @@ fn production_xcm_under_caps_mints_deposits_and_records_the_beneficiary() {
 }
 
 #[test]
+fn production_xcm_protocol_inflow_bypasses_only_the_account_cap() {
+    development_ext().execute_with(|| {
+        let beneficiary = crate::configs::treasury_protocol_account();
+        let amount = 20 * currency::USDC;
+        let issuance_before = ForeignAssets::total_issuance(usdc_location());
+        set_balance_param_value(b"phase3.tvl_cap", issuance_before.saturating_add(amount));
+        set_balance_param_value(b"phase3.dep_cap", 1);
+
+        assert!(execute_production_inbound_usdc(amount, &beneficiary, 61)
+            .ensure_complete()
+            .is_ok());
+        assert_eq!(
+            pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&beneficiary),
+            0
+        );
+        pallet_inflow_caps::CumulativeDeposits::<Runtime>::insert(&beneficiary, 0);
+        assert_ok!(InflowCaps::do_try_state());
+        pallet_inflow_caps::CumulativeDeposits::<Runtime>::remove(&beneficiary);
+
+        // The exemption never weakens the system-wide issuance ceiling.
+        let issuance_at_cap = ForeignAssets::total_issuance(usdc_location());
+        assert!(issuance_at_cap > issuance_before);
+        set_balance_param_value(b"phase3.tvl_cap", issuance_at_cap);
+        assert!(execute_production_inbound_usdc(1, &beneficiary, 62)
+            .ensure_complete()
+            .is_err());
+        assert_eq!(
+            ForeignAssets::total_issuance(usdc_location()),
+            issuance_at_cap
+        );
+        assert_eq!(
+            pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&beneficiary),
+            0
+        );
+    });
+}
+
+#[test]
 fn production_xcm_global_cap_refuses_before_minting_or_trapping() {
     // limit-coverage: phase3.tvl_cap
     use staging_xcm::latest::{Error as XcmError, InstructionError, Outcome};
@@ -3142,7 +3195,7 @@ fn production_xcm_treasury_class_can_recover_only_the_protocol_keyed_trap() {
         };
         let issuance_with_trap = ForeignAssets::total_issuance(usdc_location());
         set_balance_param_value(b"phase3.tvl_cap", issuance_with_trap);
-        set_balance_param_value(b"phase3.dep_cap", amount);
+        set_balance_param_value(b"phase3.dep_cap", 1);
 
         let claim = RuntimeCall::PolkadotXcm(pallet_xcm::Call::claim_assets {
             assets: Box::new(assets),
@@ -3163,7 +3216,8 @@ fn production_xcm_treasury_class_can_recover_only_the_protocol_keyed_trap() {
         );
         assert_eq!(
             pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&protocol),
-            amount
+            0,
+            "canonical protocol inflows bypass the per-account Phase-3 meter"
         );
         assert_eq!(
             ForeignAssets::total_issuance(usdc_location()),
@@ -4833,6 +4887,7 @@ fn xcm_traffic_recorder_clamps_large_live_epoch_day_to_u8_max() {
 #[test]
 fn oracle_probe_timeout_sink_records_welfare_xcm_traffic() {
     development_ext().execute_with(|| {
+        fund_reserve_probe_line();
         pallet_epoch::EpochOf::<Runtime>::mutate(|info| info.index = 0);
         pallet_epoch::Schedule::<Runtime>::mutate(|schedule| {
             schedule.epoch_start_block = 0;
@@ -16107,7 +16162,13 @@ fn guardian_track_admin_controls_registration_and_oracle_void_trigger_stays_fail
                 renewals_used: 0,
             });
         });
+        assert!(!crate::configs::RuntimeGuardianTriggers::current().void_in_flight);
+        assert!(!crate::configs::RuntimeGuardianTriggers::oracle_deadlock(7));
+        pallet_epoch::PendingOracleVoids::<Runtime>::insert(7, ());
+        assert!(crate::configs::RuntimeGuardianTriggers::oracle_deadlock(7));
+        assert!(!crate::configs::RuntimeGuardianTriggers::oracle_deadlock(8));
         assert!(crate::configs::RuntimeGuardianTriggers::current().void_in_flight);
+        pallet_epoch::PendingOracleVoids::<Runtime>::remove(7);
         System::set_block_number(oracle_expiry);
         assert!(!Guardian::playbook_active(
             pallet_guardian::PlaybookId::OracleVoid
@@ -16191,10 +16252,12 @@ fn oracle_void_unfed_trigger_and_migration_gap_roll_back_fifth_approval() {
 
 #[test]
 fn ledger_freeze_runtime_effect_renews_both_pallets_once_and_reverts_both() {
+    use pallet_execution_guard::GuardianState as _;
     use pallet_guardian::GuardianEffectDispatcher;
 
     development_ext().execute_with(|| {
         System::set_block_number(10);
+        pallet_conditional_ledger::LedgerDrifted::<Runtime>::put(true);
         assert_ok!(crate::configs::RuntimeGuardianEffects::dispatch(
             pallet_guardian::GuardianPower::ActivatePlaybook {
                 id: pallet_guardian::PlaybookId::LedgerFreeze,
@@ -16206,6 +16269,11 @@ fn ledger_freeze_runtime_effect_renews_both_pallets_once_and_reverts_both() {
         ));
         assert!(pallet_conditional_ledger::FrozenUntil::<Runtime>::get().is_some());
         assert!(pallet_market::FrozenUntil::<Runtime>::get().is_some());
+        assert_ne!(
+            Constitution::phase_flags() & pallet_constitution::PhaseFlagsValue::LEDGER_FROZEN,
+            0
+        );
+        assert!(crate::configs::RuntimeGuardianState::ledger_freeze_active());
 
         System::set_block_number(11);
         assert_ok!(crate::configs::RuntimeGuardianEffects::renew_playbook(
@@ -16230,6 +16298,240 @@ fn ledger_freeze_runtime_effect_renews_both_pallets_once_and_reverts_both() {
             None
         );
         assert_eq!(pallet_market::FrozenUntil::<Runtime>::get(), None);
+        assert_eq!(
+            Constitution::phase_flags() & pallet_constitution::PhaseFlagsValue::LEDGER_FROZEN,
+            0
+        );
+        assert!(!crate::configs::RuntimeGuardianState::ledger_freeze_active());
+    });
+}
+
+#[test]
+fn ledger_freeze_runtime_maintenance_tracks_the_live_drift_latch() {
+    use frame_support::traits::Hooks as _;
+    use pallet_guardian::GuardianEffectDispatcher as _;
+
+    development_ext().execute_with(|| {
+        System::set_block_number(1);
+        let _members = seat_runtime_guardians(181);
+        pallet_guardian::ActivePlaybooks::<Runtime>::mutate(|active| {
+            assert!(active
+                .try_push(pallet_guardian::ActivePlaybook {
+                    id: pallet_guardian::PlaybookId::LedgerFreeze,
+                    expiry: 100,
+                    renewals_used: 0,
+                })
+                .is_ok());
+        });
+        pallet_conditional_ledger::LedgerDrifted::<Runtime>::put(true);
+        assert_ok!(
+            crate::configs::RuntimeGuardianEffects::set_live_conditioned_playbook(
+                pallet_guardian::PlaybookId::LedgerFreeze,
+                true,
+            )
+        );
+
+        pallet_conditional_ledger::LedgerDrifted::<Runtime>::put(false);
+        System::set_block_number(2);
+        let _ = Guardian::on_initialize(2);
+        assert!(pallet_guardian::ActivePlaybooks::<Runtime>::get()
+            .iter()
+            .any(|playbook| playbook.id == pallet_guardian::PlaybookId::LedgerFreeze));
+        assert_eq!(
+            pallet_conditional_ledger::FrozenUntil::<Runtime>::get(),
+            None
+        );
+        assert_eq!(pallet_market::FrozenUntil::<Runtime>::get(), None);
+        assert_eq!(
+            Constitution::phase_flags() & pallet_constitution::PhaseFlagsValue::LEDGER_FROZEN,
+            0
+        );
+        assert_ok!(Guardian::renew_playbook(
+            crate::track_origins::Origin::GuardianTrack.into(),
+            pallet_guardian::PlaybookId::LedgerFreeze,
+        ));
+        assert_eq!(
+            pallet_guardian::ActivePlaybooks::<Runtime>::get()
+                .iter()
+                .find(|playbook| playbook.id == pallet_guardian::PlaybookId::LedgerFreeze)
+                .map(|playbook| playbook.renewals_used),
+            Some(1)
+        );
+        assert_eq!(
+            pallet_conditional_ledger::FrozenUntil::<Runtime>::get(),
+            None
+        );
+        assert_eq!(pallet_market::FrozenUntil::<Runtime>::get(), None);
+
+        pallet_conditional_ledger::LedgerDrifted::<Runtime>::put(true);
+        System::set_block_number(3);
+        let _ = Guardian::on_initialize(3);
+        assert!(pallet_conditional_ledger::FrozenUntil::<Runtime>::get().is_some());
+        assert!(pallet_market::FrozenUntil::<Runtime>::get().is_some());
+        assert_ne!(
+            Constitution::phase_flags() & pallet_constitution::PhaseFlagsValue::LEDGER_FROZEN,
+            0
+        );
+    });
+}
+
+#[test]
+fn ledger_freeze_runtime_repairs_every_three_way_effect_mismatch() {
+    use frame_support::traits::Hooks as _;
+
+    for desired in [false, true] {
+        for mask in 0u8..8 {
+            development_ext().execute_with(|| {
+                System::set_block_number(1);
+                let _members = seat_runtime_guardians(182u8.saturating_add(mask));
+                pallet_guardian::ActivePlaybooks::<Runtime>::mutate(|active| {
+                    assert!(active
+                        .try_push(pallet_guardian::ActivePlaybook {
+                            id: pallet_guardian::PlaybookId::LedgerFreeze,
+                            expiry: 100,
+                            renewals_used: 0,
+                        })
+                        .is_ok());
+                });
+                let until = 50;
+                if mask & 1 != 0 {
+                    pallet_conditional_ledger::FrozenUntil::<Runtime>::put(until);
+                }
+                if mask & 2 != 0 {
+                    pallet_market::FrozenUntil::<Runtime>::put(until);
+                }
+                if mask & 4 != 0 {
+                    assert_ok!(Constitution::note_ledger_frozen(true));
+                }
+                pallet_conditional_ledger::LedgerDrifted::<Runtime>::put(desired);
+
+                System::set_block_number(2);
+                let _ = Guardian::on_initialize(2);
+                assert_eq!(
+                    pallet_conditional_ledger::FrozenUntil::<Runtime>::get()
+                        .is_some_and(|expiry| expiry > 2),
+                    desired,
+                    "mask {mask} did not normalize ledger to {desired}"
+                );
+                assert_eq!(
+                    pallet_market::FrozenUntil::<Runtime>::get().is_some_and(|expiry| expiry > 2),
+                    desired,
+                    "mask {mask} did not normalize market to {desired}"
+                );
+                assert_eq!(
+                    Constitution::phase_flags()
+                        & pallet_constitution::PhaseFlagsValue::LEDGER_FROZEN
+                        != 0,
+                    desired,
+                    "mask {mask} did not normalize constitution to {desired}"
+                );
+            });
+        }
+    }
+}
+
+#[test]
+fn ledger_drift_reconcile_guardian_activation_and_early_lift_are_end_to_end() {
+    use frame_support::traits::{
+        fungibles::Mutate as _,
+        tokens::{Fortitude, Precision, Preservation},
+        Hooks as _,
+    };
+    use sp_runtime::traits::AccountIdConversion as _;
+
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 14_233;
+        let claimant = account(230);
+        let ledger_account: AccountId =
+            <Runtime as pallet_conditional_ledger::Config>::PalletId::get()
+                .into_account_truncating();
+        System::set_block_number(10);
+        assert_ok!(ConditionalLedger::create_vault(
+            RuntimeOrigin::signed(crate::configs::market_account()),
+            PID,
+            0,
+        ));
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &claimant,
+            2 * currency::USDC,
+        ));
+        assert_ok!(ConditionalLedger::split(
+            RuntimeOrigin::signed(claimant),
+            PID,
+            currency::USDC,
+        ));
+
+        let (custody, liability) = ConditionalLedger::maintained_collateral_totals()
+            .expect("collateral totals are defined");
+        let deficit_move = custody.saturating_sub(liability).saturating_add(1);
+        assert_ok!(ForeignAssets::burn_from(
+            usdc_location(),
+            &ledger_account,
+            deficit_move,
+            Preservation::Expendable,
+            Precision::Exact,
+            Fortitude::Force,
+        ));
+        assert_ok!(ConditionalLedger::reconcile(RuntimeOrigin::signed(
+            account(232)
+        )));
+        assert!(pallet_conditional_ledger::LedgerDrifted::<Runtime>::get());
+
+        let _action = dispatch_runtime_guardian_power(
+            pallet_guardian::GuardianPower::ActivatePlaybook {
+                id: pallet_guardian::PlaybookId::LedgerFreeze,
+                trigger: pallet_guardian::PlaybookTrigger::LedgerDrift,
+                expiry: 20,
+                target: None,
+            },
+            190,
+        );
+        assert!(pallet_conditional_ledger::FrozenUntil::<Runtime>::get().is_some());
+        assert!(pallet_market::FrozenUntil::<Runtime>::get().is_some());
+        assert_ne!(
+            Constitution::phase_flags() & pallet_constitution::PhaseFlagsValue::LEDGER_FROZEN,
+            0
+        );
+
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &ledger_account,
+            deficit_move,
+        ));
+        assert_ok!(ConditionalLedger::reconcile(RuntimeOrigin::signed(
+            account(232)
+        )));
+        System::set_block_number(11);
+        let _ = Guardian::on_initialize(11);
+        assert_eq!(
+            pallet_conditional_ledger::FrozenUntil::<Runtime>::get(),
+            None
+        );
+        assert_eq!(pallet_market::FrozenUntil::<Runtime>::get(), None);
+
+        let (custody, liability) = ConditionalLedger::maintained_collateral_totals()
+            .expect("repaired collateral totals are defined");
+        let second_move = custody.saturating_sub(liability).saturating_add(1);
+        assert_ok!(ForeignAssets::burn_from(
+            usdc_location(),
+            &ledger_account,
+            second_move,
+            Preservation::Expendable,
+            Precision::Exact,
+            Fortitude::Force,
+        ));
+        assert_ok!(ConditionalLedger::reconcile(RuntimeOrigin::signed(
+            account(232)
+        )));
+        System::set_block_number(12);
+        let _ = Guardian::on_initialize(12);
+        assert!(pallet_conditional_ledger::FrozenUntil::<Runtime>::get().is_some());
+        assert!(pallet_market::FrozenUntil::<Runtime>::get().is_some());
+        assert_ne!(
+            Constitution::phase_flags() & pallet_constitution::PhaseFlagsValue::LEDGER_FROZEN,
+            0
+        );
     });
 }
 

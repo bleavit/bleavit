@@ -8,8 +8,9 @@
 //! differential check.
 
 use crate::{
-    mock::*, BaselineVaults, DepositsHeld, Error, Event, PositionCount, PositionTotals, Positions,
-    VaultTerminalAt, Vaults,
+    mock::*, BaselineVaults, DepositsHeld, Error, Event, LastReconciliation, LedgerDrifted,
+    PositionCount, PositionTotals, Positions, ReconciliationSample, TotalEscrowed, VaultTerminalAt,
+    Vaults,
 };
 use conditional_ledger_core::{
     baseline as baseline_pos, position as pos, BaselineState, LedgerOrigin, LedgerState,
@@ -17,15 +18,20 @@ use conditional_ledger_core::{
 use frame_support::{
     __private::metadata::{RuntimeMetadata, RuntimeMetadataPrefixed},
     assert_noop, assert_ok,
-    traits::fungibles::{Inspect, Mutate},
+    storage::{unhashed, StoragePrefixedMap},
+    traits::{
+        fungibles::{Inspect, Mutate},
+        GetStorageVersion, StorageVersion,
+    },
 };
 use frame_system::RawOrigin;
 use futarchy_primitives::{
     keeper::CrankClass, kernel, Branch, FixedU64, GateType, MetricSpecVersion, PositionKind,
     ProposalId, ScalarSide,
 };
-use parity_scale_codec::Decode;
+use parity_scale_codec::{Decode, Encode};
 use scale_info::TypeDef;
+use sp_runtime::{traits::StaticLookup, DispatchError};
 
 type E = Error<Test>;
 
@@ -66,6 +72,152 @@ fn try_state() {
     assert_ok!(Ledger::do_try_state());
 }
 
+#[test]
+fn v1_migration_backfills_total_escrowed_before_new_calls_run() {
+    new_test_ext().execute_with(|| {
+        create(1);
+        create_base(7);
+        assert_ok!(Ledger::split(signed(ALICE), 1, 3 * UNIT));
+        assert_ok!(Ledger::split_baseline(signed(BOB), 7, 2 * UNIT));
+        assert_eq!(TotalEscrowed::<Test>::get(), 5 * UNIT);
+
+        // Emulate the exact legacy pre-upgrade state: vault escrow exists but
+        // the new mirror key does not, and the pallet is still storage v0.
+        TotalEscrowed::<Test>::kill();
+        StorageVersion::new(0).put::<crate::Pallet<Test>>();
+        assert_eq!(TotalEscrowed::<Test>::get(), 0);
+
+        use frame_support::{
+            migrations::{SteppedMigration, SteppedMigrationError},
+            weights::{Weight, WeightMeter},
+        };
+        let mut starved = WeightMeter::with_limit(Weight::from_parts(1, 1));
+        assert!(matches!(
+            <crate::migration::BackfillTotalEscrowedV1<Test> as SteppedMigration>::step(
+                None,
+                &mut starved,
+            ),
+            Err(SteppedMigrationError::InsufficientWeight { .. })
+        ));
+        assert_eq!(TotalEscrowed::<Test>::get(), 0);
+        assert_eq!(
+            crate::Pallet::<Test>::on_chain_storage_version(),
+            StorageVersion::new(0)
+        );
+
+        let mut cursor = None;
+        loop {
+            let mut meter = WeightMeter::with_limit(Weight::MAX);
+            cursor = <crate::migration::BackfillTotalEscrowedV1<Test> as SteppedMigration>::step(
+                cursor, &mut meter,
+            )
+            .expect("bounded migration step succeeds");
+            assert_ok!(Ledger::do_try_state());
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            crate::Pallet::<Test>::on_chain_storage_version(),
+            StorageVersion::new(1)
+        );
+        assert_eq!(TotalEscrowed::<Test>::get(), 5 * UNIT);
+        try_state();
+
+        // Version gating makes a second execution a strict state no-op.
+        let before = TotalEscrowed::<Test>::get();
+        let mut meter = WeightMeter::with_limit(Weight::MAX);
+        assert!(
+            <crate::migration::BackfillTotalEscrowedV1<Test> as SteppedMigration>::step(
+                None, &mut meter,
+            )
+            .expect("version-gated no-op succeeds")
+            .is_none()
+        );
+        assert_eq!(TotalEscrowed::<Test>::get(), before);
+    });
+}
+
+#[test]
+fn v1_migration_precharges_before_rejecting_a_malformed_raw_key() {
+    new_test_ext().execute_with(|| {
+        use frame_support::{
+            migrations::{SteppedMigration, SteppedMigrationError},
+            weights::{Weight, WeightMeter},
+        };
+
+        StorageVersion::new(0).put::<crate::Pallet<Test>>();
+        TotalEscrowed::<Test>::kill();
+
+        let mut malformed =
+            <Vaults<Test> as StoragePrefixedMap<conditional_ledger_core::VaultInfo>>::final_prefix()
+                .to_vec();
+        malformed.push(0xff);
+        unhashed::put_raw(
+            &malformed,
+            &conditional_ledger_core::VaultInfo::open(0).encode(),
+        );
+
+        // The corrupt row is present, but a starved meter wins before the
+        // version or raw-prefix reads. This pins the pre-charge ordering.
+        let mut starved = WeightMeter::with_limit(Weight::from_parts(1, 1));
+        assert!(matches!(
+            <crate::migration::BackfillTotalEscrowedV1<Test> as SteppedMigration>::step(
+                None,
+                &mut starved,
+            ),
+            Err(SteppedMigrationError::InsufficientWeight { .. })
+        ));
+
+        let mut meter = WeightMeter::with_limit(Weight::MAX);
+        assert!(matches!(
+            <crate::migration::BackfillTotalEscrowedV1<Test> as SteppedMigration>::transactional_step(
+                None,
+                &mut meter,
+            ),
+            Err(SteppedMigrationError::Failed)
+        ));
+        assert!(unhashed::exists(&malformed));
+        assert_eq!(TotalEscrowed::<Test>::get(), 0);
+        assert_eq!(
+            crate::Pallet::<Test>::on_chain_storage_version(),
+            StorageVersion::new(0)
+        );
+    });
+}
+
+#[test]
+fn v1_migration_fails_static_on_a_malformed_raw_value() {
+    new_test_ext().execute_with(|| {
+        use frame_support::{
+            migrations::{SteppedMigration, SteppedMigrationError},
+            weights::{Weight, WeightMeter},
+        };
+
+        create(1);
+        let key = Vaults::<Test>::hashed_key_for(1);
+        unhashed::put_raw(&key, &[0xff]);
+        StorageVersion::new(0).put::<crate::Pallet<Test>>();
+        TotalEscrowed::<Test>::kill();
+
+        let before = unhashed::get_raw(&key).expect("corrupt row exists");
+        let mut meter = WeightMeter::with_limit(Weight::MAX);
+        assert!(matches!(
+            <crate::migration::BackfillTotalEscrowedV1<Test> as SteppedMigration>::transactional_step(
+                None,
+                &mut meter,
+            ),
+            Err(SteppedMigrationError::Failed)
+        ));
+        assert_eq!(unhashed::get_raw(&key), Some(before));
+        assert_eq!(TotalEscrowed::<Test>::get(), 0);
+        assert_eq!(
+            crate::Pallet::<Test>::on_chain_storage_version(),
+            StorageVersion::new(0)
+        );
+    });
+}
+
 fn cap_inputs() -> (u128, u128, Vec<(AccountId, u128)>, u128) {
     (
         MockLocalUsdcIssuance::get(),
@@ -73,6 +225,102 @@ fn cap_inputs() -> (u128, u128, Vec<(AccountId, u128)>, u128) {
         MockCumulativeDeposits::get(),
         MockDepCap::get(),
     )
+}
+
+#[test]
+fn maintained_escrow_tracks_deltas_and_try_state_rejects_mirror_corruption() {
+    new_test_ext().execute_with(|| {
+        create(1);
+        assert_eq!(TotalEscrowed::<Test>::get(), 0);
+        assert_ok!(Ledger::split(signed(ALICE), 1, UNIT));
+        assert_eq!(TotalEscrowed::<Test>::get(), UNIT);
+        assert_ok!(Ledger::merge(signed(ALICE), 1, UNIT));
+        assert_eq!(TotalEscrowed::<Test>::get(), 0);
+
+        create_base(7);
+        assert_ok!(Ledger::split_baseline(signed(ALICE), 7, 2 * UNIT));
+        assert_eq!(TotalEscrowed::<Test>::get(), 2 * UNIT);
+        assert_ok!(Ledger::merge_baseline(signed(ALICE), 7, UNIT));
+        assert_eq!(TotalEscrowed::<Test>::get(), UNIT);
+        try_state();
+
+        TotalEscrowed::<Test>::put(UNIT - 1);
+        assert_eq!(Ledger::do_try_state(), Err(E::TryStateViolation.into()));
+    });
+}
+
+#[test]
+fn reconcile_edges_use_exact_undercollateralization_and_surplus_is_healthy() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            Ledger::reconcile(RuntimeOrigin::root()),
+            DispatchError::BadOrigin
+        );
+        assert_noop!(
+            Ledger::reconcile(RuntimeOrigin::none()),
+            DispatchError::BadOrigin
+        );
+        create(1);
+        assert_ok!(Ledger::split(signed(ALICE), 1, UNIT));
+        RecordKeeperRebates::set(true);
+
+        let (custody, liability) = Ledger::maintained_collateral_totals().unwrap();
+        assert!(custody > liability, "genesis endowment is lawful surplus");
+        assert_ok!(Ledger::reconcile(signed(ALICE)));
+        assert!(!LedgerDrifted::<Test>::get());
+        assert!(KeeperRebates::get().is_empty());
+
+        let forced_out = custody - liability + 1;
+        assert_ok!(Assets::force_transfer(
+            signed(ALICE),
+            USDC,
+            <Test as frame_system::Config>::Lookup::unlookup(ledger_account()),
+            <Test as frame_system::Config>::Lookup::unlookup(BOB),
+            forced_out,
+        ));
+        assert_ok!(Ledger::reconcile(signed(ALICE)));
+        assert!(LedgerDrifted::<Test>::get());
+        assert_eq!(KeeperRebates::get(), vec![(ALICE, CrankClass::General)]);
+        assert!(matches!(
+            ledger_events().last(),
+            Some(Event::LedgerDriftDetected { liability: l, custody: c }) if l > c
+        ));
+
+        let edge_count = ledger_events().len();
+        assert_ok!(Ledger::reconcile(signed(ALICE)));
+        assert_eq!(ledger_events().len(), edge_count);
+        assert_eq!(KeeperRebates::get().len(), 1);
+
+        assert_ok!(<Assets as Mutate<AccountId>>::mint_into(
+            USDC,
+            &ledger_account(),
+            forced_out,
+        ));
+        assert_ok!(Ledger::reconcile(signed(ALICE)));
+        assert!(!LedgerDrifted::<Test>::get());
+        assert_eq!(KeeperRebates::get().len(), 2);
+        assert!(matches!(
+            ledger_events().last(),
+            Some(Event::LedgerDriftCleared { liability: l, custody: c }) if l <= c
+        ));
+        try_state();
+    });
+}
+
+#[test]
+fn try_state_binds_drift_latch_to_last_reconciliation_sample() {
+    new_test_ext().execute_with(|| {
+        LastReconciliation::<Test>::put(ReconciliationSample {
+            liability: 2,
+            custody: 1,
+            at: System::block_number(),
+        });
+        assert_eq!(Ledger::do_try_state(), Err(E::TryStateViolation.into()));
+        LedgerDrifted::<Test>::put(true);
+        // The live account remains solvent; the latch records the last sample and
+        // is cleared only by the next permissionless reconciliation.
+        assert_ok!(Ledger::do_try_state());
+    });
 }
 
 #[test]

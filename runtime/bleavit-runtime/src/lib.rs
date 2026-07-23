@@ -82,6 +82,8 @@ mod pov_budgets;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_b15_recovery;
+#[cfg(test)]
 mod tests_constitution_params;
 #[cfg(test)]
 mod tests_migration_guard;

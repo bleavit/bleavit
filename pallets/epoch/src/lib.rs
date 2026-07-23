@@ -234,6 +234,11 @@ pub trait ExecutionGuardAccess {
 /// finalization share the welfare-state-free `settle_baseline_void`
 /// passthrough.
 pub trait WelfareSettlement {
+    /// Whether `epoch` has at least one committed daily gate observation.
+    /// The epoch pallet uses this narrow read to persist doc-07 §10's
+    /// target-specific fail-static VOID signal before settlement enters its
+    /// rollback layer.
+    fn gate_window_sampled(epoch: EpochId) -> bool;
     fn compute_settlement(
         cohort_epoch: EpochId,
         spec: MetricSpecVersion,
@@ -663,6 +668,16 @@ pub mod pallet {
     #[pallet::storage]
     pub type GuardianIntakePausedUntil<T: Config> = StorageValue<_, BlockNumber, OptionQuery>;
 
+    /// Cohorts whose e+1/e+2 gate window is missing a committed observation.
+    ///
+    /// This is the v1 `oracle_deadlock` producer for PB-ORACLE-VOID. It is
+    /// deliberately target-keyed: one failed cohort never authorizes VOID of
+    /// another. Cardinality is bounded by the four non-terminal cohorts and
+    /// asserted in try-state (05 §4.7; 06 §6.2; 07 §10).
+    #[pallet::storage]
+    pub type PendingOracleVoids<T: Config> =
+        CountedStorageMap<_, Blake2_128Concat, EpochId, (), OptionQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -728,6 +743,18 @@ pub mod pallet {
         },
         /// Operational event outside the frozen 02 ingest schema.
         IntakePauseCleared,
+        /// A completed gate window lacked a committed observation and now
+        /// admits PB-ORACLE-VOID for exactly this cohort.
+        /// Operational diagnostic outside the frozen 02 ingest schema.
+        OracleDeadlockLatched {
+            epoch: EpochId,
+        },
+        /// The target latch was consumed by cohort VOID or cleared after late
+        /// observations restored the settlement input.
+        /// Operational diagnostic outside the frozen 02 ingest schema.
+        OracleDeadlockCleared {
+            epoch: EpochId,
+        },
     }
 
     #[pallet::error]
@@ -1190,6 +1217,70 @@ pub mod pallet {
             );
             let params = Self::live_params()?;
             let now = Self::now();
+
+            // Detect the exact 05 §4.7 / 07 §10 fail-static condition before
+            // entering the settlement rollback layer. A write made by the
+            // failing welfare call would otherwise be rolled back with it and
+            // PB-ORACLE-VOID would remain permanently unfed (SQ-233).
+            // Inspect a transient clock-synchronized view. The persisted clock
+            // may still say `Measuring` when this crank is the first caller at
+            // the settlement boundary; persisting that catch-up before the
+            // oracle check would couple the detector write to a failing call.
+            let mut detector_state = Self::load();
+            detector_state.sync_phase(now);
+            let gate_check_eligible = detector_state.recovery_epoch.is_none()
+                && detector_state.epoch.phase == EpochPhase::Housekeeping
+                && detector_state
+                    .cohorts
+                    .iter()
+                    .find(|cohort| cohort.epoch == epoch)
+                    .filter(|cohort| match cohort.status {
+                        CohortStatus::Measuring { until_epoch } => {
+                            detector_state.epoch.index >= until_epoch.saturating_add(1)
+                        }
+                        CohortStatus::AwaitingOracle => true,
+                        CohortStatus::Settling { .. }
+                        | CohortStatus::Settled
+                        | CohortStatus::Void => false,
+                    })
+                    .map(|cohort| {
+                        cohort.proposals.iter().any(|pid| {
+                            detector_state
+                                .proposals
+                                .iter()
+                                .find(|proposal| proposal.id == *pid)
+                                .is_some_and(|proposal| {
+                                    proposal
+                                        .markets
+                                        .is_some_and(|markets| markets.gates.is_some())
+                                })
+                        })
+                    })
+                    .unwrap_or(false);
+            let gate_deadlocked = gate_check_eligible
+                && (epoch
+                    .checked_add(1)
+                    .is_none_or(|measurement| !T::Welfare::gate_window_sampled(measurement))
+                    || epoch
+                        .checked_add(2)
+                        .is_none_or(|measurement| !T::Welfare::gate_window_sampled(measurement)));
+
+            if gate_deadlocked {
+                if !PendingOracleVoids::<T>::contains_key(epoch) {
+                    ensure!(
+                        PendingOracleVoids::<T>::count() < MAX_NON_TERMINAL_COHORTS_BOUND,
+                        Error::<T>::TooManyCohorts
+                    );
+                    PendingOracleVoids::<T>::insert(epoch, ());
+                    Self::deposit_event(Event::OracleDeadlockLatched { epoch });
+                    T::KeeperRebate::rebate(&who, CrankClass::DecisionCritical);
+                }
+                return Ok(());
+            }
+            if gate_check_eligible && PendingOracleVoids::<T>::take(epoch).is_some() {
+                Self::deposit_event(Event::OracleDeadlockCleared { epoch });
+            }
+
             let result = frame_support::storage::with_storage_layer(|| {
                 let baseline =
                     T::Market::baseline_market(epoch).ok_or(Error::<T>::BadDecisionInput)?;
@@ -1358,6 +1449,9 @@ pub mod pallet {
                     GuardianReviewDeadlines::<T>::remove(pid);
                     T::ExecutionGuard::dequeue_terminal(pid)
                         .map_err(|_| CoreError::ExecutionGuard)?;
+                }
+                if PendingOracleVoids::<T>::take(epoch).is_some() {
+                    Self::deposit_event(Event::OracleDeadlockCleared { epoch });
                 }
                 Ok(())
             })
@@ -2332,6 +2426,24 @@ pub mod pallet {
                     )),
                 Error::<T>::TooManyCohorts
             );
+            ensure!(
+                PendingOracleVoids::<T>::count() <= MAX_NON_TERMINAL_COHORTS_BOUND,
+                Error::<T>::TooManyCohorts
+            );
+            for epoch in PendingOracleVoids::<T>::iter_keys() {
+                let cohort = state
+                    .cohorts
+                    .iter()
+                    .find(|cohort| cohort.epoch == epoch)
+                    .ok_or(Error::<T>::TryStateViolation)?;
+                ensure!(
+                    matches!(
+                        cohort.status,
+                        CohortStatus::Measuring { .. } | CohortStatus::AwaitingOracle
+                    ),
+                    Error::<T>::TryStateViolation
+                );
+            }
             Ok(CheckedState {
                 epoch: EpochInfo {
                     index: state.epoch.index,
