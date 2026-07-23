@@ -160,8 +160,14 @@ fn escalate_to_terminal(reporter: u8, challenger: u8, epoch: EpochId) {
             counter_value(),
             h(10)
         ));
-        set_block(d);
-        assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(9)), 1));
+        assert_ok!(Oracle::counter_report(
+            RuntimeOrigin::signed(acc(reporter)),
+            C,
+            epoch,
+            V,
+            counter_value(),
+            h(11)
+        ));
     }
     // The terminal-round challenge that makes the game adjudicable.
     let d = Rounds::<Test>::get((C, epoch, V))
@@ -547,6 +553,8 @@ fn challenge_happy_path_supersedes_quorum_and_escalates_with_doubled_bond() {
         assert_ok!(do_report(1, E, reported_value(), h(9)));
 
         System::reset_events();
+        // Keep the escalation event from the signed counter-report; the close
+        // crank itself is a no-op until the new round's deadline.
         assert_ok!(Oracle::challenge(
             RuntimeOrigin::signed(acc(4)),
             C,
@@ -568,11 +576,20 @@ fn challenge_happy_path_supersedes_quorum_and_escalates_with_doubled_bond() {
             }]
         );
 
-        // A posted challenge is itself proof of observability: the round
-        // escalates on the crank regardless of any acknowledgments (07 §5.2),
-        // bonds doubling per round (07 §6.2: `B_2 = 2·B_1`).
-        set_block(1 + ORC_WINDOW_BLOCKS);
+        // A posted challenge is itself proof of observability, but the next
+        // round requires the reporter's explicit signed consent (07 §5.3).
         System::reset_events();
+        set_block(ORC_WINDOW_BLOCKS);
+        assert_ok!(Oracle::counter_report(
+            RuntimeOrigin::signed(acc(1)),
+            C,
+            E,
+            V,
+            counter_value(),
+            h(11)
+        ));
+        set_block(1 + ORC_WINDOW_BLOCKS);
+        // The crank at the old deadline is now an open-window no-op for round 2.
         assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(9)), 20));
         assert_eq!(
             oracle_events(),
@@ -586,7 +603,7 @@ fn challenge_happy_path_supersedes_quorum_and_escalates_with_doubled_bond() {
         let round = Rounds::<Test>::get((C, E, V)).unwrap();
         assert_eq!(round.round, 2);
         assert_eq!(round.bond, bond(2));
-        assert!(round.challenger.is_none()); // cleared for the new round
+        assert_eq!(round.challenger, Some(raw(4))); // challenger identity is durable
         assert_ok!(Oracle::do_try_state());
     });
 }
@@ -1364,8 +1381,15 @@ fn request_adjudication_at_round_three_emits_event() {
             counter_value(),
             h(10)
         ));
-        set_block(1 + ORC_WINDOW_BLOCKS);
-        assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(9)), 20));
+        set_block(ORC_WINDOW_BLOCKS);
+        assert_ok!(Oracle::counter_report(
+            RuntimeOrigin::signed(acc(1)),
+            C,
+            E,
+            V,
+            counter_value(),
+            h(11)
+        ));
         assert_ok!(Oracle::challenge(
             RuntimeOrigin::signed(acc(4)),
             C,
@@ -1374,8 +1398,15 @@ fn request_adjudication_at_round_three_emits_event() {
             counter_value(),
             h(11)
         ));
-        set_block(1 + 2 * ORC_WINDOW_BLOCKS);
-        assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(9)), 20));
+        set_block(2 * ORC_WINDOW_BLOCKS - 1);
+        assert_ok!(Oracle::counter_report(
+            RuntimeOrigin::signed(acc(1)),
+            C,
+            E,
+            V,
+            counter_value(),
+            h(12)
+        ));
         let round = Rounds::<Test>::get((C, E, V)).unwrap();
         assert_eq!(round.round, 3);
         assert_eq!(round.bond, bond(3)); // 07 §6.2: `B_3 = 4·B_1`
@@ -1385,7 +1416,7 @@ fn request_adjudication_at_round_three_emits_event() {
             E,
             V,
             counter_value(),
-            h(12)
+            h(13)
         ));
 
         System::reset_events();
@@ -1448,8 +1479,23 @@ fn amended_round_cap_moves_terminal_boundary_for_next_game_only() {
             counter_value(),
             h(20)
         ));
-        set_block(1 + ORC_WINDOW_BLOCKS);
-        assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(9)), 20));
+        set_block(ORC_WINDOW_BLOCKS);
+        assert_ok!(Oracle::counter_report(
+            RuntimeOrigin::signed(acc(1)),
+            C,
+            E,
+            V,
+            counter_value(),
+            h(11)
+        ));
+        assert_ok!(Oracle::counter_report(
+            RuntimeOrigin::signed(acc(1)),
+            C,
+            E + 1,
+            V,
+            counter_value(),
+            h(21)
+        ));
         assert_eq!(
             Rounds::<Test>::get((C, E, V)).map(|round| round.round),
             Some(2)
@@ -1481,8 +1527,15 @@ fn amended_round_cap_moves_terminal_boundary_for_next_game_only() {
         );
         assert_ok!(Oracle::request_adjudication(C, E + 1, V, 78));
 
-        set_block(1 + 2 * ORC_WINDOW_BLOCKS);
-        assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(9)), 20));
+        set_block(2 * ORC_WINDOW_BLOCKS - 1);
+        assert_ok!(Oracle::counter_report(
+            RuntimeOrigin::signed(acc(1)),
+            C,
+            E,
+            V,
+            counter_value(),
+            h(12)
+        ));
         assert_eq!(
             Rounds::<Test>::get((C, E, V)).map(|round| round.round),
             Some(3)
@@ -1493,7 +1546,7 @@ fn amended_round_cap_moves_terminal_boundary_for_next_game_only() {
             E,
             V,
             counter_value(),
-            h(12)
+            h(13)
         ));
         assert_ok!(Oracle::request_adjudication(C, E, V, 79));
         assert_ok!(Oracle::do_try_state());
@@ -1532,8 +1585,15 @@ fn mid_game_bond_amendment_does_not_reprice_later_rounds() {
             counter_value(),
             h(10)
         ));
-        set_block(1 + ORC_WINDOW_BLOCKS);
-        assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(9)), 20));
+        set_block(ORC_WINDOW_BLOCKS);
+        assert_ok!(Oracle::counter_report(
+            RuntimeOrigin::signed(acc(1)),
+            C,
+            E,
+            V,
+            counter_value(),
+            h(11)
+        ));
         let round_two = Rounds::<Test>::get((C, E, V)).expect("old game escalates");
         assert_eq!(round_two.round, 2);
         assert_eq!(
@@ -1551,8 +1611,15 @@ fn mid_game_bond_amendment_does_not_reprice_later_rounds() {
             counter_value(),
             h(11)
         ));
-        set_block(1 + 2 * ORC_WINDOW_BLOCKS);
-        assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(9)), 20));
+        set_block(2 * ORC_WINDOW_BLOCKS - 1);
+        assert_ok!(Oracle::counter_report(
+            RuntimeOrigin::signed(acc(1)),
+            C,
+            E,
+            V,
+            counter_value(),
+            h(12)
+        ));
         let round_three = Rounds::<Test>::get((C, E, V)).expect("old game reaches its cap");
         assert_eq!(round_three.round, 3);
         assert_eq!(round_three.bond, opening_bond.saturating_mul(4));
@@ -3267,20 +3334,12 @@ fn adjudicate_on_a_fresh_round_is_window_open() {
 fn note_settle_deadline_neutralizes_contested_round_and_blocks_late_verdict() {
     // limit-coverage: OracleSettleDeadline(m)
     // 07 §11 rule 1: any `(component, m)` not challenge-closed by its
-    // `OracleSettleDeadline` settles NEUTRALLY. Once neutral-settled and removed,
-    // a late terminal verdict finds no round and cannot overwrite the money (I-18
-    // — a late verdict resolves bonds only).
+    // `OracleSettleDeadline` settles NEUTRALLY while retaining the round's bond
+    // stack. A late terminal verdict resolves bonds only and cannot overwrite
+    // the money (I-18).
     new_test_ext().execute_with(|| {
         register_reporter(1);
-        assert_ok!(do_report(1, E, reported_value(), h(9)));
-        assert_ok!(Oracle::challenge(
-            RuntimeOrigin::signed(acc(4)),
-            C,
-            E,
-            V,
-            counter_value(),
-            h(10)
-        ));
+        escalate_to_terminal(1, 4, E);
 
         // The money deadline fires while the round is still contested.
         assert_ok!(Oracle::note_settle_deadline(E));
@@ -3288,10 +3347,19 @@ fn note_settle_deadline_neutralizes_contested_round_and_blocks_late_verdict() {
         assert_eq!(settled.path, SettlePath::Neutral);
         assert!(settled.flagged);
         assert_eq!(settled.value, FixedU64(COMPONENT_VALUE_MAX / 2)); // 0.5, no history
-        assert!(Rounds::<Test>::get((C, E, V)).is_none()); // no money-bearing round survives
+        assert!(Rounds::<Test>::get((C, E, V)).is_some()); // bond-only round survives
         assert_ok!(Oracle::do_try_state());
 
         // A late terminal verdict can no longer overwrite the settled money.
+        assert_ok!(Oracle::adjudicate(
+            RuntimeOrigin::signed(oracle_resolution_acc()),
+            C,
+            E,
+            V,
+            counter_value(),
+            false
+        ));
+        assert!(Rounds::<Test>::get((C, E, V)).is_none());
         assert_noop!(
             Oracle::adjudicate(
                 RuntimeOrigin::signed(oracle_resolution_acc()),

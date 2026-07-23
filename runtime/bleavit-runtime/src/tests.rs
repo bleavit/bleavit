@@ -1960,7 +1960,7 @@ fn identity_and_version_pins_match_the_integration_contract() {
     // makes a future re-coupling fail here.
     assert_eq!(VERSION.transaction_version, TRANSACTION_VERSION);
     assert_eq!(VERSION.transaction_version, 1);
-    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 10);
+    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 11);
     assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
@@ -2125,10 +2125,11 @@ fn oracle_registration_reads_live_constitution_stake() {
             Some(amended_stake),
         );
         assert_eq!(
-            ForeignAssets::balance(
-                usdc_location(),
-                &crate::configs::OraclePalletId::get().into_account_truncating()
-            ),
+            {
+                let oracle_account =
+                    crate::configs::OraclePalletId::get().into_account_truncating();
+                ForeignAssets::balance(usdc_location(), &oracle_account)
+            },
             amended_stake,
         );
     });
@@ -2141,10 +2142,11 @@ fn oracle_registration_refuses_an_unfunded_reporter_atomically() {
         assert!(Oracle::register_reporter(RuntimeOrigin::signed(reporter.clone())).is_err());
         assert!(!pallet_oracle::Reporters::<Runtime>::contains_key(reporter));
         assert_eq!(
-            ForeignAssets::balance(
-                usdc_location(),
-                &crate::configs::OraclePalletId::get().into_account_truncating()
-            ),
+            {
+                let oracle_account =
+                    crate::configs::OraclePalletId::get().into_account_truncating();
+                ForeignAssets::balance(usdc_location(), &oracle_account)
+            },
             0,
         );
     });

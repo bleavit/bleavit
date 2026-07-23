@@ -3353,12 +3353,14 @@ pub struct RuntimeEpochOracle;
 impl pallet_epoch::OracleAccess for RuntimeEpochOracle {
     fn any_open_dispute_touching(spec: futarchy_primitives::MetricSpecVersion) -> bool {
         // Rounds is core-bounded to 128 and try-state-covered. Only a live
-        // challenged round at or above the value-scaled round-one merit floor
-        // is a decision-time dispute (07 §12). Registry sub-games never
-        // enter this storage surface.
+        // challenged *round* at or above the value-scaled round-one merit
+        // floor is a decision-time dispute (07 §12). `challenger` is durable
+        // across the escalation ladder; `counter_value` identifies the active
+        // challenge for this round. Registry sub-games never enter this
+        // storage surface.
         pallet_oracle::Rounds::<Runtime>::iter().any(|(_, round)| {
             round.spec_version == spec
-                && round.challenger.is_some()
+                && round.counter_value.is_some()
                 && match pallet_oracle::RoundSchedules::<Runtime>::get((
                     round.component,
                     round.epoch,
@@ -4665,8 +4667,7 @@ impl pallet_oracle::Config for Runtime {
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
 
-/// USDC custody for oracle registration stakes. Round-bond collateral remains
-/// disabled until the signed escalation kernel lands.
+/// USDC custody for oracle registration stakes and signed round-bond collateral.
 /// The dedicated sovereign account is separate from the treasury oracle payout
 /// line: its balance is exactly the bounded I-29 liability set (apart from dust
 /// only after a terminal transfer has completed).
@@ -7528,6 +7529,11 @@ impl pallet_oracle::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
                 specs: frame_support::BoundedVec::truncate_from(Vec::from([(1, version)])),
             },
         );
+    }
+    fn prime_custody(seed: u8, amount: Balance) {
+        benchmark_ensure_usdc();
+        let who = AccountId32::new([seed; 32]);
+        let _ = <ForeignAssets as Mutate<AccountId>>::mint_into(usdc_location(), &who, amount);
     }
 }
 #[cfg(feature = "runtime-benchmarks")]
