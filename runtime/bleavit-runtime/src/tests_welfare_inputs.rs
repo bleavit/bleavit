@@ -19,12 +19,25 @@ fn install_spec(
     version: futarchy_primitives::MetricSpecVersion,
     activation_epoch: futarchy_primitives::EpochId,
 ) {
+    install_spec_for(
+        version,
+        activation_epoch,
+        futarchy_primitives::metric_ids::X,
+    );
+}
+
+/// As [`install_spec`], for an explicitly chosen `C_onchain` component id.
+fn install_spec_for(
+    version: futarchy_primitives::MetricSpecVersion,
+    activation_epoch: futarchy_primitives::EpochId,
+    id: futarchy_primitives::MetricId,
+) {
     for (stored, _) in pallet_welfare::MetricSpecs::<Runtime>::iter() {
         pallet_welfare::MetricSpecs::<Runtime>::remove(stored);
     }
     pallet_welfare::SnapshotDeadline::<Runtime>::kill();
     let spec = pallet_welfare::MetricSpec {
-        id: futarchy_primitives::metric_ids::X,
+        id,
         version,
         pillar: pallet_welfare::Pillar::COnchain,
         weight: futarchy_primitives::FixedU64(pallet_welfare::ONE),
@@ -200,6 +213,66 @@ fn sq82_the_runtime_register_spec_origin_set_is_closed_and_lead_bound() {
         assert_eq!(
             current,
             <Runtime as pallet_welfare::Config>::CurrentEpoch::get(),
+        );
+    });
+}
+
+/// SQ-195: the 07 §8 reserve-health input `R` is day-resolved, fail-static, and
+/// **not measured before the probe arms**.
+///
+/// The last property is the one the row warned about: with the probe unarmed,
+/// scoring absence as 0 would drive `R = 0` on every day and set the daily C
+/// breach flag out of a mechanism that never ran — fail-destructive, not
+/// fail-safe. `ReserveProbeArmed` is exactly the latch that distinguishes
+/// "measured and failed" from "not measuring yet".
+#[test]
+fn sq195_reserve_health_is_day_resolved_and_unmeasured_before_arming() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 41;
+    const EPOCH: futarchy_primitives::EpochId = 4;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::R);
+        let r_of = |day: u8| {
+            crate::configs::RuntimeMetricInputs::daily_components(EPOCH, day, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::R)
+                .map(|c| c.value)
+        };
+
+        // Unarmed: absent entirely, so a spec registering R fails the crank
+        // status-quo-safe rather than fabricating either health or breach.
+        assert!(!crate::Oracle::reserve_probe_armed());
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(EPOCH, 1, true);
+        assert_eq!(r_of(1), None, "R must be unavailable before the probe arms");
+
+        pallet_oracle::ReserveProbeArmed::<Runtime>::put(true);
+
+        // Armed: a recorded pass scores 1, a recorded fail scores 0, and an
+        // unrecorded day scores 0 — absence is never healthy (07 §8).
+        assert_eq!(
+            r_of(1),
+            Some(futarchy_primitives::FixedU64(pallet_welfare::ONE))
+        );
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(EPOCH, 2, false);
+        assert_eq!(r_of(2), Some(futarchy_primitives::FixedU64(0)));
+        assert_eq!(r_of(3), Some(futarchy_primitives::FixedU64(0)));
+
+        // A failed day stays failed: a later success for the same day cannot
+        // rewrite it, which is what makes recovery non-retroactive.
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(EPOCH, 2, true);
+        assert_eq!(r_of(2), Some(futarchy_primitives::FixedU64(0)));
+
+        // Epoch projection is the minimum over recorded days: one failed day
+        // fails the epoch's settlement-time `C_e` term (05 §4.4).
+        assert_eq!(
+            pallet_welfare::Pallet::<Runtime>::reserve_probe_epoch(EPOCH),
+            Some(false)
+        );
+        assert_eq!(
+            pallet_welfare::Pallet::<Runtime>::reserve_probe_epoch(EPOCH + 1),
+            None,
+            "an epoch with no recorded probe day has no epoch-level R"
         );
     });
 }

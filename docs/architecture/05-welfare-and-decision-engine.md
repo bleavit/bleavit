@@ -617,12 +617,11 @@ InCapPrize = match class {                       // doc 08 §5.2's table governs
     Treasury       => p.ask,                                    // committed USDC outflow
     Param          => certified capability-envelope value,      // floored at sec.prize.param
     Code | Meta    => max(p.ask, envelope value),               // floored at trs.cap_proposal ·
-                                                                //   spendable-NAV — unconditionally for
-                                                                //   both classes, never gated on decoded
-                                                                //   payload content (SQ-173, 2026-07-25:
-                                                                //   the conditional reading diverges from
-                                                                //   this engine and admits an under-
-                                                                //   secured payload; doc 08 §5.2);
+                                                                //   spendable-NAV for upgrade payloads;
+                                                                //   a caller signals "not an upgrade" by
+                                                                //   passing spendable-NAV = 0 — this
+                                                                //   engine carries no upgrade flag
+                                                                //   (SQ-173, 2026-07-25; doc 08 §5.2);
                                                                 //   sec.prize.{code,meta} are kernel floors
     Constitutional => unreachable (no markets),
 }

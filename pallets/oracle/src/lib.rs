@@ -218,6 +218,13 @@ impl ProbeDispatch for () {
 /// 09 §6.4).
 pub trait ProbeTimeoutSink {
     fn probe_timed_out();
+    /// Record one day-resolved reserve-probe outcome (07 §8 `R_daily`; SQ-195).
+    ///
+    /// Fires on every scored slot — a success response, an error response, and
+    /// a folded timeout — so the welfare `R` input is day-attributed at the
+    /// source rather than reconstructed from the consecutive-fail counters,
+    /// which cannot say *which* day failed and which recovery rewrites.
+    fn probe_outcome(_passed: bool) {}
 }
 
 impl ProbeTimeoutSink for () {
@@ -908,6 +915,16 @@ pub mod pallet {
             })?;
             if folded_timeout {
                 T::ProbeTimeoutSink::probe_timed_out();
+                // A timeout is a scored fail for the day the attempt belonged
+                // to (07 §8: "timeout … ⇒ probe fail"), so it feeds `R` too.
+                T::ProbeTimeoutSink::probe_outcome(false);
+            }
+            if missed > 0 {
+                // Folded no-attempt slots are equally fail-static. They are
+                // attributed to the day the fold is observed: the cadence
+                // anchor advanced past them, and 07 §8 requires the saturating
+                // O(1) update to never loop over outage duration.
+                T::ProbeTimeoutSink::probe_outcome(false);
             }
             if let Some(query_id) = fresh_query_id {
                 if !was_armed {
@@ -1004,7 +1021,11 @@ pub mod pallet {
             let params = T::Params::get();
             Self::mutate_reserve_health(|o| {
                 o.reserve_probe_result_with_params(now, query_id, passed, &params)
-            })
+            })?;
+            // Only a response the core accepted reaches here; a wrong-origin,
+            // replayed or unknown id errors above and records nothing (07 §8).
+            T::ProbeTimeoutSink::probe_outcome(passed);
+            Ok(())
         }
 
         /// Escalate a round-3 dispute onto the `OracleResolution` track, recording

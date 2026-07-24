@@ -15416,14 +15416,21 @@ fn sq173_class_envelopes_back_every_binding_class_prize() {
 }
 
 /// Cross-implementation pin for 15 §4.4: the runtime's CODE/META
-/// `InCapPrize` must equal the reference model's on the same inputs. This
-/// reproduces exactly the case `reference-model/tests/test_reference_model.py`
+/// `InCapPrize` must equal the reference model's on the same inputs, on **both**
+/// sides of 08 §5.2's upgrade condition. It reproduces exactly the case
+/// `reference-model/tests/test_reference_model.py`
 /// `test_code_meta_nav_floor_is_scoped_to_upgrade_payloads` fixes — ask 100,
 /// envelope 200, spendable NAV 10,000 at `trs.cap_proposal` 5% — where the
-/// oracle returns **500**, the `trs.cap_proposal · NAV` floor. The runtime
-/// applies that floor to every CODE/META proposal, matching `decide()`, which
-/// never conditions it on payload content; a runtime that conditioned it would
-/// return 200 here and silently disagree with the oracle on a solvency path.
+/// oracle returns **500** for an upgrade payload and **200** for a non-upgrade
+/// one.
+///
+/// The oracle expresses that condition through its caller, not a flag:
+/// `decide()` takes no `upgrade_payload` argument, so a caller signals "not an
+/// upgrade" by passing `spendable_nav = 0`. That is what the Phase-0 simulation
+/// does, and what the published calibration behind the `sec.prize.*` defaults
+/// was run under. Reading `decide()`'s signature alone suggests an
+/// unconditional floor; this test exists because that misreading was briefly
+/// shipped and put the runtime at odds with the Phase-0 evidence.
 #[test]
 fn sq173_code_meta_prize_matches_the_reference_model_worked_case() {
     use frame_support::traits::fungibles::Mutate;
@@ -15474,12 +15481,31 @@ fn sq173_code_meta_prize_matches_the_reference_model_worked_case() {
                 empty_param_proposal(9_350, account(45), payload_hash, payload_len);
             proposal.class = class;
             proposal.ask = 100 * currency::USDC;
+            // Non-upgrade payload: no floor, so max(ask 100, envelope 200).
+            // The oracle's equivalent call passes `spendable_nav = 0`.
+            assert_eq!(
+                <crate::configs::RuntimeConstitutionAccess as ConstitutionAccess<AccountId>>::in_cap_prize(
+                    &proposal
+                ),
+                Some(200 * currency::USDC),
+                "{class:?} non-upgrade must equal the reference model's 200",
+            );
+
+            // Upgrade payload: the floor binds at 5% of 10,000 USDC = 500.
+            let (upgrade_hash, upgrade_len) = note_runtime_batch(vec![RuntimeCall::System(
+                frame_system::Call::authorize_upgrade {
+                    code_hash: H256::repeat_byte(46),
+                },
+            )])
+            .expect("upgrade payload is notable");
+            proposal.payload_hash = upgrade_hash.0;
+            proposal.payload_len = upgrade_len;
             assert_eq!(
                 <crate::configs::RuntimeConstitutionAccess as ConstitutionAccess<AccountId>>::in_cap_prize(
                     &proposal
                 ),
                 Some(500 * currency::USDC),
-                "{class:?} must equal the reference model's 500",
+                "{class:?} upgrade must equal the reference model's 500",
             );
         }
     });

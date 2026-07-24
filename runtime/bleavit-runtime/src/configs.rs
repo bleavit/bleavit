@@ -2592,6 +2592,29 @@ fn class_security_envelope(class: futarchy_primitives::ProposalClass) -> Option<
     live_balance_param(key).filter(|value| *value > 0)
 }
 
+/// Whether a CODE/META payload authorizes a runtime upgrade, which 08 §5.2
+/// floors at `trs.cap_proposal · spendable NAV`. An undecodable or unpinned
+/// preimage answers **yes**: the floor can only raise the prize, so the
+/// claimant-adverse reading is the one that cannot let an upgrade through
+/// under-secured (R-7).
+fn carries_upgrade_payload(proposal: &futarchy_primitives::Proposal<AccountId>) -> bool {
+    use pallet_execution_guard::BatchDispatcher;
+    let Some(calls) = proposal_calls(proposal) else {
+        return true;
+    };
+    calls.iter().any(|call| {
+        crate::classifier::RuntimeDispatcher::rederive_call(call).is_ok_and(|analysis| {
+            analysis.domains.iter().any(|domain| {
+                matches!(
+                    domain,
+                    pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade
+                        | pallet_execution_guard::CallDomain::InternalRootApplyUpgrade
+                )
+            })
+        })
+    })
+}
+
 fn scaled_pol_floor(
     class: futarchy_primitives::ProposalClass,
     floor: Balance,
@@ -4401,23 +4424,32 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
             futarchy_primitives::ProposalClass::Param => class_security_envelope(proposal.class),
             futarchy_primitives::ProposalClass::Code | futarchy_primitives::ProposalClass::Meta => {
                 let envelope = class_security_envelope(proposal.class)?;
-                // The `trs.cap_proposal · spendable NAV` floor applies to
-                // **every** CODE/META proposal, not only those whose payload
-                // decodes to a runtime upgrade. 08 §5.2 states the floor with
-                // an upgrade rationale ("an upgrade is assumed able to reach
-                // the full per-proposal outflow cap"), but the executable spec
-                // — `reference-model`'s `decision.decide`, which 15 §4.4 makes
-                // the differential oracle — applies it unconditionally for
-                // these two classes. An implementation that conditioned the
-                // floor on a decoded payload would disagree with the oracle on
-                // a solvency path and could adopt a proposal the oracle
-                // rejects; the conservative branch is also the equivalent one.
+                let prize = envelope.max(proposal.ask);
+                // 08 §5.2: the `trs.cap_proposal · spendable NAV` floor binds
+                // **runtime-upgrade payloads** — "an upgrade is assumed able to
+                // reach the full per-proposal outflow cap".
+                //
+                // The differential oracle agrees, though it says so through its
+                // caller rather than a flag: `decision.decide` takes no
+                // `upgrade_payload` argument and passes `spendable_nav`
+                // straight through, so a caller expresses "not an upgrade" by
+                // passing `spendable_nav = 0` — which is exactly what the
+                // Phase-0 simulation engine does for non-upgrade CODE/META
+                // proposals, and what the published calibration the
+                // `sec.prize.*` values were adopted from was run under. Reading
+                // `decide`'s signature alone suggests an unconditional floor;
+                // that reading is wrong, and briefly shipping it here put the
+                // runtime at odds with the Phase-0 evidence (SQ-173, corrected
+                // 2026-07-25).
                 //
                 // 05 §5.4 step 9 rounds `InCapPrize` **UP**, so the floor is
                 // ceil-rounded: flooring `nav · cap_proposal / 100` would
                 // understate it by up to one µUSDC at a boundary NAV.
+                if !carries_upgrade_payload(proposal) {
+                    return Some(prize);
+                }
                 let cap = ceil_mul_div(nav, cap_percent, 100)?;
-                Some(envelope.max(proposal.ask).max(cap))
+                Some(prize.max(cap))
             }
             // 05 §5.6: Constitutional runs no markets, so step 9 is unreachable.
             futarchy_primitives::ProposalClass::Constitutional => None,
@@ -4774,6 +4806,7 @@ fn metric_components(
     epoch: EpochId,
     spec_version: u16,
     counters: pallet_welfare::XcmTrafficCounters,
+    reserve: Option<bool>,
 ) -> Vec<pallet_welfare::ComponentValue> {
     let Some(specs) = pallet_welfare::MetricSpecs::<Runtime>::get(spec_version) else {
         return Vec::new();
@@ -4794,14 +4827,23 @@ fn metric_components(
             let value = match spec.id {
                 futarchy_primitives::metric_ids::X => x,
                 futarchy_primitives::metric_ids::R => {
-                    // 07 §8 makes R probe-day-resolved and says absence is
-                    // never healthy. The current reserve-unhealthy latch is
-                    // fail-open before the first probe and recovery rewrites
-                    // the apparent history, so v1 binds X only. R remains
-                    // unbound until a day-resolved probe-outcome store exists;
-                    // a registered R therefore fails the crank status-quo-safe,
-                    // exactly like the other unavailable on-chain components.
-                    return None;
+                    // 07 §8 (SQ-195). Before the probe arms, `R` is **not
+                    // measured**: the `ReserveProbeArmed` latch exists because
+                    // pre-arm wall-clock slots are not outages, and scoring
+                    // them 0 would set the C breach flag out of a mechanism
+                    // that never ran — fail-destructive, not fail-safe. So an
+                    // unarmed chain leaves `R` absent and a spec registering it
+                    // fails the crank status-quo-safe, as before.
+                    if !pallet_oracle::Pallet::<Runtime>::reserve_probe_armed() {
+                        return None;
+                    }
+                    // Armed: the day (or epoch) scores 1 only on a recorded
+                    // pass. Absence is never healthy — §8 has no
+                    // benefit-of-the-doubt branch, unlike `X`.
+                    match reserve {
+                        Some(true) => FixedU64(pallet_welfare::ONE),
+                        _ => FixedU64(0),
+                    }
                 }
                 // Inputs for every other registered component land with the
                 // A8/values wiring. Welfare treats registered-but-missing input
@@ -4840,6 +4882,9 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
                 epoch,
                 version,
                 pallet_welfare::Pallet::<Runtime>::xcm_traffic_epoch(epoch),
+                // 05 §4.4's settlement-time `C_e` takes epoch-level `c_j`; the
+                // epoch projection of `R` is the minimum over recorded days.
+                pallet_welfare::Pallet::<Runtime>::reserve_probe_epoch(epoch),
             );
             components.extend(
                 specs
@@ -4896,6 +4941,7 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
             epoch,
             version,
             pallet_welfare::Pallet::<Runtime>::xcm_traffic(epoch, day),
+            pallet_welfare::Pallet::<Runtime>::reserve_probe_daily(epoch, day),
         )
     }
 }
@@ -5126,6 +5172,14 @@ pub struct OracleProbeTimeoutToWelfare;
 impl pallet_oracle::ProbeTimeoutSink for OracleProbeTimeoutToWelfare {
     fn probe_timed_out() {
         <XcmTrafficRecorder as bleavit_xcm::health::LocalXcmHealthSink>::note_probe_timeout();
+    }
+
+    /// Day-attribute one scored probe slot for the 07 §8 `R_daily` input
+    /// (SQ-195). `xcm_traffic_epoch_and_day` is the established attribution
+    /// precedent and reads the same live schedule the traffic counters use.
+    fn probe_outcome(passed: bool) {
+        let (epoch, day) = xcm_traffic_epoch_and_day();
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, day, passed);
     }
 }
 

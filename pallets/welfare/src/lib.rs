@@ -382,6 +382,23 @@ pub mod pallet {
     pub type XcmTrafficEpochs<T: Config> =
         StorageValue<_, BoundedVec<EpochId, ConstU32<MAX_XCM_TRAFFIC_EPOCHS_BOUND>>, ValueQuery>;
 
+    /// Day-resolved reserve-probe outcomes (07 §8 `R_daily`; SQ-195).
+    ///
+    /// `Some(true)` = that day's probe passed; `Some(false)` = it failed
+    /// (error response, timeout, or a folded no-attempt slot). **Absence is not
+    /// health**: 07 §8 has no benefit-of-the-doubt branch, so a completed day
+    /// with no entry scores 0 once the probe is armed. Before arming, `R` is
+    /// *unavailable* rather than 0 — the probe's own `ReserveProbeArmed` latch
+    /// says pre-arm slots are not outages, and scoring them as failures would
+    /// set the C breach flag out of a mechanism that never ran.
+    ///
+    /// Keyed exactly like [`XcmTraffic`] and retired by the same bounded walk,
+    /// so it inherits that map's `MAX_XCM_TRAFFIC_EPOCHS_BOUND` prefix index and
+    /// its `u8`-bounded 256-day second key (I-20/I-21).
+    #[pallet::storage]
+    pub type ReserveProbeDaily<T: Config> =
+        StorageDoubleMap<_, Twox64Concat, EpochId, Twox64Concat, u8, bool, OptionQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -872,6 +889,10 @@ pub mod pallet {
                         break;
                     };
                     let _ = XcmTraffic::<T>::clear_prefix(epoch, u8::MAX as u32 + 1, None);
+                    // SQ-195: the day-resolved probe outcomes share this
+                    // prefix index and retention window, so they retire in the
+                    // same bounded step rather than accruing behind it.
+                    let _ = ReserveProbeDaily::<T>::clear_prefix(epoch, u8::MAX as u32 + 1, None);
                     if let Some(position) = epochs.iter().position(|stored| *stored == epoch) {
                         epochs.remove(position);
                     }
@@ -911,6 +932,57 @@ pub mod pallet {
                     counters.probe_timeouts = counters.probe_timeouts.saturating_add(1);
                 }
             });
+        }
+
+        /// Record one day-resolved reserve-probe outcome (07 §8; SQ-195).
+        ///
+        /// Fail-soft and **fail-static on conflict**: a day that already
+        /// recorded a failure stays failed even if a later response for that
+        /// same day reports success, because 07 §8 scores the day, not the
+        /// last message to arrive. Only an unrecorded day, or one already
+        /// marked passed, can be written to `true`.
+        pub fn note_reserve_probe(epoch: EpochId, day: u8, passed: bool) {
+            // Bound the new prefix to the shared traffic index so the retention
+            // walk can always find and retire it.
+            let tracked = XcmTrafficEpochs::<T>::mutate(|epochs| {
+                if epochs.contains(&epoch) {
+                    true
+                } else {
+                    epochs.try_push(epoch).is_ok()
+                }
+            });
+            if !tracked {
+                return;
+            }
+            ReserveProbeDaily::<T>::mutate(epoch, day, |slot| match slot {
+                Some(false) => {}
+                _ => *slot = Some(passed),
+            });
+        }
+
+        /// Read one day's reserve-probe outcome; `None` means unrecorded.
+        pub fn reserve_probe_daily(epoch: EpochId, day: u8) -> Option<bool> {
+            ReserveProbeDaily::<T>::get(epoch, day)
+        }
+
+        /// Epoch-level `R` for the settlement-time `C_e` term (05 §4.4).
+        ///
+        /// 07 §8 defines only `R_daily`; the epoch projection is the **minimum
+        /// over the epoch's recorded days** — one failed probe day fails the
+        /// epoch. That is the only aggregation consistent with §8's own
+        /// fail-static rule ("absence is never healthy … every absent, failed,
+        /// ambiguous, late or unauthenticated outcome is fail-static in the
+        /// pessimistic direction"): any averaging or majority reading would let
+        /// a passing day mask a proven-unreachable reserve.
+        pub fn reserve_probe_epoch(epoch: EpochId) -> Option<bool> {
+            let mut seen = false;
+            for (_, passed) in ReserveProbeDaily::<T>::iter_prefix(epoch) {
+                seen = true;
+                if !passed {
+                    return Some(false);
+                }
+            }
+            seen.then_some(true)
         }
 
         /// Return the local XCM counters for one epoch/day window.
