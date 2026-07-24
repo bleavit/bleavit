@@ -1812,10 +1812,12 @@ fn constitution_composite_v0_migration_is_atomic_before_pricing_insertion() {
 #[test]
 fn constitution_v2_migration_is_an_idempotent_current_version_noop() {
     tests::development_ext().execute_with(|| {
-        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(2));
+        // SQ-173 advanced the Constitution to v3, so a genesis chain is already
+        // past the v2 migration's window and it must do nothing at all.
+        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(3));
         let before: Vec<_> = pallet_constitution::Params::<Runtime>::iter().collect();
         let _ = <crate::migrations::MigrateConstitutionReserveProbeV2 as OnRuntimeUpgrade>::on_runtime_upgrade();
-        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(2));
+        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(3));
         assert_eq!(pallet_constitution::Params::<Runtime>::iter().collect::<Vec<_>>(), before);
     });
 }

@@ -87,12 +87,14 @@ type SingleBlockMigrations = (
     crate::migrations::RetireB16State,
     crate::migrations::MigrateConstitutionReserveProbeV2,
     crate::migrations::MigrateOracleReserveProbeV1,
+    crate::migrations::MigrateConstitutionSecurityPrizeV3,
 );
 #[cfg(all(feature = "phase-four", not(feature = "recovery")))]
 type SingleBlockMigrations = (
     crate::migrations::RetireB16State,
     crate::migrations::MigrateConstitutionReserveProbeV2,
     crate::migrations::MigrateOracleReserveProbeV1,
+    crate::migrations::MigrateConstitutionSecurityPrizeV3,
     crate::migrations::PhaseFourTransition,
 );
 #[cfg(feature = "recovery")]
@@ -100,6 +102,7 @@ type SingleBlockMigrations = (
     crate::migrations::RetireB16State,
     crate::migrations::MigrateConstitutionReserveProbeV2,
     crate::migrations::MigrateOracleReserveProbeV1,
+    crate::migrations::MigrateConstitutionSecurityPrizeV3,
     crate::migrations::TerminalRecoveryTransition,
 );
 
@@ -2037,7 +2040,7 @@ fn perbill_param_or(name: &[u8], default: u32) -> u32 {
         },
     }
 }
-fn percent_param(name: &[u8]) -> u8 {
+pub(crate) fn percent_param(name: &[u8]) -> u8 {
     percent_param_or(name, 0)
 }
 fn percent_param_or(name: &[u8], default: u8) -> u8 {
@@ -4399,11 +4402,13 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
             return Some(currency::USDC);
         }
         let nav = crate::FutarchyTreasury::nav().spendable_nav;
-        let cap = nav
-            .checked_mul(Balance::from(percent_param(b"trs.cap_proposal")))?
-            .checked_div(100)?;
+        let cap_percent = Balance::from(percent_param(b"trs.cap_proposal"));
         match proposal.class {
             futarchy_primitives::ProposalClass::Treasury => {
+                // The TREASURY admission ceiling rounds **down**: a larger cap
+                // admits a larger ask, so the floor is the conservative side
+                // here — the opposite of the CODE/META prize floor below.
+                let cap = nav.checked_mul(cap_percent)?.checked_div(100)?;
                 let calls = proposal_calls(proposal)?;
                 let ask = derived_treasury_ask(&calls)?;
                 (ask == proposal.ask && ask <= cap).then_some(ask)
@@ -4420,11 +4425,15 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
             futarchy_primitives::ProposalClass::Code | futarchy_primitives::ProposalClass::Meta => {
                 let envelope = class_security_envelope(proposal.class)?;
                 let prize = envelope.max(proposal.ask);
-                Some(if carries_upgrade_payload(proposal) {
-                    prize.max(cap)
-                } else {
-                    prize
-                })
+                if !carries_upgrade_payload(proposal) {
+                    return Some(prize);
+                }
+                // 05 §5.4 step 9 rounds `InCapPrize` **UP**, so the upgrade
+                // floor is ceil-rounded: flooring `nav · cap_proposal / 100`
+                // would understate the prize by up to one µUSDC and admit a
+                // boundary proposal the reference model rejects.
+                let cap = ceil_mul_div(nav, cap_percent, 100)?;
+                Some(prize.max(cap))
             }
             // 05 §5.6: Constitutional runs no markets, so step 9 is unreachable.
             futarchy_primitives::ProposalClass::Constitutional => None,

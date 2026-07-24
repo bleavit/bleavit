@@ -137,7 +137,7 @@ pub mod pallet {
     use futarchy_primitives::{EpochId, ParamKey, ProposalClass};
 
     /// The in-code storage version of this pallet.
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(2);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(3);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -299,6 +299,12 @@ pub mod pallet {
         /// unsafe-direction timing/capacity/POL change is refused fail-closed
         /// (SQ-303).
         BudgetDerivationRequired,
+        /// 09 §5.2: `phase3.tvl_cap` / `phase3.dep_cap` are raised only by
+        /// phase gates and are not PARAM/META-adjustable during Phases ≤ 3.
+        /// Lowering — tightening containment — remains legal at every phase
+        /// (SQ-197). Deliberately not `BadOrigin`: the origin is authorized,
+        /// the value direction is not.
+        PhaseCapRaiseRefused,
     }
 
     #[pallet::hooks]
@@ -355,6 +361,15 @@ pub mod pallet {
                     _ => return Err(Error::<T>::WrongType.into()),
                 }
             }
+            ensure!(
+                !constitution_core::phase_cap_raise_refused(
+                    key,
+                    record.value,
+                    value,
+                    PhaseFlags::<T>::get() & PhaseFlagsValue::PARAM_ARMED != 0,
+                ),
+                Error::<T>::PhaseCapRaiseRefused
+            );
             ensure!(
                 T::BudgetDerivationGuard::permits(key, record.value, value),
                 Error::<T>::BudgetDerivationRequired
@@ -755,7 +770,19 @@ pub mod pallet {
         pub fn do_try_state() -> Result<(), TryRuntimeError> {
             if StorageVersion::get::<Pallet<T>>() != STORAGE_VERSION {
                 return Err(TryRuntimeError::Other(
-                    "constitution: on-chain storage version is not v2",
+                    "constitution: on-chain storage version is not the current version",
+                ));
+            }
+            // SQ-173: the three capability-envelope rows back `InCapPrize` for
+            // PARAM/CODE/META. Their consumer reads the live record only, so an
+            // absent row silently makes every proposal of that class
+            // unresolvable at sizing — exactly what this invariant catches.
+            if !Params::<T>::contains_key(key16(b"sec.prize.param"))
+                || !Params::<T>::contains_key(key16(b"sec.prize.code"))
+                || !Params::<T>::contains_key(key16(b"sec.prize.meta"))
+            {
+                return Err(TryRuntimeError::Other(
+                    "constitution: sec.prize capability-envelope rows are absent",
                 ));
             }
             if !Params::<T>::contains_key(key16(b"ops.probe_fee"))
@@ -858,6 +885,7 @@ pub mod pallet {
                 CoreError::FlagNotArmable => Error::<T>::FlagNotArmable.into(),
                 CoreError::KernelBoundImmutable => Error::<T>::KernelBoundImmutable.into(),
                 CoreError::BudgetDerivationRequired => Error::<T>::BudgetDerivationRequired.into(),
+                CoreError::PhaseCapRaiseRefused => Error::<T>::PhaseCapRaiseRefused.into(),
                 CoreError::MetaBoundViolation => Error::<T>::MetaBoundViolation.into(),
                 CoreError::BadReleaseSchema => Error::<T>::BadReleaseSchema.into(),
                 CoreError::TooManyParams => Error::<T>::TooManyParams.into(),

@@ -10025,19 +10025,29 @@ fn void_cohort_releases_a_retained_rerun_pin_and_guard_records() {
                 .any(|(pid, _, decision)| *pid == PID && *decision == DecisionOutcome::Adopt),
             "summary={summary:?}"
         );
-        // 05 §7(4): membership, not `decision.is_some()`, is the discriminator.
-        // QUEUED_PID is decided but never reached `Measuring`, so it is not a
-        // cohort member and takes T20 — its vacated Adopt does not enter the
-        // archive. Whether T20's record is the *truthful* one for this
-        // population is SQ-319.
+        // 05 §7(4) + SQ-319 (ruled 2026-07-24): membership still decides who
+        // takes T20 — QUEUED_PID never reached `Measuring`, so it is halted,
+        // its state becomes `Rejected(ProcessHold)` and it can never execute.
+        // But T20 does not rewrite a decision the market actually produced:
+        // the archive keeps the `Adopt` that `decide()` recorded at T9, because
+        // a cohort VOID invalidates measurement inputs rather than reversing
+        // the decision.
         assert!(
             summary
                 .proposals
                 .iter()
                 .any(|(pid, _, decision)| *pid == QUEUED_PID
-                    && *decision == DecisionOutcome::Reject(RejectReason::ProcessHold)),
+                    && *decision == DecisionOutcome::Adopt),
             "summary={summary:?}"
         );
+        // T20 still halted it: the proposal is terminally archived and gone
+        // from live storage, so no queued payload of its can ever execute.
+        // Only the *record* of what the market decided is preserved. The
+        // state/decision split itself is pinned at core level by
+        // `pallet-epoch`'s `sq314_void_cohort_preserves_only_cohort_members…`.
+        assert!(!pallet_epoch::Proposals::<Runtime>::contains_key(
+            QUEUED_PID
+        ));
         // The cohort member emits no per-proposal rejection; the T20'd
         // same-epoch proposal emits exactly one.
         assert!(!System::events().iter().any(|record| matches!(
@@ -15400,6 +15410,52 @@ fn sq173_class_envelopes_back_every_binding_class_prize() {
         let mut constitutional = empty_param_proposal(9_329, account(43), H256::repeat_byte(43), 1);
         constitutional.class = ProposalClass::Constitutional;
         assert_eq!(prize(&constitutional), None);
+    });
+}
+
+#[test]
+fn sq173_upgrade_cap_floor_rounds_up_like_the_reference_model() {
+    // 05 §5.4 step 9 rounds `InCapPrize` UP. Flooring `nav · trs.cap_proposal
+    // / 100` would understate the CODE/META upgrade floor by up to one µUSDC
+    // and admit a boundary proposal the reference-model oracle rejects.
+    use frame_support::traits::fungibles::Mutate;
+    use pallet_epoch::ConstitutionAccess;
+    development_ext().execute_with(|| {
+        // Choose a NAV that does not divide evenly by the cap percentage.
+        let percent = Balance::from(crate::configs::percent_param(b"trs.cap_proposal"));
+        assert!(percent > 0);
+        let nav_target = crate::FutarchyTreasury::floor(ProposalClass::Meta)
+            .saturating_mul(8)
+            .saturating_add(1);
+        assert_ok!(<ForeignAssets as Mutate<AccountId>>::mint_into(
+            usdc_location(),
+            &crate::configs::insurance_account(),
+            nav_target,
+        ));
+        assert_ok!(FutarchyTreasury::sweep_insurance(
+            pallet_origins::Origin::FutarchyTreasury.into(),
+            nav_target
+        ));
+        let nav = FutarchyTreasury::nav().spendable_nav;
+        assert!(nav.saturating_mul(percent) % 100 != 0, "nav={nav}");
+
+        let mut proposal = empty_param_proposal(9_340, account(44), H256::repeat_byte(44), 1);
+        proposal.class = ProposalClass::Code;
+        // No pinned preimage ⇒ treated as an upgrade payload, so the cap floor
+        // applies and — at this NAV — dominates the class envelope.
+        let ceil_cap = nav
+            .saturating_mul(percent)
+            .saturating_add(99)
+            .saturating_div(100);
+        let floor_cap = nav.saturating_mul(percent).saturating_div(100);
+        assert_eq!(ceil_cap, floor_cap.saturating_add(1));
+        assert_eq!(
+            <crate::configs::RuntimeConstitutionAccess as ConstitutionAccess<AccountId>>::in_cap_prize(
+                &proposal
+            ),
+            Some(ceil_cap),
+            "the upgrade floor must round up, not down",
+        );
     });
 }
 

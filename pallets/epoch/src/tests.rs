@@ -4028,18 +4028,14 @@ fn sq314_void_cohort_preserves_only_cohort_members_and_t20s_the_rest() {
                 // pid 1 is the cohort member: its recorded Adopt survives.
                 (1, ProposalClass::Param, DecisionOutcome::Adopt,),
                 // pids 2 and 3 are decided but pre-Executed and outside the
-                // cohort, so they take T20 rather than carrying their vacated
-                // Adopt into the archive.
-                (
-                    2,
-                    ProposalClass::Param,
-                    DecisionOutcome::Reject(RejectReason::ProcessHold),
-                ),
-                (
-                    3,
-                    ProposalClass::Param,
-                    DecisionOutcome::Reject(RejectReason::ProcessHold),
-                ),
+                // cohort. SQ-319 (ruled 2026-07-24): T20 still halts them —
+                // `state` becomes `Rejected(ProcessHold)` and neither can ever
+                // execute — but it does not rewrite a decision the market
+                // actually produced. Recording `Reject(ProcessHold)` here would
+                // put a rejection in the archive that no market concluded,
+                // which is the truth defect SQ-314 was ratified against.
+                (2, ProposalClass::Param, DecisionOutcome::Adopt,),
+                (3, ProposalClass::Param, DecisionOutcome::Adopt,),
             ])
         );
         assert!(RecentCohortSummaries::<Test>::get()

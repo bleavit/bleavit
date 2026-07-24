@@ -1301,9 +1301,18 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         // `decision.is_some()` — is the discriminator: T9 records `Some(Adopt)`
         // on entry to `Queued`, so a decision alone does not mean the market
         // concluded a measurement. Everything else in the affected set is
-        // non-terminal pre-Executed and takes T20 (05 §2.1). What a decided but
-        // pre-Executed proposal *should* record is SQ-319; this is the
-        // conservative reading, changing nothing but the case SQ-314 named.
+        // non-terminal pre-Executed and takes T20 (05 §2.1).
+        //
+        // SQ-319 (ruled 2026-07-24): T20's *scope* is unchanged — every
+        // affected non-member is halted and can never execute — but it never
+        // rewrites a `DecisionOutcome` that is already recorded. `state` and
+        // `decision` carry different facts: the first is the process outcome,
+        // the second is what the market concluded. Overwriting a real `Adopt`
+        // with `Reject(ProcessHold)` would record a rejection the market never
+        // produced, which is exactly the truth defect batch D ratified against
+        // in SQ-314 — the cohort archive is the only durable record of the
+        // market's conclusion. A cohort VOID invalidates *measurement inputs*;
+        // it is not evidence that the decision went the other way.
         let members = self.cohorts[idx].proposals.clone();
         for pid in &affected {
             if self.proposal(*pid)?.markets.is_some() {
@@ -1315,7 +1324,9 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             if !is_cohort_member {
                 let proposal = self.proposal_mut(*pid)?;
                 proposal.state = ProposalState::Rejected(RejectReason::ProcessHold);
-                proposal.decision = Some(DecisionOutcome::Reject(RejectReason::ProcessHold));
+                if proposal.decision.is_none() {
+                    proposal.decision = Some(DecisionOutcome::Reject(RejectReason::ProcessHold));
+                }
                 self.events.push(Event::ProposalForceRejected {
                     pid: *pid,
                     reason: RejectReason::ProcessHold,

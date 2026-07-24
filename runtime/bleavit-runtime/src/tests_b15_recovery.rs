@@ -320,6 +320,79 @@ fn terminal_recovery_repairs_every_primary_cutpoint_and_unlocks_only_after_commi
     }
 }
 
+#[cfg(all(feature = "recovery", feature = "phase-four"))]
+#[test]
+fn sq383_terminal_recovery_completes_the_phase_transition_below_the_nav_floor() {
+    // SQ-383 added 08 §4.2's arming gate to the Phase-3->4 migration. That gate
+    // MUST NOT bind on the terminal recovery lane, which shares the same
+    // function: a recovery image runs under `OnlyInherents`/`RecoveryLockdown`,
+    // where no ordinary call — including any that could fund the treasury — is
+    // dispatchable. Enforcing the floor here would make a below-floor primary
+    // install unrecoverable forever, trading the SQ-383 defect for a bricked
+    // chain (R-7). Found by adversarial review of the SQ-383 commit.
+    with_recovery_state(active_cursor(None, 0), |_| {
+        let plan = pallet_execution_guard::PhaseFourPlan {
+            tvl_cap: pallet_constitution::Params::<Runtime>::get(pallet_constitution::key16(
+                b"phase3.tvl_cap",
+            ))
+            .expect("TVL cap is registered")
+            .value
+            .as_u128()
+            .saturating_add(1),
+            deposit_cap: 1,
+        };
+        let image = pallet_execution_guard::RecoveryImage::<Runtime>::get()
+            .expect("the recovery fixture commits an image");
+        pallet_execution_guard::PhaseFourBridge::<Runtime>::put(
+            pallet_execution_guard::PhaseFourBridgeState::Scheduled {
+                pid: image.pid,
+                code_hash: image.primary_hash,
+                plan,
+            },
+        );
+        crate::configs::RetiredMigrationCursor::kill();
+        // The scenario: a Phase-3 chain whose primary Phase-3->4 install failed
+        // below floor. Its *state* is still Phase 3, so reconstruct that rather
+        // than inheriting the profile's already-armed genesis.
+        crate::configs::PhaseTransitionLock::put(true);
+        pallet_constitution::PhaseFlags::<Runtime>::put(
+            pallet_constitution::PhaseFlagsValue::SHADOW_MODE
+                | pallet_constitution::PhaseFlagsValue::SUDO_PRESENT,
+        );
+
+        // Precondition: the chain cannot possibly clear the PARAM floor, and
+        // under recovery lockdown it has no way to ever get there.
+        assert!(
+            crate::FutarchyTreasury::nav().spendable_nav
+                < crate::FutarchyTreasury::floor(futarchy_primitives::ProposalClass::Param)
+        );
+        assert!(crate::configs::RecoveryLockdown::get());
+        assert_ne!(
+            pallet_constitution::PhaseFlags::<Runtime>::get(),
+            pallet_constitution::PhaseFlagsValue::PARAM_ARMED,
+            "precondition: PARAM must not already be armed, or the check below is vacuous",
+        );
+
+        let _ = crate::migrations::TerminalRecoveryTransition::on_runtime_upgrade();
+
+        assert_eq!(
+            pallet_constitution::PhaseFlags::<Runtime>::get(),
+            pallet_constitution::PhaseFlagsValue::PARAM_ARMED,
+            "terminal recovery must complete the already-authorized transition",
+        );
+        // The rest of the transition committed with it: the scheduled cap
+        // raise landed, which also exercises SQ-197's ordering (the arming bits
+        // are written first, so the raise passes the ordinary Phase-4 gate).
+        assert_eq!(
+            pallet_constitution::Params::<Runtime>::get(pallet_constitution::key16(
+                b"phase3.tvl_cap"
+            ))
+            .map(|record| record.value.as_u128()),
+            Some(2_000_000_000_001),
+        );
+    });
+}
+
 #[cfg(feature = "recovery")]
 #[test]
 fn stuck_cursor_restarts_the_bounded_release_repair_from_the_beginning() {

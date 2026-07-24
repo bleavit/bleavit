@@ -780,9 +780,22 @@ impl ConstitutionState {
             .find(|r| r.key == key)
             .ok_or(Error::UnknownParam)?;
         authorize_param_update(origin, record, next)?;
+        let current = record.value;
+        // 09 §5.2: a containment cap must not be raisable by ordinary class
+        // governance inside the phase it bounds. Deliberately **not**
+        // `BadOrigin` — the origin is authorized, the value direction is not.
+        ensure!(
+            !phase_cap_raise_refused(
+                key,
+                current,
+                next,
+                self.phase_flags.contains(PhaseFlags::PARAM_ARMED)
+            ),
+            Error::PhaseCapRaiseRefused
+        );
         let (index, updated) = self.checked_set_param(key, next, epoch, block)?;
         ensure!(
-            !rederive_budgets_required(key, record.value, next),
+            !rederive_budgets_required(key, current, next),
             Error::BudgetDerivationRequired
         );
         self.params[index] = updated;
@@ -976,6 +989,37 @@ pub enum Error {
     /// verifier lands, changes to the load-bearing timing/capacity/POL keys
     /// are refused in the unsafe direction (SQ-303, G-1).
     BudgetDerivationRequired,
+    /// 09 §5.2: the two Phase-3 exposure caps are raised only by phase gates
+    /// and are not PARAM/META-adjustable during Phases ≤ 3 (SQ-197).
+    PhaseCapRaiseRefused,
+}
+
+/// 09 §5.2 (SQ-197): `phase3.tvl_cap` and `phase3.dep_cap` are "raised only by
+/// phase gates … not PARAM/META-adjustable during Phases ≤ 3". Both rows are
+/// `0..=u128::MAX` with no max-delta and no cooldown, so ordinary `set_param`
+/// under the class origin could otherwise walk a containment cap straight to
+/// the unbounded sentinel while the chain is still inside the phase the cap
+/// exists to bound.
+///
+/// Only the **raise** is refused, and only before PARAM arming. Lowering is
+/// tightening and stays legal at every phase (G-1). From Phase 4 onward the
+/// row behaves as 13 §115's sentinel note describes — an ordinary amendment to
+/// its own ceiling, needing no distinguished value and no separate mechanism —
+/// which is how the Phase-5+ sentinels are installed. The Phase-3→4 migration
+/// arms `PARAM_ARMED` before applying its cap plan for exactly this reason, so
+/// its scheduled raise passes the same gate every later amendment does rather
+/// than needing an exemption.
+pub fn phase_cap_raise_refused(
+    key: ParamKey,
+    current: ParamValue,
+    next: ParamValue,
+    param_armed: bool,
+) -> bool {
+    if param_armed {
+        return false;
+    }
+    let is_phase_cap = key == key16(b"phase3.tvl_cap") || key == key16(b"phase3.dep_cap");
+    is_phase_cap && next.as_u128() > current.as_u128()
 }
 
 /// Temporary SQ-303 screen for the keys whose values feed the bounded
