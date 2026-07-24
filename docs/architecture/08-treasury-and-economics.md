@@ -14,7 +14,7 @@ Normative language: RFC 2119. USDC amounts in whole units (6 decimals); `ln 2 = 
 
 ### 1.1 Accounts and budget lines
 
-Derived sub-accounts: `MAIN`, `POL`, `INSURANCE`, `KEEPER`, `ORACLE`, `REWARDS`, and (new, D-16) `OPS` — whose budget lines are the lowercase `ops.*` keys used throughout this set (naming normalized with [12](12-release-and-operations.md) §6.1; values consolidated in [13](13-parameters.md)). Outflow calls accept only the `FutarchyTreasury` origin (from the execution guard) and MUST name a budget line; per-line budgets are constitution-keyed.
+Derived sub-accounts: `MAIN`, `POL`, `INSURANCE`, `KEEPER`, `ORACLE`, `REWARDS`, `COLLATOR`, and (new, D-16) `OPS` — whose budget lines are the lowercase `ops.*` keys used throughout this set (naming normalized with [12](12-release-and-operations.md) §6.1; values consolidated in [13](13-parameters.md)). `COLLATOR` is a dedicated custody pot for the `ops.collators` line; it is not a discretionary ops account. Outflow calls accept only the `FutarchyTreasury` origin (from the execution guard) and MUST name a budget line; per-line budgets are constitution-keyed.
 
 | Line (account) | Purpose | Per-epoch default *(normative value: [13](13-parameters.md))* |
 |---|---|---|
@@ -144,7 +144,7 @@ The reserve exists for values-layer continuity (guardian bonds, conviction depth
 
 ### 2.4 Collator compensation
 
-`collator.comp_epoch` = **2,000 USDC per collator per epoch** (PARAM-adjustable, *normative value: [13](13-parameters.md)*), paid from `ops.collators` at epoch Housekeeping to the session's registered collators pro-rata to authored-block share. Launch load: 5 invulnerables ⇒ 10,000 USDC/epoch ≈ 174,000 USDC/yr — 0.7% of the 25M initial treasury per year; sustainable without issuance.
+`collator.comp_epoch` = **2,000 USDC per collator per epoch** (PARAM-adjustable, *normative value: [13](13-parameters.md)*), paid from `ops.collators` at epoch Housekeeping to the session's registered collators pro-rata to authored-block share. The runtime records one bounded `(collator, authored_blocks)` accumulator for the pending epoch (at most the 100-candidate session bound), then computes each share with claimant-adverse floor rounding and debits the line once. A missing/underfunded line or custody pot is fail-soft: the accumulator remains pending for a later Housekeeping retry, and a successful payout clears it atomically with the custody transfers; there is no second payout for the same epoch. Launch load: 5 invulnerables ⇒ 10,000 USDC/epoch ≈ 174,000 USDC/yr — 0.7% of the 25M initial treasury per year; sustainable without issuance.
 
 ### 2.5 Initial USDC treasury and funding sequence
 

@@ -250,6 +250,17 @@ pub trait PreimageAccess {
     fn unrequest(hash: H256);
 }
 
+/// Housekeeping callback for bounded authored-share compensation. The sink is
+/// deliberately infallible: an unfunded or failed custody payout must remain
+/// pending and never make the permissionless epoch crank fail.
+pub trait CollatorCompensation {
+    fn pay();
+}
+
+impl CollatorCompensation for () {
+    fn pay() {}
+}
+
 /// A8 → A11 producer seam. Only an adopted decision invokes this endpoint.
 pub trait ExecutionGuardAccess {
     /// Freeze a CODE/META referendum identity before queue admission. The
@@ -389,6 +400,8 @@ pub mod pallet {
         type Ledger: LedgerResolution;
         /// Fail-soft keeper rebate sink (08 §6). It must never affect a crank.
         type KeeperRebate: KeeperRebateSink<Self::AccountId>;
+        /// Fail-soft Housekeeping payout for authored collator shares (08 §2.4).
+        type CollatorCompensation: CollatorCompensation;
         type GuardianOrigin: EnsureOrigin<Self::RuntimeOrigin>;
         type ExecutionGuardOrigin: EnsureOrigin<Self::RuntimeOrigin>;
         type VoidAuthority: EnsureOrigin<Self::RuntimeOrigin>;
@@ -1006,6 +1019,11 @@ pub mod pallet {
                         state.epoch.length,
                     );
                     Self::sync_clock(state, now)?;
+                    let entered_housekeeping = clock_before.1 != EpochPhase::Housekeeping
+                        && state.epoch.phase == EpochPhase::Housekeeping;
+                    if entered_housekeeping {
+                        T::CollatorCompensation::pay();
+                    }
                     let entered_seed =
                         clock_before.1 != EpochPhase::Seed && state.epoch.phase == EpochPhase::Seed;
                     if entered_seed {

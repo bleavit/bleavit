@@ -3387,7 +3387,7 @@ fn genesis_endows_every_r4_protocol_account() {
 
     development_ext().execute_with(|| {
         let endowments = crate::genesis::usdc_genesis_endowments();
-        assert_eq!(endowments.len(), 11);
+        assert_eq!(endowments.len(), 12);
         let mut accounts = BTreeSet::new();
         for (asset, account, amount) in endowments {
             assert_eq!(asset, usdc_location());
@@ -3407,7 +3407,7 @@ fn genesis_usdc_issuance_is_exactly_the_r4_floor() {
     development_ext().execute_with(|| {
         assert_eq!(
             ForeignAssets::total_issuance(usdc_location()),
-            currency::USDC_CENT.saturating_mul(11),
+            currency::USDC_CENT.saturating_mul(12),
         );
     });
 }
@@ -3458,6 +3458,10 @@ fn r4_account_addresses_are_stable() {
         (
             "treasury REWARDS",
             "6d6f646c626c2f7472737279524557415244535f000000000000000000000000",
+        ),
+        (
+            "treasury COLLATOR",
+            "6d6f646c626c2f7472737279434f4c4c41544f52000000000000000000000000",
         ),
     ];
     let endowments = crate::genesis::usdc_genesis_endowments();
@@ -4476,6 +4480,73 @@ fn treasury_rebate_payout_moves_real_usdc_from_the_selected_pot() {
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &oracle_pot),
             retained
+        );
+    });
+}
+
+#[test]
+fn treasury_collator_compensation_uses_authored_share_and_dedicated_custody() {
+    use crate::configs::treasury_collators_account;
+    use pallet_futarchy_treasury::{BudgetLine, PayoutLine, RebatePayout, TreasuryParams as _};
+
+    development_ext().execute_with(|| {
+        let first = account(77);
+        let second = account(78);
+        let pot = treasury_collators_account();
+        let allocation = crate::configs::TreasuryParams::collator_comp_epoch();
+        let retained = currency::USDC_CENT;
+        assert!(<ForeignAssets as FungiblesMutate<AccountId>>::mint_into(
+            usdc_location(),
+            &pot,
+            2 * allocation + retained,
+        )
+        .is_ok());
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            if let Some((_, balance)) = state
+                .lines
+                .iter_mut()
+                .find(|(line, _)| *line == BudgetLine::OpsCollators)
+            {
+                *balance = 2 * allocation;
+            } else {
+                let _ = state
+                    .lines
+                    .try_push((BudgetLine::OpsCollators, 2 * allocation));
+            }
+        });
+
+        FutarchyTreasury::note_collator_block(first.clone());
+        FutarchyTreasury::note_collator_block(first.clone());
+        FutarchyTreasury::note_collator_block(second.clone());
+        // The Housekeeping callback settles the completed epoch, while the
+        // active epoch remains open for subsequent authorship.
+        pallet_epoch::EpochOf::<Runtime>::mutate(|epoch| epoch.index = 2);
+        FutarchyTreasury::pay_collator_compensation();
+
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &first),
+            allocation.saturating_mul(4) / 3
+        );
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &second),
+            allocation.saturating_mul(2) / 3
+        );
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &pot),
+            2 * retained + 1
+        );
+        assert_eq!(
+            pallet_futarchy_treasury::State::<Runtime>::get()
+                .lines
+                .iter()
+                .find_map(|(line, balance)| (*line == BudgetLine::OpsCollators).then_some(*balance)),
+            Some(1)
+        );
+        assert_eq!(
+            <crate::configs::TreasuryRebatePayout as RebatePayout<AccountId>>::pot_balance(
+            PayoutLine::OpsCollators
+            ),
+            2 * retained + 1
         );
     });
 }
