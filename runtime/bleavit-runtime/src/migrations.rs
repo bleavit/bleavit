@@ -35,7 +35,7 @@ use frame_support::{
 
 #[cfg(feature = "try-runtime")]
 use alloc::{vec, vec::Vec};
-#[cfg(feature = "recovery")]
+#[cfg(any(feature = "recovery", feature = "try-runtime"))]
 use parity_scale_codec::DecodeAll;
 #[cfg(feature = "try-runtime")]
 use parity_scale_codec::{Decode, Encode};
@@ -314,7 +314,7 @@ impl OnRuntimeUpgrade for MigrateConstitutionSecurityPrizeV3 {
             let live = pallet_constitution::Params::<Runtime>::get(record.key).ok_or(
                 sp_runtime::TryRuntimeError::Other("sec.prize row absent after migration"),
             )?;
-            let expected = match before.as_ref().and_then(|rows| rows[index].clone()) {
+            let expected = match before.as_ref().and_then(|rows| rows[index]) {
                 // A pre-existing row is preserved exactly, never overwritten.
                 Some(previous) => previous,
                 None => record,

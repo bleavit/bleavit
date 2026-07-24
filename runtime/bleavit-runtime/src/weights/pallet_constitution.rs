@@ -24,7 +24,7 @@
 // --min-duration
 // 0
 // --output
-// /tmp/pallet_constitution_sq317.rs
+// /tmp/claude-1000/-home-development-bleavit/b40139b1-6248-4c1a-ad60-57e786f83c15/scratchpad/pallet_constitution_new.rs
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(unused_parens)]
@@ -41,14 +41,16 @@ impl<T: frame_system::Config> pallet_constitution::WeightInfo for WeightInfo<T> 
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
+	/// Storage: `Constitution::PhaseFlags` (r:1 w:0)
+	/// Proof: `Constitution::PhaseFlags` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	fn set_param() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `1057`
+		//  Measured:  `1071`
 		//  Estimated: `3597`
-		// Minimum execution time: 17_850_000 picoseconds.
-		Weight::from_parts(18_390_000, 0)
+		// Minimum execution time: 18_730_000 picoseconds.
+		Weight::from_parts(19_510_000, 0)
 			.saturating_add(Weight::from_parts(0, 3597))
-			.saturating_add(T::DbWeight::get().reads(2))
+			.saturating_add(T::DbWeight::get().reads(3))
 			.saturating_add(T::DbWeight::get().writes(1))
 	}
 	/// Storage: `Constitution::Capabilities` (r:1 w:1)
@@ -57,8 +59,8 @@ impl<T: frame_system::Config> pallet_constitution::WeightInfo for WeightInfo<T> 
 		// Proof Size summary in bytes:
 		//  Measured:  `1372`
 		//  Estimated: `2703`
-		// Minimum execution time: 8_820_000 picoseconds.
-		Weight::from_parts(9_480_000, 0)
+		// Minimum execution time: 8_810_000 picoseconds.
+		Weight::from_parts(9_150_000, 0)
 			.saturating_add(Weight::from_parts(0, 2703))
 			.saturating_add(T::DbWeight::get().reads(1))
 			.saturating_add(T::DbWeight::get().writes(1))
@@ -71,10 +73,10 @@ impl<T: frame_system::Config> pallet_constitution::WeightInfo for WeightInfo<T> 
 	/// Proof: `Constitution::PhaseFlags` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	fn set_phase_flag() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `11325`
+		//  Measured:  `11358`
 		//  Estimated: `26846`
-		// Minimum execution time: 52_170_000 picoseconds.
-		Weight::from_parts(56_080_000, 0)
+		// Minimum execution time: 50_589_000 picoseconds.
+		Weight::from_parts(54_510_000, 0)
 			.saturating_add(Weight::from_parts(0, 26846))
 			.saturating_add(T::DbWeight::get().reads(7))
 			.saturating_add(T::DbWeight::get().writes(1))
@@ -85,8 +87,8 @@ impl<T: frame_system::Config> pallet_constitution::WeightInfo for WeightInfo<T> 
 		// Proof Size summary in bytes:
 		//  Measured:  `339`
 		//  Estimated: `1653`
-		// Minimum execution time: 8_840_000 picoseconds.
-		Weight::from_parts(9_020_000, 0)
+		// Minimum execution time: 8_110_000 picoseconds.
+		Weight::from_parts(8_500_000, 0)
 			.saturating_add(Weight::from_parts(0, 1653))
 			.saturating_add(T::DbWeight::get().reads(1))
 			.saturating_add(T::DbWeight::get().writes(1))
@@ -97,8 +99,8 @@ impl<T: frame_system::Config> pallet_constitution::WeightInfo for WeightInfo<T> 
 		// Proof Size summary in bytes:
 		//  Measured:  `803`
 		//  Estimated: `3597`
-		// Minimum execution time: 12_610_000 picoseconds.
-		Weight::from_parts(13_020_000, 0)
+		// Minimum execution time: 11_910_000 picoseconds.
+		Weight::from_parts(12_270_000, 0)
 			.saturating_add(Weight::from_parts(0, 3597))
 			.saturating_add(T::DbWeight::get().reads(1))
 			.saturating_add(T::DbWeight::get().writes(1))

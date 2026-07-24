@@ -1943,10 +1943,22 @@ fn composed_runtime_upgrade_migrates_all_reserve_probe_v0_state_and_passes_try_s
         );
         assert!(!unhashed::exists(&blocked_meters));
         assert!(!unhashed::exists(&progress_marker));
+        // SQ-173's `MigrateConstitutionSecurityPrizeV3` composes after the v2
+        // probe migration, so a composed upgrade lands the Constitution at v3
+        // with all three capability-envelope rows seeded.
         assert_eq!(
             StorageVersion::get::<Constitution>(),
-            StorageVersion::new(2)
+            StorageVersion::new(3)
         );
+        for name in [
+            b"sec.prize.param".as_slice(),
+            b"sec.prize.code".as_slice(),
+            b"sec.prize.meta".as_slice(),
+        ] {
+            assert!(pallet_constitution::Params::<Runtime>::contains_key(
+                pallet_constitution::key16(name)
+            ));
+        }
         assert_eq!(
             pallet_constitution::Params::<Runtime>::get(fee.key),
             Some(fee)
@@ -2012,10 +2024,22 @@ fn composed_runtime_upgrade_migrates_constitution_v1_to_v2() {
         ) as Decode>::decode(&mut &output[..])
         .expect("TryRuntime result");
         assert!(used.all_lte(maximum));
+        // SQ-173's `MigrateConstitutionSecurityPrizeV3` composes after the v2
+        // probe migration, so a composed upgrade lands the Constitution at v3
+        // with all three capability-envelope rows seeded.
         assert_eq!(
             StorageVersion::get::<Constitution>(),
-            StorageVersion::new(2)
+            StorageVersion::new(3)
         );
+        for name in [
+            b"sec.prize.param".as_slice(),
+            b"sec.prize.code".as_slice(),
+            b"sec.prize.meta".as_slice(),
+        ] {
+            assert!(pallet_constitution::Params::<Runtime>::contains_key(
+                pallet_constitution::key16(name)
+            ));
+        }
         assert!(pallet_constitution::Pallet::<Runtime>::do_try_state().is_ok());
         for record in legacy {
             let migrated = pallet_constitution::Params::<Runtime>::get(record.key).unwrap();

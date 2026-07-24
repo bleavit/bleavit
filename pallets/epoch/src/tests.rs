@@ -1489,9 +1489,13 @@ fn sq40_undefined_prize_proxy_takes_t10_and_refunds_the_full_bond() {
         assert!(SeamCalls::get().contains(&SeamCall::Resolve(1, Branch::Reject)));
         assert!(SeamCalls::get().contains(&SeamCall::CloseMarkets(1)));
         assert!(SeamCalls::get().contains(&SeamCall::DequeueTerminal(1)));
+        // SQ-318 (ruled 2026-07-24): the T10 rejection releases the resource
+        // domain immediately, in both the with-markets and no-markets arms.
+        // `Rejected` is not dispatch-reachable, so a retained lock would only
+        // block other proposals through the ~3-epoch measurement window.
         assert!(ResourceLocks::<Test>::get()
             .iter()
-            .any(|(_, owner)| *owner == 1));
+            .all(|(_, owner)| *owner != 1));
         assert!(!ProposalBonds::<Test>::contains_key(1));
         assert_eq!(BondReleases::get(), vec![(proposer, bond)]);
         assert!(!System::events().iter().any(|record| matches!(

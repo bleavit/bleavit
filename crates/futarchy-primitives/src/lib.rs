@@ -988,10 +988,12 @@ pub mod kernel {
     /// classes). The values are the Phase-0 published calibration
     /// (`simulation/results/phase0-calibration.json` · `published.candidates`,
     /// `designation: published`, `violations: []`), adopted as the genesis
-    /// defaults *and* as the governed rows' minima: raising a class's prize proxy
-    /// only tightens step 9, while lowering it below the calibrated envelope is
-    /// the capture direction the sizing gate exists to refuse (R-7). The rows'
-    /// governance metadata is therefore kernel-bounded (13 rule 2).
+    /// defaults *and* as the governed rows' minima. The guarantee is the floor,
+    /// not monotonicity: the ×2 Δ is symmetric, so a proxy raised above the
+    /// calibrated value may later be lowered back toward it, but no amendment
+    /// can carry it **below** the floor — which is the capture direction the
+    /// sizing gate exists to refuse (R-7). The rows' governance metadata is
+    /// therefore kernel-bounded (13 rule 2).
     pub const SEC_PRIZE_PARAM_FLOOR: u128 = 50_000_000_000;
     /// See [`SEC_PRIZE_PARAM_FLOOR`].
     pub const SEC_PRIZE_CODE_FLOOR: u128 = 300_000_000_000;

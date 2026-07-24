@@ -2200,9 +2200,10 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         // 13 §1 row `sec.prize.*` (SQ-173): the certified capability-envelope
         // proxies that 08 §5.2 makes `InCapPrize` for the three non-TREASURY
         // binding classes. Seeded from the Phase-0 published calibration; the
-        // minimum is the same kernel floor (05 §5.6), so governance may only
-        // raise a class's prize proxy — which tightens step 9 — never walk it
-        // toward the zero that would make an unsecured payload pass.
+        // minimum is the same kernel floor (05 §5.6). The ×2 Δ is symmetric, so
+        // a raised proxy may be lowered back toward that floor — what no
+        // amendment can do is carry it *below* it, toward the zero that would
+        // make an unsecured payload pass.
         row(
             b"sec.prize.param",
             ParamValue::Balance(kernel::SEC_PRIZE_PARAM_FLOOR),

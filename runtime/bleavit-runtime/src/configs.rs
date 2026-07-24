@@ -2592,29 +2592,6 @@ fn class_security_envelope(class: futarchy_primitives::ProposalClass) -> Option<
     live_balance_param(key).filter(|value| *value > 0)
 }
 
-/// Whether a CODE/META payload authorizes a runtime upgrade, which 08 §5.2
-/// floors at `trs.cap_proposal · spendable NAV`. An undecodable or unpinned
-/// preimage answers **yes**: the floor can only raise the prize, so the
-/// claimant-adverse reading is the one that cannot let an upgrade through
-/// under-secured (R-7).
-fn carries_upgrade_payload(proposal: &futarchy_primitives::Proposal<AccountId>) -> bool {
-    use pallet_execution_guard::BatchDispatcher;
-    let Some(calls) = proposal_calls(proposal) else {
-        return true;
-    };
-    calls.iter().any(|call| {
-        crate::classifier::RuntimeDispatcher::rederive_call(call).is_ok_and(|analysis| {
-            analysis.domains.iter().any(|domain| {
-                matches!(
-                    domain,
-                    pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade
-                        | pallet_execution_guard::CallDomain::InternalRootApplyUpgrade
-                )
-            })
-        })
-    })
-}
-
 fn scaled_pol_floor(
     class: futarchy_primitives::ProposalClass,
     floor: Balance,
@@ -4424,16 +4401,23 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
             futarchy_primitives::ProposalClass::Param => class_security_envelope(proposal.class),
             futarchy_primitives::ProposalClass::Code | futarchy_primitives::ProposalClass::Meta => {
                 let envelope = class_security_envelope(proposal.class)?;
-                let prize = envelope.max(proposal.ask);
-                if !carries_upgrade_payload(proposal) {
-                    return Some(prize);
-                }
-                // 05 §5.4 step 9 rounds `InCapPrize` **UP**, so the upgrade
-                // floor is ceil-rounded: flooring `nav · cap_proposal / 100`
-                // would understate the prize by up to one µUSDC and admit a
-                // boundary proposal the reference model rejects.
+                // The `trs.cap_proposal · spendable NAV` floor applies to
+                // **every** CODE/META proposal, not only those whose payload
+                // decodes to a runtime upgrade. 08 §5.2 states the floor with
+                // an upgrade rationale ("an upgrade is assumed able to reach
+                // the full per-proposal outflow cap"), but the executable spec
+                // — `reference-model`'s `decision.decide`, which 15 §4.4 makes
+                // the differential oracle — applies it unconditionally for
+                // these two classes. An implementation that conditioned the
+                // floor on a decoded payload would disagree with the oracle on
+                // a solvency path and could adopt a proposal the oracle
+                // rejects; the conservative branch is also the equivalent one.
+                //
+                // 05 §5.4 step 9 rounds `InCapPrize` **UP**, so the floor is
+                // ceil-rounded: flooring `nav · cap_proposal / 100` would
+                // understate it by up to one µUSDC at a boundary NAV.
                 let cap = ceil_mul_div(nav, cap_percent, 100)?;
-                Some(prize.max(cap))
+                Some(envelope.max(proposal.ask).max(cap))
             }
             // 05 §5.6: Constitutional runs no markets, so step 9 is unreachable.
             futarchy_primitives::ProposalClass::Constitutional => None,

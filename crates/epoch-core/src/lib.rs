@@ -2162,9 +2162,18 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         self.events.push(Event::ProposalRejected { pid, reason: r });
         if has_markets {
             self.start_measurement(pid)?;
-        } else {
-            self.resource_locks.retain(|(_, owner)| *owner != pid);
         }
+        // 05 §1.4 (SQ-318, ruled 2026-07-24): resource locks persist **to
+        // dispatch**, and a `Rejected` proposal can never dispatch — neither
+        // rerun entry admits it (`force_rerun` takes Trading/Extended/Queued,
+        // `schedule_rerun` takes Suspended). Holding the domain through the
+        // ~3-epoch measurement window that §2.1 makes this state transient for
+        // would protect nothing and block every other proposal touching the
+        // same domain: the pure liveness cost §1.4's collision paragraph says
+        // the design avoids where it buys no safety. Measurement, cohort
+        // membership and vault resolution are unaffected — they concern
+        // welfare scoring, not the resource domain.
+        self.resource_locks.retain(|(_, owner)| *owner != pid);
         Ok(())
     }
     fn ensure_can_start_measurement(&self, pid: ProposalId) -> Result<(), Error> {
@@ -2698,7 +2707,12 @@ mod tests {
             s.proposal(1).unwrap().decision,
             Some(DecisionOutcome::Reject(RejectReason::SecuritySizing))
         );
-        assert_eq!(s.resource_locks, alloc::vec![(resource, 1)]);
+        // SQ-318 (ruled 2026-07-24): a T10 rejection releases the resource
+        // domain immediately. `Rejected` is not dispatch-reachable — neither
+        // rerun entry admits it — so holding the lock through the measurement
+        // window would block other proposals for no protective purpose.
+        assert!(s.resource_locks.is_empty());
+        let _ = resource;
         assert!(ledger
             .events
             .iter()

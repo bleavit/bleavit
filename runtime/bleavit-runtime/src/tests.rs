@@ -15377,9 +15377,11 @@ fn sq173_class_envelopes_back_every_binding_class_prize() {
         assert_eq!(prize(&param), None);
 
         // CODE/META: the envelope binds when it exceeds both the ask and the
-        // per-proposal outflow cap. The payload here has no pinned preimage,
-        // so `carries_upgrade_payload` answers yes and the cap floor applies —
-        // with a zero spendable NAV that floor is 0 and the envelope wins.
+        // `trs.cap_proposal · spendable NAV` floor. That floor applies to every
+        // CODE/META proposal — matching `reference-model`'s `decide`, the
+        // 15 §4.4 differential oracle, which never conditions it on payload
+        // content. With a zero spendable NAV the floor is 0 and the envelope
+        // wins.
         for (class, floor) in [
             (
                 ProposalClass::Code,
@@ -15410,6 +15412,62 @@ fn sq173_class_envelopes_back_every_binding_class_prize() {
         let mut constitutional = empty_param_proposal(9_329, account(43), H256::repeat_byte(43), 1);
         constitutional.class = ProposalClass::Constitutional;
         assert_eq!(prize(&constitutional), None);
+    });
+}
+
+/// Cross-implementation pin for 15 §4.4: the runtime's CODE/META
+/// `InCapPrize` must equal the reference model's on the same inputs. This
+/// reproduces exactly the case `reference-model/tests/test_reference_model.py`
+/// `test_code_meta_nav_floor_is_scoped_to_upgrade_payloads` fixes — ask 100,
+/// envelope 200, spendable NAV 10,000 at `trs.cap_proposal` 5% — where the
+/// oracle returns **500**, the `trs.cap_proposal · NAV` floor. The runtime
+/// applies that floor to every CODE/META proposal, matching `decide()`, which
+/// never conditions it on payload content; a runtime that conditioned it would
+/// return 200 here and silently disagree with the oracle on a solvency path.
+#[test]
+fn sq173_code_meta_prize_matches_the_reference_model_worked_case() {
+    use frame_support::traits::fungibles::Mutate;
+    use pallet_epoch::ConstitutionAccess;
+    development_ext().execute_with(|| {
+        // Envelope = 200 USDC (override the seeded class calibration).
+        for (class, key) in [
+            (ProposalClass::Code, b"sec.prize.code".as_slice()),
+            (ProposalClass::Meta, b"sec.prize.meta".as_slice()),
+        ] {
+            let k = pallet_constitution::key16(key);
+            let mut record = pallet_constitution::Params::<Runtime>::get(k).expect("seeded row");
+            record.value = pallet_constitution::ParamValue::Balance(200 * currency::USDC);
+            pallet_constitution::Params::<Runtime>::insert(k, record);
+            let _ = class;
+        }
+
+        // Spendable NAV = 10,000 USDC through the real INSURANCE sweep.
+        let nav_target = 10_000 * currency::USDC;
+        assert_ok!(<ForeignAssets as Mutate<AccountId>>::mint_into(
+            usdc_location(),
+            &crate::configs::insurance_account(),
+            nav_target,
+        ));
+        assert_ok!(FutarchyTreasury::sweep_insurance(
+            pallet_origins::Origin::FutarchyTreasury.into(),
+            nav_target
+        ));
+        assert_eq!(FutarchyTreasury::nav().spendable_nav, nav_target);
+        assert_eq!(crate::configs::percent_param(b"trs.cap_proposal"), 5);
+
+        for class in [ProposalClass::Code, ProposalClass::Meta] {
+            let mut proposal =
+                empty_param_proposal(9_350, account(45), H256::repeat_byte(45), 1);
+            proposal.class = class;
+            proposal.ask = 100 * currency::USDC;
+            assert_eq!(
+                <crate::configs::RuntimeConstitutionAccess as ConstitutionAccess<AccountId>>::in_cap_prize(
+                    &proposal
+                ),
+                Some(500 * currency::USDC),
+                "{class:?} must equal the reference model's 500",
+            );
+        }
     });
 }
 
