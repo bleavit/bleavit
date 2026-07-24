@@ -717,13 +717,13 @@ impl ConstitutionState {
         }
     }
 
-    pub fn set_param(
-        &mut self,
+    fn checked_set_param(
+        &self,
         key: ParamKey,
         next: ParamValue,
         epoch: u32,
         block: BlockNumber,
-    ) -> Result<(), Error> {
+    ) -> Result<(usize, ParamRecord), Error> {
         let index = self
             .params
             .iter()
@@ -751,6 +751,17 @@ impl ConstitutionState {
                 _ => return Err(Error::WrongType),
             }
         }
+        Ok((index, updated))
+    }
+
+    pub fn set_param(
+        &mut self,
+        key: ParamKey,
+        next: ParamValue,
+        epoch: u32,
+        block: BlockNumber,
+    ) -> Result<(), Error> {
+        let (index, updated) = self.checked_set_param(key, next, epoch, block)?;
         self.params[index] = updated;
         Ok(())
     }
@@ -769,7 +780,13 @@ impl ConstitutionState {
             .find(|r| r.key == key)
             .ok_or(Error::UnknownParam)?;
         authorize_param_update(origin, record, next)?;
-        self.set_param(key, next, epoch, block)
+        let (index, updated) = self.checked_set_param(key, next, epoch, block)?;
+        ensure!(
+            !rederive_budgets_required(key, record.value, next),
+            Error::BudgetDerivationRequired
+        );
+        self.params[index] = updated;
+        Ok(())
     }
 
     pub fn set_capability(&mut self, capability: CapabilityRecord) -> Result<(), Error> {
@@ -955,6 +972,44 @@ pub enum Error {
     TooManyCapabilities,
     BadOrigin,
     TryStateViolation,
+    /// The 13 §5 derived-budget artifact is not implemented yet. Until its
+    /// verifier lands, changes to the load-bearing timing/capacity/POL keys
+    /// are refused in the unsafe direction (SQ-303, G-1).
+    BudgetDerivationRequired,
+}
+
+/// Temporary SQ-303 screen for the keys whose values feed the bounded
+/// occupancy, POL-commitment or frozen NAV-floor derivations in 13 §5.
+///
+/// The durable artifact/pairing verifier is a later milestone. Accepting a
+/// change before that verifier exists would make the published floor and PoV
+/// arithmetic silently stale, so this helper rejects every timing/capacity
+/// change and only the unsafe direction for the POL keys. Safe-direction
+/// changes remain available; all accepted changes still use the normal
+/// `Params` bounds, delta and cooldown checks.
+pub fn rederive_budgets_required(key: ParamKey, current: ParamValue, next: ParamValue) -> bool {
+    let changed = current.as_u128() != next.as_u128();
+    if !changed {
+        return false;
+    }
+    let increasing = next.as_u128() > current.as_u128();
+    let decreasing = next.as_u128() < current.as_u128();
+    let timing_or_capacity = key == key16(b"epoch.slots")
+        || key == key16(b"mkt.obs_interval")
+        || key == key16(b"dec.window")
+        || key == key16(b"epoch.length")
+        || key == key16(b"ledger.archive");
+    if timing_or_capacity {
+        return true;
+    }
+    let pol_budget = key == key16(b"pol.budget_epoch");
+    let pol_floor = key == key16(b"pol.b_gate")
+        || key == key16(b"pol.b_baseline")
+        || key == key16(b"pol.b.param")
+        || key == key16(b"pol.b.trs")
+        || key == key16(b"pol.b.code")
+        || key == key16(b"pol.b.meta");
+    (pol_budget && decreasing) || (pol_floor && increasing)
 }
 
 macro_rules! ensure {
@@ -2199,6 +2254,17 @@ mod tests {
     }
 
     #[test]
+    fn error_scale_discriminants_are_append_only() {
+        // DispatchError bytes can be retained in execution records across a
+        // runtime upgrade, so adding SQ-303's error must not renumber the
+        // established variants.
+        assert_eq!(Error::MetaBoundViolation.encode(), vec![12]);
+        assert_eq!(Error::BadReleaseSchema.encode(), vec![13]);
+        assert_eq!(Error::TryStateViolation.encode(), vec![18]);
+        assert_eq!(Error::BudgetDerivationRequired.encode(), vec![19]);
+    }
+
+    #[test]
     fn param_record_fields_match_contract_02_section_7_3() {
         use scale_info::TypeDef;
         // 02 §7.3 freezes `Params: map ParamKey -> ParamRecord` as a surface the
@@ -2624,11 +2690,23 @@ mod tests {
             ),
             Err(Error::UnknownParam)
         );
-        state
-            .dispatch_set_param(
+        let before = state.clone();
+        assert_eq!(
+            state.dispatch_set_param(
                 ConstitutionOrigin::FutarchyParam,
                 key16(b"mkt.obs_interval"),
                 ParamValue::U32(12),
+                1,
+                10,
+            ),
+            Err(Error::BudgetDerivationRequired)
+        );
+        assert_eq!(state, before);
+        state
+            .dispatch_set_param(
+                ConstitutionOrigin::FutarchyParam,
+                key16(b"mkt.fee"),
+                ParamValue::Perbill(4_000_000),
                 1,
                 10,
             )
@@ -2637,11 +2715,40 @@ mod tests {
             state
                 .params
                 .iter()
-                .find(|r| r.key == key16(b"mkt.obs_interval"))
+                .find(|r| r.key == key16(b"mkt.fee"))
                 .unwrap()
                 .value,
-            ParamValue::U32(12)
+            ParamValue::Perbill(4_000_000)
         );
+    }
+
+    #[test]
+    fn sq_303_screen_rejects_only_unsafe_budget_directions() {
+        assert!(rederive_budgets_required(
+            key16(b"epoch.length"),
+            ParamValue::U32(302_400),
+            ParamValue::U32(302_401)
+        ));
+        assert!(rederive_budgets_required(
+            key16(b"pol.budget_epoch"),
+            ParamValue::Perbill(7_500_000),
+            ParamValue::Perbill(7_499_999)
+        ));
+        assert!(rederive_budgets_required(
+            key16(b"pol.b.code"),
+            ParamValue::Balance(60_000 * futarchy_primitives::currency::USDC),
+            ParamValue::Balance(60_001 * futarchy_primitives::currency::USDC)
+        ));
+        assert!(!rederive_budgets_required(
+            key16(b"pol.b.code"),
+            ParamValue::Balance(60_000 * futarchy_primitives::currency::USDC),
+            ParamValue::Balance(59_999 * futarchy_primitives::currency::USDC)
+        ));
+        assert!(!rederive_budgets_required(
+            key16(b"mkt.fee"),
+            ParamValue::Perbill(30_000_000),
+            ParamValue::Perbill(31_000_000)
+        ));
     }
 
     #[test]
