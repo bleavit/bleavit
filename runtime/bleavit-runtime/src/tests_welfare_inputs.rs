@@ -263,16 +263,67 @@ fn sq195_reserve_health_is_day_resolved_and_unmeasured_before_arming() {
         pallet_welfare::Pallet::<Runtime>::note_reserve_probe(EPOCH, 2, true);
         assert_eq!(r_of(2), Some(futarchy_primitives::FixedU64(0)));
 
-        // Epoch projection is the minimum over recorded days: one failed day
-        // fails the epoch's settlement-time `C_e` term (05 §4.4).
+        // The epoch tally is raw, not a verdict: one failed day and one passed
+        // day, with every other day of the epoch simply unrecorded.
         assert_eq!(
-            pallet_welfare::Pallet::<Runtime>::reserve_probe_epoch(EPOCH),
-            Some(false)
+            pallet_welfare::Pallet::<Runtime>::reserve_probe_epoch_tally(EPOCH),
+            (1, 1)
         );
         assert_eq!(
-            pallet_welfare::Pallet::<Runtime>::reserve_probe_epoch(EPOCH + 1),
-            None,
-            "an epoch with no recorded probe day has no epoch-level R"
+            pallet_welfare::Pallet::<Runtime>::reserve_probe_epoch_tally(EPOCH + 1),
+            (0, 0)
         );
+    });
+}
+
+/// SQ-195 (R-6 round 4 blocker): a partially-covered epoch must never read as
+/// healthy. The first implementation projected the epoch as the minimum over
+/// *recorded* days, so an epoch with one passing day and every other day
+/// unrecorded returned `R = 1` — precisely the "absence is never healthy"
+/// violation 07 §8 forbids, and it would have raised settlement-time `C_e`
+/// (05 §4.4) on an epoch the probe barely ran in.
+#[test]
+fn sq195_epoch_projection_requires_complete_day_cover() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 42;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::R);
+        pallet_oracle::ReserveProbeArmed::<Runtime>::put(true);
+
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let timing = pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch)
+            .expect("the live epoch has timing");
+        let expected_days = timing.length / futarchy_primitives::kernel::BLOCKS_PER_DAY;
+        assert!(expected_days > 1, "the epoch must span several probe days");
+
+        let epoch_r = || {
+            crate::configs::RuntimeMetricInputs::onchain_components(epoch, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::R)
+                .map(|c| c.value)
+        };
+
+        // One passing day, the rest unrecorded: NOT healthy.
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, 0, true);
+        assert_eq!(
+            epoch_r(),
+            Some(futarchy_primitives::FixedU64(0)),
+            "a single passing day cannot carry an epoch the probe did not cover",
+        );
+
+        // Every expected day passing: healthy.
+        for day in 1..expected_days {
+            let day = u8::try_from(day).expect("epoch days fit u8");
+            pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, day, true);
+        }
+        assert_eq!(
+            epoch_r(),
+            Some(futarchy_primitives::FixedU64(pallet_welfare::ONE)),
+        );
+
+        // One failed day flips it back, regardless of cover.
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, 0, false);
+        assert_eq!(epoch_r(), Some(futarchy_primitives::FixedU64(0)));
     });
 }

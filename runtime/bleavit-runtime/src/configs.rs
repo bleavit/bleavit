@@ -2128,12 +2128,22 @@ impl Get<EpochId> for GuardianReviewDeadline {
 }
 
 fn xcm_traffic_epoch_and_day() -> (EpochId, u8) {
+    epoch_and_day_at(System::block_number())
+}
+
+/// Attribute `at` to its `(epoch, day)` under the live schedule.
+///
+/// A block before the live epoch's start belongs to an earlier epoch whose
+/// start this runtime no longer holds; it clamps to day 0 of the live epoch
+/// rather than underflowing. That is the conservative direction for the SQ-195
+/// probe input: a misattributed **failure** still fails a real day, while the
+/// cover-complete epoch projection independently fails any day left unrecorded.
+fn epoch_and_day_at(at: BlockNumber) -> (EpochId, u8) {
     let info = pallet_epoch::EpochOf::<Runtime>::get();
     // The frozen EpochOf contract keeps epoch timing in the sibling live
     // schedule value; both are advanced atomically by pallet-epoch.
     let schedule = pallet_epoch::Schedule::<Runtime>::get();
-    let now = System::block_number();
-    let day = u8::try_from(now.saturating_sub(schedule.epoch_start_block) / BLOCKS_PER_DAY)
+    let day = u8::try_from(at.saturating_sub(schedule.epoch_start_block) / BLOCKS_PER_DAY)
         .unwrap_or(u8::MAX);
     (info.index, day)
 }
@@ -4801,6 +4811,26 @@ fn xcm_health(counters: pallet_welfare::XcmTrafficCounters) -> FixedU64 {
     FixedU64(value)
 }
 
+/// Epoch-level `R` for 05 §4.4's settlement-time `C_e` (07 §8; SQ-195).
+///
+/// 07 §8 defines only `R_daily`, so the epoch projection is derived here — and
+/// the derivation is **cover-complete, not a minimum over what happens to be
+/// recorded**. An epoch is healthy only if *every* probe day it should have had
+/// recorded a pass: "absence is never healthy", and a projection that ignored
+/// unrecorded days would let a single passing day carry an epoch through which
+/// the probe never ran. The expected count comes from the epoch's own length,
+/// so a governed `epoch.length` change cannot silently shrink the requirement.
+///
+/// `None` (unavailable, crank fails status-quo-safe) only when the epoch's
+/// timing is unknown — never as a stand-in for "nothing recorded".
+#[allow(dead_code)]
+fn reserve_probe_epoch_value(epoch: EpochId) -> Option<bool> {
+    let timing = pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch)?;
+    let expected_days = timing.length.checked_div(kernel::BLOCKS_PER_DAY)?;
+    let (passed, failed) = pallet_welfare::Pallet::<Runtime>::reserve_probe_epoch_tally(epoch);
+    Some(failed == 0 && passed >= expected_days)
+}
+
 #[allow(dead_code)]
 fn metric_components(
     epoch: EpochId,
@@ -4882,9 +4912,7 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
                 epoch,
                 version,
                 pallet_welfare::Pallet::<Runtime>::xcm_traffic_epoch(epoch),
-                // 05 §4.4's settlement-time `C_e` takes epoch-level `c_j`; the
-                // epoch projection of `R` is the minimum over recorded days.
-                pallet_welfare::Pallet::<Runtime>::reserve_probe_epoch(epoch),
+                reserve_probe_epoch_value(epoch),
             );
             components.extend(
                 specs
@@ -5175,10 +5203,12 @@ impl pallet_oracle::ProbeTimeoutSink for OracleProbeTimeoutToWelfare {
     }
 
     /// Day-attribute one scored probe slot for the 07 §8 `R_daily` input
-    /// (SQ-195). `xcm_traffic_epoch_and_day` is the established attribution
-    /// precedent and reads the same live schedule the traffic counters use.
-    fn probe_outcome(passed: bool) {
-        let (epoch, day) = xcm_traffic_epoch_and_day();
+    /// (SQ-195), using the block the **attempt opened** at rather than the
+    /// current block: a probe that spans a day boundary belongs to the day it
+    /// measured. Attribution otherwise follows the same live schedule the XCM
+    /// traffic counters use.
+    fn probe_outcome(opened_at: BlockNumber, passed: bool) {
+        let (epoch, day) = epoch_and_day_at(opened_at);
         pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, day, passed);
     }
 }

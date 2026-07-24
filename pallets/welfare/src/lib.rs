@@ -965,24 +965,24 @@ pub mod pallet {
             ReserveProbeDaily::<T>::get(epoch, day)
         }
 
-        /// Epoch-level `R` for the settlement-time `C_e` term (05 §4.4).
+        /// Count this epoch's recorded probe days, split pass/fail.
         ///
-        /// 07 §8 defines only `R_daily`; the epoch projection is the **minimum
-        /// over the epoch's recorded days** — one failed probe day fails the
-        /// epoch. That is the only aggregation consistent with §8's own
-        /// fail-static rule ("absence is never healthy … every absent, failed,
-        /// ambiguous, late or unauthenticated outcome is fail-static in the
-        /// pessimistic direction"): any averaging or majority reading would let
-        /// a passing day mask a proven-unreachable reserve.
-        pub fn reserve_probe_epoch(epoch: EpochId) -> Option<bool> {
-            let mut seen = false;
-            for (_, passed) in ReserveProbeDaily::<T>::iter_prefix(epoch) {
-                seen = true;
-                if !passed {
-                    return Some(false);
-                }
-            }
-            seen.then_some(true)
+        /// Deliberately **not** an epoch-level `R`: absent days are invisible
+        /// here, and 07 §8 has no benefit-of-the-doubt branch, so only a caller
+        /// that knows how many probe days the epoch *should* have can decide
+        /// health. The runtime derives that from the epoch's own length and
+        /// treats any shortfall as failure (05 §4.4's `C_e`).
+        pub fn reserve_probe_epoch_tally(epoch: EpochId) -> (u32, u32) {
+            ReserveProbeDaily::<T>::iter_prefix(epoch).fold(
+                (0_u32, 0_u32),
+                |(passed, failed), (_, ok)| {
+                    if ok {
+                        (passed.saturating_add(1), failed)
+                    } else {
+                        (passed, failed.saturating_add(1))
+                    }
+                },
+            )
         }
 
         /// Return the local XCM counters for one epoch/day window.
@@ -1250,9 +1250,18 @@ pub mod pallet {
                         "welfare XCM traffic index contains a duplicate epoch",
                     ));
                 }
-                if XcmTraffic::<T>::iter_prefix(*epoch).next().is_none() {
+                // SQ-195: the index is shared with `ReserveProbeDaily`, so an
+                // epoch carrying only reserve-probe outcomes is legitimately
+                // indexed with no traffic counter. A reserve-probe outcome can
+                // be recorded on a day that saw no local XCM at all — notably
+                // a budget refusal, which happens before the router is ever
+                // observed — so requiring traffic here would fail try-state on
+                // correct state.
+                if XcmTraffic::<T>::iter_prefix(*epoch).next().is_none()
+                    && ReserveProbeDaily::<T>::iter_prefix(*epoch).next().is_none()
+                {
                     return Err(TryRuntimeError::Other(
-                        "welfare XCM traffic index has no corresponding counter",
+                        "welfare traffic index has no corresponding counter or probe outcome",
                     ));
                 }
             }
@@ -1270,6 +1279,21 @@ pub mod pallet {
                 if counters.accepted == 0 && counters.failed == 0 && counters.probe_timeouts == 0 {
                     return Err(TryRuntimeError::Other(
                         "welfare XCM traffic stores an all-zero counter triple",
+                    ));
+                }
+            }
+            // SQ-195: every recorded probe day must be indexed and in the past,
+            // so the bounded retention walk can always reach and retire it
+            // (I-20/I-21) and no outcome can be attributed to a future epoch.
+            for (epoch, _, _) in ReserveProbeDaily::<T>::iter() {
+                if epoch > current_epoch {
+                    return Err(TryRuntimeError::Other(
+                        "welfare reserve-probe outcome lies in the future",
+                    ));
+                }
+                if !traffic_epochs.contains(&epoch) {
+                    return Err(TryRuntimeError::Other(
+                        "welfare reserve-probe outcome has no indexed epoch",
                     ));
                 }
             }
