@@ -432,6 +432,16 @@ pub mod pallet {
     #[pallet::storage]
     pub type ReserveProbeArmed<T: Config> = StorageValue<_, bool, ValueQuery>;
 
+    /// Block at which [`ReserveProbeArmed`] latched (07 §8; SQ-195).
+    ///
+    /// 07 §8 scores **zero** pre-arm wall-clock slots — "time before a complete
+    /// runnable probe existed is not retroactively classified as an outage" —
+    /// so the welfare `R` projection must know where measurement began. Without
+    /// it, an epoch in which the probe arms late can never read healthy no
+    /// matter how completely the post-arm days pass.
+    #[pallet::storage]
+    pub type ReserveProbeArmedAt<T: Config> = StorageValue<_, BlockNumber, OptionQuery>;
+
     /// Internal (not FE-read): per-round watchtower acknowledgments, keyed by
     /// `report_hash` (07 §13). Bounded to live games' acks by the core's
     /// settle/escalate pruning; `try_state` asserts `≤ MAX_ACK_RECORDS`.
@@ -952,6 +962,7 @@ pub mod pallet {
             if let Some(query_id) = fresh_query_id {
                 if !was_armed {
                     ReserveProbeArmed::<T>::put(true);
+                    ReserveProbeArmedAt::<T>::put(now);
                 }
                 T::ProbeDispatch::probe_due(query_id, params.probe_amount);
             }
@@ -1141,6 +1152,11 @@ pub mod pallet {
         /// Whether the one-time reserve-probe readiness gate has completed.
         pub fn reserve_probe_armed() -> bool {
             ReserveProbeArmed::<T>::get()
+        }
+
+        /// Block the probe armed at, if it has (07 §8; SQ-195).
+        pub fn reserve_probe_armed_at() -> Option<BlockNumber> {
+            ReserveProbeArmedAt::<T>::get()
         }
 
         // ---- Hydrate / persist (Track-A "load → call core → persist") ----

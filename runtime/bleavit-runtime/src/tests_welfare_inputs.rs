@@ -327,3 +327,146 @@ fn sq195_epoch_projection_requires_complete_day_cover() {
         assert_eq!(epoch_r(), Some(futarchy_primitives::FixedU64(0)));
     });
 }
+
+/// SQ-195: the cover-complete projection must never be **vacuous**.
+///
+/// `expected_days = epoch.length / BLOCKS_PER_DAY` is zero wherever an epoch is
+/// shorter than the frozen 14,400-block day — which the default-off
+/// `fast-timing` build produces, since it compresses `MIN_EPOCH_LENGTH_BLOCKS`
+/// while `BLOCKS_PER_DAY` stays frozen. Without a floor, `passed >= 0` reports
+/// an epoch healthy with no probe recorded at all: release timing never reaches
+/// that branch, but a compressed drill runtime would have been handed false
+/// confidence. Found by inspection, not by the suite, so it is pinned here.
+#[test]
+fn sq195_sub_day_epoch_still_requires_a_recorded_pass() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 43;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::R);
+        pallet_oracle::ReserveProbeArmed::<Runtime>::put(true);
+
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        // Force the sub-day case directly: an epoch shorter than one frozen
+        // day, which is the shape the compressed `fast-timing` build produces.
+        pallet_epoch::Schedule::<Runtime>::mutate(|schedule| {
+            schedule.length = futarchy_primitives::kernel::BLOCKS_PER_DAY / 4;
+        });
+        assert!(
+            pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch)
+                .expect("live epoch has timing")
+                .length
+                < futarchy_primitives::kernel::BLOCKS_PER_DAY,
+            "precondition: the epoch must be shorter than one frozen day",
+        );
+
+        let epoch_r = || {
+            crate::configs::RuntimeMetricInputs::onchain_components(epoch, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::R)
+                .map(|c| c.value)
+        };
+
+        // Nothing recorded: must NOT be healthy, even though the epoch is
+        // shorter than a day and the naive expected count would be zero.
+        assert_eq!(
+            epoch_r(),
+            Some(futarchy_primitives::FixedU64(0)),
+            "a sub-day epoch with no recorded probe must not read healthy",
+        );
+
+        // One recorded pass satisfies the floored requirement.
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, 0, true);
+        assert_eq!(
+            epoch_r(),
+            Some(futarchy_primitives::FixedU64(pallet_welfare::ONE)),
+        );
+    });
+}
+
+/// SQ-195 (R-6 round 5): **counting passes is not covering days.**
+///
+/// The superseded projection compared `passed >= expected_days`, so passes
+/// recorded on out-of-range days satisfied the count while the epoch's actual
+/// probe days went unprobed — "absence is never healthy" defeated by
+/// arithmetic. The check now walks the days themselves.
+#[test]
+fn sq195_projection_covers_days_not_just_a_pass_count() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 44;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::R);
+        pallet_oracle::ReserveProbeArmed::<Runtime>::put(true);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let timing =
+            pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch).expect("live epoch has timing");
+        let days = timing.length / futarchy_primitives::kernel::BLOCKS_PER_DAY;
+        assert!(days >= 3, "the epoch must span several probe days");
+
+        let epoch_r = || {
+            crate::configs::RuntimeMetricInputs::onchain_components(epoch, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::R)
+                .map(|c| c.value)
+        };
+
+        // `days` passes, but all recorded *outside* the epoch's day range. A
+        // count-based check reads this as full coverage; a cover check does not.
+        for offset in 0..days {
+            let day = u8::try_from(days + offset).expect("day fits u8");
+            pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, day, true);
+        }
+        assert_eq!(
+            epoch_r(),
+            Some(futarchy_primitives::FixedU64(0)),
+            "out-of-range passes must not satisfy the epoch's own day cover",
+        );
+    });
+}
+
+/// SQ-195 (R-6 round 5): 07 §8 scores **zero** pre-arm slots, so an epoch in
+/// which the probe arms partway through must still be able to read healthy on
+/// complete post-arm coverage. Requiring day 0 of such an epoch would make it
+/// permanently unhealthy for a mechanism that did not yet exist.
+#[test]
+fn sq195_pre_arm_days_are_outside_the_measured_range() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 45;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::R);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let timing =
+            pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch).expect("live epoch has timing");
+        let day_len = futarchy_primitives::kernel::BLOCKS_PER_DAY;
+        let days = timing.length / day_len;
+        assert!(days >= 3);
+
+        // The probe arms on day 2 of this epoch.
+        pallet_oracle::ReserveProbeArmed::<Runtime>::put(true);
+        pallet_oracle::ReserveProbeArmedAt::<Runtime>::put(timing.start + 2 * day_len);
+
+        let epoch_r = || {
+            crate::configs::RuntimeMetricInputs::onchain_components(epoch, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::R)
+                .map(|c| c.value)
+        };
+
+        // Days 0 and 1 are pre-arm and never recorded; days 2.. all pass.
+        for day in 2..days {
+            let day = u8::try_from(day).expect("day fits u8");
+            pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, day, true);
+        }
+        assert_eq!(
+            epoch_r(),
+            Some(futarchy_primitives::FixedU64(pallet_welfare::ONE)),
+            "pre-arm days must not hold a fully-covered post-arm epoch unhealthy",
+        );
+
+        // A post-arm gap still fails.
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, 2, false);
+        assert_eq!(epoch_r(), Some(futarchy_primitives::FixedU64(0)));
+    });
+}

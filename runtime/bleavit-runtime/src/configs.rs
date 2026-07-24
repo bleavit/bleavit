@@ -2128,24 +2128,30 @@ impl Get<EpochId> for GuardianReviewDeadline {
 }
 
 fn xcm_traffic_epoch_and_day() -> (EpochId, u8) {
+    // The current block is never before the live epoch's start.
     epoch_and_day_at(System::block_number())
+        .unwrap_or_else(|| (pallet_epoch::EpochOf::<Runtime>::get().index, 0))
 }
 
-/// Attribute `at` to its `(epoch, day)` under the live schedule.
+/// Attribute `at` to its `(epoch, day)` under the live schedule, or `None` when
+/// `at` predates the live epoch.
 ///
 /// A block before the live epoch's start belongs to an earlier epoch whose
-/// start this runtime no longer holds; it clamps to day 0 of the live epoch
-/// rather than underflowing. That is the conservative direction for the SQ-195
-/// probe input: a misattributed **failure** still fails a real day, while the
-/// cover-complete epoch projection independently fails any day left unrecorded.
-fn epoch_and_day_at(at: BlockNumber) -> (EpochId, u8) {
+/// start this runtime no longer holds. Clamping it to day 0 of the live epoch
+/// would be actively wrong, not merely conservative: it records the outcome
+/// against a day the probe never measured *and* leaves the real day unrecorded.
+/// Returning `None` records nothing instead — the SQ-195 cover check then fails
+/// the true epoch on its missing day, which is the fail-static outcome (07 §8).
+fn epoch_and_day_at(at: BlockNumber) -> Option<(EpochId, u8)> {
     let info = pallet_epoch::EpochOf::<Runtime>::get();
     // The frozen EpochOf contract keeps epoch timing in the sibling live
     // schedule value; both are advanced atomically by pallet-epoch.
     let schedule = pallet_epoch::Schedule::<Runtime>::get();
-    let day = u8::try_from(at.saturating_sub(schedule.epoch_start_block) / BLOCKS_PER_DAY)
-        .unwrap_or(u8::MAX);
-    (info.index, day)
+    if at < schedule.epoch_start_block {
+        return None;
+    }
+    let day = u8::try_from((at - schedule.epoch_start_block) / BLOCKS_PER_DAY).unwrap_or(u8::MAX);
+    Some((info.index, day))
 }
 
 /// Fail-soft recorder for the three locally observable v1 XCM-health signals.
@@ -4814,21 +4820,53 @@ fn xcm_health(counters: pallet_welfare::XcmTrafficCounters) -> FixedU64 {
 /// Epoch-level `R` for 05 §4.4's settlement-time `C_e` (07 §8; SQ-195).
 ///
 /// 07 §8 defines only `R_daily`, so the epoch projection is derived here — and
-/// the derivation is **cover-complete, not a minimum over what happens to be
-/// recorded**. An epoch is healthy only if *every* probe day it should have had
-/// recorded a pass: "absence is never healthy", and a projection that ignored
-/// unrecorded days would let a single passing day carry an epoch through which
-/// the probe never ran. The expected count comes from the epoch's own length,
-/// so a governed `epoch.length` change cannot silently shrink the requirement.
+/// it is a **cover check over actual days**, not a count of passes. Counting is
+/// not covering: three passes recorded on days 5–7 would satisfy a count of
+/// three while days 0–2 went unprobed, and "absence is never healthy" has no
+/// benefit-of-the-doubt branch. Every day in the measured range must carry a
+/// recorded pass.
+///
+/// The measured range starts at the **arming day**, because §8 scores zero
+/// pre-arm slots — "time before a complete runnable probe existed is not
+/// retroactively classified as an outage". Without that, an epoch in which the
+/// probe armed late could never read healthy however completely its post-arm
+/// days passed. It ends at the epoch's last whole day; a legal `epoch.length`
+/// need not be a day multiple, and the trailing partial day is not a completed
+/// cadence slot. The range is floored at one day so a sub-day epoch — which the
+/// compressed `fast-timing` build produces — still requires a recorded pass
+/// rather than passing vacuously.
 ///
 /// `None` (unavailable, crank fails status-quo-safe) only when the epoch's
 /// timing is unknown — never as a stand-in for "nothing recorded".
 #[allow(dead_code)]
 fn reserve_probe_epoch_value(epoch: EpochId) -> Option<bool> {
     let timing = pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch)?;
-    let expected_days = timing.length.checked_div(kernel::BLOCKS_PER_DAY)?;
-    let (passed, failed) = pallet_welfare::Pallet::<Runtime>::reserve_probe_epoch_tally(epoch);
-    Some(failed == 0 && passed >= expected_days)
+    let day_len = kernel::BLOCKS_PER_DAY;
+    let last_day = timing.length.checked_div(day_len).unwrap_or(0).max(1);
+
+    // Days before arming are outside the measured range entirely (07 §8).
+    let first_day = match pallet_oracle::Pallet::<Runtime>::reserve_probe_armed_at() {
+        Some(armed_at) if armed_at > timing.start => armed_at
+            .saturating_sub(timing.start)
+            .checked_div(day_len)
+            .unwrap_or(0),
+        // Armed at or before this epoch began, or not armed at all — the caller
+        // only reaches here when armed, so the whole epoch is measured.
+        _ => 0,
+    };
+    if first_day >= last_day {
+        // The probe armed inside the epoch's trailing partial day: no completed
+        // cadence slot was measured, so there is nothing to score.
+        return Some(true);
+    }
+
+    for day in first_day..last_day {
+        let day = u8::try_from(day).ok()?;
+        if pallet_welfare::Pallet::<Runtime>::reserve_probe_daily(epoch, day) != Some(true) {
+            return Some(false);
+        }
+    }
+    Some(true)
 }
 
 #[allow(dead_code)]
@@ -5208,8 +5246,13 @@ impl pallet_oracle::ProbeTimeoutSink for OracleProbeTimeoutToWelfare {
     /// measured. Attribution otherwise follows the same live schedule the XCM
     /// traffic counters use.
     fn probe_outcome(opened_at: BlockNumber, passed: bool) {
-        let (epoch, day) = epoch_and_day_at(opened_at);
-        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, day, passed);
+        // An attempt opened before the live epoch began cannot be attributed
+        // without that epoch's start block, and recording it against the wrong
+        // day is worse than not recording it: the cover check independently
+        // fails the real epoch on its missing day (07 §8).
+        if let Some((epoch, day)) = epoch_and_day_at(opened_at) {
+            pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, day, passed);
+        }
     }
 }
 
