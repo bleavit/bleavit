@@ -401,7 +401,7 @@ pub mod pallet {
         type RebatePayout: RebatePayout<Self::AccountId>;
 
         /// Runtime custody adapter which atomically moves real USDC from MAIN
-        /// into the KEEPER/ORACLE payout pot when its budget line is funded.
+        /// into the KEEPER/ORACLE/REWARDS payout pot when its budget line is funded.
         type PotFunding: PotFunding<Self::AccountId>;
 
         /// Custody seam for the 08 §1.2/§1.4 INSURANCE → `MAIN` sweep (SQ-207).
