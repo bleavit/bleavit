@@ -424,11 +424,14 @@ pub enum Capability {
     SetReleaseChannel,
     AuthorizeUpgrade,
     TreasurySpend,
-    /// Move protocol INSURANCE custody back into MAIN without granting the
-    /// broader treasury outflow surface (08 §1.2/§1.4; SQ-384).
-    InsuranceSweep,
     OracleConfig,
     MarketTemplate,
+    /// Move protocol INSURANCE custody back into MAIN without granting the
+    /// broader treasury outflow surface (08 §1.2/§1.4; SQ-384).
+    ///
+    /// Appended deliberately: Capability is SCALE-encoded in stored records
+    /// and resource keys, so the pre-existing discriminants are immutable.
+    InsuranceSweep,
 }
 
 #[derive(
@@ -945,10 +948,6 @@ pub enum Error {
     ReservedPhaseFlag,
     FlagNotArmable,
     KernelBoundImmutable,
-    /// The 13 §5 derived-budget artifact is not implemented yet. Until its
-    /// verifier lands, changes to the load-bearing timing/capacity/POL keys
-    /// are refused in the unsafe direction (SQ-303, G-1).
-    BudgetDerivationRequired,
     MetaBoundViolation,
     BadReleaseSchema,
     TooManyParams,
@@ -956,6 +955,10 @@ pub enum Error {
     TooManyCapabilities,
     BadOrigin,
     TryStateViolation,
+    /// The 13 §5 derived-budget artifact is not implemented yet. Until its
+    /// verifier lands, changes to the load-bearing timing/capacity/POL keys
+    /// are refused in the unsafe direction (SQ-303, G-1).
+    BudgetDerivationRequired,
 }
 
 /// Temporary SQ-303 screen for the keys whose values feed the bounded
@@ -2222,6 +2225,27 @@ pub mod benchmarking {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capability_scale_discriminants_are_append_only() {
+        // Capability values are embedded in stored records and the 0x02
+        // resource-key discriminator. Existing values must retain their
+        // SCALE tags when a new authority is introduced.
+        assert_eq!(Capability::OracleConfig.encode(), vec![6]);
+        assert_eq!(Capability::MarketTemplate.encode(), vec![7]);
+        assert_eq!(Capability::InsuranceSweep.encode(), vec![8]);
+    }
+
+    #[test]
+    fn error_scale_discriminants_are_append_only() {
+        // DispatchError bytes can be retained in execution records across a
+        // runtime upgrade, so adding SQ-303's error must not renumber the
+        // established variants.
+        assert_eq!(Error::MetaBoundViolation.encode(), vec![12]);
+        assert_eq!(Error::BadReleaseSchema.encode(), vec![13]);
+        assert_eq!(Error::TryStateViolation.encode(), vec![18]);
+        assert_eq!(Error::BudgetDerivationRequired.encode(), vec![19]);
+    }
 
     #[test]
     fn param_record_fields_match_contract_02_section_7_3() {
