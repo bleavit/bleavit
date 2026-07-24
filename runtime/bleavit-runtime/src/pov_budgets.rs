@@ -339,17 +339,30 @@ fn recovery_qualifier_and_mandatory_hooks_fit_absolute_class_budgets() {
 
 /// 13 §5 item 1: "`decide(pid)` reads ≤ 6 proposal books + 1 Baseline + O(10)
 /// params — PoV per call bounded regardless of map ceiling." Pinned regression
-/// ceilings (measured 2026-07-17: `decide` 183,055 B; `settle_cohort(5)`
-/// 359,385 B, both dominated by per-key trie overhead, not the 2,240-row
-/// retained map): growth past ~2× the measurement reopens the touch-bound derivation.
+/// ceilings (current 50×20 generated-weight estimate: `decide` 183,055 B;
+/// `settle_cohort(5)` 336,825 B, both dominated by per-key trie overhead, not
+/// the 2,240-row retained map): growth past ~2× the measurement reopens the
+/// touch-bound derivation.
 #[test]
 fn decide_and_settle_cohort_pov_pinned_below_map_scaling() {
     let decide =
         <crate::weights::pallet_epoch::WeightInfo<Runtime> as pallet_epoch::WeightInfo>::decide();
+    assert_eq!(
+        decide.proof_size(),
+        183_055,
+        "decide proof_size drifted from the 13 §5 generated-weight estimate"
+    );
     assert!(
         decide.proof_size() <= 384 * KIB as u64,
         "decide proof_size regressed past its pinned ceiling: {}",
         decide.proof_size()
+    );
+    let settle_five =
+        <crate::weights::pallet_epoch::WeightInfo<Runtime> as pallet_epoch::WeightInfo>::settle_cohort(5);
+    assert_eq!(
+        settle_five.proof_size(),
+        336_825,
+        "settle_cohort(5) proof_size drifted from the 13 §5 generated-weight estimate"
     );
     let settle = <crate::weights::pallet_epoch::WeightInfo<Runtime> as pallet_epoch::WeightInfo>::settle_cohort(
         MAX_COHORT_PROPOSALS_BOUND,
