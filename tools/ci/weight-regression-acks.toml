@@ -8,4 +8,3 @@
 # runtime/bleavit-runtime/src/weights/pallet_constitution.rs set_param: storage proof grew after adding validation
 # runtime/bleavit-runtime/src/weights/pallet_retired.rs *: pallet retired by approved migration
 #
-runtime/bleavit-runtime/src/weights/pallet_guardian.rs on_initialize: B18's failed DelayOnce retention checks add a bounded veto-review join to the per-block maintenance sweep; the conservative saturated envelope remains until the next full guardian benchmark refresh.
