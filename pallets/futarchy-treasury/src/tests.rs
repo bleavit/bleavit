@@ -4,7 +4,10 @@
 //! differential (Python M3 ≡ Rust core ≡ this pallet at default parameters).
 
 use crate::mock::*;
-use crate::{CollatorAuthoredBlocks, CollatorAuthoredEpoch, Error, Event, PayoutLine};
+use crate::{
+    CollatorAuthoredBlocks, CollatorAuthoredEpoch, CommunityDistributionRemaining, Error, Event,
+    PayoutLine,
+};
 use frame_support::{
     assert_err, assert_noop, assert_ok,
     traits::{Hooks, StorageVersion},
@@ -332,6 +335,27 @@ fn storage_v3_try_runtime_preserves_existing_v2_state() {
             crate::CommunityDistributionRemaining::<Test>::get(),
             123 * VIT
         );
+    });
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn storage_v3_try_runtime_preserves_existing_v1_bootstrap_latch() {
+    new_test_ext().execute_with(|| {
+        StorageVersion::new(1).put::<Treasury>();
+        TreasuryArmedValue::set(true);
+        crate::BootstrapOpsFundingClosed::<Test>::put(false);
+
+        let state = <Treasury as Hooks<u64>>::pre_upgrade().expect("pre-upgrade state");
+        let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
+        <Treasury as Hooks<u64>>::post_upgrade(state).expect("post-upgrade checks");
+
+        assert!(!crate::BootstrapOpsFundingClosed::<Test>::get());
+        assert_eq!(
+            CommunityDistributionRemaining::<Test>::get(),
+            CommunityDistributionAmount::get()
+        );
+        assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(3));
     });
 }
 

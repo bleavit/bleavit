@@ -13704,9 +13704,9 @@ fn canonical_resource_key_universe_has_no_semantic_collisions() {
             pallet_constitution::Capability::SetReleaseChannel,
             pallet_constitution::Capability::AuthorizeUpgrade,
             pallet_constitution::Capability::TreasurySpend,
-            pallet_constitution::Capability::InsuranceSweep,
             pallet_constitution::Capability::OracleConfig,
             pallet_constitution::Capability::MarketTemplate,
+            pallet_constitution::Capability::InsuranceSweep,
         ];
         for class in classes {
             for capability in fixed_capabilities {
