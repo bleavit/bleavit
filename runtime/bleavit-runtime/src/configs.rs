@@ -1256,7 +1256,7 @@ impl pallet_xcm::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type SendXcmOrigin = staging_xcm_builder::EnsureXcmOrigin<RuntimeOrigin, ()>;
     #[cfg(feature = "runtime-benchmarks")]
-    type XcmRouter = BenchmarkXcmRouter;
+    type XcmRouter = xcm_config::Router;
     #[cfg(not(feature = "runtime-benchmarks"))]
     type XcmRouter = xcm_config::Router;
     type ExecuteXcmOrigin =
@@ -1287,45 +1287,31 @@ impl pallet_xcm::Config for Runtime {
 }
 
 #[cfg(feature = "runtime-benchmarks")]
-pub struct BenchmarkXcmRouter;
-
-#[cfg(feature = "runtime-benchmarks")]
-impl staging_xcm::latest::SendXcm for BenchmarkXcmRouter {
-    type Ticket = (staging_xcm::latest::Location, staging_xcm::latest::Xcm<()>);
-
-    fn validate(
-        destination: &mut Option<staging_xcm::latest::Location>,
-        message: &mut Option<staging_xcm::latest::Xcm<()>>,
-    ) -> staging_xcm::latest::SendResult<Self::Ticket> {
-        let destination = destination
-            .take()
-            .ok_or(staging_xcm::latest::SendError::MissingArgument)?;
-        let message = message
-            .take()
-            .ok_or(staging_xcm::latest::SendError::MissingArgument)?;
-        Ok(((destination, message), staging_xcm::latest::Assets::new()))
-    }
-
-    fn deliver(
-        _ticket: Self::Ticket,
-    ) -> Result<staging_xcm::latest::XcmHash, staging_xcm::latest::SendError> {
-        Ok([0; 32])
-    }
-}
-
-#[cfg(feature = "runtime-benchmarks")]
 pub struct XcmBenchmarkDelivery;
 
 #[cfg(feature = "runtime-benchmarks")]
 impl staging_xcm_builder::EnsureDelivery for XcmBenchmarkDelivery {
     fn ensure_successful_delivery(
         _origin_ref: &staging_xcm::latest::Location,
-        _dest: &staging_xcm::latest::Location,
+        dest: &staging_xcm::latest::Location,
         _fee_reason: staging_xcm_executor::traits::FeeReason,
     ) -> (
         Option<staging_xcm_executor::FeesMode>,
         Option<staging_xcm::latest::Assets>,
     ) {
+        // Benchmark the production delivery leg. The sibling route must have
+        // real HRMP/XCMP state, and the relay-side host configuration is also
+        // primed for the production UMP alternative in this same externality.
+        ParachainSystem::open_outbound_hrmp_channel_for_benchmarks_or_tests(
+            cumulus_primitives_core::ParaId::from(chain_identity::ASSET_HUB_PARA_ID),
+        );
+        <xcm_config::Router as staging_xcm::latest::SendXcm>::ensure_successful_delivery(Some(
+            staging_xcm::latest::Location::parent(),
+        ));
+        <xcm_config::Router as staging_xcm::latest::SendXcm>::ensure_successful_delivery(Some(
+            dest.clone(),
+        ));
+
         let caller = frame_benchmarking::whitelisted_caller::<AccountId>();
         let _ = <Balances as Currency<AccountId>>::make_free_balance_be(
             &caller,
@@ -1340,7 +1326,13 @@ impl pallet_xcm::benchmarking::Config for Runtime {
     type DeliveryHelper = XcmBenchmarkDelivery;
 
     fn reachable_dest() -> Option<staging_xcm::latest::Location> {
-        Some(staging_xcm::latest::Location::parent())
+        ParachainSystem::open_outbound_hrmp_channel_for_benchmarks_or_tests(
+            cumulus_primitives_core::ParaId::from(chain_identity::ASSET_HUB_PARA_ID),
+        );
+        <xcm_config::Router as staging_xcm::latest::SendXcm>::ensure_successful_delivery(Some(
+            staging_xcm::latest::Location::parent(),
+        ));
+        Some(bleavit_xcm::identity::asset_hub_location())
     }
 
     fn reserve_transferable_asset_and_dest(
@@ -1417,7 +1409,7 @@ fn benchmark_prime_xcm_asset_state() {
     let cap = balance_param(b"phase3.dep_cap");
     if cap != u128::MAX {
         pallet_inflow_caps::CumulativeDeposits::<Runtime>::insert(
-            &frame_benchmarking::whitelisted_caller::<AccountId>(),
+            frame_benchmarking::whitelisted_caller::<AccountId>(),
             cap.saturating_sub(amount),
         );
     }
