@@ -2389,12 +2389,19 @@ fn scaled_pol_floor(
     }
 }
 
-fn scaled_decision_delta(class: futarchy_primitives::ProposalClass, prize: Balance) -> Option<u64> {
+fn scaled_decision_delta(
+    class: futarchy_primitives::ProposalClass,
+    floor: u64,
+    prize: Balance,
+) -> Option<u64> {
     let index = proposal_class_index(class);
     if index >= 4 {
         return None;
     }
-    let floor = u128::from(kernel::DECISION_DELTA_FLOORS[index].0);
+    // 08 §5.3 scales from the class's governed `dec.delta` floor.  The
+    // kernel minimum only constrains that live value; it is not the slope
+    // base for a qualification-time certificate.
+    let floor = u128::from(floor);
     let p_ref = proposal_p_ref(class, class_pol_floor(class))?;
     let scaled = if prize <= p_ref {
         floor
@@ -4116,9 +4123,13 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         proposal: &futarchy_primitives::Proposal<AccountId>,
     ) -> Option<pallet_epoch::ProposalSecurityTerms> {
         let prize = Self::in_cap_prize(proposal);
+        let delta_floor = <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get().delta
+            [proposal_class_index(proposal.class)]
+        .0;
         Some(pallet_epoch::ProposalSecurityTerms {
             in_cap_prize: prize,
-            decision_delta: prize.and_then(|value| scaled_decision_delta(proposal.class, value)),
+            decision_delta: prize
+                .and_then(|value| scaled_decision_delta(proposal.class, delta_floor, value)),
         })
     }
 
@@ -8701,5 +8712,26 @@ fn benchmark_runtime_code_with_spec(target_code_bytes: u32, spec_version: u32) -
             core::cmp::Ordering::Greater => padding_len = padding_len.saturating_sub(1),
             core::cmp::Ordering::Less => padding_len = padding_len.saturating_add(1),
         }
+    }
+}
+
+#[cfg(test)]
+mod security_term_tests {
+    use super::scaled_decision_delta;
+    use futarchy_primitives::ProposalClass;
+
+    #[test]
+    fn scaled_decision_delta_starts_from_the_governed_class_floor() {
+        crate::tests::development_ext().execute_with(|| {
+            // The Treasury floor is 0.0375 in the live registry, while the
+            // kernel minimum is 0.005.  A prize at or below P_ref must
+            // preserve the governed floor rather than silently falling back
+            // to the kernel minimum.
+            let governed_floor = 37_500_000;
+            assert_eq!(
+                scaled_decision_delta(ProposalClass::Treasury, governed_floor, 0),
+                Some(governed_floor),
+            );
+        });
     }
 }
