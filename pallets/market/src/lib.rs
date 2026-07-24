@@ -210,6 +210,17 @@ pub mod pallet {
     pub type BaselineMarketOf<T: Config> =
         StorageMap<_, Blake2_128Concat, EpochId, MarketId, OptionQuery>;
 
+    /// Last sealed decision-window TWAP for each retained Baseline book.
+    ///
+    /// The epoch decision may need the previous epoch's Baseline before its
+    /// cohort summary is finalized at e+3. Capture the immutable value at the
+    /// market seal boundary instead of reading a live/in-flight window or
+    /// waiting for `RecentCohortSummaries` (05 §5.3, SQ-88). The entry follows
+    /// `BaselineMarketOf`'s market lifetime and is removed with that book.
+    #[pallet::storage]
+    pub type SealedBaselineTwap<T: Config> =
+        StorageMap<_, Blake2_128Concat, EpochId, FixedU64, OptionQuery>;
+
     /// Block at which a book closed, retained for the frozen integration
     /// surface and lifecycle observability. Reap delay is settlement-anchored.
     #[pallet::storage]
@@ -778,6 +789,7 @@ pub mod pallet {
                         Error::<T>::TryStateViolation
                     );
                     BaselineMarketOf::<T>::remove(epoch);
+                    SealedBaselineTwap::<T>::remove(epoch);
                 }
                 Markets::<T>::remove(market);
                 ClosedAt::<T>::remove(market);
@@ -1717,6 +1729,13 @@ pub mod pallet {
             Self::seal_window(id, &book, end)
         }
 
+        /// Read the latest immutable Baseline value captured at a sealed
+        /// decision boundary. This is intentionally independent of any live
+        /// window currently registered on the same or a later Baseline book.
+        pub fn sealed_baseline_twap(epoch: EpochId) -> Option<FixedU64> {
+            SealedBaselineTwap::<T>::get(epoch)
+        }
+
         /// Market sovereign account used to sign the ledger's internal API.
         pub fn account_id() -> T::AccountId {
             <T as Config>::PalletId::get().into_account_truncating()
@@ -2067,6 +2086,23 @@ pub mod pallet {
                     window.sealed = true;
                 }
             });
+            if let BookKind::Baseline { epoch } = book.kind {
+                let window = DecisionWindows::<T>::get(id)
+                    .into_iter()
+                    .find(|window| window.end == end)
+                    .ok_or(Error::<T>::TryStateViolation)?;
+                let full = window
+                    .end
+                    .checked_sub(window.start)
+                    .ok_or(Error::<T>::TryStateViolation)?;
+                // A sealed but unobserved window remains a normal
+                // decision-grade failure. Preserve the existing seal
+                // semantics and leave the carry source absent rather than
+                // turning this status-quo path into a dispatch failure.
+                if let Some(twap) = Self::twap_at(id, end, full) {
+                    SealedBaselineTwap::<T>::insert(epoch, twap);
+                }
+            }
             Ok(())
         }
 
@@ -2301,6 +2337,16 @@ pub mod pallet {
                         Error::<T>::TryStateViolation
                     );
                 }
+            }
+            for (epoch, _) in SealedBaselineTwap::<T>::iter() {
+                let market =
+                    BaselineMarketOf::<T>::get(epoch).ok_or(Error::<T>::TryStateViolation)?;
+                ensure!(
+                    Markets::<T>::get(market).is_some_and(
+                        |book| matches!(book.kind, BookKind::Baseline { epoch: e } if e == epoch)
+                    ),
+                    Error::<T>::TryStateViolation
+                );
             }
             for (id, checkpoints) in TwapCheckpoints::<T>::iter() {
                 let _book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;

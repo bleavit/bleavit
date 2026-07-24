@@ -16115,19 +16115,12 @@ fn view_decision_stats_pins_effective_floor_pair_minima_gates_and_convergence() 
             assert_ok!(result);
         }
         // Leave the live Baseline unregistered so the shared decision helper
-        // must use the previous settled cohort's 05 §5.3 carry value.
-        pallet_epoch::RecentCohortSummaries::<Runtime>::mutate(|recent| {
-            assert!(recent
-                .try_push(futarchy_primitives::CohortSummary {
-                    epoch: epoch.saturating_sub(1),
-                    s_1e9: futarchy_primitives::FixedU64(0),
-                    baseline_twap_1e9: carried_baseline,
-                    proposals: futarchy_primitives::BoundedVec::new(),
-                    voided: false,
-                    settled_at: 0,
-                })
-                .is_ok());
-        });
+        // must use the previous epoch's sealed 05 §5.3 carry value. The
+        // snapshot is available before the e+3 cohort summary is finalized.
+        pallet_market::SealedBaselineTwap::<Runtime>::insert(
+            epoch.saturating_sub(1),
+            carried_baseline,
+        );
 
         let spend = RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::spend {
             line: pallet_futarchy_treasury::BudgetLine::Pol,
@@ -16304,6 +16297,46 @@ fn view_decision_stats_pins_effective_floor_pair_minima_gates_and_convergence() 
             )
         );
         assert!(stats.r_eff_1e9.0 > stats.twap_reject_1e9.0);
+    });
+}
+
+#[test]
+fn baseline_carry_reads_the_sealed_market_snapshot_before_late_summary() {
+    use futarchy_primitives::{BoundedVec, CohortSummary, FixedU64};
+    use pallet_epoch::MarketAccess;
+
+    development_ext().execute_with(|| {
+        let previous = 1;
+        let sealed = FixedU64(610_000_000);
+        let late_summary = FixedU64(390_000_000);
+        pallet_market::SealedBaselineTwap::<Runtime>::insert(previous, sealed);
+        pallet_epoch::RecentCohortSummaries::<Runtime>::mutate(|recent| {
+            assert!(recent
+                .try_push(CohortSummary {
+                    epoch: previous,
+                    s_1e9: FixedU64(500_000_000),
+                    baseline_twap_1e9: late_summary,
+                    proposals: BoundedVec::new(),
+                    voided: false,
+                    settled_at: 1,
+                })
+                .is_ok());
+        });
+
+        assert_eq!(
+            <crate::configs::RuntimeMarketAccess as MarketAccess<AccountId>>::previous_settled_baseline_twap(
+                previous.saturating_add(1),
+            ),
+            Some(sealed),
+        );
+        pallet_market::SealedBaselineTwap::<Runtime>::remove(previous);
+        assert_eq!(
+            <crate::configs::RuntimeMarketAccess as MarketAccess<AccountId>>::previous_settled_baseline_twap(
+                previous.saturating_add(1),
+            ),
+            None,
+            "a late cohort summary must not substitute for a missing sealed window"
+        );
     });
 }
 

@@ -3377,10 +3377,12 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
 
     fn previous_settled_baseline_twap(epoch: EpochId) -> Option<FixedU64> {
         let previous = epoch.checked_sub(1)?;
-        pallet_epoch::RecentCohortSummaries::<Runtime>::get()
-            .iter()
-            .find(|summary| summary.epoch == previous && !summary.voided)
-            .map(|summary| summary.baseline_twap_1e9)
+        // 05 §5.3 / SQ-88: carry from the previous epoch's sealed Baseline
+        // decision window. Cohort summaries are finalized only at e+3, which
+        // is too late for an earlier decision in the next epoch; the market
+        // snapshot is captured at the immutable seal boundary and retained
+        // with BaselineMarketOf until reap.
+        pallet_market::Pallet::<Runtime>::sealed_baseline_twap(previous)
     }
 }
 
