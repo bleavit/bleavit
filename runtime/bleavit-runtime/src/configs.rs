@@ -2,6 +2,8 @@
 
 use alloc::{borrow::Cow, boxed::Box, vec, vec::Vec};
 
+#[cfg(feature = "runtime-benchmarks")]
+use frame_support::traits::{Currency, Everything};
 use frame_support::{
     derive_impl,
     dispatch::{DispatchClass, DispatchResult},
@@ -1051,8 +1053,12 @@ impl staging_parachain_info::Config for Runtime {}
 pub(crate) mod xcm_config {
     use super::*;
     use staging_xcm::latest::prelude::*;
+    #[cfg(feature = "runtime-benchmarks")]
+    use staging_xcm::latest::XcmContext;
     use staging_xcm_builder::{FixedWeightBounds, FrameTransactionalProcessor, WithUniqueTopic};
     use staging_xcm_executor::XcmExecutor;
+    #[cfg(feature = "runtime-benchmarks")]
+    use staging_xcm_executor::{traits::TransactAsset, AssetsInHolding};
 
     parameter_types! {
         pub RelayNetwork: Option<NetworkId> = Some(NetworkId::Polkadot);
@@ -1086,6 +1092,42 @@ pub(crate) mod xcm_config {
         LocationToAccountId,
         AccountId,
     >;
+    #[cfg(feature = "runtime-benchmarks")]
+    pub struct BenchmarkAssets;
+    #[cfg(feature = "runtime-benchmarks")]
+    impl TransactAsset for BenchmarkAssets {
+        fn can_check_in(_: &Location, _: &Asset, _: &XcmContext) -> Result<(), XcmError> {
+            Ok(())
+        }
+        fn can_check_out(_: &Location, _: &Asset, _: &XcmContext) -> Result<(), XcmError> {
+            Ok(())
+        }
+        fn deposit_asset(
+            _: AssetsInHolding,
+            _: &Location,
+            _: Option<&XcmContext>,
+        ) -> Result<(), (AssetsInHolding, XcmError)> {
+            Ok(())
+        }
+        fn withdraw_asset(
+            _what: &Asset,
+            _: &Location,
+            _: Option<&XcmContext>,
+        ) -> Result<AssetsInHolding, XcmError> {
+            Ok(AssetsInHolding::new())
+        }
+        fn mint_asset(_what: &Asset, _: &XcmContext) -> Result<AssetsInHolding, XcmError> {
+            Ok(AssetsInHolding::new())
+        }
+        fn internal_transfer_asset(
+            what: &Asset,
+            _: &Location,
+            _: &Location,
+            _: &XcmContext,
+        ) -> Result<Asset, XcmError> {
+            Ok(what.clone())
+        }
+    }
     pub type ResponseHandler =
         bleavit_xcm::probe::ProbeAwareResponseHandler<PolkadotXcm, super::RuntimeOracleProbeSink>;
     pub type Barrier = bleavit_xcm::barrier::BleavitBarrier<
@@ -1135,9 +1177,13 @@ pub(crate) mod xcm_config {
         staging_xcm_builder::SignedToAccountId32<RuntimeOrigin, AccountId, RelayNetwork>,
     );
 
-    pub struct XcmConfig<Assets = CappedAssets>(core::marker::PhantomData<Assets>);
-    impl<Assets: staging_xcm_executor::traits::TransactAsset> staging_xcm_executor::Config
-        for XcmConfig<Assets>
+    pub struct XcmConfig<Assets = CappedAssets, BarrierType = Barrier>(
+        core::marker::PhantomData<(Assets, BarrierType)>,
+    );
+    impl<
+            Assets: staging_xcm_executor::traits::TransactAsset,
+            BarrierType: staging_xcm_executor::traits::ShouldExecute,
+        > staging_xcm_executor::Config for XcmConfig<Assets, BarrierType>
     {
         type RuntimeCall = RuntimeCall;
         // The Coretime route's local reserve withdrawal targets Parent, so the
@@ -1149,7 +1195,7 @@ pub(crate) mod xcm_config {
         type IsReserve = bleavit_xcm::assets::BleavitReserves;
         type IsTeleporter = ();
         type UniversalLocation = UniversalLocation;
-        type Barrier = Barrier;
+        type Barrier = BarrierType;
         type Weigher = Weigher;
         // Unrefunded fees use payer-adverse disposal until treasury revenue
         // routing is wired; this cannot create an unbacked claim.
@@ -1181,7 +1227,12 @@ pub(crate) mod xcm_config {
     /// so issuance is unchanged. The recovery transactor bypasses only that
     /// prospective global check; its beneficiary deposit remains capped and
     /// records the per-account cumulative meter.
+    #[allow(dead_code)]
     pub type TrapRecoveryExecutor = XcmExecutor<XcmConfig<TrapRecoveryAssets>>;
+    #[cfg(feature = "runtime-benchmarks")]
+    pub type BenchmarkExecutor = XcmExecutor<
+        XcmConfig<BenchmarkAssets, staging_xcm_builder::AllowUnpaidExecutionFrom<Everything>>,
+    >;
 }
 
 parameter_types! {
@@ -1242,10 +1293,16 @@ impl cumulus_pallet_xcmp_queue::Config for Runtime {
 impl pallet_xcm::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type SendXcmOrigin = staging_xcm_builder::EnsureXcmOrigin<RuntimeOrigin, ()>;
+    #[cfg(feature = "runtime-benchmarks")]
+    type XcmRouter = BenchmarkXcmRouter;
+    #[cfg(not(feature = "runtime-benchmarks"))]
     type XcmRouter = xcm_config::Router;
     type ExecuteXcmOrigin =
         staging_xcm_builder::EnsureXcmOrigin<RuntimeOrigin, xcm_config::LocalOriginToLocation>;
     type XcmExecuteFilter = Nothing;
+    #[cfg(feature = "runtime-benchmarks")]
+    type XcmExecutor = xcm_config::BenchmarkExecutor;
+    #[cfg(not(feature = "runtime-benchmarks"))]
     type XcmExecutor = xcm_config::TrapRecoveryExecutor;
     type XcmTeleportFilter = Nothing;
     type XcmReserveTransferFilter = bleavit_xcm::filter::ReserveTransferFilter;
@@ -1260,12 +1317,110 @@ impl pallet_xcm::Config for Runtime {
     type TrustedLockers = ();
     type SovereignAccountOf = xcm_config::LocationToAccountId;
     type MaxLockers = ConstU32<0>;
-    type WeightInfo = pallet_xcm::TestWeightInfo;
+    type WeightInfo = crate::weights::pallet_xcm::WeightInfo<Runtime>;
     type AdminOrigin = EnsureRoot<AccountId>;
     type MaxRemoteLockConsumers = ConstU32<0>;
     type RemoteLockConsumerIdentifier = ();
     type AuthorizedAliasConsideration = ();
 }
+
+#[cfg(feature = "runtime-benchmarks")]
+pub struct BenchmarkXcmRouter;
+
+#[cfg(feature = "runtime-benchmarks")]
+impl staging_xcm::latest::SendXcm for BenchmarkXcmRouter {
+    type Ticket = (staging_xcm::latest::Location, staging_xcm::latest::Xcm<()>);
+
+    fn validate(
+        destination: &mut Option<staging_xcm::latest::Location>,
+        message: &mut Option<staging_xcm::latest::Xcm<()>>,
+    ) -> staging_xcm::latest::SendResult<Self::Ticket> {
+        let destination = destination
+            .take()
+            .ok_or(staging_xcm::latest::SendError::MissingArgument)?;
+        let message = message
+            .take()
+            .ok_or(staging_xcm::latest::SendError::MissingArgument)?;
+        Ok(((destination, message), staging_xcm::latest::Assets::new()))
+    }
+
+    fn deliver(
+        _ticket: Self::Ticket,
+    ) -> Result<staging_xcm::latest::XcmHash, staging_xcm::latest::SendError> {
+        Ok([0; 32])
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+pub struct XcmBenchmarkDelivery;
+
+#[cfg(feature = "runtime-benchmarks")]
+impl staging_xcm_builder::EnsureDelivery for XcmBenchmarkDelivery {
+    fn ensure_successful_delivery(
+        _origin_ref: &staging_xcm::latest::Location,
+        _dest: &staging_xcm::latest::Location,
+        _fee_reason: staging_xcm_executor::traits::FeeReason,
+    ) -> (
+        Option<staging_xcm_executor::FeesMode>,
+        Option<staging_xcm::latest::Assets>,
+    ) {
+        let caller = frame_benchmarking::whitelisted_caller::<AccountId>();
+        let _ = <Balances as Currency<AccountId>>::make_free_balance_be(
+            &caller,
+            Balances::minimum_balance().saturating_mul(1_000),
+        );
+        (None, None)
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_xcm::benchmarking::Config for Runtime {
+    type DeliveryHelper = XcmBenchmarkDelivery;
+
+    fn reachable_dest() -> Option<staging_xcm::latest::Location> {
+        Some(staging_xcm::latest::Location::parent())
+    }
+
+    fn reserve_transferable_asset_and_dest(
+    ) -> Option<(staging_xcm::latest::Asset, staging_xcm::latest::Location)> {
+        // `pallet-xcm`'s upstream fixture deposits the benchmark asset into
+        // `whitelisted_caller()`.  The production genesis deliberately
+        // endows only protocol custody accounts, so seed that disposable
+        // benchmark account here rather than weakening the live transactor.
+        let caller = frame_benchmarking::whitelisted_caller::<AccountId>();
+        let _ = <ForeignAssets as Mutate<AccountId>>::mint_into(
+            bleavit_xcm::identity::usdc_location(),
+            &caller,
+            20 * currency::USDC,
+        );
+        Some((
+            Self::get_asset(),
+            bleavit_xcm::identity::asset_hub_location(),
+        ))
+    }
+
+    fn get_asset() -> staging_xcm::latest::Asset {
+        staging_xcm::latest::Asset {
+            id: staging_xcm::latest::AssetId(bleavit_xcm::identity::usdc_location()),
+            fun: staging_xcm::latest::Fungibility::Fungible(20 * currency::USDC),
+        }
+    }
+
+    fn set_up_complex_asset_transfer() -> Option<(
+        staging_xcm::latest::Assets,
+        u32,
+        staging_xcm::latest::Location,
+        alloc::boxed::Box<dyn FnOnce()>,
+    )> {
+        Some((
+            Self::get_asset().into(),
+            0,
+            bleavit_xcm::identity::asset_hub_location(),
+            alloc::boxed::Box::new(|| {}),
+        ))
+    }
+}
+
 impl cumulus_pallet_xcm::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type XcmExecutor = xcm_config::Executor;

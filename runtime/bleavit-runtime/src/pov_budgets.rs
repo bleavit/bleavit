@@ -265,6 +265,20 @@ fn every_futarchy_call_and_hook_fits_the_normal_class() {
     }
 }
 
+/// `claim_assets` is Public after B10's trap-recovery opening. Keep its
+/// generated proof bound in the same worst-case audit as the futarchy calls.
+#[test]
+fn xcm_claim_assets_fits_the_normal_class() {
+    let claim =
+        <crate::weights::pallet_xcm::WeightInfo<Runtime> as pallet_xcm::WeightInfo>::claim_assets();
+    assert_eq!(
+        claim.proof_size(),
+        5_275,
+        "claim_assets proof bound drifted"
+    );
+    assert_fits("pallet_xcm::claim_assets", claim);
+}
+
 #[test]
 fn recovery_qualifier_and_mandatory_hooks_fit_absolute_class_budgets() {
     let qualifier =
