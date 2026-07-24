@@ -845,6 +845,23 @@ fn preimage_request_count(hash: impl Into<H256>) -> u32 {
     }
 }
 
+/// Remove a class's `sec.prize.*` record so `in_cap_prize` renders the
+/// **undefined proxy** 13 §1 requires to fail sizing (SQ-173). Before the
+/// envelope rows were seeded, that state was simply the default; it is now
+/// reachable only by deleting the record, so the regressions below construct it
+/// explicitly instead of relying on an absent genesis row.
+pub(crate) fn clear_security_prize(class: ProposalClass) {
+    let key: &[u8] = match class {
+        ProposalClass::Param => b"sec.prize.param",
+        ProposalClass::Code => b"sec.prize.code",
+        ProposalClass::Meta => b"sec.prize.meta",
+        ProposalClass::Treasury | ProposalClass::Constitutional => {
+            panic!("class carries no sec.prize row")
+        }
+    };
+    pallet_constitution::Params::<Runtime>::remove(pallet_constitution::key16(key));
+}
+
 pub(crate) fn empty_param_proposal(
     id: futarchy_primitives::ProposalId,
     proposer: AccountId,
@@ -15319,6 +15336,74 @@ fn view_execution_queue_reuses_guard_projection_and_fails_closed() {
 }
 
 #[test]
+fn sq173_class_envelopes_back_every_binding_class_prize() {
+    // 08 §5.2 / 05 §5.6: PARAM takes the certified capability-envelope value;
+    // CODE and META take the claimant-adverse `max(ask, envelope)` and, for a
+    // runtime-upgrade payload, additionally the `trs.cap_proposal · spendable
+    // NAV` floor. Constitutional runs no markets, so step 9 is unreachable.
+    use pallet_epoch::ConstitutionAccess;
+    development_ext().execute_with(|| {
+        let prize = |proposal: &Proposal<AccountId>| {
+            <crate::configs::RuntimeConstitutionAccess as ConstitutionAccess<AccountId>>::in_cap_prize(
+                proposal,
+            )
+        };
+
+        // The seeded envelopes are exactly the Phase-0 published calibration
+        // (13 §1; simulation/results/phase0-calibration.json).
+        let param = empty_param_proposal(9_320, account(41), H256::repeat_byte(41), 1);
+        assert_eq!(
+            prize(&param),
+            Some(futarchy_primitives::kernel::SEC_PRIZE_PARAM_FLOOR),
+            "PARAM takes the certified envelope alone — no ask, no NAV floor",
+        );
+        assert_eq!(
+            futarchy_primitives::kernel::SEC_PRIZE_PARAM_FLOOR,
+            50_000 * currency::USDC,
+        );
+
+        // An undefined proxy still fails closed rather than adopting at zero.
+        clear_security_prize(ProposalClass::Param);
+        assert_eq!(prize(&param), None);
+
+        // CODE/META: the envelope binds when it exceeds both the ask and the
+        // per-proposal outflow cap. The payload here has no pinned preimage,
+        // so `carries_upgrade_payload` answers yes and the cap floor applies —
+        // with a zero spendable NAV that floor is 0 and the envelope wins.
+        for (class, floor) in [
+            (
+                ProposalClass::Code,
+                futarchy_primitives::kernel::SEC_PRIZE_CODE_FLOOR,
+            ),
+            (
+                ProposalClass::Meta,
+                futarchy_primitives::kernel::SEC_PRIZE_META_FLOOR,
+            ),
+        ] {
+            let mut proposal = empty_param_proposal(
+                9_321 + u64::from(u8::from(class == ProposalClass::Meta)),
+                account(42),
+                H256::repeat_byte(42),
+                1,
+            );
+            proposal.class = class;
+            assert_eq!(prize(&proposal), Some(floor), "{class:?} takes its envelope");
+
+            // A larger ask outranks the envelope — `max`, never `min`.
+            proposal.ask = floor.saturating_mul(3);
+            assert_eq!(prize(&proposal), Some(floor.saturating_mul(3)));
+
+            clear_security_prize(class);
+            assert_eq!(prize(&proposal), None, "{class:?} fails closed when unbacked");
+        }
+
+        let mut constitutional = empty_param_proposal(9_329, account(43), H256::repeat_byte(43), 1);
+        constitutional.class = ProposalClass::Constitutional;
+        assert_eq!(prize(&constitutional), None);
+    });
+}
+
+#[test]
 fn unavailable_prize_keeps_the_base_contest_floor_and_never_slashes_the_proposer() {
     // The grade remains meaningful even though SQ-40 now makes the later
     // sizing step a terminal SecuritySizing rejection. Keeping the base floor
@@ -15331,6 +15416,9 @@ fn unavailable_prize_keeps_the_base_contest_floor_and_never_slashes_the_proposer
         let proposal = empty_param_proposal(9_310, account(31), H256::repeat_byte(9), 1);
 
         // Precondition: this is exactly the SQ-173 state the bug tripped on.
+        // Since SQ-173 seeded the class envelopes, the undefined proxy is no
+        // longer the default — construct it by removing the record.
+        clear_security_prize(ProposalClass::Param);
         assert_eq!(
             <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
                 AccountId,
@@ -15359,6 +15447,9 @@ fn sq40_undefined_prize_takes_t10_and_refunds_the_full_runtime_bond() {
 
     development_ext().execute_with(|| {
         const PID: futarchy_primitives::ProposalId = 9_311;
+        // SQ-173 seeded the PARAM envelope, so the undefined proxy this
+        // regression exercises is now constructed, not inherited.
+        clear_security_prize(ProposalClass::Param);
         let params =
             <crate::configs::RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
         let end = params.decision_window;
@@ -16629,8 +16720,11 @@ fn view_decision_stats_returns_none_for_unknown_or_incomplete_backing() {
         pallet_conditional_ledger::Vaults::<Runtime>::remove(91);
 
         // Isolate the values/prize seam: every decision and gate book read is
-        // complete, but SQ-141 leaves CODE InCapPrize unavailable. G-1 returns
+        // complete, but the CODE InCapPrize proxy is undefined. G-1 returns
         // None instead of exposing an otherwise plausible partial statistic.
+        // SQ-173 seeded the class envelopes, so the undefined state is now
+        // constructed by removing the record rather than inherited from genesis.
+        clear_security_prize(ProposalClass::Code);
         let params =
             <crate::configs::RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
         System::set_block_number(params.decision_window);

@@ -1250,10 +1250,11 @@ fn extrinsic_value_types_do_not_admit_wrong_kinds_via_scale() {
 fn genesis_registry_matches_13_1_row_encodings() {
     new_test_ext().execute_with(|| {
         // Every 13 §1 row with a scalar concrete default and no open
-        // [VERIFY] tag is seeded (102 total, incl. per-class suffix keys and
-        // rule-6 short keys; +2 for keeper.rebate/dis.merit_min and +2 for the
-        // reserve-probe pricing rows); spot-pin the unit encodings per kind.
-        assert_eq!(Params::<Test>::count(), 102);
+        // [VERIFY] tag is seeded (105 total, incl. per-class suffix keys and
+        // rule-6 short keys; +2 for keeper.rebate/dis.merit_min, +2 for the
+        // reserve-probe pricing rows and +3 for the SQ-173 sec.prize.* class
+        // envelopes); spot-pin the unit encodings per kind.
+        assert_eq!(Params::<Test>::count(), 105);
 
         // Per-class suffix keys (13 rule 6) — δ floors, kernel-capped.
         // Phase-0-calibrated (V-12): dec.delta.meta 0.090 on the 1e9 grid.

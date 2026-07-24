@@ -2153,6 +2153,42 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             ParamClass::Meta,
             false,
         ),
+        // 13 §1 row `sec.prize.*` (SQ-173): the certified capability-envelope
+        // proxies that 08 §5.2 makes `InCapPrize` for the three non-TREASURY
+        // binding classes. Seeded from the Phase-0 published calibration; the
+        // minimum is the same kernel floor (05 §5.6), so governance may only
+        // raise a class's prize proxy — which tightens step 9 — never walk it
+        // toward the zero that would make an unsecured payload pass.
+        row(
+            b"sec.prize.param",
+            ParamValue::Balance(kernel::SEC_PRIZE_PARAM_FLOOR),
+            ParamValue::Balance(kernel::SEC_PRIZE_PARAM_FLOOR),
+            ParamValue::Balance(u128::MAX),
+            Some(MaxDelta::Factor(2)),
+            2,
+            ParamClass::Meta,
+            true
+        ),
+        row(
+            b"sec.prize.code",
+            ParamValue::Balance(kernel::SEC_PRIZE_CODE_FLOOR),
+            ParamValue::Balance(kernel::SEC_PRIZE_CODE_FLOOR),
+            ParamValue::Balance(u128::MAX),
+            Some(MaxDelta::Factor(2)),
+            2,
+            ParamClass::Meta,
+            true
+        ),
+        row(
+            b"sec.prize.meta",
+            ParamValue::Balance(kernel::SEC_PRIZE_META_FLOOR),
+            ParamValue::Balance(kernel::SEC_PRIZE_META_FLOOR),
+            ParamValue::Balance(u128::MAX),
+            Some(MaxDelta::Factor(2)),
+            2,
+            ParamClass::Meta,
+            true
+        ),
         row(
             b"phase3.tvl_cap",
             ParamValue::Balance(2_000_000_000_000),

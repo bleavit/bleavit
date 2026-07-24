@@ -694,6 +694,19 @@ fn apply_phase_four_plan(plan: pallet_execution_guard::PhaseFourPlan) -> Dispatc
 
 #[cfg(any(feature = "phase-four", feature = "recovery"))]
 fn transition_phase_four(plan: pallet_execution_guard::PhaseFourPlan) -> DispatchResult {
+    // 08 §4.2 (SQ-383): arming a proposal class REQUIRES published spendable
+    // NAV at or above that class's §4.1 floor, and the rule binds *every*
+    // writer of the arming bits — 06 §3.2 names bootstrap sudo's
+    // `constitution.set_param` **and** the phase-advancement upgrade. Only the
+    // dispatchable carried the check, so this one-shot migration armed PARAM
+    // below floor at precisely the point the chain loses sudo and the operator
+    // recourse that comes with it. The refusal is fail-static: the caller's
+    // `with_storage_layer` rolls the whole transition back, the Phase-3 flags,
+    // sudo key and OnlyInherents lock survive unchanged, and
+    // `note_phase_transition_failure` records the loud, durable signal.
+    <crate::configs::TreasuryPhaseArmingGate as pallet_constitution::PhaseArmingGate>::ensure_armable(
+        futarchy_primitives::ProposalClass::Param,
+    )?;
     apply_phase_four_plan(plan)?;
     crate::FutarchyTreasury::note_phase_four_arming();
     sp_io::storage::clear(&sudo_key_storage_key());

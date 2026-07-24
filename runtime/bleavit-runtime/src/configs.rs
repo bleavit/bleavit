@@ -2565,6 +2565,53 @@ fn ceil_mul_div(value: Balance, numerator: Balance, denominator: Balance) -> Opt
         .and_then(|product| product.checked_div(denominator))
 }
 
+/// 08 §5.2's certified capability-envelope value for the three non-TREASURY
+/// binding classes, read from the live `sec.prize.*` records (13 §1, SQ-173).
+///
+/// A zero or absent record is **not** a prize of zero: 13 §1 states that an
+/// undefined proxy means the proposal MUST NOT pass sizing, so it renders as
+/// `None` and leaves the proposal retryable rather than adopting an
+/// under-secured payload. TREASURY derives its prize exactly from the ask and
+/// Constitutional runs no markets, so neither has a row here.
+fn class_security_envelope(class: futarchy_primitives::ProposalClass) -> Option<Balance> {
+    let key: &[u8] = match class {
+        futarchy_primitives::ProposalClass::Param => b"sec.prize.param",
+        futarchy_primitives::ProposalClass::Code => b"sec.prize.code",
+        futarchy_primitives::ProposalClass::Meta => b"sec.prize.meta",
+        futarchy_primitives::ProposalClass::Treasury
+        | futarchy_primitives::ProposalClass::Constitutional => return None,
+    };
+    // Deliberately the **live** record, never the compile-time default table:
+    // a chain whose envelope row is genuinely missing from storage must fail
+    // closed at step 9 rather than silently inherit a default it never ratified
+    // (13 reading rule 2; G-1). The genesis seed is what makes the row present
+    // on a conforming chain.
+    live_balance_param(key).filter(|value| *value > 0)
+}
+
+/// Whether a CODE/META payload authorizes a runtime upgrade, which 08 §5.2
+/// floors at `trs.cap_proposal · spendable NAV`. An undecodable or unpinned
+/// preimage answers **yes**: the floor can only raise the prize, so the
+/// claimant-adverse reading is the one that cannot let an upgrade through
+/// under-secured (R-7).
+fn carries_upgrade_payload(proposal: &futarchy_primitives::Proposal<AccountId>) -> bool {
+    use pallet_execution_guard::BatchDispatcher;
+    let Some(calls) = proposal_calls(proposal) else {
+        return true;
+    };
+    calls.iter().any(|call| {
+        crate::classifier::RuntimeDispatcher::rederive_call(call).is_ok_and(|analysis| {
+            analysis.domains.iter().any(|domain| {
+                matches!(
+                    domain,
+                    pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade
+                        | pallet_execution_guard::CallDomain::InternalRootApplyUpgrade
+                )
+            })
+        })
+    })
+}
+
 fn scaled_pol_floor(
     class: futarchy_primitives::ProposalClass,
     floor: Balance,
@@ -4361,13 +4408,26 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
                 let ask = derived_treasury_ask(&calls)?;
                 (ask == proposal.ask && ask <= cap).then_some(ask)
             }
-            // A8 fail-closed: PARAM/CODE/META capability-envelope valuation is
-            // not recorded on chain. Returning None blocks Adopt at sizing
-            // step 9 — owner values/classifier envelope milestone (SQ-173).
-            futarchy_primitives::ProposalClass::Param
-            | futarchy_primitives::ProposalClass::Code
-            | futarchy_primitives::ProposalClass::Meta
-            | futarchy_primitives::ProposalClass::Constitutional => None,
+            // 08 §5.2 / 05 §5.6 (SQ-173): PARAM takes the certified
+            // capability-envelope value alone; CODE and META take the
+            // claimant-adverse `max(ask, envelope)` and, for a runtime-upgrade
+            // payload, additionally the `trs.cap_proposal · spendable NAV`
+            // floor — an upgrade is assumed able to reach the full
+            // per-proposal outflow cap. An absent (unseeded, or amended to
+            // zero) envelope stays `None`, which is what blocks Adopt at
+            // sizing step 9 rather than fabricating a low prize.
+            futarchy_primitives::ProposalClass::Param => class_security_envelope(proposal.class),
+            futarchy_primitives::ProposalClass::Code | futarchy_primitives::ProposalClass::Meta => {
+                let envelope = class_security_envelope(proposal.class)?;
+                let prize = envelope.max(proposal.ask);
+                Some(if carries_upgrade_payload(proposal) {
+                    prize.max(cap)
+                } else {
+                    prize
+                })
+            }
+            // 05 §5.6: Constitutional runs no markets, so step 9 is unreachable.
+            futarchy_primitives::ProposalClass::Constitutional => None,
         }
     }
 

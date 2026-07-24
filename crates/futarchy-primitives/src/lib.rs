@@ -982,6 +982,21 @@ pub mod kernel {
     /// this floor — the smallest admissible ceiling, never a pass-widening
     /// default (SQ-231 amendment, 2026-07-18).
     pub const SEC_FLOW_CAP_FLOOR_1E9: u64 = 7_000_000_000;
+    /// Kernel hard minima for the `sec.prize.{param,code,meta}` capability-envelope
+    /// proxies, in µUSDC (13 §1/§2; 05 §5.6 names them *kernel floors*, 08 §5.2
+    /// makes them the `InCapPrize` source for the three non-TREASURY binding
+    /// classes). The values are the Phase-0 published calibration
+    /// (`simulation/results/phase0-calibration.json` · `published.candidates`,
+    /// `designation: published`, `violations: []`), adopted as the genesis
+    /// defaults *and* as the governed rows' minima: raising a class's prize proxy
+    /// only tightens step 9, while lowering it below the calibrated envelope is
+    /// the capture direction the sizing gate exists to refuse (R-7). The rows'
+    /// governance metadata is therefore kernel-bounded (13 rule 2).
+    pub const SEC_PRIZE_PARAM_FLOOR: u128 = 50_000_000_000;
+    /// See [`SEC_PRIZE_PARAM_FLOOR`].
+    pub const SEC_PRIZE_CODE_FLOOR: u128 = 300_000_000_000;
+    /// See [`SEC_PRIZE_PARAM_FLOOR`].
+    pub const SEC_PRIZE_META_FLOOR: u128 = 600_000_000_000;
     /// D-14 expedited CODE-upgrade authorize→apply lead (three six-second days;
     /// 09 §2.1/§3.1, 13 §2). Exposed to clients as the `descriptorLeadTime` pallet
     /// metadata constant.
