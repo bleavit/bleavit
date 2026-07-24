@@ -87,7 +87,7 @@ fn sq201_cohortless_rolls_keep_welfare_history_inside_its_bound() {
             // One epoch of history arrives per roll and no cohort ever settles,
             // so `WelfareSettlement::prune` is never reached.
             seed_history(current, 1);
-            RuntimeEpochWelfare::prune_xcm_traffic(current).expect("roll maintenance is infallible");
+            RuntimeEpochWelfare::roll_maintenance(current).expect("roll maintenance is infallible");
             observed_peak = observed_peak.max(pallet_welfare::GateBreachFlags::<Runtime>::iter().count());
         }
         assert!(
@@ -112,7 +112,7 @@ fn sq201_the_roll_seam_retires_nothing_inside_the_retained_window() {
         let first = current.saturating_sub(pallet_welfare::MAX_SNAPSHOTS_BOUND - 1);
         seed_history(first, pallet_welfare::MAX_SNAPSHOTS_BOUND);
         let before = pallet_welfare::GateBreachFlags::<Runtime>::iter().count();
-        RuntimeEpochWelfare::prune_xcm_traffic(current).expect("roll maintenance is infallible");
+        RuntimeEpochWelfare::roll_maintenance(current).expect("roll maintenance is infallible");
         assert_eq!(
             pallet_welfare::GateBreachFlags::<Runtime>::iter().count(),
             before,
@@ -131,7 +131,7 @@ fn sq201_a_backlog_is_drained_across_rolls_not_in_one_call() {
         let seeded = pallet_welfare::GateBreachFlags::<Runtime>::iter().count();
         // A clock far past the whole seeded history: every epoch is retirable.
         let current = 10 * pallet_welfare::MAX_SNAPSHOTS_BOUND;
-        RuntimeEpochWelfare::prune_xcm_traffic(current).expect("roll maintenance is infallible");
+        RuntimeEpochWelfare::roll_maintenance(current).expect("roll maintenance is infallible");
         let after_one = pallet_welfare::GateBreachFlags::<Runtime>::iter().count();
         assert_eq!(
             seeded - after_one,
@@ -140,8 +140,7 @@ fn sq201_a_backlog_is_drained_across_rolls_not_in_one_call() {
         );
         // Repeated rolls do drain it.
         for _ in 0..seeded {
-            RuntimeEpochWelfare::prune_xcm_traffic(current)
-                .expect("roll maintenance is infallible");
+            RuntimeEpochWelfare::roll_maintenance(current).expect("roll maintenance is infallible");
         }
         assert_eq!(
             pallet_welfare::GateBreachFlags::<Runtime>::iter().count(),

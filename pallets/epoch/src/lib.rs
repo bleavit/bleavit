@@ -318,10 +318,16 @@ pub trait WelfareSettlement {
     /// The implementation derives its bounded rolling-window cutoff from the
     /// supplied live epoch, keeping the retention constant single-homed.
     fn prune(current_epoch: EpochId) -> DispatchResult;
-    /// Drain one bounded XCM-traffic retirement batch for the live epoch.
+    /// Drain one bounded epoch-roll maintenance batch for the live epoch.
     /// Tick invokes this unconditionally so a pathological historical backlog
     /// is retried until empty even if another crank crossed the epoch boundary.
-    fn prune_xcm_traffic(current_epoch: EpochId) -> DispatchResult;
+    ///
+    /// Deliberately **neutral** in name (SQ-420): the seam started as an
+    /// XCM-traffic prune and is now the general roll-maintenance hook — SQ-201
+    /// routed the bounded epoch-roll prune through it because it is the only
+    /// seam `tick` already invokes on every successful roll. Naming it for one
+    /// of its callees would misdescribe the contract.
+    fn roll_maintenance(current_epoch: EpochId) -> DispatchResult;
 }
 
 /// Epoch's ResolveAuthority seam. It intentionally has no settle methods.
@@ -1276,7 +1282,7 @@ pub mod pallet {
                 // when decide/settle_cohort advances the clock first. Every
                 // successful tick therefore drains one bounded welfare batch;
                 // the steady-state empty path is only an index read.
-                T::Welfare::prune_xcm_traffic(EpochOf::<T>::get().index)
+                T::Welfare::roll_maintenance(EpochOf::<T>::get().index)
                     .map_err(|_| Error::<T>::Welfare)?;
                 Ok(())
             });

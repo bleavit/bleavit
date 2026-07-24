@@ -245,7 +245,7 @@ REQUIRE  InCapPrize(p) ≤ AttackCost̂(p) / 3   else Reject(SecuritySizing)
 |---|---|
 | PARAM | certified capability-envelope value of the parameter delta ([05](05-welfare-and-decision-engine.md)) |
 | TREASURY | `ask` (already ≤ `trs.cap_proposal`·NAV by the outflow cap) |
-| CODE / META | max(`ask`, envelope), conservatively floored at `trs.cap_proposal`·NAV for runtime-upgrade payloads — an upgrade is assumed able to reach the full per-proposal outflow cap |
+| CODE / META | max(`ask`, envelope), conservatively floored at `trs.cap_proposal`·NAV — an upgrade is assumed able to reach the full per-proposal outflow cap. **The floor binds every CODE/META proposal, not only those whose payload decodes to a runtime upgrade** (normative; SQ-173 resolution, 2026-07-25): both classes are upgrade-bearing by construction, and conditioning the floor on decoded payload content would make the runtime disagree with the executable spec — [05](05-welfare-and-decision-engine.md) §5.4's `decide` applies it unconditionally — on a solvency path, admitting a proposal the [15](15-invariants-and-testing.md) §4.4 differential oracle rejects. Where the two readings differ the conservative one governs |
 
 Every TREASURY proposal also undergoes the four gate-book veto checks of [05](05-welfare-and-decision-engine.md) §5, regardless of whether its ask is above or below `trs.stream_threshold`; that threshold continues to govern payout streaming only (§1.3), not gate eligibility.
 

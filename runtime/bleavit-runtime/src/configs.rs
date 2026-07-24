@@ -4612,7 +4612,7 @@ impl pallet_epoch::WelfareSettlement for RuntimeEpochWelfare {
         pallet_welfare::Pallet::<Runtime>::prune(cutoff)
     }
 
-    fn prune_xcm_traffic(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
+    fn roll_maintenance(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
         let cutoff = current_epoch.saturating_sub(pallet_welfare::MAX_SNAPSHOTS_BOUND);
         pallet_welfare::Pallet::<Runtime>::prune_xcm_traffic(cutoff)?;
         // SQ-201 / 05 §3.3: cohort reap is not the only prune trigger. Tick

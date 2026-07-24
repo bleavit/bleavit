@@ -15455,9 +15455,23 @@ fn sq173_code_meta_prize_matches_the_reference_model_worked_case() {
         assert_eq!(FutarchyTreasury::nav().spendable_nav, nav_target);
         assert_eq!(crate::configs::percent_param(b"trs.cap_proposal"), 5);
 
+        // A payload that decodes to a real, **non-upgrade** batch. This is what
+        // makes the test non-vacuous: an unbacked hash would have satisfied the
+        // superseded `carries_upgrade_payload` predicate too (it answered "yes"
+        // on an undecodable preimage), so both implementations would agree at
+        // 500 and the regression would prove nothing. With a decodable
+        // non-upgrade batch the superseded code returns 200 and only the
+        // oracle-equivalent code returns 500.
+        let (payload_hash, payload_len) = note_runtime_batch(vec![RuntimeCall::System(
+            frame_system::Call::remark {
+                remark: alloc::vec![7_u8; 4],
+            },
+        )])
+        .expect("non-upgrade payload is notable");
+
         for class in [ProposalClass::Code, ProposalClass::Meta] {
             let mut proposal =
-                empty_param_proposal(9_350, account(45), H256::repeat_byte(45), 1);
+                empty_param_proposal(9_350, account(45), payload_hash, payload_len);
             proposal.class = class;
             proposal.ask = 100 * currency::USDC;
             assert_eq!(
