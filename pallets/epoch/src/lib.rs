@@ -2328,18 +2328,28 @@ pub mod pallet {
             let in_cap_prize = ProposalSecurityTermsOf::<T>::get(pid)
                 .map(|terms| terms.in_cap_prize)
                 .unwrap_or_else(|| T::Constitution::in_cap_prize(&proposal));
+            // The decision path accepts the previous settled Baseline carry
+            // when the live Baseline is not decision-grade (05 §5.3). Keep
+            // the view's completeness predicate identical: the live pair is
+            // required, while the Baseline full/trailing windows may be
+            // replaced by the carried value. Baseline spot is never consumed
+            // by `decide` and is therefore not a separate requirement here.
+            let baseline_backing_complete = if baseline_grade_ok {
+                baseline_full.is_some() && baseline_trailing.is_some()
+            } else {
+                T::Market::previous_settled_baseline_twap(proposal.epoch).is_some()
+            };
             let backing_complete = [
                 accept_full,
                 reject_full,
-                baseline_full,
                 accept_trailing,
                 reject_trailing,
-                baseline_trailing,
                 accept_spot,
                 reject_spot,
             ]
             .iter()
             .all(Option::is_some)
+                && baseline_backing_complete
                 && gate_backing_complete
                 && measured_depth.is_some()
                 && in_cap_prize.is_some();

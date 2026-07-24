@@ -16121,6 +16121,10 @@ fn view_decision_stats_pins_effective_floor_pair_minima_gates_and_convergence() 
             epoch.saturating_sub(1),
             carried_baseline,
         );
+        // Remove the live Baseline decision windows entirely. The decision
+        // path remains evaluable through the previous sealed carry; the view
+        // must make the same choice rather than requiring dead live-book data.
+        pallet_market::DecisionWindows::<Runtime>::remove(markets.baseline);
 
         let spend = RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::spend {
             line: pallet_futarchy_treasury::BudgetLine::Pol,
@@ -16279,6 +16283,14 @@ fn view_decision_stats_pins_effective_floor_pair_minima_gates_and_convergence() 
         assert_ne!(expected_min_depth, sum_mutant_depth);
         assert_eq!(stats.gate_twaps_1e9, Some(gate_quotes));
         assert_eq!(stats.twap_baseline_1e9, carried_baseline);
+        assert_eq!(
+            snapshot.inputs.baseline_full,
+            futarchy_primitives::FixedU64(0)
+        );
+        assert_eq!(
+            snapshot.inputs.baseline_trailing,
+            futarchy_primitives::FixedU64(0)
+        );
         assert_ne!(stats.twap_baseline_1e9, snapshot.inputs.baseline_full);
         assert_eq!(stats.traded_volume, reject_volume);
         assert_eq!(stats.v_min_required, effective_floor);
