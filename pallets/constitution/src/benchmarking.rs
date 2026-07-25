@@ -25,12 +25,27 @@ mod benches {
 
     #[benchmark]
     fn set_param() {
-        let key = key16(b"bench.param");
+        // Worst case is an amendment to one of 07 §6.3's two coverage inputs:
+        // those are the only keys whose screen walks the live MetricSpec set
+        // (SQ-495). The helper saturates that set and names a key/value pair
+        // that still passes, so the scan is measured rather than short-circuited
+        // — a synthetic key would measure a call that never does the work.
+        let (key, next) = T::BenchmarkHelper::prime_coverage_screen()
+            .unwrap_or_else(|| (key16(b"bench.param"), ParamValue::U32(12)));
         let record = ParamRecord {
             key,
-            value: ParamValue::U32(10),
-            min: ParamValue::U32(0),
-            max: ParamValue::U32(1_000_000),
+            value: match next {
+                ParamValue::Perbill(_) => ParamValue::Perbill(1),
+                _ => ParamValue::U32(10),
+            },
+            min: match next {
+                ParamValue::Perbill(_) => ParamValue::Perbill(0),
+                _ => ParamValue::U32(0),
+            },
+            max: match next {
+                ParamValue::Perbill(_) => ParamValue::Perbill(1_000_000_000),
+                _ => ParamValue::U32(1_000_000),
+            },
             max_delta: None,
             cooldown_epochs: 0,
             last_changed_epoch: 0,
@@ -42,12 +57,9 @@ mod benches {
         let origin = authority_origin::<T>(ConstitutionOrigin::FutarchyParam);
 
         #[extrinsic_call]
-        _(origin as T::RuntimeOrigin, key, ParamValue::U32(12));
+        _(origin as T::RuntimeOrigin, key, next);
 
-        assert_eq!(
-            Params::<T>::get(key).map(|r| r.value),
-            Some(ParamValue::U32(12))
-        );
+        assert_eq!(Params::<T>::get(key).map(|r| r.value), Some(next));
     }
 
     #[benchmark]

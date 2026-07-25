@@ -992,6 +992,13 @@ pub enum Error {
     /// 09 §5.2: the two Phase-3 exposure caps are raised only by phase gates
     /// and are not PARAM/META-adjustable during Phases ≤ 3 (SQ-197).
     PhaseCapRaiseRefused,
+    /// 07 §6.3 (SQ-495): the amendment would lower the bond-coverage rate
+    /// `(2^orc.rounds − 1) · orc.bond_bps` below the `Δs_max` of a component
+    /// already admitted to a live MetricSpec, so that component would keep
+    /// settling money under a ladder that no longer covers what a lie about it
+    /// can move. Raising coverage is always permitted. Appended last — the
+    /// preceding discriminants are SCALE-stable.
+    CoverageBreaksAdmission,
 }
 
 /// 09 §5.2 (SQ-197): `phase3.tvl_cap` and `phase3.dep_cap` are "raised only by
@@ -1031,6 +1038,18 @@ pub fn phase_cap_raise_refused(
 /// change and only the unsafe direction for the POL keys. Safe-direction
 /// changes remain available; all accepted changes still use the normal
 /// `Params` bounds, delta and cooldown checks.
+/// The two 13 §1 keys that jointly determine 07 §6.3's bond-coverage rate
+/// `(2^orc.rounds − 1) · orc.bond_bps`.
+///
+/// Single-homed here, beside the other key-set predicates, so the screening
+/// obligation and the parameter registry cannot drift apart. The *evaluation*
+/// cannot live in this crate — it needs the live MetricSpec set to know what
+/// coverage is required — so it is a `Config` seam on the FRAME shell, exactly
+/// like the SQ-303 budget screen (SQ-495).
+pub fn is_coverage_input(key: ParamKey) -> bool {
+    key == key16(b"orc.bond_bps") || key == key16(b"orc.rounds")
+}
+
 pub fn rederive_budgets_required(key: ParamKey, current: ParamValue, next: ParamValue) -> bool {
     let changed = current.as_u128() != next.as_u128();
     if !changed {
