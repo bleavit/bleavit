@@ -884,6 +884,51 @@ mod benches {
         Ok(())
     }
 
+    /// SQ-182/SQ-491. The worst case is a saturated oracle aggregate — the crank
+    /// hydrates and persists all of it per callback — driven at the Housekeeping
+    /// boundary so the sweep, the full `ORACLE_DEADLINE_CATCHUP` cursor run and
+    /// one cohort leg per non-terminal cohort all fire in the same call.
+    #[benchmark]
+    fn drive_oracle_boundaries() -> Result<(), BenchmarkError> {
+        let caller = T::BenchmarkHelper::account(1);
+        let epoch: EpochId = futarchy_primitives::kernel::ORACLE_DEADLINE_CATCHUP
+            .saturating_add(MAX_NON_TERMINAL_COHORTS as u32)
+            .saturating_add(2);
+        let params = T::Params::get();
+        let mut state = EpochState::new();
+        fill_epoch_state::<T>(
+            &mut state,
+            MAX_INTAKE_QUEUE,
+            MAX_LIVE_PROPOSALS,
+            MAX_NON_TERMINAL_COHORTS,
+        );
+        // Stand in Housekeeping, where every `m <= index - 1` is due, and leave the
+        // cursor at 0 so the catch-up runs its full budget.
+        state.epoch.index = epoch;
+        state.epoch.length = params.epoch_length;
+        state.epoch.next_length = params.epoch_length;
+        state.epoch.phase = futarchy_primitives::EpochPhase::Housekeeping;
+        state.epoch.epoch_start_block = epoch.saturating_mul(params.epoch_length);
+        state.epoch.phase_start_block =
+            block_for(epoch, phase_offsets::HOUSEKEEPING_NUM, params.epoch_length);
+        Pallet::<T>::seed(state)?;
+        set_block::<T>(block_for(
+            epoch,
+            phase_offsets::HOUSEKEEPING_NUM,
+            params.epoch_length,
+        ));
+        T::BenchmarkHelper::prime_oracle_state(epoch.saturating_sub(1));
+        T::BenchmarkHelper::prime_keeper_rebate();
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller));
+
+        T::BenchmarkHelper::assert_keeper_rebate_paid(
+            futarchy_primitives::keeper::CrankClass::DecisionCritical,
+        );
+        Ok(())
+    }
+
     #[benchmark]
     fn bind_ratification() -> Result<(), BenchmarkError> {
         let caller = T::BenchmarkHelper::account(1);

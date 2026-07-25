@@ -756,7 +756,11 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_epoch::Call::bind_ratification { .. }
             // 06 §3.2 authority matrix: the SQ-320 orphan-Baseline crank is a
             // permissionless Signed row, alongside the other epoch cranks.
-            | pallet_epoch::Call::finalize_epoch_baseline { .. } => leaf(CallDomain::Public),
+            | pallet_epoch::Call::finalize_epoch_baseline { .. }
+            // The SQ-182/SQ-491 oracle-boundary crank is the same shape: Signed,
+            // permissionless, idempotent, and it carries no authority of its own —
+            // every effect it has belongs to `pallet-oracle` (07 §4/§11(1)).
+            | pallet_epoch::Call::drive_oracle_boundaries { .. } => leaf(CallDomain::Public),
             pallet_epoch::Call::set_next_epoch_length { .. } => {
                 leaf(CallDomain::ConstitutionalValues)
             }

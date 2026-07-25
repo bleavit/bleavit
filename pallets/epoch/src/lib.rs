@@ -174,6 +174,32 @@ pub trait MarketAccess<AccountId> {
 
 pub trait OracleAccess {
     fn any_open_dispute_touching(spec: MetricSpecVersion) -> bool;
+    /// Run the 07 §4 watchtower liveness sweep for the epoch that just ended.
+    ///
+    /// The oracle owns the sweep; the epoch clock owns *when* it happens, which
+    /// is why the call arrives through this seam. The implementation derives
+    /// "`ended_epoch` carried ≥ 1 open round" from oracle state — the epoch
+    /// pallet holds no round history — and MUST NOT charge inactivity for an
+    /// epoch that carried none (07 §4).
+    ///
+    /// Deliberately **not** defaulted: a runtime that leaves this unbound leaves
+    /// watchtower stake discipline unenforced, and a default `Ok(())` would make
+    /// that omission invisible (SQ-491).
+    /// `attributable` is `false` when the clock advanced over intervening
+    /// epochs, so the oracle's latch and activity set describe an interval
+    /// rather than `ended_epoch`; the implementation MUST then consume both
+    /// without charging anyone (07 §4).
+    fn note_epoch_boundary(ended_epoch: EpochId, attributable: bool) -> DispatchResult;
+    /// Drive the 07 §11(1) `OracleSettleDeadline` for `measurement_epoch`:
+    /// force-neutralize every component of that epoch that is not
+    /// challenge-closed, so welfare finds a value for every expected component
+    /// and no `Rounds` entry survives its deadline money-bearing (07 §13).
+    ///
+    /// `OracleSettleDeadline(m) = start of epoch(m+1) Housekeeping`, and cohort
+    /// `m - 2` settles in that same Housekeeping — so this MUST be driven before
+    /// any settlement work in it (05 §7(1)). Not defaulted, for the same reason
+    /// as [`Self::note_epoch_boundary`] (SQ-182).
+    fn note_settle_deadline(measurement_epoch: EpochId) -> DispatchResult;
 }
 
 pub trait GuardianAccess {
@@ -360,6 +386,11 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     /// Seed the exact ongoing ratification referendum consumed by the
     /// benchmark-only bind fixture.
     fn prime_ratification(_: ProposalId, _: u32) {}
+    /// Saturate the real oracle aggregate before the boundary crank runs, so
+    /// its weight measures the hydrate/persist the callbacks actually perform
+    /// against a live chain rather than against empty maps (SQ-182; Codex P1
+    /// on #172).
+    fn prime_oracle_state(_: EpochId) {}
     fn prime_settlement(epoch: EpochId);
     fn prime_keeper_rebate() {}
     fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
@@ -766,6 +797,30 @@ pub mod pallet {
     #[pallet::storage]
     pub type PendingOracleVoids<T: Config> =
         CountedStorageMap<_, Blake2_128Concat, EpochId, (), OptionQuery>;
+
+    /// The last epoch for which the 07 §4 watchtower liveness sweep has run.
+    ///
+    /// `None` before the first observed epoch crossing. Runtime-internal: the
+    /// value orders one keeper-driven callback and appears in no 02 surface.
+    #[pallet::storage]
+    pub type LastWatchtowerSweep<T: Config> = StorageValue<_, EpochId, OptionQuery>;
+
+    /// The next measurement epoch whose 07 §11(1) `OracleSettleDeadline` has not
+    /// been driven; every `m` strictly below it has been force-neutralized.
+    ///
+    /// A cursor rather than a per-epoch flag because `sync_phase` can advance the
+    /// index by more than one, so several deadlines can fall due at once and the
+    /// catch-up must be both resumable and bounded (`ORACLE_DEADLINE_CATCHUP`).
+    ///
+    /// Defaults to 0 and is deliberately *not* initialized abreast of the clock by
+    /// a migration. A cursor that starts at the current index would claim coverage
+    /// it never provided. A chain that gains this seam by upgrade therefore
+    /// replays from 0, which costs bounded no-op work (reaped epochs have no
+    /// rounds and no expected components) for as many cranks as the catch-up
+    /// needs, and never a silent gap. Cohort coverage does **not** consult it:
+    /// see leg (3) of `drive_oracle_boundaries_inner`.
+    #[pallet::storage]
+    pub type OracleDeadlineCursor<T: Config> = StorageValue<_, EpochId, ValueQuery>;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -1278,12 +1333,12 @@ pub mod pallet {
                         );
                     Ok(())
                 })?;
+                let clock = EpochOf::<T>::get();
                 // Stateless retry hook: a clock-crossing trigger can be missed
                 // when decide/settle_cohort advances the clock first. Every
                 // successful tick therefore drains one bounded welfare batch;
                 // the steady-state empty path is only an index read.
-                T::Welfare::roll_maintenance(EpochOf::<T>::get().index)
-                    .map_err(|_| Error::<T>::Welfare)?;
+                T::Welfare::roll_maintenance(clock.index).map_err(|_| Error::<T>::Welfare)?;
                 Ok(())
             });
             // The Housekeeping phase belongs to the epoch that just ended. Pay
@@ -1729,6 +1784,50 @@ pub mod pallet {
             if result.is_ok() && frame_system::Pallet::<T>::event_count() > events_before {
                 // Not one of 08 §6.3's five closed decision-critical families.
                 T::KeeperRebate::rebate(&who, CrankClass::General);
+            }
+            result
+        }
+
+        /// Permissionless crank for the two 07 boundaries the oracle owns and the
+        /// epoch clock schedules: §4's watchtower liveness sweep at each rollover,
+        /// and §11(1)'s `OracleSettleDeadline` force-neutralization at d20
+        /// (SQ-182/SQ-491).
+        ///
+        /// A separate call rather than a rider on `tick`/`decide`/`settle_cohort`
+        /// because both callbacks hydrate the whole bounded oracle aggregate, and
+        /// 13 §5 pins `decide` at 231,055 B of proof against a 384 KiB ceiling —
+        /// the aggregate alone measures 356,514 B, so the worst case does not fit
+        /// inside a per-block crank at all. 07 §11(1) calls this a crank and §13
+        /// gives the oracle no hooks, so this is also the shape the spec asks for.
+        /// Idempotent: every leg is a no-op once its boundary has been driven.
+        #[pallet::call_index(17)]
+        #[pallet::weight(T::WeightInfo::drive_oracle_boundaries())]
+        pub fn drive_oracle_boundaries(origin: OriginFor<T>) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let now = Self::now();
+            let params = Self::live_params()?;
+            let result = frame_support::storage::with_storage_layer(|| {
+                let mut state = Self::load();
+                state.dead_man_armed = T::Guardian::dead_man_engaged();
+                state.ledger_frozen = T::Constitution::ledger_frozen();
+                state.phase_flags = T::Constitution::phase_flags();
+                state.horizon_k = params.horizon_k;
+                state.epoch.next_length = params.epoch_length;
+                Self::sync_clock(&mut state, now).map_err(Self::map_core_error)?;
+                Self::drive_oracle_boundaries_inner(state.epoch.index, state.epoch.phase)?;
+                Self::persist(state)
+            });
+            // Deliberately does **not** pay collator compensation, unlike the other
+            // three clock-syncing entry points. The sink's guard is `tracked_epoch
+            // < epoch_at(now)`, not a closing window, so a crossing this crank
+            // reaches first is still paid by the next `tick` — and every payer has
+            // to hand-splice `collator_compensation()` into the *generated* weight
+            // file, a footgun this PR documents rather than adds a fourth case to
+            // (SQ-490).
+            if result.is_ok() {
+                // Decision-critical: welfare's snapshot crank fails closed until
+                // this has run for the measurement epoch it reads (07 §11(1)).
+                T::KeeperRebate::rebate(&who, CrankClass::DecisionCritical);
             }
             result
         }
@@ -2528,6 +2627,94 @@ pub mod pallet {
             Ok(())
         }
 
+        /// Drive the two epoch→oracle boundaries the oracle owns but the epoch
+        /// clock schedules (07 §4 and §11(1); SQ-182/SQ-491).
+        ///
+        /// Reached only from the permissionless `drive_oracle_boundaries` crank,
+        /// never from `tick`/`decide`/`settle_cohort`. Both callbacks hydrate the
+        /// whole bounded oracle aggregate — 356,514 B of proof on its own
+        /// benchmarks — and `decide` alone is pinned at 231,055 B against a
+        /// 384 KiB ceiling (13 §5), so charging every clock-syncing call for the
+        /// worst case is not merely expensive, it does not fit. 07 §11(1) calls
+        /// this a *crank* and §13 gives the oracle no hooks, so a crank is also
+        /// what the spec asks for.
+        ///
+        /// Nothing is lost by decoupling it, because the ordering was never
+        /// enforced by running inside another dispatch. The consumer is
+        /// `pallet-welfare::record_snapshot(m)`, which reads the oracle's settled
+        /// `ComponentValues` and fails `MissingComponent` while a contested
+        /// component has none — not `settle_cohort`, which reads the snapshot that
+        /// crank produces. The chain `note_settle_deadline(N-1)` →
+        /// `record_snapshot(N-1)` → `settle_cohort(N-3)` is held together by each
+        /// link failing closed against the one before it, not by call ordering.
+        fn drive_oracle_boundaries_inner(index: EpochId, phase: EpochPhase) -> DispatchResult {
+            // (1) 07 §4 — the watchtower liveness sweep belongs to the epoch that
+            //     just ended, and runs once per observed crossing. Epochs an
+            //     arithmetic clock catch-up passed over are swept over, not
+            //     replayed: acknowledgment is tracked as one activity set cleared
+            //     per sweep, so there is no per-epoch record to charge a skipped
+            //     epoch against, and the second consecutive charge slashes and
+            //     ejects. `attributable` carries that clock fact to the oracle,
+            //     which cannot see it; the oracle then consumes its latch and
+            //     activity set without charging (R-7 — an unknowable adverse fact
+            //     must not slash).
+            if let Some(ended) = index.checked_sub(1) {
+                let last = LastWatchtowerSweep::<T>::get();
+                if last.is_none_or(|last| last < ended) {
+                    T::Oracle::note_epoch_boundary(ended, last == ended.checked_sub(1))?;
+                    LastWatchtowerSweep::<T>::put(ended);
+                }
+            }
+            // (2) 07 §11(1) — `OracleSettleDeadline(m) = start of epoch(m+1)
+            //     Housekeeping`. Standing in Housekeeping of `index` therefore
+            //     makes every `m <= index - 1` due; earlier in the epoch only
+            //     `m <= index - 2` is. Underflow at genesis means nothing is due.
+            let due_through = if phase == EpochPhase::Housekeeping {
+                index.checked_sub(1)
+            } else {
+                index.checked_sub(2)
+            };
+            let Some(due_through) = due_through else {
+                return Ok(());
+            };
+            let mut cursor = OracleDeadlineCursor::<T>::get();
+            let mut driven = 0u32;
+            while cursor <= due_through
+                && driven < futarchy_primitives::kernel::ORACLE_DEADLINE_CATCHUP
+            {
+                T::Oracle::note_settle_deadline(cursor)?;
+                cursor = cursor.saturating_add(1);
+                driven = driven.saturating_add(1);
+            }
+            if driven > 0 {
+                OracleDeadlineCursor::<T>::put(cursor);
+            }
+            // (3) Every live cohort's own due measurement epochs, **unconditionally**
+            //     — the cursor is not evidence for them. A cohort that formed after
+            //     one of its measurement deadlines had already been driven (a
+            //     proposal executing late in its grace window reaches `Measuring`
+            //     after `e+1` has passed) had no `CohortSchedule` when
+            //     `expected_components` was queried, so that drive covered none of
+            //     its components and left them with no neutral no-report row —
+            //     which wedges `record_snapshot` on `MissingComponent` for good.
+            //     `cursor >= m` proves the epoch was visited, never that this
+            //     cohort was in it. The calls are idempotent, and the work is
+            //     bounded by the ≤ 4 non-terminal cohorts × their frozen horizon.
+            for schedule in CohortSchedules::<T>::iter_values() {
+                let mut measurement = schedule.epoch.saturating_add(1);
+                let mut per_cohort = 0u32;
+                while measurement <= schedule.measurement_until
+                    && measurement <= due_through
+                    && per_cohort < futarchy_primitives::kernel::ORACLE_DEADLINE_CATCHUP
+                {
+                    T::Oracle::note_settle_deadline(measurement)?;
+                    measurement = measurement.saturating_add(1);
+                    per_cohort = per_cohort.saturating_add(1);
+                }
+            }
+            Ok(())
+        }
+
         fn mutate(
             op: impl FnOnce(
                 &mut EpochState<T::AccountId>,
@@ -3099,6 +3286,25 @@ pub mod pallet {
             {
                 return Err(TryRuntimeError::Other(
                     "epoch dead-man detector latch/cause state is incoherent",
+                ));
+            }
+            // Neither oracle-boundary cursor may run ahead of the clock: a swept
+            // epoch must have ended, and a driven `OracleSettleDeadline(m)` must
+            // have fallen due. Because that deadline is the *start of Housekeeping*
+            // of `m + 1`, `cursor == index` is legitimate only once the clock
+            // stands in Housekeeping; anywhere earlier it means `m = index - 1` was
+            // force-neutralized before its deadline, destroying a live game's money
+            // leg (07 §4; §11(1); I-18).
+            let cursor_ceiling = if state.epoch.phase == EpochPhase::Housekeeping {
+                state.epoch.index
+            } else {
+                state.epoch.index.saturating_sub(1)
+            };
+            if LastWatchtowerSweep::<T>::get().is_some_and(|last| last >= state.epoch.index)
+                || OracleDeadlineCursor::<T>::get() > cursor_ceiling
+            {
+                return Err(TryRuntimeError::Other(
+                    "epoch oracle-boundary cursor runs ahead of the clock (07 §4/§11)",
                 ));
             }
             let funded_pol = FundedPolSlots::<T>::get();

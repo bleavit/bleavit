@@ -8,7 +8,7 @@
 //! WASM-EXECUTION: `Compiled`, CHAIN: `None`, DB CACHE: 1024
 
 // Executed Command:
-// /home/chralt/.cargo/bin/frame-omni-bencher
+// frame-omni-bencher
 // v1
 // benchmark
 // pallet
@@ -23,9 +23,8 @@
 // 20
 // --min-duration
 // 0
-// --unsafe-overwrite-results
 // --output
-// runtime/bleavit-runtime/src/weights/pallet_oracle.rs
+// /tmp/claude-1000/-home-development-bleavit/b40139b1-6248-4c1a-ad60-57e786f83c15/scratchpad/pallet_oracle_new.rs
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(unused_parens)]
@@ -60,6 +59,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 	/// Proof: `Oracle::WatchtowerActive` (`max_values`: Some(1), `max_size`: Some(513), added: 1008, mode: `MaxEncodedLen`)
 	/// Storage: `Oracle::MoneySettled` (r:1 w:0)
 	/// Proof: `Oracle::MoneySettled` (`max_values`: Some(1), `max_size`: Some(1026), added: 1521, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::RoundActivity` (r:1 w:0)
+	/// Proof: `Oracle::RoundActivity` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
 	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Account` (r:2 w:2)
@@ -72,10 +73,10 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `206997`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_678_480_000 picoseconds.
-		Weight::from_parts(1_706_810_000, 0)
+		// Minimum execution time: 1_868_939_000 picoseconds.
+		Weight::from_parts(1_887_969_000, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
-			.saturating_add(T::DbWeight::get().reads(491))
+			.saturating_add(T::DbWeight::get().reads(492))
 			.saturating_add(T::DbWeight::get().writes(6))
 	}
 	/// Storage: `Oracle::Reporters` (r:65 w:1)
@@ -98,6 +99,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 	/// Proof: `Oracle::WatchtowerActive` (`max_values`: Some(1), `max_size`: Some(513), added: 1008, mode: `MaxEncodedLen`)
 	/// Storage: `Oracle::MoneySettled` (r:1 w:0)
 	/// Proof: `Oracle::MoneySettled` (`max_values`: Some(1), `max_size`: Some(1026), added: 1521, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::RoundActivity` (r:1 w:0)
+	/// Proof: `Oracle::RoundActivity` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
 	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Account` (r:2 w:2)
@@ -110,10 +113,10 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `204729`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_581_800_000 picoseconds.
-		Weight::from_parts(1_592_900_000, 0)
+		// Minimum execution time: 1_771_879_000 picoseconds.
+		Weight::from_parts(1_807_399_000, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
-			.saturating_add(T::DbWeight::get().reads(479))
+			.saturating_add(T::DbWeight::get().reads(480))
 			.saturating_add(T::DbWeight::get().writes(6))
 	}
 	/// Storage: `Welfare::MetricSpecs` (r:1 w:0)
@@ -148,6 +151,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 	/// Proof: `Oracle::WatchtowerActive` (`max_values`: Some(1), `max_size`: Some(513), added: 1008, mode: `MaxEncodedLen`)
 	/// Storage: `Oracle::MoneySettled` (r:1 w:0)
 	/// Proof: `Oracle::MoneySettled` (`max_values`: Some(1), `max_size`: Some(1026), added: 1521, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::RoundActivity` (r:1 w:1)
+	/// Proof: `Oracle::RoundActivity` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
 	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Account` (r:2 w:2)
@@ -156,11 +161,11 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `210064`
 		//  Estimated: `353758`
-		// Minimum execution time: 1_778_030_000 picoseconds.
-		Weight::from_parts(1_817_369_000, 0)
+		// Minimum execution time: 1_958_919_000 picoseconds.
+		Weight::from_parts(1_979_289_000, 0)
 			.saturating_add(Weight::from_parts(0, 353758))
-			.saturating_add(T::DbWeight::get().reads(515))
-			.saturating_add(T::DbWeight::get().writes(5))
+			.saturating_add(T::DbWeight::get().reads(516))
+			.saturating_add(T::DbWeight::get().writes(6))
 	}
 	/// Storage: `Oracle::Reporters` (r:65 w:0)
 	/// Proof: `Oracle::Reporters` (`max_values`: None, `max_size`: Some(69), added: 2544, mode: `MaxEncodedLen`)
@@ -182,18 +187,20 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 	/// Proof: `Oracle::WatchtowerActive` (`max_values`: Some(1), `max_size`: Some(513), added: 1008, mode: `MaxEncodedLen`)
 	/// Storage: `Oracle::MoneySettled` (r:1 w:0)
 	/// Proof: `Oracle::MoneySettled` (`max_values`: Some(1), `max_size`: Some(1026), added: 1521, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::RoundActivity` (r:1 w:0)
+	/// Proof: `Oracle::RoundActivity` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
 	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Account` (r:2 w:2)
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn challenge() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `204589`
+		//  Measured:  `204612`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_652_969_000 picoseconds.
-		Weight::from_parts(1_703_970_000, 0)
+		// Minimum execution time: 1_798_179_000 picoseconds.
+		Weight::from_parts(1_831_919_000, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
-			.saturating_add(T::DbWeight::get().reads(477))
+			.saturating_add(T::DbWeight::get().reads(478))
 			.saturating_add(T::DbWeight::get().writes(4))
 	}
 	/// Storage: `Constitution::Params` (r:12 w:0)
@@ -218,18 +225,20 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 	/// Proof: `Oracle::WatchtowerActive` (`max_values`: Some(1), `max_size`: Some(513), added: 1008, mode: `MaxEncodedLen`)
 	/// Storage: `Oracle::MoneySettled` (r:1 w:0)
 	/// Proof: `Oracle::MoneySettled` (`max_values`: Some(1), `max_size`: Some(1026), added: 1521, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::RoundActivity` (r:1 w:0)
+	/// Proof: `Oracle::RoundActivity` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
 	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Account` (r:2 w:2)
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn counter_report() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `207131`
+		//  Measured:  `207154`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_623_320_000 picoseconds.
-		Weight::from_parts(1_678_110_000, 0)
+		// Minimum execution time: 1_858_839_000 picoseconds.
+		Weight::from_parts(1_873_139_000, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
-			.saturating_add(T::DbWeight::get().reads(489))
+			.saturating_add(T::DbWeight::get().reads(490))
 			.saturating_add(T::DbWeight::get().writes(5))
 	}
 	/// Storage: `Oracle::Reporters` (r:65 w:0)
@@ -252,6 +261,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 	/// Proof: `Oracle::WatchtowerActive` (`max_values`: Some(1), `max_size`: Some(513), added: 1008, mode: `MaxEncodedLen`)
 	/// Storage: `Oracle::MoneySettled` (r:1 w:0)
 	/// Proof: `Oracle::MoneySettled` (`max_values`: Some(1), `max_size`: Some(1026), added: 1521, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::RoundActivity` (r:1 w:0)
+	/// Proof: `Oracle::RoundActivity` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
 	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Account` (r:4 w:4)
@@ -265,14 +276,14 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 	/// The range of component `n` is `[8, 262144]`.
 	fn recompute_proof(n: u32, ) -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `216051`
+		//  Measured:  `216074`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_697_210_000 picoseconds.
-		Weight::from_parts(1_764_157_271, 0)
+		// Minimum execution time: 1_914_749_000 picoseconds.
+		Weight::from_parts(1_935_825_051, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
-			// Standard Error: 30
-			.saturating_add(Weight::from_parts(1_963, 0).saturating_mul(n.into()))
-			.saturating_add(T::DbWeight::get().reads(486))
+			// Standard Error: 8
+			.saturating_add(Weight::from_parts(1_447, 0).saturating_mul(n.into()))
+			.saturating_add(T::DbWeight::get().reads(487))
 			.saturating_add(T::DbWeight::get().writes(11))
 	}
 	/// Storage: `Constitution::Params` (r:12 w:0)
@@ -297,6 +308,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 	/// Proof: `Oracle::WatchtowerActive` (`max_values`: Some(1), `max_size`: Some(513), added: 1008, mode: `MaxEncodedLen`)
 	/// Storage: `Oracle::MoneySettled` (r:1 w:0)
 	/// Proof: `Oracle::MoneySettled` (`max_values`: Some(1), `max_size`: Some(1026), added: 1521, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::RoundActivity` (r:1 w:0)
+	/// Proof: `Oracle::RoundActivity` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
 	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Account` (r:2 w:2)
@@ -309,10 +322,10 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `197617`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_774_050_000 picoseconds.
-		Weight::from_parts(1_787_080_000, 0)
+		// Minimum execution time: 1_799_889_000 picoseconds.
+		Weight::from_parts(1_827_749_000, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
-			.saturating_add(T::DbWeight::get().reads(491))
+			.saturating_add(T::DbWeight::get().reads(492))
 			.saturating_add(T::DbWeight::get().writes(7))
 	}
 	/// Storage: `Oracle::Reporters` (r:65 w:0)
@@ -335,6 +348,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 	/// Proof: `Oracle::WatchtowerActive` (`max_values`: Some(1), `max_size`: Some(513), added: 1008, mode: `MaxEncodedLen`)
 	/// Storage: `Oracle::MoneySettled` (r:1 w:0)
 	/// Proof: `Oracle::MoneySettled` (`max_values`: Some(1), `max_size`: Some(1026), added: 1521, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::RoundActivity` (r:1 w:0)
+	/// Proof: `Oracle::RoundActivity` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
 	/// Storage: `FutarchyTreasury::State` (r:1 w:1)
 	/// Proof: `FutarchyTreasury::State` (`max_values`: Some(1), `max_size`: Some(25361), added: 25856, mode: `MaxEncodedLen`)
 	/// Storage: `Constitution::Params` (r:6 w:0)
@@ -347,12 +362,12 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 	/// Proof: `System::Account` (`max_values`: None, `max_size`: Some(128), added: 2603, mode: `MaxEncodedLen`)
 	fn ack_observed() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `216017`
+		//  Measured:  `216040`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_820_600_000 picoseconds.
-		Weight::from_parts(1_831_700_000, 0)
+		// Minimum execution time: 1_862_929_000 picoseconds.
+		Weight::from_parts(1_877_989_000, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
-			.saturating_add(T::DbWeight::get().reads(485))
+			.saturating_add(T::DbWeight::get().reads(486))
 			.saturating_add(T::DbWeight::get().writes(7))
 	}
 	/// Storage: `Constitution::Params` (r:18 w:0)
@@ -377,6 +392,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 	/// Proof: `Oracle::WatchtowerActive` (`max_values`: Some(1), `max_size`: Some(513), added: 1008, mode: `MaxEncodedLen`)
 	/// Storage: `Oracle::MoneySettled` (r:1 w:0)
 	/// Proof: `Oracle::MoneySettled` (`max_values`: Some(1), `max_size`: Some(1026), added: 1521, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::RoundActivity` (r:1 w:0)
+	/// Proof: `Oracle::RoundActivity` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
 	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Account` (r:4 w:4)
@@ -388,14 +405,14 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 	/// The range of component `n` is `[1, 10]`.
 	fn crank_round_close(n: u32, ) -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `217921`
+		//  Measured:  `217944`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_909_620_000 picoseconds.
-		Weight::from_parts(1_891_994_965, 0)
+		// Minimum execution time: 1_946_709_000 picoseconds.
+		Weight::from_parts(1_923_901_241, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
-			// Standard Error: 235_734
-			.saturating_add(Weight::from_parts(50_321_602, 0).saturating_mul(n.into()))
-			.saturating_add(T::DbWeight::get().reads(499))
+			// Standard Error: 198_875
+			.saturating_add(Weight::from_parts(52_362_680, 0).saturating_mul(n.into()))
+			.saturating_add(T::DbWeight::get().reads(500))
 			.saturating_add(T::DbWeight::get().writes(8))
 			.saturating_add(T::DbWeight::get().writes((3_u64).saturating_mul(n.into())))
 	}
@@ -437,8 +454,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `14750`
 		//  Estimated: `53130`
-		// Minimum execution time: 279_530_000 picoseconds.
-		Weight::from_parts(287_680_000, 0)
+		// Minimum execution time: 287_960_000 picoseconds.
+		Weight::from_parts(292_830_000, 0)
 			.saturating_add(Weight::from_parts(0, 53130))
 			.saturating_add(T::DbWeight::get().reads(37))
 			.saturating_add(T::DbWeight::get().writes(13))
@@ -463,8 +480,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `13247`
 		//  Estimated: `45309`
-		// Minimum execution time: 101_400_000 picoseconds.
-		Weight::from_parts(103_960_000, 0)
+		// Minimum execution time: 103_900_000 picoseconds.
+		Weight::from_parts(106_040_000, 0)
 			.saturating_add(Weight::from_parts(0, 45309))
 			.saturating_add(T::DbWeight::get().reads(24))
 			.saturating_add(T::DbWeight::get().writes(5))
@@ -489,18 +506,20 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 	/// Proof: `Oracle::WatchtowerActive` (`max_values`: Some(1), `max_size`: Some(513), added: 1008, mode: `MaxEncodedLen`)
 	/// Storage: `Oracle::MoneySettled` (r:1 w:0)
 	/// Proof: `Oracle::MoneySettled` (`max_values`: Some(1), `max_size`: Some(1026), added: 1521, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::RoundActivity` (r:1 w:0)
+	/// Proof: `Oracle::RoundActivity` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
 	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Account` (r:3 w:3)
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn adjudicate() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `204592`
+		//  Measured:  `204615`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_844_300_000 picoseconds.
-		Weight::from_parts(1_850_740_000, 0)
+		// Minimum execution time: 1_892_209_000 picoseconds.
+		Weight::from_parts(1_901_189_000, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
-			.saturating_add(T::DbWeight::get().reads(477))
+			.saturating_add(T::DbWeight::get().reads(478))
 			.saturating_add(T::DbWeight::get().writes(8))
 	}
 }

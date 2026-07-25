@@ -242,6 +242,20 @@ fn plan_oracle(snapshot: &ChainSnapshot, config: &PlannerConfig, cranks: &mut Ve
             PRIORITY_ORACLE_CLOSE,
         ));
     }
+    // 07 §4/§11(1): the epoch-owned boundary crank. Idempotent and cheap when
+    // there is nothing due, so it is planned whenever the call exists rather than
+    // predicated on a cursor the snapshot does not carry — under-cranking it
+    // stalls welfare's snapshot on `MissingComponent`, which is the fail-closed
+    // direction but also a liveness stall (SQ-182/SQ-491).
+    if snapshot.has_call("Epoch", "drive_oracle_boundaries") {
+        cranks.push(crank(
+            Role::OracleClose,
+            "Epoch",
+            "drive_oracle_boundaries",
+            std::iter::empty::<(&str, Value<()>)>(),
+            PRIORITY_ORACLE_CLOSE,
+        ));
+    }
     if snapshot.has_call("Oracle", "crank_reserve_probe")
         && snapshot.reserve_health.as_ref().is_some_and(|health| {
             let interval_due = health.last_probe_at.is_some_and(|last| {

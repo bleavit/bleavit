@@ -8,25 +8,31 @@
 # runtime/bleavit-runtime/src/weights/pallet_constitution.rs set_param: storage proof grew after adding validation
 # runtime/bleavit-runtime/src/weights/pallet_retired.rs *: pallet retired by approved migration
 #
-# SQ-461 — every entry below is PRE-EXISTING STALENESS surfaced by regenerating
-# pallet_execution_guard, not a cost SQ-461 introduced. This was measured, not
-# assumed: the pallet was benchmarked a second time with the working tree reset to
-# main (50 steps / 20 repeats, same machine, minutes apart) and every regenerated
-# value at main already matched or exceeded the value this PR commits. Per-function
-# ref_time, main-baseline vs this PR: authorize_phase_four 985M vs 943M ·
-# expire_failed_execution 698M vs 663M · ratify 30M vs 29M · reject_stale 702M vs
-# 660M; reads are identical in both (commit_recovery_image 8, qualify_recovery_image
-# 17). SQ-461's step-(7) meter preview reads `FutarchyTreasury::State`, which
-# `execute`'s proof already contained, so it adds no read, no write and no PoV.
-# The committed file dated 2026-07-23 predates B19's attestor revocation/liability
-# storage, the epoch security-terms items and `PendingRatifications`, all of which
-# `execute` and its neighbours now touch. Understating a permissionless call is a
-# block-capacity DoS surface (R-7), so regenerating is the fix, not the regression.
-# Filed as SQ-490: nothing in CI re-measures weights, so this class of drift is
-# invisible until an unrelated PR happens to regenerate a file.
-runtime/bleavit-runtime/src/weights/pallet_execution_guard.rs authorize_phase_four: SQ-461 — pre-existing drift. ref_time 824M -> 943M (+14.52%), reads 116 -> 124. The Phase-4 bridge runs the full `do_execute` check list, so it inherited every storage item added to it since 2026-07-23 (B19 attestor revocations/liabilities, epoch security terms, PendingRatifications, Constitution::Params 42 -> 44). A fresh benchmark at main measures 985M — higher than this PR's 943M.
-runtime/bleavit-runtime/src/weights/pallet_execution_guard.rs commit_recovery_image: SQ-461 — pre-existing drift, reads only. reads 6 -> 8 (+33.33%) with ref_time and PoV essentially unchanged (121M -> 113M, 52175 both). The two added reads are the attestor record lookups the recovery-image commitment performs; a fresh benchmark at main measures the same 8 reads, so this PR contributes neither of them.
-runtime/bleavit-runtime/src/weights/pallet_execution_guard.rs expire_failed_execution: SQ-461 — pre-existing drift. ref_time 547M -> 663M (+21.15%), reads 105 -> 110, writes 51 -> 54. The T22 expiry crank drives the epoch terminal callback, which now also reaps the security-terms rows and the pending-ratification join (06 §2.2 SQ-192 universal reaping). A fresh benchmark at main measures 698M — higher than this PR's 663M.
-runtime/bleavit-runtime/src/weights/pallet_execution_guard.rs qualify_recovery_image: SQ-461 — pre-existing drift, reads only. reads 15 -> 17 (+13.33%); ref_time fell (264M -> 255M) and PoV is identical. Same two attestor reads as commit_recovery_image, and identically present in a fresh benchmark at main. SQ-461 does not touch the recovery-qualification path at all.
-runtime/bleavit-runtime/src/weights/pallet_execution_guard.rs ratify: SQ-461 — pre-existing drift on the smallest call in the pallet, where one storage access dominates the percentage. ref_time 22M -> 29M (+30.53%), reads 5 -> 6, writes 2 -> 3: the added read/write pair is the `PendingRatifications` identity join that 06 §2.2 requires `ratify` to consume. A fresh benchmark at main measures 30M. In absolute terms this is +7M ref_time on a 29M call, not a new cost centre.
-runtime/bleavit-runtime/src/weights/pallet_execution_guard.rs reject_stale: SQ-461 — pre-existing drift. ref_time 547M -> 660M (+20.58%), reads 105 -> 110, writes 51 -> 54 — the same terminal-callback reaping fan-out as expire_failed_execution, which is why the two track each other almost exactly. A fresh benchmark at main measures 702M, higher than this PR's 660M.
+
+# SQ-182/SQ-491 — `pallet_oracle`. One structural change, measured, in the safe
+# direction. `Oracle::load()` now hydrates the new `RoundActivity` latch (07 §4),
+# so **every** oracle extrinsic gains exactly +1 read — 485→486, 477→478, 489→490,
+# 479→480, 491→492, 499→500, 515→516, 486→487 across the twelve — and `report`
+# additionally gains +1 write (5→6) for the latch itself. Those counts are the
+# whole of the intended cost.
+#
+# The ref_time percentages are only partly explained by it, and the honest account
+# is: the committed baseline was generated 2026-07-25 on this same machine, so this
+# is not accumulated drift; two consecutive full runs of the *identical* new code
+# differ by up to 5.0% across these twelve functions (adjudicate 1,901M vs 1,806M),
+# every one reading lower on the second run; one extra host-side storage read inside
+# the measured section accounts for a further small share. A residual of a few
+# percent is unexplained and is recorded as unexplained rather than argued away.
+#
+# (That 5% band is specific to these functions, which are all ~1.8 s calls. The same
+# two-run experiment on `pallet_epoch` spread from -54.8% to +65.5% on its smaller
+# calls — see the `set_intake_paused` entry below. Percentage gates are close to
+# meaningless below roughly a millisecond of measured work on this machine.)
+#
+# The values adopted are the **higher** of the two measured runs, deliberately:
+# understating a permissionless call is the block-capacity surface the gate exists to
+# catch (R-7; 15 §4.5), and an overstatement costs block space, not safety. SQ-490
+# tracks the absent CI leg that lets this class of question arise at all.
+runtime/bleavit-runtime/src/weights/pallet_oracle.rs counter_report: SQ-182/SQ-491 — +1 read (489 -> 490) from the new RoundActivity hydrate in Oracle::load; ref_time 1,678M -> 1,873M (+11.62%). Identical-code rerun measured 1,831M, i.e. 2.2% below the adopted value, so up to ~5% of this is run-to-run variance on this machine; the baseline is same-day and same-machine, so none of it is drift. Adopted the higher run.
+runtime/bleavit-runtime/src/weights/pallet_oracle.rs deregister_reporter: SQ-182/SQ-491 — +1 read (479 -> 480) from the same hydrate; ref_time 1,593M -> 1,807M (+13.47%). Identical-code rerun measured 1,794M (-0.8%). This call does not touch the latch at all, so its movement is the hydrate plus variance, not new work on its own path. Adopted the higher run.
+runtime/bleavit-runtime/src/weights/pallet_oracle.rs register_reporter: SQ-182/SQ-491 — +1 read (491 -> 492) from the same hydrate; ref_time 1,707M -> 1,888M (+10.61%). Identical-code rerun measured 1,850M (-2.0%). Same reasoning as deregister_reporter. Adopted the higher run.

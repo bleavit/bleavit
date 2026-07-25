@@ -396,6 +396,17 @@ pub struct Oracle {
     /// Games whose money outcome was neutralized at the d20 deadline but whose
     /// bond stack remains live until a later terminal verdict (07 §11/I-18).
     pub money_settled: Vec<RoundKey>,
+    /// Whether any round has existed since the last watchtower sweep — 07 §4's
+    /// "an epoch with ≥ 1 open round", latched rather than inferred.
+    ///
+    /// It has to be a latch. A cleanly closed game is *removed* from `rounds`
+    /// ([`Oracle::settle_at`]), so by the time the sweep runs at the epoch
+    /// boundary a healthy epoch's rounds are gone and any survival-based
+    /// predicate reads `false` — which is precisely the arm that *resets*
+    /// `inactive_epochs`, so §4's charge/slash/eject would stay unreachable in
+    /// exactly the case where watchtowers had work to do (SQ-491).
+    /// [`Oracle::sweep_watchtower_liveness`] consumes and clears it.
+    pub round_activity: bool,
 }
 
 impl Oracle {
@@ -534,6 +545,12 @@ impl Oracle {
             cumulative_reporter_bond: bond,
             cumulative_challenger_bond: 0,
         });
+        // 07 §4: from here on this epoch has carried an open round, whatever
+        // becomes of it before the sweep. Latched at the single point where a
+        // game comes into existence — round one — because every later round of
+        // the same game replaces this entry rather than adding one, so the game
+        // is already counted.
+        self.round_activity = true;
         self.round_schedules.push((
             RoundKey {
                 component: input.component,
@@ -714,8 +731,41 @@ impl Oracle {
     pub fn sweep_watchtower_liveness(
         &mut self,
         ended_epoch: EpochId,
-        had_open_round: bool,
+        attributable: bool,
     ) -> Result<(), Error> {
+        if !attributable {
+            // The clock skipped epochs since the last sweep, so the latch and the
+            // activity set describe an interval, not `ended_epoch`. Charging from
+            // them would attribute a round that lived two epochs ago to this one —
+            // the over-charging direction §4 must refuse, since the second
+            // consecutive miss slashes and ejects. Consume both without charging
+            // and **without** resetting any streak: an unattributable epoch is
+            // neither a miss nor an acquittal (07 §4, SQ-491 resolution).
+            self.round_activity = false;
+            self.watchtower_active.clear();
+            return Ok(());
+        }
+        // 07 §4's "an epoch with ≥ 1 open round": either a game was created since
+        // the last sweep (the latch), or one is **still open** now — a game that
+        // spanned the whole epoch without a fresh report to latch. Money-settled
+        // games are excluded from the second disjunct: §11(1) retains them past
+        // their deadline for bond disposal only, and a round whose value is final
+        // gives a watchtower nothing left to acknowledge, so counting it would
+        // charge for up to eight days after the game actually ended.
+        //
+        // Derived here rather than supplied by the caller for the same reason the
+        // neutral carry value is: a caller-supplied liveness fact is a
+        // caller-supplied slash. `attributable` is the complement — a fact about
+        // the *clock*, which the oracle cannot see and the caller owns.
+        let live_round = self.rounds.iter().any(|round| {
+            !self.money_settled.contains(&RoundKey {
+                component: round.component,
+                epoch: round.epoch,
+                spec_version: round.spec_version,
+            })
+        });
+        let had_open_round = self.round_activity || live_round;
+        self.round_activity = false;
         let mut ejected: Vec<AccountId> = Vec::new();
         for (who, info) in self.watchtowers.iter_mut() {
             if self.watchtower_active.contains(who) {
@@ -972,8 +1022,12 @@ impl Oracle {
     /// a value for **every** expected component at settlement:
     /// 1. **Live rounds** — neutral-settle every still-open round for `epoch`, so
     ///    no `Rounds` entry survives its deadline money-bearing (§13 try-state).
-    ///    A later terminal verdict then finds no round (`RoundNotFound`) and can
-    ///    only resolve bonds/reputation (I-18) — never overwrite the money.
+    ///    The entry itself is **retained**, now non-money-bearing, until a
+    ///    terminal verdict disposes of its bond stack (§11(1) — removing it at
+    ///    d20 would silently refund an attacker who rode a dispute to terminal
+    ///    precisely to force neutral settlement). A later verdict therefore finds
+    ///    the round already `money_settled` and can only resolve
+    ///    bonds/reputation (I-18) — never overwrite the money.
     /// 2. **No-report components** — an admitted `(component, version)` that got
     ///    no report has no round, so step 1 never touches it; write its neutral
     ///    flagged carry-last `ComponentValues` entry directly (the §10 no-report
@@ -1776,6 +1830,63 @@ mod tests {
             .unwrap();
     }
 
+    /// The block at which the 07 §4 liveness fixtures open `epoch`'s game. One
+    /// full `orc.window + orc.ext_window` lane per epoch (plus slack), so a
+    /// game's whole quorum-failure closure lands before the next game opens —
+    /// the core has no block↔epoch clock of its own, so the fixtures supply the
+    /// separation the real epoch schedule would.
+    fn epoch_block(epoch: EpochId) -> BlockNumber {
+        1 + epoch * (ORC_WINDOW_BLOCKS + ORC_EXT_WINDOW_BLOCKS + 2)
+    }
+
+    /// Open a game for `(7, epoch, 3)` and let it close **inside the same
+    /// epoch** on the 07 §4 quorum-failure path (fewer than `wt.quorum` acks ⇒
+    /// one `orc.ext_window` extension, then the §10 neutral settlement).
+    ///
+    /// No watchtower is acknowledged, so none is marked active, and `rounds` is
+    /// empty again when the sweep runs: exactly the state in which only the
+    /// `round_activity` latch still records that the epoch carried work.
+    fn open_and_close_game(o: &mut Oracle, reporter: u8, epoch: EpochId) {
+        let at = open_live_game(o, reporter, epoch);
+        o.crank_round_close(at + ORC_WINDOW_BLOCKS, 8).unwrap();
+        o.crank_round_close(at + ORC_WINDOW_BLOCKS + ORC_EXT_WINDOW_BLOCKS, 8)
+            .unwrap();
+        assert!(
+            o.find_round(key(7, epoch, 3)).is_none(),
+            "the quorum-failure close reaps the round"
+        );
+    }
+
+    /// Open a game for `(7, epoch, 3)` and leave it **live**, returning the
+    /// block it opened at. The epoch carries an open round in the plainest
+    /// sense: one that is still there.
+    fn open_live_game(o: &mut Oracle, reporter: u8, epoch: EpochId) -> BlockNumber {
+        let at = epoch_block(epoch);
+        report!(
+            o,
+            acct(reporter),
+            at,
+            7,
+            epoch,
+            3,
+            FixedU64(620_000_000),
+            h(9),
+            400_000_000_000,
+            at,
+            3,
+        )
+        .unwrap();
+        at
+    }
+
+    /// The inactivity counter recorded for a seat, or `None` once it is ejected.
+    fn inactive_epochs(o: &Oracle, who: AccountId) -> Option<u8> {
+        o.watchtowers
+            .iter()
+            .find(|(a, _)| *a == who)
+            .map(|(_, info)| info.inactive_epochs)
+    }
+
     #[test]
     fn reporter_and_watchtower_registries_are_bounded() {
         let mut o = Oracle::default();
@@ -2569,16 +2680,29 @@ mod tests {
         // 07 §4 liveness discipline: registration grace, then inactivity
         // accrual, the 2-consecutive slash+eject, the active-epoch reset, and
         // the no-open-round exemption.
+        //
+        // The sweep derives 07 §4's "an epoch with ≥ 1 open round" from oracle
+        // state instead of taking it from its caller (SQ-491), so each epoch
+        // below *arranges* the predicate its step needs: a game for a chargeable
+        // epoch, no game at all for the exempt one.
         let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
         o.register_watchtower(acct(2), 0).unwrap();
         o.register_watchtower(acct(3), 0).unwrap();
 
-        // Epoch 1: both were just registered (grace) ⇒ no inactivity.
+        // Epoch 1 carried a game — so inactivity was chargeable — but both seats
+        // registered in it (grace) ⇒ neither is charged.
+        open_and_close_game(&mut o, 1, 1);
         o.sweep_watchtower_liveness(1, true).unwrap();
         assert!(o.watchtowers.iter().all(|(_, i)| i.inactive_epochs == 0));
+        assert!(!o
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::WatchtowerInactive { .. })));
         assert!(o.watchtower_active.is_empty());
 
         // Epoch 2 had an open round but neither acked ⇒ both inactive once.
+        open_and_close_game(&mut o, 1, 2);
         o.sweep_watchtower_liveness(2, true).unwrap();
         assert!(o.watchtowers.iter().all(|(_, i)| i.inactive_epochs == 1));
         assert_eq!(
@@ -2590,10 +2714,10 @@ mod tests {
         );
 
         // Watchtower 2 acks in epoch 3 (needs a live round); 3 stays idle.
-        o.register_reporter(acct(1), 0).unwrap();
-        report!(o, acct(1), 1, 7, 41, 3, FixedU64(62), h(9), 0, 10, 3).unwrap();
+        let at = open_live_game(&mut o, 1, 3);
         let rh = o.rounds[0].report_hash;
-        o.ack_observed(acct(2), 5, key(7, 41, 3), 1, rh).unwrap();
+        o.ack_observed(acct(2), at + 1, key(7, 3, 3), 1, rh)
+            .unwrap();
         o.sweep_watchtower_liveness(3, true).unwrap();
         // 2 reset to 0 (active); 3 reaches 2 ⇒ slashed and ejected.
         assert_eq!(o.watchtowers.len(), 1);
@@ -2603,9 +2727,234 @@ mod tests {
             |e| matches!(e, Event::WatchtowerSlashed { amount, .. } if *amount == WT_STAKE / 10)
         ));
 
-        // An epoch with no open round charges nobody, even when idle.
-        o.sweep_watchtower_liveness(4, false).unwrap();
+        // Epoch 4 carries no round at all — the epoch-3 game closes first and no
+        // new one opens — so it charges nobody, even though the surviving seat
+        // sat idle through it.
+        o.crank_round_close(at + ORC_WINDOW_BLOCKS, 8).unwrap();
+        o.crank_round_close(at + ORC_WINDOW_BLOCKS + ORC_EXT_WINDOW_BLOCKS, 8)
+            .unwrap();
+        assert!(o.rounds.is_empty());
+        o.sweep_watchtower_liveness(4, true).unwrap();
         assert_eq!(o.watchtowers[0].1.inactive_epochs, 0);
+        assert!(!o
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::WatchtowerInactive { epoch: 4, .. })));
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn watchtower_liveness_charges_idle_seat_after_a_cleanly_closed_game() {
+        // 07 §4 charges "a watchtower that acknowledges no round in an epoch with
+        // ≥ 1 open round" — a property of the *epoch*, not of what survives to
+        // the boundary. A healthy game that opens and closes inside the epoch is
+        // *removed* from `rounds` by `settle_at`, so a survival-based predicate
+        // reads "no open round" in exactly the healthy case and takes the arm
+        // that RESETS `inactive_epochs` — making §4's charge/slash/eject
+        // unreachable and free-riding costless (SQ-491). The idle seat MUST be
+        // charged for an epoch whose game was worked and closed.
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        o.register_watchtower(acct(2), 0).unwrap(); // acknowledges
+        o.register_watchtower(acct(3), 0).unwrap(); // acknowledges
+        o.register_watchtower(acct(4), 0).unwrap(); // free rider
+
+        // Epoch 1 consumes all three registration graces.
+        o.sweep_watchtower_liveness(1, true).unwrap();
+        assert!(o.watchtower_active.is_empty());
+
+        // Epoch 2: the healthy path — reported, acknowledged to `wt.quorum`,
+        // closed `Unchallenged` at window close, and therefore reaped.
+        let at = open_live_game(&mut o, 1, 2);
+        let rh = o.rounds[0].report_hash;
+        o.ack_observed(acct(2), at + 1, key(7, 2, 3), 1, rh)
+            .unwrap();
+        o.ack_observed(acct(3), at + 2, key(7, 2, 3), 1, rh)
+            .unwrap();
+        o.crank_round_close(at + ORC_WINDOW_BLOCKS, 8).unwrap();
+        assert_eq!(o.component_values[0].1.path, SettlePath::Unchallenged);
+        assert!(
+            o.rounds.is_empty(),
+            "the healthy close leaves no round to infer liveness from"
+        );
+
+        o.sweep_watchtower_liveness(2, true).unwrap();
+        assert_eq!(inactive_epochs(&o, acct(4)), Some(1));
+        assert!(o.events.iter().any(|e| matches!(
+            e,
+            Event::WatchtowerInactive { who, epoch } if *who == acct(4) && *epoch == 2
+        )));
+        // The two that did the work are reset, not charged.
+        assert_eq!(inactive_epochs(&o, acct(2)), Some(0));
+        assert_eq!(inactive_epochs(&o, acct(3)), Some(0));
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn watchtower_liveness_charges_a_game_still_open_across_the_whole_epoch() {
+        // 07 §4, the other disjunct: a game that opened in an earlier epoch and
+        // drew no fresh report is still an open round for the epoch it spans, so
+        // the seat that never acknowledges it is charged at the *second* sweep —
+        // where the latch, consumed by the first sweep, no longer speaks for it.
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        o.register_watchtower(acct(2), 0).unwrap();
+
+        open_live_game(&mut o, 1, 1);
+        o.sweep_watchtower_liveness(1, true).unwrap(); // registration grace
+        assert_eq!(inactive_epochs(&o, acct(2)), Some(0));
+
+        // Epoch 2 opened no game of its own: liveness rests entirely on the
+        // round still sitting in `rounds`.
+        assert!(!o.round_activity);
+        assert!(!o.rounds.is_empty());
+        o.sweep_watchtower_liveness(2, true).unwrap();
+        assert_eq!(inactive_epochs(&o, acct(2)), Some(1));
+        assert!(o.events.iter().any(|e| matches!(
+            e,
+            Event::WatchtowerInactive { who, epoch } if *who == acct(2) && *epoch == 2
+        )));
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn watchtower_liveness_unattributable_sweep_charges_nobody_and_holds_the_streak() {
+        // 07 §4 (SQ-491 resolution): when the clock advances over intervening
+        // epochs the latch and the activity set describe an *interval*, not the
+        // epoch being swept. Charging from them would attribute a round that
+        // lived two epochs ago to this one — over-charging, which the second
+        // consecutive miss turns into a slash and an ejection.
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        o.register_watchtower(acct(2), 0).unwrap();
+        o.sweep_watchtower_liveness(1, true).unwrap(); // registration grace
+
+        // A real miss in epoch 2 puts the seat one step from a slash.
+        open_and_close_game(&mut o, 1, 2);
+        o.sweep_watchtower_liveness(2, true).unwrap();
+        assert_eq!(inactive_epochs(&o, acct(2)), Some(1));
+
+        // Epoch 3 carried a game, but the clock then jumped to 8 without a crank.
+        // Sweeping 8 sees a latch set by epoch 3's game.
+        open_and_close_game(&mut o, 1, 3);
+        assert!(o.round_activity);
+        o.sweep_watchtower_liveness(8, false).unwrap();
+
+        // Nobody is charged, so the seat is not slashed or ejected...
+        assert_eq!(o.watchtowers.len(), 1);
+        assert!(!o
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::WatchtowerInactive { epoch: 8, .. })));
+        assert!(!o
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::WatchtowerSlashed { .. })));
+        // ...and the streak is neither advanced nor acquitted: an unattributable
+        // epoch is not a miss, and it is not an alibi either.
+        assert_eq!(inactive_epochs(&o, acct(2)), Some(1));
+        // Both the latch and the activity set are consumed, so the interval's
+        // activity cannot leak into the next attributable epoch.
+        assert!(!o.round_activity);
+        assert!(o.watchtower_active.is_empty());
+    }
+
+    #[test]
+    fn watchtower_liveness_ignores_a_round_retained_past_its_money_deadline() {
+        // 07 §11(1) retains a neutralized round for bond disposal only. Its value
+        // is final (I-18), so a watchtower has nothing left to acknowledge and the
+        // epoch must not be chargeable on its account — otherwise the retention
+        // window keeps charging for up to eight days after the game ended.
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        o.register_watchtower(acct(2), 0).unwrap();
+        o.sweep_watchtower_liveness(1, true).unwrap(); // registration grace
+
+        // The game opens during epoch 2 and is genuinely chargeable there.
+        open_live_game(&mut o, 1, 2);
+        o.sweep_watchtower_liveness(2, true).unwrap();
+        assert_eq!(inactive_epochs(&o, acct(2)), Some(1));
+
+        // It then hits its d20 deadline. The entry is retained, as §11(1)
+        // requires, but its money leg is settled — so epoch 3 carried no open
+        // round and the idle seat is acquitted rather than charged a second time
+        // (which at 2 consecutive would have slashed and ejected it).
+        o.force_neutralize_expired(2, &[]).unwrap();
+        assert!(!o.rounds.is_empty());
+        o.sweep_watchtower_liveness(3, true).unwrap();
+        assert_eq!(inactive_epochs(&o, acct(2)), Some(0));
+        assert_eq!(o.watchtowers.len(), 1);
+        assert!(!o
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::WatchtowerInactive { epoch: 3, .. })));
+    }
+
+    #[test]
+    fn watchtower_liveness_empty_epoch_charges_nobody_and_breaks_the_streak() {
+        // 07 §4: an epoch with no open round is nobody's liveness failure, and
+        // it breaks the "two *consecutive* inactive epochs" streak — a miss on
+        // either side of an empty epoch must not combine into a slash.
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        o.register_watchtower(acct(2), 0).unwrap();
+        o.sweep_watchtower_liveness(1, true).unwrap(); // registration grace
+
+        // Epoch 2 carried a game that came and went ⇒ the idle seat pays once.
+        open_and_close_game(&mut o, 1, 2);
+        o.sweep_watchtower_liveness(2, true).unwrap();
+        assert_eq!(inactive_epochs(&o, acct(2)), Some(1));
+
+        // Epoch 3 is genuinely empty: no game opened in it (no `report` since the
+        // last sweep) and none is open.
+        assert!(o.rounds.is_empty());
+        o.sweep_watchtower_liveness(3, true).unwrap();
+        assert_eq!(inactive_epochs(&o, acct(2)), Some(0));
+        assert!(!o
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::WatchtowerInactive { epoch: 3, .. })));
+
+        // Epoch 4 is chargeable again, so the seat takes a *fresh* first miss —
+        // not the second of a streak — and is neither slashed nor ejected.
+        open_and_close_game(&mut o, 1, 4);
+        o.sweep_watchtower_liveness(4, true).unwrap();
+        assert_eq!(inactive_epochs(&o, acct(2)), Some(1));
+        assert!(!o
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::WatchtowerSlashed { .. })));
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn watchtower_liveness_sweep_consumes_the_latch_so_one_game_charges_one_epoch() {
+        // 07 §4 charges *per epoch*: the activity record a game leaves behind is
+        // consumed by the sweep that reads it, so a single game cannot charge two
+        // successive epochs and stack a lone miss into the 2-consecutive
+        // slash+eject.
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        o.register_watchtower(acct(2), 0).unwrap();
+        o.sweep_watchtower_liveness(1, true).unwrap(); // registration grace
+
+        open_and_close_game(&mut o, 1, 2);
+        o.sweep_watchtower_liveness(2, true).unwrap();
+        assert_eq!(inactive_epochs(&o, acct(2)), Some(1));
+
+        // Epoch 3 is an epoch of its own, and an empty one — so the seat's lone
+        // miss must not become the second of a streak.
+        o.sweep_watchtower_liveness(3, true).unwrap();
+        assert_eq!(inactive_epochs(&o, acct(2)), Some(0));
+        assert_eq!(o.watchtowers.len(), 1, "not ejected");
+        assert!(!o
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::WatchtowerSlashed { .. })));
+        assert!(
+            !o.round_activity,
+            "the epoch's activity record is consumed by the sweep that reads it"
+        );
         o.try_state().unwrap();
     }
 

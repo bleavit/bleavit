@@ -482,6 +482,19 @@ pub mod pallet {
     pub type MoneySettled<T: Config> =
         StorageValue<_, BoundedVec<RoundKey, ConstU32<MAX_ROUNDS_BOUND>>, ValueQuery>;
 
+    /// 07 §4 liveness latch: whether any round has existed since the last
+    /// watchtower sweep. Not inferable from `Rounds`, which a clean closure
+    /// empties before the boundary sweep runs (SQ-491).
+    ///
+    /// Deliberately carries no `try-state` check, unlike every other item here:
+    /// both of its values are reachable against both states of `Rounds` — true
+    /// with none live (a game reported and closed inside the epoch) and false
+    /// with one live (a game that spanned a sweep) — so there is no relation to
+    /// assert. Its correctness is behavioural and is pinned by the §4 liveness
+    /// tests instead.
+    #[pallet::storage]
+    pub type RoundActivity<T: Config> = StorageValue<_, bool, ValueQuery>;
+
     /// Internal (not FE-read): the `(component, frozen version)` pairs the
     /// MetricSpec registry declares deterministically recomputable (07 §2(4)/§9).
     /// `recompute_proof` fails closed for anything absent. Seeded at genesis and
@@ -1124,12 +1137,19 @@ pub mod pallet {
 
         /// Run the 07 §4 watchtower liveness sweep for a just-ended epoch. Not an
         /// extrinsic — the epoch pallet calls this at each epoch rollover (B1a),
-        /// passing the ended epoch and whether it carried an open oracle round
-        /// (the schedule + round history live in the epoch pallet). Charges
-        /// inactivity, slashes/ejects on the second consecutive miss, and clears
-        /// the activity set. `had_open_round = false` charges nobody.
-        pub fn note_epoch_boundary(ended_epoch: EpochId, had_open_round: bool) -> DispatchResult {
-            Self::mutate_core(|o| o.sweep_watchtower_liveness(ended_epoch, had_open_round))
+        /// passing only the ended epoch: the schedule lives in the epoch clock,
+        /// but the round history does not, so whether the epoch carried an open
+        /// round is derived from oracle state (the `RoundActivity` latch plus the
+        /// live round set). Charges inactivity, slashes/ejects on the second
+        /// consecutive miss, and clears the activity set. An epoch that carried no
+        /// round charges nobody and breaks the consecutive-miss streak.
+        ///
+        /// `attributable` is the caller's complementary fact: `false` when the
+        /// clock advanced over intervening epochs, so the latch and activity set
+        /// describe an interval rather than `ended_epoch` and MUST be consumed
+        /// without charging (07 §4).
+        pub fn note_epoch_boundary(ended_epoch: EpochId, attributable: bool) -> DispatchResult {
+            Self::mutate_core(|o| o.sweep_watchtower_liveness(ended_epoch, attributable))
         }
 
         /// Force-neutralize `measurement_epoch` at its 07 §11 `OracleSettleDeadline`
@@ -1240,6 +1260,7 @@ pub mod pallet {
                 recomputable_components: Recomputable::<T>::get().into_inner(),
                 watchtower_active: WatchtowerActive::<T>::get().into_inner(),
                 money_settled: MoneySettled::<T>::get().into_inner(),
+                round_activity: RoundActivity::<T>::get(),
                 bond_settlements: Vec::new(),
             }
         }
@@ -1572,6 +1593,9 @@ pub mod pallet {
             }
             if before.money_settled != after.money_settled {
                 MoneySettled::<T>::put(BoundedVec::truncate_from(after.money_settled.clone()));
+            }
+            if before.round_activity != after.round_activity {
+                RoundActivity::<T>::put(after.round_activity);
             }
         }
 

@@ -5128,6 +5128,92 @@ fn oracle_probe_timeout_sink_records_welfare_xcm_traffic() {
     });
 }
 
+/// SQ-182: the 07 §11(1) deadline crank writes neutral rows only for **class-4**
+/// components. Only class-4 is reportable (07 §2(3)), so only class-4 can be absent
+/// at the deadline; a wider `expected` set would have the crank write neutral
+/// **flagged** `ComponentValues` for on-chain components — the declared input to
+/// §10's two-consecutive-flag renormalization and, for gate inputs, its VOID
+/// escalation. Pinned through the live seam, not just on the helper.
+#[test]
+fn sq182_money_deadline_neutralizes_only_attested_components() {
+    use pallet_welfare::{
+        BoundedSpecSet, MetricSpec, Pillar, SourceClass, EPSILON_PILLAR, HISTORY_PRIORS, ONE,
+    };
+
+    fn spec(id: u16, version: u16, source: SourceClass) -> MetricSpec {
+        MetricSpec {
+            id,
+            version,
+            pillar: Pillar::COnchain,
+            weight: futarchy_primitives::FixedU64(ONE / 2),
+            epsilon_floor: EPSILON_PILLAR,
+            activation_epoch: 0,
+            source,
+            formula_ref: [1; 32],
+            units: [2; 16],
+            repr: [3; 16],
+            cadence_blocks: 1,
+            sanity_min: futarchy_primitives::FixedU64(0),
+            sanity_max: futarchy_primitives::FixedU64(ONE),
+            has_normalization_rule: true,
+            has_missing_data_rule: true,
+            has_gaming_vectors: true,
+            has_challenge_procedure: false,
+            prior_bounds: [futarchy_primitives::FixedU64(ONE); HISTORY_PRIORS],
+        }
+    }
+
+    development_ext().execute_with(|| {
+        const VERSION: u16 = 91;
+        const COHORT: u32 = 4;
+        const MEASUREMENT: u32 = 5;
+        let onchain = futarchy_primitives::metric_ids::X;
+        let attested = futarchy_primitives::metric_ids::A_INTEGRATIONS;
+        pallet_welfare::MetricSpecs::<Runtime>::insert(
+            VERSION,
+            BoundedSpecSet::truncate_from(vec![
+                spec(onchain, VERSION, SourceClass::Onchain),
+                spec(attested, VERSION, SourceClass::Attested),
+            ]),
+        );
+        pallet_epoch::CohortSchedules::<Runtime>::insert(
+            COHORT,
+            pallet_epoch::CohortSchedule {
+                epoch: COHORT,
+                creation_epoch_length: futarchy_primitives::kernel::BLOCKS_PER_DAY * 21,
+                measurement_until: COHORT + 2,
+                settlement_epoch: COHORT + 3,
+                specs: sp_runtime::BoundedVec::truncate_from(vec![(1u64, VERSION)]),
+            },
+        );
+
+        // Only the class-4 component is expected of the oracle at the deadline.
+        assert_eq!(
+            <crate::configs::RuntimeReporting as pallet_oracle::ReportingContext>::expected_components(
+                MEASUREMENT
+            ),
+            vec![(attested, VERSION)]
+        );
+
+        // And driving the deadline through the live epoch→oracle seam writes a
+        // neutral row for exactly that one.
+        assert_ok!(
+            <crate::configs::RuntimeEpochOracle as pallet_epoch::OracleAccess>::note_settle_deadline(
+                MEASUREMENT
+            )
+        );
+        assert!(
+            pallet_oracle::Pallet::<Runtime>::settled_component(attested, MEASUREMENT, VERSION)
+                .is_some_and(|settled| settled.flagged)
+        );
+        assert!(
+            pallet_oracle::Pallet::<Runtime>::settled_component(onchain, MEASUREMENT, VERSION)
+                .is_none(),
+            "an on-chain component is never the oracle's to neutralize"
+        );
+    });
+}
+
 #[test]
 fn runtime_metric_inputs_do_not_emit_r_even_when_it_is_registered() {
     use pallet_welfare::{

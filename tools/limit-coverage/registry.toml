@@ -889,6 +889,12 @@ behavior = "remaining_after_first_reap"
 reason = "13 §2: a successful ReapBatch dispatch leaves item 101 for the next crank."
 
 [[entry]]
+key = "OracleDeadlineCatchup"
+class = "dispatch-limit"
+behavior = "remaining_after_first_catchup"
+reason = "13 §2 / 07 §11(1): a crank facing more due OracleSettleDeadlines than the bound drives exactly the bound and leaves the remainder for the next crank (same resumable shape as ReapBatch, not a rejection)."
+
+[[entry]]
 key = "settle_cohort"
 class = "dispatch-limit"
 error = "Epoch::BatchTooLarge"

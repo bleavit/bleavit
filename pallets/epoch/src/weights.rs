@@ -3,6 +3,11 @@
 //! Hand-seeded generated-shape values; B5 recalibrates execution time and PoV
 //! against the assembled runtime. Every method includes the bounded aggregate
 //! reads/writes and sibling seam calls exercised by its worst case.
+//!
+//! `tick`/`decide`/`settle_cohort` carry the 07 §4/§11(1) boundary driver on top
+//! of their own work (SQ-182): both cursors read and written, plus the cohort
+//! schedule read on the settlement path. This fallback cannot see the oracle's
+//! side of that seam, which is charged to `pallet-oracle`'s own weights.
 
 use core::marker::PhantomData;
 use frame_support::traits::Get;
@@ -26,6 +31,7 @@ pub trait WeightInfo {
     fn set_intake_paused() -> Weight;
     fn finalize_epoch_baseline() -> Weight;
     fn bind_ratification() -> Weight;
+    fn drive_oracle_boundaries() -> Weight;
 }
 
 const STATE_POV: u64 = 48_000;
@@ -40,7 +46,7 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
         base::<T>(40_000_000, 12, 10)
     }
     fn tick(items: u32) -> Weight {
-        base::<T>(55_000_000, 12, 10)
+        base::<T>(55_000_000, 15, 12)
             .saturating_add(Weight::from_parts(30_000_000, 4_000).saturating_mul(items.into()))
             .saturating_add(Self::collator_compensation())
     }
@@ -51,10 +57,10 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
         base::<T>(1_800_000_000, 245, 245)
     }
     fn decide() -> Weight {
-        base::<T>(140_000_000, 24, 14).saturating_add(Self::collator_compensation())
+        base::<T>(140_000_000, 27, 16).saturating_add(Self::collator_compensation())
     }
     fn settle_cohort(items: u32) -> Weight {
-        base::<T>(85_000_000, 16, 12)
+        base::<T>(85_000_000, 20, 14)
             .saturating_add(Weight::from_parts(45_000_000, 5_000).saturating_mul(items.into()))
             .saturating_add(Self::collator_compensation())
     }
@@ -97,6 +103,12 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
         // runtime benchmark refresh.
         base::<T>(2_100_000_000, 240, 140)
     }
+    /// Worst case: the full bounded oracle aggregate hydrated and
+    /// persisted once per callback — the sweep, `ORACLE_DEADLINE_CATCHUP`
+    /// cursor drives, and one drive per non-terminal cohort's horizon.
+    fn drive_oracle_boundaries() -> Weight {
+        base::<T>(2_400_000_000, 620, 90)
+    }
 }
 
 fn base<T: frame_system::Config>(time: u64, reads: u64, writes: u64) -> Weight {
@@ -113,7 +125,7 @@ impl WeightInfo for () {
         rocks(40_000_000, 12, 10)
     }
     fn tick(items: u32) -> Weight {
-        rocks(55_000_000, 12, 10)
+        rocks(55_000_000, 15, 12)
             .saturating_add(Weight::from_parts(30_000_000, 4_000).saturating_mul(items.into()))
             .saturating_add(Self::collator_compensation())
     }
@@ -121,10 +133,10 @@ impl WeightInfo for () {
         rocks(1_800_000_000, 245, 245)
     }
     fn decide() -> Weight {
-        rocks(140_000_000, 24, 14).saturating_add(Self::collator_compensation())
+        rocks(140_000_000, 27, 16).saturating_add(Self::collator_compensation())
     }
     fn settle_cohort(items: u32) -> Weight {
-        rocks(85_000_000, 16, 12)
+        rocks(85_000_000, 20, 14)
             .saturating_add(Weight::from_parts(45_000_000, 5_000).saturating_mul(items.into()))
             .saturating_add(Self::collator_compensation())
     }
@@ -161,6 +173,12 @@ impl WeightInfo for () {
     }
     fn bind_ratification() -> Weight {
         rocks(2_100_000_000, 240, 140)
+    }
+    /// Worst case: the full bounded oracle aggregate hydrated and
+    /// persisted once per callback — the sweep, `ORACLE_DEADLINE_CATCHUP`
+    /// cursor drives, and one drive per non-terminal cohort's horizon.
+    fn drive_oracle_boundaries() -> Weight {
+        rocks(2_400_000_000, 620, 90)
     }
 }
 
