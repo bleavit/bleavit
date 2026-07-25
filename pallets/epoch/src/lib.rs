@@ -390,6 +390,16 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     /// its weight measures the hydrate/persist the callbacks actually perform
     /// against a live chain rather than against empty maps (SQ-182; Codex P1
     /// on #172).
+    /// Saturate the oracle's `Rounds`/`RoundSchedules` with **qualifying**
+    /// §12 disputes on the proposal's frozen spec, so `decide`'s ProcessHold
+    /// predicate is measured against its real 128-round bound.
+    ///
+    /// Without it the predicate iterates an empty map and `decide` — a
+    /// decision-critical permissionless crank — is charged nothing for a scan
+    /// that reads `RoundSchedules` and `ComponentValues` per matching round
+    /// (SQ-494). Pre-existing, and exposed by the row that touched the
+    /// predicate.
+    fn prime_dispute_rounds(_spec: MetricSpecVersion) {}
     fn prime_oracle_state(_: EpochId) {}
     fn prime_settlement(epoch: EpochId);
     fn prime_keeper_rebate() {}

@@ -142,6 +142,85 @@ fn durable_challenger_without_current_counter_does_not_hold_decision() {
     });
 }
 
+/// SQ-494 / 07 §12: a round whose money leg is already settled holds nothing.
+/// §11(1) retains a neutralized round for bond disposal only, and I-18 fixes the
+/// settled value against every later verdict — so the quantity the hold exists to
+/// protect is decided, while the hold keeps costing. And it costs more than
+/// "hold" suggests: `process_hold` reaches `Rejected(ProcessHold)`, which is
+/// terminal (05 §5.4 · T10/T20), so a proposal reaching its decide window inside
+/// the interval is killed and must be resubmitted, not deferred.
+#[test]
+fn sq_494_money_settled_round_does_not_hold_the_decision() {
+    development_ext().execute_with(|| {
+        seed_open_challenged_round(FROZEN_B1);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+
+        // Still contested: the value is live, so the hold is doing its job.
+        assert!(
+            crate::configs::RuntimeEpochOracle::any_open_dispute_touching(SPEC),
+            "an unsettled challenged round must hold the decision"
+        );
+
+        // The d20 deadline neutralizes the money leg and retains the round for
+        // bond disposal — exactly the §11(1) state.
+        pallet_oracle::ComponentValues::<Runtime>::insert(
+            (COMPONENT, epoch, SPEC),
+            pallet_oracle::SettledComponent {
+                value: futarchy_primitives::FixedU64(500_000_000),
+                path: pallet_oracle::SettlePath::Neutral,
+                flagged: true,
+            },
+        );
+        assert!(
+            pallet_oracle::Rounds::<Runtime>::contains_key((COMPONENT, epoch, SPEC)),
+            "the round is retained, not removed — that is what makes this reachable"
+        );
+        assert!(
+            !crate::configs::RuntimeEpochOracle::any_open_dispute_touching(SPEC),
+            "a money-settled round holds nothing: I-18 has fixed the value"
+        );
+    });
+}
+
+/// The exclusion is per **round**, not per spec version: a genuinely live round
+/// for another measurement epoch under the same frozen spec must still hold, or
+/// SQ-494 would have widened into a hole in §12 rather than closing one.
+#[test]
+fn sq_494_exclusion_is_per_round_not_per_spec_version() {
+    development_ext().execute_with(|| {
+        seed_open_challenged_round(FROZEN_B1);
+        let settled_epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        pallet_oracle::ComponentValues::<Runtime>::insert(
+            (COMPONENT, settled_epoch, SPEC),
+            pallet_oracle::SettledComponent {
+                value: futarchy_primitives::FixedU64(500_000_000),
+                path: pallet_oracle::SettlePath::Neutral,
+                flagged: true,
+            },
+        );
+        assert!(!crate::configs::RuntimeEpochOracle::any_open_dispute_touching(SPEC));
+
+        // A second, unsettled game on the same component and frozen version for
+        // a later measurement epoch.
+        let live_epoch = settled_epoch.saturating_add(1);
+        let mut round = pallet_oracle::Rounds::<Runtime>::get((COMPONENT, settled_epoch, SPEC))
+            .expect("seeded round");
+        round.epoch = live_epoch;
+        pallet_oracle::Rounds::<Runtime>::insert((COMPONENT, live_epoch, SPEC), round);
+        pallet_oracle::RoundSchedules::<Runtime>::insert(
+            (COMPONENT, live_epoch, SPEC),
+            pallet_oracle::StoredRoundSchedule {
+                round_one_bond: FROZEN_B1,
+                round_cap: pallet_oracle::ORC_ROUNDS,
+            },
+        );
+        assert!(
+            crate::configs::RuntimeEpochOracle::any_open_dispute_touching(SPEC),
+            "a live round under the same spec must still hold the decision"
+        );
+    });
+}
+
 /// SQ-117 / SQ-158: the real runtime genesis seeds both formerly-unseeded rows,
 /// so B9's rebate pipeline reads a non-zero `keeper.rebate` and the dispute
 /// engine reads an independent `dis.merit_min`.

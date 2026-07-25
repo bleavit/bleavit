@@ -582,6 +582,10 @@ mod benches {
             MAX_NON_TERMINAL_COHORTS,
         );
         Pallet::<T>::seed(state)?;
+        // 07 §12's ProcessHold predicate scans every live round; without a
+        // saturated `Rounds` it scans nothing and `decide` is charged nothing
+        // for it (SQ-494).
+        T::BenchmarkHelper::prime_dispute_rounds(0);
         T::BenchmarkHelper::prime_keeper_rebate();
 
         #[extrinsic_call]

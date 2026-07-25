@@ -3882,6 +3882,35 @@ impl pallet_epoch::OracleAccess for RuntimeEpochOracle {
                     // lowering can never make censorship cheaper (R-7).
                     Some(frozen_b1) => round.bond >= frozen_b1.max(balance_param(b"dis.merit_min")),
                 }
+                // 07 §12 (SQ-494): a round whose money leg is already settled
+                // holds nothing. §11(1) *retains* a neutralized round for bond
+                // disposal only, and I-18 fixes the settled value against every
+                // later verdict — so the quantity §12 exists to protect is
+                // decided, while the hold keeps costing. It costs more than the
+                // word "hold" suggests: `guards.process_hold` reaches
+                // `Rejected(ProcessHold)`, which is terminal (05 §5.4 · T10/T20),
+                // so a proposal reaching its decide window is killed and must be
+                // resubmitted, not deferred until the dispute clears. Leaving it
+                // in place let the §11(4) griefer buy that outcome for every
+                // proposal consuming the component, on top of the neutral
+                // settlement §11(4) actually prices.
+                //
+                // The test is the spec's own definition of non-money-bearing
+                // (§11(1)): "a round whose `(component, epoch, spec_version)`
+                // already carries a settled `ComponentValues` entry". Reading
+                // the settled value rather than the oracle's internal
+                // money-settled latch keeps this predicate off that pallet's
+                // storage shapes.
+                //
+                // Evaluated **last**, after the merit floor: a sub-merit round
+                // already fails and never pays this read, so the ordering costs
+                // one read only where the answer can still change.
+                && pallet_oracle::Pallet::<Runtime>::settled_component(
+                    round.component,
+                    round.epoch,
+                    round.spec_version,
+                )
+                .is_none()
         })
     }
 
@@ -9186,6 +9215,71 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
     }
 
     fn prime_guard_enqueue(_: futarchy_primitives::ProposalId) {}
+
+    fn prime_dispute_rounds(spec: futarchy_primitives::MetricSpecVersion) {
+        // The worst case is a full scan that returns **false**: `.any()`
+        // short-circuits on the first qualifying round, so a map full of
+        // holding disputes is the *cheap* case. Every round here therefore
+        // clears the merit floor — paying its `RoundSchedules` read — and is
+        // then money-settled, paying the SQ-494 `ComponentValues` read and
+        // failing. Nothing short-circuits and `decide` still takes its ordinary
+        // path rather than the ProcessHold rejection.
+        //
+        // Half the map carries `spec`, half a sibling version: 02 §7.2 derives
+        // the 128-round bound as 16 components x <= 4 settling epochs x <= 2
+        // concurrent frozen versions, so **at most 64 rounds can share one
+        // frozen version**. The scan still walks all 128 — that is what `iter`
+        // costs — but only the matching half pays the two per-round reads.
+        // Seeding all 128 on one version would charge `decide` for a state the
+        // bound's own decomposition says cannot exist.
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let per_version = pallet_oracle::MAX_ROUNDS as u16 / 2;
+        for index in 0..pallet_oracle::MAX_ROUNDS as u16 {
+            let version = if index < per_version {
+                spec
+            } else {
+                spec.saturating_add(1)
+            };
+            let key = (index, epoch, version);
+            pallet_oracle::Rounds::<Runtime>::insert(
+                key,
+                pallet_oracle::RoundState {
+                    component: index,
+                    epoch,
+                    round: 1,
+                    spec_version: version,
+                    reporter: [61; 32],
+                    value: FixedU64(pallet_welfare::ONE / 2),
+                    evidence_hash: [62; 32],
+                    bond: Balance::MAX,
+                    challenge_deadline: u32::MAX,
+                    extended: false,
+                    challenger: Some([63; 32]),
+                    counter_value: Some(FixedU64(pallet_welfare::ONE / 4)),
+                    acks: 0,
+                    report_hash: [64; 32],
+                    stake_at_risk: 1,
+                    cumulative_reporter_bond: 1,
+                    cumulative_challenger_bond: 1,
+                },
+            );
+            pallet_oracle::RoundSchedules::<Runtime>::insert(
+                key,
+                pallet_oracle::StoredRoundSchedule {
+                    round_one_bond: 1,
+                    round_cap: pallet_oracle::ORC_ROUNDS,
+                },
+            );
+            pallet_oracle::ComponentValues::<Runtime>::insert(
+                key,
+                pallet_oracle::SettledComponent {
+                    value: FixedU64(pallet_welfare::ONE / 2),
+                    path: pallet_oracle::SettlePath::Neutral,
+                    flagged: true,
+                },
+            );
+        }
+    }
 
     fn prime_oracle_state(measurement_epoch: EpochId) {
         // Saturate every collection `Oracle::load` hydrates, so the boundary
