@@ -134,7 +134,7 @@ parameter_types! {
     pub static OnchainInputsByVersion: Vec<(MetricSpecVersion, Vec<ComponentValue>)> = Vec::new();
     pub static DailyInput: Vec<ComponentValue> = healthy_components();
     pub static DailyInputsByVersion: Vec<(MetricSpecVersion, Vec<ComponentValue>)> = Vec::new();
-    pub static IncidentInput: FixedU64 = FixedU64(ONE);
+    pub static IncidentInput: Option<FixedU64> = Some(FixedU64(ONE));
     pub static LedgerFailure: Option<LedgerCall> = None;
     /// Epochs whose Baseline vault is absent or already settled, i.e. the
     /// `baseline_open` precondition is false and the VOID settlement no-ops.
@@ -231,7 +231,10 @@ impl MetricInputs for TestMetricInputs {
             .unwrap_or_else(OnchainInput::get)
     }
 
-    fn incident_multiplier(_epoch: EpochId) -> FixedU64 {
+    fn incident_multiplier(_epoch: EpochId, _spec_version: u16) -> Option<FixedU64> {
+        // `None` models the registry record being absent, which 07 §7 requires
+        // `record_snapshot` to refuse on rather than resolve to the favourable
+        // neutral 1.0 (SQ-141).
         IncidentInput::get()
     }
 
@@ -366,6 +369,9 @@ impl pallet_welfare::BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
         OnchainInput::set(inputs.clone());
         DailyInput::set(inputs);
     }
+    fn seat_oracle() {
+        // The mock's `OracleAdmission` is already seated (see `SeatedOracle`).
+    }
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
@@ -380,7 +386,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     OnchainInputsByVersion::set(Vec::new());
     DailyInput::set(healthy_components());
     DailyInputsByVersion::set(Vec::new());
-    IncidentInput::set(FixedU64(ONE));
+    IncidentInput::set(Some(FixedU64(ONE)));
     LedgerFailure::set(None);
     // Default: every epoch has an `Open` Baseline vault, so the 03 §5.2
     // epoch-VOID settlement has work to do unless a test says otherwise.

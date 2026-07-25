@@ -110,7 +110,16 @@ pub trait OracleAdmission {
 /// this pallet aggregates only already-normalized `[0, 1]` components.
 pub trait MetricInputs {
     fn onchain_components(epoch: EpochId, spec_version: MetricSpecVersion) -> Vec<ComponentValue>;
-    fn incident_multiplier(epoch: EpochId) -> FixedU64;
+    /// The registry's closed incident aggregate for `(epoch, spec_version)`
+    /// — the `C_attested` multiplier of 05 §4.4.
+    ///
+    /// `None` means the record is not available: the version's `close_epoch`
+    /// has not run, a filing is still non-terminal, or no cohort froze that
+    /// version. 07 §7 requires the reader to **fail closed** on all three —
+    /// substituting the neutral 1.0 would settle a cohort at full-strength
+    /// `C_attested` on absent evidence, which is the favourable direction, not
+    /// the safe one (G-1). `record_snapshot` refuses and retries.
+    fn incident_multiplier(epoch: EpochId, spec_version: MetricSpecVersion) -> Option<FixedU64>;
     fn daily_components(
         epoch: EpochId,
         day: u8,
@@ -166,6 +175,16 @@ pub trait BenchmarkHelper<RuntimeOrigin> {
     fn prime_finalized_epoch(epoch: EpochId);
     /// Populate every component the active benchmark MetricSpec reads.
     fn prime_metric_inputs(count: u16);
+    /// Fill 07 §2(5)'s reporter and watchtower seats so `register_spec` reaches
+    /// the work it is supposed to measure.
+    ///
+    /// Deliberately a **seeding** seam and not a stubbed `OracleAdmission`:
+    /// every valid MetricSpec contains an attested component (05 §4.3/§4.4), so
+    /// an unseated oracle refuses the dispatch outright and the benchmark
+    /// measures nothing. Returning a fabricated admission instead would hide the
+    /// real storage reads the gate performs — the exact fixture-instead-of-work
+    /// shape SQ-489 was raised for.
+    fn seat_oracle();
     fn prime_keeper_rebate() {}
     fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 }
@@ -482,6 +501,12 @@ pub mod pallet {
         /// `Δs_max`, so a lie about it would cost less than it can move. Also
         /// returned when the ladder is unreadable — the fail-closed direction.
         BondCoverageUnmet,
+        /// The registry has no closed incident aggregate for this
+        /// `(epoch, spec_version)`, so `C_attested`'s multiplier is unknown
+        /// (07 §7, SQ-141). The snapshot is refused rather than resolved to the
+        /// favourable neutral 1.0; 07 §11(1)'s d20 money deadline guarantees the
+        /// record exists in time, so this is a retry, not a wedge.
+        IncidentAggregateUnavailable,
     }
 
     #[pallet::hooks]
@@ -540,7 +565,8 @@ pub mod pallet {
                 Error::<T>::EpochNotFinalized
             );
             let components = T::MetricInputs::onchain_components(epoch, spec_version);
-            let incident = T::MetricInputs::incident_multiplier(epoch);
+            let incident = T::MetricInputs::incident_multiplier(epoch, spec_version)
+                .ok_or(Error::<T>::IncidentAggregateUnavailable)?;
             let params = Self::live_params()?;
             Self::mutate(|state| {
                 state

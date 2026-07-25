@@ -799,21 +799,32 @@ fn close_epoch_incident_aggregate_is_claimant_adverse_and_notifies_welfare() {
             5,
             REG_CLOSE_BATCH as u32
         ));
-        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5));
+        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5, 3));
         // One upheld S2 (severity 0.4) ⇒ max(0, 1 − 0.4) = 0.6.
         assert_eq!(
-            Aggregates::<Test, IncidentInstance>::get(5),
+            Aggregates::<Test, IncidentInstance>::get(5, 3),
             Some(FixedU64(600_000_000))
         );
         assert_eq!(
             WelfareLog::get(),
-            vec![(RegistryKind::Incident, 5, 600_000_000)]
+            vec![(RegistryKind::Incident, 5, 3, 600_000_000)]
         );
-        // The FilingCount slot is reaped so the live-epoch bound stays concurrent;
-        // its absence is also what makes a re-close idempotent (NothingToClose).
+        // The FilingCount slot is reaped so the live-epoch bound stays concurrent.
         assert_eq!(FilingCount::<Test, IncidentInstance>::get(5), 0);
+        // Re-closing the **same version** is refused as already final. Before
+        // SQ-141 this reported `NothingToClose`, because dropping the shared
+        // count was the only "already closed" marker; the per-version aggregate
+        // is now the marker, and it says the more precise thing — the epoch was
+        // filed, and this version's record already exists. `NothingToClose`
+        // still means what it says: nothing was ever filed here.
         assert_noop!(
-            IncidentRegistry::close_epoch(signed(BOB), 5),
+            IncidentRegistry::close_epoch(signed(BOB), 5, 3),
+            Error::<Test, IncidentInstance>::AlreadyFinal
+        );
+        // An epoch with no filings and no aggregate at all is still refused, so
+        // the anti-griefing guard the disjunction relaxed is intact.
+        assert_noop!(
+            IncidentRegistry::close_epoch(signed(BOB), 6, 3),
             Error::<Test, IncidentInstance>::NothingToClose
         );
     });
@@ -833,7 +844,7 @@ fn close_epoch_requires_terminal_filings() {
         ));
         System::set_block_number(20); // past the filing window, filing still live
         assert_noop!(
-            IncidentRegistry::close_epoch(signed(BOB), 5),
+            IncidentRegistry::close_epoch(signed(BOB), 5, 3),
             Error::<Test, IncidentInstance>::WindowOpen
         );
     });
@@ -862,20 +873,20 @@ fn reap_epoch_needs_close_out_then_the_archive_delay() {
         ));
         // Cannot reap a not-yet-closed epoch.
         assert_noop!(
-            IncidentRegistry::reap_epoch(signed(BOB), 5),
+            IncidentRegistry::reap_epoch(signed(BOB), 5, 3),
             Error::<Test, IncidentInstance>::ReapNotDue
         );
-        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5));
+        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5, 3));
         // Still not reapable until the archive delay elapses since close — so
         // welfare has consumed the aggregate before the records are destroyed.
         assert_noop!(
-            IncidentRegistry::reap_epoch(signed(BOB), 5),
+            IncidentRegistry::reap_epoch(signed(BOB), 5, 3),
             Error::<Test, IncidentInstance>::ReapNotDue
         );
         System::set_block_number(CLOSE_BLOCK + ARCHIVE_DELAY + 1);
-        assert_ok!(IncidentRegistry::reap_epoch(signed(BOB), 5));
+        assert_ok!(IncidentRegistry::reap_epoch(signed(BOB), 5, 3));
         assert!(Filings::<Test, IncidentInstance>::get(5, 0).is_none());
-        assert!(Aggregates::<Test, IncidentInstance>::get(5).is_none());
+        assert!(Aggregates::<Test, IncidentInstance>::get(5, 3).is_none());
         assert_ok!(IncidentRegistry::do_try_state());
     });
 }
@@ -901,23 +912,23 @@ fn reap_epoch_rebates_once_only_after_bounded_cleanup_succeeds() {
             5,
             REG_CLOSE_BATCH as u32
         ));
-        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5));
+        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5, 3));
         KeeperRebates::set(Vec::new());
 
         assert_noop!(
-            IncidentRegistry::reap_epoch(signed(BOB), 5),
+            IncidentRegistry::reap_epoch(signed(BOB), 5, 3),
             Error::<Test, IncidentInstance>::ReapNotDue
         );
         assert!(KeeperRebates::get().is_empty());
 
         System::set_block_number(CLOSE_BLOCK + ARCHIVE_DELAY + 1);
-        assert_ok!(IncidentRegistry::reap_epoch(signed(BOB), 5));
+        assert_ok!(IncidentRegistry::reap_epoch(signed(BOB), 5, 3));
         // 07 §7 *Crank funding lines* / 08 §6.3 (SQ-297): reaping is archival
         // cleanup, so it is rebated from the metered GENERAL tranche — not the
         // oracle budget line that funds `ack_observed` / `crank_close`.
         assert_eq!(KeeperRebates::get(), vec![(acct(BOB), CrankClass::General)]);
         assert_noop!(
-            IncidentRegistry::reap_epoch(signed(BOB), 5),
+            IncidentRegistry::reap_epoch(signed(BOB), 5, 3),
             Error::<Test, IncidentInstance>::ReapNotDue
         );
         assert_eq!(KeeperRebates::get().len(), 1);
@@ -950,20 +961,20 @@ fn a_reaped_epoch_cannot_be_reclosed_to_the_favorable_value() {
             5,
             REG_CLOSE_BATCH as u32
         ));
-        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5));
+        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5, 3));
         assert_eq!(
-            Aggregates::<Test, IncidentInstance>::get(5),
+            Aggregates::<Test, IncidentInstance>::get(5, 3),
             Some(FixedU64(0))
         );
         System::set_block_number(CLOSE_BLOCK + ARCHIVE_DELAY + 1);
-        assert_ok!(IncidentRegistry::reap_epoch(signed(BOB), 5));
+        assert_ok!(IncidentRegistry::reap_epoch(signed(BOB), 5, 3));
         // The replay: re-close the now-empty epoch → refused (no FilingCount).
         assert_noop!(
-            IncidentRegistry::close_epoch(signed(BOB), 5),
+            IncidentRegistry::close_epoch(signed(BOB), 5, 3),
             Error::<Test, IncidentInstance>::NothingToClose
         );
         // Welfare was notified exactly once, with the real adverse value.
-        assert_eq!(WelfareLog::get(), vec![(RegistryKind::Incident, 5, 0)]);
+        assert_eq!(WelfareLog::get(), vec![(RegistryKind::Incident, 5, 3, 0)]);
     });
 }
 
@@ -975,7 +986,7 @@ fn close_epoch_refuses_an_unfiled_epoch() {
         // Never filed ⇒ nothing to close (welfare's pull-side "no record ⇒ 1"
         // handles genuinely-empty epochs; a permissionless empty close would grief).
         assert_noop!(
-            IncidentRegistry::close_epoch(signed(BOB), 9),
+            IncidentRegistry::close_epoch(signed(BOB), 9, 3),
             Error::<Test, IncidentInstance>::NothingToClose
         );
     });
@@ -1006,16 +1017,16 @@ fn close_epoch_rolls_back_when_welfare_refuses() {
             REG_CLOSE_BATCH as u32
         ));
         WelfareFails::set(true);
-        assert!(IncidentRegistry::close_epoch(signed(BOB), 5).is_err());
+        assert!(IncidentRegistry::close_epoch(signed(BOB), 5, 3).is_err());
         // Fully rolled back.
-        assert!(Aggregates::<Test, IncidentInstance>::get(5).is_none());
+        assert!(Aggregates::<Test, IncidentInstance>::get(5, 3).is_none());
         assert_eq!(FilingCount::<Test, IncidentInstance>::get(5), 1);
         assert!(WelfareLog::get().is_empty());
         // With welfare healthy the same close succeeds.
         WelfareFails::set(false);
-        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5));
+        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5, 3));
         assert_eq!(
-            Aggregates::<Test, IncidentInstance>::get(5),
+            Aggregates::<Test, IncidentInstance>::get(5, 3),
             Some(FixedU64(600_000_000))
         );
         assert_ok!(IncidentRegistry::do_try_state());
@@ -1121,18 +1132,18 @@ fn milestone_instance_is_independent_and_scores_points_over_target() {
             3,
             REG_CLOSE_BATCH as u32
         ));
-        assert_ok!(MilestoneRegistry::close_epoch(signed(CHARLIE), 3));
+        assert_ok!(MilestoneRegistry::close_epoch(signed(CHARLIE), 3, 3));
         // points 25 / target 100 = 0.25.
         assert_eq!(
-            Aggregates::<Test, MilestoneInstance>::get(3),
+            Aggregates::<Test, MilestoneInstance>::get(3, 3),
             Some(FixedU64(250_000_000))
         );
         assert_eq!(
             WelfareLog::get(),
-            vec![(RegistryKind::Milestone, 3, 250_000_000)]
+            vec![(RegistryKind::Milestone, 3, 3, 250_000_000)]
         );
         // The incident instance's epoch 3 is untouched by the milestone close.
-        assert!(Aggregates::<Test, IncidentInstance>::get(3).is_none());
+        assert!(Aggregates::<Test, IncidentInstance>::get(3, 3).is_none());
     });
 }
 
@@ -1167,8 +1178,8 @@ fn milestone_close_with_points(points: u16) -> FixedU64 {
         3,
         REG_CLOSE_BATCH as u32
     ));
-    assert_ok!(MilestoneRegistry::close_epoch(signed(BOB), 3));
-    Aggregates::<Test, MilestoneInstance>::get(3).unwrap()
+    assert_ok!(MilestoneRegistry::close_epoch(signed(BOB), 3, 3));
+    Aggregates::<Test, MilestoneInstance>::get(3, 3).unwrap()
 }
 
 #[test]
@@ -1225,18 +1236,18 @@ fn a_zero_milestone_target_refuses_the_close_instead_of_recording_zero() {
         // The frozen MetricSpec carries no positive target at close time.
         MilestoneTarget::set(0);
         assert_noop!(
-            MilestoneRegistry::close_epoch(signed(BOB), 3),
+            MilestoneRegistry::close_epoch(signed(BOB), 3, 3),
             Error::<Test, MilestoneInstance>::MilestoneTargetUnset
         );
         // Status quo on the failure path (G-1): no aggregate, no welfare
         // hand-off, no close stamp — so the archive gate keeps the records too.
-        assert!(Aggregates::<Test, MilestoneInstance>::get(3).is_none());
+        assert!(Aggregates::<Test, MilestoneInstance>::get(3, 3).is_none());
         assert!(WelfareLog::get().is_empty());
         assert_eq!(FilingCount::<Test, MilestoneInstance>::get(3), 1);
         assert!(Filings::<Test, MilestoneInstance>::get(3, 0).is_some());
         System::set_block_number(CLOSE_BLOCK + ARCHIVE_DELAY + 1);
         assert_noop!(
-            MilestoneRegistry::reap_epoch(signed(BOB), 3),
+            MilestoneRegistry::reap_epoch(signed(BOB), 3, 3),
             Error::<Test, MilestoneInstance>::ReapNotDue
         );
         assert_ok!(MilestoneRegistry::do_try_state());
@@ -1244,14 +1255,14 @@ fn a_zero_milestone_target_refuses_the_close_instead_of_recording_zero() {
         // The refusal is not terminal: a spec that carries the field again closes
         // to the real measurement (25 / 100 = 0.25), never to 0.0.
         MilestoneTarget::set(100);
-        assert_ok!(MilestoneRegistry::close_epoch(signed(BOB), 3));
+        assert_ok!(MilestoneRegistry::close_epoch(signed(BOB), 3, 3));
         assert_eq!(
-            Aggregates::<Test, MilestoneInstance>::get(3),
+            Aggregates::<Test, MilestoneInstance>::get(3, 3),
             Some(FixedU64(250_000_000))
         );
         assert_eq!(
             WelfareLog::get(),
-            vec![(RegistryKind::Milestone, 3, 250_000_000)]
+            vec![(RegistryKind::Milestone, 3, 3, 250_000_000)]
         );
     });
 }
@@ -1407,6 +1418,276 @@ fn registry_quorum_does_not_track_a_raised_wt_quorum() {
             Filings::<Test, IncidentInstance>::get(5, 0).map(|f| f.state),
             Some(FilingState::Upheld)
         ));
+        assert_ok!(IncidentRegistry::do_try_state());
+    });
+}
+
+// ------------------------------------------- SQ-141: per-version lifecycle
+
+/// 07 §7 (contract v14): at a MetricSpec activation boundary two cohorts measure
+/// the same epoch under **different** frozen versions, and the registry runs an
+/// independent lifecycle per version.
+///
+/// The pre-SQ-141 seam collapsed a multi-version epoch to "no unique version"
+/// and turned that into `SpecVersionMismatch`, so an activation boundary refused
+/// **every** filing for the epoch — including one naming a version that was
+/// unambiguously frozen. This is the closed→open transition 07 §7 requires be
+/// pinned rather than inferred.
+#[test]
+fn sq141_an_activation_boundary_admits_a_filing_under_either_frozen_version() {
+    new_test_ext().execute_with(|| {
+        FrozenSpecs::set(vec![3, 4]);
+        // Both versions are admissible; neither shadows the other.
+        assert_ok!(IncidentRegistry::file(
+            signed(ALICE),
+            5,
+            FilingClass::S2,
+            0,
+            H,
+            3
+        ));
+        assert_ok!(IncidentRegistry::file(
+            signed(BOB),
+            5,
+            FilingClass::S1,
+            0,
+            H,
+            4
+        ));
+        // A version no cohort froze is still refused — the gate is membership,
+        // not absence of a gate.
+        assert_noop!(
+            IncidentRegistry::file(signed(ALICE), 5, FilingClass::S3, 0, H, 5),
+            Error::<Test, IncidentInstance>::SpecVersionMismatch
+        );
+        // Filing ids stay unique across versions, which is what keeps the ten
+        // 02 §6 filing events (keyed `(epoch, filing_id)`) untouched by the
+        // re-key.
+        assert_eq!(FilingCount::<Test, IncidentInstance>::get(5), 2);
+        assert_eq!(
+            Filings::<Test, IncidentInstance>::get(5, 0)
+                .unwrap()
+                .spec_version,
+            3
+        );
+        assert_eq!(
+            Filings::<Test, IncidentInstance>::get(5, 1)
+                .unwrap()
+                .spec_version,
+            4
+        );
+        assert_ok!(IncidentRegistry::do_try_state());
+    });
+}
+
+/// Each version folds **only its own** filings, and one version's close neither
+/// produces nor blocks the other's aggregate. Folding them together would
+/// combine claims governed by different frozen specs (G-1).
+#[test]
+fn sq141_each_version_closes_to_its_own_aggregate() {
+    new_test_ext().execute_with(|| {
+        FrozenSpecs::set(vec![3, 4]);
+        assert_ok!(IncidentRegistry::file(
+            signed(ALICE),
+            5,
+            FilingClass::S2,
+            0,
+            H,
+            3
+        ));
+        assert_ok!(IncidentRegistry::file(
+            signed(BOB),
+            5,
+            FilingClass::S1,
+            0,
+            H,
+            4
+        ));
+        for wt in [WT1, WT2] {
+            register_watchtower(wt);
+            assert_ok!(IncidentRegistry::ack_observed(signed(wt), 5, 0));
+            assert_ok!(IncidentRegistry::ack_observed(signed(wt), 5, 1));
+        }
+        System::set_block_number(CLOSE_BLOCK);
+        assert_ok!(IncidentRegistry::crank_close(
+            signed(BOB),
+            5,
+            REG_CLOSE_BATCH as u32
+        ));
+        // v3 carries one upheld S2 (0.4) ⇒ 0.6; v4 one upheld S1 (1.0) ⇒ 0.0.
+        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5, 3));
+        assert_eq!(
+            Aggregates::<Test, IncidentInstance>::get(5, 3),
+            Some(FixedU64(600_000_000))
+        );
+        // The sibling has no aggregate yet — a welfare read for v4 here must
+        // find nothing rather than inherit v3's number.
+        assert_eq!(Aggregates::<Test, IncidentInstance>::get(5, 4), None);
+        // ...and it can still be closed, even though the first close dropped the
+        // epoch-wide FilingCount that the anti-griefing guard used to require.
+        assert_eq!(FilingCount::<Test, IncidentInstance>::get(5), 0);
+        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5, 4));
+        assert_eq!(
+            Aggregates::<Test, IncidentInstance>::get(5, 4),
+            Some(FixedU64(0))
+        );
+        assert_eq!(
+            WelfareLog::get(),
+            vec![
+                (RegistryKind::Incident, 5, 3, 600_000_000),
+                (RegistryKind::Incident, 5, 4, 0),
+            ]
+        );
+        assert_ok!(IncidentRegistry::do_try_state());
+    });
+}
+
+/// Reaping one version must not destroy the sibling's records. The durable ack
+/// set is keyed `(epoch, filing_id, who)` and carries no version, so a
+/// whole-prefix clear — correct while an epoch closed once — would now wipe live
+/// acks belonging to a version that has not been reaped.
+#[test]
+fn sq141_reaping_one_version_leaves_the_sibling_intact() {
+    new_test_ext().execute_with(|| {
+        FrozenSpecs::set(vec![3, 4]);
+        assert_ok!(IncidentRegistry::file(
+            signed(ALICE),
+            5,
+            FilingClass::S2,
+            0,
+            H,
+            3
+        ));
+        assert_ok!(IncidentRegistry::file(
+            signed(BOB),
+            5,
+            FilingClass::S1,
+            0,
+            H,
+            4
+        ));
+        for wt in [WT1, WT2] {
+            register_watchtower(wt);
+            assert_ok!(IncidentRegistry::ack_observed(signed(wt), 5, 0));
+            assert_ok!(IncidentRegistry::ack_observed(signed(wt), 5, 1));
+        }
+        System::set_block_number(CLOSE_BLOCK);
+        assert_ok!(IncidentRegistry::crank_close(
+            signed(BOB),
+            5,
+            REG_CLOSE_BATCH as u32
+        ));
+        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5, 3));
+        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5, 4));
+        System::set_block_number(CLOSE_BLOCK + ARCHIVE_DELAY);
+        assert_ok!(IncidentRegistry::reap_epoch(signed(BOB), 5, 3));
+        // v3 is gone; v4's filing, ack rows and aggregate all survive.
+        assert!(Filings::<Test, IncidentInstance>::get(5, 0).is_none());
+        assert!(Filings::<Test, IncidentInstance>::get(5, 1).is_some());
+        assert_eq!(Aggregates::<Test, IncidentInstance>::get(5, 3), None);
+        assert_eq!(
+            Aggregates::<Test, IncidentInstance>::get(5, 4),
+            Some(FixedU64(0))
+        );
+        assert!(
+            crate::AckRecords::<Test, IncidentInstance>::iter_key_prefix((5u32, 1u32))
+                .next()
+                .is_some()
+        );
+        assert!(
+            crate::AckRecords::<Test, IncidentInstance>::iter_key_prefix((5u32, 0u32))
+                .next()
+                .is_none()
+        );
+        assert_ok!(IncidentRegistry::do_try_state());
+        // Reaping the last version clears the epoch entirely, and a re-close is
+        // then refused as never-filed rather than admitted to the favourable
+        // "no filings ⇒ 1" value.
+        assert_ok!(IncidentRegistry::reap_epoch(signed(BOB), 5, 4));
+        assert_noop!(
+            IncidentRegistry::close_epoch(signed(BOB), 5, 4),
+            Error::<Test, IncidentInstance>::NothingToClose
+        );
+        assert_ok!(IncidentRegistry::do_try_state());
+    });
+}
+
+/// A version MUST NOT be reaped while a sibling version of the same epoch still
+/// holds unclosed records.
+///
+/// Found by an independent review of the SQ-141 re-key, and it is a hole the
+/// re-key itself opened. `close_epoch` drops the epoch-wide `FilingCount` on the
+/// **first** close, so afterwards the only evidence the epoch was ever filed is
+/// its aggregates. Reaping the first version while a second still holds a
+/// non-terminal filing erases that evidence, and the damage runs both ways: the
+/// sibling becomes permanently uncloseable (`NothingToClose`), and welfare's
+/// reader — seeing no footprint at all — reads the epoch as never-filed and
+/// returns the favourable neutral 1.0 for a version whose incident filings are
+/// still in storage. That is the exact fail-adverse substitution the fail-closed
+/// reader exists to prevent, reached through a different door.
+#[test]
+fn sq141_a_version_cannot_be_reaped_while_a_sibling_is_still_open() {
+    new_test_ext().execute_with(|| {
+        FrozenSpecs::set(vec![3, 4]);
+        assert_ok!(IncidentRegistry::file(
+            signed(ALICE),
+            5,
+            FilingClass::S2,
+            0,
+            H,
+            3
+        ));
+        assert_ok!(IncidentRegistry::file(
+            signed(BOB),
+            5,
+            FilingClass::S1,
+            0,
+            H,
+            4
+        ));
+        for wt in [WT1, WT2] {
+            register_watchtower(wt);
+            assert_ok!(IncidentRegistry::ack_observed(signed(wt), 5, 0));
+        }
+        // Filing 1 (version 4) is challenged, so it stays non-terminal until a
+        // values verdict arrives — the realistic way a sibling stays open.
+        assert_ok!(IncidentRegistry::challenge_filing(signed(CHARLIE), 5, 1, H));
+        System::set_block_number(CLOSE_BLOCK);
+        assert_ok!(IncidentRegistry::crank_close(
+            signed(BOB),
+            5,
+            REG_CLOSE_BATCH as u32
+        ));
+        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5, 3));
+        assert_eq!(FilingCount::<Test, IncidentInstance>::get(5), 0);
+        // The intermediate state is legitimate and must satisfy try-state:
+        // version 4's filing is neither counted-live (the shared count went with
+        // version 3's close) nor closed. The pre-SQ-141 partition had only those
+        // two states, so it reads this as an orphan.
+        assert_ok!(IncidentRegistry::do_try_state());
+        System::set_block_number(CLOSE_BLOCK + ARCHIVE_DELAY);
+        // Version 4 has no aggregate and still holds a filing, so version 3's
+        // archive delay elapsing is not enough.
+        assert_noop!(
+            IncidentRegistry::reap_epoch(signed(BOB), 5, 3),
+            Error::<Test, IncidentInstance>::ReapNotDue
+        );
+        // Version 3's aggregate therefore survives, which is what keeps the
+        // sibling closeable and keeps the epoch legible to welfare.
+        assert_eq!(
+            Aggregates::<Test, IncidentInstance>::get(5, 3),
+            Some(FixedU64(600_000_000))
+        );
+        // Resolve the challenge and close version 4; only then may version 3 go.
+        assert_ok!(IncidentRegistry::resolve_challenge(
+            RuntimeOrigin::signed(acct(RESOLVER)),
+            5,
+            1,
+            true,
+            H
+        ));
+        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5, 4));
+        assert_ok!(IncidentRegistry::reap_epoch(signed(BOB), 5, 3));
         assert_ok!(IncidentRegistry::do_try_state());
     });
 }

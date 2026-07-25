@@ -118,7 +118,10 @@ parameter_types! {
     pub static FilingWindowEnd: u32 = 1_000_000;
     /// The frozen MetricSpec version filings must attest under (I-16); tests file
     /// a mismatching version to exercise `SpecVersionMismatch`.
-    pub static FrozenSpec: u16 = 3;
+    /// The versions live cohorts froze for the measurement epoch (07 §7).
+    /// A single-element set is the ordinary case; two elements model an
+    /// activation boundary, which the old single-version seam could not.
+    pub static FrozenSpecs: alloc::vec::Vec<u16> = alloc::vec![3];
     /// The Milestone completion target (frozen MetricSpec field, 07 §7 / 05 §4.4);
     /// overridable per-test to prove it is a seam, not the core's `100` default.
     pub static MilestoneTarget: u32 = 100;
@@ -139,7 +142,8 @@ parameter_types! {
     pub static RegisteredWatchtowers: alloc::vec::Vec<AccountId32> = alloc::vec::Vec::new();
     /// Welfare hand-off log — `(kind, epoch, aggregate.0)`; tests assert the
     /// settlement-time consumer received the derived aggregate.
-    pub static WelfareLog: alloc::vec::Vec<(RegistryKind, EpochId, u64)> = alloc::vec::Vec::new();
+    pub static WelfareLog: alloc::vec::Vec<(RegistryKind, EpochId, u16, u64)> =
+        alloc::vec::Vec::new();
     /// When set, the welfare sink refuses — exercises the G-1 `close_epoch`
     /// rollback path (07 §7 / rule 1).
     pub static WelfareFails: bool = false;
@@ -183,12 +187,13 @@ impl WelfareSink for TestWelfare {
     fn note_external_component(
         kind: RegistryKind,
         epoch: EpochId,
+        spec_version: u16,
         aggregate: FixedU64,
     ) -> sp_runtime::DispatchResult {
         if WelfareFails::get() {
             return Err(sp_runtime::DispatchError::Other("welfare refused"));
         }
-        WelfareLog::mutate(|log| log.push((kind, epoch, aggregate.0)));
+        WelfareLog::mutate(|log| log.push((kind, epoch, spec_version, aggregate.0)));
         Ok(())
     }
 }
@@ -198,10 +203,10 @@ impl EpochContext for TestEpoch {
     fn filing_window_end(_epoch: EpochId) -> u32 {
         FilingWindowEnd::get()
     }
-    fn frozen_spec_version(_epoch: EpochId) -> Option<u16> {
-        Some(FrozenSpec::get())
+    fn frozen_spec_versions(_epoch: EpochId) -> alloc::vec::Vec<u16> {
+        FrozenSpecs::get()
     }
-    fn milestone_target(_epoch: EpochId) -> u32 {
+    fn milestone_target(_epoch: EpochId, _spec_version: u16) -> u32 {
         MilestoneTarget::get()
     }
     fn cohort_exposure(kind: RegistryKind, _epoch: EpochId) -> Option<Balance> {
@@ -380,7 +385,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         IncidentExposure::set(Some(0));
         MilestoneExposure::set(Some(0));
         FilingWindowEnd::set(1_000_000);
-        FrozenSpec::set(3);
+        FrozenSpecs::set(alloc::vec![3]);
         MilestoneTarget::set(100);
         LiveOrcWindow::set(registry_core::REG_WINDOW_BLOCKS);
         LiveWtQuorum::set(registry_core::WT_QUORUM);

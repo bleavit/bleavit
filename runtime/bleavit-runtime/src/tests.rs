@@ -12160,8 +12160,14 @@ where
             uphold: false,
             evidence_hash: [9u8; 32],
         },
-        pallet_registry::Call::close_epoch { epoch: 1 },
-        pallet_registry::Call::reap_epoch { epoch: 1 },
+        pallet_registry::Call::close_epoch {
+            epoch: 1,
+            spec_version: 1,
+        },
+        pallet_registry::Call::reap_epoch {
+            epoch: 1,
+            spec_version: 1,
+        },
     ]
 }
 
@@ -14855,15 +14861,86 @@ fn gate_v_min_is_a_live_bounded_param_not_a_hardwired_decision_floor_ratio() {
     });
 }
 
+/// SQ-141 / 07 §7: the incident-aggregate reader **fails closed**.
+///
+/// This test asserted the opposite until the `(epoch, spec_version)` re-key,
+/// and the old behaviour was defensible only because a single-key lookup could
+/// not name a *wrong* version — an absent entry could only mean "not closed
+/// yet". With the pair key it can also mean "you asked for the sibling
+/// version", and answering the neutral 1.0 there would hand a cohort
+/// full-strength `C_attested` for incidents filed under the other spec, with no
+/// error, no event and no try-state signal. Returning the favourable value on
+/// absent evidence is the G-1 violation; refusing and retrying is not, because
+/// 07 §11(1)'s d20 money deadline guarantees the record arrives.
 #[test]
-fn deferred_metric_input_incident_multiplier_uses_the_neutral_identity() {
+fn sq141_incident_multiplier_refuses_an_absent_or_wrong_version_aggregate() {
     use pallet_welfare::MetricInputs;
+    fn upheld_filing(spec_version: u16) -> registry_core::Filing {
+        registry_core::Filing {
+            who: [1u8; 32],
+            class: registry_core::FilingClass::S2,
+            points: 0,
+            evidence_hash: [9u8; 32],
+            bond: 1,
+            state: registry_core::FilingState::Upheld,
+            spec_version,
+        }
+    }
     development_ext().execute_with(|| {
-        // No closed registry epoch ⇒ the neutral 1.0 multiplier (a zero would
-        // erase C_attested outright — fail-destructive, not fail-safe).
+        // (1) No registry footprint: nothing was ever filed against epoch 5, and
+        // `close_epoch` refuses to close a never-filed epoch, so no record can
+        // ever exist. The absence *is* the evidence and 1.0 is honest — the
+        // pull-side default 07 §7's consumption model relies on, and the common
+        // case, since most epochs carry no incident filing.
         assert_eq!(
-            crate::configs::RuntimeMetricInputs::incident_multiplier(5),
-            futarchy_primitives::FixedU64(1_000_000_000)
+            crate::configs::RuntimeMetricInputs::incident_multiplier(5, 1),
+            Some(futarchy_primitives::FixedU64(1_000_000_000))
+        );
+        // (2) A live filing count means a filing can still arrive under **any**
+        // version, so no version's absence is evidence yet.
+        pallet_registry::FilingCount::<Runtime>::insert(5u32, 1u32);
+        assert_eq!(
+            crate::configs::RuntimeMetricInputs::incident_multiplier(5, 1),
+            None
+        );
+        assert_eq!(
+            crate::configs::RuntimeMetricInputs::incident_multiplier(5, 2),
+            None
+        );
+        pallet_registry::FilingCount::<Runtime>::remove(5u32);
+        // (3) A closed aggregate answers for its own version only.
+        pallet_registry::Aggregates::<Runtime>::insert(
+            5u32,
+            1u16,
+            futarchy_primitives::FixedU64(600_000_000),
+        );
+        assert_eq!(
+            crate::configs::RuntimeMetricInputs::incident_multiplier(5, 1),
+            Some(futarchy_primitives::FixedU64(600_000_000))
+        );
+        // (4) A sibling version with **no filings of its own** is not stranded by
+        // that footprint. "This version had no filings" is exactly the
+        // "no filings ⇒ 1" case `close_epoch` would record, so making it wait for
+        // a keeper to close a version with nothing to close would put a safety
+        // read behind off-chain liveness for no gain.
+        assert_eq!(
+            crate::configs::RuntimeMetricInputs::incident_multiplier(5, 2),
+            Some(futarchy_primitives::FixedU64(1_000_000_000))
+        );
+        // (5) Give version 2 an unclosed filing and it must refuse: now its
+        // missing aggregate hides real incidents rather than proving there were
+        // none. This is the case the whole re-key exists to make unreachable —
+        // answering 1.0 here would hand a cohort full-strength `C_attested` with
+        // no error, no event and no try-state signal.
+        pallet_registry::Filings::<Runtime>::insert(5u32, 0u32, upheld_filing(2));
+        assert_eq!(
+            crate::configs::RuntimeMetricInputs::incident_multiplier(5, 2),
+            None
+        );
+        // Version 1 is unaffected — it still has its own closed record.
+        assert_eq!(
+            crate::configs::RuntimeMetricInputs::incident_multiplier(5, 1),
+            Some(futarchy_primitives::FixedU64(600_000_000))
         );
     });
 }
@@ -17947,18 +18024,75 @@ fn ledger_drift_reconcile_guardian_activation_and_early_lift_are_end_to_end() {
 #[test]
 fn milestone_target_seam_is_fail_closed_in_production_and_admissible_under_benchmarks() {
     use pallet_registry::EpochContext as _;
-    let target = crate::configs::RuntimeRegistryEpoch::milestone_target(1);
-    if cfg!(feature = "runtime-benchmarks") {
-        assert!(
-            target > 0,
-            "benchmark builds need a positive milestone target or MilestoneRegistry benchmarks abort"
-        );
-    } else {
+    development_ext().execute_with(|| {
+        // SQ-175: the seam is a real read of the frozen spec's `target` now. With
+        // no MetricSpec registered it is still 0, i.e. still fail-closed — the
+        // absence of a divisor, not a fabricated one.
+        let unregistered = crate::configs::RuntimeRegistryEpoch::milestone_target(1, 7);
+        if cfg!(feature = "runtime-benchmarks") {
+            assert!(
+                unregistered > 0,
+                "benchmark builds need a positive milestone target or MilestoneRegistry \
+                 benchmarks abort before measuring anything"
+            );
+        } else {
+            assert_eq!(
+                unregistered, 0,
+                "an unregistered version has no divisor, and 0 is what refuses the filing"
+            );
+        }
+        // Registering the A-pillar milestone component makes the seam return that
+        // version's own frozen value — the half SQ-175 was open on.
+        install_milestone_spec(7, 250);
         assert_eq!(
-            target, 0,
-            "production must stay fail-closed until SQ-175 wires a real MetricSpec target"
+            crate::configs::RuntimeRegistryEpoch::milestone_target(1, 7),
+            250
         );
-    }
+        // Per-version by construction: a sibling version is unaffected.
+        install_milestone_spec(8, 400);
+        assert_eq!(
+            crate::configs::RuntimeRegistryEpoch::milestone_target(1, 7),
+            250
+        );
+        assert_eq!(
+            crate::configs::RuntimeRegistryEpoch::milestone_target(1, 8),
+            400
+        );
+    });
+}
+
+/// Store a one-component MetricSpec carrying the A-pillar milestone component at
+/// `target`. Writes `MetricSpecs` directly: `register_spec`'s own validation is
+/// covered by `sq341_attested_admission_is_gated_on_live_oracle_seats`, and this
+/// fixture is about the *read* seam.
+fn install_milestone_spec(version: u16, target: u32) {
+    let spec = pallet_welfare::MetricSpec {
+        id: futarchy_primitives::metric_ids::A_SHIPPED_UPGRADES,
+        version,
+        pillar: pallet_welfare::Pillar::A,
+        weight: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+        epsilon_floor: pallet_welfare::EPSILON_PILLAR,
+        activation_epoch: u32::MAX,
+        source: pallet_welfare::SourceClass::Attested,
+        formula_ref: [1; 32],
+        units: [2; 16],
+        repr: [3; 16],
+        cadence_blocks: 1,
+        sanity_min: futarchy_primitives::FixedU64(0),
+        sanity_max: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+        has_normalization_rule: true,
+        has_missing_data_rule: true,
+        has_gaming_vectors: true,
+        has_challenge_procedure: true,
+        prior_bounds: [futarchy_primitives::FixedU64(pallet_welfare::ONE);
+            pallet_welfare::HISTORY_PRIORS],
+        target,
+        delta_s_max_bps: 1_000,
+    };
+    pallet_welfare::MetricSpecs::<Runtime>::insert(
+        version,
+        pallet_welfare::BoundedSpecSet::try_from(vec![spec]).expect("one spec is bounded"),
+    );
 }
 
 #[test]

@@ -108,6 +108,7 @@ pub trait WelfareSink {
     fn note_external_component(
         kind: RegistryKind,
         epoch: EpochId,
+        spec_version: MetricSpecVersion,
         aggregate: FixedU64,
     ) -> sp_runtime::DispatchResult;
 }
@@ -123,13 +124,17 @@ pub trait WelfareSink {
 pub trait EpochContext {
     /// The last block at which a filing for measurement `epoch` is admissible.
     fn filing_window_end(epoch: EpochId) -> BlockNumber;
-    /// The frozen MetricSpec version filings for `epoch` must attest under (I-16).
-    fn frozen_spec_version(epoch: EpochId) -> Option<MetricSpecVersion>;
-    /// The Milestone-instance completion **target** for `epoch` — the
-    /// frozen-MetricSpec denominator of `points ÷ target` (07 §7 / 05 §4.4). A
-    /// per-spec field (I-16), never a 13/kernel constant. Unused by the Incident
-    /// instance.
-    fn milestone_target(epoch: EpochId) -> u32;
+    /// The MetricSpec versions live cohorts froze for `epoch` (I-16). A filing
+    /// must name one of them — **membership**, not equality: an activation
+    /// boundary can leave two versions consuming one measurement epoch (07
+    /// §2(4)/§7), and the previous single-version reader returned `None` there,
+    /// refusing every filing for the epoch.
+    fn frozen_spec_versions(epoch: EpochId) -> alloc::vec::Vec<MetricSpecVersion>;
+    /// The Milestone-instance completion **target** at `spec_version` — the
+    /// frozen-MetricSpec denominator of `points ÷ target` (07 §7 / 05 §4.3). A
+    /// per-spec field (I-16), never a 13/kernel constant, and therefore keyed by
+    /// the version as well as the epoch. Unused by the Incident instance.
+    fn milestone_target(epoch: EpochId, spec_version: MetricSpecVersion) -> u32;
     /// Cohort escrow exposed to a filing about `epoch`. The Incident aggregate
     /// affects every cohort consuming the measurement epoch; Milestone remains
     /// unavailable until its aggregate has a MetricId binding (07 §7).
@@ -184,7 +189,7 @@ pub mod pallet {
         reg: Registry,
         pre: Vec<(FilingId, Filing)>,
         count_epochs: Vec<EpochId>,
-        agg_epochs: Vec<EpochId>,
+        agg_epochs: Vec<(EpochId, MetricSpecVersion)>,
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -311,11 +316,25 @@ pub mod pallet {
     pub type FilingCount<T: Config<I>, I: 'static = ()> =
         StorageMap<_, Blake2_128Concat, EpochId, u32, ValueQuery>;
 
-    /// Derived epoch aggregates — `map EpochId → FixedU64` (07 §7): the `I` input
-    /// (Incident) or milestone-points input (Milestone) handed to welfare.
+    /// Derived aggregates — `map (EpochId, MetricSpecVersion) → FixedU64`
+    /// (07 §7, contract v14 / SQ-141): the `I` input (Incident) or
+    /// milestone-points input (Milestone) handed to welfare, **per frozen
+    /// MetricSpec version**. A cohort settles on its creation-time spec (I-16),
+    /// so an activation boundary leaves two versions consuming one measurement
+    /// epoch; a single value per epoch would fold claims governed by different
+    /// frozen targets and formulas into one number (G-1).
+    ///
+    /// A missing entry is **not** "no incidents" — see `Pallet::aggregate`.
     #[pallet::storage]
-    pub type Aggregates<T: Config<I>, I: 'static = ()> =
-        StorageMap<_, Blake2_128Concat, EpochId, FixedU64, OptionQuery>;
+    pub type Aggregates<T: Config<I>, I: 'static = ()> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        EpochId,
+        Twox64Concat,
+        MetricSpecVersion,
+        FixedU64,
+        OptionQuery,
+    >;
 
     /// Watchtower-acknowledgment dedup set — `(EpochId, FilingId, AccountId) → ()`
     /// (07 §4/§7). Ledger-internal; the pallet enforces the "one ack per
@@ -339,8 +358,15 @@ pub mod pallet {
     /// together with the `FilingCount`-present precondition, makes close idempotent
     /// across a reap (a reaped epoch has neither, so it cannot be re-closed).
     #[pallet::storage]
-    pub type ClosedAt<T: Config<I>, I: 'static = ()> =
-        StorageMap<_, Blake2_128Concat, EpochId, BlockNumberFor<T>, OptionQuery>;
+    pub type ClosedAt<T: Config<I>, I: 'static = ()> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        EpochId,
+        Twox64Concat,
+        MetricSpecVersion,
+        BlockNumberFor<T>,
+        OptionQuery,
+    >;
 
     // -------------------------------------------------------------------- events
 
@@ -402,11 +428,17 @@ pub mod pallet {
             challenger_share: Balance,
             insurance_share: Balance,
         },
-        /// `close_epoch` derived the epoch aggregate and handed it to welfare (07 §7).
+        /// `close_epoch` derived the aggregate for one `(epoch, frozen version)`
+        /// and handed it to welfare (07 §7). `spec_version` is a **trailing**
+        /// field added in contract v14 (02 §6/§13, SQ-141): one epoch closes once
+        /// per live version, so the pair identifies the record. The ten other
+        /// registry events are unchanged — filing-id allocation stays per-epoch
+        /// precisely so `(epoch, filing_id)` remains unique.
         RegistryEpochClosed {
             kind: RegistryKind,
             epoch: EpochId,
             aggregate: FixedU64,
+            spec_version: MetricSpecVersion,
         },
         /// A bonded watchtower acknowledged a registry filing window.
         WindowAcknowledged {
@@ -541,8 +573,8 @@ pub mod pallet {
             // The window and the frozen spec version are trusted per-epoch reads
             // (I-16), never taken from the filer.
             let filing_window_end = T::Epoch::filing_window_end(epoch);
-            let expected_spec =
-                T::Epoch::frozen_spec_version(epoch).ok_or(Error::<T, I>::SpecVersionMismatch)?;
+            let frozen_specs = T::Epoch::frozen_spec_versions(epoch);
+            let milestone_target = T::Epoch::milestone_target(epoch, spec_version);
             Self::run_scoped(epoch, |reg| {
                 reg.file(registry_core::FileInput {
                     who: raw,
@@ -552,7 +584,8 @@ pub mod pallet {
                     points,
                     evidence_hash,
                     spec_version,
-                    expected_spec,
+                    frozen_specs,
+                    milestone_target,
                     filing_window_end,
                     exposure,
                 })
@@ -670,25 +703,49 @@ pub mod pallet {
         /// Milestone: `points ÷ target`) and hand it to welfare.
         #[pallet::call_index(5)]
         #[pallet::weight(T::WeightInfo::close_epoch())]
-        pub fn close_epoch(origin: OriginFor<T>, epoch: EpochId) -> DispatchResult {
+        pub fn close_epoch(
+            origin: OriginFor<T>,
+            epoch: EpochId,
+            spec_version: MetricSpecVersion,
+        ) -> DispatchResult {
             ensure_signed(origin)?;
-            // Close only an epoch that was actually filed (has a live `FilingCount`
-            // entry). This (a) makes close idempotent across a reap — a reaped
-            // epoch has no `FilingCount`, so it can never be re-closed to the
+            // Close only an epoch that was actually filed. This (a) makes close
+            // idempotent across a reap — a fully reaped epoch has neither a
+            // `FilingCount` nor an aggregate, so it can never be re-closed to the
             // favorable "no filings ⇒ 1" value; and (b) leaves genuinely-empty
-            // epochs to welfare's pull-side "no record ⇒ 1" default rather than a
-            // permissionless griefing close (dual-review finding).
+            // epochs to welfare's pull-side default rather than a permissionless
+            // griefing close (dual-review finding).
+            //
+            // The `Aggregates` half of the disjunction is what keeps this true
+            // per version: the *first* version's close drops the epoch-wide
+            // `FilingCount`, and without it a sibling version — which still has
+            // filings and still owes welfare an input — could never be closed.
+            // An epoch carrying an aggregate is demonstrably filed, so admitting
+            // it here is not the griefing case the guard exists for.
             ensure!(
-                FilingCount::<T, I>::contains_key(epoch),
+                FilingCount::<T, I>::contains_key(epoch)
+                    || Aggregates::<T, I>::iter_key_prefix(epoch).next().is_some(),
                 Error::<T, I>::NothingToClose
             );
             let now = Self::now();
             let filing_window_end = T::Epoch::filing_window_end(epoch);
+            let milestone_target = T::Epoch::milestone_target(epoch, spec_version);
             Self::run_scoped(epoch, |reg| {
-                reg.close_epoch(epoch, now, filing_window_end).map(|_| ())
+                reg.close_epoch(
+                    epoch,
+                    spec_version,
+                    now,
+                    filing_window_end,
+                    milestone_target,
+                )
+                .map(|_| ())
             })?;
             // Stamp the close block for the reap archive-delay gate.
-            ClosedAt::<T, I>::insert(epoch, frame_system::Pallet::<T>::block_number());
+            ClosedAt::<T, I>::insert(
+                epoch,
+                spec_version,
+                frame_system::Pallet::<T>::block_number(),
+            );
             Ok(())
         }
 
@@ -699,21 +756,36 @@ pub mod pallet {
         /// a griefer erase an incident before settlement and re-open the epoch.
         #[pallet::call_index(6)]
         #[pallet::weight(T::WeightInfo::reap_epoch())]
-        pub fn reap_epoch(origin: OriginFor<T>, epoch: EpochId) -> DispatchResult {
+        pub fn reap_epoch(
+            origin: OriginFor<T>,
+            epoch: EpochId,
+            spec_version: MetricSpecVersion,
+        ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            let closed_at = ClosedAt::<T, I>::get(epoch).ok_or(Error::<T, I>::ReapNotDue)?;
+            let closed_at =
+                ClosedAt::<T, I>::get(epoch, spec_version).ok_or(Error::<T, I>::ReapNotDue)?;
             let due = closed_at.saturating_add(T::ArchiveDelay::get());
             ensure!(
                 frame_system::Pallet::<T>::block_number() >= due,
                 Error::<T, I>::ReapNotDue
             );
-            Self::run_scoped(epoch, |reg| reg.reap_epoch(epoch))?;
-            ClosedAt::<T, I>::remove(epoch);
-            // The durable ack set is the pallet's; clear the whole `(epoch, *, *)`
-            // prefix with an explicit bound (≤ `WT_QUORUM` acks per filing ×
-            // `MaxFilingsPerEpoch` filings — the cap enforced in `ack_observed`).
-            let limit = registry_core::WT_QUORUM as u32 * T::MaxFilingsPerEpoch::get() + 1;
-            let _ = AckRecords::<T, I>::clear_prefix((epoch,), limit, None);
+            // Resolve which filings this version owns **before** the core removes
+            // them, so the durable ack set can be cleared at the same granularity.
+            // Clearing the whole `(epoch, *, *)` prefix — correct while an epoch
+            // closed once — would now destroy a sibling version's live acks.
+            let reaped: Vec<FilingId> = Filings::<T, I>::iter_prefix(epoch)
+                .filter(|(_, filing)| filing.spec_version == spec_version)
+                .map(|(id, _)| id)
+                .collect();
+            Self::run_scoped(epoch, |reg| reg.reap_epoch(epoch, spec_version))?;
+            ClosedAt::<T, I>::remove(epoch, spec_version);
+            // The durable ack set is the pallet's; clear each reaped filing's
+            // `(epoch, filing_id, *)` prefix with an explicit bound (≤ `WT_QUORUM`
+            // acks per filing — the cap enforced in `ack_observed`).
+            let limit = registry_core::WT_QUORUM as u32 + 1;
+            for id in reaped {
+                let _ = AckRecords::<T, I>::clear_prefix((epoch, id), limit, None);
+            }
             // 07 §7 *Crank funding lines*: reaping is archival cleanup with no
             // dispute content, so it is rebated from the metered **general**
             // keeper tranche (08 §6.3) — NOT the oracle budget line that funds
@@ -784,9 +856,6 @@ pub mod pallet {
             reg.bond_incident = T::Params::bond_incident();
             reg.bond_milestone = T::Params::bond_milestone();
             reg.coverage_bps = T::Params::coverage_bps();
-            // The Milestone divisor is the frozen-MetricSpec target for this
-            // epoch (I-16), never a hardcode (rule 4). Incident ignores it.
-            reg.milestone_target = T::Epoch::milestone_target(epoch);
             let mut pre: Vec<(FilingId, Filing)> = Vec::new();
             for (id, f) in Filings::<T, I>::iter_prefix(epoch) {
                 reg.filings.push(((epoch, id), f));
@@ -797,10 +866,10 @@ pub mod pallet {
                 reg.filing_count.push((e, c));
                 count_epochs.push(e);
             }
-            let mut agg_epochs: Vec<EpochId> = Vec::new();
-            for (e, a) in Aggregates::<T, I>::iter() {
-                reg.aggregates.push((e, a));
-                agg_epochs.push(e);
+            let mut agg_epochs: Vec<(EpochId, MetricSpecVersion)> = Vec::new();
+            for (e, v, a) in Aggregates::<T, I>::iter() {
+                reg.aggregates.push(((e, v), a));
+                agg_epochs.push((e, v));
             }
             LoadCtx {
                 reg,
@@ -820,7 +889,7 @@ pub mod pallet {
             reg: &Registry,
             pre: &[(FilingId, Filing)],
             count_epochs: &[EpochId],
-            agg_epochs: &[EpochId],
+            agg_epochs: &[(EpochId, MetricSpecVersion)],
         ) {
             // Filings for `epoch` — write only the filings that actually changed
             // (or are new), so `file`/`challenge`/`ack`/`resolve` touch O(1)
@@ -852,13 +921,17 @@ pub mod pallet {
                     FilingCount::<T, I>::remove(e);
                 }
             }
-            // Aggregates (all).
-            for (e, a) in &reg.aggregates {
-                Aggregates::<T, I>::insert(e, a);
+            // Aggregates (all), keyed by `(epoch, frozen version)`.
+            for ((e, v), a) in &reg.aggregates {
+                Aggregates::<T, I>::insert(e, v, a);
             }
-            for e in agg_epochs {
-                if !reg.aggregates.iter().any(|(pe, _)| pe == e) {
-                    Aggregates::<T, I>::remove(e);
+            for (e, v) in agg_epochs {
+                if !reg
+                    .aggregates
+                    .iter()
+                    .any(|((pe, pv), _)| pe == e && pv == v)
+                {
+                    Aggregates::<T, I>::remove(e, v);
                 }
             }
         }
@@ -1127,14 +1200,16 @@ pub mod pallet {
                     CoreEvent::RegistryEpochClosed {
                         kind,
                         epoch,
+                        spec_version,
                         aggregate,
                     } => {
                         // 07 §7: hand the derived aggregate to welfare; a refusal
                         // propagates and rolls the close back (G-1).
-                        T::Welfare::note_external_component(kind, epoch, aggregate)?;
+                        T::Welfare::note_external_component(kind, epoch, spec_version, aggregate)?;
                         Self::deposit_event(Event::RegistryEpochClosed {
                             kind,
                             epoch,
+                            spec_version,
                             aggregate,
                         });
                     }
@@ -1179,8 +1254,8 @@ pub mod pallet {
             for (e, c) in FilingCount::<T, I>::iter() {
                 reg.filing_count.push((e, c));
             }
-            for (e, a) in Aggregates::<T, I>::iter() {
-                reg.aggregates.push((e, a));
+            for (e, v, a) in Aggregates::<T, I>::iter() {
+                reg.aggregates.push(((e, v), a));
             }
             ensure!(
                 reg.filing_count.len() <= registry_core::MAX_LIVE_EPOCHS,
@@ -1254,6 +1329,7 @@ pub mod pallet {
                 CoreError::MilestoneTargetUnset => Error::<T, I>::MilestoneTargetUnset.into(),
                 CoreError::ExposureUnavailable => Error::<T, I>::ExposureUnavailable.into(),
                 CoreError::EvidenceMismatch => Error::<T, I>::EvidenceMismatch.into(),
+                CoreError::ReapNotDue => Error::<T, I>::ReapNotDue.into(),
             }
         }
     }

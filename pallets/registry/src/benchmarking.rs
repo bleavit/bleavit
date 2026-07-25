@@ -26,7 +26,13 @@ fn worst_class<T: Config<I>, I: 'static>() -> FilingClass {
 
 fn file_many<T: Config<I>, I: 'static>(filer: &T::AccountId, epoch: EpochId, count: u32) {
     T::BenchmarkHelper::prime_epoch(epoch);
-    let spec = T::Epoch::frozen_spec_version(epoch).unwrap_or_default();
+    // The worst case names a version the epoch actually froze; an empty set
+    // would make every `file` below refuse `SpecVersionMismatch` and measure
+    // nothing.
+    let spec = T::Epoch::frozen_spec_versions(epoch)
+        .first()
+        .copied()
+        .unwrap_or_default();
     for index in 0..count {
         let mut evidence = [7u8; 32];
         evidence[..4].copy_from_slice(&index.to_le_bytes());
@@ -83,11 +89,20 @@ fn close_all<T: Config<I>, I: 'static>(keeper: &T::AccountId) {
 }
 
 /// Fill retained aggregate slots that the pallet's scoped loader always
-/// hydrates. `count` is three before closing the target epoch (which adds the
-/// fourth) and four for operations that do not add an aggregate.
+/// hydrates. `count` is `MAX_AGGREGATES - 1` before closing the target epoch
+/// (which adds the last) and `MAX_AGGREGATES` for operations that add none.
+///
+/// Since SQ-141 the map is keyed `(epoch, spec_version)` and holds 4 epochs × 2
+/// concurrent frozen versions, so the fixture spreads `count` over distinct
+/// epochs *and* versions: filling one epoch's versions only would understate
+/// the loader's key fan-out.
 fn fill_aggregates<T: Config<I>, I: 'static>(count: u32) {
     for index in 0..count {
-        Aggregates::<T, I>::insert(10_000u32.saturating_add(index), FixedU64(0));
+        Aggregates::<T, I>::insert(
+            10_000u32.saturating_add(index / 2),
+            (index % 2) as u16,
+            FixedU64(0),
+        );
     }
 }
 
@@ -101,7 +116,10 @@ mod benches {
         file_many::<T, I>(&caller, EPOCH, T::MaxFilingsPerEpoch::get() - 1);
         fill_other_live_epochs::<T, I>(&caller);
         fill_aggregates::<T, I>(registry_core::MAX_AGGREGATES as u32);
-        let spec = T::Epoch::frozen_spec_version(EPOCH).unwrap_or_default();
+        let spec = T::Epoch::frozen_spec_versions(EPOCH)
+            .first()
+            .copied()
+            .unwrap_or_default();
         let class = worst_class::<T, I>();
 
         #[extrinsic_call]
@@ -238,10 +256,15 @@ mod benches {
         frame_system::Pallet::<T>::set_block_number(PAST.into());
         close_all::<T, I>(&filer);
 
-        #[extrinsic_call]
-        _(RawOrigin::Signed(filer), EPOCH);
+        let spec = T::Epoch::frozen_spec_versions(EPOCH)
+            .first()
+            .copied()
+            .unwrap_or_default();
 
-        assert!(Aggregates::<T, I>::get(EPOCH).is_some());
+        #[extrinsic_call]
+        _(RawOrigin::Signed(filer), EPOCH, spec);
+
+        assert!(Aggregates::<T, I>::get(EPOCH, spec).is_some());
     }
 
     #[benchmark]
@@ -257,7 +280,12 @@ mod benches {
         ack_all::<T, I>(&wt1, &wt2);
         frame_system::Pallet::<T>::set_block_number(PAST.into());
         close_all::<T, I>(&filer);
-        Pallet::<T, I>::close_epoch(RawOrigin::Signed(filer.clone()).into(), EPOCH).expect("close");
+        let spec = T::Epoch::frozen_spec_versions(EPOCH)
+            .first()
+            .copied()
+            .unwrap_or_default();
+        Pallet::<T, I>::close_epoch(RawOrigin::Signed(filer.clone()).into(), EPOCH, spec)
+            .expect("close");
         // Advance past the archive delay so the epoch is reap-eligible.
         let due = frame_system::Pallet::<T>::block_number()
             .saturating_add(T::ArchiveDelay::get())
@@ -266,7 +294,7 @@ mod benches {
         T::BenchmarkHelper::prime_keeper_rebate();
 
         #[extrinsic_call]
-        _(RawOrigin::Signed(filer), EPOCH);
+        _(RawOrigin::Signed(filer), EPOCH, spec);
 
         // Archival cleanup is rebated from the metered general tranche, not the
         // oracle budget line (07 §7 *Crank funding lines*; 08 §6.3 — SQ-297).
