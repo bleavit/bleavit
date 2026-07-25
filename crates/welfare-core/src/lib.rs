@@ -5,7 +5,9 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use futarchy_fixed::FixedU64x64;
-use futarchy_primitives::{EpochId, FixedU64, MetricId, MetricSpecVersion, WelfareView};
+use futarchy_primitives::{
+    metric_ids, EpochId, FixedU64, MetricId, MetricSpecVersion, WelfareView,
+};
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
@@ -26,6 +28,10 @@ pub const MAX_GATE_FLAGS: usize = MAX_SNAPSHOTS;
 /// Number of day indices accepted by the daily-gate recorder. The two-word
 /// frozen breach bitmap covers this whole range (05 §4.7).
 pub const MAX_DAILY_GATE_SAMPLES: u8 = 64;
+/// Full scale in basis points — the ceiling 05 §4.4 puts on
+/// `delta_s_max_bps`, since `s` itself lives in [0, 1]. Narrowed from
+/// `kernel::BASIS_POINTS_DENOMINATOR` so the bound check stays in `u32`.
+pub const BPS_ONE: u32 = futarchy_primitives::kernel::BASIS_POINTS_DENOMINATOR as u32;
 pub const MAX_COMPONENTS_PER_SPEC: usize = 16;
 pub const HISTORY_PRIORS: usize = 12;
 pub const THETA_S_LO: FixedU64 = FixedU64(900_000_000);
@@ -168,6 +174,22 @@ pub struct MetricSpec {
     pub has_gaming_vectors: bool,
     pub has_challenge_procedure: bool,
     pub prior_bounds: [FixedU64; HISTORY_PRIORS],
+    /// The A-pillar milestone divisor of 05 §4.3's `min(1, points ÷ target)`,
+    /// frozen per version so a live cohort's milestones can never be
+    /// retroactively renormalized (I-16; 07 §7 *Milestone normalization*).
+    /// Required strictly positive on the milestone component
+    /// ([`metric_ids::A_SHIPPED_UPGRADES`]); ignored for every other component.
+    /// Trailing field, contract v14 (SQ-175).
+    pub target: u32,
+    /// `Δs_max` — the documented maximum single-epoch settlement impact this
+    /// component can move, in **basis points** of settlement score (05 §4.4;
+    /// 07 §6.1 fixes the basis-point space). It is the right-hand side of
+    /// 07 §6.3's admission rule `(2^R_max − 1) · orc.bond_bps ≥ Δs_max`, the
+    /// rule that makes an attested lie cost more than it can move. Bound-checked
+    /// to `0 < x ≤ 10_000` for an **attested** component only; recorded but
+    /// unconsumed for source classes 1–3, which run no §5 game and so have no
+    /// bond ladder to collateralize. Trailing field, contract v14 (SQ-341).
+    pub delta_s_max_bps: u32,
 }
 
 // FRAME genesis configs are serde-backed (including in the no_std Wasm
@@ -197,6 +219,8 @@ struct MetricSpecSerde {
     has_gaming_vectors: bool,
     has_challenge_procedure: bool,
     prior_bounds: [u64; HISTORY_PRIORS],
+    target: u32,
+    delta_s_max_bps: u32,
 }
 
 #[cfg(feature = "serde")]
@@ -224,6 +248,8 @@ impl serde::Serialize for MetricSpec {
             has_gaming_vectors: self.has_gaming_vectors,
             has_challenge_procedure: self.has_challenge_procedure,
             prior_bounds: self.prior_bounds.map(|value| value.0),
+            target: self.target,
+            delta_s_max_bps: self.delta_s_max_bps,
         }
         .serialize(serializer)
     }
@@ -255,6 +281,8 @@ impl<'de> serde::Deserialize<'de> for MetricSpec {
             has_gaming_vectors: spec.has_gaming_vectors,
             has_challenge_procedure: spec.has_challenge_procedure,
             prior_bounds: spec.prior_bounds.map(FixedU64),
+            target: spec.target,
+            delta_s_max_bps: spec.delta_s_max_bps,
         })
     }
 }
@@ -379,6 +407,75 @@ pub enum Error {
     /// observation at all (05 §4.7, SQ-79). A zero-sample window is an
     /// unavailable gate input, not evidence of no breach.
     GateWindowUnsampled,
+    /// The A-pillar milestone component declares no positive `target`, so
+    /// 05 §4.3's `min(1, points ÷ target)` has no defined value (07 §7
+    /// *Milestone normalization*). Named to match the registry's error for the
+    /// same fact, which is the downstream half of one rule. Trailing variant.
+    MilestoneTargetUnset,
+    /// An **attested** component's `delta_s_max_bps` is outside `(0, 10_000]`
+    /// (05 §4.4). Zero would assert the component cannot move settlement at
+    /// all, which no attested component can truthfully claim; above 10,000
+    /// exceeds the range of `s` itself. Trailing variant.
+    BadDeltaSMax,
+    /// The spec declares an attested component but 07 §2(5)'s seats are not
+    /// filled — fewer than `orc.n_min` registered reporters or fewer than
+    /// `wt.quorum` registered watchtowers. Trailing variant.
+    InsufficientOracleSeats,
+    /// The live bond ladder does not cover an attested component's declared
+    /// `Δs_max`: 07 §6.3's `(2^R_max − 1) · orc.bond_bps ≥ Δs_max` fails, so a
+    /// lie about this component would cost less than it can move. Also returned
+    /// when the ladder itself is unreadable, which is the fail-closed direction
+    /// for admission. Trailing variant.
+    BondCoverageUnmet,
+}
+
+/// The 07 §2(5) admission inputs that [`WelfareState::register_metric_spec`]
+/// cannot see for itself: this crate is frame-free and owns neither oracle
+/// state nor constitution parameters. Injected by the caller so the genesis
+/// build and a live `register_spec` dispatch take the identical path — the
+/// SQ-82 discipline applied to a second ambient dependency.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
+pub struct AttestedAdmission {
+    /// Registered reporters holding a full stake (07 §3).
+    pub reporters: u32,
+    /// Registered watchtowers (07 §4).
+    pub watchtowers: u32,
+    /// Live `orc.n_min` — the reporter floor 07 §2(5)/§3 require before any
+    /// attested component may be admitted (13 §1; K floor 3).
+    pub reporter_min: u32,
+    /// Live `wt.quorum` — the watchtower floor of the same rule (13 §1; K floor
+    /// 2, which is the "≥ 2 registered watchtowers" 07 §2(5) states).
+    pub watchtower_min: u32,
+    /// `(2^orc.rounds − 1) · orc.bond_bps`, from `oracle_core::coverage_bps`.
+    /// `None` means the live ladder is unreadable, and **no attested component
+    /// is then admissible** — the opposite direction the registry's filing-bond
+    /// pricing takes on the same input, and the fail-closed one here: admitting
+    /// against an unknown ladder is what 07 §6.3 exists to prevent.
+    pub coverage_bps: Option<u32>,
+}
+
+impl AttestedAdmission {
+    /// A context under which no attested component can be admitted. Used by
+    /// callers that have no oracle to consult; never a default, because
+    /// silently admitting is the failure this type exists to prevent.
+    pub const CLOSED: Self = Self {
+        reporters: 0,
+        watchtowers: 0,
+        reporter_min: u32::MAX,
+        watchtower_min: u32::MAX,
+        coverage_bps: None,
+    };
 }
 
 /// Explicit registration context for [`WelfareState::register_metric_spec`]
@@ -429,6 +526,7 @@ impl WelfareState {
         registration: Registration,
         version: MetricSpecVersion,
         mut specs: Vec<MetricSpec>,
+        admission: &AttestedAdmission,
     ) -> Result<(), Error> {
         ensure!(
             self.specs.len() < MAX_METRIC_SPECS,
@@ -483,6 +581,59 @@ impl WelfareState {
             ensure!(
                 prev.replace(spec.id).is_none_or(|p| p < spec.id),
                 Error::DuplicateComponent
+            );
+            // 05 §4.4 / 07 §7: the milestone component's divisor must exist
+            // before the MilestoneRegistry can normalize anything against it.
+            // A zero target is not "no milestones" — it makes `points ÷ target`
+            // undefined, and the registry's own rule refuses to fabricate 0.0
+            // in its place (SQ-291). Checked here, at the only place the frozen
+            // value is ever written (SQ-175).
+            ensure!(
+                spec.id != metric_ids::A_SHIPPED_UPGRADES || spec.target > 0,
+                Error::MilestoneTargetUnset
+            );
+            // 05 §4.4: `Δs_max` is mandatory on every component but bound-checked
+            // for attested ones only — classes 1–3 run no §5 game, so there is
+            // no bond ladder to collateralize them against and no rule the value
+            // would feed.
+            if spec.source == SourceClass::Attested {
+                ensure!(
+                    spec.delta_s_max_bps > 0 && spec.delta_s_max_bps <= BPS_ONE,
+                    Error::BadDeltaSMax
+                );
+                // 07 §6.3's coverage rule, evaluated against the **live**
+                // parameters (SQ-341): the whole ladder must be worth more than
+                // the maximum settlement impact a lie about this component could
+                // move. The 10.5% figure §6.3 quotes describes `R_max = 3` only
+                // and MUST NOT be hardcoded — `orc.rounds ∈ [2, 4]`, and at
+                // `(2, 150)` coverage is 450 bps.
+                ensure!(
+                    admission
+                        .coverage_bps
+                        .is_some_and(|cov| cov >= spec.delta_s_max_bps),
+                    Error::BondCoverageUnmet
+                );
+            }
+        }
+        // 07 §2(5)'s other half, enforced for the first time: an attested
+        // component may not be admitted until the reporter and watchtower seats
+        // that make its game adjudicable are actually filled. Evaluated once
+        // over the whole spec set rather than per component, because the seats
+        // are shared by every attested component in it.
+        //
+        // Deliberately gated on the spec set *containing* an attested component:
+        // a purely on-chain spec runs no oracle game, so requiring oracle seats
+        // for it would refuse registration for a reason 07 §2(5) does not state
+        // — and would make the chain's first, necessarily on-chain, MetricSpec
+        // unregistrable.
+        if specs
+            .iter()
+            .any(|spec| spec.source == SourceClass::Attested)
+        {
+            ensure!(
+                admission.reporters >= admission.reporter_min
+                    && admission.watchtowers >= admission.watchtower_min,
+                Error::InsufficientOracleSeats
             );
         }
         // 05 §4.4: every weight vector sums to 1 exactly, checked here. S is
@@ -777,10 +928,28 @@ impl WelfareState {
                         && spec.has_gaming_vectors
                         && spec.has_challenge_procedure
                         && source_matches_pillar(spec)
+                        // The two v14 fields, checked here because both are
+                        // **static properties of the stored record**: neither
+                        // can stop holding without someone rewriting the spec,
+                        // and a spec is immutable once registered (I-16).
+                        && (spec.id != metric_ids::A_SHIPPED_UPGRADES || spec.target > 0)
+                        && (spec.source != SourceClass::Attested
+                            || (spec.delta_s_max_bps > 0 && spec.delta_s_max_bps <= BPS_ONE))
                         && prev.replace(spec.id).is_none_or(|p| p < spec.id),
                     Error::TryStateViolation
                 );
             }
+            // Deliberately NOT re-checked here: 07 §6.3's coverage rule and
+            // §2(5)'s seat floors. Both are evaluated against *live* state —
+            // `orc.bond_bps`, `orc.rounds`, and the reporter/watchtower sets —
+            // every one of which may lawfully move after a spec is admitted. A
+            // try-state assertion over them would turn a legal META amendment or
+            // a reporter's legal exit into a chain-halting invariant violation,
+            // which is the opposite of G-1. That an admitted component can drift
+            // out of coverage this way is a real and open gap, recorded as
+            // SQ-495 in 07 §6.3 — it needs a screening obligation at the
+            // amendment boundary or a defined disposition at snapshot time, not
+            // a panic here.
             let weight_sum = |pillars: &[Pillar]| -> Option<u64> {
                 specs
                     .iter()
@@ -1134,8 +1303,191 @@ mod tests {
             has_gaming_vectors: true,
             has_challenge_procedure: true,
             prior_bounds: [FixedU64(ONE); HISTORY_PRIORS],
+            target: 100,
+            delta_s_max_bps: 1_000,
         }
     }
+    /// A seated oracle for tests: 07 §2(5)'s floors met and the default bond
+    /// ladder readable, so attested components are admissible. Written out
+    /// rather than defaulted — `AttestedAdmission` has no `Default` precisely
+    /// because "admit" must never be the value you get by not thinking.
+    fn seated() -> AttestedAdmission {
+        AttestedAdmission {
+            reporters: 3,
+            watchtowers: 2,
+            reporter_min: 3,
+            watchtower_min: 2,
+            // `(2^3 − 1) × 250` at the 13 §1 defaults for `orc.rounds` /
+            // `orc.bond_bps` — the 1,750 bps of 07 §6.3's worked example.
+            coverage_bps: Some(1_750),
+        }
+    }
+
+    #[test]
+    fn a_milestone_component_without_a_positive_target_is_refused() {
+        let mut w = WelfareState::new();
+        let mut specs = default_specs(1);
+        // The A-pillar milestone component (05 §4.3's `min(1, points ÷ target)`).
+        specs.push(MetricSpec {
+            weight: FixedU64(0),
+            target: 0,
+            ..spec(metric_ids::A_SHIPPED_UPGRADES, Pillar::A, 0, 1)
+        });
+        assert_eq!(
+            w.register_metric_spec(Registration::Genesis, 1, specs.clone(), &seated()),
+            Err(Error::MilestoneTargetUnset)
+        );
+        // The identical set with a positive target registers, so the refusal is
+        // attributable to `target` alone.
+        let fixed = specs
+            .into_iter()
+            .map(|s| MetricSpec { target: 1, ..s })
+            .collect::<Vec<_>>();
+        assert!(w
+            .register_metric_spec(Registration::Genesis, 1, fixed, &seated())
+            .is_ok());
+    }
+
+    #[test]
+    fn delta_s_max_is_bound_checked_for_attested_components_only() {
+        for bad in [0, BPS_ONE + 1] {
+            let mut w = WelfareState::new();
+            let specs = default_specs(1)
+                .into_iter()
+                .map(|s| {
+                    if s.source == SourceClass::Attested {
+                        MetricSpec {
+                            delta_s_max_bps: bad,
+                            ..s
+                        }
+                    } else {
+                        s
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                w.register_metric_spec(Registration::Genesis, 1, specs, &seated()),
+                Err(Error::BadDeltaSMax),
+                "delta_s_max_bps = {bad} must be refused for an attested component"
+            );
+        }
+        // 05 §4.4: recorded but not bound-checked for source classes 1-3 — a
+        // zero on an on-chain component is legal, because it runs no §5 game
+        // and so has no bond ladder to collateralize.
+        let mut w = WelfareState::new();
+        let specs = default_specs(1)
+            .into_iter()
+            .map(|s| {
+                if s.source == SourceClass::Attested {
+                    s
+                } else {
+                    MetricSpec {
+                        delta_s_max_bps: 0,
+                        ..s
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(w
+            .register_metric_spec(Registration::Genesis, 1, specs, &seated())
+            .is_ok());
+    }
+
+    #[test]
+    fn attested_admission_needs_both_halves_of_the_oracle_gate() {
+        // 07 §6.3: the ladder must cover the declared impact. `seated()` carries
+        // 1,750 bps of coverage; the specs declare 1,000.
+        let thin = AttestedAdmission {
+            coverage_bps: Some(999),
+            ..seated()
+        };
+        assert_eq!(
+            WelfareState::new().register_metric_spec(
+                Registration::Genesis,
+                1,
+                default_specs(1),
+                &thin
+            ),
+            Err(Error::BondCoverageUnmet)
+        );
+        // An unreadable ladder refuses too — the fail-closed direction for
+        // admission, and the opposite of what the registry's bond pricing does
+        // with the same `None`.
+        let unreadable = AttestedAdmission {
+            coverage_bps: None,
+            ..seated()
+        };
+        assert_eq!(
+            WelfareState::new().register_metric_spec(
+                Registration::Genesis,
+                1,
+                default_specs(1),
+                &unreadable
+            ),
+            Err(Error::BondCoverageUnmet)
+        );
+        // 07 §2(5): seats, independently of coverage.
+        for starved in [
+            AttestedAdmission {
+                reporters: 2,
+                ..seated()
+            },
+            AttestedAdmission {
+                watchtowers: 1,
+                ..seated()
+            },
+        ] {
+            assert_eq!(
+                WelfareState::new().register_metric_spec(
+                    Registration::Genesis,
+                    1,
+                    default_specs(1),
+                    &starved
+                ),
+                Err(Error::InsufficientOracleSeats)
+            );
+        }
+        // The gate is written as scoped to spec sets containing an attested
+        // component — and that scope turns out to be **every valid set**:
+        // `source_matches_pillar` forces `Pillar::A` to be `Attested`, and the
+        // A weights must sum to 1, so a valid set always has at least one
+        // attested member. A closed oracle therefore refuses registration
+        // outright, which is 07 §3's bootstrap order (reporters and watchtowers
+        // register first, permissionlessly, then the spec) rather than a
+        // deadlock. Pinned here because it is the load-bearing consequence of
+        // enforcing §2(5), and because the scoping condition reads as if some
+        // set escapes it.
+        assert_eq!(
+            WelfareState::new().register_metric_spec(
+                Registration::Genesis,
+                1,
+                default_specs(1),
+                &AttestedAdmission::CLOSED
+            ),
+            Err(Error::BondCoverageUnmet)
+        );
+    }
+
+    #[test]
+    fn try_state_rejects_a_stored_spec_that_violates_the_v14_field_rules() {
+        // Both fields are static properties of the stored record, so try-state
+        // owns them. The live-parameter halves of the gate deliberately are NOT
+        // re-checked there — see the comment at the try_state site (SQ-495).
+        let mut w = WelfareState::new();
+        w.register_metric_spec(Registration::Genesis, 1, default_specs(1), &seated())
+            .unwrap();
+        assert!(w.try_state().is_ok());
+
+        let mut corrupt = w.clone();
+        corrupt.specs[0].1[3].delta_s_max_bps = 0;
+        assert_eq!(corrupt.try_state(), Err(Error::TryStateViolation));
+
+        let mut corrupt = w;
+        corrupt.specs[0].1[3].id = metric_ids::A_SHIPPED_UPGRADES;
+        corrupt.specs[0].1[3].target = 0;
+        assert_eq!(corrupt.try_state(), Err(Error::TryStateViolation));
+    }
+
     fn default_specs(version: u16) -> Vec<MetricSpec> {
         vec![
             spec(1, Pillar::S, ONE, version),
@@ -1161,17 +1513,17 @@ mod tests {
         let mut specs = default_specs(1);
         specs[0].activation_epoch = 0;
         assert_eq!(
-            w.register_metric_spec(Registration::Genesis, 1, specs),
+            w.register_metric_spec(Registration::Genesis, 1, specs, &seated()),
             Err(Error::BadActivationEpoch)
         );
         let mut specs = default_specs(1);
         specs[0].has_gaming_vectors = false;
         assert_eq!(
-            w.register_metric_spec(Registration::Genesis, 1, specs),
+            w.register_metric_spec(Registration::Genesis, 1, specs, &seated()),
             Err(Error::MissingMetricDiscipline)
         );
         assert_eq!(
-            w.register_metric_spec(Registration::Genesis, 1, default_specs(1)),
+            w.register_metric_spec(Registration::Genesis, 1, default_specs(1), &seated()),
             Ok(())
         );
     }
@@ -1188,7 +1540,7 @@ mod tests {
             spec.activation_epoch = 1;
         }
         assert_eq!(
-            w.register_metric_spec(Registration::Genesis, 1, specs),
+            w.register_metric_spec(Registration::Genesis, 1, specs, &seated()),
             Ok(())
         );
         assert_eq!(
@@ -1208,7 +1560,7 @@ mod tests {
             spec.activation_epoch = 2;
         }
         assert_eq!(
-            w.register_metric_spec(Registration::Live { current_epoch: 1 }, 2, specs),
+            w.register_metric_spec(Registration::Live { current_epoch: 1 }, 2, specs, &seated()),
             Err(Error::BadActivationEpoch)
         );
         // ...but activating at epoch 3 (current + 2) is accepted.
@@ -1217,7 +1569,7 @@ mod tests {
             spec.activation_epoch = 3;
         }
         assert_eq!(
-            w.register_metric_spec(Registration::Live { current_epoch: 1 }, 2, specs),
+            w.register_metric_spec(Registration::Live { current_epoch: 1 }, 2, specs, &seated()),
             Ok(())
         );
     }
@@ -1234,7 +1586,8 @@ mod tests {
                     current_epoch: EpochId::MAX - 1
                 },
                 1,
-                default_specs(1)
+                default_specs(1),
+                &seated()
             ),
             Err(Error::BadActivationEpoch)
         );
@@ -1244,7 +1597,8 @@ mod tests {
                     current_epoch: EpochId::MAX
                 },
                 1,
-                default_specs(1)
+                default_specs(1),
+                &seated()
             ),
             Err(Error::BadActivationEpoch)
         );
@@ -1265,14 +1619,14 @@ mod tests {
         let mut specs = default_specs(1);
         specs[0].epsilon_floor = FixedU64(EPSILON_PILLAR.0 - 1);
         assert_eq!(
-            w.register_metric_spec(Registration::Genesis, 1, specs),
+            w.register_metric_spec(Registration::Genesis, 1, specs, &seated()),
             Err(Error::BadEpsilonFloor)
         );
 
         let mut specs = default_specs(1);
         specs[3].source = SourceClass::Onchain;
         assert_eq!(
-            w.register_metric_spec(Registration::Genesis, 1, specs),
+            w.register_metric_spec(Registration::Genesis, 1, specs, &seated()),
             Err(Error::BadSourceClass)
         );
     }
@@ -1280,7 +1634,7 @@ mod tests {
     #[test]
     fn cranks_reject_a_metric_version_before_activation() {
         let mut w = WelfareState::new();
-        w.register_metric_spec(Registration::Genesis, 1, default_specs(1))
+        w.register_metric_spec(Registration::Genesis, 1, default_specs(1), &seated())
             .unwrap();
         assert_eq!(
             w.record_snapshot(
@@ -1303,7 +1657,7 @@ mod tests {
     #[test]
     fn prune_rolls_the_bounded_epoch_windows() {
         let mut w = WelfareState::new();
-        w.register_metric_spec(Registration::Genesis, 1, default_specs(1))
+        w.register_metric_spec(Registration::Genesis, 1, default_specs(1), &seated())
             .unwrap();
         w.events.clear();
         for epoch in 2..MAX_SNAPSHOTS as u32 + 2 {
@@ -1342,7 +1696,7 @@ mod tests {
     #[test]
     fn daily_gate_uses_only_s_and_onchain_c_components() {
         let mut w = WelfareState::new();
-        w.register_metric_spec(Registration::Genesis, 1, default_specs(1))
+        w.register_metric_spec(Registration::Genesis, 1, default_specs(1), &seated())
             .unwrap();
         let (flags, changed) = w
             .record_daily_gate(
@@ -1371,7 +1725,7 @@ mod tests {
     #[test]
     fn daily_gate_signals_only_new_breach_flags_and_not_samples_or_duplicates() {
         let mut w = WelfareState::new();
-        w.register_metric_spec(Registration::Genesis, 1, default_specs(1))
+        w.register_metric_spec(Registration::Genesis, 1, default_specs(1), &seated())
             .unwrap();
 
         let (_, first_changed) = w
@@ -1404,7 +1758,7 @@ mod tests {
     #[test]
     fn daily_gate_bitmap_contains_breached_days_only() {
         let mut w = WelfareState::new();
-        w.register_metric_spec(Registration::Genesis, 1, default_specs(1))
+        w.register_metric_spec(Registration::Genesis, 1, default_specs(1), &seated())
             .unwrap();
 
         let (healthy, changed) = w
@@ -1437,7 +1791,7 @@ mod tests {
         specs.push(spec(5, Pillar::CAttested, ONE, 1));
         specs.sort_by_key(|s| s.id);
         assert_eq!(
-            w.register_metric_spec(Registration::Genesis, 1, specs),
+            w.register_metric_spec(Registration::Genesis, 1, specs, &seated()),
             Err(Error::BadWeightSum)
         );
         // A split joint vector (0.8 on-chain + 0.2 attested) registers.
@@ -1446,7 +1800,7 @@ mod tests {
         specs.push(spec(5, Pillar::CAttested, 200_000_000, 1));
         specs.sort_by_key(|s| s.id);
         assert_eq!(
-            w.register_metric_spec(Registration::Genesis, 1, specs),
+            w.register_metric_spec(Registration::Genesis, 1, specs, &seated()),
             Ok(())
         );
     }
@@ -1462,7 +1816,7 @@ mod tests {
         specs[1].weight = FixedU64(800_000_000);
         specs.push(spec(5, Pillar::CAttested, 200_000_000, 1));
         specs.sort_by_key(|s| s.id);
-        w.register_metric_spec(Registration::Genesis, 1, specs)
+        w.register_metric_spec(Registration::Genesis, 1, specs, &seated())
             .unwrap();
         let (flags, changed) = w
             .record_daily_gate(
@@ -1584,7 +1938,7 @@ mod tests {
     #[test]
     fn snapshot_rejects_duplicate_epoch_spec_and_bad_incident_multiplier() {
         let mut w = WelfareState::new();
-        w.register_metric_spec(Registration::Genesis, 1, default_specs(1))
+        w.register_metric_spec(Registration::Genesis, 1, default_specs(1), &seated())
             .unwrap();
         let comps = vec![
             ComponentValue {
@@ -1625,9 +1979,9 @@ mod tests {
     #[test]
     fn snapshots_and_settlement_bind_creation_time_spec_version() {
         let mut w = WelfareState::new();
-        w.register_metric_spec(Registration::Genesis, 1, default_specs(1))
+        w.register_metric_spec(Registration::Genesis, 1, default_specs(1), &seated())
             .unwrap();
-        w.register_metric_spec(Registration::Genesis, 2, default_specs(2))
+        w.register_metric_spec(Registration::Genesis, 2, default_specs(2), &seated())
             .unwrap();
         let comps = vec![
             ComponentValue {

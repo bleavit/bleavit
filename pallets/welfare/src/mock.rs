@@ -68,6 +68,8 @@ pub fn metric_spec(id: u16, pillar: Pillar, weight: u64, version: u16) -> Metric
         has_gaming_vectors: true,
         has_challenge_procedure: true,
         prior_bounds: [FixedU64(ONE); HISTORY_PRIORS],
+        target: 100,
+        delta_s_max_bps: 1_000,
     }
 }
 
@@ -312,7 +314,25 @@ impl EnsureOrigin<RuntimeOrigin> for TestMetricGovernanceOrigin {
     }
 }
 
+/// A seated oracle for the mock: 07 §2(5)'s floors met and the 13 §1 default
+/// bond ladder readable, so attested components are admissible. Registration is
+/// what these suites exercise; the refusal paths get their own explicit
+/// contexts in `tests.rs`.
+pub struct SeatedOracle;
+impl pallet_welfare::OracleAdmission for SeatedOracle {
+    fn admission() -> pallet_welfare::AttestedAdmission {
+        pallet_welfare::AttestedAdmission {
+            reporters: 3,
+            watchtowers: 2,
+            reporter_min: 3,
+            watchtower_min: 2,
+            coverage_bps: Some(1_750),
+        }
+    }
+}
+
 impl pallet_welfare::Config for Test {
+    type OracleAdmission = SeatedOracle;
     type MetricGovernanceOrigin = TestMetricGovernanceOrigin;
     type Params = TestParams;
     type MetricInputs = TestMetricInputs;

@@ -89,11 +89,12 @@ mod tests;
 // The functional core is the semantic source of truth; re-export its surface
 // named (not glob — the pallet owns its own `Error`/`ReserveHealth` aliases).
 pub use oracle_core::{
-    round_bond, stored_round_bond, BondSettlement, Error as CoreError, Event as CoreEvent, Oracle,
-    OracleParams, ReportInput, ReporterInfo, ReserveHealth as ReserveHealthValue, RoundKey,
-    RoundState, SettlePath, SettledComponent, StoredRoundSchedule, WatchtowerInfo, MAX_ACK_RECORDS,
-    MAX_COMPONENT_VALUES, MAX_REPORTERS, MAX_RESERVE_PROBE_QUERY_ID, MAX_ROUNDS, MAX_WATCHTOWERS,
-    ORC_MAX_PROOF_BYTES, ORC_ROUNDS, RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT,
+    can_admit_attested_component, coverage_bps, round_bond, stored_round_bond, BondSettlement,
+    Error as CoreError, Event as CoreEvent, Oracle, OracleParams, ReportInput, ReporterInfo,
+    ReserveHealth as ReserveHealthValue, RoundKey, RoundState, SettlePath, SettledComponent,
+    StoredRoundSchedule, WatchtowerInfo, MAX_ACK_RECORDS, MAX_COMPONENT_VALUES, MAX_REPORTERS,
+    MAX_RESERVE_PROBE_QUERY_ID, MAX_ROUNDS, MAX_WATCHTOWERS, ORC_MAX_PROOF_BYTES, ORC_ROUNDS,
+    ORC_ROUND_CAP_MIN, RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT,
 };
 
 #[cfg(feature = "runtime-benchmarks")]

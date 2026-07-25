@@ -1071,6 +1071,8 @@ fn install_single_active_metric_spec(
         has_challenge_procedure: true,
         prior_bounds: [futarchy_primitives::FixedU64(pallet_welfare::ONE);
             pallet_welfare::HISTORY_PRIORS],
+        target: 100,
+        delta_s_max_bps: 1_000,
     };
     let active_specs = pallet_welfare::BoundedSpecSet::try_from(vec![active_spec]).ok()?;
     pallet_welfare::MetricSpecs::<Runtime>::insert(version, active_specs);
@@ -1105,6 +1107,8 @@ fn install_active_x_snapshot_spec(
         has_challenge_procedure: true,
         prior_bounds: [futarchy_primitives::FixedU64(pallet_welfare::ONE);
             pallet_welfare::HISTORY_PRIORS],
+        target: 100,
+        delta_s_max_bps: 1_000,
     };
     let active_specs = pallet_welfare::BoundedSpecSet::try_from(vec![active_spec]).ok()?;
     pallet_welfare::MetricSpecs::<Runtime>::insert(version, active_specs);
@@ -1978,7 +1982,7 @@ fn identity_and_version_pins_match_the_integration_contract() {
     // makes a future re-coupling fail here.
     assert_eq!(VERSION.transaction_version, TRANSACTION_VERSION);
     assert_eq!(VERSION.transaction_version, 1);
-    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 13);
+    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 14);
     assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
@@ -5160,6 +5164,8 @@ fn sq182_money_deadline_neutralizes_only_attested_components() {
             has_gaming_vectors: true,
             has_challenge_procedure: false,
             prior_bounds: [futarchy_primitives::FixedU64(ONE); HISTORY_PRIORS],
+            target: 100,
+            delta_s_max_bps: 1_000,
         }
     }
 
@@ -5241,6 +5247,8 @@ fn runtime_metric_inputs_do_not_emit_r_even_when_it_is_registered() {
             has_gaming_vectors: true,
             has_challenge_procedure: false,
             prior_bounds: [futarchy_primitives::FixedU64(ONE); HISTORY_PRIORS],
+            target: 100,
+            delta_s_max_bps: 1_000,
         }
     }
 
@@ -12397,6 +12405,8 @@ fn active_metric_spec_adapter_and_seeded_qualification_freeze_the_exact_version(
             has_challenge_procedure: true,
             prior_bounds: [futarchy_primitives::FixedU64(pallet_welfare::ONE);
                 pallet_welfare::HISTORY_PRIORS],
+            target: 100,
+            delta_s_max_bps: 1_000,
         };
         let active_specs = match pallet_welfare::BoundedSpecSet::try_from(vec![active_spec]) {
             Ok(specs) => specs,
@@ -15921,6 +15931,8 @@ fn view_welfare_current_returns_latest_finalized_breached_snapshot() {
             has_gaming_vectors: true,
             has_challenge_procedure: true,
             prior_bounds: [FixedU64(0); pallet_welfare::HISTORY_PRIORS],
+            target: 100,
+            delta_s_max_bps: 1_000,
         }
     }
 
@@ -18570,7 +18582,7 @@ fn sq186_metadata_exposes_the_treasury_bond_ask_slope() {
                     .expect("Epoch advertises the contract version");
                 assert_eq!(
                     u32::decode(&mut &contract.value[..]).expect("version decodes"),
-                    13,
+                    14,
                 );
             }};
         }
@@ -18669,4 +18681,108 @@ fn sq296_runtime_incident_filing_scales_over_every_consuming_cohort() {
         );
         assert!(EXPECTED_BOND > crate::configs::balance_param(b"reg.bond_inc"));
     });
+}
+
+/// SQ-341 / 07 §2(5): attested-component admission is gated on the oracle's
+/// registered seats and on §6.3's bond-coverage rule, both read from live
+/// parameters. Before this, neither half was enforced anywhere and `orc.n_min`
+/// had **no consumer at all** in the tree — only a genesis seed and a doc
+/// comment — so a MetricSpec could admit an attested component that no reporter
+/// could report and no bond ladder could price.
+///
+/// The dispatch-past-limit case is a `register_spec` whose reporter count is
+/// below the live `orc.n_min`: it is refused with `InsufficientOracleSeats`,
+/// and — because 05 §4.3 makes every A-pillar component attested while §4.4
+/// requires the A weights to sum to 1 — that refusal reaches **every** valid
+/// spec set, not a subset. Seating the oracle is therefore a precondition of
+/// the first MetricSpec, which is 07 §3's bootstrap order.
+// limit-coverage: orc.n_min
+#[test]
+fn sq341_attested_admission_is_gated_on_live_oracle_seats() {
+    development_ext().execute_with(|| {
+        use pallet_welfare::OracleAdmission as _;
+        let admission = <Runtime as pallet_welfare::Config>::OracleAdmission::admission();
+        // The floor is the live parameter, never a literal (rule 4). A fresh
+        // development chain seats no reporters and no watchtowers.
+        assert_eq!(
+            admission.reporter_min,
+            u32::from(futarchy_primitives::kernel::ORC_REPORTERS_MIN)
+        );
+        assert_eq!(admission.reporters, 0);
+        assert_eq!(admission.watchtowers, 0);
+        assert!(
+            admission.reporters < admission.reporter_min,
+            "the fixture must sit past the limit for this to test anything"
+        );
+        // The ladder itself is readable, so the refusal below is attributable
+        // to the seats rather than to §6.3's coverage half.
+        assert_eq!(admission.coverage_bps, Some(1_750));
+
+        let refused = pallet_welfare::Pallet::<Runtime>::register_spec(
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            77,
+            pallet_welfare::BoundedSpecSet::try_from(spec_set(77))
+                .expect("fixture stays within MaxComponentsPerSpec"),
+        );
+        assert_eq!(
+            refused,
+            Err(pallet_welfare::Error::<Runtime>::InsufficientOracleSeats.into()),
+            "an unseated oracle must refuse an attested component (07 §2(5))"
+        );
+        // Nothing was stored — the refusal is a true no-op (G-1).
+        assert!(!pallet_welfare::MetricSpecs::<Runtime>::contains_key(77));
+    });
+}
+
+/// A minimal valid spec set: the four pillars, each weight vector summing to 1.
+/// `Pillar::A` is necessarily `SourceClass::Attested` (05 §4.3), which is what
+/// makes the set reach 07 §2(5) at all.
+fn spec_set(version: futarchy_primitives::MetricSpecVersion) -> Vec<pallet_welfare::MetricSpec> {
+    [
+        (
+            1u16,
+            pallet_welfare::Pillar::S,
+            pallet_welfare::SourceClass::Onchain,
+        ),
+        (
+            2,
+            pallet_welfare::Pillar::COnchain,
+            pallet_welfare::SourceClass::Onchain,
+        ),
+        (
+            3,
+            pallet_welfare::Pillar::P,
+            pallet_welfare::SourceClass::Onchain,
+        ),
+        (
+            4,
+            pallet_welfare::Pillar::A,
+            pallet_welfare::SourceClass::Attested,
+        ),
+    ]
+    .into_iter()
+    .map(|(id, pillar, source)| pallet_welfare::MetricSpec {
+        id,
+        version,
+        pillar,
+        weight: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+        epsilon_floor: pallet_welfare::EPSILON_PILLAR,
+        activation_epoch: u32::MAX,
+        source,
+        formula_ref: [1; 32],
+        units: [2; 16],
+        repr: [3; 16],
+        cadence_blocks: 1,
+        sanity_min: futarchy_primitives::FixedU64(0),
+        sanity_max: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+        has_normalization_rule: true,
+        has_missing_data_rule: true,
+        has_gaming_vectors: true,
+        has_challenge_procedure: true,
+        prior_bounds: [futarchy_primitives::FixedU64(pallet_welfare::ONE);
+            pallet_welfare::HISTORY_PRIORS],
+        target: 100,
+        delta_s_max_bps: 1_000,
+    })
+    .collect()
 }

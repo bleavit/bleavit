@@ -45,11 +45,12 @@ use futarchy_primitives::{
 };
 
 pub use welfare_core::{
-    ComponentValue, Error as CoreError, Event as CoreEvent, GateBreachFlags as CoreGateBreachFlags,
-    MetricSpec, Pillar, Registration, Snapshot as CoreSnapshot, SourceClass,
-    WelfareParams as CoreWelfareParams, WelfareState, EPSILON, EPSILON_PILLAR, HISTORY_PRIORS,
-    MAX_COMPONENTS_PER_SPEC, MAX_DAILY_GATE_SAMPLES, MAX_GATE_FLAGS, MAX_METRIC_SPECS,
-    MAX_SNAPSHOTS, ONE, THETA_C_HI, THETA_C_LO, THETA_S_HI, THETA_S_LO, W_A, W_P,
+    AttestedAdmission, ComponentValue, Error as CoreError, Event as CoreEvent,
+    GateBreachFlags as CoreGateBreachFlags, MetricSpec, Pillar, Registration,
+    Snapshot as CoreSnapshot, SourceClass, WelfareParams as CoreWelfareParams, WelfareState,
+    EPSILON, EPSILON_PILLAR, HISTORY_PRIORS, MAX_COMPONENTS_PER_SPEC, MAX_DAILY_GATE_SAMPLES,
+    MAX_GATE_FLAGS, MAX_METRIC_SPECS, MAX_SNAPSHOTS, ONE, THETA_C_HI, THETA_C_LO, THETA_S_HI,
+    THETA_S_LO, W_A, W_P,
 };
 
 /// Core bounds in the `u32` form required by FRAME's `ConstU32`.
@@ -94,6 +95,14 @@ pub trait WelfareParamsProvider {
             w_a: Self::w_a(),
         }
     }
+}
+
+/// Runtime-injected view of the 07 §2(5) admission preconditions: the oracle's
+/// registered reporter/watchtower seats and the live bond ladder that 07 §6.3's
+/// coverage rule is evaluated against. Kept a seam rather than a direct read so
+/// welfare stays independent of `pallet-oracle` and of `pallet-constitution`.
+pub trait OracleAdmission {
+    fn admission() -> AttestedAdmission;
 }
 
 /// Injected normalized metric source. Normalization, missing-data treatment,
@@ -194,6 +203,10 @@ pub mod pallet {
         type SnapshotSchedule: SnapshotSchedule;
         /// Fail-soft keeper rebate endpoint (08 §6.3).
         type KeeperRebate: KeeperRebateSink<Self::AccountId>;
+        /// 07 §2(5) attested-component admission inputs. Injected because this
+        /// pallet owns neither oracle state nor constitution parameters, and
+        /// must not import the oracle to reach them (I-24).
+        type OracleAdmission: OracleAdmission;
         /// Weight information for all extrinsics.
         type WeightInfo: WeightInfo;
         /// Admitted origin construction for benchmarks.
@@ -455,6 +468,20 @@ pub mod pallet {
         /// (05 §4.7; SQ-79). The gate input is unavailable, so settlement holds
         /// at the status quo and the cohort takes 07 §10's VOID.
         GateWindowUnsampled,
+        /// The A-pillar milestone component declares no positive `target`, so
+        /// 05 §4.3's `min(1, points ÷ target)` has no defined value (07 §7).
+        MilestoneTargetUnset,
+        /// An attested component's `delta_s_max_bps` is outside `(0, 10_000]`
+        /// (05 §4.4).
+        BadDeltaSMax,
+        /// 07 §2(5): fewer than `orc.n_min` reporters or fewer than `wt.quorum`
+        /// watchtowers are registered, so an attested component's game could not
+        /// be adjudicated.
+        InsufficientOracleSeats,
+        /// 07 §6.3: the live bond ladder does not cover the component's declared
+        /// `Δs_max`, so a lie about it would cost less than it can move. Also
+        /// returned when the ladder is unreadable — the fail-closed direction.
+        BondCoverageUnmet,
     }
 
     #[pallet::hooks]
@@ -487,6 +514,7 @@ pub mod pallet {
                     },
                     version,
                     specs.into_inner(),
+                    &T::OracleAdmission::admission(),
                 )
             })?;
             let _ = Self::snapshot_progress();
@@ -617,7 +645,19 @@ pub mod pallet {
             for (version, specs) in &self.specs {
                 assert!(
                     state
-                        .register_metric_spec(Registration::Genesis, *version, specs.clone())
+                        .register_metric_spec(
+                            Registration::Genesis,
+                            *version,
+                            specs.clone(),
+                            // 07 §2(5) binds the genesis build too. A genesis
+                            // spec carrying an attested component is refused
+                            // unless the oracle's seats are already filled at
+                            // this point in the genesis sequence — which depends
+                            // on `construct_runtime!` ordering, so an attested
+                            // genesis spec is a deliberate choice a preset must
+                            // sequence for, not something that quietly works.
+                            &T::OracleAdmission::admission(),
+                        )
                         .is_ok(),
                     "welfare genesis metric specs violate core validation"
                 );
@@ -1302,6 +1342,10 @@ pub mod pallet {
                 CoreError::ArithmeticOverflow => Error::<T>::ArithmeticOverflow.into(),
                 CoreError::TryStateViolation => Error::<T>::TryStateViolation.into(),
                 CoreError::GateWindowUnsampled => Error::<T>::GateWindowUnsampled.into(),
+                CoreError::MilestoneTargetUnset => Error::<T>::MilestoneTargetUnset.into(),
+                CoreError::BadDeltaSMax => Error::<T>::BadDeltaSMax.into(),
+                CoreError::InsufficientOracleSeats => Error::<T>::InsufficientOracleSeats.into(),
+                CoreError::BondCoverageUnmet => Error::<T>::BondCoverageUnmet.into(),
             }
         }
     }

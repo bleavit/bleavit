@@ -12,8 +12,8 @@ use std::{fs, path::PathBuf};
 use futarchy_primitives::{FixedU64, MetricId};
 use serde_json::Value;
 use welfare_core::{
-    settlement_score, ComponentValue, MetricSpec, Pillar, Registration, SourceClass, WelfareParams,
-    WelfareState, EPSILON_PILLAR, ONE,
+    settlement_score, AttestedAdmission, ComponentValue, MetricSpec, Pillar, Registration,
+    SourceClass, WelfareParams, WelfareState, EPSILON_PILLAR, ONE,
 };
 
 fn fixture() -> Value {
@@ -47,6 +47,22 @@ fn exact_1e9(value: &Value, context: &str) -> u64 {
     raw
 }
 
+/// A seated oracle for tests: 07 §2(5)'s floors met and the default bond
+/// ladder readable, so attested components are admissible. Written out
+/// rather than defaulted — `AttestedAdmission` has no `Default` precisely
+/// because "admit" must never be the value you get by not thinking.
+fn seated() -> AttestedAdmission {
+    AttestedAdmission {
+        reporters: 3,
+        watchtowers: 2,
+        reporter_min: 3,
+        watchtower_min: 2,
+        // `(2^3 − 1) × 250` at the 13 §1 defaults for `orc.rounds` /
+        // `orc.bond_bps` — the 1,750 bps of 07 §6.3's worked example.
+        coverage_bps: Some(1_750),
+    }
+}
+
 fn spec(id: MetricId, pillar: Pillar, source: SourceClass, weight_1e9: u64) -> MetricSpec {
     MetricSpec {
         id,
@@ -67,6 +83,8 @@ fn spec(id: MetricId, pillar: Pillar, source: SourceClass, weight_1e9: u64) -> M
         has_gaming_vectors: true,
         has_challenge_procedure: true,
         prior_bounds: [FixedU64(0); welfare_core::HISTORY_PRIORS],
+        target: 100,
+        delta_s_max_bps: 1_000,
     }
 }
 
@@ -271,7 +289,7 @@ fn daily_c_equals(inputs: &PipelineInputs, expected: u64) {
         );
         let mut state = WelfareState::new();
         state
-            .register_metric_spec(Registration::Genesis, 1, faithful_specs(inputs))
+            .register_metric_spec(Registration::Genesis, 1, faithful_specs(inputs), &seated())
             .expect("register faithful spec");
         let mut components = vec![
             ComponentValue {
@@ -356,7 +374,12 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
                 // production snapshot.
                 let mut state = WelfareState::new();
                 state
-                    .register_metric_spec(Registration::Genesis, 1, faithful_specs(&parsed))
+                    .register_metric_spec(
+                        Registration::Genesis,
+                        1,
+                        faithful_specs(&parsed),
+                        &seated(),
+                    )
                     .expect("register faithful spec");
                 let welfare = state
                     .record_snapshot(
@@ -419,7 +442,7 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
                 }
                 let mut c_state = WelfareState::new();
                 c_state
-                    .register_metric_spec(Registration::Genesis, 1, c_specs)
+                    .register_metric_spec(Registration::Genesis, 1, c_specs, &seated())
                     .expect("register joint-C spec");
                 c_state
                     .record_snapshot(
@@ -455,7 +478,12 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
                 );
                 let mut daily_state = WelfareState::new();
                 daily_state
-                    .register_metric_spec(Registration::Genesis, 1, faithful_specs(&parsed))
+                    .register_metric_spec(
+                        Registration::Genesis,
+                        1,
+                        faithful_specs(&parsed),
+                        &seated(),
+                    )
                     .expect("register daily spec");
                 let mut daily_components = snapshot_components(&parsed);
                 daily_components.retain(|component| {

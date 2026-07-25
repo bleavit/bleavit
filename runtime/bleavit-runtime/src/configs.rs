@@ -5260,6 +5260,7 @@ impl pallet_welfare::Config for Runtime {
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
     type SnapshotSchedule = RuntimeSnapshotSchedule;
     type KeeperRebate = FutarchyTreasury;
+    type OracleAdmission = RuntimeOracleAdmission;
     type WeightInfo = crate::weights::pallet_welfare::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
@@ -5601,6 +5602,42 @@ type RuntimeProbeDispatch = bleavit_xcm::probe::XcmProbeDispatcher<
     XcmTrafficRecorder,
 >;
 
+/// 07 §2(5)'s admission preconditions, read live at `register_spec`.
+///
+/// This is the first consumer `orc.n_min` has ever had: before it, both halves
+/// of §2(5) — the reporter/watchtower seats and §6.3's bond-coverage rule —
+/// were enforced nowhere, so an attested component could be admitted to a
+/// MetricSpec with no reporter able to report it and no ladder able to make a
+/// lie cost more than it can move (SQ-341).
+pub struct RuntimeOracleAdmission;
+impl pallet_welfare::OracleAdmission for RuntimeOracleAdmission {
+    fn admission() -> pallet_welfare::AttestedAdmission {
+        let bond_bps = perbill_bps_param_or(
+            b"orc.bond_bps",
+            pallet_oracle::OracleParams::DEFAULT.bond_bps,
+        );
+        let rounds = u8_param_or(b"orc.rounds", pallet_oracle::OracleParams::DEFAULT.rounds);
+        pallet_welfare::AttestedAdmission {
+            reporters: pallet_oracle::Reporters::<Runtime>::count(),
+            watchtowers: pallet_oracle::Watchtowers::<Runtime>::count(),
+            reporter_min: u32::from(u8_param_or(
+                b"orc.n_min",
+                futarchy_primitives::kernel::ORC_REPORTERS_MIN,
+            )),
+            watchtower_min: u32::from(u8_param_or(
+                b"wt.quorum",
+                pallet_oracle::OracleParams::DEFAULT.watchtower_quorum,
+            )),
+            // `None` here refuses every attested component — the opposite
+            // direction `RegistryParams::coverage_bps` takes on the same
+            // unreadable ladder, and the fail-closed one for admission: 07 §6.3
+            // exists precisely to stop a component settling money against a
+            // ladder nobody can size.
+            coverage_bps: pallet_oracle::coverage_bps(rounds, bond_bps),
+        }
+    }
+}
+
 pub struct RegistryParams;
 impl pallet_registry::RegistryParams for RegistryParams {
     fn bond_incident() -> Balance {
@@ -5634,16 +5671,16 @@ impl pallet_registry::RegistryParams for RegistryParams {
             pallet_oracle::OracleParams::DEFAULT.bond_bps,
         );
         let rounds = u8_param_or(b"orc.rounds", pallet_oracle::OracleParams::DEFAULT.rounds);
-        // `(2^rounds − 1)`, saturating: `orc.rounds` is kernel-bounded to 2–4, so
-        // the multiple is 3–15 and cannot overflow, but a malformed read must
-        // still degrade to the tightest lawful ladder rather than to zero — a
-        // zero multiple would price every filing at the floor (G-1).
-        let ladder = 1u32
-            .checked_shl(u32::from(rounds))
-            .map(|p| p.saturating_sub(1))
-            .filter(|m| *m > 0)
-            .unwrap_or(3);
-        bps.saturating_mul(ladder)
+        // The derivation itself is single-homed in `oracle_core::coverage_bps`
+        // (07 §6.3's owner) — this call site only chooses the failure direction
+        // for *bond pricing*. `orc.rounds` is kernel-bounded to 2–4, so `None`
+        // means a malformed read; degrade to the tightest lawful ladder (×3)
+        // rather than to zero, because a zero multiple would price every filing
+        // at the floor (G-1). Attested admission takes the opposite direction
+        // on the same `None` and refuses outright.
+        pallet_oracle::coverage_bps(rounds, bps).unwrap_or_else(|| {
+            pallet_oracle::coverage_bps(pallet_oracle::ORC_ROUND_CAP_MIN, bps).unwrap_or(bps)
+        })
     }
 }
 pub struct OracleWatchtowers;
@@ -8482,6 +8519,8 @@ impl pallet_oracle::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
             has_gaming_vectors: true,
             has_challenge_procedure: true,
             prior_bounds: [FixedU64(1_000_000_000); pallet_welfare::HISTORY_PRIORS],
+            target: 100,
+            delta_s_max_bps: 1_000,
         };
         pallet_welfare::MetricSpecs::<Runtime>::insert(
             version,

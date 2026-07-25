@@ -34,6 +34,8 @@ fn metric_spec(id: u16, pillar: Pillar, weight: u64, version: u16) -> MetricSpec
         has_gaming_vectors: true,
         has_challenge_procedure: true,
         prior_bounds: [FixedU64(ONE); HISTORY_PRIORS],
+        target: 100,
+        delta_s_max_bps: 1_000,
     }
 }
 

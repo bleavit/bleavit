@@ -56,6 +56,8 @@ fn install_spec_for(
         has_challenge_procedure: true,
         prior_bounds: [futarchy_primitives::FixedU64(pallet_welfare::ONE);
             pallet_welfare::HISTORY_PRIORS],
+        target: 100,
+        delta_s_max_bps: 1_000,
     };
     let specs = pallet_welfare::BoundedSpecSet::try_from(vec![spec]).expect("one spec is bounded");
     pallet_welfare::MetricSpecs::<Runtime>::insert(version, specs);
