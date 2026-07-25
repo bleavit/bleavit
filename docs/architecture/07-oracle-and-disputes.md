@@ -101,13 +101,15 @@ Note the Σ over cohorts: with k = 2, epochs `m` are consumed by two overlapping
 
 ### 6.3 Bond-coverage rule and the META worked example
 
-**Admission rule (normative, machine-checked at `register_spec`):** an attested component with documented maximum single-epoch settlement impact `Δs_max` (a mandatory MetricSpec field per [05](./05-welfare-and-decision-engine.md) §12.4-equivalent) MAY be admitted only if
+**Admission rule (normative, machine-checked at `register_spec`):** an attested component with documented maximum single-epoch settlement impact `Δs_max` (a mandatory MetricSpec field per [05](./05-welfare-and-decision-engine.md) §4.4, which fixes its basis-point units and its `0 < Δs_max ≤ 10,000` bound) MAY be admitted only if
 
 ```
 (2^R_max − 1) · orc.bond_bps  ≥  Δs_max          // default: 7 × 2.5% = 17.5%
 ```
 
-so that a reporter who must survive every round (or win at terminal, against the pre-cohort-snapshot electorate) risks more than the maximum value a lie can move. The 150 bps hard min keeps the left side ≥ 10.5% even at the parameter floor.
+so that a reporter who must survive every round (or win at terminal, against the pre-cohort-snapshot electorate) risks more than the maximum value a lie can move. The 150 bps hard min keeps the left side ≥ 10.5% **at `R_max = 3`**, which is `orc.rounds`' default and the regime the worked example below uses. That figure is illustrative, not a floor: [13](./13-parameters.md) §1 admits `orc.rounds ∈ [2, 4]`, and at `(2, 150)` coverage is 450 bps, not 1,050. The rule is therefore **evaluated against the live parameters at admission time** — an implementation MUST NOT hardcode the 10.5% figure or assume `R_max = 3` (SQ-341 clarification, 2026-07-25).
+
+**A lawful amendment can break coverage after admission (normative gap, recorded not closed; SQ-495).** §6.1 freezes a *game*'s bond schedule at round one, so an amendment cannot reprice an open dispute — but nothing re-checks this rule for a component already admitted to a live MetricSpec when `orc.bond_bps` or `orc.rounds` is later lowered within its 13 §1 bounds. The component then keeps settling money under a ladder that no longer covers its declared `Δs_max`, with no event and no gate. Closing it requires either a constitution-side screening obligation on those two keys or a re-check at snapshot time; both are outside this section's ownership, so the gap is rowed rather than resolved here.
 
 **The review's scenario, recomputed.** META cohort, `StakeAtRisk = 1,200,000` USDC; attacker shifts `s` by 0.10 via a subjective attested component; gross gain bounded by `0.10 × 1,200,000 = 120,000` USDC (attained only if the attacker holds *every* winning scalar unit).
 
