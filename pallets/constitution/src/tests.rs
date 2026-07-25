@@ -192,7 +192,7 @@ fn phase_flag_bit_assignments_match_02_7_3() {
 
 #[test]
 fn contract_version_and_bounds_reexports_hold() {
-    assert_eq!(CONTRACT_VERSION, 14); // v14: versioned MetricSpec surface (SQ-175/SQ-341/SQ-141)
+    assert_eq!(CONTRACT_VERSION, 15); // v15: bounded oracle retention + settled-value reaping (SQ-492)
     assert_eq!(MAX_PARAMS, 128); // 13 §4 registry bound
     assert_eq!(MAX_CAPABILITIES, 64);
     assert_eq!(crate::MAX_METERS, 16);

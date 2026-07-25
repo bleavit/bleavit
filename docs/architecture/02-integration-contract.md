@@ -124,7 +124,7 @@ The `MetricId` assignment registry is owned by [05](05-welfare-and-decision-engi
 
 Proposal positions MUST project a settled proposal vault as `ScalarSettled { winner, s }`; Baseline positions MUST project a settled epoch vault as `BaselineSettled { s }` and MUST NOT fabricate a proposal branch. `RatificationStatus::NoPassedRecord` means only that the execution guard has no passing ratification record. It is deliberately agnostic between no referendum, an in-flight referendum and a failed referendum; the frontend MUST derive that lifecycle from `pallet-referenda` ([06](06-governance-and-guardians.md) §2.2). `Pending` and `Failed` are removed because the guard cannot truthfully produce them in the deployed design. This `RatificationStatus` restructure is a pre-genesis contract-v6 repair; no deployed SCALE value requires migration.
 
-The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 14`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
+The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 15`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
 
 ---
 
@@ -398,7 +398,7 @@ Storage:
 |---|---|---|
 | `Reporters` | `map AccountId → ReporterInfo { stake: Balance, registered_at: BlockNumber, offenses: u8 }` | counted; ≥ 3 required before attested components admit |
 | `Rounds` | `map (MetricId, EpochId, MetricSpecVersion) → RoundState { component: MetricId, epoch: EpochId, round: u8, spec_version: MetricSpecVersion, reporter: AccountId, value: FixedU64, evidence_hash: H256, bond: Balance, challenge_deadline: BlockNumber, extended: bool, challenger: Option<AccountId>, counter_value: Option<FixedU64>, acks: u8, report_hash: H256, stake_at_risk: Balance, cumulative_reporter_bond: Balance, cumulative_challenger_bond: Balance }` | ≤ **128** = 16 components × ≤ 4 settling epochs × ≤ 2 concurrent frozen versions — one live game per `(component, epoch, spec_version)`. The **triple key** (contract v3) is normative: 07 §2(4) runs an independent game per frozen version, so an activation boundary keeps two games live for one `(component, epoch)`; the pair key of contract v2 could not hold them (it maps one value per key). The value re-embeds `component`/`epoch`/`spec_version` for a `try_state` key-integrity check. `report_hash`/`stake_at_risk`/`cumulative_*_bond` back per-round ack keying, bond-schedule freezing and §5.5 slashing; the FE reads the `OracleRoundView` projection (§4), not this struct |
-| `ComponentValues` | `map (MetricId, EpochId, MetricSpecVersion) → SettledComponent { value: FixedU64, path: SettlePath, flagged: bool }` | reaped at cohort settlement; **triple key** (contract v3) — per-version games settle their own cohorts, so one `(component, epoch)` can carry a settled value per frozen version. `SettlePath ∈ { Unchallenged, Recomputed, Adjudicated, ChallengerDefault, Neutral }`; `ChallengerDefault` is the §5.3 deadline path when the reporter does not post a signed `counter_report` |
+| `ComponentValues` | `map (MetricId, EpochId, MetricSpecVersion) → SettledComponent { value: FixedU64, path: SettlePath, flagged: bool }` | reaped on an **epoch cutoff**, not at cohort settlement (contract v15): the epoch clock's oracle-boundary crank retires every entry older than `current − 3` measurement epochs, bounded at `ComponentReapBatch` per call ([13](13-parameters.md) §2). A frontend MUST NOT treat a value as durable beyond that window. The former "reaped at cohort settlement" rule named a caller that does not read this map at all — `settle_cohort` reads the welfare snapshot ([07](07-oracle-and-disputes.md) §11) — and had no implementation, so entries accumulated to the bound instead (SQ-492); **triple key** (contract v3) — per-version games settle their own cohorts, so one `(component, epoch)` can carry a settled value per frozen version. `SettlePath ∈ { Unchallenged, Recomputed, Adjudicated, ChallengerDefault, Neutral }`; `ChallengerDefault` is the §5.3 deadline path when the reporter does not post a signed `counter_report` |
 | `Watchtowers` | `map AccountId → WatchtowerInfo { stake: Balance, registered_at: BlockNumber, inactive_epochs: u8 }` | counted, ≤ `wt.max = 16` seats; bonded acknowledgment quorum (D-18; registry semantics in [07](07-oracle-and-disputes.md) §4) |
 | `ReserveHealth` | `{ consecutive_fails: u8, consecutive_passes: u8, unhealthy: bool, last_query_id: u64, last_probe_at: BlockNumber, pending_since: Option<BlockNumber> }` | single value; the deterministic reserve-probe state (`R`, [07](07-oracle-and-disputes.md) §8). `last_probe_at`/`pending_since` (contract v3) time the probe for the fail-static timeout |
 
@@ -425,6 +425,7 @@ Events:
 | `ReserveProbeSent` | `{ query_id }` |
 | `ReserveProbeResult` | `{ query_id, passed: bool }` |
 | `ReserveUnhealthy` | `{ }` / `ReserveRecovered { }` — reserve-health state transitions (`R`, [07](07-oracle-and-disputes.md) §8) |
+| `RetentionExpired` | `{ component, epoch, round, reporter_bond, challenger_bond }` — the [07](07-oracle-and-disputes.md) §11(1) retention window closed with no terminal verdict: both stacks are refunded to their posters and the retained round reaped (contract v15) |
 
 ### 7.3 `pallet-constitution`
 
@@ -473,7 +474,7 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 | VIT decimals | 12 |
 | VIT existential deposit | **0.01 VIT** (= 10^10 plancks) |
 | Phase flag storage | `pallet-constitution::PhaseFlags` (§7.3) — the trading-enablement key |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 14` (runtime constant) |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 15` (runtime constant) |
 
 ---
 
@@ -517,7 +518,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 
 | Pallet | Constant name | Type | Value source |
 |---|---|---|---|
-| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 14) |
+| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 15) |
 | Constitution | `MaxParams` | `u32` | `constitution_core::MAX_PARAMS` (= 128) |
 | Constitution | `MaxCapabilities` | `u32` | `constitution_core::MAX_CAPABILITIES` (= 64) |
 | Constitution | `MaxMeters` | `u32` | `constitution_core::MAX_METERS` (= 16) |
@@ -542,7 +543,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Registry (each instance) | `ArchiveDelay` | `BlockNumber` (`u32`) | `max(live Params[ledger.archive], 21 × BLOCKS_PER_DAY)`; the 21-day floor is independent of the shared ledger tunable |
 | Registry (each instance) | `MaxFilingsPerEpoch` | `u32` | `kernel::REG_MAX_FILINGS_EPOCH` (= 64) |
 | Registry (each instance) | `MaxEvidenceLen` | `u32` | fixed `H256` evidence-hash width (= 32 bytes) |
-| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 14) |
+| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 15) |
 | ExecutionGuard | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) |
 | ExecutionGuard | `MaxExecutionRecords` | `u32` | `bounds::MAX_EXECUTION_RECORDS` (= 256) |
 | ExecutionGuard | `MaxCalls` | `u32` | `kernel::MAX_CALLS` (= 16) |
@@ -551,7 +552,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | ExecutionGuard | `MaxRuntimeCodeBytes` | `u32` | runtime `Config::MaxRuntimeCodeBytes` (`pallet_preimage::MAX_SIZE`) |
 | ExecutionGuard | `ExecutionTimelockFloor` | `[u32; 4]` | [13 §1](13-parameters.md) `exec.lock.*` K hard minima, `[14,400; 4]` blocks |
 | ExecutionGuard | `ExecutionGraceFloor` | `u32` | [13 §1](13-parameters.md) `exec.grace` K hard minimum (= 100,800 blocks) |
-| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 14) |
+| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 15) |
 | Epoch | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) |
 | Epoch | `MaxIntakeQueue` | `u32` | `bounds::INTAKE_QUEUE` (= 64) |
 | Epoch | `MaxNonTerminalCohorts` | `u32` | `bounds::MAX_NON_TERMINAL_COHORTS` (= 4) |
@@ -565,12 +566,12 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Epoch | `DecisionDeltaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.delta.*` K hard minima (= `[5,000,000; 4]`) |
 | Epoch | `TreasuryBondAskBps` | `u128` | `kernel::TREASURY_BOND_ASK_BPS` (= 50; the 08 §7 TREASURY Ask surcharge slope, added in v13 — SQ-186) |
 | Epoch | `DecisionSigmaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.sigma.*` K hard minima (= `[0; 4]`) |
-| Welfare | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 14) |
+| Welfare | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 15) |
 | Welfare | `MaxMetricSpecs` | `u32` | `welfare_core::MAX_METRIC_SPECS` (= 16) |
 | Welfare | `MaxSnapshots` | `u32` | `welfare_core::MAX_SNAPSHOTS` (= 20) |
 | Welfare | `MaxGateFlags` | `u32` | `welfare_core::MAX_GATE_FLAGS` (= 20) |
 | Welfare | `MaxDailyGateSamples` | `u8` | `welfare_core::MAX_DAILY_GATE_SAMPLES` (= 64) |
-| FutarchyTreasury | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 14) |
+| FutarchyTreasury | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 15) |
 | FutarchyTreasury | `MaxStreams` | `u32` | `futarchy_treasury_core::MAX_STREAMS` (= 128) |
 | FutarchyTreasury | `MaxBudgetLines` | `u32` | `futarchy_treasury_core::MAX_BUDGET_LINES` (= 32) |
 | FutarchyTreasury | `MaxPolCommitments` | `u32` | `futarchy_treasury_core::MAX_POL_COMMITMENTS` (= 196) |
@@ -652,6 +653,8 @@ No other origin can write the record. The layout MUST NEVER change except by app
 7. **Independent counters.** `INTEGRATION_CONTRACT_VERSION` and the SDK's `RuntimeVersion.transaction_version` are independent counters. The contract version is exposed through `futarchy-primitives`, the constants API and `release.json`; `transaction_version` denotes compatibility of existing dispatchables as embedded in signed-transaction validity. An additive contract bump MUST NOT change `transaction_version`.
 
 **Version history.**
+
+- **v15 (2026-07-25) — bounded oracle retention and settled-value reaping (SQ-492).** Two changes, both in §7.2, both consequences of the same defect: [07](07-oracle-and-disputes.md) §11(1) and §13 each name a reaper that no code drove. (i) A new **trailing** event `RetentionExpired { component, epoch, round, reporter_bond, challenger_bond }`, emitted when §11(1)'s retention window closes with no terminal verdict — the stacks are refunded to their posters rather than forfeited, because the values track's failure to rule is not a finding against either party. Appended last; no existing variant's SCALE discriminant moves. (ii) `ComponentValues`' retention **rule** changes: entries are reaped on an epoch cutoff (`current − 3` measurement epochs, bounded per crank) rather than "at cohort settlement". This is a correction of the note rather than of behaviour, because there *was* no behaviour: `settle_cohort` reads the welfare snapshot, never this map (§11's own SQ-182 resolution establishes it), so the stated trigger named a caller that could not have fired — and the map grew to `MAX_COMPONENT_VALUES`, after which every further settlement fails. It is listed as a contract change and not a silent fix because a frontend reading `ComponentValues` directly can now observe an entry disappear on a schedule the old note did not describe. No SCALE type, key or view-type shape changes. **Pre-genesis revision** — no runtime is deployed, so §13's point-3 migration clause does not apply, and `transaction_version` is untouched (§13 rule 7). Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-25, through the standing autonomous-resolution delegation.**
 
 - **v14 (2026-07-25) — the versioned MetricSpec surface (SQ-175, SQ-341, SQ-141).** Three changes, all **additive**, landing together because none is independently verifiable. (i) `MetricSpec` (read by the frontend through §7.4's `pallet-welfare::MetricSpecs`) gains two **trailing** fields: `target: u32`, the A-pillar milestone divisor of [05](05-welfare-and-decision-engine.md) §4.3's `min(1, points ÷ target)` — previously specified with no home in any struct, so the MilestoneRegistry could not normalize a filing (SQ-175); and `delta_s_max_bps: u32`, the documented maximum single-epoch settlement impact `Δs_max` that [07](07-oracle-and-disputes.md) §6.3's bond-coverage admission rule is stated against — previously unrepresentable, so the rule that makes an attested lie cost more than it can move was unimplementable regardless of where it was called (SQ-341). Both are appended after `prior_bounds`; every existing field keeps its name, type and offset. (ii) §6's `RegistryEpochClosed` gains `spec_version: MetricSpecVersion`, because 07 §7's registry lifecycle is now keyed by `(epoch, spec_version)` — one epoch closes once per frozen version (SQ-141). The other ten registry event shapes, including the `(epoch, filing_id)` key every filing event carries, are untouched: filing-id allocation stays per-epoch precisely so they can be. (iii) No storage **key** in §7 changes: 07 §7's `Aggregates` re-key is a registry-internal item this contract does not freeze. **Pre-genesis revision** — no runtime is deployed, so §13's post-genesis append-only/migration clause (point 3) does not apply, and `transaction_version` is untouched (§13 rule 7). Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-25, through the standing autonomous-resolution delegation.**
 

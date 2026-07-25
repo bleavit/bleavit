@@ -89,13 +89,14 @@ mod tests;
 // The functional core is the semantic source of truth; re-export its surface
 // named (not glob — the pallet owns its own `Error`/`ReserveHealth` aliases).
 pub use oracle_core::{
-    can_admit_attested_component, coverage_bps, round_bond, stored_round_bond, BondSettlement,
-    Error as CoreError, Event as CoreEvent, Oracle, OracleParams, ReportInput, ReporterInfo,
-    ReserveHealth as ReserveHealthValue, RoundKey, RoundState, SettlePath, SettledComponent,
-    StoredRoundSchedule, WatchtowerInfo, MAX_ACK_RECORDS, MAX_COMPONENT_VALUES, MAX_REPORTERS,
-    MAX_RESERVE_PROBE_QUERY_ID, MAX_ROUNDS, MAX_WATCHTOWERS, ORC_MAX_PROOF_BYTES, ORC_ROUNDS,
-    ORC_ROUND_CAP_MIN, RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT,
+    can_admit_attested_component, coverage_bps, round_bond, stored_round_bond, BondDisposition,
+    BondSettlement, Error as CoreError, Event as CoreEvent, Oracle, OracleParams, ReportInput,
+    ReporterInfo, ReserveHealth as ReserveHealthValue, RoundKey, RoundState, SettlePath,
+    SettledComponent, StoredRoundSchedule, WatchtowerInfo, MAX_ACK_RECORDS, MAX_COMPONENT_VALUES,
+    MAX_REPORTERS, MAX_RESERVE_PROBE_QUERY_ID, MAX_ROUNDS, MAX_WATCHTOWERS, ORC_MAX_PROOF_BYTES,
+    ORC_ROUNDS, ORC_ROUND_CAP_MIN, RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT,
 };
+pub use oracle_core::{COMPONENT_VALUE_REAP_BATCH, COMPONENT_VALUE_RETAINED_EPOCHS};
 
 #[cfg(feature = "runtime-benchmarks")]
 use futarchy_primitives::Balance;
@@ -478,10 +479,20 @@ pub mod pallet {
         StorageValue<_, BoundedVec<[u8; 32], ConstU32<MAX_WATCHTOWERS_BOUND>>, ValueQuery>;
 
     /// Internal d20 latch: a game whose money leg is neutralized remains here
-    /// until its retained bond stack reaches a terminal resolution (07 §11).
+    /// until its retained bond stack reaches a terminal resolution (07 §11),
+    /// paired with the block at which that retention expires.
+    ///
+    /// The deadline is what makes §11(1)'s "retention is bounded by the track's
+    /// own schedule" true of the implementation rather than only of the prose:
+    /// without it a round-`R_max` challenge whose verdict never lands is skipped
+    /// by every close crank forever, holding its bond stack in custody and one
+    /// of the [`MAX_ROUNDS_BOUND`] game slots (SQ-492).
     #[pallet::storage]
-    pub type MoneySettled<T: Config> =
-        StorageValue<_, BoundedVec<RoundKey, ConstU32<MAX_ROUNDS_BOUND>>, ValueQuery>;
+    pub type MoneySettled<T: Config> = StorageValue<
+        _,
+        BoundedVec<(RoundKey, futarchy_primitives::BlockNumber), ConstU32<MAX_ROUNDS_BOUND>>,
+        ValueQuery,
+    >;
 
     /// 07 §4 liveness latch: whether any round has existed since the last
     /// watchtower sweep. Not inferable from `Rounds`, which a clean closure
@@ -614,6 +625,17 @@ pub mod pallet {
         ReserveUnhealthy,
         /// The reserve recovered after `res.recover_threshold` passes (07 §8).
         ReserveRecovered,
+        /// A retained round's 07 §11(1) retention window closed with no terminal
+        /// verdict: both bond stacks were refunded to their posters and the
+        /// round reaped (SQ-492). Appended last so no earlier variant's SCALE
+        /// discriminant moves.
+        RetentionExpired {
+            component: MetricId,
+            epoch: EpochId,
+            round: u8,
+            reporter_bond: Balance,
+            challenger_bond: Balance,
+        },
     }
 
     /// 1:1 with [`CoreError`]; `CoreError::BadOrigin` maps to
@@ -1163,7 +1185,8 @@ pub mod pallet {
         /// map). A late verdict then finds no round and settles bonds only.
         pub fn note_settle_deadline(measurement_epoch: EpochId) -> DispatchResult {
             let expected = T::Reporting::expected_components(measurement_epoch);
-            Self::mutate_core(|o| o.force_neutralize_expired(measurement_epoch, &expected))
+            let now = Self::now();
+            Self::mutate_core(|o| o.force_neutralize_expired(now, measurement_epoch, &expected))
         }
 
         /// Declare a `(component, frozen version)` deterministically recomputable
@@ -1200,6 +1223,58 @@ pub mod pallet {
         /// deliberately carries no keeper rebate.
         pub fn reap_component(component: MetricId, epoch: EpochId, version: MetricSpecVersion) {
             ComponentValues::<T>::remove((component, epoch, version));
+        }
+
+        /// Reap every settled component value for a measurement epoch older than
+        /// `current_epoch - `[`COMPONENT_VALUE_RETAINED_EPOCHS`], oldest first,
+        /// at most [`COMPONENT_VALUE_REAP_BATCH`] per call. Returns how many
+        /// went, so the caller can tell a drained call from a no-op.
+        ///
+        /// 07 §13 says settled values are "reaped at cohort settlement" and
+        /// [`Self::reap_component`] is the seam it implies — but that seam had no
+        /// production caller at all, in either pallet, so nothing was ever reaped
+        /// (SQ-492). `ComponentValues` therefore grew by one entry per admitted
+        /// component per epoch until it hit [`MAX_COMPONENT_VALUES`], after which
+        /// **every** settlement fails `AlreadyFinal`: a wedge of the whole oracle
+        /// inside the first year of mainnet, not a slow leak.
+        ///
+        /// Driving it on the epoch cutoff rather than on cohort settlement is the
+        /// correction 07 §11's own resolution implies: `settle_cohort` reads the
+        /// welfare *snapshot*, never `ComponentValues`, so the last real consumer
+        /// of a measurement epoch's values is `record_snapshot(m)` in epoch `m+1`
+        /// — and a cohort-settlement trigger would be reaping on behalf of a
+        /// caller that never reads them.
+        pub fn reap_settled_components(current_epoch: EpochId) -> u32 {
+            let Some(cutoff) = current_epoch.checked_sub(COMPONENT_VALUE_RETAINED_EPOCHS) else {
+                return 0;
+            };
+            // Key-only scan of a map bounded at `MAX_COMPONENT_VALUES`, then a
+            // deterministic oldest-first order so a capped batch drains the same
+            // way on every node regardless of hasher order (I-20).
+            // A still-retained game's value is exempt whatever the cutoff says:
+            // 07 §11(1) keeps the round alive for bond disposal, and what makes it
+            // non-money-bearing is precisely that its key already carries a settled
+            // value (I-18; the §13 try-state invariant). Reaping it would leave a
+            // live round with no settled counterpart. Mirrors the core's own guard
+            // in `Oracle::reap_settled_before`.
+            let retained = MoneySettled::<T>::get();
+            let mut stale = ComponentValues::<T>::iter_keys()
+                .filter(|(component, epoch, version)| {
+                    *epoch < cutoff
+                        && !retained.iter().any(|(key, _)| {
+                            key.component == *component
+                                && key.epoch == *epoch
+                                && key.spec_version == *version
+                        })
+                })
+                .map(|(component, epoch, version)| (epoch, component, version))
+                .collect::<Vec<_>>();
+            stale.sort_unstable();
+            stale.truncate(COMPONENT_VALUE_REAP_BATCH);
+            for (epoch, component, version) in &stale {
+                ComponentValues::<T>::remove((*component, *epoch, *version));
+            }
+            stale.len() as u32
         }
 
         /// The reserve-health flag `R` (07 §8): the constitution `PhaseFlags`
@@ -1321,6 +1396,15 @@ pub mod pallet {
                         CoreEvent::RoundEscalated { .. }
                             | CoreEvent::ComponentSettled { .. }
                             | CoreEvent::WindowExtended { .. }
+                            // Expiring a retained game settles no component — the
+                            // money leg went neutral at d20 — so it emits no
+                            // `ComponentSettled` and would otherwise be the one
+                            // form of real progress this crank makes for free.
+                            // It returns a `MAX_ROUNDS` slot and releases two bond
+                            // stacks from custody; a permissionless crank nobody is
+                            // paid to run is a liveness assumption, not a mechanism
+                            // (07 §11(1); 08 §6.3 oracle line — SQ-492).
+                            | CoreEvent::RetentionExpired { .. }
                     )
                 });
                 Self::apply_custody(&before, &oracle)?;
@@ -1442,7 +1526,19 @@ pub mod pallet {
 
         fn settle_bond_custody(settlement: &BondSettlement) -> DispatchResult {
             let reporter = T::AccountId::from(settlement.reporter);
-            if settlement.reporter_wins {
+            if settlement.disposition == BondDisposition::RefundBoth {
+                // No adjudicated loser: 07 §11(1)'s retention window closed
+                // without a verdict, so both stacks go back to their posters.
+                // The griefer's price was the lock-up §11(4) names, not a
+                // forfeiture — taking custody with no finding behind it would
+                // be the unbacked claim R-7 exists to prevent (SQ-492).
+                T::Custody::release(&reporter, settlement.reporter_bond)?;
+                if let Some(challenger) = settlement.challenger.map(T::AccountId::from) {
+                    T::Custody::release(&challenger, settlement.challenger_bond)?;
+                }
+                return Ok(());
+            }
+            if settlement.disposition == BondDisposition::ReporterWins {
                 if settlement.challenger.is_some() {
                     let winner_share = settlement.challenger_bond / 100 * 40
                         + (settlement.challenger_bond % 100 * 40) / 100;
@@ -1776,6 +1872,19 @@ pub mod pallet {
                     }
                     CoreEvent::ReserveUnhealthy => Event::ReserveUnhealthy,
                     CoreEvent::ReserveRecovered => Event::ReserveRecovered,
+                    CoreEvent::RetentionExpired {
+                        component,
+                        epoch,
+                        round,
+                        reporter_bond,
+                        challenger_bond,
+                    } => Event::RetentionExpired {
+                        component,
+                        epoch,
+                        round,
+                        reporter_bond,
+                        challenger_bond,
+                    },
                 };
                 Self::deposit_event(mapped);
             }

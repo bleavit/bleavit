@@ -3801,6 +3801,13 @@ impl pallet_epoch::OracleAccess for RuntimeEpochOracle {
         // *when* the deadline falls due (§11(1)).
         pallet_oracle::Pallet::<Runtime>::note_settle_deadline(measurement_epoch)
     }
+
+    fn reap_settled_components(current_epoch: futarchy_primitives::EpochId) {
+        // 07 §13's reaping, driven from the epoch clock because the cutoff is
+        // measured in epochs and the oracle has no hooks. Bounded per call and
+        // idempotent, so a keeper may run the boundary crank every block.
+        let _ = pallet_oracle::Pallet::<Runtime>::reap_settled_components(current_epoch);
+    }
 }
 
 pub struct RuntimeEpochGuardian;
@@ -8850,6 +8857,13 @@ impl pallet_attestor::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper 
     }
 }
 
+/// Stale `ComponentValues` entries seeded for the boundary crank's 07 §13
+/// reaping sweep. Strictly above `COMPONENT_VALUE_REAP_BATCH` so the batch cap
+/// binds, and well below `MAX_COMPONENT_VALUES` so the deadline drives in the
+/// same call still have room to write their own neutral entries (SQ-492).
+#[cfg(feature = "runtime-benchmarks")]
+const STALE_COMPONENT_VALUE_SEEDS: u16 = 48;
+
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmarkHelper {
     benchmark_keeper_rebate_hooks!();
@@ -9104,6 +9118,33 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
                 },
             );
         }
+        // Stale settled values for the 07 §13 reaping sweep. Epoch 0 is older
+        // than any cutoff the crank can compute, and the count exceeds
+        // `COMPONENT_VALUE_REAP_BATCH` so the batch cap actually binds — an
+        // empty map would leave the sweep scanning nothing and the weight
+        // silently unchanged (SQ-492). Headroom below `MAX_COMPONENT_VALUES` is
+        // left for the entries the deadline drives themselves write.
+        for component in 0..STALE_COMPONENT_VALUE_SEEDS {
+            pallet_oracle::ComponentValues::<Runtime>::insert(
+                (component, 0u32, 1u16),
+                pallet_oracle::SettledComponent {
+                    value: FixedU64(pallet_welfare::ONE / 2),
+                    path: pallet_oracle::SettlePath::Neutral,
+                    flagged: true,
+                },
+            );
+        }
+    }
+
+    fn assert_oracle_components_reaped() {
+        assert_eq!(
+            pallet_oracle::ComponentValues::<Runtime>::iter_keys()
+                .filter(|(_, epoch, _)| *epoch == 0)
+                .count(),
+            (STALE_COMPONENT_VALUE_SEEDS as usize)
+                .saturating_sub(pallet_oracle::COMPONENT_VALUE_REAP_BATCH),
+            "the boundary crank must retire exactly one ComponentReapBatch"
+        );
     }
 
     fn prime_settlement(epoch: EpochId) {

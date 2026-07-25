@@ -141,6 +141,8 @@ pub enum SeamCall {
     OracleEpochBoundary(EpochId, bool),
     /// 07 §11(1) `OracleSettleDeadline` for a measurement epoch (SQ-182).
     OracleSettleDeadline(EpochId),
+    /// 07 §13 settled-component reaping sweep (SQ-492).
+    OracleReapSettled(EpochId),
     Welfare(EpochId, MetricSpecVersion, SettlementTarget),
     /// 03 §2.3/§5 epoch-VOID Baseline settlement at the neutral score.
     WelfareVoidBaseline(EpochId),
@@ -525,6 +527,10 @@ impl OracleAccess for TestOracle {
     }
     fn note_settle_deadline(measurement_epoch: EpochId) -> DispatchResult {
         SeamCalls::push(SeamCall::OracleSettleDeadline(measurement_epoch))
+    }
+    fn reap_settled_components(current_epoch: EpochId) {
+        // Infallible by contract, so the mock records rather than returns.
+        let _ = SeamCalls::push(SeamCall::OracleReapSettled(current_epoch));
     }
 }
 
