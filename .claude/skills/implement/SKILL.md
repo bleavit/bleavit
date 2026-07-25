@@ -7,8 +7,11 @@ argument-hint: "[milestone-id, e.g. A2]"
 # One spec-driven implementation increment
 
 You are executing the core session loop of this repository (AGENTS.md · Session
-protocol). One session = **one milestone** (or one clearly-scoped slice of a large
-milestone). Never start a second milestone in the same session.
+protocol). One **increment** = one milestone, or one clearly-scoped slice of a large
+one. When an increment closes, **continue to the next item** rather than handing back:
+there is no one-milestone-per-session limit (AGENTS.md R-5, amended 2026-07-25). Each
+increment still gets its own full loop below — spec first, gates, PLAN update — and
+must be finished or parked with exact resume notes before the next one starts.
 
 ## 1. Orient
 

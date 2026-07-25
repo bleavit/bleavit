@@ -39,14 +39,44 @@ Read this file first. Then read `PLAN.md`. Then work.
   02 §13 when 02 changes; changes to `02` or the INV-FE texts need the joint
   backend+frontend sign-off those docs mandate — the user speaks for both sides or
   names who does), and record substantive changes in PLAN.md · *Decision log*. When a
-  semantic change is non-obvious or you are unsure, log it in PLAN.md · *Spec
-  questions* and ask the user before diverging.
+  semantic change is non-obvious, record the reasoning in the *Decision log* (and raise a
+  *Spec questions* row if it opens a genuinely separate question) — then **decide it and
+  proceed** rather than waiting. Values-layer numbers, spec rulings and
+  integration-contract bumps are all yours to call: the user owns both sides of the
+  sign-off 02 §13 mandates and has delegated it (2026-07-25). Reserve real questions for
+  what only the user can know — their intent, an external commitment, a credential. A
+  deferred decision is unfinished work, and it is often under-research in disguise: check
+  whether the owning spec section already answers it first.
 - **R-2 — Spec-first implementation.** Before writing code, read the owning
   architecture sections for the milestone (its *Spec* column), plus the relevant
   slices of 02, 13, and 15. Every observable behavior must be traceable to spec text.
-  Never invent parameter values, names, or semantics; never resolve a `[VERIFY]` tag
-  by assumption — verify against live sources and log the result in PLAN.md ·
-  *Verification log*.
+  Never **guess** a parameter value, name, or semantics, and never resolve a
+  `[VERIFY]` tag by assumption — verify against live sources and log the result in
+  PLAN.md · *Verification log*.
+
+  **A genuinely required new parameter may be introduced** (amended 2026-07-25 by
+  explicit user instruction). The prohibition is on fabrication, not on the values
+  layer growing: where a mechanism the spec mandates cannot be expressed by any
+  existing key, add one — but earn it, in this order, and record the work:
+
+  1. **Prove necessity.** Enumerate the existing 13 §1/§2 keys that could carry the
+     value and say why each cannot. Most often one can: check whether the owning spec
+     section already names a rate or bound (it frequently does, one section over), and
+     prefer reuse. A new key whose job an existing key already does is a defect, not a
+     parameter.
+  2. **Derive the value, never pick it.** Tie it to a kernel constant, an existing
+     key, or published calibration evidence, and show the derivation. If no such
+     anchor exists, the row ships `[VERIFY]`-tagged with its consumer **fail-closed**
+     until evidence arrives — that is a legitimate state, not a stalled one.
+  3. **State the system effects.** Which invariants, gates and consumers move if it
+     is amended to each of its bounds; which direction of error is unsafe; and what
+     the bounds, max-Δ and cooldown must therefore be. A parameter whose unsafe
+     direction is unbounded is not ready.
+  4. **Record it** in 13 (the only home for values, §1/§2), in the limit-coverage
+     registry, and in PLAN.md · *Decision log* with the necessity argument.
+
+  Escalate to the user only for a value whose **error direction is unsafe** and which
+  no evidence anchors — that is a values judgement, not an implementation choice.
 - **R-3 — The living documents stay true.** After every change to the repository,
   `PLAN.md` is updated in the same session (status, session log); `README.md`,
   `AGENTS.md`, and `CLAUDE.md` are refreshed whenever the repo shape, commands, or
@@ -55,10 +85,13 @@ Read this file first. Then read `PLAN.md`. Then work.
 - **R-4 — PLAN.md is status, not spec.** Milestone rows cite `docs/architecture/`
   sections; PLAN.md never duplicates normative content. If you feel the need to
   explain protocol design in PLAN.md, you are writing in the wrong file.
-- **R-5 — One milestone per session.** Pick the next milestone (or the one in
-  progress, or the one the user names), finish it or park it cleanly with exact
-  resume notes. Never start a second milestone in the same session; never leave the
-  repo red without saying so in PLAN.md.
+- **R-5 — Keep going; park cleanly, never mid-air.** Work the in-progress milestone,
+  else the next one whose *Depends* are ✅, else what the user names — and when it
+  closes, **continue to the next item without waiting to be asked**. There is no
+  one-milestone-per-session limit (removed by explicit user instruction, 2026-07-25):
+  a session ends when the work or the user says so, not when a milestone happens to
+  close. What *is* binding is the hand-off: finish or park each item cleanly with
+  exact resume notes, and never leave the repo red without saying so in PLAN.md.
 - **R-6 — Quality gates before "done".** A milestone is ✅ only when the gates below
   pass and a spec-compliance review found no blockers. Never mark done with failing
   tests; report failures verbatim instead.

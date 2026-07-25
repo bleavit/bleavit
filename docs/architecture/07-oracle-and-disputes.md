@@ -68,8 +68,8 @@ Flat bonds made high-value cohorts cheap to attack: on a ~1.2M-USDC META cohort,
 ```
 StakeAtRisk(c, m)   = Σ CohortEscrow(k)  over every cohort k whose frozen MetricSpec
                       consumes component c for measurement epoch m
-CohortEscrow(k)     = Σ_pid escrowed(pid) over k's vaults, read at the block Snapshot(m)
-                      finalizes (deterministic, on-chain; frozen for the lifecycle)
+CohortEscrow(k)     = Σ_pid escrowed(pid) over k's vaults, read at the block round 1 of the
+                      (c, m) game is created (deterministic, on-chain; frozen for the lifecycle)
 B_1(c, m)           = max(orc.bond_floor, ceil(orc.bond_bps × StakeAtRisk(c, m) / 10,000))
 B_r(c, m)           = B_1(c, m) · 2^(r−1),   r = 1…R_max
 ```
@@ -77,6 +77,8 @@ B_r(c, m)           = B_1(c, m) · 2^(r−1),   r = 1…R_max
 Note the Σ over cohorts: with k = 2, epochs `m` are consumed by two overlapping cohorts (cohort e and e+1 both measure e+2), so the value a false `v(c, m)` can move is the *sum* of their escrows, and the bond prices that sum.
 
 **Units and rounding (normative).** `orc.bond_bps` is denominated in basis points, so the product carries the explicit `/ 10,000` divisor shown above. That division rounds **up**, as does any parameter-representation conversion that produces `orc.bond_bps` from a finer-grained on-chain encoding. Rounding is resolved in the direction of custody, on the same principle as I-4 and I-28 ([15](./15-invariants-and-testing.md) §1): over-custody is a dust/reconciliation matter, whereas under-custody is an unbacked claim. Rounding a bond down is the under-custody direction; rounding up costs at most one base unit. The `max(·)` against `orc.bond_floor` is applied after rounding. The §6.3 admission rule takes `orc.bond_bps` directly and is evaluated in basis-point space, so it is unaffected by this base-unit rounding either way.
+
+**Escrow read point (normative; SQ-174 resolution, 2026-07-25).** `CohortEscrow` is read when **round 1 of the game is created**, not at the block `Snapshot(m)` finalizes. The superseded wording was not implementable, and the circularity is structural rather than a detail: for an attested component, `Snapshot(m)` *consumes* the oracle's settled value for `(c, m)`, so it cannot also be the input that prices the game which produces that value. The game-creation read is what the paragraph below already requires of `B_1` as a whole, it is equally deterministic and on-chain, and it is equally immune to later escrow movement — which is the property the original wording was reaching for. A reporter is therefore priced against the exposure standing when they choose to report.
 
 **Per-game freezing of `B_1` and `R_max` (normative).** Both bind **once**, when round 1 of a `(component, epoch, spec_version)` game is created, and are stored with the game. Every subsequent escalation derives `B_r` from the stored `B_1` by the doubling rule above and tests terminality against the stored `R_max`; no escalation re-reads `orc.bond_floor`, `orc.bond_bps` or `orc.rounds`. A META amendment to any of those three therefore prices only games opened after it takes effect. The freeze is required, not merely convenient: a live read would let a lawful amendment retroactively under-collateralize a component that was admitted under the §6.3 coverage rule at the older parameters, and would make the §13 bond identity unsatisfiable on states the protocol can lawfully reach. An implementation MUST additionally refuse to open a game whose complete frozen ladder (through `B_1 · 2^(R_max−1)`) is not representable in `Balance`, so that a lawfully opened round can never become uncloseable. This extends §13's freezing language — which scopes "no mid-game repricing" to *escrow* movement — to parameter amendment as well.
 

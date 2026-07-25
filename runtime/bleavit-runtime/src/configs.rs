@@ -5216,12 +5216,42 @@ impl pallet_oracle::ReportingContext for RuntimeReporting {
             }
             #[cfg(not(feature = "runtime-benchmarks"))]
             {
-                // A8 fail-closed: 07 §6.1 freezes value-at-risk at Snapshot(m),
-                // but no pallet currently stores that snapshot. Reading mutable
-                // live vault escrow could only reduce a later reporter bond, so
-                // price the report out until the oracle snapshot owner lands the
-                // frozen backing (SQ-174).
-                Balance::MAX
+                // 07 §6.1 (SQ-174): `StakeAtRisk(c, m) = Σ CohortEscrow(k)` over
+                // every cohort whose frozen MetricSpec consumes `c` for
+                // measurement epoch `m`, and `CohortEscrow(k) = Σ_pid
+                // escrowed(pid)` over that cohort's vaults.
+                //
+                // The read is **live here and frozen by the caller**: §6.1's
+                // *Per-game freezing* paragraph binds `B_1` — and therefore the
+                // `StakeAtRisk` inside it — once, when round 1 of a
+                // `(component, epoch, spec_version)` game is created, storing it
+                // with the game. `oracle_core` already does exactly that, so a
+                // later escrow movement cannot reprice a live game. The same
+                // section's older `CohortEscrow` line instead says the escrow is
+                // "read at the block Snapshot(m) finalizes", which is not
+                // implementable: Snapshot(m) *consumes* the oracle's settled
+                // components for attested specs, so it cannot also be the input
+                // that prices the game producing them. That line is superseded
+                // (see the amendment in 07 §6.1).
+                //
+                // Bounded: at most `MAX_NON_TERMINAL_COHORTS_BOUND` cohorts,
+                // each with ≤ 5 proposals (13 §4), so ≤ 20 vault reads.
+                pallet_epoch::CohortSchedules::<Runtime>::iter_values()
+                    .filter(|schedule| {
+                        cohort_consumes_measurement(schedule, epoch)
+                            && schedule
+                                .specs
+                                .iter()
+                                .any(|(_, version)| spec_contains_component(*version, component))
+                    })
+                    .fold(0_u128, |total, schedule| {
+                        schedule.specs.iter().fold(total, |sum, (pid, _)| {
+                            sum.saturating_add(
+                                pallet_conditional_ledger::Vaults::<Runtime>::get(pid)
+                                    .map_or(0, |vault| vault.escrowed),
+                            )
+                        })
+                    })
             }
         } else {
             0

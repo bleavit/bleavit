@@ -216,6 +216,20 @@ impl ProbeDispatch for () {
 /// The sink is infallible so XCM-health recording can never affect the
 /// fail-static reserve-health transition or the calling keeper crank (07 §8;
 /// 09 §6.4).
+/// Worst-case weight the bounded folded-slot loop adds to `crank_reserve_probe`
+/// (07 §8; SQ-195; I-20; 15 §4.5).
+///
+/// The generated benchmark measures **one** `probe_outcome` invocation — the
+/// single timeout path — but a keeper returning after an outage folds up to
+/// [`MAX_FOLDED_PROBE_SLOT_RECORDS`] slots, and each invocation mutates the
+/// runtime sink's two welfare items (the epoch index and the day outcome). The
+/// declared weight must bound the worst case, so it carries the full addend and
+/// the dispatch refunds the slots it did not use via `PostDispatchInfo`.
+fn folded_probe_slot_weight<T: Config>() -> frame_support::weights::Weight {
+    use frame_support::traits::Get;
+    <T as frame_system::Config>::DbWeight::get().reads_writes(2, 2)
+}
+
 /// Bound on how many folded no-attempt probe slots one crank records
 /// individually (07 §8; I-20). A longer outage leaves its remaining days
 /// unrecorded, which the cover-complete epoch projection scores as failures —
@@ -859,8 +873,13 @@ pub mod pallet {
         /// XCM-free [`ProbeDispatch`] seam; send failure remains fail-static
         /// through the pending probe's timeout (I-24, rule 7).
         #[pallet::call_index(8)]
-        #[pallet::weight(T::WeightInfo::crank_reserve_probe())]
-        pub fn crank_reserve_probe(origin: OriginFor<T>) -> DispatchResult {
+        #[pallet::weight(
+            T::WeightInfo::crank_reserve_probe().saturating_add(
+                folded_probe_slot_weight::<T>()
+                    .saturating_mul(u64::from(MAX_FOLDED_PROBE_SLOT_RECORDS))
+            )
+        )]
+        pub fn crank_reserve_probe(origin: OriginFor<T>) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
             let was_armed = ReserveProbeArmed::<T>::get();
             let params = T::Params::get();
@@ -954,7 +973,8 @@ pub mod pallet {
             // epoch projection already scores as failures, so truncation is
             // fail-static rather than health-creating (I-20).
             let interval = params.probe_interval.max(1);
-            for slot in 0..missed.min(MAX_FOLDED_PROBE_SLOT_RECORDS) {
+            let recorded_slots = missed.min(MAX_FOLDED_PROBE_SLOT_RECORDS);
+            for slot in 0..recorded_slots {
                 let opened_at =
                     last_probe_at.saturating_add(interval.saturating_mul(slot.saturating_add(1)));
                 T::ProbeTimeoutSink::probe_outcome(opened_at, false);
@@ -970,7 +990,20 @@ pub mod pallet {
                 // B5 recalibrates this weight for the post-commit rebate write/payout.
                 T::KeeperRebate::rebate(&who, CrankClass::OracleLine);
             }
-            Ok(())
+            // Refund the folded slots this call did not record. The declared
+            // weight bounds the worst case at `MAX_FOLDED_PROBE_SLOT_RECORDS`
+            // sink invocations; a steady-state crank makes at most one, so
+            // charging the bound unrefunded would price every healthy crank at
+            // an outage's cost (15 §4.5).
+            let unused = u64::from(MAX_FOLDED_PROBE_SLOT_RECORDS.saturating_sub(recorded_slots));
+            Ok(frame_support::dispatch::PostDispatchInfo {
+                actual_weight: Some(T::WeightInfo::crank_reserve_probe().saturating_add(
+                    folded_probe_slot_weight::<T>().saturating_mul(
+                        u64::from(MAX_FOLDED_PROBE_SLOT_RECORDS).saturating_sub(unused),
+                    ),
+                )),
+                pays_fee: frame_support::dispatch::Pays::Yes,
+            })
         }
 
         /// `oracle.adjudicate` — the sole privileged call: the `OracleResolution`
@@ -1057,12 +1090,17 @@ pub mod pallet {
             // the outcome belongs to the day the probe measured, not the day
             // its answer happened to arrive.
             let opened_at = ReserveHealth::<T>::get().pending_since.unwrap_or(now);
-            Self::mutate_reserve_health(|o| {
+            let effective = Self::mutate_reserve_health(|o| {
                 o.reserve_probe_result_with_params(now, query_id, passed, &params)
             })?;
             // Only a response the core accepted reaches here; a wrong-origin,
             // replayed or unknown id errors above and records nothing (07 §8).
-            T::ProbeTimeoutSink::probe_outcome(opened_at, passed);
+            //
+            // Forward the **effective** outcome the core scored, never the
+            // reported one: a success arriving at or after the timeout, or while
+            // the live probe configuration is invalid, is a failure, and welfare
+            // must record the same fact the health state did.
+            T::ProbeTimeoutSink::probe_outcome(opened_at, effective);
             Ok(())
         }
 

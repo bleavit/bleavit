@@ -18252,3 +18252,68 @@ fn false_footprint_is_slashed_even_when_also_domain_inadmissible() {
         );
     });
 }
+
+/// SQ-174 (2026-07-25): `StakeAtRisk(c, m)` is a real quantity, not the
+/// `Balance::MAX` sentinel that used to refuse every exposure-bearing report.
+///
+/// 07 §6.1 defines it as `Σ CohortEscrow(k)` over the cohorts whose frozen
+/// MetricSpec consumes `c` for measurement epoch `m`, and the section's
+/// *Per-game freezing* paragraph binds `B_1` — and so this value — once at round-1
+/// creation. The superseded `CohortEscrow` wording read escrow "at the block
+/// Snapshot(m) finalizes", which is circular for an attested component: that
+/// snapshot *consumes* the settled value the game produces. The `Balance::MAX`
+/// sentinel masked the gap by overflowing `round_bond`'s checked multiplication,
+/// so the reporting game failed closed by accident of an unrelated defect.
+#[test]
+fn sq174_stake_at_risk_sums_consuming_cohort_escrow() {
+    const COMPONENT: u16 = 1;
+    const SPEC: u16 = 61;
+    const MEASUREMENT: futarchy_primitives::EpochId = 7;
+
+    development_ext().execute_with(|| {
+        let stake = || {
+            <crate::configs::RuntimeReporting as pallet_oracle::ReportingContext>::stake_at_risk(
+                COMPONENT,
+                MEASUREMENT,
+            )
+        };
+
+        // No cohort consumes the component yet: no exposure, no bond scaling.
+        assert_eq!(stake(), 0);
+
+        // A cohort whose frozen spec carries the component and whose measurement
+        // window covers epoch 7, with two proposals holding escrow.
+        install_single_active_metric_spec(SPEC).expect("spec installs");
+        for (pid, escrowed) in [(801_u64, 300), (802_u64, 500)] {
+            let mut vault = conditional_ledger_core::VaultInfo::open(SPEC);
+            vault.escrowed = escrowed * currency::USDC;
+            pallet_conditional_ledger::Vaults::<Runtime>::insert(pid, vault);
+        }
+        pallet_epoch::CohortSchedules::<Runtime>::insert(
+            MEASUREMENT - 1,
+            pallet_epoch::CohortSchedule {
+                epoch: MEASUREMENT - 1,
+                creation_epoch_length: 1,
+                measurement_until: MEASUREMENT + 1,
+                settlement_epoch: MEASUREMENT + 2,
+                specs: pallet_epoch::SpecBindings::truncate_from(vec![(801, SPEC), (802, SPEC)]),
+            },
+        );
+
+        assert_eq!(
+            stake(),
+            800 * currency::USDC,
+            "StakeAtRisk must be the summed cohort escrow, not the MAX sentinel",
+        );
+        assert_ne!(stake(), Balance::MAX);
+
+        // The bond it prices is now representable, so a report can open at all.
+        let params =
+            <crate::configs::RuntimeOracleParams as pallet_oracle::OracleParamsProvider>::get();
+        assert!(pallet_oracle::round_bond(stake(), 1, &params).is_ok());
+        assert!(
+            pallet_oracle::round_bond(Balance::MAX, 1, &params).is_err(),
+            "the superseded sentinel overflowed the bond — the accidental fail-closed",
+        );
+    });
+}
