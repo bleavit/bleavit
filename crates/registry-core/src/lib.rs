@@ -236,6 +236,12 @@ pub enum Error {
     /// bond cannot be priced. Filing refuses before any state mutation (G-1).
     /// Appended last — the preceding discriminants are SCALE-stable.
     ExposureUnavailable,
+    /// A terminal verdict named an evidence hash other than the one the challenge
+    /// committed, so it was authored against a different filing than the one it
+    /// would resolve (07 §7 *terminal resolution*). The bond stays custodied and
+    /// the filing stays `Challenged` (G-1). Appended last — the preceding
+    /// discriminants are SCALE-stable.
+    EvidenceMismatch,
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
@@ -472,18 +478,46 @@ impl Registry {
         Ok(())
     }
 
+    /// 07 §7 terminal resolution of the single counter-round. The verdict is
+    /// discretionary — neither of §7's earlier-stated closure paths is available
+    /// to a registry filing (see the terminal-resolution note there) — so the two
+    /// constraints below are what keep it from being an unconstrained binary
+    /// authority over custodied bonds (R-7).
+    ///
+    /// `evidence_hash` restates the challenger's committed content hash. It is a
+    /// **commitment binding, not a proof**: the registry stores hashes only
+    /// (`MaxEvidenceLen = 32`, 02 §9), so no preimage is available to recompute
+    /// against. Its job is to bind the verdict to the filing it was authored
+    /// about — `(epoch, filing_id)` are two integers, and a mis-parameterised
+    /// terminal dispatch would otherwise silently slash the wrong party's bond.
+    /// With the binding it fails closed instead (G-1).
     pub fn resolve_challenge(
         &mut self,
+        now: BlockNumber,
         epoch: EpochId,
         filing_id: FilingId,
         uphold: bool,
+        evidence_hash: H256,
     ) -> Result<(), Error> {
         let (who, challenger, bond) = {
             let f = self.filing_mut(epoch, filing_id)?;
-            let challenger = match f.state {
-                FilingState::Challenged { challenger, .. } => challenger,
-                _ => return Err(Error::WindowOpen),
+            let (challenger, window_end, committed) = match f.state {
+                FilingState::Challenged {
+                    challenger,
+                    window_end,
+                    evidence_hash,
+                    ..
+                } => (challenger, window_end, evidence_hash),
+                // A filing still inside its own challenge window has no
+                // counter-round to resolve; a terminal one has already resolved.
+                // These were previously conflated as `WindowOpen`.
+                FilingState::Filed { .. } => return Err(Error::WindowOpen),
+                _ => return Err(Error::AlreadyFinal),
             };
+            // Both checks precede every mutation, so a refused verdict leaves the
+            // filing exactly as it was.
+            ensure!(committed == evidence_hash, Error::EvidenceMismatch);
+            ensure!(now > window_end, Error::WindowOpen);
             f.state = if uphold {
                 FilingState::Upheld
             } else {
@@ -947,7 +981,19 @@ mod tests {
             r.challenge_filing(acct(5), 3, 9, id, h(8)),
             Err(Error::AlreadyChallenged)
         );
-        r.resolve_challenge(9, id, false).unwrap();
+        // The counter-round window opened at block 2, so the verdict is admissible
+        // only strictly after it, and only against the committed evidence hash.
+        let after_counter_round = 2 + REG_WINDOW_BLOCKS + 1;
+        assert_eq!(
+            r.resolve_challenge(2, 9, id, false, h(7)),
+            Err(Error::WindowOpen)
+        );
+        assert_eq!(
+            r.resolve_challenge(after_counter_round, 9, id, false, h(8)),
+            Err(Error::EvidenceMismatch)
+        );
+        r.resolve_challenge(after_counter_round, 9, id, false, h(7))
+            .unwrap();
         assert!(matches!(r.filings[0].1.state, FilingState::Rejected));
         assert!(r
             .events
@@ -1040,8 +1086,10 @@ mod tests {
         );
         // Resolve and close epoch 1; its filing_count slot must free up.
         r.challenge_filing(acct(8), 2, 1, 0, h(7)).unwrap();
-        r.resolve_challenge(1, 0, true).unwrap();
-        r.close_epoch(1, 11, 10).unwrap();
+        let after_counter_round = 2 + REG_WINDOW_BLOCKS + 1;
+        r.resolve_challenge(after_counter_round, 1, 0, true, h(7))
+            .unwrap();
+        r.close_epoch(1, after_counter_round + 1, 10).unwrap();
         let id = r
             .file(file_input(
                 RegistryKind::Incident,

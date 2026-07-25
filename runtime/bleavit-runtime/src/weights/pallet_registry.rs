@@ -8,24 +8,23 @@
 //! WASM-EXECUTION: `Compiled`, CHAIN: `None`, DB CACHE: 1024
 
 // Executed Command:
-// /home/chralt/.cargo/bin/frame-omni-bencher
+// frame-omni-bencher
 // v1
 // benchmark
 // pallet
 // --runtime
 // target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
-// --pallets
+// --pallet
 // pallet_registry
-// --all
+// --extrinsic
+// *
 // --steps
 // 50
 // --repeat
 // 20
-// --min-duration
-// 0
-// --unsafe-overwrite-results
 // --output
-// runtime/bleavit-runtime/src/weights/pallet_registry.rs
+// /tmp/claude-1000/-home-development-bleavit/b40139b1-6248-4c1a-ad60-57e786f83c15/scratchpad/sq294-registry.rs
+// --unsafe-overwrite-results
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(unused_parens)]
@@ -42,7 +41,7 @@ impl<T: frame_system::Config> pallet_registry::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::CohortSchedules` (`max_values`: None, `max_size`: Some(157), added: 2632, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::Vaults` (r:20 w:0)
 	/// Proof: `ConditionalLedger::Vaults` (`max_values`: None, `max_size`: Some(184), added: 2659, mode: `MaxEncodedLen`)
-	/// Storage: `Constitution::Params` (r:3 w:0)
+	/// Storage: `Constitution::Params` (r:4 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
@@ -50,60 +49,60 @@ impl<T: frame_system::Config> pallet_registry::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Welfare::MetricSpecs` (r:1 w:0)
 	/// Proof: `Welfare::MetricSpecs` (`max_values`: None, `max_size`: Some(3379), added: 5854, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::Filings` (r:64 w:1)
-	/// Proof: `MilestoneRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::FilingCount` (r:5 w:4)
-	/// Proof: `MilestoneRegistry::FilingCount` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::Aggregates` (r:5 w:4)
-	/// Proof: `MilestoneRegistry::Aggregates` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::Filings` (r:64 w:1)
+	/// Proof: `IncidentRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::FilingCount` (r:5 w:4)
+	/// Proof: `IncidentRegistry::FilingCount` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::Aggregates` (r:5 w:4)
+	/// Proof: `IncidentRegistry::Aggregates` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
 	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Account` (r:2 w:2)
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn file() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `14803`
+		//  Measured:  `15270`
 		//  Estimated: `171934`
-		// Minimum execution time: 412_200_000 picoseconds.
-		Weight::from_parts(424_340_000, 0)
+		// Minimum execution time: 418_210_000 picoseconds.
+		Weight::from_parts(440_441_000, 0)
 			.saturating_add(Weight::from_parts(0, 171934))
-			.saturating_add(T::DbWeight::get().reads(108))
+			.saturating_add(T::DbWeight::get().reads(109))
 			.saturating_add(T::DbWeight::get().writes(12))
 	}
-	/// Storage: `MilestoneRegistry::Filings` (r:65 w:1)
-	/// Proof: `MilestoneRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
-	/// Storage: `Constitution::Params` (r:3 w:0)
+	/// Storage: `IncidentRegistry::Filings` (r:65 w:1)
+	/// Proof: `IncidentRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
+	/// Storage: `Constitution::Params` (r:4 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::FilingCount` (r:5 w:4)
-	/// Proof: `MilestoneRegistry::FilingCount` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::Aggregates` (r:5 w:4)
-	/// Proof: `MilestoneRegistry::Aggregates` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::FilingCount` (r:5 w:4)
+	/// Proof: `IncidentRegistry::FilingCount` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::Aggregates` (r:5 w:4)
+	/// Proof: `IncidentRegistry::Aggregates` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
 	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Account` (r:2 w:2)
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn challenge_filing() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `10712`
+		//  Measured:  `11140`
 		//  Estimated: `174605`
-		// Minimum execution time: 316_540_000 picoseconds.
-		Weight::from_parts(322_070_000, 0)
+		// Minimum execution time: 322_141_000 picoseconds.
+		Weight::from_parts(338_001_000, 0)
 			.saturating_add(Weight::from_parts(0, 174605))
-			.saturating_add(T::DbWeight::get().reads(81))
+			.saturating_add(T::DbWeight::get().reads(82))
 			.saturating_add(T::DbWeight::get().writes(12))
 	}
 	/// Storage: `Oracle::Watchtowers` (r:1 w:0)
 	/// Proof: `Oracle::Watchtowers` (`max_values`: None, `max_size`: Some(69), added: 2544, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::AckRecords` (r:1 w:1)
-	/// Proof: `MilestoneRegistry::AckRecords` (`max_values`: None, `max_size`: Some(88), added: 2563, mode: `MaxEncodedLen`)
-	/// Storage: `Constitution::Params` (r:9 w:0)
+	/// Storage: `IncidentRegistry::AckRecords` (r:1 w:1)
+	/// Proof: `IncidentRegistry::AckRecords` (`max_values`: None, `max_size`: Some(88), added: 2563, mode: `MaxEncodedLen`)
+	/// Storage: `Constitution::Params` (r:10 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::Filings` (r:65 w:1)
-	/// Proof: `MilestoneRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::FilingCount` (r:5 w:4)
-	/// Proof: `MilestoneRegistry::FilingCount` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::Aggregates` (r:5 w:4)
-	/// Proof: `MilestoneRegistry::Aggregates` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::Filings` (r:65 w:1)
+	/// Proof: `IncidentRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::FilingCount` (r:5 w:4)
+	/// Proof: `IncidentRegistry::FilingCount` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::Aggregates` (r:5 w:4)
+	/// Proof: `IncidentRegistry::Aggregates` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
 	/// Storage: `FutarchyTreasury::State` (r:1 w:1)
 	/// Proof: `FutarchyTreasury::State` (`max_values`: Some(1), `max_size`: Some(25361), added: 25856, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
@@ -112,22 +111,22 @@ impl<T: frame_system::Config> pallet_registry::WeightInfo for WeightInfo<T> {
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn ack_observed() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `21459`
+		//  Measured:  `21850`
 		//  Estimated: `174605`
-		// Minimum execution time: 368_550_000 picoseconds.
-		Weight::from_parts(377_920_000, 0)
+		// Minimum execution time: 377_251_000 picoseconds.
+		Weight::from_parts(400_500_000, 0)
 			.saturating_add(Weight::from_parts(0, 174605))
-			.saturating_add(T::DbWeight::get().reads(90))
+			.saturating_add(T::DbWeight::get().reads(91))
 			.saturating_add(T::DbWeight::get().writes(14))
 	}
-	/// Storage: `Constitution::Params` (r:9 w:0)
+	/// Storage: `Constitution::Params` (r:10 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::Filings` (r:65 w:20)
-	/// Proof: `MilestoneRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::FilingCount` (r:5 w:4)
-	/// Proof: `MilestoneRegistry::FilingCount` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::Aggregates` (r:5 w:4)
-	/// Proof: `MilestoneRegistry::Aggregates` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::Filings` (r:65 w:20)
+	/// Proof: `IncidentRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::FilingCount` (r:5 w:4)
+	/// Proof: `IncidentRegistry::FilingCount` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::Aggregates` (r:5 w:4)
+	/// Proof: `IncidentRegistry::Aggregates` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
 	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Account` (r:3 w:3)
@@ -136,72 +135,72 @@ impl<T: frame_system::Config> pallet_registry::WeightInfo for WeightInfo<T> {
 	/// Proof: `FutarchyTreasury::State` (`max_values`: Some(1), `max_size`: Some(25361), added: 25856, mode: `MaxEncodedLen`)
 	fn crank_close() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `21208`
+		//  Measured:  `21672`
 		//  Estimated: `174605`
-		// Minimum execution time: 934_590_000 picoseconds.
-		Weight::from_parts(963_900_000, 0)
+		// Minimum execution time: 950_860_000 picoseconds.
+		Weight::from_parts(1_004_761_000, 0)
 			.saturating_add(Weight::from_parts(0, 174605))
-			.saturating_add(T::DbWeight::get().reads(89))
+			.saturating_add(T::DbWeight::get().reads(90))
 			.saturating_add(T::DbWeight::get().writes(33))
 	}
-	/// Storage: `Constitution::Params` (r:3 w:0)
+	/// Storage: `Constitution::Params` (r:4 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::Filings` (r:65 w:1)
-	/// Proof: `MilestoneRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::FilingCount` (r:5 w:4)
-	/// Proof: `MilestoneRegistry::FilingCount` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::Aggregates` (r:5 w:4)
-	/// Proof: `MilestoneRegistry::Aggregates` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::Filings` (r:65 w:1)
+	/// Proof: `IncidentRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::FilingCount` (r:5 w:4)
+	/// Proof: `IncidentRegistry::FilingCount` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::Aggregates` (r:5 w:4)
+	/// Proof: `IncidentRegistry::Aggregates` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
 	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Account` (r:3 w:3)
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn resolve_challenge() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `10814`
+		//  Measured:  `11241`
 		//  Estimated: `174605`
-		// Minimum execution time: 340_650_000 picoseconds.
-		Weight::from_parts(343_560_000, 0)
+		// Minimum execution time: 349_070_000 picoseconds.
+		Weight::from_parts(362_140_000, 0)
 			.saturating_add(Weight::from_parts(0, 174605))
-			.saturating_add(T::DbWeight::get().reads(82))
+			.saturating_add(T::DbWeight::get().reads(83))
 			.saturating_add(T::DbWeight::get().writes(13))
 	}
-	/// Storage: `MilestoneRegistry::FilingCount` (r:5 w:4)
-	/// Proof: `MilestoneRegistry::FilingCount` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::FilingCount` (r:5 w:4)
+	/// Proof: `IncidentRegistry::FilingCount` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Schedule` (r:1 w:0)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
-	/// Storage: `Constitution::Params` (r:3 w:0)
+	/// Storage: `Constitution::Params` (r:4 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::Filings` (r:65 w:0)
-	/// Proof: `MilestoneRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::Aggregates` (r:4 w:4)
-	/// Proof: `MilestoneRegistry::Aggregates` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::ClosedAt` (r:0 w:1)
-	/// Proof: `MilestoneRegistry::ClosedAt` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::Filings` (r:65 w:0)
+	/// Proof: `IncidentRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::Aggregates` (r:4 w:4)
+	/// Proof: `IncidentRegistry::Aggregates` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::ClosedAt` (r:0 w:1)
+	/// Proof: `IncidentRegistry::ClosedAt` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
 	fn close_epoch() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `9452`
+		//  Measured:  `9878`
 		//  Estimated: `174605`
-		// Minimum execution time: 285_900_000 picoseconds.
-		Weight::from_parts(294_390_000, 0)
+		// Minimum execution time: 287_971_000 picoseconds.
+		Weight::from_parts(300_350_000, 0)
 			.saturating_add(Weight::from_parts(0, 174605))
-			.saturating_add(T::DbWeight::get().reads(79))
+			.saturating_add(T::DbWeight::get().reads(80))
 			.saturating_add(T::DbWeight::get().writes(9))
 	}
-	/// Storage: `MilestoneRegistry::ClosedAt` (r:1 w:1)
-	/// Proof: `MilestoneRegistry::ClosedAt` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
-	/// Storage: `Constitution::Params` (r:11 w:0)
+	/// Storage: `IncidentRegistry::ClosedAt` (r:1 w:1)
+	/// Proof: `IncidentRegistry::ClosedAt` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
+	/// Storage: `Constitution::Params` (r:12 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::Filings` (r:65 w:64)
-	/// Proof: `MilestoneRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::FilingCount` (r:4 w:3)
-	/// Proof: `MilestoneRegistry::FilingCount` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::Aggregates` (r:5 w:4)
-	/// Proof: `MilestoneRegistry::Aggregates` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::AckRecords` (r:128 w:128)
-	/// Proof: `MilestoneRegistry::AckRecords` (`max_values`: None, `max_size`: Some(88), added: 2563, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::Filings` (r:65 w:64)
+	/// Proof: `IncidentRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::FilingCount` (r:4 w:3)
+	/// Proof: `IncidentRegistry::FilingCount` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::Aggregates` (r:5 w:4)
+	/// Proof: `IncidentRegistry::Aggregates` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
+	/// Storage: `IncidentRegistry::AckRecords` (r:128 w:128)
+	/// Proof: `IncidentRegistry::AckRecords` (`max_values`: None, `max_size`: Some(88), added: 2563, mode: `MaxEncodedLen`)
 	/// Storage: `FutarchyTreasury::State` (r:1 w:1)
 	/// Proof: `FutarchyTreasury::State` (`max_values`: Some(1), `max_size`: Some(25361), added: 25856, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
@@ -212,12 +211,12 @@ impl<T: frame_system::Config> pallet_registry::WeightInfo for WeightInfo<T> {
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn reap_epoch() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `29483`
+		//  Measured:  `29840`
 		//  Estimated: `329054`
-		// Minimum execution time: 572_360_000 picoseconds.
-		Weight::from_parts(584_300_000, 0)
+		// Minimum execution time: 576_001_000 picoseconds.
+		Weight::from_parts(605_431_000, 0)
 			.saturating_add(Weight::from_parts(0, 329054))
-			.saturating_add(T::DbWeight::get().reads(219))
+			.saturating_add(T::DbWeight::get().reads(220))
 			.saturating_add(T::DbWeight::get().writes(204))
 	}
 }

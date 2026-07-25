@@ -15,9 +15,11 @@
 //! * origin-checked `#[pallet::call]` extrinsics — `Signed` for the
 //!   permissionless bonded workflow (`file` / `challenge_filing` / `ack_observed`
 //!   / `crank_close` / `close_epoch` / `reap_epoch`), and
-//!   [`Config::ResolutionAuthority`] for `resolve_challenge` (the round-2 outcome
-//!   arrives from a keeper `recompute_proof` or the `OracleResolution` track — 07
-//!   §7 / §5.4, wired in B1a);
+//!   [`Config::ResolutionAuthority`] for `resolve_challenge` (the counter-round
+//!   verdict arrives on the `OracleResolution` values track — 07 §7 / §5.4, wired
+//!   in B1a; the mechanical `recompute_proof` route §9 offers the oracle is
+//!   structurally unavailable to a registry filing, see §7's terminal-resolution
+//!   note, and is deliberately not implemented here);
 //! * real USDC bond custody via `T::Collateral` ([`fungibles::Mutate`]): the
 //!   `reg.bond_*` bond is escrowed on `file`/`challenge_filing` and refunded or
 //!   slashed 40 / 60 on resolution (07 §5.5/§7), so the registry's held bonds and
@@ -229,10 +231,12 @@ pub mod pallet {
         /// (→ `pallet-epoch` / `pallet-welfare`, B1a).
         type Epoch: EpochContext;
 
-        /// Resolves a challenged filing's round-2 outcome (07 §7): a keeper
-        /// `recompute_proof` or the `OracleResolution` values track. No signed
-        /// origin resolves here; the runtime wires it in B1a. Narrow by
-        /// construction (rule 6) — a public caller can never force an outcome.
+        /// Resolves a challenged filing's counter-round (07 §7): the
+        /// `OracleResolution` values track, which is the only terminal path a
+        /// registry filing has. No signed origin resolves here; the runtime wires
+        /// it in B1a. Narrow by construction (rule 6) — a public caller can never
+        /// force an outcome, and the authority itself is bound by the committed
+        /// evidence hash and the counter-round window (SQ-294).
         type ResolutionAuthority: EnsureOrigin<Self::RuntimeOrigin>;
 
         /// Destination for the 60 % INSURANCE share of a slashed bond (07 §5.5).
@@ -477,6 +481,11 @@ pub mod pallet {
         /// value-scaled filing bond cannot be priced (07 §7; G-1). Appended last
         /// to preserve every preceding metadata discriminant.
         ExposureUnavailable,
+        /// The terminal verdict named an evidence hash other than the one the
+        /// challenge committed, so it was authored against a different filing than
+        /// the one it would resolve. The bond stays custodied (07 §7; G-1).
+        /// Appended last to preserve every preceding metadata discriminant.
+        EvidenceMismatch,
     }
 
     // --------------------------------------------------------------------- hooks
@@ -630,8 +639,16 @@ pub mod pallet {
         }
 
         /// 07 §7. Resolve a challenged filing's counter-round: the loser forfeits
-        /// the bond 40 / 60. The outcome arrives from a keeper `recompute_proof`
-        /// or the `OracleResolution` track (07 §5.4) — [`Config::ResolutionAuthority`].
+        /// the bond 40 / 60. The verdict arrives on the `OracleResolution` values
+        /// track (07 §5.4) via [`Config::ResolutionAuthority`], which is the
+        /// registry's **only** terminal path — §9's mechanical `recompute_proof`
+        /// needs a `formula_ref` a bonded off-chain-fact claim does not have, and
+        /// §7's escalation alternative needs a `(component, epoch)` game that an
+        /// Incident filing has no component for (`I` is not a `MetricId`).
+        ///
+        /// `evidence_hash` must restate the hash the challenge committed, and the
+        /// counter-round window must have elapsed. Both bind the discretion the
+        /// single terminal path necessarily carries (SQ-294).
         #[pallet::call_index(4)]
         #[pallet::weight(T::WeightInfo::resolve_challenge())]
         pub fn resolve_challenge(
@@ -639,9 +656,13 @@ pub mod pallet {
             epoch: EpochId,
             filing_id: FilingId,
             uphold: bool,
+            evidence_hash: H256,
         ) -> DispatchResult {
             T::ResolutionAuthority::ensure_origin(origin)?;
-            Self::run_scoped(epoch, |reg| reg.resolve_challenge(epoch, filing_id, uphold))
+            let now = Self::now();
+            Self::run_scoped(epoch, |reg| {
+                reg.resolve_challenge(now, epoch, filing_id, uphold, evidence_hash)
+            })
         }
 
         /// 07 §7. Keeper: once every filing of `epoch` is terminal, derive the
@@ -1232,6 +1253,7 @@ pub mod pallet {
                 CoreError::AlreadyQuorum => Error::<T, I>::AlreadyQuorum.into(),
                 CoreError::MilestoneTargetUnset => Error::<T, I>::MilestoneTargetUnset.into(),
                 CoreError::ExposureUnavailable => Error::<T, I>::ExposureUnavailable.into(),
+                CoreError::EvidenceMismatch => Error::<T, I>::EvidenceMismatch.into(),
             }
         }
     }
