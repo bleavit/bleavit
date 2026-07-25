@@ -966,10 +966,13 @@ impl ExecutionGuard {
                     (true, _) => RatificationStatus::NoPassedRecord,
                 },
                 // 02 §4 field "rate meters would admit execution now". The
-                // frame-free core cannot preview the runtime treasury/issuance
-                // meters, and the retired `BlockedMeters` set (SQ-146) was
-                // always empty, so this was already unconditionally `true`.
-                // A live preview at the runtime view layer is deferred (SQ-461).
+                // frame-free core cannot preview the runtime's treasury/issuance
+                // meters or `code.spacing`, so this is a placeholder that the
+                // owning pallet MUST overwrite per pid — `Pallet::queue_view` is
+                // the only production reader and does exactly that (SQ-461).
+                // `true` is deliberately the placeholder rather than `false`: it
+                // keeps the core's own differential fixtures independent of
+                // runtime meter state, and no production path publishes it.
                 meters_clear: true,
             })
             .collect()

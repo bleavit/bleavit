@@ -4097,15 +4097,81 @@ impl pallet_execution_guard::PendingOutflowSync for RuntimePendingOutflowSync {
 
 /// Read-only decision-time preview of every live treasury/issuance/spacing
 /// meter touched by the exact recursively decoded batch.
-pub(crate) fn preview_batch_admission(
-    calls: &pallet_execution_guard::pallet::RuntimeBatch<Runtime>,
-) -> bool {
+pub(crate) fn preview_batch_admission(calls: &[RuntimeCall]) -> bool {
+    matches!(
+        preview_admission_inner(calls, true),
+        PreviewVerdict::Admits | PreviewVerdict::NoVerdict
+    )
+}
+
+/// The 09 §1.2(7) **treasury-outflow and issuance rate meters** alone, for the
+/// guard's execute-time step (7) and its `meters_clear` projection (SQ-461).
+///
+/// Two deliberate narrowings relative to [`preview_batch_admission`]:
+///
+/// * `code.spacing` is excluded. The guard owns that meter because it alone knows
+///   the D-9 expedited-CODE exemption (`Expedited[pid]`); folding it in here would
+///   refuse an expedited emergency payload whose spacing window has not elapsed —
+///   exactly the lane the exemption exists for.
+/// * Only a genuine rate-meter refusal blocks. Every other treasury error
+///   (`InsufficientFunds`, `StreamRequired`, `NavFloorUnmet`, `BadOrigin`, …) is a
+///   permanent payload defect rather than transient contention, and belongs to
+///   step (12) dispatch, whose atomic rollback records the T18 failure and its
+///   bounded retry window. Reporting those at step (7) would both misdiagnose them
+///   as `MetersBlocked` and hand a permanently doomed payload the *full* grace
+///   window to be re-cranked in.
+pub(crate) fn preview_meter_admission(calls: &[RuntimeCall]) -> bool {
+    // Only a *refusal the preview can stand behind* blocks. `NoVerdict` fails
+    // OPEN, which is the safe direction here and not a weakening: the meters are
+    // still genuinely enforced by the dispatched calls at step (12). Step (7)
+    // exists only to convert transient contention into a refusal that records no
+    // failure, so blocking on a verdict we cannot trust would strand an adopted
+    // proposal for its whole grace window over a batch that would have succeeded.
+    !matches!(
+        preview_admission_inner(calls, false),
+        PreviewVerdict::Refused(
+            pallet_futarchy_treasury::CoreError::MeterExhausted
+                | pallet_futarchy_treasury::CoreError::IssuanceCapExceeded
+        )
+    )
+}
+
+/// The outcome of simulating a batch against a cloned treasury.
+enum PreviewVerdict {
+    /// Every leaf was modelled and every meter admitted.
+    Admits,
+    /// The first refusal, with every leaf before it faithfully simulated.
+    Refused(pallet_futarchy_treasury::CoreError),
+    /// **No verdict.** The batch reached a treasury call this preview does not
+    /// simulate, so the simulated state is stale for everything after it. NAV —
+    /// and therefore every meter base — is a pure function of treasury state
+    /// (`nav()` reads `main_usdc`, the budget lines, open-stream remainders and
+    /// obligations), so a `FutarchyTreasury` leaf outside the four simulated
+    /// arms is exactly the case where a later meter check would be measured
+    /// against the wrong base. `[sweep_insurance, spend]` is the worked example:
+    /// the sweep raises NAV, and judging the spend without it can refuse a batch
+    /// whose ordered atomic dispatch would succeed.
+    NoVerdict,
+}
+
+fn preview_admission_inner(calls: &[RuntimeCall], include_spacing: bool) -> PreviewVerdict {
     let mut treasury = crate::FutarchyTreasury::treasury();
     let now = System::block_number();
-    let mut ok = true;
+    let mut verdict = PreviewVerdict::Admits;
     let mut authorize_count = 0_u8;
     for call in calls {
         if !visit_runtime_leaves(call, &mut |leaf| {
+            if matches!(leaf, RuntimeCall::FutarchyTreasury(inner)
+            if !matches!(
+                inner,
+                pallet_futarchy_treasury::Call::fund_budget_line { .. }
+                    | pallet_futarchy_treasury::Call::spend { .. }
+                    | pallet_futarchy_treasury::Call::open_stream { .. }
+                    | pallet_futarchy_treasury::Call::issue_vit { .. }
+            )) {
+                verdict = PreviewVerdict::NoVerdict;
+                return false;
+            }
             let result = match leaf {
                 RuntimeCall::FutarchyTreasury(
                     pallet_futarchy_treasury::Call::fund_budget_line { line, amount },
@@ -4153,7 +4219,9 @@ pub(crate) fn preview_batch_admission(
                     *amount,
                     *line,
                 ),
-                RuntimeCall::System(frame_system::Call::authorize_upgrade { .. }) => {
+                RuntimeCall::System(frame_system::Call::authorize_upgrade { .. })
+                    if include_spacing =>
+                {
                     authorize_count = authorize_count.saturating_add(1);
                     let spacing_ok = authorize_count == 1
                         && pallet_execution_guard::LastUpgradeAuthorized::<Runtime>::get()
@@ -4168,15 +4236,23 @@ pub(crate) fn preview_batch_admission(
                 }
                 _ => Ok(()),
             };
-            if result.is_err() {
-                ok = false;
+            if let Err(error) = result {
+                verdict = PreviewVerdict::Refused(error);
+                return false;
             }
-            ok
+            true
         }) {
-            return false;
+            // The visitor stopped us, or the traversal itself refused. If we did
+            // not set a verdict, the refusal was the traversal's (over-deep or
+            // undecodable nesting) — steps (2), (6) and (11) own that, so it is
+            // not a meter verdict either.
+            return match verdict {
+                PreviewVerdict::Admits => PreviewVerdict::NoVerdict,
+                other => other,
+            };
         }
     }
-    ok
+    verdict
 }
 
 pub struct RuntimeConstitutionAccess;

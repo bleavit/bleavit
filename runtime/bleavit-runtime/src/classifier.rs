@@ -937,6 +937,13 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
             })
     }
 
+    fn meter_admission(calls: &[RuntimeCall]) -> bool {
+        // 09 §1.2(7): dry-run every treasury-outflow and issuance meter the exact
+        // decoded batch touches against a cloned aggregate. `code.spacing` stays
+        // with the guard, which owns the expedited exemption (SQ-461).
+        crate::configs::preview_meter_admission(calls)
+    }
+
     fn authorize_upgrade_hash(call: &RuntimeCall) -> Option<H256> {
         let system: Option<&frame_system::Call<Runtime>> = call.is_sub_type();
         match system {

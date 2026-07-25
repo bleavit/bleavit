@@ -266,13 +266,82 @@ fn queue_view_exposes_sorted_core_projection_and_meter_state() {
             view.iter().map(|entry| entry.pid).collect::<Vec<_>>(),
             vec![1, 2]
         );
-        // `meters_clear` is unconditionally `true` after the SQ-146 retirement of
-        // the inert `BlockedMeters` set (a live preview is deferred, SQ-461).
+        // SQ-461: `meters_clear` is now the live 09 §1.2(7) preview. The default
+        // `TestDispatcher` admits, so it reads `true` — but it must have been
+        // *asked*, once per queued proposal, about a non-empty decoded batch.
         assert!(view.iter().all(|entry| entry.meters_clear));
+        assert_eq!(MeterAdmissionQueries::get(), vec![1, 1]);
         assert!(view.iter().all(|entry| matches!(
             entry.ratification,
             futarchy_primitives::RatificationStatus::NotRequired
         )));
+    });
+}
+
+#[test]
+fn sq461_meter_contention_refuses_execute_without_spending_the_retry_budget() {
+    // 09 §1.2(7): treasury-outflow and issuance meters must admit the batch at
+    // step (7) — before any dispatch — and contention leaves the proposal queued
+    // to "retry within grace". The decisive assertion is `failed_at` staying
+    // `None`: recording a failure would move the proposal onto the shorter
+    // `failed_at + RETRY_WINDOW` clock, letting a transient meter consume a
+    // retry budget the spec grants against `grace_end`.
+    new_test_ext().execute_with(|| {
+        setup_param(1, 41);
+        let before = Queue::<Test>::get(1).expect("queued");
+        assert!(before.failed_at.is_none());
+
+        MetersAdmit::set(false);
+        assert_noop!(
+            GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
+            Error::<Test>::MetersBlocked
+        );
+
+        let after = Queue::<Test>::get(1).expect("meter contention keeps it queued");
+        assert!(
+            after.failed_at.is_none(),
+            "step (7) contention must not record a dispatch failure"
+        );
+        assert_eq!(after.grace_end, before.grace_end);
+        // Nothing dispatched, nothing recorded, no epoch hand-off, still pinned.
+        assert_eq!(pallet_test_dispatch::Value::<Test>::get(), 0);
+        assert!(ExecutionRecords::<Test>::get().is_empty());
+        assert!(epoch_calls().is_empty());
+        assert!(Unpinned::get().is_empty());
+        // The guard asked about the exact decoded batch, not an empty slice.
+        assert_eq!(MeterAdmissionQueries::get(), vec![1]);
+
+        // Once the meter clears, the same entry executes on its original grace.
+        MetersAdmit::set(true);
+        assert_ok!(GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1));
+        assert_eq!(pallet_test_dispatch::Value::<Test>::get(), 41);
+        assert_ok!(GuardPallet::do_try_state());
+    });
+}
+
+#[test]
+fn sq461_meters_clear_is_a_live_preview_and_fails_closed() {
+    // 02 §4's `meters_clear` must answer "would the meters admit execution now",
+    // and it must never answer `true` for a payload `execute` would refuse: a
+    // stale `true` is the one direction that misleads a keeper into spending a
+    // block on a doomed `execute` (G-1).
+    new_test_ext().execute_with(|| {
+        setup_param(1, 41);
+        assert!(GuardPallet::queue_view()[0].meters_clear);
+
+        MetersAdmit::set(false);
+        assert!(!GuardPallet::queue_view()[0].meters_clear);
+        // The hint agrees with what `execute` actually does at this block.
+        assert_noop!(
+            GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
+            Error::<Test>::MetersBlocked
+        );
+
+        // Fail-closed on an unreadable payload: the meters cannot be previewed at
+        // all, so the answer is `false` rather than an unexamined `true`.
+        MetersAdmit::set(true);
+        PreimageData::set(Vec::new());
+        assert!(!GuardPallet::queue_view()[0].meters_clear);
     });
 }
 
@@ -2293,7 +2362,11 @@ fn code_spacing_exact_boundary_and_expedited_zero_spacing_are_recorded() {
             GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
             Error::<Test>::MetersBlocked
         );
+        // SQ-461: the published hint tracks the spacing leg block for block, so it
+        // cannot drift from the check it previews.
+        assert!(!GuardPallet::queue_view()[0].meters_clear);
         System::set_block_number(23);
+        assert!(GuardPallet::queue_view()[0].meters_clear);
         assert_ok!(GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1));
         assert_eq!(UpgradeSpacingHistory::<Test>::get().last(), Some(&(23, 20)));
         assert_ok!(GuardPallet::do_try_state());
