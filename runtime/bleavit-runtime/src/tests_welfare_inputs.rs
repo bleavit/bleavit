@@ -470,3 +470,39 @@ fn sq195_pre_arm_days_are_outside_the_measured_range() {
         assert_eq!(epoch_r(), Some(futarchy_primitives::FixedU64(0)));
     });
 }
+
+/// SQ-195 (R-6 round 6): an **empty measured range** must not read as healthy.
+///
+/// Round 5's fix returned `Some(true)` when the probe armed inside an epoch's
+/// trailing partial day, reasoning that no completed cadence slot existed so
+/// there was nothing to score. That is the same "absence is healthy" defect in
+/// a new guise: `R = 1` was emitted for an epoch the probe never measured. The
+/// honest answer is that the metric is not measured — `None`, exactly as for an
+/// unarmed chain — so the crank fails status-quo-safe.
+#[test]
+fn sq195_empty_measured_range_is_unavailable_not_healthy() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 46;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::R);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let timing =
+            pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch).expect("live epoch has timing");
+
+        // Armed past the epoch's last whole day: nothing was ever measured.
+        pallet_oracle::ReserveProbeArmed::<Runtime>::put(true);
+        pallet_oracle::ReserveProbeArmedAt::<Runtime>::put(
+            timing.start.saturating_add(timing.length),
+        );
+
+        assert_eq!(
+            crate::configs::RuntimeMetricInputs::onchain_components(epoch, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::R)
+                .map(|c| c.value),
+            None,
+            "an epoch the probe never measured must be unavailable, never healthy",
+        );
+    });
+}

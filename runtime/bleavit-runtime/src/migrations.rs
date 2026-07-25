@@ -136,6 +136,12 @@ impl UncheckedOnRuntimeUpgrade for MigrateOracleReserveProbeV1Inner {
         health.last_probe_at = 0;
         pallet_oracle::ReserveHealth::<Runtime>::put(health);
         pallet_oracle::ReserveProbeArmed::<Runtime>::kill();
+        // SQ-195: the arming *block* is part of the same latch. Leaving it
+        // behind would contradict this migration's own contract — "leave
+        // `ReserveProbeArmed` false so the next readiness-qualified crank
+        // establishes the real cadence" — and hand the welfare `R` projection a
+        // measured-range start from a probe generation that no longer exists.
+        pallet_oracle::ReserveProbeArmedAt::<Runtime>::kill();
 
         pallet_constitution::PhaseFlags::<Runtime>::mutate(|bits| {
             if unhealthy {
@@ -149,9 +155,10 @@ impl UncheckedOnRuntimeUpgrade for MigrateOracleReserveProbeV1Inner {
         });
 
         // ReserveHealth, PhaseFlags and Treasury State reads; those three
-        // writes plus the explicit latch clear. VersionedMigration separately
-        // accounts for its StorageVersion read/write.
-        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(3, 4)
+        // writes plus the two explicit latch clears (armed flag and its block).
+        // VersionedMigration separately accounts for its StorageVersion
+        // read/write.
+        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(3, 5)
     }
 
     #[cfg(feature = "try-runtime")]
@@ -181,6 +188,10 @@ impl UncheckedOnRuntimeUpgrade for MigrateOracleReserveProbeV1Inner {
         frame_support::ensure!(
             !pallet_oracle::ReserveProbeArmed::<Runtime>::get(),
             "oracle v1 migration: legacy state incorrectly implied arming"
+        );
+        frame_support::ensure!(
+            pallet_oracle::ReserveProbeArmedAt::<Runtime>::get().is_none(),
+            "oracle v1 migration: a stale arming block survived the reset"
         );
         frame_support::ensure!(
             (pallet_constitution::PhaseFlags::<Runtime>::get()

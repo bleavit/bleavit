@@ -2133,25 +2133,37 @@ fn xcm_traffic_epoch_and_day() -> (EpochId, u8) {
         .unwrap_or_else(|| (pallet_epoch::EpochOf::<Runtime>::get().index, 0))
 }
 
-/// Attribute `at` to its `(epoch, day)` under the live schedule, or `None` when
-/// `at` predates the live epoch.
+/// Attribute `at` to its `(epoch, day)`, or `None` when no retained epoch owns it.
 ///
-/// A block before the live epoch's start belongs to an earlier epoch whose
-/// start this runtime no longer holds. Clamping it to day 0 of the live epoch
-/// would be actively wrong, not merely conservative: it records the outcome
-/// against a day the probe never measured *and* leaves the real day unrecorded.
-/// Returning `None` records nothing instead — the SQ-195 cover check then fails
-/// the true epoch on its missing day, which is the fail-static outcome (07 §8).
+/// The live schedule is checked first, then the retained `EpochTimings` ring —
+/// a probe opened just before an epoch roll and answered just after it belongs
+/// to the epoch it measured, and that epoch's timing is still on chain. Neither
+/// clamping such a block to day 0 of the live epoch (which records an outcome
+/// against a day the probe never measured) nor discarding it (which throws away
+/// a real, timely pass) is acceptable; both were shipped in this session before
+/// this form (07 §8; 05 §3.2).
+///
+/// `None` only once the owning epoch has aged out of the ring, where no
+/// attribution is recoverable. The SQ-195 cover check then fails that epoch on
+/// its missing day, which is the fail-static outcome.
 fn epoch_and_day_at(at: BlockNumber) -> Option<(EpochId, u8)> {
+    let day_of = |timing: &pallet_epoch::EpochTiming| {
+        (at >= timing.start && at < timing.start.saturating_add(timing.length))
+            .then(|| u8::try_from((at - timing.start) / BLOCKS_PER_DAY).unwrap_or(u8::MAX))
+            .map(|day| (timing.index, day))
+    };
+
     let info = pallet_epoch::EpochOf::<Runtime>::get();
-    // The frozen EpochOf contract keeps epoch timing in the sibling live
-    // schedule value; both are advanced atomically by pallet-epoch.
     let schedule = pallet_epoch::Schedule::<Runtime>::get();
-    if at < schedule.epoch_start_block {
-        return None;
+    // The live epoch has no end bound yet: anything at or after its start is its.
+    if at >= schedule.epoch_start_block {
+        let day =
+            u8::try_from((at - schedule.epoch_start_block) / BLOCKS_PER_DAY).unwrap_or(u8::MAX);
+        return Some((info.index, day));
     }
-    let day = u8::try_from((at - schedule.epoch_start_block) / BLOCKS_PER_DAY).unwrap_or(u8::MAX);
-    Some((info.index, day))
+    pallet_epoch::EpochTimings::<Runtime>::get()
+        .iter()
+        .find_map(day_of)
 }
 
 /// Fail-soft recorder for the three locally observable v1 XCM-health signals.
@@ -4850,14 +4862,23 @@ fn reserve_probe_epoch_value(epoch: EpochId) -> Option<bool> {
             .saturating_sub(timing.start)
             .checked_div(day_len)
             .unwrap_or(0),
-        // Armed at or before this epoch began, or not armed at all — the caller
-        // only reaches here when armed, so the whole epoch is measured.
+        // Armed at or before this epoch began — the whole epoch is measured.
+        //
+        // `None` lands here too: a chain that armed under a runtime predating
+        // `ReserveProbeArmedAt` has no recorded latch block. Treating the whole
+        // epoch as measured is the conservative direction — it *requires* more
+        // coverage, never less — so an upgrade cannot use a missing record to
+        // shrink the measured range (07 §8 upgrade compatibility).
         _ => 0,
     };
     if first_day >= last_day {
-        // The probe armed inside the epoch's trailing partial day: no completed
-        // cadence slot was measured, so there is nothing to score.
-        return Some(true);
+        // No completed cadence slot was measured — the probe armed inside the
+        // epoch's trailing partial day, or after it entirely. `Some(true)` here
+        // was the same "absence is healthy" defect in a new guise; the honest
+        // answer is that the metric is **not measured**, exactly as for an
+        // unarmed chain, so the crank fails status-quo-safe rather than
+        // fabricating either health or breach (07 §8, G-1).
+        return None;
     }
 
     for day in first_day..last_day {
@@ -4874,7 +4895,11 @@ fn metric_components(
     epoch: EpochId,
     spec_version: u16,
     counters: pallet_welfare::XcmTrafficCounters,
-    reserve: Option<bool>,
+    // Already-resolved `R`, or `None` meaning **unavailable** — a distinct fact
+    // from a recorded breach. Callers resolve it because the two granularities
+    // treat absence differently: an unrecorded *day* is a fail (07 §8), while
+    // an epoch with no measurable range is not measured at all.
+    reserve: Option<FixedU64>,
 ) -> Vec<pallet_welfare::ComponentValue> {
     let Some(specs) = pallet_welfare::MetricSpecs::<Runtime>::get(spec_version) else {
         return Vec::new();
@@ -4905,12 +4930,13 @@ fn metric_components(
                     if !pallet_oracle::Pallet::<Runtime>::reserve_probe_armed() {
                         return None;
                     }
-                    // Armed: the day (or epoch) scores 1 only on a recorded
-                    // pass. Absence is never healthy — §8 has no
-                    // benefit-of-the-doubt branch, unlike `X`.
+                    // Armed. `None` here is **unavailable**, not a breach:
+                    // flattening it to 0 would settle gate books as breached out
+                    // of an epoch the probe never measured. Absence of a *day*
+                    // is still a fail — the caller has already resolved that.
                     match reserve {
-                        Some(true) => FixedU64(pallet_welfare::ONE),
-                        _ => FixedU64(0),
+                        Some(value) => value,
+                        None => return None,
                     }
                 }
                 // Inputs for every other registered component land with the
@@ -4950,7 +4976,8 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
                 epoch,
                 version,
                 pallet_welfare::Pallet::<Runtime>::xcm_traffic_epoch(epoch),
-                reserve_probe_epoch_value(epoch),
+                reserve_probe_epoch_value(epoch)
+                    .map(|ok| FixedU64(if ok { pallet_welfare::ONE } else { 0 })),
             );
             components.extend(
                 specs
@@ -5007,7 +5034,15 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
             epoch,
             version,
             pallet_welfare::Pallet::<Runtime>::xcm_traffic(epoch, day),
-            pallet_welfare::Pallet::<Runtime>::reserve_probe_daily(epoch, day),
+            // 07 §8: an unrecorded probe day is a **fail**, not unavailable.
+            Some(FixedU64(
+                if pallet_welfare::Pallet::<Runtime>::reserve_probe_daily(epoch, day) == Some(true)
+                {
+                    pallet_welfare::ONE
+                } else {
+                    0
+                },
+            )),
         )
     }
 }
