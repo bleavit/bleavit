@@ -1052,7 +1052,7 @@ impl Oracle {
         query_id: u64,
         passed: bool,
         params: &OracleParams,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         ensure!(
             query_id == self.reserve_health.last_query_id,
             Error::UnknownQuery
@@ -1074,7 +1074,13 @@ impl Oracle {
             && params.reserve_probe_config_valid()
             && now < since.saturating_add(params.probe_timeout);
         self.apply_probe_result(query_id, effective, params);
-        Ok(())
+        // Return the **effective** outcome, not the reported one. A success that
+        // lands at or after the timeout, or arrives while the live probe
+        // configuration is structurally invalid, is scored as a failure here —
+        // and any consumer that mirrors this result (the welfare `R` day input)
+        // must record the same fact, or the two disagree about a day the health
+        // state has already called a fail (07 §8).
+        Ok(effective)
     }
 
     pub fn crank_probe_timeout_with_params(
@@ -1678,6 +1684,7 @@ mod tests {
                 passed,
                 &OracleParams::DEFAULT,
             )
+            .map(|_effective| ())
         }
 
         fn crank_probe_timeout(&mut self, now: BlockNumber) -> Result<(), Error> {
@@ -2328,6 +2335,40 @@ mod tests {
         );
         assert_eq!(o.component_values.len(), 1);
         o.try_state().unwrap();
+    }
+
+    /// SQ-195 (Codex connector P1, 2026-07-25): the returned outcome is the
+    /// **effective** one, not the reported one.
+    ///
+    /// A success arriving at or after `res.probe_timeout` — or while the live
+    /// probe configuration is structurally invalid — is scored as a failure by
+    /// `apply_probe_result`. Any consumer mirroring this result (the welfare `R`
+    /// day input) must record the same fact, or welfare says the day passed
+    /// while the health state has already called it a fail (07 §8).
+    #[test]
+    fn reserve_probe_result_returns_the_effective_outcome() {
+        let params = OracleParams::DEFAULT;
+
+        // Timely success: reported and effective agree.
+        let mut timely = Oracle::default();
+        assert_eq!(timely.crank_reserve_probe(RES_PROBE_INTERVAL), Ok(1));
+        assert_eq!(
+            timely.reserve_probe_result_with_params(RES_PROBE_INTERVAL, 1, true, &params),
+            Ok(true)
+        );
+
+        // The same success one block past the deadline is an effective failure,
+        // and the return value says so.
+        let mut late = Oracle::default();
+        assert_eq!(late.crank_reserve_probe(RES_PROBE_INTERVAL), Ok(1));
+        let deadline = RES_PROBE_INTERVAL.saturating_add(params.probe_timeout);
+        assert_eq!(
+            late.reserve_probe_result_with_params(deadline, 1, true, &params),
+            Ok(false),
+            "a late success must report as the failure it was scored as",
+        );
+        assert_eq!(late.reserve_health.consecutive_passes, 0);
+        assert_eq!(late.reserve_health.consecutive_fails, 1);
     }
 
     #[test]

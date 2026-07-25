@@ -780,9 +780,22 @@ impl ConstitutionState {
             .find(|r| r.key == key)
             .ok_or(Error::UnknownParam)?;
         authorize_param_update(origin, record, next)?;
+        let current = record.value;
+        // 09 §5.2: a containment cap must not be raisable by ordinary class
+        // governance inside the phase it bounds. Deliberately **not**
+        // `BadOrigin` — the origin is authorized, the value direction is not.
+        ensure!(
+            !phase_cap_raise_refused(
+                key,
+                current,
+                next,
+                self.phase_flags.contains(PhaseFlags::PARAM_ARMED)
+            ),
+            Error::PhaseCapRaiseRefused
+        );
         let (index, updated) = self.checked_set_param(key, next, epoch, block)?;
         ensure!(
-            !rederive_budgets_required(key, record.value, next),
+            !rederive_budgets_required(key, current, next),
             Error::BudgetDerivationRequired
         );
         self.params[index] = updated;
@@ -976,6 +989,37 @@ pub enum Error {
     /// verifier lands, changes to the load-bearing timing/capacity/POL keys
     /// are refused in the unsafe direction (SQ-303, G-1).
     BudgetDerivationRequired,
+    /// 09 §5.2: the two Phase-3 exposure caps are raised only by phase gates
+    /// and are not PARAM/META-adjustable during Phases ≤ 3 (SQ-197).
+    PhaseCapRaiseRefused,
+}
+
+/// 09 §5.2 (SQ-197): `phase3.tvl_cap` and `phase3.dep_cap` are "raised only by
+/// phase gates … not PARAM/META-adjustable during Phases ≤ 3". Both rows are
+/// `0..=u128::MAX` with no max-delta and no cooldown, so ordinary `set_param`
+/// under the class origin could otherwise walk a containment cap straight to
+/// the unbounded sentinel while the chain is still inside the phase the cap
+/// exists to bound.
+///
+/// Only the **raise** is refused, and only before PARAM arming. Lowering is
+/// tightening and stays legal at every phase (G-1). From Phase 4 onward the
+/// row behaves as 13 §115's sentinel note describes — an ordinary amendment to
+/// its own ceiling, needing no distinguished value and no separate mechanism —
+/// which is how the Phase-5+ sentinels are installed. The Phase-3→4 migration
+/// arms `PARAM_ARMED` before applying its cap plan for exactly this reason, so
+/// its scheduled raise passes the same gate every later amendment does rather
+/// than needing an exemption.
+pub fn phase_cap_raise_refused(
+    key: ParamKey,
+    current: ParamValue,
+    next: ParamValue,
+    param_armed: bool,
+) -> bool {
+    if param_armed {
+        return false;
+    }
+    let is_phase_cap = key == key16(b"phase3.tvl_cap") || key == key16(b"phase3.dep_cap");
+    is_phase_cap && next.as_u128() > current.as_u128()
 }
 
 /// Temporary SQ-303 screen for the keys whose values feed the bounded
@@ -2152,6 +2196,43 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             2,
             ParamClass::Meta,
             false,
+        ),
+        // 13 §1 row `sec.prize.*` (SQ-173): the certified capability-envelope
+        // proxies that 08 §5.2 makes `InCapPrize` for the three non-TREASURY
+        // binding classes. Seeded from the Phase-0 published calibration; the
+        // minimum is the same kernel floor (05 §5.6). The ×2 Δ is symmetric, so
+        // a raised proxy may be lowered back toward that floor — what no
+        // amendment can do is carry it *below* it, toward the zero that would
+        // make an unsecured payload pass.
+        row(
+            b"sec.prize.param",
+            ParamValue::Balance(kernel::SEC_PRIZE_PARAM_FLOOR),
+            ParamValue::Balance(kernel::SEC_PRIZE_PARAM_FLOOR),
+            ParamValue::Balance(u128::MAX),
+            Some(MaxDelta::Factor(2)),
+            2,
+            ParamClass::Meta,
+            true
+        ),
+        row(
+            b"sec.prize.code",
+            ParamValue::Balance(kernel::SEC_PRIZE_CODE_FLOOR),
+            ParamValue::Balance(kernel::SEC_PRIZE_CODE_FLOOR),
+            ParamValue::Balance(u128::MAX),
+            Some(MaxDelta::Factor(2)),
+            2,
+            ParamClass::Meta,
+            true
+        ),
+        row(
+            b"sec.prize.meta",
+            ParamValue::Balance(kernel::SEC_PRIZE_META_FLOOR),
+            ParamValue::Balance(kernel::SEC_PRIZE_META_FLOOR),
+            ParamValue::Balance(u128::MAX),
+            Some(MaxDelta::Factor(2)),
+            2,
+            ParamClass::Meta,
+            true
         ),
         row(
             b"phase3.tvl_cap",

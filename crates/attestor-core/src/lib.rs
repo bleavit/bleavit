@@ -213,7 +213,16 @@ pub enum Error {
     ChallengeWindowClosed,
     ChallengeAlreadyOpen,
     ChallengeBondTooSmall,
+    /// **Retained metadata, unreachable from any dispatch (SQ-342).** Superseded
+    /// by [`Error::ChallengeOpen`], which is what the live reap path returns.
+    /// The SCALE error surface is append-only, so the variant stays rather than
+    /// renumbering every discriminant after it.
     ChallengeStillOpen,
+    /// **Retained metadata, unreachable from any dispatch (SQ-342).** Its only
+    /// producer was a `require_quorum` helper with no callers: the execution
+    /// guard and epoch both need to *branch* on quorum, so they consume the
+    /// boolean [`Self::has_quorum`] instead of an error. The helper is deleted;
+    /// the variant stays for the append-only surface.
     QuorumMissing,
     /// The referenced attestation exists but has no open challenge to resolve.
     NoOpenChallenge,
@@ -668,18 +677,6 @@ impl AttestorRegistry {
             }
         }
         Ok(None)
-    }
-    pub fn require_quorum(
-        &self,
-        pid: ProposalId,
-        artifact_hash: H256,
-        now: BlockNumber,
-    ) -> Result<(), Error> {
-        ensure!(
-            self.has_quorum(pid, artifact_hash, now),
-            Error::QuorumMissing
-        );
-        Ok(())
     }
     pub fn try_state(&self) -> Result<(), Error> {
         for i in 0..self.members.len() {

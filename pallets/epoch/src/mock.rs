@@ -746,7 +746,7 @@ impl WelfareSettlement for TestWelfare {
         Ok(())
     }
 
-    fn prune_xcm_traffic(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
+    fn roll_maintenance(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
         WelfareTrafficPrunes::push(current_epoch);
         let cutoff = current_epoch.saturating_sub(TEST_WELFARE_SNAPSHOT_WINDOW);
         WelfareTrafficBacklog::prune_before(cutoff);

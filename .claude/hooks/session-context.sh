@@ -34,6 +34,6 @@ else
 fi
 
 echo
-echo "Protocol reminder (AGENTS.md): one milestone per session · implement from the spec"
+echo "Protocol reminder (AGENTS.md): implement from the spec · keep going past a closed milestone (R-5)"
 echo "in docs/architecture/ · verify per doc 15 · update PLAN.md before stopping."
 exit 0

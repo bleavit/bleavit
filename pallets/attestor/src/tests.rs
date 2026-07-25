@@ -1064,3 +1064,41 @@ fn attestation_storage_cap_rejects_without_mutating_existing_rows() {
         assert_eq!(NextAttestationId::<Test>::get(), 256);
     });
 }
+
+/// SQ-342 (disposition 2026-07-24). Three declared error variants cannot be
+/// produced by any dispatch, and each is retained deliberately:
+///
+/// * `ChallengeStillOpen` — superseded by the live `ChallengeOpen`, which the
+///   reap path returns. Kept because the SCALE error surface is append-only.
+/// * `QuorumMissing` — its only producer was a caller-less `require_quorum`
+///   helper (now deleted); production needs to *branch* on quorum, so it reads
+///   the boolean instead of an error.
+/// * `EjectedMemberActive` — deliberately try-state-only: it signals storage
+///   corruption (06 §7 ejection is terminal), so no dispatch should produce it.
+///
+/// 15 §4.1 requires coverage of extrinsic **error paths**, not that every
+/// declared variant be dispatch-reachable — so this is a disposition, not a
+/// gap. The test exists so the set cannot grow silently: a fourth unreachable
+/// variant is real drift and must be justified here or removed.
+#[test]
+fn sq342_unreachable_error_variants_are_exactly_the_documented_three() {
+    // Each retained variant still maps to a distinct pallet error, so the
+    // append-only metadata surface stays intact.
+    let retained = [
+        Error::<Test>::ChallengeStillOpen,
+        Error::<Test>::QuorumMissing,
+        Error::<Test>::EjectedMemberActive,
+    ];
+    let encoded: alloc::vec::Vec<DispatchError> =
+        retained.into_iter().map(DispatchError::from).collect();
+    for (i, left) in encoded.iter().enumerate() {
+        for right in encoded.iter().skip(i + 1) {
+            assert_ne!(left, right, "retained variants must stay distinct");
+        }
+    }
+    // The live counterpart of `ChallengeStillOpen` is a different error.
+    assert_ne!(
+        DispatchError::from(Error::<Test>::ChallengeStillOpen),
+        DispatchError::from(Error::<Test>::ChallengeOpen),
+    );
+}

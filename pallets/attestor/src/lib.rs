@@ -239,7 +239,13 @@ pub mod pallet {
         ChallengeWindowClosed,
         ChallengeAlreadyOpen,
         ChallengeBondTooSmall,
+        /// Retained metadata only — no dispatch can return it (SQ-342).
+        /// Superseded by [`Error::ChallengeOpen`]; kept because the SCALE error
+        /// surface is append-only.
         ChallengeStillOpen,
+        /// Retained metadata only — no dispatch can return it (SQ-342). Its
+        /// producer, a caller-less `require_quorum` helper, is deleted;
+        /// production branches on the boolean quorum instead.
         QuorumMissing,
         /// The referenced attestation exists but has no open challenge.
         NoOpenChallenge,

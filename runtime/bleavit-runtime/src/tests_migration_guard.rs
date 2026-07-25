@@ -36,6 +36,34 @@ use frame_support::traits::{QueryPreimage, StorePreimage};
 
 use crate::{tests, Constitution, ExecutionGuard, Oracle, Runtime, RuntimeEvent, System};
 
+/// Raise spendable NAV above the PARAM §4.1 floor so the Phase-3→4 transition
+/// clears the 08 §4.2 arming gate it must now satisfy (SQ-383). Uses the real
+/// INSURANCE sweep rather than a test-only backdoor, matching the treasury
+/// health suite's precedent.
+#[cfg(any(feature = "phase-four", feature = "recovery"))]
+fn fund_nav_above_param_floor() {
+    use frame_support::traits::fungibles::Mutate;
+    let target =
+        crate::FutarchyTreasury::floor(futarchy_primitives::ProposalClass::Param).saturating_mul(2);
+    assert!(
+        <crate::ForeignAssets as Mutate<crate::AccountId>>::mint_into(
+            bleavit_xcm::identity::usdc_location(),
+            &crate::configs::insurance_account(),
+            target,
+        )
+        .is_ok()
+    );
+    assert!(crate::FutarchyTreasury::sweep_insurance(
+        pallet_origins::Origin::FutarchyTreasury.into(),
+        target
+    )
+    .is_ok());
+    assert!(
+        crate::FutarchyTreasury::nav().spendable_nav
+            >= crate::FutarchyTreasury::floor(futarchy_primitives::ProposalClass::Param)
+    );
+}
+
 #[cfg(not(any(
     feature = "runtime-benchmarks",
     feature = "try-runtime",
@@ -853,6 +881,7 @@ fn direct_system_apply_then_go_ahead_completes_phase_four_transition() {
     let current_spec_version = candidate_version.spec_version.saturating_sub(1);
     tests::upgrade_ext_with_artifact_versions(vec![(candidate.clone(), candidate_version.clone())])
         .execute_with(|| {
+            fund_nav_above_param_floor();
             let candidate_hash = sp_io::hashing::blake2_256(&candidate);
             let current = futarchy_primitives::RuntimeVersionConstraint {
                 spec_name: candidate_version
@@ -1004,8 +1033,94 @@ fn direct_system_apply_then_go_ahead_completes_phase_four_transition() {
 /// subsequently expanded phase mask back to PARAM-only.
 #[cfg(feature = "phase-four")]
 #[test]
+fn sq383_phase_four_transition_refuses_below_the_param_nav_floor() {
+    // 08 §4.2 binds *every* writer of the arming bits, not only
+    // `constitution.set_phase_flag`. The Phase-3→4 migration used to write
+    // `PhaseFlags = PARAM_ARMED` directly, so the minimum-viable-NAV floor
+    // stopped binding at exactly the point the chain loses sudo. The refusal
+    // must be fail-static: nothing armed, sudo retained, caps unchanged, lock
+    // held, and the loud halt-source marker set.
+    tests::development_ext().execute_with(|| {
+        let mut sudo_key = [0u8; 32];
+        sudo_key[..16].copy_from_slice(&sp_io::hashing::twox_128(b"Sudo"));
+        sudo_key[16..].copy_from_slice(&sp_io::hashing::twox_128(b"Key"));
+        sp_io::storage::set(&sudo_key, &[1]);
+
+        // Precondition: spendable NAV is below the PARAM floor.
+        assert!(
+            crate::FutarchyTreasury::nav().spendable_nav
+                < crate::FutarchyTreasury::floor(futarchy_primitives::ProposalClass::Param)
+        );
+
+        let source_flags = pallet_constitution::PhaseFlagsValue::SHADOW_MODE
+            | pallet_constitution::PhaseFlagsValue::SUDO_PRESENT;
+        pallet_constitution::PhaseFlags::<Runtime>::put(source_flags);
+        crate::configs::PhaseTransitionLock::put(true);
+        crate::configs::PhaseTransitionApplied::put(true);
+        let tvl_key = pallet_constitution::key16(b"phase3.tvl_cap");
+        let tvl_before = pallet_constitution::Params::<Runtime>::get(tvl_key)
+            .expect("TVL cap is registered")
+            .value
+            .as_u128();
+        pallet_execution_guard::PhaseFourBridge::<Runtime>::put(
+            pallet_execution_guard::PhaseFourBridgeState::Scheduled {
+                pid: 4_005,
+                code_hash: [0x46; 32],
+                plan: pallet_execution_guard::PhaseFourPlan {
+                    tvl_cap: tvl_before.saturating_add(1),
+                    deposit_cap: 1,
+                },
+            },
+        );
+
+        let _ = crate::migrations::PhaseFourTransition::on_runtime_upgrade();
+
+        assert_eq!(
+            pallet_constitution::PhaseFlags::<Runtime>::get(),
+            source_flags,
+            "an under-floor transition must leave the Phase-3 arming bits exactly as they were",
+        );
+        assert!(
+            sp_io::storage::exists(&sudo_key),
+            "the sudo key is the operator recourse the refusal must preserve",
+        );
+        assert_eq!(
+            pallet_constitution::Params::<Runtime>::get(tvl_key)
+                .map(|record| record.value.as_u128()),
+            Some(tvl_before),
+            "the cap raise rolls back with the rest of the transition",
+        );
+        assert!(crate::configs::PhaseTransitionLock::get());
+        assert!(crate::configs::PhaseTransitionApplied::get());
+        assert!(!crate::configs::RuntimePhaseState::exact_phase_four());
+        assert_eq!(
+            pallet_execution_guard::PhaseFourBridge::<Runtime>::get(),
+            pallet_execution_guard::PhaseFourBridgeState::Scheduled {
+                pid: 4_005,
+                code_hash: [0x46; 32],
+                plan: pallet_execution_guard::PhaseFourPlan {
+                    tvl_cap: tvl_before.saturating_add(1),
+                    deposit_cap: 1,
+                },
+            },
+            "the bridge is not consumed, so a funded retry can still transition",
+        );
+
+        // Proof that the NAV floor is the *only* thing refusing here: funding
+        // past it makes the same gate admit. The full funded transition is
+        // covered by `phase_four_profile_removes_sudo_and_never_rearms_…`.
+        fund_nav_above_param_floor();
+        assert!(<crate::configs::TreasuryPhaseArmingGate as pallet_constitution::PhaseArmingGate>
+            ::ensure_armable(futarchy_primitives::ProposalClass::Param)
+            .is_ok());
+    });
+}
+
+#[cfg(all(feature = "phase-four", not(feature = "recovery")))]
+#[test]
 fn phase_four_profile_removes_sudo_and_never_rearms_the_one_shot_transition() {
     tests::development_ext().execute_with(|| {
+        fund_nav_above_param_floor();
         let mut sudo_key = [0u8; 32];
         sudo_key[..16].copy_from_slice(&sp_io::hashing::twox_128(b"Sudo"));
         sudo_key[16..].copy_from_slice(&sp_io::hashing::twox_128(b"Key"));
@@ -1697,10 +1812,12 @@ fn constitution_composite_v0_migration_is_atomic_before_pricing_insertion() {
 #[test]
 fn constitution_v2_migration_is_an_idempotent_current_version_noop() {
     tests::development_ext().execute_with(|| {
-        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(2));
+        // SQ-173 advanced the Constitution to v3, so a genesis chain is already
+        // past the v2 migration's window and it must do nothing at all.
+        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(3));
         let before: Vec<_> = pallet_constitution::Params::<Runtime>::iter().collect();
         let _ = <crate::migrations::MigrateConstitutionReserveProbeV2 as OnRuntimeUpgrade>::on_runtime_upgrade();
-        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(2));
+        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(3));
         assert_eq!(pallet_constitution::Params::<Runtime>::iter().collect::<Vec<_>>(), before);
     });
 }
@@ -1826,10 +1943,22 @@ fn composed_runtime_upgrade_migrates_all_reserve_probe_v0_state_and_passes_try_s
         );
         assert!(!unhashed::exists(&blocked_meters));
         assert!(!unhashed::exists(&progress_marker));
+        // SQ-173's `MigrateConstitutionSecurityPrizeV3` composes after the v2
+        // probe migration, so a composed upgrade lands the Constitution at v3
+        // with all three capability-envelope rows seeded.
         assert_eq!(
             StorageVersion::get::<Constitution>(),
-            StorageVersion::new(2)
+            StorageVersion::new(3)
         );
+        for name in [
+            b"sec.prize.param".as_slice(),
+            b"sec.prize.code".as_slice(),
+            b"sec.prize.meta".as_slice(),
+        ] {
+            assert!(pallet_constitution::Params::<Runtime>::contains_key(
+                pallet_constitution::key16(name)
+            ));
+        }
         assert_eq!(
             pallet_constitution::Params::<Runtime>::get(fee.key),
             Some(fee)
@@ -1895,10 +2024,22 @@ fn composed_runtime_upgrade_migrates_constitution_v1_to_v2() {
         ) as Decode>::decode(&mut &output[..])
         .expect("TryRuntime result");
         assert!(used.all_lte(maximum));
+        // SQ-173's `MigrateConstitutionSecurityPrizeV3` composes after the v2
+        // probe migration, so a composed upgrade lands the Constitution at v3
+        // with all three capability-envelope rows seeded.
         assert_eq!(
             StorageVersion::get::<Constitution>(),
-            StorageVersion::new(2)
+            StorageVersion::new(3)
         );
+        for name in [
+            b"sec.prize.param".as_slice(),
+            b"sec.prize.code".as_slice(),
+            b"sec.prize.meta".as_slice(),
+        ] {
+            assert!(pallet_constitution::Params::<Runtime>::contains_key(
+                pallet_constitution::key16(name)
+            ));
+        }
         assert!(pallet_constitution::Pallet::<Runtime>::do_try_state().is_ok());
         for record in legacy {
             let migrated = pallet_constitution::Params::<Runtime>::get(record.key).unwrap();

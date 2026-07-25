@@ -87,12 +87,14 @@ type SingleBlockMigrations = (
     crate::migrations::RetireB16State,
     crate::migrations::MigrateConstitutionReserveProbeV2,
     crate::migrations::MigrateOracleReserveProbeV1,
+    crate::migrations::MigrateConstitutionSecurityPrizeV3,
 );
 #[cfg(all(feature = "phase-four", not(feature = "recovery")))]
 type SingleBlockMigrations = (
     crate::migrations::RetireB16State,
     crate::migrations::MigrateConstitutionReserveProbeV2,
     crate::migrations::MigrateOracleReserveProbeV1,
+    crate::migrations::MigrateConstitutionSecurityPrizeV3,
     crate::migrations::PhaseFourTransition,
 );
 #[cfg(feature = "recovery")]
@@ -100,6 +102,7 @@ type SingleBlockMigrations = (
     crate::migrations::RetireB16State,
     crate::migrations::MigrateConstitutionReserveProbeV2,
     crate::migrations::MigrateOracleReserveProbeV1,
+    crate::migrations::MigrateConstitutionSecurityPrizeV3,
     crate::migrations::TerminalRecoveryTransition,
 );
 
@@ -2037,7 +2040,7 @@ fn perbill_param_or(name: &[u8], default: u32) -> u32 {
         },
     }
 }
-fn percent_param(name: &[u8]) -> u8 {
+pub(crate) fn percent_param(name: &[u8]) -> u8 {
     percent_param_or(name, 0)
 }
 fn percent_param_or(name: &[u8], default: u8) -> u8 {
@@ -2125,14 +2128,42 @@ impl Get<EpochId> for GuardianReviewDeadline {
 }
 
 fn xcm_traffic_epoch_and_day() -> (EpochId, u8) {
+    // The current block is never before the live epoch's start.
+    epoch_and_day_at(System::block_number())
+        .unwrap_or_else(|| (pallet_epoch::EpochOf::<Runtime>::get().index, 0))
+}
+
+/// Attribute `at` to its `(epoch, day)`, or `None` when no retained epoch owns it.
+///
+/// The live schedule is checked first, then the retained `EpochTimings` ring —
+/// a probe opened just before an epoch roll and answered just after it belongs
+/// to the epoch it measured, and that epoch's timing is still on chain. Neither
+/// clamping such a block to day 0 of the live epoch (which records an outcome
+/// against a day the probe never measured) nor discarding it (which throws away
+/// a real, timely pass) is acceptable; both were shipped in this session before
+/// this form (07 §8; 05 §3.2).
+///
+/// `None` only once the owning epoch has aged out of the ring, where no
+/// attribution is recoverable. The SQ-195 cover check then fails that epoch on
+/// its missing day, which is the fail-static outcome.
+fn epoch_and_day_at(at: BlockNumber) -> Option<(EpochId, u8)> {
+    let day_of = |timing: &pallet_epoch::EpochTiming| {
+        (at >= timing.start && at < timing.start.saturating_add(timing.length))
+            .then(|| u8::try_from((at - timing.start) / BLOCKS_PER_DAY).unwrap_or(u8::MAX))
+            .map(|day| (timing.index, day))
+    };
+
     let info = pallet_epoch::EpochOf::<Runtime>::get();
-    // The frozen EpochOf contract keeps epoch timing in the sibling live
-    // schedule value; both are advanced atomically by pallet-epoch.
     let schedule = pallet_epoch::Schedule::<Runtime>::get();
-    let now = System::block_number();
-    let day = u8::try_from(now.saturating_sub(schedule.epoch_start_block) / BLOCKS_PER_DAY)
-        .unwrap_or(u8::MAX);
-    (info.index, day)
+    // The live epoch has no end bound yet: anything at or after its start is its.
+    if at >= schedule.epoch_start_block {
+        let day =
+            u8::try_from((at - schedule.epoch_start_block) / BLOCKS_PER_DAY).unwrap_or(u8::MAX);
+        return Some((info.index, day));
+    }
+    pallet_epoch::EpochTimings::<Runtime>::get()
+        .iter()
+        .find_map(day_of)
 }
 
 /// Fail-soft recorder for the three locally observable v1 XCM-health signals.
@@ -2563,6 +2594,53 @@ fn ceil_mul_div(value: Balance, numerator: Balance, denominator: Balance) -> Opt
         .checked_mul(numerator)?
         .checked_add(denominator.saturating_sub(1))
         .and_then(|product| product.checked_div(denominator))
+}
+
+/// 08 §5.2's certified capability-envelope value for the three non-TREASURY
+/// binding classes, read from the live `sec.prize.*` records (13 §1, SQ-173).
+///
+/// A zero or absent record is **not** a prize of zero: 13 §1 states that an
+/// undefined proxy means the proposal MUST NOT pass sizing, so it renders as
+/// `None` and leaves the proposal retryable rather than adopting an
+/// under-secured payload. TREASURY derives its prize exactly from the ask and
+/// Constitutional runs no markets, so neither has a row here.
+fn class_security_envelope(class: futarchy_primitives::ProposalClass) -> Option<Balance> {
+    let key: &[u8] = match class {
+        futarchy_primitives::ProposalClass::Param => b"sec.prize.param",
+        futarchy_primitives::ProposalClass::Code => b"sec.prize.code",
+        futarchy_primitives::ProposalClass::Meta => b"sec.prize.meta",
+        futarchy_primitives::ProposalClass::Treasury
+        | futarchy_primitives::ProposalClass::Constitutional => return None,
+    };
+    // Deliberately the **live** record, never the compile-time default table:
+    // a chain whose envelope row is genuinely missing from storage must fail
+    // closed at step 9 rather than silently inherit a default it never ratified
+    // (13 reading rule 2; G-1). The genesis seed is what makes the row present
+    // on a conforming chain.
+    live_balance_param(key).filter(|value| *value > 0)
+}
+
+/// Whether a CODE/META payload authorizes a runtime upgrade, which 08 §5.2
+/// floors at `trs.cap_proposal · spendable NAV`. An undecodable or unpinned
+/// preimage answers **yes**: the floor can only raise the prize, so the
+/// claimant-adverse reading is the one that cannot let an upgrade through
+/// under-secured (R-7).
+fn carries_upgrade_payload(proposal: &futarchy_primitives::Proposal<AccountId>) -> bool {
+    use pallet_execution_guard::BatchDispatcher;
+    let Some(calls) = proposal_calls(proposal) else {
+        return true;
+    };
+    calls.iter().any(|call| {
+        crate::classifier::RuntimeDispatcher::rederive_call(call).is_ok_and(|analysis| {
+            analysis.domains.iter().any(|domain| {
+                matches!(
+                    domain,
+                    pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade
+                        | pallet_execution_guard::CallDomain::InternalRootApplyUpgrade
+                )
+            })
+        })
+    })
 }
 
 fn scaled_pol_floor(
@@ -4352,22 +4430,57 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
             return Some(currency::USDC);
         }
         let nav = crate::FutarchyTreasury::nav().spendable_nav;
-        let cap = nav
-            .checked_mul(Balance::from(percent_param(b"trs.cap_proposal")))?
-            .checked_div(100)?;
+        let cap_percent = Balance::from(percent_param(b"trs.cap_proposal"));
         match proposal.class {
             futarchy_primitives::ProposalClass::Treasury => {
+                // The TREASURY admission ceiling rounds **down**: a larger cap
+                // admits a larger ask, so the floor is the conservative side
+                // here — the opposite of the CODE/META prize floor below.
+                let cap = nav.checked_mul(cap_percent)?.checked_div(100)?;
                 let calls = proposal_calls(proposal)?;
                 let ask = derived_treasury_ask(&calls)?;
                 (ask == proposal.ask && ask <= cap).then_some(ask)
             }
-            // A8 fail-closed: PARAM/CODE/META capability-envelope valuation is
-            // not recorded on chain. Returning None blocks Adopt at sizing
-            // step 9 — owner values/classifier envelope milestone (SQ-173).
-            futarchy_primitives::ProposalClass::Param
-            | futarchy_primitives::ProposalClass::Code
-            | futarchy_primitives::ProposalClass::Meta
-            | futarchy_primitives::ProposalClass::Constitutional => None,
+            // 08 §5.2 / 05 §5.6 (SQ-173): PARAM takes the certified
+            // capability-envelope value alone; CODE and META take the
+            // claimant-adverse `max(ask, envelope)` and, for a runtime-upgrade
+            // payload, additionally the `trs.cap_proposal · spendable NAV`
+            // floor — an upgrade is assumed able to reach the full
+            // per-proposal outflow cap. An absent (unseeded, or amended to
+            // zero) envelope stays `None`, which is what blocks Adopt at
+            // sizing step 9 rather than fabricating a low prize.
+            futarchy_primitives::ProposalClass::Param => class_security_envelope(proposal.class),
+            futarchy_primitives::ProposalClass::Code | futarchy_primitives::ProposalClass::Meta => {
+                let envelope = class_security_envelope(proposal.class)?;
+                let prize = envelope.max(proposal.ask);
+                // 08 §5.2: the `trs.cap_proposal · spendable NAV` floor binds
+                // **runtime-upgrade payloads** — "an upgrade is assumed able to
+                // reach the full per-proposal outflow cap".
+                //
+                // The differential oracle agrees, though it says so through its
+                // caller rather than a flag: `decision.decide` takes no
+                // `upgrade_payload` argument and passes `spendable_nav`
+                // straight through, so a caller expresses "not an upgrade" by
+                // passing `spendable_nav = 0` — which is exactly what the
+                // Phase-0 simulation engine does for non-upgrade CODE/META
+                // proposals, and what the published calibration the
+                // `sec.prize.*` values were adopted from was run under. Reading
+                // `decide`'s signature alone suggests an unconditional floor;
+                // that reading is wrong, and briefly shipping it here put the
+                // runtime at odds with the Phase-0 evidence (SQ-173, corrected
+                // 2026-07-25).
+                //
+                // 05 §5.4 step 9 rounds `InCapPrize` **UP**, so the floor is
+                // ceil-rounded: flooring `nav · cap_proposal / 100` would
+                // understate it by up to one µUSDC at a boundary NAV.
+                if !carries_upgrade_payload(proposal) {
+                    return Some(prize);
+                }
+                let cap = ceil_mul_div(nav, cap_percent, 100)?;
+                Some(prize.max(cap))
+            }
+            // 05 §5.6: Constitutional runs no markets, so step 9 is unreachable.
+            futarchy_primitives::ProposalClass::Constitutional => None,
         }
     }
 
@@ -4559,7 +4672,7 @@ impl pallet_epoch::WelfareSettlement for RuntimeEpochWelfare {
         pallet_welfare::Pallet::<Runtime>::prune(cutoff)
     }
 
-    fn prune_xcm_traffic(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
+    fn roll_maintenance(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
         let cutoff = current_epoch.saturating_sub(pallet_welfare::MAX_SNAPSHOTS_BOUND);
         pallet_welfare::Pallet::<Runtime>::prune_xcm_traffic(cutoff)?;
         // SQ-201 / 05 §3.3: cohort reap is not the only prune trigger. Tick
@@ -4716,11 +4829,133 @@ fn xcm_health(counters: pallet_welfare::XcmTrafficCounters) -> FixedU64 {
     FixedU64(value)
 }
 
+/// The epoch's **measured day range** `[first, last)` for 07 §8's `R`, or
+/// `None` when nothing was measured (SQ-195).
+///
+/// Single-homed deliberately: the daily and epoch rules previously computed
+/// this separately and drifted apart twice — a day one accepted the other
+/// excluded, which let a keeper manufacture a `C_daily` breach on a day the
+/// epoch projection did not even require. Sharing the range makes them agree by
+/// construction rather than by inspection.
+///
+/// `first` skips days that ended before `ReserveProbeArmedAt`, since §8 scores
+/// zero pre-arm slots. `last` is the epoch's last **whole** day: a legal
+/// `epoch.length` need not be a day multiple, and a trailing partial day is not
+/// a completed cadence slot. Floored at one day so a sub-day epoch — the shape
+/// the compressed `fast-timing` build produces — still requires a recorded pass
+/// instead of passing vacuously.
+#[allow(dead_code)]
+fn reserve_probe_measured_range(epoch: EpochId) -> Option<(u32, u32)> {
+    let timing = pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch)?;
+    let day_len = kernel::BLOCKS_PER_DAY;
+    // Nothing was measured if the probe armed at or after this epoch ended.
+    // This must be decided *before* the sub-day floor below: for an epoch
+    // shorter than one day, `armed_at` past its end still floor-divides to day
+    // 0, so the floor would manufacture a required day 0 and report an entirely
+    // unmeasured epoch as **failed** rather than unmeasured (07 §8; 05 §4.4).
+    let epoch_end = timing.start.saturating_add(timing.length);
+    if pallet_oracle::Pallet::<Runtime>::reserve_probe_armed_at()
+        .is_some_and(|armed_at| armed_at >= epoch_end)
+    {
+        return None;
+    }
+    let last = timing.length.checked_div(day_len).unwrap_or(0).max(1);
+    let first = match pallet_oracle::Pallet::<Runtime>::reserve_probe_armed_at() {
+        Some(armed_at) if armed_at > timing.start => armed_at
+            .saturating_sub(timing.start)
+            .checked_div(day_len)
+            .unwrap_or(0),
+        // Armed at or before this epoch began — the whole epoch is measured.
+        //
+        // `None` lands here too: a chain that armed under a runtime predating
+        // `ReserveProbeArmedAt` has no recorded latch block. Treating the whole
+        // epoch as measured is the conservative direction — it *requires* more
+        // coverage, never less — so an upgrade cannot use a missing record to
+        // shrink the measured range (07 §8 upgrade compatibility).
+        _ => 0,
+    };
+    (first < last).then_some((first, last))
+}
+
+/// Day-level `R` for 05 §4.4's `C_daily` (07 §8; SQ-195).
+///
+/// A recorded pass scores 1 and an unrecorded day scores 0 — "absence is never
+/// healthy", and §8 gives `R` no benefit-of-the-doubt branch unlike `X`.
+///
+/// **Except before arming.** §8 scores zero pre-arm wall-clock slots, so a day
+/// that ended before the probe armed is *unavailable*, not a failure: a late
+/// daily crank must not retroactively classify time before the mechanism
+/// existed as a reserve outage and set a `C_daily` breach flag from it. The
+/// global armed latch alone is not enough to decide this — it says the probe is
+/// armed *now*, not that it was armed on the day being scored.
+#[allow(dead_code)]
+fn reserve_probe_daily_value(epoch: EpochId, day: u8) -> Option<FixedU64> {
+    // Outside the measured range the day is **unavailable**, whatever storage
+    // happens to hold. That covers three cases a keeper or a retired probe
+    // generation could otherwise turn into a false breach: a day that ended
+    // before arming, the epoch's trailing partial day, and a day index beyond
+    // the epoch entirely. A stale outcome recorded by a previous probe
+    // generation cannot resurrect one of those days either, because the range —
+    // not the record — decides membership.
+    let (first, last) = reserve_probe_measured_range(epoch)?;
+    let index = u32::from(day);
+    if index < first || index >= last {
+        return None;
+    }
+    // Inside the range: a recorded pass scores 1, and anything else — a
+    // recorded failure or no record at all — scores 0. "Absence is never
+    // healthy"; §8 gives `R` no benefit-of-the-doubt branch, unlike `X`.
+    let recorded = pallet_welfare::Pallet::<Runtime>::reserve_probe_daily(epoch, day);
+    Some(FixedU64(if recorded == Some(true) {
+        pallet_welfare::ONE
+    } else {
+        0
+    }))
+}
+
+/// Epoch-level `R` for 05 §4.4's settlement-time `C_e` (07 §8; SQ-195).
+///
+/// 07 §8 defines only `R_daily`, so the epoch projection is derived here — and
+/// it is a **cover check over actual days**, not a count of passes. Counting is
+/// not covering: three passes recorded on days 5–7 would satisfy a count of
+/// three while days 0–2 went unprobed, and "absence is never healthy" has no
+/// benefit-of-the-doubt branch. Every day in the measured range must carry a
+/// recorded pass.
+///
+/// The measured range starts at the **arming day**, because §8 scores zero
+/// pre-arm slots — "time before a complete runnable probe existed is not
+/// retroactively classified as an outage". Without that, an epoch in which the
+/// probe armed late could never read healthy however completely its post-arm
+/// days passed. It ends at the epoch's last whole day; a legal `epoch.length`
+/// need not be a day multiple, and the trailing partial day is not a completed
+/// cadence slot. The range is floored at one day so a sub-day epoch — which the
+/// compressed `fast-timing` build produces — still requires a recorded pass
+/// rather than passing vacuously.
+///
+/// `None` (unavailable, crank fails status-quo-safe) only when the epoch's
+/// timing is unknown — never as a stand-in for "nothing recorded".
+#[allow(dead_code)]
+fn reserve_probe_epoch_value(epoch: EpochId) -> Option<bool> {
+    let (first, last) = reserve_probe_measured_range(epoch)?;
+    for day in first..last {
+        let day = u8::try_from(day).ok()?;
+        if pallet_welfare::Pallet::<Runtime>::reserve_probe_daily(epoch, day) != Some(true) {
+            return Some(false);
+        }
+    }
+    Some(true)
+}
+
 #[allow(dead_code)]
 fn metric_components(
     epoch: EpochId,
     spec_version: u16,
     counters: pallet_welfare::XcmTrafficCounters,
+    // Already-resolved `R`, or `None` meaning **unavailable** — a distinct fact
+    // from a recorded breach. Callers resolve it because the two granularities
+    // treat absence differently: an unrecorded *day* is a fail (07 §8), while
+    // an epoch with no measurable range is not measured at all.
+    reserve: Option<FixedU64>,
 ) -> Vec<pallet_welfare::ComponentValue> {
     let Some(specs) = pallet_welfare::MetricSpecs::<Runtime>::get(spec_version) else {
         return Vec::new();
@@ -4741,14 +4976,24 @@ fn metric_components(
             let value = match spec.id {
                 futarchy_primitives::metric_ids::X => x,
                 futarchy_primitives::metric_ids::R => {
-                    // 07 §8 makes R probe-day-resolved and says absence is
-                    // never healthy. The current reserve-unhealthy latch is
-                    // fail-open before the first probe and recovery rewrites
-                    // the apparent history, so v1 binds X only. R remains
-                    // unbound until a day-resolved probe-outcome store exists;
-                    // a registered R therefore fails the crank status-quo-safe,
-                    // exactly like the other unavailable on-chain components.
-                    return None;
+                    // 07 §8 (SQ-195). Before the probe arms, `R` is **not
+                    // measured**: the `ReserveProbeArmed` latch exists because
+                    // pre-arm wall-clock slots are not outages, and scoring
+                    // them 0 would set the C breach flag out of a mechanism
+                    // that never ran — fail-destructive, not fail-safe. So an
+                    // unarmed chain leaves `R` absent and a spec registering it
+                    // fails the crank status-quo-safe, as before.
+                    if !pallet_oracle::Pallet::<Runtime>::reserve_probe_armed() {
+                        return None;
+                    }
+                    // Armed. `None` here is **unavailable**, not a breach:
+                    // flattening it to 0 would settle gate books as breached out
+                    // of an epoch the probe never measured. Absence of a *day*
+                    // is still a fail — the caller has already resolved that.
+                    match reserve {
+                        Some(value) => value,
+                        None => return None,
+                    }
                 }
                 // Inputs for every other registered component land with the
                 // A8/values wiring. Welfare treats registered-but-missing input
@@ -4787,6 +5032,8 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
                 epoch,
                 version,
                 pallet_welfare::Pallet::<Runtime>::xcm_traffic_epoch(epoch),
+                reserve_probe_epoch_value(epoch)
+                    .map(|ok| FixedU64(if ok { pallet_welfare::ONE } else { 0 })),
             );
             components.extend(
                 specs
@@ -4843,6 +5090,7 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
             epoch,
             version,
             pallet_welfare::Pallet::<Runtime>::xcm_traffic(epoch, day),
+            reserve_probe_daily_value(epoch, day),
         )
     }
 }
@@ -4968,12 +5216,42 @@ impl pallet_oracle::ReportingContext for RuntimeReporting {
             }
             #[cfg(not(feature = "runtime-benchmarks"))]
             {
-                // A8 fail-closed: 07 §6.1 freezes value-at-risk at Snapshot(m),
-                // but no pallet currently stores that snapshot. Reading mutable
-                // live vault escrow could only reduce a later reporter bond, so
-                // price the report out until the oracle snapshot owner lands the
-                // frozen backing (SQ-174).
-                Balance::MAX
+                // 07 §6.1 (SQ-174): `StakeAtRisk(c, m) = Σ CohortEscrow(k)` over
+                // every cohort whose frozen MetricSpec consumes `c` for
+                // measurement epoch `m`, and `CohortEscrow(k) = Σ_pid
+                // escrowed(pid)` over that cohort's vaults.
+                //
+                // The read is **live here and frozen by the caller**: §6.1's
+                // *Per-game freezing* paragraph binds `B_1` — and therefore the
+                // `StakeAtRisk` inside it — once, when round 1 of a
+                // `(component, epoch, spec_version)` game is created, storing it
+                // with the game. `oracle_core` already does exactly that, so a
+                // later escrow movement cannot reprice a live game. The same
+                // section's older `CohortEscrow` line instead says the escrow is
+                // "read at the block Snapshot(m) finalizes", which is not
+                // implementable: Snapshot(m) *consumes* the oracle's settled
+                // components for attested specs, so it cannot also be the input
+                // that prices the game producing them. That line is superseded
+                // (see the amendment in 07 §6.1).
+                //
+                // Bounded: at most `MAX_NON_TERMINAL_COHORTS_BOUND` cohorts,
+                // each with ≤ 5 proposals (13 §4), so ≤ 20 vault reads.
+                pallet_epoch::CohortSchedules::<Runtime>::iter_values()
+                    .filter(|schedule| {
+                        cohort_consumes_measurement(schedule, epoch)
+                            && schedule
+                                .specs
+                                .iter()
+                                .any(|(_, version)| spec_contains_component(*version, component))
+                    })
+                    .fold(0_u128, |total, schedule| {
+                        schedule.specs.iter().fold(total, |sum, (pid, _)| {
+                            sum.saturating_add(
+                                pallet_conditional_ledger::Vaults::<Runtime>::get(pid)
+                                    .map_or(0, |vault| vault.escrowed),
+                            )
+                        })
+                    })
             }
         } else {
             0
@@ -5073,6 +5351,21 @@ pub struct OracleProbeTimeoutToWelfare;
 impl pallet_oracle::ProbeTimeoutSink for OracleProbeTimeoutToWelfare {
     fn probe_timed_out() {
         <XcmTrafficRecorder as bleavit_xcm::health::LocalXcmHealthSink>::note_probe_timeout();
+    }
+
+    /// Day-attribute one scored probe slot for the 07 §8 `R_daily` input
+    /// (SQ-195), using the block the **attempt opened** at rather than the
+    /// current block: a probe that spans a day boundary belongs to the day it
+    /// measured. Attribution otherwise follows the same live schedule the XCM
+    /// traffic counters use.
+    fn probe_outcome(opened_at: BlockNumber, passed: bool) {
+        // An attempt opened before the live epoch began cannot be attributed
+        // without that epoch's start block, and recording it against the wrong
+        // day is worse than not recording it: the cover check independently
+        // fails the real epoch on its missing day (07 §8).
+        if let Some((epoch, day)) = epoch_and_day_at(opened_at) {
+            pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, day, passed);
+        }
     }
 }
 

@@ -1069,13 +1069,16 @@ fn try_state_rejects_reserved_flags_overspent_meters_and_overflown_registry() {
 }
 
 #[test]
-fn try_state_requires_v2_and_all_probe_rows() {
+fn try_state_requires_the_current_version_and_all_probe_and_prize_rows() {
     new_test_ext().execute_with(|| {
         StorageVersion::new(0).put::<Constitution>();
         assert!(Constitution::do_try_state().is_err());
-        StorageVersion::new(2).put::<Constitution>();
+        StorageVersion::new(3).put::<Constitution>();
 
         for name in [
+            b"sec.prize.param".as_slice(),
+            b"sec.prize.code".as_slice(),
+            b"sec.prize.meta".as_slice(),
             b"ops.probe_fee".as_slice(),
             b"ops.probe_rate".as_slice(),
             b"res.probe_int".as_slice(),
@@ -1085,7 +1088,7 @@ fn try_state_requires_v2_and_all_probe_rows() {
             b"res.recover_thr".as_slice(),
         ] {
             let key = key16(name);
-            let record = Params::<Test>::get(key).expect("probe pricing row");
+            let record = Params::<Test>::get(key).expect("probe pricing or prize row");
             Params::<Test>::remove(key);
             assert!(
                 Constitution::do_try_state().is_err(),
@@ -1250,10 +1253,11 @@ fn extrinsic_value_types_do_not_admit_wrong_kinds_via_scale() {
 fn genesis_registry_matches_13_1_row_encodings() {
     new_test_ext().execute_with(|| {
         // Every 13 §1 row with a scalar concrete default and no open
-        // [VERIFY] tag is seeded (102 total, incl. per-class suffix keys and
-        // rule-6 short keys; +2 for keeper.rebate/dis.merit_min and +2 for the
-        // reserve-probe pricing rows); spot-pin the unit encodings per kind.
-        assert_eq!(Params::<Test>::count(), 102);
+        // [VERIFY] tag is seeded (105 total, incl. per-class suffix keys and
+        // rule-6 short keys; +2 for keeper.rebate/dis.merit_min, +2 for the
+        // reserve-probe pricing rows and +3 for the SQ-173 sec.prize.* class
+        // envelopes); spot-pin the unit encodings per kind.
+        assert_eq!(Params::<Test>::count(), 105);
 
         // Per-class suffix keys (13 rule 6) — δ floors, kernel-capped.
         // Phase-0-calibrated (V-12): dec.delta.meta 0.090 on the 1e9 grid.
@@ -2130,6 +2134,59 @@ fn sq_485_reserve_probe_controls_have_immutable_nonzero_floors() {
             );
         }
         assert_ok!(Constitution::do_try_state());
+    });
+}
+
+/// SQ-197 (2026-07-24): 09 §5.2 makes the two Phase-3 exposure caps "raised
+/// only by phase gates … not PARAM/META-adjustable during Phases ≤ 3". Both
+/// rows are `0..=u128::MAX` with no max-delta and no cooldown, so without this
+/// screen an ordinary authorized `set_param` could walk a containment cap
+/// straight to the unbounded sentinel inside the phase it exists to bound.
+/// Lowering — tightening — stays legal at every phase (G-1), and from Phase 4
+/// the row behaves as 13 §115's sentinel note describes.
+#[test]
+fn sq_197_phase3_caps_are_not_raisable_before_param_arming() {
+    new_test_ext().execute_with(|| {
+        for name in [b"phase3.tvl_cap".as_slice(), b"phase3.dep_cap".as_slice()] {
+            let key = key16(name);
+            let record = Params::<Test>::get(key).expect("phase-3 cap is seeded");
+            let current = record.value.as_u128();
+            let raise = ParamValue::Balance(current.saturating_add(1));
+            let lower = ParamValue::Balance(current.saturating_sub(1));
+
+            // Phases <= 3: PARAM is not armed.
+            assert_eq!(PhaseFlags::<Test>::get() & PhaseFlagsValue::PARAM_ARMED, 0);
+            assert_noop!(
+                Constitution::set_param(RuntimeOrigin::signed(META_ACC), key, raise),
+                Error::<Test>::PhaseCapRaiseRefused,
+            );
+            assert_eq!(
+                Params::<Test>::get(key).map(|r| r.value.as_u128()),
+                Some(current),
+                "a refused raise must leave the cap exactly as it was",
+            );
+
+            // Tightening is always legal.
+            assert_ok!(Constitution::set_param(
+                RuntimeOrigin::signed(META_ACC),
+                key,
+                lower
+            ));
+
+            // From Phase 4 the same raise is an ordinary amendment — this is
+            // how 09 §5.2's scheduled raise and the Phase-5+ sentinels land.
+            PhaseFlags::<Test>::put(PhaseFlagsValue::PARAM_ARMED);
+            assert_ok!(Constitution::set_param(
+                RuntimeOrigin::signed(META_ACC),
+                key,
+                raise
+            ));
+            assert_eq!(
+                Params::<Test>::get(key).map(|r| r.value.as_u128()),
+                Some(current.saturating_add(1)),
+            );
+            PhaseFlags::<Test>::put(0);
+        }
     });
 }
 

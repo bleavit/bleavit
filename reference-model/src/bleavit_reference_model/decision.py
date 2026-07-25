@@ -370,6 +370,14 @@ def decide(
         measured_liquidity = l_hat(
             pol_depth, pair_contest, flow_cap, b_accept, b_reject
         )
+    # 08 §5.2's CODE/META NAV floor is conditional on the payload being a
+    # runtime upgrade, but this engine carries no upgrade flag: a caller signals
+    # "not an upgrade" by passing `spendable_nav = 0`, which zeroes the floor.
+    # That is the convention the Phase-0 simulation uses (see
+    # `simulation/.../engine.py`) and the one the published calibration behind
+    # the `sec.prize.*` defaults was run under. Do NOT "fix" this into an
+    # unconditional floor: doing so silently disagrees with that evidence and
+    # with every conforming runtime (SQ-173, 2026-07-25).
     prize = in_cap_prize(
         proposal_class,
         ask=ask,

@@ -35,7 +35,7 @@ use frame_support::{
 
 #[cfg(feature = "try-runtime")]
 use alloc::{vec, vec::Vec};
-#[cfg(feature = "recovery")]
+#[cfg(any(feature = "recovery", feature = "try-runtime"))]
 use parity_scale_codec::DecodeAll;
 #[cfg(feature = "try-runtime")]
 use parity_scale_codec::{Decode, Encode};
@@ -136,6 +136,19 @@ impl UncheckedOnRuntimeUpgrade for MigrateOracleReserveProbeV1Inner {
         health.last_probe_at = 0;
         pallet_oracle::ReserveHealth::<Runtime>::put(health);
         pallet_oracle::ReserveProbeArmed::<Runtime>::kill();
+        // SQ-195: the arming *block* is part of the same latch. Leaving it
+        // behind would contradict this migration's own contract — "leave
+        // `ReserveProbeArmed` false so the next readiness-qualified crank
+        // establishes the real cadence" — and hand the welfare `R` projection a
+        // measured-range start from a probe generation that no longer exists.
+        pallet_oracle::ReserveProbeArmedAt::<Runtime>::kill();
+        // ...and so are the day-resolved outcomes it indexed. Leaving them
+        // behind lets a **retired probe generation's** records survive into the
+        // new one, where a stale day inside the next measured range would score
+        // as that range's outcome (07 §8 upgrade compatibility). Bounded by the
+        // `u8` day key per retained epoch; the epoch index itself is retired by
+        // welfare's own cursor-bounded walk.
+        let cleared = pallet_welfare::ReserveProbeDaily::<Runtime>::clear(u32::MAX, None);
 
         pallet_constitution::PhaseFlags::<Runtime>::mutate(|bits| {
             if unhealthy {
@@ -149,9 +162,21 @@ impl UncheckedOnRuntimeUpgrade for MigrateOracleReserveProbeV1Inner {
         });
 
         // ReserveHealth, PhaseFlags and Treasury State reads; those three
-        // writes plus the explicit latch clear. VersionedMigration separately
-        // accounts for its StorageVersion read/write.
-        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(3, 4)
+        // writes plus the two latch clears (armed flag and its block).
+        // VersionedMigration separately accounts for its StorageVersion
+        // read/write.
+        //
+        // The day-outcome clear is charged from its **actual** removal count,
+        // not as a single write: the map spans up to one retained-epoch window
+        // × 256 day keys, so a flat charge would understate a real migration by
+        // orders of magnitude (I-20; 09 §1.1). `MultiRemovalResults` reports the
+        // backend reads and removals it performed.
+        <Runtime as frame_system::Config>::DbWeight::get()
+            .reads_writes(3, 5)
+            .saturating_add(
+                <Runtime as frame_system::Config>::DbWeight::get()
+                    .reads_writes(u64::from(cleared.loops), u64::from(cleared.backend)),
+            )
     }
 
     #[cfg(feature = "try-runtime")]
@@ -181,6 +206,16 @@ impl UncheckedOnRuntimeUpgrade for MigrateOracleReserveProbeV1Inner {
         frame_support::ensure!(
             !pallet_oracle::ReserveProbeArmed::<Runtime>::get(),
             "oracle v1 migration: legacy state incorrectly implied arming"
+        );
+        frame_support::ensure!(
+            pallet_oracle::ReserveProbeArmedAt::<Runtime>::get().is_none(),
+            "oracle v1 migration: a stale arming block survived the reset"
+        );
+        frame_support::ensure!(
+            pallet_welfare::ReserveProbeDaily::<Runtime>::iter()
+                .next()
+                .is_none(),
+            "oracle v1 migration: a retired generation's probe outcomes survived"
         );
         frame_support::ensure!(
             (pallet_constitution::PhaseFlags::<Runtime>::get()
@@ -221,6 +256,115 @@ pub(crate) fn reserve_probe_param_records() -> Option<(
         }
     }
     fee.zip(rate)
+}
+
+/// The three SQ-173 `sec.prize.*` capability-envelope rows, taken from
+/// `genesis_params()` so a chain migrated into them is byte-identical to a
+/// chain that genesised with them.
+#[allow(clippy::type_complexity)]
+pub(crate) fn security_prize_param_records() -> Option<[pallet_constitution::ParamRecord; 3]> {
+    let keys = [
+        pallet_constitution::key16(b"sec.prize.param"),
+        pallet_constitution::key16(b"sec.prize.code"),
+        pallet_constitution::key16(b"sec.prize.meta"),
+    ];
+    let mut found: [Option<pallet_constitution::ParamRecord>; 3] = [None, None, None];
+    for record in pallet_constitution::genesis_params() {
+        for (index, key) in keys.iter().enumerate() {
+            if record.key == *key {
+                found[index] = Some(record);
+            }
+        }
+    }
+    match found {
+        [Some(param), Some(code), Some(meta)] => Some([param, code, meta]),
+        _ => None,
+    }
+}
+
+/// Seed the SQ-173 capability-envelope rows on a chain that predates them.
+///
+/// Without this, an upgraded chain has no `sec.prize.*` records at all, and
+/// because `in_cap_prize` reads the **live** record only (deliberately — an
+/// unratified compile-time default must never back a security envelope), every
+/// PARAM, CODE and META proposal would fail `SecuritySizing` forever. Genesis
+/// seeding alone is not enough for a chain that already exists.
+///
+/// Insert-if-absent, never overwrite: a chain that already carries the row —
+/// including one whose governance has since raised a class's proxy — keeps its
+/// live value. Advances the Constitution storage version `2 -> 3`.
+pub struct MigrateConstitutionSecurityPrizeV3;
+
+impl OnRuntimeUpgrade for MigrateConstitutionSecurityPrizeV3 {
+    fn on_runtime_upgrade() -> Weight {
+        use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+        let weight = <Runtime as frame_system::Config>::DbWeight::get();
+        if crate::Constitution::on_chain_storage_version() != StorageVersion::new(2) {
+            return weight.reads(1);
+        }
+        let Some(records) = security_prize_param_records() else {
+            return weight.reads(1);
+        };
+        let mut written = 0u64;
+        for record in records {
+            if pallet_constitution::Params::<Runtime>::get(record.key).is_none() {
+                pallet_constitution::Params::<Runtime>::insert(record.key, record);
+                written = written.saturating_add(1);
+            }
+        }
+        StorageVersion::new(3).put::<crate::Constitution>();
+        // Version read + three existence reads; up to three row writes with
+        // their CountedStorageMap counter, plus the version write.
+        weight.reads_writes(4, written.saturating_mul(2).saturating_add(1))
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn pre_upgrade() -> Result<Vec<u8>, sp_runtime::TryRuntimeError> {
+        use frame_support::traits::GetStorageVersion;
+
+        let live = security_prize_param_records().map(|records| {
+            records.map(|record| pallet_constitution::Params::<Runtime>::get(record.key))
+        });
+        Ok((crate::Constitution::on_chain_storage_version(), live).encode())
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn post_upgrade(state: Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+        use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+        type PreState = (
+            frame_support::traits::StorageVersion,
+            Option<[Option<pallet_constitution::ParamRecord>; 3]>,
+        );
+        let (version, before): PreState = DecodeAll::decode_all(&mut state.as_slice())
+            .map_err(|_| sp_runtime::TryRuntimeError::Other("sec.prize pre-state decode"))?;
+        if version != StorageVersion::new(2) {
+            return Ok(());
+        }
+        let records = security_prize_param_records().ok_or(sp_runtime::TryRuntimeError::Other(
+            "genesis is missing a sec.prize row",
+        ))?;
+        for (index, record) in records.into_iter().enumerate() {
+            let live = pallet_constitution::Params::<Runtime>::get(record.key).ok_or(
+                sp_runtime::TryRuntimeError::Other("sec.prize row absent after migration"),
+            )?;
+            let expected = match before.as_ref().and_then(|rows| rows[index]) {
+                // A pre-existing row is preserved exactly, never overwritten.
+                Some(previous) => previous,
+                None => record,
+            };
+            frame_support::ensure!(
+                live == expected,
+                "sec.prize row does not match its expected post-migration value"
+            );
+        }
+        frame_support::ensure!(
+            crate::Constitution::on_chain_storage_version() == StorageVersion::new(3),
+            "Constitution storage version did not advance to 3"
+        );
+        Ok(())
+    }
 }
 
 fn valid_probe_record(
@@ -693,13 +837,49 @@ fn apply_phase_four_plan(plan: pallet_execution_guard::PhaseFourPlan) -> Dispatc
 }
 
 #[cfg(any(feature = "phase-four", feature = "recovery"))]
-fn transition_phase_four(plan: pallet_execution_guard::PhaseFourPlan) -> DispatchResult {
-    apply_phase_four_plan(plan)?;
-    crate::FutarchyTreasury::note_phase_four_arming();
-    sp_io::storage::clear(&sudo_key_storage_key());
+fn transition_phase_four(
+    plan: pallet_execution_guard::PhaseFourPlan,
+    enforce_arming_gate: bool,
+) -> DispatchResult {
+    // 08 §4.2 (SQ-383): arming a proposal class REQUIRES published spendable
+    // NAV at or above that class's §4.1 floor, and the rule binds *every*
+    // writer of the arming bits — 06 §3.2 names bootstrap sudo's
+    // `constitution.set_param` **and** the phase-advancement upgrade. Only the
+    // dispatchable carried the check, so this one-shot migration armed PARAM
+    // below floor at precisely the point the chain loses sudo and the operator
+    // recourse that comes with it. The refusal is fail-static: the caller's
+    // `with_storage_layer` rolls the whole transition back, the Phase-3 flags,
+    // sudo key and OnlyInherents lock survive unchanged, and
+    // `note_phase_transition_failure` records the loud, durable signal.
+    //
+    // **Terminal recovery is exempt, deliberately.** 08 §4.2 governs *arming a
+    // class at a rollout phase gate* — a first, discretionary decision. A
+    // terminal recovery image is not that: it is the repair that re-applies an
+    // already-authorized transition to unwedge a chain running under
+    // `OnlyInherents`/`RecoveryLockdown`, where no ordinary call — including
+    // any that could fund the treasury — is dispatchable. Enforcing the floor
+    // there would make a below-floor primary install unrecoverable **forever**,
+    // trading the SQ-383 defect for a bricked chain, which R-7 refuses. The
+    // arming decision was already gated on the primary path; recovery only
+    // completes it.
+    if enforce_arming_gate {
+        <crate::configs::TreasuryPhaseArmingGate as pallet_constitution::PhaseArmingGate>::ensure_armable(
+            futarchy_primitives::ProposalClass::Param,
+        )?;
+    }
+    // 09 §5.2 (SQ-197): the arming bits are written **before** the cap plan is
+    // applied. The two Phase-3 exposure caps are raisable only from Phase 4
+    // onward, so the scheduled raise below passes the same ordinary gate every
+    // later amendment does instead of needing an exemption carved for this
+    // writer. The whole sequence runs inside the caller's storage layer, so
+    // ordering changes nothing an observer can see: either all of it commits
+    // or none of it does.
     pallet_constitution::PhaseFlags::<Runtime>::put(
         pallet_constitution::PhaseFlagsValue::PARAM_ARMED,
     );
+    apply_phase_four_plan(plan)?;
+    crate::FutarchyTreasury::note_phase_four_arming();
+    sp_io::storage::clear(&sudo_key_storage_key());
     Ok(())
 }
 
@@ -755,7 +935,7 @@ impl frame_support::traits::OnRuntimeUpgrade for PhaseFourTransition {
 
         if let Some(plan) = plan.filter(|_| source_state_exact) {
             let transitioned = frame_support::storage::with_storage_layer(|| {
-                transition_phase_four(plan)?;
+                transition_phase_four(plan, true)?;
                 crate::ExecutionGuard::validation_code_applied()?;
                 crate::configs::PhaseTransitionApplied::kill();
                 crate::configs::PhaseTransitionLock::kill();
@@ -941,7 +1121,9 @@ impl frame_support::traits::OnRuntimeUpgrade for TerminalRecoveryTransition {
                         ))
                     }
                 };
-                transition_phase_four(plan)?;
+                // SQ-383: the arming gate is deliberately NOT enforced on the
+                // terminal recovery lane — see `transition_phase_four`.
+                transition_phase_four(plan, false)?;
                 crate::ExecutionGuard::recovery_code_applied(installed_hash, installed_version)?;
                 crate::configs::complete_terminal_recovery_state();
             } else {

@@ -550,21 +550,21 @@ reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/
 
 [[entry]]
 key = "sec.prize.param"
-class = "value"
-genesis = false
-reason = "13 §1: unseeded economic value — [VERIFY]-gated on Phase-0 capability-envelope calibration; it has no dispatch-path limit of its own."
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: adopted from the Phase-0 published calibration (SQ-173) and seeded with a kernel-bounded min; covered by the generated per-key set_param/amend_registry suite."
 
 [[entry]]
 key = "sec.prize.code"
-class = "value"
-genesis = false
-reason = "13 §1: unseeded economic value — [VERIFY]-gated on Phase-0 capability-envelope calibration; it has no dispatch-path limit of its own."
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: adopted from the Phase-0 published calibration (SQ-173) and seeded with a kernel-bounded min; covered by the generated per-key set_param/amend_registry suite."
 
 [[entry]]
 key = "sec.prize.meta"
-class = "value"
-genesis = false
-reason = "13 §1: unseeded economic value — [VERIFY]-gated on Phase-0 capability-envelope calibration; it has no dispatch-path limit of its own."
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: adopted from the Phase-0 published calibration (SQ-173) and seeded with a kernel-bounded min; covered by the generated per-key set_param/amend_registry suite."
 
 [[entry]]
 key = "sec.flow_cap"

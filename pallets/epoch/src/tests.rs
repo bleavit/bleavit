@@ -1489,9 +1489,13 @@ fn sq40_undefined_prize_proxy_takes_t10_and_refunds_the_full_bond() {
         assert!(SeamCalls::get().contains(&SeamCall::Resolve(1, Branch::Reject)));
         assert!(SeamCalls::get().contains(&SeamCall::CloseMarkets(1)));
         assert!(SeamCalls::get().contains(&SeamCall::DequeueTerminal(1)));
+        // SQ-318 (ruled 2026-07-24): the T10 rejection releases the resource
+        // domain immediately, in both the with-markets and no-markets arms.
+        // `Rejected` is not dispatch-reachable, so a retained lock would only
+        // block other proposals through the ~3-epoch measurement window.
         assert!(ResourceLocks::<Test>::get()
             .iter()
-            .any(|(_, owner)| *owner == 1));
+            .all(|(_, owner)| *owner != 1));
         assert!(!ProposalBonds::<Test>::contains_key(1));
         assert_eq!(BondReleases::get(), vec![(proposer, bond)]);
         assert!(!System::events().iter().any(|record| matches!(
@@ -4028,18 +4032,14 @@ fn sq314_void_cohort_preserves_only_cohort_members_and_t20s_the_rest() {
                 // pid 1 is the cohort member: its recorded Adopt survives.
                 (1, ProposalClass::Param, DecisionOutcome::Adopt,),
                 // pids 2 and 3 are decided but pre-Executed and outside the
-                // cohort, so they take T20 rather than carrying their vacated
-                // Adopt into the archive.
-                (
-                    2,
-                    ProposalClass::Param,
-                    DecisionOutcome::Reject(RejectReason::ProcessHold),
-                ),
-                (
-                    3,
-                    ProposalClass::Param,
-                    DecisionOutcome::Reject(RejectReason::ProcessHold),
-                ),
+                // cohort. SQ-319 (ruled 2026-07-24): T20 still halts them —
+                // `state` becomes `Rejected(ProcessHold)` and neither can ever
+                // execute — but it does not rewrite a decision the market
+                // actually produced. Recording `Reject(ProcessHold)` here would
+                // put a rejection in the archive that no market concluded,
+                // which is the truth defect SQ-314 was ratified against.
+                (2, ProposalClass::Param, DecisionOutcome::Adopt,),
+                (3, ProposalClass::Param, DecisionOutcome::Adopt,),
             ])
         );
         assert!(RecentCohortSummaries::<Test>::get()

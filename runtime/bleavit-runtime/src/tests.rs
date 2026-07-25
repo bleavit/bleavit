@@ -845,6 +845,23 @@ fn preimage_request_count(hash: impl Into<H256>) -> u32 {
     }
 }
 
+/// Remove a class's `sec.prize.*` record so `in_cap_prize` renders the
+/// **undefined proxy** 13 §1 requires to fail sizing (SQ-173). Before the
+/// envelope rows were seeded, that state was simply the default; it is now
+/// reachable only by deleting the record, so the regressions below construct it
+/// explicitly instead of relying on an absent genesis row.
+pub(crate) fn clear_security_prize(class: ProposalClass) {
+    let key: &[u8] = match class {
+        ProposalClass::Param => b"sec.prize.param",
+        ProposalClass::Code => b"sec.prize.code",
+        ProposalClass::Meta => b"sec.prize.meta",
+        ProposalClass::Treasury | ProposalClass::Constitutional => {
+            panic!("class carries no sec.prize row")
+        }
+    };
+    pallet_constitution::Params::<Runtime>::remove(pallet_constitution::key16(key));
+}
+
 pub(crate) fn empty_param_proposal(
     id: futarchy_primitives::ProposalId,
     proposer: AccountId,
@@ -10008,19 +10025,29 @@ fn void_cohort_releases_a_retained_rerun_pin_and_guard_records() {
                 .any(|(pid, _, decision)| *pid == PID && *decision == DecisionOutcome::Adopt),
             "summary={summary:?}"
         );
-        // 05 §7(4): membership, not `decision.is_some()`, is the discriminator.
-        // QUEUED_PID is decided but never reached `Measuring`, so it is not a
-        // cohort member and takes T20 — its vacated Adopt does not enter the
-        // archive. Whether T20's record is the *truthful* one for this
-        // population is SQ-319.
+        // 05 §7(4) + SQ-319 (ruled 2026-07-24): membership still decides who
+        // takes T20 — QUEUED_PID never reached `Measuring`, so it is halted,
+        // its state becomes `Rejected(ProcessHold)` and it can never execute.
+        // But T20 does not rewrite a decision the market actually produced:
+        // the archive keeps the `Adopt` that `decide()` recorded at T9, because
+        // a cohort VOID invalidates measurement inputs rather than reversing
+        // the decision.
         assert!(
             summary
                 .proposals
                 .iter()
                 .any(|(pid, _, decision)| *pid == QUEUED_PID
-                    && *decision == DecisionOutcome::Reject(RejectReason::ProcessHold)),
+                    && *decision == DecisionOutcome::Adopt),
             "summary={summary:?}"
         );
+        // T20 still halted it: the proposal is terminally archived and gone
+        // from live storage, so no queued payload of its can ever execute.
+        // Only the *record* of what the market decided is preserved. The
+        // state/decision split itself is pinned at core level by
+        // `pallet-epoch`'s `sq314_void_cohort_preserves_only_cohort_members…`.
+        assert!(!pallet_epoch::Proposals::<Runtime>::contains_key(
+            QUEUED_PID
+        ));
         // The cohort member emits no per-proposal rejection; the T20'd
         // same-epoch proposal emits exactly one.
         assert!(!System::events().iter().any(|record| matches!(
@@ -15319,6 +15346,218 @@ fn view_execution_queue_reuses_guard_projection_and_fails_closed() {
 }
 
 #[test]
+fn sq173_class_envelopes_back_every_binding_class_prize() {
+    // 08 §5.2 / 05 §5.6: PARAM takes the certified capability-envelope value;
+    // CODE and META take the claimant-adverse `max(ask, envelope)` and, for a
+    // runtime-upgrade payload, additionally the `trs.cap_proposal · spendable
+    // NAV` floor. Constitutional runs no markets, so step 9 is unreachable.
+    use pallet_epoch::ConstitutionAccess;
+    development_ext().execute_with(|| {
+        let prize = |proposal: &Proposal<AccountId>| {
+            <crate::configs::RuntimeConstitutionAccess as ConstitutionAccess<AccountId>>::in_cap_prize(
+                proposal,
+            )
+        };
+
+        // The seeded envelopes are exactly the Phase-0 published calibration
+        // (13 §1; simulation/results/phase0-calibration.json).
+        let param = empty_param_proposal(9_320, account(41), H256::repeat_byte(41), 1);
+        assert_eq!(
+            prize(&param),
+            Some(futarchy_primitives::kernel::SEC_PRIZE_PARAM_FLOOR),
+            "PARAM takes the certified envelope alone — no ask, no NAV floor",
+        );
+        assert_eq!(
+            futarchy_primitives::kernel::SEC_PRIZE_PARAM_FLOOR,
+            50_000 * currency::USDC,
+        );
+
+        // An undefined proxy still fails closed rather than adopting at zero.
+        clear_security_prize(ProposalClass::Param);
+        assert_eq!(prize(&param), None);
+
+        // CODE/META: the envelope binds when it exceeds both the ask and the
+        // `trs.cap_proposal · spendable NAV` floor. That floor applies to every
+        // CODE/META proposal — matching `reference-model`'s `decide`, the
+        // 15 §4.4 differential oracle, which never conditions it on payload
+        // content. With a zero spendable NAV the floor is 0 and the envelope
+        // wins.
+        for (class, floor) in [
+            (
+                ProposalClass::Code,
+                futarchy_primitives::kernel::SEC_PRIZE_CODE_FLOOR,
+            ),
+            (
+                ProposalClass::Meta,
+                futarchy_primitives::kernel::SEC_PRIZE_META_FLOOR,
+            ),
+        ] {
+            let mut proposal = empty_param_proposal(
+                9_321 + u64::from(u8::from(class == ProposalClass::Meta)),
+                account(42),
+                H256::repeat_byte(42),
+                1,
+            );
+            proposal.class = class;
+            assert_eq!(prize(&proposal), Some(floor), "{class:?} takes its envelope");
+
+            // A larger ask outranks the envelope — `max`, never `min`.
+            proposal.ask = floor.saturating_mul(3);
+            assert_eq!(prize(&proposal), Some(floor.saturating_mul(3)));
+
+            clear_security_prize(class);
+            assert_eq!(prize(&proposal), None, "{class:?} fails closed when unbacked");
+        }
+
+        let mut constitutional = empty_param_proposal(9_329, account(43), H256::repeat_byte(43), 1);
+        constitutional.class = ProposalClass::Constitutional;
+        assert_eq!(prize(&constitutional), None);
+    });
+}
+
+/// Cross-implementation pin for 15 §4.4: the runtime's CODE/META
+/// `InCapPrize` must equal the reference model's on the same inputs, on **both**
+/// sides of 08 §5.2's upgrade condition. It reproduces exactly the case
+/// `reference-model/tests/test_reference_model.py`
+/// `test_code_meta_nav_floor_is_scoped_to_upgrade_payloads` fixes — ask 100,
+/// envelope 200, spendable NAV 10,000 at `trs.cap_proposal` 5% — where the
+/// oracle returns **500** for an upgrade payload and **200** for a non-upgrade
+/// one.
+///
+/// The oracle expresses that condition through its caller, not a flag:
+/// `decide()` takes no `upgrade_payload` argument, so a caller signals "not an
+/// upgrade" by passing `spendable_nav = 0`. That is what the Phase-0 simulation
+/// does, and what the published calibration behind the `sec.prize.*` defaults
+/// was run under. Reading `decide()`'s signature alone suggests an
+/// unconditional floor; this test exists because that misreading was briefly
+/// shipped and put the runtime at odds with the Phase-0 evidence.
+#[test]
+fn sq173_code_meta_prize_matches_the_reference_model_worked_case() {
+    use frame_support::traits::fungibles::Mutate;
+    use pallet_epoch::ConstitutionAccess;
+    development_ext().execute_with(|| {
+        // Envelope = 200 USDC (override the seeded class calibration).
+        for (class, key) in [
+            (ProposalClass::Code, b"sec.prize.code".as_slice()),
+            (ProposalClass::Meta, b"sec.prize.meta".as_slice()),
+        ] {
+            let k = pallet_constitution::key16(key);
+            let mut record = pallet_constitution::Params::<Runtime>::get(k).expect("seeded row");
+            record.value = pallet_constitution::ParamValue::Balance(200 * currency::USDC);
+            pallet_constitution::Params::<Runtime>::insert(k, record);
+            let _ = class;
+        }
+
+        // Spendable NAV = 10,000 USDC through the real INSURANCE sweep.
+        let nav_target = 10_000 * currency::USDC;
+        assert_ok!(<ForeignAssets as Mutate<AccountId>>::mint_into(
+            usdc_location(),
+            &crate::configs::insurance_account(),
+            nav_target,
+        ));
+        assert_ok!(FutarchyTreasury::sweep_insurance(
+            pallet_origins::Origin::FutarchyTreasury.into(),
+            nav_target
+        ));
+        assert_eq!(FutarchyTreasury::nav().spendable_nav, nav_target);
+        assert_eq!(crate::configs::percent_param(b"trs.cap_proposal"), 5);
+
+        // A payload that decodes to a real, **non-upgrade** batch. This is what
+        // makes the test non-vacuous: an unbacked hash would have satisfied the
+        // superseded `carries_upgrade_payload` predicate too (it answered "yes"
+        // on an undecodable preimage), so both implementations would agree at
+        // 500 and the regression would prove nothing. With a decodable
+        // non-upgrade batch the superseded code returns 200 and only the
+        // oracle-equivalent code returns 500.
+        let (payload_hash, payload_len) = note_runtime_batch(vec![RuntimeCall::System(
+            frame_system::Call::remark {
+                remark: alloc::vec![7_u8; 4],
+            },
+        )])
+        .expect("non-upgrade payload is notable");
+
+        for class in [ProposalClass::Code, ProposalClass::Meta] {
+            let mut proposal =
+                empty_param_proposal(9_350, account(45), payload_hash, payload_len);
+            proposal.class = class;
+            proposal.ask = 100 * currency::USDC;
+            // Non-upgrade payload: no floor, so max(ask 100, envelope 200).
+            // The oracle's equivalent call passes `spendable_nav = 0`.
+            assert_eq!(
+                <crate::configs::RuntimeConstitutionAccess as ConstitutionAccess<AccountId>>::in_cap_prize(
+                    &proposal
+                ),
+                Some(200 * currency::USDC),
+                "{class:?} non-upgrade must equal the reference model's 200",
+            );
+
+            // Upgrade payload: the floor binds at 5% of 10,000 USDC = 500.
+            let (upgrade_hash, upgrade_len) = note_runtime_batch(vec![RuntimeCall::System(
+                frame_system::Call::authorize_upgrade {
+                    code_hash: H256::repeat_byte(46),
+                },
+            )])
+            .expect("upgrade payload is notable");
+            proposal.payload_hash = upgrade_hash.0;
+            proposal.payload_len = upgrade_len;
+            assert_eq!(
+                <crate::configs::RuntimeConstitutionAccess as ConstitutionAccess<AccountId>>::in_cap_prize(
+                    &proposal
+                ),
+                Some(500 * currency::USDC),
+                "{class:?} upgrade must equal the reference model's 500",
+            );
+        }
+    });
+}
+
+#[test]
+fn sq173_upgrade_cap_floor_rounds_up_like_the_reference_model() {
+    // 05 §5.4 step 9 rounds `InCapPrize` UP. Flooring `nav · trs.cap_proposal
+    // / 100` would understate the CODE/META upgrade floor by up to one µUSDC
+    // and admit a boundary proposal the reference-model oracle rejects.
+    use frame_support::traits::fungibles::Mutate;
+    use pallet_epoch::ConstitutionAccess;
+    development_ext().execute_with(|| {
+        // Choose a NAV that does not divide evenly by the cap percentage.
+        let percent = Balance::from(crate::configs::percent_param(b"trs.cap_proposal"));
+        assert!(percent > 0);
+        let nav_target = crate::FutarchyTreasury::floor(ProposalClass::Meta)
+            .saturating_mul(8)
+            .saturating_add(1);
+        assert_ok!(<ForeignAssets as Mutate<AccountId>>::mint_into(
+            usdc_location(),
+            &crate::configs::insurance_account(),
+            nav_target,
+        ));
+        assert_ok!(FutarchyTreasury::sweep_insurance(
+            pallet_origins::Origin::FutarchyTreasury.into(),
+            nav_target
+        ));
+        let nav = FutarchyTreasury::nav().spendable_nav;
+        assert!(nav.saturating_mul(percent) % 100 != 0, "nav={nav}");
+
+        let mut proposal = empty_param_proposal(9_340, account(44), H256::repeat_byte(44), 1);
+        proposal.class = ProposalClass::Code;
+        // No pinned preimage ⇒ treated as an upgrade payload, so the cap floor
+        // applies and — at this NAV — dominates the class envelope.
+        let ceil_cap = nav
+            .saturating_mul(percent)
+            .saturating_add(99)
+            .saturating_div(100);
+        let floor_cap = nav.saturating_mul(percent).saturating_div(100);
+        assert_eq!(ceil_cap, floor_cap.saturating_add(1));
+        assert_eq!(
+            <crate::configs::RuntimeConstitutionAccess as ConstitutionAccess<AccountId>>::in_cap_prize(
+                &proposal
+            ),
+            Some(ceil_cap),
+            "the upgrade floor must round up, not down",
+        );
+    });
+}
+
+#[test]
 fn unavailable_prize_keeps_the_base_contest_floor_and_never_slashes_the_proposer() {
     // The grade remains meaningful even though SQ-40 now makes the later
     // sizing step a terminal SecuritySizing rejection. Keeping the base floor
@@ -15331,6 +15570,9 @@ fn unavailable_prize_keeps_the_base_contest_floor_and_never_slashes_the_proposer
         let proposal = empty_param_proposal(9_310, account(31), H256::repeat_byte(9), 1);
 
         // Precondition: this is exactly the SQ-173 state the bug tripped on.
+        // Since SQ-173 seeded the class envelopes, the undefined proxy is no
+        // longer the default — construct it by removing the record.
+        clear_security_prize(ProposalClass::Param);
         assert_eq!(
             <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
                 AccountId,
@@ -15359,6 +15601,9 @@ fn sq40_undefined_prize_takes_t10_and_refunds_the_full_runtime_bond() {
 
     development_ext().execute_with(|| {
         const PID: futarchy_primitives::ProposalId = 9_311;
+        // SQ-173 seeded the PARAM envelope, so the undefined proxy this
+        // regression exercises is now constructed, not inherited.
+        clear_security_prize(ProposalClass::Param);
         let params =
             <crate::configs::RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
         let end = params.decision_window;
@@ -16629,8 +16874,11 @@ fn view_decision_stats_returns_none_for_unknown_or_incomplete_backing() {
         pallet_conditional_ledger::Vaults::<Runtime>::remove(91);
 
         // Isolate the values/prize seam: every decision and gate book read is
-        // complete, but SQ-141 leaves CODE InCapPrize unavailable. G-1 returns
+        // complete, but the CODE InCapPrize proxy is undefined. G-1 returns
         // None instead of exposing an otherwise plausible partial statistic.
+        // SQ-173 seeded the class envelopes, so the undefined state is now
+        // constructed by removing the record rather than inherited from genesis.
+        clear_security_prize(ProposalClass::Code);
         let params =
             <crate::configs::RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
         System::set_block_number(params.decision_window);
@@ -18001,6 +18249,71 @@ fn false_footprint_is_slashed_even_when_also_domain_inadmissible() {
             // unpunished.
             "a false footprint must be slashed even when the payload is also \
              domain-inadmissible: {disposition:?}",
+        );
+    });
+}
+
+/// SQ-174 (2026-07-25): `StakeAtRisk(c, m)` is a real quantity, not the
+/// `Balance::MAX` sentinel that used to refuse every exposure-bearing report.
+///
+/// 07 §6.1 defines it as `Σ CohortEscrow(k)` over the cohorts whose frozen
+/// MetricSpec consumes `c` for measurement epoch `m`, and the section's
+/// *Per-game freezing* paragraph binds `B_1` — and so this value — once at round-1
+/// creation. The superseded `CohortEscrow` wording read escrow "at the block
+/// Snapshot(m) finalizes", which is circular for an attested component: that
+/// snapshot *consumes* the settled value the game produces. The `Balance::MAX`
+/// sentinel masked the gap by overflowing `round_bond`'s checked multiplication,
+/// so the reporting game failed closed by accident of an unrelated defect.
+#[test]
+fn sq174_stake_at_risk_sums_consuming_cohort_escrow() {
+    const COMPONENT: u16 = 1;
+    const SPEC: u16 = 61;
+    const MEASUREMENT: futarchy_primitives::EpochId = 7;
+
+    development_ext().execute_with(|| {
+        let stake = || {
+            <crate::configs::RuntimeReporting as pallet_oracle::ReportingContext>::stake_at_risk(
+                COMPONENT,
+                MEASUREMENT,
+            )
+        };
+
+        // No cohort consumes the component yet: no exposure, no bond scaling.
+        assert_eq!(stake(), 0);
+
+        // A cohort whose frozen spec carries the component and whose measurement
+        // window covers epoch 7, with two proposals holding escrow.
+        install_single_active_metric_spec(SPEC).expect("spec installs");
+        for (pid, escrowed) in [(801_u64, 300), (802_u64, 500)] {
+            let mut vault = conditional_ledger_core::VaultInfo::open(SPEC);
+            vault.escrowed = escrowed * currency::USDC;
+            pallet_conditional_ledger::Vaults::<Runtime>::insert(pid, vault);
+        }
+        pallet_epoch::CohortSchedules::<Runtime>::insert(
+            MEASUREMENT - 1,
+            pallet_epoch::CohortSchedule {
+                epoch: MEASUREMENT - 1,
+                creation_epoch_length: 1,
+                measurement_until: MEASUREMENT + 1,
+                settlement_epoch: MEASUREMENT + 2,
+                specs: pallet_epoch::SpecBindings::truncate_from(vec![(801, SPEC), (802, SPEC)]),
+            },
+        );
+
+        assert_eq!(
+            stake(),
+            800 * currency::USDC,
+            "StakeAtRisk must be the summed cohort escrow, not the MAX sentinel",
+        );
+        assert_ne!(stake(), Balance::MAX);
+
+        // The bond it prices is now representable, so a report can open at all.
+        let params =
+            <crate::configs::RuntimeOracleParams as pallet_oracle::OracleParamsProvider>::get();
+        assert!(pallet_oracle::round_bond(stake(), 1, &params).is_ok());
+        assert!(
+            pallet_oracle::round_bond(Balance::MAX, 1, &params).is_err(),
+            "the superseded sentinel overflowed the bond — the accidental fail-closed",
         );
     });
 }

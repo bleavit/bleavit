@@ -322,6 +322,12 @@ live. For mock data these are the correct realistic values.
 | `RecentCohortSummaries` | ring of 32 (~22 months) | history page range |
 | `ExecutionRecords` | ring of 256 | execution history range |
 
-**Unset-by-spec ([VERIFY], sim-/ops-gated — never invent values):** `sec.prize.*`,
+**Unset-by-spec ([VERIFY], sim-/ops-gated — never invent values):**
 `sec.flow_cap`, `collator.bond_req_vit`, `ops.*` budget lines, `pol.b_baseline` calibration,
 `fee.vit_usdc_rate_ref` at TGE, `phase3.*` caps before Phase-3 arming.
+
+`sec.prize.param` / `sec.prize.code` / `sec.prize.meta` **left that list on 2026-07-24**
+(SQ-173): they are now seeded from the Phase-0 published calibration at 50,000 / 300,000 /
+600,000 USDC and readable through `params()` like any other row. They are the `InCapPrize`
+capability-envelope proxies; an **absent** row still means the proposal cannot pass sizing,
+so a UI must render "unavailable", never zero.
