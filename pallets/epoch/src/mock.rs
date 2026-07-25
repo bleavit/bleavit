@@ -136,6 +136,10 @@ pub enum SeamCall {
     },
     DequeueTerminal(ProposalId),
     DequeueForRerun(ProposalId),
+    /// 07 §4 watchtower liveness sweep for the epoch that just ended (SQ-491).
+    OracleEpochBoundary(EpochId),
+    /// 07 §11(1) `OracleSettleDeadline` for a measurement epoch (SQ-182).
+    OracleSettleDeadline(EpochId),
     Welfare(EpochId, MetricSpecVersion, SettlementTarget),
     /// 03 §2.3/§5 epoch-VOID Baseline settlement at the neutral score.
     WelfareVoidBaseline(EpochId),
@@ -514,6 +518,12 @@ pub struct TestOracle;
 impl OracleAccess for TestOracle {
     fn any_open_dispute_touching(_spec: MetricSpecVersion) -> bool {
         OpenDispute::get()
+    }
+    fn note_epoch_boundary(ended_epoch: EpochId) -> DispatchResult {
+        SeamCalls::push(SeamCall::OracleEpochBoundary(ended_epoch))
+    }
+    fn note_settle_deadline(measurement_epoch: EpochId) -> DispatchResult {
+        SeamCalls::push(SeamCall::OracleSettleDeadline(measurement_epoch))
     }
 }
 

@@ -11,13 +11,15 @@
 
 use crate::mock::*;
 use crate::pallet::{
-    Recomputable, Reporters, ReserveHealth, ReserveProbeArmed, RoundSchedules, Rounds,
-    WatchtowerActive, Watchtowers,
+    Recomputable, Reporters, ReserveHealth, ReserveProbeArmed, RoundActivity, RoundSchedules,
+    Rounds, WatchtowerActive, Watchtowers,
 };
 use crate::{Error, Event};
 use frame_support::traits::{ConstU32, StorageVersion};
 use frame_support::{assert_noop, assert_ok, pallet_prelude::DispatchResult, BoundedVec};
-use futarchy_primitives::{Balance, EpochId, FixedU64, MetricId, MetricSpecVersion, H256};
+use futarchy_primitives::{
+    Balance, BlockNumber, EpochId, FixedU64, MetricId, MetricSpecVersion, H256,
+};
 use oracle_core::{
     hash_evidence, hash_report, round_bond, OracleParams, RoundState, SettlePath,
     StoredRoundSchedule, COMPONENT_VALUE_MAX, ORC_EXT_WINDOW_BLOCKS, ORC_REPORTER_STAKE,
@@ -3008,26 +3010,87 @@ fn settled_component_reads_and_reap_clears_the_entry() {
 // =========================================================================
 // 15. Watchtower liveness discipline (07 §4 — epoch-boundary sweep)
 // =========================================================================
-// `note_epoch_boundary(ended_epoch, had_open_round)` is runtime-internal (the
-// epoch pallet drives it at B1a); it is called directly here, not as an
-// extrinsic. The just-ended epoch's activity set is `WatchtowerActive`.
+// `note_epoch_boundary(ended_epoch)` is runtime-internal (the epoch pallet drives
+// it at B1a); it is called directly here, not as an extrinsic. The just-ended
+// epoch's activity set is `WatchtowerActive`.
+//
+// 07 §4's "an epoch with ≥ 1 open round" is *derived* from oracle state, not
+// supplied by the caller (SQ-491) — the epoch clock knows the schedule, not the
+// round history — so each test below arranges the predicate it needs:
+// `open_and_close_game` / `open_live_game` for a chargeable epoch, and simply
+// nothing for an exempt one. `RoundActivity` is the cross-call latch, so these
+// tests also exercise its hydrate/persist round trip through storage.
+
+/// The block at which `epoch`'s liveness fixture opens its game: one full
+/// `orc.window + orc.ext_window` lane per epoch (plus slack), so a game's whole
+/// quorum-failure closure lands before the next game opens.
+fn game_open_block(epoch: EpochId) -> BlockNumber {
+    1 + epoch * (ORC_WINDOW_BLOCKS + ORC_EXT_WINDOW_BLOCKS + 2)
+}
+
+/// Open a game for `(C, epoch, V)` and leave it **live**, returning its
+/// `report_hash`. The mock's report window is a constant, so it is moved to this
+/// game's opening block for the duration of the report — which therefore also
+/// lands on the last admissible block of its window (07 §5.1 admits
+/// `now <= report_window_end`) — and restored, since `new_test_ext` does not
+/// reset that static and no other test may inherit a widened window.
+fn open_live_game(reporter: u8, epoch: EpochId) -> H256 {
+    let at = game_open_block(epoch);
+    let window = ReportWindowEnd::get();
+    ReportWindowEnd::set(at);
+    set_block(at);
+    assert_ok!(do_report(reporter, epoch, reported_value(), h(9)));
+    ReportWindowEnd::set(window);
+    hash_report(C, epoch, 1, reported_value(), h(9))
+}
+
+/// Arrange a chargeable 07 §4 epoch: a game opens **and closes inside it**, on
+/// the quorum-failure path (no acknowledgments ⇒ one `orc.ext_window` extension,
+/// then the §10 neutral settlement). No watchtower is acknowledged, so none is
+/// marked active, and `Rounds` is empty again at the boundary — the state in
+/// which only the `RoundActivity` latch records that the epoch carried work.
+fn open_and_close_game(reporter: u8, epoch: EpochId) {
+    let at = game_open_block(epoch);
+    open_live_game(reporter, epoch);
+    set_block(at + ORC_WINDOW_BLOCKS);
+    assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(9)), 20));
+    set_block(at + ORC_WINDOW_BLOCKS + ORC_EXT_WINDOW_BLOCKS);
+    assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(9)), 20));
+    assert!(
+        Rounds::<Test>::get((C, epoch, V)).is_none(),
+        "the quorum-failure close reaps the round"
+    );
+}
 
 #[test]
 fn watchtower_liveness_registration_grace_charges_nothing() {
     // 07 §4: a watchtower is active for the epoch it registered in — the first
-    // sweep does not charge it, and the activity set clears afterward.
+    // sweep does not charge it, and the activity set clears afterward. The epoch
+    // is genuinely chargeable (a game ran in it) and a seat already past its
+    // grace pays in the very same sweep, so it is grace that spares the new seat
+    // and not the no-open-round exemption.
     new_test_ext().execute_with(|| {
+        register_reporter(1);
+        register_watchtower(3);
+        open_and_close_game(1, 1);
+        assert_ok!(Oracle::note_epoch_boundary(1)); // consumes seat 3's grace
+
         register_watchtower(2);
         // Registration marked the seat active for the current epoch.
         assert!(WatchtowerActive::<Test>::get().contains(&raw(2)));
+        open_and_close_game(1, 2);
 
         System::reset_events();
-        assert_ok!(Oracle::note_epoch_boundary(1, true));
+        assert_ok!(Oracle::note_epoch_boundary(2));
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 0);
-        assert!(!oracle_events()
-            .iter()
-            .any(|e| matches!(e, Event::WatchtowerInactive { .. })));
+        assert!(!oracle_events().iter().any(|e| matches!(
+            e,
+            Event::WatchtowerInactive { who, .. } if *who == acc(2)
+        )));
+        // Same epoch, same absence of acknowledgments: the seat past grace pays.
+        assert_eq!(Watchtowers::<Test>::get(acc(3)).unwrap().inactive_epochs, 1);
         assert!(WatchtowerActive::<Test>::get().is_empty()); // swept clean
+        assert!(!RoundActivity::<Test>::get()); // and the epoch's record consumed
         assert_ok!(Oracle::do_try_state());
     });
 }
@@ -3037,11 +3100,14 @@ fn watchtower_liveness_inactive_epoch_accrues_and_emits() {
     // 07 §4: a watchtower that acknowledges no round in an epoch that carried an
     // open round is marked inactive for that epoch.
     new_test_ext().execute_with(|| {
+        register_reporter(1);
         register_watchtower(2);
-        assert_ok!(Oracle::note_epoch_boundary(1, true)); // grace consumed
+        open_and_close_game(1, 1);
+        assert_ok!(Oracle::note_epoch_boundary(1)); // grace consumed
 
+        open_and_close_game(1, 2);
         System::reset_events();
-        assert_ok!(Oracle::note_epoch_boundary(2, true));
+        assert_ok!(Oracle::note_epoch_boundary(2));
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 1);
         assert_eq!(
             oracle_events(),
@@ -3058,19 +3124,23 @@ fn watchtower_liveness_inactive_epoch_accrues_and_emits() {
 fn watchtower_liveness_second_consecutive_miss_slashes_and_ejects() {
     // 07 §4: two consecutive inactive epochs slash 10 % of `wt.stake` and eject.
     new_test_ext().execute_with(|| {
+        register_reporter(1);
         register_watchtower(2);
-        assert_ok!(Oracle::note_epoch_boundary(1, true)); // grace
-        assert_ok!(Oracle::note_epoch_boundary(2, true)); // inactive #1
+        open_and_close_game(1, 1);
+        assert_ok!(Oracle::note_epoch_boundary(1)); // grace
+        open_and_close_game(1, 2);
+        assert_ok!(Oracle::note_epoch_boundary(2)); // inactive #1
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 1);
 
         let mut amended = ParamsValue::get();
         amended.watchtower_stake = WT_STAKE.saturating_add(1);
         ParamsValue::set(amended);
         register_watchtower(3);
+        open_and_close_game(1, 3);
         System::reset_events();
         let released_before = CustodyReleased::get();
         let slashed_before = CustodySlashed::get();
-        assert_ok!(Oracle::note_epoch_boundary(3, true)); // inactive #2 ⇒ slash + eject
+        assert_ok!(Oracle::note_epoch_boundary(3)); // inactive #2 ⇒ slash + eject
         assert!(oracle_events().iter().any(|e| matches!(
             e,
             Event::WatchtowerSlashed { who, amount }
@@ -3084,9 +3154,11 @@ fn watchtower_liveness_second_consecutive_miss_slashes_and_ejects() {
             WT_STAKE - WT_STAKE / 10
         );
 
+        open_and_close_game(1, 4);
         System::reset_events();
-        assert_ok!(Oracle::note_epoch_boundary(4, true)); // amended seat inactive #1
-        assert_ok!(Oracle::note_epoch_boundary(5, true)); // amended seat slash + eject
+        assert_ok!(Oracle::note_epoch_boundary(4)); // amended seat inactive #1
+        open_and_close_game(1, 5);
+        assert_ok!(Oracle::note_epoch_boundary(5)); // amended seat slash + eject
         assert!(oracle_events().iter().any(|e| matches!(
             e,
             Event::WatchtowerSlashed { who, amount }
@@ -3106,24 +3178,25 @@ fn watchtower_liveness_acknowledgment_resets_the_counter() {
     new_test_ext().execute_with(|| {
         register_reporter(1);
         register_watchtower(2);
-        assert_ok!(Oracle::note_epoch_boundary(1, true)); // grace
-        assert_ok!(Oracle::note_epoch_boundary(2, true)); // inactive #1
+        open_and_close_game(1, 1);
+        assert_ok!(Oracle::note_epoch_boundary(1)); // grace
+        open_and_close_game(1, 2);
+        assert_ok!(Oracle::note_epoch_boundary(2)); // inactive #1
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 1);
 
         // The watchtower does its job next epoch: acknowledge a live round.
-        assert_ok!(do_report(1, E, reported_value(), h(9)));
-        let rh = hash_report(C, E, 1, reported_value(), h(9));
+        let rh = open_live_game(1, 3);
         assert_ok!(Oracle::ack_observed(
             RuntimeOrigin::signed(acc(2)),
             C,
-            E,
+            3,
             V,
             1,
             rh
         ));
 
         System::reset_events();
-        assert_ok!(Oracle::note_epoch_boundary(3, true));
+        assert_ok!(Oracle::note_epoch_boundary(3));
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 0); // reset
         assert_eq!(Watchtowers::<Test>::count(), 1); // not ejected
         assert!(!oracle_events().iter().any(|e| matches!(
@@ -3137,13 +3210,20 @@ fn watchtower_liveness_acknowledgment_resets_the_counter() {
 #[test]
 fn watchtower_liveness_no_open_round_epoch_charges_nobody() {
     // 07 §4: an epoch with no open round is not a liveness failure — a genuinely
-    // idle (non-active) watchtower is exempt when `had_open_round = false`.
+    // idle (non-active) watchtower is exempt when the epoch carried no round at
+    // all: none opened in it (`RoundActivity` clear) and none is open (`Rounds`
+    // empty).
     new_test_ext().execute_with(|| {
+        register_reporter(1);
         register_watchtower(2);
-        assert_ok!(Oracle::note_epoch_boundary(1, true)); // grace clears the active set
+        open_and_close_game(1, 1);
+        assert_ok!(Oracle::note_epoch_boundary(1)); // grace clears the active set
 
+        // No game opened in epoch 2 (no `report` since the boundary) and none is
+        // open.
+        assert_eq!(Rounds::<Test>::iter().count(), 0);
         System::reset_events();
-        assert_ok!(Oracle::note_epoch_boundary(2, false)); // idle, but no open round
+        assert_ok!(Oracle::note_epoch_boundary(2)); // idle, but no open round
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 0);
         assert_eq!(Watchtowers::<Test>::count(), 1);
         assert!(!oracle_events()
@@ -3159,21 +3239,126 @@ fn watchtower_liveness_no_open_round_breaks_the_inactivity_streak() {
     // counter, breaking the "two *consecutive*" streak — so a miss on either side
     // of an exempt epoch cannot combine to force a slash.
     new_test_ext().execute_with(|| {
+        register_reporter(1);
         register_watchtower(2);
-        assert_ok!(Oracle::note_epoch_boundary(1, true)); // grace
-        assert_ok!(Oracle::note_epoch_boundary(2, true)); // miss #1 ⇒ inactive 1
+        open_and_close_game(1, 1);
+        assert_ok!(Oracle::note_epoch_boundary(1)); // grace
+        open_and_close_game(1, 2);
+        assert_ok!(Oracle::note_epoch_boundary(2)); // miss #1 ⇒ inactive 1
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 1);
 
-        assert_ok!(Oracle::note_epoch_boundary(3, false)); // exempt ⇒ streak resets
+        // Epoch 3 carries no round at all ⇒ exempt.
+        assert_eq!(Rounds::<Test>::iter().count(), 0);
+        assert_ok!(Oracle::note_epoch_boundary(3)); // exempt ⇒ streak resets
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 0);
 
+        open_and_close_game(1, 4);
         System::reset_events();
-        assert_ok!(Oracle::note_epoch_boundary(4, true)); // a fresh miss #1, not #2
+        assert_ok!(Oracle::note_epoch_boundary(4)); // a fresh miss #1, not #2
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 1);
         assert_eq!(Watchtowers::<Test>::count(), 1); // not ejected
         assert!(!oracle_events()
             .iter()
             .any(|e| matches!(e, Event::WatchtowerSlashed { .. })));
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+#[test]
+fn watchtower_liveness_charges_a_game_still_open_across_the_whole_epoch() {
+    // 07 §4's other reading of "an epoch with ≥ 1 open round": a game opened in
+    // an earlier epoch and drawing no fresh report still makes every epoch it
+    // spans chargeable, so the seat that never acknowledges it pays at the
+    // boundary after the one whose report opened it.
+    new_test_ext().execute_with(|| {
+        register_reporter(1);
+        register_watchtower(2);
+        open_live_game(1, 1);
+        assert_ok!(Oracle::note_epoch_boundary(1)); // registration grace
+        assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 0);
+
+        // Epoch 2 opened no game of its own — its liveness rests entirely on the
+        // round still sitting in `Rounds`.
+        assert!(!RoundActivity::<Test>::get());
+        assert_eq!(Rounds::<Test>::iter().count(), 1);
+        System::reset_events();
+        assert_ok!(Oracle::note_epoch_boundary(2));
+        assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 1);
+        assert_eq!(
+            oracle_events(),
+            vec![Event::WatchtowerInactive {
+                who: acc(2),
+                epoch: 2,
+            }]
+        );
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+#[test]
+fn watchtower_liveness_charges_idle_seat_after_a_cleanly_closed_game() {
+    // 07 §4 charges "a watchtower that acknowledges no round in an epoch with
+    // ≥ 1 open round" — a property of the *epoch*, not of what survives to the
+    // boundary. A healthy game that opens and closes inside the epoch is reaped
+    // from `Rounds`, so a survival-based predicate would read "no open round" in
+    // exactly the healthy case and take the arm that RESETS the counter, leaving
+    // §4's charge/slash/eject unreachable and free-riding costless (SQ-491).
+    // Asserted through the pallet as well as the core, because the latch has to
+    // survive the storage round trip between the report and the boundary sweep.
+    new_test_ext().execute_with(|| {
+        register_reporter(1);
+        register_watchtower(2); // acknowledges
+        register_watchtower(3); // acknowledges
+        register_watchtower(4); // free rider
+        open_and_close_game(1, 1);
+        assert_ok!(Oracle::note_epoch_boundary(1)); // consumes all three graces
+        assert!(WatchtowerActive::<Test>::get().is_empty());
+
+        // Epoch 2 runs the healthy path: reported, acknowledged to `wt.quorum`,
+        // closed `Unchallenged` at window close, and therefore reaped.
+        let rh = open_live_game(1, 2);
+        // Only seats 2 and 3 acknowledge; seat 4 free-rides.
+        for who in [2u8, 3] {
+            assert_ok!(Oracle::ack_observed(
+                RuntimeOrigin::signed(acc(who)),
+                C,
+                2,
+                V,
+                1,
+                rh
+            ));
+        }
+        set_block(game_open_block(2) + ORC_WINDOW_BLOCKS);
+        assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(9)), 20));
+        assert_eq!(
+            Oracle::settled_component(C, 2, V).map(|s| s.path),
+            Some(SettlePath::Unchallenged)
+        );
+        assert_eq!(
+            Rounds::<Test>::iter().count(),
+            0,
+            "the healthy close leaves no round to infer liveness from"
+        );
+        // The epoch's work is recorded in storage across the calls that reaped
+        // the round — the latch survives the hydrate/persist round trip.
+        assert!(
+            RoundActivity::<Test>::get(),
+            "the closed game is still recorded for the epoch that carried it"
+        );
+
+        System::reset_events();
+        assert_ok!(Oracle::note_epoch_boundary(2));
+        assert_eq!(Watchtowers::<Test>::get(acc(4)).unwrap().inactive_epochs, 1);
+        assert_eq!(
+            oracle_events(),
+            vec![Event::WatchtowerInactive {
+                who: acc(4),
+                epoch: 2,
+            }]
+        );
+        // The two that did the work are reset, not charged.
+        assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 0);
+        assert_eq!(Watchtowers::<Test>::get(acc(3)).unwrap().inactive_epochs, 0);
         assert_ok!(Oracle::do_try_state());
     });
 }

@@ -1106,6 +1106,22 @@ pub mod kernel {
     pub const TICK_BATCH: u32 = 10;
     pub const REAP_BATCH: u32 = 100;
     pub const SETTLE_COHORT_MAX_ITEMS: u32 = 100;
+    /// Measurement epochs whose 07 §11(1) `OracleSettleDeadline` one clock-syncing
+    /// crank may drive from the epoch pallet's cursor. `sync_phase` advances the
+    /// epoch index arithmetically, so a chain nobody cranked for several epochs
+    /// presents several due deadlines at once, and force-neutralizing all of them
+    /// in one dispatch would make the crank's weight a function of the idle gap
+    /// (I-20).
+    ///
+    /// Derived from [`MAX_NON_TERMINAL_COHORTS`], not chosen: a round can exist for
+    /// a measurement epoch only while some live cohort consumes it (the oracle's
+    /// `report` requires `is_expected_spec_version`), so at most this many epochs
+    /// can have deadline work that is not already a no-op, and a cursor step over
+    /// an epoch with no live cohort costs one empty pass. The bound therefore
+    /// covers every epoch that can carry a round, and `settle_cohort` additionally
+    /// drives its own cohort's measurement epochs so a lagging cursor can never
+    /// let a settlement outrun the deadline.
+    pub const ORACLE_DEADLINE_CATCHUP: u32 = crate::bounds::MAX_NON_TERMINAL_COHORTS;
     pub const KEEPER_BUDGET_EPOCH_FLOOR_USDC: u128 = 6_000_000_000;
     /// SQ-117 (ruled 2026-07-21): the benchmark **fee basis** the launch
     /// `keeper.rebate` seed is calibrated against — the sanctioned-crank fee

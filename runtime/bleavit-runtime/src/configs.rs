@@ -3781,6 +3781,23 @@ impl pallet_epoch::OracleAccess for RuntimeEpochOracle {
                 }
         })
     }
+
+    fn note_epoch_boundary(ended_epoch: futarchy_primitives::EpochId) -> DispatchResult {
+        // 07 §4's "≥ 1 open round" predicate is derived inside the oracle, from
+        // its own `RoundActivity` latch: the epoch clock owns *when* the sweep
+        // happens and nothing more. Passing the predicate in from here would make
+        // a slash depend on a caller-supplied fact, and every derivation available
+        // to a caller is wrong in one direction or the other, because a cleanly
+        // closed game leaves no trace in `Rounds` to observe.
+        pallet_oracle::Pallet::<Runtime>::note_epoch_boundary(ended_epoch)
+    }
+
+    fn note_settle_deadline(measurement_epoch: futarchy_primitives::EpochId) -> DispatchResult {
+        // The oracle resolves the expected-component set itself through the
+        // `ReportingContext` provider (07 §2(4)); the epoch clock only owns
+        // *when* the deadline falls due (§11(1)).
+        pallet_oracle::Pallet::<Runtime>::note_settle_deadline(measurement_epoch)
+    }
 }
 
 pub struct RuntimeEpochGuardian;
@@ -5338,7 +5355,20 @@ impl pallet_oracle::ReportingContext for RuntimeReporting {
             for (_, version) in schedule.specs {
                 if let Some(specs) = pallet_welfare::MetricSpecs::<Runtime>::get(version) {
                     for spec in specs {
-                        if !expected.contains(&(spec.id, version)) {
+                        // Only class-4 components are reportable (07 §2(3)), so
+                        // only they can be *absent* at the §11 money deadline and
+                        // need the no-report neutral row. Including on-chain
+                        // components would have the deadline crank write flagged
+                        // neutral `ComponentValues` entries for X/R/E/H — values
+                        // welfare never reads from the oracle (`onchain_components`
+                        // filters to `Attested` too) but which are the declared
+                        // input to §10's two-consecutive-flag renormalization, and
+                        // several of which are gate inputs whose flagged failure
+                        // §10 escalates to a cohort VOID. They would also consume
+                        // the bounded `ComponentValues` budget for nothing.
+                        if matches!(spec.source, pallet_welfare::SourceClass::Attested)
+                            && !expected.contains(&(spec.id, version))
+                        {
                             expected.push((spec.id, version));
                         }
                     }
