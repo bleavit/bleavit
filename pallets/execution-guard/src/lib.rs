@@ -307,6 +307,17 @@ pub trait BatchDispatcher<Call> {
     /// origin-elevating wrapper, including `sudo.sudo`, even when the inner
     /// leaf is otherwise within the proposal class.
     fn safety_filter(class: ProposalClass, call: &Call) -> bool;
+    /// Read-only preview of 09 §1.2(7)'s **treasury-outflow and issuance**
+    /// meters over the exact decoded batch: would they admit it now?
+    ///
+    /// Defaulted to `true` so a dispatcher that models no meters stays
+    /// source-compatible. The guard checks `code.spacing` itself — it alone
+    /// knows the D-9 expedited exemption — so this method MUST NOT re-ask it.
+    /// It MUST be side-effect free: it runs both inside `execute` before any
+    /// dispatch and in the read-only `meters_clear` projection (SQ-461).
+    fn meter_admission(_calls: &[Call]) -> bool {
+        true
+    }
     /// Recognizes only the exact allowlisted `system.authorize_upgrade(hash)`.
     fn authorize_upgrade_hash(call: &Call) -> Option<H256>;
     fn recovery_image_descriptor(call: &Call) -> Option<RecoveryImageDescriptor>;
@@ -1841,15 +1852,61 @@ pub mod pallet {
 
         /// Read-only 02 §3 execution-queue projection. Hydration sorts by
         /// proposal id and [`ExecutionGuard::view`] single-homes ratification.
-        /// `QueuedExecutionView.meters_clear` is `true` post-SQ-146 retirement of
-        /// the inert `BlockedMeters` set; a live rate-meter preview is deferred
-        /// (SQ-461). A missing/invalid runtime version is a G-1 empty sentinel
-        /// rather than a partially trusted queue.
+        /// `meters_clear` is filled in here rather than in the frame-free core,
+        /// which cannot see the runtime's meters (SQ-461). A missing/invalid
+        /// runtime version is a G-1 empty sentinel rather than a partially
+        /// trusted queue.
         pub fn queue_view() -> Vec<futarchy_primitives::QueuedExecutionView> {
             match Self::load() {
-                Ok(guard) => guard.view(),
+                Ok(guard) => guard
+                    .view()
+                    .into_iter()
+                    .map(|mut view| {
+                        view.meters_clear = Self::meters_clear(view.pid);
+                        view
+                    })
+                    .collect(),
                 Err(_) => Vec::new(),
             }
+        }
+
+        /// 09 §1.2(7)'s `code.spacing` leg, shared by `execute` and the
+        /// `meters_clear` projection so the published hint cannot drift from the
+        /// check it previews. The D-9 expedited CODE lane is exempt by design.
+        fn spacing_admits(
+            pid: ProposalId,
+            declared_domains: &[CallDomain],
+            now: BlockNumber,
+        ) -> DispatchResult {
+            if declared_domains.contains(&CallDomain::InternalRootAuthorizeUpgrade)
+                && !Expedited::<T>::get(pid)
+            {
+                if let Some(last) = LastUpgradeAuthorized::<T>::get() {
+                    let next = last
+                        .checked_add(T::Params::code_spacing())
+                        .ok_or(Error::<T>::Overflow)?;
+                    ensure!(now >= next, Error::<T>::MetersBlocked);
+                }
+            }
+            Ok(())
+        }
+
+        /// 02 §4 `meters_clear` — "rate meters would admit execution now" — over
+        /// this proposal's exact pinned payload, running the same two legs step
+        /// (7) runs. Read-only and **fail-closed**: a payload that cannot be
+        /// fetched or decoded is reported NOT clear, because `execute` would
+        /// refuse it too (G-1). Reporting a stale `true` is the one direction
+        /// that misleads a keeper into spending a block on a doomed `execute`.
+        fn meters_clear(pid: ProposalId) -> bool {
+            let Some(queued) = Queue::<T>::get(pid) else {
+                return false;
+            };
+            if Self::spacing_admits(pid, &queued.declared_domains, Self::now()).is_err() {
+                return false;
+            }
+            T::Preimages::fetch(queued.payload_hash, queued.payload_len).is_some_and(|bytes| {
+                Self::decode_batch(&bytes).is_ok_and(|calls| T::Dispatcher::meter_admission(&calls))
+            })
         }
 
         pub fn retry_exhausted(pid: ProposalId) -> bool {
@@ -1987,22 +2044,24 @@ pub mod pallet {
                 );
             }
 
-            // (7) rate meters (09 §1.2(7)). The `code.spacing` meter is checked
-            // here; treasury/issuance meters are enforced by the dispatched
-            // calls themselves. The former generic `BlockedMeters` resource set
-            // was retired as inert — it never had a production writer (SQ-146).
-            if queued
-                .declared_domains
-                .contains(&CallDomain::InternalRootAuthorizeUpgrade)
-                && !Expedited::<T>::get(pid)
-            {
-                if let Some(last) = LastUpgradeAuthorized::<T>::get() {
-                    let next = last
-                        .checked_add(T::Params::code_spacing())
-                        .ok_or(Error::<T>::Overflow)?;
-                    ensure!(now >= next, Error::<T>::MetersBlocked);
-                }
-            }
+            // (7) rate meters (09 §1.2(7)): treasury-outflow, issuance and
+            // `code.spacing` must all admit the batch. The former generic
+            // `BlockedMeters` resource set was retired as inert — it never had a
+            // production writer (SQ-146).
+            //
+            // Both legs run BEFORE any dispatch, and both refuse with
+            // `MetersBlocked` from inside `execute`'s storage layer, so a
+            // meter-contended attempt is rolled back whole: no `ExecutionRecord`,
+            // and — decisively — no `failed_at`. §1.2(7) says contention leaves
+            // the proposal queued to "retry within grace", which is the full
+            // grace window; recording a failure would instead move it onto the
+            // shorter `failed_at + RETRY_WINDOW` clock and let a transient meter
+            // spend the proposal's retry budget (SQ-461).
+            Self::spacing_admits(pid, &queued.declared_domains, now)?;
+            ensure!(
+                T::Dispatcher::meter_admission(&calls),
+                Error::<T>::MetersBlocked
+            );
 
             // (8) resource locks.
             let held = HeldResources::<T>::get();

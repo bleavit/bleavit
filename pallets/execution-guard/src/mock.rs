@@ -295,6 +295,12 @@ parameter_types! {
     pub static KeeperRebates: Vec<(AccountId32, CrankClass)> = Vec::new();
     pub static PendingSyncRefuses: bool = false;
     pub static PendingFailStaticForced: bool = false;
+    /// SQ-461: the 09 §1.2(7) treasury/issuance meter preview. `true` keeps
+    /// `TestDispatcher` behaving exactly like the defaulted trait method.
+    pub static MetersAdmit: bool = true;
+    /// The batch length of every `meter_admission` query, so a test can prove the
+    /// guard hands over the exact decoded batch rather than an empty slice.
+    pub static MeterAdmissionQueries: Vec<u32> = Vec::new();
 }
 
 pub struct TestKeeperRebate;
@@ -730,6 +736,13 @@ impl BatchDispatcher<RuntimeCall> for TestDispatcher {
             domains,
             nested_calls,
         })
+    }
+
+    fn meter_admission(calls: &[RuntimeCall]) -> bool {
+        MeterAdmissionQueries::mutate(|queries| {
+            queries.push(u32::try_from(calls.len()).unwrap_or(u32::MAX))
+        });
+        MetersAdmit::get()
     }
 
     fn safety_filter(class: ProposalClass, call: &RuntimeCall) -> bool {
@@ -1426,6 +1439,8 @@ pub fn reset_statics() {
     KeeperRebates::set(Vec::new());
     PendingSyncRefuses::set(false);
     PendingFailStaticForced::set(false);
+    MetersAdmit::set(true);
+    MeterAdmissionQueries::set(Vec::new());
     pallet_test_dispatch::DispatchFailure::<Test>::put(false);
     pallet_test_dispatch::EpochLog::<Test>::kill();
     pallet_test_dispatch::ReleaseLog::<Test>::kill();

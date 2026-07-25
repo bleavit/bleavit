@@ -4097,12 +4097,46 @@ impl pallet_execution_guard::PendingOutflowSync for RuntimePendingOutflowSync {
 
 /// Read-only decision-time preview of every live treasury/issuance/spacing
 /// meter touched by the exact recursively decoded batch.
-pub(crate) fn preview_batch_admission(
-    calls: &pallet_execution_guard::pallet::RuntimeBatch<Runtime>,
-) -> bool {
+pub(crate) fn preview_batch_admission(calls: &[RuntimeCall]) -> bool {
+    preview_admission_inner(calls, true).is_ok()
+}
+
+/// The 09 §1.2(7) **treasury-outflow and issuance rate meters** alone, for the
+/// guard's execute-time step (7) and its `meters_clear` projection (SQ-461).
+///
+/// Two deliberate narrowings relative to [`preview_batch_admission`]:
+///
+/// * `code.spacing` is excluded. The guard owns that meter because it alone knows
+///   the D-9 expedited-CODE exemption (`Expedited[pid]`); folding it in here would
+///   refuse an expedited emergency payload whose spacing window has not elapsed —
+///   exactly the lane the exemption exists for.
+/// * Only a genuine rate-meter refusal blocks. Every other treasury error
+///   (`InsufficientFunds`, `StreamRequired`, `NavFloorUnmet`, `BadOrigin`, …) is a
+///   permanent payload defect rather than transient contention, and belongs to
+///   step (12) dispatch, whose atomic rollback records the T18 failure and its
+///   bounded retry window. Reporting those at step (7) would both misdiagnose them
+///   as `MetersBlocked` and hand a permanently doomed payload the *full* grace
+///   window to be re-cranked in.
+pub(crate) fn preview_meter_admission(calls: &[RuntimeCall]) -> bool {
+    !matches!(
+        preview_admission_inner(calls, false),
+        Err(Some(
+            pallet_futarchy_treasury::CoreError::MeterExhausted
+                | pallet_futarchy_treasury::CoreError::IssuanceCapExceeded
+        ))
+    )
+}
+
+/// `Err(Some(e))` carries the first refusal encountered; `Err(None)` means the
+/// leaf traversal itself refused (over-deep/undecodable nesting), which no caller
+/// may read as a meter verdict — steps (2), (6) and (11) own that.
+fn preview_admission_inner(
+    calls: &[RuntimeCall],
+    include_spacing: bool,
+) -> Result<(), Option<pallet_futarchy_treasury::CoreError>> {
     let mut treasury = crate::FutarchyTreasury::treasury();
     let now = System::block_number();
-    let mut ok = true;
+    let mut first_error = None;
     let mut authorize_count = 0_u8;
     for call in calls {
         if !visit_runtime_leaves(call, &mut |leaf| {
@@ -4153,7 +4187,9 @@ pub(crate) fn preview_batch_admission(
                     *amount,
                     *line,
                 ),
-                RuntimeCall::System(frame_system::Call::authorize_upgrade { .. }) => {
+                RuntimeCall::System(frame_system::Call::authorize_upgrade { .. })
+                    if include_spacing =>
+                {
                     authorize_count = authorize_count.saturating_add(1);
                     let spacing_ok = authorize_count == 1
                         && pallet_execution_guard::LastUpgradeAuthorized::<Runtime>::get()
@@ -4168,15 +4204,22 @@ pub(crate) fn preview_batch_admission(
                 }
                 _ => Ok(()),
             };
-            if result.is_err() {
-                ok = false;
+            if let Err(error) = result {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
             }
-            ok
+            first_error.is_none()
         }) {
-            return false;
+            // Either the visitor stopped us on the first refusal, or the traversal
+            // itself refused — `first_error` distinguishes the two.
+            return Err(first_error);
         }
     }
-    ok
+    match first_error {
+        None => Ok(()),
+        Some(error) => Err(Some(error)),
+    }
 }
 
 pub struct RuntimeConstitutionAccess;

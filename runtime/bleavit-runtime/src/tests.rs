@@ -11710,6 +11710,9 @@ fn queue_time_meter_preview_is_live_recursive_and_read_only() {
         });
         let exhausted_outflow = pallet_futarchy_treasury::State::<Runtime>::get();
         assert!(!crate::configs::preview_batch_admission(&spend_batch));
+        // SQ-461: the same refusal through the narrower leg the guard consults at
+        // execute step (7).
+        assert!(!crate::configs::preview_meter_admission(&spend_batch));
         assert_eq!(
             pallet_futarchy_treasury::State::<Runtime>::get(),
             exhausted_outflow,
@@ -11747,6 +11750,7 @@ fn queue_time_meter_preview_is_live_recursive_and_read_only() {
         });
         let exhausted_issuance = pallet_futarchy_treasury::State::<Runtime>::get();
         assert!(!crate::configs::preview_batch_admission(&issue_batch));
+        assert!(!crate::configs::preview_meter_admission(&issue_batch));
         assert_eq!(
             pallet_futarchy_treasury::State::<Runtime>::get(),
             exhausted_issuance,
@@ -11780,6 +11784,34 @@ fn queue_time_meter_preview_is_live_recursive_and_read_only() {
             pallet_execution_guard::LastUpgradeAuthorized::<Runtime>::get(),
             Some(now),
         );
+        // SQ-461: the meter leg the guard consults at step (7) deliberately does
+        // NOT re-ask `code.spacing`, even with the spacing window wide open in the
+        // blocking direction. The guard owns that meter because it alone knows the
+        // D-9 expedited-CODE exemption (`Expedited[pid]`); a leg that refused here
+        // would silently kill the emergency lane the exemption exists for.
+        assert!(crate::configs::preview_meter_admission(&authorize_batch));
+
+        // SQ-461: and only a genuine I-7/I-17 rate meter may block at step (7).
+        // `fund_budget_line` carries no meter at all — this fixture zeroed
+        // `main_usdc`, so it refuses with a permanent payload defect. That belongs
+        // to step (12) dispatch and its bounded T18 retry window; misreporting it
+        // as `MetersBlocked` would both name the wrong cause and hand a payload
+        // that can never succeed the *full* grace window to be re-cranked in.
+        let fund =
+            RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::fund_budget_line {
+                line: BudgetLine::Pol,
+                amount: 1,
+            });
+        let fund_batch =
+            match pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(vec![fund]) {
+                Ok(batch) => batch,
+                Err(_) => {
+                    assert!(false, "one funding call must fit the guard batch");
+                    return;
+                }
+            };
+        assert!(!crate::configs::preview_batch_admission(&fund_batch));
+        assert!(crate::configs::preview_meter_admission(&fund_batch));
 
         let all_metered =
             match pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(vec![
@@ -15333,9 +15365,11 @@ fn view_execution_queue_reuses_guard_projection_and_fails_closed() {
             (1..=32).collect::<Vec<_>>()
         );
         assert_eq!(view.len(), 32);
-        // `meters_clear` is unconditionally `true` after the SQ-146 retirement of
-        // the inert `BlockedMeters` set (live preview deferred, SQ-461).
-        assert!(view.iter().all(|entry| entry.meters_clear));
+        // SQ-461: `meters_clear` is the live 09 §1.2(7) preview, and it is
+        // fail-closed. These synthetic entries note no preimage, so their payloads
+        // cannot be fetched or decoded — the projection must refuse to claim the
+        // meters would admit an execution the guard would itself reject (G-1).
+        assert!(view.iter().all(|entry| !entry.meters_clear));
         assert!(view.iter().all(|entry| matches!(
             entry.ratification,
             futarchy_primitives::RatificationStatus::NotRequired

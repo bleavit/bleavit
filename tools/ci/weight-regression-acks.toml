@@ -8,3 +8,25 @@
 # runtime/bleavit-runtime/src/weights/pallet_constitution.rs set_param: storage proof grew after adding validation
 # runtime/bleavit-runtime/src/weights/pallet_retired.rs *: pallet retired by approved migration
 #
+# SQ-461 — every entry below is PRE-EXISTING STALENESS surfaced by regenerating
+# pallet_execution_guard, not a cost SQ-461 introduced. This was measured, not
+# assumed: the pallet was benchmarked a second time with the working tree reset to
+# main (50 steps / 20 repeats, same machine, minutes apart) and every regenerated
+# value at main already matched or exceeded the value this PR commits. Per-function
+# ref_time, main-baseline vs this PR: authorize_phase_four 985M vs 943M ·
+# expire_failed_execution 698M vs 663M · ratify 30M vs 29M · reject_stale 702M vs
+# 660M; reads are identical in both (commit_recovery_image 8, qualify_recovery_image
+# 17). SQ-461's step-(7) meter preview reads `FutarchyTreasury::State`, which
+# `execute`'s proof already contained, so it adds no read, no write and no PoV.
+# The committed file dated 2026-07-23 predates B19's attestor revocation/liability
+# storage, the epoch security-terms items and `PendingRatifications`, all of which
+# `execute` and its neighbours now touch. Understating a permissionless call is a
+# block-capacity DoS surface (R-7), so regenerating is the fix, not the regression.
+# Filed as SQ-490: nothing in CI re-measures weights, so this class of drift is
+# invisible until an unrelated PR happens to regenerate a file.
+runtime/bleavit-runtime/src/weights/pallet_execution_guard.rs authorize_phase_four: SQ-461 — pre-existing drift. ref_time 824M -> 943M (+14.52%), reads 116 -> 124. The Phase-4 bridge runs the full `do_execute` check list, so it inherited every storage item added to it since 2026-07-23 (B19 attestor revocations/liabilities, epoch security terms, PendingRatifications, Constitution::Params 42 -> 44). A fresh benchmark at main measures 985M — higher than this PR's 943M.
+runtime/bleavit-runtime/src/weights/pallet_execution_guard.rs commit_recovery_image: SQ-461 — pre-existing drift, reads only. reads 6 -> 8 (+33.33%) with ref_time and PoV essentially unchanged (121M -> 113M, 52175 both). The two added reads are the attestor record lookups the recovery-image commitment performs; a fresh benchmark at main measures the same 8 reads, so this PR contributes neither of them.
+runtime/bleavit-runtime/src/weights/pallet_execution_guard.rs expire_failed_execution: SQ-461 — pre-existing drift. ref_time 547M -> 663M (+21.15%), reads 105 -> 110, writes 51 -> 54. The T22 expiry crank drives the epoch terminal callback, which now also reaps the security-terms rows and the pending-ratification join (06 §2.2 SQ-192 universal reaping). A fresh benchmark at main measures 698M — higher than this PR's 663M.
+runtime/bleavit-runtime/src/weights/pallet_execution_guard.rs qualify_recovery_image: SQ-461 — pre-existing drift, reads only. reads 15 -> 17 (+13.33%); ref_time fell (264M -> 255M) and PoV is identical. Same two attestor reads as commit_recovery_image, and identically present in a fresh benchmark at main. SQ-461 does not touch the recovery-qualification path at all.
+runtime/bleavit-runtime/src/weights/pallet_execution_guard.rs ratify: SQ-461 — pre-existing drift on the smallest call in the pallet, where one storage access dominates the percentage. ref_time 22M -> 29M (+30.53%), reads 5 -> 6, writes 2 -> 3: the added read/write pair is the `PendingRatifications` identity join that 06 §2.2 requires `ratify` to consume. A fresh benchmark at main measures 30M. In absolute terms this is +7M ref_time on a 29M call, not a new cost centre.
+runtime/bleavit-runtime/src/weights/pallet_execution_guard.rs reject_stale: SQ-461 — pre-existing drift. ref_time 547M -> 660M (+20.58%), reads 105 -> 110, writes 51 -> 54 — the same terminal-callback reaping fan-out as expire_failed_execution, which is why the two track each other almost exactly. A fresh benchmark at main measures 702M, higher than this PR's 660M.
