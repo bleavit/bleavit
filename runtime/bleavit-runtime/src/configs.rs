@@ -8396,10 +8396,20 @@ impl pallet_registry::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBench
     fn funded_account(seed: u8) -> AccountId {
         let who = AccountId32::new([seed; 32]);
         benchmark_ensure_usdc();
+        // The registry's worst case posts ~68 filing bonds from ONE account (64
+        // filings in the measured epoch, one per auxiliary live epoch, plus a
+        // challenge bond). Since SQ-296 each of those is value-scaled rather than
+        // the 5,000 USDC floor, and 1,000,000 USDC stopped covering them: the
+        // `Benchmark smoke` job went red on `resolve_challenge` with
+        // `Token(FundsUnavailable)` raised from the fixture's own setup. The
+        // fixture must fund the worst case it claims to measure, so this is
+        // headroom rather than a tuned figure. Minting to a filer account cannot
+        // feed back into the measurement: exposure is a fold over cohort vault
+        // escrow, never over account balances.
         let _ = <ForeignAssets as Mutate<AccountId>>::mint_into(
             usdc_location(),
             &who,
-            currency::USDC.saturating_mul(1_000_000),
+            currency::USDC.saturating_mul(1_000_000_000),
         );
         who
     }

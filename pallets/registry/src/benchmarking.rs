@@ -202,6 +202,12 @@ mod benches {
             [8u8; 32],
         )
         .expect("challenge");
+        // SQ-294: the verdict is admissible only strictly after the counter-round
+        // window, so the benchmark must measure the real post-window path rather
+        // than a call that would refuse. `PAST` is absolute, and deliberately so:
+        // the harness re-runs this setup, and a relative advance would compound
+        // across iterations instead of landing on the same measured state.
+        frame_system::Pallet::<T>::set_block_number(PAST.into());
 
         #[extrinsic_call]
         _(
@@ -209,6 +215,7 @@ mod benches {
             EPOCH,
             filing_id,
             false,
+            [8u8; 32],
         );
 
         assert!(matches!(

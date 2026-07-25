@@ -11999,6 +11999,7 @@ where
             epoch: 1,
             filing_id: 0,
             uphold: false,
+            evidence_hash: [9u8; 32],
         },
         pallet_registry::Call::close_epoch { epoch: 1 },
         pallet_registry::Call::reap_epoch { epoch: 1 },

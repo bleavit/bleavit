@@ -597,12 +597,16 @@ fn resolve_reject_slashes_the_filer_40_60_to_challenger_and_insurance() {
         let alice0 = usdc(&acct(ALICE));
         let bob0 = usdc(&acct(BOB));
         let ins0 = usdc(&acct(INSURANCE));
+        // SQ-294: the verdict is admissible only strictly after the counter-round
+        // window the challenge opened.
+        System::set_block_number(REG_WINDOW_BLOCKS as u64 + 2);
         // uphold=false ⇒ the filing is rejected; ALICE (filer) is the loser.
         assert_ok!(IncidentRegistry::resolve_challenge(
             signed(RESOLVER),
             5,
             0,
-            false
+            false,
+            H
         ));
         assert!(matches!(
             Filings::<Test, IncidentInstance>::get(5, 0).unwrap().state,
@@ -632,12 +636,14 @@ fn resolve_uphold_slashes_the_challenger() {
         assert_ok!(IncidentRegistry::challenge_filing(signed(BOB), 5, 0, H));
         let alice0 = usdc(&acct(ALICE));
         let bob0 = usdc(&acct(BOB));
+        System::set_block_number(REG_WINDOW_BLOCKS as u64 + 2);
         // uphold=true ⇒ filing upheld; BOB (challenger) is the loser.
         assert_ok!(IncidentRegistry::resolve_challenge(
             signed(RESOLVER),
             5,
             0,
-            true
+            true,
+            H
         ));
         assert!(matches!(
             Filings::<Test, IncidentInstance>::get(5, 0).unwrap().state,
@@ -661,10 +667,111 @@ fn resolve_challenge_rejects_public_origin() {
             VER
         ));
         assert_ok!(IncidentRegistry::challenge_filing(signed(BOB), 5, 0, H));
-        // A signed non-authority cannot resolve a challenge (rule 6).
+        // A signed non-authority cannot resolve a challenge (rule 6). Note the
+        // block has not advanced: the origin check must win over SQ-294's window
+        // and evidence checks, so a public caller never learns anything from them.
         assert_noop!(
-            IncidentRegistry::resolve_challenge(signed(ALICE), 5, 0, false),
+            IncidentRegistry::resolve_challenge(signed(ALICE), 5, 0, false, H),
             sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn sq294_resolution_binds_the_challenge_committed_evidence_hash() {
+    // 07 §7 terminal resolution. `(epoch, filing_id)` are two integers, so a
+    // mis-parameterised governance verdict would otherwise slash the wrong
+    // party's bond silently. Restating the committed hash makes that fail closed.
+    new_test_ext().execute_with(|| {
+        assert_ok!(IncidentRegistry::file(
+            signed(ALICE),
+            5,
+            FilingClass::S2,
+            0,
+            H,
+            VER
+        ));
+        assert_ok!(IncidentRegistry::challenge_filing(signed(BOB), 5, 0, H));
+        System::set_block_number(REG_WINDOW_BLOCKS as u64 + 2);
+        let alice0 = usdc(&acct(ALICE));
+        let bob0 = usdc(&acct(BOB));
+        let escrow0 = usdc(&incident_account());
+        assert!(escrow0 > 0, "both bonds must be custodied while challenged");
+
+        let other: [u8; 32] = [7u8; 32];
+        assert_noop!(
+            IncidentRegistry::resolve_challenge(signed(RESOLVER), 5, 0, false, other),
+            Error::<Test, IncidentInstance>::EvidenceMismatch
+        );
+        // Nothing moved and nothing resolved: the filing is still challenged and
+        // both bonds are still custodied (G-1).
+        assert!(matches!(
+            Filings::<Test, IncidentInstance>::get(5, 0).unwrap().state,
+            FilingState::Challenged { .. }
+        ));
+        assert_eq!(usdc(&incident_account()), escrow0);
+        assert_eq!(usdc(&acct(ALICE)), alice0);
+        assert_eq!(usdc(&acct(BOB)), bob0);
+
+        // The committed hash resolves it.
+        assert_ok!(IncidentRegistry::resolve_challenge(
+            signed(RESOLVER),
+            5,
+            0,
+            false,
+            H
+        ));
+        assert_eq!(usdc(&incident_account()), 0);
+    });
+}
+
+#[test]
+fn sq294_resolution_waits_for_the_counter_round_and_names_the_state_correctly() {
+    // The `Challenged { window_end }` the state machine stores had no reader at
+    // all before SQ-294, so a verdict could land in the same block the challenge
+    // was filed. The `Filed`/terminal distinction was likewise collapsed into one
+    // `WindowOpen`.
+    new_test_ext().execute_with(|| {
+        assert_ok!(IncidentRegistry::file(
+            signed(ALICE),
+            5,
+            FilingClass::S2,
+            0,
+            H,
+            VER
+        ));
+        // Unchallenged: there is no counter-round to resolve, and the filing's own
+        // challenge window is genuinely still open.
+        assert_noop!(
+            IncidentRegistry::resolve_challenge(signed(RESOLVER), 5, 0, false, H),
+            Error::<Test, IncidentInstance>::WindowOpen
+        );
+
+        assert_ok!(IncidentRegistry::challenge_filing(signed(BOB), 5, 0, H));
+        // Same block as the challenge, and one block short of the deadline.
+        assert_noop!(
+            IncidentRegistry::resolve_challenge(signed(RESOLVER), 5, 0, false, H),
+            Error::<Test, IncidentInstance>::WindowOpen
+        );
+        System::set_block_number(REG_WINDOW_BLOCKS as u64 + 1);
+        assert_noop!(
+            IncidentRegistry::resolve_challenge(signed(RESOLVER), 5, 0, false, H),
+            Error::<Test, IncidentInstance>::WindowOpen
+        );
+
+        // Strictly after it, the verdict lands.
+        System::set_block_number(REG_WINDOW_BLOCKS as u64 + 2);
+        assert_ok!(IncidentRegistry::resolve_challenge(
+            signed(RESOLVER),
+            5,
+            0,
+            false,
+            H
+        ));
+        // A terminal filing reports `AlreadyFinal`, not `WindowOpen`.
+        assert_noop!(
+            IncidentRegistry::resolve_challenge(signed(RESOLVER), 5, 0, false, H),
+            Error::<Test, IncidentInstance>::AlreadyFinal
         );
     });
 }

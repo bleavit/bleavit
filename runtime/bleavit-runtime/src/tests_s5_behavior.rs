@@ -1788,11 +1788,13 @@ fn registry_resolve_challenge_carries_its_real_oracle_resolution_authority() {
             epoch: 1,
             filing_id: 0,
             uphold: true,
+            evidence_hash: [9u8; 32],
         }),
         RuntimeCall::MilestoneRegistry(pallet_registry::Call::resolve_challenge {
             epoch: 1,
             filing_id: 0,
             uphold: true,
+            evidence_hash: [9u8; 32],
         }),
     ];
     let adjudicate = RuntimeCall::Oracle(pallet_oracle::Call::adjudicate {
