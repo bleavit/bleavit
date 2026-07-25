@@ -4098,7 +4098,10 @@ impl pallet_execution_guard::PendingOutflowSync for RuntimePendingOutflowSync {
 /// Read-only decision-time preview of every live treasury/issuance/spacing
 /// meter touched by the exact recursively decoded batch.
 pub(crate) fn preview_batch_admission(calls: &[RuntimeCall]) -> bool {
-    preview_admission_inner(calls, true).is_ok()
+    matches!(
+        preview_admission_inner(calls, true),
+        PreviewVerdict::Admits | PreviewVerdict::NoVerdict
+    )
 }
 
 /// The 09 §1.2(7) **treasury-outflow and issuance rate meters** alone, for the
@@ -4118,28 +4121,57 @@ pub(crate) fn preview_batch_admission(calls: &[RuntimeCall]) -> bool {
 ///   as `MetersBlocked` and hand a permanently doomed payload the *full* grace
 ///   window to be re-cranked in.
 pub(crate) fn preview_meter_admission(calls: &[RuntimeCall]) -> bool {
+    // Only a *refusal the preview can stand behind* blocks. `NoVerdict` fails
+    // OPEN, which is the safe direction here and not a weakening: the meters are
+    // still genuinely enforced by the dispatched calls at step (12). Step (7)
+    // exists only to convert transient contention into a refusal that records no
+    // failure, so blocking on a verdict we cannot trust would strand an adopted
+    // proposal for its whole grace window over a batch that would have succeeded.
     !matches!(
         preview_admission_inner(calls, false),
-        Err(Some(
+        PreviewVerdict::Refused(
             pallet_futarchy_treasury::CoreError::MeterExhausted
                 | pallet_futarchy_treasury::CoreError::IssuanceCapExceeded
-        ))
+        )
     )
 }
 
-/// `Err(Some(e))` carries the first refusal encountered; `Err(None)` means the
-/// leaf traversal itself refused (over-deep/undecodable nesting), which no caller
-/// may read as a meter verdict — steps (2), (6) and (11) own that.
-fn preview_admission_inner(
-    calls: &[RuntimeCall],
-    include_spacing: bool,
-) -> Result<(), Option<pallet_futarchy_treasury::CoreError>> {
+/// The outcome of simulating a batch against a cloned treasury.
+enum PreviewVerdict {
+    /// Every leaf was modelled and every meter admitted.
+    Admits,
+    /// The first refusal, with every leaf before it faithfully simulated.
+    Refused(pallet_futarchy_treasury::CoreError),
+    /// **No verdict.** The batch reached a treasury call this preview does not
+    /// simulate, so the simulated state is stale for everything after it. NAV —
+    /// and therefore every meter base — is a pure function of treasury state
+    /// (`nav()` reads `main_usdc`, the budget lines, open-stream remainders and
+    /// obligations), so a `FutarchyTreasury` leaf outside the four simulated
+    /// arms is exactly the case where a later meter check would be measured
+    /// against the wrong base. `[sweep_insurance, spend]` is the worked example:
+    /// the sweep raises NAV, and judging the spend without it can refuse a batch
+    /// whose ordered atomic dispatch would succeed.
+    NoVerdict,
+}
+
+fn preview_admission_inner(calls: &[RuntimeCall], include_spacing: bool) -> PreviewVerdict {
     let mut treasury = crate::FutarchyTreasury::treasury();
     let now = System::block_number();
-    let mut first_error = None;
+    let mut verdict = PreviewVerdict::Admits;
     let mut authorize_count = 0_u8;
     for call in calls {
         if !visit_runtime_leaves(call, &mut |leaf| {
+            if matches!(leaf, RuntimeCall::FutarchyTreasury(inner)
+            if !matches!(
+                inner,
+                pallet_futarchy_treasury::Call::fund_budget_line { .. }
+                    | pallet_futarchy_treasury::Call::spend { .. }
+                    | pallet_futarchy_treasury::Call::open_stream { .. }
+                    | pallet_futarchy_treasury::Call::issue_vit { .. }
+            )) {
+                verdict = PreviewVerdict::NoVerdict;
+                return false;
+            }
             let result = match leaf {
                 RuntimeCall::FutarchyTreasury(
                     pallet_futarchy_treasury::Call::fund_budget_line { line, amount },
@@ -4205,21 +4237,22 @@ fn preview_admission_inner(
                 _ => Ok(()),
             };
             if let Err(error) = result {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
+                verdict = PreviewVerdict::Refused(error);
+                return false;
             }
-            first_error.is_none()
+            true
         }) {
-            // Either the visitor stopped us on the first refusal, or the traversal
-            // itself refused — `first_error` distinguishes the two.
-            return Err(first_error);
+            // The visitor stopped us, or the traversal itself refused. If we did
+            // not set a verdict, the refusal was the traversal's (over-deep or
+            // undecodable nesting) — steps (2), (6) and (11) own that, so it is
+            // not a meter verdict either.
+            return match verdict {
+                PreviewVerdict::Admits => PreviewVerdict::NoVerdict,
+                other => other,
+            };
         }
     }
-    match first_error {
-        None => Ok(()),
-        Some(error) => Err(Some(error)),
-    }
+    verdict
 }
 
 pub struct RuntimeConstitutionAccess;

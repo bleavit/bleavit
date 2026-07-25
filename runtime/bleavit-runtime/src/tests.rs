@@ -11813,6 +11813,39 @@ fn queue_time_meter_preview_is_live_recursive_and_read_only() {
         assert!(!crate::configs::preview_batch_admission(&fund_batch));
         assert!(crate::configs::preview_meter_admission(&fund_batch));
 
+        // SQ-461 (connector P1): a batch whose earlier leaf moves the meter *base*
+        // is not something this preview can judge. `sweep_insurance` raises NAV —
+        // `nav()` is a pure function of treasury state — and the preview does not
+        // simulate it, so judging the later `spend` against the pre-sweep state
+        // would refuse a batch whose ordered atomic dispatch succeeds. Step (7)
+        // must therefore fail OPEN: the meters still bind at step (12), and
+        // blocking here would strand an adopted proposal for its whole grace
+        // window. The outflow meter is still exhausted from above, so the same
+        // `spend` alone is (and must remain) refused.
+        let sweep =
+            RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::sweep_insurance {
+                amount: currency::USDC,
+            });
+        let sweep_then_spend =
+            match pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(vec![
+                sweep,
+                nested_spend.clone(),
+            ]) {
+                Ok(batch) => batch,
+                Err(_) => {
+                    assert!(false, "a sweep plus a spend must fit the guard batch");
+                    return;
+                }
+            };
+        assert!(
+            !crate::configs::preview_meter_admission(&spend_batch),
+            "the spend alone is judgeable and genuinely meter-refused"
+        );
+        assert!(
+            crate::configs::preview_meter_admission(&sweep_then_spend),
+            "an unmodelled NAV-moving precursor must yield no verdict, not a refusal"
+        );
+
         let all_metered =
             match pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(vec![
                 RuntimeCall::Utility(pallet_utility::Call::batch {
