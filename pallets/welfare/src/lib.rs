@@ -965,26 +965,6 @@ pub mod pallet {
             ReserveProbeDaily::<T>::get(epoch, day)
         }
 
-        /// Count this epoch's recorded probe days, split pass/fail.
-        ///
-        /// Deliberately **not** an epoch-level `R`: absent days are invisible
-        /// here, and 07 §8 has no benefit-of-the-doubt branch, so only a caller
-        /// that knows how many probe days the epoch *should* have can decide
-        /// health. The runtime derives that from the epoch's own length and
-        /// treats any shortfall as failure (05 §4.4's `C_e`).
-        pub fn reserve_probe_epoch_tally(epoch: EpochId) -> (u32, u32) {
-            ReserveProbeDaily::<T>::iter_prefix(epoch).fold(
-                (0_u32, 0_u32),
-                |(passed, failed), (_, ok)| {
-                    if ok {
-                        (passed.saturating_add(1), failed)
-                    } else {
-                        (passed, failed.saturating_add(1))
-                    }
-                },
-            )
-        }
-
         /// Return the local XCM counters for one epoch/day window.
         pub fn xcm_traffic(epoch: EpochId, day: u8) -> XcmTrafficCounters {
             XcmTraffic::<T>::get(epoch, day)

@@ -268,15 +268,20 @@ fn sq195_reserve_health_is_day_resolved_and_unmeasured_before_arming() {
         pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, 2, true);
         assert_eq!(r_of(2), Some(futarchy_primitives::FixedU64(0)));
 
-        // The epoch tally is raw, not a verdict: one failed day and one passed
-        // day, with every other day of the epoch simply unrecorded.
+        // Raw storage still holds exactly what was recorded — one pass, one
+        // fail — but no consumer reads it without going through the measured
+        // range, which is what keeps the daily and epoch rules in agreement.
         assert_eq!(
-            pallet_welfare::Pallet::<Runtime>::reserve_probe_epoch_tally(epoch),
-            (1, 1)
+            pallet_welfare::Pallet::<Runtime>::reserve_probe_daily(epoch, 1),
+            Some(true)
         );
         assert_eq!(
-            pallet_welfare::Pallet::<Runtime>::reserve_probe_epoch_tally(epoch + 1),
-            (0, 0)
+            pallet_welfare::Pallet::<Runtime>::reserve_probe_daily(epoch, 2),
+            Some(false)
+        );
+        assert_eq!(
+            pallet_welfare::Pallet::<Runtime>::reserve_probe_daily(epoch, 3),
+            None
         );
     });
 }
@@ -615,6 +620,54 @@ fn sq195_daily_rule_rejects_days_outside_the_measured_range() {
             r_of(1),
             None,
             "a recorded pre-arm day stays outside the range"
+        );
+    });
+}
+
+/// SQ-195 (R-6 round 9): the sub-day floor must not manufacture a required day
+/// for an epoch the probe never reached.
+///
+/// `last` is floored at one day so a sub-day epoch cannot pass vacuously. But
+/// for such an epoch an `armed_at` past its end still floor-divides to day 0, so
+/// the floor produced the range `[0, 1)` and reported an **entirely unmeasured**
+/// epoch as *failed* rather than unmeasured — settleable, on data that never
+/// existed. The unmeasured case is now decided before the floor applies.
+#[test]
+fn sq195_sub_day_epoch_armed_after_its_end_is_unmeasured_not_failed() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 49;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::R);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let day_len = futarchy_primitives::kernel::BLOCKS_PER_DAY;
+
+        // A sub-day epoch, with the probe arming after it ended.
+        pallet_epoch::Schedule::<Runtime>::mutate(|schedule| {
+            schedule.length = day_len / 4;
+        });
+        let timing =
+            pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch).expect("live epoch has timing");
+        pallet_oracle::ReserveProbeArmed::<Runtime>::put(true);
+        pallet_oracle::ReserveProbeArmedAt::<Runtime>::put(
+            timing.start.saturating_add(timing.length),
+        );
+
+        assert_eq!(
+            crate::configs::RuntimeMetricInputs::onchain_components(epoch, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::R)
+                .map(|c| c.value),
+            None,
+            "an epoch the probe never reached must be unmeasured, not failed",
+        );
+        // The daily rule agrees — day 0 is outside the measured range.
+        assert_eq!(
+            crate::configs::RuntimeMetricInputs::daily_components(epoch, 0, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::R)
+                .map(|c| c.value),
+            None,
         );
     });
 }

@@ -4848,6 +4848,17 @@ fn xcm_health(counters: pallet_welfare::XcmTrafficCounters) -> FixedU64 {
 fn reserve_probe_measured_range(epoch: EpochId) -> Option<(u32, u32)> {
     let timing = pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch)?;
     let day_len = kernel::BLOCKS_PER_DAY;
+    // Nothing was measured if the probe armed at or after this epoch ended.
+    // This must be decided *before* the sub-day floor below: for an epoch
+    // shorter than one day, `armed_at` past its end still floor-divides to day
+    // 0, so the floor would manufacture a required day 0 and report an entirely
+    // unmeasured epoch as **failed** rather than unmeasured (07 §8; 05 §4.4).
+    let epoch_end = timing.start.saturating_add(timing.length);
+    if pallet_oracle::Pallet::<Runtime>::reserve_probe_armed_at()
+        .is_some_and(|armed_at| armed_at >= epoch_end)
+    {
+        return None;
+    }
     let last = timing.length.checked_div(day_len).unwrap_or(0).max(1);
     let first = match pallet_oracle::Pallet::<Runtime>::reserve_probe_armed_at() {
         Some(armed_at) if armed_at > timing.start => armed_at

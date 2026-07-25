@@ -148,7 +148,7 @@ impl UncheckedOnRuntimeUpgrade for MigrateOracleReserveProbeV1Inner {
         // as that range's outcome (07 §8 upgrade compatibility). Bounded by the
         // `u8` day key per retained epoch; the epoch index itself is retired by
         // welfare's own cursor-bounded walk.
-        let _ = pallet_welfare::ReserveProbeDaily::<Runtime>::clear(u32::MAX, None);
+        let cleared = pallet_welfare::ReserveProbeDaily::<Runtime>::clear(u32::MAX, None);
 
         pallet_constitution::PhaseFlags::<Runtime>::mutate(|bits| {
             if unhealthy {
@@ -162,10 +162,21 @@ impl UncheckedOnRuntimeUpgrade for MigrateOracleReserveProbeV1Inner {
         });
 
         // ReserveHealth, PhaseFlags and Treasury State reads; those three
-        // writes, the two latch clears (armed flag and its block), and the
-        // bounded day-outcome clear. VersionedMigration separately accounts for
-        // its StorageVersion read/write.
-        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(3, 6)
+        // writes plus the two latch clears (armed flag and its block).
+        // VersionedMigration separately accounts for its StorageVersion
+        // read/write.
+        //
+        // The day-outcome clear is charged from its **actual** removal count,
+        // not as a single write: the map spans up to one retained-epoch window
+        // × 256 day keys, so a flat charge would understate a real migration by
+        // orders of magnitude (I-20; 09 §1.1). `MultiRemovalResults` reports the
+        // backend reads and removals it performed.
+        <Runtime as frame_system::Config>::DbWeight::get()
+            .reads_writes(3, 5)
+            .saturating_add(
+                <Runtime as frame_system::Config>::DbWeight::get()
+                    .reads_writes(u64::from(cleared.loops), u64::from(cleared.backend)),
+            )
     }
 
     #[cfg(feature = "try-runtime")]
