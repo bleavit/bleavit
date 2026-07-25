@@ -5658,8 +5658,22 @@ impl pallet_welfare::OracleAdmission for RuntimeOracleAdmission {
             pallet_oracle::OracleParams::DEFAULT.bond_bps,
         );
         let rounds = u8_param_or(b"orc.rounds", pallet_oracle::OracleParams::DEFAULT.rounds);
+        // 07 §3 requires "≥ 3 registered reporters **with full stakes**", and the
+        // counted-map size is not that: `record_reporter_offense` halves the
+        // stake on a second adjudicated-false report and leaves the reporter
+        // **registered** (ejection is the third offense). Counting map entries
+        // would let a half-staked seat satisfy the admission gate, admitting an
+        // attested component against less collateral than §3 demands — the
+        // stake is the whole reason a reporter's word is worth anything
+        // (Codex review, PR #173).
+        let reporter_stake = balance_param_or(
+            b"orc.rep_stake",
+            pallet_oracle::OracleParams::DEFAULT.reporter_stake,
+        );
         pallet_welfare::AttestedAdmission {
-            reporters: pallet_oracle::Reporters::<Runtime>::count(),
+            reporters: pallet_oracle::Reporters::<Runtime>::iter_values()
+                .filter(|info| info.stake >= reporter_stake)
+                .count() as u32,
             watchtowers: pallet_oracle::Watchtowers::<Runtime>::count(),
             reporter_min: u32::from(u8_param_or(
                 b"orc.n_min",

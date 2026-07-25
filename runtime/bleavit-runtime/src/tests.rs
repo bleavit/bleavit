@@ -18851,6 +18851,28 @@ fn sq341_attested_admission_is_gated_on_live_oracle_seats() {
         // The ladder itself is readable, so the refusal below is attributable
         // to the seats rather than to §6.3's coverage half.
         assert_eq!(admission.coverage_bps, Some(1_750));
+        // 07 §3 counts reporters "with full stakes", which is not the same as
+        // registered seats: a second adjudicated-false report halves the stake
+        // and leaves the reporter registered. Seat three reporters, one of them
+        // slashed, and the count must read 2 — otherwise a half-collateralized
+        // seat would admit an attested component (Codex review, PR #173).
+        let stake = pallet_oracle::OracleParams::DEFAULT.reporter_stake;
+        for (index, held) in [stake, stake, stake / 2].into_iter().enumerate() {
+            pallet_oracle::Reporters::<Runtime>::insert(
+                sp_runtime::AccountId32::new([100u8 + index as u8; 32]),
+                pallet_oracle::ReporterInfo {
+                    stake: held,
+                    registered_at: 0,
+                    offenses: 0,
+                },
+            );
+        }
+        assert_eq!(pallet_oracle::Reporters::<Runtime>::count(), 3);
+        assert_eq!(
+            <Runtime as pallet_welfare::Config>::OracleAdmission::admission().reporters,
+            2,
+            "a slashed-but-registered reporter must not fill a 07 §3 seat"
+        );
 
         let refused = pallet_welfare::Pallet::<Runtime>::register_spec(
             pallet_origins::Origin::ConstitutionalValues.into(),

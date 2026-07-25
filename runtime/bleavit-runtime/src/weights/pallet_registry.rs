@@ -23,7 +23,7 @@
 // --repeat
 // 20
 // --output
-// /tmp/claude-1000/-home-development-bleavit/b40139b1-6248-4c1a-ad60-57e786f83c15/scratchpad/sq141-pallet_registry.rs
+// /tmp/claude-1000/-home-development-bleavit/b40139b1-6248-4c1a-ad60-57e786f83c15/scratchpad/fix-pallet_registry.rs
 // --unsafe-overwrite-results
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
@@ -63,8 +63,8 @@ impl<T: frame_system::Config> pallet_registry::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `15489`
 		//  Estimated: `171934`
-		// Minimum execution time: 451_490_000 picoseconds.
-		Weight::from_parts(477_970_000, 0)
+		// Minimum execution time: 485_761_000 picoseconds.
+		Weight::from_parts(495_730_000, 0)
 			.saturating_add(Weight::from_parts(0, 171934))
 			.saturating_add(T::DbWeight::get().reads(113))
 			.saturating_add(T::DbWeight::get().writes(16))
@@ -85,8 +85,8 @@ impl<T: frame_system::Config> pallet_registry::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `11208`
 		//  Estimated: `174605`
-		// Minimum execution time: 335_150_000 picoseconds.
-		Weight::from_parts(355_920_000, 0)
+		// Minimum execution time: 364_660_000 picoseconds.
+		Weight::from_parts(372_321_000, 0)
 			.saturating_add(Weight::from_parts(0, 174605))
 			.saturating_add(T::DbWeight::get().reads(86))
 			.saturating_add(T::DbWeight::get().writes(16))
@@ -113,8 +113,8 @@ impl<T: frame_system::Config> pallet_registry::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `21955`
 		//  Estimated: `174605`
-		// Minimum execution time: 395_180_000 picoseconds.
-		Weight::from_parts(419_440_000, 0)
+		// Minimum execution time: 426_670_000 picoseconds.
+		Weight::from_parts(435_961_000, 0)
 			.saturating_add(Weight::from_parts(0, 174605))
 			.saturating_add(T::DbWeight::get().reads(95))
 			.saturating_add(T::DbWeight::get().writes(18))
@@ -137,8 +137,8 @@ impl<T: frame_system::Config> pallet_registry::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `21704`
 		//  Estimated: `174605`
-		// Minimum execution time: 974_761_000 picoseconds.
-		Weight::from_parts(1_038_551_000, 0)
+		// Minimum execution time: 1_054_371_000 picoseconds.
+		Weight::from_parts(1_071_830_000, 0)
 			.saturating_add(Weight::from_parts(0, 174605))
 			.saturating_add(T::DbWeight::get().reads(94))
 			.saturating_add(T::DbWeight::get().writes(37))
@@ -159,36 +159,38 @@ impl<T: frame_system::Config> pallet_registry::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `11310`
 		//  Estimated: `174605`
-		// Minimum execution time: 363_580_000 picoseconds.
-		Weight::from_parts(384_390_000, 0)
+		// Minimum execution time: 395_860_000 picoseconds.
+		Weight::from_parts(402_621_000, 0)
 			.saturating_add(Weight::from_parts(0, 174605))
 			.saturating_add(T::DbWeight::get().reads(87))
 			.saturating_add(T::DbWeight::get().writes(17))
 	}
 	/// Storage: `MilestoneRegistry::FilingCount` (r:5 w:4)
 	/// Proof: `MilestoneRegistry::FilingCount` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::CohortSchedules` (r:5 w:0)
+	/// Proof: `Epoch::CohortSchedules` (`max_values`: None, `max_size`: Some(157), added: 2632, mode: `MaxEncodedLen`)
+	/// Storage: `Welfare::MetricSpecs` (r:1 w:0)
+	/// Proof: `Welfare::MetricSpecs` (`max_values`: None, `max_size`: Some(3507), added: 5982, mode: `MaxEncodedLen`)
+	/// Storage: `MilestoneRegistry::Filings` (r:65 w:0)
+	/// Proof: `MilestoneRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Schedule` (r:1 w:0)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
-	/// Storage: `Welfare::MetricSpecs` (r:1 w:0)
-	/// Proof: `Welfare::MetricSpecs` (`max_values`: None, `max_size`: Some(3507), added: 5982, mode: `MaxEncodedLen`)
 	/// Storage: `Constitution::Params` (r:4 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
-	/// Storage: `MilestoneRegistry::Filings` (r:65 w:0)
-	/// Proof: `MilestoneRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
 	/// Storage: `MilestoneRegistry::Aggregates` (r:8 w:8)
 	/// Proof: `MilestoneRegistry::Aggregates` (`max_values`: None, `max_size`: Some(38), added: 2513, mode: `MaxEncodedLen`)
 	/// Storage: `MilestoneRegistry::ClosedAt` (r:0 w:1)
 	/// Proof: `MilestoneRegistry::ClosedAt` (`max_values`: None, `max_size`: Some(34), added: 2509, mode: `MaxEncodedLen`)
 	fn close_epoch() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `10221`
+		//  Measured:  `10588`
 		//  Estimated: `174605`
-		// Minimum execution time: 304_631_000 picoseconds.
-		Weight::from_parts(321_670_000, 0)
+		// Minimum execution time: 379_810_000 picoseconds.
+		Weight::from_parts(385_850_000, 0)
 			.saturating_add(Weight::from_parts(0, 174605))
-			.saturating_add(T::DbWeight::get().reads(85))
+			.saturating_add(T::DbWeight::get().reads(90))
 			.saturating_add(T::DbWeight::get().writes(13))
 	}
 	/// Storage: `MilestoneRegistry::ClosedAt` (r:1 w:1)
@@ -215,8 +217,8 @@ impl<T: frame_system::Config> pallet_registry::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `30005`
 		//  Estimated: `329054`
-		// Minimum execution time: 1_056_751_000 picoseconds.
-		Weight::from_parts(1_110_100_000, 0)
+		// Minimum execution time: 1_139_281_000 picoseconds.
+		Weight::from_parts(1_161_500_000, 0)
 			.saturating_add(Weight::from_parts(0, 329054))
 			.saturating_add(T::DbWeight::get().reads(224))
 			.saturating_add(T::DbWeight::get().writes(208))

@@ -1691,3 +1691,66 @@ fn sq141_a_version_cannot_be_reaped_while_a_sibling_is_still_open() {
         assert_ok!(IncidentRegistry::do_try_state());
     });
 }
+
+/// `close_epoch` must refuse a version the epoch never froze.
+///
+/// Codex review of PR #173, and the attack is specific to the versioned
+/// lifecycle: once an epoch has any filing and its window ends, the per-version
+/// filing filter is empty for *any* unfrozen version number, so the fold records
+/// the neutral "no filings ⇒ 1" aggregate for it. Each bogus close consumes one
+/// of the eight `MAX_AGGREGATES` slots **and** satisfies the `NothingToClose`
+/// disjunct for the next, so a signed caller could fill the map and make the
+/// legitimate version's close fail `TooManyAggregates` — permanently, since
+/// nothing reaps an aggregate whose epoch never closes.
+#[test]
+fn sq141_close_refuses_a_version_the_epoch_never_froze() {
+    new_test_ext().execute_with(|| {
+        FrozenSpecs::set(vec![3]);
+        // Two epochs filed under version 3 while the filing window is open.
+        for epoch in [5, 6] {
+            assert_ok!(IncidentRegistry::file(
+                signed(ALICE),
+                epoch,
+                FilingClass::S2,
+                0,
+                H,
+                3
+            ));
+        }
+        for wt in [WT1, WT2] {
+            register_watchtower(wt);
+            assert_ok!(IncidentRegistry::ack_observed(signed(wt), 5, 0));
+            assert_ok!(IncidentRegistry::ack_observed(signed(wt), 6, 0));
+        }
+        System::set_block_number(CLOSE_BLOCK);
+        for epoch in [5, 6] {
+            assert_ok!(IncidentRegistry::crank_close(
+                signed(BOB),
+                epoch,
+                REG_CLOSE_BATCH as u32
+            ));
+        }
+        // The griefing close: version 999 was never frozen and holds no filings.
+        assert_noop!(
+            IncidentRegistry::close_epoch(signed(CHARLIE), 5, 999),
+            Error::<Test, IncidentInstance>::SpecVersionMismatch
+        );
+        assert!(!Aggregates::<Test, IncidentInstance>::contains_key(5, 999));
+        // The legitimate version still closes, and the slot budget is intact.
+        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5, 3));
+        assert_eq!(
+            Aggregates::<Test, IncidentInstance>::get(5, 3),
+            Some(FixedU64(600_000_000))
+        );
+        // A late close stays legal for a version that still holds filings even
+        // after its cohorts settle and the frozen set is pruned out from under
+        // it — otherwise its records could never be reaped.
+        FrozenSpecs::set(vec![]);
+        assert_noop!(
+            IncidentRegistry::close_epoch(signed(BOB), 6, 4),
+            Error::<Test, IncidentInstance>::SpecVersionMismatch
+        );
+        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 6, 3));
+        assert_ok!(IncidentRegistry::do_try_state());
+    });
+}

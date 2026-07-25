@@ -447,7 +447,9 @@ pub enum Error {
     TypeInfo,
 )]
 pub struct AttestedAdmission {
-    /// Registered reporters holding a full stake (07 §3).
+    /// Registered reporters **still holding a full stake** (07 §3). A reporter
+    /// slashed to half stake on a second adjudicated-false report stays
+    /// registered, so a count of registered seats over-states this.
     pub reporters: u32,
     /// Registered watchtowers (07 §4).
     pub watchtowers: u32,

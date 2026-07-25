@@ -727,6 +727,33 @@ pub mod pallet {
                     || Aggregates::<T, I>::iter_key_prefix(epoch).next().is_some(),
                 Error::<T, I>::NothingToClose
             );
+            // The version must be one the epoch actually froze — or one that
+            // already holds filings, which is the same fact proven durably.
+            //
+            // Without this, `close_epoch` is a griefing surface the single-key
+            // lifecycle did not have: once an epoch has any filing and its
+            // window ends, the per-version filing filter is empty for *any*
+            // other version number, so the fold records the neutral "no filings
+            // ⇒ 1" aggregate for a version nobody froze. Each bogus close
+            // consumes one of the eight `MAX_AGGREGATES` slots and satisfies the
+            // `NothingToClose` disjunct for the next, so a signed caller can
+            // fill the map and make the *legitimate* version's close fail
+            // `TooManyAggregates` — permanently, since nothing reaps an
+            // aggregate whose epoch never closes (Codex review, PR #173).
+            //
+            // The `has_filings` disjunct is what keeps a late close legal: once
+            // every cohort consuming the epoch has settled, `CohortSchedules` is
+            // pruned and the frozen set empties, but a version that still holds
+            // filings must remain closeable or its records can never be reaped.
+            // It cannot be abused, because filings only exist under a version
+            // that passed this same gate in `file`.
+            let frozen = T::Epoch::frozen_spec_versions(epoch);
+            let has_filings = Filings::<T, I>::iter_prefix_values(epoch)
+                .any(|filing| filing.spec_version == spec_version);
+            ensure!(
+                frozen.contains(&spec_version) || has_filings,
+                Error::<T, I>::SpecVersionMismatch
+            );
             let now = Self::now();
             let filing_window_end = T::Epoch::filing_window_end(epoch);
             let milestone_target = T::Epoch::milestone_target(epoch, spec_version);

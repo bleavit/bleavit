@@ -23,7 +23,7 @@
 // --repeat
 // 20
 // --output
-// /tmp/claude-1000/-home-development-bleavit/b40139b1-6248-4c1a-ad60-57e786f83c15/scratchpad/sq141b-pallet_welfare.rs
+// /tmp/claude-1000/-home-development-bleavit/b40139b1-6248-4c1a-ad60-57e786f83c15/scratchpad/fix-pallet_welfare.rs
 // --unsafe-overwrite-results
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
@@ -45,10 +45,10 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 	/// Proof: `Welfare::GateBreachFlags` (`max_values`: None, `max_size`: Some(30), added: 2505, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
-	/// Storage: `Constitution::Params` (r:4 w:0)
+	/// Storage: `Constitution::Params` (r:5 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::CounterForReporters` (r:1 w:0)
-	/// Proof: `Oracle::CounterForReporters` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::Reporters` (r:4 w:0)
+	/// Proof: `Oracle::Reporters` (`max_values`: None, `max_size`: Some(69), added: 2544, mode: `MaxEncodedLen`)
 	/// Storage: `Oracle::CounterForWatchtowers` (r:1 w:0)
 	/// Proof: `Oracle::CounterForWatchtowers` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Welfare::SnapshotDeadline` (r:1 w:1)
@@ -59,12 +59,12 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::EpochTimings` (`max_values`: Some(1), `max_size`: Some(385), added: 880, mode: `MaxEncodedLen`)
 	fn register_spec() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `60502`
+		//  Measured:  `60804`
 		//  Estimated: `102684`
-		// Minimum execution time: 460_650_000 picoseconds.
-		Weight::from_parts(488_080_000, 0)
+		// Minimum execution time: 488_690_000 picoseconds.
+		Weight::from_parts(526_100_000, 0)
 			.saturating_add(Weight::from_parts(0, 102684))
-			.saturating_add(T::DbWeight::get().reads(69))
+			.saturating_add(T::DbWeight::get().reads(73))
 			.saturating_add(T::DbWeight::get().writes(57))
 	}
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
@@ -99,8 +99,8 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `75520`
 		//  Estimated: `102684`
-		// Minimum execution time: 559_220_000 picoseconds.
-		Weight::from_parts(590_879_000, 0)
+		// Minimum execution time: 568_160_000 picoseconds.
+		Weight::from_parts(625_500_000, 0)
 			.saturating_add(Weight::from_parts(0, 102684))
 			.saturating_add(T::DbWeight::get().reads(82))
 			.saturating_add(T::DbWeight::get().writes(60))
@@ -127,8 +127,8 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `75596`
 		//  Estimated: `102684`
-		// Minimum execution time: 486_990_000 picoseconds.
-		Weight::from_parts(515_690_000, 0)
+		// Minimum execution time: 529_030_000 picoseconds.
+		Weight::from_parts(542_160_000, 0)
 			.saturating_add(Weight::from_parts(0, 102684))
 			.saturating_add(T::DbWeight::get().reads(77))
 			.saturating_add(T::DbWeight::get().writes(61))
