@@ -416,7 +416,7 @@ reason = "13 §1 / rule 7: amendment bounds covered by the generated per-key sui
 key = "orc.bond_bps"
 class = "param-bounds"
 genesis = true
-reason = "13 §1 / rule 7: amendment bounds covered by the generated per-key suite; the oracle consumer reads live Params (genesis-default fallback) since B10."
+reason = "13 §1 / rule 7: amendment bounds covered by the generated per-key suite; the oracle consumer reads live Params (genesis-default fallback) since B10, and since SQ-296 the registry's value-scaled filing bond reads the same rate as a second consumer (07 §7)."
 
 [[entry]]
 key = "orc.rounds"
