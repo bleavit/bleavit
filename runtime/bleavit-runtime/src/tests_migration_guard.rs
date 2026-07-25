@@ -1812,13 +1812,105 @@ fn constitution_composite_v0_migration_is_atomic_before_pricing_insertion() {
 #[test]
 fn constitution_v2_migration_is_an_idempotent_current_version_noop() {
     tests::development_ext().execute_with(|| {
-        // SQ-173 advanced the Constitution to v3, so a genesis chain is already
-        // past the v2 migration's window and it must do nothing at all.
-        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(3));
+        // SQ-173 advanced the Constitution to v3 and SQ-486 to v4, so a genesis
+        // chain is already past the v2 migration's window and it must do nothing
+        // at all.
+        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(4));
         let before: Vec<_> = pallet_constitution::Params::<Runtime>::iter().collect();
         let _ = <crate::migrations::MigrateConstitutionReserveProbeV2 as OnRuntimeUpgrade>::on_runtime_upgrade();
-        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(3));
+        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(4));
         assert_eq!(pallet_constitution::Params::<Runtime>::iter().collect::<Vec<_>>(), before);
+    });
+}
+
+/// SQ-486 / connector review of #166: the `sec.flow_cap` row is seeded at genesis
+/// but an already-live chain never runs genesis, so it needs the v4 migration
+/// that 13 §1 (*Existing-chain introduction of new rows*) makes mandatory.
+///
+/// The bug this pins is deliberately quiet: `sec_flow_cap_1e9` falls back to the
+/// compile-time default, so the *gate* stays correct at ×16 while `Params` holds
+/// no record — leaving a ceiling the frontend cannot read and governance cannot
+/// amend. A test that only checked the computed ceiling would pass either way, so
+/// this one asserts on the **record**.
+#[test]
+fn constitution_v4_migration_seeds_sec_flow_cap_on_an_existing_chain() {
+    tests::development_ext().execute_with(|| {
+        let record = crate::migrations::security_flow_cap_param_record()
+            .expect("sec.flow_cap is in the genesis registry template");
+
+        // An existing chain that predates SQ-486: at v3, with no row.
+        StorageVersion::new(3).put::<Constitution>();
+        pallet_constitution::Params::<Runtime>::remove(record.key);
+        assert!(!pallet_constitution::Params::<Runtime>::contains_key(
+            record.key
+        ));
+
+        let used = <crate::migrations::MigrateConstitutionSecurityFlowCapV4 as OnRuntimeUpgrade>::on_runtime_upgrade();
+        // Strictly more than the version-read-only early return, i.e. the row
+        // write and the version write were actually charged for.
+        let noop = <Runtime as frame_system::Config>::DbWeight::get().reads(1);
+        assert!(used.ref_time() > noop.ref_time());
+
+        assert_eq!(
+            StorageVersion::get::<Constitution>(),
+            StorageVersion::new(4)
+        );
+        // Byte-identical to a chain that genesised with the row.
+        assert_eq!(
+            pallet_constitution::Params::<Runtime>::get(record.key),
+            Some(record)
+        );
+    });
+}
+
+/// Insert-if-absent, never overwrite: a chain whose governance already moved the
+/// ceiling inside its ×7–×32 bounds keeps its own value across the upgrade.
+#[test]
+fn constitution_v4_migration_never_overwrites_an_amended_flow_cap() {
+    tests::development_ext().execute_with(|| {
+        let record = crate::migrations::security_flow_cap_param_record()
+            .expect("sec.flow_cap is in the genesis registry template");
+        let mut amended = record;
+        amended.value = pallet_constitution::ParamValue::Fixed(
+            futarchy_primitives::FixedU64(24_000_000_000),
+        );
+        assert_ne!(amended.value, record.value);
+
+        StorageVersion::new(3).put::<Constitution>();
+        pallet_constitution::Params::<Runtime>::insert(record.key, amended);
+
+        let _ = <crate::migrations::MigrateConstitutionSecurityFlowCapV4 as OnRuntimeUpgrade>::on_runtime_upgrade();
+
+        assert_eq!(
+            StorageVersion::get::<Constitution>(),
+            StorageVersion::new(4)
+        );
+        assert_eq!(
+            pallet_constitution::Params::<Runtime>::get(record.key),
+            Some(amended),
+            "a lawful live value must survive the migration untouched",
+        );
+    });
+}
+
+/// A genesis chain is already at v4, so the migration is a version-read no-op.
+#[test]
+fn constitution_v4_migration_is_an_idempotent_current_version_noop() {
+    tests::development_ext().execute_with(|| {
+        assert_eq!(
+            StorageVersion::get::<Constitution>(),
+            StorageVersion::new(4)
+        );
+        let before: Vec<_> = pallet_constitution::Params::<Runtime>::iter().collect();
+        let _ = <crate::migrations::MigrateConstitutionSecurityFlowCapV4 as OnRuntimeUpgrade>::on_runtime_upgrade();
+        assert_eq!(
+            StorageVersion::get::<Constitution>(),
+            StorageVersion::new(4)
+        );
+        assert_eq!(
+            pallet_constitution::Params::<Runtime>::iter().collect::<Vec<_>>(),
+            before
+        );
     });
 }
 
@@ -1943,17 +2035,19 @@ fn composed_runtime_upgrade_migrates_all_reserve_probe_v0_state_and_passes_try_s
         );
         assert!(!unhashed::exists(&blocked_meters));
         assert!(!unhashed::exists(&progress_marker));
-        // SQ-173's `MigrateConstitutionSecurityPrizeV3` composes after the v2
-        // probe migration, so a composed upgrade lands the Constitution at v3
-        // with all three capability-envelope rows seeded.
+        // SQ-173's `MigrateConstitutionSecurityPrizeV3` and SQ-486's
+        // `MigrateConstitutionSecurityFlowCapV4` compose after the v2 probe
+        // migration, so a composed upgrade lands the Constitution at v4 with all
+        // three capability-envelope rows *and* the `sec.flow_cap` ceiling seeded.
         assert_eq!(
             StorageVersion::get::<Constitution>(),
-            StorageVersion::new(3)
+            StorageVersion::new(4)
         );
         for name in [
             b"sec.prize.param".as_slice(),
             b"sec.prize.code".as_slice(),
             b"sec.prize.meta".as_slice(),
+            b"sec.flow_cap".as_slice(),
         ] {
             assert!(pallet_constitution::Params::<Runtime>::contains_key(
                 pallet_constitution::key16(name)
@@ -2024,17 +2118,19 @@ fn composed_runtime_upgrade_migrates_constitution_v1_to_v2() {
         ) as Decode>::decode(&mut &output[..])
         .expect("TryRuntime result");
         assert!(used.all_lte(maximum));
-        // SQ-173's `MigrateConstitutionSecurityPrizeV3` composes after the v2
-        // probe migration, so a composed upgrade lands the Constitution at v3
-        // with all three capability-envelope rows seeded.
+        // SQ-173's `MigrateConstitutionSecurityPrizeV3` and SQ-486's
+        // `MigrateConstitutionSecurityFlowCapV4` compose after the v2 probe
+        // migration, so a composed upgrade lands the Constitution at v4 with all
+        // three capability-envelope rows *and* the `sec.flow_cap` ceiling seeded.
         assert_eq!(
             StorageVersion::get::<Constitution>(),
-            StorageVersion::new(3)
+            StorageVersion::new(4)
         );
         for name in [
             b"sec.prize.param".as_slice(),
             b"sec.prize.code".as_slice(),
             b"sec.prize.meta".as_slice(),
+            b"sec.flow_cap".as_slice(),
         ] {
             assert!(pallet_constitution::Params::<Runtime>::contains_key(
                 pallet_constitution::key16(name)

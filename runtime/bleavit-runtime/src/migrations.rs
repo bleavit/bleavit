@@ -282,6 +282,15 @@ pub(crate) fn security_prize_param_records() -> Option<[pallet_constitution::Par
     }
 }
 
+/// The SQ-486 `sec.flow_cap` row, taken from `genesis_params()` so a chain
+/// migrated into it is byte-identical to a chain that genesised with it.
+pub(crate) fn security_flow_cap_param_record() -> Option<pallet_constitution::ParamRecord> {
+    let key = pallet_constitution::key16(b"sec.flow_cap");
+    pallet_constitution::genesis_params()
+        .into_iter()
+        .find(|record| record.key == key)
+}
+
 /// Seed the SQ-173 capability-envelope rows on a chain that predates them.
 ///
 /// Without this, an upgraded chain has no `sec.prize.*` records at all, and
@@ -362,6 +371,91 @@ impl OnRuntimeUpgrade for MigrateConstitutionSecurityPrizeV3 {
         frame_support::ensure!(
             crate::Constitution::on_chain_storage_version() == StorageVersion::new(3),
             "Constitution storage version did not advance to 3"
+        );
+        Ok(())
+    }
+}
+
+/// Seed the SQ-486 `sec.flow_cap` row on a chain that predates its adoption.
+///
+/// 13 §1 (*Existing-chain introduction of new rows*) makes this mandatory, not
+/// optional: a runtime that first **consumes** a newly introduced key MUST carry
+/// a versioned constitution-state migration inserting the complete bounded
+/// record on existing chains. Genesis seeding alone covers only a chain that has
+/// not launched yet.
+///
+/// The failure mode without it is quieter than SQ-173's and therefore worse to
+/// leave: `sec_flow_cap_1e9` falls back to the compile-time default table, so the
+/// *gate* keeps computing the right ceiling (16) and nothing looks broken —
+/// while `Params` holds no record at all, so `FutarchyApi::params` cannot surface
+/// the row to the frontend and `amend_registry` cannot move it anywhere inside
+/// the documented ×7–×32 bounds. A gate-bearing ceiling that governance cannot
+/// reach is not a governed parameter.
+///
+/// Insert-if-absent, never overwrite: a chain already carrying the row keeps its
+/// live value, including one governance has since amended. Advances the
+/// Constitution storage version `3 -> 4`.
+pub struct MigrateConstitutionSecurityFlowCapV4;
+
+impl OnRuntimeUpgrade for MigrateConstitutionSecurityFlowCapV4 {
+    fn on_runtime_upgrade() -> Weight {
+        use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+        let weight = <Runtime as frame_system::Config>::DbWeight::get();
+        if crate::Constitution::on_chain_storage_version() != StorageVersion::new(3) {
+            return weight.reads(1);
+        }
+        let Some(record) = security_flow_cap_param_record() else {
+            return weight.reads(1);
+        };
+        let mut written = 0u64;
+        if pallet_constitution::Params::<Runtime>::get(record.key).is_none() {
+            pallet_constitution::Params::<Runtime>::insert(record.key, record);
+            written = 1;
+        }
+        StorageVersion::new(4).put::<crate::Constitution>();
+        // Version read + one existence read; the row write with its
+        // CountedStorageMap counter, plus the version write.
+        weight.reads_writes(2, written.saturating_mul(2).saturating_add(1))
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn pre_upgrade() -> Result<Vec<u8>, sp_runtime::TryRuntimeError> {
+        use frame_support::traits::GetStorageVersion;
+
+        let live = security_flow_cap_param_record()
+            .map(|record| pallet_constitution::Params::<Runtime>::get(record.key));
+        Ok((crate::Constitution::on_chain_storage_version(), live).encode())
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn post_upgrade(state: Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+        use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+        type PreState = (
+            frame_support::traits::StorageVersion,
+            Option<Option<pallet_constitution::ParamRecord>>,
+        );
+        let (version, before): PreState = DecodeAll::decode_all(&mut state.as_slice())
+            .map_err(|_| sp_runtime::TryRuntimeError::Other("sec.flow_cap pre-state decode"))?;
+        if version != StorageVersion::new(3) {
+            return Ok(());
+        }
+        let record = security_flow_cap_param_record().ok_or(sp_runtime::TryRuntimeError::Other(
+            "genesis is missing the sec.flow_cap row",
+        ))?;
+        let live = pallet_constitution::Params::<Runtime>::get(record.key).ok_or(
+            sp_runtime::TryRuntimeError::Other("sec.flow_cap row absent after migration"),
+        )?;
+        // A pre-existing row is preserved exactly, never overwritten.
+        let expected = before.flatten().unwrap_or(record);
+        frame_support::ensure!(
+            live == expected,
+            "sec.flow_cap row does not match its expected post-migration value"
+        );
+        frame_support::ensure!(
+            crate::Constitution::on_chain_storage_version() == StorageVersion::new(4),
+            "Constitution storage version did not advance to 4"
         );
         Ok(())
     }

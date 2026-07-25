@@ -1073,12 +1073,13 @@ fn try_state_requires_the_current_version_and_all_probe_and_prize_rows() {
     new_test_ext().execute_with(|| {
         StorageVersion::new(0).put::<Constitution>();
         assert!(Constitution::do_try_state().is_err());
-        StorageVersion::new(3).put::<Constitution>();
+        StorageVersion::new(4).put::<Constitution>();
 
         for name in [
             b"sec.prize.param".as_slice(),
             b"sec.prize.code".as_slice(),
             b"sec.prize.meta".as_slice(),
+            b"sec.flow_cap".as_slice(),
             b"ops.probe_fee".as_slice(),
             b"ops.probe_rate".as_slice(),
             b"res.probe_int".as_slice(),

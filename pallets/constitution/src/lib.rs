@@ -137,7 +137,12 @@ pub mod pallet {
     use futarchy_primitives::{EpochId, ParamKey, ProposalClass};
 
     /// The in-code storage version of this pallet.
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(3);
+    ///
+    /// `4` since SQ-486 seeded the `sec.flow_cap` row; the runtime's
+    /// `MigrateConstitutionSecurityFlowCapV4` takes an existing chain `3 -> 4`,
+    /// so a migrated chain and a freshly genesised one agree (13 §1,
+    /// *Existing-chain introduction of new rows*).
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(4);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -783,6 +788,17 @@ pub mod pallet {
             {
                 return Err(TryRuntimeError::Other(
                     "constitution: sec.prize capability-envelope rows are absent",
+                ));
+            }
+            // SQ-486: `sec.flow_cap` is gate-bearing (it bounds the contest-capital
+            // term inside step 9's `L̂`). Its consumer falls back to the
+            // compile-time default, so an absent row does *not* break the gate —
+            // which is precisely why it needs an invariant. Without one, a chain
+            // silently ends up with a ceiling `FutarchyApi::params` cannot surface
+            // and `amend_registry` cannot move: governed in name only.
+            if !Params::<T>::contains_key(key16(b"sec.flow_cap")) {
+                return Err(TryRuntimeError::Other(
+                    "constitution: sec.flow_cap ceiling row is absent",
                 ));
             }
             if !Params::<T>::contains_key(key16(b"ops.probe_fee"))

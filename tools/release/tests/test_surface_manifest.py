@@ -115,7 +115,16 @@ class SurfaceManifestTests(unittest.TestCase):
             for entry in self.entries
             if entry["id"] == "constant.identity.contract_version"
         )
-        self.assertEqual(version["layout"], {"type": "u32", "value": "0x0c000000"})
+        # Derive the expected SCALE bytes from the manifest's own declared
+        # contract version instead of pinning a literal. The literal form of this
+        # assertion silently agreed with a stale `0x0c000000` after the top-level
+        # version moved to 13, so the suite stayed green while the manifest no
+        # longer matched the runtime it gates (SQ-186 connector review).
+        declared = self.manifest["integration_contract_version"]
+        self.assertEqual(
+            version["layout"],
+            {"type": "u32", "value": "0x" + declared.to_bytes(4, "little").hex()},
+        )
 
     def test_section_six_events_and_section_seven_attestor_storage_are_exact(self) -> None:
         expected_events = {
