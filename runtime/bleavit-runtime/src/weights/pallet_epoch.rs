@@ -24,7 +24,7 @@
 // --min-duration
 // 0
 // --output
-// /tmp/claude-1000/-home-development-bleavit/b40139b1-6248-4c1a-ad60-57e786f83c15/scratchpad/pallet_epoch_new.rs
+// /tmp/claude-1000/-home-development-bleavit/b40139b1-6248-4c1a-ad60-57e786f83c15/scratchpad/pallet_epoch_v2.rs
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(unused_parens)]
@@ -103,8 +103,8 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `45698`
 		//  Estimated: `183055`
-		// Minimum execution time: 1_858_658_000 picoseconds.
-		Weight::from_parts(1_886_588_000, 0)
+		// Minimum execution time: 1_859_650_000 picoseconds.
+		Weight::from_parts(1_874_360_000, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
 			.saturating_add(T::DbWeight::get().reads(232))
 			.saturating_add(T::DbWeight::get().writes(118))
@@ -185,8 +185,8 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `45225`
 		//  Estimated: `183055`
-		// Minimum execution time: 1_794_639_000 picoseconds.
-		Weight::from_parts(1_804_929_000, 0)
+		// Minimum execution time: 1_790_269_000 picoseconds.
+		Weight::from_parts(1_797_580_000, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
 			.saturating_add(T::DbWeight::get().reads(235))
 			.saturating_add(T::DbWeight::get().writes(123))
@@ -255,32 +255,6 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::CounterForProposals` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::CounterForCohorts` (r:1 w:1)
 	/// Proof: `Epoch::CounterForCohorts` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
-	/// Storage: `Epoch::LastWatchtowerSweep` (r:1 w:1)
-	/// Proof: `Epoch::LastWatchtowerSweep` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::Reporters` (r:1 w:0)
-	/// Proof: `Oracle::Reporters` (`max_values`: None, `max_size`: Some(69), added: 2544, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::Watchtowers` (r:1 w:0)
-	/// Proof: `Oracle::Watchtowers` (`max_values`: None, `max_size`: Some(69), added: 2544, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::Rounds` (r:1 w:0)
-	/// Proof: `Oracle::Rounds` (`max_values`: None, `max_size`: Some(281), added: 2756, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::RoundSchedules` (r:1 w:0)
-	/// Proof: `Oracle::RoundSchedules` (`max_values`: None, `max_size`: Some(41), added: 2516, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::ComponentValues` (r:1 w:0)
-	/// Proof: `Oracle::ComponentValues` (`max_values`: None, `max_size`: Some(66), added: 2541, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::ReserveHealth` (r:1 w:0)
-	/// Proof: `Oracle::ReserveHealth` (`max_values`: Some(1), `max_size`: Some(20), added: 515, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::AckRecords` (r:1 w:0)
-	/// Proof: `Oracle::AckRecords` (`max_values`: Some(1), `max_size`: Some(149506), added: 150001, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::Recomputable` (r:1 w:0)
-	/// Proof: `Oracle::Recomputable` (`max_values`: Some(1), `max_size`: Some(258), added: 753, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::WatchtowerActive` (r:1 w:0)
-	/// Proof: `Oracle::WatchtowerActive` (`max_values`: Some(1), `max_size`: Some(513), added: 1008, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::MoneySettled` (r:1 w:0)
-	/// Proof: `Oracle::MoneySettled` (`max_values`: Some(1), `max_size`: Some(1026), added: 1521, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::RoundActivity` (r:1 w:0)
-	/// Proof: `Oracle::RoundActivity` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
-	/// Storage: `Epoch::OracleDeadlineCursor` (r:1 w:1)
-	/// Proof: `Epoch::OracleDeadlineCursor` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Welfare::XcmTrafficEpochs` (r:1 w:1)
 	/// Proof: `Welfare::XcmTrafficEpochs` (`max_values`: Some(1), `max_size`: Some(85), added: 580, mode: `MaxEncodedLen`)
 	/// Storage: `Welfare::XcmTraffic` (r:512 w:512)
@@ -302,16 +276,16 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// The range of component `n` is `[1, 10]`.
 	fn tick(n: u32, ) -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `77446 + n * (171 ±0)`
+		//  Measured:  `77381 + n * (171 ±0)`
 		//  Estimated: `183055 + n * (2753 ±0)`
-		// Minimum execution time: 2_577_208_000 picoseconds.
-		Weight::from_parts(2_649_855_146, 0)
+		// Minimum execution time: 2_483_539_000 picoseconds.
+		Weight::from_parts(2_529_396_008, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
-			// Standard Error: 236_751
-			.saturating_add(Weight::from_parts(21_032_210, 0).saturating_mul(n.into()))
-			.saturating_add(T::DbWeight::get().reads(770))
+			// Standard Error: 1_221_902
+			.saturating_add(Weight::from_parts(33_102_561, 0).saturating_mul(n.into()))
+			.saturating_add(T::DbWeight::get().reads(757))
 			.saturating_add(T::DbWeight::get().reads((5_u64).saturating_mul(n.into())))
-			.saturating_add(T::DbWeight::get().writes(632))
+			.saturating_add(T::DbWeight::get().writes(630))
 			.saturating_add(T::DbWeight::get().writes((1_u64).saturating_mul(n.into())))
 			.saturating_add(Weight::from_parts(0, 2753).saturating_mul(n.into()))
 			.saturating_add(Self::collator_compensation())
@@ -448,8 +422,8 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `89571`
 		//  Estimated: `183055`
-		// Minimum execution time: 2_262_159_000 picoseconds.
-		Weight::from_parts(2_293_769_000, 0)
+		// Minimum execution time: 2_301_170_000 picoseconds.
+		Weight::from_parts(2_366_100_000, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
 			.saturating_add(T::DbWeight::get().reads(270))
 			.saturating_add(T::DbWeight::get().writes(135))
@@ -489,35 +463,7 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::BaselineCarry` (`max_values`: Some(1), `max_size`: Some(5), added: 500, mode: `MaxEncodedLen`)
 	/// Storage: `Market::BaselineMarketOf` (r:1 w:0)
 	/// Proof: `Market::BaselineMarketOf` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
-	/// Storage: `Epoch::LastWatchtowerSweep` (r:1 w:1)
-	/// Proof: `Epoch::LastWatchtowerSweep` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::Reporters` (r:1 w:0)
-	/// Proof: `Oracle::Reporters` (`max_values`: None, `max_size`: Some(69), added: 2544, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::Watchtowers` (r:1 w:0)
-	/// Proof: `Oracle::Watchtowers` (`max_values`: None, `max_size`: Some(69), added: 2544, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::Rounds` (r:1 w:0)
-	/// Proof: `Oracle::Rounds` (`max_values`: None, `max_size`: Some(281), added: 2756, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::RoundSchedules` (r:1 w:0)
-	/// Proof: `Oracle::RoundSchedules` (`max_values`: None, `max_size`: Some(41), added: 2516, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::ComponentValues` (r:1 w:0)
-	/// Proof: `Oracle::ComponentValues` (`max_values`: None, `max_size`: Some(66), added: 2541, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::ReserveHealth` (r:1 w:0)
-	/// Proof: `Oracle::ReserveHealth` (`max_values`: Some(1), `max_size`: Some(20), added: 515, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::AckRecords` (r:1 w:0)
-	/// Proof: `Oracle::AckRecords` (`max_values`: Some(1), `max_size`: Some(149506), added: 150001, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::Recomputable` (r:1 w:0)
-	/// Proof: `Oracle::Recomputable` (`max_values`: Some(1), `max_size`: Some(258), added: 753, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::WatchtowerActive` (r:1 w:0)
-	/// Proof: `Oracle::WatchtowerActive` (`max_values`: Some(1), `max_size`: Some(513), added: 1008, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::MoneySettled` (r:1 w:0)
-	/// Proof: `Oracle::MoneySettled` (`max_values`: Some(1), `max_size`: Some(1026), added: 1521, mode: `MaxEncodedLen`)
-	/// Storage: `Oracle::RoundActivity` (r:1 w:0)
-	/// Proof: `Oracle::RoundActivity` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
-	/// Storage: `Epoch::OracleDeadlineCursor` (r:1 w:1)
-	/// Proof: `Epoch::OracleDeadlineCursor` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
-	/// Storage: `Epoch::CohortSchedules` (r:5 w:1)
-	/// Proof: `Epoch::CohortSchedules` (`max_values`: None, `max_size`: Some(157), added: 2632, mode: `MaxEncodedLen`)
-	/// Storage: `Welfare::MetricSpecs` (r:2 w:0)
+	/// Storage: `Welfare::MetricSpecs` (r:1 w:0)
 	/// Proof: `Welfare::MetricSpecs` (`max_values`: None, `max_size`: Some(3379), added: 5854, mode: `MaxEncodedLen`)
 	/// Storage: `Welfare::Snapshots` (r:21 w:20)
 	/// Proof: `Welfare::Snapshots` (`max_values`: None, `max_size`: Some(253), added: 2728, mode: `MaxEncodedLen`)
@@ -563,6 +509,8 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::PendingOracleVoids` (`max_values`: None, `max_size`: Some(20), added: 2495, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::ProposalSchedules` (r:33 w:12)
 	/// Proof: `Epoch::ProposalSchedules` (`max_values`: None, `max_size`: Some(42), added: 2517, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::CohortSchedules` (r:5 w:1)
+	/// Proof: `Epoch::CohortSchedules` (`max_values`: None, `max_size`: Some(157), added: 2632, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::ProposalSecurityTermsOf` (r:33 w:12)
 	/// Proof: `Epoch::ProposalSecurityTermsOf` (`max_values`: None, `max_size`: Some(50), added: 2525, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::CounterForProposalSecurityTermsOf` (r:1 w:1)
@@ -590,16 +538,16 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// The range of component `n` is `[1, 12]`.
 	fn settle_cohort(n: u32, ) -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `84309 + n * (1523 ±0)`
-		//  Estimated: `183055 + n * (30754 ±24)`
-		// Minimum execution time: 3_321_458_000 picoseconds.
-		Weight::from_parts(2_851_018_827, 0)
+		//  Measured:  `84136 + n * (1523 ±0)`
+		//  Estimated: `183055 + n * (30754 ±57)`
+		// Minimum execution time: 3_247_810_000 picoseconds.
+		Weight::from_parts(2_802_728_060, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
-			// Standard Error: 256_371
-			.saturating_add(Weight::from_parts(513_148_802, 0).saturating_mul(n.into()))
-			.saturating_add(T::DbWeight::get().reads(829))
+			// Standard Error: 497_115
+			.saturating_add(Weight::from_parts(513_953_680, 0).saturating_mul(n.into()))
+			.saturating_add(T::DbWeight::get().reads(815))
 			.saturating_add(T::DbWeight::get().reads((34_u64).saturating_mul(n.into())))
-			.saturating_add(T::DbWeight::get().writes(702))
+			.saturating_add(T::DbWeight::get().writes(700))
 			.saturating_add(T::DbWeight::get().writes((52_u64).saturating_mul(n.into())))
 			.saturating_add(Weight::from_parts(0, 30754).saturating_mul(n.into()))
 			.saturating_add(Self::collator_compensation())
@@ -658,8 +606,8 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `45042`
 		//  Estimated: `183055`
-		// Minimum execution time: 1_764_569_000 picoseconds.
-		Weight::from_parts(1_784_399_000, 0)
+		// Minimum execution time: 1_805_040_000 picoseconds.
+		Weight::from_parts(1_827_980_000, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
 			.saturating_add(T::DbWeight::get().reads(226))
 			.saturating_add(T::DbWeight::get().writes(113))
@@ -718,8 +666,8 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `45005`
 		//  Estimated: `183055`
-		// Minimum execution time: 1_726_579_000 picoseconds.
-		Weight::from_parts(1_741_449_000, 0)
+		// Minimum execution time: 1_732_070_000 picoseconds.
+		Weight::from_parts(1_746_130_000, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
 			.saturating_add(T::DbWeight::get().reads(226))
 			.saturating_add(T::DbWeight::get().writes(113))
@@ -784,8 +732,8 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `45167`
 		//  Estimated: `183055`
-		// Minimum execution time: 1_789_689_000 picoseconds.
-		Weight::from_parts(1_802_389_000, 0)
+		// Minimum execution time: 1_796_200_000 picoseconds.
+		Weight::from_parts(1_811_000_000, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
 			.saturating_add(T::DbWeight::get().reads(242))
 			.saturating_add(T::DbWeight::get().writes(129))
@@ -844,8 +792,8 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `45005`
 		//  Estimated: `183055`
-		// Minimum execution time: 1_723_219_000 picoseconds.
-		Weight::from_parts(1_744_489_000, 0)
+		// Minimum execution time: 1_719_680_000 picoseconds.
+		Weight::from_parts(1_746_839_000, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
 			.saturating_add(T::DbWeight::get().reads(226))
 			.saturating_add(T::DbWeight::get().writes(113))
@@ -930,8 +878,8 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `45386`
 		//  Estimated: `183055`
-		// Minimum execution time: 1_952_019_000 picoseconds.
-		Weight::from_parts(1_967_019_000, 0)
+		// Minimum execution time: 1_955_690_000 picoseconds.
+		Weight::from_parts(1_975_980_000, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
 			.saturating_add(T::DbWeight::get().reads(251))
 			.saturating_add(T::DbWeight::get().writes(139))
@@ -1014,8 +962,8 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `45350`
 		//  Estimated: `183055`
-		// Minimum execution time: 1_822_779_000 picoseconds.
-		Weight::from_parts(1_840_629_000, 0)
+		// Minimum execution time: 1_832_250_000 picoseconds.
+		Weight::from_parts(1_847_000_000, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
 			.saturating_add(T::DbWeight::get().reads(249))
 			.saturating_add(T::DbWeight::get().writes(137))
@@ -1130,8 +1078,8 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `55946`
 		//  Estimated: `183055`
-		// Minimum execution time: 1_936_479_000 picoseconds.
-		Weight::from_parts(1_952_989_000, 0)
+		// Minimum execution time: 1_937_620_000 picoseconds.
+		Weight::from_parts(1_966_070_000, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
 			.saturating_add(T::DbWeight::get().reads(269))
 			.saturating_add(T::DbWeight::get().writes(159))
@@ -1222,11 +1170,103 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `56961`
 		//  Estimated: `183055`
-		// Minimum execution time: 1_890_788_000 picoseconds.
-		Weight::from_parts(1_907_699_000, 0)
+		// Minimum execution time: 1_905_920_000 picoseconds.
+		Weight::from_parts(1_925_830_000, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
 			.saturating_add(T::DbWeight::get().reads(247))
 			.saturating_add(T::DbWeight::get().writes(129))
+	}
+	/// Storage: `Constitution::Params` (r:41 w:0)
+	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::EpochOf` (r:1 w:1)
+	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::Schedule` (r:1 w:1)
+	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::Proposals` (r:33 w:32)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::Cohorts` (r:5 w:4)
+	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
+	/// Proof: `Epoch::DeadManDetector` (`max_values`: Some(1), `max_size`: Some(2), added: 497, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::IntakeQueue` (r:1 w:1)
+	/// Proof: `Epoch::IntakeQueue` (`max_values`: Some(1), `max_size`: Some(514), added: 1009, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::RecentCohortSummaries` (r:1 w:1)
+	/// Proof: `Epoch::RecentCohortSummaries` (`max_values`: Some(1), `max_size`: Some(5057), added: 5552, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::ResourceLocks` (r:1 w:1)
+	/// Proof: `Epoch::ResourceLocks` (`max_values`: Some(1), `max_size`: Some(4098), added: 4593, mode: `MaxEncodedLen`)
+	/// Storage: `Constitution::PhaseFlags` (r:1 w:0)
+	/// Proof: `Constitution::PhaseFlags` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::NextProposalId` (r:1 w:1)
+	/// Proof: `Epoch::NextProposalId` (`max_values`: Some(1), `max_size`: Some(8), added: 503, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::RolloverCounts` (r:1 w:1)
+	/// Proof: `Epoch::RolloverCounts` (`max_values`: Some(1), `max_size`: Some(578), added: 1073, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::DeadMan` (r:1 w:1)
+	/// Proof: `Epoch::DeadMan` (`max_values`: Some(1), `max_size`: Some(10), added: 505, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::StaleEpochCutoff` (r:1 w:1)
+	/// Proof: `Epoch::StaleEpochCutoff` (`max_values`: Some(1), `max_size`: Some(8), added: 503, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::BaselineCarry` (r:1 w:1)
+	/// Proof: `Epoch::BaselineCarry` (`max_values`: Some(1), `max_size`: Some(5), added: 500, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::LastWatchtowerSweep` (r:1 w:1)
+	/// Proof: `Epoch::LastWatchtowerSweep` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::Reporters` (r:65 w:0)
+	/// Proof: `Oracle::Reporters` (`max_values`: None, `max_size`: Some(69), added: 2544, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::Watchtowers` (r:17 w:0)
+	/// Proof: `Oracle::Watchtowers` (`max_values`: None, `max_size`: Some(69), added: 2544, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::Rounds` (r:129 w:0)
+	/// Proof: `Oracle::Rounds` (`max_values`: None, `max_size`: Some(281), added: 2756, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::RoundSchedules` (r:129 w:0)
+	/// Proof: `Oracle::RoundSchedules` (`max_values`: None, `max_size`: Some(41), added: 2516, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::ComponentValues` (r:1 w:0)
+	/// Proof: `Oracle::ComponentValues` (`max_values`: None, `max_size`: Some(66), added: 2541, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::ReserveHealth` (r:1 w:0)
+	/// Proof: `Oracle::ReserveHealth` (`max_values`: Some(1), `max_size`: Some(20), added: 515, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::AckRecords` (r:1 w:0)
+	/// Proof: `Oracle::AckRecords` (`max_values`: Some(1), `max_size`: Some(149506), added: 150001, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::Recomputable` (r:1 w:0)
+	/// Proof: `Oracle::Recomputable` (`max_values`: Some(1), `max_size`: Some(258), added: 753, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::WatchtowerActive` (r:1 w:0)
+	/// Proof: `Oracle::WatchtowerActive` (`max_values`: Some(1), `max_size`: Some(513), added: 1008, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::MoneySettled` (r:1 w:0)
+	/// Proof: `Oracle::MoneySettled` (`max_values`: Some(1), `max_size`: Some(1026), added: 1521, mode: `MaxEncodedLen`)
+	/// Storage: `Oracle::RoundActivity` (r:1 w:0)
+	/// Proof: `Oracle::RoundActivity` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::OracleDeadlineCursor` (r:1 w:1)
+	/// Proof: `Epoch::OracleDeadlineCursor` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::CohortSchedules` (r:5 w:0)
+	/// Proof: `Epoch::CohortSchedules` (`max_values`: None, `max_size`: Some(157), added: 2632, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::ProposalBonds` (r:1 w:0)
+	/// Proof: `Epoch::ProposalBonds` (`max_values`: None, `max_size`: Some(72), added: 2547, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::CounterForPendingOracleVoids` (r:1 w:0)
+	/// Proof: `Epoch::CounterForPendingOracleVoids` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::PendingOracleVoids` (r:1 w:0)
+	/// Proof: `Epoch::PendingOracleVoids` (`max_values`: None, `max_size`: Some(20), added: 2495, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::ProposalSchedules` (r:33 w:0)
+	/// Proof: `Epoch::ProposalSchedules` (`max_values`: None, `max_size`: Some(42), added: 2517, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::ProposalSecurityTermsOf` (r:33 w:0)
+	/// Proof: `Epoch::ProposalSecurityTermsOf` (`max_values`: None, `max_size`: Some(50), added: 2525, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::CounterForIntakeProposals` (r:1 w:1)
+	/// Proof: `Epoch::CounterForIntakeProposals` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::CounterForProposals` (r:1 w:1)
+	/// Proof: `Epoch::CounterForProposals` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `Epoch::CounterForCohorts` (r:1 w:1)
+	/// Proof: `Epoch::CounterForCohorts` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `FutarchyTreasury::State` (r:1 w:1)
+	/// Proof: `FutarchyTreasury::State` (`max_values`: Some(1), `max_size`: Some(25361), added: 25856, mode: `MaxEncodedLen`)
+	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
+	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
+	/// Storage: `ForeignAssets::Account` (r:2 w:2)
+	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
+	fn drive_oracle_boundaries() -> Weight {
+		// Proof Size summary in bytes:
+		//  Measured:  `99641`
+		//  Estimated: `356514`
+		// Minimum execution time: 5_691_189_000 picoseconds.
+		Weight::from_parts(5_720_100_000, 0)
+			.saturating_add(Weight::from_parts(0, 356514))
+			.saturating_add(T::DbWeight::get().reads(586))
+			.saturating_add(T::DbWeight::get().writes(119))
 	}
 	/// Storage: `Epoch::EpochOf` (r:1 w:1)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
@@ -1292,8 +1332,8 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `44880`
 		//  Estimated: `183055`
-		// Minimum execution time: 1_737_479_000 picoseconds.
-		Weight::from_parts(1_764_399_000, 0)
+		// Minimum execution time: 1_749_530_000 picoseconds.
+		Weight::from_parts(1_765_909_000, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
 			.saturating_add(T::DbWeight::get().reads(228))
 			.saturating_add(T::DbWeight::get().writes(114))
@@ -1411,11 +1451,11 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `55370 + n * (1668 ±0)`
 		//  Estimated: `183055 + n * (35266 ±0)`
-		// Minimum execution time: 2_039_169_000 picoseconds.
-		Weight::from_parts(1_759_322_757, 0)
+		// Minimum execution time: 2_058_820_000 picoseconds.
+		Weight::from_parts(1_809_704_256, 0)
 			.saturating_add(Weight::from_parts(0, 183055))
-			// Standard Error: 824_352
-			.saturating_add(Weight::from_parts(284_397_393, 0).saturating_mul(n.into()))
+			// Standard Error: 205_293
+			.saturating_add(Weight::from_parts(275_096_245, 0).saturating_mul(n.into()))
 			.saturating_add(T::DbWeight::get().reads(238))
 			.saturating_add(T::DbWeight::get().reads((45_u64).saturating_mul(n.into())))
 			.saturating_add(T::DbWeight::get().writes(120))
@@ -1428,8 +1468,8 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `0`
 		//  Estimated: `0`
-		// Minimum execution time: 8_410_000 picoseconds.
-		Weight::from_parts(10_390_000, 0)
+		// Minimum execution time: 4_400_000 picoseconds.
+		Weight::from_parts(4_610_000, 0)
 			.saturating_add(Weight::from_parts(0, 0))
 			.saturating_add(T::DbWeight::get().writes(1))
 	}

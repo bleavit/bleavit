@@ -1143,8 +1143,13 @@ pub mod pallet {
         /// live round set). Charges inactivity, slashes/ejects on the second
         /// consecutive miss, and clears the activity set. An epoch that carried no
         /// round charges nobody and breaks the consecutive-miss streak.
-        pub fn note_epoch_boundary(ended_epoch: EpochId) -> DispatchResult {
-            Self::mutate_core(|o| o.sweep_watchtower_liveness(ended_epoch))
+        ///
+        /// `attributable` is the caller's complementary fact: `false` when the
+        /// clock advanced over intervening epochs, so the latch and activity set
+        /// describe an interval rather than `ended_epoch` and MUST be consumed
+        /// without charging (07 §4).
+        pub fn note_epoch_boundary(ended_epoch: EpochId, attributable: bool) -> DispatchResult {
+            Self::mutate_core(|o| o.sweep_watchtower_liveness(ended_epoch, attributable))
         }
 
         /// Force-neutralize `measurement_epoch` at its 07 §11 `OracleSettleDeadline`

@@ -3782,14 +3782,17 @@ impl pallet_epoch::OracleAccess for RuntimeEpochOracle {
         })
     }
 
-    fn note_epoch_boundary(ended_epoch: futarchy_primitives::EpochId) -> DispatchResult {
+    fn note_epoch_boundary(
+        ended_epoch: futarchy_primitives::EpochId,
+        attributable: bool,
+    ) -> DispatchResult {
         // 07 §4's "≥ 1 open round" predicate is derived inside the oracle, from
         // its own `RoundActivity` latch: the epoch clock owns *when* the sweep
         // happens and nothing more. Passing the predicate in from here would make
         // a slash depend on a caller-supplied fact, and every derivation available
         // to a caller is wrong in one direction or the other, because a cleanly
         // closed game leaves no trace in `Rounds` to observe.
-        pallet_oracle::Pallet::<Runtime>::note_epoch_boundary(ended_epoch)
+        pallet_oracle::Pallet::<Runtime>::note_epoch_boundary(ended_epoch, attributable)
     }
 
     fn note_settle_deadline(measurement_epoch: futarchy_primitives::EpochId) -> DispatchResult {
@@ -8856,6 +8859,72 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
     }
 
     fn prime_guard_enqueue(_: futarchy_primitives::ProposalId) {}
+
+    fn prime_oracle_state(measurement_epoch: EpochId) {
+        // Saturate every collection `Oracle::load` hydrates, so the boundary
+        // crank's weight reflects the real bounded aggregate. Without this the
+        // benchmark measures one `Oracle::Rounds` read against a 128-entry bound
+        // and understates a permissionless call (R-7; Codex P1 on #172).
+        for seed in 0..pallet_oracle::MAX_REPORTERS {
+            pallet_oracle::Reporters::<Runtime>::insert(
+                <RuntimeBenchmarkHelper as pallet_epoch::BenchmarkHelper<
+                    RuntimeOrigin,
+                    AccountId,
+                >>::account(seed as u8),
+                pallet_oracle::ReporterInfo {
+                    stake: 1,
+                    registered_at: 1,
+                    offenses: 0,
+                },
+            );
+        }
+        for seed in 0..pallet_oracle::MAX_WATCHTOWERS {
+            pallet_oracle::Watchtowers::<Runtime>::insert(
+                <RuntimeBenchmarkHelper as pallet_epoch::BenchmarkHelper<
+                    RuntimeOrigin,
+                    AccountId,
+                >>::account((128 + seed) as u8),
+                pallet_oracle::WatchtowerInfo {
+                    stake: 1,
+                    registered_at: 1,
+                    inactive_epochs: 0,
+                },
+            );
+        }
+        // Spread the rounds across the measurement epochs the crank drives, so the
+        // per-epoch filter in `force_neutralize_expired` walks a full map.
+        for index in 0..pallet_oracle::MAX_ROUNDS {
+            let component = (index % 64) as u16;
+            let epoch = measurement_epoch.saturating_sub((index / 64) as u32);
+            let round = pallet_oracle::RoundState {
+                component,
+                epoch,
+                round: 1,
+                spec_version: 1,
+                reporter: [1u8; 32],
+                value: FixedU64(pallet_welfare::ONE / 2),
+                evidence_hash: [2u8; 32],
+                bond: 1,
+                challenge_deadline: u32::MAX,
+                extended: false,
+                challenger: None,
+                counter_value: None,
+                acks: 0,
+                report_hash: [3u8; 32],
+                stake_at_risk: 1,
+                cumulative_reporter_bond: 1,
+                cumulative_challenger_bond: 0,
+            };
+            pallet_oracle::Rounds::<Runtime>::insert((component, epoch, 1u16), round);
+            pallet_oracle::RoundSchedules::<Runtime>::insert(
+                (component, epoch, 1u16),
+                pallet_oracle::StoredRoundSchedule {
+                    round_one_bond: 1,
+                    round_cap: 3,
+                },
+            );
+        }
+    }
 
     fn prime_settlement(epoch: EpochId) {
         for (pid, proposal) in pallet_epoch::Proposals::<Runtime>::iter() {

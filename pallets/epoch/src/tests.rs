@@ -37,7 +37,7 @@ fn core_seam_calls() -> Vec<SeamCall> {
         .filter(|call| {
             !matches!(
                 call,
-                SeamCall::OracleEpochBoundary(_) | SeamCall::OracleSettleDeadline(_)
+                SeamCall::OracleEpochBoundary(..) | SeamCall::OracleSettleDeadline(_)
             )
         })
         .collect()
@@ -85,6 +85,12 @@ fn narrow_status_reader_matches_full_projection_for_all_phases() {
             assert_eq!(Epoch::status_view(), Epoch::epoch_state().status_view());
         }
     });
+}
+
+fn drive_boundaries() {
+    assert_ok!(Epoch::drive_oracle_boundaries(RuntimeOrigin::signed(
+        keeper()
+    )));
 }
 
 fn sync_at(block: BlockNumber) {
@@ -3610,28 +3616,18 @@ fn settlement_is_cursor_resumable_and_welfare_is_the_only_settlement_seam() {
             Cohorts::<Test>::get(0).map(|c| c.status),
             Some(CohortStatus::Settling { cursor: 1 })
         );
-        // SQ-182/SQ-491 ordering, in the exact log: this crank is the first to
-        // cross into Housekeeping of epoch 3, so it sweeps the ended epoch 2
-        // (07 §4) and drives every due `OracleSettleDeadline` — including m = 2,
-        // this cohort's last measurement epoch, whose deadline *is* this
-        // Housekeeping — strictly before welfare reads a component value
-        // (07 §11(1); 05 §7(1)).
+        // Settlement carries no oracle-boundary work: those callbacks hydrate the
+        // whole bounded oracle aggregate and live on their own crank (07 §11(1)).
         assert_eq!(
             SeamCalls::get(),
-            vec![
-                SeamCall::OracleEpochBoundary(2),
-                SeamCall::OracleSettleDeadline(0),
-                SeamCall::OracleSettleDeadline(1),
-                SeamCall::OracleSettleDeadline(2),
-                SeamCall::Welfare(
-                    0,
-                    1,
-                    SettlementTarget::Proposal {
-                        pid: 1,
-                        has_gate_books: false,
-                    },
-                ),
-            ]
+            vec![SeamCall::Welfare(
+                0,
+                1,
+                SettlementTarget::Proposal {
+                    pid: 1,
+                    has_gate_books: false,
+                },
+            )]
         );
         assert_eq!(
             KeeperRebates::get(),
@@ -3699,11 +3695,16 @@ fn sq182_money_deadline_falls_due_at_housekeeping_and_catches_up_bounded() {
 
         // Intake of epoch 5: due through 3, and a fresh cursor at 0 has four
         // epochs to cover — exactly the catch-up bound, so it stops at 3.
-        sync_at(phase_block(5, phase_offsets::INTAKE_NUM));
+        set_block(phase_block(5, phase_offsets::INTAKE_NUM));
+        drive_boundaries();
         assert_eq!(
             SeamCalls::get(),
             vec![
-                SeamCall::OracleEpochBoundary(4),
+                // Unattributable: this chain has never swept, so the latch and
+                // activity set describe an unknown interval, not epoch 4. At
+                // genesis the same expression reads `true`, because `ended = 0`
+                // has no predecessor to have missed.
+                SeamCall::OracleEpochBoundary(4, false),
                 SeamCall::OracleSettleDeadline(0),
                 SeamCall::OracleSettleDeadline(1),
                 SeamCall::OracleSettleDeadline(2),
@@ -3718,16 +3719,13 @@ fn sq182_money_deadline_falls_due_at_housekeeping_and_catches_up_bounded() {
         // A second crank in the same phase has nothing left to drive: epoch 4's
         // deadline is the *next* epoch's Housekeeping, not this one.
         SeamCalls::set(Vec::new());
-        sync_at(phase_block(5, phase_offsets::INTAKE_NUM));
+        drive_boundaries();
         assert!(SeamCalls::get().is_empty());
         assert_eq!(OracleDeadlineCursor::<Test>::get(), 4);
 
         // Crossing into Housekeeping of 5 makes m = 4 due — and only m = 4.
         set_block(phase_block(5, phase_offsets::HOUSEKEEPING_NUM));
-        assert_ok!(Epoch::tick(
-            RuntimeOrigin::signed(keeper()),
-            tick_batch(Vec::new()),
-        ));
+        drive_boundaries();
         assert_eq!(
             SeamCalls::get(),
             vec![SeamCall::OracleSettleDeadline(4)],
@@ -3745,123 +3743,104 @@ fn sq182_money_deadline_falls_due_at_housekeeping_and_catches_up_bounded() {
 fn sq491_watchtower_sweep_runs_once_per_crossing_and_skips_stalled_epochs() {
     new_test_ext().execute_with(|| {
         seed_idle_clock(5);
-        sync_at(phase_block(5, phase_offsets::INTAKE_NUM));
+        set_block(phase_block(5, phase_offsets::INTAKE_NUM));
+        drive_boundaries();
         assert_eq!(LastWatchtowerSweep::<Test>::get(), Some(4));
 
         // Same epoch, later phase: no second sweep for an epoch already swept.
         SeamCalls::set(Vec::new());
-        sync_at(phase_block(5, phase_offsets::DECIDE_NUM));
+        set_block(phase_block(5, phase_offsets::DECIDE_NUM));
+        drive_boundaries();
         assert!(!SeamCalls::get()
             .iter()
-            .any(|call| matches!(call, SeamCall::OracleEpochBoundary(_))));
+            .any(|call| matches!(call, SeamCall::OracleEpochBoundary(..))));
 
         // A four-epoch stall: only the epoch that just ended is charged. Epochs
         // 5..7 carried no blocks, so charging their watchtowers would slash
         // operators for the chain's idleness.
         SeamCalls::set(Vec::new());
-        sync_at(phase_block(9, phase_offsets::INTAKE_NUM));
+        set_block(phase_block(9, phase_offsets::INTAKE_NUM));
+        drive_boundaries();
         assert_eq!(EpochOf::<Test>::get().index, 9);
         assert_eq!(
             SeamCalls::get()
                 .into_iter()
-                .filter(|call| matches!(call, SeamCall::OracleEpochBoundary(_)))
+                .filter(|call| matches!(call, SeamCall::OracleEpochBoundary(..)))
                 .collect::<Vec<_>>(),
-            vec![SeamCall::OracleEpochBoundary(8)]
+            vec![SeamCall::OracleEpochBoundary(8, false)],
+            "epochs 5..7 were passed over, so the sweep of 8 is unattributable"
         );
         assert_eq!(LastWatchtowerSweep::<Test>::get(), Some(8));
     });
 }
 
-/// A cohort whose measurement epochs the bounded catch-up has not reached still
-/// gets them driven, because `settle_cohort` drives its own consumed epochs too.
-/// This is the case the cursor alone cannot cover: settling while a component of a
-/// consumed epoch is still money-bearing would leave a round alive past the
-/// deadline that settlement depends on (07 §11(1); §13; I-18).
+/// **The cursor is not evidence for a cohort.** A cohort that forms after one of
+/// its measurement deadlines was already driven — a proposal reaching `Measuring`
+/// late in its grace window — had no `CohortSchedule` when `expected_components`
+/// was queried, so that drive covered none of its components and left them with no
+/// neutral no-report row. `record_snapshot` then fails `MissingComponent` forever.
+/// The crank therefore re-drives every live cohort's due epochs unconditionally
+/// (07 §11(1); Codex P1 on #172).
 #[test]
-fn sq182_settlement_drives_its_own_measurement_epochs_past_the_catchup_bound() {
+fn sq182_cohort_epochs_are_driven_even_when_the_cursor_already_passed_them() {
     new_test_ext().execute_with(|| {
         let mut state = cohort_state(1, 2, CohortStatus::Measuring { until_epoch: 4 });
-        // Start the clock at the cohort's own epoch, so the advance to its
-        // settlement Housekeeping is the ordinary three epochs; the subject here is
-        // the cursor lag, not a stalled-clock T20.
         let start = phase_block(2, phase_offsets::INTAKE_NUM);
         state.epoch.index = 2;
         state.epoch.epoch_start_block = start;
         state.epoch.phase_start_block = start;
-        // `seed` freezes the cohort's I-16 schedule from core state, so the
-        // `CohortSchedules` row the cohort leg reads is the real one.
         assert_ok!(Epoch::seed(state));
         assert_eq!(
             CohortSchedules::<Test>::get(2).map(|s| s.measurement_until),
             Some(4)
         );
+
+        // The cursor has already walked past this cohort's measurement epochs —
+        // exactly the state a drive that ran before the cohort existed leaves.
         set_block(phase_block(5, phase_offsets::HOUSEKEEPING_NUM));
-        assert_ok!(Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 2, 1));
+        OracleDeadlineCursor::<Test>::put(5);
+        LastWatchtowerSweep::<Test>::put(4);
+        SeamCalls::set(Vec::new());
 
-        let log = SeamCalls::get();
-        let driven = log
-            .iter()
-            .filter_map(|call| match call {
-                SeamCall::OracleSettleDeadline(m) => Some(*m),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        // The cursor exhausts its budget at m = 3, so m = 4 — this cohort's last
-        // measurement epoch, and the one whose deadline is this very Housekeeping —
-        // is reached only by the cohort leg.
-        assert_eq!(driven, vec![0, 1, 2, 3, 4]);
-        assert_eq!(OracleDeadlineCursor::<Test>::get(), 4);
+        drive_boundaries();
 
-        // And it lands before the settlement it protects.
-        let deadline = log
-            .iter()
-            .position(|call| call == &SeamCall::OracleSettleDeadline(4))
-            .expect("m = 4 was driven");
-        let welfare = log
-            .iter()
-            .position(|call| matches!(call, SeamCall::Welfare(..)))
-            .expect("the cohort settled");
-        assert!(deadline < welfare);
+        assert_eq!(
+            SeamCalls::get(),
+            vec![
+                SeamCall::OracleSettleDeadline(3),
+                SeamCall::OracleSettleDeadline(4),
+            ],
+            "the cohort leg must not trust the cursor"
+        );
+        // And it does not advance the cursor: the epochs below it are not
+        // necessarily done, and marking them so would skip them permanently.
+        assert_eq!(OracleDeadlineCursor::<Test>::get(), 5);
     });
 }
 
-/// G-1/R-7: a refused money deadline takes the whole crank with it. Settling after
-/// a failed force-neutralization would read a component the oracle never made
-/// neutral, which is exactly the I-18 breach the deadline exists to prevent.
+/// G-1/R-7: a refused money deadline takes the whole crank with it, rather than
+/// silently skipping the deadline — SQ-491's failure mode was exactly a silent skip.
 #[test]
-fn sq182_a_refused_money_deadline_rolls_the_settlement_back() {
+fn sq182_a_refused_money_deadline_rolls_the_crank_back() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Epoch::seed(cohort_state(
-            1,
-            0,
-            CohortStatus::Measuring { until_epoch: 2 },
-        )));
-        set_block(phase_block(3, phase_offsets::HOUSEKEEPING_NUM));
+        seed_idle_clock(5);
+        set_block(phase_block(5, phase_offsets::HOUSEKEEPING_NUM));
         SeamFailure::set(Some(SeamCall::OracleSettleDeadline(2)));
         assert_noop!(
-            Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1),
+            Epoch::drive_oracle_boundaries(RuntimeOrigin::signed(keeper())),
             DispatchError::Other("injected epoch seam failure")
         );
         assert_eq!(
-            Cohorts::<Test>::get(0).map(|c| c.status),
-            Some(CohortStatus::Measuring { until_epoch: 2 }),
-            "no settlement survives a refused deadline"
+            OracleDeadlineCursor::<Test>::get(),
+            0,
+            "no partial cursor advance survives a refused deadline"
         );
+        assert_eq!(LastWatchtowerSweep::<Test>::get(), None);
 
-        // The same refusal blocks the clock crank rather than silently skipping
-        // the deadline (SQ-491's failure mode was exactly a silent skip).
-        assert_noop!(
-            Epoch::tick(RuntimeOrigin::signed(keeper()), tick_batch(Vec::new())),
-            DispatchError::Other("injected epoch seam failure")
-        );
-
-        // Cleared, the same crank now settles.
         SeamFailure::set(None);
-        assert_ok!(Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1));
-        assert_eq!(
-            Cohorts::<Test>::get(0).map(|c| c.status),
-            Some(CohortStatus::Settling { cursor: 1 })
-        );
+        drive_boundaries();
+        assert_eq!(OracleDeadlineCursor::<Test>::get(), 4);
+        assert_eq!(LastWatchtowerSweep::<Test>::get(), Some(4));
     });
 }
 

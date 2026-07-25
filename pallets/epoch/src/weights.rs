@@ -31,6 +31,7 @@ pub trait WeightInfo {
     fn set_intake_paused() -> Weight;
     fn finalize_epoch_baseline() -> Weight;
     fn bind_ratification() -> Weight;
+    fn drive_oracle_boundaries() -> Weight;
 }
 
 const STATE_POV: u64 = 48_000;
@@ -102,6 +103,12 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
         // runtime benchmark refresh.
         base::<T>(2_100_000_000, 240, 140)
     }
+    /// Worst case: the full bounded oracle aggregate hydrated and
+    /// persisted once per callback — the sweep, `ORACLE_DEADLINE_CATCHUP`
+    /// cursor drives, and one drive per non-terminal cohort's horizon.
+    fn drive_oracle_boundaries() -> Weight {
+        base::<T>(2_400_000_000, 620, 90)
+    }
 }
 
 fn base<T: frame_system::Config>(time: u64, reads: u64, writes: u64) -> Weight {
@@ -166,6 +173,12 @@ impl WeightInfo for () {
     }
     fn bind_ratification() -> Weight {
         rocks(2_100_000_000, 240, 140)
+    }
+    /// Worst case: the full bounded oracle aggregate hydrated and
+    /// persisted once per callback — the sweep, `ORACLE_DEADLINE_CATCHUP`
+    /// cursor drives, and one drive per non-terminal cohort's horizon.
+    fn drive_oracle_boundaries() -> Weight {
+        rocks(2_400_000_000, 620, 90)
     }
 }
 

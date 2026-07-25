@@ -36,13 +36,3 @@
 runtime/bleavit-runtime/src/weights/pallet_oracle.rs counter_report: SQ-182/SQ-491 — +1 read (489 -> 490) from the new RoundActivity hydrate in Oracle::load; ref_time 1,678M -> 1,873M (+11.62%). Identical-code rerun measured 1,831M, i.e. 2.2% below the adopted value, so up to ~5% of this is run-to-run variance on this machine; the baseline is same-day and same-machine, so none of it is drift. Adopted the higher run.
 runtime/bleavit-runtime/src/weights/pallet_oracle.rs deregister_reporter: SQ-182/SQ-491 — +1 read (479 -> 480) from the same hydrate; ref_time 1,593M -> 1,807M (+13.47%). Identical-code rerun measured 1,794M (-0.8%). This call does not touch the latch at all, so its movement is the hydrate plus variance, not new work on its own path. Adopted the higher run.
 runtime/bleavit-runtime/src/weights/pallet_oracle.rs register_reporter: SQ-182/SQ-491 — +1 read (491 -> 492) from the same hydrate; ref_time 1,707M -> 1,888M (+10.61%). Identical-code rerun measured 1,850M (-2.0%). Same reasoning as deregister_reporter. Adopted the higher run.
-
-# SQ-182 — `pallet_epoch::set_intake_paused` is measurement noise, demonstrated, not
-# argued. Reads and writes are unchanged (0 r / 1 w) and this PR adds nothing to that
-# call's path: `set_intake_paused` does not sync the clock, so it never reaches the
-# 07 §4/§11(1) boundary driver. A rerun of the *identical* code measured 4,700,000 —
-# within 3% of the 4,580,000 baseline the gate is comparing against, and 55% below the
-# 10,390,000 this file adopts. On a ~5 microsecond call, absolute jitter dominates the
-# percentage completely. The higher sample is kept because overstating the smallest
-# call in the pallet costs nothing and understating it is the direction R-7 cares about.
-runtime/bleavit-runtime/src/weights/pallet_epoch.rs set_intake_paused: SQ-182 — measurement noise on a ~5 microsecond call, not a cost change. reads/writes unchanged (0 r / 1 w) and the call never reaches the new boundary driver. Identical-code rerun measured 4,700,000 against a 4,580,000 baseline (+2.6%), versus the 10,390,000 adopted here; the same experiment moved `withdraw` +65.5% with no code change at all. Adopted the higher sample deliberately.

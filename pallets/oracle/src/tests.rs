@@ -3073,7 +3073,7 @@ fn watchtower_liveness_registration_grace_charges_nothing() {
         register_reporter(1);
         register_watchtower(3);
         open_and_close_game(1, 1);
-        assert_ok!(Oracle::note_epoch_boundary(1)); // consumes seat 3's grace
+        assert_ok!(Oracle::note_epoch_boundary(1, true)); // consumes seat 3's grace
 
         register_watchtower(2);
         // Registration marked the seat active for the current epoch.
@@ -3081,7 +3081,7 @@ fn watchtower_liveness_registration_grace_charges_nothing() {
         open_and_close_game(1, 2);
 
         System::reset_events();
-        assert_ok!(Oracle::note_epoch_boundary(2));
+        assert_ok!(Oracle::note_epoch_boundary(2, true));
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 0);
         assert!(!oracle_events().iter().any(|e| matches!(
             e,
@@ -3103,11 +3103,11 @@ fn watchtower_liveness_inactive_epoch_accrues_and_emits() {
         register_reporter(1);
         register_watchtower(2);
         open_and_close_game(1, 1);
-        assert_ok!(Oracle::note_epoch_boundary(1)); // grace consumed
+        assert_ok!(Oracle::note_epoch_boundary(1, true)); // grace consumed
 
         open_and_close_game(1, 2);
         System::reset_events();
-        assert_ok!(Oracle::note_epoch_boundary(2));
+        assert_ok!(Oracle::note_epoch_boundary(2, true));
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 1);
         assert_eq!(
             oracle_events(),
@@ -3127,9 +3127,9 @@ fn watchtower_liveness_second_consecutive_miss_slashes_and_ejects() {
         register_reporter(1);
         register_watchtower(2);
         open_and_close_game(1, 1);
-        assert_ok!(Oracle::note_epoch_boundary(1)); // grace
+        assert_ok!(Oracle::note_epoch_boundary(1, true)); // grace
         open_and_close_game(1, 2);
-        assert_ok!(Oracle::note_epoch_boundary(2)); // inactive #1
+        assert_ok!(Oracle::note_epoch_boundary(2, true)); // inactive #1
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 1);
 
         let mut amended = ParamsValue::get();
@@ -3140,7 +3140,7 @@ fn watchtower_liveness_second_consecutive_miss_slashes_and_ejects() {
         System::reset_events();
         let released_before = CustodyReleased::get();
         let slashed_before = CustodySlashed::get();
-        assert_ok!(Oracle::note_epoch_boundary(3)); // inactive #2 ⇒ slash + eject
+        assert_ok!(Oracle::note_epoch_boundary(3, true)); // inactive #2 ⇒ slash + eject
         assert!(oracle_events().iter().any(|e| matches!(
             e,
             Event::WatchtowerSlashed { who, amount }
@@ -3156,9 +3156,9 @@ fn watchtower_liveness_second_consecutive_miss_slashes_and_ejects() {
 
         open_and_close_game(1, 4);
         System::reset_events();
-        assert_ok!(Oracle::note_epoch_boundary(4)); // amended seat inactive #1
+        assert_ok!(Oracle::note_epoch_boundary(4, true)); // amended seat inactive #1
         open_and_close_game(1, 5);
-        assert_ok!(Oracle::note_epoch_boundary(5)); // amended seat slash + eject
+        assert_ok!(Oracle::note_epoch_boundary(5, true)); // amended seat slash + eject
         assert!(oracle_events().iter().any(|e| matches!(
             e,
             Event::WatchtowerSlashed { who, amount }
@@ -3179,9 +3179,9 @@ fn watchtower_liveness_acknowledgment_resets_the_counter() {
         register_reporter(1);
         register_watchtower(2);
         open_and_close_game(1, 1);
-        assert_ok!(Oracle::note_epoch_boundary(1)); // grace
+        assert_ok!(Oracle::note_epoch_boundary(1, true)); // grace
         open_and_close_game(1, 2);
-        assert_ok!(Oracle::note_epoch_boundary(2)); // inactive #1
+        assert_ok!(Oracle::note_epoch_boundary(2, true)); // inactive #1
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 1);
 
         // The watchtower does its job next epoch: acknowledge a live round.
@@ -3196,7 +3196,7 @@ fn watchtower_liveness_acknowledgment_resets_the_counter() {
         ));
 
         System::reset_events();
-        assert_ok!(Oracle::note_epoch_boundary(3));
+        assert_ok!(Oracle::note_epoch_boundary(3, true));
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 0); // reset
         assert_eq!(Watchtowers::<Test>::count(), 1); // not ejected
         assert!(!oracle_events().iter().any(|e| matches!(
@@ -3217,13 +3217,13 @@ fn watchtower_liveness_no_open_round_epoch_charges_nobody() {
         register_reporter(1);
         register_watchtower(2);
         open_and_close_game(1, 1);
-        assert_ok!(Oracle::note_epoch_boundary(1)); // grace clears the active set
+        assert_ok!(Oracle::note_epoch_boundary(1, true)); // grace clears the active set
 
         // No game opened in epoch 2 (no `report` since the boundary) and none is
         // open.
         assert_eq!(Rounds::<Test>::iter().count(), 0);
         System::reset_events();
-        assert_ok!(Oracle::note_epoch_boundary(2)); // idle, but no open round
+        assert_ok!(Oracle::note_epoch_boundary(2, true)); // idle, but no open round
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 0);
         assert_eq!(Watchtowers::<Test>::count(), 1);
         assert!(!oracle_events()
@@ -3242,19 +3242,19 @@ fn watchtower_liveness_no_open_round_breaks_the_inactivity_streak() {
         register_reporter(1);
         register_watchtower(2);
         open_and_close_game(1, 1);
-        assert_ok!(Oracle::note_epoch_boundary(1)); // grace
+        assert_ok!(Oracle::note_epoch_boundary(1, true)); // grace
         open_and_close_game(1, 2);
-        assert_ok!(Oracle::note_epoch_boundary(2)); // miss #1 ⇒ inactive 1
+        assert_ok!(Oracle::note_epoch_boundary(2, true)); // miss #1 ⇒ inactive 1
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 1);
 
         // Epoch 3 carries no round at all ⇒ exempt.
         assert_eq!(Rounds::<Test>::iter().count(), 0);
-        assert_ok!(Oracle::note_epoch_boundary(3)); // exempt ⇒ streak resets
+        assert_ok!(Oracle::note_epoch_boundary(3, true)); // exempt ⇒ streak resets
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 0);
 
         open_and_close_game(1, 4);
         System::reset_events();
-        assert_ok!(Oracle::note_epoch_boundary(4)); // a fresh miss #1, not #2
+        assert_ok!(Oracle::note_epoch_boundary(4, true)); // a fresh miss #1, not #2
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 1);
         assert_eq!(Watchtowers::<Test>::count(), 1); // not ejected
         assert!(!oracle_events()
@@ -3274,7 +3274,7 @@ fn watchtower_liveness_charges_a_game_still_open_across_the_whole_epoch() {
         register_reporter(1);
         register_watchtower(2);
         open_live_game(1, 1);
-        assert_ok!(Oracle::note_epoch_boundary(1)); // registration grace
+        assert_ok!(Oracle::note_epoch_boundary(1, true)); // registration grace
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 0);
 
         // Epoch 2 opened no game of its own — its liveness rests entirely on the
@@ -3282,7 +3282,7 @@ fn watchtower_liveness_charges_a_game_still_open_across_the_whole_epoch() {
         assert!(!RoundActivity::<Test>::get());
         assert_eq!(Rounds::<Test>::iter().count(), 1);
         System::reset_events();
-        assert_ok!(Oracle::note_epoch_boundary(2));
+        assert_ok!(Oracle::note_epoch_boundary(2, true));
         assert_eq!(Watchtowers::<Test>::get(acc(2)).unwrap().inactive_epochs, 1);
         assert_eq!(
             oracle_events(),
@@ -3311,7 +3311,7 @@ fn watchtower_liveness_charges_idle_seat_after_a_cleanly_closed_game() {
         register_watchtower(3); // acknowledges
         register_watchtower(4); // free rider
         open_and_close_game(1, 1);
-        assert_ok!(Oracle::note_epoch_boundary(1)); // consumes all three graces
+        assert_ok!(Oracle::note_epoch_boundary(1, true)); // consumes all three graces
         assert!(WatchtowerActive::<Test>::get().is_empty());
 
         // Epoch 2 runs the healthy path: reported, acknowledged to `wt.quorum`,
@@ -3347,7 +3347,7 @@ fn watchtower_liveness_charges_idle_seat_after_a_cleanly_closed_game() {
         );
 
         System::reset_events();
-        assert_ok!(Oracle::note_epoch_boundary(2));
+        assert_ok!(Oracle::note_epoch_boundary(2, true));
         assert_eq!(Watchtowers::<Test>::get(acc(4)).unwrap().inactive_epochs, 1);
         assert_eq!(
             oracle_events(),
