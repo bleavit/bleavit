@@ -8,3 +8,4 @@
 # runtime/bleavit-runtime/src/weights/pallet_constitution.rs set_param: storage proof grew after adding validation
 # runtime/bleavit-runtime/src/weights/pallet_retired.rs *: pallet retired by approved migration
 #
+runtime/bleavit-runtime/src/weights/pallet_constitution.rs set_param: SQ-495: set_param's worst case is now an amendment to one of 07 §6.3's two coverage inputs, which walks the live MetricSpec set to find the strictest admitted Delta-s-max. The 3 -> 21 reads is that walk being measured for the first time - the previous number came from a synthetic bench.param key that short-circuits the screen entirely, so it measured a call that never does the work (the SQ-489 fixture-instead-of-work shape). Every other key still short-circuits before touching welfare storage, so only the two coverage keys pay it in practice; the benchmark charges all set_param calls the worst case, which is the conservative direction.

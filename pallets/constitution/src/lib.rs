@@ -48,9 +48,9 @@ mod tests;
 // The functional core is the semantic source of truth; re-export its surface
 // (named, not glob — the pallet defines its own `Error`/storage aliases).
 pub use constitution_core::{
-    empty_release_channel, genesis_capabilities, genesis_meters, genesis_params, key16,
-    rederive_budgets_required, Capability, CapabilityRecord, ConstitutionOrigin, ConstitutionState,
-    Error as CoreError, MaxDelta, Meter, ParamClass, ParamRecord, ParamValue,
+    empty_release_channel, genesis_capabilities, genesis_meters, genesis_params, is_coverage_input,
+    key16, rederive_budgets_required, Capability, CapabilityRecord, ConstitutionOrigin,
+    ConstitutionState, Error as CoreError, MaxDelta, Meter, ParamClass, ParamRecord, ParamValue,
     PhaseFlags as PhaseFlagsValue, ReleaseChannel as ReleaseChannelValue, CONTRACT_VERSION,
     MAX_CAPABILITIES, MAX_METERS, MAX_PARAMS, META_MAX_COOLDOWN_EPOCHS,
     POL_BUDGET_EPOCH_DEFAULT_PPB, POL_B_DEFAULTS, POL_GATE_B_DEFAULT, RELEASE_CHANNEL_FLAGS,
@@ -99,6 +99,34 @@ impl BudgetDerivationGuard for () {
     }
 }
 
+/// 07 §6.3's coverage rule, re-checked at the amendment boundary (SQ-495).
+///
+/// The rule is evaluated once, at `register_spec`, against the coverage rate
+/// `(2^orc.rounds − 1) · orc.bond_bps`. Nothing re-checked it when either input
+/// was later lowered inside its own 13 §1 bounds, so a component admitted at
+/// `(3, 250)` — 1,750 bps of coverage — could keep settling money at `(2, 150)`,
+/// which is 450. The coverage rule is what makes attested settlement bonded at
+/// all: below it, a lie moves more value than the whole ladder can forfeit.
+///
+/// Screening at the governance boundary rather than at snapshot time is the
+/// fail-closed half of the choice 07 §6.3 offers. It refuses the amendment
+/// while every admitted component is still fully collateralized, instead of
+/// admitting the amendment and then needing a defined disposition for a
+/// component that has become under-covered mid-life.
+///
+/// Like [`BudgetDerivationGuard`] this is a `Config` seam: the evaluation needs
+/// the live MetricSpec set, which this pallet does not own.
+pub trait CoverageGuard {
+    /// `true` permits the change after ordinary bounds/Δ/cooldown checks.
+    fn permits(key: futarchy_primitives::ParamKey, next: ParamValue) -> bool;
+}
+
+impl CoverageGuard for () {
+    fn permits(_: futarchy_primitives::ParamKey, _: ParamValue) -> bool {
+        true
+    }
+}
+
 /// Permissive default for mocks and for runtimes that have not bound the
 /// treasury yet. Production binds the real gate.
 impl PhaseArmingGate for () {
@@ -122,6 +150,19 @@ pub trait BenchmarkHelper<RuntimeOrigin> {
     /// during setup. Pallet-only mocks need no extra state.
     fn prime_phase_arming() -> DispatchResult {
         Ok(())
+    }
+
+    /// Saturate the state the SQ-495 coverage screen scans, and return the key
+    /// plus a value that passes it.
+    ///
+    /// `set_param`'s worst case is an amendment to one of §6.3's two coverage
+    /// inputs, because only those walk the live MetricSpec set. A synthetic key
+    /// short-circuits the screen and measures a call that never does the work —
+    /// the fixture-instead-of-work shape SQ-489 was raised for. Returning
+    /// `None` keeps pallet-only mocks (which bind `CoverageGuard = ()`) on the
+    /// synthetic key, where the screen genuinely is a no-op.
+    fn prime_coverage_screen() -> Option<(futarchy_primitives::ParamKey, ParamValue)> {
+        None
     }
 }
 
@@ -172,6 +213,8 @@ pub mod pallet {
 
         /// Temporary fail-closed guard for 13 §5 coupling changes (SQ-303).
         type BudgetDerivationGuard: BudgetDerivationGuard;
+        /// 07 §6.3 coverage re-check on `orc.bond_bps` / `orc.rounds` (SQ-495).
+        type CoverageGuard: CoverageGuard;
 
         /// Origin construction for benchmarking (see [`BenchmarkHelper`]).
         #[cfg(feature = "runtime-benchmarks")]
@@ -304,6 +347,14 @@ pub mod pallet {
         /// unsafe-direction timing/capacity/POL change is refused fail-closed
         /// (SQ-303).
         BudgetDerivationRequired,
+        /// 07 §6.3 (SQ-495): the amendment would lower the bond-coverage rate
+        /// `(2^orc.rounds − 1) · orc.bond_bps` below the `Δs_max` of a component
+        /// already admitted to a live MetricSpec. Raising coverage is always
+        /// permitted; only the direction that leaves an admitted component
+        /// settling money under an uncovering ladder is refused. Deliberately
+        /// not `BadOrigin` — the origin is authorized, the resulting state is
+        /// not.
+        CoverageBreaksAdmission,
         /// 09 §5.2: `phase3.tvl_cap` / `phase3.dep_cap` are raised only by
         /// phase gates and are not PARAM/META-adjustable during Phases ≤ 3.
         /// Lowering — tightening containment — remains legal at every phase
@@ -378,6 +429,10 @@ pub mod pallet {
             ensure!(
                 T::BudgetDerivationGuard::permits(key, record.value, value),
                 Error::<T>::BudgetDerivationRequired
+            );
+            ensure!(
+                T::CoverageGuard::permits(key, value),
+                Error::<T>::CoverageBreaksAdmission
             );
             Params::<T>::insert(key, updated);
             Self::deposit_event(Event::ParamUpdated { key, value });
@@ -901,6 +956,7 @@ pub mod pallet {
                 CoreError::FlagNotArmable => Error::<T>::FlagNotArmable.into(),
                 CoreError::KernelBoundImmutable => Error::<T>::KernelBoundImmutable.into(),
                 CoreError::BudgetDerivationRequired => Error::<T>::BudgetDerivationRequired.into(),
+                CoreError::CoverageBreaksAdmission => Error::<T>::CoverageBreaksAdmission.into(),
                 CoreError::PhaseCapRaiseRefused => Error::<T>::PhaseCapRaiseRefused.into(),
                 CoreError::MetaBoundViolation => Error::<T>::MetaBoundViolation.into(),
                 CoreError::BadReleaseSchema => Error::<T>::BadReleaseSchema.into(),

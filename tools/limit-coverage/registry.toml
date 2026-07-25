@@ -416,13 +416,13 @@ reason = "13 §1 / rule 7: amendment bounds covered by the generated per-key sui
 key = "orc.bond_bps"
 class = "param-bounds"
 genesis = true
-reason = "13 §1 / rule 7: amendment bounds covered by the generated per-key suite; the oracle consumer reads live Params (genesis-default fallback) since B10, and since SQ-296 the registry's value-scaled filing bond reads the same rate as a second consumer (07 §7)."
+reason = "13 §1 / rule 7: amendment bounds covered by the generated per-key suite; the oracle consumer reads live Params (genesis-default fallback) since B10, and since SQ-296 the registry's value-scaled filing bond reads the same rate as a second consumer (07 §7). SQ-495 adds an amendment-boundary coverage screen jointly over this key and orc.rounds — a cross-key live-state constraint like the gate.v_min/dec.v_min coupling, not a bound on this key's own value, so the class stays param-bounds."
 
 [[entry]]
 key = "orc.rounds"
 class = "param-bounds"
 genesis = true
-reason = "13 §1 / rule 7: amendment bounds covered by the generated per-key suite; the oracle consumer reads live Params (genesis-default fallback) since B10."
+reason = "13 §1 / rule 7: amendment bounds covered by the generated per-key suite; the oracle consumer reads live Params (genesis-default fallback) since B10. SQ-495 adds an amendment-boundary coverage screen jointly over this key and orc.bond_bps, which — like the gate.v_min/dec.v_min coupling — is a cross-key live-state constraint rather than a bound on this key's own value, so the class stays param-bounds; the screen is pinned by sq495_an_amendment_cannot_under_collateralize_an_admitted_component."
 
 [[entry]]
 key = "orc.window"
