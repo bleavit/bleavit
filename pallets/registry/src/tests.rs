@@ -182,9 +182,9 @@ fn sq296_fractional_base_unit_rounds_bond_up() {
         ));
 
         let stored = Filings::<Test, IncidentInstance>::get(5, 0).map(|filing| filing.bond);
-        assert_eq!(stored, Some(5_000_000_001));
-        assert_eq!(usdc(&acct(ALICE)), before - 5_000_000_001);
-        assert_eq!(usdc(&incident_account()), 5_000_000_001);
+        assert_eq!(stored, Some(35_000_000_001));
+        assert_eq!(usdc(&acct(ALICE)), before - 35_000_000_001);
+        assert_eq!(usdc(&incident_account()), 35_000_000_001);
     });
 }
 
@@ -210,7 +210,8 @@ fn sq296_unavailable_exposure_refuses_without_custody() {
 #[test]
 fn sq296_filing_bond_is_frozen_for_matching_challenge() {
     new_test_ext().execute_with(|| {
-        // Creation: 400,000 USDC × 250 bps = 10,000 USDC, above the floor.
+        // Creation: 400,000 USDC × 1,750 bps (the 07 §6.3 one-round coverage rate,
+        // 7 × 250) = 70,000 USDC, above the floor.
         IncidentExposure::set(Some(400_000 * UNIT));
         assert_ok!(IncidentRegistry::file(
             signed(ALICE),
@@ -220,19 +221,19 @@ fn sq296_filing_bond_is_frozen_for_matching_challenge() {
             H,
             VER
         ));
-        let stored_bond = 10_000_000_000;
+        let stored_bond = 70_000_000_000;
         assert_eq!(
             Filings::<Test, IncidentInstance>::get(5, 0).map(|filing| filing.bond),
             Some(stored_bond)
         );
 
-        // A live META amendment would price a new filing at 20,000 USDC.
-        BondBps::set(500);
+        // A live META amendment would price a new filing at 140,000 USDC.
+        CoverageBps::set(3_500);
         let challenger_before = usdc(&acct(BOB));
         assert_ok!(IncidentRegistry::challenge_filing(signed(BOB), 5, 0, H));
 
         // The existing claim and its matching challenge remain frozen at the
-        // creation-time 10,000-USDC amount, never the live 20,000-USDC quote.
+        // creation-time 70,000-USDC amount, never the live 140,000-USDC quote.
         assert_eq!(
             Filings::<Test, IncidentInstance>::get(5, 0).map(|filing| filing.bond),
             Some(stored_bond)

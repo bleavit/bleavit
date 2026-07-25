@@ -81,7 +81,7 @@ pub trait RegistryParams {
     /// `reg.bond_milestone`, the Milestone filing-bond floor in base USDC units.
     fn bond_milestone() -> Balance;
     /// `orc.bond_bps`, the value-scaling rate in basis points (250 = 2.5%).
-    fn bond_bps() -> u32;
+    fn coverage_bps() -> u32;
 }
 
 /// The 07 §4 bonded watchtower registry, read at `ack_observed`. Only bonded,
@@ -730,7 +730,7 @@ pub mod pallet {
             };
             let scaled = exposure
                 .ok_or(Error::<T, I>::ExposureUnavailable)?
-                .checked_mul(T::Params::bond_bps() as Balance)
+                .checked_mul(T::Params::coverage_bps() as Balance)
                 .ok_or(Error::<T, I>::Overflow)?
                 .div_ceil(10_000);
             Ok(core::cmp::max(floor, scaled))
@@ -762,7 +762,7 @@ pub mod pallet {
             let mut reg = Registry::new(T::Kind::get());
             reg.bond_incident = T::Params::bond_incident();
             reg.bond_milestone = T::Params::bond_milestone();
-            reg.bond_bps = T::Params::bond_bps();
+            reg.coverage_bps = T::Params::coverage_bps();
             // The Milestone divisor is the frozen-MetricSpec target for this
             // epoch (I-16), never a hardcode (rule 4). Incident ignores it.
             reg.milestone_target = T::Epoch::milestone_target(epoch);
@@ -1151,7 +1151,7 @@ pub mod pallet {
             let mut reg = Registry::new(T::Kind::get());
             reg.bond_incident = T::Params::bond_incident();
             reg.bond_milestone = T::Params::bond_milestone();
-            reg.bond_bps = T::Params::bond_bps();
+            reg.coverage_bps = T::Params::coverage_bps();
             for (epoch, id, f) in Filings::<T, I>::iter() {
                 reg.filings.push(((epoch, id), f));
             }

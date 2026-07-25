@@ -104,8 +104,10 @@ parameter_types! {
     /// (rule 4), never a hardcode. Default = the 13 §1 defaults.
     pub static BondIncident: Balance = REG_BOND_INCIDENT;
     pub static BondMilestone: Balance = REG_BOND_MILESTONE;
-    /// Live `orc.bond_bps` in basis points (250 = 2.5%).
-    pub static BondBps: u32 = 250;
+    /// The 07 §6.3 one-round coverage rate in basis points: `(2^orc.rounds − 1) ×
+    /// orc.bond_bps`, i.e. 7 × 250 = 1,750 (17.5%) at defaults. A registry filing
+    /// is a one-round game, so it posts the terminal-stack equivalent up front.
+    pub static CoverageBps: u32 = 1_750;
     /// Determinable exposure fixtures for each instance. Production Milestone
     /// uses `None`; the mock defaults to `Some(0)` so its independent lifecycle
     /// tests can exercise the floor knee.
@@ -164,8 +166,8 @@ impl RegistryParams for TestParams {
     fn bond_milestone() -> Balance {
         BondMilestone::get()
     }
-    fn bond_bps() -> u32 {
-        BondBps::get()
+    fn coverage_bps() -> u32 {
+        CoverageBps::get()
     }
 }
 
@@ -374,7 +376,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         // Reset overridable statics to defaults for a clean per-test start.
         BondIncident::set(REG_BOND_INCIDENT);
         BondMilestone::set(REG_BOND_MILESTONE);
-        BondBps::set(250);
+        CoverageBps::set(1_750);
         IncidentExposure::set(Some(0));
         MilestoneExposure::set(Some(0));
         FilingWindowEnd::set(1_000_000);

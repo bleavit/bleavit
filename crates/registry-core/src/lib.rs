@@ -271,7 +271,7 @@ pub struct Registry {
     /// Live `orc.bond_bps` in basis points (250 = 2.5%). The FRAME pallet
     /// refreshes it from `pallet-constitution::Params` on every load; 250 is
     /// only the 13 §1 standalone / differential default.
-    pub bond_bps: u32,
+    pub coverage_bps: u32,
     /// The Milestone-instance completion target (07 §7 / 05 §4.4: aggregate =
     /// `points ÷ target`). A per-MetricSpec frozen field (I-16), NOT a 13/kernel
     /// constant — the FRAME pallet refreshes it from the frozen MetricSpec via
@@ -294,7 +294,7 @@ impl Registry {
             ack_records: Vec::new(),
             bond_incident: REG_BOND_INCIDENT,
             bond_milestone: REG_BOND_MILESTONE,
-            bond_bps: 250,
+            coverage_bps: 1_750,
             milestone_target: MILESTONE_TARGET_POINTS,
         }
     }
@@ -685,7 +685,7 @@ impl Registry {
         };
         let scaled = exposure
             .ok_or(Error::ExposureUnavailable)?
-            .checked_mul(self.bond_bps as Balance)
+            .checked_mul(self.coverage_bps as Balance)
             .ok_or(Error::Overflow)?
             .div_ceil(10_000);
         Ok(core::cmp::max(floor, scaled))

@@ -5500,19 +5500,41 @@ impl pallet_registry::RegistryParams for RegistryParams {
     fn bond_milestone() -> Balance {
         balance_param(b"reg.bond_mile")
     }
-    fn bond_bps() -> u32 {
-        // Single-key read, deliberately **not**
-        // `RuntimeOracleParams::get().bond_bps`: that getter materializes the
-        // whole 12-key `OracleParams` aggregate, so routing one value through it
-        // cost 11 wasted `Constitution::Params` reads on **every** registry call
-        // that loads the core aggregate — visible as `challenge_filing` gaining
-        // 12 reads under SQ-489's regeneration despite never touching the
-        // exposure fold. Same helper and same default as the aggregate's own
-        // `bond_bps` line, so the value is identical by construction (SQ-489).
-        perbill_bps_param_or(
+    fn coverage_bps() -> u32 {
+        // 07 §6.3's coverage rule is stated over the **whole ladder**, not round
+        // one: `(2^R_max − 1) · orc.bond_bps ≥ Δs_max` — 7 × 2.5% = 17.5% at
+        // defaults. A registry filing is a **one-round** game, so it has no
+        // escalation to build that stack and must post the terminal-stack
+        // equivalent up front. Applying `orc.bond_bps` alone made the bond
+        // *proportional* to exposure without being *covering*: an unchallenged
+        // false S1 filing zeroes `I`, hence `c_settlement`, moving far more than
+        // 2.5% of exposure — and an upheld filing is refunded, so the attacker
+        // pays nothing at all (connector P1 on PR #169; SQ-296).
+        //
+        // Derived from two existing keys, not picked, so no new parameter is
+        // needed (R-2 step 1 resolves by reuse). The principled long-run rate is
+        // `Δs_max`-derived; that needs the MetricSpec field SQ-341 adds, and this
+        // multiple is the conservative interim that cannot under-collateralize.
+        //
+        // Single-key reads, deliberately **not** `RuntimeOracleParams::get()`:
+        // that getter materializes the whole 12-key `OracleParams` aggregate, so
+        // routing values through it cost 11 wasted `Constitution::Params` reads on
+        // every registry call that loads the core aggregate (SQ-489).
+        let bps = perbill_bps_param_or(
             b"orc.bond_bps",
             pallet_oracle::OracleParams::DEFAULT.bond_bps,
-        )
+        );
+        let rounds = u8_param_or(b"orc.rounds", pallet_oracle::OracleParams::DEFAULT.rounds);
+        // `(2^rounds − 1)`, saturating: `orc.rounds` is kernel-bounded to 2–4, so
+        // the multiple is 3–15 and cannot overflow, but a malformed read must
+        // still degrade to the tightest lawful ladder rather than to zero — a
+        // zero multiple would price every filing at the floor (G-1).
+        let ladder = 1u32
+            .checked_shl(u32::from(rounds))
+            .map(|p| p.saturating_sub(1))
+            .filter(|m| *m > 0)
+            .unwrap_or(3);
+        bps.saturating_mul(ladder)
     }
 }
 pub struct OracleWatchtowers;

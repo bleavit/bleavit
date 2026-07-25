@@ -18435,7 +18435,11 @@ fn sq296_runtime_incident_filing_scales_over_every_consuming_cohort() {
     const MEASUREMENT: futarchy_primitives::EpochId = 1;
     const PID: u64 = 811;
     const EXPOSURE: Balance = 400_000 * currency::USDC;
-    const EXPECTED_BOND: Balance = 10_000 * currency::USDC;
+    // 400,000 x 1,750 bps = 70,000 USDC. The rate is the 07 §6.3 one-round
+    // coverage rate `(2^orc.rounds - 1) x orc.bond_bps` = 7 x 250, not round one's
+    // 250 alone: a one-round game has no escalation to build the ladder the
+    // coverage rule is stated over (SQ-296, connector P1 on #169).
+    const EXPECTED_BOND: Balance = 70_000 * currency::USDC;
 
     development_ext().execute_with(|| {
         install_single_active_metric_spec(SPEC).expect("spec installs");

@@ -161,12 +161,16 @@ Exposure(Milestone, m) = Σ CohortEscrow(k)  over the cohorts whose frozen
                          MetricSpec consumes the milestone component for m
 
 F(kind, m)             = max( reg.bond_{kind},
-                              ceil( orc.bond_bps × Exposure(kind, m) / 10,000 ) )
+                              ceil( CoverageBps × Exposure(kind, m) / 10,000 ) )
+
+CoverageBps            = (2^orc.rounds − 1) · orc.bond_bps      // default 7 × 250 = 1,750 bps
 ```
 
 Three things about this shape are load-bearing.
 
-**The rate is `orc.bond_bps`, reused — not a new parameter.** This section already required a registry dispute to carry "§6 value-scaled bonds", and §6.1's rate *is* `orc.bond_bps`. The ruling moved *when* the scaling applies, not at what rate. The units, the `/ 10,000` divisor and the round-**up** of that division are §6.1's *Units and rounding* rule verbatim, and the `max` against the floor is applied after rounding, for the same custody reason (I-4 / I-28: over-custody is dust, under-custody is an unbacked claim).
+**The rate is the §6.3 *coverage* rate, derived from `orc.bond_bps` — not a new parameter.** This section already required a registry dispute to carry "§6 value-scaled bonds", and §6.1's rate *is* `orc.bond_bps`. But §6's protective property is not `B_1`: §6.3 states coverage over the **whole ladder**, `(2^R_max − 1) · orc.bond_bps ≥ Δs_max`. A registry filing is a **one-round** game — there is no escalation to build that stack — so it MUST post the terminal-stack equivalent at creation. Applying `orc.bond_bps` alone would make the bond *proportional* to exposure without being *covering*: an unchallenged false S1 filing zeroes `I`, hence `c_settlement`, moving far more than 2.5% of the exposure, and an upheld filing is refunded, so the attacker would pay nothing. Both factors are existing keys, so the values layer does not grow.
+
+**The long-run rate is `Δs_max`-derived.** §6.3's rule is stated against a component's documented maximum single-epoch settlement impact, and until the MetricSpec surface carries `Δs_max` the exact per-component rate cannot be computed. The terminal-stack multiple above is the conservative stand-in: it is what §6.3 already guarantees for the oracle's escalating game, so it cannot under-collateralize a one-round game measured against the same rule. The units, the `/ 10,000` divisor and the round-**up** of that division are §6.1's *Units and rounding* rule verbatim, and the `max` against the floor is applied after rounding, for the same custody reason (I-4 / I-28: over-custody is dust, under-custody is an unbacked claim).
 
 **The floors stay the `reg.bond_*` keys, whose role changes.** They were the bond; they are now its floor. Deliberately not `orc.bond_floor`: that would double the incident bond at zero exposure and leave both [13](./13-parameters.md) keys with no consumer.
 
