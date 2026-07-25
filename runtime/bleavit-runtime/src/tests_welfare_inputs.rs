@@ -554,3 +554,67 @@ fn sq195_daily_value_exempts_days_that_ended_before_arming() {
         );
     });
 }
+
+/// SQ-195 (R-6 round 8): the daily rule must reject days **outside the measured
+/// range**, whatever storage holds.
+///
+/// Two paths previously turned such a day into a false `C_daily` breach: a
+/// keeper submitting a day index beyond the epoch, and a stale outcome recorded
+/// by a retired probe generation. Both worked because the daily rule consulted
+/// the record before the range; the range now decides membership, and both
+/// granularities share it so they cannot drift apart again.
+#[test]
+fn sq195_daily_rule_rejects_days_outside_the_measured_range() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 48;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::R);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let timing =
+            pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch).expect("live epoch has timing");
+        let day_len = futarchy_primitives::kernel::BLOCKS_PER_DAY;
+        let last_whole_day = timing.length / day_len;
+        pallet_oracle::ReserveProbeArmed::<Runtime>::put(true);
+        pallet_oracle::ReserveProbeArmedAt::<Runtime>::put(0);
+
+        let r_of = |day: u8| {
+            crate::configs::RuntimeMetricInputs::daily_components(epoch, day, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::R)
+                .map(|c| c.value)
+        };
+
+        // A day index past the epoch's last whole day is not a cadence slot,
+        // even with a recorded failure sitting on it.
+        let beyond = u8::try_from(last_whole_day).expect("day fits u8");
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, beyond, false);
+        assert_eq!(
+            r_of(beyond),
+            None,
+            "a day beyond the epoch cannot manufacture a C_daily breach",
+        );
+
+        // A far-out index behaves the same way.
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, 200, false);
+        assert_eq!(r_of(200), None);
+
+        // A day inside the range still scores normally.
+        assert_eq!(r_of(0), Some(futarchy_primitives::FixedU64(0)));
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, 0, true);
+        assert_eq!(
+            r_of(0),
+            Some(futarchy_primitives::FixedU64(pallet_welfare::ONE))
+        );
+
+        // A recorded *pre-arm* day is excluded by the range too, so a retired
+        // generation's outcome cannot latch a breach after re-arming.
+        pallet_oracle::ReserveProbeArmedAt::<Runtime>::put(timing.start + 2 * day_len);
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, 1, false);
+        assert_eq!(
+            r_of(1),
+            None,
+            "a recorded pre-arm day stays outside the range"
+        );
+    });
+}

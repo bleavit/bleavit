@@ -4829,6 +4829,43 @@ fn xcm_health(counters: pallet_welfare::XcmTrafficCounters) -> FixedU64 {
     FixedU64(value)
 }
 
+/// The epoch's **measured day range** `[first, last)` for 07 §8's `R`, or
+/// `None` when nothing was measured (SQ-195).
+///
+/// Single-homed deliberately: the daily and epoch rules previously computed
+/// this separately and drifted apart twice — a day one accepted the other
+/// excluded, which let a keeper manufacture a `C_daily` breach on a day the
+/// epoch projection did not even require. Sharing the range makes them agree by
+/// construction rather than by inspection.
+///
+/// `first` skips days that ended before `ReserveProbeArmedAt`, since §8 scores
+/// zero pre-arm slots. `last` is the epoch's last **whole** day: a legal
+/// `epoch.length` need not be a day multiple, and a trailing partial day is not
+/// a completed cadence slot. Floored at one day so a sub-day epoch — the shape
+/// the compressed `fast-timing` build produces — still requires a recorded pass
+/// instead of passing vacuously.
+#[allow(dead_code)]
+fn reserve_probe_measured_range(epoch: EpochId) -> Option<(u32, u32)> {
+    let timing = pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch)?;
+    let day_len = kernel::BLOCKS_PER_DAY;
+    let last = timing.length.checked_div(day_len).unwrap_or(0).max(1);
+    let first = match pallet_oracle::Pallet::<Runtime>::reserve_probe_armed_at() {
+        Some(armed_at) if armed_at > timing.start => armed_at
+            .saturating_sub(timing.start)
+            .checked_div(day_len)
+            .unwrap_or(0),
+        // Armed at or before this epoch began — the whole epoch is measured.
+        //
+        // `None` lands here too: a chain that armed under a runtime predating
+        // `ReserveProbeArmedAt` has no recorded latch block. Treating the whole
+        // epoch as measured is the conservative direction — it *requires* more
+        // coverage, never less — so an upgrade cannot use a missing record to
+        // shrink the measured range (07 §8 upgrade compatibility).
+        _ => 0,
+    };
+    (first < last).then_some((first, last))
+}
+
 /// Day-level `R` for 05 §4.4's `C_daily` (07 §8; SQ-195).
 ///
 /// A recorded pass scores 1 and an unrecorded day scores 0 — "absence is never
@@ -4842,22 +4879,27 @@ fn xcm_health(counters: pallet_welfare::XcmTrafficCounters) -> FixedU64 {
 /// armed *now*, not that it was armed on the day being scored.
 #[allow(dead_code)]
 fn reserve_probe_daily_value(epoch: EpochId, day: u8) -> Option<FixedU64> {
-    if let Some(recorded) = pallet_welfare::Pallet::<Runtime>::reserve_probe_daily(epoch, day) {
-        return Some(FixedU64(if recorded { pallet_welfare::ONE } else { 0 }));
+    // Outside the measured range the day is **unavailable**, whatever storage
+    // happens to hold. That covers three cases a keeper or a retired probe
+    // generation could otherwise turn into a false breach: a day that ended
+    // before arming, the epoch's trailing partial day, and a day index beyond
+    // the epoch entirely. A stale outcome recorded by a previous probe
+    // generation cannot resurrect one of those days either, because the range —
+    // not the record — decides membership.
+    let (first, last) = reserve_probe_measured_range(epoch)?;
+    let index = u32::from(day);
+    if index < first || index >= last {
+        return None;
     }
-    // Unrecorded: a fail, unless the whole day preceded arming.
-    let timing = pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch)?;
-    if let Some(armed_at) = pallet_oracle::Pallet::<Runtime>::reserve_probe_armed_at() {
-        let day_end = timing.start.saturating_add(
-            u32::from(day)
-                .saturating_add(1)
-                .saturating_mul(kernel::BLOCKS_PER_DAY),
-        );
-        if armed_at >= day_end {
-            return None;
-        }
-    }
-    Some(FixedU64(0))
+    // Inside the range: a recorded pass scores 1, and anything else — a
+    // recorded failure or no record at all — scores 0. "Absence is never
+    // healthy"; §8 gives `R` no benefit-of-the-doubt branch, unlike `X`.
+    let recorded = pallet_welfare::Pallet::<Runtime>::reserve_probe_daily(epoch, day);
+    Some(FixedU64(if recorded == Some(true) {
+        pallet_welfare::ONE
+    } else {
+        0
+    }))
 }
 
 /// Epoch-level `R` for 05 §4.4's settlement-time `C_e` (07 §8; SQ-195).
@@ -4883,36 +4925,8 @@ fn reserve_probe_daily_value(epoch: EpochId, day: u8) -> Option<FixedU64> {
 /// timing is unknown — never as a stand-in for "nothing recorded".
 #[allow(dead_code)]
 fn reserve_probe_epoch_value(epoch: EpochId) -> Option<bool> {
-    let timing = pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch)?;
-    let day_len = kernel::BLOCKS_PER_DAY;
-    let last_day = timing.length.checked_div(day_len).unwrap_or(0).max(1);
-
-    // Days before arming are outside the measured range entirely (07 §8).
-    let first_day = match pallet_oracle::Pallet::<Runtime>::reserve_probe_armed_at() {
-        Some(armed_at) if armed_at > timing.start => armed_at
-            .saturating_sub(timing.start)
-            .checked_div(day_len)
-            .unwrap_or(0),
-        // Armed at or before this epoch began — the whole epoch is measured.
-        //
-        // `None` lands here too: a chain that armed under a runtime predating
-        // `ReserveProbeArmedAt` has no recorded latch block. Treating the whole
-        // epoch as measured is the conservative direction — it *requires* more
-        // coverage, never less — so an upgrade cannot use a missing record to
-        // shrink the measured range (07 §8 upgrade compatibility).
-        _ => 0,
-    };
-    if first_day >= last_day {
-        // No completed cadence slot was measured — the probe armed inside the
-        // epoch's trailing partial day, or after it entirely. `Some(true)` here
-        // was the same "absence is healthy" defect in a new guise; the honest
-        // answer is that the metric is **not measured**, exactly as for an
-        // unarmed chain, so the crank fails status-quo-safe rather than
-        // fabricating either health or breach (07 §8, G-1).
-        return None;
-    }
-
-    for day in first_day..last_day {
+    let (first, last) = reserve_probe_measured_range(epoch)?;
+    for day in first..last {
         let day = u8::try_from(day).ok()?;
         if pallet_welfare::Pallet::<Runtime>::reserve_probe_daily(epoch, day) != Some(true) {
             return Some(false);

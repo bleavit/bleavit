@@ -142,6 +142,13 @@ impl UncheckedOnRuntimeUpgrade for MigrateOracleReserveProbeV1Inner {
         // establishes the real cadence" — and hand the welfare `R` projection a
         // measured-range start from a probe generation that no longer exists.
         pallet_oracle::ReserveProbeArmedAt::<Runtime>::kill();
+        // ...and so are the day-resolved outcomes it indexed. Leaving them
+        // behind lets a **retired probe generation's** records survive into the
+        // new one, where a stale day inside the next measured range would score
+        // as that range's outcome (07 §8 upgrade compatibility). Bounded by the
+        // `u8` day key per retained epoch; the epoch index itself is retired by
+        // welfare's own cursor-bounded walk.
+        let _ = pallet_welfare::ReserveProbeDaily::<Runtime>::clear(u32::MAX, None);
 
         pallet_constitution::PhaseFlags::<Runtime>::mutate(|bits| {
             if unhealthy {
@@ -155,10 +162,10 @@ impl UncheckedOnRuntimeUpgrade for MigrateOracleReserveProbeV1Inner {
         });
 
         // ReserveHealth, PhaseFlags and Treasury State reads; those three
-        // writes plus the two explicit latch clears (armed flag and its block).
-        // VersionedMigration separately accounts for its StorageVersion
-        // read/write.
-        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(3, 5)
+        // writes, the two latch clears (armed flag and its block), and the
+        // bounded day-outcome clear. VersionedMigration separately accounts for
+        // its StorageVersion read/write.
+        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(3, 6)
     }
 
     #[cfg(feature = "try-runtime")]
@@ -192,6 +199,12 @@ impl UncheckedOnRuntimeUpgrade for MigrateOracleReserveProbeV1Inner {
         frame_support::ensure!(
             pallet_oracle::ReserveProbeArmedAt::<Runtime>::get().is_none(),
             "oracle v1 migration: a stale arming block survived the reset"
+        );
+        frame_support::ensure!(
+            pallet_welfare::ReserveProbeDaily::<Runtime>::iter()
+                .next()
+                .is_none(),
+            "oracle v1 migration: a retired generation's probe outcomes survived"
         );
         frame_support::ensure!(
             (pallet_constitution::PhaseFlags::<Runtime>::get()
