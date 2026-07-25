@@ -298,7 +298,11 @@ mod benches {
             [9u8; 32],
         );
 
-        assert!(Rounds::<T>::contains_key((COMPONENT, EPOCH, SPEC)));
+        let round = Rounds::<T>::get((COMPONENT, EPOCH, SPEC)).expect("measured reporting round");
+        assert!(
+            round.bond > T::Params::get().bond_floor,
+            "benchmark fixture must exercise the value-scaled path above the floor knee"
+        );
     }
 
     #[benchmark]

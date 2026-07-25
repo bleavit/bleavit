@@ -5214,53 +5214,42 @@ impl pallet_oracle::ReportingContext for RuntimeReporting {
                         .any(|(_, version)| spec_contains_component(*version, component))
             });
         if has_exposure {
-            #[cfg(feature = "runtime-benchmarks")]
-            {
-                // B5 fixture value: 500,000 x 250 bps = 12,500 USDC,
-                // strictly above the 10,000 `orc.bond_floor` — the variable
-                // bond path, not the floor knee — without overflowing the
-                // checked calculation.
-                500_000 * currency::USDC
-            }
-            #[cfg(not(feature = "runtime-benchmarks"))]
-            {
-                // 07 §6.1 (SQ-174): `StakeAtRisk(c, m) = Σ CohortEscrow(k)` over
-                // every cohort whose frozen MetricSpec consumes `c` for
-                // measurement epoch `m`, and `CohortEscrow(k) = Σ_pid
-                // escrowed(pid)` over that cohort's vaults.
-                //
-                // The read is **live here and frozen by the caller**: §6.1's
-                // *Per-game freezing* paragraph binds `B_1` — and therefore the
-                // `StakeAtRisk` inside it — once, when round 1 of a
-                // `(component, epoch, spec_version)` game is created, storing it
-                // with the game. `oracle_core` already does exactly that, so a
-                // later escrow movement cannot reprice a live game. The same
-                // section's older `CohortEscrow` line instead says the escrow is
-                // "read at the block Snapshot(m) finalizes", which is not
-                // implementable: Snapshot(m) *consumes* the oracle's settled
-                // components for attested specs, so it cannot also be the input
-                // that prices the game producing them. That line is superseded
-                // (see the amendment in 07 §6.1).
-                //
-                // Bounded: at most `MAX_NON_TERMINAL_COHORTS_BOUND` cohorts,
-                // each with ≤ 5 proposals (13 §4), so ≤ 20 vault reads.
-                pallet_epoch::CohortSchedules::<Runtime>::iter_values()
-                    .filter(|schedule| {
-                        cohort_consumes_measurement(schedule, epoch)
-                            && schedule
-                                .specs
-                                .iter()
-                                .any(|(_, version)| spec_contains_component(*version, component))
+            // 07 §6.1 (SQ-174): `StakeAtRisk(c, m) = Σ CohortEscrow(k)` over
+            // every cohort whose frozen MetricSpec consumes `c` for
+            // measurement epoch `m`, and `CohortEscrow(k) = Σ_pid
+            // escrowed(pid)` over that cohort's vaults.
+            //
+            // The read is **live here and frozen by the caller**: §6.1's
+            // *Per-game freezing* paragraph binds `B_1` — and therefore the
+            // `StakeAtRisk` inside it — once, when round 1 of a
+            // `(component, epoch, spec_version)` game is created, storing it
+            // with the game. `oracle_core` already does exactly that, so a
+            // later escrow movement cannot reprice a live game. The same
+            // section's older `CohortEscrow` line instead says the escrow is
+            // "read at the block Snapshot(m) finalizes", which is not
+            // implementable: Snapshot(m) *consumes* the oracle's settled
+            // components for attested specs, so it cannot also be the input
+            // that prices the game producing them. That line is superseded
+            // (see the amendment in 07 §6.1).
+            //
+            // Bounded: at most `MAX_NON_TERMINAL_COHORTS_BOUND` cohorts,
+            // each with ≤ 5 proposals (13 §4), so ≤ 20 vault reads.
+            pallet_epoch::CohortSchedules::<Runtime>::iter_values()
+                .filter(|schedule| {
+                    cohort_consumes_measurement(schedule, epoch)
+                        && schedule
+                            .specs
+                            .iter()
+                            .any(|(_, version)| spec_contains_component(*version, component))
+                })
+                .fold(0_u128, |total, schedule| {
+                    schedule.specs.iter().fold(total, |sum, (pid, _)| {
+                        sum.saturating_add(
+                            pallet_conditional_ledger::Vaults::<Runtime>::get(pid)
+                                .map_or(0, |vault| vault.escrowed),
+                        )
                     })
-                    .fold(0_u128, |total, schedule| {
-                        schedule.specs.iter().fold(total, |sum, (pid, _)| {
-                            sum.saturating_add(
-                                pallet_conditional_ledger::Vaults::<Runtime>::get(pid)
-                                    .map_or(0, |vault| vault.escrowed),
-                            )
-                        })
-                    })
-            }
+                })
         } else {
             0
         }
@@ -5609,32 +5598,7 @@ impl pallet_registry::EpochContext for RuntimeRegistryEpoch {
                 let has_exposure = pallet_epoch::CohortSchedules::<Runtime>::iter_values()
                     .any(|schedule| cohort_consumes_measurement(&schedule, epoch));
                 if has_exposure {
-                    #[cfg(feature = "runtime-benchmarks")]
-                    {
-                        // The fold is executed and its result discarded, so a
-                        // benchmark that reaches this arm measures the storage
-                        // walk instead of skipping it; only the returned *value*
-                        // is overridden, to 500,000 × 250 bps = 12,500 USDC —
-                        // strictly above the 5,000-USDC Incident floor, keeping
-                        // weight generation on the variable-bond arithmetic path
-                        // rather than the floor knee.
-                        //
-                        // This is necessary but **not yet sufficient** (SQ-489):
-                        // the walk is still behind `has_exposure`, and the worst
-                        // case is `MAX_NON_TERMINAL_COHORTS` (4) schedules walked
-                        // twice plus ≤ 5 proposal vaults each — up to 28 reads
-                        // against a measured 87, a ~32 % understatement on a
-                        // permissionless call. Closing it needs the runtime
-                        // benchmark to *seed* that worst case and the weights
-                        // regenerated; until then the number above is not a
-                        // measured bound and must not be treated as one.
-                        let _ = incident_cohort_escrow(epoch);
-                        Some(500_000 * currency::USDC)
-                    }
-                    #[cfg(not(feature = "runtime-benchmarks"))]
-                    {
-                        Some(incident_cohort_escrow(epoch))
-                    }
+                    Some(incident_cohort_escrow(epoch))
                 } else {
                     Some(0)
                 }
@@ -5642,10 +5606,18 @@ impl pallet_registry::EpochContext for RuntimeRegistryEpoch {
             registry_core::RegistryKind::Milestone => {
                 #[cfg(feature = "runtime-benchmarks")]
                 {
-                    // Measurement scaffolding only: production below remains
-                    // fail-closed, while generated weights exercise the
-                    // variable-bond path instead of the floor knee.
-                    let _ = epoch;
+                    // Measurement scaffolding only — production below stays
+                    // fail-closed. The fold is **walked** and discarded, not
+                    // skipped, because both registry instances bind the same
+                    // `crate::weights::pallet_registry::WeightInfo`: whichever
+                    // instance the generator renders last wins the shared file,
+                    // so an instance that measures a cheaper path silently
+                    // understates the other. Returning the fixture without
+                    // walking measured Milestone at 99 reads against Incident's
+                    // 119, and the 99 overwrote the 119 — reintroducing exactly
+                    // the undercharge SQ-489 exists to remove. Both arms must
+                    // therefore measure the same worst case (SQ-489).
+                    let _ = incident_cohort_escrow(epoch);
                     Some(500_000 * currency::USDC)
                 }
                 #[cfg(not(feature = "runtime-benchmarks"))]
@@ -8281,6 +8253,43 @@ impl pallet_welfare::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
     }
     fn prime_metric_inputs(_: u16) {}
 }
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_prime_cohort_exposure(epoch: EpochId, version: u16) {
+    let _ = pallet_epoch::CohortSchedules::<Runtime>::clear(u32::MAX, None);
+    let _ = pallet_conditional_ledger::Vaults::<Runtime>::clear(u32::MAX, None);
+
+    let cohort_count = bounds::MAX_NON_TERMINAL_COHORTS;
+    let proposals_per_cohort =
+        u32::from(<RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get().epoch_slots);
+    let escrow_per_vault = currency::USDC.saturating_mul(25_000);
+
+    for cohort_index in 0..cohort_count {
+        let specs = (0..proposals_per_cohort)
+            .map(|proposal_index| {
+                let pid = 9_000_000_u64
+                    .saturating_add(u64::from(cohort_index).saturating_mul(100))
+                    .saturating_add(u64::from(proposal_index));
+                let mut vault = pallet_conditional_ledger::core_ledger::VaultInfo::open(version);
+                vault.escrowed = escrow_per_vault;
+                pallet_conditional_ledger::Vaults::<Runtime>::insert(pid, vault);
+                (pid, version)
+            })
+            .collect::<Vec<_>>();
+        pallet_epoch::CohortSchedules::<Runtime>::insert(
+            cohort_index,
+            pallet_epoch::CohortSchedule {
+                epoch: epoch.saturating_sub(1),
+                creation_epoch_length:
+                    <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get().epoch_length,
+                measurement_until: epoch,
+                settlement_epoch: epoch.saturating_add(1),
+                specs: frame_support::BoundedVec::truncate_from(specs),
+            },
+        );
+    }
+}
+
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_oracle::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
     benchmark_keeper_rebate_hooks!();
@@ -8336,18 +8345,7 @@ impl pallet_oracle::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
             version,
             frame_support::BoundedVec::truncate_from(Vec::from([spec])),
         );
-        let cohort_epoch = epoch.saturating_sub(1);
-        pallet_epoch::CohortSchedules::<Runtime>::insert(
-            cohort_epoch,
-            pallet_epoch::CohortSchedule {
-                epoch: cohort_epoch,
-                creation_epoch_length:
-                    <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get().epoch_length,
-                measurement_until: epoch,
-                settlement_epoch: epoch.saturating_add(1),
-                specs: frame_support::BoundedVec::truncate_from(Vec::from([(1, version)])),
-            },
-        );
+        benchmark_prime_cohort_exposure(epoch, version);
     }
     fn prime_custody(seed: u8, amount: Balance) {
         benchmark_ensure_usdc();
@@ -8380,17 +8378,6 @@ impl pallet_registry::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBench
     fn prime_epoch(epoch: EpochId) {
         <RuntimeBenchmarkHelper as pallet_oracle::BenchmarkHelper<RuntimeOrigin>>::prime_reporting(
             1, epoch, 1,
-        );
-        pallet_epoch::CohortSchedules::<Runtime>::insert(
-            epoch.saturating_sub(1),
-            pallet_epoch::CohortSchedule {
-                epoch: epoch.saturating_sub(1),
-                creation_epoch_length:
-                    <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get().epoch_length,
-                measurement_until: epoch,
-                settlement_epoch: epoch.saturating_add(1),
-                specs: frame_support::BoundedVec::truncate_from(Vec::from([(1, 1)])),
-            },
         );
     }
 }
