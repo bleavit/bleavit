@@ -989,6 +989,9 @@ pub enum Error {
     /// verifier lands, changes to the load-bearing timing/capacity/POL keys
     /// are refused in the unsafe direction (SQ-303, G-1).
     BudgetDerivationRequired,
+    /// 09 §5.2: the two Phase-3 exposure caps are raised only by phase gates
+    /// and are not PARAM/META-adjustable during Phases ≤ 3 (SQ-197).
+    PhaseCapRaiseRefused,
     /// 07 §6.3 (SQ-495): the amendment would lower the bond-coverage rate
     /// `(2^orc.rounds − 1) · orc.bond_bps` below the `Δs_max` of a component
     /// already admitted to a live MetricSpec, so that component would keep
@@ -996,9 +999,6 @@ pub enum Error {
     /// can move. Raising coverage is always permitted. Appended last — the
     /// preceding discriminants are SCALE-stable.
     CoverageBreaksAdmission,
-    /// 09 §5.2: the two Phase-3 exposure caps are raised only by phase gates
-    /// and are not PARAM/META-adjustable during Phases ≤ 3 (SQ-197).
-    PhaseCapRaiseRefused,
 }
 
 /// 09 §5.2 (SQ-197): `phase3.tvl_cap` and `phase3.dep_cap` are "raised only by

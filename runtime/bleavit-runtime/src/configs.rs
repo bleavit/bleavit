@@ -1897,7 +1897,35 @@ impl pallet_constitution::CoverageGuard for RuntimeCoverageGuard {
         // A malformed ladder refuses, matching attested admission's direction on
         // the same input rather than the registry's bond-pricing fallback: an
         // amendment that leaves coverage unknowable cannot be shown safe.
-        pallet_oracle::coverage_bps(rounds, bond_bps).is_some_and(|cov| cov >= required)
+        let Some(proposed) = pallet_oracle::coverage_bps(rounds, bond_bps) else {
+            return false;
+        };
+        if proposed >= required {
+            return true;
+        }
+        // Coverage is already short of what some admitted component needs, and
+        // an absolute test would freeze **both** keys forever in exactly that
+        // state — the one the screen exists to get out of. A chain upgrading
+        // into this screen can arrive already under-covered, and no single
+        // lawful step necessarily restores full coverage: with a 10,000-bps
+        // component stranded at `(2, 150)`, raising rounds to 4 reaches 2,250
+        // and raising the rate to its `Factor(2)` limit reaches 900, so an
+        // absolute check rejects both repairs and the parameters can never be
+        // restored (Codex review, PR #174).
+        //
+        // So a **non-decreasing** amendment is always permitted, which is what
+        // 07 §6.3's "raising coverage is always legal" already promises.
+        // Comparing coverage rather than the key value handles both inputs
+        // uniformly, since coverage is monotone increasing in each. The screen
+        // still refuses every amendment that lowers coverage further.
+        let current = pallet_oracle::coverage_bps(
+            u8_param_or(b"orc.rounds", pallet_oracle::OracleParams::DEFAULT.rounds),
+            perbill_bps_param_or(
+                b"orc.bond_bps",
+                pallet_oracle::OracleParams::DEFAULT.bond_bps,
+            ),
+        );
+        current.is_some_and(|current| proposed >= current)
     }
 }
 

@@ -347,6 +347,12 @@ pub mod pallet {
         /// unsafe-direction timing/capacity/POL change is refused fail-closed
         /// (SQ-303).
         BudgetDerivationRequired,
+        /// 09 §5.2: `phase3.tvl_cap` / `phase3.dep_cap` are raised only by
+        /// phase gates and are not PARAM/META-adjustable during Phases ≤ 3.
+        /// Lowering — tightening containment — remains legal at every phase
+        /// (SQ-197). Deliberately not `BadOrigin`: the origin is authorized,
+        /// the value direction is not.
+        PhaseCapRaiseRefused,
         /// 07 §6.3 (SQ-495): the amendment would lower the bond-coverage rate
         /// `(2^orc.rounds − 1) · orc.bond_bps` below the `Δs_max` of a component
         /// already admitted to a live MetricSpec. Raising coverage is always
@@ -355,12 +361,6 @@ pub mod pallet {
         /// not `BadOrigin` — the origin is authorized, the resulting state is
         /// not.
         CoverageBreaksAdmission,
-        /// 09 §5.2: `phase3.tvl_cap` / `phase3.dep_cap` are raised only by
-        /// phase gates and are not PARAM/META-adjustable during Phases ≤ 3.
-        /// Lowering — tightening containment — remains legal at every phase
-        /// (SQ-197). Deliberately not `BadOrigin`: the origin is authorized,
-        /// the value direction is not.
-        PhaseCapRaiseRefused,
     }
 
     #[pallet::hooks]

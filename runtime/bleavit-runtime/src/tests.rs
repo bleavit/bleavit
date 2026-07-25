@@ -19006,6 +19006,35 @@ fn sq495_an_amendment_cannot_under_collateralize_an_admitted_component() {
             rounds,
             pallet_constitution::ParamValue::U8(4),
         ));
+        // A chain that is ALREADY under-covered must still be repairable in
+        // steps. An absolute `cov >= required` test freezes both keys forever in
+        // exactly the state the screen exists to leave: with a 10,000-bps
+        // component stranded at `(2, 150)`, raising rounds to 4 reaches only
+        // 2,250 and raising the rate to its Factor(2) limit only 900, so every
+        // repair is rejected and neither parameter can ever be restored. A
+        // non-decreasing amendment is therefore always permitted, which is what
+        // 07 §6.3's "raising coverage is always legal" promises (Codex review,
+        // PR #174).
+        pallet_welfare::MetricSpecs::<Runtime>::remove(41);
+        install_attested_spec(43, 10_000);
+        advance_cooldown();
+        // Still refuses a further lowering...
+        assert_noop!(
+            Constitution::set_param(
+                pallet_origins::Origin::FutarchyMeta.into(),
+                bond_bps,
+                pallet_constitution::ParamValue::Perbill(15_000_000),
+            ),
+            pallet_constitution::Error::<Runtime>::CoverageBreaksAdmission
+        );
+        // ...but admits a raise that improves coverage without restoring it.
+        advance_cooldown();
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            bond_bps,
+            pallet_constitution::ParamValue::Perbill(50_000_000),
+        ));
+        pallet_welfare::MetricSpecs::<Runtime>::remove(43);
         // And a component that declares less impact is not held hostage by a
         // stricter sibling's requirement being absent: with only a 450-bps
         // component admitted, the two-round ladder clears.
