@@ -8,7 +8,7 @@
 use crate::mock::*;
 use crate::{Aggregates, Error, FilingCount, Filings};
 use frame_support::{assert_noop, assert_ok};
-use futarchy_primitives::{keeper::CrankClass, FixedU64};
+use futarchy_primitives::{keeper::CrankClass, Balance, FixedU64};
 use registry_core::{
     FilingClass, FilingState, RegistryKind, MAX_FILINGS_PER_EPOCH, MAX_LIVE_EPOCHS,
     REG_BOND_INCIDENT, REG_BOND_MILESTONE, REG_CLOSE_BATCH, REG_EXT_WINDOW_BLOCKS,
@@ -139,6 +139,125 @@ fn file_reads_bond_from_params_not_a_hardcode() {
         );
         assert_eq!(usdc(&acct(ALICE)), a0 - raised);
         assert_eq!(usdc(&incident_account()), raised);
+    });
+}
+
+#[test]
+fn sq296_floor_knee_uses_incident_floor_at_zero_exposure() {
+    new_test_ext().execute_with(|| {
+        IncidentExposure::set(Some(0));
+        let before = usdc(&acct(ALICE));
+
+        assert_ok!(IncidentRegistry::file(
+            signed(ALICE),
+            5,
+            FilingClass::S2,
+            0,
+            H,
+            VER
+        ));
+
+        let stored = Filings::<Test, IncidentInstance>::get(5, 0).map(|filing| filing.bond);
+        assert_eq!(stored, Some(5_000_000_000));
+        assert_eq!(usdc(&acct(ALICE)), before - 5_000_000_000);
+        assert_eq!(usdc(&incident_account()), 5_000_000_000);
+    });
+}
+
+#[test]
+fn sq296_fractional_base_unit_rounds_bond_up() {
+    new_test_ext().execute_with(|| {
+        // 250 × 200,000,000,001 / 10,000 =
+        // 5,000,000,000.025 base units: custody rounds to 5,000,000,001.
+        IncidentExposure::set(Some(200_000 * UNIT + 1));
+        let before = usdc(&acct(ALICE));
+
+        assert_ok!(IncidentRegistry::file(
+            signed(ALICE),
+            5,
+            FilingClass::S2,
+            0,
+            H,
+            VER
+        ));
+
+        let stored = Filings::<Test, IncidentInstance>::get(5, 0).map(|filing| filing.bond);
+        assert_eq!(stored, Some(5_000_000_001));
+        assert_eq!(usdc(&acct(ALICE)), before - 5_000_000_001);
+        assert_eq!(usdc(&incident_account()), 5_000_000_001);
+    });
+}
+
+#[test]
+fn sq296_unavailable_exposure_refuses_without_custody() {
+    new_test_ext().execute_with(|| {
+        IncidentExposure::set(None);
+        let filer_before = usdc(&acct(ALICE));
+        let custody_before = usdc(&incident_account());
+
+        assert_noop!(
+            IncidentRegistry::file(signed(ALICE), 5, FilingClass::S2, 0, H, VER),
+            Error::<Test, IncidentInstance>::ExposureUnavailable
+        );
+
+        assert_eq!(usdc(&acct(ALICE)), filer_before);
+        assert_eq!(usdc(&incident_account()), custody_before);
+        assert_eq!(FilingCount::<Test, IncidentInstance>::get(5), 0);
+        assert!(Filings::<Test, IncidentInstance>::get(5, 0).is_none());
+    });
+}
+
+#[test]
+fn sq296_filing_bond_is_frozen_for_matching_challenge() {
+    new_test_ext().execute_with(|| {
+        // Creation: 400,000 USDC × 250 bps = 10,000 USDC, above the floor.
+        IncidentExposure::set(Some(400_000 * UNIT));
+        assert_ok!(IncidentRegistry::file(
+            signed(ALICE),
+            5,
+            FilingClass::S2,
+            0,
+            H,
+            VER
+        ));
+        let stored_bond = 10_000_000_000;
+        assert_eq!(
+            Filings::<Test, IncidentInstance>::get(5, 0).map(|filing| filing.bond),
+            Some(stored_bond)
+        );
+
+        // A live META amendment would price a new filing at 20,000 USDC.
+        BondBps::set(500);
+        let challenger_before = usdc(&acct(BOB));
+        assert_ok!(IncidentRegistry::challenge_filing(signed(BOB), 5, 0, H));
+
+        // The existing claim and its matching challenge remain frozen at the
+        // creation-time 10,000-USDC amount, never the live 20,000-USDC quote.
+        assert_eq!(
+            Filings::<Test, IncidentInstance>::get(5, 0).map(|filing| filing.bond),
+            Some(stored_bond)
+        );
+        assert_eq!(usdc(&acct(BOB)), challenger_before - stored_bond);
+        assert_eq!(usdc(&incident_account()), 2 * stored_bond);
+    });
+}
+
+#[test]
+fn sq296_scaled_bond_overflow_refuses_without_custody() {
+    new_test_ext().execute_with(|| {
+        IncidentExposure::set(Some(Balance::MAX));
+        let filer_before = usdc(&acct(ALICE));
+        let custody_before = usdc(&incident_account());
+
+        assert_noop!(
+            IncidentRegistry::file(signed(ALICE), 5, FilingClass::S2, 0, H, VER),
+            Error::<Test, IncidentInstance>::Overflow
+        );
+
+        assert_eq!(usdc(&acct(ALICE)), filer_before);
+        assert_eq!(usdc(&incident_account()), custody_before);
+        assert_eq!(FilingCount::<Test, IncidentInstance>::get(5), 0);
+        assert!(Filings::<Test, IncidentInstance>::get(5, 0).is_none());
     });
 }
 

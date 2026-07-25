@@ -5511,6 +5511,9 @@ impl pallet_registry::RegistryParams for RegistryParams {
     fn bond_milestone() -> Balance {
         balance_param(b"reg.bond_mile")
     }
+    fn bond_bps() -> u32 {
+        <RuntimeOracleParams as pallet_oracle::OracleParamsProvider>::get().bond_bps
+    }
 }
 pub struct OracleWatchtowers;
 impl pallet_registry::WatchtowerRegistry<AccountId> for OracleWatchtowers {
@@ -5531,6 +5534,32 @@ impl pallet_registry::WelfareSink for WelfarePullSink {
     }
 }
 pub struct RuntimeRegistryEpoch;
+/// `Exposure(Incident, m)` of 07 §7: the cohort escrow a filing against
+/// measurement epoch `m` can move.
+///
+/// `I` is not a `MetricId`. It multiplies `C_attested` and `C_settlement`
+/// unconditionally for every cohort that snapshots the epoch (05 §4.4), so the
+/// exposure set is *every* consuming cohort — deliberately the same SQ-174
+/// escrow fold as `stake_at_risk`, with the `spec_contains_component` filter
+/// removed. Pricing an incident filing against one component's consumers would
+/// under-collateralize it by construction.
+///
+/// Single-homed so the `runtime-benchmarks` path can execute the identical walk
+/// it is meant to measure. Bounded: at most `MAX_NON_TERMINAL_COHORTS` (4)
+/// schedules × five proposal vaults each (13 §4).
+fn incident_cohort_escrow(epoch: EpochId) -> Balance {
+    pallet_epoch::CohortSchedules::<Runtime>::iter_values()
+        .filter(|schedule| cohort_consumes_measurement(schedule, epoch))
+        .fold(0_u128, |total, schedule| {
+            schedule.specs.iter().fold(total, |sum, (pid, _)| {
+                sum.saturating_add(
+                    pallet_conditional_ledger::Vaults::<Runtime>::get(pid)
+                        .map_or(0, |vault| vault.escrowed),
+                )
+            })
+        })
+}
+
 impl pallet_registry::EpochContext for RuntimeRegistryEpoch {
     fn filing_window_end(epoch: EpochId) -> u32 {
         report_window_end(epoch).map_or(0, |end| end)
@@ -5572,6 +5601,64 @@ impl pallet_registry::EpochContext for RuntimeRegistryEpoch {
         #[cfg(not(feature = "runtime-benchmarks"))]
         {
             0
+        }
+    }
+    fn cohort_exposure(kind: registry_core::RegistryKind, epoch: EpochId) -> Option<Balance> {
+        match kind {
+            registry_core::RegistryKind::Incident => {
+                let has_exposure = pallet_epoch::CohortSchedules::<Runtime>::iter_values()
+                    .any(|schedule| cohort_consumes_measurement(&schedule, epoch));
+                if has_exposure {
+                    #[cfg(feature = "runtime-benchmarks")]
+                    {
+                        // The fold is executed and its result discarded, so a
+                        // benchmark that reaches this arm measures the storage
+                        // walk instead of skipping it; only the returned *value*
+                        // is overridden, to 500,000 × 250 bps = 12,500 USDC —
+                        // strictly above the 5,000-USDC Incident floor, keeping
+                        // weight generation on the variable-bond arithmetic path
+                        // rather than the floor knee.
+                        //
+                        // This is necessary but **not yet sufficient** (SQ-489):
+                        // the walk is still behind `has_exposure`, and the worst
+                        // case is `MAX_NON_TERMINAL_COHORTS` (4) schedules walked
+                        // twice plus ≤ 5 proposal vaults each — up to 28 reads
+                        // against a measured 87, a ~32 % understatement on a
+                        // permissionless call. Closing it needs the runtime
+                        // benchmark to *seed* that worst case and the weights
+                        // regenerated; until then the number above is not a
+                        // measured bound and must not be treated as one.
+                        let _ = incident_cohort_escrow(epoch);
+                        Some(500_000 * currency::USDC)
+                    }
+                    #[cfg(not(feature = "runtime-benchmarks"))]
+                    {
+                        Some(incident_cohort_escrow(epoch))
+                    }
+                } else {
+                    Some(0)
+                }
+            }
+            registry_core::RegistryKind::Milestone => {
+                #[cfg(feature = "runtime-benchmarks")]
+                {
+                    // Measurement scaffolding only: production below remains
+                    // fail-closed, while generated weights exercise the
+                    // variable-bond path instead of the floor knee.
+                    let _ = epoch;
+                    Some(500_000 * currency::USDC)
+                }
+                #[cfg(not(feature = "runtime-benchmarks"))]
+                {
+                    let _ = epoch;
+                    // The Milestone aggregate has no MetricId binding:
+                    // `note_external_component` is a no-op pull sink and
+                    // `milestone_target` is zero in production. Until SQ-175
+                    // wires that binding, no cohort exposure is determinable.
+                    // `None` is SQ-296's G-1 status-quo posture, not a stub.
+                    None
+                }
+            }
         }
     }
 }

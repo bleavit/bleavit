@@ -232,6 +232,10 @@ pub enum Error {
     /// if it were a real measurement, which the rule forbids. Appended last —
     /// the preceding discriminants are SCALE-stable.
     MilestoneTargetUnset,
+    /// The filing's cohort exposure cannot be determined, so its value-scaled
+    /// bond cannot be priced. Filing refuses before any state mutation (G-1).
+    /// Appended last — the preceding discriminants are SCALE-stable.
+    ExposureUnavailable,
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
@@ -245,6 +249,9 @@ pub struct FileInput {
     pub spec_version: MetricSpecVersion,
     pub expected_spec: MetricSpecVersion,
     pub filing_window_end: BlockNumber,
+    /// Cohort escrow exposed to this filing's aggregate. `None` is a
+    /// fail-closed refusal, never a zero-exposure fallback (07 §7).
+    pub exposure: Option<Balance>,
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
@@ -261,6 +268,10 @@ pub struct Registry {
     pub bond_incident: Balance,
     /// Live `reg.bond_milestone` — see [`Registry::bond_incident`].
     pub bond_milestone: Balance,
+    /// Live `orc.bond_bps` in basis points (250 = 2.5%). The FRAME pallet
+    /// refreshes it from `pallet-constitution::Params` on every load; 250 is
+    /// only the 13 §1 standalone / differential default.
+    pub bond_bps: u32,
     /// The Milestone-instance completion target (07 §7 / 05 §4.4: aggregate =
     /// `points ÷ target`). A per-MetricSpec frozen field (I-16), NOT a 13/kernel
     /// constant — the FRAME pallet refreshes it from the frozen MetricSpec via
@@ -283,6 +294,7 @@ impl Registry {
             ack_records: Vec::new(),
             bond_incident: REG_BOND_INCIDENT,
             bond_milestone: REG_BOND_MILESTONE,
+            bond_bps: 250,
             milestone_target: MILESTONE_TARGET_POINTS,
         }
     }
@@ -300,6 +312,11 @@ impl Registry {
             Error::AlreadyFinal
         );
         self.validate_class(input.class)?;
+        // Price the claim before any state mutation. In particular, an
+        // unavailable Milestone exposure wins over the independent
+        // normalization-target gate: production must refuse it for the
+        // SQ-296 fail-closed reason until SQ-175 wires a component binding.
+        let bond = self.required_bond(input.exposure)?;
         // 07 §7 *Milestone normalization*: a milestone component with no
         // positive `target` is not admissible, so the Milestone instance refuses
         // the filing at the door rather than escrowing a bond into an epoch whose
@@ -309,7 +326,6 @@ impl Registry {
         if matches!(self.kind, RegistryKind::Milestone) {
             ensure!(self.milestone_target > 0, Error::MilestoneTargetUnset);
         }
-        let bond = self.required_bond();
         ensure!(bond > 0, Error::BondBelowMinimum);
         if self.filing_count.iter().all(|(e, _)| *e != input.epoch) {
             ensure!(
@@ -634,8 +650,9 @@ impl Registry {
         for ((epoch, _), f) in &self.filings {
             // A filed bond is always positive; it is NOT re-checked against the
             // live `required_bond()`, because a mid-life META amendment of
-            // `reg.bond_*` (13 §1) may raise the requirement above a bond that was
-            // valid — and is custodied at its stored amount — when it was filed.
+            // `reg.bond_*` or `orc.bond_bps` (13 §1), or a change in cohort
+            // exposure, may raise the requirement above a bond that was valid —
+            // and is custodied at its stored amount — when it was filed.
             ensure!(f.bond > 0, Error::BondBelowMinimum);
             self.validate_class(f.class)?;
             // Every retained filing belongs to exactly one lifecycle stage:
@@ -661,11 +678,17 @@ impl Registry {
             .map(|(_, v)| *v)
     }
 
-    fn required_bond(&self) -> Balance {
-        match self.kind {
+    fn required_bond(&self, exposure: Option<Balance>) -> Result<Balance, Error> {
+        let floor = match self.kind {
             RegistryKind::Incident => self.bond_incident,
             RegistryKind::Milestone => self.bond_milestone,
-        }
+        };
+        let scaled = exposure
+            .ok_or(Error::ExposureUnavailable)?
+            .checked_mul(self.bond_bps as Balance)
+            .ok_or(Error::Overflow)?
+            .div_ceil(10_000);
+        Ok(core::cmp::max(floor, scaled))
     }
     fn validate_class(&self, class: FilingClass) -> Result<(), Error> {
         match (self.kind, class) {
@@ -806,6 +829,7 @@ mod tests {
             spec_version: 3,
             expected_spec: 3,
             filing_window_end: 10,
+            exposure: Some(0),
         }
     }
 

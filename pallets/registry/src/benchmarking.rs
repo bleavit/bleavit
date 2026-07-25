@@ -107,7 +107,16 @@ mod benches {
         #[extrinsic_call]
         _(RawOrigin::Signed(caller), EPOCH, class, 10, [7u8; 32], spec);
 
-        assert!(Filings::<T, I>::get(EPOCH, T::MaxFilingsPerEpoch::get() - 1).is_some());
+        let filing =
+            Filings::<T, I>::get(EPOCH, T::MaxFilingsPerEpoch::get() - 1).expect("measured filing");
+        let floor = match T::Kind::get() {
+            RegistryKind::Incident => T::Params::bond_incident(),
+            RegistryKind::Milestone => T::Params::bond_milestone(),
+        };
+        assert!(
+            filing.bond > floor,
+            "benchmark fixture must exercise the value-scaled path above the floor knee"
+        );
     }
 
     #[benchmark]

@@ -17795,6 +17795,53 @@ fn milestone_target_seam_is_fail_closed_in_production_and_admissible_under_bench
     }
 }
 
+#[test]
+fn sq296_runtime_milestone_filing_is_fail_closed_without_component_binding() {
+    use pallet_registry::EpochContext as _;
+
+    development_ext().execute_with(|| {
+        let epoch = 1;
+        assert_eq!(
+            crate::configs::RuntimeRegistryEpoch::cohort_exposure(
+                registry_core::RegistryKind::Milestone,
+                epoch,
+            ),
+            None,
+            "Milestone exposure is indeterminate until SQ-175 binds a MetricId",
+        );
+
+        let filer = account(246);
+        let filer_before = ForeignAssets::balance(usdc_location(), &filer);
+        let registry_account = crate::configs::MilestonePalletId::get().into_account_truncating();
+        let custody_before = ForeignAssets::balance(usdc_location(), &registry_account);
+
+        assert_noop!(
+            MilestoneRegistry::file(
+                RuntimeOrigin::signed(filer.clone()),
+                epoch,
+                registry_core::FilingClass::Scope(1),
+                25,
+                [9; 32],
+                1,
+            ),
+            pallet_registry::Error::<Runtime, pallet_registry::Instance1>::ExposureUnavailable
+        );
+
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &filer),
+            filer_before
+        );
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &registry_account),
+            custody_before
+        );
+        assert!(
+            pallet_registry::Filings::<Runtime, pallet_registry::Instance1>::get(epoch, 0)
+                .is_none()
+        );
+    });
+}
+
 // -------------------------------------------------------------------------
 // XCM trap recovery through the proposal lifecycle (05 §1.4 `0x0A`; 09 §6.1;
 // 06 §3.2) — SQ-244 / SQ-316
@@ -18379,5 +18426,89 @@ fn sq186_metadata_exposes_the_treasury_bond_ask_slope() {
             RuntimeMetadata::V16(metadata) => assert_slope!(metadata),
             other => panic!("unexpected runtime metadata version: {other:?}"),
         }
+    });
+}
+
+#[test]
+fn sq296_runtime_incident_filing_scales_over_every_consuming_cohort() {
+    const SPEC: u16 = 62;
+    const MEASUREMENT: futarchy_primitives::EpochId = 1;
+    const PID: u64 = 811;
+    const EXPOSURE: Balance = 400_000 * currency::USDC;
+    const EXPECTED_BOND: Balance = 10_000 * currency::USDC;
+
+    development_ext().execute_with(|| {
+        install_single_active_metric_spec(SPEC).expect("spec installs");
+        pallet_epoch::EpochTimings::<Runtime>::mutate(|timings| {
+            if !timings.iter().any(|timing| timing.index == MEASUREMENT) {
+                assert!(
+                    timings
+                        .try_push(pallet_epoch::EpochTiming {
+                            index: MEASUREMENT,
+                            start: 0,
+                            length: 100,
+                        })
+                        .is_ok(),
+                    "measurement timing fixture must fit",
+                );
+            }
+        });
+
+        let mut vault = conditional_ledger_core::VaultInfo::open(SPEC);
+        vault.escrowed = EXPOSURE;
+        pallet_conditional_ledger::Vaults::<Runtime>::insert(PID, vault);
+        pallet_epoch::CohortSchedules::<Runtime>::insert(
+            0,
+            pallet_epoch::CohortSchedule {
+                epoch: 0,
+                creation_epoch_length: 1,
+                measurement_until: MEASUREMENT,
+                settlement_epoch: MEASUREMENT + 1,
+                specs: pallet_epoch::SpecBindings::truncate_from(vec![(PID, SPEC)]),
+            },
+        );
+
+        use pallet_registry::EpochContext as _;
+        assert_eq!(
+            crate::configs::RuntimeRegistryEpoch::cohort_exposure(
+                registry_core::RegistryKind::Incident,
+                MEASUREMENT,
+            ),
+            Some(EXPOSURE),
+        );
+
+        let filer = account(247);
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &filer,
+            EXPECTED_BOND.saturating_add(ForeignAssets::minimum_balance(usdc_location())),
+        ));
+        let filer_before = ForeignAssets::balance(usdc_location(), &filer);
+        let registry_account = crate::configs::IncidentPalletId::get().into_account_truncating();
+        let custody_before = ForeignAssets::balance(usdc_location(), &registry_account);
+
+        assert_ok!(IncidentRegistry::file(
+            RuntimeOrigin::signed(filer.clone()),
+            MEASUREMENT,
+            registry_core::FilingClass::S1,
+            0,
+            [9; 32],
+            SPEC,
+        ));
+
+        assert_eq!(
+            pallet_registry::Filings::<Runtime>::get(MEASUREMENT, 0).map(|filing| filing.bond),
+            Some(EXPECTED_BOND),
+            "250 bps × 400,000 USDC must custody exactly 10,000 USDC",
+        );
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &filer),
+            filer_before - EXPECTED_BOND,
+        );
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &registry_account),
+            custody_before + EXPECTED_BOND,
+        );
+        assert!(EXPECTED_BOND > crate::configs::balance_param(b"reg.bond_inc"));
     });
 }

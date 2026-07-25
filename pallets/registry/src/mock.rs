@@ -104,6 +104,13 @@ parameter_types! {
     /// (rule 4), never a hardcode. Default = the 13 §1 defaults.
     pub static BondIncident: Balance = REG_BOND_INCIDENT;
     pub static BondMilestone: Balance = REG_BOND_MILESTONE;
+    /// Live `orc.bond_bps` in basis points (250 = 2.5%).
+    pub static BondBps: u32 = 250;
+    /// Determinable exposure fixtures for each instance. Production Milestone
+    /// uses `None`; the mock defaults to `Some(0)` so its independent lifecycle
+    /// tests can exercise the floor knee.
+    pub static IncidentExposure: Option<Balance> = Some(0);
+    pub static MilestoneExposure: Option<Balance> = Some(0);
     /// The filing-window-end block (07 §7); a single far-future default so filing
     /// is open — tests lower it to exercise the `WindowClosed` path.
     pub static FilingWindowEnd: u32 = 1_000_000;
@@ -157,6 +164,9 @@ impl RegistryParams for TestParams {
     fn bond_milestone() -> Balance {
         BondMilestone::get()
     }
+    fn bond_bps() -> u32 {
+        BondBps::get()
+    }
 }
 
 pub struct TestWatchtowers;
@@ -191,6 +201,12 @@ impl EpochContext for TestEpoch {
     }
     fn milestone_target(_epoch: EpochId) -> u32 {
         MilestoneTarget::get()
+    }
+    fn cohort_exposure(kind: RegistryKind, _epoch: EpochId) -> Option<Balance> {
+        match kind {
+            RegistryKind::Incident => IncidentExposure::get(),
+            RegistryKind::Milestone => MilestoneExposure::get(),
+        }
     }
 }
 
@@ -275,7 +291,13 @@ impl crate::BenchmarkHelper<RuntimeOrigin, AccountId32> for TestBenchmarkHelper 
             }
         });
     }
-    fn prime_epoch(_: EpochId) {}
+    fn prime_epoch(_: EpochId) {
+        // Keep benchmark measurement on the variable-bond path:
+        // 500,000 USDC × 250 bps = 12,500 USDC, above both floors.
+        let exposure = Some(500_000 * UNIT);
+        IncidentExposure::set(exposure);
+        MilestoneExposure::set(exposure);
+    }
 }
 
 // ---- test helpers ------------------------------------------------------------
@@ -352,6 +374,9 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         // Reset overridable statics to defaults for a clean per-test start.
         BondIncident::set(REG_BOND_INCIDENT);
         BondMilestone::set(REG_BOND_MILESTONE);
+        BondBps::set(250);
+        IncidentExposure::set(Some(0));
+        MilestoneExposure::set(Some(0));
         FilingWindowEnd::set(1_000_000);
         FrozenSpec::set(3);
         MilestoneTarget::set(100);
