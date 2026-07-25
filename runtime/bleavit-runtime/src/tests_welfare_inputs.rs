@@ -229,12 +229,15 @@ fn sq82_the_runtime_register_spec_origin_set_is_closed_and_lead_bound() {
 fn sq195_reserve_health_is_day_resolved_and_unmeasured_before_arming() {
     use pallet_welfare::MetricInputs;
     const VERSION: futarchy_primitives::MetricSpecVersion = 41;
-    const EPOCH: futarchy_primitives::EpochId = 4;
 
     crate::tests::development_ext().execute_with(|| {
         install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::R);
+        // The live epoch, so the day-level rule can resolve real timing; an
+        // epoch whose timing is unknown is *unavailable*, not a failure,
+        // because pre-arm days cannot be distinguished without it.
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
         let r_of = |day: u8| {
-            crate::configs::RuntimeMetricInputs::daily_components(EPOCH, day, VERSION)
+            crate::configs::RuntimeMetricInputs::daily_components(epoch, day, VERSION)
                 .into_iter()
                 .find(|c| c.id == futarchy_primitives::metric_ids::R)
                 .map(|c| c.value)
@@ -243,10 +246,12 @@ fn sq195_reserve_health_is_day_resolved_and_unmeasured_before_arming() {
         // Unarmed: absent entirely, so a spec registering R fails the crank
         // status-quo-safe rather than fabricating either health or breach.
         assert!(!crate::Oracle::reserve_probe_armed());
-        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(EPOCH, 1, true);
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, 1, true);
         assert_eq!(r_of(1), None, "R must be unavailable before the probe arms");
 
+        // Armed from the epoch's very start, so no day is pre-arm.
         pallet_oracle::ReserveProbeArmed::<Runtime>::put(true);
+        pallet_oracle::ReserveProbeArmedAt::<Runtime>::put(0);
 
         // Armed: a recorded pass scores 1, a recorded fail scores 0, and an
         // unrecorded day scores 0 — absence is never healthy (07 §8).
@@ -254,23 +259,23 @@ fn sq195_reserve_health_is_day_resolved_and_unmeasured_before_arming() {
             r_of(1),
             Some(futarchy_primitives::FixedU64(pallet_welfare::ONE))
         );
-        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(EPOCH, 2, false);
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, 2, false);
         assert_eq!(r_of(2), Some(futarchy_primitives::FixedU64(0)));
         assert_eq!(r_of(3), Some(futarchy_primitives::FixedU64(0)));
 
         // A failed day stays failed: a later success for the same day cannot
         // rewrite it, which is what makes recovery non-retroactive.
-        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(EPOCH, 2, true);
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, 2, true);
         assert_eq!(r_of(2), Some(futarchy_primitives::FixedU64(0)));
 
         // The epoch tally is raw, not a verdict: one failed day and one passed
         // day, with every other day of the epoch simply unrecorded.
         assert_eq!(
-            pallet_welfare::Pallet::<Runtime>::reserve_probe_epoch_tally(EPOCH),
+            pallet_welfare::Pallet::<Runtime>::reserve_probe_epoch_tally(epoch),
             (1, 1)
         );
         assert_eq!(
-            pallet_welfare::Pallet::<Runtime>::reserve_probe_epoch_tally(EPOCH + 1),
+            pallet_welfare::Pallet::<Runtime>::reserve_probe_epoch_tally(epoch + 1),
             (0, 0)
         );
     });
@@ -503,6 +508,49 @@ fn sq195_empty_measured_range_is_unavailable_not_healthy() {
                 .map(|c| c.value),
             None,
             "an epoch the probe never measured must be unavailable, never healthy",
+        );
+    });
+}
+
+/// SQ-195 (R-6 round 7): the pre-arm exemption binds the **daily** value too.
+///
+/// The epoch projection excluded pre-arm days, but `daily_components` converted
+/// every unrecorded day to `R = 0` on the strength of the *global* armed latch
+/// alone. That latch says the probe is armed **now**, not that it was armed on
+/// the day being scored, so a late daily crank could classify time before the
+/// mechanism existed as a reserve outage and set a `C_daily` breach flag from
+/// it — exactly what 07 §8 excludes.
+#[test]
+fn sq195_daily_value_exempts_days_that_ended_before_arming() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 47;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::R);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let timing =
+            pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch).expect("live epoch has timing");
+        let day_len = futarchy_primitives::kernel::BLOCKS_PER_DAY;
+
+        // Armed at the start of day 2: days 0 and 1 ended before it.
+        pallet_oracle::ReserveProbeArmed::<Runtime>::put(true);
+        pallet_oracle::ReserveProbeArmedAt::<Runtime>::put(timing.start + 2 * day_len);
+
+        let r_of = |day: u8| {
+            crate::configs::RuntimeMetricInputs::daily_components(epoch, day, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::R)
+                .map(|c| c.value)
+        };
+
+        assert_eq!(r_of(0), None, "day 0 ended before arming — not measured");
+        assert_eq!(r_of(1), None, "day 1 ended before arming — not measured");
+        // Day 2 is measured: unrecorded is a real failure from here on.
+        assert_eq!(r_of(2), Some(futarchy_primitives::FixedU64(0)));
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, 2, true);
+        assert_eq!(
+            r_of(2),
+            Some(futarchy_primitives::FixedU64(pallet_welfare::ONE))
         );
     });
 }

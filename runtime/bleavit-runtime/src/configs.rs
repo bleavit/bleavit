@@ -4829,6 +4829,37 @@ fn xcm_health(counters: pallet_welfare::XcmTrafficCounters) -> FixedU64 {
     FixedU64(value)
 }
 
+/// Day-level `R` for 05 §4.4's `C_daily` (07 §8; SQ-195).
+///
+/// A recorded pass scores 1 and an unrecorded day scores 0 — "absence is never
+/// healthy", and §8 gives `R` no benefit-of-the-doubt branch unlike `X`.
+///
+/// **Except before arming.** §8 scores zero pre-arm wall-clock slots, so a day
+/// that ended before the probe armed is *unavailable*, not a failure: a late
+/// daily crank must not retroactively classify time before the mechanism
+/// existed as a reserve outage and set a `C_daily` breach flag from it. The
+/// global armed latch alone is not enough to decide this — it says the probe is
+/// armed *now*, not that it was armed on the day being scored.
+#[allow(dead_code)]
+fn reserve_probe_daily_value(epoch: EpochId, day: u8) -> Option<FixedU64> {
+    if let Some(recorded) = pallet_welfare::Pallet::<Runtime>::reserve_probe_daily(epoch, day) {
+        return Some(FixedU64(if recorded { pallet_welfare::ONE } else { 0 }));
+    }
+    // Unrecorded: a fail, unless the whole day preceded arming.
+    let timing = pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch)?;
+    if let Some(armed_at) = pallet_oracle::Pallet::<Runtime>::reserve_probe_armed_at() {
+        let day_end = timing.start.saturating_add(
+            u32::from(day)
+                .saturating_add(1)
+                .saturating_mul(kernel::BLOCKS_PER_DAY),
+        );
+        if armed_at >= day_end {
+            return None;
+        }
+    }
+    Some(FixedU64(0))
+}
+
 /// Epoch-level `R` for 05 §4.4's settlement-time `C_e` (07 §8; SQ-195).
 ///
 /// 07 §8 defines only `R_daily`, so the epoch projection is derived here — and
@@ -5034,15 +5065,7 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
             epoch,
             version,
             pallet_welfare::Pallet::<Runtime>::xcm_traffic(epoch, day),
-            // 07 §8: an unrecorded probe day is a **fail**, not unavailable.
-            Some(FixedU64(
-                if pallet_welfare::Pallet::<Runtime>::reserve_probe_daily(epoch, day) == Some(true)
-                {
-                    pallet_welfare::ONE
-                } else {
-                    0
-                },
-            )),
+            reserve_probe_daily_value(epoch, day),
         )
     }
 }
