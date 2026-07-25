@@ -1482,6 +1482,26 @@ impl Oracle {
         self.money_settled.iter().any(|(stored, _)| *stored == key)
     }
 
+    /// Whether `(component, epoch, version)` is `component`'s newest settled
+    /// value — the carry checkpoint 07 §10's "last valid value" reads.
+    ///
+    /// Selected by the same `(epoch, version)` ordering
+    /// [`Self::last_valid_value`] uses, so the entry the carry would pick is
+    /// exactly the entry reaping spares.
+    fn is_carry_checkpoint(
+        &self,
+        component: MetricId,
+        epoch: EpochId,
+        version: MetricSpecVersion,
+    ) -> bool {
+        self.component_values
+            .iter()
+            .filter(|((c, _, _), _)| *c == component)
+            .map(|((_, e, v), _)| (*e, *v))
+            .max()
+            == Some((epoch, version))
+    }
+
     /// The block at which `key`'s retained bond stack expires, if it is retained.
     fn retention_deadline(&self, key: RoundKey) -> Option<BlockNumber> {
         self.money_settled
@@ -1510,6 +1530,21 @@ impl Oracle {
     /// the two windows do not overlap (retention is ~8 days, the cutoff is three
     /// ~20-day epochs back), which is exactly why this must be a guard rather than
     /// an argument — the overlap needs only a stalled close crank to become real.
+    ///
+    /// **Each component's newest settled value is also exempt — its carry
+    /// checkpoint.** 07 §10 settles a failed component at "its last valid
+    /// value", which [`Self::last_valid_value`] reads out of exactly this
+    /// history. An unqualified cutoff would delete that history for a component
+    /// no cohort consumed for longer than the retention window — the cohortless
+    /// epochs 05 §3.3 explicitly contemplates — so when reporting resumed and a
+    /// report was missed the carry would silently become the neutral 0.5 instead
+    /// of the component's real last value, moving `W` and every settlement that
+    /// reads it. Before this reaper existed nothing was ever removed, so the
+    /// degenerate branch was unreachable in production; introducing reaping is
+    /// what makes the checkpoint necessary (Codex F13, raised again on #175).
+    /// The exemption is per **component**, not per `(component, version)`,
+    /// because `last_valid_value` selects across versions — so it holds at most
+    /// one entry per live MetricId and cannot grow with MetricSpec activations.
     pub fn reap_settled_before(&mut self, cutoff: EpochId, max: usize) -> usize {
         let mut stale = self
             .component_values
@@ -1521,6 +1556,7 @@ impl Oracle {
                         epoch: *e,
                         spec_version: *v,
                     })
+                    && !self.is_carry_checkpoint(*c, *e, *v)
             })
             .map(|((c, e, v), _)| (*e, *c, *v))
             .collect::<Vec<_>>();
@@ -3369,7 +3405,8 @@ mod tests {
         o.try_state().unwrap();
 
         // Once the retention expires and the round is reaped, the value is
-        // ordinary history again and the sweep takes it.
+        // ordinary history again — reapable as soon as it is no longer the
+        // component's own carry checkpoint, which a later settled value makes it.
         o.crank_round_close_with_params(
             1_000_000 + futarchy_primitives::kernel::ORC_RETENTION_BLOCKS,
             20,
@@ -3377,8 +3414,58 @@ mod tests {
         )
         .unwrap();
         assert!(o.rounds.is_empty());
+        assert_eq!(
+            o.reap_settled_before(9_999, 64),
+            0,
+            "the sole value for a component is its carry checkpoint"
+        );
+        o.component_values.push((
+            (7, 42, 3),
+            SettledComponent {
+                value: FixedU64(600_000_000),
+                path: SettlePath::Unchallenged,
+                flagged: false,
+            },
+        ));
         assert_eq!(o.reap_settled_before(9_999, 64), 1);
-        assert!(o.component_values.is_empty());
+        assert_eq!(o.component_values.len(), 1);
+        assert_eq!(o.component_values[0].0, (7, 42, 3));
+        o.try_state().unwrap();
+    }
+
+    /// 07 §10 settles a failed component at "its last valid value", which
+    /// `last_valid_value` reads out of the settled history. An unqualified
+    /// cutoff deletes that history for a component no cohort consumed for
+    /// longer than the retention window — the cohortless epochs 05 §3.3
+    /// contemplates — and the next missed report would then carry the neutral
+    /// 0.5 instead of the component's real last value, moving `W` and every
+    /// settlement reading it. Unreachable before this reaper existed, because
+    /// nothing was ever removed (Codex F13; #175 review).
+    #[test]
+    fn sq492_reaping_preserves_each_component_carry_checkpoint() {
+        let mut o = Oracle::default();
+        for (component, epoch, value) in [(7u16, 10u32, 620_000_000u64), (7, 11, 640_000_000)] {
+            o.component_values.push((
+                (component, epoch, 1),
+                SettledComponent {
+                    value: FixedU64(value),
+                    path: SettlePath::Unchallenged,
+                    flagged: false,
+                },
+            ));
+        }
+        // A cutoff far past both: an unqualified sweep takes the whole history.
+        assert_eq!(o.reap_settled_before(9_999, 64), 1);
+        assert_eq!(o.component_values.len(), 1);
+        assert_eq!(o.component_values[0].0, (7, 11, 1));
+
+        // And the carry the survivor exists for still reads the real last
+        // value rather than the neutral 0.5 default.
+        assert_eq!(o.last_valid_value(7, 20), FixedU64(640_000_000));
+        assert_ne!(o.last_valid_value(7, 20), FixedU64(COMPONENT_VALUE_MAX / 2));
+
+        // Draining is idempotent: the checkpoint is not re-offered each crank.
+        assert_eq!(o.reap_settled_before(9_999, 64), 0);
         o.try_state().unwrap();
     }
 

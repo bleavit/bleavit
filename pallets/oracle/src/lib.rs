@@ -1257,8 +1257,19 @@ pub mod pallet {
             // value (I-18; the §13 try-state invariant). Reaping it would leave a
             // live round with no settled counterpart. Mirrors the core's own guard
             // in `Oracle::reap_settled_before`.
+            // Each component's newest value is exempt too — the 07 §10 carry
+            // checkpoint. Without it a component no cohort consumed for longer
+            // than the retention window loses its whole history, and the next
+            // missed report carries the neutral 0.5 instead of its real last
+            // value, moving `W`. Per component rather than per (component,
+            // version), matching `last_valid_value`'s cross-version selection,
+            // so it holds ≤ 1 entry per live MetricId. Mirrors the core's
+            // `Oracle::reap_settled_before`.
             let retained = MoneySettled::<T>::get();
-            let mut stale = ComponentValues::<T>::iter_keys()
+            let keys = ComponentValues::<T>::iter_keys().collect::<Vec<_>>();
+            let mut stale = keys
+                .iter()
+                .copied()
                 .filter(|(component, epoch, version)| {
                     *epoch < cutoff
                         && !retained.iter().any(|(key, _)| {
@@ -1266,6 +1277,12 @@ pub mod pallet {
                                 && key.epoch == *epoch
                                 && key.spec_version == *version
                         })
+                        && keys
+                            .iter()
+                            .filter(|(c, _, _)| c == component)
+                            .map(|(_, e, v)| (*e, *v))
+                            .max()
+                            != Some((*epoch, *version))
                 })
                 .map(|(component, epoch, version)| (epoch, component, version))
                 .collect::<Vec<_>>();

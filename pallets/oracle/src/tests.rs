@@ -3794,8 +3794,22 @@ fn sq492_reaper_never_strands_a_retained_round() {
         );
         assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(9)), 20));
         assert!(Rounds::<Test>::get((C, E, V)).is_none());
+        assert_eq!(
+            Oracle::reap_settled_components(E + 9_999),
+            0,
+            "the sole value for a component is its carry checkpoint"
+        );
+        ComponentValues::<Test>::insert(
+            (C, E + 1, V),
+            SettledComponent {
+                value: reported_value(),
+                path: SettlePath::Unchallenged,
+                flagged: false,
+            },
+        );
         assert_eq!(Oracle::reap_settled_components(E + 9_999), 1);
         assert!(Oracle::settled_component(C, E, V).is_none());
+        assert!(Oracle::settled_component(C, E + 1, V).is_some());
         assert_ok!(Oracle::do_try_state());
     });
 }
@@ -3856,9 +3870,13 @@ fn sq492_component_reap_batch_is_resumable_not_a_rejection() {
                 );
             }
         }
-        let stale = u32::from(per_epoch) * stale_epochs;
+        // Every component's newest entry is its 07 §10 carry checkpoint and is
+        // exempt, so only the older generations are reapable.
+        let total = u32::from(per_epoch) * stale_epochs;
+        let checkpoints = u32::from(per_epoch);
+        let reapable = total - checkpoints;
         assert!(
-            stale > COMPONENT_VALUE_REAP_BATCH as u32,
+            reapable > COMPONENT_VALUE_REAP_BATCH as u32,
             "the cap must bind"
         );
 
@@ -3871,7 +3889,7 @@ fn sq492_component_reap_batch_is_resumable_not_a_rejection() {
         let remaining_after_first_component_reap = ComponentValues::<Test>::iter().count() as u32;
         assert_eq!(
             remaining_after_first_component_reap,
-            stale - COMPONENT_VALUE_REAP_BATCH as u32
+            total - COMPONENT_VALUE_REAP_BATCH as u32
         );
         // Oldest first: the batch drained whole epochs from the bottom, so the
         // survivors are the newest ones (I-20, and deterministic across nodes
@@ -3885,12 +3903,14 @@ fn sq492_component_reap_batch_is_resumable_not_a_rejection() {
             COMPONENT_VALUE_REAP_BATCH as u32 / u32::from(per_epoch)
         );
 
-        // The next crank drains the remainder and then goes quiet.
+        // The next crank drains the rest of the reapable set and then goes
+        // quiet, leaving exactly one carry checkpoint per component standing.
         assert_eq!(
             Oracle::reap_settled_components(20),
-            remaining_after_first_component_reap
+            reapable - COMPONENT_VALUE_REAP_BATCH as u32
         );
         assert_eq!(Oracle::reap_settled_components(20), 0);
+        assert_eq!(ComponentValues::<Test>::iter().count() as u32, checkpoints);
         assert_ok!(Oracle::do_try_state());
     });
 }
