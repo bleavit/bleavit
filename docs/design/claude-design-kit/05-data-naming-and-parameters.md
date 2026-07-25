@@ -20,7 +20,7 @@ Block-time basis for human-time conversions: **6 s/block, 14,400 blocks/day** (1
 | **VIT** (native governance token) | **12 decimals**; total supply 10^9; existential deposit 0.01 VIT |
 | Prices / scores | fixed-point, **1e9 scale** at every API/event boundary; quote clamp [0.001, 0.999]; `p_S = 1 − p_L`; gate books map YES ↦ LONG |
 | Time | all deadlines are block numbers (`decide_at`, `maturity`, `grace_end`, `challenge_deadline`, `next_boundary`) — the UI computes countdowns from them |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 12`, a runtime constant, echoed in `release.json` |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 13`, a runtime constant, echoed in `release.json` |
 
 ### A2. What the UI can read and display (02 §3–§4, §7)
 
@@ -256,7 +256,7 @@ live. For mock data these are the correct realistic values.
 
 | Parameter | Value | UI surface |
 |---|---|---|
-| `prop.bond` | 1k / 5k+0.5%·Ask / 25k / 50k USDC per class | "bond required" in submit form |
+| `prop.bond` | 1k / 5k+0.5%·Ask / 25k / 50k USDC per class — the class **base** comes from `params()`, the TREASURY `0.5%·Ask` slope from the `Epoch::TreasuryBondAskBps` metadata constant (v13, SQ-186); never hardcode the slope | "bond required" in submit form |
 | `intake.max_per_account` | 4 per epoch | "3 of 4 submissions used" |
 | `intake.slash_fraction` | 10% of bond (to INSURANCE) on non-decision-grade / missing preimage | submission warning; `IntakeSlashed` toast |
 | `IntakeQueue` | 64; frozen direct read contains Submitted IDs; overflow ⇒ `IntakeFull` | queue page "full" state |

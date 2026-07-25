@@ -1978,7 +1978,7 @@ fn identity_and_version_pins_match_the_integration_contract() {
     // makes a future re-coupling fail here.
     assert_eq!(VERSION.transaction_version, TRANSACTION_VERSION);
     assert_eq!(VERSION.transaction_version, 1);
-    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 12);
+    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 13);
     assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
@@ -18315,5 +18315,69 @@ fn sq174_stake_at_risk_sums_consuming_cohort_escrow() {
             pallet_oracle::round_bond(Balance::MAX, 1, &params).is_err(),
             "the superseded sentinel overflowed the bond — the accidental fail-closed",
         );
+    });
+}
+
+/// SQ-186 (contract v13, 2026-07-25): `Epoch::TreasuryBondAskBps` is on the
+/// frozen 02 §9 metadata surface, carrying the kernel slope of 08 §7's TREASURY
+/// intake bond.
+///
+/// 13 §1 already stated the surcharge is a kernel constant governing the class
+/// **base only** — deliberately outside the `prop.bond.trs` Params row, because
+/// with no economic bounds to bind it governance could walk the surcharge toward
+/// zero and weaken intake pricing (R-7). What was missing was any way for the
+/// frontend to *read* the slope, leaving it to hardcode 50 bps. This asserts the
+/// real runtime metadata, not the Rust constant, because the hardcode is what the
+/// exposure exists to prevent.
+#[test]
+fn sq186_metadata_exposes_the_treasury_bond_ask_slope() {
+    use frame_support::__private::metadata::{RuntimeMetadata, RuntimeMetadataPrefixed};
+
+    development_ext().execute_with(|| {
+        let version = Runtime::metadata_versions()
+            .into_iter()
+            .filter(|version| matches!(version, 15 | 16))
+            .max()
+            .expect("stable2606 exposes V15 or V16 metadata");
+        let encoded = Runtime::metadata_at_version(version)
+            .expect("a reported runtime metadata version is constructible");
+        let prefixed = RuntimeMetadataPrefixed::decode(&mut &encoded[..])
+            .expect("runtime-generated metadata decodes");
+
+        macro_rules! assert_slope {
+            ($metadata:expr) => {{
+                let epoch = $metadata
+                    .pallets
+                    .iter()
+                    .find(|pallet| pallet.name == "Epoch")
+                    .expect("Epoch pallet is present");
+                let slope = epoch
+                    .constants
+                    .iter()
+                    .find(|constant| constant.name == "TreasuryBondAskBps")
+                    .expect("v13 exposes the TREASURY bond Ask slope");
+                assert_eq!(
+                    u128::decode(&mut &slope.value[..]).expect("slope decodes as u128"),
+                    futarchy_primitives::kernel::TREASURY_BOND_ASK_BPS,
+                );
+                assert_eq!(futarchy_primitives::kernel::TREASURY_BOND_ASK_BPS, 50);
+                // The contract version advertised in metadata moved with it.
+                let contract = epoch
+                    .constants
+                    .iter()
+                    .find(|constant| constant.name == "INTEGRATION_CONTRACT_VERSION")
+                    .expect("Epoch advertises the contract version");
+                assert_eq!(
+                    u32::decode(&mut &contract.value[..]).expect("version decodes"),
+                    13,
+                );
+            }};
+        }
+
+        match prefixed.1 {
+            RuntimeMetadata::V15(metadata) => assert_slope!(metadata),
+            RuntimeMetadata::V16(metadata) => assert_slope!(metadata),
+            other => panic!("unexpected runtime metadata version: {other:?}"),
+        }
     });
 }

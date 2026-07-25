@@ -85,7 +85,7 @@ class SurfaceManifestTests(unittest.TestCase):
 
     def test_schema_and_entry_shapes(self) -> None:
         self.assertEqual(self.manifest["schema"], "bleavit.critical-surface.v1")
-        self.assertEqual(self.manifest["integration_contract_version"], 12)
+        self.assertEqual(self.manifest["integration_contract_version"], 13)
         identifiers = [entry["id"] for entry in self.entries]
         self.assertEqual(len(identifiers), len(set(identifiers)))
         for entry in self.entries:

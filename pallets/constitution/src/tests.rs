@@ -192,7 +192,7 @@ fn phase_flag_bit_assignments_match_02_7_3() {
 
 #[test]
 fn contract_version_and_bounds_reexports_hold() {
-    assert_eq!(CONTRACT_VERSION, 12); // v12: registry archive-delay floor metadata binding
+    assert_eq!(CONTRACT_VERSION, 13); // v13: Epoch::TreasuryBondAskBps metadata constant (SQ-186)
     assert_eq!(MAX_PARAMS, 128); // 13 §4 registry bound
     assert_eq!(MAX_CAPABILITIES, 64);
     assert_eq!(crate::MAX_METERS, 16);
@@ -1253,11 +1253,12 @@ fn extrinsic_value_types_do_not_admit_wrong_kinds_via_scale() {
 fn genesis_registry_matches_13_1_row_encodings() {
     new_test_ext().execute_with(|| {
         // Every 13 §1 row with a scalar concrete default and no open
-        // [VERIFY] tag is seeded (105 total, incl. per-class suffix keys and
+        // [VERIFY] tag is seeded (106 total, incl. per-class suffix keys and
         // rule-6 short keys; +2 for keeper.rebate/dis.merit_min, +2 for the
-        // reserve-probe pricing rows and +3 for the SQ-173 sec.prize.* class
-        // envelopes); spot-pin the unit encodings per kind.
-        assert_eq!(Params::<Test>::count(), 105);
+        // reserve-probe pricing rows, +3 for the SQ-173 sec.prize.* class
+        // envelopes and +1 for SQ-486's adopted sec.flow_cap); spot-pin the
+        // unit encodings per kind.
+        assert_eq!(Params::<Test>::count(), 106);
 
         // Per-class suffix keys (13 rule 6) — δ floors, kernel-capped.
         // Phase-0-calibrated (V-12): dec.delta.meta 0.090 on the 1e9 grid.
@@ -2465,5 +2466,46 @@ fn sq_150_no_origin_may_amend_a_kernel_bounded_registry_row() {
             );
         }
         assert_ok!(Constitution::do_try_state());
+    });
+}
+
+/// SQ-486 (decided 2026-07-25): `sec.flow_cap` is adopted at the Phase-0
+/// calibration, ×16, with bounds that constrain the direction that is unsafe.
+///
+/// The earlier posture — leave it unseeded so the consumer clamps to the kernel
+/// ×7 floor — was wrong, not merely cautious. The 15 §4.9 security criterion was
+/// met **at the ×16 calibration** (`violations: []`), and 13 §1 says ×7 "could
+/// reject honest exactly-grade proposals": conservatism there buys a liveness
+/// hazard, not validated safety. The unsafe direction is *upward* — a higher
+/// ceiling counts more contest capital into step 9's `L̂` and eases the gate — so
+/// the row carries a ×32 max, one governed Δ ×2 step above the calibration.
+#[test]
+fn sq_486_sec_flow_cap_is_adopted_with_its_unsafe_direction_bounded() {
+    new_test_ext().execute_with(|| {
+        let record = Params::<Test>::get(key16(b"sec.flow_cap")).expect("seeded");
+        assert_eq!(
+            record.value,
+            ParamValue::Fixed(futarchy_primitives::FixedU64(16_000_000_000)),
+        );
+        assert_eq!(
+            record.min,
+            ParamValue::Fixed(futarchy_primitives::FixedU64(
+                futarchy_primitives::kernel::SEC_FLOW_CAP_FLOOR_1E9
+            )),
+            "the kernel ×7 liveness floor still binds below",
+        );
+        assert_eq!(
+            record.max,
+            ParamValue::Fixed(futarchy_primitives::FixedU64(32_000_000_000)),
+            "the unsafe direction must be bounded, not open",
+        );
+        assert!(record.kernel_bounded, "the bounds are kernel-derived");
+
+        // The adopted value is strictly above the floor the consumer used to
+        // clamp to, so the ceiling actually moved.
+        assert!(
+            record.value.as_u128()
+                > u128::from(futarchy_primitives::kernel::SEC_FLOW_CAP_FLOOR_1E9),
+        );
     });
 }

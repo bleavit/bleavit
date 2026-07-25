@@ -1781,6 +1781,19 @@ pub mod pallet {
         fn integration_contract_version() -> u32 {
             futarchy_primitives::INTEGRATION_CONTRACT_VERSION
         }
+        /// 08 §7's TREASURY intake-bond Ask surcharge slope, in basis points
+        /// (02 §9, added in contract v13 — SQ-186).
+        ///
+        /// The class **base** is the governed `prop.bond.trs` Params row; this
+        /// slope is a kernel constant and deliberately *not* part of that row
+        /// (13 §1), because with no economic bounds to bind it governance could
+        /// otherwise walk the surcharge toward zero and weaken intake pricing
+        /// (R-7). Exposed so the frontend can compute a TREASURY bond from the
+        /// live base without hardcoding the slope.
+        #[pallet::constant_name(TreasuryBondAskBps)]
+        fn treasury_bond_ask_bps() -> u128 {
+            futarchy_primitives::kernel::TREASURY_BOND_ASK_BPS
+        }
         #[pallet::constant_name(MaxLiveProposals)]
         fn max_live_proposals() -> u32 {
             MAX_LIVE_PROPOSALS_BOUND

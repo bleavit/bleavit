@@ -124,7 +124,7 @@ The `MetricId` assignment registry is owned by [05](05-welfare-and-decision-engi
 
 Proposal positions MUST project a settled proposal vault as `ScalarSettled { winner, s }`; Baseline positions MUST project a settled epoch vault as `BaselineSettled { s }` and MUST NOT fabricate a proposal branch. `RatificationStatus::NoPassedRecord` means only that the execution guard has no passing ratification record. It is deliberately agnostic between no referendum, an in-flight referendum and a failed referendum; the frontend MUST derive that lifecycle from `pallet-referenda` ([06](06-governance-and-guardians.md) §2.2). `Pending` and `Failed` are removed because the guard cannot truthfully produce them in the deployed design. This `RatificationStatus` restructure is a pre-genesis contract-v6 repair; no deployed SCALE value requires migration.
 
-The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 12`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
+The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 13`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
 
 ---
 
@@ -473,7 +473,7 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 | VIT decimals | 12 |
 | VIT existential deposit | **0.01 VIT** (= 10^10 plancks) |
 | Phase flag storage | `pallet-constitution::PhaseFlags` (§7.3) — the trading-enablement key |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 12` (runtime constant) |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 13` (runtime constant) |
 
 ---
 
@@ -496,7 +496,7 @@ Enumeration of every value the frontend's precondition tables re-check (defaults
 | `IntakeQueue = 64` bound | metadata constant | `epoch.submit` queue-cap check |
 | `intake.max_per_account` live rate limit (launch default 4; META-amendable bounds [2, 8]) | `params()` — bind `ParamView.value`, `.min`, and `.max`; no metadata constant | `epoch.submit` account-rate check |
 | `MaxLiveProposals = 32` | metadata constant | discovery bounds |
-| `prop.bond` per class | `params()` | `epoch.submit` |
+| `prop.bond` per class | `params()` for the class **base**; the TREASURY Ask surcharge is the `TreasuryBondAskBps` metadata constant (K, not part of the `Params` row — [13](13-parameters.md) §1) | `epoch.submit` |
 | `mkt.fee` (30 bps default) | `Market::Fee` for the basis-points projection used by quote recomputation, cross-checked against the raw `Perbill` inner scalar from `params()` (§4) | quote display, `buy/sell` cost recompute |
 | `mkt.obs_interval` (10 blocks) | `params()` | crank staleness check |
 | `dec.window`, `dec.trailing`, `dec.delta`, `dec.sigma`, `dec.coverage`, `dec.v_min`; `dec.extension` (K) | `params()` for tunable values/bounds. Metadata constants exist only for the rule-7 kernel-bounded `dec.window` / `dec.delta` / `dec.sigma` floors and kernel-only `dec.extension`. `dec.trailing` / `dec.coverage` / `dec.v_min` bind through `ParamView.min` / `.max`: respectively 3,600 / 28,800 blocks, 90 / 99 percent, and ×0.1 / ×10 of the per-class schedule; only the effective-v-min `2·InCapPrize` term is K. | finalized decision statistics, `decide` crank |
@@ -517,7 +517,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 
 | Pallet | Constant name | Type | Value source |
 |---|---|---|---|
-| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 12) |
+| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 13) |
 | Constitution | `MaxParams` | `u32` | `constitution_core::MAX_PARAMS` (= 128) |
 | Constitution | `MaxCapabilities` | `u32` | `constitution_core::MAX_CAPABILITIES` (= 64) |
 | Constitution | `MaxMeters` | `u32` | `constitution_core::MAX_METERS` (= 16) |
@@ -542,7 +542,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Registry (each instance) | `ArchiveDelay` | `BlockNumber` (`u32`) | `max(live Params[ledger.archive], 21 × BLOCKS_PER_DAY)`; the 21-day floor is independent of the shared ledger tunable |
 | Registry (each instance) | `MaxFilingsPerEpoch` | `u32` | `kernel::REG_MAX_FILINGS_EPOCH` (= 64) |
 | Registry (each instance) | `MaxEvidenceLen` | `u32` | fixed `H256` evidence-hash width (= 32 bytes) |
-| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 12) |
+| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 13) |
 | ExecutionGuard | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) |
 | ExecutionGuard | `MaxExecutionRecords` | `u32` | `bounds::MAX_EXECUTION_RECORDS` (= 256) |
 | ExecutionGuard | `MaxCalls` | `u32` | `kernel::MAX_CALLS` (= 16) |
@@ -551,7 +551,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | ExecutionGuard | `MaxRuntimeCodeBytes` | `u32` | runtime `Config::MaxRuntimeCodeBytes` (`pallet_preimage::MAX_SIZE`) |
 | ExecutionGuard | `ExecutionTimelockFloor` | `[u32; 4]` | [13 §1](13-parameters.md) `exec.lock.*` K hard minima, `[14,400; 4]` blocks |
 | ExecutionGuard | `ExecutionGraceFloor` | `u32` | [13 §1](13-parameters.md) `exec.grace` K hard minimum (= 100,800 blocks) |
-| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 12) |
+| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 13) |
 | Epoch | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) |
 | Epoch | `MaxIntakeQueue` | `u32` | `bounds::INTAKE_QUEUE` (= 64) |
 | Epoch | `MaxNonTerminalCohorts` | `u32` | `bounds::MAX_NON_TERMINAL_COHORTS` (= 4) |
@@ -563,13 +563,14 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Epoch | `DecisionWindowFloor` | `u32` | [13 §1](13-parameters.md) `dec.window` K hard minimum (= 14,400 blocks) |
 | Epoch | `DecisionExtension` | `u32` | `kernel::DEC_EXTENSION_BLOCKS` (= 43,200) |
 | Epoch | `DecisionDeltaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.delta.*` K hard minima (= `[5,000,000; 4]`) |
+| Epoch | `TreasuryBondAskBps` | `u128` | `kernel::TREASURY_BOND_ASK_BPS` (= 50; the 08 §7 TREASURY Ask surcharge slope, added in v13 — SQ-186) |
 | Epoch | `DecisionSigmaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.sigma.*` K hard minima (= `[0; 4]`) |
-| Welfare | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 12) |
+| Welfare | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 13) |
 | Welfare | `MaxMetricSpecs` | `u32` | `welfare_core::MAX_METRIC_SPECS` (= 16) |
 | Welfare | `MaxSnapshots` | `u32` | `welfare_core::MAX_SNAPSHOTS` (= 20) |
 | Welfare | `MaxGateFlags` | `u32` | `welfare_core::MAX_GATE_FLAGS` (= 20) |
 | Welfare | `MaxDailyGateSamples` | `u8` | `welfare_core::MAX_DAILY_GATE_SAMPLES` (= 64) |
-| FutarchyTreasury | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 12) |
+| FutarchyTreasury | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 13) |
 | FutarchyTreasury | `MaxStreams` | `u32` | `futarchy_treasury_core::MAX_STREAMS` (= 128) |
 | FutarchyTreasury | `MaxBudgetLines` | `u32` | `futarchy_treasury_core::MAX_BUDGET_LINES` (= 32) |
 | FutarchyTreasury | `MaxPolCommitments` | `u32` | `futarchy_treasury_core::MAX_POL_COMMITMENTS` (= 196) |
@@ -652,6 +653,7 @@ No other origin can write the record. The layout MUST NEVER change except by app
 
 **Version history.**
 
+- **v13 (2026-07-25) — TREASURY bond Ask-surcharge slope as metadata (SQ-186).** §9 exposes `Epoch::TreasuryBondAskBps`, the kernel `TREASURY_BOND_ASK_BPS = 50` slope of 08 §7's TREASURY intake bond. Purely **additive**: a new name on §9's frozen metadata-constant list, no existing name, type, shape or value changed, so `transaction_version` is untouched (§13 rule 7). It closes the last half of SQ-186 — 13 §1 already states the surcharge is a kernel constant governing the class **base only**, but the frontend had no way to read the slope and would have had to hardcode it. Joint backend+frontend sign-off recorded per §13(2), the user owning both sides.
 - **v12 (2026-07-24) — registry archive-delay floor (SQ-76).** Section 9 exposes the registry instances' `ArchiveDelay` metadata constant, and its value is frozen as `max(Params[ledger.archive], 21 × BLOCKS_PER_DAY)`. This preserves the 07 §7 money-deadline floor independently even if the shared ledger archive policy is lowered. Pre-genesis, no migration is required. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-24, through the standing autonomous-resolution delegation.**
 
 - **v11 (2026-07-23) — signed oracle escalation custody (A12).** Section 7.2 adds the explicit `ChallengerDefault` `SettlePath` variant for the §5.3 deadline outcome. The oracle's signed `counter_report` advances a challenged round only with reporter consent; challenger identity and cumulative bond liabilities persist across rounds, and d20 neutralization retains the bounded round record until bond/reputation resolution. This is a pre-genesis additive revision; no migration is required. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-23, through the standing autonomous-resolution delegation.**

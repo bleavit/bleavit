@@ -81,6 +81,7 @@
   "res.probe_int",
   "res.probe_to",
   "res.recover_thr",
+  "sec.flow_cap",
   "sec.prize.code",
   "sec.prize.meta",
   "sec.prize.param",

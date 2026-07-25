@@ -2234,6 +2234,23 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             ParamClass::Meta,
             true
         ),
+        // 13 §1 row `sec.flow_cap` (SQ-486, adopted 2026-07-25): the gate-bearing
+        // ceiling on the measured non-POL contest-capital term inside step 9's
+        // `L̂` and the `C_hold` diagnostic. Seeded from the Phase-0 calibration
+        // the 15 §4.9 security criterion was actually met at; the kernel ×7 min
+        // is the liveness floor (below it honest exactly-grade proposals are
+        // rejected) and the ×32 max bounds the *unsafe* direction, since a
+        // higher ceiling eases the sizing gate.
+        row(
+            b"sec.flow_cap",
+            ParamValue::Fixed(FixedU64(16_000_000_000)),
+            ParamValue::Fixed(FixedU64(kernel::SEC_FLOW_CAP_FLOOR_1E9)),
+            ParamValue::Fixed(FixedU64(32_000_000_000)),
+            Some(MaxDelta::Factor(2)),
+            2,
+            ParamClass::Meta,
+            true
+        ),
         row(
             b"phase3.tvl_cap",
             ParamValue::Balance(2_000_000_000_000),
