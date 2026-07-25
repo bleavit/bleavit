@@ -568,9 +568,9 @@ reason = "13 §1 / rule 7; 15 §4.6: adopted from the Phase-0 published calibrat
 
 [[entry]]
 key = "sec.flow_cap"
-class = "diagnostic"
-genesis = false
-reason = "13 §1 explicitly marks sec.flow_cap diagnostic-only in v1; it never gates dispatch."
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: the prior \"diagnostic-only, never gates dispatch\" reason was made false by the SQ-231 amendment — the ceiling is gate-bearing inside step 9's L-hat. Adopted from the Phase-0 calibration (SQ-486) and seeded with kernel-bounded metadata; covered by the generated per-key set_param/amend_registry suite."
 
 [[entry]]
 key = "ops.bootnodes"

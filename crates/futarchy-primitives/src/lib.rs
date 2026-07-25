@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 12;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 13;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -1208,10 +1208,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn contract_version_is_v12() {
-        // SQ-76 adds the registry ArchiveDelay metadata binding and its
-        // independent money-deadline floor to the frozen contract surface.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 12);
+    fn contract_version_is_v13() {
+        // SQ-186 adds `Epoch::TreasuryBondAskBps` — the kernel slope of 08 §7's
+        // TREASURY intake bond — to 02 §9's frozen metadata-constant list. Purely
+        // additive, so `transaction_version` is untouched (02 §13 rule 7).
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 13);
     }
 
     #[test]

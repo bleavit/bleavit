@@ -88,6 +88,7 @@ type SingleBlockMigrations = (
     crate::migrations::MigrateConstitutionReserveProbeV2,
     crate::migrations::MigrateOracleReserveProbeV1,
     crate::migrations::MigrateConstitutionSecurityPrizeV3,
+    crate::migrations::MigrateConstitutionSecurityFlowCapV4,
 );
 #[cfg(all(feature = "phase-four", not(feature = "recovery")))]
 type SingleBlockMigrations = (
@@ -95,6 +96,7 @@ type SingleBlockMigrations = (
     crate::migrations::MigrateConstitutionReserveProbeV2,
     crate::migrations::MigrateOracleReserveProbeV1,
     crate::migrations::MigrateConstitutionSecurityPrizeV3,
+    crate::migrations::MigrateConstitutionSecurityFlowCapV4,
     crate::migrations::PhaseFourTransition,
 );
 #[cfg(feature = "recovery")]
@@ -103,6 +105,7 @@ type SingleBlockMigrations = (
     crate::migrations::MigrateConstitutionReserveProbeV2,
     crate::migrations::MigrateOracleReserveProbeV1,
     crate::migrations::MigrateConstitutionSecurityPrizeV3,
+    crate::migrations::MigrateConstitutionSecurityFlowCapV4,
     crate::migrations::TerminalRecoveryTransition,
 );
 
@@ -2001,14 +2004,19 @@ fn fixed_param_or(name: &[u8], default: u64) -> u64 {
 }
 /// Live `sec.flow_cap` (13 §1) clamped to its kernel hard minimum ×7.
 ///
-/// The row's published value is Phase-0 sim-gated and deliberately absent from
-/// the seeded genesis registry (`sec.*` stay out until calibrated — the same
-/// fail-closed posture as the unpublished `sec.prize.*` floors, which
-/// `in_cap_prize` renders as `None`). A ceiling has the opposite conservative
-/// direction from a floor: `None` here would zero the contest term wrongly,
-/// while any *large* default would widen step 9 — so an unpublished (or
-/// sub-minimum) read collapses to exactly the kernel minimum 7, the smallest
-/// admissible ceiling (08 §5.3; SQ-231).
+/// SQ-486 adopted the row at ×16 from the Phase-0 calibration, so it **is** now
+/// seeded at genesis and inserted on existing chains by
+/// `MigrateConstitutionSecurityFlowCapV4`. The clamp stays, and it is not
+/// redundant: it keeps a hypothetically absent or sub-minimum read collapsing to
+/// exactly the kernel minimum ×7 rather than to zero. That direction is the
+/// deliberate one — a ceiling is not a floor, so `0` would wrongly *erase* the
+/// contest-capital term while any large default would *widen* step 9, and ×7 is
+/// the smallest admissible ceiling (08 §5.3; SQ-231).
+///
+/// Unlike `in_cap_prize`'s envelope reads, this consumer intentionally accepts
+/// the compile-time default as a fallback: an unreachable ceiling must degrade to
+/// the tightest lawful one, whereas an unratified *security envelope* must not be
+/// backed at all.
 #[allow(dead_code)]
 pub(crate) fn sec_flow_cap_1e9() -> u64 {
     fixed_param(b"sec.flow_cap").max(kernel::SEC_FLOW_CAP_FLOOR_1E9)

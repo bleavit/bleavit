@@ -85,7 +85,7 @@ class SurfaceManifestTests(unittest.TestCase):
 
     def test_schema_and_entry_shapes(self) -> None:
         self.assertEqual(self.manifest["schema"], "bleavit.critical-surface.v1")
-        self.assertEqual(self.manifest["integration_contract_version"], 12)
+        self.assertEqual(self.manifest["integration_contract_version"], 13)
         identifiers = [entry["id"] for entry in self.entries]
         self.assertEqual(len(identifiers), len(set(identifiers)))
         for entry in self.entries:
@@ -115,7 +115,16 @@ class SurfaceManifestTests(unittest.TestCase):
             for entry in self.entries
             if entry["id"] == "constant.identity.contract_version"
         )
-        self.assertEqual(version["layout"], {"type": "u32", "value": "0x0c000000"})
+        # Derive the expected SCALE bytes from the manifest's own declared
+        # contract version instead of pinning a literal. The literal form of this
+        # assertion silently agreed with a stale `0x0c000000` after the top-level
+        # version moved to 13, so the suite stayed green while the manifest no
+        # longer matched the runtime it gates (SQ-186 connector review).
+        declared = self.manifest["integration_contract_version"]
+        self.assertEqual(
+            version["layout"],
+            {"type": "u32", "value": "0x" + declared.to_bytes(4, "little").hex()},
+        )
 
     def test_section_six_events_and_section_seven_attestor_storage_are_exact(self) -> None:
         expected_events = {

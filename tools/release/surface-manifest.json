@@ -1,6 +1,6 @@
 {
   "schema": "bleavit.critical-surface.v1",
-  "integration_contract_version": 12,
+  "integration_contract_version": 13,
   "description": "Critical chain/frontend surface frozen by architecture 02 sections 3, 6-9, and 12.",
   "release_blockers": [
     {
@@ -757,7 +757,7 @@
       "citation": "02 §8; 02 §13",
       "layout": {
         "type": "u32",
-        "value": "0x0c000000"
+        "value": "0x0d000000"
       }
     },
     {
@@ -1058,6 +1058,18 @@
       "layout": {
         "type": "u32",
         "value": "0x80130300"
+      }
+    },
+    {
+      "id": "constant.epoch.treasury_bond_ask_bps",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "TreasuryBondAskBps",
+      "required": true,
+      "citation": "02 §9; 08 §7",
+      "layout": {
+        "type": "u128",
+        "value": "0x32000000000000000000000000000000"
       }
     },
     {
