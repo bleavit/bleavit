@@ -5157,19 +5157,60 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
             components
         }
     }
-    fn incident_multiplier(epoch: EpochId) -> FixedU64 {
+    fn incident_multiplier(epoch: EpochId, spec_version: u16) -> Option<FixedU64> {
         // The IncidentRegistry aggregate IS the C_attested multiplier
-        // (registry-core: an empty closed epoch records exactly 1.0). An
-        // absent entry means the epoch is not closed yet; the neutral 1.0 is
-        // returned because this seam is unreachable while
-        // `onchain_components` is empty (snapshot cranks reject first) — the
-        // real MetricInputs must instead gate snapshots on registry close-out
-        // rather than fabricate a multiplier (returning 0 here would zero
-        // C_attested outright, which is fail-destructive, not fail-safe).
-        match pallet_registry::Aggregates::<Runtime>::get(epoch) {
-            Some(value) => value,
-            None => FixedU64(1_000_000_000),
+        // (registry-core: an empty *closed* epoch records exactly 1.0), and
+        // since SQ-141 it is keyed by `(epoch, frozen version)` because two
+        // cohorts measuring one epoch under different specs must not share a
+        // number.
+        //
+        // A miss is answered by asking *why* it missed, and the two reasons are
+        // not alike (07 §7 *the reader MUST fail closed*):
+        //
+        //  - **No registry footprint at all.** Nothing was ever filed against
+        //    this epoch, and `close_epoch` deliberately refuses to close such an
+        //    epoch (`NothingToClose`) so a griefer cannot manufacture the
+        //    favourable "no filings ⇒ 1" record. The absence *is* the evidence,
+        //    and 1.0 is the honest reading — the pull-side default 07 §7's
+        //    consumption model has always relied on. Refusing here instead would
+        //    wedge the chain: the overwhelmingly common epoch has no incident
+        //    filings, so no snapshot could ever be recorded.
+        //
+        //  - **A footprint exists but this version's aggregate is not in it.**
+        //    Either the version's `close_epoch` has not run, a filing is still
+        //    non-terminal, or the caller named a version no cohort froze. Now
+        //    the absence proves nothing about incidents, and answering 1.0 would
+        //    hand a cohort full-strength `C_attested` for incidents filed under
+        //    the sibling version — silently, with no error, no event and no
+        //    try-state signal. That is the G-1 violation the pair key makes
+        //    reachable, so the read refuses and `record_snapshot` retries. 07
+        //    §11(1)'s d20 money deadline guarantees the record arrives, and the
+        //    filing window for epoch `m` closes well before it.
+        if let Some(value) = pallet_registry::Aggregates::<Runtime>::get(epoch, spec_version) {
+            return Some(value);
         }
+        // While the epoch's filing count is live a filing can still arrive under
+        // **any** version, so no version's absence is yet evidence of anything.
+        if pallet_registry::FilingCount::<Runtime>::contains_key(epoch) {
+            return None;
+        }
+        // Once the window has shut, the evidence is **this version's own**
+        // retained filings — deliberately not "the epoch has some record".
+        //
+        // Scoping it to the epoch would strand a version that legitimately has
+        // no filings: an incident filed under the sibling version leaves a
+        // footprint on the epoch, and this version — whose cohorts had nothing
+        // filed against them — would refuse forever unless a keeper happened to
+        // crank a close for a version with nothing to close. That makes a
+        // *safety* read depend on off-chain liveness for no gain, since "this
+        // version has no filings" is exactly the "no filings ⇒ 1" case
+        // `close_epoch` would record anyway.
+        //
+        // The scan is bounded by `MaxFilingsPerEpoch` (64) and reached only
+        // after the filing window closes, on a once-per-epoch-per-version crank.
+        let has_records = pallet_registry::Filings::<Runtime>::iter_prefix_values(epoch)
+            .any(|filing| filing.spec_version == spec_version);
+        (!has_records).then_some(FixedU64(1_000_000_000))
     }
     fn daily_components(
         epoch: EpochId,
@@ -5260,6 +5301,7 @@ impl pallet_welfare::Config for Runtime {
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
     type SnapshotSchedule = RuntimeSnapshotSchedule;
     type KeeperRebate = FutarchyTreasury;
+    type OracleAdmission = RuntimeOracleAdmission;
     type WeightInfo = crate::weights::pallet_welfare::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
@@ -5601,6 +5643,56 @@ type RuntimeProbeDispatch = bleavit_xcm::probe::XcmProbeDispatcher<
     XcmTrafficRecorder,
 >;
 
+/// 07 §2(5)'s admission preconditions, read live at `register_spec`.
+///
+/// This is the first consumer `orc.n_min` has ever had: before it, both halves
+/// of §2(5) — the reporter/watchtower seats and §6.3's bond-coverage rule —
+/// were enforced nowhere, so an attested component could be admitted to a
+/// MetricSpec with no reporter able to report it and no ladder able to make a
+/// lie cost more than it can move (SQ-341).
+pub struct RuntimeOracleAdmission;
+impl pallet_welfare::OracleAdmission for RuntimeOracleAdmission {
+    fn admission() -> pallet_welfare::AttestedAdmission {
+        let bond_bps = perbill_bps_param_or(
+            b"orc.bond_bps",
+            pallet_oracle::OracleParams::DEFAULT.bond_bps,
+        );
+        let rounds = u8_param_or(b"orc.rounds", pallet_oracle::OracleParams::DEFAULT.rounds);
+        // 07 §3 requires "≥ 3 registered reporters **with full stakes**", and the
+        // counted-map size is not that: `record_reporter_offense` halves the
+        // stake on a second adjudicated-false report and leaves the reporter
+        // **registered** (ejection is the third offense). Counting map entries
+        // would let a half-staked seat satisfy the admission gate, admitting an
+        // attested component against less collateral than §3 demands — the
+        // stake is the whole reason a reporter's word is worth anything
+        // (Codex review, PR #173).
+        let reporter_stake = balance_param_or(
+            b"orc.rep_stake",
+            pallet_oracle::OracleParams::DEFAULT.reporter_stake,
+        );
+        pallet_welfare::AttestedAdmission {
+            reporters: pallet_oracle::Reporters::<Runtime>::iter_values()
+                .filter(|info| info.stake >= reporter_stake)
+                .count() as u32,
+            watchtowers: pallet_oracle::Watchtowers::<Runtime>::count(),
+            reporter_min: u32::from(u8_param_or(
+                b"orc.n_min",
+                futarchy_primitives::kernel::ORC_REPORTERS_MIN,
+            )),
+            watchtower_min: u32::from(u8_param_or(
+                b"wt.quorum",
+                pallet_oracle::OracleParams::DEFAULT.watchtower_quorum,
+            )),
+            // `None` here refuses every attested component — the opposite
+            // direction `RegistryParams::coverage_bps` takes on the same
+            // unreadable ladder, and the fail-closed one for admission: 07 §6.3
+            // exists precisely to stop a component settling money against a
+            // ladder nobody can size.
+            coverage_bps: pallet_oracle::coverage_bps(rounds, bond_bps),
+        }
+    }
+}
+
 pub struct RegistryParams;
 impl pallet_registry::RegistryParams for RegistryParams {
     fn bond_incident() -> Balance {
@@ -5634,16 +5726,16 @@ impl pallet_registry::RegistryParams for RegistryParams {
             pallet_oracle::OracleParams::DEFAULT.bond_bps,
         );
         let rounds = u8_param_or(b"orc.rounds", pallet_oracle::OracleParams::DEFAULT.rounds);
-        // `(2^rounds − 1)`, saturating: `orc.rounds` is kernel-bounded to 2–4, so
-        // the multiple is 3–15 and cannot overflow, but a malformed read must
-        // still degrade to the tightest lawful ladder rather than to zero — a
-        // zero multiple would price every filing at the floor (G-1).
-        let ladder = 1u32
-            .checked_shl(u32::from(rounds))
-            .map(|p| p.saturating_sub(1))
-            .filter(|m| *m > 0)
-            .unwrap_or(3);
-        bps.saturating_mul(ladder)
+        // The derivation itself is single-homed in `oracle_core::coverage_bps`
+        // (07 §6.3's owner) — this call site only chooses the failure direction
+        // for *bond pricing*. `orc.rounds` is kernel-bounded to 2–4, so `None`
+        // means a malformed read; degrade to the tightest lawful ladder (×3)
+        // rather than to zero, because a zero multiple would price every filing
+        // at the floor (G-1). Attested admission takes the opposite direction
+        // on the same `None` and refuses outright.
+        pallet_oracle::coverage_bps(rounds, bps).unwrap_or_else(|| {
+            pallet_oracle::coverage_bps(pallet_oracle::ORC_ROUND_CAP_MIN, bps).unwrap_or(bps)
+        })
     }
 }
 pub struct OracleWatchtowers;
@@ -5659,6 +5751,7 @@ impl pallet_registry::WelfareSink for WelfarePullSink {
     fn note_external_component(
         _: registry_core::RegistryKind,
         _: EpochId,
+        _: u16,
         _: FixedU64,
     ) -> sp_runtime::DispatchResult {
         Ok(())
@@ -5678,6 +5771,21 @@ pub struct RuntimeRegistryEpoch;
 /// Single-homed so the `runtime-benchmarks` path can execute the identical walk
 /// it is meant to measure. Bounded: at most `MAX_NON_TERMINAL_COHORTS` (4)
 /// schedules × five proposal vaults each (13 §4).
+/// Whether the frozen MetricSpec `version` registers the A-pillar milestone
+/// component — the predicate behind 07 §7's component-scoped
+/// `Exposure(Milestone, m)`.
+///
+/// Gated to match its only caller: the production arm of `cohort_exposure`.
+/// Benchmark builds take the fixture arm, so without this the function is dead
+/// code there and `-D warnings` fails a gate an ungated `cargo check` passes.
+#[cfg(not(feature = "runtime-benchmarks"))]
+fn milestone_component_is_frozen_in(version: u16) -> bool {
+    pallet_welfare::MetricSpecs::<Runtime>::get(version)
+        .into_iter()
+        .flatten()
+        .any(|spec| spec.id == futarchy_primitives::metric_ids::A_SHIPPED_UPGRADES)
+}
+
 fn incident_cohort_escrow(epoch: EpochId) -> Balance {
     pallet_epoch::CohortSchedules::<Runtime>::iter_values()
         .filter(|schedule| cohort_consumes_measurement(schedule, epoch))
@@ -5695,44 +5803,64 @@ impl pallet_registry::EpochContext for RuntimeRegistryEpoch {
     fn filing_window_end(epoch: EpochId) -> u32 {
         report_window_end(epoch).map_or(0, |end| end)
     }
-    fn frozen_spec_version(epoch: EpochId) -> Option<u16> {
+    fn frozen_spec_versions(epoch: EpochId) -> Vec<u16> {
+        // Every version some live cohort froze for this measurement epoch
+        // (I-16), not the unique one. The previous reader collapsed a
+        // multi-version epoch to `None`, and `file` turned that into
+        // `SpecVersionMismatch` — so an activation boundary refused **every**
+        // filing for the epoch, including ones naming a version that was
+        // unambiguously frozen. That was fail-closed in the wrong place: the
+        // ambiguity is in the aggregate, which SQ-141 keys by the pair, not in
+        // the filing, which names its version explicitly.
+        //
+        // A version is still dropped if `MetricSpecs` no longer holds it: a
+        // filing must attest under a spec that exists to be recomputed against.
+        // The bound is `epoch.horizon_k ≤ 2` (05 §3.3, SQ-496) — the same factor
+        // that sizes `MAX_AGGREGATES`.
         let mut versions = pallet_epoch::CohortSchedules::<Runtime>::iter_values()
             .filter(|schedule| cohort_consumes_measurement(schedule, epoch))
-            .flat_map(|schedule| schedule.specs.into_iter().map(|(_, version)| version))
+            .flat_map(|schedule| schedule.specs.clone().into_iter().map(|(_, v)| v))
+            .filter(|version| pallet_welfare::MetricSpecs::<Runtime>::contains_key(version))
             .collect::<Vec<_>>();
         versions.sort_unstable();
         versions.dedup();
-        (versions.len() == 1)
-            .then(|| versions.first().copied())
-            .flatten()
-            .filter(|version| pallet_welfare::MetricSpecs::<Runtime>::contains_key(version))
+        versions
     }
-    fn milestone_target(_: EpochId) -> u32 {
-        // A8 fail-closed: MetricSpec has no milestone-target field, so the
-        // Milestone registry cannot normalize claims — owner MetricSpec schema
-        // amendment/SQ-175. Zero makes `file` and `close_epoch` reject with
-        // `MilestoneTargetUnset` (07 §7 *Milestone normalization*: "until the
-        // MetricSpec surface carries the field no milestone component may be
-        // admitted"), so no milestone filing is admitted and no fabricated 0.0
-        // aggregate ever reaches welfare (SQ-291).
+    fn milestone_target(_: EpochId, spec_version: u16) -> u32 {
+        // SQ-175: the frozen MetricSpec's own `target`, read at the version the
+        // caller names. It is per-spec and per-version by construction (I-16) —
+        // a global tunable could retroactively renormalize milestones a live
+        // cohort is already measuring, which is why 05 §4.4 puts it in the spec
+        // and never in 13.
         //
-        // Benchmark-only exception, on the B5 precedent of benchmark seams with
+        // Absent spec, absent milestone component, or a zero target all return
+        // 0, which `file` and `close_epoch` turn into `MilestoneTargetUnset`
+        // (07 §7 *Milestone normalization*). That is the fail-closed direction:
+        // a fabricated aggregate of 0.0 would be a fail-*adverse* measurement
+        // masquerading as a real one (SQ-291). `register_spec` already refuses
+        // a spec whose milestone component has no positive target (SQ-341), so
+        // in practice this reads a value the registration gate has validated.
+        let target = pallet_welfare::MetricSpecs::<Runtime>::get(spec_version)
+            .into_iter()
+            .flatten()
+            .find(|spec| spec.id == futarchy_primitives::metric_ids::A_SHIPPED_UPGRADES)
+            .map_or(0, |spec| spec.target);
+        // Benchmark-only fallback, on the B5 precedent of benchmark seams with
         // zero pallets dropped: `define_benchmarks!` measures the
-        // `MilestoneRegistry` instance, and every setup routes through `file()`
-        // (`file_many` in `pallets/registry/src/benchmarking.rs`). A zero target
-        // aborts each setup with `MilestoneTargetUnset` before anything is
-        // measured, so weight generation for the whole instance would die
-        // silently rather than loudly. This value is measurement scaffolding
-        // only: `runtime-benchmarks` is never enabled in a release runtime, so
-        // the fail-closed production posture above is unchanged.
+        // `MilestoneRegistry` instance and every setup routes through `file()`
+        // (`file_many` in `pallets/registry/src/benchmarking.rs`), which does not
+        // build welfare state. With no registered spec the read above is 0, each
+        // setup aborts with `MilestoneTargetUnset` before anything is measured,
+        // and weight generation for the whole instance dies silently rather than
+        // loudly. Narrower than the pre-SQ-175 version, which overrode the seam
+        // unconditionally: a benchmark that *does* register a spec now measures
+        // against its real target. `runtime-benchmarks` is never enabled in a
+        // release runtime, so the production posture is unchanged.
         #[cfg(feature = "runtime-benchmarks")]
-        {
-            registry_core::MILESTONE_TARGET_POINTS
+        if target == 0 {
+            return registry_core::MILESTONE_TARGET_POINTS;
         }
-        #[cfg(not(feature = "runtime-benchmarks"))]
-        {
-            0
-        }
+        target
     }
     fn cohort_exposure(kind: registry_core::RegistryKind, epoch: EpochId) -> Option<Balance> {
         match kind {
@@ -5764,13 +5892,36 @@ impl pallet_registry::EpochContext for RuntimeRegistryEpoch {
                 }
                 #[cfg(not(feature = "runtime-benchmarks"))]
                 {
-                    let _ = epoch;
-                    // The Milestone aggregate has no MetricId binding:
-                    // `note_external_component` is a no-op pull sink and
-                    // `milestone_target` is zero in production. Until SQ-175
-                    // wires that binding, no cohort exposure is determinable.
-                    // `None` is SQ-296's G-1 status-quo posture, not a stub.
-                    None
+                    // 07 §7: `Exposure(Milestone, m)` is component-scoped — the
+                    // cohorts whose **frozen** MetricSpec consumes the milestone
+                    // component for `m`, not every cohort consuming `m` (that is
+                    // the Incident set, because `I` is a scalar multiplier and
+                    // not a `MetricId`). SQ-175 makes this determinable for the
+                    // first time: the spec now carries the milestone `target`,
+                    // so "consumes the milestone component" is a real predicate
+                    // over the frozen version rather than an unbound seam.
+                    //
+                    // Still `None` — never `Some(0)` — when no live cohort's
+                    // frozen spec carries the component: an undeterminable
+                    // exposure must refuse the filing (`ExposureUnavailable`,
+                    // G-1), whereas a zero would price it at the floor and
+                    // under-collateralize it (SQ-296).
+                    let mut consuming = false;
+                    let escrow = pallet_epoch::CohortSchedules::<Runtime>::iter_values()
+                        .filter(|schedule| cohort_consumes_measurement(schedule, epoch))
+                        .fold(0_u128, |total, schedule| {
+                            schedule.specs.iter().fold(total, |sum, (pid, version)| {
+                                if !milestone_component_is_frozen_in(*version) {
+                                    return sum;
+                                }
+                                consuming = true;
+                                sum.saturating_add(
+                                    pallet_conditional_ledger::Vaults::<Runtime>::get(pid)
+                                        .map_or(0, |vault| vault.escrowed),
+                                )
+                            })
+                        });
+                    consuming.then_some(escrow)
                 }
             }
         }
@@ -8394,6 +8545,33 @@ impl pallet_welfare::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
         pallet_epoch::EpochOf::<Runtime>::mutate(|info| info.index = epoch.saturating_add(1));
     }
     fn prime_metric_inputs(_: u16) {}
+    fn seat_oracle() {
+        // Real oracle storage, so the admission gate's reads are measured rather
+        // than assumed: `Reporters`/`Watchtowers` are counted maps, and the
+        // counts plus two `Constitution::Params` reads are what `register_spec`
+        // pays on every call.
+        let params = pallet_oracle::OracleParams::DEFAULT;
+        for index in 0..u32::from(futarchy_primitives::kernel::ORC_REPORTERS_MIN) {
+            pallet_oracle::Reporters::<Runtime>::insert(
+                AccountId32::new([200u8.saturating_add(index as u8); 32]),
+                pallet_oracle::ReporterInfo {
+                    stake: params.reporter_stake,
+                    registered_at: 0,
+                    offenses: 0,
+                },
+            );
+        }
+        for index in 0..u32::from(params.watchtower_quorum) {
+            pallet_oracle::Watchtowers::<Runtime>::insert(
+                AccountId32::new([220u8.saturating_add(index as u8); 32]),
+                pallet_oracle::WatchtowerInfo {
+                    stake: params.watchtower_stake,
+                    registered_at: 0,
+                    inactive_epochs: 0,
+                },
+            );
+        }
+    }
 }
 
 #[cfg(feature = "runtime-benchmarks")]
@@ -8482,6 +8660,8 @@ impl pallet_oracle::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
             has_gaming_vectors: true,
             has_challenge_procedure: true,
             prior_bounds: [FixedU64(1_000_000_000); pallet_welfare::HISTORY_PRIORS],
+            target: 100,
+            delta_s_max_bps: 1_000,
         };
         pallet_welfare::MetricSpecs::<Runtime>::insert(
             version,

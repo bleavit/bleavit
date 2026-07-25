@@ -174,13 +174,27 @@ pub struct RegistryFilingSnapshot {
     pub deadline: Option<u64>,
 }
 
+/// One `(epoch, spec_version)` bucket of a registry instance's lifecycle.
+/// 07 §7 (SQ-141) versions that lifecycle by the pair — an activation boundary
+/// leaves two cohorts measuring the same epoch under different frozen specs,
+/// and folding their filings into one aggregate would combine claims governed
+/// by different frozen specs (G-1). `Aggregates`, `ClosedAt`,
+/// `close_epoch` and `reap_epoch` are all keyed by the pair; `Filings` and
+/// `FilingCount` deliberately are not, so the version of a filing comes from
+/// its own record and `filing_count_present` is an epoch-wide fact replicated
+/// across that epoch's buckets.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistryEpochSnapshot {
     pub pallet: String,
     pub epoch: u64,
+    pub spec_version: u64,
     pub filings: Vec<RegistryFilingSnapshot>,
+    /// `FilingCount[epoch]`, which is keyed by epoch alone — true for every
+    /// live version of that epoch, and never a version's own evidence.
     pub filing_count_present: bool,
+    /// `Aggregates[(epoch, spec_version)]` — this version's own aggregate.
     pub aggregate_present: bool,
+    /// `ClosedAt[(epoch, spec_version)]` — this version's own close block.
     pub closed_at: Option<u64>,
     pub archive_delay: Option<u64>,
 }
@@ -666,55 +680,14 @@ impl SnapshotExtractor {
                 continue;
             }
             let archive_delay = self.constant_u64(at_block, pallet, "ArchiveDelay");
-            let mut by_epoch = BTreeMap::<u64, RegistryEpochSnapshot>::new();
-            for (keys, value) in self.iter_values(at_block, pallet, "Filings").await {
-                let Some(epoch) = keys.first().and_then(as_u64) else {
-                    continue;
-                };
-                let Some(filing_id) = keys.get(1).and_then(as_u64) else {
-                    continue;
-                };
-                let Some(state_value) = value.at("state") else {
-                    continue;
-                };
-                let Some(state) = variant_name(state_value) else {
-                    continue;
-                };
-                by_epoch
-                    .entry(epoch)
-                    .or_insert_with(|| registry_epoch(pallet, epoch, archive_delay))
-                    .filings
-                    .push(RegistryFilingSnapshot {
-                        filing_id,
-                        state: state.to_owned(),
-                        deadline: variant_field(state_value, "window_end").and_then(as_u64),
-                    });
-            }
-            for (keys, _) in self.iter_values(at_block, pallet, "FilingCount").await {
-                if let Some(epoch) = keys.first().and_then(as_u64) {
-                    by_epoch
-                        .entry(epoch)
-                        .or_insert_with(|| registry_epoch(pallet, epoch, archive_delay))
-                        .filing_count_present = true;
-                }
-            }
-            for (keys, _) in self.iter_values(at_block, pallet, "Aggregates").await {
-                if let Some(epoch) = keys.first().and_then(as_u64) {
-                    by_epoch
-                        .entry(epoch)
-                        .or_insert_with(|| registry_epoch(pallet, epoch, archive_delay))
-                        .aggregate_present = true;
-                }
-            }
-            for (keys, value) in self.iter_values(at_block, pallet, "ClosedAt").await {
-                if let Some(epoch) = keys.first().and_then(as_u64) {
-                    by_epoch
-                        .entry(epoch)
-                        .or_insert_with(|| registry_epoch(pallet, epoch, archive_delay))
-                        .closed_at = as_u64(&value);
-                }
-            }
-            result.extend(by_epoch.into_values());
+            result.extend(group_registry_epochs(
+                pallet,
+                archive_delay,
+                self.iter_values(at_block, pallet, "Filings").await,
+                self.iter_values(at_block, pallet, "Aggregates").await,
+                self.iter_values(at_block, pallet, "ClosedAt").await,
+                self.iter_values(at_block, pallet, "FilingCount").await,
+            ));
         }
         result
     }
@@ -1162,16 +1135,115 @@ fn capability(role: Role, available: bool, missing_reason: &'static str) -> Role
     }
 }
 
-fn registry_epoch(pallet: &str, epoch: u64, archive_delay: Option<u64>) -> RegistryEpochSnapshot {
+fn registry_epoch(
+    pallet: &str,
+    epoch: u64,
+    spec_version: u64,
+    archive_delay: Option<u64>,
+) -> RegistryEpochSnapshot {
     RegistryEpochSnapshot {
         pallet: pallet.to_owned(),
         epoch,
+        spec_version,
         filings: Vec::new(),
         filing_count_present: false,
         aggregate_present: false,
         closed_at: None,
         archive_delay,
     }
+}
+
+/// Fold a registry instance's four maps into the per-`(epoch, spec_version)`
+/// buckets the planner cranks (07 §7, SQ-141). The three versioned inputs each
+/// *name* their version — `Filings` in the record, `Aggregates`/`ClosedAt` in
+/// the second key component — and only they may create a bucket.
+///
+/// Every bucket is therefore resolved, never defaulted: `close_epoch` and
+/// `reap_epoch` act on the version they are handed, so a bucket assembled under
+/// a guessed version would crank a sibling cohort's record. An entry whose
+/// version does not decode is dropped and stays unplanned (G-1).
+fn group_registry_epochs(
+    pallet: &str,
+    archive_delay: Option<u64>,
+    filings: impl IntoIterator<Item = (Vec<Value<()>>, Value<()>)>,
+    aggregates: impl IntoIterator<Item = (Vec<Value<()>>, Value<()>)>,
+    closed_at: impl IntoIterator<Item = (Vec<Value<()>>, Value<()>)>,
+    filing_counts: impl IntoIterator<Item = (Vec<Value<()>>, Value<()>)>,
+) -> Vec<RegistryEpochSnapshot> {
+    let mut by_version = BTreeMap::<(u64, u64), RegistryEpochSnapshot>::new();
+    for (keys, value) in filings {
+        let Some(epoch) = keys.first().and_then(as_u64) else {
+            continue;
+        };
+        let Some(filing_id) = keys.get(1).and_then(as_u64) else {
+            continue;
+        };
+        // `Filings` keeps its `(epoch, filing_id)` key — the record carries the
+        // version, and `close_epoch` folds only the filings carrying the one it
+        // names. Each filing must therefore land in its own version's bucket.
+        let Some(spec_version) = value.at("spec_version").and_then(as_u64) else {
+            continue;
+        };
+        let Some(state_value) = value.at("state") else {
+            continue;
+        };
+        let Some(state) = variant_name(state_value) else {
+            continue;
+        };
+        by_version
+            .entry((epoch, spec_version))
+            .or_insert_with(|| registry_epoch(pallet, epoch, spec_version, archive_delay))
+            .filings
+            .push(RegistryFilingSnapshot {
+                filing_id,
+                state: state.to_owned(),
+                deadline: variant_field(state_value, "window_end").and_then(as_u64),
+            });
+    }
+    for (keys, _) in aggregates {
+        if let Some((epoch, spec_version)) = registry_version_key(&keys) {
+            by_version
+                .entry((epoch, spec_version))
+                .or_insert_with(|| registry_epoch(pallet, epoch, spec_version, archive_delay))
+                .aggregate_present = true;
+        }
+    }
+    for (keys, value) in closed_at {
+        if let Some((epoch, spec_version)) = registry_version_key(&keys) {
+            by_version
+                .entry((epoch, spec_version))
+                .or_insert_with(|| registry_epoch(pallet, epoch, spec_version, archive_delay))
+                .closed_at = as_u64(&value);
+        }
+    }
+    // `FilingCount` last, and strictly read-only over the buckets the versioned
+    // maps established. It stays keyed by the epoch alone (07 §7: it is the
+    // filing-id allocator and the 64-per-epoch cap, both facts about an epoch
+    // rather than a version of it), so it applies to *every* live version of
+    // that epoch — and it can never name one. An epoch whose counter is all
+    // that remains carries no version to crank, so it is left unplanned instead
+    // of being attributed to a guessed version 0.
+    for (keys, _) in filing_counts {
+        let Some(epoch) = keys.first().and_then(as_u64) else {
+            continue;
+        };
+        for bucket in by_version
+            .range_mut((epoch, u64::MIN)..=(epoch, u64::MAX))
+            .map(|(_, bucket)| bucket)
+        {
+            bucket.filing_count_present = true;
+        }
+    }
+    by_version.into_values().collect()
+}
+
+/// The `(epoch, spec_version)` key of the versioned registry maps —
+/// `Aggregates` and `ClosedAt` are `double_map (EpochId, MetricSpecVersion)`
+/// since SQ-141, so subxt yields two key components. Both must decode: a
+/// single-component key belongs to a pre-v14 runtime whose version cannot be
+/// recovered, and dropping the entry keeps the reader fail-closed.
+fn registry_version_key(keys: &[Value<()>]) -> Option<(u64, u64)> {
+    Some((as_u64(keys.first()?)?, as_u64(keys.get(1)?)?))
 }
 
 fn resolve_tick_batch(value: Option<u64>) -> usize {
@@ -1641,7 +1713,10 @@ mod tests {
     use crate::planner::{plan, PlannerConfig};
     use scale_info::TypeInfo;
     use subxt::ext::{
-        codec::Encode, scale_decode::DecodeAsType, scale_encode::EncodeAsType, scale_value::Value,
+        codec::Encode,
+        scale_decode::DecodeAsType,
+        scale_encode::EncodeAsType,
+        scale_value::{Composite, Value},
     };
 
     #[allow(dead_code)]
@@ -2323,5 +2398,140 @@ mod tests {
             derive_welfare_candidates(Some(11), &activations, &recorded, &cohorts);
         assert_eq!(active, Some(2));
         assert_eq!(candidates, vec![(10, 1), (10, 2)]);
+    }
+
+    fn filing_entry(
+        epoch: u64,
+        filing_id: u64,
+        spec_version: Option<u64>,
+        state: &str,
+    ) -> (Vec<Value<()>>, Value<()>) {
+        let mut fields = vec![(
+            "state".to_owned(),
+            Value::variant(state, Composite::named([("window_end", Value::u128(999))])),
+        )];
+        if let Some(version) = spec_version {
+            fields.push(("spec_version".to_owned(), Value::u128(u128::from(version))));
+        }
+        (
+            vec![
+                Value::u128(u128::from(epoch)),
+                Value::u128(filing_id.into()),
+            ],
+            Value::named_composite(fields),
+        )
+    }
+
+    fn versioned_entry(epoch: u64, spec_version: u64, value: u64) -> (Vec<Value<()>>, Value<()>) {
+        (
+            vec![
+                Value::u128(u128::from(epoch)),
+                Value::u128(u128::from(spec_version)),
+            ],
+            Value::u128(u128::from(value)),
+        )
+    }
+
+    #[test]
+    fn registry_buckets_split_one_epoch_across_its_frozen_spec_versions() {
+        // 07 §7 (SQ-141): `Filings` is unversioned, so each filing's own
+        // `spec_version` decides its bucket; `Aggregates`/`ClosedAt` name theirs
+        // in the second key component; `FilingCount` is epoch-wide and true for
+        // every version of the epoch.
+        let grouped = group_registry_epochs(
+            "IncidentRegistry",
+            Some(50),
+            vec![
+                filing_entry(3, 1, Some(2), "Filed"),
+                filing_entry(3, 2, Some(3), "Upheld"),
+            ],
+            vec![versioned_entry(3, 2, 1)],
+            vec![versioned_entry(3, 2, 900)],
+            vec![(vec![Value::u128(3)], Value::u128(2))],
+        );
+
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(
+            grouped[0],
+            RegistryEpochSnapshot {
+                pallet: "IncidentRegistry".to_owned(),
+                epoch: 3,
+                spec_version: 2,
+                filings: vec![RegistryFilingSnapshot {
+                    filing_id: 1,
+                    state: "Filed".to_owned(),
+                    deadline: Some(999),
+                }],
+                filing_count_present: true,
+                aggregate_present: true,
+                closed_at: Some(900),
+                archive_delay: Some(50),
+            }
+        );
+        // The sibling version carries its own filing and neither the aggregate
+        // nor the close record of version 2 — that is the whole point of the
+        // re-key: its welfare input is still owed.
+        assert_eq!(grouped[1].spec_version, 3);
+        assert_eq!(grouped[1].filings[0].filing_id, 2);
+        assert!(grouped[1].filing_count_present);
+        assert!(!grouped[1].aggregate_present);
+        assert_eq!(grouped[1].closed_at, None);
+    }
+
+    #[test]
+    fn registry_buckets_fail_closed_on_an_unresolvable_spec_version() {
+        // A filing whose `spec_version` does not decode, and a versioned map
+        // entry carrying only the epoch key (a pre-v14 shape), are dropped
+        // rather than defaulted to version 0: `close_epoch`/`reap_epoch` act on
+        // the version they are handed, so a guessed bucket would crank a
+        // sibling cohort's record (07 §7, G-1).
+        let grouped = group_registry_epochs(
+            "IncidentRegistry",
+            Some(50),
+            vec![filing_entry(3, 1, None, "Upheld")],
+            vec![(vec![Value::u128(3)], Value::u128(1))],
+            vec![(vec![Value::u128(3)], Value::u128(900))],
+            vec![(vec![Value::u128(3)], Value::u128(1))],
+        );
+        assert!(grouped.is_empty());
+    }
+
+    #[test]
+    fn a_lone_filing_count_never_invents_a_version_bucket() {
+        // `FilingCount` is keyed by the epoch alone and can never name a
+        // version, so it only marks buckets the versioned maps established.
+        let grouped = group_registry_epochs(
+            "IncidentRegistry",
+            Some(50),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![(vec![Value::u128(7)], Value::u128(4))],
+        );
+        assert!(grouped.is_empty());
+    }
+
+    #[test]
+    fn filing_count_marks_only_its_own_epochs_buckets() {
+        let grouped = group_registry_epochs(
+            "IncidentRegistry",
+            Some(50),
+            vec![
+                filing_entry(3, 1, Some(2), "Filed"),
+                filing_entry(4, 2, Some(2), "Filed"),
+            ],
+            Vec::new(),
+            Vec::new(),
+            vec![(vec![Value::u128(4)], Value::u128(1))],
+        );
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(
+            (grouped[0].epoch, grouped[0].filing_count_present),
+            (3, false)
+        );
+        assert_eq!(
+            (grouped[1].epoch, grouped[1].filing_count_present),
+            (4, true)
+        );
     }
 }

@@ -505,6 +505,11 @@ fn plan_registries(
     if !enabled(config, Role::RegistryClose) {
         return;
     }
+    // `crank_close(epoch, batch)` stayed epoch-keyed under SQ-141: it walks the
+    // epoch's `Filings`, which are not versioned, so both versions' due filings
+    // are closed by one call. Fold the per-version buckets back to one crank per
+    // `(pallet, epoch)` — one per bucket would submit the same work twice.
+    let mut due_by_epoch = BTreeMap::<(&'static str, u64), usize>::new();
     for registry in &snapshot.registry_epochs {
         let Some(pallet) = registry_pallet(&registry.pallet) else {
             continue;
@@ -520,26 +525,39 @@ fn plan_registries(
             })
             .count();
         if due > 0 {
-            if !snapshot.has_call(pallet, "crank_close") {
-                continue;
-            }
-            cranks.push(crank(
-                Role::RegistryClose,
-                pallet,
-                "crank_close",
-                [
-                    ("epoch", number(registry.epoch)),
-                    ("batch", number(REGISTRY_CLOSE_BATCH.min(due) as u64)),
-                ],
-                PRIORITY_REGISTRY_CLOSE,
-            ));
+            *due_by_epoch.entry((pallet, registry.epoch)).or_default() += due;
         }
+    }
+    for ((pallet, epoch), due) in due_by_epoch {
+        if !snapshot.has_call(pallet, "crank_close") {
+            continue;
+        }
+        cranks.push(crank(
+            Role::RegistryClose,
+            pallet,
+            "crank_close",
+            [
+                ("epoch", number(epoch)),
+                ("batch", number(REGISTRY_CLOSE_BATCH.min(due) as u64)),
+            ],
+            PRIORITY_REGISTRY_CLOSE,
+        ));
+    }
+    // `close_epoch(epoch, spec_version)`, by contrast, closes exactly one
+    // version: each bucket is an independent crank (07 §7, SQ-141).
+    for registry in &snapshot.registry_epochs {
+        let Some(pallet) = registry_pallet(&registry.pallet) else {
+            continue;
+        };
         if registry_close_proven(snapshot, registry) && snapshot.has_call(pallet, "close_epoch") {
             cranks.push(crank(
                 Role::RegistryClose,
                 pallet,
                 "close_epoch",
-                [("epoch", number(registry.epoch))],
+                [
+                    ("epoch", number(registry.epoch)),
+                    ("spec_version", number(registry.spec_version)),
+                ],
                 PRIORITY_REGISTRY_CLOSE,
             ));
         }
@@ -547,12 +565,15 @@ fn plan_registries(
 }
 
 fn registry_close_proven(snapshot: &ChainSnapshot, registry: &RegistryEpochSnapshot) -> bool {
+    // Only *this version's* filings gate its close: a sibling version's stuck
+    // dispute must not hold this version's welfare input hostage, and the
+    // pallet's fold selects on `spec_version` for the same reason (07 §7).
     let all_terminal = registry
         .filings
         .iter()
         .all(|filing| matches!(filing.state.as_str(), "Upheld" | "Rejected"));
     let filings_proven =
-        !registry.filings.is_empty() && registry.filing_count_present && all_terminal;
+        !registry.filings.is_empty() && epoch_filed(snapshot, registry) && all_terminal;
     let reporting_epoch_passed = snapshot
         .epoch
         .as_ref()
@@ -561,6 +582,23 @@ fn registry_close_proven(snapshot: &ChainSnapshot, registry: &RegistryEpochSnaps
         && registry.closed_at.is_none()
         && filings_proven
         && reporting_epoch_passed
+}
+
+/// The `NothingToClose` precondition, mirrored exactly. `close_epoch` admits an
+/// epoch that still carries its `FilingCount` **or** already carries some
+/// version's aggregate — and it must, because the *first* version's close drops
+/// the epoch-wide counter (07 §7: `FilingCount` is keyed by epoch alone).
+/// Requiring the counter alone would strand the second version of an activation
+/// boundary, whose welfare input is still owed; requiring neither would revive
+/// the A6 guard this predicate exists for, letting a reaped or never-filed
+/// epoch be (re-)closed to the favorable "no filings ⇒ 1" aggregate.
+fn epoch_filed(snapshot: &ChainSnapshot, registry: &RegistryEpochSnapshot) -> bool {
+    registry.filing_count_present
+        || snapshot.registry_epochs.iter().any(|sibling| {
+            sibling.pallet == registry.pallet
+                && sibling.epoch == registry.epoch
+                && sibling.aggregate_present
+        })
 }
 
 fn plan_renewals(snapshot: &ChainSnapshot, config: &PlannerConfig, cranks: &mut Vec<PlannedCrank>) {
@@ -680,11 +718,19 @@ fn plan_cleanup(snapshot: &ChainSnapshot, config: &PlannerConfig, cranks: &mut V
                 if !snapshot.has_call(pallet, "reap_epoch") {
                     continue;
                 }
+                // `ClosedAt` is keyed by `(epoch, spec_version)` since SQ-141,
+                // so each bucket's `closed_at` gates its own reap and names the
+                // version whose filings, acks and aggregate are removed. A
+                // sibling version reaped by the wrong argument would destroy
+                // records welfare has not consumed yet (07 §7).
                 cranks.push(crank(
                     Role::Cleanup,
                     pallet,
                     "reap_epoch",
-                    [("epoch", number(registry.epoch))],
+                    [
+                        ("epoch", number(registry.epoch)),
+                        ("spec_version", number(registry.spec_version)),
+                    ],
                     PRIORITY_CLEANUP,
                 ));
             }
@@ -750,7 +796,7 @@ fn sequence(values: Vec<u64>) -> Value<()> {
 mod tests {
     use std::collections::BTreeSet;
 
-    use subxt::ext::scale_value::ValueDef;
+    use subxt::ext::scale_value::{Primitive, ValueDef};
 
     use super::*;
     use crate::snapshot::{
@@ -867,6 +913,7 @@ mod tests {
             registry_epochs: vec![RegistryEpochSnapshot {
                 pallet: "IncidentRegistry".to_owned(),
                 epoch: 2,
+                spec_version: 2,
                 filings: vec![RegistryFilingSnapshot {
                     filing_id: 1,
                     state: "Filed".to_owned(),
@@ -936,14 +983,60 @@ mod tests {
     }
 
     fn empty_registry(pallet: &str, epoch: u64) -> RegistryEpochSnapshot {
+        empty_registry_version(pallet, epoch, 2)
+    }
+
+    fn empty_registry_version(
+        pallet: &str,
+        epoch: u64,
+        spec_version: u64,
+    ) -> RegistryEpochSnapshot {
         RegistryEpochSnapshot {
             pallet: pallet.to_owned(),
             epoch,
+            spec_version,
             filings: Vec::new(),
             filing_count_present: false,
             aggregate_present: false,
             closed_at: None,
             archive_delay: Some(50),
+        }
+    }
+
+    /// A `(epoch, spec_version)` bucket whose own filings are all terminal —
+    /// the shape `close_epoch` is planned for (07 §7, SQ-141).
+    fn closable_registry(
+        pallet: &str,
+        epoch: u64,
+        spec_version: u64,
+        filing_id: u64,
+    ) -> RegistryEpochSnapshot {
+        RegistryEpochSnapshot {
+            filing_count_present: true,
+            filings: vec![RegistryFilingSnapshot {
+                filing_id,
+                state: "Upheld".to_owned(),
+                deadline: None,
+            }],
+            ..empty_registry_version(pallet, epoch, spec_version)
+        }
+    }
+
+    /// Read a named `u128` argument off a planned crank — the shape `number()`
+    /// builds, so a missing or differently typed field reads as `None` rather
+    /// than passing an assertion by accident.
+    fn argument(crank: &PlannedCrank, name: &str) -> Option<u128> {
+        match &crank.args {
+            Composite::Named(fields) => {
+                fields
+                    .iter()
+                    .find(|(field, _)| field == name)
+                    .and_then(|(_, value)| match &value.value {
+                        ValueDef::Primitive(Primitive::U128(value)) => Some(*value),
+                        _ => None,
+                    })
+            }
+            Composite::Unnamed(_) => None,
         }
     }
 
@@ -1528,5 +1621,120 @@ mod tests {
         let mut window_open = snapshot.clone();
         window_open.epoch.as_mut().expect("fixture epoch").index = 4;
         assert!(!registry_close_proven(&window_open, &terminal));
+    }
+
+    #[test]
+    fn a_sibling_versions_aggregate_stands_in_for_the_dropped_filing_count() {
+        // 07 §7 (SQ-141): the *first* version's close drops the epoch-wide
+        // `FilingCount`, and the pallet's `NothingToClose` guard therefore also
+        // admits an epoch that carries some version's aggregate. Without that
+        // disjunction the second version of an activation boundary — whose
+        // welfare input is still owed — would never be planned again.
+        let mut snapshot = snapshot();
+        let closed_sibling = RegistryEpochSnapshot {
+            aggregate_present: true,
+            closed_at: Some(900),
+            ..empty_registry_version("IncidentRegistry", 3, 2)
+        };
+        let mut pending = closable_registry("IncidentRegistry", 3, 3, 2);
+        pending.filing_count_present = false;
+        snapshot.registry_epochs = vec![closed_sibling, pending.clone()];
+        assert!(registry_close_proven(&snapshot, &pending));
+
+        // Same epoch, other registry instance: the two instances keep separate
+        // storage, so one's aggregate proves nothing about the other's epoch.
+        let mut other_instance = snapshot.clone();
+        other_instance.registry_epochs[0].pallet = "MilestoneRegistry".to_owned();
+        assert!(!registry_close_proven(&other_instance, &pending));
+
+        // And once that sibling is reaped, neither the counter nor an aggregate
+        // remains: the pallet refuses `NothingToClose`, so the planner must too.
+        let mut reaped = snapshot.clone();
+        reaped.registry_epochs.remove(0);
+        assert!(!registry_close_proven(&reaped, &pending));
+    }
+
+    #[test]
+    fn two_spec_versions_of_one_epoch_are_planned_as_independent_closes() {
+        // 07 §7 (SQ-141): a MetricSpec activation leaves two cohorts measuring
+        // epoch 3 under different frozen specs. Each version folds only its own
+        // filings and owes welfare its own aggregate, so each is a separate
+        // `close_epoch` naming its version.
+        let mut snapshot = snapshot();
+        snapshot.registry_epochs = vec![
+            closable_registry("IncidentRegistry", 3, 2, 1),
+            closable_registry("IncidentRegistry", 3, 3, 2),
+        ];
+        let planned = plan(&snapshot, &config_for(Role::RegistryClose));
+        let mut closes = planned
+            .iter()
+            .filter(|crank| crank.call == "close_epoch")
+            .map(|crank| (argument(crank, "epoch"), argument(crank, "spec_version")))
+            .collect::<Vec<_>>();
+        closes.sort_unstable();
+        assert_eq!(closes, vec![(Some(3), Some(2)), (Some(3), Some(3))]);
+        assert!(planned
+            .iter()
+            .all(|crank| crank.pallet == "IncidentRegistry"));
+    }
+
+    #[test]
+    fn unversioned_crank_close_stays_one_call_for_both_versions() {
+        // `crank_close(epoch, batch)` walks the epoch's `Filings`, which SQ-141
+        // deliberately left unversioned, so one call closes both versions' due
+        // filings — one crank per bucket would submit the same work twice.
+        let mut snapshot = snapshot();
+        snapshot.registry_epochs = vec![
+            RegistryEpochSnapshot {
+                filings: vec![RegistryFilingSnapshot {
+                    filing_id: 1,
+                    state: "Filed".to_owned(),
+                    deadline: Some(999),
+                }],
+                ..empty_registry_version("IncidentRegistry", 3, 2)
+            },
+            RegistryEpochSnapshot {
+                filings: vec![RegistryFilingSnapshot {
+                    filing_id: 2,
+                    state: "Filed".to_owned(),
+                    deadline: Some(999),
+                }],
+                ..empty_registry_version("IncidentRegistry", 3, 3)
+            },
+        ];
+        let planned = plan(&snapshot, &config_for(Role::RegistryClose));
+        let cranked = planned
+            .iter()
+            .filter(|crank| crank.call == "crank_close")
+            .collect::<Vec<_>>();
+        assert_eq!(cranked.len(), 1, "got {planned:?}");
+        assert_eq!(argument(cranked[0], "epoch"), Some(3));
+        // The batch is the epoch-wide due count, not one bucket's.
+        assert_eq!(argument(cranked[0], "batch"), Some(2));
+    }
+
+    #[test]
+    fn registry_reap_names_the_version_whose_archive_delay_elapsed() {
+        // `ClosedAt` is keyed by `(epoch, spec_version)`, so each version's reap
+        // becomes due on its own close block and removes only its own records.
+        let mut snapshot = snapshot();
+        snapshot.registry_epochs = vec![
+            RegistryEpochSnapshot {
+                closed_at: Some(999),
+                ..empty_registry_version("IncidentRegistry", 3, 2)
+            },
+            RegistryEpochSnapshot {
+                closed_at: Some(900),
+                ..empty_registry_version("IncidentRegistry", 3, 3)
+            },
+        ];
+        let planned = plan(&snapshot, &config_for(Role::Cleanup));
+        let reaps = planned
+            .iter()
+            .filter(|crank| crank.call == "reap_epoch")
+            .collect::<Vec<_>>();
+        assert_eq!(reaps.len(), 1, "got {planned:?}");
+        assert_eq!(argument(reaps[0], "epoch"), Some(3));
+        assert_eq!(argument(reaps[0], "spec_version"), Some(3));
     }
 }

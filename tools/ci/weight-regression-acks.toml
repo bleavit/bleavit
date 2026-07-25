@@ -8,31 +8,12 @@
 # runtime/bleavit-runtime/src/weights/pallet_constitution.rs set_param: storage proof grew after adding validation
 # runtime/bleavit-runtime/src/weights/pallet_retired.rs *: pallet retired by approved migration
 #
-
-# SQ-182/SQ-491 — `pallet_oracle`. One structural change, measured, in the safe
-# direction. `Oracle::load()` now hydrates the new `RoundActivity` latch (07 §4),
-# so **every** oracle extrinsic gains exactly +1 read — 485→486, 477→478, 489→490,
-# 479→480, 491→492, 499→500, 515→516, 486→487 across the twelve — and `report`
-# additionally gains +1 write (5→6) for the latch itself. Those counts are the
-# whole of the intended cost.
-#
-# The ref_time percentages are only partly explained by it, and the honest account
-# is: the committed baseline was generated 2026-07-25 on this same machine, so this
-# is not accumulated drift; two consecutive full runs of the *identical* new code
-# differ by up to 5.0% across these twelve functions (adjudicate 1,901M vs 1,806M),
-# every one reading lower on the second run; one extra host-side storage read inside
-# the measured section accounts for a further small share. A residual of a few
-# percent is unexplained and is recorded as unexplained rather than argued away.
-#
-# (That 5% band is specific to these functions, which are all ~1.8 s calls. The same
-# two-run experiment on `pallet_epoch` spread from -54.8% to +65.5% on its smaller
-# calls — see the `set_intake_paused` entry below. Percentage gates are close to
-# meaningless below roughly a millisecond of measured work on this machine.)
-#
-# The values adopted are the **higher** of the two measured runs, deliberately:
-# understating a permissionless call is the block-capacity surface the gate exists to
-# catch (R-7; 15 §4.5), and an overstatement costs block space, not safety. SQ-490
-# tracks the absent CI leg that lets this class of question arise at all.
-runtime/bleavit-runtime/src/weights/pallet_oracle.rs counter_report: SQ-182/SQ-491 — +1 read (489 -> 490) from the new RoundActivity hydrate in Oracle::load; ref_time 1,678M -> 1,873M (+11.62%). Identical-code rerun measured 1,831M, i.e. 2.2% below the adopted value, so up to ~5% of this is run-to-run variance on this machine; the baseline is same-day and same-machine, so none of it is drift. Adopted the higher run.
-runtime/bleavit-runtime/src/weights/pallet_oracle.rs deregister_reporter: SQ-182/SQ-491 — +1 read (479 -> 480) from the same hydrate; ref_time 1,593M -> 1,807M (+13.47%). Identical-code rerun measured 1,794M (-0.8%). This call does not touch the latch at all, so its movement is the hydrate plus variance, not new work on its own path. Adopted the higher run.
-runtime/bleavit-runtime/src/weights/pallet_oracle.rs register_reporter: SQ-182/SQ-491 — +1 read (491 -> 492) from the same hydrate; ref_time 1,707M -> 1,888M (+10.61%). Identical-code rerun measured 1,850M (-2.0%). Same reasoning as deregister_reporter. Adopted the higher run.
+runtime/bleavit-runtime/src/weights/pallet_registry.rs file: SQ-141: Aggregates is keyed (epoch, spec_version), so MAX_AGGREGATES rises 4 -> 8 (4 non-settled epochs x <= 2 concurrent frozen versions, 05 3.3) and the pallet's scoped loader/persist diffs 8 aggregate keys instead of 4. +4 writes on every registry call is exactly that, and it is measured, not estimated.
+runtime/bleavit-runtime/src/weights/pallet_registry.rs challenge_filing: SQ-141: same +4 aggregate keys in the scoped loader/persist as `file`. No behavior on this path changed.
+runtime/bleavit-runtime/src/weights/pallet_registry.rs ack_observed: SQ-141: same +4 aggregate keys in the scoped loader/persist as `file`. No behavior on this path changed.
+runtime/bleavit-runtime/src/weights/pallet_registry.rs crank_close: SQ-141: same +4 aggregate keys in the scoped loader/persist as `file`. No behavior on this path changed.
+runtime/bleavit-runtime/src/weights/pallet_registry.rs resolve_challenge: SQ-141: same +4 aggregate keys in the scoped loader/persist as `file`. No behavior on this path changed.
+runtime/bleavit-runtime/src/weights/pallet_registry.rs close_epoch: SQ-141: the +4 aggregate keys, one Aggregates prefix read, and the frozen-version gate. close_epoch is now per-version and the first version's close drops the epoch-wide FilingCount, so the anti-griefing guard reads the epoch's aggregate prefix as the second half of its disjunction - without it a sibling version could never be closed. The version gate (frozen set from the epoch seam, plus a bounded filings scan for the late-close case) is the fix for a griefing surface the re-key opened: without it any signed caller could close arbitrary unfrozen version numbers, each consuming one of the eight aggregate slots until the legitimate close failed TooManyAggregates permanently (Codex review, PR #173).
+runtime/bleavit-runtime/src/weights/pallet_registry.rs reap_epoch: SQ-141: reap is per-version now. It walks the epoch's filings to enforce the sibling-ordering rule (07 7: a version must not be reaped while a sibling still holds unclosed records, or the epoch's only remaining evidence that it was ever filed is erased) and clears one ack prefix per reaped filing instead of one prefix for the whole epoch, which would destroy a live sibling's acks. Both are the fix for a real defect, not overhead.
+runtime/bleavit-runtime/src/weights/pallet_welfare.rs record_snapshot: SQ-141/SQ-341: MetricSpec gained two trailing u32 fields (contract v14), so the MetricSpecs proof grows 3379 -> 3507 B and every spec decode costs more; and the incident-aggregate read is now fail-closed, which costs a FilingCount read plus a bounded scan of the epoch's filings (<= MaxFilingsPerEpoch = 64, reached only after the filing window shuts) to tell 'this version had no filings' (neutral is honest) from 'this version has records that have not closed' (must refuse). Paying for that distinction is the point of the re-key.
+runtime/bleavit-runtime/src/weights/pallet_welfare.rs register_spec: SQ-341: register_spec now enforces both halves of 07 2(5) - the Reporters/Watchtowers counted-map reads plus two Constitution::Params reads for orc.n_min/wt.quorum and the live coverage rate - and validates the two new MetricSpec fields per component, over a spec set whose encoded size grew with them. The reporter count iterates Reporters rather than reading the counted-map size, because 07 §3 counts seats holding a FULL stake and a reporter slashed on a second adjudicated-false report stays registered at half stake (Codex review, PR #173). Previously the rule was enforced nowhere and orc.n_min had no consumer at all, so this is new work being measured for the first time rather than the same work costing more.

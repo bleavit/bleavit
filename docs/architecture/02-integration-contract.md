@@ -124,7 +124,7 @@ The `MetricId` assignment registry is owned by [05](05-welfare-and-decision-engi
 
 Proposal positions MUST project a settled proposal vault as `ScalarSettled { winner, s }`; Baseline positions MUST project a settled epoch vault as `BaselineSettled { s }` and MUST NOT fabricate a proposal branch. `RatificationStatus::NoPassedRecord` means only that the execution guard has no passing ratification record. It is deliberately agnostic between no referendum, an in-flight referendum and a failed referendum; the frontend MUST derive that lifecycle from `pallet-referenda` ([06](06-governance-and-guardians.md) §2.2). `Pending` and `Failed` are removed because the guard cannot truthfully produce them in the deployed design. This `RatificationStatus` restructure is a pre-genesis contract-v6 repair; no deployed SCALE value requires migration.
 
-The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 13`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
+The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 14`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
 
 ---
 
@@ -364,7 +364,7 @@ Canonical names below are FINAL. **X-11d fix:** the FE draft's four misnamed epo
 | `pallet-epoch` | `ProposalSubmitted`, `ProposalWithdrawn`, `ScreeningStarted`, `ProposalCancelled { pid, reason }`, `ProposalQualified`, `ProposalDeferred`, **`SlotsShrunk { epoch: EpochId, requested: u32, funded: u32, dropped: Vec<ProposalId> }`**, `MarketsOpened`, `DecisionExtended`, `ProposalQueued { pid, payload_hash, maturity }`, `ProposalRejected { pid, reason }`, `ProposalDelayed { pid, justification_hash }`, `RerunScheduled`, `RerunOpened`, `MandateExpired`, `MeasurementStarted { cohort }`, `CohortSettled { epoch, s }`, **`CohortVoided { epoch: EpochId }`**, **`BaselineCarried { pid: ProposalId, epoch: EpochId }`**, **`ProposalForceRejected { pid, reason }`** — emitted by transition T20 (emergency/VOID force-reject), which previously emitted nothing and silently corrupted every event-derived archive (X-11f), `IntakeSlashed { pid, reason, amount }` (accompanies every partial intake-bond slash — [06](06-governance-and-guardians.md) §4). In `SlotsShrunk`, `requested` and `funded` are proposal-slot counts, not USDC amounts; USDC determines which qualified entries fit, while these fields report the pre- and post-shrink entry counts. |
 | `pallet-execution-guard` | `Executed { pid, record }`, `ExecutionFailed { pid, outcome: DispatchOutcomeCode }`, `Ratified { pid, referendum_index }` (written by `execution_guard.ratify(proposal_id, referendum_index)`, the sole `ratify`-track governance call — [06](06-governance-and-guardians.md) §2.2), `UpgradeAuthorized { code_hash: H256, authorized_at: BlockNumber }` (system-event mirror carrying `authorized_at` for the `DescriptorLeadTime` check, D-14), **`Enqueued { pid: ProposalId, maturity: BlockNumber }`**, **`Rejected { pid: ProposalId, reason: RejectReason }`**, **`UpgradeApplied { code_hash: H256, spec_version: u32 }`**, **`PreimageUnpinned { pid: ProposalId, payload_hash: H256 }`**, **`UpgradeAborted { code_hash: H256 }`**. `UpgradeAuthorized` remains the two-field public event; `applicable_at` is derived as `authorized_at + DescriptorLeadTime` ([09](09-execution-upgrades-and-rollout.md) §2.1). |
 | `pallet-oracle` | §7.2 table |
-| `pallet-registry` | `IncidentFiled`, `MilestoneFiled`, `IncidentChallenged`, `MilestoneChallenged`, `IncidentUpheld`, `IncidentRejected`, `MilestoneAccepted`, `MilestoneRejected`, `FilingBondSlashed`, `RegistryEpochClosed` (field detail in [07](07-oracle-and-disputes.md); names frozen here), **`WindowAcknowledged { epoch: EpochId, filing_id: FilingId, watchtower: AccountId }`**, **`WindowExtended { epoch: EpochId, filing_id: FilingId, new_deadline: BlockNumber }`**. `FilingId = u32`; these pallet-registry events are distinct from the identically named pallet-oracle events in §7.2, which carry `component`/`round`. |
+| `pallet-registry` | `IncidentFiled`, `MilestoneFiled`, `IncidentChallenged`, `MilestoneChallenged`, `IncidentUpheld`, `IncidentRejected`, `MilestoneAccepted`, `MilestoneRejected`, `FilingBondSlashed`, **`RegistryEpochClosed`** — which carries `spec_version: MetricSpecVersion` alongside `kind`/`epoch`/`aggregate` (contract v14), because 07 §7 keys the registry lifecycle by `(epoch, spec_version)` and one epoch therefore closes once per frozen version — (remaining field detail in [07](07-oracle-and-disputes.md); names frozen here), **`WindowAcknowledged { epoch: EpochId, filing_id: FilingId, watchtower: AccountId }`**, **`WindowExtended { epoch: EpochId, filing_id: FilingId, new_deadline: BlockNumber }`**. `FilingId = u32`; these pallet-registry events are distinct from the identically named pallet-oracle events in §7.2, which carry `component`/`round`. |
 | `pallet-guardian` | `GuardianAction { action_id, power, target, justification_hash }`, `ForceRerun { pid, justification_hash, window_end }`, `PlaybookActivated { id, trigger, expiry }`, `PlaybookRenewed { id }`, `PlaybookExpired { id }`, `ReviewScheduled { action, referendum }`, **`MembersSet { members: [AccountId; 7] }`**, **`ActionProposed { action_id: ActionId, power: GuardianPower }`**, **`ActionApproved { action_id: ActionId, who: AccountId, approvals: u8 }`**, **`ActionRatified { action: ActionId }`**, **`ReviewFailed { action: ActionId, slashed_each: Balance }`**, **`RecallScheduled { action: ActionId, referendum: u32 }`**, **`RecallEnacted { action: ActionId, removed: BoundedVec<AccountId, ConstU32<7>> }`**, **`PlaybookRegistrationSet { id: PlaybookId, enabled: bool }`** |
 | `pallet-attestor` | **`MembersSet { members: Vec<AccountId> }`**, **`AttestationSubmitted { attestation_id: AttestationId, pid: ProposalId, artifact_hash: H256, attestor: AccountId }`**, **`AttestationChallenged { attestation_id: AttestationId, challenger: AccountId, evidence_hash: H256 }`**, **`ChallengeResolved { attestation_id: AttestationId, upheld: bool, loser: AccountId, slashed: Balance }`**, **`AttestorEjected { who: AccountId }`**, **`AttestorRemovedForCause { who: AccountId, cause_hash: H256 }`**, **`AttestationRevoked { attestation_id: AttestationId, pid: ProposalId, attestor: AccountId, cause_hash: H256 }`** |
 | `pallet-futarchy-treasury` | **`NavHaircutFlagged { epoch: EpochId, flag: bool }`** — emitted on every reserve-health flag transition; in the ingest set under criterion (b) because [08](08-treasury-and-economics.md) §1.2(4) requires the frontend to surface the flag on every NAV render. The line's other events (`Spent`, `StreamOpened`/`Claimed`/`Cancelled`, `BudgetLineFunded`, `VitIssued`, `KeeperBudgetLow`, `KeeperBudgetExhausted`, `NavFloorUnmet`, the coretime events) are **not** in the ingest set and stay treasury-owned per [08](08-treasury-and-economics.md) §1.4 |
@@ -473,7 +473,7 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 | VIT decimals | 12 |
 | VIT existential deposit | **0.01 VIT** (= 10^10 plancks) |
 | Phase flag storage | `pallet-constitution::PhaseFlags` (§7.3) — the trading-enablement key |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 13` (runtime constant) |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 14` (runtime constant) |
 
 ---
 
@@ -517,7 +517,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 
 | Pallet | Constant name | Type | Value source |
 |---|---|---|---|
-| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 13) |
+| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 14) |
 | Constitution | `MaxParams` | `u32` | `constitution_core::MAX_PARAMS` (= 128) |
 | Constitution | `MaxCapabilities` | `u32` | `constitution_core::MAX_CAPABILITIES` (= 64) |
 | Constitution | `MaxMeters` | `u32` | `constitution_core::MAX_METERS` (= 16) |
@@ -542,7 +542,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Registry (each instance) | `ArchiveDelay` | `BlockNumber` (`u32`) | `max(live Params[ledger.archive], 21 × BLOCKS_PER_DAY)`; the 21-day floor is independent of the shared ledger tunable |
 | Registry (each instance) | `MaxFilingsPerEpoch` | `u32` | `kernel::REG_MAX_FILINGS_EPOCH` (= 64) |
 | Registry (each instance) | `MaxEvidenceLen` | `u32` | fixed `H256` evidence-hash width (= 32 bytes) |
-| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 13) |
+| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 14) |
 | ExecutionGuard | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) |
 | ExecutionGuard | `MaxExecutionRecords` | `u32` | `bounds::MAX_EXECUTION_RECORDS` (= 256) |
 | ExecutionGuard | `MaxCalls` | `u32` | `kernel::MAX_CALLS` (= 16) |
@@ -551,7 +551,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | ExecutionGuard | `MaxRuntimeCodeBytes` | `u32` | runtime `Config::MaxRuntimeCodeBytes` (`pallet_preimage::MAX_SIZE`) |
 | ExecutionGuard | `ExecutionTimelockFloor` | `[u32; 4]` | [13 §1](13-parameters.md) `exec.lock.*` K hard minima, `[14,400; 4]` blocks |
 | ExecutionGuard | `ExecutionGraceFloor` | `u32` | [13 §1](13-parameters.md) `exec.grace` K hard minimum (= 100,800 blocks) |
-| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 13) |
+| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 14) |
 | Epoch | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) |
 | Epoch | `MaxIntakeQueue` | `u32` | `bounds::INTAKE_QUEUE` (= 64) |
 | Epoch | `MaxNonTerminalCohorts` | `u32` | `bounds::MAX_NON_TERMINAL_COHORTS` (= 4) |
@@ -565,12 +565,12 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Epoch | `DecisionDeltaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.delta.*` K hard minima (= `[5,000,000; 4]`) |
 | Epoch | `TreasuryBondAskBps` | `u128` | `kernel::TREASURY_BOND_ASK_BPS` (= 50; the 08 §7 TREASURY Ask surcharge slope, added in v13 — SQ-186) |
 | Epoch | `DecisionSigmaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.sigma.*` K hard minima (= `[0; 4]`) |
-| Welfare | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 13) |
+| Welfare | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 14) |
 | Welfare | `MaxMetricSpecs` | `u32` | `welfare_core::MAX_METRIC_SPECS` (= 16) |
 | Welfare | `MaxSnapshots` | `u32` | `welfare_core::MAX_SNAPSHOTS` (= 20) |
 | Welfare | `MaxGateFlags` | `u32` | `welfare_core::MAX_GATE_FLAGS` (= 20) |
 | Welfare | `MaxDailyGateSamples` | `u8` | `welfare_core::MAX_DAILY_GATE_SAMPLES` (= 64) |
-| FutarchyTreasury | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 13) |
+| FutarchyTreasury | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 14) |
 | FutarchyTreasury | `MaxStreams` | `u32` | `futarchy_treasury_core::MAX_STREAMS` (= 128) |
 | FutarchyTreasury | `MaxBudgetLines` | `u32` | `futarchy_treasury_core::MAX_BUDGET_LINES` (= 32) |
 | FutarchyTreasury | `MaxPolCommitments` | `u32` | `futarchy_treasury_core::MAX_POL_COMMITMENTS` (= 196) |
@@ -652,6 +652,8 @@ No other origin can write the record. The layout MUST NEVER change except by app
 7. **Independent counters.** `INTEGRATION_CONTRACT_VERSION` and the SDK's `RuntimeVersion.transaction_version` are independent counters. The contract version is exposed through `futarchy-primitives`, the constants API and `release.json`; `transaction_version` denotes compatibility of existing dispatchables as embedded in signed-transaction validity. An additive contract bump MUST NOT change `transaction_version`.
 
 **Version history.**
+
+- **v14 (2026-07-25) — the versioned MetricSpec surface (SQ-175, SQ-341, SQ-141).** Three changes, all **additive**, landing together because none is independently verifiable. (i) `MetricSpec` (read by the frontend through §7.4's `pallet-welfare::MetricSpecs`) gains two **trailing** fields: `target: u32`, the A-pillar milestone divisor of [05](05-welfare-and-decision-engine.md) §4.3's `min(1, points ÷ target)` — previously specified with no home in any struct, so the MilestoneRegistry could not normalize a filing (SQ-175); and `delta_s_max_bps: u32`, the documented maximum single-epoch settlement impact `Δs_max` that [07](07-oracle-and-disputes.md) §6.3's bond-coverage admission rule is stated against — previously unrepresentable, so the rule that makes an attested lie cost more than it can move was unimplementable regardless of where it was called (SQ-341). Both are appended after `prior_bounds`; every existing field keeps its name, type and offset. (ii) §6's `RegistryEpochClosed` gains `spec_version: MetricSpecVersion`, because 07 §7's registry lifecycle is now keyed by `(epoch, spec_version)` — one epoch closes once per frozen version (SQ-141). The other ten registry event shapes, including the `(epoch, filing_id)` key every filing event carries, are untouched: filing-id allocation stays per-epoch precisely so they can be. (iii) No storage **key** in §7 changes: 07 §7's `Aggregates` re-key is a registry-internal item this contract does not freeze. **Pre-genesis revision** — no runtime is deployed, so §13's post-genesis append-only/migration clause (point 3) does not apply, and `transaction_version` is untouched (§13 rule 7). Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-25, through the standing autonomous-resolution delegation.**
 
 - **v13 (2026-07-25) — TREASURY bond Ask-surcharge slope as metadata (SQ-186).** §9 exposes `Epoch::TreasuryBondAskBps`, the kernel `TREASURY_BOND_ASK_BPS = 50` slope of 08 §7's TREASURY intake bond. Purely **additive**: a new name on §9's frozen metadata-constant list, no existing name, type, shape or value changed, so `transaction_version` is untouched (§13 rule 7). It closes the last half of SQ-186 — 13 §1 already states the surcharge is a kernel constant governing the class **base only**, but the frontend had no way to read the slope and would have had to hardcode it. Joint backend+frontend sign-off recorded per §13(2), the user owning both sides.
 - **v12 (2026-07-24) — registry archive-delay floor (SQ-76).** Section 9 exposes the registry instances' `ArchiveDelay` metadata constant, and its value is frozen as `max(Params[ledger.archive], 21 × BLOCKS_PER_DAY)`. This preserves the 07 §7 money-deadline floor independently even if the shared ledger archive policy is lowered. Pre-genesis, no migration is required. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-24, through the standing autonomous-resolution delegation.**

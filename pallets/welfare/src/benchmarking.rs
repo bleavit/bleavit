@@ -10,6 +10,20 @@ use alloc::vec::Vec;
 use frame_benchmarking::v2::*;
 use frame_system::RawOrigin;
 
+/// A seated oracle for benchmark fixtures: 07 §2(5)'s floors met and the 13 §1
+/// default bond ladder readable, so the attested components every valid spec set
+/// necessarily contains are admissible. Without it each setup would abort with
+/// `InsufficientOracleSeats` before anything is measured.
+fn seated_oracle() -> AttestedAdmission {
+    AttestedAdmission {
+        reporters: 3,
+        watchtowers: 2,
+        reporter_min: 3,
+        watchtower_min: 2,
+        coverage_bps: Some(1_750),
+    }
+}
+
 fn metric_spec(id: u16, pillar: Pillar, weight: u64, version: u16) -> MetricSpec {
     let source = match pillar {
         Pillar::CAttested | Pillar::A => SourceClass::Attested,
@@ -34,6 +48,8 @@ fn metric_spec(id: u16, pillar: Pillar, weight: u64, version: u16) -> MetricSpec
         has_gaming_vectors: true,
         has_challenge_procedure: true,
         prior_bounds: [FixedU64(ONE); HISTORY_PRIORS],
+        target: 100,
+        delta_s_max_bps: 1_000,
     }
 }
 
@@ -92,7 +108,12 @@ fn fill_gate_flags(state: &mut WelfareState, count: usize) -> Result<(), Benchma
 fn fill_specs(state: &mut WelfareState, first_version: u16) -> Result<(), BenchmarkError> {
     for version in first_version..=MAX_METRIC_SPECS as u16 {
         state
-            .register_metric_spec(Registration::Genesis, version, full_specs(version))
+            .register_metric_spec(
+                Registration::Genesis,
+                version,
+                full_specs(version),
+                &seated_oracle(),
+            )
             .map_err(|_| BenchmarkError::Stop("benchmark spec setup failed"))?;
     }
     Ok(())
@@ -104,10 +125,20 @@ mod benches {
 
     #[benchmark]
     fn register_spec() -> Result<(), BenchmarkError> {
+        // 07 §2(5): every valid spec set contains an attested component (05 §4.3
+        // makes the A pillar attested, §4.4 makes it mandatory), so an unseated
+        // oracle refuses the dispatch with `InsufficientOracleSeats` and nothing
+        // downstream is measured (SQ-341).
+        T::BenchmarkHelper::seat_oracle();
         let mut state = WelfareState::new();
         for version in 1..MAX_METRIC_SPECS as u16 {
             state
-                .register_metric_spec(Registration::Genesis, version, full_specs(version))
+                .register_metric_spec(
+                    Registration::Genesis,
+                    version,
+                    full_specs(version),
+                    &seated_oracle(),
+                )
                 .map_err(|_| BenchmarkError::Stop("benchmark setup failed"))?;
         }
         fill_snapshots(&mut state, MAX_SNAPSHOTS)?;
@@ -140,7 +171,7 @@ mod benches {
     fn record_snapshot() -> Result<(), BenchmarkError> {
         let mut state = WelfareState::new();
         state
-            .register_metric_spec(Registration::Genesis, 1, full_specs(1))
+            .register_metric_spec(Registration::Genesis, 1, full_specs(1), &seated_oracle())
             .map_err(|_| BenchmarkError::Stop("benchmark setup failed"))?;
         fill_specs(&mut state, 2)?;
         fill_snapshots(&mut state, MAX_SNAPSHOTS - 1)?;
@@ -165,7 +196,7 @@ mod benches {
     fn record_daily_gate() -> Result<(), BenchmarkError> {
         let mut state = WelfareState::new();
         state
-            .register_metric_spec(Registration::Genesis, 1, full_specs(1))
+            .register_metric_spec(Registration::Genesis, 1, full_specs(1), &seated_oracle())
             .map_err(|_| BenchmarkError::Stop("benchmark setup failed"))?;
         fill_specs(&mut state, 2)?;
         fill_snapshots(&mut state, MAX_SNAPSHOTS)?;

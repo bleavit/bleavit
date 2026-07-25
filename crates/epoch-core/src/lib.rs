@@ -136,7 +136,21 @@ impl EpochParams {
                 && self.epoch_slots > 0
                 && usize::from(self.epoch_slots) <= MAX_ACTIVE_PER_EPOCH
                 && self.horizon_k > 0
-                && usize::from(self.horizon_k) <= MAX_NON_TERMINAL_COHORTS
+                // 05 §3.3 decomposes I-21's cohort cap as `k measuring + 1
+                // awaiting oracle + 1 settling`, so the admissible horizon is
+                // `MAX_NON_TERMINAL_COHORTS - 2`, not the cap itself. A cohort
+                // created at `e` stays non-terminal through `e + k + 1` (it
+                // settles at `e + k + 1` and is only then removed), and one
+                // cohort forms per epoch, so steady state holds `k + 2` live
+                // cohorts. The old `<= MAX_NON_TERMINAL_COHORTS` admitted
+                // `k = 3` and `k = 4`, which need 5 and 6 slots: within a few
+                // epochs every `qualify` would fail `TooManyCohorts` forever —
+                // a chain-wide wedge reachable by a lawful META+values
+                // amendment inside the key's own stated bounds (SQ-496). It
+                // also silently invalidated every `× 2 concurrent frozen
+                // versions` bound derived from it (`MAX_ROUNDS = 16 × 4 × 2`,
+                // 02 §7.2; 07 §7's per-version aggregates).
+                && usize::from(self.horizon_k) <= MAX_NON_TERMINAL_COHORTS.saturating_sub(2)
                 && self.intake_max_per_account > 0
                 && usize::from(self.intake_max_per_account) <= MAX_INTAKE_QUEUE
                 && self.coverage_pct <= 100

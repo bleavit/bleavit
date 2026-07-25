@@ -68,6 +68,8 @@ pub fn metric_spec(id: u16, pillar: Pillar, weight: u64, version: u16) -> Metric
         has_gaming_vectors: true,
         has_challenge_procedure: true,
         prior_bounds: [FixedU64(ONE); HISTORY_PRIORS],
+        target: 100,
+        delta_s_max_bps: 1_000,
     }
 }
 
@@ -132,7 +134,7 @@ parameter_types! {
     pub static OnchainInputsByVersion: Vec<(MetricSpecVersion, Vec<ComponentValue>)> = Vec::new();
     pub static DailyInput: Vec<ComponentValue> = healthy_components();
     pub static DailyInputsByVersion: Vec<(MetricSpecVersion, Vec<ComponentValue>)> = Vec::new();
-    pub static IncidentInput: FixedU64 = FixedU64(ONE);
+    pub static IncidentInput: Option<FixedU64> = Some(FixedU64(ONE));
     pub static LedgerFailure: Option<LedgerCall> = None;
     /// Epochs whose Baseline vault is absent or already settled, i.e. the
     /// `baseline_open` precondition is false and the VOID settlement no-ops.
@@ -229,7 +231,10 @@ impl MetricInputs for TestMetricInputs {
             .unwrap_or_else(OnchainInput::get)
     }
 
-    fn incident_multiplier(_epoch: EpochId) -> FixedU64 {
+    fn incident_multiplier(_epoch: EpochId, _spec_version: u16) -> Option<FixedU64> {
+        // `None` models the registry record being absent, which 07 §7 requires
+        // `record_snapshot` to refuse on rather than resolve to the favourable
+        // neutral 1.0 (SQ-141).
         IncidentInput::get()
     }
 
@@ -312,7 +317,25 @@ impl EnsureOrigin<RuntimeOrigin> for TestMetricGovernanceOrigin {
     }
 }
 
+/// A seated oracle for the mock: 07 §2(5)'s floors met and the 13 §1 default
+/// bond ladder readable, so attested components are admissible. Registration is
+/// what these suites exercise; the refusal paths get their own explicit
+/// contexts in `tests.rs`.
+pub struct SeatedOracle;
+impl pallet_welfare::OracleAdmission for SeatedOracle {
+    fn admission() -> pallet_welfare::AttestedAdmission {
+        pallet_welfare::AttestedAdmission {
+            reporters: 3,
+            watchtowers: 2,
+            reporter_min: 3,
+            watchtower_min: 2,
+            coverage_bps: Some(1_750),
+        }
+    }
+}
+
 impl pallet_welfare::Config for Test {
+    type OracleAdmission = SeatedOracle;
     type MetricGovernanceOrigin = TestMetricGovernanceOrigin;
     type Params = TestParams;
     type MetricInputs = TestMetricInputs;
@@ -346,6 +369,9 @@ impl pallet_welfare::BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
         OnchainInput::set(inputs.clone());
         DailyInput::set(inputs);
     }
+    fn seat_oracle() {
+        // The mock's `OracleAdmission` is already seated (see `SeatedOracle`).
+    }
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
@@ -360,7 +386,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     OnchainInputsByVersion::set(Vec::new());
     DailyInput::set(healthy_components());
     DailyInputsByVersion::set(Vec::new());
-    IncidentInput::set(FixedU64(ONE));
+    IncidentInput::set(Some(FixedU64(ONE)));
     LedgerFailure::set(None);
     // Default: every epoch has an `Open` Baseline vault, so the 03 §5.2
     // epoch-VOID settlement has work to do unless a test says otherwise.

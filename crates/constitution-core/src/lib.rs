@@ -1235,11 +1235,16 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             b"epoch.horizon_k",
             ParamValue::U8(2),
             ParamValue::U8(1),
-            ParamValue::U8(4),
+            // Kernel ceiling `MAX_NON_TERMINAL_COHORTS - 2` (13 §1, SQ-496):
+            // 05 §3.3 spends the other two cohort slots on the awaiting-oracle
+            // and settling epochs, so `k = 3` would need five live slots and
+            // wedge `qualify` permanently. `true` below marks the row
+            // kernel-bounded, so `amend_registry` cannot raise the ceiling back.
+            ParamValue::U8(2),
             Some(MaxDelta::Absolute(ParamValue::U8(1))),
             4,
             ParamClass::MetaAndValues,
-            false
+            true
         ),
         row(
             b"mkt.obs_interval",
@@ -1893,8 +1898,8 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         ),
         row(
             b"orc.n_min",
-            ParamValue::U8(3),
-            ParamValue::U8(3),
+            ParamValue::U8(kernel::ORC_REPORTERS_MIN),
+            ParamValue::U8(kernel::ORC_REPORTERS_MIN),
             ParamValue::U8(16),
             Some(MaxDelta::Absolute(ParamValue::U8(1))),
             2,
@@ -3093,7 +3098,10 @@ mod tests {
             state.dispatch_set_param(
                 ConstitutionOrigin::ConstitutionalValues,
                 key16(b"epoch.horizon_k"),
-                ParamValue::U8(3),
+                // 1, not 3: the kernel ceiling is now `MAX_NON_TERMINAL_COHORTS
+                // - 2 = 2` (SQ-496), so 3 would be refused for a *bounds*
+                // reason and stop testing the origin rule this case is about.
+                ParamValue::U8(1),
                 4,
                 40
             ),
@@ -3103,7 +3111,7 @@ mod tests {
             .dispatch_set_param(
                 ConstitutionOrigin::FutarchyMeta,
                 key16(b"epoch.horizon_k"),
-                ParamValue::U8(3),
+                ParamValue::U8(1),
                 4,
                 40,
             )

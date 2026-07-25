@@ -14,17 +14,17 @@
 // pallet
 // --runtime
 // target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
-// --pallets
+// --pallet
 // pallet_oracle
-// --all
+// --extrinsic
+// *
 // --steps
 // 50
 // --repeat
 // 20
-// --min-duration
-// 0
 // --output
-// /tmp/claude-1000/-home-development-bleavit/b40139b1-6248-4c1a-ad60-57e786f83c15/scratchpad/pallet_oracle_new.rs
+// /tmp/claude-1000/-home-development-bleavit/b40139b1-6248-4c1a-ad60-57e786f83c15/scratchpad/sq141-pallet_oracle.rs
+// --unsafe-overwrite-results
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(unused_parens)]
@@ -73,8 +73,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `206997`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_868_939_000 picoseconds.
-		Weight::from_parts(1_887_969_000, 0)
+		// Minimum execution time: 1_781_817_000 picoseconds.
+		Weight::from_parts(1_817_127_000, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
 			.saturating_add(T::DbWeight::get().reads(492))
 			.saturating_add(T::DbWeight::get().writes(6))
@@ -113,14 +113,14 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `204729`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_771_879_000 picoseconds.
-		Weight::from_parts(1_807_399_000, 0)
+		// Minimum execution time: 1_609_877_000 picoseconds.
+		Weight::from_parts(1_760_907_000, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
 			.saturating_add(T::DbWeight::get().reads(480))
 			.saturating_add(T::DbWeight::get().writes(6))
 	}
 	/// Storage: `Welfare::MetricSpecs` (r:1 w:0)
-	/// Proof: `Welfare::MetricSpecs` (`max_values`: None, `max_size`: Some(3379), added: 5854, mode: `MaxEncodedLen`)
+	/// Proof: `Welfare::MetricSpecs` (`max_values`: None, `max_size`: Some(3507), added: 5982, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::CohortSchedules` (r:5 w:0)
 	/// Proof: `Epoch::CohortSchedules` (`max_values`: None, `max_size`: Some(157), added: 2632, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
@@ -159,10 +159,10 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn report() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `210064`
+		//  Measured:  `210072`
 		//  Estimated: `353758`
-		// Minimum execution time: 1_958_919_000 picoseconds.
-		Weight::from_parts(1_979_289_000, 0)
+		// Minimum execution time: 1_901_807_000 picoseconds.
+		Weight::from_parts(1_932_077_000, 0)
 			.saturating_add(Weight::from_parts(0, 353758))
 			.saturating_add(T::DbWeight::get().reads(516))
 			.saturating_add(T::DbWeight::get().writes(6))
@@ -197,8 +197,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `204612`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_798_179_000 picoseconds.
-		Weight::from_parts(1_831_919_000, 0)
+		// Minimum execution time: 1_748_297_000 picoseconds.
+		Weight::from_parts(1_778_448_000, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
 			.saturating_add(T::DbWeight::get().reads(478))
 			.saturating_add(T::DbWeight::get().writes(4))
@@ -235,8 +235,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `207154`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_858_839_000 picoseconds.
-		Weight::from_parts(1_873_139_000, 0)
+		// Minimum execution time: 1_806_238_000 picoseconds.
+		Weight::from_parts(1_836_777_000, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
 			.saturating_add(T::DbWeight::get().reads(490))
 			.saturating_add(T::DbWeight::get().writes(5))
@@ -278,11 +278,11 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `216074`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_914_749_000 picoseconds.
-		Weight::from_parts(1_935_825_051, 0)
+		// Minimum execution time: 1_876_297_000 picoseconds.
+		Weight::from_parts(1_919_578_028, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
-			// Standard Error: 8
-			.saturating_add(Weight::from_parts(1_447, 0).saturating_mul(n.into()))
+			// Standard Error: 13
+			.saturating_add(Weight::from_parts(1_197, 0).saturating_mul(n.into()))
 			.saturating_add(T::DbWeight::get().reads(487))
 			.saturating_add(T::DbWeight::get().writes(11))
 	}
@@ -322,8 +322,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `197617`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_799_889_000 picoseconds.
-		Weight::from_parts(1_827_749_000, 0)
+		// Minimum execution time: 1_644_357_000 picoseconds.
+		Weight::from_parts(1_719_128_000, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
 			.saturating_add(T::DbWeight::get().reads(492))
 			.saturating_add(T::DbWeight::get().writes(7))
@@ -364,8 +364,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `216040`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_862_929_000 picoseconds.
-		Weight::from_parts(1_877_989_000, 0)
+		// Minimum execution time: 1_685_037_000 picoseconds.
+		Weight::from_parts(1_784_047_000, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
 			.saturating_add(T::DbWeight::get().reads(486))
 			.saturating_add(T::DbWeight::get().writes(7))
@@ -407,11 +407,11 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `217944`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_946_709_000 picoseconds.
-		Weight::from_parts(1_923_901_241, 0)
+		// Minimum execution time: 1_918_518_000 picoseconds.
+		Weight::from_parts(1_926_177_389, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
-			// Standard Error: 198_875
-			.saturating_add(Weight::from_parts(52_362_680, 0).saturating_mul(n.into()))
+			// Standard Error: 594_082
+			.saturating_add(Weight::from_parts(43_488_429, 0).saturating_mul(n.into()))
 			.saturating_add(T::DbWeight::get().reads(500))
 			.saturating_add(T::DbWeight::get().writes(8))
 			.saturating_add(T::DbWeight::get().writes((3_u64).saturating_mul(n.into())))
@@ -454,8 +454,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `14750`
 		//  Estimated: `53130`
-		// Minimum execution time: 287_960_000 picoseconds.
-		Weight::from_parts(292_830_000, 0)
+		// Minimum execution time: 259_740_000 picoseconds.
+		Weight::from_parts(286_660_000, 0)
 			.saturating_add(Weight::from_parts(0, 53130))
 			.saturating_add(T::DbWeight::get().reads(37))
 			.saturating_add(T::DbWeight::get().writes(13))
@@ -480,8 +480,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `13247`
 		//  Estimated: `45309`
-		// Minimum execution time: 103_900_000 picoseconds.
-		Weight::from_parts(106_040_000, 0)
+		// Minimum execution time: 98_870_000 picoseconds.
+		Weight::from_parts(103_540_000, 0)
 			.saturating_add(Weight::from_parts(0, 45309))
 			.saturating_add(T::DbWeight::get().reads(24))
 			.saturating_add(T::DbWeight::get().writes(5))
@@ -516,8 +516,8 @@ impl<T: frame_system::Config> pallet_oracle::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `204615`
 		//  Estimated: `356514`
-		// Minimum execution time: 1_892_209_000 picoseconds.
-		Weight::from_parts(1_901_189_000, 0)
+		// Minimum execution time: 1_843_438_000 picoseconds.
+		Weight::from_parts(1_871_828_000, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
 			.saturating_add(T::DbWeight::get().reads(478))
 			.saturating_add(T::DbWeight::get().writes(8))

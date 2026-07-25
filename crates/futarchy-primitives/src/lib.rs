@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 13;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 14;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -1029,6 +1029,12 @@ pub mod kernel {
     /// snapshots that selection for its full lifecycle.
     pub const ORC_ROUNDS_MIN: u8 = 2;
     pub const ORC_ROUNDS_MAX: u8 = 4;
+    /// Reporters that MUST be registered with full stakes before any attested
+    /// component may be admitted to a MetricSpec, and before Phase-3 arming
+    /// (07 §2(5)/§3). 13 §1 has always marked `orc.n_min`'s floor as a kernel
+    /// value; this is that floor's first home in code, so the constitution's
+    /// genesis seed and the admission gate cannot drift apart (SQ-341).
+    pub const ORC_REPORTERS_MIN: u8 = 3;
     /// Class-4 oracle report window after the measurement epoch closes (07 §5(1)).
     pub const ORC_REPORT_WINDOW_BLOCKS: u32 = 2 * BLOCKS_PER_DAY;
     pub const MAX_NESTED_LEVELS: u32 = 4;
@@ -1228,7 +1234,7 @@ mod tests {
         // SQ-186 adds `Epoch::TreasuryBondAskBps` — the kernel slope of 08 §7's
         // TREASURY intake bond — to 02 §9's frozen metadata-constant list. Purely
         // additive, so `transaction_version` is untouched (02 §13 rule 7).
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 13);
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 14);
     }
 
     #[test]

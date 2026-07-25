@@ -1355,8 +1355,13 @@ fn assert_last_matches_core(event: CoreEvent) {
 fn shell_matches_core_over_400_step_fixed_seed_sequence() {
     new_test_ext().execute_with(|| {
         let mut core = WelfareState::new();
-        core.register_metric_spec(Registration::Genesis, 1, genesis_specs(1))
-            .expect("seed spec is valid");
+        core.register_metric_spec(
+            Registration::Genesis,
+            1,
+            genesis_specs(1),
+            &crate::mock::SeatedOracle::admission(),
+        )
+        .expect("seed spec is valid");
         core.events.clear();
         let params = CoreWelfareParams::DEFAULT;
         let mut seed = 0x6d2b_79f5_u64;
@@ -1384,6 +1389,7 @@ fn shell_matches_core_over_400_step_fixed_seed_sequence() {
                         Registration::Live { current_epoch: now },
                         version,
                         specs.clone(),
+                        &crate::mock::SeatedOracle::admission(),
                     );
                     let pallet_result = Welfare::register_spec(
                         RuntimeOrigin::signed(governance_acc()),

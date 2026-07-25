@@ -129,10 +129,22 @@ startup line and plans nothing. The keeper reads `Welfare.MaxGateFlags` and
 day indices matching welfare-core. Internal-only pruning, upgrade-proof recomputation, and other
 calls whose arguments cannot be proved from storage are likewise never guessed. Zero-filing
 registry epochs are deliberately unclosable on-chain under the
-A6 dual-review ruling: `close_epoch` requires a live `FilingCount` entry, preventing a
-reaped/never-filed epoch from being (re-)closed to the favorable `no filings => 1` aggregate.
-Welfare instead applies its pull-side `no record => 1` default, so the keeper never plans these
-epochs.
+A6 dual-review ruling: `close_epoch` requires a live `FilingCount` entry — or, once the epoch's
+first version has closed and dropped that epoch-wide counter, some version's aggregate —
+preventing a reaped/never-filed epoch from being (re-)closed to the favorable
+`no filings => 1` aggregate. Welfare instead applies its pull-side `no record => 1` default, so
+the keeper never plans these epochs.
+
+Per [`07-oracle-and-disputes.md` §7](../docs/architecture/07-oracle-and-disputes.md), the registry
+lifecycle is keyed by `(epoch, spec_version)`: a MetricSpec activation boundary leaves two cohorts
+measuring one epoch under different frozen specs, and their filings must never be folded into one
+aggregate. The registry snapshot therefore buckets records per version — filings by the
+`spec_version` of their own record, `Aggregates` and `ClosedAt` by their second storage key — and
+plans `close_epoch(epoch, spec_version)` and `reap_epoch(epoch, spec_version)` once per version.
+`crank_close(epoch, batch)` and the `FilingCount` id allocator stay epoch-keyed on chain, so the
+planner still emits one `crank_close` per epoch covering both versions' due filings. A record
+whose version cannot be resolved from storage is dropped rather than defaulted: cranking the wrong
+version would act on a sibling cohort's record.
 
 ## Concurrent operation and economics
 

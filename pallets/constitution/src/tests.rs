@@ -192,7 +192,7 @@ fn phase_flag_bit_assignments_match_02_7_3() {
 
 #[test]
 fn contract_version_and_bounds_reexports_hold() {
-    assert_eq!(CONTRACT_VERSION, 13); // v13: Epoch::TreasuryBondAskBps metadata constant (SQ-186)
+    assert_eq!(CONTRACT_VERSION, 14); // v14: versioned MetricSpec surface (SQ-175/SQ-341/SQ-141)
     assert_eq!(MAX_PARAMS, 128); // 13 §4 registry bound
     assert_eq!(MAX_CAPABILITIES, 64);
     assert_eq!(crate::MAX_METERS, 16);
@@ -294,7 +294,9 @@ fn set_param_authority_matrix_is_exact_per_class() {
                 Constitution::set_param(
                     RuntimeOrigin::signed(refused),
                     key16(HORIZON_KEY),
-                    ParamValue::U8(3)
+                    // 1, not 3: 3 is above the SQ-496 kernel ceiling of 2 and
+                    // would be refused on bounds, masking the origin rule.
+                    ParamValue::U8(1)
                 ),
                 DispatchError::BadOrigin
             );
@@ -302,7 +304,7 @@ fn set_param_authority_matrix_is_exact_per_class() {
         assert_ok!(Constitution::set_param(
             RuntimeOrigin::signed(META_ACC),
             key16(HORIZON_KEY),
-            ParamValue::U8(3)
+            ParamValue::U8(1)
         ));
     });
 }
@@ -1501,18 +1503,38 @@ fn generated_registry_suite_rejects_every_seeded_key_past_its_amendment_limits()
             }
 
             if record.max_delta.is_some() {
-                let candidate = delta_past_limit(record).unwrap_or_else(|| {
-                    panic!("generated key {key_name} has no in-bounds past-Δ candidate")
-                });
-                set_epoch(record.cooldown_epochs);
-                assert_noop!(
-                    Constitution::set_param(
-                        governance_origin_for(record, candidate),
-                        record.key,
-                        candidate
-                    ),
-                    Error::<Test>::DeltaTooLarge
-                );
+                // A key whose whole `[min, max]` band is no wider than its
+                // max-Δ has **no** reachable past-Δ state: every in-bounds move
+                // is within Δ by construction, so the Δ limit constrains
+                // nothing that the bounds legs above do not already cover. That
+                // is a provable vacuity, not missing coverage — so it is
+                // skipped with the proof rather than panicked on (SQ-496 made
+                // `epoch.horizon_k` the first such key by deriving its ceiling
+                // from `MAX_NON_TERMINAL_COHORTS - 2`). Anything else that
+                // yields no candidate is still a fixture defect and still
+                // panics.
+                if let Some(candidate) = delta_past_limit(record) {
+                    set_epoch(record.cooldown_epochs);
+                    assert_noop!(
+                        Constitution::set_param(
+                            governance_origin_for(record, candidate),
+                            record.key,
+                            candidate
+                        ),
+                        Error::<Test>::DeltaTooLarge
+                    );
+                } else {
+                    let span = record.max.as_u128().saturating_sub(record.min.as_u128());
+                    let delta = match record.max_delta {
+                        Some(crate::MaxDelta::Absolute(bound)) => Some(bound.as_u128()),
+                        _ => None,
+                    };
+                    assert!(
+                        delta.is_some_and(|delta| span <= delta),
+                        "generated key {key_name} has no in-bounds past-Δ candidate \
+                         and its band is not provably narrower than its max-Δ"
+                    );
+                }
             }
 
             if record.kernel_bounded {

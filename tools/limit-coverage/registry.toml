@@ -457,9 +457,10 @@ reason = "13 §1 / rule 7: amendment bounds covered by the generated per-key sui
 
 [[entry]]
 key = "orc.n_min"
-class = "param-bounds"
+class = "dispatch-limit"
 genesis = true
-reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+behavior = "InsufficientOracleSeats"
+reason = "13 §1 / 07 §2(5): SQ-341 gave this key its first consumer of any kind — before it, both halves of the attested-admission rule were enforced nowhere and the key appeared only in its genesis seed and a doc comment. `welfare.register_spec` now refuses with `InsufficientOracleSeats` when fewer than `orc.n_min` reporters (or fewer than `wt.quorum` watchtowers) are registered. Because 05 §4.3 makes every A-pillar component attested and §4.4 requires the A weights to sum to 1, the gate reaches every valid spec set. Amendment bounds remain covered by the generated per-key suite."
 
 [[entry]]
 key = "reg.bond_inc"

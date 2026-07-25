@@ -1582,17 +1582,33 @@ pub fn stored_round_bond(
         .ok_or(Error::Overflow)
 }
 
-pub fn can_admit_attested_component(delta_s_max_bps: u32, params: &OracleParams) -> bool {
-    if !(ORC_ROUND_CAP_MIN..=ORC_ROUND_CAP_MAX).contains(&params.rounds) {
-        return false;
+/// The 07 §6.3 bond-coverage rate `(2^R_max − 1) · orc.bond_bps`, in basis
+/// points — what a reporter who must survive every round of the §5 ladder puts
+/// at risk, expressed against the settlement impact a lie could move.
+///
+/// **This is the single home of that derivation.** It has three consumers that
+/// need *opposite* failure directions when `rounds` is outside its 13 §1 kernel
+/// band [2, 4], so the malformed case is returned as `None` rather than resolved
+/// here: attested admission ([`can_admit_attested_component`], and welfare's
+/// `register_metric_spec` gate) refuses, while the registry's value-scaled
+/// filing bond falls back to the tightest lawful ladder (×3) because a zero
+/// multiple would price every filing at the floor. Both are fail-closed for
+/// their own consumer, and neither is safe for the other — which is exactly why
+/// the choice belongs at the call site and the arithmetic does not.
+pub fn coverage_bps(rounds: u8, bond_bps: u32) -> Option<u32> {
+    if !(ORC_ROUND_CAP_MIN..=ORC_ROUND_CAP_MAX).contains(&rounds) {
+        return None;
     }
-    let Some(round_multiplier) = 1u32.checked_shl(u32::from(params.rounds)) else {
-        return false;
-    };
-    let coverage_bps = round_multiplier
-        .saturating_sub(1)
-        .saturating_mul(params.bond_bps);
-    coverage_bps >= delta_s_max_bps
+    let round_multiplier = 1u32.checked_shl(u32::from(rounds))?;
+    Some(round_multiplier.saturating_sub(1).saturating_mul(bond_bps))
+}
+
+/// 07 §6.3's admission rule at live parameters: a component may settle money
+/// only if the whole bond ladder covers the maximum single-epoch settlement
+/// impact it documents. The 10.5% figure §6.3 quotes is illustrative of
+/// `R_max = 3` and MUST NOT be hardcoded (SQ-341).
+pub fn can_admit_attested_component(delta_s_max_bps: u32, params: &OracleParams) -> bool {
+    coverage_bps(params.rounds, params.bond_bps).is_some_and(|cov| cov >= delta_s_max_bps)
 }
 
 /// Deterministic content hash for committed evidence payloads (the model

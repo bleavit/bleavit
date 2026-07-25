@@ -45,11 +45,12 @@ use futarchy_primitives::{
 };
 
 pub use welfare_core::{
-    ComponentValue, Error as CoreError, Event as CoreEvent, GateBreachFlags as CoreGateBreachFlags,
-    MetricSpec, Pillar, Registration, Snapshot as CoreSnapshot, SourceClass,
-    WelfareParams as CoreWelfareParams, WelfareState, EPSILON, EPSILON_PILLAR, HISTORY_PRIORS,
-    MAX_COMPONENTS_PER_SPEC, MAX_DAILY_GATE_SAMPLES, MAX_GATE_FLAGS, MAX_METRIC_SPECS,
-    MAX_SNAPSHOTS, ONE, THETA_C_HI, THETA_C_LO, THETA_S_HI, THETA_S_LO, W_A, W_P,
+    AttestedAdmission, ComponentValue, Error as CoreError, Event as CoreEvent,
+    GateBreachFlags as CoreGateBreachFlags, MetricSpec, Pillar, Registration,
+    Snapshot as CoreSnapshot, SourceClass, WelfareParams as CoreWelfareParams, WelfareState,
+    EPSILON, EPSILON_PILLAR, HISTORY_PRIORS, MAX_COMPONENTS_PER_SPEC, MAX_DAILY_GATE_SAMPLES,
+    MAX_GATE_FLAGS, MAX_METRIC_SPECS, MAX_SNAPSHOTS, ONE, THETA_C_HI, THETA_C_LO, THETA_S_HI,
+    THETA_S_LO, W_A, W_P,
 };
 
 /// Core bounds in the `u32` form required by FRAME's `ConstU32`.
@@ -96,12 +97,29 @@ pub trait WelfareParamsProvider {
     }
 }
 
+/// Runtime-injected view of the 07 §2(5) admission preconditions: the oracle's
+/// registered reporter/watchtower seats and the live bond ladder that 07 §6.3's
+/// coverage rule is evaluated against. Kept a seam rather than a direct read so
+/// welfare stays independent of `pallet-oracle` and of `pallet-constitution`.
+pub trait OracleAdmission {
+    fn admission() -> AttestedAdmission;
+}
+
 /// Injected normalized metric source. Normalization, missing-data treatment,
 /// raw counter mapping, and attestation plumbing are runtime-composition work;
 /// this pallet aggregates only already-normalized `[0, 1]` components.
 pub trait MetricInputs {
     fn onchain_components(epoch: EpochId, spec_version: MetricSpecVersion) -> Vec<ComponentValue>;
-    fn incident_multiplier(epoch: EpochId) -> FixedU64;
+    /// The registry's closed incident aggregate for `(epoch, spec_version)`
+    /// — the `C_attested` multiplier of 05 §4.4.
+    ///
+    /// `None` means the record is not available: the version's `close_epoch`
+    /// has not run, a filing is still non-terminal, or no cohort froze that
+    /// version. 07 §7 requires the reader to **fail closed** on all three —
+    /// substituting the neutral 1.0 would settle a cohort at full-strength
+    /// `C_attested` on absent evidence, which is the favourable direction, not
+    /// the safe one (G-1). `record_snapshot` refuses and retries.
+    fn incident_multiplier(epoch: EpochId, spec_version: MetricSpecVersion) -> Option<FixedU64>;
     fn daily_components(
         epoch: EpochId,
         day: u8,
@@ -157,6 +175,16 @@ pub trait BenchmarkHelper<RuntimeOrigin> {
     fn prime_finalized_epoch(epoch: EpochId);
     /// Populate every component the active benchmark MetricSpec reads.
     fn prime_metric_inputs(count: u16);
+    /// Fill 07 §2(5)'s reporter and watchtower seats so `register_spec` reaches
+    /// the work it is supposed to measure.
+    ///
+    /// Deliberately a **seeding** seam and not a stubbed `OracleAdmission`:
+    /// every valid MetricSpec contains an attested component (05 §4.3/§4.4), so
+    /// an unseated oracle refuses the dispatch outright and the benchmark
+    /// measures nothing. Returning a fabricated admission instead would hide the
+    /// real storage reads the gate performs — the exact fixture-instead-of-work
+    /// shape SQ-489 was raised for.
+    fn seat_oracle();
     fn prime_keeper_rebate() {}
     fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 }
@@ -194,6 +222,10 @@ pub mod pallet {
         type SnapshotSchedule: SnapshotSchedule;
         /// Fail-soft keeper rebate endpoint (08 §6.3).
         type KeeperRebate: KeeperRebateSink<Self::AccountId>;
+        /// 07 §2(5) attested-component admission inputs. Injected because this
+        /// pallet owns neither oracle state nor constitution parameters, and
+        /// must not import the oracle to reach them (I-24).
+        type OracleAdmission: OracleAdmission;
         /// Weight information for all extrinsics.
         type WeightInfo: WeightInfo;
         /// Admitted origin construction for benchmarks.
@@ -455,6 +487,26 @@ pub mod pallet {
         /// (05 §4.7; SQ-79). The gate input is unavailable, so settlement holds
         /// at the status quo and the cohort takes 07 §10's VOID.
         GateWindowUnsampled,
+        /// The A-pillar milestone component declares no positive `target`, so
+        /// 05 §4.3's `min(1, points ÷ target)` has no defined value (07 §7).
+        MilestoneTargetUnset,
+        /// An attested component's `delta_s_max_bps` is outside `(0, 10_000]`
+        /// (05 §4.4).
+        BadDeltaSMax,
+        /// 07 §2(5): fewer than `orc.n_min` reporters or fewer than `wt.quorum`
+        /// watchtowers are registered, so an attested component's game could not
+        /// be adjudicated.
+        InsufficientOracleSeats,
+        /// 07 §6.3: the live bond ladder does not cover the component's declared
+        /// `Δs_max`, so a lie about it would cost less than it can move. Also
+        /// returned when the ladder is unreadable — the fail-closed direction.
+        BondCoverageUnmet,
+        /// The registry has no closed incident aggregate for this
+        /// `(epoch, spec_version)`, so `C_attested`'s multiplier is unknown
+        /// (07 §7, SQ-141). The snapshot is refused rather than resolved to the
+        /// favourable neutral 1.0; 07 §11(1)'s d20 money deadline guarantees the
+        /// record exists in time, so this is a retry, not a wedge.
+        IncidentAggregateUnavailable,
     }
 
     #[pallet::hooks]
@@ -487,6 +539,7 @@ pub mod pallet {
                     },
                     version,
                     specs.into_inner(),
+                    &T::OracleAdmission::admission(),
                 )
             })?;
             let _ = Self::snapshot_progress();
@@ -512,7 +565,8 @@ pub mod pallet {
                 Error::<T>::EpochNotFinalized
             );
             let components = T::MetricInputs::onchain_components(epoch, spec_version);
-            let incident = T::MetricInputs::incident_multiplier(epoch);
+            let incident = T::MetricInputs::incident_multiplier(epoch, spec_version)
+                .ok_or(Error::<T>::IncidentAggregateUnavailable)?;
             let params = Self::live_params()?;
             Self::mutate(|state| {
                 state
@@ -617,7 +671,19 @@ pub mod pallet {
             for (version, specs) in &self.specs {
                 assert!(
                     state
-                        .register_metric_spec(Registration::Genesis, *version, specs.clone())
+                        .register_metric_spec(
+                            Registration::Genesis,
+                            *version,
+                            specs.clone(),
+                            // 07 §2(5) binds the genesis build too. A genesis
+                            // spec carrying an attested component is refused
+                            // unless the oracle's seats are already filled at
+                            // this point in the genesis sequence — which depends
+                            // on `construct_runtime!` ordering, so an attested
+                            // genesis spec is a deliberate choice a preset must
+                            // sequence for, not something that quietly works.
+                            &T::OracleAdmission::admission(),
+                        )
                         .is_ok(),
                     "welfare genesis metric specs violate core validation"
                 );
@@ -1302,6 +1368,10 @@ pub mod pallet {
                 CoreError::ArithmeticOverflow => Error::<T>::ArithmeticOverflow.into(),
                 CoreError::TryStateViolation => Error::<T>::TryStateViolation.into(),
                 CoreError::GateWindowUnsampled => Error::<T>::GateWindowUnsampled.into(),
+                CoreError::MilestoneTargetUnset => Error::<T>::MilestoneTargetUnset.into(),
+                CoreError::BadDeltaSMax => Error::<T>::BadDeltaSMax.into(),
+                CoreError::InsufficientOracleSeats => Error::<T>::InsufficientOracleSeats.into(),
+                CoreError::BondCoverageUnmet => Error::<T>::BondCoverageUnmet.into(),
             }
         }
     }
