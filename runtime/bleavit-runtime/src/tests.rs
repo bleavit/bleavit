@@ -18942,3 +18942,157 @@ fn spec_set(version: futarchy_primitives::MetricSpecVersion) -> Vec<pallet_welfa
     })
     .collect()
 }
+
+/// SQ-495 / 07 §6.3: an amendment that would lower the bond-coverage rate below
+/// an already-admitted component's `Δs_max` is refused at the governance
+/// boundary.
+///
+/// The rule `(2^orc.rounds − 1) · orc.bond_bps ≥ Δs_max` was evaluated once, at
+/// `register_spec`, and nothing re-checked it afterwards. Both inputs are
+/// lawfully amendable inside their own 13 §1 bounds — `orc.rounds` carries no
+/// max-Δ at all, and `orc.bond_bps` 250 → 150 sits inside its `Factor(2)` band —
+/// so a component admitted at `(3, 250)`, i.e. 1,750 bps of coverage, could keep
+/// settling money at `(2, 150)`, which is 450. That is the coverage rule
+/// silently ceasing to hold for a live component, with no event and no gate.
+#[test]
+fn sq495_an_amendment_cannot_under_collateralize_an_admitted_component() {
+    development_ext().execute_with(|| {
+        let rounds = pallet_constitution::key16(b"orc.rounds");
+        let bond_bps = pallet_constitution::key16(b"orc.bond_bps");
+        // With nothing admitted there is no claim to leave unbacked, so the
+        // screen stands aside entirely.
+        advance_cooldown();
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            rounds,
+            pallet_constitution::ParamValue::U8(2),
+        ));
+        advance_cooldown();
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            rounds,
+            pallet_constitution::ParamValue::U8(3),
+        ));
+
+        // Admit a component declaring the full 1,750 bps the default ladder
+        // covers — the worked example of 07 §6.3.
+        install_attested_spec(41, 1_750);
+
+        // Dropping the ladder to two rounds leaves 3 × 250 = 750 bps: refused.
+        advance_cooldown();
+        assert_noop!(
+            Constitution::set_param(
+                pallet_origins::Origin::FutarchyMeta.into(),
+                rounds,
+                pallet_constitution::ParamValue::U8(2),
+            ),
+            pallet_constitution::Error::<Runtime>::CoverageBreaksAdmission
+        );
+        // Halving the rate leaves 7 × 150 = 1,050 bps: also refused.
+        advance_cooldown();
+        assert_noop!(
+            Constitution::set_param(
+                pallet_origins::Origin::FutarchyMeta.into(),
+                bond_bps,
+                pallet_constitution::ParamValue::Perbill(15_000_000),
+            ),
+            pallet_constitution::Error::<Runtime>::CoverageBreaksAdmission
+        );
+        // Raising coverage is always legal — the screen is directional, not a
+        // freeze on the keys.
+        advance_cooldown();
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            rounds,
+            pallet_constitution::ParamValue::U8(4),
+        ));
+        // A chain that is ALREADY under-covered must still be repairable in
+        // steps. An absolute `cov >= required` test freezes both keys forever in
+        // exactly the state the screen exists to leave: with a 10,000-bps
+        // component stranded at `(2, 150)`, raising rounds to 4 reaches only
+        // 2,250 and raising the rate to its Factor(2) limit only 900, so every
+        // repair is rejected and neither parameter can ever be restored. A
+        // non-decreasing amendment is therefore always permitted, which is what
+        // 07 §6.3's "raising coverage is always legal" promises (Codex review,
+        // PR #174).
+        pallet_welfare::MetricSpecs::<Runtime>::remove(41);
+        install_attested_spec(43, 10_000);
+        advance_cooldown();
+        // Still refuses a further lowering...
+        assert_noop!(
+            Constitution::set_param(
+                pallet_origins::Origin::FutarchyMeta.into(),
+                bond_bps,
+                pallet_constitution::ParamValue::Perbill(15_000_000),
+            ),
+            pallet_constitution::Error::<Runtime>::CoverageBreaksAdmission
+        );
+        // ...but admits a raise that improves coverage without restoring it.
+        advance_cooldown();
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            bond_bps,
+            pallet_constitution::ParamValue::Perbill(50_000_000),
+        ));
+        pallet_welfare::MetricSpecs::<Runtime>::remove(43);
+        // And a component that declares less impact is not held hostage by a
+        // stricter sibling's requirement being absent: with only a 450-bps
+        // component admitted, the two-round ladder clears.
+        pallet_welfare::MetricSpecs::<Runtime>::remove(41);
+        install_attested_spec(42, 450);
+        advance_cooldown();
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            rounds,
+            pallet_constitution::ParamValue::U8(3),
+        ));
+        advance_cooldown();
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            rounds,
+            pallet_constitution::ParamValue::U8(2),
+        ));
+    });
+}
+
+/// Advance the epoch clock past the 13 §1 cooldown so consecutive amendments of
+/// the same key are admissible; the screen under test is unrelated to cooldown.
+fn advance_cooldown() {
+    pallet_epoch::EpochOf::<Runtime>::mutate(|info| {
+        info.index = info.index.saturating_add(8);
+    });
+}
+
+/// Store a one-component attested MetricSpec declaring `delta_s_max_bps`.
+/// Writes `MetricSpecs` directly: `register_spec`'s own admission gate is
+/// covered by `sq341_attested_admission_is_gated_on_live_oracle_seats`, and this
+/// fixture is about the *amendment* screen.
+fn install_attested_spec(version: u16, delta_s_max_bps: u32) {
+    let spec = pallet_welfare::MetricSpec {
+        id: futarchy_primitives::metric_ids::A_SHIPPED_UPGRADES,
+        version,
+        pillar: pallet_welfare::Pillar::A,
+        weight: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+        epsilon_floor: pallet_welfare::EPSILON_PILLAR,
+        activation_epoch: u32::MAX,
+        source: pallet_welfare::SourceClass::Attested,
+        formula_ref: [1; 32],
+        units: [2; 16],
+        repr: [3; 16],
+        cadence_blocks: 1,
+        sanity_min: futarchy_primitives::FixedU64(0),
+        sanity_max: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+        has_normalization_rule: true,
+        has_missing_data_rule: true,
+        has_gaming_vectors: true,
+        has_challenge_procedure: true,
+        prior_bounds: [futarchy_primitives::FixedU64(pallet_welfare::ONE);
+            pallet_welfare::HISTORY_PRIORS],
+        target: 100,
+        delta_s_max_bps,
+    };
+    pallet_welfare::MetricSpecs::<Runtime>::insert(
+        version,
+        pallet_welfare::BoundedSpecSet::try_from(vec![spec]).expect("one spec is bounded"),
+    );
+}

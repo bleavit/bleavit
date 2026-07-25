@@ -107,6 +107,11 @@ impl pallet_constitution::Config for Test {
     type WeightInfo = ();
     type PhaseArmingGate = TestPhaseArmingGate;
     type BudgetDerivationGuard = ();
+    // The coverage screen needs the live MetricSpec set, which this mock does
+    // not carry; the composed behaviour is pinned in the runtime suite. `()`
+    // permits, keeping the core/pallet differential focused on registry
+    // semantics — the same reason `BudgetDerivationGuard` is unbound here.
+    type CoverageGuard = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestBenchmarkHelper;
 }

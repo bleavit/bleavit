@@ -1827,12 +1827,115 @@ impl pallet_constitution::BudgetDerivationGuard for RuntimeBudgetDerivationGuard
     }
 }
 
+/// 07 §6.3's coverage rule, re-checked whenever one of its two inputs is
+/// amended (SQ-495).
+///
+/// The rule is evaluated once, at `register_spec`. Nothing re-checked it when
+/// `orc.bond_bps` or `orc.rounds` was later lowered inside its own 13 §1
+/// bounds, so a component admitted at `(3, 250)` — 1,750 bps of coverage —
+/// could keep settling money at `(2, 150)`, which is 450. Both moves are
+/// single, lawful amendments: `orc.rounds` carries no max-Δ at all, and
+/// `orc.bond_bps` 250 → 150 sits inside its `Factor(2)` band.
+pub struct RuntimeCoverageGuard;
+impl pallet_constitution::CoverageGuard for RuntimeCoverageGuard {
+    fn permits(key: futarchy_primitives::ParamKey, next: pallet_constitution::ParamValue) -> bool {
+        // Every other key short-circuits before any welfare storage is touched,
+        // so the bounded MetricSpec scan below is paid only on the two keys
+        // that can actually move coverage.
+        if !pallet_constitution::is_coverage_input(key) {
+            return true;
+        }
+        // The amended key takes its proposed value; the other keeps its live
+        // one. `dispatch_set_param` runs this screen *before* committing the
+        // update, so the live read is the pre-amendment value — which is what
+        // the pairing needs.
+        let rounds_key = pallet_constitution::key16(b"orc.rounds");
+        let (rounds, bond_bps) = if key == rounds_key {
+            (
+                u8::try_from(next.as_u128()).unwrap_or(u8::MAX),
+                perbill_bps_param_or(
+                    b"orc.bond_bps",
+                    pallet_oracle::OracleParams::DEFAULT.bond_bps,
+                ),
+            )
+        } else {
+            // `orc.bond_bps` is stored as a `Perbill`, i.e. **parts per
+            // billion**, while §6.3's rule is stated in basis points — a factor
+            // of 100,000. Comparing the raw value against a `Δs_max` in bps
+            // would make every proposed rate look ~100,000× more generous than
+            // it is and wave through exactly the amendments this screen exists
+            // to refuse. Rounded **up**, matching `perbill_bps_param_or`, so
+            // the rounding never overstates coverage.
+            const PPB_PER_BPS: u128 = 100_000;
+            let parts = next.as_u128();
+            let bps = parts / PPB_PER_BPS + u128::from(parts % PPB_PER_BPS != 0);
+            (
+                u8_param_or(b"orc.rounds", pallet_oracle::OracleParams::DEFAULT.rounds),
+                u32::try_from(bps).unwrap_or(u32::MAX),
+            )
+        };
+        // The strictest live requirement. Scans **every registered** version,
+        // not just the ones live cohorts froze: a version registered now
+        // activates later, and its components were admitted against today's
+        // ladder. Bounded by MAX_METRIC_SPECS × MAX_COMPONENTS_PER_SPEC.
+        //
+        // Only `Attested` components carry a bond ladder — classes 1–3 run no
+        // §5 game, so their recorded `delta_s_max_bps` is not bound-checked at
+        // registration and must not bind an amendment here either.
+        let required = pallet_welfare::MetricSpecs::<Runtime>::iter_values()
+            .flatten()
+            .filter(|spec| matches!(spec.source, pallet_welfare::SourceClass::Attested))
+            .map(|spec| spec.delta_s_max_bps)
+            .max();
+        let Some(required) = required else {
+            // Nothing admitted yet, so nothing can be under-collateralized.
+            // This is the pre-genesis and early-bootstrap state, and it is the
+            // only case where an unreadable ladder is also permitted: with no
+            // attested component there is no claim to leave unbacked.
+            return true;
+        };
+        // A malformed ladder refuses, matching attested admission's direction on
+        // the same input rather than the registry's bond-pricing fallback: an
+        // amendment that leaves coverage unknowable cannot be shown safe.
+        let Some(proposed) = pallet_oracle::coverage_bps(rounds, bond_bps) else {
+            return false;
+        };
+        if proposed >= required {
+            return true;
+        }
+        // Coverage is already short of what some admitted component needs, and
+        // an absolute test would freeze **both** keys forever in exactly that
+        // state — the one the screen exists to get out of. A chain upgrading
+        // into this screen can arrive already under-covered, and no single
+        // lawful step necessarily restores full coverage: with a 10,000-bps
+        // component stranded at `(2, 150)`, raising rounds to 4 reaches 2,250
+        // and raising the rate to its `Factor(2)` limit reaches 900, so an
+        // absolute check rejects both repairs and the parameters can never be
+        // restored (Codex review, PR #174).
+        //
+        // So a **non-decreasing** amendment is always permitted, which is what
+        // 07 §6.3's "raising coverage is always legal" already promises.
+        // Comparing coverage rather than the key value handles both inputs
+        // uniformly, since coverage is monotone increasing in each. The screen
+        // still refuses every amendment that lowers coverage further.
+        let current = pallet_oracle::coverage_bps(
+            u8_param_or(b"orc.rounds", pallet_oracle::OracleParams::DEFAULT.rounds),
+            perbill_bps_param_or(
+                b"orc.bond_bps",
+                pallet_oracle::OracleParams::DEFAULT.bond_bps,
+            ),
+        );
+        current.is_some_and(|current| proposed >= current)
+    }
+}
+
 impl pallet_constitution::Config for Runtime {
     type GovernanceOrigin = ConstitutionGovernanceOrigin;
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
     type WeightInfo = crate::weights::pallet_constitution::WeightInfo<Runtime>;
     type PhaseArmingGate = TreasuryPhaseArmingGate;
     type BudgetDerivationGuard = RuntimeBudgetDerivationGuard;
+    type CoverageGuard = RuntimeCoverageGuard;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
@@ -8486,6 +8589,50 @@ impl pallet_market::BenchmarkHelper for RuntimeBenchmarkHelper {
 
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_constitution::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
+    fn prime_coverage_screen() -> Option<(
+        futarchy_primitives::ParamKey,
+        pallet_constitution::ParamValue,
+    )> {
+        // Saturate `MetricSpecs` to its 13 §4 bound so the SQ-495 screen walks
+        // the whole live set, then amend `orc.bond_bps` to a rate that still
+        // covers the seeded `Δs_max`. The scan is real work on the measured
+        // path; a `Δs_max` of 1 keeps the call succeeding so the benchmark
+        // measures the full walk rather than an early refusal.
+        for version in 1..=(pallet_welfare::MAX_METRIC_SPECS as u16) {
+            let specs: Vec<_> = (0..pallet_welfare::MAX_COMPONENTS_PER_SPEC as u16)
+                .map(|component| pallet_welfare::MetricSpec {
+                    id: component,
+                    version,
+                    pillar: pallet_welfare::Pillar::A,
+                    weight: FixedU64(0),
+                    epsilon_floor: pallet_welfare::EPSILON_PILLAR,
+                    activation_epoch: u32::MAX,
+                    source: pallet_welfare::SourceClass::Attested,
+                    formula_ref: [1; 32],
+                    units: [2; 16],
+                    repr: [3; 16],
+                    cadence_blocks: 1,
+                    sanity_min: FixedU64(0),
+                    sanity_max: FixedU64(1_000_000_000),
+                    has_normalization_rule: true,
+                    has_missing_data_rule: true,
+                    has_gaming_vectors: true,
+                    has_challenge_procedure: true,
+                    prior_bounds: [FixedU64(1_000_000_000); pallet_welfare::HISTORY_PRIORS],
+                    target: 100,
+                    delta_s_max_bps: 1,
+                })
+                .collect();
+            pallet_welfare::MetricSpecs::<Runtime>::insert(
+                version,
+                pallet_welfare::BoundedSpecSet::truncate_from(specs),
+            );
+        }
+        Some((
+            pallet_constitution::key16(b"orc.bond_bps"),
+            pallet_constitution::ParamValue::Perbill(25_000_000),
+        ))
+    }
     fn origin(authority: pallet_constitution::ConstitutionOrigin) -> RuntimeOrigin {
         match authority {
             pallet_constitution::ConstitutionOrigin::FutarchyParam => {
