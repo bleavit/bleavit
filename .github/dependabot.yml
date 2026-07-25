@@ -1,5 +1,21 @@
 version: 2
 
+# Every ecosystem below is grouped into a single pull request per run.
+#
+# Why: an ungrouped run opens one PR per dependency, and same-ecosystem PRs all
+# rewrite the *same* file — `Cargo.lock` for the two cargo entries, the three
+# `.github/workflows/*.yml` files for the actions entry. Because each PR is cut
+# from the main of its own creation, merging one immediately staleifies the rest:
+# they must rebase and re-run a full CI cycle (~2.5 h here, the TLC
+# model-checking job alone being ~2h20m), and their lockfile edits often overlap
+# in ways a 3-way merge resolves into an inconsistent lock. Six such PRs
+# (#160-#165, batched by hand into #167) cost one serial rebase chain and proved
+# the point; grouping makes Dependabot produce the batch itself.
+#
+# `applies-to` is left at its default of `version-updates` **deliberately**, so
+# that *security* updates are NOT grouped — those keep arriving as one focused,
+# individually reviewable and individually revertable PR each, which is the
+# posture this repository wants for advisory-driven bumps (AGENTS.md R-7).
 updates:
   - package-ecosystem: "cargo"
     directory: "/"
@@ -19,11 +35,25 @@ updates:
       - dependency-name: "polkadot-*"
       - dependency-name: "parachains-common"
       - dependency-name: "substrate-wasm-builder"
+    # Everything the ignore list above leaves eligible is per-crate rather than
+    # workspace-level (`parity-scale-codec`, `scale-info`, `serde`, `serde_json`,
+    # `proptest`, `bounded-collections`, ...); all of it lands in one root
+    # `Cargo.lock`, so one PR per run is the only non-colliding shape.
+    groups:
+      root-workspace:
+        patterns:
+          - "*"
 
   - package-ecosystem: "cargo"
     directory: "/keeper"
     schedule:
       interval: "weekly"
+    # The keeper is a separate workspace on caret ranges, so its weekly run is
+    # the highest-volume one — this is the entry that produced #161-#165.
+    groups:
+      keeper-workspace:
+        patterns:
+          - "*"
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -38,3 +68,10 @@ updates:
     # the action installs; the action ref tracks that file by hand.
     ignore:
       - dependency-name: "dtolnay/rust-toolchain"
+    # Action bumps touch `ci.yml`/`release.yml`/`sweep.yml`, and a single action
+    # is usually pinned across all three (setup-python was 10 call sites in
+    # #160), so separate PRs conflict on the same lines.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
