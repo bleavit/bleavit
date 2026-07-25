@@ -5501,7 +5501,18 @@ impl pallet_registry::RegistryParams for RegistryParams {
         balance_param(b"reg.bond_mile")
     }
     fn bond_bps() -> u32 {
-        <RuntimeOracleParams as pallet_oracle::OracleParamsProvider>::get().bond_bps
+        // Single-key read, deliberately **not**
+        // `RuntimeOracleParams::get().bond_bps`: that getter materializes the
+        // whole 12-key `OracleParams` aggregate, so routing one value through it
+        // cost 11 wasted `Constitution::Params` reads on **every** registry call
+        // that loads the core aggregate — visible as `challenge_filing` gaining
+        // 12 reads under SQ-489's regeneration despite never touching the
+        // exposure fold. Same helper and same default as the aggregate's own
+        // `bond_bps` line, so the value is identical by construction (SQ-489).
+        perbill_bps_param_or(
+            b"orc.bond_bps",
+            pallet_oracle::OracleParams::DEFAULT.bond_bps,
+        )
     }
 }
 pub struct OracleWatchtowers;
