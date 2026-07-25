@@ -7,7 +7,7 @@ use frame_support::weights::Weight;
 
 /// Runtime-provided weights for the registry extrinsics.
 pub trait WeightInfo {
-    /// `file` — one bond escrow + one filing insert.
+    /// `file` — bounded cohort-exposure fold + one bond escrow + one filing insert.
     fn file() -> Weight;
     /// `challenge_filing` — one bond escrow + one filing mutate.
     fn challenge_filing() -> Weight;

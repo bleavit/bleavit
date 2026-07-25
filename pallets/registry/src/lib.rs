@@ -70,16 +70,18 @@ use futarchy_primitives::{
 };
 use registry_core::{FilingClass, FilingId, RegistryKind};
 
-/// Live `reg.bond_incident` / `reg.bond_milestone` (13 §1, META), read from
+/// Live filing-bond parameters (13 §1, META), read from
 /// `pallet-constitution::Params` (rule 4). The runtime converts the typed
-/// `Params` records to base USDC units (B1a); the pallet threads them into the
-/// core's [`registry_core::Registry`] bond seams on every load, so the bond a
-/// filing escrows is always the live tunable, never a compile-time literal.
+/// records to base USDC units / basis points; the pallet threads them into the
+/// core's [`registry_core::Registry`] seams on every load, so a filing is priced
+/// from live tunables at creation and then frozen in [`registry_core::Filing`].
 pub trait RegistryParams {
-    /// `reg.bond_incident` in base USDC units (default 5,000 USDC).
+    /// `reg.bond_incident`, the Incident filing-bond floor in base USDC units.
     fn bond_incident() -> Balance;
-    /// `reg.bond_milestone` in base USDC units (default 2,500 USDC).
+    /// `reg.bond_milestone`, the Milestone filing-bond floor in base USDC units.
     fn bond_milestone() -> Balance;
+    /// `orc.bond_bps`, the value-scaling rate in basis points (250 = 2.5%).
+    fn coverage_bps() -> u32;
 }
 
 /// The 07 §4 bonded watchtower registry, read at `ack_observed`. Only bonded,
@@ -126,6 +128,10 @@ pub trait EpochContext {
     /// per-spec field (I-16), never a 13/kernel constant. Unused by the Incident
     /// instance.
     fn milestone_target(epoch: EpochId) -> u32;
+    /// Cohort escrow exposed to a filing about `epoch`. The Incident aggregate
+    /// affects every cohort consuming the measurement epoch; Milestone remains
+    /// unavailable until its aggregate has a MetricId binding (07 §7).
+    fn cohort_exposure(kind: RegistryKind, epoch: EpochId) -> Option<Balance>;
 }
 
 /// Maps a benchmark scenario to concrete runtime origins/accounts so the harness
@@ -467,6 +473,10 @@ pub mod pallet {
         /// A-pillar component (07 §7 *Milestone normalization*). Appended last —
         /// the preceding variant indices are metadata-stable (02 §13).
         MilestoneTargetUnset,
+        /// The epoch's cohort exposure cannot be determined, so the
+        /// value-scaled filing bond cannot be priced (07 §7; G-1). Appended last
+        /// to preserve every preceding metadata discriminant.
+        ExposureUnavailable,
     }
 
     // --------------------------------------------------------------------- hooks
@@ -500,9 +510,9 @@ pub mod pallet {
 
     #[pallet::call]
     impl<T: Config<I>, I: 'static> Pallet<T, I> {
-        /// 07 §7. File a bonded claim about an off-chain fact. Holds
-        /// `reg.bond_{incident,milestone}` (from `Params`), opens a 72 h challenge
-        /// window under the §4 quorum rule.
+        /// 07 §7. File a bonded claim about an off-chain fact. Holds the
+        /// value-scaled bond floored by `reg.bond_{incident,milestone}`, then
+        /// opens a 72 h challenge window under the §4 quorum rule.
         #[pallet::call_index(0)]
         #[pallet::weight(T::WeightInfo::file())]
         pub fn file(
@@ -516,7 +526,9 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             let raw = Self::to_core_authorized(&who)?;
             let now = Self::now();
-            let bond = Self::required_bond();
+            let kind = T::Kind::get();
+            let exposure = T::Epoch::cohort_exposure(kind, epoch);
+            let bond = Self::required_bond(exposure)?;
             // The window and the frozen spec version are trusted per-epoch reads
             // (I-16), never taken from the filer.
             let filing_window_end = T::Epoch::filing_window_end(epoch);
@@ -533,6 +545,7 @@ pub mod pallet {
                     spec_version,
                     expected_spec,
                     filing_window_end,
+                    exposure,
                 })
                 .map(|_| ())
             })?;
@@ -706,12 +719,21 @@ pub mod pallet {
             T::UsdcAssetId::get()
         }
 
-        /// The live required bond for this instance's kind (from `Params`, rule 4).
-        fn required_bond() -> Balance {
-            match T::Kind::get() {
+        /// Price the filing at creation (07 §7 / SQ-296), mirroring
+        /// `registry_core::Registry::required_bond` exactly. The division rounds
+        /// up and the floor is applied afterwards: under-custody is an unbacked
+        /// claim (I-4 / I-28).
+        fn required_bond(exposure: Option<Balance>) -> Result<Balance, DispatchError> {
+            let floor = match T::Kind::get() {
                 RegistryKind::Incident => T::Params::bond_incident(),
                 RegistryKind::Milestone => T::Params::bond_milestone(),
-            }
+            };
+            let scaled = exposure
+                .ok_or(Error::<T, I>::ExposureUnavailable)?
+                .checked_mul(T::Params::coverage_bps() as Balance)
+                .ok_or(Error::<T, I>::Overflow)?
+                .div_ceil(10_000);
+            Ok(core::cmp::max(floor, scaled))
         }
 
         /// Current block as the core's `u32` block number (real runtime is u32;
@@ -740,6 +762,7 @@ pub mod pallet {
             let mut reg = Registry::new(T::Kind::get());
             reg.bond_incident = T::Params::bond_incident();
             reg.bond_milestone = T::Params::bond_milestone();
+            reg.coverage_bps = T::Params::coverage_bps();
             // The Milestone divisor is the frozen-MetricSpec target for this
             // epoch (I-16), never a hardcode (rule 4). Incident ignores it.
             reg.milestone_target = T::Epoch::milestone_target(epoch);
@@ -1128,6 +1151,7 @@ pub mod pallet {
             let mut reg = Registry::new(T::Kind::get());
             reg.bond_incident = T::Params::bond_incident();
             reg.bond_milestone = T::Params::bond_milestone();
+            reg.coverage_bps = T::Params::coverage_bps();
             for (epoch, id, f) in Filings::<T, I>::iter() {
                 reg.filings.push(((epoch, id), f));
             }
@@ -1207,6 +1231,7 @@ pub mod pallet {
                 CoreError::NotRegistered => Error::<T, I>::NotRegistered.into(),
                 CoreError::AlreadyQuorum => Error::<T, I>::AlreadyQuorum.into(),
                 CoreError::MilestoneTargetUnset => Error::<T, I>::MilestoneTargetUnset.into(),
+                CoreError::ExposureUnavailable => Error::<T, I>::ExposureUnavailable.into(),
             }
         }
     }
