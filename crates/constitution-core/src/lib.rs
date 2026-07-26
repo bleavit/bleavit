@@ -9,6 +9,9 @@ use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
 pub use futarchy_primitives::kernel;
+/// 13 §5 items 1–4's derivation inputs, re-exported so the FRAME shell and the
+/// runtime guard name the same type the screen consumes (SQ-501).
+pub use futarchy_primitives::kernel::OccupancyParams;
 pub use futarchy_primitives::INTEGRATION_CONTRACT_VERSION as CONTRACT_VERSION;
 
 /// `twox128("Constitution") ++ twox128("ReleaseChannel")`.
@@ -824,10 +827,18 @@ impl ConstitutionState {
     /// delivered the safety property, only the CODE proposal can.
     ///
     /// **Occupancy keys.** Items 1–4's bounded occupancy and PoV arithmetic is
-    /// compiled in the same way, but its re-derivation is a whole-document
-    /// recomputation with no single literal to compare against, so the
-    /// fail-closed refusal stands for those and the row's successor obligation
-    /// keeps them.
+    /// compiled in the same way, and since SQ-501 it is screened the same way:
+    /// the envelopes 13 §5 publishes are single-homed as kernel constants, so a
+    /// proposed `epoch.slots`, `mkt.obs_interval`, `dec.window` or `epoch.length`
+    /// is re-derived against them and refused exactly when one would breach.
+    /// Before that they were refused unconditionally in **both** directions,
+    /// which is the same defect SQ-303 removed from the class-floor family: no
+    /// value of the four keys was admissible, so their 13 §1 registry rows were
+    /// declaratory. As with the class floors, the direction that is currently
+    /// unsafe reopens the moment a CODE change moves the compiled figure — and,
+    /// unlike a direction test, a combination that keeps every envelope inside
+    /// its constant (raise `mkt.obs_interval`, then raise `dec.window`) passes
+    /// today.
     fn ensure_derivations_survive(
         &self,
         key: ParamKey,
@@ -837,8 +848,27 @@ impl ConstitutionState {
         if current.as_u128() == next.as_u128() {
             return Ok(());
         }
-        ensure!(!is_occupancy_input(key), Error::BudgetDerivationRequired);
-        if !is_class_floor_input(key) {
+        let occupancy = is_occupancy_input(key);
+        let class_floor = is_class_floor_input(key);
+        // Every other key short-circuits before any registry scan, so ordinary
+        // parameter administration pays for none of the lookups below.
+        if !occupancy && !class_floor {
+            return Ok(());
+        }
+        if occupancy {
+            let params = occupancy_params_for(key, next, |wanted| {
+                self.params
+                    .iter()
+                    .find(|record| record.key == wanted)
+                    .map(|record| record.value)
+            })
+            // A missing or non-`u32` row is a broken registry, not a licence:
+            // refuse rather than screen against a partial parameter set (G-1).
+            .ok_or(Error::BudgetDerivationRequired)?;
+            ensure!(
+                occupancy_envelopes_survive(params),
+                Error::BudgetDerivationRequired
+            );
             return Ok(());
         }
         let proposed = |name: &[u8]| -> Option<u128> {
@@ -1048,14 +1078,12 @@ pub enum Error {
     TooManyCapabilities,
     BadOrigin,
     TryStateViolation,
-    /// 13 §5 item 6's screening obligation refused this change (SQ-303, G-1).
-    ///
-    /// Two distinct causes, both fail-closed. A **class-floor** key
-    /// (`pol.budget_epoch`, `pol.b_gate`, `pol.b.*`) whose proposed value would
-    /// push a re-derived 08 §4.1 floor above the frozen literal — including the
-    /// case where the derivation cannot be evaluated at all. Or any **occupancy**
-    /// key ([`is_occupancy_input`]), which is refused in either direction while
-    /// items 1–4's envelopes exist only as prose (SQ-501).
+    /// A 13 §5 derivation would not survive the proposed value: either an
+    /// 08 §4.1 per-class NAV floor would rise above the frozen literal the
+    /// treasury enforces (SQ-303), or one of items 1–4's occupancy envelopes
+    /// would grow past the frozen figure the runtime compiles against
+    /// (SQ-501). Also the fail-closed answer when the derivation cannot be
+    /// evaluated at all (G-1).
     BudgetDerivationRequired,
     /// 09 §5.2: the two Phase-3 exposure caps are raised only by phase gates
     /// and are not PARAM/META-adjustable during Phases ≤ 3 (SQ-197).
@@ -1114,19 +1142,151 @@ pub fn is_coverage_input(key: ParamKey) -> bool {
 pub const POL_B_CLASS_KEYS: [&[u8]; 4] =
     [b"pol.b.param", b"pol.b.trs", b"pol.b.code", b"pol.b.meta"];
 
-/// 13 §5 item 6 keys whose change makes the **bounded occupancy / PoV** arithmetic
-/// of items 1–4 stale, so no re-derivation carried in an artifact can make the
-/// compiled envelopes right again.
+/// 13 §5 item 6 keys whose change moves the **bounded occupancy / PoV**
+/// arithmetic of items 1–4, and which are therefore screened by value at
+/// `set_param` (SQ-501).
 ///
 /// `ledger.archive` is deliberately **not** here. Item 6 states its own reason:
 /// it "can only move downward from its one-year K ceiling, so the compiled
 /// 2,240-row storage envelope remains safe". Screening it was an over-rejection
-/// against the spec's own words (SQ-303).
+/// against the spec's own words (SQ-303). It is still an *input* to item 1's
+/// re-derivation — see [`OCCUPANCY_PARAM_KEYS`] — just not a trigger.
 pub fn is_occupancy_input(key: ParamKey) -> bool {
     key == key16(b"epoch.slots")
         || key == key16(b"mkt.obs_interval")
         || key == key16(b"dec.window")
         || key == key16(b"epoch.length")
+}
+
+/// Every 13 §1 key 13 §5 items 1–4 re-derive from, paired with the
+/// [`OccupancyParams`] field it fills.
+///
+/// Single-homed (SQ-501) for the same reason [`class_floors_survive`] is: the
+/// core aggregate reads them out of its own `params` vector and the runtime
+/// guard reads them out of `Params` storage, and a second copy of this key list
+/// that drifted would screen a different parameter set than the one being
+/// written.
+///
+/// `ledger.archive` appears here although it is not a screening *trigger*: item
+/// 1's retained-map derivation takes it as an input, and reading it live is what
+/// makes that derivation true rather than assumed.
+pub const OCCUPANCY_PARAM_KEYS: [&[u8]; 5] = [
+    b"epoch.length",
+    b"epoch.slots",
+    b"mkt.obs_interval",
+    b"dec.window",
+    b"ledger.archive",
+];
+
+/// Build the 13 §5 items 1–4 derivation inputs from a parameter set, with
+/// `next` substituted for `key` exactly as the class-floor screen substitutes
+/// its proposed value.
+///
+/// `lookup` resolves a key against the *live* registry — `self.params` for the
+/// core aggregate, `Params` storage for the FRAME shell — so the two callers
+/// share this extraction rather than each writing their own.
+///
+/// `None` on a missing row or a value outside `u32`: both are states in which
+/// the envelopes cannot be evaluated, and G-1 makes that a refusal rather than a
+/// pass.
+pub fn occupancy_params_for(
+    key: ParamKey,
+    next: ParamValue,
+    lookup: impl Fn(ParamKey) -> Option<ParamValue>,
+) -> Option<OccupancyParams> {
+    let mut raw = [0u32; 5];
+    for (slot, name) in raw.iter_mut().zip(OCCUPANCY_PARAM_KEYS.iter()) {
+        let wanted = key16(name);
+        let value = if wanted == key { next } else { lookup(wanted)? };
+        *slot = u32::try_from(value.as_u128()).ok()?;
+    }
+    Some(OccupancyParams {
+        epoch_length: raw[0],
+        epoch_slots: raw[1],
+        obs_interval: raw[2],
+        dec_window: raw[3],
+        archive_delay: raw[4],
+    })
+}
+
+/// Do 13 §5 items 1–4's occupancy envelopes still hold at these parameter
+/// values?
+///
+/// `false` means at least one re-derived envelope — retained `Markets` rows and
+/// their 512 KiB budget, vault occupancy and its 13 KiB budget, the `market.reap`
+/// protocol-position cells, or either keeper observation load — has grown past
+/// the frozen figure 13 §5 publishes and the runtime compiles against. That is
+/// the occupancy family's exact analogue of [`class_floors_survive`]: items 1–4
+/// used to be refused unconditionally in both directions because their envelopes
+/// existed only as prose, which left the four 13 §1 rows declaratory (SQ-501).
+///
+/// Single-homed here because two callers need the identical answer:
+/// [`ConstitutionState::set_param`] for the core aggregate, and the runtime's
+/// `BudgetDerivationGuard` for the pallet's own storage path. A second copy of
+/// this arithmetic that drifted would admit a change the other refuses.
+///
+/// Fail-closed on any inability to evaluate (G-1): an overflow, a zero epoch
+/// length or a zero observation interval answers `false`, never "no envelope was
+/// breached". Every derivation rounds **up**, so the error direction is always
+/// against the proposal (R-7).
+pub fn occupancy_envelopes_survive(params: OccupancyParams) -> bool {
+    use futarchy_primitives::kernel;
+
+    // Item 1 — retained `Markets` rows and their byte budget.
+    let Some(retained) = kernel::derived_retained_markets(&params) else {
+        return false;
+    };
+    if retained > futarchy_primitives::bounds::MAX_STORED_MARKETS {
+        return false;
+    }
+    let Some(retained_bytes) = retained.checked_mul(kernel::MARKET_BOOK_MAX_BYTES) else {
+        return false;
+    };
+    if retained_bytes > kernel::RETAINED_MARKETS_BUDGET_BYTES {
+        return false;
+    }
+
+    // Item 2 — vault occupancy and its byte budget.
+    let Some(vaults) = kernel::derived_vault_occupancy(params.epoch_slots) else {
+        return false;
+    };
+    if vaults > kernel::LIVE_VAULT_ENVELOPE {
+        return false;
+    }
+    let Some(vault_bytes) = vaults.checked_mul(kernel::VAULT_MAX_BYTES) else {
+        return false;
+    };
+    if vault_bytes > kernel::VAULT_OCCUPANCY_BUDGET_BYTES {
+        return false;
+    }
+
+    // Item 3 — the per-reap protocol-position universe. No 13 §1 key moves it;
+    // it is re-derived anyway so this is a complete items-1–4 recomputation and
+    // not a partial one.
+    let Some(cells) = kernel::derived_market_reap_protocol_cells() else {
+        return false;
+    };
+    if cells > kernel::MARKET_REAP_PROTOCOL_POSITION_CELLS {
+        return false;
+    }
+
+    // Item 4 — keeper crank load, both the metered decision-critical figure
+    // `keeper.budget_epoch` is sized against (08 §6.2) and the full-window
+    // figure the `ops.keepers` continuity line is sized against (08 §6.3).
+    let Some(decision_critical) = kernel::derived_decision_critical_observations(&params) else {
+        return false;
+    };
+    if decision_critical > kernel::KEEPER_DECISION_CRITICAL_OBSERVATIONS {
+        return false;
+    }
+    let Some(full_window) = kernel::derived_full_window_observations(&params) else {
+        return false;
+    };
+    if full_window > kernel::KEEPER_FULL_WINDOW_OBSERVATIONS {
+        return false;
+    }
+
+    true
 }
 
 /// Do 08 §4.1's frozen per-class NAV floors still hold at these parameter values?
@@ -2914,11 +3074,17 @@ mod tests {
             Err(Error::UnknownParam)
         );
         let before = state.clone();
+        // SQ-501: the occupancy screen is a value test, so the refusal has to be
+        // a value that actually breaches. *Lowering* the observation interval
+        // raises the 13 §5 item 4 crank load past the frozen 133,920 (10 -> 9 is
+        // 148,800), which is the direction `keeper.budget_epoch` cannot absorb.
+        // Raising it is admitted — see
+        // `sq_501_occupancy_screen_admits_exactly_the_values_the_envelopes_hold_for`.
         assert_eq!(
             state.dispatch_set_param(
                 ConstitutionOrigin::FutarchyParam,
                 key16(b"mkt.obs_interval"),
-                ParamValue::U32(12),
+                ParamValue::U32(9),
                 1,
                 10,
             ),
@@ -2950,8 +3116,9 @@ mod tests {
         let usdc = futarchy_primitives::currency::USDC;
         let mut state = ConstitutionState::genesis();
 
-        // Occupancy inputs stay fail-closed: items 1-4 have no single literal to
-        // compare a re-derivation against.
+        // Occupancy inputs are judged by value too since SQ-501 (they were
+        // refused outright when this test was written): a raise past the frozen
+        // 13 §5 item 4 full-window figure is refused.
         assert_eq!(
             state.ensure_derivations_survive(
                 key16(b"epoch.length"),
@@ -3044,6 +3211,346 @@ mod tests {
                 key16(b"pol.b_baseline"),
                 ParamValue::Balance(25_000 * usdc),
                 ParamValue::Balance(26_000 * usdc)
+            ),
+            Ok(())
+        );
+    }
+
+    // ------------------------------------------------------------ SQ-501 ---
+    //
+    // The occupancy family used to be refused unconditionally in both
+    // directions, so no value of `epoch.slots`, `mkt.obs_interval`,
+    // `dec.window` or `epoch.length` was admissible and their 13 §1 rows were
+    // declaratory. These tests pin the value test that replaced it: admitted
+    // exactly when every 13 §5 item 1–4 envelope still holds.
+
+    /// The genesis registry sits **exactly on** three of the four envelopes
+    /// (52 vaults, 133,920 decision-critical and 580,320 full-window
+    /// observations), which is what makes each key's admission boundary its own
+    /// default and lets both sides of it be tested.
+    ///
+    /// Production magnitudes, so default build only: `fast-timing` compresses
+    /// the epoch clock these figures are derived at (SQ-128), exactly like the
+    /// neighbouring `epoch.length` boundary cases above.
+    #[cfg(not(feature = "fast-timing"))]
+    #[test]
+    fn sq_501_occupancy_screen_admits_exactly_the_values_the_envelopes_hold_for() {
+        let state = ConstitutionState::genesis();
+        let screen = |name: &[u8], current: ParamValue, next: ParamValue| {
+            state.ensure_derivations_survive(key16(name), current, next)
+        };
+
+        // `epoch.slots` — item 2's vault occupancy (32 + 4·slots ≤ 52) and item
+        // 4's book count (slots·6 + 1) both bind at 5. Lowering is safe.
+        assert_eq!(
+            screen(b"epoch.slots", ParamValue::U8(5), ParamValue::U8(4)),
+            Ok(())
+        );
+        assert_eq!(
+            screen(b"epoch.slots", ParamValue::U8(5), ParamValue::U8(6)),
+            Err(Error::BudgetDerivationRequired)
+        );
+
+        // `mkt.obs_interval` — item 4's crank load is inversely proportional to
+        // it, so raising is safe and 10 -> 9 is the first breach.
+        assert_eq!(
+            screen(
+                b"mkt.obs_interval",
+                ParamValue::U32(10),
+                ParamValue::U32(11)
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            screen(b"mkt.obs_interval", ParamValue::U32(10), ParamValue::U32(9)),
+            Err(Error::BudgetDerivationRequired)
+        );
+
+        // `dec.window` — item 4's decision-critical figure is 31 ×
+        // ceil(window / 10), so 43,200 is admissible to the block and 43,201
+        // buys a whole extra observation per book.
+        assert_eq!(
+            screen(
+                b"dec.window",
+                ParamValue::U32(43_200),
+                ParamValue::U32(43_190)
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            screen(
+                b"dec.window",
+                ParamValue::U32(43_200),
+                ParamValue::U32(43_201)
+            ),
+            Err(Error::BudgetDerivationRequired)
+        );
+
+        // `epoch.length` — item 4's full-window figure is 31 ×
+        // ceil(epoch·13/21 / 10); shortening the epoch shortens the Trade phase.
+        assert_eq!(
+            screen(
+                b"epoch.length",
+                ParamValue::U32(302_400),
+                ParamValue::U32(302_379)
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            screen(
+                b"epoch.length",
+                ParamValue::U32(302_400),
+                ParamValue::U32(302_401)
+            ),
+            Err(Error::BudgetDerivationRequired)
+        );
+    }
+
+    /// `OCCUPANCY_PARAM_KEYS` fills [`OccupancyParams`] positionally, so a
+    /// reordering of the list would silently feed `dec.window` into the epoch
+    /// length. Pin the mapping against the genesis registry, whose five values
+    /// are pairwise distinct, and pin that substituting the amended key moves
+    /// **only** its own field.
+    #[cfg(not(feature = "fast-timing"))]
+    #[test]
+    fn sq_501_extractor_maps_each_key_to_its_own_field() {
+        let state = ConstitutionState::genesis();
+        let live = |wanted: ParamKey| {
+            state
+                .params
+                .iter()
+                .find(|record| record.key == wanted)
+                .map(|record| record.value)
+        };
+        let genesis = OccupancyParams {
+            epoch_length: 302_400,
+            epoch_slots: 5,
+            obs_interval: 10,
+            dec_window: 43_200,
+            archive_delay: kernel::MAX_ARCHIVE_DELAY_BLOCKS,
+        };
+        // An unrelated key substitutes nothing, so this is the pure live read.
+        assert_eq!(
+            occupancy_params_for(key16(b"mkt.fee"), ParamValue::Perbill(1), live),
+            Some(genesis)
+        );
+        for (name, next, expected) in [
+            (
+                b"epoch.length".as_slice(),
+                ParamValue::U32(201_600),
+                OccupancyParams {
+                    epoch_length: 201_600,
+                    ..genesis
+                },
+            ),
+            (
+                b"epoch.slots".as_slice(),
+                ParamValue::U8(3),
+                OccupancyParams {
+                    epoch_slots: 3,
+                    ..genesis
+                },
+            ),
+            (
+                b"mkt.obs_interval".as_slice(),
+                ParamValue::U32(25),
+                OccupancyParams {
+                    obs_interval: 25,
+                    ..genesis
+                },
+            ),
+            (
+                b"dec.window".as_slice(),
+                ParamValue::U32(14_400),
+                OccupancyParams {
+                    dec_window: 14_400,
+                    ..genesis
+                },
+            ),
+            (
+                b"ledger.archive".as_slice(),
+                ParamValue::U32(1_296_000),
+                OccupancyParams {
+                    archive_delay: 1_296_000,
+                    ..genesis
+                },
+            ),
+        ] {
+            assert_eq!(
+                occupancy_params_for(key16(name), next, live),
+                Some(expected),
+                "{name:?} did not substitute into its own field"
+            );
+        }
+    }
+
+    /// An equal write is not a change (13 §5 item 6), so it never reaches the
+    /// derivation at all — including for keys whose live value would fail the
+    /// screen if it were proposed today.
+    #[test]
+    fn sq_501_equal_writes_are_never_screened() {
+        let state = ConstitutionState::genesis();
+        for name in OCCUPANCY_PARAM_KEYS {
+            let record = state
+                .params
+                .iter()
+                .find(|record| record.key == key16(name))
+                .expect("13 §1 occupancy row is seeded");
+            assert_eq!(
+                state.ensure_derivations_survive(record.key, record.value, record.value),
+                Ok(()),
+                "equal write to {name:?} was screened"
+            );
+        }
+    }
+
+    /// 13 §5 item 6 names `ledger.archive` an item-1 *input* but explicitly not
+    /// a screening trigger ("can only move downward from its one-year K
+    /// ceiling"). Reading it live and screening it are different things, and
+    /// SQ-501 must not turn the first into the second.
+    #[test]
+    fn sq_501_ledger_archive_is_an_input_not_a_trigger() {
+        let state = ConstitutionState::genesis();
+        assert!(!is_occupancy_input(key16(b"ledger.archive")));
+        assert!(OCCUPANCY_PARAM_KEYS.contains(&b"ledger.archive".as_slice()));
+        // Every lawful move is downward, and downward shrinks item 1's retained
+        // batch count. Not screened at all, in either direction.
+        for next in [1_296_000_u32, kernel::MAX_ARCHIVE_DELAY_BLOCKS - 1] {
+            assert_eq!(
+                state.ensure_derivations_survive(
+                    key16(b"ledger.archive"),
+                    ParamValue::U32(kernel::MAX_ARCHIVE_DELAY_BLOCKS),
+                    ParamValue::U32(next)
+                ),
+                Ok(())
+            );
+        }
+    }
+
+    /// A registry the screen cannot read is refused, never passed (G-1). The
+    /// derivation has no partial answer: an absent row means the envelopes were
+    /// never evaluated, which is not the same as "no envelope was breached".
+    #[test]
+    fn sq_501_screen_fails_closed_on_an_unreadable_registry() {
+        let mut state = ConstitutionState::genesis();
+        state
+            .params
+            .retain(|record| record.key != key16(b"dec.window"));
+        assert_eq!(
+            state.ensure_derivations_survive(
+                key16(b"epoch.slots"),
+                ParamValue::U8(5),
+                ParamValue::U8(4)
+            ),
+            Err(Error::BudgetDerivationRequired)
+        );
+        // Same answer from the shared extractor, which is what both callers use.
+        assert_eq!(
+            occupancy_params_for(key16(b"epoch.slots"), ParamValue::U8(4), |wanted| state
+                .params
+                .iter()
+                .find(|record| record.key == wanted)
+                .map(|record| record.value)),
+            None
+        );
+    }
+
+    /// The paired-CODE analogue for the occupancy family: a change that breaches
+    /// today is admitted once another key has paid for it. A direction test
+    /// could not express this at all, which is the SQ-501 defect.
+    #[cfg(not(feature = "fast-timing"))]
+    #[test]
+    fn sq_501_screen_admits_a_breaching_raise_once_another_key_pays_for_it() {
+        let mut state = ConstitutionState::genesis();
+        // 43,200 -> 86,400 doubles the decision-critical load at the default
+        // observation interval.
+        assert_eq!(
+            state.ensure_derivations_survive(
+                key16(b"dec.window"),
+                ParamValue::U32(43_200),
+                ParamValue::U32(86_400)
+            ),
+            Err(Error::BudgetDerivationRequired)
+        );
+        // Halving the observation rate first pays for exactly that doubling:
+        // 31 × ceil(86,400/20) = 133,920, the frozen figure to the observation.
+        for record in state.params.iter_mut() {
+            if record.key == key16(b"mkt.obs_interval") {
+                record.value = ParamValue::U32(20);
+            }
+        }
+        assert_eq!(
+            state.ensure_derivations_survive(
+                key16(b"dec.window"),
+                ParamValue::U32(43_200),
+                ParamValue::U32(86_400)
+            ),
+            Ok(())
+        );
+        // The same raise buys `epoch.length` its whole 13 §1 range: at a 20-block
+        // interval the 604,800-block epoch's Trade phase costs 31 ×
+        // ceil(374,400/20) = 580,320 full-window observations — again exactly the
+        // frozen figure. `epoch.length` is therefore screened, not frozen upward.
+        assert_eq!(
+            state.ensure_derivations_survive(
+                key16(b"epoch.length"),
+                ParamValue::U32(302_400),
+                ParamValue::U32(kernel::PRODUCTION_MAX_EPOCH_LENGTH_BLOCKS)
+            ),
+            Ok(())
+        );
+    }
+
+    /// The 13 §1 bounds / max-Δ / cooldown checks run **before** the screen, so
+    /// an out-of-registry value still fails as an ordinary registry violation
+    /// and the limit-coverage bindings for these rows stay reachable (15 §4.6).
+    #[cfg(not(feature = "fast-timing"))]
+    #[test]
+    fn sq_501_registry_checks_still_precede_the_occupancy_screen() {
+        let mut state = ConstitutionState::genesis();
+        // Below `epoch.slots`' hard min — and also inside every envelope, so
+        // only the ordering can produce `BelowMin`.
+        assert_eq!(
+            state.dispatch_set_param(
+                ConstitutionOrigin::FutarchyMeta,
+                key16(b"epoch.slots"),
+                ParamValue::U8(0),
+                1,
+                10,
+            ),
+            Err(Error::BelowMin)
+        );
+        // Above `mkt.obs_interval`'s hard max — safe for every envelope
+        // (fewer observations), so again only the ordering yields `AboveMax`.
+        assert_eq!(
+            state.dispatch_set_param(
+                ConstitutionOrigin::FutarchyParam,
+                key16(b"mkt.obs_interval"),
+                ParamValue::U32(51),
+                1,
+                10,
+            ),
+            Err(Error::AboveMax)
+        );
+        // Max-Δ likewise: 10 -> 16 is envelope-safe but a 6-block step.
+        assert_eq!(
+            state.dispatch_set_param(
+                ConstitutionOrigin::FutarchyParam,
+                key16(b"mkt.obs_interval"),
+                ParamValue::U32(16),
+                1,
+                10,
+            ),
+            Err(Error::DeltaTooLarge)
+        );
+        // And an admissible, envelope-safe value goes through end to end.
+        assert_eq!(
+            state.dispatch_set_param(
+                ConstitutionOrigin::FutarchyParam,
+                key16(b"mkt.obs_interval"),
+                ParamValue::U32(15),
+                1,
+                10,
             ),
             Ok(())
         );

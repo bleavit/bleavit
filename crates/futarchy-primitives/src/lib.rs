@@ -1228,6 +1228,188 @@ pub mod kernel {
         let divisor = u128::from(budget_epoch_ppb);
         Some(scaled.checked_add(divisor - 1)? / divisor)
     }
+
+    // --- 13 §5 items 1–4: the frozen occupancy envelopes (SQ-501) -------------
+    //
+    // The class-floor family above had one machine-checkable literal per class,
+    // which is what let SQ-303 replace a direction test with a value test. The
+    // occupancy family had none — 13 §5 items 1–4 stated their envelopes as
+    // prose — so `epoch.slots`, `mkt.obs_interval`, `dec.window` and
+    // `epoch.length` were refused **unconditionally in both directions**, which
+    // made their 13 §1 registry rows declaratory. These constants are those
+    // envelopes, single-homed here so the same screen can be a value test
+    // (SQ-501). Every one is transcribed from 13 §5 and reproduced from its own
+    // derivation by `occupancy_envelopes_reproduce_the_published_13_5_figures`.
+
+    /// 13 §5 item 1: measured `MarketBook<AccountId>` `MaxEncodedLen`
+    /// (B10 re-measurement, 2026-07-17, after the accumulator widened to the
+    /// 04 §7 two-limb u256 shape). The runtime asserts the real
+    /// `max_encoded_len()` against this figure, so struct growth reopens the
+    /// derivation rather than silently invalidating it.
+    pub const MARKET_BOOK_MAX_BYTES: u32 = 205;
+    /// 13 §5 item 1: the retained `Markets` map byte budget (512 KiB).
+    pub const RETAINED_MARKETS_BUDGET_BYTES: u32 = 512 * 1024;
+    /// 13 §5 item 2: the **pinned** per-vault ceiling. Deliberately the pinned
+    /// ~256 B and not the measured 160 B — the occupancy screen must not admit
+    /// a parameter change that only fits because today's struct happens to be
+    /// small (R-7: round against the proposal).
+    pub const VAULT_MAX_BYTES: u32 = 256;
+    /// 13 §5 item 2: the vault-occupancy byte budget (13 KiB). Exactly
+    /// [`LIVE_VAULT_ENVELOPE`] × [`VAULT_MAX_BYTES`], which is where the figure
+    /// came from.
+    pub const VAULT_OCCUPANCY_BUDGET_BYTES: u32 = 13 * 1024;
+    /// 13 §5 item 2: the frozen vault-occupancy envelope — 32 live + 4 cohorts
+    /// × 5 settling.
+    pub const LIVE_VAULT_ENVELOPE: u32 = 52;
+    /// 03 §4: distinct `PositionKind` values one proposal vault carries — the
+    /// three branch-scoped instruments plus a Yes/No pair per `GateType`.
+    pub const PROPOSAL_POSITION_KINDS: u32 = 7;
+    /// 13 §5 item 3 / 03 §4: one proposal vault's fixed position universe —
+    /// two `Branch`es × [`PROPOSAL_POSITION_KINDS`] = 14 instruments.
+    pub const PROPOSAL_POSITION_INSTRUMENTS: u32 = 2 * PROPOSAL_POSITION_KINDS;
+    /// The protocol accounts one market book owns inventory through: the book
+    /// account and its fee account.
+    pub const MARKET_PROTOCOL_ACCOUNTS: u32 = 2;
+    /// 13 §5 items 1/3: the protocol-position cells one `market.reap` reads and
+    /// removes — 14 instruments × 2 protocol accounts.
+    pub const MARKET_REAP_PROTOCOL_POSITION_CELLS: u32 = 28;
+    /// 13 §5 item 4: decision-critical keeper observations per epoch, the load
+    /// `keeper.budget_epoch` (and its 6,000 USDC kernel floor) is sized against
+    /// — 08 §6.2.
+    pub const KEEPER_DECISION_CRITICAL_OBSERVATIONS: u64 = 133_920;
+    /// 13 §5 item 4: full-trading-window keeper observations per epoch, the load
+    /// the `ops.keepers` continuity line is sized against — 08 §6.3.
+    pub const KEEPER_FULL_WINDOW_OBSERVATIONS: u64 = 580_320;
+
+    /// The 13 §1 parameter values every 13 §5 item 1–4 occupancy envelope is
+    /// re-derived from, in their raw registry units (blocks / slots / blocks /
+    /// blocks / blocks).
+    ///
+    /// A struct rather than five positional `u32`s on purpose: the core
+    /// aggregate and the runtime guard both build one, and two call sites that
+    /// disagreed about argument order would screen different things while
+    /// looking identical.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct OccupancyParams {
+        /// `epoch.length`, in blocks.
+        pub epoch_length: u32,
+        /// `epoch.slots` (N_active).
+        pub epoch_slots: u32,
+        /// `mkt.obs_interval`, in blocks.
+        pub obs_interval: u32,
+        /// `dec.window`, in blocks.
+        pub dec_window: u32,
+        /// `ledger.archive`, in blocks.
+        pub archive_delay: u32,
+    }
+
+    /// Books trading concurrently in one epoch (13 §4: "31 = 5·6 + 1"): one
+    /// book set per active slot plus the epoch's single unconditional Baseline
+    /// book.
+    pub fn derived_trading_books(epoch_slots: u32) -> Option<u32> {
+        epoch_slots
+            .checked_mul(crate::bounds::BOOKS_PER_PROPOSAL)?
+            .checked_add(1)
+    }
+
+    /// 13 §5 item 1: rows present in the retained `Markets` map at these
+    /// parameter values —
+    ///
+    /// ```text
+    /// MaxLiveMarkets + (ceil(ledger.archive / epoch.length) + 1) × (epoch.slots·6 + 1)
+    /// ```
+    ///
+    /// The live/POL envelope, one creation batch per epoch boundary inside the
+    /// archive delay, and one extra boundary batch so Seed can precede a
+    /// same-boundary keeper reap. The division rounds **up**, against the
+    /// proposal.
+    ///
+    /// `None` on a zero epoch length (no finite batch count exists) or on any
+    /// overflow, so the caller refuses rather than reading a saturated figure as
+    /// "the envelope holds" (G-1).
+    ///
+    /// Evaluated at the *proposed* values this is the true occupancy;
+    /// [`crate::bounds::MAX_STORED_MARKETS`] is the same formula evaluated at
+    /// each input's compiled bound (archive ceiling, 14-day epoch floor, 12-slot
+    /// registry maximum), which is why the comparison is `≤` and why it does not
+    /// bind anywhere inside the 13 §1 ranges. It is the safety net that starts
+    /// binding the moment one of those bounds is widened — and, under the
+    /// default-off `fast-timing` build, it correctly reports that a compressed
+    /// epoch clock beside an uncompressed one-year archive delay would blow the
+    /// map (that build's `MAX_STORED_MARKETS` deliberately keeps the production
+    /// epoch floor).
+    pub fn derived_retained_markets(params: &OccupancyParams) -> Option<u32> {
+        if params.epoch_length == 0 {
+            return None;
+        }
+        let batches = params
+            .archive_delay
+            .div_ceil(params.epoch_length)
+            .checked_add(1)?;
+        let per_batch = derived_trading_books(params.epoch_slots)?;
+        crate::bounds::MAX_LIVE_MARKETS.checked_add(batches.checked_mul(per_batch)?)
+    }
+
+    /// 13 §5 item 2: vault occupancy at these parameter values —
+    /// `MaxLiveProposals + MaxSettlingCohorts × epoch.slots`.
+    pub fn derived_vault_occupancy(epoch_slots: u32) -> Option<u32> {
+        crate::bounds::MAX_LIVE_PROPOSALS
+            .checked_add(crate::bounds::MAX_NON_TERMINAL_COHORTS.checked_mul(epoch_slots)?)
+    }
+
+    /// 13 §3.1: blocks in the Trade phase, `[5/21, 18/21)` of `epoch.length`.
+    /// Rounds **up** so a longer window (more observations) is never understated.
+    pub fn derived_trade_window_blocks(epoch_length: u32) -> Option<u32> {
+        let span = crate::phase_offsets::DECIDE_NUM.checked_sub(crate::phase_offsets::TRADE_NUM)?;
+        let denominator = crate::phase_offsets::DENOMINATOR;
+        if denominator == 0 {
+            return None;
+        }
+        u32::try_from(
+            u64::from(epoch_length)
+                .checked_mul(u64::from(span))?
+                .div_ceil(u64::from(denominator)),
+        )
+        .ok()
+    }
+
+    /// 13 §5 item 4: decision-critical keeper observations per epoch —
+    /// `(epoch.slots·6 + 1) × ceil(dec.window / mkt.obs_interval)`.
+    ///
+    /// `None` on a zero observation interval (an infinite crank rate has no
+    /// finite budget) or on overflow.
+    pub fn derived_decision_critical_observations(params: &OccupancyParams) -> Option<u64> {
+        if params.obs_interval == 0 {
+            return None;
+        }
+        let per_book = u64::from(params.dec_window).div_ceil(u64::from(params.obs_interval));
+        per_book.checked_mul(u64::from(derived_trading_books(params.epoch_slots)?))
+    }
+
+    /// 13 §5 item 4: full-trading-window keeper observations per epoch —
+    /// `(epoch.slots·6 + 1) × ceil(trade window / mkt.obs_interval)`.
+    pub fn derived_full_window_observations(params: &OccupancyParams) -> Option<u64> {
+        if params.obs_interval == 0 {
+            return None;
+        }
+        let window = derived_trade_window_blocks(params.epoch_length)?;
+        let per_book = u64::from(window).div_ceil(u64::from(params.obs_interval));
+        per_book.checked_mul(u64::from(derived_trading_books(params.epoch_slots)?))
+    }
+
+    /// 13 §5 items 1/3: protocol-position cells one `market.reap` touches —
+    /// the proposal vault's fixed 14-instrument universe × the book's two
+    /// protocol accounts.
+    ///
+    /// Deliberately takes no [`OccupancyParams`]: item 3 is the one envelope of
+    /// the four that no 13 §1 key moves. It is still re-derived rather than
+    /// asserted so that the screen is a complete items-1–4 recomputation, and so
+    /// that a change to the position universe fails loudly here instead of
+    /// quietly invalidating item 3.
+    pub fn derived_market_reap_protocol_cells() -> Option<u32> {
+        PROPOSAL_POSITION_INSTRUMENTS.checked_mul(MARKET_PROTOCOL_ACCOUNTS)
+    }
+
     pub const KEEPER_BUDGET_EPOCH_FLOOR_USDC: u128 = 6_000_000_000;
     /// SQ-117 (ruled 2026-07-21): the benchmark **fee basis** the launch
     /// `keeper.rebate` seed is calibrated against — the sanctioned-crank fee
@@ -1896,6 +2078,201 @@ mod tests {
         );
         assert_eq!(bounds::MAX_LIVE_MARKETS, 196);
         assert_eq!(bounds::MAX_STORED_MARKETS, 2_240);
+    }
+
+    /// SQ-501: the occupancy derivations must reproduce 13 §5 items 1–4's
+    /// published figures exactly, or the screen built on them is comparing
+    /// against numbers the document does not state.
+    ///
+    /// Production-magnitude assertions, so they run in the default build only —
+    /// the `fast-timing` feature compresses the epoch clock these figures are
+    /// derived at (SQ-128), exactly like the neighbouring floor pins.
+    #[cfg(not(feature = "fast-timing"))]
+    #[test]
+    fn occupancy_envelopes_reproduce_the_published_13_5_figures() {
+        use kernel::OccupancyParams;
+
+        // --- item 1 -------------------------------------------------------
+        // 196 = 32·6 + 4: one book set per live proposal plus one Baseline book
+        // per non-terminal cohort.
+        assert_eq!(
+            bounds::MAX_LIVE_MARKETS,
+            bounds::MAX_LIVE_PROPOSALS * bounds::BOOKS_PER_PROPOSAL
+                + bounds::MAX_NON_TERMINAL_COHORTS,
+        );
+        // "2,240 = 196 + (ceil(1 yr / 14 d) + 1)·(12·6 + 1)" — the same
+        // derivation the screen runs, evaluated at each input's compiled bound
+        // (the archive ceiling, the 14-day epoch floor, the 12-slot registry
+        // maximum). That it lands exactly on `MAX_STORED_MARKETS` is what makes
+        // `derived <= MAX_STORED_MARKETS` the right comparison.
+        let worst_case = OccupancyParams {
+            epoch_length: kernel::PRODUCTION_MIN_EPOCH_LENGTH_BLOCKS,
+            epoch_slots: bounds::MAX_COHORT_PROPOSALS,
+            obs_interval: 10,
+            dec_window: 43_200,
+            archive_delay: kernel::MAX_ARCHIVE_DELAY_BLOCKS,
+        };
+        let retained = kernel::derived_retained_markets(&worst_case).expect("derivable");
+        assert_eq!(retained, 2_240);
+        assert_eq!(retained, bounds::MAX_STORED_MARKETS);
+        // "2,240 books × 205 B = 459,200 B ≈ 448.4 KiB, within a 512 KiB budget".
+        let retained_bytes = retained * kernel::MARKET_BOOK_MAX_BYTES;
+        assert_eq!(retained_bytes, 459_200);
+        assert_eq!(retained_bytes * 10 / 1024, 4_484); // 448.4 KiB
+        assert!(retained_bytes <= kernel::RETAINED_MARKETS_BUDGET_BYTES);
+
+        // --- item 2 -------------------------------------------------------
+        // "≤ 32 live + 4 cohorts × 5 settling = ≤ 52 × 160 B ≈ 8.1 KiB, within
+        // the ≤ 13 KiB budget"; ~256 B stays the pinned per-vault ceiling, and
+        // 52 × 256 is exactly where the 13 KiB budget comes from.
+        let defaults = OccupancyParams {
+            epoch_length: 302_400,
+            epoch_slots: 5,
+            obs_interval: 10,
+            dec_window: 43_200,
+            archive_delay: kernel::MAX_ARCHIVE_DELAY_BLOCKS,
+        };
+        let vaults = kernel::derived_vault_occupancy(defaults.epoch_slots).expect("derivable");
+        assert_eq!(vaults, 52);
+        assert_eq!(vaults, kernel::LIVE_VAULT_ENVELOPE);
+        assert_eq!(vaults * 160, 8_320); // ≈ 8.1 KiB at the measured VaultInfo
+        assert_eq!(
+            kernel::LIVE_VAULT_ENVELOPE * kernel::VAULT_MAX_BYTES,
+            kernel::VAULT_OCCUPANCY_BUDGET_BYTES,
+        );
+
+        // --- item 3 -------------------------------------------------------
+        // "`market.reap` reads/removes at most 28 protocol-position cells";
+        // "per-vault reap drains the `(PositionId, *)` prefix in ReapBatch = 100
+        // chunks"; "dusting an account to its 64-cap now costs 6.4 USDC".
+        assert_eq!(
+            kernel::derived_market_reap_protocol_cells().expect("derivable"),
+            kernel::MARKET_REAP_PROTOCOL_POSITION_CELLS,
+        );
+        assert_eq!(kernel::MARKET_REAP_PROTOCOL_POSITION_CELLS, 28);
+        assert_eq!(kernel::REAP_BATCH, 100);
+        // The 14 is 2 `Branch`es × the `PositionKind` cardinality, and that
+        // cardinality is asserted exhaustively below — a new variant fails to
+        // compile there rather than silently invalidating item 3.
+        assert_eq!(
+            kernel::PROPOSAL_POSITION_INSTRUMENTS,
+            position_kind_cardinality() * 2,
+        );
+        assert_eq!(
+            u128::from(bounds::MAX_ACCOUNT_POSITIONS) * kernel::POSITION_DEPOSIT_USDC,
+            6_400_000, // 6.4 USDC per victim account
+        );
+
+        // --- item 4 -------------------------------------------------------
+        // "31 trading books × (43,200/10) = 133,920 decision-critical
+        // observations/epoch; × (187,200/10) = 580,320 full-window".
+        assert_eq!(
+            kernel::derived_trading_books(defaults.epoch_slots).expect("derivable"),
+            31
+        );
+        assert_eq!(
+            kernel::derived_trade_window_blocks(defaults.epoch_length).expect("derivable"),
+            187_200,
+        );
+        assert_eq!(
+            kernel::derived_decision_critical_observations(&defaults).expect("derivable"),
+            kernel::KEEPER_DECISION_CRITICAL_OBSERVATIONS,
+        );
+        assert_eq!(kernel::KEEPER_DECISION_CRITICAL_OBSERVATIONS, 133_920);
+        assert_eq!(
+            kernel::derived_full_window_observations(&defaults).expect("derivable"),
+            kernel::KEEPER_FULL_WINDOW_OBSERVATIONS,
+        );
+        assert_eq!(kernel::KEEPER_FULL_WINDOW_OBSERVATIONS, 580_320);
+    }
+
+    /// The `PositionKind` cardinality 13 §5 item 3's 14-instrument proposal
+    /// vault is built from, counted **exhaustively**: adding a variant (or a
+    /// `GateType`) stops this compiling instead of leaving
+    /// `PROPOSAL_POSITION_KINDS` quietly stale.
+    #[cfg(not(feature = "fast-timing"))]
+    fn position_kind_cardinality() -> u32 {
+        let gates = [GateType::Survival, GateType::Security];
+        // Exhaustive by construction: the match below has no wildcard arm.
+        let mut counted = 0_u32;
+        for kind in [
+            PositionKind::BranchUsdc,
+            PositionKind::Long,
+            PositionKind::Short,
+        ]
+        .into_iter()
+        .chain(gates.into_iter().map(PositionKind::GateYes))
+        .chain(gates.into_iter().map(PositionKind::GateNo))
+        {
+            match kind {
+                PositionKind::BranchUsdc
+                | PositionKind::Long
+                | PositionKind::Short
+                | PositionKind::GateYes(GateType::Survival)
+                | PositionKind::GateYes(GateType::Security)
+                | PositionKind::GateNo(GateType::Survival)
+                | PositionKind::GateNo(GateType::Security) => counted += 1,
+            }
+        }
+        assert_eq!(counted, kernel::PROPOSAL_POSITION_KINDS);
+        counted
+    }
+
+    /// Every occupancy derivation answers `None` — never a saturated or wrapped
+    /// figure — on a degenerate or overflowing input, so the caller refuses
+    /// instead of reading "no envelope was breached" (G-1).
+    #[test]
+    fn occupancy_derivations_fail_closed_on_degenerate_input() {
+        use kernel::OccupancyParams;
+
+        let zero_epoch = OccupancyParams {
+            epoch_length: 0,
+            epoch_slots: 5,
+            obs_interval: 10,
+            dec_window: 43_200,
+            archive_delay: kernel::MAX_ARCHIVE_DELAY_BLOCKS,
+        };
+        assert_eq!(kernel::derived_retained_markets(&zero_epoch), None);
+
+        let zero_interval = OccupancyParams {
+            epoch_length: 302_400,
+            epoch_slots: 5,
+            obs_interval: 0,
+            dec_window: 43_200,
+            archive_delay: kernel::MAX_ARCHIVE_DELAY_BLOCKS,
+        };
+        assert_eq!(
+            kernel::derived_decision_critical_observations(&zero_interval),
+            None
+        );
+        assert_eq!(
+            kernel::derived_full_window_observations(&zero_interval),
+            None
+        );
+
+        // Overflow, not wrap-around, on absurd slot counts.
+        assert_eq!(kernel::derived_trading_books(u32::MAX), None);
+        assert_eq!(kernel::derived_vault_occupancy(u32::MAX), None);
+        let huge_slots = OccupancyParams {
+            epoch_slots: u32::MAX,
+            ..zero_interval
+        };
+        assert_eq!(kernel::derived_retained_markets(&huge_slots), None);
+        // A one-block epoch retains one batch per block of the archive delay.
+        let one_block_epoch = OccupancyParams {
+            epoch_length: 1,
+            epoch_slots: 5,
+            obs_interval: 10,
+            dec_window: 43_200,
+            archive_delay: u32::MAX,
+        };
+        assert_eq!(kernel::derived_retained_markets(&one_block_epoch), None);
+
+        // The Trade-phase fraction rounds **up**: a partial block of trading
+        // window is a whole block of observation the keeper must be paid for.
+        assert_eq!(kernel::derived_trade_window_blocks(21), Some(13));
+        assert_eq!(kernel::derived_trade_window_blocks(22), Some(14));
+        assert_eq!(kernel::derived_trade_window_blocks(1), Some(1));
     }
 
     /// Under the compressed test build the same floors derive from the single

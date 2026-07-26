@@ -49,13 +49,15 @@ mod tests;
 // (named, not glob — the pallet defines its own `Error`/storage aliases).
 pub use constitution_core::{
     class_floors_survive, empty_release_channel, genesis_capabilities, genesis_meters,
-    genesis_params, is_class_floor_input, is_coverage_input, is_occupancy_input, key16, Capability,
-    CapabilityRecord, ConstitutionOrigin, ConstitutionState, Error as CoreError, MaxDelta, Meter,
+    genesis_params, is_class_floor_input, is_coverage_input, is_occupancy_input, key16,
+    occupancy_envelopes_survive, occupancy_params_for, Capability, CapabilityRecord,
+    ConstitutionOrigin, ConstitutionState, Error as CoreError, MaxDelta, Meter, OccupancyParams,
     ParamClass, ParamRecord, ParamValue, PhaseFlags as PhaseFlagsValue,
     ReleaseChannel as ReleaseChannelValue, CONTRACT_VERSION, MAX_CAPABILITIES, MAX_METERS,
-    MAX_PARAMS, META_MAX_COOLDOWN_EPOCHS, POL_BUDGET_EPOCH_DEFAULT_PPB, POL_B_CLASS_KEYS,
-    POL_B_DEFAULTS, POL_GATE_B_DEFAULT, RELEASE_CHANNEL_FLAGS, RELEASE_CHANNEL_FLAG_URGENT_UPGRADE,
-    RELEASE_CHANNEL_LEN, RELEASE_CHANNEL_PENDING_AUTHORIZED_AT, RELEASE_CHANNEL_SPEC_VERSION,
+    MAX_PARAMS, META_MAX_COOLDOWN_EPOCHS, OCCUPANCY_PARAM_KEYS, POL_BUDGET_EPOCH_DEFAULT_PPB,
+    POL_B_CLASS_KEYS, POL_B_DEFAULTS, POL_GATE_B_DEFAULT, RELEASE_CHANNEL_FLAGS,
+    RELEASE_CHANNEL_FLAG_URGENT_UPGRADE, RELEASE_CHANNEL_LEN,
+    RELEASE_CHANNEL_PENDING_AUTHORIZED_AT, RELEASE_CHANNEL_SPEC_VERSION,
     RELEASE_CHANNEL_STORAGE_KEY, RELEASE_CHANNEL_UPDATED_AT,
 };
 pub use futarchy_primitives::kernel;
@@ -85,9 +87,15 @@ pub trait PhaseArmingGate {
     fn ensure_armable(class: ProposalClass) -> DispatchResult;
 }
 
-/// Temporary SQ-303 admission seam. The runtime binds the conservative
-/// re-derivation screen; pallet-only mocks keep the core/pallet differential
-/// focused on the registry semantics.
+/// 13 §5 item 6's re-derivation screen (SQ-303, SQ-501).
+///
+/// A `Config` seam rather than pallet logic because the answer must be computed
+/// from the live `Params` **storage** the call is about to write, which the
+/// frame-free core cannot read. The arithmetic itself is single-homed in
+/// `constitution-core` (`class_floors_survive`, `occupancy_envelopes_survive`,
+/// `occupancy_params_for`) so the runtime binding and the core aggregate cannot
+/// answer differently. Pallet-only mocks bind `()` and keep the core/pallet
+/// differential focused on registry semantics.
 pub trait BudgetDerivationGuard {
     /// `true` permits the change after ordinary bounds/Δ/cooldown checks.
     fn permits(key: futarchy_primitives::ParamKey, current: ParamValue, next: ParamValue) -> bool;

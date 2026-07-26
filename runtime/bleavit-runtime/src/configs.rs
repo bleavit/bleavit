@@ -1832,19 +1832,23 @@ impl pallet_constitution::PhaseArmingGate for TreasuryPhaseArmingGate {
     }
 }
 
-/// 13 §5 item 6 / 08 §4.1's screening obligation (SQ-303).
+/// 13 §5 item 6 / 08 §4.1's screening obligation (SQ-303, SQ-501).
 ///
-/// Two families, two answers. **Occupancy inputs** stay fail-closed: items 1–4's
-/// bounded occupancy and PoV arithmetic is compiled, and its re-derivation is a
-/// whole-document recomputation with no single literal to compare against.
-/// **Class-floor inputs** are judged by value — re-derive 08 §4.1's per-class
-/// floors from the *proposed* parameter set and refuse exactly when one would
-/// exceed the frozen literal the treasury enforces.
+/// Two families, one answer since SQ-501: both are judged **by value**.
+/// **Class-floor inputs** re-derive 08 §4.1's per-class floors from the
+/// *proposed* parameter set and are refused exactly when one would exceed the
+/// frozen literal the treasury enforces. **Occupancy inputs** re-derive 13 §5
+/// items 1–4's envelopes the same way, against the kernel constants SQ-501
+/// single-homed them as; before that they were refused outright, which made the
+/// four 13 §1 rows declaratory.
 ///
 /// This is the seam rather than the core aggregate because the pallet's
 /// `set_param` works directly on `Params` storage, so the answer has to be
-/// computed from that storage; `constitution_core::class_floors_survive` is the
-/// single home of the arithmetic both paths use.
+/// computed from that storage. `constitution_core::class_floors_survive` and
+/// `::occupancy_envelopes_survive` are the single homes of the arithmetic both
+/// paths use, and `::occupancy_params_for` the single home of the key list and
+/// the proposed-value substitution — a drifting second copy would admit a change
+/// the core refuses.
 pub struct RuntimeBudgetDerivationGuard;
 impl pallet_constitution::BudgetDerivationGuard for RuntimeBudgetDerivationGuard {
     fn permits(
@@ -1859,7 +1863,15 @@ impl pallet_constitution::BudgetDerivationGuard for RuntimeBudgetDerivationGuard
             return true;
         }
         if pallet_constitution::is_occupancy_input(key) {
-            return false;
+            // Read the live registry, substituting the proposed value for
+            // `key`. A missing or non-`u32` row is a broken invariant, not a
+            // licence: refuse rather than screen a partial parameter set (G-1).
+            let Some(params) = pallet_constitution::occupancy_params_for(key, next, |wanted| {
+                pallet_constitution::Params::<Runtime>::get(wanted).map(|record| record.value)
+            }) else {
+                return false;
+            };
+            return pallet_constitution::occupancy_envelopes_survive(params);
         }
         if !pallet_constitution::is_class_floor_input(key) {
             return true;
