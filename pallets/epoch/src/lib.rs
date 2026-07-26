@@ -396,14 +396,22 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     /// Seed the exact ongoing ratification referendum consumed by the
     /// benchmark-only bind fixture.
     fn prime_ratification(_: ProposalId, _: u32) {}
+    /// Saturate the oracle's `Rounds`/`RoundSchedules` with **qualifying**
+    /// §12 disputes on the proposal's frozen spec, so `decide`'s ProcessHold
+    /// predicate is measured against its real 128-round bound.
+    ///
+    /// Without it the predicate iterates an empty map and `decide` — a
+    /// decision-critical permissionless crank — is charged nothing for a scan
+    /// that reads `RoundSchedules` and `ComponentValues` per matching round
+    /// (SQ-494). Pre-existing, and exposed by the row that touched the
+    /// predicate.
+    fn prime_dispute_rounds(_spec: MetricSpecVersion) {}
     /// Saturate the real oracle aggregate before the boundary crank runs, so
     /// its weight measures the hydrate/persist the callbacks actually perform
     /// against a live chain rather than against empty maps (SQ-182; Codex P1
-    /// on #172).
-    ///
-    /// Seed the oracle's bounded aggregate for the boundary crank, including a
-    /// saturated **stale** `ComponentValues` map so the 07 §13 reaping sweep is
-    /// measured doing real work rather than scanning an empty prefix (SQ-492).
+    /// on #172), including a saturated **stale** `ComponentValues` map so the
+    /// 07 §13 reaping sweep is measured doing real work rather than scanning an
+    /// empty prefix (SQ-492).
     fn prime_oracle_state(_: EpochId) {}
     /// Assert the reaping sweep retired exactly one `ComponentReapBatch` from the
     /// map [`Self::prime_oracle_state`] seeded.

@@ -341,21 +341,30 @@ fn recovery_qualifier_and_mandatory_hooks_fit_absolute_class_budgets() {
 /// 13 §5 item 1: "`decide(pid)` reads ≤ 6 proposal books + 1 Baseline + O(10)
 /// params — PoV per call bounded regardless of map ceiling." Pinned regression
 /// ceilings (current 50×20 generated-weight estimate plus the A13 collator-
-/// compensation add of 48,000 B: `decide` 231,055 B; `settle_cohort(5)`
+/// compensation add of 48,000 B: `decide` 404,514 B; `settle_cohort(5)`
 /// 384,825 B, both dominated by per-key trie overhead, not
 /// the 2,240-row retained map): growth past ~2× the measurement reopens the
 /// touch-bound derivation.
+///
+/// `decide` moved 231,055 -> 404,514 B with SQ-494, and the move is a
+/// **measurement**, not a regression: the benchmark seeded no `Rounds` at all,
+/// so 07 §12's ProcessHold predicate scanned an empty map and this
+/// decision-critical permissionless crank was charged nothing for a walk
+/// bounded at `MAX_ROUNDS` = 128 with two reads per matching round. The local
+/// ceiling rises 384 -> 512 KiB with it; at 10.3 % of the 3,932,160 B
+/// normal-class budget (beside `settle_cohort(5)`'s 9.8 %) that is still ~8x of
+/// headroom, so the pin keeps detecting drift rather than rubber-stamping it.
 #[test]
 fn decide_and_settle_cohort_pov_pinned_below_map_scaling() {
     let decide =
         <crate::weights::pallet_epoch::WeightInfo<Runtime> as pallet_epoch::WeightInfo>::decide();
     assert_eq!(
         decide.proof_size(),
-        231_055,
+        404_514,
         "decide proof_size drifted from the 13 §5 generated-weight estimate"
     );
     assert!(
-        decide.proof_size() <= 384 * KIB as u64,
+        decide.proof_size() <= 512 * KIB as u64,
         "decide proof_size regressed past its pinned ceiling: {}",
         decide.proof_size()
     );
