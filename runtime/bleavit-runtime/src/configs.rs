@@ -1832,8 +1832,19 @@ impl pallet_constitution::PhaseArmingGate for TreasuryPhaseArmingGate {
     }
 }
 
-/// Temporary SQ-303 fail-closed screen. The eventual committed re-derivation
-/// artifact will replace this conservative unsafe-direction brake.
+/// 13 §5 item 6 / 08 §4.1's screening obligation (SQ-303).
+///
+/// Two families, two answers. **Occupancy inputs** stay fail-closed: items 1–4's
+/// bounded occupancy and PoV arithmetic is compiled, and its re-derivation is a
+/// whole-document recomputation with no single literal to compare against.
+/// **Class-floor inputs** are judged by value — re-derive 08 §4.1's per-class
+/// floors from the *proposed* parameter set and refuse exactly when one would
+/// exceed the frozen literal the treasury enforces.
+///
+/// This is the seam rather than the core aggregate because the pallet's
+/// `set_param` works directly on `Params` storage, so the answer has to be
+/// computed from that storage; `constitution_core::class_floors_survive` is the
+/// single home of the arithmetic both paths use.
 pub struct RuntimeBudgetDerivationGuard;
 impl pallet_constitution::BudgetDerivationGuard for RuntimeBudgetDerivationGuard {
     fn permits(
@@ -1841,7 +1852,50 @@ impl pallet_constitution::BudgetDerivationGuard for RuntimeBudgetDerivationGuard
         current: pallet_constitution::ParamValue,
         next: pallet_constitution::ParamValue,
     ) -> bool {
-        !pallet_constitution::rederive_budgets_required(key, current, next)
+        // A write that changes nothing is not a change: 13 §5 item 6 attaches
+        // the obligation to "a decision changing" one of these keys, and an
+        // equal write re-derives to exactly what is already compiled.
+        if current.as_u128() == next.as_u128() {
+            return true;
+        }
+        if pallet_constitution::is_occupancy_input(key) {
+            return false;
+        }
+        if !pallet_constitution::is_class_floor_input(key) {
+            return true;
+        }
+        // Read the live registry, substituting the proposed value for `key`.
+        // Only reached for the six class-floor keys, so ordinary parameter
+        // administration pays none of these reads.
+        let proposed = |name: &[u8]| -> Option<u128> {
+            let wanted = pallet_constitution::key16(name);
+            if wanted == key {
+                return Some(next.as_u128());
+            }
+            pallet_constitution::Params::<Runtime>::get(wanted).map(|record| record.value.as_u128())
+        };
+        let Some(budget) = proposed(b"pol.budget_epoch") else {
+            return false;
+        };
+        let Ok(budget_ppb) = u32::try_from(budget) else {
+            return false;
+        };
+        let Some(b_gate) = proposed(b"pol.b_gate") else {
+            return false;
+        };
+        let mut b_class = [0u128; 4];
+        for (slot, name) in b_class
+            .iter_mut()
+            .zip(pallet_constitution::POL_B_CLASS_KEYS.iter())
+        {
+            match proposed(name) {
+                Some(value) => *slot = value,
+                // A missing registry row is a broken invariant, not a licence:
+                // refuse rather than screen against a partial parameter set.
+                None => return false,
+            }
+        }
+        pallet_constitution::class_floors_survive(budget_ppb, b_gate, b_class)
     }
 }
 

@@ -794,11 +794,74 @@ impl ConstitutionState {
             Error::PhaseCapRaiseRefused
         );
         let (index, updated) = self.checked_set_param(key, next, epoch, block)?;
+        self.ensure_derivations_survive(key, current, next)?;
+        self.params[index] = updated;
+        Ok(())
+    }
+
+    /// 13 §5 item 6 / 08 §4.1 — the screening obligation, enforced by **value**
+    /// rather than by direction (SQ-303).
+    ///
+    /// Two families, and they need different answers because only one of them
+    /// has a machine-checkable safety property.
+    ///
+    /// **Class-floor keys.** 08 §4.1's per-class NAV floors are compile-time
+    /// constants derived from `pol.budget_epoch`, `pol.b_gate` and the four
+    /// `pol.b.*` keys, and they do not track those keys. The danger is precise:
+    /// lowering the budget or raising a `b` pushes the *true* floor above the
+    /// frozen literal, and §4.2's arming gate then passes a class below its real
+    /// minimum-viable NAV. So re-derive the true floor from the proposed values
+    /// and refuse exactly when it would exceed the literal the runtime enforces.
+    ///
+    /// This is what makes 08 §4.1's paired-CODE route usable rather than
+    /// theoretical. The direction test this replaces refused every raise and
+    /// every cut unconditionally, so a CODE proposal that correctly updated the
+    /// literals still could not carry its values change through — the six keys
+    /// were frozen in fact. Under a value test the same change simply passes
+    /// once the literals are right, with no pairing machinery, no artifact
+    /// schema and no verifier. That matters because 08 §4.1 is explicit that
+    /// "no governance artifact can move them": a verifier could never have
+    /// delivered the safety property, only the CODE proposal can.
+    ///
+    /// **Occupancy keys.** Items 1–4's bounded occupancy and PoV arithmetic is
+    /// compiled in the same way, but its re-derivation is a whole-document
+    /// recomputation with no single literal to compare against, so the
+    /// fail-closed refusal stands for those and the row's successor obligation
+    /// keeps them.
+    fn ensure_derivations_survive(
+        &self,
+        key: ParamKey,
+        current: ParamValue,
+        next: ParamValue,
+    ) -> Result<(), Error> {
+        if current.as_u128() == next.as_u128() {
+            return Ok(());
+        }
+        ensure!(!is_occupancy_input(key), Error::BudgetDerivationRequired);
+        if !is_class_floor_input(key) {
+            return Ok(());
+        }
+        let proposed = |name: &[u8]| -> Option<u128> {
+            let wanted = key16(name);
+            if wanted == key {
+                return Some(next.as_u128());
+            }
+            self.params
+                .iter()
+                .find(|record| record.key == wanted)
+                .map(|record| record.value.as_u128())
+        };
+        let budget_ppb = proposed(b"pol.budget_epoch").ok_or(Error::UnknownParam)?;
+        let budget_ppb = u32::try_from(budget_ppb).map_err(|_| Error::BudgetDerivationRequired)?;
+        let b_gate = proposed(b"pol.b_gate").ok_or(Error::UnknownParam)?;
+        let mut b_class = [0u128; 4];
+        for (slot, name) in b_class.iter_mut().zip(POL_B_CLASS_KEYS.iter()) {
+            *slot = proposed(name).ok_or(Error::UnknownParam)?;
+        }
         ensure!(
-            !rederive_budgets_required(key, current, next),
+            class_floors_survive(budget_ppb, b_gate, b_class),
             Error::BudgetDerivationRequired
         );
-        self.params[index] = updated;
         Ok(())
     }
 
@@ -1050,29 +1113,69 @@ pub fn is_coverage_input(key: ParamKey) -> bool {
     key == key16(b"orc.bond_bps") || key == key16(b"orc.rounds")
 }
 
-pub fn rederive_budgets_required(key: ParamKey, current: ParamValue, next: ParamValue) -> bool {
-    let changed = current.as_u128() != next.as_u128();
-    if !changed {
-        return false;
-    }
-    let increasing = next.as_u128() > current.as_u128();
-    let decreasing = next.as_u128() < current.as_u128();
-    let timing_or_capacity = key == key16(b"epoch.slots")
+/// The four 13 §1 keys whose values feed 08 §3's per-class POL commitment, in
+/// PARAM / TREASURY / CODE / META order.
+pub const POL_B_CLASS_KEYS: [&[u8]; 4] =
+    [b"pol.b.param", b"pol.b.trs", b"pol.b.code", b"pol.b.meta"];
+
+/// 13 §5 item 6 keys whose change makes the **bounded occupancy / PoV** arithmetic
+/// of items 1–4 stale, so no re-derivation carried in an artifact can make the
+/// compiled envelopes right again.
+///
+/// `ledger.archive` is deliberately **not** here. Item 6 states its own reason:
+/// it "can only move downward from its one-year K ceiling, so the compiled
+/// 2,240-row storage envelope remains safe". Screening it was an over-rejection
+/// against the spec's own words (SQ-303).
+pub fn is_occupancy_input(key: ParamKey) -> bool {
+    key == key16(b"epoch.slots")
         || key == key16(b"mkt.obs_interval")
         || key == key16(b"dec.window")
         || key == key16(b"epoch.length")
-        || key == key16(b"ledger.archive");
-    if timing_or_capacity {
-        return true;
+}
+
+/// Do 08 §4.1's frozen per-class NAV floors still hold at these parameter values?
+///
+/// `false` means at least one class's *true* floor — the 08 §3/§4.1 derivation
+/// at these values — has risen above the compile-time literal the treasury
+/// enforces, so §4.2's arming gate would pass that class below its real
+/// minimum-viable NAV.
+///
+/// Single-homed here (SQ-303) because two callers need the identical answer:
+/// [`ConstitutionState::set_param`] for the core aggregate, and the runtime's
+/// `BudgetDerivationGuard` for the pallet's own storage path. A second copy of
+/// this arithmetic that drifted would admit a change the other refuses.
+///
+/// Fail-closed on any inability to evaluate (G-1): an overflow or a zero POL
+/// budget answers `false`, never "no floor was breached".
+pub fn class_floors_survive(budget_epoch_ppb: u32, b_gate: Balance, b_class: [Balance; 4]) -> bool {
+    for (index, b) in b_class.iter().enumerate() {
+        let Some(derived) =
+            futarchy_primitives::kernel::derived_class_nav_floor(*b, b_gate, budget_epoch_ppb)
+        else {
+            return false;
+        };
+        let Some(frozen) = futarchy_primitives::kernel::CLASS_NAV_FLOOR_USDC.get(index) else {
+            return false;
+        };
+        if derived > *frozen {
+            return false;
+        }
     }
-    let pol_budget = key == key16(b"pol.budget_epoch");
-    let pol_floor = key == key16(b"pol.b_gate")
-        || key == key16(b"pol.b_baseline")
-        || key == key16(b"pol.b.param")
-        || key == key16(b"pol.b.trs")
-        || key == key16(b"pol.b.code")
-        || key == key16(b"pol.b.meta");
-    (pol_budget && decreasing) || (pol_floor && increasing)
+    true
+}
+
+/// Whether `key` feeds 08 §4.1's frozen per-class NAV floors.
+///
+/// `pol.b_baseline` is deliberately **not** here. 13 §5 item 6 admits it as an
+/// item-5 re-derivation trigger on the narrow ground that item 5 carries the
+/// Baseline commitment — and says in the same breath that its inclusion "is
+/// *not* a claim that it moves the four class floors", 08 §4.3 keeping the
+/// Baseline book outside the §4.1 arithmetic and outside `pol.budget_epoch`
+/// entirely. Screening it against those floors was an over-rejection (SQ-303).
+pub fn is_class_floor_input(key: ParamKey) -> bool {
+    key == key16(b"pol.budget_epoch")
+        || key == key16(b"pol.b_gate")
+        || POL_B_CLASS_KEYS.iter().any(|name| key == key16(name))
 }
 
 macro_rules! ensure {
@@ -2847,32 +2950,135 @@ mod tests {
     }
 
     #[test]
-    fn sq_303_screen_rejects_only_unsafe_budget_directions() {
-        assert!(rederive_budgets_required(
-            key16(b"epoch.length"),
-            ParamValue::U32(302_400),
-            ParamValue::U32(302_401)
-        ));
-        assert!(rederive_budgets_required(
-            key16(b"pol.budget_epoch"),
-            ParamValue::Perbill(7_500_000),
-            ParamValue::Perbill(7_499_999)
-        ));
-        assert!(rederive_budgets_required(
-            key16(b"pol.b.code"),
-            ParamValue::Balance(60_000 * futarchy_primitives::currency::USDC),
-            ParamValue::Balance(60_001 * futarchy_primitives::currency::USDC)
-        ));
-        assert!(!rederive_budgets_required(
-            key16(b"pol.b.code"),
-            ParamValue::Balance(60_000 * futarchy_primitives::currency::USDC),
-            ParamValue::Balance(59_999 * futarchy_primitives::currency::USDC)
-        ));
-        assert!(!rederive_budgets_required(
-            key16(b"mkt.fee"),
-            ParamValue::Perbill(30_000_000),
-            ParamValue::Perbill(31_000_000)
-        ));
+    fn sq_303_screen_refuses_by_value_and_admits_the_paired_code_route() {
+        let usdc = futarchy_primitives::currency::USDC;
+        let mut state = ConstitutionState::genesis();
+
+        // Occupancy inputs stay fail-closed: items 1-4 have no single literal to
+        // compare a re-derivation against.
+        assert_eq!(
+            state.ensure_derivations_survive(
+                key16(b"epoch.length"),
+                ParamValue::U32(302_400),
+                ParamValue::U32(302_401)
+            ),
+            Err(Error::BudgetDerivationRequired)
+        );
+
+        // Class-floor inputs are judged by value. Raising `pol.b.code` pushes the
+        // true CODE floor past the frozen literal — which has only 0.39 USDC of
+        // slack — so it is refused...
+        assert_eq!(
+            state.ensure_derivations_survive(
+                key16(b"pol.b.code"),
+                ParamValue::Balance(60_000 * usdc),
+                ParamValue::Balance(60_001 * usdc)
+            ),
+            Err(Error::BudgetDerivationRequired)
+        );
+        // ... and so is any cut to the POL budget, which raises every floor.
+        assert_eq!(
+            state.ensure_derivations_survive(
+                key16(b"pol.budget_epoch"),
+                ParamValue::Perbill(7_500_000),
+                ParamValue::Perbill(7_499_999)
+            ),
+            Err(Error::BudgetDerivationRequired)
+        );
+        // The safe direction is ordinary business.
+        assert_eq!(
+            state.ensure_derivations_survive(
+                key16(b"pol.b.code"),
+                ParamValue::Balance(60_000 * usdc),
+                ParamValue::Balance(59_999 * usdc)
+            ),
+            Ok(())
+        );
+        // A raise on a *larger* budget passes, because the true floor falls back
+        // under the literal. This is the paired-CODE route the direction test
+        // made unusable: once the frozen literals are right for the new values,
+        // the values change needs no artifact, no pairing record and no verifier
+        // — it simply stops being unsafe.
+        for record in state.params.iter_mut() {
+            if record.key == key16(b"pol.budget_epoch") {
+                record.value = ParamValue::Perbill(15_000_000);
+            }
+        }
+        assert_eq!(
+            state.ensure_derivations_survive(
+                key16(b"pol.b.code"),
+                ParamValue::Balance(60_000 * usdc),
+                ParamValue::Balance(60_001 * usdc)
+            ),
+            Ok(())
+        );
+
+        // Unrelated keys are untouched.
+        assert_eq!(
+            state.ensure_derivations_survive(
+                key16(b"mkt.fee"),
+                ParamValue::Perbill(30_000_000),
+                ParamValue::Perbill(31_000_000)
+            ),
+            Ok(())
+        );
+    }
+
+    /// 13 §5 item 6 gives both of these keys an explicit reason not to be
+    /// screened against the §4.1 floors, and the direction test screened them
+    /// anyway (SQ-303).
+    #[test]
+    fn sq_303_screen_does_not_over_reject_ledger_archive_or_pol_b_baseline() {
+        let usdc = futarchy_primitives::currency::USDC;
+        let state = ConstitutionState::genesis();
+        // "can only move downward from its one-year K ceiling, so the compiled
+        // 2,240-row storage envelope remains safe".
+        assert_eq!(
+            state.ensure_derivations_survive(
+                key16(b"ledger.archive"),
+                ParamValue::U32(5_256_000),
+                ParamValue::U32(5_255_999)
+            ),
+            Ok(())
+        );
+        // "moves no frozen literal" — 08 §4.3 keeps the Baseline book outside
+        // the §4.1 arithmetic and outside `pol.budget_epoch`.
+        assert_eq!(
+            state.ensure_derivations_survive(
+                key16(b"pol.b_baseline"),
+                ParamValue::Balance(25_000 * usdc),
+                ParamValue::Balance(26_000 * usdc)
+            ),
+            Ok(())
+        );
+    }
+
+    /// The derivation must reproduce 08 §4.1's published table, or the screen is
+    /// comparing against something other than the floors the runtime enforces.
+    #[test]
+    fn sq_303_derivation_reproduces_the_published_floor_table() {
+        let usdc = futarchy_primitives::currency::USDC;
+        let gate = 7_500 * usdc;
+        for (b, frozen) in [
+            (10_000, 4_620_989u128),
+            (25_000, 7_393_600),
+            (60_000, 13_862_944),
+            (100_000, 21_256_533),
+        ] {
+            let derived =
+                futarchy_primitives::kernel::derived_class_nav_floor(b * usdc, gate, 7_500_000)
+                    .expect("derivable at the default budget");
+            // Every published literal is at or above the exact derivation — the
+            // conservative direction, and what makes `derived <= frozen` the
+            // right test rather than an equality.
+            assert!(
+                derived <= frozen * usdc,
+                "derived {derived} exceeds published floor {frozen}"
+            );
+            // ... but by less than one whole USDC, so the table really is this
+            // derivation and not an unrelated set of numbers.
+            assert!(frozen * usdc - derived < 31 * usdc);
+        }
     }
 
     #[test]

@@ -1161,6 +1161,73 @@ pub mod kernel {
     /// drives its own cohort's measurement epochs so a lagging cursor can never
     /// let a settlement outrun the deadline.
     pub const ORACLE_DEADLINE_CATCHUP: u32 = crate::bounds::MAX_NON_TERMINAL_COHORTS;
+
+    /// 08 §4.1 per-class minimum-viable-NAV floors, in base USDC units, ordered
+    /// PARAM / TREASURY / CODE / META. Frozen constants: 08 §4.1 is explicit
+    /// that the treasury "MUST return exactly the values above" rather than
+    /// re-derive them at read time, because they do not share one rounding
+    /// convention.
+    ///
+    /// Single-homed here (SQ-303) rather than in `futarchy-treasury-core`,
+    /// because two crates now need them: the treasury enforces them at the
+    /// §4.2 arming gate, and the constitution screens parameter changes against
+    /// them. Duplicating a 13-owned value in a second crate is the defect rule 4
+    /// forbids.
+    pub const CLASS_NAV_FLOOR_USDC: [crate::Balance; 4] = [
+        4_620_989 * crate::currency::USDC,
+        7_393_600 * crate::currency::USDC,
+        13_862_944 * crate::currency::USDC,
+        21_256_533 * crate::currency::USDC,
+    ];
+
+    /// `ln 2` scaled by 10^18, for the 08 §3 per-book worst-case maker loss.
+    const LN2_SCALED_1E18: u128 = 693_147_180_559_945_309;
+    const LN2_SCALE: u128 = 1_000_000_000_000_000_000;
+    const PERBILL: u128 = 1_000_000_000;
+
+    /// The 08 §3/§4.1 derivation of a class's true minimum-viable NAV floor from
+    /// the live parameters, in base USDC units:
+    ///
+    /// ```text
+    /// commitment(K) = (2 · pol.b.K + 4 · pol.b_gate) · ln 2
+    /// floor(K)      = commitment(K) / pol.budget_epoch
+    /// ```
+    ///
+    /// This is what [`CLASS_NAV_FLOOR_USDC`] was computed from, and the point of
+    /// having it in code is SQ-303's screen: the floors are compile-time
+    /// constants that do **not** track the keys they were derived from, so a
+    /// decision lowering `pol.budget_epoch` or raising a `pol.b` can push the
+    /// true floor above the frozen literal and leave the §4.2 arming gate
+    /// passing a class below its real minimum.
+    ///
+    /// Rounds the true floor **up**. Every rounding step here is against the
+    /// proposal (R-7): a floor rounded down could admit a parameter change that
+    /// leaves the frozen literal wrong by less than one unit, which is the one
+    /// direction this screen exists to prevent.
+    pub fn derived_class_nav_floor(
+        b_class: crate::Balance,
+        b_gate: crate::Balance,
+        budget_epoch_ppb: u32,
+    ) -> Option<crate::Balance> {
+        if budget_epoch_ppb == 0 {
+            // A zero POL budget seeds no book at any NAV, so no finite floor
+            // exists. `None` is the fail-closed answer; a saturating 0 would
+            // read as "any NAV suffices".
+            return None;
+        }
+        let books = b_class
+            .checked_mul(2)?
+            .checked_add(b_gate.checked_mul(4)?)?;
+        // ceil(books · ln2)
+        let commitment = books
+            .checked_mul(LN2_SCALED_1E18)?
+            .checked_add(LN2_SCALE - 1)?
+            / LN2_SCALE;
+        // ceil(commitment / budget_epoch)
+        let scaled = commitment.checked_mul(PERBILL)?;
+        let divisor = u128::from(budget_epoch_ppb);
+        Some(scaled.checked_add(divisor - 1)? / divisor)
+    }
     pub const KEEPER_BUDGET_EPOCH_FLOOR_USDC: u128 = 6_000_000_000;
     /// SQ-117 (ruled 2026-07-21): the benchmark **fee basis** the launch
     /// `keeper.rebate` seed is calibrated against — the sanctioned-crank fee

@@ -48,14 +48,14 @@ mod tests;
 // The functional core is the semantic source of truth; re-export its surface
 // (named, not glob — the pallet defines its own `Error`/storage aliases).
 pub use constitution_core::{
-    empty_release_channel, genesis_capabilities, genesis_meters, genesis_params, is_coverage_input,
-    key16, rederive_budgets_required, Capability, CapabilityRecord, ConstitutionOrigin,
-    ConstitutionState, Error as CoreError, MaxDelta, Meter, ParamClass, ParamRecord, ParamValue,
-    PhaseFlags as PhaseFlagsValue, ReleaseChannel as ReleaseChannelValue, CONTRACT_VERSION,
-    MAX_CAPABILITIES, MAX_METERS, MAX_PARAMS, META_MAX_COOLDOWN_EPOCHS,
-    POL_BUDGET_EPOCH_DEFAULT_PPB, POL_B_DEFAULTS, POL_GATE_B_DEFAULT, RELEASE_CHANNEL_FLAGS,
-    RELEASE_CHANNEL_FLAG_URGENT_UPGRADE, RELEASE_CHANNEL_LEN,
-    RELEASE_CHANNEL_PENDING_AUTHORIZED_AT, RELEASE_CHANNEL_SPEC_VERSION,
+    class_floors_survive, empty_release_channel, genesis_capabilities, genesis_meters,
+    genesis_params, is_class_floor_input, is_coverage_input, is_occupancy_input, key16, Capability,
+    CapabilityRecord, ConstitutionOrigin, ConstitutionState, Error as CoreError, MaxDelta, Meter,
+    ParamClass, ParamRecord, ParamValue, PhaseFlags as PhaseFlagsValue,
+    ReleaseChannel as ReleaseChannelValue, CONTRACT_VERSION, MAX_CAPABILITIES, MAX_METERS,
+    MAX_PARAMS, META_MAX_COOLDOWN_EPOCHS, POL_BUDGET_EPOCH_DEFAULT_PPB, POL_B_CLASS_KEYS,
+    POL_B_DEFAULTS, POL_GATE_B_DEFAULT, RELEASE_CHANNEL_FLAGS, RELEASE_CHANNEL_FLAG_URGENT_UPGRADE,
+    RELEASE_CHANNEL_LEN, RELEASE_CHANNEL_PENDING_AUTHORIZED_AT, RELEASE_CHANNEL_SPEC_VERSION,
     RELEASE_CHANNEL_STORAGE_KEY, RELEASE_CHANNEL_UPDATED_AT,
 };
 pub use futarchy_primitives::kernel;

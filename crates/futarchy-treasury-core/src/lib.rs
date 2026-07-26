@@ -1171,13 +1171,20 @@ impl Treasury {
                 .max(self.meter_180d.utilization_bps(nav)),
         }
     }
+    /// 08 §4.1 per-class minimum-viable-NAV floor.
+    ///
+    /// The literals live in `futarchy_primitives::kernel::CLASS_NAV_FLOOR_USDC`
+    /// (SQ-303) because the constitution's parameter screen needs the same
+    /// values; keeping a second copy here would be the duplicated-13-value
+    /// defect. CONST shares META's floor — 08 §4.1 gives four class floors and
+    /// 13 rule 7 projects CONST onto META.
     pub fn floor(class: ProposalClass) -> Balance {
+        let floors = futarchy_primitives::kernel::CLASS_NAV_FLOOR_USDC;
         match class {
-            ProposalClass::Param => 4_620_989 * USDC,
-            ProposalClass::Treasury => 7_393_600 * USDC,
-            ProposalClass::Code => 13_862_944 * USDC,
-            ProposalClass::Meta => 21_256_533 * USDC,
-            ProposalClass::Constitutional => 21_256_533 * USDC,
+            ProposalClass::Param => floors[0],
+            ProposalClass::Treasury => floors[1],
+            ProposalClass::Code => floors[2],
+            ProposalClass::Meta | ProposalClass::Constitutional => floors[3],
         }
     }
     pub fn ensure_nav_floor(&mut self, class: ProposalClass) -> Result<(), Error> {
