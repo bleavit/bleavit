@@ -368,6 +368,25 @@ class HandWrittenSurvivalTests(unittest.TestCase):
             self.assertIsNotNone(block, f"{rel}::{function} not extractable for preservation")
 
 
+class ComponentSelectionTests(unittest.TestCase):
+    def test_component_bearing_pallets_are_a_strict_subset(self):
+        """The release gate's scope is derived from the files, not hand-listed."""
+        files = MODULE.committed_weight_files()
+        with_components = [
+            pallet
+            for pallet, path in files.items()
+            if any(w.ranges for w in PARSE(path.read_text(encoding="utf-8")).values())
+        ]
+        self.assertTrue(with_components)
+        self.assertLess(len(with_components), len(files))
+        # `pallet_epoch` carries `tick`/`settle_cohort` component slopes and is the
+        # one custom pallet verified at matching fidelity on this branch.
+        self.assertIn("pallet_epoch", with_components)
+        # `pallet_attestor` is constant-weight throughout — the class the cheap
+        # per-commit run gates soundly, and the class the original defect was in.
+        self.assertNotIn("pallet_attestor", with_components)
+
+
 class LastImplScopingTests(unittest.TestCase):
     """A shadowed definition in an earlier impl must never be the one copied.
 
@@ -470,6 +489,28 @@ class RepositoryTests(unittest.TestCase):
                 "pallet_guardian": ["on_initialize"],
             },
         )
+
+    def test_the_release_fidelity_gate_exists_and_blocks_publication(self):
+        """The release-time obligation must be implemented, not just written down.
+
+        15 §4.5 makes matching-fidelity re-measurement of component-bearing
+        functions a release-time duty. A normative sentence with no workflow behind
+        it is exactly the artifact-versus-reality gap this row exists to close, so
+        the job must exist *and* `publish` must depend on it — otherwise a release
+        could ship on slopes verified at no fidelity at all.
+        """
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        self.assertIn("--check --components-only", " ".join(workflow.split()))
+        self.assertIn("--steps 50 --repeat 20", " ".join(workflow.split()))
+        parsed = None
+        try:
+            import yaml
+
+            parsed = yaml.safe_load(workflow)
+        except ImportError:  # pragma: no cover - pyyaml absent in some envs
+            self.skipTest("pyyaml not installed")
+        self.assertIn("release-fidelity-weights", parsed["jobs"])
+        self.assertIn("release-fidelity-weights", parsed["jobs"]["publish"]["needs"])
 
     def test_the_drift_check_is_actually_wired_into_ci(self):
         """A gate nobody runs is not a gate.

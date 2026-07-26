@@ -686,6 +686,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--changed", action="store_true", help="select pallets whose local source changed"
     )
+    parser.add_argument(
+        "--components-only",
+        action="store_true",
+        help="select only pallets containing a component-bearing function — the set a "
+        "reduced-fidelity run cannot gate, and therefore the release-time obligation",
+    )
     parser.add_argument("--base", default="origin/main", help="base for --changed")
     parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
     parser.add_argument("--steps", type=int, default=50)
@@ -722,6 +728,26 @@ def _run(args: argparse.Namespace) -> int:
             )
             return 2
         selected = list(args.pallet)
+    elif args.components_only:
+        # Derived from the committed files, not listed by hand: a pallet needs a
+        # matching-fidelity run exactly when it has a fitted component, because
+        # that is the only case a cheap run cannot gate (a 2-point fit can lose a
+        # linear term, and losing it understates).
+        selected = [
+            pallet
+            for pallet, path in files.items()
+            if any(
+                weight.ranges
+                for weight in parse_weight_file(path.read_text(encoding="utf-8")).values()
+            )
+        ]
+        print(
+            f"Component-bearing pallets ({len(selected)} of {len(files)}): "
+            + ", ".join(selected)
+        )
+        if not selected:
+            print("no component-bearing weight function in the repository.")
+            return 0
     elif args.changed:
         selected, unknowable = changed_pallets(args.base)
         if unknowable:
@@ -806,6 +832,7 @@ def _run(args: argparse.Namespace) -> int:
         return 1
 
     failed: list[Comparison] = []
+    recovered: list[str] = []
     with tempfile.TemporaryDirectory() as raw:
         workdir = Path(raw)
         for index, pallet in enumerate(selected, 1):
@@ -851,20 +878,37 @@ def _run(args: argparse.Namespace) -> int:
                 if (rel, function) in reasons
             }
             report(comparison)
-            # A previously unmeasurable fixture that now runs is good news, and
-            # the kind of good news that otherwise never gets noticed.
+            # A previously unmeasurable fixture that now runs must FAIL, not
+            # merely print. The declaration/marker cross-check above runs against
+            # the *committed* text, so it cannot see this transition — and if this
+            # were only a note, the exemption would never expire: the entry would
+            # sit there indefinitely, ready to carry a *later* genuine failure
+            # forward unnoticed. An exemption that cannot expire is not the
+            # mechanically expiring control this gate claims to be.
             for function in preserved_functions(committed):
                 if function not in regenerated.preserved:
                     print(
-                        f"    note   {function}: was preserved, now benchmarks cleanly — "
-                        "drop the preservation"
+                        f"    RUNNABLE  {function}: was preserved, now benchmarks cleanly",
+                        file=sys.stderr,
                     )
+                    recovered.append(f"{pallet}::{function}")
             if comparison.failed:
                 failed.append(comparison)
             if args.write:
                 destination.write_text(regenerated.text, encoding="utf-8")
                 print(f"    wrote {destination.relative_to(ROOT)}")
 
+    if recovered:
+        print(
+            f"\nFAIL: {len(recovered)} preserved fixture(s) now benchmark cleanly: "
+            + ", ".join(recovered)
+            + f".\nThis is good news and it is still a failure: remove the "
+            f"`{PRESERVED_MARKER}` doc comment and the matching {PRESERVATION.name} entry "
+            "so the function rejoins the freshness gate. Leaving the exemption in place "
+            "would let a later, genuine benchmark failure be carried forward unnoticed.",
+            file=sys.stderr,
+        )
+        return 1
     if failed and args.write:
         # Drift is the expected input to `--write`, and it has just been corrected
         # on disk. Reporting a failure here would make the fix look like a break.
