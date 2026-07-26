@@ -8,3 +8,84 @@
 # runtime/bleavit-runtime/src/weights/pallet_constitution.rs set_param: storage proof grew after adding validation
 # runtime/bleavit-runtime/src/weights/pallet_retired.rs *: pallet retired by approved migration
 #
+# ---------------------------------------------------------------------------
+# SQ-490 weight sweep (2026-07-26). Every entry below is a *measurement
+# replacing a stale or hand-written number*, not a cost increase: no dispatch
+# does more work than it did before this branch. All were produced by one
+# serial `frame-omni-bencher` pass over the same assembled runtime-benchmarks
+# wasm, with no other load on the machine.
+# ---------------------------------------------------------------------------
+
+# --- pallet_attestor: the whole file was stale, not just the two functions
+# that had no benchmark. It was generated 2026-07-16; B19 then added cause-aware
+# revocation, bounded liability storage and NATIVE BOND CUSTODY, and the
+# committed weights never learned about any of it. Evidence: the old file's proof
+# annotations name three storage keys (Attestations, Members, NextAttestationId);
+# the regenerated file names eight, adding Revocations, Liabilities,
+# Balances::Holds, System::Account and a Constitution::Params read. Main has been
+# understating every dispatchable in a bond-custody pallet (R-7).
+runtime/bleavit-runtime/src/weights/pallet_attestor.rs set_members: SQ-490 — stale since 2026-07-16; B19's per-member bond custody (Balances::Holds + System::Account) and revocation/liability storage were never measured, so reads 3 -> 69 and writes 3 -> 67 are the real access pattern catching up, not new work
+runtime/bleavit-runtime/src/weights/pallet_attestor.rs challenge_attestation: SQ-490 — stale since 2026-07-16; the challenge path now takes a bond hold and reads Constitution::Params, so reads/writes 3 -> 7 is the real access pattern catching up
+runtime/bleavit-runtime/src/weights/pallet_attestor.rs resolve_challenge: SQ-490 — stale since 2026-07-16; resolution now releases holds and touches liability storage, so reads/writes 3 -> 10 is the real access pattern catching up
+runtime/bleavit-runtime/src/weights/pallet_attestor.rs remove_for_cause: SQ-490 — first measured value; B19 hand-wrote 8 reads for what revokes EVERY unexecuted record of the removed member (06 §7), which is 261 reads at the full MAX_ATTESTATIONS ledger. ValuesOrigin-gated, so not a spam vector, but it was budgeted at ~1/33 of its storage cost on the governance enactment path
+runtime/bleavit-runtime/src/weights/pallet_attestor.rs reap_attestation: SQ-490 — first measured value; B19's hand-written 60 us was close (107.8 us measured) and its PoV was conservative, but it was never measured
+
+# --- upstream FRAME drift since the 2026-07-16 mass generation. reads/writes/PoV
+# all moved, so these are real structural changes in the pinned SDK, not jitter.
+runtime/bleavit-runtime/src/weights/pallet_migrations.rs exec_migration_completed: SQ-490 — upstream SDK drift since 2026-07-16; reads 1 -> 3 and writes 1 -> 5 are a changed access pattern in the pinned pallet, re-measured not re-priced
+runtime/bleavit-runtime/src/weights/pallet_migrations.rs exec_migration_fail: SQ-490 — upstream SDK drift since 2026-07-16; PoV 3,731 -> 67,035 and writes 1 -> 4 reflect the pinned pallet's changed failure path, re-measured not re-priced
+runtime/bleavit-runtime/src/weights/pallet_migrations.rs onboard_new_mbms: SQ-490 — upstream SDK drift since 2026-07-16; ref_time only, +17.5% on a 7.6 us call
+
+# --- ref_time-only moves on sub-millisecond calls, with reads, writes and PoV
+# byte-identical. These are the jitter this row measured (a 127% spread on
+# unchanged code) rather than regressions, and they are the empirical case for
+# item (4) gating storage dimensions exactly and treating ref_time as advisory
+# below roughly a millisecond.
+runtime/bleavit-runtime/src/weights/pallet_collator_selection.rs note_author: SQ-490 — ref_time only, 37.9 -> 42.2 us (+11.4%), with reads/writes/PoV unchanged; measurement jitter on a sub-millisecond call, not a regression
+runtime/bleavit-runtime/src/weights/pallet_referenda.rs nudge_referendum_timed_out: SQ-490 — ref_time only, 11.8 -> 13.2 us (+11.9%), with reads/writes/PoV unchanged; measurement jitter on a sub-millisecond call, not a regression
+
+# --- the A13 collator payout: a hand-written estimate replaced by a benchmark.
+runtime/bleavit-runtime/src/weights/pallet_epoch.rs collator_compensation: SQ-490 — first measured value; the previous number was a hand-written estimate that understated ref_time ~2.4x, so this is a measurement replacing a guess, not a cost increase. The PoV jump 48,000 -> 389,037 B is the generator's synthetic per-key envelope over 120 shared-prefix ForeignAssets::Account keys (recorded proof 17,874 B); declared anyway because under-declaring PoV invalidates blocks while over-declaring only costs capacity (see SQ-499)
+
+# --- the runtime-upgrade path, re-measured on the current runtime. Both moves are
+# in the CONSERVATIVE direction (three additional reads charged), the annotated
+# storage-key set is byte-identical, the proof envelope is unchanged, and
+# set_code's ref_time actually DECREASED (96.2 -> 91.9 ms). The three extra reads
+# are therefore unannotated accesses the 2026-07-16 run did not observe; not
+# attributed to a named key here rather than guessing at one, and worth a look
+# when item (4) makes regeneration routine.
+runtime/bleavit-runtime/src/weights/frame_system.rs set_code: SQ-490 — re-measured on the current runtime; reads 5 -> 8 with the annotated key set and proof envelope unchanged and ref_time down 96.2 -> 91.9 ms. Charging more reads is the conservative direction; cause is three unannotated accesses, deliberately not attributed to a named key without evidence
+runtime/bleavit-runtime/src/weights/frame_system.rs apply_authorized_upgrade: SQ-490 — re-measured on the current runtime; reads 6 -> 9, same three unannotated accesses as set_code, same conservative direction
+runtime/bleavit-runtime/src/weights/pallet_attestor.rs attest: SQ-490 — stale since 2026-07-16; same B19 bond-custody cause as its siblings (Balances::Holds + System::Account + Constitution::Params), so reads 3 -> 7 and writes 3 -> 5 are the real access pattern catching up
+runtime/bleavit-runtime/src/weights/pallet_session.rs set_keys: SQ-490 — ref_time only, 36.7 -> 53.0 us, with reads/writes/PoV unchanged; sub-millisecond call inside the jitter band this row measured
+runtime/bleavit-runtime/src/weights/pallet_scheduler.rs set_retry_named: SQ-490 — ref_time only, 28.1 -> 31.0 us (+10.1%, barely over the threshold), with reads/writes/PoV unchanged; sub-millisecond jitter
+
+# --- pallet_assets: 22 of its 38 re-measured functions moved. This file had been
+# frozen at 2026-07-16 because ONE broken upstream fixture aborts the whole pallet
+# (see tools/ci/generated-weight-overrides.toml and the doc comment on
+# migration_v2_foreign_asset_set_reserve_weight). It carries ten permissionless
+# Public dispatchables (classifier.rs:331), so these were live understated weights.
+# Two shapes: ref_time-only moves on microsecond calls (jitter), and a real
+# proof-envelope growth from upstream widening Asset/Account MaxEncodedLen.
+runtime/bleavit-runtime/src/weights/pallet_assets.rs balance: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time only, 5,130,000 -> 6,140,000 ps (+19.69%), with reads/writes/PoV unchanged; sub-millisecond call inside the jitter band this row measured
+runtime/bleavit-runtime/src/weights/pallet_assets.rs block: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time only, 13,970,000 -> 16,400,000 ps (+17.39%), with reads/writes/PoV unchanged; sub-millisecond call inside the jitter band this row measured
+runtime/bleavit-runtime/src/weights/pallet_assets.rs destroy_accounts: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). proof_size 2,612,675 -> 3,211,273 (+22.91%). The proof growth is upstream pallet-assets 52 widening its Asset/Account MaxEncodedLen (Asset 808 B, Account 732 B in the regenerated annotations), which raises the proof envelope; re-measured, not re-priced
+runtime/bleavit-runtime/src/weights/pallet_assets.rs destroy_approvals: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). proof_size 2,626,675 -> 3,225,273 (+22.79%). The proof growth is upstream pallet-assets 52 widening its Asset/Account MaxEncodedLen (Asset 808 B, Account 732 B in the regenerated annotations), which raises the proof envelope; re-measured, not re-priced
+runtime/bleavit-runtime/src/weights/pallet_assets.rs finish_destroy: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time only, 12,110,000 -> 14,600,000 ps (+20.56%), with reads/writes/PoV unchanged; sub-millisecond call inside the jitter band this row measured
+runtime/bleavit-runtime/src/weights/pallet_assets.rs force_cancel_approval: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time only, 28,271,000 -> 32,490,000 ps (+14.92%), with reads/writes/PoV unchanged; sub-millisecond call inside the jitter band this row measured
+runtime/bleavit-runtime/src/weights/pallet_assets.rs force_transfer: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time 37,470,000 -> 43,080,000 (+14.97%); proof_size 6,208 -> 7,404 (+19.27%). The proof growth is upstream pallet-assets 52 widening its Asset/Account MaxEncodedLen (Asset 808 B, Account 732 B in the regenerated annotations), which raises the proof envelope; re-measured, not re-priced
+runtime/bleavit-runtime/src/weights/pallet_assets.rs freeze: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time only, 13,290,000 -> 16,380,000 ps (+23.25%), with reads/writes/PoV unchanged; sub-millisecond call inside the jitter band this row measured
+runtime/bleavit-runtime/src/weights/pallet_assets.rs freeze_asset: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time only, 8,720,000 -> 10,480,000 ps (+20.18%), with reads/writes/PoV unchanged; sub-millisecond call inside the jitter band this row measured
+runtime/bleavit-runtime/src/weights/pallet_assets.rs get_metadata: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time only, 4,950,000 -> 6,830,000 ps (+37.98%), with reads/writes/PoV unchanged; sub-millisecond call inside the jitter band this row measured
+runtime/bleavit-runtime/src/weights/pallet_assets.rs mint: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time only, 18,930,000 -> 22,610,000 ps (+19.44%), with reads/writes/PoV unchanged; sub-millisecond call inside the jitter band this row measured
+runtime/bleavit-runtime/src/weights/pallet_assets.rs set_min_balance: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time only, 9,790,000 -> 11,280,000 ps (+15.22%), with reads/writes/PoV unchanged; sub-millisecond call inside the jitter band this row measured
+runtime/bleavit-runtime/src/weights/pallet_assets.rs set_team: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time only, 8,810,000 -> 10,380,000 ps (+17.82%), with reads/writes/PoV unchanged; sub-millisecond call inside the jitter band this row measured
+runtime/bleavit-runtime/src/weights/pallet_assets.rs thaw: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time only, 13,400,000 -> 16,390,000 ps (+22.31%), with reads/writes/PoV unchanged; sub-millisecond call inside the jitter band this row measured
+runtime/bleavit-runtime/src/weights/pallet_assets.rs thaw_asset: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time only, 8,850,000 -> 10,460,000 ps (+18.19%), with reads/writes/PoV unchanged; sub-millisecond call inside the jitter band this row measured
+runtime/bleavit-runtime/src/weights/pallet_assets.rs touch: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time only, 28,920,000 -> 32,890,000 ps (+13.73%), with reads/writes/PoV unchanged; sub-millisecond call inside the jitter band this row measured
+runtime/bleavit-runtime/src/weights/pallet_assets.rs touch_other: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time only, 27,680,000 -> 31,430,000 ps (+13.55%), with reads/writes/PoV unchanged; sub-millisecond call inside the jitter band this row measured
+runtime/bleavit-runtime/src/weights/pallet_assets.rs transfer: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). proof_size 6,208 -> 7,404 (+19.27%). The proof growth is upstream pallet-assets 52 widening its Asset/Account MaxEncodedLen (Asset 808 B, Account 732 B in the regenerated annotations), which raises the proof envelope; re-measured, not re-priced
+runtime/bleavit-runtime/src/weights/pallet_assets.rs transfer_all: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time 48,810,000 -> 54,010,000 (+10.65%); proof_size 6,208 -> 7,404 (+19.27%). The proof growth is upstream pallet-assets 52 widening its Asset/Account MaxEncodedLen (Asset 808 B, Account 732 B in the regenerated annotations), which raises the proof envelope; re-measured, not re-priced
+runtime/bleavit-runtime/src/weights/pallet_assets.rs transfer_approved: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). proof_size 6,208 -> 7,404 (+19.27%). The proof growth is upstream pallet-assets 52 widening its Asset/Account MaxEncodedLen (Asset 808 B, Account 732 B in the regenerated annotations), which raises the proof envelope; re-measured, not re-priced
+runtime/bleavit-runtime/src/weights/pallet_assets.rs transfer_keep_alive: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). proof_size 6,208 -> 7,404 (+19.27%). The proof growth is upstream pallet-assets 52 widening its Asset/Account MaxEncodedLen (Asset 808 B, Account 732 B in the regenerated annotations), which raises the proof envelope; re-measured, not re-priced
+runtime/bleavit-runtime/src/weights/pallet_assets.rs transfer_ownership: SQ-490 — first re-measurement since 2026-07-16 (this file was frozen by one broken upstream fixture, see the overrides note). ref_time only, 10,850,000 -> 13,420,000 ps (+23.69%), with reads/writes/PoV unchanged; sub-millisecond call inside the jitter band this row measured

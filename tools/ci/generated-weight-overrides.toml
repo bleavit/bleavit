@@ -1,0 +1,26 @@
+# Deliberate hand-written weights inside frame-omni-bencher-generated files.
+#
+# 15 §4.5 forbids these by default: the generator does not emit them, so a
+# regeneration deletes them, and the deletion presents as a weight *decrease* —
+# invisible to a growth-only gate. Every entry here is therefore a live hazard
+# with a named owner, not a settled exception.
+#
+# Format (one function per line):
+# <repo-relative-weight-path> <function>: <non-empty justification>
+#
+# Entries expire mechanically: `check-generated-weights.py` fails once the
+# function carries a measured value or disappears, so an override cannot outlive
+# its reason.
+
+runtime/bleavit-runtime/src/weights/pallet_xcm.rs teleport_assets: protocol-disabled by the production XCM filters (09 §6.2); retains a fail-closed Weight::MAX because no valid benchmark fixture may bypass those filters, and Weight::MAX cannot undercharge
+runtime/bleavit-runtime/src/weights/pallet_xcm.rs execute: protocol-disabled by the production XCM filters (09 §6.2); retains a fail-closed Weight::MAX for the same reason as teleport_assets
+runtime/bleavit-runtime/src/weights/pallet_guardian.rs on_initialize: SQ-490 — conservative pallet-fallback envelope (1.95 ms / 220 r / 150 w) deliberately kept ABOVE the generated value, because the existing benchmark does not seed B18's saturated per-block veto-join sweep and so measures a lighter hook than production runs. This is a per-block hook, so regenerating pallet_guardian without first extending that fixture would silently undercharge every block. Owner: SQ-490 item (4) — extend the guardian on_initialize benchmark to the saturated sweep, then drop this entry.
+
+# NOTE (SQ-490): a function *preserved* from an older generation needs no entry
+# here — it still carries the generator's measured line, so this gate sees it as
+# generated. That is the gate's deliberate scope: it catches hand-written terms,
+# not stale ones. `pallet_assets::migration_v2_foreign_asset_set_reserve_weight` is
+# exactly that case (see the doc comment on the function), and its provenance is
+# recorded there rather than here. Item (4)'s regenerate-and-diff should compare
+# per-function provenance, since a file header date can now be newer than one of
+# its functions.

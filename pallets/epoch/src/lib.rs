@@ -433,6 +433,23 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     fn assert_settlement_renormalized(_epoch: EpochId) {}
     fn prime_keeper_rebate() {}
     fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
+    /// Seed the A13 collator-compensation sink at its worst case: a full
+    /// authored-share accumulator for an epoch that has already completed, a
+    /// registered-collator count, no overflow flag, and a funded custody line —
+    /// so `T::CollatorCompensation::pay()` runs every transfer instead of
+    /// returning at one of its guards (SQ-490).
+    fn prime_collator_compensation() {}
+    /// Assert the payout actually happened.
+    ///
+    /// Asserted for the same reason the reaping sweep and the settlement
+    /// recompute are: the failure mode is *silence*. Every guard in
+    /// `pay_collator_compensation` returns quietly — an unset tracked epoch, a
+    /// tracked epoch that is not yet complete, a missing registered count, an
+    /// overflow flag, an unfunded line — so a fixture that trips any of them
+    /// measures a call that pays nobody, and the weight file reports a plausible
+    /// small number. This term is the largest single addend in three of the
+    /// heaviest dispatches on the chain; it must not be measured as a no-op.
+    fn assert_collator_compensation_paid() {}
 }
 
 /// `Get<EpochId>` projection for sibling pallets (treasury/registry/welfare).
@@ -1104,8 +1121,16 @@ pub mod pallet {
 
         /// Permissionless bounded crank. An empty batch advances only the phase
         /// clock; each item is idempotent when no transition is due.
+        ///
+        /// The A13 collator payout is composed here rather than folded into the
+        /// benchmarked `tick` number: it fires only on an epoch crossing, and
+        /// `tick`'s benchmarked worst case is a full batch *without* one, so no
+        /// single fixture measures both. Charging it unconditionally is the
+        /// conservative direction — a crossing is only known after dispatch
+        /// (SQ-490).
         #[pallet::call_index(2)]
-        #[pallet::weight(T::WeightInfo::tick(pids.len() as u32))]
+        #[pallet::weight(T::WeightInfo::tick(pids.len() as u32)
+            .saturating_add(T::WeightInfo::collator_compensation()))]
         pub fn tick(origin: OriginFor<T>, pids: TickBatch) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let params = Self::live_params()?;
@@ -1394,8 +1419,12 @@ pub mod pallet {
             result
         }
 
+        /// Charges the A13 collator payout for the same reason `tick` does: this
+        /// is a clock-syncing entry point, so it can be the crossing's first
+        /// caller (SQ-490).
         #[pallet::call_index(3)]
-        #[pallet::weight(T::WeightInfo::decide())]
+        #[pallet::weight(T::WeightInfo::decide()
+            .saturating_add(T::WeightInfo::collator_compensation()))]
         pub fn decide(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let params = Self::live_params()?;
@@ -1488,8 +1517,12 @@ pub mod pallet {
             result
         }
 
+        /// Charges the A13 collator payout for the same reason `tick` does: this
+        /// is a clock-syncing entry point, so it can be the crossing's first
+        /// caller (SQ-490).
         #[pallet::call_index(4)]
-        #[pallet::weight(T::WeightInfo::settle_cohort(*batch))]
+        #[pallet::weight(T::WeightInfo::settle_cohort(*batch)
+            .saturating_add(T::WeightInfo::collator_compensation()))]
         pub fn settle_cohort(origin: OriginFor<T>, epoch: EpochId, batch: u32) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(
@@ -1859,10 +1892,11 @@ pub mod pallet {
             // Deliberately does **not** pay collator compensation, unlike the other
             // three clock-syncing entry points. The sink's guard is `tracked_epoch
             // < epoch_at(now)`, not a closing window, so a crossing this crank
-            // reaches first is still paid by the next `tick` — and every payer has
-            // to hand-splice `collator_compensation()` into the *generated* weight
-            // file, a footgun this PR documents rather than adds a fourth case to
-            // (SQ-490).
+            // reaches first is still paid by the next `tick`, and not paying keeps
+            // this call's weight free of the payout term. Adding a fourth payer is
+            // now a one-line change — compose `collator_compensation()` into the
+            // `#[pallet::weight]` attribute the way the other three do (SQ-490
+            // removed the hand-splice that used to make it a footgun).
             if result.is_ok() {
                 // Decision-critical: welfare's snapshot crank fails closed until
                 // this has run for the measurement epoch it reads (07 §11(1)).

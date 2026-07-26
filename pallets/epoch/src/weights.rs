@@ -8,6 +8,16 @@
 //! of their own work (SQ-182): both cursors read and written, plus the cohort
 //! schedule read on the settlement path. This fallback cannot see the oracle's
 //! side of that seam, which is charged to `pallet-oracle`'s own weights.
+//!
+//! `collator_compensation` is *not* folded into those three methods. It is a
+//! separate benchmarked term composed at each dispatchable's `#[pallet::weight]`
+//! attribute (SQ-490), because the payout fires only on an epoch crossing while
+//! each call's benchmarked worst case is its own heaviest non-crossing fixture —
+//! no single benchmark measures both. Composing at the call site also keeps the
+//! generated weight file purely generated: the previous arrangement required
+//! hand-splicing this function and three `saturating_add` call sites back into
+//! `runtime/bleavit-runtime/src/weights/pallet_epoch.rs` after every
+//! regeneration, and dropping them read as an ordinary weight *decrease*.
 
 use core::marker::PhantomData;
 use frame_support::traits::Get;
@@ -48,21 +58,18 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     fn tick(items: u32) -> Weight {
         base::<T>(55_000_000, 15, 12)
             .saturating_add(Weight::from_parts(30_000_000, 4_000).saturating_mul(items.into()))
-            .saturating_add(Self::collator_compensation())
     }
     fn collator_compensation() -> Weight {
         // Maximum 120-author payout: one bounded treasury state update plus
-        // two ForeignAssets account accesses per recipient. This is charged
-        // on every tick because phase entry is only known after dispatch.
+        // two ForeignAssets account accesses per recipient.
         base::<T>(1_800_000_000, 245, 245)
     }
     fn decide() -> Weight {
-        base::<T>(140_000_000, 27, 16).saturating_add(Self::collator_compensation())
+        base::<T>(140_000_000, 27, 16)
     }
     fn settle_cohort(items: u32) -> Weight {
         base::<T>(85_000_000, 20, 14)
             .saturating_add(Weight::from_parts(45_000_000, 5_000).saturating_mul(items.into()))
-            .saturating_add(Self::collator_compensation())
     }
     fn set_next_epoch_length() -> Weight {
         base::<T>(30_000_000, 12, 10)
@@ -127,18 +134,16 @@ impl WeightInfo for () {
     fn tick(items: u32) -> Weight {
         rocks(55_000_000, 15, 12)
             .saturating_add(Weight::from_parts(30_000_000, 4_000).saturating_mul(items.into()))
-            .saturating_add(Self::collator_compensation())
     }
     fn collator_compensation() -> Weight {
         rocks(1_800_000_000, 245, 245)
     }
     fn decide() -> Weight {
-        rocks(140_000_000, 27, 16).saturating_add(Self::collator_compensation())
+        rocks(140_000_000, 27, 16)
     }
     fn settle_cohort(items: u32) -> Weight {
         rocks(85_000_000, 20, 14)
             .saturating_add(Weight::from_parts(45_000_000, 5_000).saturating_mul(items.into()))
-            .saturating_add(Self::collator_compensation())
     }
     fn set_next_epoch_length() -> Weight {
         rocks(30_000_000, 12, 10)

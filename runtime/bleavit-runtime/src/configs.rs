@@ -8357,6 +8357,129 @@ pub(crate) fn prime_keeper_rebate_worst_case() {
     }
 }
 
+/// Epoch whose authored shares the collator-compensation benchmark pays out.
+/// The sink only pays a *completed* epoch, so the fixture also has to place the
+/// clock in a strictly later one.
+#[cfg(feature = "runtime-benchmarks")]
+const BENCHMARK_COLLATOR_COMP_EPOCH: EpochId = 0;
+
+/// Seed the A13 payout at its worst case: the accumulator full to
+/// `MaxCollatorCompensationEntries`, every entry a distinct payee, the tracked
+/// epoch complete, and custody funded for the whole pool so no transfer fails.
+///
+/// All of it is treasury-pallet state, which is why this cannot live in
+/// `pallets/epoch/src/benchmarking.rs` (I-24 keeps the two pallets apart) and is
+/// reached through the `BenchmarkHelper` seam instead.
+#[cfg(feature = "runtime-benchmarks")]
+fn prime_collator_compensation_worst_case() {
+    use frame_support::BoundedVec;
+
+    benchmark_ensure_usdc();
+
+    let entries = pallet_futarchy_treasury::MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND;
+    let registered = entries;
+
+    // Place the clock in the epoch after the one being paid. `epoch_for_block`
+    // reads `EpochOf`/`Schedule`, so both are set explicitly rather than left to
+    // defaults that happen to compute a usable answer.
+    let length = <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get().epoch_length;
+    let paid_epoch = BENCHMARK_COLLATOR_COMP_EPOCH;
+    let clock_epoch = paid_epoch.saturating_add(1);
+    pallet_epoch::EpochOf::<Runtime>::mutate(|epoch| epoch.index = clock_epoch);
+    pallet_epoch::Schedule::<Runtime>::put(pallet_epoch::EpochSchedule {
+        epoch_start_block: length,
+        length,
+        next_length: length,
+    });
+    System::set_block_number(length);
+
+    // Distinct payees, each with a distinct share so the division runs per entry
+    // rather than collapsing to one repeated quotient.
+    let shares = (0..entries)
+        .map(|index| (benchmark_collator_payee(index), index.saturating_add(1)))
+        .collect::<Vec<_>>();
+    // `truncate_from` rather than a fallible conversion: the length is exactly
+    // the bound by construction, and this file may not use `expect`.
+    pallet_futarchy_treasury::CollatorAuthoredBlocks::<Runtime>::put(BoundedVec::truncate_from(
+        shares,
+    ));
+    pallet_futarchy_treasury::CollatorAuthoredEpoch::<Runtime>::put(paid_epoch);
+    pallet_futarchy_treasury::CollatorAuthoredRegisteredCount::<Runtime>::put(registered);
+    pallet_futarchy_treasury::CollatorAuthoredOverflowed::<Runtime>::put(false);
+    // A pending accumulator would be paid *instead* of the authored one, and it
+    // is empty here — that fixture would measure nothing.
+    pallet_futarchy_treasury::CollatorPendingEpoch::<Runtime>::kill();
+
+    // Fund from the live parameter: the pool is `collator.comp × registered`, and
+    // an underfunded `OpsCollators` line makes `debitable_line` fail, which the
+    // sink swallows — a silent no-op measurement.
+    let pool = <TreasuryParams as pallet_futarchy_treasury::TreasuryParams>::collator_comp_epoch()
+        .saturating_mul(Balance::from(registered));
+    pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+        let line = pallet_futarchy_treasury::BudgetLine::OpsCollators;
+        if let Some((_, balance)) = state.lines.iter_mut().find(|(stored, _)| *stored == line) {
+            *balance = pool;
+        } else {
+            let _ = state.lines.try_push((line, pool));
+        }
+    });
+    // Custody is funded to twice the pool, not to the pool exactly. Payouts move
+    // through `Preservation::Preserve`, so a pot holding precisely the pool fails
+    // its *last* transfer — the sum of the truncated per-share quotients leaves
+    // under `min_balance` behind. That failure is swallowed by the sink, so the
+    // benchmark would have measured a rolled-back no-op.
+    let custody = pool.saturating_mul(2);
+    let pot = treasury_collators_account();
+    let balance = <ForeignAssets as Inspect<AccountId>>::balance(usdc_location(), &pot);
+    if balance < custody {
+        let _ = <ForeignAssets as Mutate<AccountId>>::mint_into(
+            usdc_location(),
+            &pot,
+            custody.saturating_sub(balance),
+        );
+    }
+}
+
+/// Distinct payee per accumulator slot. `BenchmarkHelper::account` takes a `u8`
+/// seed and the bound is 120, but deriving the account here keeps the payee set
+/// disjoint from the seeds other fixtures use for callers and proposers.
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_collator_payee(index: u32) -> AccountId {
+    let mut raw = [0u8; 32];
+    raw[0..4].copy_from_slice(&index.to_le_bytes());
+    raw[4..8].copy_from_slice(b"coll");
+    AccountId32::new(raw)
+}
+
+/// Assert the payout ran to completion: the accumulator retired, the paid-epoch
+/// marker advanced, and the line debited by the full pool.
+#[cfg(feature = "runtime-benchmarks")]
+fn assert_collator_compensation_was_paid() {
+    assert_eq!(
+        pallet_futarchy_treasury::CollatorCompensationPaidEpoch::<Runtime>::get(),
+        Some(BENCHMARK_COLLATOR_COMP_EPOCH),
+        "benchmark must pay the seeded completed epoch, not return at a guard"
+    );
+    assert!(
+        pallet_futarchy_treasury::CollatorAuthoredBlocks::<Runtime>::get().is_empty(),
+        "a paid accumulator is retired in the same storage layer as the transfers"
+    );
+    assert!(
+        pallet_futarchy_treasury::CollatorAuthoredEpoch::<Runtime>::get().is_none(),
+        "a paid accumulator releases its epoch marker"
+    );
+    let paid = <ForeignAssets as Inspect<AccountId>>::balance(
+        usdc_location(),
+        &benchmark_collator_payee(
+            pallet_futarchy_treasury::MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND - 1,
+        ),
+    );
+    assert!(
+        paid > 0,
+        "the largest-share payee must have actually received a transfer"
+    );
+}
+
 #[cfg(feature = "runtime-benchmarks")]
 fn assert_keeper_rebate_was_paid(class: CrankClass) {
     let state = pallet_futarchy_treasury::State::<Runtime>::get();
@@ -9476,6 +9599,14 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
             )),
             "settle_cohort must measure the 07 §10 recompute, not skip it"
         );
+    }
+
+    fn prime_collator_compensation() {
+        prime_collator_compensation_worst_case();
+    }
+
+    fn assert_collator_compensation_paid() {
+        assert_collator_compensation_was_paid();
     }
 
     fn prime_settlement(epoch: EpochId) {

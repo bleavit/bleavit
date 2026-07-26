@@ -1007,6 +1007,31 @@ mod benches {
         Ok(())
     }
 
+    /// The A13 collator payout, measured as its own term.
+    ///
+    /// Not an extrinsic: it is the sibling-pallet sink the three clock-syncing
+    /// dispatchables invoke on an epoch crossing, and each of those calls
+    /// composes this weight at its `#[pallet::weight]` attribute (SQ-490). It has
+    /// to be benchmarked separately because a crossing and each call's own
+    /// heaviest fixture are mutually exclusive — `tick`'s worst case is a full
+    /// batch mid-phase, which by construction crosses nothing.
+    ///
+    /// Worst case is the full authored-share accumulator paid out in one call,
+    /// seeded runtime-side because every storage item involved belongs to the
+    /// treasury pallet.
+    #[benchmark]
+    fn collator_compensation() -> Result<(), BenchmarkError> {
+        T::BenchmarkHelper::prime_collator_compensation();
+
+        #[block]
+        {
+            T::CollatorCompensation::pay();
+        }
+
+        T::BenchmarkHelper::assert_collator_compensation_paid();
+        Ok(())
+    }
+
     #[benchmark]
     fn set_intake_paused() -> Result<(), BenchmarkError> {
         let origin = T::EmergencyPlaybookOrigin::try_successful_origin()

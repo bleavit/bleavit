@@ -121,6 +121,10 @@ else
   echo "      To run it here: git fetch origin main, or pass --base <rev> yourself."
 fi
 python3 tools/ci/check-weight-storage-bounds.py
+# 15 §4.5: generated weight files hold only generated weights. The growth-only
+# regression gate above cannot see a hand-written term being deleted by a
+# regeneration, because that reads as a *decrease* (SQ-490).
+python3 tools/ci/check-generated-weights.py
 
 # B6 release gate (09 §2.1(5)): compile the deployable runtime and its
 # benchmarking surface, then compile and execute the runtime's genesis-state

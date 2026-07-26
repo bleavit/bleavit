@@ -167,6 +167,11 @@ jobs:
         run: python3 tools/ci/check-weight-regression.py --self-test
       - name: Check committed weight diffs
         run: python3 tools/ci/check-weight-regression.py
+      # 15 §4.5: a hand-written term inside a generated weight file is deleted by
+      # the next regeneration, and that reads as a *decrease* — the one shape the
+      # growth-only gate above cannot see (SQ-490).
+      - name: Check generated weight files hold only generated weights
+        run: python3 tools/ci/check-generated-weights.py
 
   benchmark-smoke:
     name: Benchmark smoke

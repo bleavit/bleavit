@@ -208,10 +208,12 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
         }),
     );
     all.extend(
+        // `create_community_schedule` was missing from this sweep until SQ-490.
         pallet_call_weights!(pallet_futarchy_treasury as pallet_futarchy_treasury::WeightInfo {
             spend, open_stream, claim_stream, cancel_stream, fund_budget_line, issue_vit,
             recover_foreign, execute_coretime_renewal, note_coretime_quote,
             prune_coretime_quote, set_coretime_authority, sweep_insurance,
+            create_community_schedule,
         }),
     );
     all.extend(
@@ -221,10 +223,22 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
         }),
     );
     all.extend(
+        // `remove_for_cause` and `reap_attestation` were missing from this sweep
+        // until SQ-490 — both are live dispatchables, so I-20 covers them, and
+        // `remove_for_cause` is the heaviest call in the pallet (it revokes every
+        // unexecuted record of the removed member, 261 reads at the full
+        // `MAX_ATTESTATIONS` ledger). Its hand-written weight had declared 8.
         pallet_call_weights!(pallet_attestor as pallet_attestor::WeightInfo {
             set_members, attest, challenge_attestation, resolve_challenge,
+            remove_for_cause, reap_attestation,
         }),
     );
+    // The three clock-syncing cranks charge the A13 collator payout on top of
+    // their own benchmarked work, composed at each `#[pallet::weight]` attribute
+    // (SQ-490). The generated function is therefore only *one addend* of what the
+    // chain dispatches, and I-20 is a statement about the dispatched weight — so
+    // the composed total is what has to fit the class here.
+    let collator_payout = <crate::weights::pallet_epoch::WeightInfo<Runtime> as pallet_epoch::WeightInfo>::collator_compensation();
     all.extend(
         pallet_call_weights!(pallet_epoch as pallet_epoch::WeightInfo {
             submit, withdraw, decide, set_next_epoch_length, delay_once,
@@ -235,9 +249,20 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
             settle_cohort(MAX_COHORT_PROPOSALS_BOUND),
             void_cohort(MAX_COHORT_PROPOSALS_BOUND),
             set_intake_paused,
+        })
+        .into_iter()
+        .map(|(name, weight)| match name {
+            "pallet_epoch::tick" | "pallet_epoch::decide" | "pallet_epoch::settle_cohort" => {
+                (name, weight.saturating_add(collator_payout))
+            }
+            _ => (name, weight),
         }),
     );
     all.extend(
+        // `qualify_recovery_image` is deliberately absent: it is
+        // `DispatchClass::Operational`, and `recovery_qualifier_and_mandatory_hooks_
+        // fit_absolute_class_budgets` already checks it against the Operational
+        // budget. Adding it here would assert the wrong class.
         pallet_call_weights!(pallet_execution_guard as pallet_execution_guard::WeightInfo {
             ratify, reject_stale, expire_failed_execution,
             execute(MAX_CALLS_BOUND),
@@ -260,7 +285,14 @@ fn every_futarchy_call_and_hook_fits_the_normal_class() {
     // Exact count of the 12 futarchy pallets' WeightInfo functions — update
     // in lockstep when a trait gains or loses a function, so a silently
     // dropped inventory entry cannot pass.
-    assert_eq!(all.len(), 112, "call inventory drifted");
+    //
+    // 112 -> 115 with SQ-490: three live Normal-class dispatchables had never
+    // been listed here at all (`attestor::remove_for_cause`,
+    // `attestor::reap_attestation`, `futarchy_treasury::create_community_schedule`).
+    // This pin detects a *dropped* entry but could not detect a *never-added*
+    // one, because the list and the count were maintained by the same hand —
+    // which is why SQ-490 item (4) should derive the list from call metadata.
+    assert_eq!(all.len(), 115, "call inventory drifted");
     for (name, w) in all {
         assert_fits(name, w);
     }
@@ -340,46 +372,70 @@ fn recovery_qualifier_and_mandatory_hooks_fit_absolute_class_budgets() {
 
 /// 13 §5 item 1: "`decide(pid)` reads ≤ 6 proposal books + 1 Baseline + O(10)
 /// params — PoV per call bounded regardless of map ceiling." Pinned regression
-/// ceilings (current 50×20 generated-weight estimate plus the A13 collator-
-/// compensation add of 48,000 B: `decide` 404,514 B; `settle_cohort(5)`
-/// 384,825 B, both dominated by per-key trie overhead, not
-/// the 2,240-row retained map): growth past ~2× the measurement reopens the
-/// touch-bound derivation.
+/// ceilings over the **dispatched** weight — i.e. the generated function plus the
+/// A13 collator-compensation term each of these calls composes at its
+/// `#[pallet::weight]` attribute (SQ-490). Read through `get_dispatch_info()` on
+/// purpose: pinning the generated method alone would pin one addend of what the
+/// chain actually charges, which is what this test did before the composition
+/// moved out of the generated file.
 ///
-/// `decide` moved 231,055 -> 404,514 B with SQ-494, and the move is a
-/// **measurement**, not a regression: the benchmark seeded no `Rounds` at all,
-/// so 07 §12's ProcessHold predicate scanned an empty map and this
-/// decision-critical permissionless crank was charged nothing for a walk
-/// bounded at `MAX_ROUNDS` = 128 with two reads per matching round. The local
-/// ceiling rises 384 -> 512 KiB with it; at 10.3 % of the 3,932,160 B
-/// normal-class budget (beside `settle_cohort(5)`'s 9.8 %) that is still ~8x of
-/// headroom, so the pin keeps detecting drift rather than rubber-stamping it.
+/// `decide` moved 231,055 -> 404,514 B with SQ-494, then 404,514 -> 745,551 B
+/// with SQ-490. Both moves are **measurements**, not regressions. SQ-494's: the
+/// benchmark seeded no `Rounds`, so 07 §12's ProcessHold predicate scanned an
+/// empty map. SQ-490's: the collator-compensation term stopped being a
+/// hand-written 48,000 B guess and became a benchmark, which returned an
+/// **estimated** 389,037 B.
+///
+/// That 8x jump is the generator's synthetic per-key envelope, not a real proof:
+/// the payout touches `ForeignAssets::Account` for 120 payees and the estimator
+/// charges each as an independent maximum-depth trie path, ignoring their shared
+/// asset prefix — the same behavior `tick`'s `pov_mode` annotation already
+/// documents for an unbounded double map. The benchmark's *recorded* proof was
+/// 17,874 B, ~22x smaller. It is kept at the estimate anyway, because the
+/// directions of error are not symmetric: over-declaring PoV costs block
+/// capacity, while under-declaring it produces blocks that exceed their proof
+/// budget at execution. A sparse benchmark trie under-represents production path
+/// depth, so `Measured` here would be optimistic about the wrong thing.
+///
+/// The capacity cost that buys is real and quantified: `decide` is now 19.0 % of
+/// the 3,932,160 B normal-class budget and `settle_cohort(12)` 23.9 %, so a
+/// crank charges ~389 KB of proof for a payout that fires once an epoch. The fix
+/// is the post-dispatch refund 15 §4.5 already mandates for payload-executing
+/// extrinsics; it is recorded as its own row rather than done here.
 #[test]
 fn decide_and_settle_cohort_pov_pinned_below_map_scaling() {
-    let decide =
-        <crate::weights::pallet_epoch::WeightInfo<Runtime> as pallet_epoch::WeightInfo>::decide();
+    use frame_support::dispatch::GetDispatchInfo;
+
+    let decide = crate::RuntimeCall::Epoch(pallet_epoch::Call::decide { pid: 1 })
+        .get_dispatch_info()
+        .call_weight;
     assert_eq!(
         decide.proof_size(),
-        404_514,
-        "decide proof_size drifted from the 13 §5 generated-weight estimate"
+        745_551,
+        "decide proof_size drifted from the 13 §5 dispatched-weight estimate"
     );
     assert!(
-        decide.proof_size() <= 512 * KIB as u64,
+        decide.proof_size() <= 1024 * KIB as u64,
         "decide proof_size regressed past its pinned ceiling: {}",
         decide.proof_size()
     );
     let settle_five =
-        <crate::weights::pallet_epoch::WeightInfo<Runtime> as pallet_epoch::WeightInfo>::settle_cohort(5);
+        crate::RuntimeCall::Epoch(pallet_epoch::Call::settle_cohort { epoch: 1, batch: 5 })
+            .get_dispatch_info()
+            .call_weight;
     assert_eq!(
         settle_five.proof_size(),
-        384_825,
-        "settle_cohort(5) proof_size drifted from the 13 §5 generated-weight estimate"
+        725_862,
+        "settle_cohort(5) proof_size drifted from the 13 §5 dispatched-weight estimate"
     );
-    let settle = <crate::weights::pallet_epoch::WeightInfo<Runtime> as pallet_epoch::WeightInfo>::settle_cohort(
-        MAX_COHORT_PROPOSALS_BOUND,
-    );
+    let settle = crate::RuntimeCall::Epoch(pallet_epoch::Call::settle_cohort {
+        epoch: 1,
+        batch: MAX_COHORT_PROPOSALS_BOUND,
+    })
+    .get_dispatch_info()
+    .call_weight;
     assert!(
-        settle.proof_size() <= 768 * KIB as u64,
+        settle.proof_size() <= 1280 * KIB as u64,
         "settle_cohort proof_size regressed past its pinned ceiling: {}",
         settle.proof_size()
     );
