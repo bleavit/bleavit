@@ -667,11 +667,11 @@ The superseded spec both assigned `SettleAuthority` to "pallet-welfare/oracle" a
 
 ```
 pallet-epoch::settle_cohort(e, batch)                       [Signed keeper; cursor-resumable]
-  └─ for each proposal in cohort e, and for Baseline(e):
-       pallet-welfare::compute_settlement(pid | baseline e)  [callable ONLY from pallet-epoch]
+  └─ once per batch, over its slice of {proposals of cohort e} ∪ {Baseline(e)}:
+       pallet-welfare::compute_settlement(e, spec, targets)  [callable ONLY from pallet-epoch]
          ├─ computes s = GeoMean(W_{e+1}, W_{e+2}) on the creation-time MetricSpec (I-16, §4.4)
          ├─ reads GateBreachFlags(e+1, e+2) for gate outcomes (§4.7)
-         └─ dispatches with pallet-welfare's SettleAuthority origin:
+         └─ dispatches with pallet-welfare's SettleAuthority origin, per target:
               ledger.settle_scalar(pid, s)                   (doc 03)
               ledger.settle_gate(pid, gate, outcome)         (doc 03, B-2 instruments)
               ledger.settle_baseline(e, s)                   (doc 03, BaselineVaults, B-3)
@@ -688,6 +688,14 @@ pallet-epoch::finalize_epoch_baseline(e)                    [Signed, permissionl
          └─ dispatches with pallet-welfare's SettleAuthority origin:
               ledger.settle_baseline(e, 0.5)                 (spec-fixed constant; no score computed)
 ```
+
+**The measured endpoint takes a batch, and the score is computed once for it (normative; SQ-497 resolution, 2026-07-26).** `compute_settlement` is called **once per `settle_cohort` batch** with that batch's targets, not once per target. This is not an efficiency note dressed as a rule — it changes what an observer sees, so it is stated here rather than left to the implementation.
+
+Three things it does **not** change. The **authority boundary** is untouched: epoch passes the *targets* and never a score, so §6's rule that "epoch can request a settlement, never choose its score" holds exactly as before — which is why the batched endpoint takes targets rather than accepting a caller-supplied `s`. The **ledger dispatches** are unchanged in number and order: every target still receives its own `settle_scalar` / `settle_gate` / `settle_baseline`. And the **score** is unchanged, because a cohort carries one frozen `metric_spec` (this document freezes it at creation, I-16; the epoch module rejects a cohort whose proposals disagree), so `(e, spec)` already determined a single `s` for every target in the cohort — the per-target calls were recomputing an identical number.
+
+What it does change is **event multiplicity**: `SettlementComputed`, and the 07 §10 renormalization events that accompany it, are deposited **once per batch**. They describe the computation, and there is now one computation where there were `|batch|` identical ones. Consumers MUST NOT treat the count of `SettlementComputed` events as a count of settled items — the ledger settlement events are that count. Neither event appears in [02](./02-integration-contract.md), so no frozen surface moves.
+
+This is sound only because settlement **mutates no welfare state**: `compute_settlement` is a read over the snapshot window, so the repetition it replaces was provably redundant rather than semantically load-bearing. A future settlement path that did mutate welfare state could not be batched this way without re-deriving this paragraph.
 
 **Three entry paths, one authority; two neutral transitions (normative; SQ-320).** The `ledger.settle_baseline(e, ·)` terminal is reachable from **exactly three** `pallet-epoch` entry points and from nowhere else: `settle_cohort` → `compute_settlement` (the measured path, which computes `s` and reads the MetricSpec and gate flags), `void_cohort` → `settle_baseline_void` (the mandatory neutral cohort-VOID path of §7(5)), and `finalize_epoch_baseline` → `settle_baseline_void` (the permissionless neutral orphan-epoch path of §7(6)). The latter two are the **exactly two neutral owning transitions**: neither enters `compute_settlement`; both use the same passthrough precisely because they compute no score. They carry the spec-fixed `s = 0.5`, read no snapshot, MetricSpec or gate flags, and can settle **only** a Baseline vault, never a proposal vault or gate. All three entry points dispatch under the same single `SettleAuthority` origin owned by `pallet-welfare`, so §7(6) preserves the closed welfare-owned authority boundary while adding the third total path and second neutral path.
 
