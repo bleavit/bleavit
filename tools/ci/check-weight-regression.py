@@ -184,6 +184,17 @@ class Acknowledgement:
 
     def covers(self, regressions: list[Regression]) -> tuple[bool, str]:
         """Does this entry authorize exactly the regression that is present?"""
+        if self.removal:
+            # A removal entry is pinless by construction, so without this branch it
+            # would fall into the pinless "authorizes anything" case below and
+            # become a wildcard over *live* regressions — reopening precisely the
+            # hole mandatory pinning closed, and doing it through the one form the
+            # parser still lets you write without pins. `@ removed` authorizes a
+            # deletion and nothing else.
+            return False, (
+                "'@ removed' authorizes a deletion, not a regression on a function "
+                "that is still present; pin the accepted values instead"
+            )
         if not self.pins:
             # Legacy unpinned entry: authorizes anything, which is why parsing
             # rejects it for function acknowledgements.
@@ -845,6 +856,17 @@ def run_self_tests() -> None:
         raise AssertionError("'@ removed' with pins must be rejected")
     parsed_removal = parse_acknowledgements(f"{FIXTURE_PATH} trade @ removed: retired")
     assert parsed_removal[(FIXTURE_PATH, "trade")].removal
+
+    # …and it is not a wildcard over a *live* regression. A removal entry is
+    # pinless by construction, so without an explicit guard it would land in the
+    # pinless "authorizes anything" branch — reopening the very hole mandatory
+    # pinning closed, through the one form the parser still accepts without pins.
+    live_regression = fixture_comparison(
+        reads_head, {key: Acknowledgement("retired", {}, True)}
+    )
+    assert key in live_regression.unacknowledged, live_regression
+    assert key not in live_regression.acknowledged
+    assert "authorizes a deletion" in live_regression.mismatched_acks[key]
 
     # Parsing: a function entry must pin, a `*` file entry need not.
     try:
