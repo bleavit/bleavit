@@ -2,7 +2,7 @@
 name = "bleavit-node"
 version = "0.1.0"
 description = "Bleavit collator node — the polkadot-omni-node stack branded for the Bleavit parachain (B3; 01 §4.2)"
-authors = ["Bleavit"]
+authors = ["Bleavit Contributors"]
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
