@@ -33,7 +33,25 @@ ROOT = Path(__file__).resolve().parents[2]
 ACK_FILE = ROOT / "tools" / "ci" / "weight-regression-acks.toml"
 LIMIT_NUMERATOR = 110
 LIMIT_DENOMINATOR = 100
-REF_TIME_FLOOR = 1_000_000
+# Absolute-delta floors. `exceeds_limit` requires BOTH a >10% relative move and a
+# delta above the floor, so these decide what counts as signal.
+#
+# ref_time's floor is 250 µs, raised from 1 µs by SQ-490 on measured evidence. The
+# 21-pallet sweep produced 38 regressed functions; replaying the gate over them
+# shows every function with a *real* change also moved a storage dimension, while
+# every ref_time-only mover had a delta of 1–48 µs. The largest ref_time-only
+# delta (47.8 µs) is *above* the smallest storage-flagged one (4.8 µs), so the two
+# populations are not separable by ref_time at all and are perfectly separable by
+# storage. Any floor in 100–500 µs yields the identical verdict on that data; 250
+# µs is the midpoint. At 1 µs the gate was a jitter detector that cost a reviewer
+# an acknowledgement per run — the same benchmark on the same wasm minutes apart
+# moved a sub-millisecond call by 127%.
+#
+# ref_time therefore acts as a backstop for a large move that touches no storage;
+# reads/writes/proof_size stay the primary signal and are reproducible (two
+# independent regenerations hours apart produced byte-identical storage
+# dimensions while ref_time drifted on its own).
+REF_TIME_FLOOR = 250_000_000
 PROOF_SIZE_FLOOR = 1_024
 DB_ACCESS_FLOOR = 1
 
@@ -89,9 +107,21 @@ DB_SLOPE_RE = re.compile(
     r"([A-Za-z_][A-Za-z0-9_]*)(?:\s*\.\s*into\s*\(\s*\)|\s+as\s+u64)"
     r"\s*\)\s*\)"
 )
+# `<path> <function-or-*> [@ dim=value, ...]: <justification>`
+#
+# The optional `@` clause pins the accepted head values. Pinning is what makes an
+# *obsolete* acknowledgement safe to merely warn about instead of failing: an
+# unpinned entry authorizes any future regression on that function, so leaving one
+# lying around would let a later, different regression inherit an old
+# justification. With pins, a changed regression no longer matches and fails.
 ACK_RE = re.compile(
-    r"^(\S+)\s+(\*|[A-Za-z_][A-Za-z0-9_]*)\s*:\s*(\S(?:.*\S)?)$"
+    r"^(\S+)\s+(\*|[A-Za-z_][A-Za-z0-9_]*)\s*"
+    r"(?:@\s*([^:]*?)\s*)?:\s*(\S(?:.*\S)?)$"
 )
+PIN_RE = re.compile(r"^([a-z_]+)\s*=\s*(\d[\d_]*)$")
+PINNABLE = ("ref_time", "proof_size", "reads", "writes")
+# `@ removed` in place of pins: authorizes a deletion, never a regression.
+REMOVAL_MARKER = "removed"
 
 
 class CheckError(RuntimeError):
@@ -144,13 +174,63 @@ class Regression:
     head: int
 
 
+@dataclass(frozen=True)
+class Acknowledgement:
+    """A justified acceptance of one function's regression, or of its removal."""
+
+    justification: str
+    pins: dict[str, int] = field(default_factory=dict)
+    removal: bool = False
+
+    def covers(self, regressions: list[Regression]) -> tuple[bool, str]:
+        """Does this entry authorize exactly the regression that is present?"""
+        if self.removal:
+            # A removal entry is pinless by construction, so without this branch it
+            # would fall into the pinless "authorizes anything" case below and
+            # become a wildcard over *live* regressions — reopening precisely the
+            # hole mandatory pinning closed, and doing it through the one form the
+            # parser still lets you write without pins. `@ removed` authorizes a
+            # deletion and nothing else.
+            return False, (
+                "'@ removed' authorizes a deletion, not a regression on a function "
+                "that is still present; pin the accepted values instead"
+            )
+        if not self.pins:
+            # Legacy unpinned entry: authorizes anything, which is why parsing
+            # rejects it for function acknowledgements.
+            return True, ""
+        actual = {r.quantity.removeprefix("worst_case."): r.head for r in regressions}
+        mismatched = [
+            f"{dim}: pinned {self.pins[dim]:,} but measured "
+            f"{actual.get(dim, 0):,}"
+            for dim in sorted(self.pins)
+            if actual.get(dim) != self.pins[dim]
+        ]
+        unpinned = sorted(set(actual) - set(self.pins))
+        if unpinned:
+            mismatched.append(
+                "regression on unpinned dimension(s): " + ", ".join(unpinned)
+            )
+        return (not mismatched), "; ".join(mismatched)
+
+
 @dataclass
 class Comparison:
     unacknowledged: dict[tuple[str, str], list[Regression]] = field(default_factory=dict)
     acknowledged: dict[tuple[str, str], list[Regression]] = field(default_factory=dict)
     unacknowledged_removals: dict[tuple[str, str], str] = field(default_factory=dict)
     acknowledged_removals: dict[tuple[str, str], str] = field(default_factory=dict)
+    # An entry whose function is gone: it may be masking a rename or a move, so
+    # it stays fatal.
     stale_acks: dict[tuple[str, str], str] = field(default_factory=dict)
+    # An entry whose function is still present but no longer regresses — the
+    # regression landed in the baseline. Inert, because it is pinned. Warn only:
+    # this is the state every acknowledgement reaches the moment its PR merges,
+    # and failing on it cost thirteen manual prunes before SQ-490.
+    obsolete_acks: dict[tuple[str, str], str] = field(default_factory=dict)
+    # An entry that is present and active but whose pins do not match what was
+    # measured. Fatal: the justification was written for a different number.
+    mismatched_acks: dict[tuple[str, str], str] = field(default_factory=dict)
     notices: list[str] = field(default_factory=list)
     compared_functions: int = 0
 
@@ -343,8 +423,8 @@ def git_file(base: str, path: str) -> str:
     return run_git("show", f"{base}:{path}")
 
 
-def parse_acknowledgements(text: str) -> dict[tuple[str, str], str]:
-    acknowledgements: dict[tuple[str, str], str] = {}
+def parse_acknowledgements(text: str) -> dict[tuple[str, str], Acknowledgement]:
+    acknowledgements: dict[tuple[str, str], Acknowledgement] = {}
     for line_number, raw_line in enumerate(text.splitlines(), 1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -353,12 +433,64 @@ def parse_acknowledgements(text: str) -> dict[tuple[str, str], str]:
         if match is None:
             raise CheckError(
                 f"{ACK_FILE.relative_to(ROOT)}:{line_number}: expected "
-                "'<repo-relative-weight-path> <function-or-*>: <justification>'"
+                "'<repo-relative-weight-path> <function-or-*> "
+                "[@ dim=value, ...]: <justification>'"
             )
-        path, function, justification = match.groups()
+        path, function, pin_clause, justification = match.groups()
         if not matching_weight_path(path):
             raise CheckError(
                 f"{ACK_FILE.relative_to(ROOT)}:{line_number}: not a discovered weight path: {path}"
+            )
+        pins: dict[str, int] = {}
+        removal = False
+        for raw_pin in (pin_clause or "").split(","):
+            pin = raw_pin.strip()
+            if not pin:
+                continue
+            # `@ removed` authorizes a *deletion*, which has no values to pin. It is
+            # a separate authorization from a growth acknowledgement on purpose: a
+            # justification written about a weight going up says nothing about the
+            # function being deleted, and an obsolete growth entry lingering after
+            # its PR merged must not silently absorb a later removal.
+            if pin == REMOVAL_MARKER:
+                removal = True
+                continue
+            pin_match = PIN_RE.fullmatch(pin)
+            if pin_match is None:
+                raise CheckError(
+                    f"{ACK_FILE.relative_to(ROOT)}:{line_number}: expected "
+                    f"'<dimension>=<integer>', got {pin!r}"
+                )
+            dimension, value = pin_match.groups()
+            if dimension not in PINNABLE:
+                raise CheckError(
+                    f"{ACK_FILE.relative_to(ROOT)}:{line_number}: unknown dimension "
+                    f"{dimension!r}; expected one of {', '.join(PINNABLE)}"
+                )
+            if dimension in pins:
+                raise CheckError(
+                    f"{ACK_FILE.relative_to(ROOT)}:{line_number}: duplicate pin "
+                    f"for {dimension}"
+                )
+            pins[dimension] = parse_integer(value)
+        # A file-removal entry (`*`) has no per-dimension values to pin. Every
+        # function entry must pin, because an unpinned entry authorizes any future
+        # regression on that function — and since obsolete entries now only warn,
+        # an unpinned one could sit in the file and silently absorb a later,
+        # unrelated regression under someone else's justification.
+        if function != "*" and not pins and not removal:
+            raise CheckError(
+                f"{ACK_FILE.relative_to(ROOT)}:{line_number}: acknowledgement for "
+                f"{path}::{function} must pin the accepted values, e.g. "
+                "'@ reads=261, ref_time=828490000', or say '@ removed' to authorize a "
+                "deletion. Run this checker without arguments and it prints the exact "
+                "line to paste."
+            )
+        if removal and pins:
+            raise CheckError(
+                f"{ACK_FILE.relative_to(ROOT)}:{line_number}: '@ {REMOVAL_MARKER}' "
+                "authorizes a deletion and cannot also pin values; a function is either "
+                "gone or it regressed, never both"
             )
         key = (path, function)
         if key in acknowledgements:
@@ -366,7 +498,7 @@ def parse_acknowledgements(text: str) -> dict[tuple[str, str], str]:
                 f"{ACK_FILE.relative_to(ROOT)}:{line_number}: duplicate acknowledgement "
                 f"for {path} {function}"
             )
-        acknowledgements[key] = justification
+        acknowledgements[key] = Acknowledgement(justification, pins, removal)
     return acknowledgements
 
 
@@ -399,6 +531,7 @@ def compare_weight_sets(
 ) -> Comparison:
     result = Comparison()
     active_acknowledgements: set[tuple[str, str]] = set()
+    present_functions: set[tuple[str, str]] = set()
     for path in sorted(set(base_files) | set(head_files)):
         if path not in base_files:
             result.notices.append(f"NEW weight file allowed: {path}")
@@ -406,7 +539,8 @@ def compare_weight_sets(
         if path not in head_files:
             key = (path, "*")
             detail = "weight file removed"
-            if key in acknowledgements:
+            entry = acknowledgements.get(key)
+            if entry is not None:
                 result.acknowledged_removals[key] = detail
                 active_acknowledgements.add(key)
             else:
@@ -422,27 +556,56 @@ def compare_weight_sets(
                 continue
             if function not in head_functions:
                 detail = "weight function removed"
-                if key in acknowledgements:
+                entry = acknowledgements.get(key)
+                # A *growth* acknowledgement must not authorize a deletion. Its
+                # justification was written about a number going up and says
+                # nothing about the function disappearing — and since obsolete
+                # entries now only warn, one left behind after its PR merged would
+                # otherwise sit there ready to absorb an unrelated later removal
+                # under someone else's reasoning. Only `@ removed` authorizes this.
+                if entry is not None and entry.removal:
                     result.acknowledged_removals[key] = detail
                     active_acknowledgements.add(key)
                 else:
+                    if entry is not None:
+                        detail += (
+                            " — the acknowledgement present pins values for a weight"
+                            " *increase* and does not authorize a deletion; use"
+                            " '@ removed: <why>'"
+                        )
+                        active_acknowledgements.add(key)
                     result.unacknowledged_removals[key] = detail
                 continue
             result.compared_functions += 1
+            present_functions.add(key)
             regressions = compare_function(base_functions[function], head_functions[function])
             if not regressions:
                 continue
-            if key in acknowledgements:
+            entry = acknowledgements.get(key)
+            if entry is None:
+                result.unacknowledged[key] = regressions
+                continue
+            covered, reason = entry.covers(regressions)
+            if covered:
                 result.acknowledged[key] = regressions
                 active_acknowledgements.add(key)
             else:
+                # Present and active, but pinned to different numbers: the
+                # justification was written for a regression that is not this one.
+                result.mismatched_acks[key] = reason
                 result.unacknowledged[key] = regressions
 
-    result.stale_acks = {
-        key: justification
-        for key, justification in acknowledgements.items()
-        if key not in active_acknowledgements
-    }
+    for key, entry in acknowledgements.items():
+        if key in active_acknowledgements or key in result.mismatched_acks:
+            continue
+        if key in present_functions or (key[1] == "*" and key[0] in head_files):
+            # The function still exists and simply no longer regresses — the usual
+            # post-merge state. Inert because it is pinned, so warn rather than fail.
+            result.obsolete_acks[key] = entry.justification
+        else:
+            # The function or file is gone; the entry could be masking a rename or
+            # a move, which is the case that must stay fatal.
+            result.stale_acks[key] = entry.justification
     return result
 
 
@@ -460,7 +623,7 @@ def format_delta(regression: Regression) -> str:
 
 def report_comparison(
     comparison: Comparison,
-    acknowledgements: dict[tuple[str, str], str],
+    acknowledgements: dict[tuple[str, str], Acknowledgement],
     base: str,
     file_count: int,
 ) -> bool:
@@ -475,13 +638,13 @@ def report_comparison(
         path, function = key
         print(
             f"ACKNOWLEDGED REMOVAL: {path}::{function}: {detail}; "
-            f"{acknowledgements[key]}"
+            f"{acknowledgements[key].justification}"
         )
     for key, regressions in sorted(comparison.acknowledged.items()):
         path, function = key
         print(
             f"ACKNOWLEDGED REGRESSION: {path}::{function}: "
-            f"{acknowledgements[key]}"
+            f"{acknowledgements[key].justification}"
         )
         for regression in regressions:
             print(f"  {format_delta(regression)}")
@@ -493,10 +656,33 @@ def report_comparison(
         print(f"REGRESSION: {path}::{function}", file=sys.stderr)
         for regression in regressions:
             print(f"  {format_delta(regression)}", file=sys.stderr)
+        if key in comparison.mismatched_acks:
+            print(
+                f"  PINNED VALUES DO NOT MATCH: {comparison.mismatched_acks[key]}",
+                file=sys.stderr,
+            )
+        # Print the line to paste. Hand-transcribing four measured integers is
+        # how a pinned acknowledgement would otherwise become a chore.
+        pins = ", ".join(
+            f"{r.quantity.removeprefix('worst_case.')}={r.head}" for r in regressions
+        )
+        print(
+            f"  to accept: {path} {function} @ {pins}: <why this is intended>",
+            file=sys.stderr,
+        )
+    for key, justification in sorted(comparison.obsolete_acks.items()):
+        path, function = key
+        print(
+            f"OBSOLETE ACKNOWLEDGEMENT (not fatal — the regression is now in the "
+            f"baseline, and the entry is pinned so it cannot absorb a different "
+            f"one; delete it when convenient): {path}::{function}: {justification}"
+        )
     for key, justification in sorted(comparison.stale_acks.items()):
         path, function = key
         print(
-            f"STALE ACKNOWLEDGEMENT: {path}::{function}: {justification}",
+            f"STALE ACKNOWLEDGEMENT: {path}::{function} no longer exists in the "
+            f"head weight files, so this entry may be masking a rename or a move: "
+            f"{justification}",
             file=sys.stderr,
         )
 
@@ -507,8 +693,9 @@ def report_comparison(
     )
     if failed:
         print(
-            "FAIL: weight regressions and removals require a current scoped "
-            "acknowledgement; stale acknowledgements must be removed.",
+            "FAIL: weight regressions and removals require a current, "
+            "value-pinned acknowledgement; an acknowledgement whose function has "
+            "vanished must be removed.",
             file=sys.stderr,
         )
         return False
@@ -542,7 +729,8 @@ def replace_once(text: str, old: str, new: str) -> str:
 
 
 def fixture_comparison(
-    head: str, acknowledgements: dict[tuple[str, str], str] | None = None
+    head: str,
+    acknowledgements: dict[tuple[str, str], Acknowledgement] | None = None,
 ) -> Comparison:
     return compare_weight_sets(
         {FIXTURE_PATH: parse_weight_file(FIXTURE_BASE)},
@@ -589,22 +777,125 @@ def run_self_tests() -> None:
     assert not one_extra_read.unacknowledged
 
     # A raw slope delta below the ref-time floor still exceeds that floor after
-    # evaluation at the generated high bound and must fail.
+    # evaluation at the generated high bound and must fail. The per-unit delta
+    # here is 2.99 µs — well under the 250 µs floor — while the worst case at
+    # c = 100 grows by 299 µs, which is over it. That contrast is the whole point
+    # of the assertion, so the numbers are scaled to the floor rather than the
+    # floor being weakened to suit them.
     slope_regression = fixture_comparison(
-        replace_once(FIXTURE_BASE, "(10_000, 2)", "(22_000, 2)")
+        replace_once(FIXTURE_BASE, "(10_000, 2)", "(3_000_000, 2)")
     )
     assert [r.quantity for r in slope_regression.unacknowledged[key]] == [
         "worst_case.ref_time"
     ]
 
-    acknowledged = fixture_comparison(
-        replace_once(FIXTURE_BASE, "(0, 1_000)", "(0, 2_200)"),
-        {key: "measured proof growth is intentional"},
-    )
-    assert key in acknowledged.acknowledged and not acknowledged.stale_acks
+    # A pinned acknowledgement covering exactly the measured proof size.
+    proof_head = replace_once(FIXTURE_BASE, "(0, 1_000)", "(0, 2_200)")
+    pinned = Acknowledgement("measured proof growth is intentional", {"proof_size": 2_400})
+    acknowledged = fixture_comparison(proof_head, {key: pinned})
+    assert key in acknowledged.acknowledged
+    assert not acknowledged.stale_acks and not acknowledged.obsolete_acks
+    assert not acknowledged.mismatched_acks
 
-    stale = fixture_comparison(FIXTURE_BASE, {key: "obsolete"})
-    assert key in stale.stale_acks
+    # Pinned to a different number: the justification was written for another
+    # regression, so it must NOT authorize this one.
+    wrong_pin = Acknowledgement("stale number", {"proof_size": 9_999})
+    mismatched = fixture_comparison(proof_head, {key: wrong_pin})
+    assert key in mismatched.mismatched_acks
+    assert key in mismatched.unacknowledged
+
+    # A regression on a dimension the entry does not pin is not covered either.
+    unpinned_dim = Acknowledgement("only pinned proof", {"proof_size": 2_400})
+    reads_head = replace_once(FIXTURE_BASE, ".reads(5)", ".reads(18)")
+    partial = fixture_comparison(reads_head, {key: unpinned_dim})
+    assert key in partial.mismatched_acks
+
+    # The post-merge state: function still present, regression now in the
+    # baseline. Inert because pinned, so it warns and does NOT fail. This is what
+    # removes the thirteen-times-repeated manual prune.
+    obsolete = fixture_comparison(FIXTURE_BASE, {key: pinned})
+    assert key in obsolete.obsolete_acks
+    assert not obsolete.stale_acks
+
+    # The dangerous case stays fatal: an entry naming something that is not in
+    # the weight files at all.
+    ghost_key = (FIXTURE_PATH, "function_that_never_existed")
+    ghost = fixture_comparison(FIXTURE_BASE, {ghost_key: pinned})
+    assert ghost_key in ghost.stale_acks
+    assert ghost_key not in ghost.obsolete_acks
+
+    # A *growth* acknowledgement does not authorize a deletion. Its justification
+    # was written about a number going up, and since obsolete entries now only
+    # warn, one left behind after its PR merged would otherwise sit there ready to
+    # absorb an unrelated later removal under someone else's reasoning.
+    growth_only = compare_weight_sets(
+        {FIXTURE_PATH: parse_weight_file(FIXTURE_BASE)},
+        {FIXTURE_PATH: {}},
+        {key: pinned},
+    )
+    assert key in growth_only.unacknowledged_removals, growth_only
+    assert key not in growth_only.acknowledged_removals
+    assert "does not authorize a deletion" in growth_only.unacknowledged_removals[key]
+
+    # `@ removed` is the authorization that does apply.
+    removal_entry = Acknowledgement("the call was retired by an approved migration", {}, True)
+    removal = compare_weight_sets(
+        {FIXTURE_PATH: parse_weight_file(FIXTURE_BASE)},
+        {FIXTURE_PATH: {}},
+        {key: removal_entry},
+    )
+    assert key in removal.acknowledged_removals, removal
+    assert not removal.stale_acks and not removal.obsolete_acks
+
+    # …and it cannot double as a regression acknowledgement.
+    try:
+        parse_acknowledgements(f"{FIXTURE_PATH} trade @ removed, reads=5: both")
+    except CheckError as error:
+        assert "cannot also pin values" in str(error), error
+    else:  # pragma: no cover - the raise above is the expected path
+        raise AssertionError("'@ removed' with pins must be rejected")
+    parsed_removal = parse_acknowledgements(f"{FIXTURE_PATH} trade @ removed: retired")
+    assert parsed_removal[(FIXTURE_PATH, "trade")].removal
+
+    # …and it is not a wildcard over a *live* regression. A removal entry is
+    # pinless by construction, so without an explicit guard it would land in the
+    # pinless "authorizes anything" branch — reopening the very hole mandatory
+    # pinning closed, through the one form the parser still accepts without pins.
+    live_regression = fixture_comparison(
+        reads_head, {key: Acknowledgement("retired", {}, True)}
+    )
+    assert key in live_regression.unacknowledged, live_regression
+    assert key not in live_regression.acknowledged
+    assert "authorizes a deletion" in live_regression.mismatched_acks[key]
+
+    # Parsing: a function entry must pin, a `*` file entry need not.
+    try:
+        parse_acknowledgements(f"{FIXTURE_PATH} trade: no pins")
+    except CheckError as error:
+        assert "must pin the accepted values" in str(error), error
+    else:  # pragma: no cover - guard
+        raise AssertionError("unpinned function acknowledgement must be rejected")
+    assert parse_acknowledgements(f"{FIXTURE_PATH} *: pallet retired")[
+        (FIXTURE_PATH, "*")
+    ].pins == {}
+    parsed_pins = parse_acknowledgements(
+        f"{FIXTURE_PATH} trade @ reads=261, ref_time=828_490_000: measured"
+    )[(FIXTURE_PATH, "trade")].pins
+    assert parsed_pins == {"reads": 261, "ref_time": 828_490_000}
+    try:
+        parse_acknowledgements(f"{FIXTURE_PATH} trade @ bogus=1: x")
+    except CheckError as error:
+        assert "unknown dimension" in str(error), error
+    else:  # pragma: no cover - guard
+        raise AssertionError("unknown pin dimension must be rejected")
+
+    # The measured jitter band: a ref_time-only move under the floor is not a
+    # regression at all, so it needs no acknowledgement. 48 µs was the largest
+    # ref_time-only delta in the SQ-490 sweep.
+    jitter = fixture_comparison(
+        replace_once(FIXTURE_BASE, "from_parts(10_000_000", "from_parts(58_000_000")
+    )
+    assert not jitter.unacknowledged, jitter.unacknowledged
 
     new_function_text = FIXTURE_BASE.replace(
         "\n}\n",
@@ -622,7 +913,8 @@ def run_self_tests() -> None:
     removed = fixture_comparison(removed_text)
     assert key in removed.unacknowledged_removals
     removed_acknowledged = fixture_comparison(
-        removed_text, {key: "renamed with an audited call mapping"}
+        removed_text,
+        {key: Acknowledgement("renamed with an audited call mapping", {}, True)},
     )
     assert key in removed_acknowledged.acknowledged_removals
     assert not removed_acknowledged.stale_acks
@@ -635,13 +927,14 @@ def run_self_tests() -> None:
     file_removed_acknowledged = compare_weight_sets(
         {FIXTURE_PATH: parse_weight_file(FIXTURE_BASE)},
         {},
-        {file_key: "pallet retired by approved migration"},
+        {file_key: Acknowledgement("pallet retired by approved migration")},
     )
     assert file_key in file_removed_acknowledged.acknowledged_removals
     parsed_file_ack = parse_acknowledgements(
         f"{FIXTURE_PATH} *: pallet retired by approved migration\n"
     )
-    assert parsed_file_ack == {file_key: "pallet retired by approved migration"}
+    assert parsed_file_ack[file_key].justification == "pallet retired by approved migration"
+    assert parsed_file_ack[file_key].pins == {}
 
     # A second implementation must replace, not be masked by, the first.
     last_impl = parse_weight_file(
@@ -683,7 +976,24 @@ def run_self_tests() -> None:
     else:
         assert main_push.commit is None
 
-    print("Weight regression self-tests passed (16 cases).")
+    # Counted from this function's own AST rather than typed in. A hand-written
+    # count of a hand-written list is the defect SQ-490 spent a whole row on; it
+    # would be poor form to leave one here, where it would quietly under-report
+    # coverage every time someone adds a case.
+    print(f"Weight regression self-tests passed ({_self_test_assertion_count()} assertions).")
+
+
+def _self_test_assertion_count() -> int:
+    import ast
+
+    try:
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):  # pragma: no cover - defensive
+        return 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "run_self_tests":
+            return sum(1 for child in ast.walk(node) if isinstance(child, ast.Assert))
+    return 0
 
 
 def load_weight_sets(base: str) -> tuple[

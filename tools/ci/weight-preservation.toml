@@ -1,0 +1,23 @@
+# Weight functions allowed to ship WITHOUT a fresh measurement.
+#
+# `regenerate-weights.py --check` re-measures every pallet and gates the storage
+# dimensions. A function whose benchmark fixture cannot be satisfied in this
+# runtime cannot be re-measured at all, so it is carried forward verbatim from its
+# last good generation. That is a real exemption from the freshness gate, and it is
+# declared here rather than inferred from the `**Preserved, not re-measured` marker
+# in the generated file — the tool *writes* that marker, so treating it as its own
+# authorization would let anyone turn "this weight is stale" into "this weight is
+# exempt" by adding a comment.
+#
+# Format (one function per line):
+# <repo-relative-weight-path> <function>: <non-empty justification>
+#
+# The justification must say why the fixture cannot run AND why shipping an
+# unverified value for this particular function is acceptable — the second half is
+# the one that matters, because the gate is not checking this weight for anyone.
+#
+# Cross-checked in both directions on every run: a marker with no entry here fails,
+# and an entry whose function is no longer marked (or which now benchmarks cleanly)
+# fails as stale. Neither can rot silently.
+
+runtime/bleavit-runtime/src/weights/pallet_assets.rs migration_v2_foreign_asset_set_reserve_weight: upstream `pallet-assets`' benchmark for this function asserts that the asset it creates is the only key in `ForeignAssets::Asset`, which Bleavit genesis contradicts by design — it pre-registers the 02 §8 Location-keyed USDC, whose key hashes before the benchmark's — so the fixture traps in this runtime and no measurement is obtainable. Shipping it unverified is acceptable because it weighs `pallet-assets`' v2 storage migration, which a chain born at the current storage version never executes: there is no dispatch path that charges it. Expires if upstream drops the empty-map assumption, at which point the fixture runs and this entry fails as stale.
