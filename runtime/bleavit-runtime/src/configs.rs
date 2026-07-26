@@ -5265,7 +5265,12 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
                 .filter(|spec| spec.activation_epoch <= epoch)
                 .map(|spec| pallet_welfare::ComponentValue {
                     id: spec.id,
-                    value: FixedU64(1_000_000_000),
+                    // Strictly interior, not the 1.0 this fabricated for years:
+                    // at exactly 1.0 every 05 §4.4 weighted-geometric term is
+                    // skipped and both gates saturate, so `record_snapshot`'s
+                    // measured weight covered the bookkeeping and none of the
+                    // aggregation it exists to perform.
+                    value: FixedU64(930_000_000),
                 })
                 .collect()
         }
@@ -5294,6 +5299,51 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
                     }),
             );
             components
+        }
+    }
+    /// 07 §10's flag bits for `(epoch, version)`, read from the oracle's own
+    /// settled values — the only place they exist.
+    ///
+    /// Scoped to **attested** specs for the same reason `onchain_components` is:
+    /// 07 §11(1) consequence (i) makes class-4 components the only reportable
+    /// ones, so a flag on anything else would be feeding §10's renormalization
+    /// with a value the oracle never owned. An absent settled entry contributes
+    /// no flag; `record_snapshot` already refuses a snapshot whose *value* is
+    /// missing, so absence here is never silently read as "unflagged and fine".
+    fn flagged_components(epoch: EpochId, version: u16) -> Vec<futarchy_primitives::MetricId> {
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            // Worst case for the settlement recompute is a **non-empty** drop
+            // set that still leaves the pillar groups populated: dropping every
+            // attested component would empty the A pillar and make the recompute
+            // cheaper, not dearer (07 §10 renormalizes the composite instead of
+            // evaluating A's terms). So the fixture flags exactly the first
+            // attested component and keeps the rest voting.
+            let _ = epoch;
+            return pallet_welfare::MetricSpecs::<Runtime>::get(version)
+                .into_iter()
+                .flat_map(|specs| {
+                    specs
+                        .into_iter()
+                        .filter(|spec| matches!(spec.source, pallet_welfare::SourceClass::Attested))
+                        .map(|spec| spec.id)
+                        .take(1)
+                })
+                .collect();
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        {
+            let Some(specs) = pallet_welfare::MetricSpecs::<Runtime>::get(version) else {
+                return Vec::new();
+            };
+            specs
+                .iter()
+                .filter(|spec| matches!(spec.source, pallet_welfare::SourceClass::Attested))
+                .filter_map(|spec| {
+                    pallet_oracle::Pallet::<Runtime>::settled_component(spec.id, epoch, version)
+                        .and_then(|settled| settled.flagged.then_some(spec.id))
+                })
+                .collect()
         }
     }
     fn incident_multiplier(epoch: EpochId, spec_version: u16) -> Option<FixedU64> {
@@ -9399,6 +9449,19 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
         );
     }
 
+    fn assert_settlement_renormalized(epoch: EpochId) {
+        assert!(
+            frame_system::Pallet::<Runtime>::read_events_no_consensus().any(|record| matches!(
+                record.event,
+                RuntimeEvent::Welfare(pallet_welfare::Event::SettlementRenormalized {
+                    epoch: settled,
+                    ..
+                }) if settled == epoch
+            )),
+            "settle_cohort must measure the 07 §10 recompute, not skip it"
+        );
+    }
+
     fn prime_settlement(epoch: EpochId) {
         for (pid, proposal) in pallet_epoch::Proposals::<Runtime>::iter() {
             if proposal.epoch == epoch {
@@ -9426,6 +9489,16 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
                 balance_param(b"pol.b_baseline"),
             );
         }
+        // 07 §10's settlement-time recompute reads the *spec set* of the version
+        // the cohort settles on, so the fixture must register it. Without it the
+        // recompute has no weights to renormalize and silently falls back to the
+        // recorded `W` — measuring none of the work `settle_cohort` performs.
+        if let Ok(specs) =
+            frame_support::BoundedVec::try_from(pallet_welfare::benchmarking::full_specs(0))
+        {
+            pallet_welfare::MetricSpecs::<Runtime>::insert(0, specs);
+        }
+        let attested = pallet_welfare::benchmarking::attested_ids();
         for offset in 1..=pallet_welfare::MAX_SNAPSHOTS_BOUND {
             let measured_epoch = epoch.saturating_add(offset);
             pallet_welfare::Snapshots::<Runtime>::insert(
@@ -9442,10 +9515,31 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
                     gate_c: FixedU64(500_000_000),
                     welfare: FixedU64(500_000_000),
                     components: frame_support::BoundedVec::truncate_from(
-                        pallet_welfare::benchmarking::healthy(
+                        // Interior values: at the former 1.0 every geometric term
+                        // is skipped, so the recompute this fixture exists to
+                        // measure would cost almost nothing.
+                        pallet_welfare::benchmarking::degraded(
                             pallet_welfare::MAX_COMPONENTS_PER_SPEC as u16,
                         ),
                     ),
+                },
+            );
+            pallet_welfare::SnapshotContexts::<Runtime>::insert(
+                (measured_epoch, 0),
+                pallet_welfare::StoredSnapshotContext {
+                    epoch: measured_epoch,
+                    spec_version: 0,
+                    // One flagged component, not all of them: 07 §10's recompute
+                    // costs a term per *surviving* component, so the dearest
+                    // non-empty drop set is the smallest one. Flagging every
+                    // attested component would empty the A pillar and let the
+                    // composite renormalize instead of evaluating its terms.
+                    flagged: frame_support::BoundedVec::truncate_from(
+                        attested.iter().copied().take(1).collect::<Vec<_>>(),
+                    ),
+                    incident_multiplier: FixedU64(pallet_welfare::ONE),
+                    params:
+                        <WelfareParams as pallet_welfare::WelfareParamsProvider>::welfare_params(),
                 },
             );
             pallet_welfare::GateBreachFlags::<Runtime>::insert(

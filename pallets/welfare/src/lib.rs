@@ -41,16 +41,16 @@ use alloc::vec::Vec;
 use frame_support::pallet_prelude::DispatchResult;
 use futarchy_primitives::{
     keeper::{CrankClass, KeeperRebateSink},
-    BlockNumber, EpochId, FixedU64, MetricSpecVersion, ProposalId,
+    BlockNumber, EpochId, FixedU64, MetricId, MetricSpecVersion, ProposalId,
 };
 
 pub use welfare_core::{
     AttestedAdmission, ComponentValue, Error as CoreError, Event as CoreEvent,
     GateBreachFlags as CoreGateBreachFlags, MetricSpec, Pillar, Registration,
-    Snapshot as CoreSnapshot, SourceClass, WelfareParams as CoreWelfareParams, WelfareState,
-    EPSILON, EPSILON_PILLAR, HISTORY_PRIORS, MAX_COMPONENTS_PER_SPEC, MAX_DAILY_GATE_SAMPLES,
-    MAX_GATE_FLAGS, MAX_METRIC_SPECS, MAX_SNAPSHOTS, ONE, THETA_C_HI, THETA_C_LO, THETA_S_HI,
-    THETA_S_LO, W_A, W_P,
+    Snapshot as CoreSnapshot, SnapshotContext as CoreSnapshotContext, SourceClass,
+    WelfareParams as CoreWelfareParams, WelfareState, EPSILON, EPSILON_PILLAR, HISTORY_PRIORS,
+    MAX_COMPONENTS_PER_SPEC, MAX_DAILY_GATE_SAMPLES, MAX_GATE_FLAGS, MAX_METRIC_SPECS,
+    MAX_SNAPSHOTS, ONE, THETA_C_HI, THETA_C_LO, THETA_S_HI, THETA_S_LO, W_A, W_P,
 };
 
 /// Core bounds in the `u32` form required by FRAME's `ConstU32`.
@@ -110,6 +110,17 @@ pub trait OracleAdmission {
 /// this pallet aggregates only already-normalized `[0, 1]` components.
 pub trait MetricInputs {
     fn onchain_components(epoch: EpochId, spec_version: MetricSpecVersion) -> Vec<ComponentValue>;
+    /// The components whose settled value for `(epoch, spec_version)` is a
+    /// **flagged carry-last** rather than a fresh measurement — 07 §10's flag
+    /// bit, as settled by the oracle.
+    ///
+    /// Read alongside the values instead of folded into them because the flag is
+    /// not a value: §10 lets a component's carried number stand for one flagged
+    /// epoch and drops it only on the second consecutive one, which is a fact
+    /// about *history*, resolved per cohort at settlement. Absence of a flag is
+    /// the ordinary case and needs no special reading; absence of the whole
+    /// component is already `record_snapshot`'s `MissingComponent`.
+    fn flagged_components(epoch: EpochId, spec_version: MetricSpecVersion) -> Vec<MetricId>;
     /// The registry's closed incident aggregate for `(epoch, spec_version)`
     /// — the `C_attested` multiplier of 05 §4.4.
     ///
@@ -239,6 +250,7 @@ pub mod pallet {
     type CheckedStorage = (
         Vec<(MetricSpecVersion, BoundedSpecSet)>,
         Vec<((EpochId, MetricSpecVersion), StoredSnapshot)>,
+        Vec<((EpochId, MetricSpecVersion), StoredSnapshotContext)>,
         Vec<(EpochId, CoreGateBreachFlags)>,
     );
 
@@ -298,6 +310,53 @@ pub mod pallet {
         pub gate_c: FixedU64,
         pub welfare: FixedU64,
         pub components: BoundedComponents,
+    }
+
+    /// The 07 §10 renormalization inputs for one snapshot: which of its
+    /// components are flagged carry-lasts, and the incident multiplier and
+    /// tunables its `W` was evaluated under.
+    ///
+    /// Deliberately **not** part of `StoredSnapshot`: 02 §7.4 publishes
+    /// `Snapshots` to the frontend, and nothing here is frontend data — the
+    /// outcome of the recompute reaches it as the `SettlementRenormalized`
+    /// event instead. The same separation `SampledGateDays` makes for the same
+    /// reason. Bounded and pruned in lockstep with `Snapshots`.
+    #[derive(
+        Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo,
+    )]
+    pub struct StoredSnapshotContext {
+        pub epoch: EpochId,
+        pub spec_version: MetricSpecVersion,
+        pub flagged: BoundedVec<MetricId, ConstU32<MAX_COMPONENTS_PER_SPEC_BOUND>>,
+        pub incident_multiplier: FixedU64,
+        pub params: CoreWelfareParams,
+    }
+
+    impl TryFrom<CoreSnapshotContext> for StoredSnapshotContext {
+        type Error = CoreError;
+
+        fn try_from(context: CoreSnapshotContext) -> Result<Self, Self::Error> {
+            Ok(Self {
+                epoch: context.epoch,
+                spec_version: context.spec_version,
+                flagged: BoundedVec::try_from(context.flagged)
+                    .map_err(|_| CoreError::TooManyComponents)?,
+                incident_multiplier: context.incident_multiplier,
+                params: context.params,
+            })
+        }
+    }
+
+    impl From<StoredSnapshotContext> for CoreSnapshotContext {
+        fn from(context: StoredSnapshotContext) -> Self {
+            Self {
+                epoch: context.epoch,
+                spec_version: context.spec_version,
+                flagged: context.flagged.into_inner(),
+                incident_multiplier: context.incident_multiplier,
+                params: context.params,
+            }
+        }
     }
 
     /// The oldest outstanding scheduled snapshot and the last obligation that
@@ -367,6 +426,16 @@ pub mod pallet {
     #[pallet::storage]
     pub type Snapshots<T: Config> =
         StorageMap<_, Blake2_128Concat, (EpochId, MetricSpecVersion), StoredSnapshot, OptionQuery>;
+
+    /// Pallet-internal 07 §10 settlement context, one entry per `Snapshots` key.
+    #[pallet::storage]
+    pub type SnapshotContexts<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        (EpochId, MetricSpecVersion),
+        StoredSnapshotContext,
+        OptionQuery,
+    >;
 
     #[pallet::storage]
     pub type SnapshotDeadline<T: Config> = StorageValue<_, SnapshotProgress, OptionQuery>;
@@ -453,6 +522,16 @@ pub mod pallet {
             spec_version: MetricSpecVersion,
             score: FixedU64,
         },
+        /// 07 §10: this cohort's `W` was recomputed without `dropped` — flagged
+        /// in two consecutive epochs of its measurement window — with the
+        /// surviving weights renormalized. Emitted immediately before
+        /// `SettlementComputed`, so a score that is not the geometric mean of
+        /// the two published `Snapshots.welfare` values always says why.
+        SettlementRenormalized {
+            epoch: EpochId,
+            spec_version: MetricSpecVersion,
+            dropped: BoundedVec<MetricId, ConstU32<MAX_COMPONENTS_PER_SPEC_BOUND>>,
+        },
     }
 
     /// Core errors map 1:1; `BadParams` identifies an invalid live registry
@@ -507,6 +586,14 @@ pub mod pallet {
         /// favourable neutral 1.0; 07 §11(1)'s d20 money deadline guarantees the
         /// record exists in time, so this is a retry, not a wedge.
         IncidentAggregateUnavailable,
+        /// A flagged component offered for a snapshot is not an **attested**
+        /// component of that spec version (07 §10; §11(1)(i)). Only class-4
+        /// components are reportable, so only they can carry a flagged epoch.
+        BadFlaggedComponent,
+        /// A snapshot exists with no 07 §10 settlement context beside it. The two
+        /// are written and retired atomically, so this is a corrupted-state
+        /// signal rather than a reachable outcome.
+        MissingSnapshotContext,
     }
 
     #[pallet::hooks]
@@ -567,10 +654,11 @@ pub mod pallet {
             let components = T::MetricInputs::onchain_components(epoch, spec_version);
             let incident = T::MetricInputs::incident_multiplier(epoch, spec_version)
                 .ok_or(Error::<T>::IncidentAggregateUnavailable)?;
+            let flagged = T::MetricInputs::flagged_components(epoch, spec_version);
             let params = Self::live_params()?;
             Self::mutate(|state| {
                 state
-                    .record_snapshot(epoch, spec_version, components, incident, &params)
+                    .record_snapshot(epoch, spec_version, components, incident, flagged, &params)
                     .map(|_| ())
             })?;
             Self::note_snapshot_recorded(epoch, spec_version);
@@ -793,6 +881,12 @@ pub mod pallet {
             let score = state
                 .compute_settlement(cohort_epoch, spec_version)
                 .map_err(Self::map_core_error)?;
+            // The core reports what it did — including 07 §10's renormalization,
+            // which the caller cannot reconstruct from the score alone — so the
+            // events are drained from it rather than rebuilt here. Nothing else
+            // of the computation is persisted: settlement mutates no welfare
+            // state (`compute_settlement` is a read over the snapshot window).
+            let core_events = core::mem::take(&mut state.events);
             let gate_outcomes = match target {
                 SettleTarget::Proposal {
                     has_gate_books: true,
@@ -819,11 +913,9 @@ pub mod pallet {
                         T::Ledger::settle_baseline(cohort_epoch, score)?;
                     }
                 }
-                Self::deposit_core_event(CoreEvent::SettlementComputed {
-                    epoch: cohort_epoch,
-                    spec_version,
-                    score,
-                });
+                for event in core_events {
+                    Self::deposit_core_event(event);
+                }
                 Ok::<(), DispatchError>(())
             })?;
             Ok(score)
@@ -927,6 +1019,10 @@ pub mod pallet {
             for epoch in retired {
                 for key in snapshot_keys.iter().filter(|(e, _)| *e == epoch) {
                     Snapshots::<T>::remove(key);
+                    // The 07 §10 context retires with its snapshot; the pairing
+                    // is a try-state invariant, so leaving one behind is a
+                    // violation and not merely idle storage.
+                    SnapshotContexts::<T>::remove(key);
                 }
                 GateBreachFlags::<T>::remove(epoch);
                 SampledGateDays::<T>::remove(epoch);
@@ -1092,11 +1188,16 @@ pub mod pallet {
                 .map(|(_, snapshot)| CoreSnapshot::from(snapshot))
                 .collect::<Vec<_>>();
             snapshots.sort_by_key(|snapshot| (snapshot.epoch, snapshot.spec_version));
+            let mut snapshot_contexts = SnapshotContexts::<T>::iter()
+                .map(|(_, context)| CoreSnapshotContext::from(context))
+                .collect::<Vec<_>>();
+            snapshot_contexts.sort_by_key(|context| (context.epoch, context.spec_version));
             let mut gate_flags = GateBreachFlags::<T>::iter().collect::<Vec<_>>();
             gate_flags.sort_by_key(|(epoch, _)| *epoch);
             WelfareState {
                 specs,
                 snapshots,
+                snapshot_contexts,
                 gate_flags,
                 events: Vec::new(),
             }
@@ -1110,13 +1211,16 @@ pub mod pallet {
         }
 
         fn persist(pre: &WelfareState, post: WelfareState) -> DispatchResult {
-            let (specs, snapshots, gate_flags) = Self::checked_storage(&post)?;
+            let (specs, snapshots, snapshot_contexts, gate_flags) = Self::checked_storage(&post)?;
 
             for (version, _) in &pre.specs {
                 MetricSpecs::<T>::remove(version);
             }
             for snapshot in &pre.snapshots {
                 Snapshots::<T>::remove((snapshot.epoch, snapshot.spec_version));
+            }
+            for context in &pre.snapshot_contexts {
+                SnapshotContexts::<T>::remove((context.epoch, context.spec_version));
             }
             for (epoch, _) in &pre.gate_flags {
                 GateBreachFlags::<T>::remove(epoch);
@@ -1126,6 +1230,9 @@ pub mod pallet {
             }
             for (key, snapshot) in snapshots {
                 Snapshots::<T>::insert(key, snapshot);
+            }
+            for (key, context) in snapshot_contexts {
+                SnapshotContexts::<T>::insert(key, context);
             }
             for (epoch, flags) in gate_flags {
                 GateBreachFlags::<T>::insert(epoch, flags);
@@ -1166,8 +1273,21 @@ pub mod pallet {
                 .into_iter()
                 .map(|snapshot| ((snapshot.epoch, snapshot.spec_version), snapshot))
                 .collect();
+            if state.snapshot_contexts.len() > MAX_SNAPSHOTS {
+                return Err(Error::<T>::TooManySnapshots.into());
+            }
+            let snapshot_contexts = state
+                .snapshot_contexts
+                .iter()
+                .cloned()
+                .map(StoredSnapshotContext::try_from)
+                .collect::<Result<Vec<_>, CoreError>>()
+                .map_err(Self::map_core_error)?
+                .into_iter()
+                .map(|context| ((context.epoch, context.spec_version), context))
+                .collect();
             let gate_flags = state.gate_flags.clone();
-            Ok((specs, snapshots, gate_flags))
+            Ok((specs, snapshots, snapshot_contexts, gate_flags))
         }
 
         fn deposit_core_event(event: CoreEvent) {
@@ -1203,6 +1323,18 @@ pub mod pallet {
                     epoch,
                     spec_version,
                     score,
+                },
+                CoreEvent::SettlementRenormalized {
+                    epoch,
+                    spec_version,
+                    dropped,
+                } => Event::SettlementRenormalized {
+                    epoch,
+                    spec_version,
+                    // The core normalizes the set against the version's own
+                    // component list, which is itself bounded by
+                    // `MAX_COMPONENTS_PER_SPEC`, so this cannot truncate.
+                    dropped: BoundedVec::truncate_from(dropped),
                 },
             };
             Self::deposit_event(event);
@@ -1247,6 +1379,7 @@ pub mod pallet {
             }
             if MetricSpecs::<T>::iter().count() > MAX_METRIC_SPECS
                 || Snapshots::<T>::iter().count() > MAX_SNAPSHOTS
+                || SnapshotContexts::<T>::iter().count() > MAX_SNAPSHOTS
                 || GateBreachFlags::<T>::iter().count() > MAX_GATE_FLAGS
                 || SampledGateDays::<T>::iter().count() > MAX_GATE_FLAGS
             {
@@ -1270,6 +1403,27 @@ pub mod pallet {
                 StoredSnapshot::try_from(CoreSnapshot::from(snapshot)).map_err(|_| {
                     TryRuntimeError::Other("welfare snapshot violates its component bound")
                 })?;
+                // 07 §10: the context is written and retired with its snapshot,
+                // and settlement treats an absent one as corruption rather than
+                // as an unflagged epoch — so the pairing is checked here in both
+                // directions (the core checks the counts and the flag contents).
+                if !SnapshotContexts::<T>::contains_key(key) {
+                    return Err(TryRuntimeError::Other(
+                        "welfare snapshot has no 07 §10 settlement context",
+                    ));
+                }
+            }
+            for (key, context) in SnapshotContexts::<T>::iter() {
+                if key != (context.epoch, context.spec_version) {
+                    return Err(TryRuntimeError::Other(
+                        "welfare snapshot-context map key does not match its value",
+                    ));
+                }
+                if !Snapshots::<T>::contains_key(key) {
+                    return Err(TryRuntimeError::Other(
+                        "welfare settlement context outlived its snapshot",
+                    ));
+                }
             }
             for epoch in SampledGateDays::<T>::iter_keys() {
                 if !GateBreachFlags::<T>::contains_key(epoch) {
@@ -1372,6 +1526,8 @@ pub mod pallet {
                 CoreError::BadDeltaSMax => Error::<T>::BadDeltaSMax.into(),
                 CoreError::InsufficientOracleSeats => Error::<T>::InsufficientOracleSeats.into(),
                 CoreError::BondCoverageUnmet => Error::<T>::BondCoverageUnmet.into(),
+                CoreError::BadFlaggedComponent => Error::<T>::BadFlaggedComponent.into(),
+                CoreError::MissingSnapshotContext => Error::<T>::MissingSnapshotContext.into(),
             }
         }
     }

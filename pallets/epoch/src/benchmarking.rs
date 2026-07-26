@@ -677,6 +677,7 @@ mod benches {
         T::BenchmarkHelper::assert_keeper_rebate_paid(
             futarchy_primitives::keeper::CrankClass::DecisionCritical,
         );
+        T::BenchmarkHelper::assert_settlement_renormalized(0);
         assert!(!crate::Cohorts::<T>::contains_key(0));
         if let Some(welfare) = welfare {
             assert_eq!(welfare.snapshots, welfare.gate_flags);
