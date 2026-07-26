@@ -975,6 +975,210 @@ fn try_state_accepts_a_bounded_backlog_and_rejects_structural_corruption() {
     });
 }
 
+// ---------------------------------------------------------------- A14
+//
+// The 05 §4.3 collator-authorship series. It is written by the block-authorship
+// event handler, shares the `XcmTrafficEpochs` prefix index and the one bounded
+// reaper with the other two daily series, and feeds `K` today plus `U` and
+// `D_eff` later. Every property below is about the *series*, not about `K`: the
+// component projection is runtime composition and is pinned in
+// `runtime/bleavit-runtime/src/tests_welfare_inputs.rs`.
+
+fn author(n: u8) -> sp_core::crypto::AccountId32 {
+    sp_core::crypto::AccountId32::new([n; 32])
+}
+
+#[test]
+fn collator_authorship_accumulates_per_author_per_day_and_sums_over_the_epoch() {
+    new_test_ext().execute_with(|| {
+        // Day 0: author 1 twice, author 2 once.
+        Welfare::note_collator_authorship(7, 0, author(1));
+        Welfare::note_collator_authorship(7, 0, author(1));
+        Welfare::note_collator_authorship(7, 0, author(2));
+        // Day 1: author 1 once, author 3 once.
+        Welfare::note_collator_authorship(7, 1, author(1));
+        Welfare::note_collator_authorship(7, 1, author(3));
+        // A different epoch must not leak into either.
+        Welfare::note_collator_authorship(8, 0, author(9));
+
+        assert_eq!(
+            Welfare::collator_authorship(7, 0).into_inner(),
+            vec![(author(1), 2), (author(2), 1)]
+        );
+        assert_eq!(
+            Welfare::collator_authorship(7, 1).into_inner(),
+            vec![(author(1), 1), (author(3), 1)]
+        );
+        assert_eq!(Welfare::collator_authorship(7, 2).into_inner(), vec![]);
+
+        // The epoch fold sums per author across days — author 1's three blocks
+        // are one entry, not two — and is sorted by account id so two nodes
+        // agree on the vector, not merely on its contents.
+        assert_eq!(
+            Welfare::collator_authorship_epoch(7),
+            vec![(author(1), 3), (author(2), 1), (author(3), 1)]
+        );
+        assert_eq!(Welfare::collator_authorship_epoch(8), vec![(author(9), 1)]);
+        assert_eq!(Welfare::collator_authorship_epoch(9), vec![]);
+    });
+}
+
+#[test]
+fn collator_authorship_saturates_rather_than_overflowing_a_count() {
+    new_test_ext().execute_with(|| {
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![7]));
+        CollatorAuthorship::<Test>::insert(
+            7,
+            0,
+            BoundedVec::truncate_from(vec![(author(1), u32::MAX)]),
+        );
+
+        Welfare::note_collator_authorship(7, 0, author(1));
+
+        assert_eq!(
+            Welfare::collator_authorship(7, 0).into_inner(),
+            vec![(author(1), u32::MAX)]
+        );
+    });
+}
+
+#[test]
+fn a_full_day_vector_drops_only_the_new_author() {
+    new_test_ext().execute_with(|| {
+        for n in 0..MAX_AUTHORSHIP_ENTRIES {
+            Welfare::note_collator_authorship(7, 0, author(n as u8));
+        }
+        let full = Welfare::collator_authorship(7, 0);
+        assert_eq!(full.len(), MAX_AUTHORSHIP_ENTRIES as usize);
+
+        // The overflowing author is dropped: no panic, no error, and no state
+        // growth — the vector is still exactly at its bound.
+        Welfare::note_collator_authorship(7, 0, author(200));
+        let after = Welfare::collator_authorship(7, 0);
+        assert_eq!(after, full, "a full day vector must not admit a new author");
+        assert!(!after.iter().any(|(who, _)| *who == author(200)));
+        assert_eq!(CollatorAuthorship::<Test>::iter().count(), 1);
+
+        // Authors already recorded for the day keep accumulating; the drop
+        // costs the *new* observation only.
+        Welfare::note_collator_authorship(7, 0, author(0));
+        assert_eq!(Welfare::collator_authorship(7, 0)[0], (author(0), 2));
+
+        // Dropping understates `K`/`U`/`D_eff`, never overstates them: the
+        // distinct-author count is capped by the bound, never inflated past it.
+        assert_eq!(
+            Welfare::collator_authorship_epoch(7).len(),
+            MAX_AUTHORSHIP_ENTRIES as usize
+        );
+    });
+}
+
+#[test]
+fn a_full_traffic_index_drops_the_whole_authorship_observation() {
+    // The same rule `note_xcm_traffic` follows: recording into an unindexed
+    // prefix would create state the bounded retention walk can never reach.
+    new_test_ext().execute_with(|| {
+        for epoch in 0..MAX_XCM_TRAFFIC_EPOCHS_BOUND {
+            Welfare::note_xcm_traffic(epoch, 0, XcmTrafficKind::Accepted);
+        }
+        assert_eq!(
+            XcmTrafficEpochs::<Test>::get().len(),
+            MAX_XCM_TRAFFIC_EPOCHS_BOUND as usize
+        );
+
+        Welfare::note_collator_authorship(MAX_XCM_TRAFFIC_EPOCHS_BOUND, 0, author(1));
+
+        assert!(!CollatorAuthorship::<Test>::contains_key(
+            MAX_XCM_TRAFFIC_EPOCHS_BOUND,
+            0
+        ));
+        assert_eq!(
+            XcmTrafficEpochs::<Test>::get().len(),
+            MAX_XCM_TRAFFIC_EPOCHS_BOUND as usize
+        );
+
+        // An already-indexed epoch keeps recording normally.
+        Welfare::note_collator_authorship(0, 0, author(1));
+        assert_eq!(
+            Welfare::collator_authorship(0, 0).into_inner(),
+            vec![(author(1), 1)]
+        );
+    });
+}
+
+#[test]
+fn the_reaper_retires_authorship_in_the_same_bounded_walk_as_traffic() {
+    new_test_ext().execute_with(|| {
+        for epoch in [1, 3, 5] {
+            Welfare::note_xcm_traffic(epoch, 0, XcmTrafficKind::Accepted);
+            Welfare::note_collator_authorship(epoch, 0, author(1));
+            Welfare::note_collator_authorship(epoch, u8::MAX, author(2));
+        }
+        // An authorship-only epoch: no XCM was sent and no probe ran, which is
+        // ordinary. It must be reaped by the same walk, not stranded.
+        Welfare::note_collator_authorship(2, 0, author(3));
+
+        // One call retires its bounded batch, oldest first, from *both* maps.
+        assert_ok!(Welfare::prune_xcm_traffic(5));
+        assert_eq!(XcmTraffic::<Test>::iter_prefix(1).count(), 0);
+        assert_eq!(CollatorAuthorship::<Test>::iter_prefix(1).count(), 0);
+        assert_eq!(CollatorAuthorship::<Test>::iter_prefix(2).count(), 0);
+        assert_eq!(XcmTrafficEpochs::<Test>::get().into_inner(), vec![3, 5]);
+
+        // Epoch 3 is still eligible; the next call takes it, and 5 (not below
+        // the cutoff) is retained with its authorship intact.
+        assert_ok!(Welfare::prune_xcm_traffic(5));
+        assert_eq!(CollatorAuthorship::<Test>::iter_prefix(3).count(), 0);
+        assert_eq!(CollatorAuthorship::<Test>::iter_prefix(5).count(), 2);
+        assert_eq!(XcmTrafficEpochs::<Test>::get().into_inner(), vec![5]);
+        assert_eq!(
+            Welfare::collator_authorship_epoch(5),
+            vec![(author(1), 1), (author(2), 1)]
+        );
+    });
+}
+
+#[test]
+fn try_state_binds_the_authorship_series_to_the_shared_index() {
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(30);
+
+        // Populated through the writer: indexed, in the past, inside its bound.
+        Welfare::note_collator_authorship(29, 0, author(1));
+        Welfare::note_collator_authorship(29, 0, author(2));
+        Welfare::note_collator_authorship(29, 4, author(1));
+        assert_ok!(Welfare::do_try_state());
+
+        // An authorship-only epoch is legitimate state: the index check must not
+        // demand an XCM counter or a probe outcome alongside it.
+        assert_eq!(XcmTraffic::<Test>::iter_prefix(29).count(), 0);
+        assert_eq!(ReserveProbeDaily::<Test>::iter_prefix(29).count(), 0);
+
+        // An epoch present in the map but absent from the index is unreachable
+        // by the bounded reaper — the exact corruption the index exists to
+        // exclude (I-20).
+        XcmTrafficEpochs::<Test>::kill();
+        assert!(Welfare::do_try_state().is_err());
+
+        // Restoring the index restores the invariant.
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![29]));
+        assert_ok!(Welfare::do_try_state());
+
+        // Authorship attributed to an epoch the clock has not reached.
+        CollatorAuthorship::<Test>::insert(31, 0, BoundedVec::truncate_from(vec![(author(1), 1)]));
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![29, 31]));
+        assert!(Welfare::do_try_state().is_err());
+
+        // An empty stored author set is not a legal record either: the writer
+        // never produces one, so its presence is corruption.
+        CollatorAuthorship::<Test>::remove(31, 0);
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![29]));
+        assert_ok!(Welfare::do_try_state());
+        CollatorAuthorship::<Test>::insert(29, 9, BoundedVec::truncate_from(Vec::new()));
+        assert!(Welfare::do_try_state().is_err());
+    });
+}
+
 #[test]
 fn injected_component_vector_over_limit_is_rejected() {
     new_test_ext().execute_with(|| {

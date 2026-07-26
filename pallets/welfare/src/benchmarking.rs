@@ -8,6 +8,8 @@ use super::*;
 use crate::pallet::{BoundedSpecSet, Pallet};
 use alloc::vec::Vec;
 use frame_benchmarking::v2::*;
+use frame_support::traits::Get;
+use frame_support::BoundedVec;
 use frame_system::RawOrigin;
 
 /// A seated oracle for benchmark fixtures: 07 §2(5)'s floors met and the 13 §1
@@ -258,6 +260,46 @@ mod benches {
             futarchy_primitives::keeper::CrankClass::General,
         );
         assert_eq!(GateBreachFlags::<T>::iter().count(), MAX_GATE_FLAGS);
+        Ok(())
+    }
+
+    /// The 05 §4.3 authorship recorder at its worst case.
+    ///
+    /// Worst case is the day vector **full to its bound with the author already
+    /// in it, at the last position**: the scan runs the whole vector and then
+    /// still writes. Seeding a full vector whose author is *absent* would scan
+    /// just as far but drop instead of writing, and seeding a short vector
+    /// would measure neither — so the fixture pins the one shape that pays for
+    /// both the full scan and the write.
+    ///
+    /// The epoch is pre-indexed because an unindexed one returns before the
+    /// map is touched at all (the cheap path, not the dear one).
+    #[benchmark]
+    fn note_collator_authorship() -> Result<(), BenchmarkError> {
+        let epoch: EpochId = 7;
+        let day: u8 = 3;
+        XcmTrafficEpochs::<T>::put(BoundedVec::truncate_from(alloc::vec![epoch]));
+
+        let bound = <T as Config>::MaxCollatorAuthorshipEntries::get();
+        let author: T::AccountId = account("welfare-author", bound, 0);
+        let mut authors = Vec::new();
+        for index in 0..bound.saturating_sub(1) {
+            authors.push((account::<T::AccountId>("welfare-author", index, 0), 1u32));
+        }
+        // Last position, so `find` scans every preceding entry first.
+        authors.push((author.clone(), 1));
+        let seeded = BoundedVec::try_from(authors)
+            .map_err(|_| BenchmarkError::Stop("benchmark authorship fixture exceeds its bound"))?;
+        CollatorAuthorship::<T>::insert(epoch, day, seeded);
+
+        #[block]
+        {
+            Pallet::<T>::note_collator_authorship(epoch, day, author.clone());
+        }
+
+        assert!(CollatorAuthorship::<T>::get(epoch, day)
+            .iter()
+            .any(|(who, blocks)| *who == author && *blocks == 2));
         Ok(())
     }
 

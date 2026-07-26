@@ -12,6 +12,10 @@ pub trait WeightInfo {
     fn register_spec() -> Weight;
     fn record_snapshot() -> Weight;
     fn record_daily_gate() -> Weight;
+    /// The 05 §4.3 authorship-series recorder. Not an extrinsic: the block
+    /// authorship `EventHandler` reserves no weight, so the writer registers
+    /// this itself as `Mandatory`.
+    fn note_collator_authorship() -> Weight;
 }
 
 const STATE_POV: u64 = 32_000;
@@ -36,6 +40,12 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(3))
             .saturating_add(T::DbWeight::get().writes(3))
     }
+
+    fn note_collator_authorship() -> Weight {
+        Weight::from_parts(15_000_000, STATE_POV)
+            .saturating_add(T::DbWeight::get().reads(2))
+            .saturating_add(T::DbWeight::get().writes(2))
+    }
 }
 
 impl WeightInfo for () {
@@ -55,5 +65,11 @@ impl WeightInfo for () {
         Weight::from_parts(65_000_000, STATE_POV)
             .saturating_add(RocksDbWeight::get().reads(3))
             .saturating_add(RocksDbWeight::get().writes(3))
+    }
+
+    fn note_collator_authorship() -> Weight {
+        Weight::from_parts(15_000_000, STATE_POV)
+            .saturating_add(RocksDbWeight::get().reads(2))
+            .saturating_add(RocksDbWeight::get().writes(2))
     }
 }

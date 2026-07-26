@@ -343,6 +343,11 @@ impl pallet_welfare::OracleAdmission for SeatedOracle {
     }
 }
 
+/// Deliberately far below the runtime's 120: the overflow direction of the
+/// 05 §4.3 authorship series is a behavior these suites must exercise, and a
+/// mock that needs 120 distinct accounts to reach it would not.
+pub const MAX_AUTHORSHIP_ENTRIES: u32 = 3;
+
 impl pallet_welfare::Config for Test {
     type OracleAdmission = SeatedOracle;
     type MetricGovernanceOrigin = TestMetricGovernanceOrigin;
@@ -352,6 +357,7 @@ impl pallet_welfare::Config for Test {
     type CurrentEpoch = CurrentEpochValue;
     type SnapshotSchedule = TestSnapshotSchedule;
     type KeeperRebate = TestKeeperRebate;
+    type MaxCollatorAuthorshipEntries = frame_support::traits::ConstU32<MAX_AUTHORSHIP_ENTRIES>;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestBenchmarkHelper;

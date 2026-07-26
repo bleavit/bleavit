@@ -240,6 +240,15 @@ pub mod pallet {
         /// pallet owns neither oracle state nor constitution parameters, and
         /// must not import the oracle to reach them (I-24).
         type OracleAdmission: OracleAdmission;
+        /// 13 §4 bound on distinct authors tracked in one `(epoch, day)` slot of
+        /// [`CollatorAuthorship`].
+        ///
+        /// The runtime binds this to the same constant as the treasury's
+        /// `MaxCollatorCompensationEntries`: both count *the same population* —
+        /// the collators that can author in one active session — and letting
+        /// them disagree would mean one of the two silently disagrees with the
+        /// chain about how many collators exist.
+        type MaxCollatorAuthorshipEntries: Get<u32>;
         /// Weight information for all extrinsics.
         type WeightInfo: WeightInfo;
         /// Admitted origin construction for benchmarks.
@@ -502,6 +511,35 @@ pub mod pallet {
     #[pallet::storage]
     pub type ReserveProbeDaily<T: Config> =
         StorageDoubleMap<_, Twox64Concat, EpochId, Twox64Concat, u8, bool, OptionQuery>;
+
+    /// Per-author authored-block counts by `(epoch, day)` (05 §4.3).
+    ///
+    /// The shared series behind three welfare components, all of which read
+    /// *distinct authors* or *authored blocks* over a window and none of which
+    /// can be reconstructed from an aggregate count: collator-set adequacy `K`
+    /// (`min(1, distinct_active_authors / collator.n_min)`, live since A14),
+    /// block production `U`, and collator concentration `D_eff` (§4.5), which
+    /// needs the per-author distribution and not merely its cardinality. One
+    /// series serves all three so the three can never disagree about who
+    /// authored what.
+    ///
+    /// This pallet records only the counts and deliberately computes no
+    /// component from them — the same division of labour [`XcmTraffic`] makes.
+    ///
+    /// Keyed exactly like [`XcmTraffic`] and retired by the same bounded walk,
+    /// so it inherits that map's `MAX_XCM_TRAFFIC_EPOCHS_BOUND` prefix index and
+    /// its `u8`-bounded 256-day second key (I-20/I-21). The per-day vector is
+    /// bounded by [`Config::MaxCollatorAuthorshipEntries`] (13 §4).
+    #[pallet::storage]
+    pub type CollatorAuthorship<T: Config> = StorageDoubleMap<
+        _,
+        Twox64Concat,
+        EpochId,
+        Twox64Concat,
+        u8,
+        BoundedVec<(T::AccountId, u32), T::MaxCollatorAuthorshipEntries>,
+        ValueQuery,
+    >;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -1086,6 +1124,11 @@ pub mod pallet {
                     // prefix index and retention window, so they retire in the
                     // same bounded step rather than accruing behind it.
                     let _ = ReserveProbeDaily::<T>::clear_prefix(epoch, u8::MAX as u32 + 1, None);
+                    // A14: so does the collator-authorship series. A second
+                    // index or a second reaper would be two retention policies
+                    // over one epoch window, and the one that fell behind would
+                    // be the one holding unbounded state.
+                    let _ = CollatorAuthorship::<T>::clear_prefix(epoch, u8::MAX as u32 + 1, None);
                     if let Some(position) = epochs.iter().position(|stored| *stored == epoch) {
                         epochs.remove(position);
                     }
@@ -1156,6 +1199,86 @@ pub mod pallet {
         /// Read one day's reserve-probe outcome; `None` means unrecorded.
         pub fn reserve_probe_daily(epoch: EpochId, day: u8) -> Option<bool> {
             ReserveProbeDaily::<T>::get(epoch, day)
+        }
+
+        /// Record one authored parachain block against its `(epoch, day)` slot
+        /// (05 §4.3).
+        ///
+        /// Fail-soft in the strongest sense: `pallet_authorship` drives its
+        /// `EventHandler` from `on_initialize` and reserves no weight for it, so
+        /// this registers its own benchmarked worst-case weight as `Mandatory`
+        /// before touching storage (the `note_collator_block` pattern) and can
+        /// then neither error nor panic. Counts saturate.
+        ///
+        /// **Every overflow drops the observation, and that is the safe
+        /// direction.** Two bounds can bind: the shared [`XcmTrafficEpochs`]
+        /// index (a new epoch arriving while bounded maintenance catches up) and
+        /// the day's own author vector. Dropping loses an author, and every
+        /// consumer of this series reads *more* authors as *healthier* — `K` is
+        /// `min(1, distinct_active_authors / collator.n_min)`, and the `U` and
+        /// `D_eff` bindings that will read it are likewise monotone in recorded
+        /// authorship. So an overflow can only ever understate the score, never
+        /// overstate it: it can cost a healthy chain welfare, but it cannot hand
+        /// a degraded one a gate it did not earn (G-1). Recording into an
+        /// unindexed prefix, by contrast, would create state the bounded
+        /// retention walk can never reach (I-20).
+        pub fn note_collator_authorship(epoch: EpochId, day: u8, who: T::AccountId) {
+            frame_system::Pallet::<T>::register_extra_weight_unchecked(
+                T::WeightInfo::note_collator_authorship(),
+                DispatchClass::Mandatory,
+            );
+            // Bound the new prefix to the shared traffic index so the retention
+            // walk can always find and retire it.
+            let tracked = XcmTrafficEpochs::<T>::mutate(|epochs| {
+                if epochs.contains(&epoch) {
+                    true
+                } else {
+                    epochs.try_push(epoch).is_ok()
+                }
+            });
+            if !tracked {
+                return;
+            }
+            CollatorAuthorship::<T>::mutate(epoch, day, |authors| {
+                if let Some(entry) = authors.iter_mut().find(|(stored, _)| *stored == who) {
+                    entry.1 = entry.1.saturating_add(1);
+                    return;
+                }
+                // A full day vector drops the *new* author only; the authors
+                // already recorded for the day keep accumulating.
+                let _ = authors.try_push((who, 1));
+            });
+        }
+
+        /// Return one day's per-author authored-block counts.
+        pub fn collator_authorship(
+            epoch: EpochId,
+            day: u8,
+        ) -> BoundedVec<(T::AccountId, u32), T::MaxCollatorAuthorshipEntries> {
+            CollatorAuthorship::<T>::get(epoch, day)
+        }
+
+        /// Return an epoch's per-author authored-block counts, summed over days.
+        ///
+        /// The double-map epoch prefix makes the reads proportional to days that
+        /// actually recorded authorship; the `u8` second key hard-bounds that at
+        /// 256, and each day at [`Config::MaxCollatorAuthorshipEntries`].
+        ///
+        /// Sorted by account id, because the result is consensus input: the
+        /// double map iterates in storage-hash order, which is stable for one
+        /// node but is not a property any caller should be made to rely on.
+        pub fn collator_authorship_epoch(epoch: EpochId) -> Vec<(T::AccountId, u32)> {
+            let mut totals: Vec<(T::AccountId, u32)> = Vec::new();
+            for (_, authors) in CollatorAuthorship::<T>::iter_prefix(epoch) {
+                for (who, blocks) in authors.into_iter() {
+                    match totals.iter_mut().find(|(stored, _)| *stored == who) {
+                        Some(entry) => entry.1 = entry.1.saturating_add(blocks),
+                        None => totals.push((who, blocks)),
+                    }
+                }
+            }
+            totals.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            totals
         }
 
         /// Return the local XCM counters for one epoch/day window.
@@ -1541,11 +1664,17 @@ pub mod pallet {
                 // a budget refusal, which happens before the router is ever
                 // observed — so requiring traffic here would fail try-state on
                 // correct state.
+                // A14 adds the third co-indexed series for the same reason: a
+                // block can be authored in an epoch that sent no XCM and ran no
+                // probe, so an authorship-only prefix is correct state.
                 if XcmTraffic::<T>::iter_prefix(*epoch).next().is_none()
                     && ReserveProbeDaily::<T>::iter_prefix(*epoch).next().is_none()
+                    && CollatorAuthorship::<T>::iter_prefix(*epoch)
+                        .next()
+                        .is_none()
                 {
                     return Err(TryRuntimeError::Other(
-                        "welfare traffic index has no corresponding counter or probe outcome",
+                        "welfare traffic index has no corresponding counter, probe outcome, or authorship record",
                     ));
                 }
             }
@@ -1578,6 +1707,36 @@ pub mod pallet {
                 if !traffic_epochs.contains(&epoch) {
                     return Err(TryRuntimeError::Other(
                         "welfare reserve-probe outcome has no indexed epoch",
+                    ));
+                }
+            }
+            // A14: the same two properties for the collator-authorship series —
+            // every recorded day is indexed, so the bounded retention walk can
+            // reach and retire it (I-20/I-21), and no authorship is attributed
+            // to an epoch the clock has not reached. The per-day bound is
+            // checked explicitly rather than trusted to the decoder: a
+            // `BoundedVec` decoded from corrupt state is exactly what try-state
+            // exists to catch, and 05 §4.3's `K` divides by a live parameter, so
+            // an over-long vector would be read as distinct authors.
+            for (epoch, _, authors) in CollatorAuthorship::<T>::iter() {
+                if epoch > current_epoch {
+                    return Err(TryRuntimeError::Other(
+                        "welfare collator authorship lies in the future",
+                    ));
+                }
+                if !traffic_epochs.contains(&epoch) {
+                    return Err(TryRuntimeError::Other(
+                        "welfare collator authorship has no indexed epoch",
+                    ));
+                }
+                if authors.len() > T::MaxCollatorAuthorshipEntries::get() as usize {
+                    return Err(TryRuntimeError::Other(
+                        "welfare collator authorship exceeds its per-day bound",
+                    ));
+                }
+                if authors.is_empty() {
+                    return Err(TryRuntimeError::Other(
+                        "welfare collator authorship stores an empty author set",
                     ));
                 }
             }

@@ -4667,8 +4667,18 @@ fn treasury_collator_boundary_authorship_uses_the_next_epoch_accumulator() {
 fn runtime_collator_authorship_charges_mandatory_accounting_weight() {
     development_ext().execute_with(|| {
         let before = *System::block_weight().get(DispatchClass::Mandatory);
+        // `pallet_authorship` reserves no weight for its `EventHandler`, so
+        // *every* sink the handler drives must register its own. The handler has
+        // two — 08 §2.4's payout accumulator and, since A14, 05 §4.3's
+        // authorship series — and the block must be charged for both. Adding a
+        // third sink without its own benchmarked weight is precisely the
+        // under-accounting this sums to catch.
         let expected = <<Runtime as pallet_futarchy_treasury::Config>::WeightInfo as
-            pallet_futarchy_treasury::WeightInfo>::note_collator_block();
+            pallet_futarchy_treasury::WeightInfo>::note_collator_block()
+            .saturating_add(
+                <<Runtime as pallet_welfare::Config>::WeightInfo as
+                    pallet_welfare::WeightInfo>::note_collator_authorship(),
+            );
 
         <crate::configs::RuntimeCollatorAuthorship as pallet_authorship::EventHandler<
             AccountId,
