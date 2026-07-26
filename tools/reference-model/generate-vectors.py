@@ -58,7 +58,11 @@ from bleavit_reference_model.twap import (
     ContestCapitalAccumulator,
     TwapAccumulator,
 )
-from bleavit_reference_model.welfare import full_pipeline, settlement_score
+from bleavit_reference_model.welfare import (
+    full_pipeline,
+    full_pipeline_renormalized,
+    settlement_score,
+)
 
 SWEEP_SCHEMA = "bleavit.reference-model.v3"
 SWEEP_MASTER_SEED = 0xB1EA_5EED_256B_0001
@@ -260,6 +264,18 @@ WELFARE_NON_BINARY_DAILY_WEIGHTS_INPUTS = {
     **WELFARE_INPUTS,
     "c_weights": {"C01": "0.10", "C02": "0.50", "C03": "0.40"},
     "c_daily": {"C01": "0.531441", "C02": "1.0"},
+}
+
+# Same components at live gates: S = min(0.99, 0.99, D_eff=1) = 0.99 ≥ θS⁺, so
+# g(S) = 1 and `W` is not gate-vetoed to zero. `WELFARE_INPUTS` sits at
+# S = 0.83125 < θS⁻ = 0.90 (05 §4.1), which zeroes `W` and makes every row over
+# it a pillar-only vector; the 07 §10 recompute's composite leg — an emptied
+# pillar renormalizing `{wP, wA}` — is only observable in `W` with the gates open.
+WELFARE_LIVE_GATES_INPUTS = {
+    **WELFARE_INPUTS,
+    "u": "0.99",
+    "f": "0.99",
+    "hhi": "0.10",
 }
 
 
@@ -1993,6 +2009,40 @@ def build():
     non_binary_pipeline = full_pipeline(
         **_decimal_tree(WELFARE_NON_BINARY_DAILY_WEIGHTS_INPUTS)
     )
+    # 07 §10 settlement-time recompute: a component flagged in two consecutive
+    # epochs meeting inside the cohort's W_{e+1}/W_{e+2} window is dropped from
+    # both recomputes, surviving weights renormalized within the pillar group
+    # (the Q64.64 quotient of 05 §4.4 / SQ-321). Both drop sets name only
+    # attested components — C03 is the attested C member, A01/A02 are the
+    # attested A members — because only class-4 components can be flagged
+    # (07 §11(1)(i)).
+    dropped_components = ["A01", "C03"]
+    dropped_pipeline = full_pipeline_renormalized(
+        dropped=dropped_components, **_decimal_tree(WELFARE_INPUTS)
+    )
+    # Dropping every A component empties the pillar: 05 §4.1's {wP, wA} then
+    # renormalizes over the survivor, so the composite is P alone at weight
+    # exactly 1 — and by §4.4's degenerate-single-term exactness rule (SQ-493)
+    # that composite *is* P, bit-exactly, not the exp2(log2(P)) round-trip one
+    # ulp below it. The reported A is the empty weighted product on the FixedU64
+    # grid, 1.000000000: inert, because §4.4 rule 2 drops the composite term
+    # outright rather than multiplying by it ("never on a fabricated A = 1"), so
+    # its weight is exactly 0. It must not be read as "the A pillar is perfect",
+    # and W here is not GeoComposite(P, 1.0) — that value is strictly higher.
+    dropped_a_pillar = ["A01", "A02"]
+    dropped_a_pipeline = full_pipeline_renormalized(
+        dropped=dropped_a_pillar, **_decimal_tree(WELFARE_INPUTS)
+    )
+    # The same emptied-A drop at live gates (g(S) = 1), where the composite leg
+    # reaches `W` instead of being zeroed by the S gate. The pair of rows below
+    # differs in the drop alone, so `W` isolates it: 05 §4.4 rule 2's
+    # `W = g(S)·g(C)·P` against the two-term GeoComposite of the same tree.
+    live_gates_pipeline = full_pipeline(
+        **_decimal_tree(WELFARE_LIVE_GATES_INPUTS)
+    )
+    live_gates_dropped_a_pipeline = full_pipeline_renormalized(
+        dropped=dropped_a_pillar, **_decimal_tree(WELFARE_LIVE_GATES_INPUTS)
+    )
     welfare_scenarios = [
         {
             "name": "equal_horizons",
@@ -2023,6 +2073,57 @@ def build():
             "settlement_with_self": format(
                 settlement_score(
                     non_binary_pipeline["W"], non_binary_pipeline["W"]
+                ),
+                "f",
+            ),
+        },
+        {
+            "name": "settlement_renormalized_drops_flagged_components",
+            "inputs": WELFARE_INPUTS,
+            "dropped": dropped_components,
+            "outputs": _string_tree(dropped_pipeline),
+            "settlement_with_self": format(
+                settlement_score(
+                    dropped_pipeline["W"], dropped_pipeline["W"]
+                ),
+                "f",
+            ),
+        },
+        {
+            "name": "settlement_renormalized_drops_whole_a_pillar",
+            "inputs": WELFARE_INPUTS,
+            "dropped": dropped_a_pillar,
+            "outputs": _string_tree(dropped_a_pipeline),
+            "settlement_with_self": format(
+                settlement_score(
+                    dropped_a_pipeline["W"], dropped_a_pipeline["W"]
+                ),
+                "f",
+            ),
+        },
+        # The un-dropped half of the live-gate pair: an ordinary §4.4 pipeline
+        # row (no `dropped` key), so the recompute row below is a controlled
+        # A/B against it — same inputs, same S/C/P, `W` differing in the drop.
+        {
+            "name": "full_pipeline_live_gates",
+            "inputs": WELFARE_LIVE_GATES_INPUTS,
+            "outputs": _string_tree(live_gates_pipeline),
+            "settlement_with_self": format(
+                settlement_score(
+                    live_gates_pipeline["W"], live_gates_pipeline["W"]
+                ),
+                "f",
+            ),
+        },
+        {
+            "name": "settlement_renormalized_whole_a_pillar_at_live_gates",
+            "inputs": WELFARE_LIVE_GATES_INPUTS,
+            "dropped": dropped_a_pillar,
+            "outputs": _string_tree(live_gates_dropped_a_pipeline),
+            "settlement_with_self": format(
+                settlement_score(
+                    live_gates_dropped_a_pipeline["W"],
+                    live_gates_dropped_a_pipeline["W"],
                 ),
                 "f",
             ),

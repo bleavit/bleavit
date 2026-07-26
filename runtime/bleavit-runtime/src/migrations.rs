@@ -1289,3 +1289,126 @@ impl frame_support::traits::OnRuntimeUpgrade for TerminalRecoveryTransition {
         Ok(())
     }
 }
+
+/// SQ-493: backfill the 07 §10 settlement context for snapshots recorded before
+/// `Welfare::SnapshotContexts` existed. Advances the Welfare storage version
+/// `0 -> 1`.
+///
+/// Without it, an upgraded chain carries up to `MAX_SNAPSHOTS` retained
+/// snapshots with no context at all, and SQ-493's bidirectional `try-state`
+/// pairing rejects the upgrade outright (Codex review, PR #177).
+///
+/// **The backfilled record is exact, not a stand-in.** Its flagged set is
+/// **empty**, which is precisely the history those snapshots have: they were
+/// recorded by a runtime with no flag bit, so no two-consecutive streak can span
+/// them. The other two fields are written at their neutral and live values and
+/// are **provably never read** for such a snapshot — 07 §10's recompute runs only
+/// on a non-empty drop set, and an empty `flagged` at `e+1` makes the drop set
+/// empty for every window that contains it (the drop set is
+/// `flagged(e+1) ∩ (flagged(e) ∪ flagged(e+2))`). So a pre-rule snapshot keeps
+/// settling on its recorded `W`, which is the behaviour it was measured under.
+///
+/// Insert-if-absent and version-gated, so a re-run is a no-op and a chain that
+/// already carries a real context — one written by `record_snapshot` after the
+/// upgrade — is never overwritten.
+pub struct MigrateWelfareSnapshotContextsV1;
+
+#[cfg(feature = "try-runtime")]
+type WelfareContextPreState = (frame_support::traits::StorageVersion, u32, u32);
+
+impl OnRuntimeUpgrade for MigrateWelfareSnapshotContextsV1 {
+    fn on_runtime_upgrade() -> Weight {
+        use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+        let weight = <Runtime as frame_system::Config>::DbWeight::get();
+        if crate::Welfare::on_chain_storage_version() != StorageVersion::new(0) {
+            return weight.reads(1);
+        }
+        // Key-only scan: the map is bounded at `MAX_SNAPSHOTS` by
+        // `checked_storage` on every write, so this is a bounded read.
+        let keys =
+            pallet_welfare::Snapshots::<Runtime>::iter_keys().collect::<alloc::vec::Vec<_>>();
+        let live_params =
+            <crate::configs::WelfareParams as pallet_welfare::WelfareParamsProvider>::welfare_params(
+            );
+        let mut written = 0u64;
+        for (epoch, spec_version) in &keys {
+            if pallet_welfare::SnapshotContexts::<Runtime>::contains_key((*epoch, *spec_version)) {
+                continue;
+            }
+            pallet_welfare::SnapshotContexts::<Runtime>::insert(
+                (*epoch, *spec_version),
+                pallet_welfare::StoredSnapshotContext {
+                    epoch: *epoch,
+                    spec_version: *spec_version,
+                    flagged: Default::default(),
+                    incident_multiplier: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                    params: live_params,
+                },
+            );
+            written = written.saturating_add(1);
+        }
+        StorageVersion::new(1).put::<crate::Welfare>();
+        weight.reads_writes(
+            1u64.saturating_add(keys.len() as u64).saturating_mul(2),
+            written.saturating_add(1),
+        )
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn pre_upgrade() -> Result<Vec<u8>, sp_runtime::TryRuntimeError> {
+        use frame_support::traits::GetStorageVersion;
+
+        Ok((
+            crate::Welfare::on_chain_storage_version(),
+            pallet_welfare::Snapshots::<Runtime>::iter_keys().count() as u32,
+            pallet_welfare::SnapshotContexts::<Runtime>::iter_keys().count() as u32,
+        )
+            .encode())
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn post_upgrade(state: Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+        use frame_support::traits::{GetStorageVersion, StorageVersion};
+
+        let (version, snapshots, contexts): WelfareContextPreState =
+            DecodeAll::decode_all(&mut state.as_slice())
+                .map_err(|_| sp_runtime::TryRuntimeError::Other("welfare pre-state decode"))?;
+        if version != StorageVersion::new(0) {
+            frame_support::ensure!(
+                pallet_welfare::SnapshotContexts::<Runtime>::iter_keys().count() as u32 == contexts,
+                "welfare context migration: a skipped run must not write"
+            );
+            return Ok(());
+        }
+        frame_support::ensure!(
+            crate::Welfare::on_chain_storage_version() == StorageVersion::new(1),
+            "welfare context migration: storage version did not advance"
+        );
+        // Exactly the pairing `do_try_state` enforces, asserted here so the
+        // failure names the migration rather than the invariant.
+        frame_support::ensure!(
+            pallet_welfare::SnapshotContexts::<Runtime>::iter_keys().count() as u32 == snapshots,
+            "welfare context migration: contexts do not pair 1:1 with snapshots"
+        );
+        for key in pallet_welfare::Snapshots::<Runtime>::iter_keys() {
+            frame_support::ensure!(
+                pallet_welfare::SnapshotContexts::<Runtime>::contains_key(key),
+                "welfare context migration: a snapshot was left without its context"
+            );
+        }
+        // Every context this migration writes carries an empty flag set — that is
+        // what makes the neutral multiplier and the live tunables unreachable for
+        // a pre-rule snapshot. Only assertable when the map started empty; past
+        // that, a non-empty set is a legitimately recorded one.
+        if contexts == 0 {
+            for (_, context) in pallet_welfare::SnapshotContexts::<Runtime>::iter() {
+                frame_support::ensure!(
+                    context.flagged.is_empty(),
+                    "welfare context migration: backfilled a non-empty flag set"
+                );
+            }
+        }
+        Ok(())
+    }
+}

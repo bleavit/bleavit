@@ -2232,3 +2232,97 @@ fn migration_halted_diagnostic_emits_once_on_first_activation() {
         );
     });
 }
+
+/// SQ-493: an upgraded chain's retained snapshots get their 07 §10 context, and
+/// the pairing `do_try_state` enforces holds afterwards.
+#[test]
+fn welfare_snapshot_context_migration_backfills_every_retained_snapshot() {
+    tests::development_ext().execute_with(|| {
+        StorageVersion::new(0).put::<crate::Welfare>();
+        // A pre-SQ-493 chain: snapshots present, no contexts at all.
+        for epoch in 3..=6u32 {
+            pallet_welfare::Snapshots::<Runtime>::insert(
+                (epoch, 1u16),
+                pallet_welfare::StoredSnapshot {
+                    epoch,
+                    spec_version: 1,
+                    s_pillar: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                    c_onchain: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                    c_attested: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                    p_pillar: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                    a_pillar: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                    gate_s: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                    gate_c: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                    welfare: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                    components: frame_support::BoundedVec::default(),
+                },
+            );
+        }
+        assert_eq!(pallet_welfare::SnapshotContexts::<Runtime>::iter().count(), 0);
+
+        let _ = <crate::migrations::MigrateWelfareSnapshotContextsV1 as OnRuntimeUpgrade>::on_runtime_upgrade();
+
+        assert_eq!(StorageVersion::get::<crate::Welfare>(), StorageVersion::new(1));
+        assert_eq!(pallet_welfare::SnapshotContexts::<Runtime>::iter().count(), 4);
+        for epoch in 3..=6u32 {
+            let context = pallet_welfare::SnapshotContexts::<Runtime>::get((epoch, 1u16))
+                .expect("context backfilled");
+            assert_eq!(context.epoch, epoch);
+            assert_eq!(context.spec_version, 1);
+            // Empty is the exact history: a snapshot recorded before the flag bit
+            // existed cannot carry a two-consecutive streak, so it keeps settling
+            // on its recorded `W` and the other two fields are never read.
+            assert!(context.flagged.is_empty());
+            assert_eq!(context.incident_multiplier, futarchy_primitives::FixedU64(pallet_welfare::ONE));
+        }
+
+        // Idempotent, and never overwrites a real context.
+        let mut real = pallet_welfare::SnapshotContexts::<Runtime>::get((3u32, 1u16))
+            .expect("context present");
+        real.flagged = frame_support::BoundedVec::truncate_from(vec![7u16]);
+        pallet_welfare::SnapshotContexts::<Runtime>::insert((3u32, 1u16), real.clone());
+        let _ = <crate::migrations::MigrateWelfareSnapshotContextsV1 as OnRuntimeUpgrade>::on_runtime_upgrade();
+        assert_eq!(
+            pallet_welfare::SnapshotContexts::<Runtime>::get((3u32, 1u16)),
+            Some(real),
+            "a completed migration must not run again"
+        );
+    });
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn welfare_snapshot_context_migration_try_runtime_proves_the_pairing() {
+    tests::development_ext().execute_with(|| {
+        StorageVersion::new(0).put::<crate::Welfare>();
+        pallet_welfare::Snapshots::<Runtime>::insert(
+            (9u32, 2u16),
+            pallet_welfare::StoredSnapshot {
+                epoch: 9,
+                spec_version: 2,
+                s_pillar: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                c_onchain: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                c_attested: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                p_pillar: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                a_pillar: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                gate_s: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                gate_c: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                welfare: futarchy_primitives::FixedU64(pallet_welfare::ONE),
+                components: frame_support::BoundedVec::default(),
+            },
+        );
+
+        let state =
+            <crate::migrations::MigrateWelfareSnapshotContextsV1 as OnRuntimeUpgrade>::pre_upgrade()
+                .expect("welfare pre-upgrade snapshot");
+        let _ = <crate::migrations::MigrateWelfareSnapshotContextsV1 as OnRuntimeUpgrade>::on_runtime_upgrade();
+        <crate::migrations::MigrateWelfareSnapshotContextsV1 as OnRuntimeUpgrade>::post_upgrade(
+            state,
+        )
+        .expect("welfare post-upgrade checks");
+
+        assert_eq!(StorageVersion::get::<crate::Welfare>(), StorageVersion::new(1));
+        pallet_welfare::Pallet::<Runtime>::do_try_state()
+            .expect("the SQ-493 pairing holds after the backfill");
+    });
+}

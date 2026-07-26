@@ -10,7 +10,7 @@ use crate::{
 use frame_support::{derive_impl, parameter_types, traits::EnsureOrigin};
 use futarchy_primitives::{
     keeper::{CrankClass, KeeperRebateSink},
-    EpochId, FixedU64, MetricSpecVersion, ProposalId,
+    EpochId, FixedU64, MetricId, MetricSpecVersion, ProposalId,
 };
 use parity_scale_codec::{Decode, Encode};
 use sp_core::crypto::AccountId32;
@@ -135,6 +135,8 @@ parameter_types! {
     pub static DailyInput: Vec<ComponentValue> = healthy_components();
     pub static DailyInputsByVersion: Vec<(MetricSpecVersion, Vec<ComponentValue>)> = Vec::new();
     pub static IncidentInput: Option<FixedU64> = Some(FixedU64(ONE));
+    /// 07 §10 flag bits per `(epoch, spec_version)`, as the oracle settled them.
+    pub static FlaggedInputs: Vec<((EpochId, MetricSpecVersion), Vec<MetricId>)> = Vec::new();
     pub static LedgerFailure: Option<LedgerCall> = None;
     /// Epochs whose Baseline vault is absent or already settled, i.e. the
     /// `baseline_open` precondition is false and the VOID settlement no-ops.
@@ -229,6 +231,13 @@ impl MetricInputs for TestMetricInputs {
             .into_iter()
             .find_map(|(version, components)| (version == spec_version).then_some(components))
             .unwrap_or_else(OnchainInput::get)
+    }
+
+    fn flagged_components(epoch: EpochId, spec_version: MetricSpecVersion) -> Vec<MetricId> {
+        FlaggedInputs::get()
+            .into_iter()
+            .find_map(|(key, flagged)| (key == (epoch, spec_version)).then_some(flagged))
+            .unwrap_or_default()
     }
 
     fn incident_multiplier(_epoch: EpochId, _spec_version: u16) -> Option<FixedU64> {

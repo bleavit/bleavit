@@ -1347,6 +1347,15 @@ fn assert_last_matches_core(event: CoreEvent) {
             spec_version,
             score,
         }),
+        CoreEvent::SettlementRenormalized {
+            epoch,
+            spec_version,
+            dropped,
+        } => RuntimeEvent::Welfare(Event::SettlementRenormalized {
+            epoch,
+            spec_version,
+            dropped: frame_support::BoundedVec::truncate_from(dropped),
+        }),
     };
     System::assert_last_event(expected);
 }
@@ -1406,8 +1415,14 @@ fn shell_matches_core_over_400_step_fixed_seed_sequence() {
                     let p = 500_000_000 + ((seed >> 7) % 500_000_001);
                     let values = components(ONE, c, p, ONE);
                     OnchainInput::set(values.clone());
-                    let core_result =
-                        core.record_snapshot(epoch, version, values, FixedU64(ONE), &params);
+                    let core_result = core.record_snapshot(
+                        epoch,
+                        version,
+                        values,
+                        FixedU64(ONE),
+                        Vec::new(),
+                        &params,
+                    );
                     let pallet_result =
                         Welfare::record_snapshot(RuntimeOrigin::signed(keeper()), epoch, version);
                     let expected_ok = core_result.is_ok();
@@ -1492,7 +1507,7 @@ fn shell_matches_core_over_400_step_fixed_seed_sequence() {
 
             if expected_ok {
                 assert_eq!(core.events.len(), 1, "event cardinality at step {step}");
-                assert_last_matches_core(core.events[0]);
+                assert_last_matches_core(core.events[0].clone());
             } else {
                 assert!(core.events.is_empty(), "failed core emitted at step {step}");
             }
@@ -1863,6 +1878,143 @@ fn sq201_epoch_roll_prune_protects_the_snapshot_deadline_binding() {
             .expect("snapshot progress advanced");
         assert_ok!(Welfare::prune_epoch_roll(u32::MAX));
         assert!(Snapshots::<Test>::contains_key((last, 1)));
+        assert_ok!(Welfare::do_try_state());
+    });
+}
+
+// ---- SQ-493: 07 §10 two-consecutive-flag renormalization, shell wiring -------
+
+/// Component values kept strictly interior so every gate and geometric term is
+/// live. At the mock's healthy 1.0 inputs the whole composite short-circuits and
+/// a renormalization test would compare two identical saturated scores.
+fn interior_components() -> Vec<ComponentValue> {
+    components(950_000_000, 930_000_000, 800_000_000, 600_000_000)
+}
+
+fn record_window(flagged: Vec<((EpochId, MetricSpecVersion), Vec<MetricId>)>) {
+    OnchainInput::set(interior_components());
+    FlaggedInputs::set(flagged);
+    for epoch in 10..=12 {
+        assert_ok!(Welfare::record_snapshot(
+            RuntimeOrigin::signed(keeper()),
+            epoch,
+            1,
+        ));
+    }
+}
+
+fn settled_score() -> FixedU64 {
+    LedgerCalls::set(Vec::new());
+    assert_ok!(Welfare::compute_settlement(10, 1, SettleTarget::Baseline));
+    match LedgerCalls::get().last() {
+        Some(LedgerCall::Baseline(_, score)) => *score,
+        other => panic!("expected a baseline settlement, got {other:?}"),
+    }
+}
+
+#[test]
+fn sq493_flags_reach_storage_and_renormalize_the_settlement_score() {
+    new_test_ext().execute_with(|| {
+        // The A component (id 4, attested) is flagged in both measured epochs.
+        record_window(vec![((11, 1), vec![4]), ((12, 1), vec![4])]);
+
+        // The flags land in the pallet-internal context beside each snapshot —
+        // never in `Snapshots`, which is a frozen 02 §7.4 frontend surface.
+        for epoch in 11..=12 {
+            let context = SnapshotContexts::<Test>::get((epoch, 1)).expect("context stored");
+            assert_eq!(context.flagged.into_inner(), vec![4]);
+            assert_eq!(context.incident_multiplier, FixedU64(ONE));
+            assert_eq!(
+                context.params,
+                Welfare::welfare_state().snapshot_contexts[0].params
+            );
+        }
+        assert!(SnapshotContexts::<Test>::get((10, 1))
+            .expect("context stored")
+            .flagged
+            .is_empty());
+
+        let renormalized = settled_score();
+        let events = System::events()
+            .into_iter()
+            .filter_map(|record| match record.event {
+                RuntimeEvent::Welfare(event) => Some(event),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let dropped = BoundedVec::try_from(vec![4u16]).expect("bounded");
+        assert_eq!(
+            events[events.len() - 2],
+            Event::SettlementRenormalized {
+                epoch: 10,
+                spec_version: 1,
+                dropped,
+            },
+            "the renormalization must be reported immediately before the score"
+        );
+        assert!(matches!(
+            events[events.len() - 1],
+            Event::SettlementComputed { epoch: 10, .. }
+        ));
+        assert_ok!(Welfare::do_try_state());
+        // The drop is load-bearing: the same inputs unflagged settle lower,
+        // because the 0.6 A value was still voting.
+        let carried = new_test_ext().execute_with(|| {
+            record_window(Vec::new());
+            let score = settled_score();
+            assert!(!System::events().into_iter().any(|record| matches!(
+                record.event,
+                RuntimeEvent::Welfare(Event::SettlementRenormalized { .. })
+            )));
+            score
+        });
+        assert!(
+            carried.0 < renormalized.0,
+            "carried {carried:?} vs renormalized {renormalized:?}"
+        );
+        // Both scores must be strictly interior, or the comparison above proves
+        // nothing: a zeroed gate or a saturated composite compares equal
+        // whatever the renormalization did.
+        for score in [carried, renormalized] {
+            assert!(
+                (100_000_000..900_000_000).contains(&score.0),
+                "degenerate settlement fixture: {score:?}"
+            );
+        }
+    });
+}
+
+#[test]
+fn sq493_a_flag_on_a_non_attested_component_refuses_the_crank() {
+    new_test_ext().execute_with(|| {
+        OnchainInput::set(interior_components());
+        // Component 2 is the on-chain C input: 07 §11(1)(i) makes class-4
+        // components the only reportable ones, so a flag here would be feeding
+        // §10's renormalization with a value the oracle never owned. The crank
+        // refuses rather than recording it (G-1).
+        FlaggedInputs::set(vec![((11, 1), vec![2])]);
+        assert_noop!(
+            Welfare::record_snapshot(RuntimeOrigin::signed(keeper()), 11, 1),
+            Error::<Test>::BadFlaggedComponent
+        );
+        assert!(SnapshotContexts::<Test>::get((11, 1)).is_none());
+    });
+}
+
+#[test]
+fn sq493_contexts_retire_with_their_snapshots_on_both_prune_paths() {
+    new_test_ext().execute_with(|| {
+        record_window(vec![((11, 1), vec![4]), ((12, 1), vec![4])]);
+        assert_eq!(SnapshotContexts::<Test>::iter().count(), 3);
+        assert_ok!(Welfare::prune(11));
+        assert_eq!(SnapshotContexts::<Test>::iter().count(), 2);
+        assert!(SnapshotContexts::<Test>::get((10, 1)).is_none());
+        assert_ok!(Welfare::do_try_state());
+        assert_ok!(Welfare::prune_epoch_roll(12));
+        assert_eq!(
+            SnapshotContexts::<Test>::iter().count(),
+            Snapshots::<Test>::iter().count()
+        );
         assert_ok!(Welfare::do_try_state());
     });
 }

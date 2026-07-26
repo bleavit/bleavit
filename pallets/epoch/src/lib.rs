@@ -421,6 +421,16 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     /// does the work, and the weight file then reports no change at all.
     fn assert_oracle_components_reaped() {}
     fn prime_settlement(epoch: EpochId);
+    /// Assert the settled cohort's `W` was actually **recomputed** under
+    /// 07 §10 — i.e. that [`Self::prime_settlement`] left a live two-consecutive
+    /// flag streak and the renormalization ran.
+    ///
+    /// Asserted for the same reason the reaping sweep is: the failure mode is
+    /// silence. A fixture that seeds no flags, no spec set, or components at
+    /// exactly 1.0 measures a settlement that skips the recompute entirely, and
+    /// the weight file reports no change — the shape every fixture-instead-of-work
+    /// regression in this repo has taken.
+    fn assert_settlement_renormalized(_epoch: EpochId) {}
     fn prime_keeper_rebate() {}
     fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 }
