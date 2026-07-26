@@ -2576,8 +2576,10 @@ fn sq500_maintenance_batch_rotates_past_reviews_that_cannot_settle() {
         run_to_block(start + 1);
         assert_eq!(FailedActions::<Test>::count(), 0);
 
-        // Block two rotates past them and settles the real ones — without the
-        // cursor this block would re-select the same failing prefix forever.
+        // Block two rotates past them and settles the real ones — the
+        // `remaining_after_first_maintenance_batch` carry, reached by rotation
+        // rather than by the failing prefix draining. Without the cursor this
+        // block would re-select that same prefix forever.
         run_to_block(start + 2);
         assert_eq!(FailedActions::<Test>::count(), batch);
         for index in 0..batch {
