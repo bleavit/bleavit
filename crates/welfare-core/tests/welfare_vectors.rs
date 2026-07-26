@@ -13,7 +13,7 @@ use futarchy_primitives::{FixedU64, MetricId};
 use serde_json::Value;
 use welfare_core::{
     settlement_score, AttestedAdmission, ComponentValue, MetricSpec, Pillar, Registration,
-    SourceClass, WelfareParams, WelfareState, EPSILON_PILLAR, ONE,
+    SourceClass, WelfareParams, WelfareState, EPSILON_PILLAR, ONE, THETA_S_LO as CORE_THETA_S_LO,
 };
 
 fn fixture() -> Value {
@@ -336,7 +336,9 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
     let scenarios = fixture["welfare_scenarios"]
         .as_array()
         .expect("welfare_scenarios family present");
-    assert_eq!(scenarios.len(), 4, "welfare family cardinality drifted");
+    // 4 + the SQ-493 additions: the live-gate `full_pipeline` baseline and the
+    // three 07 §10 renormalization rows.
+    assert_eq!(scenarios.len(), 8, "welfare family cardinality drifted");
 
     for row in scenarios {
         let name = row["name"].as_str().expect("scenario name");
@@ -359,7 +361,9 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
                 // one grid ulp (the G0-suite-reported defect, fixed 2026-07-18).
                 assert_eq!(score, FixedU64(expected), "{name}: settlement score");
             }
-            "full_pipeline" | "full_pipeline_non_binary_daily_weights" => {
+            "full_pipeline"
+            | "full_pipeline_non_binary_daily_weights"
+            | "full_pipeline_live_gates" => {
                 let parsed = pipeline_inputs(inputs);
                 let outputs = &row["outputs"];
                 // Pin the harness-derived D_eff to the vector before it feeds
@@ -387,6 +391,7 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
                         1,
                         snapshot_components(&parsed),
                         FixedU64(parsed.incident),
+                        Vec::new(),
                         &WelfareParams::DEFAULT,
                     )
                     .expect("snapshot records");
@@ -450,6 +455,7 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
                         1,
                         snapshot_components(&parsed),
                         FixedU64(parsed.incident),
+                        Vec::new(),
                         &WelfareParams::DEFAULT,
                     )
                     .expect("joint-C snapshot records");
@@ -499,9 +505,14 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
                 let (flags, _changed) = daily_state
                     .record_daily_gate(1, 0, 1, daily_components, &WelfareParams::DEFAULT)
                     .expect("daily gate records");
-                assert!(
+                // Directional, not one-sided: `full_pipeline_live_gates` sits
+                // *above* `welfare.thetaS`, and an assertion that only ever
+                // witnessed the breach side would pass on a comparator stuck at
+                // "breached".
+                assert_eq!(
                     flags.s_breached,
-                    "{name} S_daily below welfare.thetaS must latch a breach"
+                    exact_1e9(&outputs["S_daily"], "S_daily") < CORE_THETA_S_LO.0,
+                    "{name} S_daily breach must match the thetaS comparison"
                 );
 
                 // settlement_with_self: 05 §4.4 (4) applied to (W, W).
@@ -515,6 +526,104 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
                     )),
                     "{name} settlement_with_self"
                 );
+            }
+            "settlement_renormalized_drops_flagged_components"
+            | "settlement_renormalized_drops_whole_a_pillar"
+            | "settlement_renormalized_whole_a_pillar_at_live_gates" => {
+                // 07 §10 / 05 §4.4's settlement-time recompute, replayed through
+                // the production settlement path rather than any internal helper:
+                // three snapshots, the dropped components flagged in the two the
+                // cohort measures, and the score the cohort settles at.
+                let parsed = pipeline_inputs(inputs);
+                let outputs = &row["outputs"];
+                assert_eq!(
+                    parsed.d_eff,
+                    exact_1e9(&outputs["D_eff"], "D_eff"),
+                    "{name} D_eff"
+                );
+                let dropped = row["dropped"]
+                    .as_array()
+                    .expect("dropped set")
+                    .iter()
+                    .map(|value| {
+                        let component = value.as_str().expect("dropped component name");
+                        match component {
+                            "C03" => ID_C03,
+                            "A01" => ID_A01,
+                            "A02" => ID_A02,
+                            other => panic!("{name}: unmapped dropped component {other}"),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                assert!(!dropped.is_empty(), "{name} drops nothing");
+
+                let mut state = WelfareState::new();
+                state
+                    .register_metric_spec(
+                        Registration::Genesis,
+                        1,
+                        faithful_specs(&parsed),
+                        &seated(),
+                    )
+                    .expect("register faithful spec");
+                // Epoch 1 is the cohort's own epoch; 2 and 3 are the epochs it
+                // settles from. Flagging the set in both of those is exactly the
+                // 07 §10(3) streak that condemns the components.
+                let mut recorded = None;
+                for epoch in 1..=3 {
+                    let flagged = if epoch == 1 {
+                        Vec::new()
+                    } else {
+                        dropped.clone()
+                    };
+                    let welfare = state
+                        .record_snapshot(
+                            epoch,
+                            1,
+                            snapshot_components(&parsed),
+                            FixedU64(parsed.incident),
+                            flagged,
+                            &WelfareParams::DEFAULT,
+                        )
+                        .expect("snapshot records");
+                    recorded = Some(welfare);
+                }
+                state.try_state().expect("welfare state stays consistent");
+                let recorded = recorded.expect("three snapshots recorded");
+                let score = state
+                    .compute_settlement(1, 1)
+                    .expect("cohort settles on the recomputed window");
+
+                // Both measured epochs carry identical inputs, so the corpus `W`
+                // pins the score through the same public score function.
+                let expected_w = FixedU64(exact_1e9(&outputs["W"], "W"));
+                assert_eq!(
+                    score,
+                    settlement_score(expected_w, expected_w).expect("self score"),
+                    "{name} recomputed W"
+                );
+                assert_eq!(
+                    score,
+                    FixedU64(exact_1e9(
+                        &row["settlement_with_self"],
+                        "settlement_with_self"
+                    )),
+                    "{name} settlement_with_self"
+                );
+
+                // Where the gates leave `W` observable, the drop must actually
+                // move it — otherwise this row would pass against a settlement
+                // that ignored the flags entirely. The gate-vetoed rows cannot
+                // discriminate `W` (g(S) = 0 zeroes it either way) and pin the
+                // pillars instead, which is why the corpus carries a live-gate
+                // pair as well.
+                if recorded.0 > 0 {
+                    assert_ne!(
+                        score,
+                        settlement_score(recorded, recorded).expect("carried score"),
+                        "{name}: the renormalization must move the score"
+                    );
+                }
             }
             other => panic!("unknown welfare scenario: {other}"),
         }

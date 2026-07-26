@@ -53,17 +53,41 @@ fn metric_spec(id: u16, pillar: Pillar, weight: u64, version: u16) -> MetricSpec
     }
 }
 
+/// A full 16-component spec set weighted for the **worst case of the 05 §4.4
+/// aggregation**, not merely for the component bound.
+///
+/// The distribution matters because `S` is a `min` — cheap — while every C/P/A
+/// term costs a `log2`, a multiply and (under 07 §10's renormalization) a
+/// divide. A set that spent 12 of its 16 slots on `S` filled the bound while
+/// leaving four transcendental terms to measure; this one leaves twelve. The
+/// joint C vector's eight components carry `ONE / 8` each, so the vector sums to
+/// exactly 1 on the 1e9 grid, and both C sources stay live so the attested
+/// incident-multiplier path is exercised too.
 pub fn full_specs(version: u16) -> Vec<MetricSpec> {
-    let mut specs = (1..=12)
+    let mut specs = (1..=4)
         .map(|id| metric_spec(id, Pillar::S, 0, version))
         .collect::<Vec<_>>();
-    specs.push(metric_spec(13, Pillar::COnchain, ONE / 2, version));
-    // Keep both C sources live so snapshot/gate benchmarks exercise the
-    // attested-C incident-multiplier path as well as the on-chain component.
-    specs.push(metric_spec(14, Pillar::CAttested, ONE / 2, version));
-    specs.push(metric_spec(15, Pillar::P, ONE, version));
-    specs.push(metric_spec(16, Pillar::A, ONE, version));
+    for id in 5..=9 {
+        specs.push(metric_spec(id, Pillar::COnchain, ONE / 8, version));
+    }
+    for id in 10..=12 {
+        specs.push(metric_spec(id, Pillar::CAttested, ONE / 8, version));
+    }
+    specs.push(metric_spec(13, Pillar::P, ONE / 2, version));
+    specs.push(metric_spec(14, Pillar::P, ONE / 2, version));
+    specs.push(metric_spec(15, Pillar::A, ONE / 2, version));
+    specs.push(metric_spec(16, Pillar::A, ONE / 2, version));
     specs
+}
+
+/// The attested components of [`full_specs`] — the only ones 07 §10 can flag
+/// (§11(1) consequence (i)), and therefore the worst-case flagged set.
+pub fn attested_ids() -> Vec<futarchy_primitives::MetricId> {
+    full_specs(0)
+        .into_iter()
+        .filter(|spec| spec.source == SourceClass::Attested)
+        .map(|spec| spec.id)
+        .collect()
 }
 
 pub fn healthy(count: u16) -> Vec<ComponentValue> {
@@ -75,14 +99,34 @@ pub fn healthy(count: u16) -> Vec<ComponentValue> {
         .collect()
 }
 
+/// Component values strictly **inside** `(ε, 1)`, so every weighted-geometric
+/// term is actually evaluated.
+///
+/// [`healthy`] returns exactly 1.0, at which 05 §4.4's product skips every term
+/// (`x^w = 1`) and both gates saturate — so a snapshot benchmark built on it
+/// measures the bookkeeping and none of the arithmetic. The value is also kept
+/// away from the `θ⁻` floors, so `g(S)` and `g(C)` land on the interior
+/// smoothstep branch rather than the constant one.
+pub fn degraded(count: u16) -> Vec<ComponentValue> {
+    (1..=count)
+        .map(|id| ComponentValue {
+            id,
+            value: FixedU64(930_000_000),
+        })
+        .collect()
+}
+
 fn fill_snapshots(state: &mut WelfareState, count: usize) -> Result<(), BenchmarkError> {
     for epoch in 2..(count as u32 + 2) {
         state
             .record_snapshot(
                 epoch,
                 1,
-                healthy(MAX_COMPONENTS_PER_SPEC as u16),
+                degraded(MAX_COMPONENTS_PER_SPEC as u16),
                 FixedU64(ONE),
+                // Worst-case 07 §10 context: every flaggable component flagged,
+                // which is also the largest record the pallet mirror stores.
+                attested_ids(),
                 &CoreWelfareParams::DEFAULT,
             )
             .map_err(|_| BenchmarkError::Stop("benchmark snapshot setup failed"))?;
@@ -97,7 +141,7 @@ fn fill_gate_flags(state: &mut WelfareState, count: usize) -> Result<(), Benchma
                 epoch,
                 0,
                 1,
-                healthy(MAX_COMPONENTS_PER_SPEC as u16),
+                degraded(MAX_COMPONENTS_PER_SPEC as u16),
                 &CoreWelfareParams::DEFAULT,
             )
             .map_err(|_| BenchmarkError::Stop("benchmark gate setup failed"))?;
