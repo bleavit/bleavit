@@ -130,6 +130,41 @@ impl pallet_attestor::BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
     fn ratify() -> RuntimeOrigin {
         RuntimeOrigin::signed(AccountId32::from(RATIFY_ACC))
     }
+
+    fn prime_terminal_proposal(_pid: futarchy_primitives::ProposalId) {
+        ProposalTerminal::set(true);
+    }
+
+    fn prime_funds() {
+        // The pallet-only benchmark suite ran red before this existed: genesis
+        // endows accounts 1..=16 but places no holds and never funds the
+        // challenger, so every custody-aware benchmark aborted in setup with
+        // "Funds are unavailable" — and no gate noticed, because
+        // `cargo test --workspace` does not enable `runtime-benchmarks` for this
+        // pallet (SQ-490's family: a test that exists but is never executed).
+        use frame_support::traits::fungible::{Mutate, MutateHold};
+        let attestor_reason: RuntimeHoldReason = pallet_attestor::HoldReason::AttestorBond.into();
+        let challenge_reason: RuntimeHoldReason = pallet_attestor::HoldReason::ChallengeBond.into();
+        for seed in 1..=255u8 {
+            let who = AccountId32::from([seed; 32]);
+            let _ =
+                <Balances as Mutate<AccountId32>>::set_balance(&who, 1_000_000_000_000_000_000u128);
+            if u32::from(seed) <= pallet_attestor::MAX_ATTESTORS {
+                let _ = <Balances as MutateHold<AccountId32>>::hold(
+                    &attestor_reason,
+                    &who,
+                    pallet_attestor::ATTESTOR_BOND,
+                );
+            }
+            if seed == 250 {
+                let _ = <Balances as MutateHold<AccountId32>>::hold(
+                    &challenge_reason,
+                    &who,
+                    pallet_attestor::CHALLENGE_BOND,
+                );
+            }
+        }
+    }
 }
 
 pub fn acct(n: u8) -> AccountId32 {

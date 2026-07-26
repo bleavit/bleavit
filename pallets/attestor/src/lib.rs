@@ -88,6 +88,15 @@ pub trait BenchmarkHelper<RuntimeOrigin> {
     fn values() -> RuntimeOrigin;
     /// Construct a `ratify`-track origin.
     fn ratify() -> RuntimeOrigin;
+    /// Make `pid` read **terminal** through [`AttestorProposalStatus`], so
+    /// `reap_attestation` reaches the work it is supposed to measure.
+    ///
+    /// A seeding seam rather than a stubbed status oracle: the runtime binding
+    /// resolves terminality from real `pallet-epoch` storage, so a benchmark run
+    /// against an unseeded chain fails `ProposalNotTerminal` during setup and
+    /// measures nothing (SQ-489's fixture-instead-of-work shape). Pallet-only
+    /// mocks flip their own switch.
+    fn prime_terminal_proposal(_pid: futarchy_primitives::ProposalId) {}
 }
 
 #[frame_support::pallet]

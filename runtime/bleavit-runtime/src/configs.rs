@@ -9031,6 +9031,19 @@ impl pallet_attestor::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper 
     fn ratify() -> RuntimeOrigin {
         pallet_origins::Origin::ConstitutionalValues.into()
     }
+    fn prime_terminal_proposal(pid: futarchy_primitives::ProposalId) {
+        // `is_terminal` resolves against real `pallet-epoch` storage, so an
+        // unseeded chain fails `reap_attestation` at its precondition and the
+        // benchmark measures nothing (SQ-489/SQ-490). Seed the proposal the
+        // reaped attestation names, in a terminal state.
+        let proposal = benchmark_epoch_proposal(
+            pid,
+            futarchy_primitives::H256::from([7u8; 32]),
+            0,
+            futarchy_primitives::ProposalState::Settled,
+        );
+        pallet_epoch::Proposals::<Runtime>::insert(pid, proposal);
+    }
 }
 
 /// Stale `ComponentValues` entries seeded for the boundary crank's 07 §13
