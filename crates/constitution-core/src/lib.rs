@@ -1177,10 +1177,29 @@ pub fn genesis_capabilities() -> Vec<CapabilityRecord> {
 /// `trailing <= window`); every other duration Param stays at its frozen value so
 /// the emergency/execution/oracle windows can never fire inside a minute-scale
 /// drill.
+/// 13 §1's `epoch.length` **ceiling** — 42 days at 6-second blocks.
+///
+/// Exposed because the ceiling, not the default, is what a block-denominated
+/// governance track must be sized against: `epoch.length` is governable over
+/// 14–42 d, so a delay expressed in blocks spans a number of epoch boundaries
+/// that depends on the live value. 06 §2.1's `entrenched` track uses this to
+/// guarantee its four boundaries at **any** legal length (SQ-234).
+///
+/// The guarantee is unconditional because this row is **kernel-bounded** (13
+/// rule 7): its entire governance-metadata tuple — min, max, max-Δ, cooldown,
+/// class — is genesis-fixed and `amend_registry` refuses it outright, so no
+/// governance path can raise the ceiling out from under a scheduled delay.
+///
+/// Deliberately **not** compressed by `fast-timing`: every 06 §2.1 track period
+/// stays at its release value in that build, so the emergency, execution and
+/// governance windows can never fire inside a minute-scale drill. The compressed
+/// registry ceiling below is the *registry's* seed, which is a different thing.
+pub const EPOCH_LENGTH_CEILING_BLOCKS: u32 = 604_800;
+
 #[cfg(not(feature = "fast-timing"))]
 mod timing_defaults {
     pub const EPOCH_LENGTH: u32 = 302_400;
-    pub const EPOCH_LENGTH_MAX: u32 = 604_800;
+    pub const EPOCH_LENGTH_MAX: u32 = super::EPOCH_LENGTH_CEILING_BLOCKS;
     pub const DEC_WINDOW: u32 = 43_200;
     pub const DEC_WINDOW_MAX: u32 = 86_400;
     pub const DEC_TRAILING: u32 = 14_400;

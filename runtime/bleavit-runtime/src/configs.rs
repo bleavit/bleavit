@@ -1560,7 +1560,22 @@ pub(crate) const TRACKS: [pallet_referenda::Track<u16, Balance, u32>; 6] = [
             prepare_period: 7 * BLOCKS_PER_DAY,
             decision_period: 28 * BLOCKS_PER_DAY,
             confirm_period: 7 * BLOCKS_PER_DAY,
-            min_enactment_period: 4 * 21 * BLOCKS_PER_DAY,
+            // 06 §2.1/§2.4: **four epoch boundaries**, not 84 days. `epoch.length`
+            // is governable over 14–42 d, so a block-denominated delay spans a
+            // boundary count that depends on the live value — at the 42 d maximum
+            // the former `4 × 21 d` spanned only two, halving the priced second
+            // opinion exactly when governance had lengthened epochs (SQ-234).
+            //
+            // Sizing against the **ceiling** makes the guarantee unconditional and
+            // needs no new machinery: `pallet-referenda` reads this once, at bake
+            // time (`earliest_allowed = now + min_enactment_period`), so a delay
+            // derived from the *live* length could still be shaved by a lengthening
+            // that lands afterwards. The ceiling cannot move — `epoch.length` is
+            // kernel-bounded (13 rule 7), so `amend_registry` refuses its metadata
+            // tuple outright. Shorter epochs only add boundaries, never remove
+            // them, and every entrenched-track power is a loosening, so the
+            // resulting over-delay at shorter lengths errs toward more review.
+            min_enactment_period: 4 * pallet_constitution::EPOCH_LENGTH_CEILING_BLOCKS,
             min_approval: ENTRENCHED_APPROVAL,
             min_support: ENTRENCHED_SUPPORT,
         },
