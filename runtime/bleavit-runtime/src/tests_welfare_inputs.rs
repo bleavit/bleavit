@@ -1330,6 +1330,150 @@ fn zero_denominator_leaves_u_absent_and_fails_the_crank_closed() {
     });
 }
 
+// ------------------------------------------------------- A14: `H` and `Π`
+//
+// 05 §4.3's two remaining on-chain `C_onchain` components. The pallet owns the
+// accumulators (pinned in `pallets/welfare/src/tests.rs`); what is composed here
+// is the projection into component values — the 40 % mapping for `H`, the
+// `max(0, 1 − 0.25·n)` step for `Π`, and the deliberate asymmetry in how the two
+// treat an empty window.
+
+fn seed_sample(epoch: futarchy_primitives::EpochId, day: u8, utilization: u64, blocks: u32) {
+    // Bind the epoch to the shared retention index the way a real recorder
+    // would, so the seeded rows stay reachable by the bounded reaper.
+    pallet_welfare::Pallet::<Runtime>::note_xcm_traffic(
+        epoch,
+        day,
+        pallet_welfare::XcmTrafficKind::Accepted,
+    );
+    pallet_welfare::BlockWeightSamples::<Runtime>::insert(
+        epoch,
+        day,
+        pallet_welfare::BlockWeightSample {
+            utilization_sum: utilization,
+            blocks,
+        },
+    );
+}
+
+fn component_of(
+    id: futarchy_primitives::MetricId,
+    epoch: futarchy_primitives::EpochId,
+    version: futarchy_primitives::MetricSpecVersion,
+) -> Option<futarchy_primitives::FixedU64> {
+    use pallet_welfare::MetricInputs;
+    crate::configs::RuntimeMetricInputs::onchain_components(epoch, version)
+        .into_iter()
+        .find(|c| c.id == id)
+        .map(|c| c.value)
+}
+
+fn daily_component_of(
+    id: futarchy_primitives::MetricId,
+    epoch: futarchy_primitives::EpochId,
+    day: u8,
+    version: futarchy_primitives::MetricSpecVersion,
+) -> Option<futarchy_primitives::FixedU64> {
+    use pallet_welfare::MetricInputs;
+    crate::configs::RuntimeMetricInputs::daily_components(epoch, day, version)
+        .into_iter()
+        .find(|c| c.id == id)
+        .map(|c| c.value)
+}
+
+/// 05 §4.3: `H = 1 − mean(used ÷ limit)`, "mapped so 40% target utilization ⇒ 1".
+///
+/// The two properties that fix the mapping: **exactly** 1 at the 40 % target,
+/// and falling from there as utilization rises. Below target it clamps — spare
+/// capacity is healthy, not better than healthy, and an unclamped `H` would push
+/// `C_onchain` off the [0,1] domain both §4.1 gates are defined on.
+#[test]
+fn a14_h_reads_one_at_target_falls_above_it_and_clamps_below() {
+    const VERSION: futarchy_primitives::MetricSpecVersion = 61;
+    const ONE: u64 = pallet_welfare::ONE;
+    // The 40 % is a kernel constant, never a literal in the consumer (rule 4).
+    let target = futarchy_primitives::kernel::WEIGHT_HEADROOM_TARGET_UTILIZATION;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::H);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let h_at = |utilization: u64| {
+            seed_sample(epoch, 0, utilization, 1);
+            component_of(futarchy_primitives::metric_ids::H, epoch, VERSION)
+        };
+
+        // Exactly at target: exactly 1. Not 0.999…, not the raw 1 − 0.4 = 0.6.
+        assert_eq!(h_at(target), Some(futarchy_primitives::FixedU64(ONE)));
+
+        // Above target it falls, strictly and monotonically.
+        let just_above = h_at(target + 1).expect("sampled");
+        assert!(
+            just_above.0 < ONE,
+            "H must fall the moment utilization passes the target",
+        );
+        let seventy = h_at(700_000_000).expect("sampled");
+        // (1 − 0.7) / (1 − 0.4) = 0.5 exactly on the 1e9 grid.
+        assert_eq!(seventy, futarchy_primitives::FixedU64(500_000_000));
+        assert!(
+            seventy.0 < just_above.0,
+            "H must be monotone in utilization"
+        );
+        // A saturated block leaves no headroom at all.
+        assert_eq!(h_at(ONE), Some(futarchy_primitives::FixedU64(0)));
+
+        // Below target it clamps at 1 rather than exceeding the pillar domain.
+        assert_eq!(h_at(target - 1), Some(futarchy_primitives::FixedU64(ONE)));
+        assert_eq!(h_at(100_000_000), Some(futarchy_primitives::FixedU64(ONE)));
+        assert_eq!(h_at(0), Some(futarchy_primitives::FixedU64(ONE)));
+    });
+}
+
+/// Both granularities read the same accumulator, and the epoch projection is
+/// **block-weighted**: a day that produced two blocks must not weigh the same as
+/// a full one.
+#[test]
+fn a14_h_is_block_weighted_across_the_epoch_and_day_resolved_within_it() {
+    const VERSION: futarchy_primitives::MetricSpecVersion = 62;
+    const ONE: u64 = pallet_welfare::ONE;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::H);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        // Day 0: one saturated block. Day 1: one idle block.
+        seed_sample(epoch, 0, ONE, 1);
+        seed_sample(epoch, 1, 0, 1);
+
+        // Day-resolved: the two days disagree completely.
+        assert_eq!(
+            daily_component_of(futarchy_primitives::metric_ids::H, epoch, 0, VERSION),
+            Some(futarchy_primitives::FixedU64(0)),
+        );
+        assert_eq!(
+            daily_component_of(futarchy_primitives::metric_ids::H, epoch, 1, VERSION),
+            Some(futarchy_primitives::FixedU64(ONE)),
+        );
+
+        // Epoch-wide: mean 0.5 ⇒ (1 − 0.5)/0.6 = 0.8333…, truncated down.
+        assert_eq!(
+            component_of(futarchy_primitives::metric_ids::H, epoch, VERSION),
+            Some(futarchy_primitives::FixedU64(833_333_333)),
+        );
+
+        // Two more idle blocks on day 1 move the epoch mean to 0.25 — below
+        // target — while day 0 is unchanged. That is only possible because the
+        // epoch sums blocks, not daily means.
+        seed_sample(epoch, 1, 0, 3);
+        assert_eq!(
+            component_of(futarchy_primitives::metric_ids::H, epoch, VERSION),
+            Some(futarchy_primitives::FixedU64(ONE)),
+        );
+        assert_eq!(
+            daily_component_of(futarchy_primitives::metric_ids::H, epoch, 0, VERSION),
+            Some(futarchy_primitives::FixedU64(0)),
+        );
+    });
+}
+
 /// The filter selects on **source class**, not pillar. Before A14 it read
 /// `pillar == COnchain`, which made every S component structurally unemittable
 /// however it was registered — `U` included.
@@ -1632,6 +1776,215 @@ fn an_outage_across_a_window_boundary_is_lost_by_neither_window() {
         assert_eq!(
             pallet_welfare::Pallet::<Runtime>::block_production_epoch(epoch).relay_slots,
             501,
+        );
+    });
+}
+
+/// A window with no sampled block resolves `H` **absent**, and the crank then
+/// fails status-quo-safe (G-1).
+///
+/// The fabricated alternative — reading 1 — would raise `C_onchain` out of a
+/// window nothing measured. 05 §4.3's missing-data column gives `H` no
+/// "no data ⇒ 1" rule precisely because absence of a *measurement* is not the
+/// same fact as absence of an *event*.
+#[test]
+fn a14_h_is_absent_without_a_sampled_block_and_the_crank_fails_closed() {
+    const VERSION: futarchy_primitives::MetricSpecVersion = 63;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::H);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+
+        assert_eq!(
+            component_of(futarchy_primitives::metric_ids::H, epoch, VERSION),
+            None,
+            "an unsampled epoch must not fabricate headroom",
+        );
+        assert_eq!(
+            daily_component_of(futarchy_primitives::metric_ids::H, epoch, 0, VERSION),
+            None,
+            "an unsampled day must not fabricate headroom",
+        );
+
+        // The composed consequence: with `H` registered and absent, the keeper
+        // crank refuses rather than snapshotting a fabricated pillar.
+        pallet_epoch::EpochOf::<Runtime>::mutate(|info| {
+            info.index = epoch.saturating_add(1);
+        });
+        assert!(
+            pallet_welfare::Pallet::<Runtime>::record_snapshot(
+                crate::RuntimeOrigin::signed(crate::tests::account(77)),
+                epoch,
+                VERSION,
+            )
+            .is_err(),
+            "a registered-but-unmeasured H must fail the crank status-quo-safe",
+        );
+
+        // One sampled block is all it takes for the same crank to proceed.
+        seed_sample(
+            epoch,
+            0,
+            futarchy_primitives::kernel::WEIGHT_HEADROOM_TARGET_UTILIZATION,
+            1,
+        );
+        assert_eq!(
+            component_of(futarchy_primitives::metric_ids::H, epoch, VERSION),
+            Some(futarchy_primitives::FixedU64(pallet_welfare::ONE)),
+        );
+        assert!(pallet_welfare::Pallet::<Runtime>::record_snapshot(
+            crate::RuntimeOrigin::signed(crate::tests::account(77)),
+            epoch,
+            VERSION,
+        )
+        .is_ok());
+    });
+}
+
+/// 05 §4.3: `Π = max(0, 1 − 0.25 · defensive_failure_events)` per window, and
+/// §4.3's missing-data rule makes **no events ⇒ 1** — the asymmetry with `H`.
+///
+/// `Π` counts occurrences of a fault, so a window with none is a window in which
+/// the runtime's assumptions held; that *is* the healthy observation. `H`
+/// averages a quantity, and a window with no sample has no average at all.
+#[test]
+fn a14_pi_steps_down_by_a_quarter_and_saturates_at_zero() {
+    const VERSION: futarchy_primitives::MetricSpecVersion = 64;
+    const ONE: u64 = pallet_welfare::ONE;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::PI);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let pi = || component_of(futarchy_primitives::metric_ids::PI, epoch, VERSION);
+        let pi_daily =
+            |day: u8| daily_component_of(futarchy_primitives::metric_ids::PI, epoch, day, VERSION);
+
+        // No events: legitimately 1, and available — never absent.
+        assert_eq!(pi(), Some(futarchy_primitives::FixedU64(ONE)));
+        assert_eq!(pi_daily(0), Some(futarchy_primitives::FixedU64(ONE)));
+
+        let note = |day: u8| {
+            pallet_welfare::Pallet::<Runtime>::note_integrity_failure(
+                epoch,
+                day,
+                futarchy_primitives::integrity::IntegrityFault::FailStaticLatch,
+            )
+        };
+
+        note(0);
+        assert_eq!(pi(), Some(futarchy_primitives::FixedU64(750_000_000)));
+        note(0);
+        assert_eq!(pi(), Some(futarchy_primitives::FixedU64(500_000_000)));
+        note(0);
+        assert_eq!(pi(), Some(futarchy_primitives::FixedU64(250_000_000)));
+        // The fourth zeroes it — the saturation point the kernel constant fixes.
+        note(0);
+        assert_eq!(pi(), Some(futarchy_primitives::FixedU64(0)));
+        assert_eq!(
+            futarchy_primitives::kernel::INTEGRITY_FAILURES_TO_ZERO,
+            4,
+            "the step and the saturation point are one constant, not two",
+        );
+        // A fifth stays at zero rather than wrapping below it.
+        note(0);
+        assert_eq!(pi(), Some(futarchy_primitives::FixedU64(0)));
+
+        // Day-resolved: a fault on day 0 leaves day 1 healthy, and the epoch
+        // projection is the sum across days.
+        assert_eq!(pi_daily(1), Some(futarchy_primitives::FixedU64(ONE)));
+        note(1);
+        assert_eq!(
+            pi_daily(1),
+            Some(futarchy_primitives::FixedU64(750_000_000))
+        );
+        assert_eq!(pi(), Some(futarchy_primitives::FixedU64(0)));
+    });
+}
+
+/// The two runtime-side `Π` sites, and the one that deliberately is not.
+///
+/// 05 §4.3.2 admits a fail-static latch engaged out of a detected inconsistency.
+/// `UPGRADE_ABORT_TRIGGER` is not one: the relay preserved the status quo,
+/// nothing was discarded, and a fresh proposal is the defined path — which is
+/// why it is excluded from `EXECUTION_HALT_SOURCES` and therefore from the
+/// counter by construction rather than by a hand-maintained exception.
+#[test]
+fn a14_the_execution_halt_latch_counts_once_and_an_upgrade_abort_never_does() {
+    const VERSION: futarchy_primitives::MetricSpecVersion = 65;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::PI);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let count = || pallet_welfare::Pallet::<Runtime>::integrity_failures_epoch(epoch);
+
+        // A relay-aborted upgrade raises the guardian-visible trigger without
+        // halting execution. Not a §4.3.2 event.
+        crate::configs::note_upgrade_abort_trigger_for_test();
+        assert_eq!(count(), 0, "an upgrade abort must never reach Π");
+
+        // A genuine migration failure engages the fail-static latch: one event.
+        crate::configs::note_migration_stall_halt_for_test();
+        assert_eq!(count(), 1);
+
+        // A second source setting while the halt is already engaged is the same
+        // latch re-described, not a new one.
+        crate::configs::note_migration_stall_halt_for_test();
+        crate::configs::note_upgrade_abort_trigger_for_test();
+        assert_eq!(
+            count(),
+            1,
+            "the activation edge is the event, not each write"
+        );
+    });
+}
+
+/// The `H` sampler runs in `pallet-welfare`'s `on_finalize`, so it can only see
+/// weight registered by pallets ordered at or before index 54. That is sound
+/// **because** no pallet after it consumes any — 55–64 are all custom pallets
+/// with no `on_finalize` at all — and this pins that ordering property rather
+/// than leaving it as a comment that a later `construct_runtime!` edit could
+/// silently falsify.
+#[test]
+fn a14_no_pallet_ordered_after_welfare_consumes_finalization_weight() {
+    use frame_support::traits::OnFinalize;
+
+    crate::tests::development_ext().execute_with(|| {
+        let now = frame_system::Pallet::<Runtime>::block_number();
+        frame_system::Pallet::<Runtime>::register_extra_weight_unchecked(
+            crate::configs::RuntimeBlockWeights::get().max_block / 4,
+            frame_support::dispatch::DispatchClass::Mandatory,
+        );
+        // Sample exactly as the hook would.
+        pallet_welfare::Pallet::<Runtime>::sample_block_weight();
+        let sampled = frame_system::Pallet::<Runtime>::block_weight().total();
+
+        // Every pallet at a `construct_runtime!` index above Welfare's 54.
+        <pallet_oracle::Pallet<Runtime> as OnFinalize<_>>::on_finalize(now);
+        <pallet_registry::Pallet<Runtime> as OnFinalize<_>>::on_finalize(now);
+        <pallet_registry::Pallet<Runtime, pallet_registry::Instance1> as OnFinalize<_>>::on_finalize(now);
+        <pallet_futarchy_treasury::Pallet<Runtime> as OnFinalize<_>>::on_finalize(now);
+        <pallet_guardian::Pallet<Runtime> as OnFinalize<_>>::on_finalize(now);
+        <pallet_attestor::Pallet<Runtime> as OnFinalize<_>>::on_finalize(now);
+        <pallet_epoch::Pallet<Runtime> as OnFinalize<_>>::on_finalize(now);
+        <pallet_execution_guard::Pallet<Runtime> as OnFinalize<_>>::on_finalize(now);
+        <pallet_inflow_caps::Pallet<Runtime> as OnFinalize<_>>::on_finalize(now);
+
+        assert_eq!(
+            frame_system::Pallet::<Runtime>::block_weight().total(),
+            sampled,
+            "a pallet ordered after Welfare now consumes finalization weight the H sampler cannot see",
+        );
+
+        // And what was sampled really is this block's whole utilization.
+        let (epoch, day) = <Runtime as pallet_welfare::Config>::CurrentWindow::get();
+        let expected = pallet_welfare::block_utilization(
+            sampled,
+            crate::configs::RuntimeBlockWeights::get().max_block,
+        )
+        .expect("the runtime block limit is measurable");
+        assert_eq!(
+            pallet_welfare::Pallet::<Runtime>::block_weight_sample(epoch, day).utilization_sum,
+            expected,
         );
     });
 }

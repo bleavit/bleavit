@@ -20,9 +20,21 @@ pub trait WeightInfo {
     /// inherent and the post-transaction boundary that drive it reserve no
     /// weight, so the writer registers this itself as `Mandatory`.
     fn note_block_production() -> Weight;
+    /// Weight of the per-block `sample_block_weight` finalization hook
+    /// (05 §4.3 `H`). Registered as `Mandatory` extra weight because block
+    /// finalization reserves nothing for it — the `note_collator_block` /
+    /// `pallet_collator_selection::note_author` pattern.
+    fn sample_block_weight() -> Weight;
+    /// Weight of one `Π` increment (05 §4.3). Also `Mandatory` extra weight:
+    /// every caller is a hook or an infallible seam on an already-failing path
+    /// that reserved nothing for the recorder.
+    fn note_integrity_failure() -> Weight;
 }
 
 const STATE_POV: u64 = 32_000;
+/// Placeholder proof size for the `(epoch, day)` weight-sample accumulator plus
+/// the shared bounded epoch index; replaced by the generated runtime weights.
+const SAMPLE_POV: u64 = 4_000;
 
 pub struct SubstrateWeight<T>(PhantomData<T>);
 
@@ -56,6 +68,18 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(3))
             .saturating_add(T::DbWeight::get().writes(3))
     }
+
+    fn sample_block_weight() -> Weight {
+        Weight::from_parts(10_000_000, SAMPLE_POV)
+            .saturating_add(T::DbWeight::get().reads(4))
+            .saturating_add(T::DbWeight::get().writes(2))
+    }
+
+    fn note_integrity_failure() -> Weight {
+        Weight::from_parts(12_000_000, SAMPLE_POV)
+            .saturating_add(T::DbWeight::get().reads(2))
+            .saturating_add(T::DbWeight::get().writes(2))
+    }
 }
 
 impl WeightInfo for () {
@@ -87,5 +111,17 @@ impl WeightInfo for () {
         Weight::from_parts(15_000_000, STATE_POV)
             .saturating_add(RocksDbWeight::get().reads(3))
             .saturating_add(RocksDbWeight::get().writes(3))
+    }
+
+    fn sample_block_weight() -> Weight {
+        Weight::from_parts(10_000_000, SAMPLE_POV)
+            .saturating_add(RocksDbWeight::get().reads(4))
+            .saturating_add(RocksDbWeight::get().writes(2))
+    }
+
+    fn note_integrity_failure() -> Weight {
+        Weight::from_parts(12_000_000, SAMPLE_POV)
+            .saturating_add(RocksDbWeight::get().reads(2))
+            .saturating_add(RocksDbWeight::get().writes(2))
     }
 }

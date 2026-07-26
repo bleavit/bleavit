@@ -345,6 +345,7 @@ pub mod pallet {
     use sp_runtime::TryRuntimeError;
 
     use futarchy_primitives::{
+        integrity::{IntegrityFault, IntegritySink},
         keeper::{CrankClass, KeeperRebateSink},
         Balance, BlockNumber, EpochId, ProposalClass,
     };
@@ -440,6 +441,16 @@ pub mod pallet {
 
         /// Custody seam for the 08 §1.2/§1.4 INSURANCE → `MAIN` sweep (SQ-207).
         type InsuranceSweep: InsuranceSweep;
+
+        /// 05 §4.3.2 `Π` recorder for the collator-accounting losses in
+        /// [`Pallet::note_collator_block`] (08 §2.4).
+        ///
+        /// Injected rather than called directly because this pallet must not
+        /// depend on `pallet-welfare` — welfare already depends on it for the
+        /// 08 §6.3 keeper rebate, and the reverse edge would close a cycle. The
+        /// runtime supplies the single recorder every fault site in the chain
+        /// shares, so the `(epoch, day)` window is derived in exactly one place.
+        type Integrity: IntegritySink;
 
         /// Weight information for extrinsics.
         type WeightInfo: WeightInfo;
@@ -1338,13 +1349,34 @@ pub mod pallet {
                     // accumulator is a bounded fail-closed condition.
                     if CollatorPendingEpoch::<T>::get().is_some() {
                         match CollatorDroppedEpoch::<T>::get() {
-                            None => CollatorDroppedEpoch::<T>::put(epoch),
+                            None => {
+                                CollatorDroppedEpoch::<T>::put(epoch);
+                                // 05 §4.3.2 `Π`, `LostAccounting`. All three
+                                // clauses: the pallet holds unconditionally that
+                                // at most one completed accumulator awaits
+                                // payout, this block's authored share is
+                                // discarded outright, and no crank rebuilds it —
+                                // the marker only ever escalates into the
+                                // `Overflowed` latch below, which voids the
+                                // *whole* epoch's collator compensation.
+                                Self::note_collator_accounting_loss();
+                            }
                             Some(dropped) if dropped != epoch => {
                                 // Keep the first dropped epoch. A second
                                 // distinct drop also taints the complete
                                 // current accumulator conservatively.
                                 CollatorAuthoredOverflowed::<T>::put(true);
+                                // A *second, distinct* epoch losing a boundary
+                                // block is a new loss, and it additionally
+                                // taints an accumulator that was until now
+                                // payable — so it is counted, unlike the
+                                // `Some(_)` arm below.
+                                Self::note_collator_accounting_loss();
                             }
+                            // A repeat drop of the epoch already marked. The
+                            // loss of that epoch's accounting was counted when
+                            // the marker was set, and §4.3.2 counts an event
+                            // once — re-observing it is not a second event.
                             Some(_) => {}
                         }
                         return;
@@ -1354,6 +1386,12 @@ pub mod pallet {
                     let overflowed = CollatorAuthoredOverflowed::<T>::take();
                     CollatorPendingBlocks::<T>::put(blocks);
                     CollatorPendingEpoch::<T>::put(tracked);
+                    // **Not** a `Π` event (05 §4.3.2). This is the already-set
+                    // `CollatorAuthoredOverflowed` flag being *moved* into the
+                    // pending slot alongside the accumulator it describes, not a
+                    // new detection: whatever set it was counted where it was
+                    // set. Counting the carry too would count one lost epoch
+                    // twice, which the "at most once" rule forbids.
                     CollatorPendingOverflowed::<T>::put(overflowed);
                     if let Some(registered) = registered {
                         CollatorPendingRegisteredCount::<T>::put(registered);
@@ -1365,6 +1403,10 @@ pub mod pallet {
                 CollatorAuthoredEpoch::<T>::put(epoch);
                 CollatorAuthoredRegisteredCount::<T>::put(T::RegisteredCollatorCount::get());
                 if CollatorDroppedEpoch::<T>::get() == Some(epoch) {
+                    // **Not** a `Π` event. This consumes the marker set above
+                    // and turns it into the latch that voids the epoch — the
+                    // downstream consequence of a loss already counted at the
+                    // moment the block was dropped, not a second detection.
                     CollatorAuthoredOverflowed::<T>::put(true);
                     CollatorDroppedEpoch::<T>::kill();
                 }
@@ -1373,9 +1415,31 @@ pub mod pallet {
                 if let Some((_, blocks)) = shares.iter_mut().find(|(who, _)| *who == author) {
                     *blocks = blocks.saturating_add(1);
                 } else if shares.try_push((author, 1)).is_err() {
-                    CollatorAuthoredOverflowed::<T>::put(true);
+                    // 05 §4.3.2 `Π`, `LostAccounting`. The bound is the active
+                    // session's collator ceiling (13 §4), so a 121st distinct
+                    // author is a population the runtime holds to be impossible
+                    // — not a queue under load. The latch then discards *every*
+                    // collator's share for the epoch, and no crank can rebuild
+                    // an accumulator whose input was the block stream itself.
+                    //
+                    // Only the false → true transition counts: once latched the
+                    // epoch is already unpayable, and each further overflowing
+                    // author is the same lost epoch, not a new one.
+                    if !CollatorAuthoredOverflowed::<T>::get() {
+                        CollatorAuthoredOverflowed::<T>::put(true);
+                        Self::note_collator_accounting_loss();
+                    }
                 }
             });
+        }
+
+        /// Record one 08 §2.4 collator-accounting loss into 05 §4.3's `Π`.
+        ///
+        /// A single funnel so every site in this pallet reaches the runtime's
+        /// one recorder by the same route, and so the "counted here, not there"
+        /// decisions above are visible as calls rather than as absences.
+        fn note_collator_accounting_loss() {
+            T::Integrity::note_integrity_failure(IntegrityFault::LostAccounting);
         }
 
         /// Pay the bounded authored-share accumulator at the completed-epoch
@@ -1384,6 +1448,19 @@ pub mod pallet {
         /// meaningful and a failed custody transfer leaves the accumulator for
         /// retry. Every transfer and accounting/map cleanup share one storage
         /// transaction, so a partial payout cannot create an unbacked claimant.
+        ///
+        /// **No path in this function is a 05 §4.3.2 `Π` event**, and the
+        /// distinction is exactly the ruling's third clause. Its bails —
+        /// nothing tracked, epoch not yet complete, missing registered count, a
+        /// core computation or `checked_state` refusal — all return with state
+        /// *intact*, so clause 2 (state discarded or a latch engaged) never
+        /// holds; Housekeeping re-enters at the next boundary. The two
+        /// `let _ = result;` sites discard a storage-layer error whose whole
+        /// design is that the accumulator survives for retry, which is a defined
+        /// recovery path, so clause 3 never holds either. The overflowed-
+        /// teardown path is doubly excluded: its epoch's loss was already
+        /// counted where the latch was set, and counting the teardown would
+        /// count one lost epoch twice.
         pub fn pay_collator_compensation() {
             let pending = CollatorPendingEpoch::<T>::get().is_some();
             let Some(tracked_epoch) = (if pending {

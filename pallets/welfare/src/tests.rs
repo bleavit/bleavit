@@ -1,6 +1,6 @@
 use crate::mock::*;
 use crate::*;
-use frame_support::{assert_noop, assert_ok, BoundedVec};
+use frame_support::{assert_noop, assert_ok, traits::Get, BoundedVec};
 use futarchy_primitives::{keeper::CrankClass, kernel, FixedU64};
 
 fn bounded(specs: Vec<MetricSpec>) -> BoundedSpecSet {
@@ -2962,5 +2962,371 @@ fn sq497_diffed_persist_still_writes_updates_and_still_removes_dropped_keys() {
         assert_ok!(Welfare::prune(12));
         assert!(!GateBreachFlags::<Test>::contains_key(11));
         assert!(!Snapshots::<Test>::contains_key((11, 1)));
+    });
+}
+
+// ------------------------------------------------------- A14: `H` and `Π`
+//
+// 05 §4.3 adds two `C_onchain` components with on-chain inputs this pallet
+// owns: the block-weight utilization accumulator behind `H`, and the single
+// saturating defensive-failure counter behind `Π`. The 40 % mapping and the
+// `max(0, 1 − 0.25·n)` projection are runtime-composition work and are pinned in
+// `runtime/bleavit-runtime/src/tests_welfare_inputs.rs`; what belongs here is
+// the recording, the bounds, the reaper and try-state.
+
+/// The block limit the mock's `frame_system` declares, so tests express
+/// utilization as a fraction of the real denominator rather than a literal.
+fn block_limit() -> frame_support::weights::Weight {
+    <<Test as frame_system::Config>::BlockWeights as Get<frame_system::limits::BlockWeights>>::get()
+        .max_block
+}
+
+#[test]
+fn utilization_takes_the_worse_of_the_two_weight_dimensions() {
+    let limit = frame_support::weights::Weight::from_parts(1_000, 2_000);
+    // ref_time saturated, proof idle: headroom is exhausted, so the ratio is 1.
+    assert_eq!(
+        crate::block_utilization(frame_support::weights::Weight::from_parts(1_000, 0), limit),
+        Some(ONE),
+    );
+    // proof saturated, ref_time idle: same answer, which is the whole point of
+    // `max` — either dimension alone can exhaust the block.
+    assert_eq!(
+        crate::block_utilization(frame_support::weights::Weight::from_parts(0, 2_000), limit),
+        Some(ONE),
+    );
+    // Balanced at half of each: 0.5, not the 1.0 a sum would report.
+    assert_eq!(
+        crate::block_utilization(
+            frame_support::weights::Weight::from_parts(500, 1_000),
+            limit
+        ),
+        Some(ONE / 2),
+    );
+    // Rounding is against the score: 1/1000 of ref_time rounds *up*.
+    let sliver = crate::block_utilization(frame_support::weights::Weight::from_parts(1, 0), limit)
+        .expect("measurable");
+    assert_eq!(sliver, ONE / 1_000, "exact ratios are not inflated");
+    let ragged = crate::block_utilization(
+        frame_support::weights::Weight::from_parts(1, 0),
+        frame_support::weights::Weight::from_parts(3, 3),
+    )
+    .expect("measurable");
+    assert_eq!(ragged, ONE / 3 + 1, "an inexact ratio must round up");
+    // Over the limit clamps at full rather than overflowing the grid.
+    assert_eq!(
+        crate::block_utilization(
+            frame_support::weights::Weight::from_parts(u64::MAX, u64::MAX),
+            limit
+        ),
+        Some(ONE),
+    );
+    // A limit with no measurable dimension yields no ratio at all.
+    assert_eq!(
+        crate::block_utilization(
+            frame_support::weights::Weight::from_parts(1, 1),
+            frame_support::weights::Weight::from_parts(0, 0)
+        ),
+        None,
+    );
+}
+
+#[test]
+fn the_finalization_sampler_accumulates_into_its_window() {
+    new_test_ext().execute_with(|| {
+        CurrentWindowValue::set((4, 2));
+        // A known consumed weight, so the recorded ratio is checkable rather
+        // than merely non-zero.
+        let used = block_limit() / 2;
+        frame_system::Pallet::<Test>::register_extra_weight_unchecked(
+            used,
+            frame_support::dispatch::DispatchClass::Mandatory,
+        );
+        let before = frame_system::Pallet::<Test>::block_weight().total();
+        Welfare::sample_block_weight();
+
+        let sample = Welfare::block_weight_sample(4, 2);
+        assert_eq!(sample.blocks, 1);
+        // The sampler charges its own benchmarked weight *before* reading, so
+        // the recorded ratio is at least the pre-hook utilization — the
+        // sampler's own cost is part of the block's real utilization.
+        let floor = crate::block_utilization(before, block_limit()).expect("measurable");
+        assert!(
+            sample.utilization_sum >= floor,
+            "sampled {} < pre-hook {floor}",
+            sample.utilization_sum,
+        );
+        assert!(sample.utilization_sum <= ONE);
+        // The window is bound to the shared retention index, so the reaper can
+        // always reach it (I-20).
+        assert!(XcmTrafficEpochs::<Test>::get().contains(&4));
+
+        // A second sample in the same window adds, and both granularities read
+        // the same accumulator.
+        Welfare::sample_block_weight();
+        assert_eq!(Welfare::block_weight_sample(4, 2).blocks, 2);
+        assert_eq!(Welfare::block_weight_epoch(4).blocks, 2);
+    });
+}
+
+#[test]
+fn the_epoch_accumulator_is_block_weighted_across_days() {
+    new_test_ext().execute_with(|| {
+        // Day 0 samples once at full utilization; day 1 samples three times at
+        // zero. The epoch mean must be 1/4, not the 1/2 a mean-of-daily-means
+        // would give.
+        Welfare::note_xcm_traffic(6, 0, XcmTrafficKind::Accepted);
+        BlockWeightSamples::<Test>::insert(
+            6,
+            0,
+            BlockWeightSample {
+                utilization_sum: ONE,
+                blocks: 1,
+            },
+        );
+        BlockWeightSamples::<Test>::insert(
+            6,
+            1,
+            BlockWeightSample {
+                utilization_sum: 0,
+                blocks: 3,
+            },
+        );
+        let epoch = Welfare::block_weight_epoch(6);
+        assert_eq!(epoch.utilization_sum, ONE);
+        assert_eq!(epoch.blocks, 4);
+    });
+}
+
+#[test]
+fn an_unsampled_window_stores_nothing_at_all() {
+    new_test_ext().execute_with(|| {
+        // `ValueQuery` means an unwritten key reads as the default. The default
+        // carries `blocks == 0`, which is what makes "never sampled" a distinct
+        // fact from "sampled and idle" — the difference between `H` absent and
+        // `H` = 1.
+        assert_eq!(Welfare::block_weight_sample(9, 0).blocks, 0);
+        assert_eq!(Welfare::block_weight_epoch(9).blocks, 0);
+        assert_eq!(BlockWeightSamples::<Test>::iter().count(), 0);
+    });
+}
+
+#[test]
+fn the_sampler_drops_the_window_when_the_shared_index_is_full() {
+    new_test_ext().execute_with(|| {
+        // 05 §4.3.2's excluded class: a bounded index at its limit while the
+        // reaper catches up. The observation is dropped and — critically — this
+        // does **not** increment `Π`.
+        CurrentEpochValue::set(MAX_XCM_TRAFFIC_EPOCHS_BOUND + 1);
+        for epoch in 0..MAX_XCM_TRAFFIC_EPOCHS_BOUND {
+            Welfare::note_xcm_traffic(epoch, 0, XcmTrafficKind::Accepted);
+        }
+        assert_eq!(
+            XcmTrafficEpochs::<Test>::get().len(),
+            MAX_XCM_TRAFFIC_EPOCHS_BOUND as usize
+        );
+        CurrentWindowValue::set((MAX_XCM_TRAFFIC_EPOCHS_BOUND, 0));
+
+        Welfare::sample_block_weight();
+
+        assert_eq!(
+            Welfare::block_weight_sample(MAX_XCM_TRAFFIC_EPOCHS_BOUND, 0).blocks,
+            0
+        );
+        assert_eq!(
+            Welfare::integrity_failures_epoch(MAX_XCM_TRAFFIC_EPOCHS_BOUND),
+            0
+        );
+        assert!(Welfare::do_try_state().is_ok());
+    });
+}
+
+#[test]
+fn a_qualifying_site_increments_the_counter_exactly_once_and_emits() {
+    new_test_ext().execute_with(|| {
+        frame_system::Pallet::<Test>::set_block_number(1);
+        Welfare::note_integrity_failure(3, 5, IntegrityFault::FailStaticLatch);
+
+        assert_eq!(Welfare::integrity_failures(3, 5), 1);
+        assert_eq!(Welfare::integrity_failures_epoch(3), 1);
+        // Every increment is evented: an integrity failure visible only as a
+        // lower welfare score two cranks later is unactionable (12 §6.3).
+        assert!(frame_system::Pallet::<Test>::events().iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::Welfare(Event::IntegrityFailureRecorded {
+                    epoch: 3,
+                    day: 5,
+                    fault: IntegrityFault::FailStaticLatch,
+                    count: 1,
+                })
+            )
+        }));
+
+        // Distinct faults accumulate, and the event carries the running total.
+        Welfare::note_integrity_failure(3, 5, IntegrityFault::LostAccounting);
+        assert_eq!(Welfare::integrity_failures(3, 5), 2);
+        assert!(frame_system::Pallet::<Test>::events().iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::Welfare(Event::IntegrityFailureRecorded { count: 2, .. })
+            )
+        }));
+        // Days are isolated, and the epoch total is their sum.
+        Welfare::note_integrity_failure(3, 6, IntegrityFault::DiscardedInternalCall);
+        assert_eq!(Welfare::integrity_failures(3, 6), 1);
+        assert_eq!(Welfare::integrity_failures_epoch(3), 3);
+        assert!(Welfare::do_try_state().is_ok());
+    });
+}
+
+#[test]
+fn the_integrity_counter_saturates_rather_than_wrapping() {
+    new_test_ext().execute_with(|| {
+        Welfare::note_xcm_traffic(3, 5, XcmTrafficKind::Accepted);
+        IntegrityFailures::<Test>::insert(3, 5, u32::MAX);
+        Welfare::note_integrity_failure(3, 5, IntegrityFault::FailStaticLatch);
+        // Wrapping to zero would report a perfectly healthy `Π` out of the
+        // worst possible state (G-1).
+        assert_eq!(Welfare::integrity_failures(3, 5), u32::MAX);
+    });
+}
+
+#[test]
+fn the_integrity_recorder_drops_the_record_when_the_index_is_full() {
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(MAX_XCM_TRAFFIC_EPOCHS_BOUND + 1);
+        for epoch in 0..MAX_XCM_TRAFFIC_EPOCHS_BOUND {
+            Welfare::note_xcm_traffic(epoch, 0, XcmTrafficKind::Accepted);
+        }
+        Welfare::note_integrity_failure(
+            MAX_XCM_TRAFFIC_EPOCHS_BOUND,
+            0,
+            IntegrityFault::FailStaticLatch,
+        );
+        // An unindexed counter would be unreachable by the reaper and would
+        // depress `Π` for a window nothing can retire.
+        assert_eq!(
+            Welfare::integrity_failures(MAX_XCM_TRAFFIC_EPOCHS_BOUND, 0),
+            0
+        );
+        assert!(Welfare::do_try_state().is_ok());
+    });
+}
+
+#[test]
+fn the_reaper_retires_both_new_series_with_their_shared_prefix() {
+    new_test_ext().execute_with(|| {
+        for epoch in [1u32, 2, 3] {
+            CurrentWindowValue::set((epoch, 0));
+            Welfare::sample_block_weight();
+            Welfare::note_integrity_failure(epoch, 1, IntegrityFault::FailStaticLatch);
+        }
+        assert_eq!(BlockWeightSamples::<Test>::iter().count(), 3);
+        assert_eq!(IntegrityFailures::<Test>::iter().count(), 3);
+
+        // Bounded, oldest first: at most `XCM_TRAFFIC_PRUNE_MAX_EPOCHS` per call.
+        assert_ok!(Welfare::prune_xcm_traffic(3));
+        assert_eq!(BlockWeightSamples::<Test>::iter_prefix(1).count(), 0);
+        assert_eq!(BlockWeightSamples::<Test>::iter_prefix(2).count(), 0);
+        assert_eq!(IntegrityFailures::<Test>::iter_prefix(1).count(), 0);
+        assert_eq!(IntegrityFailures::<Test>::iter_prefix(2).count(), 0);
+        assert_eq!(BlockWeightSamples::<Test>::iter_prefix(3).count(), 1);
+        assert_eq!(IntegrityFailures::<Test>::iter_prefix(3).count(), 1);
+        assert_eq!(XcmTrafficEpochs::<Test>::get().into_inner(), vec![3]);
+        assert!(Welfare::do_try_state().is_ok());
+    });
+}
+
+#[test]
+fn try_state_rejects_an_unindexed_or_future_or_empty_series_row() {
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(5);
+
+        // Unindexed: the bounded reaper could never reach it.
+        BlockWeightSamples::<Test>::insert(
+            4,
+            0,
+            BlockWeightSample {
+                utilization_sum: 1,
+                blocks: 1,
+            },
+        );
+        assert!(Welfare::do_try_state().is_err());
+        BlockWeightSamples::<Test>::remove(4, 0);
+
+        IntegrityFailures::<Test>::insert(4, 0, 1);
+        assert!(Welfare::do_try_state().is_err());
+        IntegrityFailures::<Test>::remove(4, 0);
+
+        // Indexed but in the future: no observation can belong to an epoch the
+        // clock has not reached.
+        Welfare::note_xcm_traffic(4, 0, XcmTrafficKind::Accepted);
+        XcmTrafficEpochs::<Test>::mutate(|epochs| {
+            assert!(epochs.try_push(99).is_ok());
+        });
+        BlockWeightSamples::<Test>::insert(
+            99,
+            0,
+            BlockWeightSample {
+                utilization_sum: 1,
+                blocks: 1,
+            },
+        );
+        assert!(Welfare::do_try_state().is_err());
+        BlockWeightSamples::<Test>::remove(99, 0);
+        IntegrityFailures::<Test>::insert(99, 0, 1);
+        assert!(Welfare::do_try_state().is_err());
+        IntegrityFailures::<Test>::remove(99, 0);
+        XcmTrafficEpochs::<Test>::mutate(|epochs| {
+            let position = epochs.iter().position(|e| *e == 99).expect("pushed above");
+            epochs.remove(position);
+        });
+        assert!(Welfare::do_try_state().is_ok());
+
+        // A zero block count stored on disk would make "never sampled"
+        // indistinguishable from "sampled and idle".
+        BlockWeightSamples::<Test>::insert(
+            4,
+            1,
+            BlockWeightSample {
+                utilization_sum: 0,
+                blocks: 0,
+            },
+        );
+        assert!(Welfare::do_try_state().is_err());
+        BlockWeightSamples::<Test>::remove(4, 1);
+
+        // A mean above full utilization can only come from a recorder that
+        // skipped the clamp.
+        BlockWeightSamples::<Test>::insert(
+            4,
+            1,
+            BlockWeightSample {
+                utilization_sum: ONE + 1,
+                blocks: 1,
+            },
+        );
+        assert!(Welfare::do_try_state().is_err());
+        BlockWeightSamples::<Test>::remove(4, 1);
+
+        IntegrityFailures::<Test>::insert(4, 1, 0);
+        assert!(Welfare::do_try_state().is_err());
+        IntegrityFailures::<Test>::remove(4, 1);
+        assert!(Welfare::do_try_state().is_ok());
+    });
+}
+
+#[test]
+fn the_index_admits_an_epoch_that_only_ever_sampled_block_weight() {
+    new_test_ext().execute_with(|| {
+        // The first block of a fresh epoch indexes it through the sampler,
+        // typically long before any XCM is sent or any probe answered. try-state
+        // must accept that state, or every epoch roll would fail it.
+        CurrentWindowValue::set((2, 0));
+        Welfare::sample_block_weight();
+        assert_eq!(XcmTraffic::<Test>::iter_prefix(2).count(), 0);
+        assert_eq!(ReserveProbeDaily::<Test>::iter_prefix(2).count(), 0);
+        assert!(Welfare::do_try_state().is_ok());
     });
 }

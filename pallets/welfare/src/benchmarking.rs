@@ -476,5 +476,64 @@ mod benches {
         Ok(())
     }
 
+    /// Fill the shared retention index to one below its bound with epochs that
+    /// are **not** `live`, so a writer for `live` pays the maximum `contains`
+    /// scan and then a real push. A full index would short-circuit into the
+    /// fail-soft drop and measure nothing at all.
+    fn fill_traffic_index_except<T: Config>(live: EpochId) {
+        let mut filled = 0;
+        let mut candidate = live.saturating_add(1);
+        while filled < crate::MAX_XCM_TRAFFIC_EPOCHS_BOUND.saturating_sub(1) {
+            if candidate != live {
+                Pallet::<T>::note_xcm_traffic(candidate, 0, XcmTrafficKind::Accepted);
+                filled = filled.saturating_add(1);
+            }
+            candidate = candidate.saturating_add(1);
+        }
+    }
+
+    /// 05 §4.3 `H`: the per-block finalization sampler.
+    ///
+    /// Worst case is the **first** block of a window: the shared retention
+    /// index does not yet contain the epoch, so the mutate pays a full-length
+    /// read plus a push and a write, and the `(epoch, day)` accumulator is
+    /// created rather than updated.
+    #[benchmark]
+    fn sample_block_weight() -> Result<(), BenchmarkError> {
+        let (epoch, day) = <T::CurrentWindow as frame_support::traits::Get<_>>::get();
+        fill_traffic_index_except::<T>(epoch);
+
+        #[block]
+        {
+            Pallet::<T>::sample_block_weight();
+        }
+
+        assert!(XcmTrafficEpochs::<T>::get().contains(&epoch));
+        assert_eq!(BlockWeightSamples::<T>::get(epoch, day).blocks, 1);
+        Ok(())
+    }
+
+    /// 05 §4.3 `Π`: the single increment path.
+    ///
+    /// Same worst case as the sampler — a window whose epoch the shared index
+    /// has not seen — plus the event deposit every increment owes 12 §6.3.
+    #[benchmark]
+    fn note_integrity_failure() -> Result<(), BenchmarkError> {
+        let (epoch, day) = <T::CurrentWindow as frame_support::traits::Get<_>>::get();
+        fill_traffic_index_except::<T>(epoch);
+
+        #[block]
+        {
+            Pallet::<T>::note_integrity_failure(
+                epoch,
+                day,
+                futarchy_primitives::integrity::IntegrityFault::FailStaticLatch,
+            );
+        }
+
+        assert_eq!(IntegrityFailures::<T>::get(epoch, day), 1);
+        Ok(())
+    }
+
     impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext(), crate::mock::Test);
 }

@@ -40,6 +40,7 @@ mod tests;
 use alloc::vec::Vec;
 use frame_support::pallet_prelude::DispatchResult;
 use futarchy_primitives::{
+    integrity::IntegrityFault,
     keeper::{CrankClass, KeeperRebateSink},
     BlockNumber, EpochId, FixedU64, MetricId, MetricSpecVersion, ProposalId,
 };
@@ -66,6 +67,51 @@ pub const MAX_XCM_TRAFFIC_EPOCHS_BOUND: u32 = MAX_SNAPSHOTS_BOUND + 1;
 /// while a pathological historical backlog is spread across successive keeper
 /// ticks. Keeping the catch-up cursor-bounded is required by I-20.
 pub const XCM_TRAFFIC_PRUNE_MAX_EPOCHS: usize = 2;
+
+/// Per-block weight-utilization ratio on the [`ONE`] (1e9) grid, or `None`
+/// when the configured block limit carries no measurable dimension (05 §4.3).
+///
+/// **Which dimension the ratio uses (normative choice, recorded here).** A
+/// FRAME block weight is two-dimensional — `ref_time` and `proof_size` — and
+/// 05 §4.3 writes `H = 1 − mean(block weight used ÷ limit)` as though it were
+/// scalar. This takes the **maximum of the two normalized components**, because
+/// headroom is exhausted when *either* dimension is: a block at 95 % of the PoV
+/// budget and 10 % of the execution budget has 5 % of headroom left, not 90 %,
+/// and the next extrinsic it must refuse is refused on proof size. The
+/// alternatives are both wrong in the unsafe direction — a sum double-counts a
+/// block that is balanced across both, and either dimension taken alone reports
+/// full health while the other saturates, which is exactly the blindness the
+/// `C_onchain` pillar exists to remove. `max` is also the only choice that keeps
+/// `H` a lower bound on true headroom under every mix of the two.
+///
+/// Rounding is **up**, so `H` can only be reported lower than the truth
+/// (rule 2 / I-5: never round a health score in its own favour).
+pub fn block_utilization(
+    used: frame_support::weights::Weight,
+    limit: frame_support::weights::Weight,
+) -> Option<u64> {
+    let dimension = |used: u64, limit: u64| -> Option<u64> {
+        // A zero limit has no defined quotient. The dimension is unmeasurable
+        // rather than saturated, so it contributes nothing and the other
+        // dimension decides; both zero yields `None` and `H` goes absent.
+        if limit == 0 {
+            return None;
+        }
+        let scaled = u128::from(used)
+            .checked_mul(u128::from(ONE))?
+            // Ceiling division: round the *utilization* up.
+            .checked_add(u128::from(limit).saturating_sub(1))?
+            .checked_div(u128::from(limit))?;
+        Some(u64::try_from(scaled.min(u128::from(ONE))).unwrap_or(ONE))
+    };
+    let ref_time = dimension(used.ref_time(), limit.ref_time());
+    let proof_size = dimension(used.proof_size(), limit.proof_size());
+    match (ref_time, proof_size) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    }
+}
 
 /// Maximum retired welfare epochs removed by one epoch-roll prune (05 §3.3).
 ///
@@ -242,6 +288,17 @@ pub mod pallet {
         type Ledger: LedgerSettlement;
         /// Current epoch clock used by metric registration.
         type CurrentEpoch: Get<EpochId>;
+        /// The `(epoch, day)` measurement window the **current block** belongs
+        /// to (05 §3.2/§4.3).
+        ///
+        /// Injected rather than derived here because the attribution rule lives
+        /// with the epoch schedule — a block just past an epoch roll belongs to
+        /// the epoch that owned it, and only the runtime can see the retained
+        /// timing ring that decides this. The same derivation already keys
+        /// [`XcmTraffic`] and [`ReserveProbeDaily`], and sharing it is the point:
+        /// one block must not be attributed to two different days by two
+        /// different recorders.
+        type CurrentWindow: Get<(EpochId, u8)>;
         /// Exact epoch-close schedule used by the 05 §4.8 detector.
         type SnapshotSchedule: SnapshotSchedule;
         /// Fail-soft keeper rebate endpoint (08 §6.3).
@@ -420,6 +477,39 @@ pub mod pallet {
         fn is_empty(&self) -> bool {
             self.non_empty_blocks == 0 && self.empty_blocks == 0 && self.relay_slots == 0
         }
+    }
+
+    /// One `(epoch, day)` window's block-weight utilization series (05 §4.3).
+    ///
+    /// Two scalars, not a per-block vector: `H` and `H^{day}` are both means
+    /// over their window, and a mean needs only the running sum and the count.
+    /// Keeping the raw series would make the collection grow with block
+    /// production for no additional information (I-20/I-21), and — unlike `F`'s
+    /// median, which 05 §4.3.2 says a conforming runtime MUST retain the series
+    /// for — a mean is exactly reconstructible from its accumulator.
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        Decode,
+        DecodeWithMemTracking,
+        Default,
+        Encode,
+        Eq,
+        MaxEncodedLen,
+        PartialEq,
+        TypeInfo,
+    )]
+    pub struct BlockWeightSample {
+        /// Saturating sum of per-block utilization ratios on the [`ONE`] grid.
+        ///
+        /// `u64` is not tight: a 14,400-block day at the maximum ratio sums to
+        /// 1.44e13, four orders of magnitude below `u64::MAX`, so the saturation
+        /// below is a defensive floor rather than a reachable state.
+        pub utilization_sum: u64,
+        /// Blocks sampled into `utilization_sum`. **Zero means the window was
+        /// never sampled**, which resolves `H` *absent* rather than healthy.
+        pub blocks: u32,
     }
 
     /// Bounded mirror of the core snapshot, whose transient component `Vec`
@@ -778,6 +868,32 @@ pub mod pallet {
     pub type BlockProductionEpoch<T: Config> =
         StorageMap<_, Twox64Concat, EpochId, BlockProductionCounters, ValueQuery>;
 
+    /// Block-weight utilization accumulator by `(epoch, day)` (05 §4.3 `H`).
+    ///
+    /// Written once per block by [`Pallet::sample_block_weight`] from
+    /// `on_finalize`, because `frame_system::BlockWeight` is `kill`ed at the top
+    /// of every `initialize` and is therefore unreadable from anywhere else.
+    /// The runtime binding maps the window's mean to `H`; this pallet stores
+    /// only the accumulator. Keyed exactly like [`XcmTraffic`], so it inherits
+    /// that map's `MAX_XCM_TRAFFIC_EPOCHS_BOUND` prefix index, its `u8`-bounded
+    /// 256-day second key, and its bounded retention walk (I-20/I-21).
+    #[pallet::storage]
+    pub type BlockWeightSamples<T: Config> =
+        StorageDoubleMap<_, Twox64Concat, EpochId, Twox64Concat, u8, BlockWeightSample, ValueQuery>;
+
+    /// Qualifying defensive-path failures by `(epoch, day)` (05 §4.3 `Π`).
+    ///
+    /// The **single** counter behind `Π = max(0, 1 − 0.25 · events)`, with
+    /// exactly one write path — [`Pallet::note_integrity_failure`] — so no site
+    /// can double-count an event (05 §4.3.2: "a single event increments it at
+    /// most once"). Saturating and per window; 05 §4.3.2 fixes the qualifying
+    /// class, and [`futarchy_primitives::integrity`] carries that test.
+    ///
+    /// Keyed and retired exactly like [`XcmTraffic`], sharing its prefix index.
+    #[pallet::storage]
+    pub type IntegrityFailures<T: Config> =
+        StorageDoubleMap<_, Twox64Concat, EpochId, Twox64Concat, u8, u32, ValueQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -809,6 +925,23 @@ pub mod pallet {
             epoch: EpochId,
             spec_version: MetricSpecVersion,
             dropped: BoundedVec<MetricId, ConstU32<MAX_COMPONENTS_PER_SPEC_BOUND>>,
+        },
+        /// One qualifying 05 §4.3.2 defensive-path failure was counted into
+        /// `Π`'s window accumulator.
+        ///
+        /// Emitted on **every** increment, deliberately. An integrity failure
+        /// that surfaces only as a lower welfare score two cranks later is
+        /// unactionable: operators need to know which fault class fired, in
+        /// which window, and how many have accumulated — the fourth zeroes `Π`
+        /// (12 §6.3). Off the 02 §6 ingest set by that section's (a)–(c) rule
+        /// (an operator/monitoring diagnostic), so it carries no contract bump.
+        IntegrityFailureRecorded {
+            epoch: EpochId,
+            day: u8,
+            fault: IntegrityFault,
+            /// The window's post-increment total, so a subscriber that missed
+            /// an earlier event still sees the true count.
+            count: u32,
         },
     }
 
@@ -889,6 +1022,23 @@ pub mod pallet {
 
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        /// Sample this block's weight utilization for 05 §4.3's `H`.
+        ///
+        /// **`on_finalize` is the only place this can be read.**
+        /// `frame_system::initialize` `kill`s `BlockWeight` at the top of every
+        /// block, so an `on_initialize` sampler would see the counter already
+        /// cleared and a dispatch-time sampler would see only the weight
+        /// consumed so far. Finalization is the one point at which the counter
+        /// holds the block's complete cost.
+        ///
+        /// The pallet is at `construct_runtime` index 54 and every pallet after
+        /// it (55–64) is a custom pallet with no `on_finalize` at all, so the
+        /// sample is not systematically short of any later hook's weight. That
+        /// ordering property is asserted by a runtime test rather than assumed.
+        fn on_finalize(_n: BlockNumberFor<T>) {
+            Self::sample_block_weight();
+        }
+
         #[cfg(feature = "try-runtime")]
         fn try_state(_n: BlockNumberFor<T>) -> Result<(), TryRuntimeError> {
             Self::do_try_state()
@@ -1400,6 +1550,13 @@ pub mod pallet {
                     // Leaving it behind would be a `U` denominator for a window
                     // whose day slots are gone — try-state rejects exactly that.
                     BlockProductionEpoch::<T>::remove(epoch);
+                    // A14: the 05 §4.3 `H` and `Π` series are keyed and
+                    // retained identically, so they retire in the same step.
+                    // Each is bounded by the `u8` day key's 256 entries, so the
+                    // per-prefix work stays the fixed multiple of `u8::MAX + 1`
+                    // this walk was budgeted for.
+                    let _ = BlockWeightSamples::<T>::clear_prefix(epoch, u8::MAX as u32 + 1, None);
+                    let _ = IntegrityFailures::<T>::clear_prefix(epoch, u8::MAX as u32 + 1, None);
                     if let Some(position) = epochs.iter().position(|stored| *stored == epoch) {
                         epochs.remove(position);
                     }
@@ -1413,18 +1570,15 @@ pub mod pallet {
         /// Saturation is deliberate: router delivery and oracle timeout handling
         /// are fail-soft observation paths, so recording can never error or panic.
         pub fn note_xcm_traffic(epoch: EpochId, day: u8, kind: XcmTrafficKind) {
-            let tracked = XcmTrafficEpochs::<T>::mutate(|epochs| {
-                if epochs.contains(&epoch) {
-                    true
-                } else {
-                    epochs.try_push(epoch).is_ok()
-                }
-            });
+            let tracked = Self::track_traffic_epoch(epoch);
             // A full index can occur while bounded maintenance catches up. The
             // conservative bounded-state choice is to drop the whole new-epoch
             // observation rather than create an unindexed counter; the caller's
             // transport/probe path remains fail-soft and existing indexed epochs
-            // continue recording normally.
+            // continue recording normally. 05 §4.3.2 rules this drop *out* of
+            // `Π`'s qualifying class by name: it is an observation dropped to
+            // keep a bounded index consistent, and the bounded reaper is its
+            // defined recovery path.
             if !tracked {
                 return;
             }
@@ -1451,14 +1605,7 @@ pub mod pallet {
         pub fn note_reserve_probe(epoch: EpochId, day: u8, passed: bool) {
             // Bound the new prefix to the shared traffic index so the retention
             // walk can always find and retire it.
-            let tracked = XcmTrafficEpochs::<T>::mutate(|epochs| {
-                if epochs.contains(&epoch) {
-                    true
-                } else {
-                    epochs.try_push(epoch).is_ok()
-                }
-            });
-            if !tracked {
+            if !Self::track_traffic_epoch(epoch) {
                 return;
             }
             ReserveProbeDaily::<T>::mutate(epoch, day, |slot| match slot {
@@ -1658,6 +1805,140 @@ pub mod pallet {
                     total
                 },
             )
+        }
+
+        /// Bind `epoch` to the shared retention index, returning whether it is
+        /// now tracked.
+        ///
+        /// Every `(epoch, day)` series in this pallet — XCM traffic, reserve
+        /// probes, block-weight samples, integrity failures — is retired by one
+        /// bounded walk over [`XcmTrafficEpochs`], so a writer that skipped this
+        /// would create a prefix the reaper can never reach (I-20).
+        ///
+        /// Reads before it writes, deliberately: the block-weight sampler calls
+        /// this on **every** block, and an unconditional `mutate` would rewrite
+        /// the index's ~85 bytes 14,400 times a day to store the value it
+        /// already held. Only a genuinely new epoch pays a write (SQ-497's
+        /// "write the difference" discipline).
+        fn track_traffic_epoch(epoch: EpochId) -> bool {
+            if XcmTrafficEpochs::<T>::get().contains(&epoch) {
+                return true;
+            }
+            XcmTrafficEpochs::<T>::mutate(|epochs| epochs.try_push(epoch).is_ok())
+        }
+
+        /// Accumulate this block's weight utilization into its `(epoch, day)`
+        /// window (05 §4.3 `H`).
+        ///
+        /// `pallet_authorship`'s `note_author` precedent: the block-finalization
+        /// hooks reserve nothing for this work, so it charges its own
+        /// benchmarked worst case as `Mandatory` extra weight **before** doing
+        /// anything. Registering first is deliberate — the sampler's own cost is
+        /// part of the block's real utilization, and reading `BlockWeight`
+        /// afterwards is the only order in which the reported ratio is honest.
+        ///
+        /// Fail-soft throughout, like every other observation path here: an
+        /// unmeasurable limit or a full retention index drops the sample rather
+        /// than fabricating one. Dropping is safe *because* a window with no
+        /// samples resolves `H` absent, not 1 — see [`Self::block_weight_epoch`].
+        ///
+        /// A drop here is **not** a `Π` event: it is 05 §4.3.2's excluded
+        /// "observation dropped to keep a bounded index consistent", whose
+        /// defined recovery is the bounded reaper freeing the index.
+        pub fn sample_block_weight() {
+            frame_system::Pallet::<T>::register_extra_weight_unchecked(
+                T::WeightInfo::sample_block_weight(),
+                DispatchClass::Mandatory,
+            );
+            let limit = <T as frame_system::Config>::BlockWeights::get().max_block;
+            let used = frame_system::Pallet::<T>::block_weight().total();
+            let Some(ratio) = block_utilization(used, limit) else {
+                return;
+            };
+            let (epoch, day) = T::CurrentWindow::get();
+            if !Self::track_traffic_epoch(epoch) {
+                return;
+            }
+            BlockWeightSamples::<T>::mutate(epoch, day, |sample| {
+                sample.utilization_sum = sample.utilization_sum.saturating_add(ratio);
+                sample.blocks = sample.blocks.saturating_add(1);
+            });
+        }
+
+        /// Record one qualifying 05 §4.3.2 defensive-path failure (`Π`).
+        ///
+        /// The **single** write path into [`IntegrityFailures`]. Callers must
+        /// have applied §4.3.2's three-clause test — see
+        /// [`futarchy_primitives::integrity`] — and must not call it twice for
+        /// one event, including when a already-counted fault is later moved,
+        /// mirrored or re-observed.
+        ///
+        /// Infallible and saturating: every caller is already on a failure path
+        /// and must not have its control flow changed by the recorder (G-1).
+        /// A saturated counter is not a lost event either — `Π` is already 0 at
+        /// four, so `u32::MAX` and `u32::MAX + 1` score identically.
+        ///
+        /// A full retention index drops the record. That is the same bounded
+        /// backpressure [`Self::note_xcm_traffic`] takes, and it is the safe
+        /// direction here for a different reason: an unindexed counter would be
+        /// unreachable by the reaper *and* unreadable by the crank, so it would
+        /// depress `Π` for a window nothing can ever retire.
+        pub fn note_integrity_failure(epoch: EpochId, day: u8, fault: IntegrityFault) {
+            // Self-accounting for the same reason the sampler is: every caller
+            // is a hook or an infallible seam that reserved nothing for this,
+            // and charging here keeps the cost with the work instead of forcing
+            // each fault site to widen its own declared weight for a branch it
+            // almost never takes.
+            frame_system::Pallet::<T>::register_extra_weight_unchecked(
+                T::WeightInfo::note_integrity_failure(),
+                DispatchClass::Mandatory,
+            );
+            if !Self::track_traffic_epoch(epoch) {
+                return;
+            }
+            let count = IntegrityFailures::<T>::mutate(epoch, day, |count| {
+                *count = count.saturating_add(1);
+                *count
+            });
+            Self::deposit_event(Event::IntegrityFailureRecorded {
+                epoch,
+                day,
+                fault,
+                count,
+            });
+        }
+
+        /// Return one day's block-weight accumulator (05 §4.3 `H^{day}`).
+        pub fn block_weight_sample(epoch: EpochId, day: u8) -> BlockWeightSample {
+            BlockWeightSamples::<T>::get(epoch, day)
+        }
+
+        /// Return the epoch-wide block-weight accumulator (05 §4.3 `H`).
+        ///
+        /// Field-wise saturating sum over the epoch prefix, so the epoch mean is
+        /// the block-weighted mean of its days and not a mean of daily means —
+        /// a day that produced two blocks must not weigh the same as a full one.
+        pub fn block_weight_epoch(epoch: EpochId) -> BlockWeightSample {
+            BlockWeightSamples::<T>::iter_prefix(epoch).fold(
+                BlockWeightSample::default(),
+                |mut total, (_, sample)| {
+                    total.utilization_sum =
+                        total.utilization_sum.saturating_add(sample.utilization_sum);
+                    total.blocks = total.blocks.saturating_add(sample.blocks);
+                    total
+                },
+            )
+        }
+
+        /// Return one day's qualifying-failure count (05 §4.3 `Π^{day}`).
+        pub fn integrity_failures(epoch: EpochId, day: u8) -> u32 {
+            IntegrityFailures::<T>::get(epoch, day)
+        }
+
+        /// Return the epoch-wide qualifying-failure count (05 §4.3 `Π`).
+        pub fn integrity_failures_epoch(epoch: EpochId) -> u32 {
+            IntegrityFailures::<T>::iter_prefix(epoch)
+                .fold(0_u32, |total, (_, count)| total.saturating_add(count))
         }
 
         /// Full core state rebuilt from the three frozen storage mirrors.
@@ -2021,10 +2302,15 @@ pub mod pallet {
                 // a budget refusal, which happens before the router is ever
                 // observed — so requiring traffic here would fail try-state on
                 // correct state.
-                // A14 adds two more co-indexed series for the same reason: a
+                // A14 adds four more co-indexed series for the same reason: a
                 // block is produced — and authored — in every epoch, including
                 // one that sent no XCM and ran no probe, so an authorship-only
-                // or block-production-only prefix is correct state.
+                // or block-production-only prefix is correct state. The `H` and
+                // `Π` series join the same disjunction, and are the strongest
+                // case for it: the first block of a fresh epoch indexes the
+                // epoch through the block-weight sampler, typically before any
+                // XCM is ever sent, so requiring traffic here would fail
+                // try-state on correct state on essentially every epoch roll.
                 if XcmTraffic::<T>::iter_prefix(*epoch).next().is_none()
                     && ReserveProbeDaily::<T>::iter_prefix(*epoch).next().is_none()
                     && CollatorAuthorship::<T>::iter_prefix(*epoch)
@@ -2032,9 +2318,13 @@ pub mod pallet {
                         .is_none()
                     && !CollatorAuthorshipEpoch::<T>::contains_key(*epoch)
                     && BlockProduction::<T>::iter_prefix(*epoch).next().is_none()
+                    && BlockWeightSamples::<T>::iter_prefix(*epoch)
+                        .next()
+                        .is_none()
+                    && IntegrityFailures::<T>::iter_prefix(*epoch).next().is_none()
                 {
                     return Err(TryRuntimeError::Other(
-                        "welfare traffic index has no corresponding counter, probe outcome, authorship record, or block-production record",
+                        "welfare traffic index has no corresponding counter, probe outcome, authorship record, block-production record, block-weight sample, or integrity-failure count",
                     ));
                 }
             }
@@ -2185,6 +2475,57 @@ pub mod pallet {
                 if folded != total {
                     return Err(TryRuntimeError::Other(
                         "welfare block-production total disagrees with its day slots",
+                    ));
+                }
+            }
+            // A14 (05 §4.3): the `H` accumulator and the `Π` counter carry the
+            // same three obligations as every other `(epoch, day)` series here —
+            // reachable by the bounded reaper, never attributed to a future
+            // epoch, and never stored empty (an all-zero row would make the
+            // difference between "sampled and idle" and "never sampled"
+            // unreadable, and that difference is exactly what decides whether
+            // `H` is 1 or absent).
+            for (epoch, _, sample) in BlockWeightSamples::<T>::iter() {
+                if epoch > current_epoch {
+                    return Err(TryRuntimeError::Other(
+                        "welfare block-weight sample lies in the future",
+                    ));
+                }
+                if !traffic_epochs.contains(&epoch) {
+                    return Err(TryRuntimeError::Other(
+                        "welfare block-weight sample has no indexed epoch",
+                    ));
+                }
+                if sample.blocks == 0 {
+                    return Err(TryRuntimeError::Other(
+                        "welfare block-weight sample records no sampled block",
+                    ));
+                }
+                // The mean must stay on the [0, 1] grid: `H`'s mapping assumes
+                // it and a sum above `blocks · ONE` could only come from a
+                // recorder that skipped `block_utilization`'s clamp.
+                if u128::from(sample.utilization_sum)
+                    > u128::from(sample.blocks).saturating_mul(u128::from(ONE))
+                {
+                    return Err(TryRuntimeError::Other(
+                        "welfare block-weight sample exceeds full utilization",
+                    ));
+                }
+            }
+            for (epoch, _, count) in IntegrityFailures::<T>::iter() {
+                if epoch > current_epoch {
+                    return Err(TryRuntimeError::Other(
+                        "welfare integrity-failure count lies in the future",
+                    ));
+                }
+                if !traffic_epochs.contains(&epoch) {
+                    return Err(TryRuntimeError::Other(
+                        "welfare integrity-failure count has no indexed epoch",
+                    ));
+                }
+                if count == 0 {
+                    return Err(TryRuntimeError::Other(
+                        "welfare integrity-failure count stores a zero",
                     ));
                 }
             }
