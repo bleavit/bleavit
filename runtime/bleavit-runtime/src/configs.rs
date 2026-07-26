@@ -9225,21 +9225,20 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
         // failing. Nothing short-circuits and `decide` still takes its ordinary
         // path rather than the ProcessHold rejection.
         //
-        // Half the map carries `spec`, half a sibling version: 02 §7.2 derives
-        // the 128-round bound as 16 components x <= 4 settling epochs x <= 2
-        // concurrent frozen versions, so **at most 64 rounds can share one
-        // frozen version**. The scan still walks all 128 — that is what `iter`
-        // costs — but only the matching half pays the two per-round reads.
-        // Seeding all 128 on one version would charge `decide` for a state the
-        // bound's own decomposition says cannot exist.
+        // **All 128 on the proposal's own version.** 02 §7.2 decomposes the
+        // bound as 16 components x <= 4 settling epochs x <= 2 concurrent
+        // versions, which suggests at most 64 rounds can share one — but that
+        // 4-epoch factor holds only once a retained round is eventually reaped.
+        // 07 §11(1)'s retention had no implemented deadline until SQ-492, so a
+        // terminal challenged round that reaches its money deadline survives
+        // indefinitely and successive epochs accumulate money-settled rounds on
+        // one long-lived frozen version until the 128-slot cap. Seeding 64/64
+        // would measure half the reachable per-round reads and undercharge a
+        // permissionless call (#176 review). Once SQ-492's reaper lands this
+        // fixture is merely conservative, which is the safe direction.
         let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
-        let per_version = pallet_oracle::MAX_ROUNDS as u16 / 2;
         for index in 0..pallet_oracle::MAX_ROUNDS as u16 {
-            let version = if index < per_version {
-                spec
-            } else {
-                spec.saturating_add(1)
-            };
+            let version = spec;
             let key = (index, epoch, version);
             pallet_oracle::Rounds::<Runtime>::insert(
                 key,
