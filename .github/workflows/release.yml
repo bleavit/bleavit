@@ -115,16 +115,12 @@ jobs:
     timeout-minutes: 720
     env:
       CARGO_INCREMENTAL: 0
+    # Deliberately no runner-disk-reclaim step: that is for the *full workspace*
+    # build (~35 GB). This job builds only `-p bleavit-runtime`, the identical
+    # footprint to ci.yml's `benchmark-smoke`, which runs the same two cargo
+    # commands on a stock runner and needs no reclaim.
     steps:
       - uses: actions/checkout@v7
-      - name: Free runner disk space (the benchmarking runtime build needs ~35 GB)
-        run: |
-          set -euo pipefail
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force > /dev/null 2>&1 || true
-          df -h /
       - uses: dtolnay/rust-toolchain@1.89.0
         with:
           targets: wasm32-unknown-unknown, wasm32v1-none
