@@ -878,42 +878,62 @@ pub mod pallet {
         pub fn compute_settlement(
             cohort_epoch: EpochId,
             spec_version: MetricSpecVersion,
-            target: SettleTarget,
+            targets: &[SettleTarget],
         ) -> Result<FixedU64, DispatchError> {
+            // SQ-497 — one computation per *batch*, not per target.
+            //
+            // `(cohort_epoch, spec_version)` fixes the score, and `epoch-core`
+            // enforces a single frozen `metric_spec` for a whole cohort, so every
+            // target in a batch settles at the same number. Calling this per
+            // target reloaded the entire welfare mirror and recomputed the
+            // identical 07 §10 renormalized pair once per proposal. Nothing is
+            // lost by hoisting: settlement mutates no welfare state — the core
+            // call is a read over the snapshot window — so the repetition was
+            // provably redundant rather than semantically load-bearing.
             let mut state = Self::load();
             let score = state
                 .compute_settlement(cohort_epoch, spec_version)
                 .map_err(Self::map_core_error)?;
             // The core reports what it did — including 07 §10's renormalization,
             // which the caller cannot reconstruct from the score alone — so the
-            // events are drained from it rather than rebuilt here. Nothing else
-            // of the computation is persisted: settlement mutates no welfare
-            // state (`compute_settlement` is a read over the snapshot window).
+            // events are drained from it rather than rebuilt here. They are
+            // deposited **once per batch** now, matching the one computation they
+            // describe, instead of once per settled item.
             let core_events = core::mem::take(&mut state.events);
-            let gate_outcomes = match target {
-                SettleTarget::Proposal {
-                    has_gate_books: true,
-                    ..
-                } => Some(Self::gate_outcomes(cohort_epoch)?),
-                _ => None,
+            // Per-epoch, not per-target: the same window decides every target's
+            // gate outcome, so this too was recomputed per proposal.
+            let gate_outcomes = if targets.iter().any(|target| {
+                matches!(
+                    target,
+                    SettleTarget::Proposal {
+                        has_gate_books: true,
+                        ..
+                    }
+                )
+            }) {
+                Some(Self::gate_outcomes(cohort_epoch)?)
+            } else {
+                None
             };
 
             frame_support::storage::with_storage_layer(|| {
-                match target {
-                    SettleTarget::Proposal {
-                        pid,
-                        has_gate_books,
-                    } => {
-                        T::Ledger::settle_scalar(pid, score)?;
-                        if has_gate_books {
-                            let (s_breached, c_breached) = gate_outcomes
-                                .ok_or(DispatchError::Other("missing gate outcomes"))?;
-                            T::Ledger::settle_gate(pid, GateKind::Survival, s_breached)?;
-                            T::Ledger::settle_gate(pid, GateKind::Security, c_breached)?;
+                for target in targets {
+                    match *target {
+                        SettleTarget::Proposal {
+                            pid,
+                            has_gate_books,
+                        } => {
+                            T::Ledger::settle_scalar(pid, score)?;
+                            if has_gate_books {
+                                let (s_breached, c_breached) = gate_outcomes
+                                    .ok_or(DispatchError::Other("missing gate outcomes"))?;
+                                T::Ledger::settle_gate(pid, GateKind::Survival, s_breached)?;
+                                T::Ledger::settle_gate(pid, GateKind::Security, c_breached)?;
+                            }
                         }
-                    }
-                    SettleTarget::Baseline => {
-                        T::Ledger::settle_baseline(cohort_epoch, score)?;
+                        SettleTarget::Baseline => {
+                            T::Ledger::settle_baseline(cohort_epoch, score)?;
+                        }
                     }
                 }
                 for event in core_events {
@@ -1216,29 +1236,82 @@ pub mod pallet {
         fn persist(pre: &WelfareState, post: WelfareState) -> DispatchResult {
             let (specs, snapshots, snapshot_contexts, gate_flags) = Self::checked_storage(&post)?;
 
+            // SQ-497 — write the *difference*, not the whole mirror.
+            //
+            // This used to remove every key named by `pre` and re-insert every
+            // key named by `post`, so adding one snapshot wrote ~80 keys. On a
+            // parachain each of those writes is proof the block has to carry,
+            // and none of them changed a value.
+            //
+            // Equality is decided against **stored** state rather than against
+            // `pre`. That is deliberate: `pre` is a core-shaped clone and the
+            // core → stored conversions are lossy in representation (bounded
+            // containers, packed contexts), so comparing core values would be
+            // comparing something other than what is written.
+            //
+            // The comparison reads are nearly free. `load()` already iterated all
+            // four maps in this same call, so every *existing* key's proof node
+            // is in the PoV already; only a key being created costs a genuinely
+            // new read. Measured, the trade is +1 to +2 reads against ~75 fewer
+            // writes: `record_snapshot` 102 r / 80 w → 104 r / 6 w,
+            // `record_daily_gate` 98 / 81 → 99 / 6, `register_spec` 77 w → 2 w.
+            let live_specs = specs
+                .iter()
+                .map(|(version, _)| *version)
+                .collect::<Vec<_>>();
             for (version, _) in &pre.specs {
-                MetricSpecs::<T>::remove(version);
-            }
-            for snapshot in &pre.snapshots {
-                Snapshots::<T>::remove((snapshot.epoch, snapshot.spec_version));
-            }
-            for context in &pre.snapshot_contexts {
-                SnapshotContexts::<T>::remove((context.epoch, context.spec_version));
-            }
-            for (epoch, _) in &pre.gate_flags {
-                GateBreachFlags::<T>::remove(epoch);
+                if !live_specs.contains(version) {
+                    MetricSpecs::<T>::remove(version);
+                }
             }
             for (version, spec_set) in specs {
-                MetricSpecs::<T>::insert(version, spec_set);
+                if MetricSpecs::<T>::get(version).as_ref() != Some(&spec_set) {
+                    MetricSpecs::<T>::insert(version, spec_set);
+                }
+            }
+
+            let live_snapshots = snapshots.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+            for snapshot in &pre.snapshots {
+                let key = (snapshot.epoch, snapshot.spec_version);
+                if !live_snapshots.contains(&key) {
+                    Snapshots::<T>::remove(key);
+                }
             }
             for (key, snapshot) in snapshots {
-                Snapshots::<T>::insert(key, snapshot);
+                if Snapshots::<T>::get(key).as_ref() != Some(&snapshot) {
+                    Snapshots::<T>::insert(key, snapshot);
+                }
+            }
+
+            let live_contexts = snapshot_contexts
+                .iter()
+                .map(|(key, _)| *key)
+                .collect::<Vec<_>>();
+            for context in &pre.snapshot_contexts {
+                let key = (context.epoch, context.spec_version);
+                if !live_contexts.contains(&key) {
+                    SnapshotContexts::<T>::remove(key);
+                }
             }
             for (key, context) in snapshot_contexts {
-                SnapshotContexts::<T>::insert(key, context);
+                if SnapshotContexts::<T>::get(key).as_ref() != Some(&context) {
+                    SnapshotContexts::<T>::insert(key, context);
+                }
+            }
+
+            let live_gate_flags = gate_flags
+                .iter()
+                .map(|(epoch, _)| *epoch)
+                .collect::<Vec<_>>();
+            for (epoch, _) in &pre.gate_flags {
+                if !live_gate_flags.contains(epoch) {
+                    GateBreachFlags::<T>::remove(epoch);
+                }
             }
             for (epoch, flags) in gate_flags {
-                GateBreachFlags::<T>::insert(epoch, flags);
+                if GateBreachFlags::<T>::get(epoch).as_ref() != Some(&flags) {
+                    GateBreachFlags::<T>::insert(epoch, flags);
+                }
             }
             for event in post.events {
                 Self::deposit_core_event(event);

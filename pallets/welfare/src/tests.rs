@@ -1126,10 +1126,10 @@ fn compute_settlement_dispatches_scalar_gates_and_baseline() {
         assert_ok!(Welfare::compute_settlement(
             10,
             1,
-            SettleTarget::Proposal {
+            &[SettleTarget::Proposal {
                 pid: 42,
                 has_gate_books: true,
-            },
+            }]
         ));
         assert_eq!(
             LedgerCalls::get(),
@@ -1149,17 +1149,21 @@ fn compute_settlement_dispatches_scalar_gates_and_baseline() {
         assert_ok!(Welfare::compute_settlement(
             10,
             1,
-            SettleTarget::Proposal {
+            &[SettleTarget::Proposal {
                 pid: 43,
                 has_gate_books: false,
-            },
+            }]
         ));
         assert_eq!(
             LedgerCalls::get(),
             vec![LedgerCall::Scalar(43, FixedU64(ONE))]
         );
 
-        assert_ok!(Welfare::compute_settlement(10, 1, SettleTarget::Baseline,));
+        assert_ok!(Welfare::compute_settlement(
+            10,
+            1,
+            &[SettleTarget::Baseline]
+        ));
         assert_eq!(
             LedgerCalls::get().last(),
             Some(&LedgerCall::Baseline(10, FixedU64(ONE)))
@@ -1200,10 +1204,10 @@ fn ledger_failure_is_atomic_and_emits_no_settlement_event() {
             Welfare::compute_settlement(
                 10,
                 1,
-                SettleTarget::Proposal {
+                &[SettleTarget::Proposal {
                     pid: 42,
                     has_gate_books: true,
-                },
+                }]
             ),
             sp_runtime::DispatchError::Other("injected ledger failure")
         );
@@ -1258,7 +1262,7 @@ fn sq92_settle_baseline_void_reads_no_welfare_state_and_needs_no_snapshots() {
     // contrast: the scored path for the same epoch cannot run at all here.
     new_test_ext().execute_with(|| {
         assert_noop!(
-            Welfare::compute_settlement(10, 1, SettleTarget::Baseline),
+            Welfare::compute_settlement(10, 1, &[SettleTarget::Baseline]),
             Error::<Test>::MissingComponent
         );
         LedgerCalls::set(Vec::new());
@@ -1454,7 +1458,7 @@ fn shell_matches_core_over_400_step_fixed_seed_sequence() {
                         expected_ledger_calls.push(LedgerCall::Baseline(cohort, score));
                     }
                     let pallet_result =
-                        Welfare::compute_settlement(cohort, version, SettleTarget::Baseline);
+                        Welfare::compute_settlement(cohort, version, &[SettleTarget::Baseline]);
                     let expected_ok = core_result.is_ok();
                     assert_eq!(pallet_result.is_ok(), expected_ok, "settle step {step}");
                     expected_ok
@@ -1484,10 +1488,10 @@ fn shell_matches_core_over_400_step_fixed_seed_sequence() {
                     let pallet_result = Welfare::compute_settlement(
                         cohort,
                         version,
-                        SettleTarget::Proposal {
+                        &[SettleTarget::Proposal {
                             pid,
                             has_gate_books: true,
-                        },
+                        }],
                     );
                     let expected_ok = core_result.is_ok();
                     assert_eq!(
@@ -1598,10 +1602,10 @@ fn sq79_a_wholly_unsampled_gate_window_refuses_settlement_instead_of_reading_no_
             Welfare::compute_settlement(
                 10,
                 1,
-                SettleTarget::Proposal {
+                &[SettleTarget::Proposal {
                     pid: 42,
                     has_gate_books: true,
-                },
+                }]
             ),
             Error::<Test>::GateWindowUnsampled
         );
@@ -1635,10 +1639,10 @@ fn sq79_a_half_sampled_window_is_still_an_unavailable_gate_input() {
             Welfare::compute_settlement(
                 10,
                 1,
-                SettleTarget::Proposal {
+                &[SettleTarget::Proposal {
                     pid: 42,
                     has_gate_books: true,
-                },
+                }]
             ),
             Error::<Test>::GateWindowUnsampled
         );
@@ -1668,10 +1672,10 @@ fn sq79_one_sampled_day_per_epoch_is_enough() {
         assert_ok!(Welfare::compute_settlement(
             10,
             1,
-            SettleTarget::Proposal {
+            &[SettleTarget::Proposal {
                 pid: 42,
                 has_gate_books: true,
-            },
+            }]
         ));
         assert_eq!(
             LedgerCalls::get(),
@@ -1701,12 +1705,16 @@ fn sq79_refusal_is_scoped_to_gate_books_only() {
         assert_ok!(Welfare::compute_settlement(
             10,
             1,
-            SettleTarget::Proposal {
+            &[SettleTarget::Proposal {
                 pid: 43,
                 has_gate_books: false,
-            },
+            }]
         ));
-        assert_ok!(Welfare::compute_settlement(10, 1, SettleTarget::Baseline));
+        assert_ok!(Welfare::compute_settlement(
+            10,
+            1,
+            &[SettleTarget::Baseline]
+        ));
         assert_eq!(
             LedgerCalls::get(),
             vec![
@@ -1905,7 +1913,11 @@ fn record_window(flagged: Vec<((EpochId, MetricSpecVersion), Vec<MetricId>)>) {
 
 fn settled_score() -> FixedU64 {
     LedgerCalls::set(Vec::new());
-    assert_ok!(Welfare::compute_settlement(10, 1, SettleTarget::Baseline));
+    assert_ok!(Welfare::compute_settlement(
+        10,
+        1,
+        &[SettleTarget::Baseline]
+    ));
     match LedgerCalls::get().last() {
         Some(LedgerCall::Baseline(_, score)) => *score,
         other => panic!("expected a baseline settlement, got {other:?}"),
@@ -2016,5 +2028,135 @@ fn sq493_contexts_retire_with_their_snapshots_on_both_prune_paths() {
             Snapshots::<Test>::iter().count()
         );
         assert_ok!(Welfare::do_try_state());
+    });
+}
+
+/// SQ-497: a batch settles every target and computes the score **once**.
+///
+/// The seam takes the targets rather than a score, so welfare still owns the
+/// number (05 §6) — what changes is that `(cohort_epoch, spec_version)` fixes it
+/// for the whole batch, which `epoch-core` guarantees by freezing one
+/// `metric_spec` per cohort. The observable proof is the event stream: the
+/// computation deposits `SettlementComputed` once, while the ledger sees every
+/// target.
+#[test]
+fn sq497_batched_settlement_settles_every_target_and_computes_the_score_once() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Welfare::record_snapshot(
+            RuntimeOrigin::signed(keeper()),
+            11,
+            1,
+        ));
+        assert_ok!(Welfare::record_snapshot(
+            RuntimeOrigin::signed(keeper()),
+            12,
+            1,
+        ));
+        DailyInput::set(components(800_000_000, ONE, ONE, ONE));
+        assert_ok!(Welfare::record_daily_gate(
+            RuntimeOrigin::signed(keeper()),
+            11,
+            0,
+            1,
+        ));
+        DailyInput::set(components(ONE, 800_000_000, ONE, ONE));
+        assert_ok!(Welfare::record_daily_gate(
+            RuntimeOrigin::signed(keeper()),
+            12,
+            1,
+            1,
+        ));
+
+        LedgerCalls::set(Vec::new());
+        System::reset_events();
+        let score = Welfare::compute_settlement(
+            10,
+            1,
+            &[
+                SettleTarget::Proposal {
+                    pid: 42,
+                    has_gate_books: true,
+                },
+                SettleTarget::Proposal {
+                    pid: 43,
+                    has_gate_books: false,
+                },
+                SettleTarget::Baseline,
+            ],
+        );
+        assert_ok!(score);
+
+        // Every target settled, in order, at the one shared score.
+        assert_eq!(
+            LedgerCalls::get(),
+            vec![
+                LedgerCall::Scalar(42, FixedU64(ONE)),
+                LedgerCall::Gate(42, GateKind::Survival, true),
+                LedgerCall::Gate(42, GateKind::Security, true),
+                LedgerCall::Scalar(43, FixedU64(ONE)),
+                LedgerCall::Baseline(10, FixedU64(ONE)),
+            ]
+        );
+
+        // ... and the computation was reported exactly once, not once per item.
+        let settlements = System::events()
+            .into_iter()
+            .filter(|record| {
+                matches!(
+                    record.event,
+                    RuntimeEvent::Welfare(Event::SettlementComputed { .. })
+                )
+            })
+            .count();
+        assert_eq!(settlements, 1);
+    });
+}
+
+/// SQ-497: `persist` writes the difference, so both edges of "difference" must
+/// hold — an in-place value change is still written, and a key the new state
+/// drops is still removed.
+///
+/// This is the risk the diff introduced. The old shape removed every key and
+/// re-inserted every key, which is wasteful but cannot miss an update; a diff
+/// that compares the wrong thing silently keeps stale state. The comparison is
+/// against **stored** values for exactly that reason — the core → stored
+/// conversions change representation, so comparing core values would be
+/// comparing something other than what is written.
+#[test]
+fn sq497_diffed_persist_still_writes_updates_and_still_removes_dropped_keys() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Welfare::record_snapshot(
+            RuntimeOrigin::signed(keeper()),
+            11,
+            1,
+        ));
+        DailyInput::set(components(800_000_000, ONE, ONE, ONE));
+        assert_ok!(Welfare::record_daily_gate(
+            RuntimeOrigin::signed(keeper()),
+            11,
+            0,
+            1,
+        ));
+        let after_first = GateBreachFlags::<Test>::get(11).expect("flags recorded");
+
+        // An in-place update of a key that already exists.
+        DailyInput::set(components(ONE, 800_000_000, ONE, ONE));
+        assert_ok!(Welfare::record_daily_gate(
+            RuntimeOrigin::signed(keeper()),
+            11,
+            1,
+            1,
+        ));
+        let after_second = GateBreachFlags::<Test>::get(11).expect("flags still recorded");
+        assert_ne!(
+            after_first, after_second,
+            "a changed value must reach storage",
+        );
+        assert!(Snapshots::<Test>::contains_key((11, 1)));
+
+        // A key the new state drops.
+        assert_ok!(Welfare::prune(12));
+        assert!(!GateBreachFlags::<Test>::contains_key(11));
+        assert!(!Snapshots::<Test>::contains_key((11, 1)));
     });
 }

@@ -4908,19 +4908,22 @@ impl pallet_epoch::WelfareSettlement for RuntimeEpochWelfare {
     fn compute_settlement(
         cohort_epoch: EpochId,
         spec: futarchy_primitives::MetricSpecVersion,
-        target: pallet_epoch::SettlementTarget,
+        targets: &[pallet_epoch::SettlementTarget],
     ) -> Result<FixedU64, DispatchError> {
-        let target = match target {
-            pallet_epoch::SettlementTarget::Proposal {
-                pid,
-                has_gate_books,
-            } => pallet_welfare::SettleTarget::Proposal {
-                pid,
-                has_gate_books,
-            },
-            pallet_epoch::SettlementTarget::Baseline => pallet_welfare::SettleTarget::Baseline,
-        };
-        pallet_welfare::Pallet::<Runtime>::compute_settlement(cohort_epoch, spec, target)
+        let targets = targets
+            .iter()
+            .map(|target| match target {
+                pallet_epoch::SettlementTarget::Proposal {
+                    pid,
+                    has_gate_books,
+                } => pallet_welfare::SettleTarget::Proposal {
+                    pid: *pid,
+                    has_gate_books: *has_gate_books,
+                },
+                pallet_epoch::SettlementTarget::Baseline => pallet_welfare::SettleTarget::Baseline,
+            })
+            .collect::<alloc::vec::Vec<_>>();
+        pallet_welfare::Pallet::<Runtime>::compute_settlement(cohort_epoch, spec, &targets)
     }
     fn settle_baseline_void(cohort_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
         pallet_welfare::Pallet::<Runtime>::settle_baseline_void(cohort_epoch)

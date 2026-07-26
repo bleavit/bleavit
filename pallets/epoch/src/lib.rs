@@ -340,10 +340,13 @@ pub trait WelfareSettlement {
     /// target-specific fail-static VOID signal before settlement enters its
     /// rollback layer.
     fn gate_window_sampled(epoch: EpochId) -> bool;
+    /// Settle every target in one batch and return the single score they share
+    /// (SQ-497; see the `epoch_core::WelfareOps` method of the same name for why
+    /// it is batched).
     fn compute_settlement(
         cohort_epoch: EpochId,
         spec: MetricSpecVersion,
-        target: SettlementTarget,
+        targets: &[SettlementTarget],
     ) -> Result<FixedU64, DispatchError>;
     /// Settle a cohort-VOID or orphan epoch's Baseline vault at the neutral
     /// score (03 §2.3/§5; 05 §7(5)–(6)).
@@ -2130,9 +2133,9 @@ pub mod pallet {
             &mut self,
             cohort_epoch: EpochId,
             spec: MetricSpecVersion,
-            target: SettlementTarget,
+            targets: &[SettlementTarget],
         ) -> Result<FixedU64, CoreError> {
-            T::Welfare::compute_settlement(cohort_epoch, spec, target)
+            T::Welfare::compute_settlement(cohort_epoch, spec, targets)
                 .map_err(|_| CoreError::Welfare)
         }
 

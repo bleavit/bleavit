@@ -13,7 +13,7 @@
 // benchmark
 // pallet
 // --runtime
-// target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
+// /home/development/bleavit/target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
 // --pallet
 // pallet_welfare
 // --extrinsic
@@ -23,7 +23,7 @@
 // --repeat
 // 20
 // --output
-// /tmp/claude-1000/-home-development-bleavit/b40139b1-6248-4c1a-ad60-57e786f83c15/scratchpad/new-pallet_welfare.rs
+// runtime/bleavit-runtime/src/weights/pallet_welfare.rs
 // --unsafe-overwrite-results
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
@@ -37,13 +37,13 @@ use core::marker::PhantomData;
 /// Weight functions for `pallet_welfare`.
 pub struct WeightInfo<T>(PhantomData<T>);
 impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
-	/// Storage: `Welfare::MetricSpecs` (r:17 w:16)
+	/// Storage: `Welfare::MetricSpecs` (r:17 w:1)
 	/// Proof: `Welfare::MetricSpecs` (`max_values`: None, `max_size`: Some(3507), added: 5982, mode: `MaxEncodedLen`)
-	/// Storage: `Welfare::Snapshots` (r:21 w:20)
+	/// Storage: `Welfare::Snapshots` (r:21 w:0)
 	/// Proof: `Welfare::Snapshots` (`max_values`: None, `max_size`: Some(253), added: 2728, mode: `MaxEncodedLen`)
-	/// Storage: `Welfare::SnapshotContexts` (r:21 w:20)
+	/// Storage: `Welfare::SnapshotContexts` (r:21 w:0)
 	/// Proof: `Welfare::SnapshotContexts` (`max_values`: None, `max_size`: Some(117), added: 2592, mode: `MaxEncodedLen`)
-	/// Storage: `Welfare::GateBreachFlags` (r:21 w:20)
+	/// Storage: `Welfare::GateBreachFlags` (r:21 w:0)
 	/// Proof: `Welfare::GateBreachFlags` (`max_values`: None, `max_size`: Some(30), added: 2505, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
@@ -63,15 +63,15 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `62877`
 		//  Estimated: `102684`
-		// Minimum execution time: 604_570_000 picoseconds.
-		Weight::from_parts(639_980_000, 0)
+		// Minimum execution time: 548_190_000 picoseconds.
+		Weight::from_parts(589_080_000, 0)
 			.saturating_add(Weight::from_parts(0, 102684))
 			.saturating_add(T::DbWeight::get().reads(94))
-			.saturating_add(T::DbWeight::get().writes(77))
+			.saturating_add(T::DbWeight::get().writes(2))
 	}
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
-	/// Storage: `Welfare::MetricSpecs` (r:17 w:16)
+	/// Storage: `Welfare::MetricSpecs` (r:17 w:0)
 	/// Proof: `Welfare::MetricSpecs` (`max_values`: None, `max_size`: Some(3507), added: 5982, mode: `MaxEncodedLen`)
 	/// Storage: `IncidentRegistry::Aggregates` (r:1 w:0)
 	/// Proof: `IncidentRegistry::Aggregates` (`max_values`: None, `max_size`: Some(38), added: 2513, mode: `MaxEncodedLen`)
@@ -81,11 +81,11 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 	/// Proof: `IncidentRegistry::Filings` (`max_values`: None, `max_size`: Some(196), added: 2671, mode: `MaxEncodedLen`)
 	/// Storage: `Constitution::Params` (r:13 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
-	/// Storage: `Welfare::Snapshots` (r:20 w:20)
+	/// Storage: `Welfare::Snapshots` (r:21 w:1)
 	/// Proof: `Welfare::Snapshots` (`max_values`: None, `max_size`: Some(253), added: 2728, mode: `MaxEncodedLen`)
-	/// Storage: `Welfare::SnapshotContexts` (r:20 w:20)
+	/// Storage: `Welfare::SnapshotContexts` (r:21 w:1)
 	/// Proof: `Welfare::SnapshotContexts` (`max_values`: None, `max_size`: Some(117), added: 2592, mode: `MaxEncodedLen`)
-	/// Storage: `Welfare::GateBreachFlags` (r:21 w:20)
+	/// Storage: `Welfare::GateBreachFlags` (r:21 w:0)
 	/// Proof: `Welfare::GateBreachFlags` (`max_values`: None, `max_size`: Some(30), added: 2505, mode: `MaxEncodedLen`)
 	/// Storage: `Welfare::SnapshotDeadline` (r:1 w:0)
 	/// Proof: `Welfare::SnapshotDeadline` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
@@ -103,25 +103,25 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `77492`
 		//  Estimated: `102684`
-		// Minimum execution time: 752_940_000 picoseconds.
-		Weight::from_parts(790_180_000, 0)
+		// Minimum execution time: 693_260_000 picoseconds.
+		Weight::from_parts(741_030_000, 0)
 			.saturating_add(Weight::from_parts(0, 102684))
-			.saturating_add(T::DbWeight::get().reads(102))
-			.saturating_add(T::DbWeight::get().writes(80))
+			.saturating_add(T::DbWeight::get().reads(104))
+			.saturating_add(T::DbWeight::get().writes(6))
 	}
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
-	/// Storage: `Welfare::MetricSpecs` (r:17 w:16)
+	/// Storage: `Welfare::MetricSpecs` (r:17 w:0)
 	/// Proof: `Welfare::MetricSpecs` (`max_values`: None, `max_size`: Some(3507), added: 5982, mode: `MaxEncodedLen`)
 	/// Storage: `Constitution::Params` (r:13 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	/// Storage: `Welfare::SampledGateDays` (r:1 w:1)
 	/// Proof: `Welfare::SampledGateDays` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
-	/// Storage: `Welfare::Snapshots` (r:21 w:20)
+	/// Storage: `Welfare::Snapshots` (r:21 w:0)
 	/// Proof: `Welfare::Snapshots` (`max_values`: None, `max_size`: Some(253), added: 2728, mode: `MaxEncodedLen`)
-	/// Storage: `Welfare::SnapshotContexts` (r:21 w:20)
+	/// Storage: `Welfare::SnapshotContexts` (r:21 w:0)
 	/// Proof: `Welfare::SnapshotContexts` (`max_values`: None, `max_size`: Some(117), added: 2592, mode: `MaxEncodedLen`)
-	/// Storage: `Welfare::GateBreachFlags` (r:20 w:20)
+	/// Storage: `Welfare::GateBreachFlags` (r:21 w:1)
 	/// Proof: `Welfare::GateBreachFlags` (`max_values`: None, `max_size`: Some(30), added: 2505, mode: `MaxEncodedLen`)
 	/// Storage: `FutarchyTreasury::State` (r:1 w:1)
 	/// Proof: `FutarchyTreasury::State` (`max_values`: Some(1), `max_size`: Some(25361), added: 25856, mode: `MaxEncodedLen`)
@@ -133,10 +133,10 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `77669`
 		//  Estimated: `102684`
-		// Minimum execution time: 619_380_000 picoseconds.
-		Weight::from_parts(656_039_000, 0)
+		// Minimum execution time: 560_970_000 picoseconds.
+		Weight::from_parts(598_580_000, 0)
 			.saturating_add(Weight::from_parts(0, 102684))
-			.saturating_add(T::DbWeight::get().reads(98))
-			.saturating_add(T::DbWeight::get().writes(81))
+			.saturating_add(T::DbWeight::get().reads(99))
+			.saturating_add(T::DbWeight::get().writes(6))
 	}
 }
