@@ -465,7 +465,12 @@ impl<T: pallet::Config> frame_support::traits::Get<EpochId> for CurrentEpoch<T> 
 pub mod pallet {
     use super::*;
     use alloc::vec::Vec;
-    use frame_support::{pallet_prelude::*, traits::EnsureOrigin};
+    use frame_support::{
+        dispatch::{DispatchErrorWithPostInfo, DispatchResultWithPostInfo, Pays, PostDispatchInfo},
+        pallet_prelude::*,
+        traits::EnsureOrigin,
+        weights::Weight,
+    };
     use frame_system::pallet_prelude::*;
     use futarchy_primitives::{Branch, CohortSummary, DecisionOutcome, EpochPhase, ProposalState};
     use sp_runtime::{SaturatedConversion, TryRuntimeError};
@@ -1127,13 +1132,16 @@ pub mod pallet {
         /// `tick`'s benchmarked worst case is a full batch *without* one, so no
         /// single fixture measures both. Charging it unconditionally is the
         /// conservative direction — a crossing is only known after dispatch
-        /// (SQ-490).
+        /// (SQ-490). SQ-499 keeps that pre-charge and refunds this addend only
+        /// when the payout branch was not taken.
         #[pallet::call_index(2)]
-        #[pallet::weight(T::WeightInfo::tick(pids.len() as u32)
-            .saturating_add(T::WeightInfo::collator_compensation()))]
-        pub fn tick(origin: OriginFor<T>, pids: TickBatch) -> DispatchResult {
+        #[pallet::weight(Pallet::<T>::tick_weight(pids.len() as u32))]
+        pub fn tick(origin: OriginFor<T>, pids: TickBatch) -> DispatchResultWithPostInfo {
+            // Errors before `result` exists retain `actual_weight: None` and the
+            // full pre-charge; overcharging is the safe direction (SQ-499).
             let who = ensure_signed(origin)?;
             let params = Self::live_params()?;
+            let charged = Self::tick_weight(pids.len() as u32);
             let now = Self::now();
             let mut advanced = false;
             let mut crossed_epoch = false;
@@ -1409,25 +1417,29 @@ pub mod pallet {
             // only after the clock crossing has persisted `EpochOf`, so the
             // compensation sink observes `CurrentEpoch = completed + 1` and
             // its completed-epoch guard cannot suppress the payout.
+            let mut paid = false;
             if result.is_ok() && crossed_epoch {
                 T::CollatorCompensation::pay();
+                paid = true;
             }
             if result.is_ok() && advanced {
                 // B5 recalibrates this weight for the rebate sink's treasury writes.
                 T::KeeperRebate::rebate(&who, CrankClass::DecisionCritical);
             }
-            result
+            Self::finish_with_compensation(charged, paid, result)
         }
 
         /// Charges the A13 collator payout for the same reason `tick` does: this
         /// is a clock-syncing entry point, so it can be the crossing's first
         /// caller (SQ-490).
         #[pallet::call_index(3)]
-        #[pallet::weight(T::WeightInfo::decide()
-            .saturating_add(T::WeightInfo::collator_compensation()))]
-        pub fn decide(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
+        #[pallet::weight(Pallet::<T>::decide_weight())]
+        pub fn decide(origin: OriginFor<T>, pid: ProposalId) -> DispatchResultWithPostInfo {
+            // Errors before `result` exists retain `actual_weight: None` and the
+            // full pre-charge; overcharging is the safe direction (SQ-499).
             let who = ensure_signed(origin)?;
             let params = Self::live_params()?;
+            let charged = Self::decide_weight();
             let now = Self::now();
             let epoch_before = EpochOf::<T>::get().index;
             let mut decision_advanced = false;
@@ -1509,27 +1521,35 @@ pub mod pallet {
                 // B5 recalibrates this weight for the rebate sink's treasury writes.
                 T::KeeperRebate::rebate(&who, CrankClass::DecisionCritical);
             }
+            let mut paid = false;
             if result.is_ok() && EpochOf::<T>::get().index != epoch_before {
                 // Any successful clock-sync entry point can be the first
                 // caller after Housekeeping; do not wait for a later tick.
                 T::CollatorCompensation::pay();
+                paid = true;
             }
-            result
+            Self::finish_with_compensation(charged, paid, result)
         }
 
         /// Charges the A13 collator payout for the same reason `tick` does: this
         /// is a clock-syncing entry point, so it can be the crossing's first
         /// caller (SQ-490).
         #[pallet::call_index(4)]
-        #[pallet::weight(T::WeightInfo::settle_cohort(*batch)
-            .saturating_add(T::WeightInfo::collator_compensation()))]
-        pub fn settle_cohort(origin: OriginFor<T>, epoch: EpochId, batch: u32) -> DispatchResult {
+        #[pallet::weight(Pallet::<T>::settle_cohort_weight(*batch))]
+        pub fn settle_cohort(
+            origin: OriginFor<T>,
+            epoch: EpochId,
+            batch: u32,
+        ) -> DispatchResultWithPostInfo {
+            // Errors before `result` exists retain `actual_weight: None` and the
+            // full pre-charge; overcharging is the safe direction (SQ-499).
             let who = ensure_signed(origin)?;
             ensure!(
                 batch > 0 && batch <= futarchy_primitives::kernel::SETTLE_COHORT_MAX_ITEMS,
                 Error::<T>::BatchTooLarge
             );
             let params = Self::live_params()?;
+            let charged = Self::settle_cohort_weight(batch);
             let now = Self::now();
             let epoch_before = EpochOf::<T>::get().index;
 
@@ -1582,15 +1602,18 @@ pub mod pallet {
 
             if gate_deadlocked {
                 if !PendingOracleVoids::<T>::contains_key(epoch) {
-                    ensure!(
-                        PendingOracleVoids::<T>::count() < MAX_NON_TERMINAL_COHORTS_BOUND,
-                        Error::<T>::TooManyCohorts
-                    );
+                    if PendingOracleVoids::<T>::count() >= MAX_NON_TERMINAL_COHORTS_BOUND {
+                        return Self::finish_with_compensation(
+                            charged,
+                            false,
+                            Err(Error::<T>::TooManyCohorts.into()),
+                        );
+                    }
                     PendingOracleVoids::<T>::insert(epoch, ());
                     Self::deposit_event(Event::OracleDeadlockLatched { epoch });
                     T::KeeperRebate::rebate(&who, CrankClass::DecisionCritical);
                 }
-                return Ok(());
+                return Self::finish_with_compensation(charged, false, Ok(()));
             }
             if gate_check_eligible && PendingOracleVoids::<T>::take(epoch).is_some() {
                 Self::deposit_event(Event::OracleDeadlockCleared { epoch });
@@ -1636,12 +1659,14 @@ pub mod pallet {
                 // B5 recalibrates this weight for the rebate sink's treasury writes.
                 T::KeeperRebate::rebate(&who, CrankClass::DecisionCritical);
             }
+            let mut paid = false;
             if result.is_ok() && EpochOf::<T>::get().index != epoch_before {
                 // `settle_cohort` also synchronizes the phase clock and may
                 // cross Housekeeping before `tick` gets a chance to run.
                 T::CollatorCompensation::pay();
+                paid = true;
             }
-            result
+            Self::finish_with_compensation(charged, paid, result)
         }
 
         /// META/ConstitutionalValues refresh of the next-boundary epoch length.
@@ -2117,6 +2142,38 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
+        fn tick_weight(items: u32) -> Weight {
+            T::WeightInfo::tick(items).saturating_add(T::WeightInfo::collator_compensation())
+        }
+
+        fn decide_weight() -> Weight {
+            T::WeightInfo::decide().saturating_add(T::WeightInfo::collator_compensation())
+        }
+
+        fn settle_cohort_weight(items: u32) -> Weight {
+            T::WeightInfo::settle_cohort(items)
+                .saturating_add(T::WeightInfo::collator_compensation())
+        }
+
+        fn finish_with_compensation(
+            charged: Weight,
+            paid: bool,
+            result: DispatchResult,
+        ) -> DispatchResultWithPostInfo {
+            let actual_weight = if paid {
+                charged
+            } else {
+                charged.saturating_sub(T::WeightInfo::collator_compensation())
+            };
+            let post_info = PostDispatchInfo {
+                actual_weight: Some(actual_weight),
+                pays_fee: Pays::Yes,
+            };
+            result
+                .map(|()| post_info)
+                .map_err(|error| DispatchErrorWithPostInfo { post_info, error })
+        }
+
         pub fn current_epoch() -> EpochId {
             EpochOf::<T>::get().index
         }

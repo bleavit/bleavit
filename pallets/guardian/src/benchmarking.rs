@@ -47,6 +47,28 @@ fn action_at_four<T: Config>(power: GuardianPower) -> ActionId {
     id
 }
 
+/// Drive one action all the way to dispatch and return its id, so a fixture can
+/// build a *batch* of genuinely settleable reviews rather than one (SQ-500).
+///
+/// Unlike [`action_at_four`] this reads the id from [`NextActionId`] instead of
+/// assuming 0, and spends the fifth approval itself. `SuspendOnGate` is the power
+/// used because it carries no per-epoch allowance, so the same council can drive
+/// it as many times as the fixture needs.
+fn dispatch_suspend_on_gate<T: Config>() -> Result<ActionId, BenchmarkError> {
+    let id = NextActionId::<T>::get();
+    Pallet::<T>::propose_action(
+        T::BenchmarkHelper::signed([1; 32]),
+        GuardianPower::SuspendOnGate,
+        H256::default(),
+    )
+    .map_err(|_| BenchmarkError::Stop("propose"))?;
+    for i in 1..GUARDIAN_THRESHOLD {
+        Pallet::<T>::approve_action(T::BenchmarkHelper::signed([i + 1; 32]), id)
+            .map_err(|_| BenchmarkError::Stop("approve"))?;
+    }
+    Ok(id)
+}
+
 fn pending(id: ActionId, dispatched: bool) -> PendingAction {
     PendingAction {
         id,
@@ -317,47 +339,81 @@ mod benches {
         ));
     }
 
+    /// The mandatory maintenance hook at its **bounded** worst case (SQ-500):
+    /// a saturated settle batch, a saturated reap batch, and every other bounded
+    /// collection full.
+    ///
+    /// The batch is what makes this hook's weight finite, so the fixture must
+    /// actually saturate it. The pre-SQ-500 fixture did not: it filled
+    /// `ReviewDeadlines` to `MAX_REVIEWS` but set `ratified = true` on every
+    /// filler, which the overdue filter excludes, so it measured **one** settle
+    /// and its comment justified that by calling 128 simultaneous failures
+    /// unreachable. They are reachable — reviews created in one epoch share one
+    /// deadline — which is the defect SQ-500 records. What the bound changes is
+    /// that the hook now settles at most `GUARDIAN_MAINTENANCE_BATCH` of them per
+    /// block and carries the rest, so *that* is the worst case to measure.
     #[benchmark]
     fn on_initialize() -> Result<(), BenchmarkError> {
         seed_council::<T>();
         T::BenchmarkHelper::prime_for_worst_case();
-        // Use a non-delay action here so the benchmark exercises the full
-        // terminal reap path. A delayed action intentionally retains its veto
-        // referendum until T12 (SQ-311) and is covered by pallet tests.
-        let overdue = action_at_four::<T>(GuardianPower::SuspendOnGate);
-        Pallet::<T>::approve_action(T::BenchmarkHelper::signed([5; 32]), overdue)
-            .map_err(|_| BenchmarkError::Stop("dispatch"))?;
+        // A full settle batch. `SuspendOnGate` is used (rather than a delayed
+        // action) so the benchmark exercises the full terminal reap path: a
+        // delayed action intentionally retains its veto referendum until T12
+        // (SQ-311) and is covered by pallet tests.
+        let mut overdue = alloc::vec::Vec::new();
+        for _ in 0..GUARDIAN_MAINTENANCE_BATCH {
+            overdue.push(dispatch_suspend_on_gate::<T>()?);
+        }
+        let first = *overdue.first().ok_or(BenchmarkError::Stop("empty batch"))?;
         let deadline = ReviewDeadlines::<T>::get()
             .iter()
-            .find(|review| review.action_id == overdue)
+            .find(|review| review.action_id == first)
             .map(|review| review.deadline_epoch)
             .ok_or(BenchmarkError::Stop("overdue review deadline"))?;
-        T::BenchmarkHelper::prime_maintenance_epoch(deadline.saturating_add(1));
+        // Past both horizons at once: the review deadline, and the four-epoch
+        // retention that makes the seeded `FailedActions` rows reapable — the
+        // reap sweep is the hook's other bounded batch and must also saturate.
+        T::BenchmarkHelper::prime_maintenance_epoch(deadline.saturating_add(1).max(4));
         let approvers = [[1; 32], [2; 32], [3; 32], [4; 32], [5; 32]];
+        let dispatched = NextActionId::<T>::get();
         PendingActions::<T>::mutate(|actions| {
-            for id in 1..MAX_PENDING_ACTIONS {
+            for id in dispatched..MAX_PENDING_ACTIONS {
                 actions.try_push(pending(id, true)).expect("pending bound");
             }
         });
         Approvals::<T>::mutate(|approvals| {
-            for id in 1..MAX_PENDING_ACTIONS {
-                for who in approvers {
-                    approvals.try_push((id, who)).expect("approval bound");
-                }
+            while approvals.len() < MAX_APPROVALS as usize {
+                let id = (approvals.len() as u32 / GUARDIAN_SEATS as u32)
+                    .saturating_add(MAX_PENDING_ACTIONS);
+                let who = approvers[approvals.len() % approvers.len()];
+                approvals.try_push((id, who)).expect("approval bound");
             }
         });
+        // The reviews behind the batch: real records the hook must *skip* this
+        // block because the bound is already spent. They are what proves the
+        // measured weight does not grow with the backlog.
         ReviewDeadlines::<T>::mutate(|reviews| {
             while reviews.len() < MAX_REVIEWS as usize {
                 let id = 1_000u32.saturating_add(reviews.len() as u32);
-                let mut terminal = review(id, 0);
-                // Terminal reviews exercise the full bounded reap without
-                // inventing unreachable fronting records for 128 simultaneous
-                // failures. The real `overdue` record exercises cancellation,
-                // refund, slash and recall at the strict deadline boundary.
-                terminal.ratified = true;
-                reviews.try_push(terminal).expect("review bound");
+                reviews.try_push(review(id, 0)).expect("review bound");
             }
         });
+        // A saturated reap batch too, leaving exactly enough headroom under
+        // `MAX_FAILED_ACTIONS` for this block's settles to insert their records
+        // (`settle_failed_review` fails closed at the ceiling).
+        for id in 0..MAX_FAILED_ACTIONS.saturating_sub(GUARDIAN_MAINTENANCE_BATCH) {
+            FailedActions::<T>::insert(
+                20_000u32.saturating_add(id),
+                FailedAction {
+                    approvers: [
+                        [1; 32], [2; 32], [3; 32], [4; 32], [5; 32], [0; 32], [0; 32],
+                    ],
+                    approver_count: GUARDIAN_THRESHOLD,
+                    failed_epoch: 0,
+                    recall_referendum: None,
+                },
+            );
+        }
         fill_playbooks::<T>(0);
         ActivePlaybooks::<T>::mutate(|playbooks| {
             let ledger = playbooks
@@ -376,17 +432,39 @@ mod benches {
 
         assert_eq!(ActivePlaybooks::<T>::get().len(), 1);
         assert_eq!(ActivePlaybooks::<T>::get()[0].id, PlaybookId::LedgerFreeze);
-        assert!(PendingActions::<T>::get().is_empty());
-        assert!(ReviewDeadlines::<T>::get().is_empty());
-        let failed = FailedActions::<T>::get(overdue).expect("overdue review settled");
-        assert!(failed.recall_referendum.is_some());
+        // Every review in the batch settled — the failure mode this fixture
+        // exists to exclude is measuring fewer (SQ-490's lesson: a fixture that
+        // never reaches the work reports a plausible small number).
+        let mut recalls = 0u32;
+        for action in &overdue {
+            let failed = FailedActions::<T>::get(action).expect("batch review settled");
+            recalls = recalls.saturating_add(u32::from(failed.recall_referendum.is_some()));
+            assert!(!ReviewReferenda::<T>::contains_key(action));
+            assert!(!VetoReviewReferenda::<T>::contains_key(action));
+        }
+        // At least one settle took the *expensive* branch — scheduling a recall
+        // referendum (preimage + submit + decision deposit + transfer). Not every
+        // one can, and that is a property of the system rather than of the
+        // fixture: a recall is funded from the slash pool, a seat's 50,000 VIT
+        // bond absorbs exactly two 50 % slashes, and a settle draws from five
+        // approvers at once — so a fresh council's 350,000 VIT of bonded capital
+        // funds the first two settles of a batch and no more. Asserting all ten
+        // would only be satisfiable by seeding bond capital the chain cannot
+        // hold, which inflates a *mandatory* per-block charge with unreachable
+        // state.
+        assert!(recalls > 0);
+        // ... and the backlog behind it did not, so the bound really bounds.
+        assert!(!ReviewDeadlines::<T>::get().is_empty());
+        // The reap sweep ran a full batch as well.
+        assert_eq!(
+            FailedActions::<T>::count(),
+            MAX_FAILED_ACTIONS.saturating_sub(GUARDIAN_MAINTENANCE_BATCH),
+        );
         assert!(
             crate::pallet::MemberBonds::<T>::get()[..usize::from(GUARDIAN_THRESHOLD)]
                 .iter()
-                .all(|bond| *bond == GUARDIAN_BOND / 2)
+                .all(|bond| *bond < GUARDIAN_BOND)
         );
-        assert!(!ReviewReferenda::<T>::contains_key(overdue));
-        assert!(!VetoReviewReferenda::<T>::contains_key(overdue));
         Ok(())
     }
 

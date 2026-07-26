@@ -90,6 +90,38 @@ pub const MAX_PENDING_BOND_RELEASES: u32 = (GUARDIAN_SEATS as u32) * 2;
 /// Failed accountability records share the open-review concurrency ceiling.
 pub const MAX_FAILED_ACTIONS: u32 = MAX_REVIEWS;
 
+/// `GuardianMaintenanceBatch` (13 §2 crank batch bounds; 06 §5.4) — the number
+/// of overdue reviews the mandatory per-block maintenance hook settles, and the
+/// number of [`FailedActions`] rows it reaps, in one block. The excess resumes
+/// on the next block (SQ-500).
+///
+/// **Derived, not chosen.** It is the number of reviews the §5.2 allowance-capped
+/// powers can bring to a single shared deadline: `DelayOnce` 2/epoch, `ForceRerun`
+/// 1/epoch, `PauseIntake` 1 per 4-epoch window, plus one activation of each of the
+/// six enumerated playbooks ([`MAX_ACTIVE_PLAYBOOKS`]; re-activation requires
+/// expiry first). Under a live clock the hook therefore never lags at all — the
+/// carry path is reached only by the unallowanced `SuspendOnGate` power, or after
+/// a multi-epoch clock jump lands several epochs' deadlines in one block.
+///
+/// A saturated [`MAX_REVIEWS`] backlog drains in `⌈128 / 10⌉` = 13 blocks (~78 s).
+///
+/// **What the measurement said.** The saturated batch benchmarks at 100 reads /
+/// 101 writes / 125,304 B of proof / 5.63 ms, against the hand-written envelope
+/// it replaces (220 / 150 / 183,055 B / 1.95 ms). The bound therefore *lowers*
+/// the mandatory per-block storage and PoV charge and *raises* the ref_time
+/// charge: the guess had over-declared storage and under-declared time by ~2.9x.
+/// At 5.63 ms the hook is 0.28 % of the 2-second block, so ref_time is nowhere
+/// near binding — the derivation above, not that headroom, is what fixes the
+/// value.
+///
+/// Overload **carries the remainder; it never skips** (G-1, R-7). Dropping a due
+/// review would forfeit an accountability action outright, whereas deferring one
+/// only delays a slash — the same asymmetry 06 §5.4's SQ-45(c) ruling turns on.
+pub const GUARDIAN_MAINTENANCE_BATCH: u32 = MAX_ACTIVE_PLAYBOOKS
+    + guardian_core::DELAY_ONCE_ALLOWANCE_PER_EPOCH as u32
+    + guardian_core::FORCE_RERUN_ALLOWANCE_PER_EPOCH as u32
+    + guardian_core::PAUSE_INTAKE_ALLOWANCE as u32;
+
 /// Guardian-side proposal status feed (reads `pallet-epoch`). Supplies the
 /// admissibility context for `delay_once` / `force_rerun` (06 §5.3): the
 /// proposal's current [`ProposalStatus`] and whether it is already inside a
@@ -452,6 +484,19 @@ pub mod pallet {
     #[pallet::storage]
     pub type FailedActions<T: Config> =
         CountedStorageMap<_, Blake2_128Concat, ActionId, FailedAction, OptionQuery>;
+
+    /// Round-robin resume point for the bounded [`FailedActions`] reap sweep
+    /// (SQ-500). Holds the last action id the maintenance hook examined; the
+    /// next block resumes *after* its storage key and wraps to the start of the
+    /// map once a sweep runs short of [`GUARDIAN_MAINTENANCE_BATCH`].
+    ///
+    /// A cursor rather than a plain `take(n)`: the map is iterated in hash order,
+    /// so re-reading the first `n` keys every block would reap those and starve
+    /// every key behind them. `OptionQuery` with a `None` default means an
+    /// upgraded chain starts a fresh sweep at the head of the map, so no
+    /// migration is required and no key is skipped.
+    #[pallet::storage]
+    pub type FailedActionReapCursor<T: Config> = StorageValue<_, ActionId, OptionQuery>;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -1754,13 +1799,40 @@ pub mod pallet {
         /// no-op-safe.
         fn run_maintenance() {
             let epoch = T::CurrentEpoch::get();
+            let loaded = Self::load();
             // The core asks the FRAME shell whether a failed DelayOnce review
-            // still has a live veto referendum.  Snapshot the bounded action
-            // keys once; scanning the reverse pid→action join for every
-            // candidate would turn this already bounded hook into an O(n²)
-            // storage walk.
-            let live_veto_actions = VetoReviewReferenda::<T>::iter_keys().collect::<Vec<_>>();
-            let overdue = match Self::load() {
+            // still has a live veto referendum. Snapshot the answer once;
+            // consulting the map per candidate would turn this hook into an
+            // O(n²) storage walk.
+            //
+            // The snapshot is built from the **pending action set**, not from
+            // `VetoReviewReferenda::iter_keys()` (SQ-500). The core only ever
+            // asks about a pending `DelayOnce` action, so the two agree on every
+            // question that is actually put — but a map-wide key scan costs one
+            // read per *stored* key, a quantity no declared bound covers, while
+            // this walk is in-memory over the already-loaded aggregate and buys
+            // at most one read per `DelayOnce` action pending, i.e. at most
+            // `MAX_PENDING_ACTIONS`. Truncating the snapshot is not an option in
+            // either form: a missing entry reaps an action whose upheld veto is
+            // still live, destroying the bounded T24 admission record.
+            let live_veto_actions = loaded
+                .as_ref()
+                .map(|g| {
+                    g.pending
+                        .iter()
+                        .filter(|action| {
+                            matches!(action.power, guardian_core::GuardianPower::DelayOnce { .. })
+                        })
+                        .map(|action| action.id)
+                        .filter(|action| VetoReviewReferenda::<T>::contains_key(action))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            // Settle at most one batch per block (13 §2 `GuardianMaintenanceBatch`;
+            // 06 §5.4). Settling a review flips its `recall_scheduled` bit, so it
+            // stops matching this filter and the next block's batch begins at the
+            // next unsettled review — the remainder carries, nothing is skipped.
+            let overdue = match loaded.as_ref() {
                 Some(g) => g
                     .reviews
                     .iter()
@@ -1770,6 +1842,7 @@ pub mod pallet {
                             && epoch > review.deadline_epoch
                     })
                     .map(|review| review.action_id)
+                    .take(GUARDIAN_MAINTENANCE_BATCH as usize)
                     .collect::<Vec<_>>(),
                 None => Vec::new(),
             };
@@ -1900,9 +1973,35 @@ pub mod pallet {
             })
         }
 
+        /// Retire failed-action records past their four-epoch retention, at most
+        /// [`GUARDIAN_MAINTENANCE_BATCH`] per block (SQ-500).
+        ///
+        /// The map holds up to [`MAX_FAILED_ACTIONS`] rows, so a full scan is a
+        /// storage-determined per-block cost inside a mandatory hook. Iteration is
+        /// in hash order, which is why the batch resumes from a stored cursor
+        /// rather than restarting at the head: a fixed `take(n)` would re-examine
+        /// the same prefix forever and starve every key behind it. A sweep that
+        /// runs short of the batch has reached the end of the map and clears the
+        /// cursor, so the next block starts over from the head.
         fn reap_failed_actions() {
             let epoch = T::CurrentEpoch::get();
-            for (action, failed) in FailedActions::<T>::iter() {
+            let mut iter = match FailedActionReapCursor::<T>::get() {
+                // `iter_from` resumes strictly *after* the given storage key and
+                // does not require it to still exist — a row reaped last block
+                // still positions the walk correctly.
+                Some(action) => {
+                    FailedActions::<T>::iter_from(FailedActions::<T>::hashed_key_for(action))
+                }
+                None => FailedActions::<T>::iter(),
+            };
+            let mut examined = 0u32;
+            let mut last = None;
+            while examined < GUARDIAN_MAINTENANCE_BATCH {
+                let Some((action, failed)) = iter.next() else {
+                    break;
+                };
+                examined = examined.saturating_add(1);
+                last = Some(action);
                 if epoch < failed.failed_epoch.saturating_add(4) {
                     continue;
                 }
@@ -1914,6 +2013,11 @@ pub mod pallet {
                     }
                     None => FailedActions::<T>::remove(action),
                 }
+            }
+            // Short sweep ⇒ the map is exhausted ⇒ wrap to the head next block.
+            match last.filter(|_| examined == GUARDIAN_MAINTENANCE_BATCH) {
+                Some(action) => FailedActionReapCursor::<T>::put(action),
+                None => FailedActionReapCursor::<T>::kill(),
             }
         }
 

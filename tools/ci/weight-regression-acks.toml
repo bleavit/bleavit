@@ -52,3 +52,15 @@
 runtime/bleavit-runtime/src/weights/pallet_futarchy_treasury.rs note_collator_block @ reads=10: measured correction, not a code change — the committed 8 reads predate A13's collator-compensation accounting reaching this call, which now also touches the authored-epoch and registered-count keys. Found by the SQ-490 drift gate; regenerated at 50x20.
 runtime/bleavit-runtime/src/weights/pallet_guardian.rs approve_action @ writes=51: measured correction, not a code change — the committed 45 writes understate the approval path's real storage cost after B18's veto-review and fronting records. Found by the SQ-490 drift gate; regenerated at 50x20.
 runtime/bleavit-runtime/src/weights/pallet_guardian.rs uphold_veto @ writes=83: measured correction, not a code change — the committed 75 writes understate the veto-upholding path over the same B18 records. Found by the SQ-490 drift gate; regenerated at 50x20.
+
+# SQ-500 (2026-07-26) — the guardian maintenance hook's ref_time triples because
+# the value it replaces was never measured. The old 1.95 ms / 220 r / 150 w was a
+# hand-written envelope held deliberately above a fixture that settled ONE review,
+# because the sweep had no per-block bound and no weight value is the right fix
+# for an unbounded mandatory hook. The sweep is now bounded (13 §2
+# `GuardianMaintenanceBatch` = 10, 06 §5.4) and the fixture saturates it, so this
+# is the first real measurement of the hook. It moves in both directions at once:
+# reads 220 -> 100, writes 150 -> 101 and proof 183,055 -> 125,304 B all FALL,
+# while ref_time rises 1.95 -> 5.63 ms. The guess had over-declared storage and
+# under-declared time. 5.63 ms is 0.28 % of the 2-second block.
+runtime/bleavit-runtime/src/weights/pallet_guardian.rs on_initialize @ ref_time=5627551000: first real measurement of the maintenance hook — SQ-500 bounded the sweep at GuardianMaintenanceBatch = 10 and the fixture now saturates it, replacing a hand-written 1.95 ms envelope that had never been benchmarked. Storage and PoV fall (220->100 r, 150->101 w, 183,055->125,304 B) in the same regeneration; only ref_time rises, to 0.28 % of the 2 s block.
