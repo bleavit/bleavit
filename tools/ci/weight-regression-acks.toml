@@ -39,20 +39,6 @@
 # this file is a gate control, not an archive.
 # ---------------------------------------------------------------------------
 
-# The three entries below share one cause and it is worth stating once: the
-# weight went up because the **declaration was wrong**, not because the code got
-# heavier. Each was found by the new per-function drift gate
-# (`regenerate-weights.py --check`, CI job `benchmark-smoke`) on its first real
-# run over all 31 weight files, which is the entire point of that gate — the
-# growth checker here compares two *committed* artifacts, so it can only ever see
-# a regeneration and never the absence of one. Committed values were regenerated
-# at the files' own 50x20 fidelity. Accepting a correction of an undercharge is
-# the safe direction; leaving it would keep three governance calls charging less
-# than they perform.
-runtime/bleavit-runtime/src/weights/pallet_futarchy_treasury.rs note_collator_block @ reads=10: measured correction, not a code change — the committed 8 reads predate A13's collator-compensation accounting reaching this call, which now also touches the authored-epoch and registered-count keys. Found by the SQ-490 drift gate; regenerated at 50x20.
-runtime/bleavit-runtime/src/weights/pallet_guardian.rs approve_action @ writes=51: measured correction, not a code change — the committed 45 writes understate the approval path's real storage cost after B18's veto-review and fronting records. Found by the SQ-490 drift gate; regenerated at 50x20.
-runtime/bleavit-runtime/src/weights/pallet_guardian.rs uphold_veto @ writes=83: measured correction, not a code change — the committed 75 writes understate the veto-upholding path over the same B18 records. Found by the SQ-490 drift gate; regenerated at 50x20.
-
 # SQ-500 (2026-07-26) — the guardian maintenance hook's ref_time triples because
 # the value it replaces was never measured. The old 1.95 ms / 220 r / 150 w was a
 # hand-written envelope held deliberately above a fixture that settled ONE review,
