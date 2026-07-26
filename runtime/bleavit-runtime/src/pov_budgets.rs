@@ -15,8 +15,10 @@
 
 use crate::configs::RuntimeBlockWeights;
 use crate::{AccountId, Runtime};
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::string::{String, ToString};
 use frame_support::dispatch::DispatchClass;
-use frame_support::traits::{ConstU32, Get};
+use frame_support::traits::{ConstU32, Get, GetCallMetadata};
 use frame_support::weights::Weight;
 use pallet_epoch::{MAX_COHORT_PROPOSALS_BOUND, TICK_BATCH_BOUND};
 use pallet_execution_guard::MAX_CALLS_BOUND;
@@ -273,6 +275,306 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
     all
 }
 
+// --- I-20 inventory derivation (SQ-490 item 4) --------------------------------
+//
+// `all_futarchy_call_weights` is a hand-written list, and until SQ-490 its only
+// completeness check was a hand-written count of its own length. Two hands
+// maintaining one fact detect a *dropped* entry and are structurally blind to a
+// *never-added* one — which is exactly what happened: three live Normal-class
+// dispatchables (`attestor::remove_for_cause`, `attestor::reap_attestation`,
+// `futarchy_treasury::create_community_schedule`) had never appeared in the
+// sweep at all, so I-20 never covered them.
+//
+// The inventory is therefore derived from the runtime's own call metadata
+// (`GetCallMetadata`, the surface `construct_runtime!` generates). Every
+// dispatchable the runtime can dispatch must be either swept here or
+// explicitly classified out, and each classification is itself checked. What
+// stays declared is only what call metadata cannot express: block hooks and
+// migration steps are not calls, so they are pinned as an exact set instead.
+//
+// Two limits of this derivation, stated so it is not read as proving more than
+// it does:
+//
+//  * It proves every dispatchable is *present* in the sweep at *some* component
+//    argument. It cannot prove the argument is the call's worst admissible one —
+//    those are supplied by hand below, and a call swept at less than its maximum
+//    passes every assertion here. That remains a review obligation.
+//  * A pallet with dispatchables that `construct_runtime!` lists *without* its
+//    `Call` part would have no `RuntimeCall` variant and so read as callless.
+//    That is sound rather than a hole: a call absent from `RuntimeCall` cannot be
+//    dispatched at all, and I-20 is a statement about dispatched weight.
+
+/// Runtime pallet alias → the `crate::weights` module whose generated
+/// `WeightInfo` the I-20 sweep charges for that pallet's dispatchables.
+///
+/// Many-to-one is legitimate and load-bearing: `pallet_registry` is instantiated
+/// twice (02 §7 slots 56/57) and both instances bind the *same* generated file
+/// (`configs.rs` documents the resulting last-instance-wins hazard, SQ-489), so
+/// one sweep entry per call name covers both.
+const FUTARCHY_DISPATCHING_MODULES: &[(&str, &str)] = &[
+    ("Constitution", "pallet_constitution"),
+    ("ConditionalLedger", "pallet_conditional_ledger"),
+    ("Market", "pallet_market"),
+    ("Welfare", "pallet_welfare"),
+    ("Oracle", "pallet_oracle"),
+    ("IncidentRegistry", "pallet_registry"),
+    ("MilestoneRegistry", "pallet_registry"),
+    ("FutarchyTreasury", "pallet_futarchy_treasury"),
+    ("Guardian", "pallet_guardian"),
+    ("Attestor", "pallet_attestor"),
+    ("Epoch", "pallet_epoch"),
+    ("ExecutionGuard", "pallet_execution_guard"),
+];
+
+/// Bleavit pallets that declare **no** dispatchables at all — asserted, not
+/// assumed. `pallet_origins` is an origin/filter shim over 06 §3.2's closed
+/// matrix (the same invariant `pallet-constitution`'s call-enum test pins),
+/// `pallet_inflow_caps` is the 09 §5.2 state-only shared meter that runs inside
+/// its callers' weight envelopes, and `track_origins` is the values-track origin
+/// shim.
+///
+/// `construct_runtime!` gives a pallet a `RuntimeCall` variant only when it has
+/// dispatchables, so **absence** from `get_module_names()` is the mechanical
+/// proof that these three declare none. If one ever gains a call it appears
+/// there, and `every_runtime_module_is_classified_for_the_i20_sweep` fails
+/// instead of letting an unswept dispatchable through.
+const FUTARCHY_CALLLESS_MODULES: &[&str] = &["Origins", "InflowCaps", "TrackOrigins"];
+
+/// Upstream FRAME/Cumulus/XCM pallets. Their generated weights are regression
+/// gated by `check-weight-regression.py` and their class budgets are upstream's
+/// concern; I-20 is a statement about *futarchy* calls (15 §4.5). Listed
+/// explicitly so a newly wired pallet cannot land unclassified.
+const UPSTREAM_MODULES: &[&str] = &[
+    "System",
+    "Timestamp",
+    "ParachainSystem",
+    "ParachainInfo",
+    "Balances",
+    "ForeignAssets",
+    "TransactionPayment",
+    "AssetTxPayment",
+    "Vesting",
+    "Referenda",
+    "ConvictionVoting",
+    "Preimage",
+    "Scheduler",
+    "Utility",
+    "Proxy",
+    "Multisig",
+    "Migrations",
+    // `bootstrap`-only (02 §7 slot 28); absent from a production runtime.
+    "Sudo",
+    "XcmpQueue",
+    "MessageQueue",
+    "CumulusXcm",
+    "PolkadotXcm",
+    "Authorship",
+    "CollatorSelection",
+    "Session",
+    "Aura",
+    "AuraExt",
+];
+
+/// Dispatchables deliberately absent from the Normal-class sweep because they
+/// are dispatched in another class. Every entry is class-verified by
+/// `non_normal_exclusions_are_really_non_normal`, so this list cannot be used to
+/// quietly drop a Normal call out of its budget.
+const NON_NORMAL_DISPATCHABLES: &[&str] = &["pallet_execution_guard::qualify_recovery_image"];
+
+/// Sweep entries that are not dispatchables. Call metadata cannot enumerate
+/// these, so they are pinned as an exact set — an undeclared non-call entry
+/// appearing in the sweep fails the coverage test, and so does a misspelled call
+/// name (it lands here rather than matching a derived name).
+///
+/// The three `pallet_market` entries are internal operations, not calls: markets
+/// are created, seeded and closed through the runtime adapters in `configs.rs`
+/// that the epoch cranks drive (`register_decision_window`, `seed_branch_pair`,
+/// `allocate_market_id`), and nothing charges these three functions — the
+/// enclosing crank's own benchmark measures that work end to end, which is where
+/// `decide`'s 745 KB of proof comes from. Charging them again would double-count.
+/// They stay in the sweep because I-20 is worth stating per operation: each one
+/// fits the Normal class on its own.
+const NON_CALL_SWEEP_ENTRIES: &[&str] = &[
+    "pallet_conditional_ledger::migration_step",
+    "pallet_guardian::on_initialize",
+    "pallet_market::close",
+    "pallet_market::create_market",
+    "pallet_market::seed",
+    "pallet_origins::safety_filter",
+];
+
+fn runtime_module_names() -> &'static [&'static str] {
+    <crate::RuntimeCall as GetCallMetadata>::get_module_names()
+}
+
+/// Every dispatchable the runtime declares, named the way the sweep names it.
+///
+/// Aliases sharing a weights module must declare **identical** call sets, and that
+/// is what makes the many-to-one mapping safe rather than merely convenient. Two
+/// instances of one pallet do share a call set; a mistyped row pointing some other
+/// pallet at an existing module does not, and without this check its calls would
+/// normalise onto the existing names and disappear by set deduplication — the
+/// derivation would then report full coverage of a call it never evaluated.
+fn derived_dispatchable_names() -> BTreeSet<String> {
+    let mut by_module: BTreeMap<&str, Vec<(&str, BTreeSet<&str>)>> = BTreeMap::new();
+    for (alias, weights_module) in FUTARCHY_DISPATCHING_MODULES {
+        let calls = <crate::RuntimeCall as GetCallMetadata>::get_call_names(alias);
+        assert!(
+            !calls.is_empty(),
+            "`{alias}` is classified as a dispatching futarchy pallet but declares no calls; \
+             move it to FUTARCHY_CALLLESS_MODULES",
+        );
+        by_module
+            .entry(weights_module)
+            .or_default()
+            .push((alias, calls.iter().copied().collect()));
+    }
+
+    let mut derived = BTreeSet::new();
+    for (weights_module, aliases) in by_module {
+        let (first_alias, first_calls) = &aliases[0];
+        for (alias, calls) in &aliases[1..] {
+            assert_eq!(
+                calls, first_calls,
+                "`{alias}` and `{first_alias}` are both mapped to `{weights_module}` but declare \
+                 different calls. A shared weights module is safe only for instances of the same \
+                 pallet (which bind the same generated file); otherwise one pallet's calls \
+                 normalise onto the other's names and vanish from this derivation.",
+            );
+        }
+        for call in first_calls {
+            derived.insert(alloc::format!("{weights_module}::{call}"));
+        }
+    }
+    derived
+}
+
+#[test]
+fn every_runtime_module_is_classified_for_the_i20_sweep() {
+    for module in runtime_module_names() {
+        let dispatching = FUTARCHY_DISPATCHING_MODULES
+            .iter()
+            .any(|(alias, _)| alias == module);
+        let callless = FUTARCHY_CALLLESS_MODULES.contains(module);
+        let upstream = UPSTREAM_MODULES.contains(module);
+        assert_eq!(
+            [dispatching, callless, upstream]
+                .iter()
+                .filter(|hit| **hit)
+                .count(),
+            1,
+            "runtime module `{module}` is not classified exactly once for the I-20 sweep. \
+             Add it to FUTARCHY_DISPATCHING_MODULES (and to all_futarchy_call_weights), to \
+             FUTARCHY_CALLLESS_MODULES, or to UPSTREAM_MODULES.",
+        );
+    }
+    // A table entry that no longer names a live module would silently stop
+    // contributing to the derived set, which is the failure mode this whole
+    // derivation exists to remove.
+    let live: BTreeSet<&str> = runtime_module_names().iter().copied().collect();
+    for (alias, _) in FUTARCHY_DISPATCHING_MODULES {
+        assert!(
+            live.contains(alias),
+            "FUTARCHY_DISPATCHING_MODULES names `{alias}`, which is not a runtime module \
+             (renamed or removed?)",
+        );
+    }
+    // A pallet with no dispatchables gets no `RuntimeCall` variant, so absence is
+    // the proof. Appearing here means it gained calls, which must be swept.
+    for alias in FUTARCHY_CALLLESS_MODULES {
+        assert!(
+            !live.contains(alias),
+            "`{alias}` is classified as having no dispatchables but now has a RuntimeCall \
+             variant; move it to FUTARCHY_DISPATCHING_MODULES and sweep its calls in \
+             all_futarchy_call_weights",
+        );
+    }
+}
+
+#[test]
+fn every_futarchy_dispatchable_is_covered_by_the_class_sweep() {
+    let derived = derived_dispatchable_names();
+    let swept: BTreeSet<String> = all_futarchy_call_weights()
+        .into_iter()
+        .map(|(name, _)| name.to_string())
+        .collect();
+    let non_normal: BTreeSet<String> = NON_NORMAL_DISPATCHABLES
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+
+    let missing: BTreeSet<&String> = derived
+        .difference(&swept)
+        .filter(|name| !non_normal.contains(*name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "dispatchables absent from the I-20 class-fit sweep: {missing:?}. Add each to \
+         all_futarchy_call_weights at its worst component arguments, or — only if it is \
+         dispatched in another class — to NON_NORMAL_DISPATCHABLES.",
+    );
+
+    let non_call: BTreeSet<String> = swept.difference(&derived).cloned().collect();
+    let declared_non_call: BTreeSet<String> = NON_CALL_SWEEP_ENTRIES
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    assert_eq!(
+        non_call, declared_non_call,
+        "the sweep's non-dispatchable entries drifted from NON_CALL_SWEEP_ENTRIES. Call \
+         metadata cannot enumerate hooks and migration steps, so they are pinned by name; a \
+         misspelled call name lands here too.",
+    );
+
+    for name in &non_normal {
+        assert!(
+            derived.contains(name),
+            "NON_NORMAL_DISPATCHABLES names `{name}`, which is not a dispatchable of any \
+             classified futarchy pallet",
+        );
+        assert!(
+            !swept.contains(name),
+            "`{name}` is excluded as non-Normal yet also swept against the Normal budget",
+        );
+    }
+}
+
+#[test]
+fn non_normal_exclusions_are_really_non_normal() {
+    use frame_support::dispatch::GetDispatchInfo;
+
+    // Building the real `RuntimeCall` is the point: the class lives in the
+    // `#[pallet::weight]` attribute, not in metadata, so the only honest check
+    // is to ask the runtime what it would charge.
+    let verified: BTreeSet<String> = [(
+        "pallet_execution_guard::qualify_recovery_image",
+        crate::RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::qualify_recovery_image {
+            pid: 1,
+        }),
+    )]
+    .into_iter()
+    .map(|(name, call)| {
+        let class = call.get_dispatch_info().class;
+        assert_ne!(
+            class,
+            DispatchClass::Normal,
+            "`{name}` is excluded from the Normal-class sweep but dispatches as Normal",
+        );
+        name.to_string()
+    })
+    .collect();
+
+    let declared: BTreeSet<String> = NON_NORMAL_DISPATCHABLES
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    assert_eq!(
+        verified, declared,
+        "every NON_NORMAL_DISPATCHABLES entry needs its class asserted here, against a real \
+         RuntimeCall, and every assertion here needs its entry declared",
+    );
+}
+
 /// I-20 / 15 §4.5: every production-dispatched futarchy call and block hook, at
 /// its worst component arguments, fits the normal dispatch class. The
 /// `try-runtime`-only market `try_state` hook is deliberately excluded: it is
@@ -282,17 +584,20 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
 #[test]
 fn every_futarchy_call_and_hook_fits_the_normal_class() {
     let all = all_futarchy_call_weights();
-    // Exact count of the 12 futarchy pallets' WeightInfo functions — update
-    // in lockstep when a trait gains or loses a function, so a silently
-    // dropped inventory entry cannot pass.
-    //
-    // 112 -> 115 with SQ-490: three live Normal-class dispatchables had never
-    // been listed here at all (`attestor::remove_for_cause`,
-    // `attestor::reap_attestation`, `futarchy_treasury::create_community_schedule`).
-    // This pin detects a *dropped* entry but could not detect a *never-added*
-    // one, because the list and the count were maintained by the same hand —
-    // which is why SQ-490 item (4) should derive the list from call metadata.
-    assert_eq!(all.len(), 115, "call inventory drifted");
+    // Completeness is proved by derivation, not by a pinned count: every
+    // dispatchable in `derived_dispatchable_names()` is either swept or
+    // class-excluded, and the non-call entries are pinned as an exact set
+    // (`every_futarchy_dispatchable_is_covered_by_the_class_sweep`). The
+    // hand-written `assert_eq!(all.len(), 115)` this replaces could only catch a
+    // *dropped* entry — it passed for however long three live Normal-class
+    // dispatchables were missing, because the list and the count were written by
+    // the same hand (SQ-490 item 4).
+    assert_eq!(
+        all.len(),
+        derived_dispatchable_names().len() - NON_NORMAL_DISPATCHABLES.len()
+            + NON_CALL_SWEEP_ENTRIES.len(),
+        "sweep length disagrees with the derived dispatchable inventory",
+    );
     for (name, w) in all {
         assert_fits(name, w);
     }

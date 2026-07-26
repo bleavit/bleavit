@@ -173,6 +173,9 @@ jobs:
       - name: Check generated weight files hold only generated weights
         run: python3 tools/ci/check-generated-weights.py
 
+  # Weight-drift gate (15 §4.5). The job keeps its `benchmark-smoke` id so branch
+  # protection keeps resolving, but it is no longer a smoke test: it re-measures
+  # every pallet and compares against the committed weights (SQ-490 item 4).
   benchmark-smoke:
     name: Benchmark smoke
     runs-on: ubuntu-latest
@@ -183,6 +186,9 @@ jobs:
           # substrate-wasm-builder needs the Wasm runtime target on a clean runner.
           targets: wasm32v1-none
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
       - name: Install native build dependencies
         # omni-bencher's dependency tree reaches litep2p, whose build script
         # needs `protoc`; the workspace build needs libclang (bindgen).
@@ -191,20 +197,33 @@ jobs:
         run: cargo install --locked frame-omni-bencher --version 0.22.0
       - name: Build benchmark runtime Wasm
         run: cargo build --locked --release -p bleavit-runtime --features runtime-benchmarks
-      - name: Execute every pallet benchmark
-        # pallet_assets::migration_v2_foreign_asset_set_reserve_weight is the
-        # weight function for pallet-assets's v2 storage migration, which a
-        # chain born at the current storage version never executes. Upstream's
-        # benchmark asserts `Asset::iter_keys().next()` equals its own created
-        # asset — an empty-map assumption the development genesis breaks by
-        # design: it registers the 02 §8 Location-keyed USDC at genesis and the
-        # USDC key hashes before the benchmark's. Every executable call/hook
-        # weight remains covered (15 §4.5).
-        run: >-
-          frame-omni-bencher v1 benchmark pallet
-          --runtime target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
-          --all --steps 2 --repeat 1
-          --exclude-extrinsics pallet_assets::migration_v2_foreign_asset_set_reserve_weight
+      - name: Re-measure every pallet and diff the committed weights
+        # This step used to execute every benchmark and discard the results, so it
+        # could see a benchmark that *crashes* and never one that *disagrees* with
+        # the committed file. `check-weight-regression.py` cannot cover the gap
+        # either: it diffs HEAD against the merge base, so it detects a
+        # regeneration and never the absence of one. That gap shipped
+        # `pallet_attestor::remove_for_cause` declaring 8 reads while performing
+        # 261 (SQ-490).
+        #
+        # Running at 2x1 is sound for some functions and not others, and the tool
+        # splits them on measured evidence rather than convenience. Constant-weight
+        # functions agree exactly across fidelities (`pallet_attestor` 6/6,
+        # `pallet_collator_selection` 2/2), so their storage totals are hard-gated
+        # here — and that is the class the SQ-490 defect belonged to, so this cheap
+        # run does catch the real thing. Component-bearing functions do NOT agree:
+        # a 2-point fit can lose a linear term outright (`new_session`: worst-case
+        # writes 100 at 50x20 against 3 at 2x1), so they are advisory here and are
+        # gated by a matching-fidelity run at release time. ref_time is advisory
+        # always (127% measured spread on unchanged code).
+        #
+        # `pallet_assets`' one unsatisfiable upstream fixture (its v2-migration
+        # benchmark asserts an empty asset map, which the 02 §8 genesis USDC
+        # registration breaks by design) no longer needs naming here: the tool
+        # probes for it and carries it forward only because
+        # tools/ci/weight-preservation.toml declares why an unverified weight for
+        # that one function is acceptable.
+        run: python3 tools/ci/regenerate-weights.py --check --steps 2 --repeat 1
 
   # B7 environment release artifacts — 15 §4.7; 02 §11.
   environments:

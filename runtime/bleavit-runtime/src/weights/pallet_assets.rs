@@ -594,7 +594,9 @@ impl<T: frame_system::Config> pallet_assets::WeightInfo for WeightInfo<T> {
 			.saturating_add(Weight::from_parts(0, 4233))
 			.saturating_add(T::DbWeight::get().reads(1))
 	}
-	/// **Preserved from the 2026-07-16 generation, not re-measured (SQ-490).**
+	/// **Preserved, not re-measured** — carried forward from the 2026-07-16
+	/// generation (SQ-490). The marker on this line is machine-read by
+	/// `tools/ci/regenerate-weights.py`, which reports it on every `--check`.
 	///
 	/// Upstream `pallet-assets`' benchmark for this function asserts that the asset
 	/// it creates is the only key in `ForeignAssets::Asset`, but Bleavit genesis
