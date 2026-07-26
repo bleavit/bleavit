@@ -85,7 +85,7 @@ class SurfaceManifestTests(unittest.TestCase):
 
     def test_schema_and_entry_shapes(self) -> None:
         self.assertEqual(self.manifest["schema"], "bleavit.critical-surface.v1")
-        self.assertEqual(self.manifest["integration_contract_version"], 14)
+        self.assertEqual(self.manifest["integration_contract_version"], 15)
         identifiers = [entry["id"] for entry in self.entries]
         self.assertEqual(len(identifiers), len(set(identifiers)))
         for entry in self.entries:
@@ -215,6 +215,7 @@ class SurfaceManifestTests(unittest.TestCase):
                 "ReserveProbeResult",
                 "ReserveUnhealthy",
                 "ReserveRecovered",
+                "RetentionExpired",
             },
             "pallet-registry": {
                 "IncidentFiled",

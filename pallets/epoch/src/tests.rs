@@ -667,7 +667,7 @@ fn genesis_uses_the_frozen_three_field_epoch_shape() {
             <CurrentEpoch<Test> as frame_support::traits::Get<EpochId>>::get(),
             0
         );
-        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 14);
+        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 15);
         assert_ok!(Epoch::do_try_state());
     });
 }
@@ -3709,6 +3709,9 @@ fn sq182_money_deadline_falls_due_at_housekeeping_and_catches_up_bounded() {
                 SeamCall::OracleSettleDeadline(1),
                 SeamCall::OracleSettleDeadline(2),
                 SeamCall::OracleSettleDeadline(3),
+                // The 07 §13 reaping sweep closes every drive, after the
+                // deadlines it must never come between (SQ-492).
+                SeamCall::OracleReapSettled(5),
             ]
         );
         // The bound is resumable, not a rejection: the excess is left for the
@@ -3720,15 +3723,23 @@ fn sq182_money_deadline_falls_due_at_housekeeping_and_catches_up_bounded() {
         // deadline is the *next* epoch's Housekeeping, not this one.
         SeamCalls::set(Vec::new());
         drive_boundaries();
-        assert!(SeamCalls::get().is_empty());
+        assert_eq!(
+            SeamCalls::get(),
+            vec![SeamCall::OracleReapSettled(5)],
+            "only the unconditional reaping sweep, no deadline left to drive"
+        );
         assert_eq!(OracleDeadlineCursor::<Test>::get(), 4);
 
         // Crossing into Housekeeping of 5 makes m = 4 due — and only m = 4.
+        SeamCalls::set(Vec::new());
         set_block(phase_block(5, phase_offsets::HOUSEKEEPING_NUM));
         drive_boundaries();
         assert_eq!(
             SeamCalls::get(),
-            vec![SeamCall::OracleSettleDeadline(4)],
+            vec![
+                SeamCall::OracleSettleDeadline(4),
+                SeamCall::OracleReapSettled(5)
+            ],
             "Housekeeping of N drives exactly m = N - 1"
         );
         assert_eq!(OracleDeadlineCursor::<Test>::get(), 5);
@@ -3809,6 +3820,7 @@ fn sq182_cohort_epochs_are_driven_even_when_the_cursor_already_passed_them() {
             vec![
                 SeamCall::OracleSettleDeadline(3),
                 SeamCall::OracleSettleDeadline(4),
+                SeamCall::OracleReapSettled(5),
             ],
             "the cohort leg must not trust the cursor"
         );

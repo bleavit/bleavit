@@ -1982,7 +1982,7 @@ fn identity_and_version_pins_match_the_integration_contract() {
     // makes a future re-coupling fail here.
     assert_eq!(VERSION.transaction_version, TRANSACTION_VERSION);
     assert_eq!(VERSION.transaction_version, 1);
-    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 14);
+    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 15);
     assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
@@ -15156,6 +15156,20 @@ fn six_referenda_tracks_have_normative_schedules_and_origins() {
         assert_eq!(track.info.decision_deposit, deposit * currency::VIT);
     }
 
+    // 07 §11(1) bounds a money-settled round's bond retention by "the track's
+    // own schedule (7 d decision + 1 d confirm)". `ORC_RETENTION_BLOCKS` is that
+    // schedule, so the two must be read off the same numbers — otherwise a
+    // future retune of the oracle track silently shortens retention and starts
+    // reaping stacks whose verdict is still coming (SQ-492).
+    let oracle_track = crate::configs::TRACKS
+        .iter()
+        .find(|track| track.id == 5)
+        .expect("the oracle track");
+    assert_eq!(
+        kernel::ORC_RETENTION_BLOCKS,
+        oracle_track.info.decision_period + oracle_track.info.confirm_period
+    );
+
     for (origin, id) in [
         (crate::track_origins::Origin::Metric, 0),
         (crate::track_origins::Origin::Constitution, 1),
@@ -18716,7 +18730,7 @@ fn sq186_metadata_exposes_the_treasury_bond_ask_slope() {
                     .expect("Epoch advertises the contract version");
                 assert_eq!(
                     u32::decode(&mut &contract.value[..]).expect("version decodes"),
-                    14,
+                    15,
                 );
             }};
         }

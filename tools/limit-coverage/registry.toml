@@ -896,6 +896,12 @@ behavior = "remaining_after_first_catchup"
 reason = "13 §2 / 07 §11(1): a crank facing more due OracleSettleDeadlines than the bound drives exactly the bound and leaves the remainder for the next crank (same resumable shape as ReapBatch, not a rejection)."
 
 [[entry]]
+key = "ComponentReapBatch"
+class = "dispatch-limit"
+behavior = "remaining_after_first_component_reap"
+reason = "13 §2 / 07 §13: a crank facing more stale settled component values than the bound retires exactly the bound, oldest first, and leaves the remainder for the next crank (the resumable ReapBatch shape, not a rejection)."
+
+[[entry]]
 key = "settle_cohort"
 class = "dispatch-limit"
 error = "Epoch::BatchTooLarge"

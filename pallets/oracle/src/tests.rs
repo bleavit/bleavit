@@ -11,8 +11,8 @@
 
 use crate::mock::*;
 use crate::pallet::{
-    Recomputable, Reporters, ReserveHealth, ReserveProbeArmed, RoundActivity, RoundSchedules,
-    Rounds, WatchtowerActive, Watchtowers,
+    ComponentValues, MoneySettled, Recomputable, Reporters, ReserveHealth, ReserveProbeArmed,
+    RoundActivity, RoundSchedules, Rounds, WatchtowerActive, Watchtowers,
 };
 use crate::{Error, Event};
 use frame_support::traits::{ConstU32, StorageVersion};
@@ -21,9 +21,10 @@ use futarchy_primitives::{
     Balance, BlockNumber, EpochId, FixedU64, MetricId, MetricSpecVersion, H256,
 };
 use oracle_core::{
-    hash_evidence, hash_report, round_bond, OracleParams, RoundState, SettlePath,
-    StoredRoundSchedule, COMPONENT_VALUE_MAX, ORC_EXT_WINDOW_BLOCKS, ORC_REPORTER_STAKE,
-    ORC_ROUNDS, ORC_WINDOW_BLOCKS, RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT, WT_STAKE,
+    hash_evidence, hash_report, round_bond, OracleParams, RoundState, SettlePath, SettledComponent,
+    StoredRoundSchedule, COMPONENT_VALUE_MAX, COMPONENT_VALUE_REAP_BATCH, ORC_EXT_WINDOW_BLOCKS,
+    ORC_REPORTER_STAKE, ORC_ROUNDS, ORC_WINDOW_BLOCKS, RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT,
+    WT_STAKE,
 };
 use parity_scale_codec::{Compact, Decode, Encode};
 use sp_runtime::DispatchError;
@@ -1958,6 +1959,101 @@ mod probe_dispatch_seam {
         });
     }
 
+    /// 08 §6.3 / 07 §11(1): expiring a retained game is the one form of real
+    /// progress `crank_round_close` makes that settles **no** component — the
+    /// money leg went neutral at d20 — so it emits no `ComponentSettled` and
+    /// would have been unpaid. It returns a `MAX_ROUNDS` slot and releases two
+    /// bond stacks from custody; a permissionless crank nobody is paid to run
+    /// is a liveness assumption, not a mechanism (SQ-492).
+    #[test]
+    fn sq492_expiring_a_retained_game_earns_the_oracle_line_rebate() {
+        new_ext().execute_with(|| {
+            let reporter = AccountId32::new([1; 32]);
+            let challenger = AccountId32::new([4; 32]);
+            let keeper = AccountId32::new([9; 32]);
+            assert_ok!(Oracle::register_reporter(RuntimeOrigin::signed(
+                reporter.clone()
+            )));
+            assert_ok!(Oracle::report(
+                RuntimeOrigin::signed(reporter.clone()),
+                C,
+                E,
+                V,
+                reported_value(),
+                h(9)
+            ));
+            for _ in 1..oracle_core::ORC_ROUNDS {
+                let deadline = pallet_oracle::Rounds::<DispatchTest>::get((C, E, V))
+                    .expect("live round")
+                    .challenge_deadline;
+                frame_system::Pallet::<DispatchTest>::set_block_number(u64::from(deadline - 1));
+                assert_ok!(Oracle::challenge(
+                    RuntimeOrigin::signed(challenger.clone()),
+                    C,
+                    E,
+                    V,
+                    counter_value(),
+                    h(10)
+                ));
+                assert_ok!(Oracle::counter_report(
+                    RuntimeOrigin::signed(reporter.clone()),
+                    C,
+                    E,
+                    V,
+                    counter_value(),
+                    h(11)
+                ));
+            }
+            let deadline = pallet_oracle::Rounds::<DispatchTest>::get((C, E, V))
+                .expect("live round")
+                .challenge_deadline;
+            frame_system::Pallet::<DispatchTest>::set_block_number(u64::from(deadline - 1));
+            assert_ok!(Oracle::challenge(
+                RuntimeOrigin::signed(challenger),
+                C,
+                E,
+                V,
+                counter_value(),
+                h(10)
+            ));
+
+            let neutralized_at =
+                u32::try_from(frame_system::Pallet::<DispatchTest>::block_number()).unwrap();
+            assert_ok!(Oracle::note_settle_deadline(E));
+            REBATES.with(|rebates| rebates.borrow_mut().clear());
+
+            // One block early there is nothing to pay for: the crank correctly
+            // leaves the round alone while a verdict can still land.
+            frame_system::Pallet::<DispatchTest>::set_block_number(u64::from(
+                neutralized_at + futarchy_primitives::kernel::ORC_RETENTION_BLOCKS - 1,
+            ));
+            assert_ok!(Oracle::crank_round_close(
+                RuntimeOrigin::signed(keeper.clone()),
+                20
+            ));
+            REBATES.with(|rebates| assert!(rebates.borrow().is_empty()));
+
+            frame_system::Pallet::<DispatchTest>::set_block_number(u64::from(
+                neutralized_at + futarchy_primitives::kernel::ORC_RETENTION_BLOCKS,
+            ));
+            assert_ok!(Oracle::crank_round_close(
+                RuntimeOrigin::signed(keeper.clone()),
+                20
+            ));
+            assert!(pallet_oracle::Rounds::<DispatchTest>::get((C, E, V)).is_none());
+            REBATES.with(|rebates| {
+                assert_eq!(
+                    &*rebates.borrow(),
+                    &[(keeper.clone(), CrankClass::OracleLine)]
+                )
+            });
+
+            // And the drained crank pays nothing further.
+            assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(keeper), 20));
+            REBATES.with(|rebates| assert_eq!(rebates.borrow().len(), 1));
+        });
+    }
+
     #[test]
     fn watchtower_ack_rebates_once_and_duplicate_pays_nothing() {
         new_ext().execute_with(|| {
@@ -3614,6 +3710,208 @@ fn note_settle_deadline_neutralizes_contested_round_and_blocks_late_verdict() {
             ),
             Error::<Test>::RoundNotFound
         );
+    });
+}
+
+/// 07 §11(1) bounds retention by the `OracleResolution` track's own schedule.
+/// Through the FRAME shell that has to mean real custody moving: the refund is
+/// a `release` of each stack to its poster, and **nothing** reaches INSURANCE,
+/// because no side was adjudicated wrong (SQ-492; R-7).
+#[test]
+fn sq492_expired_retention_refunds_both_stacks_and_frees_the_slot() {
+    new_test_ext().execute_with(|| {
+        register_reporter(1);
+        escalate_to_terminal(1, 4, E);
+        let round = Rounds::<Test>::get((C, E, V)).expect("terminal round");
+        let stacks = round.cumulative_reporter_bond + round.cumulative_challenger_bond;
+        assert!(round.cumulative_challenger_bond > 0);
+
+        let neutralized_at = u32::try_from(System::block_number()).unwrap();
+        assert_ok!(Oracle::note_settle_deadline(E));
+        assert!(Rounds::<Test>::get((C, E, V)).is_some());
+        assert_eq!(
+            MoneySettled::<Test>::get()
+                .into_inner()
+                .iter()
+                .find(|(key, _)| key.component == C && key.epoch == E)
+                .map(|(_, until)| *until),
+            Some(neutralized_at + futarchy_primitives::kernel::ORC_RETENTION_BLOCKS)
+        );
+        CustodyReleased::set(0);
+        CustodySlashed::set(0);
+
+        // Before the deadline the close crank leaves the round alone: a verdict
+        // can still land, and §5.5's forfeiture is the whole griefing price.
+        set_block(neutralized_at + futarchy_primitives::kernel::ORC_RETENTION_BLOCKS - 1);
+        assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(9)), 20));
+        assert!(Rounds::<Test>::get((C, E, V)).is_some());
+        assert_eq!(CustodyReleased::get(), 0);
+
+        set_block(neutralized_at + futarchy_primitives::kernel::ORC_RETENTION_BLOCKS);
+        assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(9)), 20));
+        assert!(
+            Rounds::<Test>::get((C, E, V)).is_none(),
+            "the retained round is reaped, returning its MAX_ROUNDS slot"
+        );
+        assert!(RoundSchedules::<Test>::get((C, E, V)).is_none());
+        assert!(MoneySettled::<Test>::get().is_empty());
+        assert_eq!(CustodyReleased::get(), stacks, "both stacks go back");
+        assert_eq!(CustodySlashed::get(), 0, "no finding, so no forfeiture");
+        assert_eq!(
+            Oracle::settled_component(C, E, V).map(|s| s.path),
+            Some(SettlePath::Neutral),
+            "the money leg is final and untouched (I-18)"
+        );
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+/// The shell must reproduce the core's retained-round exemption: a value a
+/// still-retained game rests on is never reaped, whatever the cutoff says.
+/// Removing it would leave a live `Rounds` entry with no settled counterpart —
+/// money-bearing past its own deadline, which `do_try_state` catches (SQ-492).
+#[test]
+fn sq492_reaper_never_strands_a_retained_round() {
+    new_test_ext().execute_with(|| {
+        register_reporter(1);
+        escalate_to_terminal(1, 4, E);
+        assert_ok!(Oracle::note_settle_deadline(E));
+        assert!(Rounds::<Test>::get((C, E, V)).is_some());
+        assert!(Oracle::settled_component(C, E, V).is_some());
+
+        // A cutoff far past the retained epoch — what a stalled close crank
+        // leaves, since the cutoff advances on the clock while retention ends
+        // only when someone cranks.
+        assert_eq!(Oracle::reap_settled_components(E + 9_999), 0);
+        assert!(Oracle::settled_component(C, E, V).is_some());
+        assert_ok!(Oracle::do_try_state());
+
+        // Once the retention expires and the round is reaped, the value is
+        // ordinary history and the sweep takes it.
+        set_block(
+            u32::try_from(System::block_number()).unwrap()
+                + futarchy_primitives::kernel::ORC_RETENTION_BLOCKS,
+        );
+        assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(9)), 20));
+        assert!(Rounds::<Test>::get((C, E, V)).is_none());
+        assert_eq!(
+            Oracle::reap_settled_components(E + 9_999),
+            0,
+            "the sole value for a component is its carry checkpoint"
+        );
+        ComponentValues::<Test>::insert(
+            (C, E + 1, V),
+            SettledComponent {
+                value: reported_value(),
+                path: SettlePath::Unchallenged,
+                flagged: false,
+            },
+        );
+        assert_eq!(Oracle::reap_settled_components(E + 9_999), 1);
+        assert!(Oracle::settled_component(C, E, V).is_none());
+        assert!(Oracle::settled_component(C, E + 1, V).is_some());
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+/// 07 §13's settled-value reaping, which had no production caller anywhere until
+/// the epoch clock gained one: `ComponentValues` otherwise grows by an entry per
+/// admitted component per epoch until `MAX_COMPONENT_VALUES` turns every further
+/// settlement into `AlreadyFinal` (SQ-492).
+#[test]
+fn sq492_reap_settled_components_is_epoch_cutoff_and_bounded() {
+    new_test_ext().execute_with(|| {
+        for epoch in 0u32..6 {
+            for component in 0u16..2 {
+                ComponentValues::<Test>::insert(
+                    (component, epoch, V),
+                    SettledComponent {
+                        value: reported_value(),
+                        path: SettlePath::Unchallenged,
+                        flagged: false,
+                    },
+                );
+            }
+        }
+
+        // Nothing is due before the retention window has even elapsed.
+        assert_eq!(Oracle::reap_settled_components(2), 0);
+        assert_eq!(ComponentValues::<Test>::iter().count(), 12);
+
+        // At epoch 8 the cutoff is 5, so epochs 0..4 go and 5 stays — the
+        // cutoff epoch itself is retained because welfare may still read it.
+        assert_eq!(Oracle::reap_settled_components(8), 10);
+        assert_eq!(ComponentValues::<Test>::iter().count(), 2);
+        assert!(ComponentValues::<Test>::iter_keys().all(|(_, epoch, _)| epoch == 5));
+        // Idempotent: a keeper may drive the boundary crank every block.
+        assert_eq!(Oracle::reap_settled_components(8), 0);
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+/// 13 §2 · `ComponentReapBatch`: a crank facing more stale values than the bound
+/// retires exactly the bound, oldest epoch first, and resumes on the next crank
+/// — the resumable `ReapBatch` shape, never a rejection.
+#[test]
+fn sq492_component_reap_batch_is_resumable_not_a_rejection() {
+    // limit-coverage: ComponentReapBatch
+    new_test_ext().execute_with(|| {
+        let per_epoch = 8u16;
+        let stale_epochs = 6u32;
+        for epoch in 0..stale_epochs {
+            for component in 0..per_epoch {
+                ComponentValues::<Test>::insert(
+                    (component, epoch, V),
+                    SettledComponent {
+                        value: reported_value(),
+                        path: SettlePath::Unchallenged,
+                        flagged: false,
+                    },
+                );
+            }
+        }
+        // Every component's newest entry is its 07 §10 carry checkpoint and is
+        // exempt, so only the older generations are reapable.
+        let total = u32::from(per_epoch) * stale_epochs;
+        let checkpoints = u32::from(per_epoch);
+        let reapable = total - checkpoints;
+        assert!(
+            reapable > COMPONENT_VALUE_REAP_BATCH as u32,
+            "the cap must bind"
+        );
+
+        // One crank retires exactly the batch — a dispatch past the limit is
+        // capped, not refused (G-1 leaves the excess for the next crank).
+        assert_eq!(
+            Oracle::reap_settled_components(20),
+            COMPONENT_VALUE_REAP_BATCH as u32
+        );
+        let remaining_after_first_component_reap = ComponentValues::<Test>::iter().count() as u32;
+        assert_eq!(
+            remaining_after_first_component_reap,
+            total - COMPONENT_VALUE_REAP_BATCH as u32
+        );
+        // Oldest first: the batch drained whole epochs from the bottom, so the
+        // survivors are the newest ones (I-20, and deterministic across nodes
+        // regardless of storage-hasher order).
+        let oldest_surviving = ComponentValues::<Test>::iter_keys()
+            .map(|(_, epoch, _)| epoch)
+            .min()
+            .expect("survivors");
+        assert_eq!(
+            oldest_surviving,
+            COMPONENT_VALUE_REAP_BATCH as u32 / u32::from(per_epoch)
+        );
+
+        // The next crank drains the rest of the reapable set and then goes
+        // quiet, leaving exactly one carry checkpoint per component standing.
+        assert_eq!(
+            Oracle::reap_settled_components(20),
+            reapable - COMPONENT_VALUE_REAP_BATCH as u32
+        );
+        assert_eq!(Oracle::reap_settled_components(20), 0);
+        assert_eq!(ComponentValues::<Test>::iter().count() as u32, checkpoints);
+        assert_ok!(Oracle::do_try_state());
     });
 }
 
