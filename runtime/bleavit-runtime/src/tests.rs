@@ -15147,9 +15147,12 @@ fn sq_501_runtime_guard_and_core_agree_on_every_occupancy_probe() {
             // — the screen is only as good as the parameter set it reads.
             assert_eq!(core_lookup(key), Some(current), "{name:?} live value");
             for next in values.iter().copied() {
-                let expected = if current.as_u128() == next.as_u128() {
-                    true
-                } else if pallet_constitution::is_occupancy_input(key) {
+                if pallet_constitution::is_occupancy_input(key)
+                    && current.as_u128() != next.as_u128()
+                {
+                    // The two registry readings must agree before the verdicts
+                    // can: the screen is only as good as the parameter set it
+                    // reads out of storage.
                     let core_params =
                         pallet_constitution::occupancy_params_for(key, next, core_lookup)
                             .expect("the genesis registry is readable");
@@ -15163,17 +15166,75 @@ fn sq_501_runtime_guard_and_core_agree_on_every_occupancy_probe() {
                         core_params, storage_params,
                         "{name:?} -> {next:?}: core and storage derived different inputs",
                     );
-                    pallet_constitution::occupancy_envelopes_survive(core_params)
-                } else {
-                    true
-                };
+                }
+                // The whole verdict, through the one shared entry point — so the
+                // SQ-501 `mkt.obs_interval` rule is part of the differential and
+                // not a runtime-only addition.
+                let expected = pallet_constitution::occupancy_change_permitted(
+                    key,
+                    current,
+                    next,
+                    core_lookup,
+                );
                 assert_eq!(
                     crate::configs::RuntimeBudgetDerivationGuard::permits(key, current, next),
                     expected,
-                    "{name:?} -> {next:?}: runtime guard disagrees with the core derivation",
+                    "{name:?} -> {next:?}: runtime guard disagrees with the core screen",
                 );
             }
         }
+    });
+}
+
+/// The #189 review's P1, end to end through the real extrinsic: the two
+/// individually-safe amendments must not compose into a breach.
+///
+/// `epoch.slots` 5 → 4 is admitted, and a registry-only screen then read
+/// `mkt.obs_interval` 10 → 9 as `25 × 4,800 = 120,000` while the still-live
+/// five-slot cohort needed `31 × 4,800 = 148,800`. The interval lowering is now
+/// refused — the registry cannot describe the shapes of books already trading.
+#[test]
+fn sq_501_slots_then_interval_composition_is_refused_at_the_extrinsic() {
+    use pallet_constitution::ParamValue;
+
+    development_ext().execute_with(|| {
+        let slots = pallet_constitution::key16(b"epoch.slots");
+        let interval = pallet_constitution::key16(b"mkt.obs_interval");
+
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            slots,
+            ParamValue::U8(4),
+        ));
+
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_noop!(
+            Constitution::set_param(
+                pallet_origins::Origin::FutarchyParam.into(),
+                interval,
+                ParamValue::U32(9),
+            ),
+            pallet_constitution::Error::<Runtime>::BudgetDerivationRequired
+        );
+        assert_eq!(
+            pallet_constitution::Params::<Runtime>::get(interval)
+                .expect("mkt.obs_interval row survives a refused write")
+                .value,
+            ParamValue::U32(10),
+        );
+
+        // Raising it stays admitted: a longer interval can only reduce the load
+        // of every book already trading, so no in-flight shape is needed.
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyParam.into(),
+            interval,
+            ParamValue::U32(14),
+        ));
     });
 }
 

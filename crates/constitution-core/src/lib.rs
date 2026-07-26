@@ -856,17 +856,18 @@ impl ConstitutionState {
             return Ok(());
         }
         if occupancy {
-            let params = occupancy_params_for(key, next, |wanted| {
-                self.params
-                    .iter()
-                    .find(|record| record.key == wanted)
-                    .map(|record| record.value)
-            })
-            // A missing or non-`u32` row is a broken registry, not a licence:
-            // refuse rather than screen against a partial parameter set (G-1).
-            .ok_or(Error::BudgetDerivationRequired)?;
+            // One shared entry point, so the core aggregate and the runtime
+            // guard cannot disagree. A missing or non-`u32` row, an overflow or
+            // an unscreenable transition all answer `false` — refuse rather than
+            // screen against a parameter set that does not describe reality
+            // (G-1).
             ensure!(
-                occupancy_envelopes_survive(params),
+                occupancy_change_permitted(key, current, next, |wanted| {
+                    self.params
+                        .iter()
+                        .find(|record| record.key == wanted)
+                        .map(|record| record.value)
+                }),
                 Error::BudgetDerivationRequired
             );
             return Ok(());
@@ -1177,6 +1178,76 @@ pub const OCCUPANCY_PARAM_KEYS: [&[u8]; 5] = [
     b"dec.window",
     b"ledger.archive",
 ];
+
+/// Would this change lower `mkt.obs_interval`?
+///
+/// **The one transition the registry cannot screen (SQ-501 amendment).** Three of
+/// the four occupancy keys are creation-time-pinned: 13 §3.1 gives in-flight
+/// cohorts their creation-time schedule, and a cohort's book count is fixed when
+/// it qualifies. `mkt.obs_interval` is the exception — it is consumed **live** by
+/// the observation crank, against every book already trading.
+///
+/// That asymmetry is what makes the registry a sufficient screen for the other
+/// three and an insufficient one here. Write `books(t)`, `window(t)` for the
+/// registry values a cohort adopted at its formation and `i(t)` for the interval
+/// then in force. The screen keeps the registry inside the envelope at all times,
+/// so `books(t) · ceil(window(t) / i(t)) ≤ 133,920`. At any later `t'` that
+/// cohort's real load is `books(t) · ceil(window(t) / i(t'))` — its own pinned
+/// shape against the *live* interval. If `i` never falls, that load never rises
+/// above the value already proved safe, so the envelope holds for every in-flight
+/// cohort without reading one. If `i` falls, every in-flight cohort's load rises
+/// at once, and the registry no longer describes their shapes: lowering
+/// `epoch.slots` 5 → 4 and then `mkt.obs_interval` 10 → 9 each pass a
+/// registry-only screen (25 × 4,800 = 120,000) while the still-live five-slot
+/// cohort needs 31 × 4,800 = 148,800 — over the frozen budget. Each amendment is
+/// safe against the registry; the pair is unsafe against reality, because the
+/// first one's saving has not materialised yet.
+///
+/// So a lowering is refused. It is refused rather than screened because the
+/// in-flight maximum cannot be *established*: the creation-time `epoch.slots` is
+/// recoverable from bounded state (the per-epoch `FundedPolSlots` seed snapshot
+/// plus the ≤ `MAX_NON_TERMINAL_COHORTS` `Cohorts` rows), but the creation-time
+/// `dec.window` is recorded nowhere, and G-1 makes an undeterminable input a
+/// refusal, never an assumption. Recording it beside `CohortSchedule`'s existing
+/// `creation_epoch_length` is what converts this into a value test.
+///
+/// Single-homed here for the same reason as the rest of the screen: the core
+/// aggregate and the runtime guard must not disagree about it.
+pub fn obs_interval_lowering_refused(key: ParamKey, current: ParamValue, next: ParamValue) -> bool {
+    key == key16(b"mkt.obs_interval") && next.as_u128() < current.as_u128()
+}
+
+/// The complete 13 §5 items 1–4 verdict for one proposed `set_param`.
+///
+/// The single entry point both screens use, so there is exactly one place where
+/// the equal-write short-circuit, the [`obs_interval_lowering_refused`] rule and
+/// the value test compose. `lookup` reads the *live* registry — `self.params` for
+/// the core aggregate, `Params` storage for the FRAME shell.
+///
+/// `false` is the fail-closed answer for every case that cannot be evaluated
+/// (G-1); `true` for keys outside the occupancy family, which this screen does
+/// not govern.
+pub fn occupancy_change_permitted(
+    key: ParamKey,
+    current: ParamValue,
+    next: ParamValue,
+    lookup: impl Fn(ParamKey) -> Option<ParamValue>,
+) -> bool {
+    // An equal write is not a change (13 §5 item 6).
+    if current.as_u128() == next.as_u128() {
+        return true;
+    }
+    if !is_occupancy_input(key) {
+        return true;
+    }
+    if obs_interval_lowering_refused(key, current, next) {
+        return false;
+    }
+    match occupancy_params_for(key, next, lookup) {
+        Some(params) => occupancy_envelopes_survive(params),
+        None => false,
+    }
+}
 
 /// Build the 13 §5 items 1–4 derivation inputs from a parameter set, with
 /// `next` substituted for `key` exactly as the class-floor screen substitutes
@@ -3499,6 +3570,125 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    /// The #189 review's P1, with its exact numbers.
+    ///
+    /// `epoch.slots` 5 → 4 is admitted (both individually safe against the
+    /// registry). A registry-only screen then admitted `mkt.obs_interval` 10 → 9
+    /// as `25 × 4,800 = 120,000`, while the still-live five-slot cohort has 31
+    /// books and needs `31 × 4,800 = 148,800` — over the frozen 133,920. The
+    /// lowering is now refused, and the composition that makes it reachable is
+    /// exactly the compensating route the value test opened.
+    #[cfg(not(feature = "fast-timing"))]
+    #[test]
+    fn sq_501_lowering_slots_then_the_interval_cannot_slip_past_the_keeper_budget() {
+        let mut state = ConstitutionState::genesis();
+
+        // Step 1: `epoch.slots` 5 -> 4. Individually safe, and admitted.
+        state
+            .dispatch_set_param(
+                ConstitutionOrigin::FutarchyMeta,
+                key16(b"epoch.slots"),
+                ParamValue::U8(4),
+                2,
+                20,
+            )
+            .expect("lowering the slot count is safe against every envelope");
+
+        // The registry now says 25 trading books, so a registry-only
+        // re-derivation reads 25 × ceil(43,200/9) = 120,000 and looks safe.
+        let registry_only =
+            occupancy_params_for(key16(b"mkt.obs_interval"), ParamValue::U32(9), |wanted| {
+                state
+                    .params
+                    .iter()
+                    .find(|record| record.key == wanted)
+                    .map(|record| record.value)
+            })
+            .expect("the registry is readable");
+        assert_eq!(
+            kernel::derived_decision_critical_observations(&registry_only),
+            Some(120_000),
+        );
+        assert!(occupancy_envelopes_survive(registry_only));
+
+        // The five-slot cohort that is still in flight needs 148,800, which is
+        // over the envelope — the load a registry-only screen cannot see.
+        let in_flight = kernel::OccupancyParams {
+            epoch_slots: 5,
+            ..registry_only
+        };
+        assert_eq!(
+            kernel::derived_decision_critical_observations(&in_flight),
+            Some(148_800),
+        );
+        assert!(!occupancy_envelopes_survive(in_flight));
+
+        // Step 2 is therefore refused, and the registry is unchanged.
+        let before = state.clone();
+        assert_eq!(
+            state.dispatch_set_param(
+                ConstitutionOrigin::FutarchyParam,
+                key16(b"mkt.obs_interval"),
+                ParamValue::U32(9),
+                3,
+                30,
+            ),
+            Err(Error::BudgetDerivationRequired)
+        );
+        assert_eq!(state, before);
+
+        // Raising the interval stays ordinary business: it can only reduce the
+        // load of every book already trading, so no in-flight shape is needed.
+        state
+            .dispatch_set_param(
+                ConstitutionOrigin::FutarchyParam,
+                key16(b"mkt.obs_interval"),
+                ParamValue::U32(14),
+                3,
+                30,
+            )
+            .expect("raising the observation interval is unconditionally safe");
+    }
+
+    /// The rule is a property of the *transition*, not of the derived figure, so
+    /// pin it directly: no `mkt.obs_interval` lowering is admitted at any value,
+    /// and no other occupancy key is caught by it.
+    #[test]
+    fn sq_501_obs_interval_lowering_rule_is_scoped_to_that_one_key() {
+        let interval = key16(b"mkt.obs_interval");
+        assert!(obs_interval_lowering_refused(
+            interval,
+            ParamValue::U32(10),
+            ParamValue::U32(9)
+        ));
+        // Equal and upward are not lowerings.
+        assert!(!obs_interval_lowering_refused(
+            interval,
+            ParamValue::U32(10),
+            ParamValue::U32(10)
+        ));
+        assert!(!obs_interval_lowering_refused(
+            interval,
+            ParamValue::U32(10),
+            ParamValue::U32(11)
+        ));
+        // The creation-time-pinned keys keep both directions value-screened:
+        // their reductions bind only future cohorts, and their raises are
+        // refused by the envelopes themselves.
+        for name in [
+            b"epoch.slots".as_slice(),
+            b"dec.window".as_slice(),
+            b"epoch.length".as_slice(),
+            b"ledger.archive".as_slice(),
+        ] {
+            assert!(!obs_interval_lowering_refused(
+                key16(name),
+                ParamValue::U32(10),
+                ParamValue::U32(9)
+            ));
+        }
     }
 
     /// The 13 §1 bounds / max-Δ / cooldown checks run **before** the screen, so

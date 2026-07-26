@@ -1863,15 +1863,15 @@ impl pallet_constitution::BudgetDerivationGuard for RuntimeBudgetDerivationGuard
             return true;
         }
         if pallet_constitution::is_occupancy_input(key) {
-            // Read the live registry, substituting the proposed value for
-            // `key`. A missing or non-`u32` row is a broken invariant, not a
-            // licence: refuse rather than screen a partial parameter set (G-1).
-            let Some(params) = pallet_constitution::occupancy_params_for(key, next, |wanted| {
+            // Read the live registry, substituting the proposed value for `key`.
+            // `occupancy_change_permitted` is the single home of the whole
+            // verdict — the equal-write short-circuit, the SQ-501
+            // `mkt.obs_interval` lowering rule and the value test — so this path
+            // and the core aggregate's cannot drift. A missing or non-`u32` row
+            // is a broken invariant, not a licence: it answers `false` (G-1).
+            return pallet_constitution::occupancy_change_permitted(key, current, next, |wanted| {
                 pallet_constitution::Params::<Runtime>::get(wanted).map(|record| record.value)
-            }) else {
-                return false;
-            };
-            return pallet_constitution::occupancy_envelopes_survive(params);
+            });
         }
         if !pallet_constitution::is_class_floor_input(key) {
             return true;
