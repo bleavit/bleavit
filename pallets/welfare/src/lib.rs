@@ -597,6 +597,14 @@ pub mod pallet {
         /// are written and retired atomically, so this is a corrupted-state
         /// signal rather than a reachable outcome.
         MissingSnapshotContext,
+        /// A 05 §4.6 percentile was asked of an empty winsorization sample. The
+        /// `prior_bounds ++ finalized` assembly is always 12 elements, so this
+        /// is a corrupted-state signal rather than a reachable outcome.
+        EmptyNormalizationSample,
+        /// The 05 §4.6 min–max range is zero-width, so the component's raw
+        /// series has no map onto [0,1]. Refused rather than resolved to the
+        /// adopt-favourable 1.0 (G-1).
+        DegenerateNormalizationRange,
     }
 
     #[pallet::hooks]
@@ -1604,6 +1612,10 @@ pub mod pallet {
                 CoreError::BondCoverageUnmet => Error::<T>::BondCoverageUnmet.into(),
                 CoreError::BadFlaggedComponent => Error::<T>::BadFlaggedComponent.into(),
                 CoreError::MissingSnapshotContext => Error::<T>::MissingSnapshotContext.into(),
+                CoreError::EmptyNormalizationSample => Error::<T>::EmptyNormalizationSample.into(),
+                CoreError::DegenerateNormalizationRange => {
+                    Error::<T>::DegenerateNormalizationRange.into()
+                }
             }
         }
     }

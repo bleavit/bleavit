@@ -16318,6 +16318,7 @@ dependencies = [
  "futarchy-fixed",
  "futarchy-primitives",
  "parity-scale-codec",
+ "proptest",
  "scale-info",
  "serde",
  "serde_json",

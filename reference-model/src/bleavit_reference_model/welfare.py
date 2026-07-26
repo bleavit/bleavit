@@ -6,6 +6,9 @@ WORK_PREC = 100
 ONE = Decimal(1)
 ZERO = Decimal(0)
 FIXED_GRID = Decimal("1e-9")
+# The `FixedU64` grid of 05 §4.4(1): a u64 count of 1e-9 units.
+FIXED_SCALE = 10**9
+FIXED_RAW_MAX = (1 << 64) - 1
 Q64_SCALE = Decimal(1 << 64)
 EPSILON_C = Decimal("0.01")
 EPSILON_P = Decimal("0.01")
@@ -472,16 +475,58 @@ def full_pipeline_renormalized(
     return full_pipeline(dropped=dropped, **inputs)
 
 
+def _fixed_raw(value) -> int:
+    """The 1e9-grid integer behind a `FixedU64` (05 §4.4(1)).
+
+    Values outside the representable domain are refused rather than wrapped:
+    §4.4 says component and pillar arithmetic happens on this grid, so a
+    quantity that does not fit it has no normalized meaning.
+    """
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        raw = int(
+            (_d(value) * Decimal(FIXED_SCALE)).to_integral_value(
+                rounding=ROUND_FLOOR
+            )
+        )
+    if not 0 <= raw <= FIXED_RAW_MAX:
+        raise ValueError("value outside the FixedU64 domain")
+    return raw
+
+
+def log1p(value) -> Decimal:
+    """05 §4.6 `log1p`: `ln(1 + x)` on the 64.64 grid, floored to 1e9.
+
+    §4.6 rule 1 fixes the evaluation: `x` enters 64.64 through the same
+    truncating `Q64(x) = floor(x · 2^64 / 10^9)` conversion §4.4 uses for the
+    weighted-log products, `1 + x` is formed there, and the natural logarithm is
+    floored back onto the 1e9 grid *before* the min-max map — so the min-max
+    quotient is exact integer arithmetic rather than a division that amplifies a
+    transcendental residual by `1/(hi - lo)`.
+
+    The logarithm itself is evaluated at the model's full working precision from
+    the exact rational `(2^64 + Q64(x)) / 2^64`, which is what makes this an
+    independent check of the 64.64 primitive rather than a copy of it.
+    """
+    q64 = (_fixed_raw(value) << 64) // FIXED_SCALE
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        # `n / 2^64 == n · 5^64 · 10^-64`, exact at WORK_PREC for every
+        # representable argument (the widest numerator is under 10^75).
+        exact = Decimal((1 << 64) + q64).scaleb(-64) * Decimal(5) ** 64
+        return floor_fixed(exact.ln())
+
+
 def percentile(values: Sequence[Decimal], fraction: Decimal) -> Decimal:
     """Inclusive linear percentile used for the 12-point p5/p95 bounds."""
     if not values:
         raise ValueError("values must not be empty")
-    fraction = _d(fraction)
+    fraction = floor_fixed(fraction)
     if not ZERO <= fraction <= ONE:
         raise ValueError("percentile must be in [0, 1]")
-    ordered = sorted(_d(value) for value in values)
+    ordered = sorted(_fixed_raw(value) for value in values)
     if len(ordered) == 1:
-        return ordered[0]
+        return floor_fixed(Decimal(ordered[0]).scaleb(-9))
     with localcontext() as ctx:
         ctx.prec = WORK_PREC
         # Inclusive linear ("type-7") interpolation: rank 1 + f·(n−1) on the
@@ -493,36 +538,94 @@ def percentile(values: Sequence[Decimal], fraction: Decimal) -> Decimal:
         lower = int(rank.to_integral_value(rounding=ROUND_FLOOR))
         upper = min(lower + 1, len(ordered) - 1)
         part = rank - lower
-        return floor_fixed(ordered[lower] + (ordered[upper] - ordered[lower]) * part)
+        interpolated = ordered[lower] + (ordered[upper] - ordered[lower]) * part
+        return floor_fixed(interpolated.scaleb(-9))
 
 
 def normalization_sample(
     prior_bounds: Sequence[Decimal],
     finalized_values: Sequence[Decimal],
 ) -> list[Decimal]:
+    """05 §4.6 cold start: trailing 12 of `PriorBounds ++ finalized values`.
+
+    Real values displace pseudo-observations oldest-first, so the sample is
+    always exactly 12 elements — which is what makes §4.6's "never vacuous"
+    claim hold (p5 interpolates between x₁ and x₂, p95 between x₁₁ and x₁₂).
+    """
     if len(prior_bounds) != 12:
         raise ValueError("PriorBounds must contain exactly 12 values")
     return [
-        _d(value)
+        floor_fixed(value)
         for value in (list(prior_bounds) + list(finalized_values))[-12:]
     ]
 
 
 def winsorize(values, lo, hi):
-    lo = _d(lo)
-    hi = _d(hi)
-    return [min(max(_d(value), lo), hi) for value in values]
+    lo = floor_fixed(lo)
+    hi = floor_fixed(hi)
+    if hi < lo:
+        raise ValueError("winsorization bounds are inverted")
+    return [min(max(floor_fixed(value), lo), hi) for value in values]
 
 
 def minmax_normalize(value, lo, hi) -> Decimal:
-    value = _d(value)
-    lo = _d(lo)
-    hi = _d(hi)
+    """05 §4.6 min-max map, quotient rounded DOWN; zero-width fails closed."""
+    value = floor_fixed(value)
+    lo = floor_fixed(lo)
+    hi = floor_fixed(hi)
     if hi <= lo:
-        raise ValueError("bad range")
+        # 05 §4.6 rule 3: refuse rather than resolve to the adopt-favourable
+        # 1.0 — an unmoved series carries no information (G-1).
+        raise ValueError("degenerate normalization range")
     with localcontext() as ctx:
         ctx.prec = WORK_PREC
-        return floor_fixed(_clamp((value - lo) / (hi - lo)))
+        return floor_fixed(_clamp((_clamp(value, lo, hi) - lo) / (hi - lo)))
+
+
+# 05 §4.3's metric table declares the heavy-tailed transform per component, and
+# in the v1 set exactly one component carries it: `P` fees, `N(log1p(fees_USDC))`
+# (MetricId 20). Adding another is a §4.3 amendment, not a configuration change.
+LOG1P_METRIC_IDS = frozenset({20})
+
+
+def is_log1p_series(metric_id: int) -> bool:
+    """Does 05 §4.3 declare this component `N(log1p(·))`?"""
+    return metric_id in LOG1P_METRIC_IDS
+
+
+def normalization_constants(
+    sample: Sequence[Decimal],
+    log1p_series: bool = False,
+) -> dict:
+    """05 §4.6 constants, "frozen at epoch open before any epoch-e market opens".
+
+    `p_low`/`p_high` are the winsorization bounds on the raw scale; `lo`/`hi` are
+    the min-max endpoints on the transformed scale. §4.6 rule 3's zero-width
+    check is evaluated after the transform, where two distinct raw bounds can
+    still collapse onto one grid point.
+    """
+    p_low = percentile(sample, Decimal("0.05"))
+    p_high = percentile(sample, Decimal("0.95"))
+    lo = log1p(p_low) if log1p_series else p_low
+    hi = log1p(p_high) if log1p_series else p_high
+    if hi <= lo:
+        raise ValueError("degenerate normalization range")
+    return {
+        "p_low": p_low,
+        "p_high": p_high,
+        "lo": lo,
+        "hi": hi,
+        "log1p": log1p_series,
+    }
+
+
+def apply_normalization(constants: Mapping, value) -> Decimal:
+    """Winsorize, optionally `log1p`, then min-max map (05 §4.6)."""
+    clipped = min(
+        max(floor_fixed(value), constants["p_low"]), constants["p_high"]
+    )
+    mapped = log1p(clipped) if constants["log1p"] else clipped
+    return minmax_normalize(mapped, constants["lo"], constants["hi"])
 
 
 def normalize_metric(
@@ -533,13 +636,4 @@ def normalize_metric(
 ) -> Decimal:
     """05 §4.6 trailing-12 winsorization, optional log1p, and min-max."""
     sample = normalization_sample(prior_bounds, finalized_values)
-    lo = percentile(sample, Decimal("0.05"))
-    hi = percentile(sample, Decimal("0.95"))
-    clipped = min(max(_d(value), lo), hi)
-    if log1p:
-        with localcontext() as ctx:
-            ctx.prec = WORK_PREC
-            clipped = (ONE + clipped).ln()
-            lo = (ONE + lo).ln()
-            hi = (ONE + hi).ln()
-    return minmax_normalize(clipped, lo, hi)
+    return apply_normalization(normalization_constants(sample, log1p), value)

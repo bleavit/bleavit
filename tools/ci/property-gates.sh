@@ -44,17 +44,24 @@ run_constitution() {
   cargo test --locked -p constitution-core --release --test property
 }
 
+run_welfare() {
+  echo "property-suites: welfare-core 05 §4.6 normalization kernel"
+  cargo test --locked -p welfare-core --release --test property
+}
+
 case "${suite}" in
   ledger) run_ledger ;;
   market) run_market ;;
   constitution) run_constitution ;;
+  welfare) run_welfare ;;
   all)
     run_ledger
     run_market
     run_constitution
+    run_welfare
     ;;
   *)
-    echo "property-suites: unknown shard '${suite}' (expected ledger|market|constitution, or no argument for all)" >&2
+    echo "property-suites: unknown shard '${suite}' (expected ledger|market|constitution|welfare, or no argument for all)" >&2
     exit 2
     ;;
 esac

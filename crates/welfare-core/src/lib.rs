@@ -19,6 +19,14 @@ macro_rules! ensure {
     };
 }
 
+pub mod normalization;
+
+pub use normalization::{
+    apply as apply_normalization, freeze_constants as freeze_normalization_constants, log1p,
+    minmax, normalization_sample, normalize_metric, percentile, uses_log1p, winsorize,
+    winsorize_value, NormalizationConstants, P_HIGH, P_LOW,
+};
+
 pub const ONE: u64 = 1_000_000_000;
 pub const EPSILON: FixedU64 = FixedU64(1);
 pub const EPSILON_PILLAR: FixedU64 = FixedU64(10_000_000);
@@ -522,6 +530,17 @@ pub enum Error {
     /// writes the pair atomically and pruning retires it atomically, so this is
     /// a corrupted-state signal, not a reachable path. Trailing variant.
     MissingSnapshotContext,
+    /// A 05 §4.6 percentile was asked of an empty sample. Unreachable through
+    /// the 12-element `prior_bounds ++ finalized` assembly, which is total by
+    /// construction; the variant exists so the kernel's percentile is total for
+    /// every caller rather than only for its own. Trailing variant.
+    EmptyNormalizationSample,
+    /// The 05 §4.6 min–max range is zero-width (`p95 ≤ p5` after the optional
+    /// `log1p`), so the series has no map onto [0,1]. Refused rather than
+    /// resolved: the adopt-favourable convention (1.0) would hand a pillar a
+    /// perfect component computed from a series that never moved, which is the
+    /// opposite of the status-quo default (G-1). Trailing variant.
+    DegenerateNormalizationRange,
 }
 
 /// The 07 §2(5) admission inputs that [`WelfareState::register_metric_spec`]
