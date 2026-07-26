@@ -1247,10 +1247,14 @@ pub mod pallet {
             // `pre`. That is deliberate: `pre` is a core-shaped clone and the
             // core → stored conversions are lossy in representation (bounded
             // containers, packed contexts), so comparing core values would be
-            // comparing something other than what is written. The reads cost no
-            // extra proof — `load()` already iterated all four maps in this same
-            // call, so every node is in the PoV already — and a decode is far
-            // cheaper than a write.
+            // comparing something other than what is written.
+            //
+            // The comparison reads are nearly free. `load()` already iterated all
+            // four maps in this same call, so every *existing* key's proof node
+            // is in the PoV already; only a key being created costs a genuinely
+            // new read. Measured, the trade is +1 to +2 reads against ~75 fewer
+            // writes: `record_snapshot` 102 r / 80 w → 104 r / 6 w,
+            // `record_daily_gate` 98 / 81 → 99 / 6, `register_spec` 77 w → 2 w.
             let live_specs = specs
                 .iter()
                 .map(|(version, _)| *version)
