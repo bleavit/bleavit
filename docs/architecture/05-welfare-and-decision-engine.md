@@ -350,6 +350,29 @@ Default v = (0.4, 0.3, 0.3)   (normative values incl. *_req keys: §13)
 
 Every ratio divides a held amount by a **requirement denominated in the same asset** (VIT requirements in VIT, USDC requirements in USDC — requirements are constitution keys). No conversion rate, no external price, no oracle input exists in `E`; it is deterministic and same-block computable, hence lives in `C_onchain`. Raising security by raising requirements is a values/META decision on the `*_req` keys, not a market observable.
 
+#### 4.3.2 Sources for `U`, `F` and `Π` (normative; SQ-181 resolution, 2026-07-26)
+
+§4.3's table gives every component a formula, but three of them name a quantity no section supplies. Each is fixed here, and each is anchored to something that already exists rather than to a new tunable.
+
+**`U` — the denominator is relay slots, not parachain blocks.** Read as parachain blocks, "scheduled slots per epoch" makes `U` identically 1: `epoch.length` is itself denominated in parachain blocks ([13](./13-parameters.md) §1), so the chain authors exactly as many blocks as the epoch is *defined* to contain and the ratio measures nothing. The measuring reading is the relay one. Every parachain block carries `PersistedValidationData.relay_parent_number`, and its advancement between consecutive parachain blocks is the number of relay slots that elapsed — the only relay signal the parachain runtime can observe on stable2606 (the `F` row above; SQ-282). **Scheduled slots for a window are therefore the relay-parent advancement across it**, giving
+
+```
+U = clamp( (non_empty_blocks + 0.25 · empty_blocks) / relay_parent_advancement , 0, 1 )
+```
+
+A chain producing one non-empty block per relay slot scores 1; a collator outage widens the advancement without adding blocks and `U` falls in proportion, which is the liveness fact the S pillar exists to price. **An empty block is one whose extrinsics are all inherents** — the deterministic, same-block-observable definition. No other reading is conforming; in particular a block carrying calls that failed or were filtered is **not** empty, because it consumed its slot and its weight. `U` and `U^{day}` are sums of the same per-block observation over different windows, so one accumulator serves both.
+
+**`F` — `target` and `Λ_max` are derived, not new keys.** The `F` row names both and neither is a [13](./13-parameters.md) key. Both are fixed here by derivation, and deliberately not introduced as tunables, because neither is a values judgement:
+
+- `target = 1`. One parachain block per relay slot is the nominal cadence, so a gap of 1 is a healthy chain and must score `F = 1`.
+- `Λ_max = kernel::DEAD_MAN_RELAY_BLOCKS`. §4.8's dead-man switch engages at exactly this gap, so anchoring `Λ_max` to it makes `F` reach 0 precisely where the chain has already been declared stalled. A smaller value would zero a gate input while the chain is still live; a larger one would leave `F` positive through a declared stall. They must not drift, so `F` reads the kernel constant rather than a copy of it.
+
+The formula takes a **median over the window**, so a conforming runtime MUST retain the observed gap *series* for that window. The last gap alone, or the dead-man's boolean cause bit, is not sufficient.
+
+**`Π` — which failures count.** "Defensive-path/integrity counter" is fixed to a decidable class. An event qualifies **iff** the runtime detected a violation of an assumption it holds unconditionally, **and** the fallback discarded correctness-relevant state or engaged a fail-static latch, **and** no defined path later restores what was lost. Qualifying, concretely: an internal cross-pallet call whose failure is discarded rather than propagated; a fail-static latch engaged out of a detected inconsistency; the loss of an accounting accumulator no later crank can reconstruct.
+
+Deliberately **not** qualifying: bounded-maintenance backpressure — a bounded collection at its limit while its cursor-bounded reaper catches up, or an observation dropped to keep a bounded index consistent. Those are designed states with a defined recovery, and the third clause above is exactly the test that separates them. The distinction is load-bearing at this weighting: at 0.25 per event, four qualifying events zero `Π`, and `Π` at weight 0.10 pulls `C` far enough to risk a §4.7 daily breach flag — which arms the guardian's `suspend_on_gate` power ([06](./06-governance-and-guardians.md)). Routine capacity backpressure MUST NOT be able to reach that. The counter is per window, saturating, reset per window, and a single event increments it at most once.
+
 ### 4.4 Intra-pillar aggregation — fully specified (B-med: C/P/A aggregation; G-7)
 
 Two conforming implementations MUST compute bit-identical `FixedU64` pillar values, `W_e` and `s`. The formulas, weights, ε-floors, **and the evaluation order and rounding** are all normative.
