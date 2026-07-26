@@ -15171,12 +15171,12 @@ fn six_referenda_tracks_have_normative_schedules_and_origins() {
         .expect("the entrenched track");
     assert_eq!(
         entrenched_track.info.min_enactment_period,
-        4 * pallet_constitution::EPOCH_LENGTH_CEILING_BLOCKS
+        4 * kernel::PRODUCTION_MAX_EPOCH_LENGTH_BLOCKS
     );
     // Four boundaries at the ceiling, and strictly more at any shorter legal
     // length — including the 14 d floor, where the same delay spans 12.
     for length in [
-        pallet_constitution::EPOCH_LENGTH_CEILING_BLOCKS,
+        kernel::PRODUCTION_MAX_EPOCH_LENGTH_BLOCKS,
         kernel::PRODUCTION_MIN_EPOCH_LENGTH_BLOCKS,
     ] {
         assert!(
@@ -15249,17 +15249,20 @@ fn entrenched_enactment_spans_four_epochs_at_every_legal_epoch_length() {
             .expect("the entrenched track")
             .info
             .min_enactment_period;
-        // Four at the ceiling — the binding case, and the one the former
-        // `4 × 21 d` failed at (it spanned two).
-        assert_eq!(delay / max, 4);
         assert!(min < max, "a governable range is what makes this necessary");
-        // Strictly more at any shorter legal length: shortening epochs can only
-        // add boundaries, so the guarantee holds across the whole range.
+        // The invariant that holds on **every** profile: the delay covers at
+        // least four maximum-length epochs, hence at least four at any shorter
+        // legal length too, since shortening only adds boundaries.
+        assert!(4 * max <= delay);
         assert!(delay / min >= 4);
-        assert!(
-            4 * max <= delay,
-            "the delay must cover four maximum-length epochs exactly or better"
-        );
+        // Exact equality is a production-profile fact and is asserted only
+        // there: `fast-timing` seeds the registry ceiling at `42 · FAST_DAY`
+        // while the delay deliberately stays at its release value (every 06 §2.1
+        // track period does), so the ratio is far larger than four in that build
+        // — safe, but not equal (Codex review, PR #178 P2).
+        if max == kernel::PRODUCTION_MAX_EPOCH_LENGTH_BLOCKS {
+            assert_eq!(delay / max, 4);
+        }
     });
 }
 

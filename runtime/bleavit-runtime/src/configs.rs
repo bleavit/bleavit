@@ -1578,7 +1578,7 @@ pub(crate) const TRACKS: [pallet_referenda::Track<u16, Balance, u32>; 6] = [
             // tuple outright. Shorter epochs only add boundaries, never remove
             // them, and every entrenched-track power is a loosening, so the
             // resulting over-delay at shorter lengths errs toward more review.
-            min_enactment_period: 4 * pallet_constitution::EPOCH_LENGTH_CEILING_BLOCKS,
+            min_enactment_period: 4 * kernel::PRODUCTION_MAX_EPOCH_LENGTH_BLOCKS,
             min_approval: ENTRENCHED_APPROVAL,
             min_support: ENTRENCHED_SUPPORT,
         },
