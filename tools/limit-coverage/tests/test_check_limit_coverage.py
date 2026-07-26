@@ -164,9 +164,16 @@ class LimitCoverageTests(unittest.TestCase):
         self.assertEqual(
             checker.kernel_keys(
                 "Crank batch bounds: `TickBatch` = 10; `ReapBatch` = 100; "
-                "`settle_cohort` <= 100; `OracleDeadlineCatchup` = 4"
+                "`settle_cohort` <= 100; `OracleDeadlineCatchup` = 4; "
+                "`ComponentReapBatch` = 32"
             ),
-            ["TickBatch", "ReapBatch", "settle_cohort", "OracleDeadlineCatchup"],
+            [
+                "TickBatch",
+                "ReapBatch",
+                "settle_cohort",
+                "OracleDeadlineCatchup",
+                "ComponentReapBatch",
+            ],
         )
         self.assertEqual(
             checker.kernel_keys("`MinTrade` / `MaxTrade`"),

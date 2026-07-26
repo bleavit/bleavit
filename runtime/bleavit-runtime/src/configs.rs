@@ -3882,6 +3882,35 @@ impl pallet_epoch::OracleAccess for RuntimeEpochOracle {
                     // lowering can never make censorship cheaper (R-7).
                     Some(frozen_b1) => round.bond >= frozen_b1.max(balance_param(b"dis.merit_min")),
                 }
+                // 07 §12 (SQ-494): a round whose money leg is already settled
+                // holds nothing. §11(1) *retains* a neutralized round for bond
+                // disposal only, and I-18 fixes the settled value against every
+                // later verdict — so the quantity §12 exists to protect is
+                // decided, while the hold keeps costing. It costs more than the
+                // word "hold" suggests: `guards.process_hold` reaches
+                // `Rejected(ProcessHold)`, which is terminal (05 §5.4 · T10/T20),
+                // so a proposal reaching its decide window is killed and must be
+                // resubmitted, not deferred until the dispute clears. Leaving it
+                // in place let the §11(4) griefer buy that outcome for every
+                // proposal consuming the component, on top of the neutral
+                // settlement §11(4) actually prices.
+                //
+                // The test is the spec's own definition of non-money-bearing
+                // (§11(1)): "a round whose `(component, epoch, spec_version)`
+                // already carries a settled `ComponentValues` entry". Reading
+                // the settled value rather than the oracle's internal
+                // money-settled latch keeps this predicate off that pallet's
+                // storage shapes.
+                //
+                // Evaluated **last**, after the merit floor: a sub-merit round
+                // already fails and never pays this read, so the ordering costs
+                // one read only where the answer can still change.
+                && pallet_oracle::Pallet::<Runtime>::settled_component(
+                    round.component,
+                    round.epoch,
+                    round.spec_version,
+                )
+                .is_none()
         })
     }
 
@@ -3903,6 +3932,13 @@ impl pallet_epoch::OracleAccess for RuntimeEpochOracle {
         // `ReportingContext` provider (07 §2(4)); the epoch clock only owns
         // *when* the deadline falls due (§11(1)).
         pallet_oracle::Pallet::<Runtime>::note_settle_deadline(measurement_epoch)
+    }
+
+    fn reap_settled_components(current_epoch: futarchy_primitives::EpochId) {
+        // 07 §13's reaping, driven from the epoch clock because the cutoff is
+        // measured in epochs and the oracle has no hooks. Bounded per call and
+        // idempotent, so a keeper may run the boundary crank every block.
+        let _ = pallet_oracle::Pallet::<Runtime>::reap_settled_components(current_epoch);
     }
 }
 
@@ -8997,6 +9033,13 @@ impl pallet_attestor::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper 
     }
 }
 
+/// Stale `ComponentValues` entries seeded for the boundary crank's 07 §13
+/// reaping sweep. Strictly above `COMPONENT_VALUE_REAP_BATCH` so the batch cap
+/// binds, and well below `MAX_COMPONENT_VALUES` so the deadline drives in the
+/// same call still have room to write their own neutral entries (SQ-492).
+#[cfg(feature = "runtime-benchmarks")]
+const STALE_COMPONENT_VALUE_SEEDS: u16 = pallet_oracle::MAX_COMPONENT_VALUES as u16;
+
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmarkHelper {
     benchmark_keeper_rebate_hooks!();
@@ -9187,6 +9230,74 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
 
     fn prime_guard_enqueue(_: futarchy_primitives::ProposalId) {}
 
+    fn prime_dispute_rounds(spec: futarchy_primitives::MetricSpecVersion) {
+        // The worst case is a full scan that returns **false**: `.any()`
+        // short-circuits on the first qualifying round, so a map full of
+        // holding disputes is the *cheap* case. Every round here therefore
+        // clears the merit floor — paying its `RoundSchedules` read — and is
+        // then money-settled, paying the SQ-494 `ComponentValues` read and
+        // failing. Nothing short-circuits and `decide` still takes its ordinary
+        // path rather than the ProcessHold rejection.
+        //
+        // **All 128 on the proposal's own version.** 02 §7.2 decomposes the
+        // bound as 16 components x <= 4 settling epochs x <= 2 concurrent
+        // versions, which suggests at most 64 rounds can share one — but that
+        // 4-epoch factor holds only once a retained round is eventually reaped,
+        // and 07 §11(1)'s retention had no implemented deadline before SQ-492
+        // (#175), so successive epochs accumulated money-settled rounds on one
+        // long-lived frozen version to the 128-slot cap. A 64/64 split measured
+        // half the reachable per-round reads and undercharged a permissionless
+        // call (#176 review).
+        //
+        // With #175 merged the retention deadline exists and the 4-epoch factor
+        // is true again, so 128-on-one-version is no longer reachable and this
+        // fixture is **conservative rather than exact**. It stays: charging the
+        // larger figure cannot under-charge, and re-measuring downward would
+        // trade a safety margin for a smaller number.
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        for index in 0..pallet_oracle::MAX_ROUNDS as u16 {
+            let version = spec;
+            let key = (index, epoch, version);
+            pallet_oracle::Rounds::<Runtime>::insert(
+                key,
+                pallet_oracle::RoundState {
+                    component: index,
+                    epoch,
+                    round: 1,
+                    spec_version: version,
+                    reporter: [61; 32],
+                    value: FixedU64(pallet_welfare::ONE / 2),
+                    evidence_hash: [62; 32],
+                    bond: Balance::MAX,
+                    challenge_deadline: u32::MAX,
+                    extended: false,
+                    challenger: Some([63; 32]),
+                    counter_value: Some(FixedU64(pallet_welfare::ONE / 4)),
+                    acks: 0,
+                    report_hash: [64; 32],
+                    stake_at_risk: 1,
+                    cumulative_reporter_bond: 1,
+                    cumulative_challenger_bond: 1,
+                },
+            );
+            pallet_oracle::RoundSchedules::<Runtime>::insert(
+                key,
+                pallet_oracle::StoredRoundSchedule {
+                    round_one_bond: 1,
+                    round_cap: pallet_oracle::ORC_ROUNDS,
+                },
+            );
+            pallet_oracle::ComponentValues::<Runtime>::insert(
+                key,
+                pallet_oracle::SettledComponent {
+                    value: FixedU64(pallet_welfare::ONE / 2),
+                    path: pallet_oracle::SettlePath::Neutral,
+                    flagged: true,
+                },
+            );
+        }
+    }
+
     fn prime_oracle_state(measurement_epoch: EpochId) {
         // Saturate every collection `Oracle::load` hydrates, so the boundary
         // crank's weight reflects the real bounded aggregate. Without this the
@@ -9251,6 +9362,41 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
                 },
             );
         }
+        // Stale settled values for the 07 §13 reaping sweep, seeded to the full
+        // `MAX_COMPONENT_VALUES` bound because every `Oracle::load` in this
+        // crank scans the whole map — the scan is the cost, and a partial
+        // fixture understates every hydration in the call, not just the sweep
+        // (#175 review). **Two generations per component**, because each
+        // component's newest value is its §10 carry checkpoint and is exempt:
+        // one generation per component would leave nothing reapable at all and
+        // the sweep would measure a no-op while reporting a green weight
+        // (SQ-492).
+        let components = STALE_COMPONENT_VALUE_SEEDS / 2;
+        for component in 0..components {
+            for epoch in 0..2u32 {
+                pallet_oracle::ComponentValues::<Runtime>::insert(
+                    (component, epoch, 1u16),
+                    pallet_oracle::SettledComponent {
+                        value: FixedU64(pallet_welfare::ONE / 2),
+                        path: pallet_oracle::SettlePath::Neutral,
+                        flagged: true,
+                    },
+                );
+            }
+        }
+    }
+
+    fn assert_oracle_components_reaped() {
+        // Only the older generation is reapable — the newer one is each
+        // component's carry checkpoint — so the batch comes out of epoch 0.
+        assert_eq!(
+            pallet_oracle::ComponentValues::<Runtime>::iter_keys()
+                .filter(|(_, epoch, _)| *epoch == 0)
+                .count(),
+            (STALE_COMPONENT_VALUE_SEEDS as usize / 2)
+                .saturating_sub(pallet_oracle::COMPONENT_VALUE_REAP_BATCH),
+            "the boundary crank must retire exactly one ComponentReapBatch"
+        );
     }
 
     fn prime_settlement(epoch: EpochId) {
