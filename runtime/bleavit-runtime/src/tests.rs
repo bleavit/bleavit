@@ -14855,6 +14855,104 @@ fn sq_303_rederivation_screen_is_fail_closed_in_production() {
     });
 }
 
+/// SQ-303: the class-floor screen judges by **value**, so the 08 §4.1
+/// paired-CODE route actually works.
+///
+/// The direction test this replaces refused every `pol.b` raise and every
+/// `pol.budget_epoch` cut unconditionally, which meant a CODE proposal that had
+/// correctly updated the frozen floor literals still could not carry its values
+/// change through — those six keys were frozen in fact, not screened. Under a
+/// value test the same change stops being unsafe on its own once the derivation
+/// fits under the literals, with no artifact, no pairing record and no verifier.
+#[test]
+fn sq303_class_floor_screen_admits_a_raise_once_the_derivation_fits() {
+    development_ext().execute_with(|| {
+        let pol_key = pallet_constitution::key16(b"pol.b.code");
+        let budget_key = pallet_constitution::key16(b"pol.budget_epoch");
+        let current_pol = match pallet_constitution::Params::<Runtime>::get(pol_key) {
+            Some(record) => record.value.as_u128(),
+            None => panic!("13 §1 pol.b.code row is missing"),
+        };
+
+        // At the default 0.75 % budget the CODE literal has ~0.39 USDC of slack,
+        // so any raise pushes the true floor past it.
+        assert_noop!(
+            Constitution::set_param(
+                pallet_origins::Origin::FutarchyTreasury.into(),
+                pol_key,
+                pallet_constitution::ParamValue::Balance(
+                    current_pol + futarchy_primitives::currency::USDC
+                ),
+            ),
+            pallet_constitution::Error::<Runtime>::BudgetDerivationRequired
+        );
+
+        // Raise the POL budget to its 1.5 % kernel ceiling — which halves every
+        // derived floor — and the identical raise is admitted.
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            budget_key,
+            pallet_constitution::ParamValue::Perbill(15_000_000),
+        ));
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyTreasury.into(),
+            pol_key,
+            pallet_constitution::ParamValue::Balance(
+                current_pol + futarchy_primitives::currency::USDC
+            ),
+        ));
+    });
+}
+
+/// SQ-303: two keys the direction test screened against the §4.1 floors although
+/// 13 §5 item 6 gives each an explicit reason not to be.
+#[test]
+fn sq303_screen_does_not_freeze_ledger_archive_or_pol_b_baseline() {
+    development_ext().execute_with(|| {
+        // "can only move downward from its one-year K ceiling, so the compiled
+        // 2,240-row storage envelope remains safe" — item 6.
+        let archive_key = pallet_constitution::key16(b"ledger.archive");
+        let archive = match pallet_constitution::Params::<Runtime>::get(archive_key) {
+            Some(record) => record.value.as_u128() as u32,
+            None => panic!("13 §1 ledger.archive row is missing"),
+        };
+        // Clear the row's live cooldown first; the screen is what this test is
+        // about, not the rate limiter.
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            archive_key,
+            pallet_constitution::ParamValue::U32(archive - 1),
+        ));
+
+        // "moves no frozen literal" — 08 §4.3 keeps the Baseline book outside the
+        // §4.1 arithmetic and outside `pol.budget_epoch` entirely.
+        let baseline_key = pallet_constitution::key16(b"pol.b_baseline");
+        let baseline = match pallet_constitution::Params::<Runtime>::get(baseline_key) {
+            Some(record) => record.value.as_u128(),
+            None => panic!("13 §1 pol.b_baseline row is missing"),
+        };
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(2)
+        });
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyTreasury.into(),
+            baseline_key,
+            pallet_constitution::ParamValue::Balance(
+                baseline + futarchy_primitives::currency::USDC
+            ),
+        ));
+    });
+}
+
 #[test]
 fn gate_v_min_is_a_live_bounded_param_not_a_hardwired_decision_floor_ratio() {
     use pallet_epoch::EpochParamsProvider;
