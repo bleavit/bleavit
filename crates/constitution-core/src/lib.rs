@@ -1180,7 +1180,9 @@ pub fn genesis_capabilities() -> Vec<CapabilityRecord> {
 #[cfg(not(feature = "fast-timing"))]
 mod timing_defaults {
     pub const EPOCH_LENGTH: u32 = 302_400;
-    pub const EPOCH_LENGTH_MAX: u32 = 604_800;
+    // The kernel is the single home for this ceiling (13 rule 7 makes the row
+    // kernel-bounded); this module only seeds the registry record from it.
+    pub const EPOCH_LENGTH_MAX: u32 = super::kernel::PRODUCTION_MAX_EPOCH_LENGTH_BLOCKS;
     pub const DEC_WINDOW: u32 = 43_200;
     pub const DEC_WINDOW_MAX: u32 = 86_400;
     pub const DEC_TRAILING: u32 = 14_400;
