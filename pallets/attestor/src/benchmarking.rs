@@ -252,6 +252,36 @@ mod benches {
         }
         Attestations::<T>::put(BoundedVec::truncate_from(attestations));
         NextAttestationId::<T>::put(MAX_ATTESTATIONS);
+
+        // Saturate `Revocations` too. `reap_attestation` runs `retain` across the
+        // whole vector and then scans it a second time for the reaped attestor, and
+        // the registry is one aggregate, so a full vector also costs a decode and a
+        // re-encode. Leaving it empty made all of that free and understated a
+        // permissionless extrinsic — the fixture-instead-of-work shape this whole
+        // row exists to remove (Codex review of #180, P1).
+        //
+        // `try_state` requires every revocation to match a live attestation on
+        // (id, pid, attestor), so the valid maximum is exactly one per attestation,
+        // which is also the storage bound. The target's own revocation goes FIRST so
+        // `retain` shifts the remaining 255 entries, and it is the only one owned by
+        // the reaped attestor — `retain` drops it before the `still_present` scan
+        // runs, so the liability-release arm is still the arm being measured.
+        let mut revocations = Vec::with_capacity(MAX_ATTESTATIONS as usize);
+        revocations.push(AttestationRevocation {
+            attestation_id: last,
+            pid: last as futarchy_primitives::ProposalId,
+            attestor: [1; 32],
+            cause_hash: [9; 32],
+        });
+        revocations.extend((0..last).map(|id| AttestationRevocation {
+            attestation_id: id,
+            pid: id as futarchy_primitives::ProposalId,
+            attestor: [2; 32],
+            cause_hash: [9; 32],
+        }));
+        assert_eq!(revocations.len(), MAX_ATTESTATIONS as usize);
+        Revocations::<T>::put(BoundedVec::truncate_from(revocations));
+
         seed_liability::<T>([1; 32]);
         T::BenchmarkHelper::prime_terminal_proposal(last as futarchy_primitives::ProposalId);
 
@@ -262,6 +292,10 @@ mod benches {
             Attestations::<T>::get().len(),
             MAX_ATTESTATIONS as usize - 1
         );
+        // The reaped attestation's revocation went with it, which proves `retain`
+        // actually traversed and rewrote the saturated vector rather than
+        // short-circuiting on an empty one.
+        assert_eq!(Revocations::<T>::get().len(), MAX_ATTESTATIONS as usize - 1);
         // Its attestor held nothing else, so the liability was disposed of —
         // the arm that also releases the bond.
         assert!(Liabilities::<T>::get().is_empty());

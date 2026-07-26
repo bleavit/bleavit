@@ -13,7 +13,7 @@
 // benchmark
 // pallet
 // --runtime
-// /home/development/bleavit/target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
+// target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
 // --pallet
 // pallet_attestor
 // --extrinsic
@@ -57,8 +57,8 @@ impl<T: frame_system::Config> pallet_attestor::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `41701`
 		//  Estimated: `82582`
-		// Minimum execution time: 1_193_140_000 picoseconds.
-		Weight::from_parts(1_229_730_000, 0)
+		// Minimum execution time: 1_110_510_000 picoseconds.
+		Weight::from_parts(1_211_980_000, 0)
 			.saturating_add(Weight::from_parts(0, 82582))
 			.saturating_add(T::DbWeight::get().reads(69))
 			.saturating_add(T::DbWeight::get().writes(67))
@@ -79,8 +79,8 @@ impl<T: frame_system::Config> pallet_attestor::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `31747`
 		//  Estimated: `52175`
-		// Minimum execution time: 69_780_000 picoseconds.
-		Weight::from_parts(71_930_000, 0)
+		// Minimum execution time: 58_510_000 picoseconds.
+		Weight::from_parts(62_320_000, 0)
 			.saturating_add(Weight::from_parts(0, 52175))
 			.saturating_add(T::DbWeight::get().reads(7))
 			.saturating_add(T::DbWeight::get().writes(5))
@@ -103,8 +103,8 @@ impl<T: frame_system::Config> pallet_attestor::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `31703`
 		//  Estimated: `52175`
-		// Minimum execution time: 106_470_000 picoseconds.
-		Weight::from_parts(110_130_000, 0)
+		// Minimum execution time: 92_360_000 picoseconds.
+		Weight::from_parts(97_990_000, 0)
 			.saturating_add(Weight::from_parts(0, 52175))
 			.saturating_add(T::DbWeight::get().reads(7))
 			.saturating_add(T::DbWeight::get().writes(7))
@@ -127,8 +127,8 @@ impl<T: frame_system::Config> pallet_attestor::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `32941`
 		//  Estimated: `52175`
-		// Minimum execution time: 138_180_000 picoseconds.
-		Weight::from_parts(142_190_000, 0)
+		// Minimum execution time: 121_930_000 picoseconds.
+		Weight::from_parts(128_740_000, 0)
 			.saturating_add(Weight::from_parts(0, 52175))
 			.saturating_add(T::DbWeight::get().reads(10))
 			.saturating_add(T::DbWeight::get().writes(10))
@@ -149,8 +149,8 @@ impl<T: frame_system::Config> pallet_attestor::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `30930`
 		//  Estimated: `718046`
-		// Minimum execution time: 877_050_000 picoseconds.
-		Weight::from_parts(906_110_000, 0)
+		// Minimum execution time: 784_940_000 picoseconds.
+		Weight::from_parts(828_490_000, 0)
 			.saturating_add(Weight::from_parts(0, 718046))
 			.saturating_add(T::DbWeight::get().reads(261))
 			.saturating_add(T::DbWeight::get().writes(5))
@@ -173,10 +173,10 @@ impl<T: frame_system::Config> pallet_attestor::WeightInfo for WeightInfo<T> {
 	/// Proof: `Balances::Holds` (`max_values`: None, `max_size`: Some(157), added: 2632, mode: `MaxEncodedLen`)
 	fn reap_attestation() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `32559`
+		//  Measured:  `52042`
 		//  Estimated: `52175`
-		// Minimum execution time: 104_650_000 picoseconds.
-		Weight::from_parts(107_840_000, 0)
+		// Minimum execution time: 103_820_000 picoseconds.
+		Weight::from_parts(110_350_000, 0)
 			.saturating_add(Weight::from_parts(0, 52175))
 			.saturating_add(T::DbWeight::get().reads(8))
 			.saturating_add(T::DbWeight::get().writes(7))

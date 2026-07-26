@@ -34,6 +34,32 @@ FN_RE = re.compile(
 )
 ENTRY_RE = re.compile(r"^(\S+)\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(\S(?:.*\S)?)$")
 
+# The generator emits a small, fixed grammar. Consuming exactly that grammar and
+# then asking whether any letters are left is how a term *spliced into an already
+# generated function* gets caught — that function keeps its `Minimum execution
+# time:` line, so the marker check above passes it. Both halves matter: the
+# original SQ-490 defect was a hand-written function (no marker) **plus** three
+# `.saturating_add(Self::collator_compensation())` calls inside functions that
+# did have one, and a marker-only check sees just the first half.
+INT = r"\d[\d_]*(?:_?u64)?"
+GENERATED_CONSTRUCTS = (
+    # Comments carry the measured summary and the Standard Error notes.
+    re.compile(r"//[^\n]*"),
+    # A component-scaled term: `.saturating_mul(n.into())` / `(n as u64)`.
+    re.compile(
+        r"\.\s*saturating_mul\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*"
+        r"(?:\.\s*into\s*\(\s*\)|as\s+u64)\s*\)"
+    ),
+    re.compile(rf"Weight\s*::\s*from_parts\s*\(\s*{INT}\s*,\s*{INT}\s*\)"),
+    re.compile(r"Weight\s*::\s*MAX"),
+    re.compile(r"(?:T\s*::\s*DbWeight|RocksDbWeight)\s*::\s*get\s*\(\s*\)"),
+    re.compile(rf"\.\s*(?:reads|writes)\s*\(\s*\(?\s*{INT}\s*\)?\s*\)"),
+    re.compile(r"\.\s*(?:reads|writes)\s*\(\s*\(?\s*\)?\s*\)"),
+    re.compile(r"\.\s*saturating_add\s*\("),
+)
+# What may legally remain once the grammar above is consumed.
+RESIDUE_RE = re.compile(r"[A-Za-z]")
+
 
 class CheckError(RuntimeError):
     """A user-facing configuration or repository error."""
@@ -60,8 +86,26 @@ def load_overrides(path: Path = OVERRIDES) -> dict[tuple[str, str], str]:
     return overrides
 
 
+def spliced_residue(body: str) -> str:
+    """Return whatever is left of a body after the generator's own grammar.
+
+    Empty means the body is pure generator output. Anything alphabetic means a
+    term was written by hand — the shape a regeneration silently deletes.
+    """
+    remainder = body
+    for pattern in GENERATED_CONSTRUCTS:
+        remainder = pattern.sub(" ", remainder)
+    if not RESIDUE_RE.search(remainder):
+        return ""
+    return " ".join(remainder.split())
+
+
 def scan(weights_dir: Path = WEIGHTS) -> dict[tuple[str, str], bool]:
-    """Map (repo-relative path, function) -> whether it carries a measured line."""
+    """Map (repo-relative path, function) -> whether it is pure generator output.
+
+    A function counts as generated only if it carries the generator's measured
+    line **and** its body contains nothing outside the generator's grammar.
+    """
     found: dict[tuple[str, str], bool] = {}
     if not weights_dir.is_dir():
         return found
@@ -75,7 +119,9 @@ def scan(weights_dir: Path = WEIGHTS) -> dict[tuple[str, str], bool]:
             rel = path.relative_to(weights_dir).as_posix()
         text = path.read_text(encoding="utf-8")
         for match in FN_RE.finditer(text):
-            found[(rel, match.group(1))] = MEASURED_MARKER in match.group(2)
+            body = match.group(2)
+            pure = MEASURED_MARKER in body and not spliced_residue(body)
+            found[(rel, match.group(1))] = pure
     return found
 
 

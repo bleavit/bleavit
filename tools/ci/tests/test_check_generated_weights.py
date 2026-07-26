@@ -104,6 +104,66 @@ class OverrideFileTests(unittest.TestCase):
             self.load("w/a.rs f: one\nw/a.rs f: two\n")
 
 
+PURE_BODY = """
+\t\t// Minimum execution time: 4_074_888_000 picoseconds.
+\t\tWeight::from_parts(4_128_930_000, 0)
+\t\t\t.saturating_add(Weight::from_parts(0, 356514))
+\t\t\t.saturating_add(T::DbWeight::get().reads(655))
+\t\t\t.saturating_add(T::DbWeight::get().writes(135))
+"""
+
+LINEAR_BODY = """
+\t\t// Minimum execution time: 2_535_236_370 picoseconds.
+\t\tWeight::from_parts(2_535_236_370, 0)
+\t\t\t.saturating_add(Weight::from_parts(0, 183055))
+\t\t\t// Standard Error: 9_566
+\t\t\t.saturating_add(Weight::from_parts(24_709_931, 0).saturating_mul(n.into()))
+\t\t\t.saturating_add(T::DbWeight::get().reads((5_u64).saturating_mul(n.into())))
+\t\t\t.saturating_add(T::DbWeight::get().writes((1_u64).saturating_mul(n.into())))
+\t\t\t.saturating_add(Weight::from_parts(0, 2753).saturating_mul(n.into()))
+"""
+
+
+class SplicedTermTests(unittest.TestCase):
+    """The half a marker-only check cannot see.
+
+    A term spliced into an *already generated* function leaves that function's
+    `Minimum execution time:` line intact, so the marker passes it while a
+    regeneration silently deletes the added term. This is not hypothetical: it is
+    literally half of the SQ-490 defect (a hand-written function *plus* three
+    `.saturating_add(Self::collator_compensation())` call sites).
+    """
+
+    def test_pure_generated_body_has_no_residue(self):
+        self.assertEqual(MODULE.spliced_residue(PURE_BODY), "")
+
+    def test_linear_component_body_has_no_residue(self):
+        self.assertEqual(MODULE.spliced_residue(LINEAR_BODY), "")
+
+    def test_weight_max_sentinel_has_no_residue(self):
+        self.assertEqual(MODULE.spliced_residue("\t\tWeight::MAX\n"), "")
+
+    def test_the_original_defect_is_flagged(self):
+        spliced = PURE_BODY + "\t\t\t.saturating_add(Self::collator_compensation())\n"
+        self.assertIn("collator_compensation", MODULE.spliced_residue(spliced))
+
+    def test_free_function_splice_is_flagged(self):
+        spliced = PURE_BODY + "\t\t\t.saturating_add(inflow_cap_gate_weight::<T>())\n"
+        self.assertIn("inflow_cap_gate_weight", MODULE.spliced_residue(spliced))
+
+    def test_a_measured_function_carrying_a_splice_is_not_counted_as_generated(self):
+        body = PURE_BODY + "\t\t\t.saturating_add(Self::collator_compensation())\n"
+        source = (
+            "impl<T: frame_system::Config> pallet_x::WeightInfo for WeightInfo<T> {\n"
+            f"\tfn spliced() -> Weight {{{body}\t}}\n}}\n"
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            (directory / "pallet_x.rs").write_text(source, encoding="utf-8")
+            found = MODULE.scan(directory)
+        self.assertEqual(list(found.values()), [False], found)
+
+
 class RepositoryTests(unittest.TestCase):
     def test_repository_state_passes_the_gate(self):
         found = MODULE.scan()
