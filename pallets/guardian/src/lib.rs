@@ -105,14 +105,21 @@ pub const MAX_FAILED_ACTIONS: u32 = MAX_REVIEWS;
 ///
 /// A saturated [`MAX_REVIEWS`] backlog drains in `⌈128 / 10⌉` = 13 blocks (~78 s).
 ///
-/// **What the measurement said.** The saturated batch benchmarks at 100 reads /
-/// 101 writes / 125,304 B of proof / 5.63 ms, against the hand-written envelope
+/// **What the measurement said.** The saturated batch benchmarks at 105 reads /
+/// 110 writes / 125,304 B of proof / 6.08 ms, against the hand-written envelope
 /// it replaces (220 / 150 / 183,055 B / 1.95 ms). The bound therefore *lowers*
 /// the mandatory per-block storage and PoV charge and *raises* the ref_time
-/// charge: the guess had over-declared storage and under-declared time by ~2.9x.
-/// At 5.63 ms the hook is 0.28 % of the 2-second block, so ref_time is nowhere
+/// charge: the guess had over-declared storage and under-declared time by ~3.1x.
+/// At 6.08 ms the hook is 0.30 % of the 2-second block, so ref_time is nowhere
 /// near binding — the derivation above, not that headroom, is what fixes the
 /// value.
+///
+/// The measurement is only worth that much because the fixture spends the
+/// council's bond the way an adversary would: a recall referendum is funded from
+/// the slash pool, so *which* seats approve decides how many settles in a batch
+/// can afford one. Reusing one approver set funds two; rotating funds six. See
+/// `benchmarking::RECALL_MAXIMIZING_APPROVERS` — the difference is 5 reads,
+/// 9 writes and 8 % of ref_time on a mandatory hook.
 ///
 /// Overload **carries the remainder; it never skips** (G-1, R-7). Dropping a due
 /// review would forfeit an accountability action outright, whereas deferring one
@@ -484,6 +491,25 @@ pub mod pallet {
     #[pallet::storage]
     pub type FailedActions<T: Config> =
         CountedStorageMap<_, Blake2_128Concat, ActionId, FailedAction, OptionQuery>;
+
+    /// Round-robin resume point for the bounded overdue-review settle sweep
+    /// (SQ-500). Holds the last action id the batch selected; the next block's
+    /// batch begins at the next overdue review *after* it and wraps to the head
+    /// of the list when it runs out.
+    ///
+    /// Without this the bound would silently break its own rule. Settling a
+    /// review is what removes it from the overdue set, so a plain
+    /// `take(GUARDIAN_MAINTENANCE_BATCH)` re-selects the same prefix on every
+    /// block — and a review whose settlement persistently fails (a missing
+    /// fronting or referendum join, say) stays in that prefix forever. With
+    /// enough such records the batch never reaches the valid overdue reviews
+    /// behind them, and their slash and recall are suppressed permanently: a
+    /// **skip** wearing the shape of a carry, which is exactly what 06 §5.4
+    /// forbids. Rotating the selection guarantees every overdue review is
+    /// attempted within `⌈overdue / GuardianMaintenanceBatch⌉` blocks whatever
+    /// any individual settlement does.
+    #[pallet::storage]
+    pub type MaintenanceSweepCursor<T: Config> = StorageValue<_, ActionId, OptionQuery>;
 
     /// Round-robin resume point for the bounded [`FailedActions`] reap sweep
     /// (SQ-500). Holds the last action id the maintenance hook examined; the
@@ -1829,23 +1855,56 @@ pub mod pallet {
                 })
                 .unwrap_or_default();
             // Settle at most one batch per block (13 §2 `GuardianMaintenanceBatch`;
-            // 06 §5.4). Settling a review flips its `recall_scheduled` bit, so it
-            // stops matching this filter and the next block's batch begins at the
-            // next unsettled review — the remainder carries, nothing is skipped.
-            let overdue = match loaded.as_ref() {
-                Some(g) => g
-                    .reviews
+            // 06 §5.4), resuming after the previous block's last selection.
+            //
+            // Settling a review flips its `recall_scheduled` bit, so a successful
+            // settle drops out of this filter on its own — but a *failing* one
+            // does not, and re-selecting the same prefix every block would let a
+            // handful of unsettleable records hide every review behind them
+            // forever. The rotation is what makes the carry a carry rather than
+            // a skip; see [`MaintenanceSweepCursor`].
+            let due = loaded
+                .as_ref()
+                .map(|g| {
+                    g.reviews
+                        .iter()
+                        .filter(|review| {
+                            !review.ratified
+                                && !review.recall_scheduled
+                                && epoch > review.deadline_epoch
+                        })
+                        .map(|review| review.action_id)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            // Rotate in memory over the already-loaded aggregate — no storage
+            // read, and `reviews` is bounded by `MAX_REVIEWS`.
+            // Resume at the first review *after* the cursor rather than at the
+            // cursor's own position. Action ids ascend with the review vector
+            // (`NextActionId` is monotonic and settlement preserves order), so
+            // this still advances when the cursor's own review settled and left
+            // the list — which is the common case, and the case a
+            // position-of-equal lookup would silently restart from the head on.
+            let resume = match MaintenanceSweepCursor::<T>::get() {
+                Some(cursor) => due
                     .iter()
-                    .filter(|review| {
-                        !review.ratified
-                            && !review.recall_scheduled
-                            && epoch > review.deadline_epoch
-                    })
-                    .map(|review| review.action_id)
-                    .take(GUARDIAN_MAINTENANCE_BATCH as usize)
-                    .collect::<Vec<_>>(),
-                None => Vec::new(),
+                    .position(|action| *action > cursor)
+                    .unwrap_or_default(),
+                None => 0,
             };
+            let overdue = due
+                .iter()
+                .skip(resume)
+                .chain(due.iter().take(resume))
+                .copied()
+                .take(GUARDIAN_MAINTENANCE_BATCH as usize)
+                .collect::<Vec<_>>();
+            match overdue.last() {
+                Some(action) => MaintenanceSweepCursor::<T>::put(action),
+                // Nothing due: clear the cursor so the next backlog starts at the
+                // head rather than resuming from a review that no longer exists.
+                None => MaintenanceSweepCursor::<T>::kill(),
+            }
 
             // Refund and restore every independently-refundable due slice
             // first. Each child layer is durable on its own; one unfinished or

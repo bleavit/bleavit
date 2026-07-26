@@ -47,27 +47,74 @@ fn action_at_four<T: Config>(power: GuardianPower) -> ActionId {
     id
 }
 
-/// Drive one action all the way to dispatch and return its id, so a fixture can
-/// build a *batch* of genuinely settleable reviews rather than one (SQ-500).
+/// Drive one action to dispatch under a chosen 5-of-7 approval set, and return
+/// its id, so a fixture can build a *batch* of genuinely settleable reviews
+/// rather than one (SQ-500).
 ///
 /// Unlike [`action_at_four`] this reads the id from [`NextActionId`] instead of
 /// assuming 0, and spends the fifth approval itself. `SuspendOnGate` is the power
 /// used because it carries no per-epoch allowance, so the same council can drive
 /// it as many times as the fixture needs.
-fn dispatch_suspend_on_gate<T: Config>() -> Result<ActionId, BenchmarkError> {
+///
+/// `seats` is the approver set, proposer first. Which seats approve is not a
+/// detail: a failed review's recall referendum is funded from the slash pool,
+/// and a seat's bond funds exactly two 50 % slashes, so the *distribution* of
+/// approvals across the seven seats is what decides how many settles in a batch
+/// can afford the expensive `schedule_recall` path. See
+/// [`RECALL_MAXIMIZING_APPROVERS`].
+fn dispatch_suspend_on_gate<T: Config>(
+    seats: [u8; GUARDIAN_THRESHOLD as usize],
+) -> Result<ActionId, BenchmarkError> {
     let id = NextActionId::<T>::get();
+    let (proposer, approvers) = seats.split_first().ok_or(BenchmarkError::Stop("seats"))?;
     Pallet::<T>::propose_action(
-        T::BenchmarkHelper::signed([1; 32]),
+        T::BenchmarkHelper::signed([*proposer; 32]),
         GuardianPower::SuspendOnGate,
         H256::default(),
     )
     .map_err(|_| BenchmarkError::Stop("propose"))?;
-    for i in 1..GUARDIAN_THRESHOLD {
-        Pallet::<T>::approve_action(T::BenchmarkHelper::signed([i + 1; 32]), id)
+    for seat in approvers {
+        Pallet::<T>::approve_action(T::BenchmarkHelper::signed([*seat; 32]), id)
             .map_err(|_| BenchmarkError::Stop("approve"))?;
     }
     Ok(id)
 }
+
+/// The approval schedule that maximizes how many of a saturated settle batch can
+/// schedule a recall referendum (SQ-500, tightened after review).
+///
+/// A recall needs `slash_pool >= SubmissionDeposit + 5,000 VIT`, and one 50 %
+/// slash of a seat bond is 25,000 VIT — so **a single** approver with bond left
+/// funds a recall. A fresh seven-seat council therefore holds exactly
+/// `7 x 2 = 14` slash events, and the question is how few a settle can consume.
+/// Repeating one approver set spends five per settle and exhausts the council in
+/// two, which is what the first version of this fixture measured. Rotating so
+/// that later actions reuse already-drained seats plus one fresh one spends
+/// **one** per settle:
+///
+/// | Actions | Approvers   | Slash events | Recall? |
+/// |---------|-------------|--------------|---------|
+/// | 1, 2    | seats 1–5   | 5 each       | yes     |
+/// | 3, 4    | 1–4 + 6     | 1 each       | yes     |
+/// | 5, 6    | 1–4 + 7     | 1 each       | yes     |
+/// | 7–10    | 1–5         | 0            | no      |
+///
+/// `5 + 5 + 1 + 1 + 1 + 1 = 14` — the council's entire slashable capital, spent
+/// across **six** recall-scheduling settles instead of two. Six is the maximum:
+/// every seat is funded at the start, so the first two settles cannot cost less
+/// than five events each, leaving four for singles.
+const RECALL_MAXIMIZING_APPROVERS: [[u8; GUARDIAN_THRESHOLD as usize]; 10] = [
+    [1, 2, 3, 4, 5],
+    [1, 2, 3, 4, 5],
+    [1, 2, 3, 4, 6],
+    [1, 2, 3, 4, 6],
+    [1, 2, 3, 4, 7],
+    [1, 2, 3, 4, 7],
+    [1, 2, 3, 4, 5],
+    [1, 2, 3, 4, 5],
+    [1, 2, 3, 4, 5],
+    [1, 2, 3, 4, 5],
+];
 
 fn pending(id: ActionId, dispatched: bool) -> PendingAction {
     PendingAction {
@@ -361,8 +408,11 @@ mod benches {
         // delayed action intentionally retains its veto referendum until T12
         // (SQ-311) and is covered by pallet tests.
         let mut overdue = alloc::vec::Vec::new();
-        for _ in 0..GUARDIAN_MAINTENANCE_BATCH {
-            overdue.push(dispatch_suspend_on_gate::<T>()?);
+        for index in 0..GUARDIAN_MAINTENANCE_BATCH {
+            let seats = *RECALL_MAXIMIZING_APPROVERS
+                .get(index as usize)
+                .ok_or(BenchmarkError::Stop("approval schedule too short"))?;
+            overdue.push(dispatch_suspend_on_gate::<T>(seats)?);
         }
         let first = *overdue.first().ok_or(BenchmarkError::Stop("empty batch"))?;
         let deadline = ReviewDeadlines::<T>::get()
@@ -442,17 +492,26 @@ mod benches {
             assert!(!ReviewReferenda::<T>::contains_key(action));
             assert!(!VetoReviewReferenda::<T>::contains_key(action));
         }
-        // At least one settle took the *expensive* branch — scheduling a recall
-        // referendum (preimage + submit + decision deposit + transfer). Not every
-        // one can, and that is a property of the system rather than of the
-        // fixture: a recall is funded from the slash pool, a seat's 50,000 VIT
-        // bond absorbs exactly two 50 % slashes, and a settle draws from five
-        // approvers at once — so a fresh council's 350,000 VIT of bonded capital
-        // funds the first two settles of a batch and no more. Asserting all ten
+        // The batch took the expensive `schedule_recall` branch (preimage +
+        // submit + decision deposit + transfer) as many times as the council's
+        // bonded capital can fund it — six, per `RECALL_MAXIMIZING_APPROVERS`.
+        // Pinning the count, not just `> 0`, is the point: the first version of
+        // this fixture reused one approver set, measured two, and would have
+        // shipped a mandatory hook weight that understates its own worst case by
+        // four recall schedules. Ten is unreachable on-chain and asserting it
         // would only be satisfiable by seeding bond capital the chain cannot
-        // hold, which inflates a *mandatory* per-block charge with unreachable
-        // state.
-        assert!(recalls > 0);
+        // hold.
+        //
+        // A floor rather than an equality because the two environments this
+        // benchmark runs in do not agree, and only one of them is the one being
+        // weighed: the mock's `ReviewScheduler` double schedules unconditionally
+        // and reaches ten, while the runtime's charges
+        // `SubmissionDeposit + 5,000 VIT` against the slash pool and reaches six.
+        // Six is what the measured weight must cover.
+        assert!(
+            recalls >= 6,
+            "the batch must reach the council's full recall-funding capacity",
+        );
         // ... and the backlog behind it did not, so the bound really bounds.
         assert!(!ReviewDeadlines::<T>::get().is_empty());
         // The reap sweep ran a full batch as well.

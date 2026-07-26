@@ -46,7 +46,7 @@
 # for an unbounded mandatory hook. The sweep is now bounded (13 §2
 # `GuardianMaintenanceBatch` = 10, 06 §5.4) and the fixture saturates it, so this
 # is the first real measurement of the hook. It moves in both directions at once:
-# reads 220 -> 100, writes 150 -> 101 and proof 183,055 -> 125,304 B all FALL,
-# while ref_time rises 1.95 -> 5.63 ms. The guess had over-declared storage and
-# under-declared time. 5.63 ms is 0.28 % of the 2-second block.
-runtime/bleavit-runtime/src/weights/pallet_guardian.rs on_initialize @ ref_time=5627551000: first real measurement of the maintenance hook — SQ-500 bounded the sweep at GuardianMaintenanceBatch = 10 and the fixture now saturates it, replacing a hand-written 1.95 ms envelope that had never been benchmarked. Storage and PoV fall (220->100 r, 150->101 w, 183,055->125,304 B) in the same regeneration; only ref_time rises, to 0.28 % of the 2 s block.
+# reads 220 -> 105, writes 150 -> 110 and proof 183,055 -> 125,304 B all FALL,
+# while ref_time rises 1.95 -> 6.08 ms. The guess had over-declared storage and
+# under-declared time. 6.08 ms is 0.30 % of the 2-second block.
+runtime/bleavit-runtime/src/weights/pallet_guardian.rs on_initialize @ ref_time=6076186000: first real measurement of the maintenance hook — SQ-500 bounded the sweep at GuardianMaintenanceBatch = 10 and the fixture now saturates it, replacing a hand-written 1.95 ms envelope that had never been benchmarked. Storage and PoV fall (220->105 r, 150->110 w, 183,055->125,304 B) in the same regeneration; only ref_time rises, to 0.30 % of the 2 s block.

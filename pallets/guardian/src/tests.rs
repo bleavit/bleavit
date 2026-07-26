@@ -48,7 +48,7 @@ fn approve_to_dispatch() {
 fn reset_review_scheduler() {
     NextReferendum::set(100);
     ReviewSchedulingFails::set(false);
-    ReviewRefundFailsFor::set(None);
+    ReviewRefundFailsFor::set(Vec::new());
     ScheduledReviews::set(Vec::new());
     CancelledReviews::set(Vec::new());
     RefundedReviews::set(Vec::new());
@@ -2095,7 +2095,7 @@ fn three_concurrent_failed_reviews_settle_independently_with_bounded_liability()
 
         // Isolate the middle review's refund failure. The first and third
         // reviews must commit independently instead of sharing one rollback.
-        ReviewRefundFailsFor::set(Some(102));
+        ReviewRefundFailsFor::set(vec![102]);
         set_epoch(3);
         run_to_block(3);
         assert!(FailedActions::<Test>::contains_key(0));
@@ -2131,7 +2131,7 @@ fn three_concurrent_failed_reviews_settle_independently_with_bounded_liability()
 
         // Retrying only the failed review consumes the remaining bounded
         // liability. No exact transfer can demand more than the live hold.
-        ReviewRefundFailsFor::set(None);
+        ReviewRefundFailsFor::set(Vec::new());
         run_to_block(4);
         assert!(FailedActions::<Test>::contains_key(0));
         assert!(FailedActions::<Test>::contains_key(1));
@@ -2506,6 +2506,83 @@ fn sq500_failed_action_reap_is_bounded_and_drains_every_key() {
         assert!(FailedActionReapCursor::<Test>::get().is_some());
         run_to_block(start + 4);
         assert!(FailedActionReapCursor::<Test>::get().is_none());
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+/// SQ-500 (tightened after review): the settle batch **rotates**, so a review
+/// whose settlement persistently fails cannot hide the reviews behind it.
+///
+/// This is the failure the bound introduced and the cursor removes. Settling is
+/// what drops a review out of the overdue filter, so a fixed `take(n)` re-selects
+/// the same prefix every block — and records that never settle stay in that
+/// prefix forever. With a prefix of failures as wide as the batch, every valid
+/// overdue review behind them would be suppressed permanently: a skip wearing the
+/// shape of a carry, which 06 §5.4 forbids.
+#[test]
+fn sq500_maintenance_batch_rotates_past_reviews_that_cannot_settle() {
+    // limit-coverage: GuardianMaintenanceBatch
+    new_test_ext().execute_with(|| {
+        reset_review_scheduler();
+        set_triggers(TriggerState {
+            gate_breach: true,
+            ..TriggerState::none()
+        });
+        // A batch-wide prefix of reviews whose deposit refund is stuck, so
+        // `restore_due_review_fronting` fails and `settle_failed_review` then
+        // refuses on the residual it left (G-1: never slash against two
+        // deposits). They stay overdue every block, and — unlike a hand-forged
+        // record — the state stays invariant-valid, so this is the reachable
+        // shape of the problem rather than an already-corrupt chain.
+        let batch = crate::GUARDIAN_MAINTENANCE_BATCH;
+        let mut stuck = Vec::new();
+        for action in 0..batch {
+            assert_ok!(Guardian::propose_action(
+                RuntimeOrigin::signed(acct(1)),
+                GuardianPower::SuspendOnGate,
+                hash(action as u8),
+            ));
+            for member in 2..=5u8 {
+                assert_ok!(Guardian::approve_action(
+                    RuntimeOrigin::signed(acct(member)),
+                    action,
+                ));
+            }
+            stuck.push(ReviewReferenda::<Test>::get(action).expect("review scheduled"));
+        }
+        ReviewRefundFailsFor::set(stuck);
+
+        // ... and behind them, a batch of reviews that settle normally.
+        let first_real = batch;
+        for index in 0..batch {
+            let action = first_real + index;
+            assert_ok!(Guardian::propose_action(
+                RuntimeOrigin::signed(acct(1)),
+                GuardianPower::SuspendOnGate,
+                hash(index as u8),
+            ));
+            for member in 2..=5u8 {
+                assert_ok!(Guardian::approve_action(
+                    RuntimeOrigin::signed(acct(member)),
+                    action,
+                ));
+            }
+        }
+
+        set_epoch(3);
+        let start = System::block_number() as u32;
+
+        // Block one spends its whole batch on the unsettleable prefix.
+        run_to_block(start + 1);
+        assert_eq!(FailedActions::<Test>::count(), 0);
+
+        // Block two rotates past them and settles the real ones — without the
+        // cursor this block would re-select the same failing prefix forever.
+        run_to_block(start + 2);
+        assert_eq!(FailedActions::<Test>::count(), batch);
+        for index in 0..batch {
+            assert!(FailedActions::<Test>::contains_key(first_real + index));
+        }
         assert_ok!(Guardian::do_try_state());
     });
 }

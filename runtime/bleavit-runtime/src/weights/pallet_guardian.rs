@@ -69,8 +69,8 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `53835`
 		//  Estimated: `31567`
-		// Minimum execution time: 327_290_000 picoseconds.
-		Weight::from_parts(360_100_000, 0)
+		// Minimum execution time: 326_160_000 picoseconds.
+		Weight::from_parts(360_951_000, 0)
 			.saturating_add(Weight::from_parts(0, 31567))
 			.saturating_add(T::DbWeight::get().reads(26))
 			.saturating_add(T::DbWeight::get().writes(24))
@@ -103,8 +103,8 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `52165`
 		//  Estimated: `31567`
-		// Minimum execution time: 73_740_000 picoseconds.
-		Weight::from_parts(85_620_000, 0)
+		// Minimum execution time: 73_720_000 picoseconds.
+		Weight::from_parts(85_310_000, 0)
 			.saturating_add(Weight::from_parts(0, 31567))
 			.saturating_add(T::DbWeight::get().reads(12))
 			.saturating_add(T::DbWeight::get().writes(10))
@@ -223,8 +223,8 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `59091`
 		//  Estimated: `94842`
-		// Minimum execution time: 869_690_000 picoseconds.
-		Weight::from_parts(889_270_000, 0)
+		// Minimum execution time: 803_391_000 picoseconds.
+		Weight::from_parts(880_161_000, 0)
 			.saturating_add(Weight::from_parts(0, 94842))
 			.saturating_add(T::DbWeight::get().reads(101))
 			.saturating_add(T::DbWeight::get().writes(51))
@@ -279,8 +279,8 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `55175`
 		//  Estimated: `42428`
-		// Minimum execution time: 565_120_000 picoseconds.
-		Weight::from_parts(577_990_000, 0)
+		// Minimum execution time: 527_101_000 picoseconds.
+		Weight::from_parts(571_721_000, 0)
 			.saturating_add(Weight::from_parts(0, 42428))
 			.saturating_add(T::DbWeight::get().reads(33))
 			.saturating_add(T::DbWeight::get().writes(31))
@@ -331,8 +331,8 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `53259`
 		//  Estimated: `31567`
-		// Minimum execution time: 104_980_000 picoseconds.
-		Weight::from_parts(119_980_000, 0)
+		// Minimum execution time: 105_090_000 picoseconds.
+		Weight::from_parts(120_150_000, 0)
 			.saturating_add(Weight::from_parts(0, 31567))
 			.saturating_add(T::DbWeight::get().reads(21))
 			.saturating_add(T::DbWeight::get().writes(13))
@@ -485,8 +485,8 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `20508`
 		//  Estimated: `105270`
-		// Minimum execution time: 986_490_000 picoseconds.
-		Weight::from_parts(1_003_361_000, 0)
+		// Minimum execution time: 925_021_000 picoseconds.
+		Weight::from_parts(998_211_000, 0)
 			.saturating_add(Weight::from_parts(0, 105270))
 			.saturating_add(T::DbWeight::get().reads(138))
 			.saturating_add(T::DbWeight::get().writes(83))
@@ -523,8 +523,8 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `1766`
 		//  Estimated: `31567`
-		// Minimum execution time: 41_180_000 picoseconds.
-		Weight::from_parts(42_950_000, 0)
+		// Minimum execution time: 37_800_000 picoseconds.
+		Weight::from_parts(42_280_000, 0)
 			.saturating_add(Weight::from_parts(0, 31567))
 			.saturating_add(T::DbWeight::get().reads(14))
 			.saturating_add(T::DbWeight::get().writes(12))
@@ -535,8 +535,8 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `0`
 		//  Estimated: `0`
-		// Minimum execution time: 4_950_000 picoseconds.
-		Weight::from_parts(5_670_000, 0)
+		// Minimum execution time: 4_890_000 picoseconds.
+		Weight::from_parts(5_500_000, 0)
 			.saturating_add(Weight::from_parts(0, 0))
 			.saturating_add(T::DbWeight::get().writes(1))
 	}
@@ -564,19 +564,21 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	/// Storage: `Guardian::NextActionId` (r:1 w:1)
 	/// Proof: `Guardian::NextActionId` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `Guardian::MaintenanceSweepCursor` (r:1 w:1)
+	/// Proof: `Guardian::MaintenanceSweepCursor` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Guardian::ReviewFrontingOf` (r:10 w:10)
 	/// Proof: `Guardian::ReviewFrontingOf` (`max_values`: None, `max_size`: Some(473), added: 2948, mode: `MaxEncodedLen`)
 	/// Storage: `Guardian::ReviewReferenda` (r:10 w:10)
 	/// Proof: `Guardian::ReviewReferenda` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
 	/// Storage: `Guardian::VetoReviewReferenda` (r:10 w:0)
 	/// Proof: `Guardian::VetoReviewReferenda` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
-	/// Storage: `Referenda::ReferendumInfoFor` (r:10 w:12)
+	/// Storage: `Referenda::ReferendumInfoFor` (r:10 w:16)
 	/// Proof: `Referenda::ReferendumInfoFor` (`max_values`: None, `max_size`: Some(936), added: 3411, mode: `MaxEncodedLen`)
 	/// Storage: `Scheduler::Agenda` (r:3 w:3)
 	/// Proof: `Scheduler::Agenda` (`max_values`: None, `max_size`: Some(38963), added: 41438, mode: `MaxEncodedLen`)
-	/// Storage: `System::Account` (r:7 w:7)
+	/// Storage: `System::Account` (r:9 w:9)
 	/// Proof: `System::Account` (`max_values`: None, `max_size`: Some(128), added: 2603, mode: `MaxEncodedLen`)
-	/// Storage: `Balances::Holds` (r:5 w:5)
+	/// Storage: `Balances::Holds` (r:7 w:7)
 	/// Proof: `Balances::Holds` (`max_values`: None, `max_size`: Some(157), added: 2632, mode: `MaxEncodedLen`)
 	/// Storage: `Guardian::FailedActions` (r:21 w:20)
 	/// Proof: `Guardian::FailedActions` (`max_values`: None, `max_size`: Some(254), added: 2729, mode: `MaxEncodedLen`)
@@ -618,12 +620,12 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 	/// Proof: `ConditionalLedger::SplitPausedUntil` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	fn on_initialize() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `71347`
+		//  Measured:  `71707`
 		//  Estimated: `125304`
-		// Minimum execution time: 5_197_851_000 picoseconds.
-		Weight::from_parts(5_627_551_000, 0)
+		// Minimum execution time: 5_594_297_000 picoseconds.
+		Weight::from_parts(6_076_186_000, 0)
 			.saturating_add(Weight::from_parts(0, 125304))
-			.saturating_add(T::DbWeight::get().reads(100))
-			.saturating_add(T::DbWeight::get().writes(101))
+			.saturating_add(T::DbWeight::get().reads(105))
+			.saturating_add(T::DbWeight::get().writes(110))
 	}
 }
