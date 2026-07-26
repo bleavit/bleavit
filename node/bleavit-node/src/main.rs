@@ -19,8 +19,12 @@ impl CliConfig for BleavitCliConfig {
         env!("CARGO_PKG_VERSION").into()
     }
 
+    /// Kept byte-identical to `LICENSE`'s copyright line: `polkadot-omni-node-lib`
+    /// composes this with `copyright_start_year()` into the binary's `--version`
+    /// attribution, so a mismatch would ship a node whose stated copyright holder
+    /// disagrees with the licence it is distributed under.
     fn author() -> String {
-        "Bleavit".into()
+        "Bleavit Contributors".into()
     }
 
     fn support_url() -> String {
