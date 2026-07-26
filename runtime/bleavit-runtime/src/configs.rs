@@ -89,6 +89,7 @@ type SingleBlockMigrations = (
     crate::migrations::MigrateOracleReserveProbeV1,
     crate::migrations::MigrateConstitutionSecurityPrizeV3,
     crate::migrations::MigrateConstitutionSecurityFlowCapV4,
+    crate::migrations::MigrateWelfareSnapshotContextsV1,
 );
 #[cfg(all(feature = "phase-four", not(feature = "recovery")))]
 type SingleBlockMigrations = (
@@ -97,6 +98,7 @@ type SingleBlockMigrations = (
     crate::migrations::MigrateOracleReserveProbeV1,
     crate::migrations::MigrateConstitutionSecurityPrizeV3,
     crate::migrations::MigrateConstitutionSecurityFlowCapV4,
+    crate::migrations::MigrateWelfareSnapshotContextsV1,
     crate::migrations::PhaseFourTransition,
 );
 #[cfg(feature = "recovery")]
@@ -106,6 +108,7 @@ type SingleBlockMigrations = (
     crate::migrations::MigrateOracleReserveProbeV1,
     crate::migrations::MigrateConstitutionSecurityPrizeV3,
     crate::migrations::MigrateConstitutionSecurityFlowCapV4,
+    crate::migrations::MigrateWelfareSnapshotContextsV1,
     crate::migrations::TerminalRecoveryTransition,
 );
 
@@ -5320,7 +5323,7 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
             // evaluating A's terms). So the fixture flags exactly the first
             // attested component and keeps the rest voting.
             let _ = epoch;
-            return pallet_welfare::MetricSpecs::<Runtime>::get(version)
+            pallet_welfare::MetricSpecs::<Runtime>::get(version)
                 .into_iter()
                 .flat_map(|specs| {
                     specs
@@ -5329,7 +5332,7 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
                         .map(|spec| spec.id)
                         .take(1)
                 })
-                .collect();
+                .collect()
         }
         #[cfg(not(feature = "runtime-benchmarks"))]
         {

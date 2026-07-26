@@ -209,7 +209,10 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
     use sp_runtime::TryRuntimeError;
 
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+    // 1 since SQ-493: `SnapshotContexts` must exist for every retained snapshot
+    // (07 §10), and an upgrading chain reaches that state through
+    // `MigrateWelfareSnapshotContextsV1` rather than by genesis alone.
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
