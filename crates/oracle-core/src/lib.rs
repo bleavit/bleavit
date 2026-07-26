@@ -20,11 +20,46 @@ pub const MAX_WATCHTOWERS: usize = futarchy_primitives::kernel::WT_MAX as usize;
 pub const MAX_ROUNDS: usize = 128;
 /// Settled values awaiting reaping; sized like [`MAX_ROUNDS`] (per-version).
 pub const MAX_COMPONENT_VALUES: usize = 128;
+/// Measurement epochs of settled-component history retained before
+/// [`Oracle::reap_settled_before`] removes them (07 §13 "reaped at cohort
+/// settlement").
+///
+/// **Derived.** The newest consumer of `ComponentValues[·, m, ·]` is
+/// `pallet-welfare::record_snapshot(m)`, which runs in epoch `m+1` — 07 §11's
+/// resolution establishes that `settle_cohort` reads the *snapshot*, never the
+/// component values — and 07 §10's neutral carry-last reads the immediately
+/// preceding epoch. Retaining `{current-3, current-2, current-1}` therefore
+/// leaves the oldest retained epoch a full epoch past its last consumer and the
+/// newest reaped one three epochs past, while holding at most
+/// `16 components × 3 epochs × ≤ 2 concurrent frozen versions = 96` entries,
+/// inside [`MAX_COMPONENT_VALUES`]. Without this reaper the map grows by ~16
+/// entries per epoch forever and wedges the oracle at its own bound (SQ-492).
+pub const COMPONENT_VALUE_RETAINED_EPOCHS: EpochId = 3;
+/// Settled component values reaped per oracle-boundary crank
+/// (13 §2 · `ComponentReapBatch`).
+///
+/// **Derived**: retaining [`COMPONENT_VALUE_RETAINED_EPOCHS`] epochs inside
+/// [`MAX_COMPONENT_VALUES`] means one measurement epoch's values are exactly
+/// `MAX_COMPONENT_VALUES / (COMPONENT_VALUE_RETAINED_EPOCHS + 1)` entries — the
+/// steady-state arrival rate — so a single crank clears one epoch's worth and
+/// the batch neither falls behind production nor is picked. Excess resumes on
+/// the next crank, the resumable shape of `ReapBatch`/`OracleDeadlineCatchup`
+/// rather than a rejection.
+pub const COMPONENT_VALUE_REAP_BATCH: usize =
+    MAX_COMPONENT_VALUES / (COMPONENT_VALUE_RETAINED_EPOCHS as usize + 1);
 /// Upper bound on live acknowledgment records: at most one live round per game
 /// key, each acknowledged by at most every registered watchtower. Pruned on
 /// settle/escalate (see [`Oracle::settle_at`]/`crank_round_close`) so this holds
 /// by construction; the FRAME shell's `AckRecords` storage bound is this value.
 pub const MAX_ACK_RECORDS: usize = MAX_WATCHTOWERS * MAX_ROUNDS;
+/// The block a game money-settled at `now` stops being retained for bond
+/// disposal (07 §11(1)). Single home for the arithmetic so the two
+/// neutralization paths — quorum failure and the d20 deadline crank — cannot
+/// stamp different windows on the same kind of retention.
+fn retention_deadline_from(now: BlockNumber) -> BlockNumber {
+    now.saturating_add(futarchy_primitives::kernel::ORC_RETENTION_BLOCKS)
+}
+
 pub const ORC_WINDOW_BLOCKS: BlockNumber = 43_200;
 pub const ORC_EXT_WINDOW_BLOCKS: BlockNumber =
     futarchy_primitives::kernel::WATCHTOWER_EXTENSION_BLOCKS;
@@ -192,6 +227,26 @@ pub struct StoredRoundSchedule {
     pub round_cap: u8,
 }
 
+/// How a terminal transition disposes of the two escrowed bond stacks.
+///
+/// An explicit three-way enum rather than a `reporter_wins: bool`, because the
+/// third case is not a win for anybody: a retained round whose verdict never
+/// lands has no adjudicated loser, so taking custody of either stack would
+/// create a claim with no finding behind it (R-7). Encoding that as a second
+/// bool would admit a `wins && refund` state with no meaning.
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+pub enum BondDisposition {
+    /// The challenger's stack is forfeit 40/60 (07 §5.5); the reporter's is released.
+    ReporterWins,
+    /// The reporter's stack is forfeit 40/60; the challenger's is released.
+    ChallengerWins,
+    /// No verdict landed inside 07 §11(1)'s retention window: both stacks are
+    /// released to their posters. §11(4) prices the griefing move as the
+    /// *capital lock-up* it is, not as a slash, and the values track's failure
+    /// to rule is not a finding against either party (SQ-492).
+    RefundBoth,
+}
+
 /// Internal custody instruction emitted by a terminal transition. This is not
 /// persisted or exposed through the frozen `RoundState`; the FRAME shell uses it
 /// to move the already-escrowed round-bond stacks atomically with the state diff.
@@ -201,7 +256,7 @@ pub struct BondSettlement {
     pub challenger: Option<AccountId>,
     pub reporter_bond: Balance,
     pub challenger_bond: Balance,
-    pub reporter_wins: bool,
+    pub disposition: BondDisposition,
 }
 
 #[derive(Clone, Copy, Debug, Decode, Default, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
@@ -318,6 +373,16 @@ pub enum Event {
     },
     ReserveUnhealthy,
     ReserveRecovered,
+    /// 07 §11(1)'s retention window closed with no terminal verdict: both
+    /// stacks were refunded and the retained round reaped (SQ-492). Appended
+    /// last — inserting mid-enum would shift every later SCALE discriminant.
+    RetentionExpired {
+        component: MetricId,
+        epoch: EpochId,
+        round: u8,
+        reporter_bond: Balance,
+        challenger_bond: Balance,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
@@ -394,8 +459,14 @@ pub struct Oracle {
     /// before persisting and never writes them as storage.
     pub bond_settlements: Vec<BondSettlement>,
     /// Games whose money outcome was neutralized at the d20 deadline but whose
-    /// bond stack remains live until a later terminal verdict (07 §11/I-18).
-    pub money_settled: Vec<RoundKey>,
+    /// bond stack remains live until a later terminal verdict (07 §11/I-18),
+    /// each paired with the block at which that retention expires.
+    ///
+    /// The deadline is stamped at neutralization rather than derived at read
+    /// time, on the same per-game freeze reasoning as
+    /// [`StoredRoundSchedule`] (07 §6.1): a retained stack's disposal date must
+    /// not move under an in-flight game.
+    pub money_settled: Vec<(RoundKey, BlockNumber)>,
     /// Whether any round has existed since the last watchtower sweep — 07 §4's
     /// "an epoch with ≥ 1 open round", latched rather than inferred.
     ///
@@ -758,7 +829,7 @@ impl Oracle {
         // caller-supplied slash. `attributable` is the complement — a fact about
         // the *clock*, which the oracle cannot see and the caller owns.
         let live_round = self.rounds.iter().any(|round| {
-            !self.money_settled.contains(&RoundKey {
+            !self.is_money_settled(RoundKey {
                 component: round.component,
                 epoch: round.epoch,
                 spec_version: round.spec_version,
@@ -827,7 +898,7 @@ impl Oracle {
                 epoch: self.rounds[i].epoch,
                 spec_version: self.rounds[i].spec_version,
             };
-            if self.money_settled.contains(&current_key) {
+            if let Some(retain_until) = self.retention_deadline(current_key) {
                 // The money leg is already neutral. Resolve only the retained
                 // bond ledger once a party's current-round obligation is known;
                 // never write a second ComponentValues entry.
@@ -850,8 +921,24 @@ impl Oracle {
                     processed += 1;
                     continue;
                 }
-                // A retained round-3 challenge is waiting for the values track;
-                // the permissionless close crank must not consume it.
+                // A retained round-`R_max` challenge is waiting for the values
+                // track. Neither party is in default — both funded the round —
+                // so nothing here decides the stack, and the close crank must
+                // not consume it while a verdict can still land.
+                //
+                // But 07 §11(1) bounds that wait by the `OracleResolution`
+                // track's own schedule, and the bound has to be *implemented*:
+                // without it this arm is a permanent skip, the stack stays in
+                // custody against the I-29 identity forever and the game holds
+                // one of the 128 `MAX_ROUNDS` slots against the reporting
+                // surface — one abandoned dispute per slot is the whole attack
+                // (SQ-492). Past the deadline the retention has bought all the
+                // adjudication it can, so it ends: refund both stacks and reap.
+                if now >= retain_until {
+                    self.expire_retention_at(i)?;
+                    processed += 1;
+                    continue;
+                }
                 i += 1;
                 continue;
             }
@@ -894,7 +981,7 @@ impl Oracle {
                         round,
                     });
                     let carried = self.last_valid_value(component, epoch);
-                    self.neutral_at(i, carried, 1)?;
+                    self.neutral_at(i, carried, 1, retention_deadline_from(now))?;
                 }
             } else if self.rounds[i].round < schedule.round_cap {
                 // The reporter did not post a consenting `counter_report`.
@@ -1027,7 +1114,10 @@ impl Oracle {
     ///    d20 would silently refund an attacker who rode a dispute to terminal
     ///    precisely to force neutral settlement). A later verdict therefore finds
     ///    the round already `money_settled` and can only resolve
-    ///    bonds/reputation (I-18) — never overwrite the money.
+    ///    bonds/reputation (I-18) — never overwrite the money. Retention is
+    ///    **bounded**: `now` stamps each retained game with its
+    ///    [`kernel::ORC_RETENTION_BLOCKS`](futarchy_primitives::kernel::ORC_RETENTION_BLOCKS)
+    ///    expiry, after which `crank_round_close` refunds and reaps it (§11(1)).
     /// 2. **No-report components** — an admitted `(component, version)` that got
     ///    no report has no round, so step 1 never touches it; write its neutral
     ///    flagged carry-last `ComponentValues` entry directly (the §10 no-report
@@ -1035,11 +1125,15 @@ impl Oracle {
     ///    settle a cohort with a missing neutral value (Codex P1).
     pub fn force_neutralize_expired(
         &mut self,
+        now: BlockNumber,
         epoch: EpochId,
         expected: &[(MetricId, MetricSpecVersion)],
     ) -> Result<(), Error> {
         // (1) retain the live round and neutralize only its money leg. The
-        // retained stack is resolved by a later counter default/adjudication.
+        // retained stack is resolved by a later counter default/adjudication,
+        // or — if none lands inside the track's own schedule — refunded and
+        // reaped at `retain_until` (§11(1)).
+        let retain_until = retention_deadline_from(now);
         let keys = self
             .rounds
             .iter()
@@ -1053,7 +1147,7 @@ impl Oracle {
         for key in keys {
             if let Some(idx) = self.find_round(key) {
                 let carried = self.last_valid_value(key.component, epoch);
-                self.neutral_at(idx, carried, 1)?;
+                self.neutral_at(idx, carried, 1, retain_until)?;
             }
         }
         // (2) After (1) no round for `epoch` remains, so any expected key still
@@ -1239,7 +1333,7 @@ impl Oracle {
                 .iter()
                 .any(|((c, e, v), _)| *c == r.component && *e == r.epoch && *v == r.spec_version)
             {
-                ensure!(self.money_settled.contains(&key), Error::AlreadyFinal);
+                ensure!(self.is_money_settled(key), Error::AlreadyFinal);
             }
             let recorded_acks = self
                 .ack_records
@@ -1257,12 +1351,21 @@ impl Oracle {
         for (key, _) in &self.round_schedules {
             ensure!(self.find_round(*key).is_some(), Error::RoundNotFound);
         }
-        for key in &self.money_settled {
+        for (key, retain_until) in &self.money_settled {
             ensure!(self.find_round(*key).is_some(), Error::RoundNotFound);
             ensure!(
                 self.component_values.iter().any(|((c, e, v), _)| {
                     *c == key.component && *e == key.epoch && *v == key.spec_version
                 }),
+                Error::RoundNotFound
+            );
+            // 07 §11(1)'s retention is *bounded*. A zero deadline is what an
+            // unstamped entry decodes to, and it would make the round eligible
+            // for expiry at genesis; a deadline is only ever written as
+            // `now + ORC_RETENTION_BLOCKS`, so it exceeds the window by
+            // construction and try-state says so rather than trusting it.
+            ensure!(
+                *retain_until >= futarchy_primitives::kernel::ORC_RETENTION_BLOCKS as BlockNumber,
                 Error::RoundNotFound
             );
         }
@@ -1291,7 +1394,11 @@ impl Oracle {
             challenger: r.challenger,
             reporter_bond: r.cumulative_reporter_bond,
             challenger_bond: r.cumulative_challenger_bond,
-            reporter_wins,
+            disposition: if reporter_wins {
+                BondDisposition::ReporterWins
+            } else {
+                BondDisposition::ChallengerWins
+            },
         });
         // The game for this `(component, epoch, version)` is terminal: its
         // acknowledgment records are dead weight, so reap them — scoped to this
@@ -1324,8 +1431,142 @@ impl Oracle {
                 path,
             });
         }
-        self.money_settled.retain(|stored| *stored != key);
+        self.money_settled.retain(|(stored, _)| *stored != key);
         Ok(())
+    }
+
+    /// 07 §11(1)'s retention window has closed on a money-settled round at the
+    /// round cap with a live challenge, and no terminal verdict arrived.
+    ///
+    /// Both stacks go back to their posters. §11(4) prices "ride a dispute to
+    /// terminal purely to force neutral settlement" as paying the §6 stack's
+    /// *capital lock-up* for a status-quo outcome — a cost of time, not a
+    /// forfeiture — and here there is no adjudicated wrong side at all: the
+    /// values track simply never ruled. Taking custody of either stack on that
+    /// non-event would create a claim with no finding behind it, which is the
+    /// one thing solvency-critical code must not do (R-7). The money leg is
+    /// already final and untouched (I-18); only the bond ledger closes.
+    fn expire_retention_at(&mut self, idx: usize) -> Result<(), Error> {
+        let round = self.rounds.get(idx).ok_or(Error::RoundNotFound)?;
+        let key = RoundKey {
+            component: round.component,
+            epoch: round.epoch,
+            spec_version: round.spec_version,
+        };
+        let schedule_idx = self.round_schedule_index(key).ok_or(Error::RoundNotFound)?;
+        let r = self.rounds.remove(idx);
+        self.round_schedules.remove(schedule_idx);
+        self.bond_settlements.push(BondSettlement {
+            reporter: r.reporter,
+            challenger: r.challenger,
+            reporter_bond: r.cumulative_reporter_bond,
+            challenger_bond: r.cumulative_challenger_bond,
+            disposition: BondDisposition::RefundBoth,
+        });
+        self.ack_records.retain(|(c, e, v, _, _, _)| {
+            !(*c == r.component && *e == r.epoch && *v == r.spec_version)
+        });
+        self.money_settled.retain(|(stored, _)| *stored != key);
+        self.events.push(Event::RetentionExpired {
+            component: r.component,
+            epoch: r.epoch,
+            round: r.round,
+            reporter_bond: r.cumulative_reporter_bond,
+            challenger_bond: r.cumulative_challenger_bond,
+        });
+        Ok(())
+    }
+
+    /// Whether `key`'s money leg has already been neutralized (07 §11(1)).
+    fn is_money_settled(&self, key: RoundKey) -> bool {
+        self.money_settled.iter().any(|(stored, _)| *stored == key)
+    }
+
+    /// Whether `(component, epoch, version)` is `component`'s newest settled
+    /// value — the carry checkpoint 07 §10's "last valid value" reads.
+    ///
+    /// Selected by the same `(epoch, version)` ordering
+    /// [`Self::last_valid_value`] uses, so the entry the carry would pick is
+    /// exactly the entry reaping spares.
+    fn is_carry_checkpoint(
+        &self,
+        component: MetricId,
+        epoch: EpochId,
+        version: MetricSpecVersion,
+    ) -> bool {
+        self.component_values
+            .iter()
+            .filter(|((c, _, _), _)| *c == component)
+            .map(|((_, e, v), _)| (*e, *v))
+            .max()
+            == Some((epoch, version))
+    }
+
+    /// The block at which `key`'s retained bond stack expires, if it is retained.
+    fn retention_deadline(&self, key: RoundKey) -> Option<BlockNumber> {
+        self.money_settled
+            .iter()
+            .find_map(|(stored, until)| (*stored == key).then_some(*until))
+    }
+
+    /// Drop settled component values for measurement epochs strictly older than
+    /// `cutoff` (07 §13 "reaped at cohort settlement"), removing at most `max`
+    /// entries per call and returning how many went.
+    ///
+    /// The reaper the bound has always assumed and nobody drove: `ComponentValues`
+    /// grows by one entry per admitted component per epoch and nothing ever
+    /// removed one, so the map reaches [`MAX_COMPONENT_VALUES`] and every
+    /// subsequent settlement fails `AlreadyFinal` — a total oracle wedge, not a
+    /// leak (SQ-492). Oldest-epoch-first so a capped batch drains deterministically
+    /// (I-20).
+    ///
+    /// **A still-retained game's value is never reaped, whatever the cutoff says.**
+    /// 07 §11(1) keeps a neutralized round alive for bond disposal, and what makes
+    /// that round non-money-bearing — the property I-18 and the §13 try-state
+    /// invariant both rest on — is precisely that its `(component, epoch, version)`
+    /// already carries a settled value. Retiring the value out from under it would
+    /// leave a live `Rounds` entry with no settled counterpart: try-state fails,
+    /// and the round reads as money-bearing past its own deadline. In production
+    /// the two windows do not overlap (retention is ~8 days, the cutoff is three
+    /// ~20-day epochs back), which is exactly why this must be a guard rather than
+    /// an argument — the overlap needs only a stalled close crank to become real.
+    ///
+    /// **Each component's newest settled value is also exempt — its carry
+    /// checkpoint.** 07 §10 settles a failed component at "its last valid
+    /// value", which [`Self::last_valid_value`] reads out of exactly this
+    /// history. An unqualified cutoff would delete that history for a component
+    /// no cohort consumed for longer than the retention window — the cohortless
+    /// epochs 05 §3.3 explicitly contemplates — so when reporting resumed and a
+    /// report was missed the carry would silently become the neutral 0.5 instead
+    /// of the component's real last value, moving `W` and every settlement that
+    /// reads it. Before this reaper existed nothing was ever removed, so the
+    /// degenerate branch was unreachable in production; introducing reaping is
+    /// what makes the checkpoint necessary (Codex F13, raised again on #175).
+    /// The exemption is per **component**, not per `(component, version)`,
+    /// because `last_valid_value` selects across versions — so it holds at most
+    /// one entry per live MetricId and cannot grow with MetricSpec activations.
+    pub fn reap_settled_before(&mut self, cutoff: EpochId, max: usize) -> usize {
+        let mut stale = self
+            .component_values
+            .iter()
+            .filter(|((c, e, v), _)| {
+                *e < cutoff
+                    && !self.is_money_settled(RoundKey {
+                        component: *c,
+                        epoch: *e,
+                        spec_version: *v,
+                    })
+                    && !self.is_carry_checkpoint(*c, *e, *v)
+            })
+            .map(|((c, e, v), _)| (*e, *c, *v))
+            .collect::<Vec<_>>();
+        stale.sort_unstable();
+        stale.truncate(max);
+        for (epoch, component, version) in &stale {
+            self.component_values
+                .retain(|((c, e, v), _)| !(c == component && e == epoch && v == version));
+        }
+        stale.len()
     }
 
     /// The value the neutral path carries for `component` when settling
@@ -1353,6 +1594,7 @@ impl Oracle {
         idx: usize,
         carried_value: FixedU64,
         flagged_epochs: u8,
+        retain_until: BlockNumber,
     ) -> Result<(), Error> {
         let component = self.rounds[idx].component;
         let epoch = self.rounds[idx].epoch;
@@ -1361,7 +1603,7 @@ impl Oracle {
             epoch,
             spec_version: self.rounds[idx].spec_version,
         };
-        if self.money_settled.contains(&key) {
+        if self.is_money_settled(key) {
             return Ok(());
         }
         ensure!(
@@ -1388,7 +1630,7 @@ impl Oracle {
             value: carried_value,
             path: SettlePath::Neutral,
         });
-        self.money_settled.push(key);
+        self.money_settled.push((key, retain_until));
         Ok(())
     }
 
@@ -2895,7 +3137,7 @@ mod tests {
         // requires, but its money leg is settled — so epoch 3 carried no open
         // round and the idle seat is acquitted rather than charged a second time
         // (which at 2 consecutive would have slashed and ejected it).
-        o.force_neutralize_expired(2, &[]).unwrap();
+        o.force_neutralize_expired(0, 2, &[]).unwrap();
         assert!(!o.rounds.is_empty());
         o.sweep_watchtower_liveness(3, true).unwrap();
         assert_eq!(inactive_epochs(&o, acct(2)), Some(0));
@@ -2982,7 +3224,7 @@ mod tests {
         let mut o = Oracle::default();
         o.register_reporter(acct(1), 0).unwrap();
         to_terminal(&mut o, 1, 4, key(7, 41, 3), FixedU64(620_000_000));
-        o.force_neutralize_expired(41, &[]).unwrap();
+        o.force_neutralize_expired(0, 41, &[]).unwrap();
         assert_eq!(o.component_values.len(), 1);
         assert_eq!(o.component_values[0].1.path, SettlePath::Neutral);
         assert!(o.component_values[0].1.flagged);
@@ -3002,6 +3244,250 @@ mod tests {
             FixedU64(COMPONENT_VALUE_MAX / 2)
         );
         o.try_state().unwrap();
+    }
+
+    /// 07 §11(1): "Retention is bounded by the track's own schedule (7 d
+    /// decision + 1 d confirm), after which the stack resolves and the entry is
+    /// reaped." Nothing implemented the *after*: a round-`R_max` challenge whose
+    /// verdict never landed was skipped by every close crank forever, so its
+    /// bonds stayed in custody and its slot stayed occupied against
+    /// `MAX_ROUNDS` — one abandoned dispute per slot starves the reporting
+    /// surface (SQ-492).
+    #[test]
+    fn sq492_retained_round_expires_and_refunds_both_stacks() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        let k = key(7, 41, 3);
+        to_terminal(&mut o, 1, 4, k, FixedU64(620_000_000));
+        let neutralized_at = 1_000_000;
+        o.force_neutralize_expired(neutralized_at, 41, &[]).unwrap();
+        assert_eq!(o.rounds.len(), 1, "the stack is retained past the deadline");
+        let expiry = neutralized_at + futarchy_primitives::kernel::ORC_RETENTION_BLOCKS;
+        assert_eq!(o.retention_deadline(k), Some(expiry));
+        let (reporter_stack, challenger_stack) = (
+            o.rounds[0].cumulative_reporter_bond,
+            o.rounds[0].cumulative_challenger_bond,
+        );
+        assert!(reporter_stack > 0 && challenger_stack > 0);
+
+        // One block early the verdict can still land, so the crank must not
+        // consume the round. This is the half a `now >= deadline` typo breaks
+        // silently, so it is asserted rather than implied.
+        o.bond_settlements.clear();
+        o.crank_round_close_with_params(expiry - 1, 20, &OracleParams::DEFAULT)
+            .unwrap();
+        assert_eq!(o.rounds.len(), 1);
+        assert!(o.bond_settlements.is_empty());
+        o.try_state().unwrap();
+
+        // At the deadline the retention has bought all the adjudication it can.
+        o.crank_round_close_with_params(expiry, 20, &OracleParams::DEFAULT)
+            .unwrap();
+        assert!(o.rounds.is_empty(), "the slot is returned");
+        assert!(o.round_schedules.is_empty());
+        assert!(o.money_settled.is_empty());
+        assert_eq!(o.bond_settlements.len(), 1);
+        let settlement = o.bond_settlements[0];
+        assert_eq!(
+            settlement.disposition,
+            BondDisposition::RefundBoth,
+            "no verdict means no adjudicated loser — taking either stack would \
+             be a claim with no finding behind it (R-7)"
+        );
+        assert_eq!(settlement.reporter_bond, reporter_stack);
+        assert_eq!(settlement.challenger_bond, challenger_stack);
+        assert_eq!(settlement.challenger, Some(acct(4)));
+        assert!(o.events.iter().any(|e| matches!(
+            e,
+            Event::RetentionExpired {
+                component: 7,
+                epoch: 41,
+                ..
+            }
+        )));
+
+        // The money leg is untouched: I-18 says the neutral value settled at the
+        // deadline is final, and expiry disposes of bonds only.
+        assert_eq!(o.component_values.len(), 1);
+        assert_eq!(o.component_values[0].1.path, SettlePath::Neutral);
+        o.try_state().unwrap();
+    }
+
+    /// The expiry must not pre-empt a verdict that arrives inside the window:
+    /// §5.5's forfeiture is the whole griefing price, and refunding a loser
+    /// who was about to be adjudicated wrong would erase it.
+    #[test]
+    fn sq492_verdict_inside_the_retention_window_still_forfeits() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        let k = key(7, 41, 3);
+        to_terminal(&mut o, 1, 4, k, FixedU64(620_000_000));
+        o.force_neutralize_expired(1_000_000, 41, &[]).unwrap();
+        o.bond_settlements.clear();
+        o.adjudicate(Origin::OracleResolution, k, FixedU64(440_000_000), true)
+            .unwrap();
+        assert_eq!(o.bond_settlements.len(), 1);
+        assert_eq!(
+            o.bond_settlements[0].disposition,
+            BondDisposition::ChallengerWins
+        );
+        assert!(
+            o.money_settled.is_empty(),
+            "the retention entry goes with it"
+        );
+        o.try_state().unwrap();
+    }
+
+    /// 07 §13 says settled values are "reaped at cohort settlement" — and no
+    /// caller in either pallet ever reaped one, so `ComponentValues` grew by an
+    /// entry per admitted component per epoch until `MAX_COMPONENT_VALUES`
+    /// turned every further settlement into `AlreadyFinal` (SQ-492).
+    #[test]
+    fn sq492_reap_settled_before_is_bounded_and_oldest_first() {
+        let mut o = Oracle::default();
+        for epoch in 10u32..14 {
+            for component in 0u16..3 {
+                o.component_values.push((
+                    (component, epoch, 1),
+                    SettledComponent {
+                        value: FixedU64(500_000_000),
+                        path: SettlePath::Unchallenged,
+                        flagged: false,
+                    },
+                ));
+            }
+        }
+
+        // Bounded: a cap smaller than the stale set drains oldest-first and
+        // leaves the rest for the next crank (the `ReapBatch` shape, not a
+        // rejection).
+        assert_eq!(o.reap_settled_before(13, 4), 4);
+        assert!(
+            !o.component_values.iter().any(|((_, e, _), _)| *e == 10),
+            "epoch 10 goes before any of 11"
+        );
+        assert_eq!(
+            o.component_values
+                .iter()
+                .filter(|((_, e, _), _)| *e == 11)
+                .count(),
+            2
+        );
+
+        // Draining is idempotent once nothing is left below the cutoff, and the
+        // cutoff epoch itself is retained — welfare may still read it.
+        assert_eq!(o.reap_settled_before(13, 64), 5);
+        assert_eq!(o.reap_settled_before(13, 64), 0);
+        assert_eq!(o.component_values.len(), 3);
+        assert!(o.component_values.iter().all(|((_, e, _), _)| *e == 13));
+    }
+
+    /// The reaper must not retire the settled value a still-retained round is
+    /// resting on. That value is what makes the round non-money-bearing past its
+    /// own deadline (I-18; the 07 §13 try-state invariant), so removing it leaves
+    /// a live `Rounds` entry with no counterpart and breaks try-state on a chain
+    /// whose only fault was a stalled close crank.
+    #[test]
+    fn sq492_reaper_never_strands_a_retained_round() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        let k = key(7, 41, 3);
+        to_terminal(&mut o, 1, 4, k, FixedU64(620_000_000));
+        o.force_neutralize_expired(1_000_000, 41, &[]).unwrap();
+        assert_eq!(o.component_values.len(), 1);
+        o.try_state().unwrap();
+
+        // A cutoff far past the retained epoch — the state a stalled close crank
+        // leaves, since the reaping cutoff advances on the clock and retention
+        // only ends when someone cranks.
+        assert_eq!(o.reap_settled_before(9_999, 64), 0);
+        assert_eq!(o.component_values.len(), 1);
+        o.try_state().unwrap();
+
+        // Once the retention expires and the round is reaped, the value is
+        // ordinary history again — reapable as soon as it is no longer the
+        // component's own carry checkpoint, which a later settled value makes it.
+        o.crank_round_close_with_params(
+            1_000_000 + futarchy_primitives::kernel::ORC_RETENTION_BLOCKS,
+            20,
+            &OracleParams::DEFAULT,
+        )
+        .unwrap();
+        assert!(o.rounds.is_empty());
+        assert_eq!(
+            o.reap_settled_before(9_999, 64),
+            0,
+            "the sole value for a component is its carry checkpoint"
+        );
+        o.component_values.push((
+            (7, 42, 3),
+            SettledComponent {
+                value: FixedU64(600_000_000),
+                path: SettlePath::Unchallenged,
+                flagged: false,
+            },
+        ));
+        assert_eq!(o.reap_settled_before(9_999, 64), 1);
+        assert_eq!(o.component_values.len(), 1);
+        assert_eq!(o.component_values[0].0, (7, 42, 3));
+        o.try_state().unwrap();
+    }
+
+    /// 07 §10 settles a failed component at "its last valid value", which
+    /// `last_valid_value` reads out of the settled history. An unqualified
+    /// cutoff deletes that history for a component no cohort consumed for
+    /// longer than the retention window — the cohortless epochs 05 §3.3
+    /// contemplates — and the next missed report would then carry the neutral
+    /// 0.5 instead of the component's real last value, moving `W` and every
+    /// settlement reading it. Unreachable before this reaper existed, because
+    /// nothing was ever removed (Codex F13; #175 review).
+    #[test]
+    fn sq492_reaping_preserves_each_component_carry_checkpoint() {
+        let mut o = Oracle::default();
+        for (component, epoch, value) in [(7u16, 10u32, 620_000_000u64), (7, 11, 640_000_000)] {
+            o.component_values.push((
+                (component, epoch, 1),
+                SettledComponent {
+                    value: FixedU64(value),
+                    path: SettlePath::Unchallenged,
+                    flagged: false,
+                },
+            ));
+        }
+        // A cutoff far past both: an unqualified sweep takes the whole history.
+        assert_eq!(o.reap_settled_before(9_999, 64), 1);
+        assert_eq!(o.component_values.len(), 1);
+        assert_eq!(o.component_values[0].0, (7, 11, 1));
+
+        // And the carry the survivor exists for still reads the real last
+        // value rather than the neutral 0.5 default.
+        assert_eq!(o.last_valid_value(7, 20), FixedU64(640_000_000));
+        assert_ne!(o.last_valid_value(7, 20), FixedU64(COMPONENT_VALUE_MAX / 2));
+
+        // Draining is idempotent: the checkpoint is not re-offered each crank.
+        assert_eq!(o.reap_settled_before(9_999, 64), 0);
+        o.try_state().unwrap();
+    }
+
+    /// The retained-entry bound is what keeps the whole map inside
+    /// `MAX_COMPONENT_VALUES`, so it is arithmetic, not a preference.
+    #[test]
+    fn sq492_retention_bounds_are_derived_not_picked() {
+        // 16 components x retained epochs x <= 2 concurrent frozen versions.
+        let worst_case = 16 * (COMPONENT_VALUE_RETAINED_EPOCHS as usize) * 2;
+        assert!(worst_case <= MAX_COMPONENT_VALUES);
+        // One epoch's arrivals per crank: enough to keep pace with production.
+        assert_eq!(
+            COMPONENT_VALUE_REAP_BATCH * (COMPONENT_VALUE_RETAINED_EPOCHS as usize + 1),
+            MAX_COMPONENT_VALUES
+        );
+        // The retention window is the OracleResolution track's own schedule
+        // (06 §2.1: 0 prepare / 7 d decision / 1 d confirm). `bleavit-runtime`
+        // asserts the other half of this binding against its track table.
+        assert_eq!(
+            futarchy_primitives::kernel::ORC_RETENTION_BLOCKS,
+            8 * futarchy_primitives::kernel::BLOCKS_PER_DAY
+        );
     }
 
     #[test]
@@ -3031,7 +3517,7 @@ mod tests {
         )
         .unwrap();
         let expected = [(7, 3), (8, 3)];
-        o.force_neutralize_expired(41, &expected).unwrap();
+        o.force_neutralize_expired(0, 41, &expected).unwrap();
         // Both keys carry a neutral flagged value — 7 from its round, 8 no-report.
         assert_eq!(o.component_values.len(), 2);
         for &(c, v) in &expected {
@@ -3052,7 +3538,7 @@ mod tests {
         assert_eq!(no_report.1.value, FixedU64(COMPONENT_VALUE_MAX / 2));
         assert_eq!(o.rounds.len(), 1);
         // Idempotent: a second crank finds both keys valued and adds nothing.
-        o.force_neutralize_expired(41, &expected).unwrap();
+        o.force_neutralize_expired(0, 41, &expected).unwrap();
         assert_eq!(o.component_values.len(), 2);
         o.try_state().unwrap();
     }

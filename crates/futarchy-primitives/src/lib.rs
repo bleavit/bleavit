@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 14;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 15;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -1037,6 +1037,22 @@ pub mod kernel {
     pub const ORC_REPORTERS_MIN: u8 = 3;
     /// Class-4 oracle report window after the measurement epoch closes (07 §5(1)).
     pub const ORC_REPORT_WINDOW_BLOCKS: u32 = 2 * BLOCKS_PER_DAY;
+    /// How long a money-settled round's bond stack is retained before the close
+    /// crank resolves and reaps it (07 §11(1): "retention is bounded by the
+    /// track's own schedule (7 d decision + 1 d confirm), after which the stack
+    /// resolves and the entry is reaped").
+    ///
+    /// **Derived, not chosen.** It is the `OracleResolution` track's own
+    /// schedule from 06 §2.1 — `prepare 0 / decision 7 d / confirm 1 d` — so the
+    /// window is exactly long enough to outlive the latest verdict that track
+    /// can still deliver, and no longer. `bleavit-runtime`'s track table is the
+    /// other end of the binding and a runtime test asserts the equality, so a
+    /// track retune cannot silently shorten retention.
+    ///
+    /// Not compressed under `fast-timing`: the governance tracks are not, and a
+    /// retention window shorter than the track it tracks would reap a stack the
+    /// verdict is still coming for.
+    pub const ORC_RETENTION_BLOCKS: u32 = 8 * BLOCKS_PER_DAY;
     pub const MAX_NESTED_LEVELS: u32 = 4;
     pub const MAX_NESTED_CALLS: u32 = 16;
     pub const MAX_CALLS: u32 = 16;
@@ -1234,7 +1250,7 @@ mod tests {
         // SQ-186 adds `Epoch::TreasuryBondAskBps` — the kernel slope of 08 §7's
         // TREASURY intake bond — to 02 §9's frozen metadata-constant list. Purely
         // additive, so `transaction_version` is untouched (02 §13 rule 7).
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 14);
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 15);
     }
 
     #[test]

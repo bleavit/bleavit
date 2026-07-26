@@ -930,6 +930,10 @@ mod benches {
         T::BenchmarkHelper::assert_keeper_rebate_paid(
             futarchy_primitives::keeper::CrankClass::DecisionCritical,
         );
+        // The 07 §13 reaping sweep is part of this crank's worst case, and a
+        // fixture that left `ComponentValues` empty would measure it doing
+        // nothing while reporting a green weight (SQ-492).
+        T::BenchmarkHelper::assert_oracle_components_reaped();
         Ok(())
     }
 

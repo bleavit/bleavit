@@ -3933,6 +3933,13 @@ impl pallet_epoch::OracleAccess for RuntimeEpochOracle {
         // *when* the deadline falls due (§11(1)).
         pallet_oracle::Pallet::<Runtime>::note_settle_deadline(measurement_epoch)
     }
+
+    fn reap_settled_components(current_epoch: futarchy_primitives::EpochId) {
+        // 07 §13's reaping, driven from the epoch clock because the cutoff is
+        // measured in epochs and the oracle has no hooks. Bounded per call and
+        // idempotent, so a keeper may run the boundary crank every block.
+        let _ = pallet_oracle::Pallet::<Runtime>::reap_settled_components(current_epoch);
+    }
 }
 
 pub struct RuntimeEpochGuardian;
@@ -9026,6 +9033,13 @@ impl pallet_attestor::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper 
     }
 }
 
+/// Stale `ComponentValues` entries seeded for the boundary crank's 07 §13
+/// reaping sweep. Strictly above `COMPONENT_VALUE_REAP_BATCH` so the batch cap
+/// binds, and well below `MAX_COMPONENT_VALUES` so the deadline drives in the
+/// same call still have room to write their own neutral entries (SQ-492).
+#[cfg(feature = "runtime-benchmarks")]
+const STALE_COMPONENT_VALUE_SEEDS: u16 = pallet_oracle::MAX_COMPONENT_VALUES as u16;
+
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmarkHelper {
     benchmark_keeper_rebate_hooks!();
@@ -9228,14 +9242,18 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
         // **All 128 on the proposal's own version.** 02 §7.2 decomposes the
         // bound as 16 components x <= 4 settling epochs x <= 2 concurrent
         // versions, which suggests at most 64 rounds can share one — but that
-        // 4-epoch factor holds only once a retained round is eventually reaped.
-        // 07 §11(1)'s retention had no implemented deadline until SQ-492, so a
-        // terminal challenged round that reaches its money deadline survives
-        // indefinitely and successive epochs accumulate money-settled rounds on
-        // one long-lived frozen version until the 128-slot cap. Seeding 64/64
-        // would measure half the reachable per-round reads and undercharge a
-        // permissionless call (#176 review). Once SQ-492's reaper lands this
-        // fixture is merely conservative, which is the safe direction.
+        // 4-epoch factor holds only once a retained round is eventually reaped,
+        // and 07 §11(1)'s retention had no implemented deadline before SQ-492
+        // (#175), so successive epochs accumulated money-settled rounds on one
+        // long-lived frozen version to the 128-slot cap. A 64/64 split measured
+        // half the reachable per-round reads and undercharged a permissionless
+        // call (#176 review).
+        //
+        // With #175 merged the retention deadline exists and the 4-epoch factor
+        // is true again, so 128-on-one-version is no longer reachable and this
+        // fixture is **conservative rather than exact**. It stays: charging the
+        // larger figure cannot under-charge, and re-measuring downward would
+        // trade a safety margin for a smaller number.
         let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
         for index in 0..pallet_oracle::MAX_ROUNDS as u16 {
             let version = spec;
@@ -9344,6 +9362,41 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
                 },
             );
         }
+        // Stale settled values for the 07 §13 reaping sweep, seeded to the full
+        // `MAX_COMPONENT_VALUES` bound because every `Oracle::load` in this
+        // crank scans the whole map — the scan is the cost, and a partial
+        // fixture understates every hydration in the call, not just the sweep
+        // (#175 review). **Two generations per component**, because each
+        // component's newest value is its §10 carry checkpoint and is exempt:
+        // one generation per component would leave nothing reapable at all and
+        // the sweep would measure a no-op while reporting a green weight
+        // (SQ-492).
+        let components = STALE_COMPONENT_VALUE_SEEDS / 2;
+        for component in 0..components {
+            for epoch in 0..2u32 {
+                pallet_oracle::ComponentValues::<Runtime>::insert(
+                    (component, epoch, 1u16),
+                    pallet_oracle::SettledComponent {
+                        value: FixedU64(pallet_welfare::ONE / 2),
+                        path: pallet_oracle::SettlePath::Neutral,
+                        flagged: true,
+                    },
+                );
+            }
+        }
+    }
+
+    fn assert_oracle_components_reaped() {
+        // Only the older generation is reapable — the newer one is each
+        // component's carry checkpoint — so the batch comes out of epoch 0.
+        assert_eq!(
+            pallet_oracle::ComponentValues::<Runtime>::iter_keys()
+                .filter(|(_, epoch, _)| *epoch == 0)
+                .count(),
+            (STALE_COMPONENT_VALUE_SEEDS as usize / 2)
+                .saturating_sub(pallet_oracle::COMPONENT_VALUE_REAP_BATCH),
+            "the boundary crank must retire exactly one ComponentReapBatch"
+        );
     }
 
     fn prime_settlement(epoch: EpochId) {

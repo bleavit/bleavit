@@ -9,8 +9,8 @@
 
 use super::*;
 use crate::pallet::{
-    AckRecords, ComponentValues, Pallet, Recomputable, Reporters, RoundSchedules, Rounds,
-    WatchtowerActive, Watchtowers,
+    AckRecords, ComponentValues, MoneySettled, Pallet, Recomputable, Reporters, RoundSchedules,
+    Rounds, WatchtowerActive, Watchtowers,
 };
 
 use frame_benchmarking::v2::*;
@@ -181,6 +181,31 @@ fn fill_component_values<T: Config>(count: u32) {
             },
         );
     }
+}
+
+/// Saturate `MoneySettled` so every `mutate_core` on this path reads (and, on a
+/// dirty path, writes) the real bounded value rather than an empty one.
+///
+/// A conservative **synthetic** envelope, like `crank_reserve_probe`'s: the keys
+/// are deliberately outside the live-round space, because an entry that matched
+/// a round would send that round down the 07 §11(1) retained branch and change
+/// which paths the batch exercises. What is being measured here is the value's
+/// encoded size — which grew when each entry gained its retention deadline
+/// (SQ-492) — not the retained branch, which `sq492_*` covers behaviourally.
+fn fill_money_settled<T: Config>() {
+    let entries = (0..MAX_ROUNDS_BOUND)
+        .map(|index| {
+            (
+                oracle_core::RoundKey {
+                    component: 3_000u16.saturating_add(index as u16),
+                    epoch: 0,
+                    spec_version: SPEC,
+                },
+                u32::MAX,
+            )
+        })
+        .collect::<alloc::vec::Vec<_>>();
+    MoneySettled::<T>::put(BoundedVec::truncate_from(entries));
 }
 
 fn fill_recomputable<T: Config>(include_target: bool) {
@@ -471,6 +496,7 @@ mod benches {
         fill_watchtower_capacity::<T>(MAX_WATCHTOWERS_BOUND as u8);
         fill_ack_capacity::<T>(16, 16);
         fill_component_values::<T>(MAX_COMPONENT_VALUES_BOUND.saturating_sub(n));
+        fill_money_settled::<T>();
         fill_recomputable::<T>(false);
         frame_system::Pallet::<T>::set_block_number((ORC_WINDOW_BLOCKS + 2).into());
         let keeper = account::<T>(5);

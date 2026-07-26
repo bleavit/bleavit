@@ -200,6 +200,16 @@ pub trait OracleAccess {
     /// any settlement work in it (05 §7(1)). Not defaulted, for the same reason
     /// as [`Self::note_epoch_boundary`] (SQ-182).
     fn note_settle_deadline(measurement_epoch: EpochId) -> DispatchResult;
+    /// Reap one bounded batch of settled component values whose measurement
+    /// epoch is old enough that no consumer remains (07 §13).
+    ///
+    /// The epoch clock owns *when*, exactly as it does for the two calls above,
+    /// because the cutoff is expressed in epochs and the oracle has no hooks
+    /// (07 §13) — so without a driver on this side nothing reaps and the
+    /// oracle's `ComponentValues` grows until it wedges at its own bound
+    /// (SQ-492). Infallible and idempotent: a maintenance sweep must never be
+    /// able to fail the crank that carries the money deadline.
+    fn reap_settled_components(current_epoch: EpochId);
 }
 
 pub trait GuardianAccess {
@@ -386,10 +396,6 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     /// Seed the exact ongoing ratification referendum consumed by the
     /// benchmark-only bind fixture.
     fn prime_ratification(_: ProposalId, _: u32) {}
-    /// Saturate the real oracle aggregate before the boundary crank runs, so
-    /// its weight measures the hydrate/persist the callbacks actually perform
-    /// against a live chain rather than against empty maps (SQ-182; Codex P1
-    /// on #172).
     /// Saturate the oracle's `Rounds`/`RoundSchedules` with **qualifying**
     /// §12 disputes on the proposal's frozen spec, so `decide`'s ProcessHold
     /// predicate is measured against its real 128-round bound.
@@ -400,7 +406,20 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     /// (SQ-494). Pre-existing, and exposed by the row that touched the
     /// predicate.
     fn prime_dispute_rounds(_spec: MetricSpecVersion) {}
+    /// Saturate the real oracle aggregate before the boundary crank runs, so
+    /// its weight measures the hydrate/persist the callbacks actually perform
+    /// against a live chain rather than against empty maps (SQ-182; Codex P1
+    /// on #172), including a saturated **stale** `ComponentValues` map so the
+    /// 07 §13 reaping sweep is measured doing real work rather than scanning an
+    /// empty prefix (SQ-492).
     fn prime_oracle_state(_: EpochId) {}
+    /// Assert the reaping sweep retired exactly one `ComponentReapBatch` from the
+    /// map [`Self::prime_oracle_state`] seeded.
+    ///
+    /// The benchmark asserts this because the failure mode is *silence*: a
+    /// fixture that leaves `ComponentValues` empty measures a call that never
+    /// does the work, and the weight file then reports no change at all.
+    fn assert_oracle_components_reaped() {}
     fn prime_settlement(epoch: EpochId);
     fn prime_keeper_rebate() {}
     fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
@@ -2722,6 +2741,14 @@ pub mod pallet {
                     per_cohort = per_cohort.saturating_add(1);
                 }
             }
+            // (4) 07 §13's settled-value reaping. Last, and deliberately after
+            //     the drives above: a sweep whose only job is to retire dead
+            //     state must never come between a due deadline and the value
+            //     welfare is about to read for it. The cutoff is epoch-based and
+            //     the newest epoch it can retire is already three epochs past
+            //     `record_snapshot`, its last consumer (07 §11), so this can
+            //     only remove values nothing is able to ask for.
+            T::Oracle::reap_settled_components(index);
             Ok(())
         }
 
