@@ -245,11 +245,20 @@ pub trait LedgerOps<AccountId> {
 /// exposes no *scored* ledger settlement method, preventing epoch from
 /// double-settling: epoch can request a settlement, never choose its score.
 pub trait WelfareOps {
+    /// Settle every target in one batch and return the single score they share.
+    ///
+    /// Batched rather than per-target (SQ-497). A cohort carries one frozen
+    /// `metric_spec` — this module enforces it, `TryStateViolation` if it drifts
+    /// — so `(cohort_epoch, spec)` fixes the score for every item in the batch,
+    /// and calling per target made welfare reload its whole state and recompute
+    /// the identical 07 §10 renormalized pair once per proposal. Passing the
+    /// targets instead of the score keeps this seam's rule intact: epoch can
+    /// request a settlement, never choose its score.
     fn compute_settlement(
         &mut self,
         cohort_epoch: EpochId,
         spec: MetricSpecVersion,
-        target: SettlementTarget,
+        targets: &[SettlementTarget],
     ) -> Result<FixedU64, Error>;
 
     /// Settle the epoch's Baseline vault at the fixed neutral score
@@ -1754,27 +1763,29 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         };
         let total = proposals.len().saturating_add(1); // one Baseline target
         let end = cursor.saturating_add(batch as usize).min(total);
-        let mut score = None;
+        let mut targets = Vec::new();
         for item in cursor..end {
-            let value = if item < proposals.len() {
+            targets.push(if item < proposals.len() {
                 let pid = proposals.get(item).copied().ok_or(Error::BadState)?;
                 let has_gate_books = self
                     .proposal(pid)?
                     .markets
                     .is_some_and(|markets| markets.gates.is_some());
-                welfare.compute_settlement(
-                    epoch,
-                    spec,
-                    SettlementTarget::Proposal {
-                        pid,
-                        has_gate_books,
-                    },
-                )?
+                SettlementTarget::Proposal {
+                    pid,
+                    has_gate_books,
+                }
             } else {
-                welfare.compute_settlement(epoch, spec, SettlementTarget::Baseline)?
-            };
-            score = Some(value);
+                SettlementTarget::Baseline
+            });
         }
+        // An empty slice must not reach welfare: `score` stays `None` and the
+        // caller's `ok_or(Error::Welfare)` below keeps its pre-SQ-497 meaning.
+        let score = if targets.is_empty() {
+            None
+        } else {
+            Some(welfare.compute_settlement(epoch, spec, &targets)?)
+        };
 
         if end < total {
             self.cohorts.get_mut(idx).ok_or(Error::BadState)?.status =
@@ -3189,9 +3200,11 @@ mod tests {
             &mut self,
             cohort_epoch: EpochId,
             spec: MetricSpecVersion,
-            target: SettlementTarget,
+            targets: &[SettlementTarget],
         ) -> Result<FixedU64, Error> {
-            self.calls.push((cohort_epoch, spec, target));
+            for target in targets {
+                self.calls.push((cohort_epoch, spec, *target));
+            }
             Ok(FixedU64(500_000_000))
         }
 

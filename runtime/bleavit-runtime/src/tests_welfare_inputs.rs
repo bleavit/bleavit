@@ -178,10 +178,10 @@ fn sq79_the_runtime_settlement_seam_refuses_an_unsampled_gate_window() {
         let result = RuntimeEpochWelfare::compute_settlement(
             10,
             1,
-            pallet_epoch::SettlementTarget::Proposal {
+            &[pallet_epoch::SettlementTarget::Proposal {
                 pid: 42,
                 has_gate_books: true,
-            },
+            }],
         );
         assert!(
             result.is_err(),

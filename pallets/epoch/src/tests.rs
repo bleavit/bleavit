@@ -431,10 +431,15 @@ impl CoreWelfareOps for DifferentialWelfare {
         &mut self,
         cohort_epoch: EpochId,
         spec: MetricSpecVersion,
-        target: SettlementTarget,
+        targets: &[SettlementTarget],
     ) -> Result<FixedU64, CoreError> {
-        self.calls
-            .push(SeamCall::Welfare(cohort_epoch, spec, target));
+        // One recorded call per target: SQ-497 changed how often the score is
+        // computed, not which targets settle, so the differential's expectations
+        // over the seam are unchanged.
+        for target in targets {
+            self.calls
+                .push(SeamCall::Welfare(cohort_epoch, spec, *target));
+        }
         Ok(WelfareScore::get())
     }
 

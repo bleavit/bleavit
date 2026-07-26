@@ -735,9 +735,14 @@ impl WelfareSettlement for TestWelfare {
     fn compute_settlement(
         cohort_epoch: EpochId,
         spec: MetricSpecVersion,
-        target: SettlementTarget,
+        targets: &[SettlementTarget],
     ) -> Result<FixedU64, DispatchError> {
-        SeamCalls::push(SeamCall::Welfare(cohort_epoch, spec, target))?;
+        // One seam call per target keeps every existing assertion about *which*
+        // targets settled valid; SQ-497 changed how many times the score is
+        // computed, not which items are settled.
+        for target in targets {
+            SeamCalls::push(SeamCall::Welfare(cohort_epoch, spec, *target))?;
+        }
         Ok(WelfareScore::get())
     }
 
