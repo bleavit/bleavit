@@ -1048,9 +1048,14 @@ pub enum Error {
     TooManyCapabilities,
     BadOrigin,
     TryStateViolation,
-    /// The 13 §5 derived-budget artifact is not implemented yet. Until its
-    /// verifier lands, changes to the load-bearing timing/capacity/POL keys
-    /// are refused in the unsafe direction (SQ-303, G-1).
+    /// 13 §5 item 6's screening obligation refused this change (SQ-303, G-1).
+    ///
+    /// Two distinct causes, both fail-closed. A **class-floor** key
+    /// (`pol.budget_epoch`, `pol.b_gate`, `pol.b.*`) whose proposed value would
+    /// push a re-derived 08 §4.1 floor above the frozen literal — including the
+    /// case where the derivation cannot be evaluated at all. Or any **occupancy**
+    /// key ([`is_occupancy_input`]), which is refused in either direction while
+    /// items 1–4's envelopes exist only as prose (SQ-501).
     BudgetDerivationRequired,
     /// 09 §5.2: the two Phase-3 exposure caps are raised only by phase gates
     /// and are not PARAM/META-adjustable during Phases ≤ 3 (SQ-197).
@@ -1092,15 +1097,6 @@ pub fn phase_cap_raise_refused(
     is_phase_cap && next.as_u128() > current.as_u128()
 }
 
-/// Temporary SQ-303 screen for the keys whose values feed the bounded
-/// occupancy, POL-commitment or frozen NAV-floor derivations in 13 §5.
-///
-/// The durable artifact/pairing verifier is a later milestone. Accepting a
-/// change before that verifier exists would make the published floor and PoV
-/// arithmetic silently stale, so this helper rejects every timing/capacity
-/// change and only the unsafe direction for the POL keys. Safe-direction
-/// changes remain available; all accepted changes still use the normal
-/// `Params` bounds, delta and cooldown checks.
 /// The two 13 §1 keys that jointly determine 07 §6.3's bond-coverage rate
 /// `(2^orc.rounds − 1) · orc.bond_bps`.
 ///
