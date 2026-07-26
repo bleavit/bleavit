@@ -47,7 +47,18 @@ pub const W_A: FixedU64 = FixedU64(400_000_000);
 /// independent core and reference vectors. Production runtimes pass the live
 /// values into every operation that consumes a gate threshold or pillar
 /// weight, preserving byte-identical behavior at [`Self::DEFAULT`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub struct WelfareParams {
     pub theta_s_lo: FixedU64,
     pub theta_s_hi: FixedU64,
@@ -82,6 +93,36 @@ impl WelfareParams {
         ensure!(
             (300_000_000..=700_000_000).contains(&self.w_p.0)
                 && (300_000_000..=700_000_000).contains(&self.w_a.0),
+            Error::ValueOutOfRange
+        );
+        ensure!(
+            self.w_p
+                .0
+                .checked_add(self.w_a.0)
+                .is_some_and(|sum| sum == ONE),
+            Error::BadWeightSum
+        );
+        Ok(())
+    }
+
+    /// Validate a **recorded** parameter set — one stored with a past snapshot
+    /// and replayed by 07 §10's recompute — for the internal consistency its
+    /// arithmetic needs, and nothing else.
+    ///
+    /// Deliberately *not* [`Self::validate`]. That check compares against the
+    /// live kernel floors (`THETA_S_LO`, `THETA_C_LO`) and the 13 §1 band on the
+    /// pillar weights, both of which a later CODE or META amendment may lawfully
+    /// move. Applied to history, that turns a legal amendment into a wedge: a
+    /// cohort in flight across it could never settle its recomputed window, and
+    /// a `try-state` assertion over the same fields would halt the chain
+    /// outright. The same reasoning the spec-coverage note in `try_state`
+    /// records for 07 §6.3 — live rules do not bind stored records.
+    pub fn validate_recorded(&self) -> Result<(), Error> {
+        ensure!(
+            self.theta_s_lo.0 < self.theta_s_hi.0
+                && self.theta_s_hi.0 <= ONE
+                && self.theta_c_lo.0 < self.theta_c_hi.0
+                && self.theta_c_hi.0 <= ONE,
             Error::ValueOutOfRange
         );
         ensure!(
@@ -319,6 +360,45 @@ pub struct Snapshot {
     pub components: Vec<ComponentValue>,
 }
 
+/// The per-snapshot settlement context 07 §10's renormalization needs.
+///
+/// Kept **beside** [`Snapshot`] rather than inside it because `Snapshots` is a
+/// frozen 02 §7.4 frontend read surface: widening the value shape (or widening
+/// [`ComponentValue`] with a `flagged` bit) would move the contract for data no
+/// frontend consumes. The 07 §10 recompute is settlement-time and pallet-
+/// internal, so its inputs are too.
+///
+/// Both fields are recorded *when observed* rather than derived later, which is
+/// the [`crate`]-wide lesson of 05 §4.4's own two-consecutive-carried-epochs
+/// rule (`epoch-core`'s `baseline_carry`): the oracle's flagged
+/// `ComponentValues` history is reaped on an epoch cutoff (07 §13), so a
+/// settlement that re-derived consecutiveness from it would be reading state
+/// that may legitimately be gone.
+#[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
+pub struct SnapshotContext {
+    pub epoch: EpochId,
+    pub spec_version: MetricSpecVersion,
+    /// The components whose settled value for this `(epoch, version)` is a
+    /// **flagged carry-last** (07 §10). Ascending `MetricId`, deduplicated.
+    /// Only an attested component can appear: 07 §11(1) consequence (i) makes
+    /// class-4 components the only reportable — hence the only flaggable — ones.
+    pub flagged: Vec<MetricId>,
+    /// The `I_e` incident multiplier this snapshot's `C_e` was computed with
+    /// (05 §4.4). Stored because the recompute needs it and the snapshot keeps
+    /// it only *folded into* `c_attested`/`c_settlement`; recovering it as
+    /// `c_settlement ÷ c_joint` would be a lossy division in an unaudited
+    /// direction.
+    pub incident_multiplier: FixedU64,
+    /// The live tunables this snapshot's `W` was evaluated under.
+    ///
+    /// Stored so the 07 §10 recompute differs from the recorded `W` in exactly
+    /// one respect — the dropped components — and never in a gate threshold or
+    /// pillar weight that governance lawfully amended in between. Re-reading
+    /// live `Params` at settlement would silently re-price an already-measured
+    /// epoch, which is the I-16 freeze applied to the values layer.
+    pub params: WelfareParams,
+}
+
 #[derive(
     Clone,
     Copy,
@@ -337,18 +417,10 @@ pub struct GateBreachFlags {
     pub day_bitmap: [u32; 2],
 }
 
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Decode,
-    DecodeWithMemTracking,
-    Encode,
-    Eq,
-    MaxEncodedLen,
-    PartialEq,
-    TypeInfo,
-)]
+// Not `Copy`/`MaxEncodedLen`: `SettlementRenormalized` names the dropped
+// components, and the bound on that list belongs to the pallet's `BoundedVec`
+// mirror (`MAX_COMPONENTS_PER_SPEC`), not to this frame-free core.
+#[derive(Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, PartialEq, TypeInfo)]
 pub enum Event {
     MetricSpecRegistered {
         version: MetricSpecVersion,
@@ -368,6 +440,17 @@ pub enum Event {
         epoch: EpochId,
         spec_version: MetricSpecVersion,
         score: FixedU64,
+    },
+    /// 07 §10: this cohort's `W` was recomputed without `dropped`, whose
+    /// components were flagged in two consecutive epochs of its measurement
+    /// window, with the surviving weights renormalized. Emitted only when the
+    /// set is non-empty, immediately before [`Event::SettlementComputed`], so a
+    /// score that does not match the geometric mean of the two published
+    /// `Snapshots.welfare` values always carries its reason.
+    SettlementRenormalized {
+        epoch: EpochId,
+        spec_version: MetricSpecVersion,
+        dropped: Vec<MetricId>,
     },
 }
 
@@ -427,6 +510,18 @@ pub enum Error {
     /// when the ladder itself is unreadable, which is the fail-closed direction
     /// for admission. Trailing variant.
     BondCoverageUnmet,
+    /// A snapshot was offered a flagged component that is not an **attested**
+    /// component of its own spec version (07 §10; §11(1) consequence (i)).
+    /// Only class-4 components are reportable, so only they can be absent at
+    /// the money deadline and carry a flagged epoch — a flag on anything else
+    /// would feed 07 §10's renormalization with a value the oracle never owned.
+    /// Trailing variant.
+    BadFlaggedComponent,
+    /// A snapshot exists with no [`SnapshotContext`] beside it, so 07 §10's
+    /// consecutiveness cannot be evaluated for the epochs it covers. Recording
+    /// writes the pair atomically and pruning retires it atomically, so this is
+    /// a corrupted-state signal, not a reachable path. Trailing variant.
+    MissingSnapshotContext,
 }
 
 /// The 07 §2(5) admission inputs that [`WelfareState::register_metric_spec`]
@@ -503,6 +598,9 @@ pub enum Registration {
 pub struct WelfareState {
     pub specs: Vec<(MetricSpecVersion, Vec<MetricSpec>)>,
     pub snapshots: Vec<Snapshot>,
+    /// One record per snapshot, carrying the 07 §10 inputs the frozen 02 §7.4
+    /// `Snapshots` shape deliberately does not: see [`SnapshotContext`].
+    pub snapshot_contexts: Vec<SnapshotContext>,
     pub gate_flags: Vec<(EpochId, GateBreachFlags)>,
     pub events: Vec<Event>,
 }
@@ -518,6 +616,7 @@ impl WelfareState {
         Self {
             specs: Vec::new(),
             snapshots: Vec::new(),
+            snapshot_contexts: Vec::new(),
             gate_flags: Vec::new(),
             events: Vec::new(),
         }
@@ -661,12 +760,22 @@ impl WelfareState {
         Ok(())
     }
 
+    /// Record epoch `epoch`'s snapshot under `spec_version`.
+    ///
+    /// `flagged` carries the 07 §10 flag bits the oracle settled for this
+    /// `(epoch, version)` — the components whose value here is a carry-last, not
+    /// a fresh measurement. They do **not** change this snapshot's `W`: §10
+    /// grants a single flagged epoch the carried value and only a *second
+    /// consecutive* one drops the component, which is a per-cohort fact resolved
+    /// in [`Self::compute_settlement`]. Recording them is what makes that
+    /// resolution possible without re-reading reapable oracle history.
     pub fn record_snapshot(
         &mut self,
         epoch: EpochId,
         spec_version: MetricSpecVersion,
         components: Vec<ComponentValue>,
         incident_multiplier: FixedU64,
+        flagged: Vec<MetricId>,
         params: &WelfareParams,
     ) -> Result<FixedU64, Error> {
         params.validate()?;
@@ -690,6 +799,7 @@ impl WelfareState {
                 .all(|s| s.epoch != epoch || s.spec_version != spec_version),
             Error::DuplicateSnapshot
         );
+        let flagged = normalized_flags(&specs, flagged)?;
         let pillars = compute_pillars(&specs, &components, incident_multiplier)?;
         let welfare = compute_welfare(
             pillars.s,
@@ -710,6 +820,13 @@ impl WelfareState {
             gate_c: gate(pillars.c_settlement, params.theta_c_lo, params.theta_c_hi)?,
             welfare,
             components,
+        });
+        self.snapshot_contexts.push(SnapshotContext {
+            epoch,
+            spec_version,
+            flagged,
+            incident_multiplier,
+            params: *params,
         });
         self.events.push(Event::SnapshotRecorded {
             epoch,
@@ -791,15 +908,124 @@ impl WelfareState {
         let second_epoch = cohort_epoch
             .checked_add(2)
             .ok_or(Error::ArithmeticOverflow)?;
-        let w1 = self.snapshot(first_epoch, spec_version)?.welfare;
-        let w2 = self.snapshot(second_epoch, spec_version)?.welfare;
+        // 07 §10: a component flagged in two consecutive epochs of the window
+        // this cohort consumes stops voting; the surviving weights renormalize.
+        let dropped = self.twice_flagged(cohort_epoch, spec_version)?;
+        let w1 = self.settlement_welfare(first_epoch, spec_version, &dropped)?;
+        let w2 = self.settlement_welfare(second_epoch, spec_version, &dropped)?;
         let score = settlement_score(w1, w2)?;
+        if !dropped.is_empty() {
+            self.events.push(Event::SettlementRenormalized {
+                epoch: cohort_epoch,
+                spec_version,
+                dropped,
+            });
+        }
         self.events.push(Event::SettlementComputed {
             epoch: cohort_epoch,
             spec_version,
             score,
         });
         Ok(score)
+    }
+
+    /// The 07 §10 drop set for a cohort at `cohort_epoch`: every component
+    /// flagged in **two consecutive epochs** that meet inside the cohort's
+    /// measurement window `{e+1, e+2}` — i.e. flagged at `(e, e+1)` or at
+    /// `(e+1, e+2)`.
+    ///
+    /// Three properties of this reading are deliberate.
+    ///
+    /// 1. **Cohort-scoped, not epoch-scoped.** §10 drops the component from
+    ///    "affected not-yet-settled cohorts", so the streak is evaluated against
+    ///    the window and applied to *both* of its epochs. Two cohorts sharing an
+    ///    epoch can therefore weigh it differently, which is exactly why §10
+    ///    makes this a settlement-time operation instead of folding it into the
+    ///    recorded `W`.
+    /// 2. **`e` participates, `e+3` does not.** The streak that condemns a
+    ///    component may begin one epoch before the window; a streak beginning at
+    ///    `e+2` is not yet two epochs long inside it. `e`'s snapshot is the
+    ///    cohort's own creation epoch, so its flags are already settled history
+    ///    by the time the cohort settles at `e+2`'s Housekeeping.
+    /// 3. **An absent record is not a flagged epoch.** A version's first live
+    ///    epoch has no predecessor at that version, so no streak is observable
+    ///    there — and §10 grants a single flagged epoch its carried value
+    ///    anyway. The failure keeps voting for at most one extra epoch at an
+    ///    activation boundary, after which the streak is fully inside the
+    ///    version and observed exactly.
+    fn twice_flagged(
+        &self,
+        cohort_epoch: EpochId,
+        spec_version: MetricSpecVersion,
+    ) -> Result<Vec<MetricId>, Error> {
+        let first_epoch = cohort_epoch
+            .checked_add(1)
+            .ok_or(Error::ArithmeticOverflow)?;
+        let second_epoch = cohort_epoch
+            .checked_add(2)
+            .ok_or(Error::ArithmeticOverflow)?;
+        let before = self.flagged_at(cohort_epoch, spec_version);
+        let first = self.flagged_at(first_epoch, spec_version);
+        let second = self.flagged_at(second_epoch, spec_version);
+        let mut dropped = first
+            .iter()
+            .filter(|id| before.contains(id) || second.contains(id))
+            .copied()
+            .collect::<Vec<_>>();
+        dropped.sort_unstable();
+        dropped.dedup();
+        Ok(dropped)
+    }
+
+    /// The flagged set recorded for `(epoch, version)`, or empty when no
+    /// snapshot covers it (see `twice_flagged` property 3).
+    fn flagged_at(&self, epoch: EpochId, version: MetricSpecVersion) -> &[MetricId] {
+        self.snapshot_contexts
+            .iter()
+            .find(|context| context.epoch == epoch && context.spec_version == version)
+            .map(|context| context.flagged.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// One epoch's contribution to a cohort's settlement score: the recorded
+    /// `W` when nothing is dropped, else 07 §10's recompute over the surviving
+    /// components with renormalized weights.
+    ///
+    /// The recompute reads the snapshot's own stored components, incident
+    /// multiplier and tunables, so it reproduces the recorded evaluation in
+    /// every respect but the drop — no live re-read can move it.
+    fn settlement_welfare(
+        &self,
+        epoch: EpochId,
+        spec_version: MetricSpecVersion,
+        dropped: &[MetricId],
+    ) -> Result<FixedU64, Error> {
+        let snapshot = self.snapshot(epoch, spec_version)?;
+        if dropped.is_empty() {
+            return Ok(snapshot.welfare);
+        }
+        let context = self
+            .snapshot_contexts
+            .iter()
+            .find(|context| context.epoch == epoch && context.spec_version == spec_version)
+            .ok_or(Error::MissingSnapshotContext)?;
+        // Unreachable while the pallet retires no spec version (I-16 retains a
+        // version for as long as a cohort can still settle on it), and
+        // deliberately fail-soft rather than fatal if that ever changes:
+        // a settlement that cannot be recomputed must still settle on the
+        // recorded measurement. Wedging the cohort would strand every holder in
+        // it, which is a strictly worse outcome than one epoch of a carried
+        // value continuing to vote.
+        let Ok(specs) = self.spec(spec_version) else {
+            return Ok(snapshot.welfare);
+        };
+        renormalized_welfare(
+            specs,
+            &snapshot.components,
+            context.incident_multiplier,
+            dropped,
+            &context.params,
+        )
     }
 
     pub fn current_view(
@@ -898,6 +1124,11 @@ impl WelfareState {
     pub fn prune_before(&mut self, cutoff_epoch: EpochId) {
         self.snapshots
             .retain(|snapshot| snapshot.epoch >= cutoff_epoch);
+        // Retired in lockstep with the snapshots they annotate: the try-state
+        // pairing is what lets `compute_settlement` treat a missing context as
+        // corruption rather than as "not flagged" (07 §10).
+        self.snapshot_contexts
+            .retain(|context| context.epoch >= cutoff_epoch);
         self.gate_flags.retain(|(epoch, _)| *epoch >= cutoff_epoch);
     }
 
@@ -989,6 +1220,43 @@ impl WelfareState {
                 Error::TryStateViolation
             );
         }
+        // 07 §10: exactly one context per snapshot, in both directions. The
+        // pairing is what makes an absent context corruption rather than an
+        // unflagged epoch, and it is the only thing standing between a pruning
+        // bug and a silently un-renormalized settlement.
+        ensure!(
+            self.snapshot_contexts.len() == self.snapshots.len(),
+            Error::TryStateViolation
+        );
+        for (index, context) in self.snapshot_contexts.iter().enumerate() {
+            ensure!(
+                self.snapshot_contexts[..index].iter().all(|seen| {
+                    seen.epoch != context.epoch || seen.spec_version != context.spec_version
+                }) && self
+                    .snapshots
+                    .iter()
+                    .any(|snapshot| snapshot.epoch == context.epoch
+                        && snapshot.spec_version == context.spec_version)
+                    && context.incident_multiplier.0 <= ONE
+                    // Internal consistency only — see `validate_recorded`. The
+                    // live-floor form of this check would halt the chain on a
+                    // legal kernel or 13 §1 amendment.
+                    && context.params.validate_recorded().is_ok(),
+                Error::TryStateViolation
+            );
+            // Only attested components of this very version can be flagged, and
+            // the set is ascending and deduplicated (§11(1) consequence (i)).
+            let mut previous = None;
+            for id in &context.flagged {
+                ensure!(
+                    previous.replace(*id).is_none_or(|seen| seen < *id)
+                        && self.spec(context.spec_version).is_ok_and(|specs| specs
+                            .iter()
+                            .any(|spec| spec.id == *id && spec.source == SourceClass::Attested)),
+                    Error::TryStateViolation
+                );
+            }
+        }
         for (index, (epoch, flags)) in self.gate_flags.iter().enumerate() {
             ensure!(
                 self.gate_flags[..index]
@@ -1076,6 +1344,132 @@ fn compute_pillars(
     })
 }
 
+/// 07 §10's settlement-time `W` recompute: the same evaluation the snapshot
+/// recorded, with `dropped` removed and the surviving weights renormalized
+/// (05 §4.4's `w_j / Σ w`, the rule `C_daily` already states).
+///
+/// **Which groups may be emptied is not symmetric.** `S` and `C` enter `W`
+/// through the gates `g(S)`, `g(C)`; a gate has no weight to renormalize away,
+/// and both a min over nothing and a weighted product over nothing evaluate to
+/// the *most favourable* value, so an emptied gate group would convert total
+/// unavailability into a perfect score — and dropping the factor outright would
+/// treat an unmeasurable security pillar as no constraint at all. Those groups
+/// therefore decline the drop and keep every component they had; §10 assigns
+/// gate-input failure to VOID, which is a different mechanism with a different
+/// trigger (05 §4.7), not something this recompute may improvise. `P` and `A`
+/// are weighted terms of one composite, so an emptied group renormalizes at the
+/// pillar level by the same rule — `A` going dark leaves `W` measured on what
+/// could be measured, rather than on `A`'s stale carried values.
+///
+/// In v1 only `A` is reachable: `source_matches_pillar` makes every `S`, `P` and
+/// `C_onchain` component on-chain, only attested components can be flagged
+/// (07 §11(1)(i)), and `C_attested` is empty (07 §2's split keeps gate inputs
+/// unattested). The other branches are the fail-safe for a spec set that is not.
+fn renormalized_welfare(
+    specs: &[MetricSpec],
+    components: &[ComponentValue],
+    incident: FixedU64,
+    dropped: &[MetricId],
+    params: &WelfareParams,
+) -> Result<FixedU64, Error> {
+    // `validate_recorded`, not `validate`: these tunables are a stored record of
+    // an epoch already measured, and re-checking them against today's kernel
+    // floors would make a lawful amendment wedge every in-flight cohort whose
+    // window carries a drop set.
+    params.validate_recorded()?;
+    let kept = specs
+        .iter()
+        .filter(|spec| !dropped.contains(&spec.id))
+        .copied()
+        .collect::<Vec<_>>();
+    let weight_sum = |set: &[MetricSpec], group: &[Pillar]| -> Result<u64, Error> {
+        set.iter()
+            .filter(|spec| group.contains(&spec.pillar))
+            .try_fold(0u64, |acc, spec| {
+                acc.checked_add(spec.weight.0)
+                    .ok_or(Error::ArithmeticOverflow)
+            })
+    };
+    let populated =
+        |set: &[MetricSpec], group: &[Pillar]| set.iter().any(|spec| group.contains(&spec.pillar));
+    // A group whose drop would empty it declines the drop entirely.
+    let retained = |group: &[Pillar]| -> &[MetricSpec] {
+        if populated(specs, group) && !populated(&kept, group) {
+            specs
+        } else {
+            kept.as_slice()
+        }
+    };
+    // Renormalize only where the surviving weights no longer sum to 1, so an
+    // untouched group takes the byte-identical path the snapshot took.
+    let renormalize = |total: u64| (total != ONE).then_some(total);
+
+    let s_group = [Pillar::S];
+    let s = retained(&s_group)
+        .iter()
+        .filter(|spec| spec.pillar == Pillar::S)
+        .try_fold(FixedU64(ONE), |acc, spec| {
+            Ok(FixedU64(acc.0.min(value_for(spec.id, components)?.0)))
+        })?;
+
+    let c_group = [Pillar::COnchain, Pillar::CAttested];
+    let c_specs = retained(&c_group);
+    let c_total = weight_sum(c_specs, &c_group)?;
+    ensure!(c_total > 0, Error::BadWeightSum);
+    let c_joint = weighted_geo(c_specs, components, &c_group, renormalize(c_total))?;
+    let c_settlement = mul_down(incident, c_joint)?;
+
+    // P and A: an emptied group's weight moves to its sibling, which — since
+    // `w_p + w_a == 1` is enforced — is exactly that sibling's weight
+    // renormalized over itself.
+    let p_group = [Pillar::P];
+    let a_group = [Pillar::A];
+    let p_total = weight_sum(&kept, &p_group)?;
+    let a_total = weight_sum(&kept, &a_group)?;
+    let p = weighted_geo(&kept, components, &p_group, renormalize(p_total))?;
+    let a = weighted_geo(&kept, components, &a_group, renormalize(a_total))?;
+    let (w_p, w_a) = match (p_total == 0, a_total == 0) {
+        (false, true) => (FixedU64(ONE), FixedU64(0)),
+        (true, false) => (FixedU64(0), FixedU64(ONE)),
+        // Both pillars gone: nothing survives to renormalize onto, so the
+        // composite declines the drop the same way the gate groups do.
+        (true, true) => {
+            let p = weighted_geo(specs, components, &p_group, None)?;
+            let a = weighted_geo(specs, components, &a_group, None)?;
+            return welfare_from_pillars(s, c_settlement, p, a, params.w_p, params.w_a, params);
+        }
+        (false, false) => (params.w_p, params.w_a),
+    };
+    welfare_from_pillars(s, c_settlement, p, a, w_p, w_a, params)
+}
+
+/// Normalize and validate one snapshot's 07 §10 flag set: ascending, deduped,
+/// and drawn only from the version's **attested** components (§11(1)(i)).
+fn normalized_flags(
+    specs: &[MetricSpec],
+    mut flagged: Vec<MetricId>,
+) -> Result<Vec<MetricId>, Error> {
+    ensure!(
+        flagged.len() <= MAX_COMPONENTS_PER_SPEC,
+        Error::TooManyComponents
+    );
+    flagged.sort_unstable();
+    let offered = flagged.len();
+    flagged.dedup();
+    ensure!(flagged.len() == offered, Error::DuplicateComponent);
+    for id in &flagged {
+        let spec = specs
+            .iter()
+            .find(|spec| spec.id == *id)
+            .ok_or(Error::BadFlaggedComponent)?;
+        ensure!(
+            spec.source == SourceClass::Attested,
+            Error::BadFlaggedComponent
+        );
+    }
+    Ok(flagged)
+}
+
 fn compute_daily_gates(
     specs: &[MetricSpec],
     components: &[ComponentValue],
@@ -1112,6 +1506,9 @@ fn weighted_geo(
     renormalize: Option<u64>,
 ) -> Result<FixedU64, Error> {
     let mut exponent = FixedU64x64::ZERO;
+    // The one participating term, when there is exactly one (see below).
+    let mut sole: Option<(u64, FixedU64x64)> = None;
+    let mut participants = 0usize;
     for m in specs.iter().filter(|m| pillars.contains(&m.pillar)) {
         let v = value_for(m.id, components)?;
         let value = v.0.max(m.epsilon_floor.0);
@@ -1130,9 +1527,31 @@ fn weighted_geo(
                 .checked_div(q64_from_1e9(total)?)
                 .map_err(|_| Error::ArithmeticOverflow)?;
         }
+        participants += 1;
+        sole = Some((value, weight));
         exponent = exponent
             .checked_add(mul_ceil_q64(log, weight)?)
             .map_err(|_| Error::ArithmeticOverflow)?;
+    }
+    // 05 §4.4 rule 3: a **single** participating term whose weight is exactly 1
+    // is the value itself — every other term contributed a factor of exactly 1
+    // (weight 0, or a value at the 1.0 ceiling), so the composite is `x^1`.
+    //
+    // The log2/exp2 route does not reproduce that, and not because of precision:
+    // §4.4's discipline truncates the exponent to the 64.64 grid, and truncating
+    // an irrational `log2 x` alone lands one 1e-9 ulp below `x`. The reference
+    // model does the same at 332-bit, so no differential would ever catch it —
+    // which is why the exact reading is normative rather than left to rounding.
+    // (`settlement_score` below is the *other* case: there the residual really
+    // is finite-precision and the exact `isqrt` is the fix.) Reachable in
+    // production since 07 §10's renormalization can leave one survivor at
+    // weight 1.
+    if participants == 1 {
+        if let Some((value, weight)) = sole {
+            if weight == FixedU64x64::ONE {
+                return Ok(FixedU64(value));
+            }
+        }
     }
     exp2_inverse_down(exponent)
 }
@@ -1181,6 +1600,8 @@ fn value_for(id: MetricId, components: &[ComponentValue]) -> Result<FixedU64, Er
 /// W product, same discipline as [`weighted_geo`]).
 fn geo_pair(first: (FixedU64, FixedU64), second: (FixedU64, FixedU64)) -> Result<FixedU64, Error> {
     let mut exponent = FixedU64x64::ZERO;
+    let mut sole = None;
+    let mut participants = 0usize;
     for (value, weight) in [first, second] {
         if weight.0 == 0 || value.0 >= ONE {
             continue;
@@ -1192,9 +1613,21 @@ fn geo_pair(first: (FixedU64, FixedU64), second: (FixedU64, FixedU64)) -> Result
             .checked_div(q64_from_1e9(value.0)?)
             .map_err(|_| Error::ArithmeticOverflow)?;
         let log = inv.log2().map_err(|_| Error::ArithmeticOverflow)?;
+        participants += 1;
+        sole = Some((value, weight));
         exponent = exponent
             .checked_add(mul_ceil_q64(log, q64_from_1e9(weight.0)?)?)
             .map_err(|_| Error::ArithmeticOverflow)?;
+    }
+    // The `weighted_geo` exactness rule, which this composite reaches whenever
+    // 07 §10 renormalizes a whole pillar group away: one surviving pillar at
+    // weight 1 is that pillar's value, not its log2/exp2 round-trip.
+    if participants == 1 {
+        if let Some((value, weight)) = sole {
+            if weight.0 == ONE {
+                return Ok(value);
+            }
+        }
     }
     exp2_inverse_down(exponent)
 }
@@ -1207,9 +1640,24 @@ pub fn compute_welfare(
     params: &WelfareParams,
 ) -> Result<FixedU64, Error> {
     params.validate()?;
+    welfare_from_pillars(s, c, p, a, params.w_p, params.w_a, params)
+}
+
+/// The 05 §4.4(3) `W` product with the composite's pillar weights supplied.
+/// They are the live `params` values on every ordinary path; 07 §10's recompute
+/// passes them renormalized when a whole pillar group has been dropped.
+fn welfare_from_pillars(
+    s: FixedU64,
+    c: FixedU64,
+    p: FixedU64,
+    a: FixedU64,
+    w_p: FixedU64,
+    w_a: FixedU64,
+    params: &WelfareParams,
+) -> Result<FixedU64, Error> {
     let gs = gate(s, params.theta_s_lo, params.theta_s_hi)?;
     let gc = gate(c, params.theta_c_lo, params.theta_c_hi)?;
-    let pa = geo_pair((p, params.w_p), (a, params.w_a))?;
+    let pa = geo_pair((p, w_p), (a, w_a))?;
     mul_down(mul_down(gs, gc)?, pa)
 }
 
@@ -1506,6 +1954,429 @@ mod tests {
             })
             .collect()
     }
+
+    // ---- 07 §10 two-consecutive-flag renormalization (SQ-493) ----------------
+
+    /// A spec set with **two** components in the joint C vector and **two** in
+    /// A, so a drop leaves something to renormalize onto. Ids 3, 5 and 6 are
+    /// attested and therefore the only flaggable ones.
+    fn renorm_specs(version: u16) -> Vec<MetricSpec> {
+        vec![
+            spec(1, Pillar::S, 0, version),
+            spec(2, Pillar::COnchain, 600_000_000, version),
+            spec(3, Pillar::CAttested, 400_000_000, version),
+            spec(4, Pillar::P, ONE, version),
+            spec(5, Pillar::A, 500_000_000, version),
+            spec(6, Pillar::A, 500_000_000, version),
+        ]
+    }
+
+    /// Values deliberately **below** 1.0 across the board: at exactly 1.0 every
+    /// weighted-geometric term is skipped, so a renormalization test built on
+    /// healthy inputs would pass while proving nothing. They are also chosen to
+    /// keep every gate strictly **interior** — a fixture whose `g(C)` sits at
+    /// its floor zeroes `W`, and two zeroed welfares compare equal whatever the
+    /// renormalization does. `renorm_state` asserts that non-degeneracy.
+    fn renorm_components() -> Vec<ComponentValue> {
+        vec![
+            ComponentValue {
+                id: 1,
+                value: FixedU64(950_000_000),
+            },
+            ComponentValue {
+                id: 2,
+                value: FixedU64(930_000_000),
+            },
+            ComponentValue {
+                id: 3,
+                value: FixedU64(900_000_000),
+            },
+            ComponentValue {
+                id: 4,
+                value: FixedU64(800_000_000),
+            },
+            ComponentValue {
+                id: 5,
+                value: FixedU64(600_000_000),
+            },
+            ComponentValue {
+                id: 6,
+                value: FixedU64(500_000_000),
+            },
+        ]
+    }
+
+    /// Record snapshots for `epochs`, flagging `flagged` in the epochs named by
+    /// `flag_at`. Returns the state ready for a `compute_settlement` call.
+    fn renorm_state(epochs: &[EpochId], flag_at: &[(EpochId, Vec<MetricId>)]) -> WelfareState {
+        let mut w = WelfareState::new();
+        w.register_metric_spec(Registration::Genesis, 1, renorm_specs(1), &seated())
+            .expect("spec set registers");
+        for epoch in epochs {
+            let flagged = flag_at
+                .iter()
+                .find_map(|(at, ids)| (at == epoch).then(|| ids.clone()))
+                .unwrap_or_default();
+            w.record_snapshot(
+                *epoch,
+                1,
+                renorm_components(),
+                FixedU64(ONE),
+                flagged,
+                &WelfareParams::DEFAULT,
+            )
+            .expect("snapshot records");
+        }
+        // The fixture must exercise the arithmetic it claims to: a zeroed or
+        // saturated `W` makes every comparison below vacuous.
+        for epoch in epochs {
+            let welfare = w.snapshot(*epoch, 1).expect("snapshot").welfare.0;
+            assert!(
+                (100_000_000..900_000_000).contains(&welfare),
+                "degenerate renormalization fixture: W = {welfare}"
+            );
+        }
+        w.events.clear();
+        w
+    }
+
+    fn renormalized_event(state: &WelfareState) -> Option<Vec<MetricId>> {
+        state.events.iter().find_map(|event| match event {
+            Event::SettlementRenormalized { dropped, .. } => Some(dropped.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn sq493_two_consecutive_flags_drop_the_component_and_renormalize() {
+        // Flagged at 6 and 7 — the cohort at 5 consumes exactly those.
+        let mut flagged = renorm_state(&[5, 6, 7], &[(6, vec![3]), (7, vec![3])]);
+        let score = flagged.compute_settlement(5, 1).expect("settles");
+        assert_eq!(renormalized_event(&flagged), Some(vec![3]));
+
+        // Independent derivation: the identical inputs under a spec set that
+        // never had component 3, whose C weight vector is therefore the
+        // renormalized one (0.6 / 0.6 = 1). 07 §10's "recompute W without the
+        // component, weights renormalized" is exactly that measurement.
+        let mut without = WelfareState::new();
+        let specs = renorm_specs(1)
+            .into_iter()
+            .filter(|s| s.id != 3)
+            .map(|s| {
+                if s.pillar == Pillar::COnchain {
+                    MetricSpec {
+                        weight: FixedU64(ONE),
+                        ..s
+                    }
+                } else {
+                    s
+                }
+            })
+            .collect::<Vec<_>>();
+        without
+            .register_metric_spec(Registration::Genesis, 1, specs, &seated())
+            .expect("reduced spec set registers");
+        for epoch in [6, 7] {
+            without
+                .record_snapshot(
+                    epoch,
+                    1,
+                    renorm_components(),
+                    FixedU64(ONE),
+                    Vec::new(),
+                    &WelfareParams::DEFAULT,
+                )
+                .expect("snapshot records");
+        }
+        let expected = without.compute_settlement(5, 1).expect("settles");
+        assert_eq!(score, expected);
+
+        // ...and the drop is not a no-op: the flagged component was voting.
+        let mut unflagged = renorm_state(&[5, 6, 7], &[]);
+        let carried = unflagged.compute_settlement(5, 1).expect("settles");
+        assert!(
+            carried.0 < score.0,
+            "dropping the 0.7 component must raise the renormalized score \
+             (carried {carried:?}, renormalized {score:?})"
+        );
+        assert_eq!(renormalized_event(&unflagged), None);
+    }
+
+    #[test]
+    fn sq493_one_flagged_epoch_keeps_carrying_at_full_weight() {
+        // §10 grants the first flagged epoch its carried value; only the second
+        // consecutive one drops the component.
+        let mut once = renorm_state(&[5, 6, 7], &[(6, vec![3])]);
+        let score = once.compute_settlement(5, 1).expect("settles");
+        let mut never = renorm_state(&[5, 6, 7], &[]);
+        assert_eq!(score, never.compute_settlement(5, 1).expect("settles"));
+        assert_eq!(renormalized_event(&once), None);
+    }
+
+    #[test]
+    fn sq493_a_streak_entering_the_window_from_before_it_still_drops() {
+        // Flagged at 5 and 6: the streak began in the cohort's own epoch and is
+        // two long by `e+1`, so it condemns the component for this cohort.
+        let mut early = renorm_state(&[5, 6, 7], &[(5, vec![3]), (6, vec![3])]);
+        let score = early.compute_settlement(5, 1).expect("settles");
+        assert_eq!(renormalized_event(&early), Some(vec![3]));
+        let mut both = renorm_state(&[5, 6, 7], &[(6, vec![3]), (7, vec![3])]);
+        assert_eq!(score, both.compute_settlement(5, 1).expect("settles"));
+    }
+
+    #[test]
+    fn sq493_consecutive_cohorts_weigh_the_same_epoch_differently() {
+        // Flagged at 7 and 8. The cohort at 5 (window 6,7) sees no streak inside
+        // its window; the cohort at 6 (window 7,8) does. The same epoch-7
+        // snapshot therefore enters the two settlements with different weight —
+        // which is why §10 makes this settlement-time rather than a property of
+        // the recorded `W`.
+        let mut state = renorm_state(&[5, 6, 7, 8], &[(7, vec![3]), (8, vec![3])]);
+        let earlier = state.compute_settlement(5, 1).expect("settles");
+        assert_eq!(renormalized_event(&state), None);
+        state.events.clear();
+        let later = state.compute_settlement(6, 1).expect("settles");
+        assert_eq!(renormalized_event(&state), Some(vec![3]));
+        assert!(earlier.0 < later.0);
+    }
+
+    #[test]
+    fn sq493_dropping_the_whole_a_pillar_renormalizes_the_composite_onto_p() {
+        let mut state = renorm_state(&[5, 6, 7], &[(6, vec![5, 6]), (7, vec![5, 6])]);
+        let score = state.compute_settlement(5, 1).expect("settles");
+        assert_eq!(renormalized_event(&state), Some(vec![5, 6]));
+
+        // With A unmeasurable the composite's surviving weight renormalizes to
+        // exactly 1, so `W = g(S) · g(C) · P` — not `A = 1.0` (which would turn
+        // total attestation failure into a perfect pillar) and not a wedge.
+        let specs = renorm_specs(1);
+        let components = renorm_components();
+        let params = WelfareParams::DEFAULT;
+        let pillars = compute_pillars(&specs, &components, FixedU64(ONE)).expect("pillars");
+        let p = pillars.p;
+        let expected_w = mul_down(
+            mul_down(
+                gate(pillars.s, params.theta_s_lo, params.theta_s_hi).expect("g(S)"),
+                gate(pillars.c_settlement, params.theta_c_lo, params.theta_c_hi).expect("g(C)"),
+            )
+            .expect("g(S)*g(C)"),
+            p,
+        )
+        .expect("W");
+        assert_eq!(score, settlement_score(expected_w, expected_w).expect("s"));
+    }
+
+    #[test]
+    fn sq493_a_drop_that_would_empty_the_gate_group_is_declined() {
+        // A spec set whose whole joint C vector is attested — not reachable for a
+        // 07 §2-conforming v1 spec, and the one case where renormalization has
+        // nothing to renormalize onto. `g(C)` has no weight to redistribute, and
+        // an empty weighted product is 1.0, so the drop is declined instead of
+        // converting total unavailability into a perfect security pillar.
+        let mut w = WelfareState::new();
+        let specs = vec![
+            spec(1, Pillar::S, 0, 1),
+            spec(2, Pillar::CAttested, ONE, 1),
+            spec(4, Pillar::P, ONE, 1),
+            spec(5, Pillar::A, ONE, 1),
+        ];
+        w.register_metric_spec(Registration::Genesis, 1, specs, &seated())
+            .expect("registers");
+        let components = renorm_components();
+        for epoch in [5, 6, 7] {
+            let flagged = if epoch == 5 { Vec::new() } else { vec![2] };
+            w.record_snapshot(
+                epoch,
+                1,
+                components.clone(),
+                FixedU64(ONE),
+                flagged,
+                &WelfareParams::DEFAULT,
+            )
+            .expect("records");
+        }
+        let recorded = w.snapshot(6, 1).expect("snapshot").welfare;
+        w.events.clear();
+        let score = w.compute_settlement(5, 1).expect("settles");
+        // The event still reports the streak, but the measurement is unchanged:
+        // declining is visible, not silent.
+        assert_eq!(renormalized_event(&w), Some(vec![2]));
+        assert_eq!(
+            score,
+            settlement_score(recorded, recorded).expect("unchanged score")
+        );
+    }
+
+    #[test]
+    fn sq493_each_epoch_recomputes_under_its_own_recorded_tunables() {
+        // Amending a gate threshold between the two measured epochs must not
+        // re-price either of them: the recompute reads the tunables stored with
+        // the snapshot, so it differs from the recorded `W` in the drop alone.
+        let tight = WelfareParams {
+            theta_c_lo: FixedU64(890_000_000),
+            ..WelfareParams::DEFAULT
+        };
+        let mut w = WelfareState::new();
+        w.register_metric_spec(Registration::Genesis, 1, renorm_specs(1), &seated())
+            .expect("registers");
+        for (epoch, params) in [
+            (5, &WelfareParams::DEFAULT),
+            (6, &WelfareParams::DEFAULT),
+            (7, &tight),
+        ] {
+            w.record_snapshot(
+                epoch,
+                1,
+                renorm_components(),
+                FixedU64(ONE),
+                if epoch == 5 { Vec::new() } else { vec![3] },
+                params,
+            )
+            .expect("records");
+        }
+        let score = w.compute_settlement(5, 1).expect("settles");
+
+        let specs = renorm_specs(1);
+        let components = renorm_components();
+        let recompute = |params: &WelfareParams| {
+            renormalized_welfare(&specs, &components, FixedU64(ONE), &[3], params).expect("W'")
+        };
+        let expected =
+            settlement_score(recompute(&WelfareParams::DEFAULT), recompute(&tight)).expect("s");
+        assert_eq!(score, expected);
+        // The amendment is load-bearing: evaluating both epochs under either
+        // single parameter set gives a different score.
+        for params in [&WelfareParams::DEFAULT, &tight] {
+            assert_ne!(
+                score,
+                settlement_score(recompute(params), recompute(params)).expect("s")
+            );
+        }
+    }
+
+    #[test]
+    fn sq493_only_attested_components_of_this_version_can_be_flagged() {
+        let mut w = WelfareState::new();
+        w.register_metric_spec(Registration::Genesis, 1, renorm_specs(1), &seated())
+            .expect("registers");
+        let record = |w: &mut WelfareState, epoch: EpochId, flagged: Vec<MetricId>| {
+            w.record_snapshot(
+                epoch,
+                1,
+                renorm_components(),
+                FixedU64(ONE),
+                flagged,
+                &WelfareParams::DEFAULT,
+            )
+        };
+        // On-chain component (07 §11(1)(i): only class-4 components are
+        // reportable, so only they can be absent at the money deadline).
+        assert_eq!(record(&mut w, 5, vec![2]), Err(Error::BadFlaggedComponent));
+        // Not a component of this version at all.
+        assert_eq!(record(&mut w, 5, vec![99]), Err(Error::BadFlaggedComponent));
+        // Repeated id.
+        assert_eq!(
+            record(&mut w, 5, vec![3, 3]),
+            Err(Error::DuplicateComponent)
+        );
+        // The attested one records, and normalizes to ascending order.
+        assert!(record(&mut w, 5, vec![6, 5, 3]).is_ok());
+        assert_eq!(w.flagged_at(5, 1), &[3, 5, 6]);
+    }
+
+    #[test]
+    fn sq493_a_recorded_window_still_settles_after_the_live_floors_move() {
+        // A kernel or 13 §1 amendment may lawfully raise `welfare.thetaS` above
+        // what an in-flight cohort's snapshots were measured under. The recompute
+        // must replay those stored tunables anyway: validating them against the
+        // *new* floors would refuse the settlement forever, wedging every holder
+        // in the cohort, and the same check in `try_state` would halt the chain.
+        let stale = WelfareParams {
+            theta_s_lo: FixedU64(500_000_000),
+            ..WelfareParams::DEFAULT
+        };
+        assert_eq!(stale.validate(), Err(Error::ValueOutOfRange));
+        assert!(stale.validate_recorded().is_ok());
+
+        let mut state = renorm_state(&[5, 6, 7], &[(6, vec![3]), (7, vec![3])]);
+        for context in &mut state.snapshot_contexts {
+            context.params = stale;
+        }
+        assert!(state.try_state().is_ok(), "history must not halt try-state");
+        assert!(
+            state.compute_settlement(5, 1).is_ok(),
+            "a recomputed window must survive a lawful floor amendment"
+        );
+
+        // Internal inconsistency is still refused — the relaxation is scoped to
+        // the live-bounds comparison, not to the arithmetic's preconditions.
+        let broken = WelfareParams {
+            theta_c_hi: FixedU64(0),
+            ..WelfareParams::DEFAULT
+        };
+        assert_eq!(broken.validate_recorded(), Err(Error::ValueOutOfRange));
+        for context in &mut state.snapshot_contexts {
+            context.params = broken;
+        }
+        assert_eq!(state.try_state(), Err(Error::TryStateViolation));
+    }
+
+    #[test]
+    fn sq493_a_lone_surviving_component_at_weight_one_is_evaluated_exactly() {
+        // 05 §4.4 rule 3. 07 §10's renormalization makes a weight of exactly 1
+        // reachable, and at that weight the composite is the value itself. The
+        // `exp2(log2(1/x))` route floors one ulp short of it because §4.4
+        // truncates the exponent to the 64.64 grid — an error the reference model
+        // reproduces exactly, so only a normative rule closes it.
+        let specs = vec![spec(4, Pillar::P, ONE, 1)];
+        let value = FixedU64(800_000_000);
+        let components = vec![ComponentValue { id: 4, value }];
+        assert_eq!(
+            weighted_geo(&specs, &components, &[Pillar::P], None).expect("P"),
+            value
+        );
+        assert_eq!(
+            geo_pair((value, FixedU64(ONE)), (FixedU64(500_000_000), FixedU64(0)))
+                .expect("composite"),
+            value
+        );
+        // The residual this guards against is real, not hypothetical: evaluated
+        // the long way round the same input lands one ulp low.
+        let inv = FixedU64x64::ONE
+            .checked_div(q64_from_1e9(value.0).expect("q64"))
+            .expect("inverse");
+        let round_trip = exp2_inverse_down(inv.log2().expect("log2")).expect("exp2");
+        assert_eq!(round_trip.0, value.0 - 1);
+    }
+
+    #[test]
+    fn sq493_contexts_are_paired_with_their_snapshots_through_pruning() {
+        let mut w = renorm_state(&[5, 6, 7], &[(6, vec![3]), (7, vec![3])]);
+        assert!(w.try_state().is_ok());
+        w.prune_before(7);
+        assert_eq!(w.snapshot_contexts.len(), 1);
+        assert_eq!(w.snapshots.len(), 1);
+        assert!(w.try_state().is_ok());
+
+        // A context left behind by a partial prune is a try-state violation, and
+        // a snapshot with no context refuses to settle rather than reading the
+        // absence as "nothing was flagged".
+        let mut orphaned = renorm_state(&[5, 6, 7], &[(6, vec![3]), (7, vec![3])]);
+        orphaned.snapshots.retain(|s| s.epoch != 7);
+        assert_eq!(orphaned.try_state(), Err(Error::TryStateViolation));
+
+        // A snapshot with no context refuses to settle rather than reading the
+        // absence as "nothing was flagged". The streak here is carried by epochs
+        // 5 and 6, so stripping 7's context leaves a live drop set whose second
+        // recompute has no inputs — the state this can only reach by corruption.
+        let mut stripped = renorm_state(&[5, 6, 7], &[(5, vec![3]), (6, vec![3])]);
+        stripped.snapshot_contexts.retain(|c| c.epoch != 7);
+        assert_eq!(stripped.try_state(), Err(Error::TryStateViolation));
+        assert_eq!(
+            stripped.compute_settlement(5, 1),
+            Err(Error::MissingSnapshotContext)
+        );
+    }
     #[test]
     fn metric_spec_registration_enforces_activation_disciplines_and_weight_sums() {
         let mut w = WelfareState::new();
@@ -1551,6 +2422,7 @@ mod tests {
                 1,
                 healthy_components(),
                 FixedU64(ONE),
+                Vec::new(),
                 &WelfareParams::DEFAULT,
             ),
             Ok(FixedU64(ONE))
@@ -1644,6 +2516,7 @@ mod tests {
                 1,
                 healthy_components(),
                 FixedU64(ONE),
+                Vec::new(),
                 &WelfareParams::DEFAULT,
             ),
             Err(Error::SpecNotActive)
@@ -1668,6 +2541,7 @@ mod tests {
                 1,
                 healthy_components(),
                 FixedU64(ONE),
+                Vec::new(),
                 &WelfareParams::DEFAULT,
             )
             .unwrap();
@@ -1688,6 +2562,7 @@ mod tests {
                 1,
                 healthy_components(),
                 FixedU64(ONE),
+                Vec::new(),
                 &WelfareParams::DEFAULT,
             )
             .is_ok());
@@ -1966,14 +2841,29 @@ mod tests {
                 1,
                 comps.clone(),
                 FixedU64(ONE + 1),
+                Vec::new(),
                 &WelfareParams::DEFAULT,
             ),
             Err(Error::ValueOutOfRange)
         );
-        w.record_snapshot(7, 1, comps.clone(), FixedU64(ONE), &WelfareParams::DEFAULT)
-            .unwrap();
+        w.record_snapshot(
+            7,
+            1,
+            comps.clone(),
+            FixedU64(ONE),
+            Vec::new(),
+            &WelfareParams::DEFAULT,
+        )
+        .unwrap();
         assert_eq!(
-            w.record_snapshot(7, 1, comps, FixedU64(ONE), &WelfareParams::DEFAULT),
+            w.record_snapshot(
+                7,
+                1,
+                comps,
+                FixedU64(ONE),
+                Vec::new(),
+                &WelfareParams::DEFAULT
+            ),
             Err(Error::DuplicateSnapshot)
         );
     }
@@ -2003,10 +2893,24 @@ mod tests {
                 value: FixedU64(ONE),
             },
         ];
-        w.record_snapshot(11, 1, comps.clone(), FixedU64(ONE), &WelfareParams::DEFAULT)
-            .unwrap();
-        w.record_snapshot(12, 1, comps, FixedU64(ONE), &WelfareParams::DEFAULT)
-            .unwrap();
+        w.record_snapshot(
+            11,
+            1,
+            comps.clone(),
+            FixedU64(ONE),
+            Vec::new(),
+            &WelfareParams::DEFAULT,
+        )
+        .unwrap();
+        w.record_snapshot(
+            12,
+            1,
+            comps,
+            FixedU64(ONE),
+            Vec::new(),
+            &WelfareParams::DEFAULT,
+        )
+        .unwrap();
         assert_eq!(w.compute_settlement(10, 1), Ok(FixedU64(ONE)));
         assert_eq!(w.compute_settlement(10, 2), Err(Error::MissingComponent));
     }
