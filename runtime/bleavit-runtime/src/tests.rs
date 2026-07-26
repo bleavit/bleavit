@@ -15133,7 +15133,9 @@ fn six_referenda_tracks_have_normative_schedules_and_origins() {
     let expected = [
         (0, 2, 14, 2, 14, 10_000),
         (1, 2, 21, 3, 28, 25_000),
-        (2, 7, 28, 7, 84, 50_000),
+        // SQ-234: the entrenched enactment delay is four epochs at the
+        // `epoch.length` ceiling (42 d), not four at its 21 d default.
+        (2, 7, 28, 7, 4 * 42, 50_000),
         (3, 1, 7, 1, 2, 5_000),
         (4, 1, 7, 1, 0, 1_000),
         (5, 0, 7, 1, 0, 5_000),
@@ -15154,6 +15156,33 @@ fn six_referenda_tracks_have_normative_schedules_and_origins() {
             enactment * kernel::BLOCKS_PER_DAY
         );
         assert_eq!(track.info.decision_deposit, deposit * currency::VIT);
+    }
+
+    // SQ-234: the entrenched delay must be **derived** from the `epoch.length`
+    // ceiling, not merely equal to a number that happens to match it today. 06
+    // §2.4 buys four epoch boundaries of priced second opinion, and a
+    // block-denominated track cannot count boundaries — so the delay is sized
+    // against the largest legal epoch, which is what makes "at least four"
+    // unconditional. Reading it off the same constant the registry ceiling is
+    // seeded from keeps a future ceiling change from silently shortening it.
+    let entrenched_track = crate::configs::TRACKS
+        .iter()
+        .find(|track| track.id == 2)
+        .expect("the entrenched track");
+    assert_eq!(
+        entrenched_track.info.min_enactment_period,
+        4 * kernel::PRODUCTION_MAX_EPOCH_LENGTH_BLOCKS
+    );
+    // Four boundaries at the ceiling, and strictly more at any shorter legal
+    // length — including the 14 d floor, where the same delay spans 12.
+    for length in [
+        kernel::PRODUCTION_MAX_EPOCH_LENGTH_BLOCKS,
+        kernel::PRODUCTION_MIN_EPOCH_LENGTH_BLOCKS,
+    ] {
+        assert!(
+            entrenched_track.info.min_enactment_period / length >= 4,
+            "the entrenched delay must span >= 4 epoch boundaries at {length} blocks"
+        );
     }
 
     // 07 §11(1) bounds a money-settled round's bond retention by "the track's
@@ -15188,6 +15217,53 @@ fn six_referenda_tracks_have_normative_schedules_and_origins() {
         crate::configs::BleavitTracks::track_for(legacy.caller()),
         Ok(2)
     );
+}
+
+/// SQ-234: 06 §2.4 buys the entrenched track **four epoch boundaries** of priced
+/// second opinion, and a block-denominated `TrackInfo` cannot count boundaries.
+/// The delay is therefore sized against the largest legal `epoch.length`, read
+/// here from the **live registry record** rather than from a constant, so a
+/// reseeded ceiling cannot silently shorten the guarantee. The record is
+/// kernel-bounded, which is what makes it a ceiling no governance path can raise.
+#[test]
+fn entrenched_enactment_spans_four_epochs_at_every_legal_epoch_length() {
+    development_ext().execute_with(|| {
+        let record = pallet_constitution::Params::<Runtime>::get(pallet_constitution::key16(
+            b"epoch.length",
+        ))
+        .expect("epoch.length is genesis-seeded");
+        assert!(
+            record.kernel_bounded,
+            "the boundary guarantee rests on the ceiling being immutable (13 rule 7)"
+        );
+        let (min, max) = match (record.min, record.max) {
+            (
+                pallet_constitution::ParamValue::U32(min),
+                pallet_constitution::ParamValue::U32(max),
+            ) => (min, max),
+            other => panic!("epoch.length bounds must be u32: {other:?}"),
+        };
+        let delay = crate::configs::TRACKS
+            .iter()
+            .find(|track| track.id == 2)
+            .expect("the entrenched track")
+            .info
+            .min_enactment_period;
+        assert!(min < max, "a governable range is what makes this necessary");
+        // The invariant that holds on **every** profile: the delay covers at
+        // least four maximum-length epochs, hence at least four at any shorter
+        // legal length too, since shortening only adds boundaries.
+        assert!(4 * max <= delay);
+        assert!(delay / min >= 4);
+        // Exact equality is a production-profile fact and is asserted only
+        // there: `fast-timing` seeds the registry ceiling at `42 · FAST_DAY`
+        // while the delay deliberately stays at its release value (every 06 §2.1
+        // track period does), so the ratio is far larger than four in that build
+        // — safe, but not equal (Codex review, PR #178 P2).
+        if max == kernel::PRODUCTION_MAX_EPOCH_LENGTH_BLOCKS {
+            assert_eq!(delay / max, 4);
+        }
+    });
 }
 
 /// 13 §3.4 (SQ-229): `UndecidingTimeout` MUST be at least the longest track
