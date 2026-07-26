@@ -52,7 +52,10 @@ parameter_types! {
     /// Monotonic referendum index handed back by the review scheduler.
     pub static NextReferendum: u32 = 100;
     pub static ReviewSchedulingFails: bool = false;
-    pub static ReviewRefundFailsFor: Option<u32> = None;
+    /// Referenda whose refund fails, modelling a stuck deposit refund. A set,
+    /// not one id: SQ-500's rotation only matters once a *whole batch* of
+    /// reviews fails to settle, so a single-id hook cannot express the case.
+    pub static ReviewRefundFailsFor: Vec<u32> = Vec::new();
     pub static ScheduledReviews: Vec<(crate::ActionId, ReviewVerdict, u32)> = Vec::new();
     pub static CancelledReviews: Vec<u32> = Vec::new();
     pub static RefundedReviews: Vec<u32> = Vec::new();
@@ -180,7 +183,7 @@ impl GuardianReviewScheduler for TestScheduler {
     }
 
     fn refund_review(referendum: u32) -> Result<(), sp_runtime::DispatchError> {
-        if ReviewRefundFailsFor::get() == Some(referendum) {
+        if ReviewRefundFailsFor::get().contains(&referendum) {
             return Err(sp_runtime::DispatchError::Other(
                 "review refund unavailable",
             ));

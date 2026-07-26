@@ -481,12 +481,12 @@ class RepositoryTests(unittest.TestCase):
             {
                 # Fixture unsatisfiable in this runtime (weight-preservation.toml).
                 "pallet_assets": ["migration_v2_foreign_asset_set_reserve_weight"],
-                # Deliberately hand-written envelope, held above the one-settle
-                # measurement until SQ-500 bounds the sweep
-                # (generated-weight-overrides.toml). The marker appeared when the
-                # pallet was regenerated and the tool preserved it — which is the
-                # behaviour that keeps the SQ-500 undercharge from getting worse.
-                "pallet_guardian": ["on_initialize"],
+                # `pallet_guardian::on_initialize` was here until SQ-500. It held a
+                # hand-written envelope above a fixture that settled one review,
+                # because the sweep had no per-block bound. The bound exists now
+                # (13 §2 `GuardianMaintenanceBatch`), the fixture saturates it, and
+                # the function is a fresh measurement — so it needs neither the
+                # preserved marker nor its override entry.
             },
         )
 

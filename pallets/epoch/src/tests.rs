@@ -3,6 +3,7 @@ use crate::*;
 use epoch_core::{CohortInfo as CoreCohort, EpochParams, Origin as CoreOrigin};
 use frame_support::{
     assert_noop, assert_ok,
+    dispatch::{GetDispatchInfo, Pays},
     traits::{Hooks, StorageVersion},
     weights::Weight,
     BoundedVec,
@@ -13,6 +14,23 @@ use futarchy_primitives::{
 };
 use parity_scale_codec::{Compact, Decode, Encode};
 use sp_runtime::DispatchError;
+
+/// `assert_noop!` for the three cranks that return `DispatchResultWithPostInfo`
+/// (SQ-499). Deliberately **not** named `assert_noop!`: shadowing frame's macro
+/// would make the three post-info cranks behave differently from every other
+/// call under the same spelling, which is exactly the kind of invisible
+/// divergence a reader cannot see at the call site.
+///
+/// Semantics are frame's: storage unchanged *and* the expected error, with the
+/// post-dispatch weight ignored (`assert_noop!` cannot compare it, and the
+/// refund itself is asserted by the `sq499_*` tests).
+macro_rules! assert_crank_noop {
+    ($call:expr, $error:expr $(,)?) => {{
+        frame_support::assert_storage_noop!({
+            frame_support::assert_err_ignore_postinfo!($call, $error);
+        });
+    }};
+}
 
 fn phase_block(epoch: EpochId, numerator: BlockNumber) -> BlockNumber {
     let length = ParamsValue::get().epoch_length;
@@ -177,6 +195,115 @@ fn tick_fully_drains_a_twenty_one_epoch_backlog_in_eleven_calls() {
         assert!(WelfareTrafficBacklog::get().is_empty());
         assert_eq!(WelfareTrafficPrunes::get().len(), 11);
         assert!(WelfareTrafficPrunes::get().iter().all(|epoch| *epoch == 41));
+    });
+}
+
+#[test]
+fn sq499_tick_without_epoch_crossing_refunds_collator_compensation_exactly() {
+    // SQ-499: a steady-state permissionless tick must not pay for epoch-boundary work.
+    new_test_ext().execute_with(|| {
+        let batch = tick_batch(Vec::new());
+        let charged = crate::Call::<Test>::tick {
+            pids: batch.clone(),
+        }
+        .get_dispatch_info()
+        .call_weight;
+        let compensation = <() as crate::WeightInfo>::collator_compensation();
+
+        let post = Epoch::tick(RuntimeOrigin::signed(keeper()), batch)
+            .expect("steady-state tick succeeds");
+
+        assert_eq!(post.pays_fee, Pays::Yes);
+        assert_eq!(
+            post.actual_weight,
+            Some(charged.saturating_sub(compensation))
+        );
+        assert!(
+            post.actual_weight
+                .is_some_and(|actual| actual.all_lt(charged)),
+            "the non-crossing tick must refund the compensation addend"
+        );
+    });
+}
+
+#[test]
+fn sq499_epoch_crossing_cranks_do_not_refund_collator_compensation() {
+    // SQ-499: every clock-syncing crank keeps its full pre-charge when it crosses an epoch.
+    new_test_ext().execute_with(|| {
+        seed_idle_clock(0);
+        let batch = tick_batch(Vec::new());
+        let charged = crate::Call::<Test>::tick {
+            pids: batch.clone(),
+        }
+        .get_dispatch_info()
+        .call_weight;
+        set_block(ParamsValue::get().epoch_length);
+
+        let post =
+            Epoch::tick(RuntimeOrigin::signed(keeper()), batch).expect("crossing tick succeeds");
+
+        assert_eq!(EpochOf::<Test>::get().index, 1);
+        assert_eq!(post.actual_weight, Some(charged));
+    });
+
+    new_test_ext().execute_with(|| {
+        let mut state = decision_state(1, ProposalClass::Param);
+        state.epoch.phase = EpochPhase::Housekeeping;
+        state.epoch.phase_start_block = phase_block(0, phase_offsets::HOUSEKEEPING_NUM);
+        state.proposals[0].decide_at = ParamsValue::get().epoch_length;
+        assert_ok!(Epoch::seed(state));
+        let charged = crate::Call::<Test>::decide { pid: 1 }
+            .get_dispatch_info()
+            .call_weight;
+        set_block(ParamsValue::get().epoch_length);
+
+        let post =
+            Epoch::decide(RuntimeOrigin::signed(keeper()), 1).expect("crossing decide succeeds");
+
+        assert_eq!(EpochOf::<Test>::get().index, 1);
+        assert_eq!(post.actual_weight, Some(charged));
+    });
+
+    new_test_ext().execute_with(|| {
+        assert_ok!(Epoch::seed(cohort_state(
+            1,
+            0,
+            CohortStatus::Measuring { until_epoch: 2 },
+        )));
+        let charged = crate::Call::<Test>::settle_cohort { epoch: 0, batch: 1 }
+            .get_dispatch_info()
+            .call_weight;
+        set_block(phase_block(3, phase_offsets::HOUSEKEEPING_NUM));
+
+        let post = Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1)
+            .expect("crossing settlement succeeds");
+
+        assert_eq!(EpochOf::<Test>::get().index, 3);
+        assert_eq!(post.actual_weight, Some(charged));
+    });
+}
+
+#[test]
+fn sq499_post_decision_error_refunds_collator_compensation() {
+    // SQ-499: errors after the payout decision share the same exact refund calculation.
+    new_test_ext().execute_with(|| {
+        let batch = tick_batch(vec![99]);
+        let charged = crate::Call::<Test>::tick {
+            pids: batch.clone(),
+        }
+        .get_dispatch_info()
+        .call_weight;
+        let compensation = <() as crate::WeightInfo>::collator_compensation();
+
+        let error = Epoch::tick(RuntimeOrigin::signed(keeper()), batch)
+            .expect_err("an unknown proposal must fail");
+
+        assert_eq!(error.error, Error::<Test>::UnknownProposal.into());
+        assert_eq!(error.post_info.pays_fee, Pays::Yes);
+        assert_eq!(
+            error.post_info.actual_weight,
+            Some(charged.saturating_sub(compensation))
+        );
     });
 }
 
@@ -784,16 +911,16 @@ fn signed_keeper_calls_reject_root_and_none() {
             assert_noop!(Epoch::withdraw(origin, 1), DispatchError::BadOrigin);
         }
         for origin in [RuntimeOrigin::root(), RuntimeOrigin::none()] {
-            assert_noop!(
+            assert_crank_noop!(
                 Epoch::tick(origin, tick_batch(Vec::new())),
                 DispatchError::BadOrigin
             );
         }
         for origin in [RuntimeOrigin::root(), RuntimeOrigin::none()] {
-            assert_noop!(Epoch::decide(origin, 1), DispatchError::BadOrigin);
+            assert_crank_noop!(Epoch::decide(origin, 1), DispatchError::BadOrigin);
         }
         for origin in [RuntimeOrigin::root(), RuntimeOrigin::none()] {
-            assert_noop!(Epoch::settle_cohort(origin, 0, 1), DispatchError::BadOrigin);
+            assert_crank_noop!(Epoch::settle_cohort(origin, 0, 1), DispatchError::BadOrigin);
         }
     });
 }
@@ -2654,7 +2781,7 @@ fn tick_drives_qualify_and_seed_with_bounded_idempotent_items() {
         );
         assert!(SeamCalls::get().contains(&SeamCall::CreateVault(1, 1)));
         assert_eq!(last_epoch_event(), Some(Event::MarketsOpened(1)));
-        assert_noop!(
+        assert_crank_noop!(
             Epoch::tick(RuntimeOrigin::signed(keeper()), tick_batch(vec![99])),
             Error::<Test>::UnknownProposal
         );
@@ -2716,7 +2843,7 @@ fn qualification_pin_failure_rolls_back_and_remains_keeper_retriable() {
         ));
         PreimageRequestFails::set(true);
         set_block(phase_block(0, phase_offsets::QUALIFY_NUM));
-        assert_noop!(
+        assert_crank_noop!(
             Epoch::tick(RuntimeOrigin::signed(keeper()), tick_batch(vec![1])),
             Error::<Test>::BadDecisionInput
         );
@@ -2791,7 +2918,7 @@ fn keeper_rebate_is_exactly_once_for_useful_tick_and_zero_for_noop_or_error() {
             RuntimeOrigin::signed(keeper()),
             tick_batch(vec![1]),
         ));
-        assert_noop!(
+        assert_crank_noop!(
             Epoch::tick(RuntimeOrigin::signed(keeper()), tick_batch(vec![99])),
             Error::<Test>::UnknownProposal
         );
@@ -3052,7 +3179,7 @@ fn decision_extension_is_once_only_and_keeps_creation_schedule_frozen() {
 
         // The same window cannot be extended again, and the too-early retry does
         // not earn another rebate.
-        assert_noop!(
+        assert_crank_noop!(
             Epoch::decide(RuntimeOrigin::signed(keeper()), 1),
             Error::<Test>::BadPhase
         );
@@ -3116,7 +3243,7 @@ fn market_extension_and_close_registration_failures_are_atomic_g1() {
         let before_state = Epoch::epoch_state().encode();
         let before_events = System::events();
         let before_calls = SeamCalls::get();
-        assert_noop!(
+        assert_crank_noop!(
             Epoch::decide(RuntimeOrigin::signed(keeper()), 1),
             DispatchError::Other("injected epoch seam failure")
         );
@@ -3131,7 +3258,7 @@ fn market_extension_and_close_registration_failures_are_atomic_g1() {
         let before_state = Epoch::epoch_state().encode();
         let before_events = System::events();
         let before_calls = SeamCalls::get();
-        assert_noop!(
+        assert_crank_noop!(
             Epoch::decide(RuntimeOrigin::signed(keeper()), 1),
             DispatchError::Other("injected epoch seam failure")
         );
@@ -3657,7 +3784,7 @@ fn settlement_is_cursor_resumable_and_welfare_is_the_only_settlement_seam() {
                 (keeper(), CrankClass::DecisionCritical),
             ]
         );
-        assert_noop!(
+        assert_crank_noop!(
             Epoch::settle_cohort(
                 RuntimeOrigin::signed(keeper()),
                 0,
@@ -3665,11 +3792,11 @@ fn settlement_is_cursor_resumable_and_welfare_is_the_only_settlement_seam() {
             ),
             Error::<Test>::BatchTooLarge
         );
-        assert_noop!(
+        assert_crank_noop!(
             Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 0),
             Error::<Test>::BatchTooLarge
         );
-        assert_noop!(
+        assert_crank_noop!(
             Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1),
             Error::<Test>::BadState
         );
@@ -3991,7 +4118,7 @@ fn unsampled_gate_window_cannot_latch_before_housekeeping() {
         set_block(phase_block(3, phase_offsets::TRADE_NUM));
         RecordKeeperRebates::set(true);
 
-        assert_noop!(
+        assert_crank_noop!(
             Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1),
             Error::<Test>::BadPhase
         );
@@ -4012,7 +4139,7 @@ fn an_existing_oracle_deadlock_latch_survives_out_of_phase_polling() {
         assert!(PendingOracleVoids::<Test>::contains_key(0));
 
         set_block(phase_block(4, phase_offsets::TRADE_NUM));
-        assert_noop!(
+        assert_crank_noop!(
             Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1),
             Error::<Test>::BadPhase
         );
@@ -4422,7 +4549,7 @@ fn ledger_and_welfare_failures_are_atomic_g1() {
         let before_state = Epoch::epoch_state().encode();
         let before_events = System::events();
         let before_calls = SeamCalls::get();
-        assert_noop!(
+        assert_crank_noop!(
             Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 2),
             Error::<Test>::Welfare
         );
@@ -4442,7 +4569,7 @@ fn ledger_and_welfare_failures_are_atomic_g1() {
         let before_state = Epoch::epoch_state().encode();
         let before_events = System::events();
         let before_calls = SeamCalls::get();
-        assert_noop!(
+        assert_crank_noop!(
             Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 2),
             Error::<Test>::Welfare
         );

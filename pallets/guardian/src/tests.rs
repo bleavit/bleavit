@@ -48,7 +48,7 @@ fn approve_to_dispatch() {
 fn reset_review_scheduler() {
     NextReferendum::set(100);
     ReviewSchedulingFails::set(false);
-    ReviewRefundFailsFor::set(None);
+    ReviewRefundFailsFor::set(Vec::new());
     ScheduledReviews::set(Vec::new());
     CancelledReviews::set(Vec::new());
     RefundedReviews::set(Vec::new());
@@ -2095,7 +2095,7 @@ fn three_concurrent_failed_reviews_settle_independently_with_bounded_liability()
 
         // Isolate the middle review's refund failure. The first and third
         // reviews must commit independently instead of sharing one rollback.
-        ReviewRefundFailsFor::set(Some(102));
+        ReviewRefundFailsFor::set(vec![102]);
         set_epoch(3);
         run_to_block(3);
         assert!(FailedActions::<Test>::contains_key(0));
@@ -2131,7 +2131,7 @@ fn three_concurrent_failed_reviews_settle_independently_with_bounded_liability()
 
         // Retrying only the failed review consumes the remaining bounded
         // liability. No exact transfer can demand more than the live hold.
-        ReviewRefundFailsFor::set(None);
+        ReviewRefundFailsFor::set(Vec::new());
         run_to_block(4);
         assert!(FailedActions::<Test>::contains_key(0));
         assert!(FailedActions::<Test>::contains_key(1));
@@ -2386,5 +2386,205 @@ fn uphold_veto_is_delay_only_and_atomic_with_the_epoch_callback() {
             Guardian::uphold_veto(values_origin(), 0),
             Error::<Test>::NotDelayAction
         );
+    });
+}
+
+/// 13 §2 · `GuardianMaintenanceBatch` (06 §5.4): the mandatory maintenance hook
+/// settles at most one batch of overdue reviews per block and **carries** the
+/// remainder to the next block — the resumable `ReapBatch` shape, never a
+/// rejection and never a skip.
+///
+/// The direction matters (G-1, R-7): dropping a due review would forfeit an
+/// accountability action outright, while deferring one only delays a slash. That
+/// is the same asymmetry 06 §5.4's SQ-45(c) ruling turns on.
+#[test]
+fn sq500_maintenance_settles_one_batch_per_block_and_carries_the_remainder() {
+    // limit-coverage: GuardianMaintenanceBatch
+    new_test_ext().execute_with(|| {
+        reset_review_scheduler();
+        set_triggers(TriggerState {
+            gate_breach: true,
+            ..TriggerState::none()
+        });
+        // One review more than the bound, all sharing a deadline — the shape a
+        // council produces by acting several times inside one epoch, since
+        // `deadline_epoch = current_epoch + review_deadline_epochs`.
+        let over = crate::GUARDIAN_MAINTENANCE_BATCH + 1;
+        for action in 0..over {
+            assert_ok!(Guardian::propose_action(
+                RuntimeOrigin::signed(acct(1)),
+                GuardianPower::SuspendOnGate,
+                hash(action as u8),
+            ));
+            for member in 2..=5u8 {
+                assert_ok!(Guardian::approve_action(
+                    RuntimeOrigin::signed(acct(member)),
+                    action,
+                ));
+            }
+        }
+        assert_eq!(ReviewDeadlines::<Test>::get().len(), over as usize);
+
+        set_epoch(3);
+        let start = System::block_number() as u32;
+        run_to_block(start + 1);
+
+        // Exactly one batch settled.
+        assert_eq!(
+            FailedActions::<Test>::count(),
+            crate::GUARDIAN_MAINTENANCE_BATCH
+        );
+        for action in 0..crate::GUARDIAN_MAINTENANCE_BATCH {
+            assert!(FailedActions::<Test>::contains_key(action));
+        }
+        // The remainder was carried, not dropped: its review record is still
+        // open and still unsettled, so its accountability action survives
+        // (`remaining_after_first_maintenance_batch`).
+        let carried = crate::GUARDIAN_MAINTENANCE_BATCH;
+        assert!(!FailedActions::<Test>::contains_key(carried));
+        assert!(ReviewDeadlines::<Test>::get()
+            .iter()
+            .any(|review| review.action_id == carried
+                && !review.ratified
+                && !review.recall_scheduled));
+        assert_ok!(Guardian::do_try_state());
+
+        // ... and it settles on the very next block, unprompted.
+        run_to_block(start + 2);
+        assert!(FailedActions::<Test>::contains_key(carried));
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+/// SQ-500: the failed-action reap sweep is bounded per block **and** resumes
+/// from a stored cursor.
+///
+/// The cursor is the part that is easy to get wrong: `FailedActions` iterates in
+/// hash order, so a plain `take(GuardianMaintenanceBatch)` would re-examine the
+/// same prefix every block and starve every key behind it — a bound that looks
+/// correct and silently never reaps most of the map.
+#[test]
+fn sq500_failed_action_reap_is_bounded_and_drains_every_key() {
+    // limit-coverage: GuardianMaintenanceBatch
+    new_test_ext().execute_with(|| {
+        let seeded = crate::GUARDIAN_MAINTENANCE_BATCH * 3;
+        for action in 0..seeded {
+            FailedActions::<Test>::insert(
+                action,
+                crate::pallet::FailedAction {
+                    approvers: [[0u8; 32]; GUARDIAN_SEATS],
+                    approver_count: 0,
+                    failed_epoch: 0,
+                    recall_referendum: None,
+                },
+            );
+        }
+        // Past the four-epoch retention, so every seeded row is reapable.
+        set_epoch(4);
+        let start = System::block_number() as u32;
+
+        // One batch per block, no more — `remaining_after_first_maintenance_batch`
+        // stays in the map instead of being reaped or skipped.
+        run_to_block(start + 1);
+        assert_eq!(
+            FailedActions::<Test>::count(),
+            seeded - crate::GUARDIAN_MAINTENANCE_BATCH
+        );
+        run_to_block(start + 2);
+        assert_eq!(
+            FailedActions::<Test>::count(),
+            seeded - 2 * crate::GUARDIAN_MAINTENANCE_BATCH
+        );
+
+        // Every key drains — nothing behind the first batch is starved.
+        run_to_block(start + 3);
+        assert_eq!(FailedActions::<Test>::count(), 0);
+        // That third sweep examined a *full* batch that happened to end at the
+        // last key, so the cursor is still set. The next sweep finds nothing
+        // after it, runs short, and wraps to the head — so a row inserted behind
+        // the cursor waits at most one block, never indefinitely.
+        assert!(FailedActionReapCursor::<Test>::get().is_some());
+        run_to_block(start + 4);
+        assert!(FailedActionReapCursor::<Test>::get().is_none());
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+/// SQ-500 (tightened after review): the settle batch **rotates**, so a review
+/// whose settlement persistently fails cannot hide the reviews behind it.
+///
+/// This is the failure the bound introduced and the cursor removes. Settling is
+/// what drops a review out of the overdue filter, so a fixed `take(n)` re-selects
+/// the same prefix every block — and records that never settle stay in that
+/// prefix forever. With a prefix of failures as wide as the batch, every valid
+/// overdue review behind them would be suppressed permanently: a skip wearing the
+/// shape of a carry, which 06 §5.4 forbids.
+#[test]
+fn sq500_maintenance_batch_rotates_past_reviews_that_cannot_settle() {
+    // limit-coverage: GuardianMaintenanceBatch
+    new_test_ext().execute_with(|| {
+        reset_review_scheduler();
+        set_triggers(TriggerState {
+            gate_breach: true,
+            ..TriggerState::none()
+        });
+        // A batch-wide prefix of reviews whose deposit refund is stuck, so
+        // `restore_due_review_fronting` fails and `settle_failed_review` then
+        // refuses on the residual it left (G-1: never slash against two
+        // deposits). They stay overdue every block, and — unlike a hand-forged
+        // record — the state stays invariant-valid, so this is the reachable
+        // shape of the problem rather than an already-corrupt chain.
+        let batch = crate::GUARDIAN_MAINTENANCE_BATCH;
+        let mut stuck = Vec::new();
+        for action in 0..batch {
+            assert_ok!(Guardian::propose_action(
+                RuntimeOrigin::signed(acct(1)),
+                GuardianPower::SuspendOnGate,
+                hash(action as u8),
+            ));
+            for member in 2..=5u8 {
+                assert_ok!(Guardian::approve_action(
+                    RuntimeOrigin::signed(acct(member)),
+                    action,
+                ));
+            }
+            stuck.push(ReviewReferenda::<Test>::get(action).expect("review scheduled"));
+        }
+        ReviewRefundFailsFor::set(stuck);
+
+        // ... and behind them, a batch of reviews that settle normally.
+        let first_real = batch;
+        for index in 0..batch {
+            let action = first_real + index;
+            assert_ok!(Guardian::propose_action(
+                RuntimeOrigin::signed(acct(1)),
+                GuardianPower::SuspendOnGate,
+                hash(index as u8),
+            ));
+            for member in 2..=5u8 {
+                assert_ok!(Guardian::approve_action(
+                    RuntimeOrigin::signed(acct(member)),
+                    action,
+                ));
+            }
+        }
+
+        set_epoch(3);
+        let start = System::block_number() as u32;
+
+        // Block one spends its whole batch on the unsettleable prefix.
+        run_to_block(start + 1);
+        assert_eq!(FailedActions::<Test>::count(), 0);
+
+        // Block two rotates past them and settles the real ones — the
+        // `remaining_after_first_maintenance_batch` carry, reached by rotation
+        // rather than by the failing prefix draining. Without the cursor this
+        // block would re-select that same prefix forever.
+        run_to_block(start + 2);
+        assert_eq!(FailedActions::<Test>::count(), batch);
+        for index in 0..batch {
+            assert!(FailedActions::<Test>::contains_key(first_real + index));
+        }
+        assert_ok!(Guardian::do_try_state());
     });
 }

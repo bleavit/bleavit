@@ -265,7 +265,11 @@ fn seed_queued_epoch_proposal(
     grace_end: BlockNumber,
     version_constraint: RuntimeVersionConstraint,
 ) -> Result<(), DispatchError> {
-    Epoch::tick(RuntimeOrigin::signed(account(69)), Default::default())?;
+    // SQ-499: `tick` returns post-dispatch info now (it refunds the A13
+    // compensation pre-charge when it did not cross an epoch); this helper only
+    // cares about the error.
+    Epoch::tick(RuntimeOrigin::signed(account(69)), Default::default())
+        .map_err(|error| error.error)?;
     let epoch = pallet_epoch::EpochOf::<Runtime>::get().index;
     let epoch_schedule = pallet_epoch::Schedule::<Runtime>::get();
     let first_market = pid.saturating_mul(10);

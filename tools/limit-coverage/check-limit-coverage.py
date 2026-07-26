@@ -326,6 +326,7 @@ def kernel_keys(cell: str, value: str = "") -> list[str]:
         "settle_cohort",
         "OracleDeadlineCatchup",
         "ComponentReapBatch",
+        "GuardianMaintenanceBatch",
     ]:
         return batch_codes
     if strip_markdown(cell) == "PB-LEDGER-FREEZE":

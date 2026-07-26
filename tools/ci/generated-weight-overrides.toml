@@ -14,7 +14,12 @@
 
 runtime/bleavit-runtime/src/weights/pallet_xcm.rs teleport_assets: protocol-disabled by the production XCM filters (09 §6.2); retains a fail-closed Weight::MAX because no valid benchmark fixture may bypass those filters, and Weight::MAX cannot undercharge
 runtime/bleavit-runtime/src/weights/pallet_xcm.rs execute: protocol-disabled by the production XCM filters (09 §6.2); retains a fail-closed Weight::MAX for the same reason as teleport_assets
-runtime/bleavit-runtime/src/weights/pallet_guardian.rs on_initialize: pallet-fallback envelope (1.95 ms / 220 r / 150 w) kept ABOVE the value the current fixture measures, because that fixture seeds MAX_REVIEWS reviews with `ratified = true` and `run_maintenance`'s overdue filter excludes them — so it measures ONE settle where production can run 128. Read this entry as "above the measured value", NOT as "sufficient": at >=10 storage reads per settle the saturated case needs >=1,280 reads against the 220 declared here, so the envelope is short by roughly 6x and no weight value is the right fix for a per-block hook that size. Owner: **SQ-500** (bound the sweep per block with defined overload behaviour, runtime-code rule 3), which supersedes SQ-490 item (4)'s "extend the fixture" framing — extending the fixture alone would only make the undercharge visible, not safe. Regenerating pallet_guardian before SQ-500 lands replaces this envelope with the one-settle measurement and makes the undercharge worse.
+# (SQ-500, closed 2026-07-26) `pallet_guardian::on_initialize` was here: a
+# hand-written 1.95 ms / 220 r / 150 w envelope held above a fixture that
+# measured ONE settle where production could run 128, because the sweep had no
+# per-block bound and no weight value is the right fix for that. The bound now
+# exists (13 §2 `GuardianMaintenanceBatch`, 06 §5.4) and the fixture saturates
+# it, so the function is a real measurement and needs no override.
 
 # NOTE (SQ-490): the gate checks two things, and only the second was in the
 # first draft of it. (1) the generator's `Minimum execution time:` line must be
