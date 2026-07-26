@@ -932,6 +932,23 @@ pub mod kernel {
     /// Release-runtime epoch floor used by archive-capacity derivations. Keep
     /// this production literal separate from the fast-timing test-only floor.
     pub const PRODUCTION_MIN_EPOCH_LENGTH_BLOCKS: u32 = 201_600;
+    /// Release-runtime epoch **ceiling** — 42 days, the other end of 13 §1's
+    /// `epoch.length` range, and its single compile-time home.
+    ///
+    /// It is a kernel constant for the same reason the floor above is: 13 rule 7
+    /// marks `epoch.length` kernel-bounded, so its entire governance-metadata
+    /// tuple is genesis-fixed and `amend_registry` refuses it. `constitution-core`
+    /// seeds the production registry maximum from this value, and 06 §2.1's
+    /// `entrenched` enactment delay is sized against it (`4 ×`, SQ-234) — a
+    /// block-denominated governance track has to be sized against the largest
+    /// legal epoch, because it cannot count epoch boundaries.
+    ///
+    /// Deliberately has **no** `fast-timing` variant, unlike the floor. Every
+    /// 06 §2.1 track period stays at its release value in that build so the
+    /// governance, emergency and execution windows cannot fire inside a
+    /// minute-scale drill; the compressed *registry* ceiling is a separate,
+    /// registry-side seed.
+    pub const PRODUCTION_MAX_EPOCH_LENGTH_BLOCKS: u32 = 604_800;
     /// Minimum META-amendable epoch length (14 days; 05 §3.1 / 13 §1).
     ///
     /// The default-off `fast-timing` feature (SQ-128) lowers this floor to a
