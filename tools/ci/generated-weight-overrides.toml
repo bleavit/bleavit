@@ -1,0 +1,35 @@
+# Deliberate hand-written weights inside frame-omni-bencher-generated files.
+#
+# 15 §4.5 forbids these by default: the generator does not emit them, so a
+# regeneration deletes them, and the deletion presents as a weight *decrease* —
+# invisible to a growth-only gate. Every entry here is therefore a live hazard
+# with a named owner, not a settled exception.
+#
+# Format (one function per line):
+# <repo-relative-weight-path> <function>: <non-empty justification>
+#
+# Entries expire mechanically: `check-generated-weights.py` fails once the
+# function carries a measured value or disappears, so an override cannot outlive
+# its reason.
+
+runtime/bleavit-runtime/src/weights/pallet_xcm.rs teleport_assets: protocol-disabled by the production XCM filters (09 §6.2); retains a fail-closed Weight::MAX because no valid benchmark fixture may bypass those filters, and Weight::MAX cannot undercharge
+runtime/bleavit-runtime/src/weights/pallet_xcm.rs execute: protocol-disabled by the production XCM filters (09 §6.2); retains a fail-closed Weight::MAX for the same reason as teleport_assets
+runtime/bleavit-runtime/src/weights/pallet_guardian.rs on_initialize: SQ-490 — conservative pallet-fallback envelope (1.95 ms / 220 r / 150 w) deliberately kept ABOVE the generated value, because the existing benchmark does not seed B18's saturated per-block veto-join sweep and so measures a lighter hook than production runs. This is a per-block hook, so regenerating pallet_guardian without first extending that fixture would silently undercharge every block. Owner: SQ-490 item (4) — extend the guardian on_initialize benchmark to the saturated sweep, then drop this entry.
+
+# NOTE (SQ-490): the gate checks two things, and only the second was in the
+# first draft of it. (1) the generator's `Minimum execution time:` line must be
+# present, and (2) the body must contain **nothing outside the generator's own
+# grammar** — because a term spliced into an *already generated* function keeps
+# that line, so a marker-only check would pass it. That was literally half of the
+# SQ-490 defect: a hand-written function (no marker) plus three
+# `.saturating_add(Self::collator_compensation())` call sites inside functions
+# that had one. Codex raised it on #180; the grammar check closes it, validated
+# against all 356 real functions with zero false positives.
+#
+# Still out of scope, deliberately: a function *preserved verbatim* from an older
+# generation is indistinguishable from a fresh one — it has the marker and clean
+# grammar. That is staleness, not hand-writing.
+# `pallet_assets::migration_v2_foreign_asset_set_reserve_weight` is exactly that
+# case; its provenance is recorded in a doc comment on the function. Item (4)'s
+# regenerate-and-diff should compare per-function provenance, since a file header
+# date can now be newer than one of its functions.

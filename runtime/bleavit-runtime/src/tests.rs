@@ -4510,6 +4510,60 @@ fn treasury_rebate_payout_moves_real_usdc_from_the_selected_pot() {
     });
 }
 
+/// The A13 payout term must remain composed into every dispatchable that pays
+/// it, and absent from the one that does not.
+///
+/// This exists because the term used to be hand-spliced into the *generated*
+/// weight file, where `frame-omni-bencher` would silently delete it on every
+/// regeneration — and losing it presents as an ordinary weight *decrease*, the
+/// one shape a >10 % growth gate cannot see. SQ-490 moved the composition to
+/// each `#[pallet::weight]` attribute; this test is what makes that structural
+/// rather than a comment asking the next person to re-splice it.
+#[test]
+fn epoch_paying_calls_declare_the_collator_compensation_term() {
+    use frame_support::dispatch::GetDispatchInfo;
+    use pallet_epoch::WeightInfo as _;
+
+    type W = <Runtime as pallet_epoch::Config>::WeightInfo;
+    let payout = W::collator_compensation();
+    assert!(
+        payout.ref_time() > 0 && payout.proof_size() > 0,
+        "a zero payout term would make this test vacuous"
+    );
+
+    let batch = pallet_epoch::TickBatch::truncate_from(vec![1, 2, 3]);
+    let items = batch.len() as u32;
+    let tick = RuntimeCall::Epoch(pallet_epoch::Call::tick { pids: batch });
+    assert_eq!(
+        tick.get_dispatch_info().call_weight,
+        W::tick(items).saturating_add(payout),
+        "tick must charge the payout on top of its benchmarked batch work"
+    );
+
+    let decide = RuntimeCall::Epoch(pallet_epoch::Call::decide { pid: 1 });
+    assert_eq!(
+        decide.get_dispatch_info().call_weight,
+        W::decide().saturating_add(payout),
+        "decide is a clock-syncing entry point and can be the crossing's first caller"
+    );
+
+    let settle = RuntimeCall::Epoch(pallet_epoch::Call::settle_cohort { epoch: 1, batch: 4 });
+    assert_eq!(
+        settle.get_dispatch_info().call_weight,
+        W::settle_cohort(4).saturating_add(payout),
+        "settle_cohort is a clock-syncing entry point and can be the crossing's first caller"
+    );
+
+    // The fourth clock-syncing crank deliberately does not pay, so it must not be
+    // charged either — otherwise every keeper overpays for work this call never does.
+    let drive = RuntimeCall::Epoch(pallet_epoch::Call::drive_oracle_boundaries {});
+    assert_eq!(
+        drive.get_dispatch_info().call_weight,
+        W::drive_oracle_boundaries(),
+        "drive_oracle_boundaries does not pay compensation and must not be charged for it"
+    );
+}
+
 #[test]
 fn treasury_collator_compensation_uses_authored_share_and_dedicated_custody() {
     use crate::configs::treasury_collators_account;
