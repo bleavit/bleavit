@@ -14,8 +14,9 @@ use frame_support::{
         fungibles::{Inspect, Mutate},
         tokens::{Fortitude, Preservation},
         Bounded, ConstBool, ConstU128, ConstU32, ConstU64, ConstU8, Contains, EqualPrivilegeOnly,
-        Get, InstanceFilter, Nothing, OriginTrait, QueryPreimage, StorageInstance, StorePreimage,
-        TransformOrigin, UnfilteredDispatchable, VariantCountOf, VestedTransfer, WithdrawReasons,
+        Get, InstanceFilter, Nothing, OriginTrait, PostInherents, PostTransactions, QueryPreimage,
+        StorageInstance, StorePreimage, TransformOrigin, UnfilteredDispatchable, VariantCountOf,
+        VestedTransfer, WithdrawReasons,
     },
     weights::{
         constants::{
@@ -131,6 +132,12 @@ impl frame_system::Config for Runtime {
     type MaxConsumers = ConstU32<16>;
     type SingleBlockMigrations = SingleBlockMigrations;
     type MultiBlockMigrator = RecoveryAwareMigrations;
+    // 05 §4.3.2's block-production observation. These two are the only hooks
+    // that straddle the inherent/transaction boundary in every execution path,
+    // which is what makes "all extrinsics are inherents" decidable without
+    // enumerating this runtime's inherent providers.
+    type PostInherents = BlockProductionInherentBoundary;
+    type PostTransactions = BlockProductionRecorder;
 }
 
 parameter_types! {
@@ -957,6 +964,17 @@ pub(crate) fn dead_man_detector_hook_weight() -> Weight {
     // first schedule-derived deadline, plus the fixed relay/cause/flag writes.
     Weight::from_parts(50_000_000, 60_000)
         .saturating_add(<Runtime as frame_system::Config>::DbWeight::get().reads_writes(24, 6))
+}
+
+/// The 05 §4.3.2 observation work `pallet_welfare::note_block_production`'s own
+/// benchmark does not cover: attributing the block to its `(epoch, day)` window.
+///
+/// `epoch_and_day_at` reads the live epoch and its schedule, plus the retained
+/// timing ring for a block that predates the live epoch's start — charged at
+/// that three-read worst case. Neither of the two per-block hooks that perform
+/// this work reserves any weight for a caller, so both charge it themselves.
+pub(crate) fn block_production_window_weight() -> Weight {
+    <Runtime as frame_system::Config>::DbWeight::get().reads(3)
 }
 
 /// PB-MIGRATION signal bridge. A failed step stays stuck (the SDK's
@@ -2466,6 +2484,91 @@ impl XcmTrafficRecorder {
     fn record(kind: pallet_welfare::XcmTrafficKind) {
         let (epoch, day) = xcm_traffic_epoch_and_day();
         pallet_welfare::Pallet::<Runtime>::note_xcm_traffic(epoch, day, kind);
+    }
+}
+
+pub struct InherentBoundaryStorage;
+impl StorageInstance for InherentBoundaryStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeWelfare"
+    }
+    const STORAGE_PREFIX: &'static str = "InherentBoundary";
+}
+/// How many extrinsics of the current block were inherents.
+///
+/// Written once per block by [`BlockProductionInherentBoundary`] and read once
+/// per block by [`BlockProductionRecorder`]; never carries meaning across a
+/// block boundary.
+pub type InherentBoundary = frame_support::storage::types::StorageValue<
+    InherentBoundaryStorage,
+    u32,
+    frame_support::pallet_prelude::ValueQuery,
+>;
+
+/// Capture the inherent/transaction boundary for 05 §4.3.2's emptiness rule.
+///
+/// **How an inherent is distinguished.** Not by pallet, not by call name, and
+/// not by a hardcoded count of this runtime's inherent providers — all three
+/// would silently go wrong the moment the runtime gains or reorders one. The
+/// distinction is taken from `frame_executive` itself, which is the only
+/// component that knows it: the executive verifies that every inherent precedes
+/// every transaction (`InvalidInherentPosition` otherwise) and then calls this
+/// hook exactly once per block, in every execution path, at the instant the
+/// last inherent has been applied and before the first transaction can be.
+/// `extrinsic_index()` at that instant *is* the number of inherents in the
+/// block, by construction.
+///
+/// The rule is total: `extrinsic_index()` is initialized to `Some(0)` by
+/// `initialize_block` and the `unwrap_or_default` covers the case it is absent
+/// anyway, so a block with no inherents at all records a boundary of zero and
+/// is classified by its transactions like any other.
+pub struct BlockProductionInherentBoundary;
+impl PostInherents for BlockProductionInherentBoundary {
+    fn post_inherents() {
+        frame_system::Pallet::<Runtime>::register_extra_weight_unchecked(
+            <Runtime as frame_system::Config>::DbWeight::get().reads_writes(1, 1),
+            DispatchClass::Mandatory,
+        );
+        InherentBoundary::put(
+            frame_system::Pallet::<Runtime>::extrinsic_index().unwrap_or_default(),
+        );
+    }
+}
+
+/// Record this block against 05 §4.3.2's numerator once its extrinsic count is
+/// final.
+///
+/// `frame_executive` calls this immediately after `note_finished_extrinsics()`,
+/// which is what publishes `ExtrinsicCount` — so this is the earliest point at
+/// which the classification is decidable, and it precedes `on_idle`/`on_finalize`
+/// so no later hook can change the answer.
+///
+/// **An empty block is one whose extrinsics are all inherents** (05 §4.3.2), so
+/// the test is `extrinsic_count() <= boundary`. A block carrying calls that
+/// failed or were filtered is deliberately **not** empty: it consumed its slot
+/// and its weight, and `note_applied_extrinsic` counts it whatever the dispatch
+/// returned. The comparison is `<=` rather than `==` so that a boundary left
+/// stale-high by any path that skipped the boundary hook reads *empty* — the
+/// direction that understates `U` rather than overstating it (G-1).
+pub struct BlockProductionRecorder;
+impl PostTransactions for BlockProductionRecorder {
+    fn post_transactions() {
+        frame_system::Pallet::<Runtime>::register_extra_weight_unchecked(
+            // The boundary and the extrinsic count, plus the `(epoch, day)`
+            // attribution; the accumulator write itself is benchmarked and
+            // charged by the pallet writer.
+            <Runtime as frame_system::Config>::DbWeight::get()
+                .reads(2)
+                .saturating_add(block_production_window_weight()),
+            DispatchClass::Mandatory,
+        );
+        let empty = frame_system::Pallet::<Runtime>::extrinsic_count() <= InherentBoundary::get();
+        let (epoch, day) = xcm_traffic_epoch_and_day();
+        pallet_welfare::Pallet::<Runtime>::note_block_production(
+            epoch,
+            day,
+            pallet_welfare::BlockProductionSignal::Authored { empty },
+        );
     }
 }
 
@@ -5510,6 +5613,44 @@ fn collator_adequacy(authorship: &AuthorshipWindowInput) -> Option<FixedU64> {
     Some(FixedU64(u64::try_from(scaled).ok()?))
 }
 
+/// 05 §4.3.2 block production `U` over one already-accumulated window.
+///
+/// ```text
+/// U = clamp((non_empty_blocks + 0.25 · empty_blocks) / relay_slots, 0, 1)
+/// ```
+///
+/// The quarter weight is exact in integer arithmetic because numerator and
+/// denominator are both scaled by four; the quotient then floors, which is the
+/// same round-toward-−∞ direction 05 §4.4's determinism discipline applies to
+/// every other welfare term and the conservative one for a liveness score.
+///
+/// A ratio above 1 is legitimate and clamps: two parachain blocks can share a
+/// relay parent (elastic scaling), and a chain producing more blocks than relay
+/// slots is maximum liveness, not an error.
+///
+/// **A zero denominator resolves the component absent**, never 1.0. No relay
+/// slot was observed for the window, so nothing about its liveness is known —
+/// and 05 §4.3.2 exists precisely because the fabricated-1 reading of `U` (the
+/// parachain-block denominator) measures nothing. `record_snapshot` treats a
+/// registered-but-missing input as an error, so the crank fails
+/// status-quo-safe like every other unproduced component (G-1).
+#[allow(dead_code)]
+fn block_production(counters: pallet_welfare::BlockProductionCounters) -> Option<FixedU64> {
+    if counters.relay_slots == 0 {
+        return None;
+    }
+    let one = u128::from(pallet_welfare::ONE);
+    let numerator = u128::from(counters.non_empty_blocks)
+        .checked_mul(4)?
+        .checked_add(u128::from(counters.empty_blocks))?;
+    let denominator = u128::from(counters.relay_slots).checked_mul(4)?;
+    let scaled = numerator
+        .checked_mul(one)?
+        .checked_div(denominator)?
+        .min(one);
+    Some(FixedU64(u64::try_from(scaled).ok()?))
+}
+
 /// The already-resolved per-window inputs [`metric_components`] projects into
 /// 05 §4.3 component values.
 ///
@@ -5547,6 +5688,11 @@ struct MetricComponentInputs {
     /// normative and `record_daily_gate` refuses a day outside it (SQ-181), so
     /// the projection is never asked for a window that does not exist.
     authorship: AuthorshipWindowInput,
+    /// Block-production terms for the window (05 §4.3.2). Absence is carried in
+    /// the counters themselves: a zero relay-slot denominator means the window
+    /// was never observed, and `block_production` resolves it **absent** rather
+    /// than scoring it.
+    block_production: pallet_welfare::BlockProductionCounters,
 }
 
 #[allow(dead_code)]
@@ -5560,20 +5706,41 @@ fn metric_components(
     };
     let x = xcm_health(inputs.counters);
     let k = collator_adequacy(&inputs.authorship);
+    let u = block_production(inputs.block_production);
     specs
         .iter()
         .filter(|spec| {
-            // Honor the 05 §4.3 source column: X is an on-chain counter input.
-            // Registration already rejects a C_onchain spec with an attested
-            // source (`source_matches_pillar`), so this is defense in depth
-            // against emitting a computed value for an oracle-sourced game.
+            // Honor the 05 §4.3 **source column**, not the pillar. This path
+            // computes the deterministic runtime-state components, and 05 §4.3
+            // puts those in two pillars: `C_onchain` and `S` — `U` is an S
+            // component, so a `pillar == COnchain` filter made it structurally
+            // unemittable however it was registered.
+            //
+            // `welfare-core`'s `source_matches_pillar` makes the source test
+            // exactly equivalent for `C_onchain` (S and `C_onchain` are both
+            // on-chain/relay-derived; `C_attested` and `A` are both attested),
+            // so nothing that used to be emitted stops being emitted and no
+            // attested component can ever reach this path. `P` is also
+            // on-chain-sourced and therefore admitted by the filter, and falls
+            // through the `_` arm below unresolved — the same status-quo-safe
+            // outcome it had before.
             spec.activation_epoch <= epoch
-                && spec.pillar == pallet_welfare::Pillar::COnchain
-                && spec.source == pallet_welfare::SourceClass::Onchain
+                && matches!(
+                    spec.source,
+                    pallet_welfare::SourceClass::Onchain
+                        | pallet_welfare::SourceClass::RelayDerived
+                )
         })
         .filter_map(|spec| {
             let value = match spec.id {
                 futarchy_primitives::metric_ids::X => x,
+                // 05 §4.3.2 (A14). `None` means the window recorded no relay
+                // slots at all, so `U` is **unavailable** — absent, never the
+                // fabricated 1.0 the superseded parachain-block reading gave.
+                futarchy_primitives::metric_ids::U => match u {
+                    Some(value) => value,
+                    None => return None,
+                },
                 futarchy_primitives::metric_ids::R => {
                     // 07 §8 (SQ-195). Before the probe arms, `R` is **not
                     // measured**: the `ReserveProbeArmed` latch exists because
@@ -5665,6 +5832,9 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
                     reserve: reserve_probe_epoch_value(epoch)
                         .map(|ok| FixedU64(if ok { pallet_welfare::ONE } else { 0 })),
                     authorship: AuthorshipWindowInput::epoch(epoch),
+                    block_production: pallet_welfare::Pallet::<Runtime>::block_production_epoch(
+                        epoch,
+                    ),
                 },
             );
             components.extend(
@@ -5814,6 +5984,7 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
                 counters: pallet_welfare::Pallet::<Runtime>::xcm_traffic(epoch, day),
                 reserve: reserve_probe_daily_value(epoch, day),
                 authorship: AuthorshipWindowInput::day(epoch, day),
+                block_production: pallet_welfare::Pallet::<Runtime>::block_production(epoch, day),
             },
         )
     }
@@ -8472,7 +8643,15 @@ pub struct ExecutionGuardSystemEvent;
 impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEvent {
     fn on_validation_data(data: &cumulus_primitives_core::PersistedValidationData) {
         frame_system::Pallet::<Runtime>::register_extra_weight_unchecked(
-            migration_validation_hook_weight().saturating_add(dead_man_detector_hook_weight()),
+            migration_validation_hook_weight()
+                .saturating_add(dead_man_detector_hook_weight())
+                // 05 §4.3.2's relay-slot observation below: the `(epoch, day)`
+                // attribution plus the one extra `LastRelayParent` read the
+                // detector's own envelope does not include. Charged here, ahead
+                // of the abort branches that can return early, because
+                // over-charging a halting block is the safe direction.
+                .saturating_add(block_production_window_weight())
+                .saturating_add(<Runtime as frame_system::Config>::DbWeight::get().reads(1)),
             DispatchClass::Mandatory,
         );
         // Called once by the mandatory parachain inherent before the
@@ -8498,12 +8677,44 @@ impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEven
         let now = frame_system::Pallet::<Runtime>::block_number();
         let snapshot_overdue = pallet_welfare::Pallet::<Runtime>::snapshot_overdue(now)
             && !snapshot_close_blocked_by_pause();
+        // 05 §4.3.2: `U`'s denominator is the sum of per-block relay-parent
+        // deltas, and its baseline is the *previous block's* relay parent —
+        // which crosses the window boundary, so an outage spanning a day or an
+        // epoch is charged to exactly one window and lost by neither. The
+        // detector already stores that baseline as `pallet_epoch::LastRelayParent`
+        // (05 §4.8), so it is read here rather than duplicated: one observation,
+        // one relay-parent read path, and no way for the two consumers to
+        // disagree about what the previous block anchored to. It must be read
+        // *before* `observe_dead_man`, which is what advances it.
+        let previous_relay_parent = pallet_epoch::LastRelayParent::<Runtime>::get();
         // The pallet seam accepts only the plain relay number (I-24); detector
         // failure leaves the already-latched status quo untouched.
         let _ = pallet_epoch::Pallet::<Runtime>::observe_dead_man(
             data.relay_parent_number,
             snapshot_overdue,
         );
+        {
+            // §4.3.2's nominal-cadence rule covers both cases where no usable
+            // predecessor exists: genesis (no baseline recorded yet) and a relay
+            // regression (`checked_sub` fails). The regression case is
+            // unreachable in production — the parachain-system monotonicity
+            // check rejects it before this seam — and one is the conservative
+            // answer for it anyway: it is the same "score this opening block as
+            // healthy cadence" reading genesis gets, rather than a zero
+            // denominator or an arbitrary jump. A delta of *zero* is not that
+            // case and is recorded as zero: two parachain blocks may share a
+            // relay parent, and `U`'s clamp absorbs the ratio above 1.
+            let slots = match previous_relay_parent {
+                Some(seen) => data.relay_parent_number.checked_sub(seen).unwrap_or(1),
+                None => 1,
+            };
+            let (epoch, day) = xcm_traffic_epoch_and_day();
+            pallet_welfare::Pallet::<Runtime>::note_block_production(
+                epoch,
+                day,
+                pallet_welfare::BlockProductionSignal::RelaySlots(slots),
+            );
+        }
         if let Some(expected) = scheduled_upgrade_abort_candidate() {
             frame_system::Pallet::<Runtime>::register_extra_weight_unchecked(
                 recovery_hook_weight(pallet_preimage::MAX_SIZE),

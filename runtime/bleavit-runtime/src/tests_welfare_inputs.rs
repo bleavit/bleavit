@@ -32,18 +32,35 @@ fn install_spec_for(
     activation_epoch: futarchy_primitives::EpochId,
     id: futarchy_primitives::MetricId,
 ) {
-    for (stored, _) in pallet_welfare::MetricSpecs::<Runtime>::iter() {
-        pallet_welfare::MetricSpecs::<Runtime>::remove(stored);
-    }
-    pallet_welfare::SnapshotDeadline::<Runtime>::kill();
-    let spec = pallet_welfare::MetricSpec {
+    install_specs(
+        version,
+        vec![metric_spec(
+            id,
+            version,
+            activation_epoch,
+            pallet_welfare::Pillar::COnchain,
+            pallet_welfare::SourceClass::Onchain,
+        )],
+    );
+}
+
+/// One well-formed `MetricSpec`, with the pillar and source class left to the
+/// caller so the S-pillar and attested paths can be exercised too.
+fn metric_spec(
+    id: futarchy_primitives::MetricId,
+    version: futarchy_primitives::MetricSpecVersion,
+    activation_epoch: futarchy_primitives::EpochId,
+    pillar: pallet_welfare::Pillar,
+    source: pallet_welfare::SourceClass,
+) -> pallet_welfare::MetricSpec {
+    pallet_welfare::MetricSpec {
         id,
         version,
-        pillar: pallet_welfare::Pillar::COnchain,
+        pillar,
         weight: futarchy_primitives::FixedU64(pallet_welfare::ONE),
         epsilon_floor: pallet_welfare::EPSILON_PILLAR,
         activation_epoch,
-        source: pallet_welfare::SourceClass::Onchain,
+        source,
         formula_ref: [1; 32],
         units: [2; 16],
         repr: [3; 16],
@@ -58,8 +75,20 @@ fn install_spec_for(
             pallet_welfare::HISTORY_PRIORS],
         target: 100,
         delta_s_max_bps: 1_000,
-    };
-    let specs = pallet_welfare::BoundedSpecSet::try_from(vec![spec]).expect("one spec is bounded");
+    }
+}
+
+/// Replace the registered spec set with `specs`, installed directly so these
+/// tests do not depend on the (still absent) production genesis MetricSpec set.
+fn install_specs(
+    version: futarchy_primitives::MetricSpecVersion,
+    specs: Vec<pallet_welfare::MetricSpec>,
+) {
+    for (stored, _) in pallet_welfare::MetricSpecs::<Runtime>::iter() {
+        pallet_welfare::MetricSpecs::<Runtime>::remove(stored);
+    }
+    pallet_welfare::SnapshotDeadline::<Runtime>::kill();
+    let specs = pallet_welfare::BoundedSpecSet::try_from(specs).expect("test spec set is bounded");
     pallet_welfare::MetricSpecs::<Runtime>::insert(version, specs);
 }
 
@@ -1114,6 +1143,359 @@ fn sq181_record_daily_gate_refuses_a_day_the_epoch_never_had() {
         assert_eq!(
             pallet_welfare::SampledGateDays::<Runtime>::get(epoch),
             sampled,
+        );
+    });
+}
+
+// --------------------------------------- A14 · 05 §4.3.2 block production `U`
+//
+// `U = clamp((non_empty_blocks + 0.25 · empty_blocks) / relay_slots, 0, 1)`, over
+// a denominator that is the **sum of per-block relay-parent deltas**. The pallet
+// owns the accumulator and is covered in `pallets/welfare/src/tests.rs`; these
+// pin the runtime projection — the arithmetic, the zero-denominator rule, the
+// source-class filter, and the two per-block hooks that feed it.
+
+/// Record one block's two observations the way the runtime's hooks do.
+fn note_block(epoch: futarchy_primitives::EpochId, day: u8, slots: u32, empty: bool) {
+    pallet_welfare::Pallet::<Runtime>::note_block_production(
+        epoch,
+        day,
+        pallet_welfare::BlockProductionSignal::RelaySlots(slots),
+    );
+    pallet_welfare::Pallet::<Runtime>::note_block_production(
+        epoch,
+        day,
+        pallet_welfare::BlockProductionSignal::Authored { empty },
+    );
+}
+
+/// Install a single S-pillar `U` spec and return the live epoch.
+fn install_u_spec(version: futarchy_primitives::MetricSpecVersion) -> futarchy_primitives::EpochId {
+    install_specs(
+        version,
+        vec![metric_spec(
+            futarchy_primitives::metric_ids::U,
+            version,
+            0,
+            pallet_welfare::Pillar::S,
+            pallet_welfare::SourceClass::Onchain,
+        )],
+    );
+    pallet_epoch::CurrentEpoch::<Runtime>::get()
+}
+
+/// A `PersistedValidationData` carrying nothing but the relay parent — the only
+/// field this seam reads (I-24).
+fn validation_data(relay_parent_number: u32) -> cumulus_primitives_core::PersistedValidationData {
+    cumulus_primitives_core::PersistedValidationData {
+        parent_head: Default::default(),
+        relay_parent_number,
+        relay_parent_storage_root: Default::default(),
+        max_pov_size: 0,
+    }
+}
+
+fn component_ids(components: Vec<pallet_welfare::ComponentValue>) -> Vec<u16> {
+    let mut ids = components.into_iter().map(|c| c.id).collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids
+}
+
+#[test]
+fn u_weights_empty_blocks_at_a_quarter_over_the_relay_slot_denominator() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 60;
+
+    crate::tests::development_ext().execute_with(|| {
+        let epoch = install_u_spec(VERSION);
+        let u_day = |day: u8| {
+            crate::configs::RuntimeMetricInputs::daily_components(epoch, day, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::U)
+                .map(|c| c.value.0)
+        };
+
+        // Four non-empty blocks, one per relay slot: a chain filling every slot
+        // scores exactly 1.
+        for _ in 0..4 {
+            note_block(epoch, 0, 1, false);
+        }
+        assert_eq!(u_day(0), Some(pallet_welfare::ONE));
+
+        // A fifth block, empty, on its own relay slot: (4 + 0.25) / 5 = 0.85.
+        note_block(epoch, 0, 1, true);
+        assert_eq!(u_day(0), Some(850_000_000));
+
+        // Day 1: a collator outage widens the denominator without adding
+        // blocks, and `U` falls in proportion — 1 / 5 = 0.2.
+        note_block(epoch, 1, 5, false);
+        assert_eq!(u_day(1), Some(200_000_000));
+
+        // The epoch projection sums the same per-block terms over both days:
+        // (5 + 0.25) / 10 = 0.525.
+        assert_eq!(
+            crate::configs::RuntimeMetricInputs::onchain_components(epoch, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::U)
+                .map(|c| c.value.0),
+            Some(525_000_000),
+        );
+    });
+}
+
+#[test]
+fn u_clamps_above_one_when_blocks_outrun_relay_slots() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 61;
+
+    crate::tests::development_ext().execute_with(|| {
+        let epoch = install_u_spec(VERSION);
+        // Elastic scaling: two parachain blocks share one relay parent, so the
+        // second contributes a delta of zero. The ratio exceeds 1 and clamps —
+        // producing more blocks than relay slots is maximum liveness.
+        note_block(epoch, 0, 1, false);
+        note_block(epoch, 0, 0, false);
+
+        assert_eq!(
+            crate::configs::RuntimeMetricInputs::daily_components(epoch, 0, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::U)
+                .map(|c| c.value.0),
+            Some(pallet_welfare::ONE),
+        );
+    });
+}
+
+/// One block in the window is a well-defined score, not a division by zero:
+/// §4.3.2's per-block deltas give it a denominator of its own, which an endpoint
+/// difference could not.
+#[test]
+fn a_one_block_window_scores_rather_than_dividing_by_zero() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 64;
+
+    crate::tests::development_ext().execute_with(|| {
+        let epoch = install_u_spec(VERSION);
+        note_block(epoch, 3, 1, false);
+
+        assert_eq!(
+            crate::configs::RuntimeMetricInputs::daily_components(epoch, 3, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::U)
+                .map(|c| c.value.0),
+            Some(pallet_welfare::ONE),
+        );
+    });
+}
+
+/// The rule 05 §4.3.2 makes normative: a zero denominator resolves `U`
+/// **absent**, never a fabricated 1.0 — which is exactly the reading the
+/// superseded parachain-block denominator produced, and the reason it measured
+/// nothing. An unavailable registered component fails the crank status-quo-safe.
+#[test]
+fn zero_denominator_leaves_u_absent_and_fails_the_crank_closed() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 62;
+
+    crate::tests::development_ext().execute_with(|| {
+        let epoch = install_u_spec(VERSION);
+        // Nothing observed at all.
+        assert!(crate::configs::RuntimeMetricInputs::onchain_components(epoch, VERSION).is_empty());
+        assert!(
+            crate::configs::RuntimeMetricInputs::daily_components(epoch, 0, VERSION).is_empty()
+        );
+
+        // A window that recorded authorship but no relay slot is equally
+        // unmeasured: the denominator, not the numerator, is what `U` divides by.
+        pallet_welfare::Pallet::<Runtime>::note_block_production(
+            epoch,
+            0,
+            pallet_welfare::BlockProductionSignal::Authored { empty: false },
+        );
+        assert!(
+            crate::configs::RuntimeMetricInputs::daily_components(epoch, 0, VERSION).is_empty()
+        );
+
+        // And the crank refuses rather than snapshotting a fabricated score.
+        pallet_epoch::EpochOf::<Runtime>::mutate(|info| info.index = epoch.saturating_add(1));
+        assert!(
+            pallet_welfare::Pallet::<Runtime>::record_snapshot(
+                crate::RuntimeOrigin::signed(crate::tests::account(1)),
+                epoch,
+                VERSION,
+            )
+            .is_err(),
+            "a registered component with no value must fail the crank closed",
+        );
+    });
+}
+
+/// The filter selects on **source class**, not pillar. Before A14 it read
+/// `pillar == COnchain`, which made every S component structurally unemittable
+/// however it was registered — `U` included.
+#[test]
+fn the_source_class_filter_admits_s_and_still_excludes_attested() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 63;
+
+    crate::tests::development_ext().execute_with(|| {
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        install_specs(
+            VERSION,
+            vec![
+                // `C_onchain`: emitted before and after the change.
+                metric_spec(
+                    futarchy_primitives::metric_ids::X,
+                    VERSION,
+                    0,
+                    pallet_welfare::Pillar::COnchain,
+                    pallet_welfare::SourceClass::Onchain,
+                ),
+                // `S`: newly reachable.
+                metric_spec(
+                    futarchy_primitives::metric_ids::U,
+                    VERSION,
+                    0,
+                    pallet_welfare::Pillar::S,
+                    pallet_welfare::SourceClass::Onchain,
+                ),
+                // `C_attested`: never emitted by this path. `welfare-core`'s
+                // `source_matches_pillar` guarantees an attested pillar carries
+                // an attested source, so the source filter excludes it as
+                // strictly as the pillar filter did.
+                metric_spec(
+                    futarchy_primitives::metric_ids::A_RUNTIME_PERF,
+                    VERSION,
+                    0,
+                    pallet_welfare::Pillar::CAttested,
+                    pallet_welfare::SourceClass::Attested,
+                ),
+            ],
+        );
+        note_block(epoch, 0, 1, false);
+
+        // No local XCM traffic means `X = 1` (absence of failure, 09 §6.4), so
+        // both deterministic components resolve and the attested one does not.
+        assert_eq!(
+            component_ids(crate::configs::RuntimeMetricInputs::daily_components(
+                epoch, 0, VERSION
+            )),
+            vec![
+                futarchy_primitives::metric_ids::X,
+                futarchy_primitives::metric_ids::U,
+            ],
+        );
+        // `onchain_components` adds attested values only from the oracle's own
+        // settled records, and there are none — so the attested component stays
+        // absent there too rather than being computed by this path.
+        assert_eq!(
+            component_ids(crate::configs::RuntimeMetricInputs::onchain_components(
+                epoch, VERSION
+            )),
+            vec![
+                futarchy_primitives::metric_ids::X,
+                futarchy_primitives::metric_ids::U,
+            ],
+        );
+    });
+}
+
+/// The two per-block hooks: the relay delta rides the parachain inherent's
+/// single `relay_parent_number` read, and the emptiness classification waits for
+/// the extrinsic count to be final.
+#[test]
+fn the_per_block_hooks_record_the_relay_delta_and_the_emptiness_class() {
+    use cumulus_pallet_parachain_system::OnSystemEvent;
+    use frame_support::traits::{PostInherents, PostTransactions};
+
+    crate::tests::development_ext().execute_with(|| {
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+
+        // No baseline yet: 05 §4.3.2's nominal-cadence rule gives the first
+        // block a delta of one rather than a zero denominator or an arbitrary
+        // jump.
+        assert!(pallet_epoch::LastRelayParent::<Runtime>::get().is_none());
+        crate::configs::ExecutionGuardSystemEvent::on_validation_data(&validation_data(1_000));
+        assert_eq!(
+            pallet_welfare::Pallet::<Runtime>::block_production_epoch(epoch).relay_slots,
+            1,
+        );
+        // The detector's baseline is the one that advanced — a single
+        // observation, read by both consumers.
+        assert_eq!(pallet_epoch::LastRelayParent::<Runtime>::get(), Some(1_000));
+
+        // The next block's delta is measured against that baseline.
+        crate::configs::ExecutionGuardSystemEvent::on_validation_data(&validation_data(1_007));
+        assert_eq!(
+            pallet_welfare::Pallet::<Runtime>::block_production_epoch(epoch).relay_slots,
+            8,
+        );
+
+        // Emptiness: `post_inherents` captures the inherent boundary and
+        // `post_transactions` classifies against the final extrinsic count.
+        // Two inherents and nothing else is an all-inherent block.
+        frame_system::Pallet::<Runtime>::set_extrinsic_index(2);
+        crate::configs::BlockProductionInherentBoundary::post_inherents();
+        frame_system::Pallet::<Runtime>::note_finished_extrinsics();
+        crate::configs::BlockProductionRecorder::post_transactions();
+        let counters = pallet_welfare::Pallet::<Runtime>::block_production_epoch(epoch);
+        assert_eq!((counters.empty_blocks, counters.non_empty_blocks), (1, 0));
+
+        // Two inherents plus one transaction: not empty. A block whose call
+        // failed or was filtered lands here too — it consumed its slot, and
+        // `note_applied_extrinsic` counted it whatever the dispatch returned.
+        frame_system::Pallet::<Runtime>::set_extrinsic_index(2);
+        crate::configs::BlockProductionInherentBoundary::post_inherents();
+        frame_system::Pallet::<Runtime>::set_extrinsic_index(3);
+        frame_system::Pallet::<Runtime>::note_finished_extrinsics();
+        crate::configs::BlockProductionRecorder::post_transactions();
+        let counters = pallet_welfare::Pallet::<Runtime>::block_production_epoch(epoch);
+        assert_eq!((counters.empty_blocks, counters.non_empty_blocks), (1, 1));
+
+        // A block with no inherents at all is still classified, not skipped:
+        // the boundary is zero and its transactions decide.
+        frame_system::Pallet::<Runtime>::set_extrinsic_index(0);
+        crate::configs::BlockProductionInherentBoundary::post_inherents();
+        frame_system::Pallet::<Runtime>::note_finished_extrinsics();
+        crate::configs::BlockProductionRecorder::post_transactions();
+        let counters = pallet_welfare::Pallet::<Runtime>::block_production_epoch(epoch);
+        assert_eq!((counters.empty_blocks, counters.non_empty_blocks), (2, 1));
+    });
+}
+
+/// The cross-window baseline, end to end through the inherent hook: an outage
+/// whose catch-up block lands on a new window's first block is charged to that
+/// window, and to exactly one window.
+#[test]
+fn an_outage_across_a_window_boundary_is_lost_by_neither_window() {
+    use cumulus_pallet_parachain_system::OnSystemEvent;
+
+    crate::tests::development_ext().execute_with(|| {
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let day_len = futarchy_primitives::kernel::BLOCKS_PER_DAY;
+        let start = pallet_epoch::Schedule::<Runtime>::get().epoch_start_block;
+
+        // Last block of day 0.
+        frame_system::Pallet::<Runtime>::set_block_number(start.saturating_add(day_len - 1));
+        crate::configs::ExecutionGuardSystemEvent::on_validation_data(&validation_data(5_000));
+        // First block of day 1, after a 500-slot stall.
+        frame_system::Pallet::<Runtime>::set_block_number(start.saturating_add(day_len));
+        crate::configs::ExecutionGuardSystemEvent::on_validation_data(&validation_data(5_500));
+
+        // Day 0 keeps only its own opening slot — the outage is not back-dated.
+        assert_eq!(
+            pallet_welfare::Pallet::<Runtime>::block_production(epoch, 0).relay_slots,
+            1,
+        );
+        // Day 1 carries the whole jump, because its baseline is the previous
+        // *window's* last block. An endpoint difference would have lost it.
+        assert_eq!(
+            pallet_welfare::Pallet::<Runtime>::block_production(epoch, 1).relay_slots,
+            500,
+        );
+        assert_eq!(
+            pallet_welfare::Pallet::<Runtime>::block_production_epoch(epoch).relay_slots,
+            501,
         );
     });
 }

@@ -163,4 +163,16 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 			.saturating_add(T::DbWeight::get().reads(3))
 			.saturating_add(T::DbWeight::get().writes(3))
 	}
+	/// Storage: `Welfare::BlockProduction` (r:1 w:1)
+	/// Proof: `Welfare::BlockProduction` (`max_values`: None, `max_size`: Some(45), added: 2520, mode: `MaxEncodedLen`)
+	fn note_block_production() -> Weight {
+		// Proof Size summary in bytes:
+		//  Measured:  `182`
+		//  Estimated: `3510`
+		// Minimum execution time: 6_551_000 picoseconds.
+		Weight::from_parts(7_170_000, 0)
+			.saturating_add(Weight::from_parts(0, 3510))
+			.saturating_add(T::DbWeight::get().reads(2))
+			.saturating_add(T::DbWeight::get().writes(2))
+	}
 }

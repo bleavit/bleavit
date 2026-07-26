@@ -315,6 +315,72 @@ pub mod pallet {
         ProbeTimeout,
     }
 
+    /// Locally observed block production for one epoch/day window (05 §4.3.2).
+    ///
+    /// The three fields are exactly the three terms of `U`:
+    /// `U = clamp((non_empty_blocks + 0.25·empty_blocks) / relay_slots, 0, 1)`.
+    ///
+    /// `relay_slots` is a **sum of per-block deltas**, never an endpoint
+    /// difference: §4.3.2 makes the previous block's relay parent the baseline
+    /// for this one *across the window boundary*, so every relay slot is charged
+    /// to exactly one window, no boundary loses an outage, and a one-block
+    /// window is well-defined rather than a division by zero. The runtime
+    /// composition layer owns the delta because the relay parent crosses the
+    /// Cumulus boundary there (I-24); this pallet only accumulates it.
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        Decode,
+        DecodeWithMemTracking,
+        Default,
+        Encode,
+        Eq,
+        MaxEncodedLen,
+        PartialEq,
+        TypeInfo,
+    )]
+    pub struct BlockProductionCounters {
+        /// Authored parachain blocks carrying at least one non-inherent
+        /// extrinsic (weight 1 in `U`'s numerator).
+        pub non_empty_blocks: u64,
+        /// Authored parachain blocks whose extrinsics are all inherents
+        /// (weight 0.25 in `U`'s numerator — 05 §4.3.2 prices collator padding).
+        pub empty_blocks: u64,
+        /// Relay slots elapsed over the window: the summed per-block relay-parent
+        /// delta, which is `U`'s denominator.
+        pub relay_slots: u64,
+    }
+
+    /// One block-production observation (05 §4.3.2).
+    ///
+    /// The two arms arrive at different points of the same block — the relay
+    /// delta with the parachain inherent, the emptiness classification once the
+    /// extrinsic count is final — so they are two calls into one writer rather
+    /// than one call carrying both, exactly as [`XcmTrafficKind`] splits the
+    /// three transport signals.
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        Decode,
+        DecodeWithMemTracking,
+        Encode,
+        Eq,
+        MaxEncodedLen,
+        PartialEq,
+        TypeInfo,
+    )]
+    pub enum BlockProductionSignal {
+        /// Relay slots elapsed since the previous parachain block. One at
+        /// genesis or wherever no usable predecessor exists (§4.3.2's nominal
+        /// cadence rule); zero is legitimate where two parachain blocks share a
+        /// relay parent, and `U`'s clamp absorbs the resulting ratio above 1.
+        RelaySlots(u32),
+        /// One authored parachain block, classified by §4.3.2's emptiness rule.
+        Authored { empty: bool },
+    }
+
     /// Bounded mirror of the core snapshot, whose transient component `Vec`
     /// cannot itself implement `MaxEncodedLen`.
     #[derive(
@@ -619,6 +685,34 @@ pub mod pallet {
     #[pallet::storage]
     pub type CollatorAuthorshipEpoch<T: Config> =
         StorageMap<_, Twox64Concat, EpochId, AuthorshipWindow<T>, ValueQuery>;
+
+    /// Block-production counters by `(epoch, day)` (05 §4.3.2; A14).
+    ///
+    /// `U` and `U^{day}` are sums of the same per-block observation over
+    /// different windows, so one accumulator serves both: the epoch projection
+    /// is the prefix fold [`Pallet::block_production_epoch`], exactly as
+    /// [`Pallet::xcm_traffic_epoch`] projects the transport counters.
+    ///
+    /// This pallet records only the three terms and deliberately computes no
+    /// component from them — the same division of labour [`XcmTraffic`] makes,
+    /// and the reason `U`'s clamp and its zero-denominator rule live in the
+    /// runtime binding beside the other 05 §4.3 projections.
+    ///
+    /// Keyed exactly like [`XcmTraffic`] and retired by the same bounded walk,
+    /// so it inherits that map's `MAX_XCM_TRAFFIC_EPOCHS_BOUND` prefix index and
+    /// its `u8`-bounded 256-day second key (I-20/I-21). The value is a
+    /// fixed-width counter triple, so the map adds no variable-length collection
+    /// of its own (13 §4).
+    #[pallet::storage]
+    pub type BlockProduction<T: Config> = StorageDoubleMap<
+        _,
+        Twox64Concat,
+        EpochId,
+        Twox64Concat,
+        u8,
+        BlockProductionCounters,
+        ValueQuery,
+    >;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -1235,6 +1329,9 @@ pub mod pallet {
                     // Its epoch aggregate retires in the same step: it is keyed
                     // by the same epoch and reachable only through this index.
                     CollatorAuthorshipEpoch::<T>::remove(epoch);
+                    // A14: and so does the 05 §4.3.2 block-production series,
+                    // for the same reason.
+                    let _ = BlockProduction::<T>::clear_prefix(epoch, u8::MAX as u32 + 1, None);
                     if let Some(position) = epochs.iter().position(|stored| *stored == epoch) {
                         epochs.remove(position);
                     }
@@ -1386,6 +1483,104 @@ pub mod pallet {
         /// write, so this is one bounded read and not a fold over 256 days.
         pub fn collator_authorship_epoch(epoch: EpochId) -> AuthorshipWindow<T> {
             CollatorAuthorshipEpoch::<T>::get(epoch)
+        }
+
+        /// Record one 05 §4.3.2 block-production observation against its
+        /// `(epoch, day)` window.
+        ///
+        /// Fail-soft in the strongest sense: both call sites are per-block
+        /// runtime hooks — the parachain inherent for the relay delta, the
+        /// post-transaction boundary for the emptiness classification — and
+        /// neither reserves any weight for this work. So the writer registers
+        /// its own benchmarked worst case as `Mandatory` before touching storage
+        /// (the `note_collator_block` pattern) and can then neither error nor
+        /// panic. Counts saturate.
+        ///
+        /// **A full index drops the whole window's observations, and that is the
+        /// fail-closed direction.** The shared [`XcmTrafficEpochs`] index can be
+        /// full while bounded maintenance catches up; recording into an
+        /// unindexed prefix would create state the bounded retention walk can
+        /// never reach (I-20). Because *both* arms are refused together for such
+        /// an epoch, a window that is dropped from its very first block keeps a
+        /// zero denominator, and a zero denominator resolves `U` **absent** —
+        /// the crank then fails status-quo-safe instead of scoring a window that
+        /// was never measured (G-1). A prefix that starts recording only partway
+        /// through its window loses the dropped blocks from the numerator and
+        /// their relay slots from the denominator together, so neither term is
+        /// silently favoured.
+        pub fn note_block_production(epoch: EpochId, day: u8, signal: BlockProductionSignal) {
+            frame_system::Pallet::<T>::register_extra_weight_unchecked(
+                T::WeightInfo::note_block_production(),
+                DispatchClass::Mandatory,
+            );
+            // A zero relay delta contributes nothing to either term, so it is a
+            // genuine no-op and is dropped *before* any storage is touched.
+            // Writing it would index the epoch and store an all-zero triple for
+            // a window whose authored block has not landed yet — a stored
+            // zero-denominator row, which is exactly the shape try-state treats
+            // as corruption because it is indistinguishable from a window that
+            // was never observed. Reachable in production: two parachain blocks
+            // may share a relay parent, and the second one's authored count can
+            // be attributed to the next window if the epoch clock rolls between
+            // the inherent and the post-transaction boundary.
+            if matches!(signal, BlockProductionSignal::RelaySlots(0)) {
+                return;
+            }
+            // Bound the new prefix to the shared traffic index so the retention
+            // walk can always find and retire it.
+            let tracked = XcmTrafficEpochs::<T>::mutate(|epochs| {
+                if epochs.contains(&epoch) {
+                    true
+                } else {
+                    epochs.try_push(epoch).is_ok()
+                }
+            });
+            if !tracked {
+                return;
+            }
+            BlockProduction::<T>::mutate(epoch, day, |counters| match signal {
+                BlockProductionSignal::RelaySlots(slots) => {
+                    counters.relay_slots = counters.relay_slots.saturating_add(u64::from(slots));
+                }
+                BlockProductionSignal::Authored { empty: false } => {
+                    counters.non_empty_blocks = counters.non_empty_blocks.saturating_add(1);
+                }
+                BlockProductionSignal::Authored { empty: true } => {
+                    counters.empty_blocks = counters.empty_blocks.saturating_add(1);
+                }
+            });
+        }
+
+        /// Return one day's block-production counters (05 §4.3.2 `U^{day}`).
+        pub fn block_production(epoch: EpochId, day: u8) -> BlockProductionCounters {
+            BlockProduction::<T>::get(epoch, day)
+        }
+
+        /// Return the field-wise saturating sum of an epoch's block-production
+        /// counters (05 §4.3.2 `U`).
+        ///
+        /// Summing the day slots is the whole-window observation, not an
+        /// approximation of one: §4.3.2 defines both granularities as sums of
+        /// the same per-block terms, and the relay deltas partition the window
+        /// because each block's baseline is its predecessor — including across
+        /// a day boundary, where the previous day's last block is the baseline
+        /// for the next day's first.
+        ///
+        /// The double-map epoch prefix makes the reads proportional to days that
+        /// actually recorded production; the `u8` second key hard-bounds that at
+        /// 256.
+        pub fn block_production_epoch(epoch: EpochId) -> BlockProductionCounters {
+            BlockProduction::<T>::iter_prefix(epoch).fold(
+                BlockProductionCounters::default(),
+                |mut total, (_, counters)| {
+                    total.non_empty_blocks = total
+                        .non_empty_blocks
+                        .saturating_add(counters.non_empty_blocks);
+                    total.empty_blocks = total.empty_blocks.saturating_add(counters.empty_blocks);
+                    total.relay_slots = total.relay_slots.saturating_add(counters.relay_slots);
+                    total
+                },
+            )
         }
 
         /// Return the local XCM counters for one epoch/day window.
@@ -1771,18 +1966,20 @@ pub mod pallet {
                 // a budget refusal, which happens before the router is ever
                 // observed — so requiring traffic here would fail try-state on
                 // correct state.
-                // A14 adds the third co-indexed series for the same reason: a
-                // block can be authored in an epoch that sent no XCM and ran no
-                // probe, so an authorship-only prefix is correct state.
+                // A14 adds two more co-indexed series for the same reason: a
+                // block is produced — and authored — in every epoch, including
+                // one that sent no XCM and ran no probe, so an authorship-only
+                // or block-production-only prefix is correct state.
                 if XcmTraffic::<T>::iter_prefix(*epoch).next().is_none()
                     && ReserveProbeDaily::<T>::iter_prefix(*epoch).next().is_none()
                     && CollatorAuthorship::<T>::iter_prefix(*epoch)
                         .next()
                         .is_none()
                     && !CollatorAuthorshipEpoch::<T>::contains_key(*epoch)
+                    && BlockProduction::<T>::iter_prefix(*epoch).next().is_none()
                 {
                     return Err(TryRuntimeError::Other(
-                        "welfare traffic index has no corresponding counter, probe outcome, or authorship record",
+                        "welfare traffic index has no corresponding counter, probe outcome, authorship record, or block-production record",
                     ));
                 }
             }
@@ -1866,6 +2063,35 @@ pub mod pallet {
                 if !day_truncated && day_total <= u64::from(u32::MAX) && day_total != epoch_total {
                     return Err(TryRuntimeError::Other(
                         "welfare collator authorship aggregate disagrees with its day series",
+                    ));
+                }
+            }
+            // A14: the same two properties for the 05 §4.3.2 block-production
+            // series — every recorded day is indexed, so the bounded retention
+            // walk can reach and retire it (I-20/I-21), and no production is
+            // attributed to an epoch the clock has not reached. An all-zero
+            // triple is rejected for the same reason the traffic counters are:
+            // the writer never stores one, so its presence means either an
+            // orphaned key or a lost accumulator, and `U` divides by
+            // `relay_slots` — a stored zero-denominator row is indistinguishable
+            // from a window that was never observed.
+            for (epoch, _, counters) in BlockProduction::<T>::iter() {
+                if epoch > current_epoch {
+                    return Err(TryRuntimeError::Other(
+                        "welfare block production lies in the future",
+                    ));
+                }
+                if !traffic_epochs.contains(&epoch) {
+                    return Err(TryRuntimeError::Other(
+                        "welfare block production has no indexed epoch",
+                    ));
+                }
+                if counters.non_empty_blocks == 0
+                    && counters.empty_blocks == 0
+                    && counters.relay_slots == 0
+                {
+                    return Err(TryRuntimeError::Other(
+                        "welfare block production stores an all-zero counter triple",
                     ));
                 }
             }

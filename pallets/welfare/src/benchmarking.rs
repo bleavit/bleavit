@@ -373,5 +373,47 @@ mod benches {
         Ok(())
     }
 
+    /// The 05 §4.3.2 block-production recorder at its worst case.
+    ///
+    /// Worst case is the shared epoch index **full to its bound with the target
+    /// epoch at the last position**, and the `(epoch, day)` slot already
+    /// populated: the index scan runs the whole vector before matching, the
+    /// index is written back regardless, and the counter read proves an existing
+    /// value rather than a default. An unindexed epoch returns before the
+    /// counter map is touched at all (the cheap path, not the dear one).
+    ///
+    /// Both signal arms perform exactly one saturating field update over the
+    /// same read/write pair, so measuring either measures both; the authored
+    /// arm is used because it is the one every block takes.
+    #[benchmark]
+    fn note_block_production() -> Result<(), BenchmarkError> {
+        let epoch: EpochId = MAX_XCM_TRAFFIC_EPOCHS_BOUND - 1;
+        let day: u8 = 3;
+        // Last position, so `contains` scans every preceding entry first.
+        let indexed = (0..MAX_XCM_TRAFFIC_EPOCHS_BOUND).collect::<Vec<EpochId>>();
+        XcmTrafficEpochs::<T>::put(BoundedVec::truncate_from(indexed));
+        BlockProduction::<T>::insert(
+            epoch,
+            day,
+            BlockProductionCounters {
+                non_empty_blocks: 1,
+                empty_blocks: 1,
+                relay_slots: 2,
+            },
+        );
+
+        #[block]
+        {
+            Pallet::<T>::note_block_production(
+                epoch,
+                day,
+                BlockProductionSignal::Authored { empty: false },
+            );
+        }
+
+        assert_eq!(BlockProduction::<T>::get(epoch, day).non_empty_blocks, 2);
+        Ok(())
+    }
+
     impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext(), crate::mock::Test);
 }
