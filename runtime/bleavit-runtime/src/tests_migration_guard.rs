@@ -2326,3 +2326,89 @@ fn welfare_snapshot_context_migration_try_runtime_proves_the_pairing() {
             .expect("the SQ-493 pairing holds after the backfill");
     });
 }
+
+/// **Regression (audit 2026-07-27, AUD-1).** `ExecutionGuard::migration_completed`
+/// engages the fail-static execution halt directly when the paired recovery image
+/// cannot be released — the guard's own comment calls it "the only cleanup latch".
+/// `MigrationStatusToGuard::completed` then called `clear_migration_halt_sources`,
+/// whose `sync_execution_migration_halt` **overwrites** `MigrationHalt` from the
+/// `MigrationHaltSources` bitmask alone. Because the guard's condition sets no
+/// source bit, the halt it had just raised was erased in the same call and never
+/// re-raised (nothing polls this condition after an MBM completes), making the
+/// latch a permanent no-op on the one path it exists to guard (09 §3.2; R-7).
+#[cfg(not(any(
+    feature = "runtime-benchmarks",
+    feature = "try-runtime",
+    feature = "recovery"
+)))]
+#[test]
+fn completed_migration_keeps_the_halt_when_the_recovery_image_cannot_be_released() {
+    tests::development_ext().execute_with(|| {
+        // A committed recovery image whose preimage was never requested: the
+        // `RecoveryImages::unpin` seam refuses with `Unavailable`, which is
+        // exactly the corrupt-pin state the guard halts on.
+        pallet_execution_guard::RecoveryImage::<Runtime>::put(
+            pallet_execution_guard::RecoveryImageCommitment {
+                pid: 1,
+                primary_hash: [0xa1; 32],
+                hash: [0xb2; 32],
+                len: 32,
+                target_spec_version: 2,
+                attestation_id: 1,
+                committed_at: 1,
+            },
+        );
+        assert_eq!(crate::configs::MigrationHaltSources::get(), 0);
+        assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
+
+        <crate::configs::MigrationStatusToGuard as frame_support::migrations::MigrationStatusHandler>::completed();
+
+        // The unreleasable image is still pinned, so the latch MUST stand.
+        assert!(pallet_execution_guard::RecoveryImage::<Runtime>::get().is_some());
+        assert!(
+            pallet_execution_guard::MigrationHalt::<Runtime>::get(),
+            "the execution halt raised by migration_completed was silently cleared"
+        );
+    });
+}
+
+/// The AUD-1 latch must not become the opposite defect: a halt with no exit.
+/// `RECOVERY_PIN_HALT` lifts exactly when the unreleasable record is gone, and
+/// stays up while it survives.
+#[cfg(not(any(
+    feature = "runtime-benchmarks",
+    feature = "try-runtime",
+    feature = "recovery"
+)))]
+#[test]
+fn the_recovery_pin_halt_lifts_only_once_the_image_is_released() {
+    tests::development_ext().execute_with(|| {
+        pallet_execution_guard::RecoveryImage::<Runtime>::put(
+            pallet_execution_guard::RecoveryImageCommitment {
+                pid: 1,
+                primary_hash: [0xa1; 32],
+                hash: [0xb2; 32],
+                len: 32,
+                target_spec_version: 2,
+                attestation_id: 1,
+                committed_at: 1,
+            },
+        );
+        <crate::configs::MigrationStatusToGuard as frame_support::migrations::MigrationStatusHandler>::completed();
+        assert!(pallet_execution_guard::MigrationHalt::<Runtime>::get());
+
+        // A later terminal-recovery completion while the record still survives
+        // must NOT lift the latch.
+        crate::configs::clear_recovery_pin_halt_if_released();
+        assert!(
+            pallet_execution_guard::MigrationHalt::<Runtime>::get(),
+            "the latch lifted while the recovery image was still unreleased"
+        );
+
+        // Operators repair the pin; the guard's retry releases the record.
+        pallet_execution_guard::RecoveryImage::<Runtime>::kill();
+        crate::configs::clear_recovery_pin_halt_if_released();
+        assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        assert_eq!(crate::configs::MigrationHaltSources::get(), 0);
+    });
+}

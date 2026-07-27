@@ -180,3 +180,36 @@ class RepositoryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VacuousPassTests(unittest.TestCase):
+    """Regression (audit 2026-07-27, AUD-3).
+
+    `scan` returns an empty map both when the weights directory is absent and
+    when it contains no parsable weight function. `main` then printed
+    "0 functions checked" and exited 0, so a moved directory or a generator
+    grammar the regex stopped matching would have turned this gate into a
+    silent no-op — the vacuous-pass shape 15 §5 forbids elsewhere.
+    """
+
+    def test_scan_of_a_missing_directory_is_empty(self):
+        with tempfile.TemporaryDirectory() as raw:
+            self.assertEqual(MODULE.scan(Path(raw) / "absent"), {})
+
+    def test_scan_of_a_directory_without_weight_functions_is_empty(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            (directory / "mod.rs").write_text("pub mod nothing;\n", encoding="utf-8")
+            self.assertEqual(MODULE.scan(directory), {})
+
+    def test_main_refuses_an_empty_inventory(self):
+        original = MODULE.WEIGHTS
+        try:
+            with tempfile.TemporaryDirectory() as raw:
+                MODULE.WEIGHTS = Path(raw) / "absent"
+                self.assertEqual(MODULE.main([]), 2)
+        finally:
+            MODULE.WEIGHTS = original
+
+    def test_main_passes_on_a_real_inventory(self):
+        self.assertEqual(MODULE.main([]), 0)

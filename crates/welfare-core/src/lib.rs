@@ -774,6 +774,29 @@ impl WelfareState {
         );
         ensure!(weight_sum(&[Pillar::P])? == ONE, Error::BadWeightSum);
         ensure!(weight_sum(&[Pillar::A])? == ONE, Error::BadWeightSum);
+        // 05 §4.6 / I-16 select the active spec as "the unique version with the
+        // latest activation epoch"; a tie means **no active spec**, permanently,
+        // for every epoch from that activation onward. That fail-closed reading is
+        // correct — but nothing stopped two lawful registrations from creating the
+        // tie, and once created there is no re-derivation path: `active_spec`
+        // returns `None` forever, so no snapshot can advance `SnapshotDeadline`,
+        // the dead-man's snapshot-overdue cause latches, and the deadline's
+        // try-state pairing fails once the wedged epoch's timing is reaped.
+        //
+        // Admission control is the repair: refuse the *second* registration that
+        // would tie, so the ambiguity branch below stays unreachable by
+        // construction while remaining as defense in depth. Refusing (rather than
+        // silently ordering the tie) is the G-1 direction — governance re-submits
+        // one epoch over (audit 2026-07-27, AUD-4).
+        let incoming_activation = specs.iter().map(|s| s.activation_epoch).max();
+        if let Some(incoming) = incoming_activation {
+            ensure!(
+                !self.specs.iter().any(|(_, existing)| {
+                    existing.iter().map(|s| s.activation_epoch).max() == Some(incoming)
+                }),
+                Error::BadActivationEpoch
+            );
+        }
         self.specs.push((version, specs));
         self.events.push(Event::MetricSpecRegistered { version });
         Ok(())
@@ -2892,7 +2915,14 @@ mod tests {
         let mut w = WelfareState::new();
         w.register_metric_spec(Registration::Genesis, 1, default_specs(1), &seated())
             .unwrap();
-        w.register_metric_spec(Registration::Genesis, 2, default_specs(2), &seated())
+        // Distinct activation epochs: two versions may no longer tie on their
+        // maximum activation epoch (AUD-4). `default_specs` hardcodes epoch 2,
+        // and this test is about creation-time spec BINDING, not activation.
+        let mut v2 = default_specs(2);
+        for spec in &mut v2 {
+            spec.activation_epoch = 3;
+        }
+        w.register_metric_spec(Registration::Genesis, 2, v2, &seated())
             .unwrap();
         let comps = vec![
             ComponentValue {

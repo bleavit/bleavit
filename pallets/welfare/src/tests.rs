@@ -629,11 +629,15 @@ fn metric_spec_history_accepts_16_and_rejects_17th() {
     // limit-coverage: MetricSpecs
     new_test_ext().execute_with(|| {
         CurrentEpochValue::set(0);
+        // Distinct activation epochs per version: registrations may no longer
+        // tie on their maximum activation epoch (AUD-4), and `default_specs`
+        // hardcodes epoch 2 for every version. The bound under test is
+        // unchanged — only the fixture's activation spread is.
         for version in 2..=16 {
             assert_ok!(Welfare::register_spec(
                 RuntimeOrigin::signed(governance_acc()),
                 version,
-                bounded(default_specs(version)),
+                bounded(specs_activating(version, u32::from(version))),
             ));
         }
         assert_eq!(MetricSpecs::<Test>::iter().count(), MAX_METRIC_SPECS);
@@ -641,7 +645,7 @@ fn metric_spec_history_accepts_16_and_rejects_17th() {
             Welfare::register_spec(
                 RuntimeOrigin::signed(governance_acc()),
                 17,
-                bounded(default_specs(17)),
+                bounded(specs_activating(17, 17)),
             ),
             Error::<Test>::TooManyMetricSpecs
         );
@@ -3328,5 +3332,45 @@ fn the_index_admits_an_epoch_that_only_ever_sampled_block_weight() {
         assert_eq!(XcmTraffic::<Test>::iter_prefix(2).count(), 0);
         assert_eq!(ReserveProbeDaily::<Test>::iter_prefix(2).count(), 0);
         assert!(Welfare::do_try_state().is_ok());
+    });
+}
+
+/// **Regression (audit 2026-07-27, AUD-4).** 05 §4.6 / I-16 resolve the active
+/// spec as "the unique version with the latest activation epoch", and a tie
+/// means *no active spec* — permanently, for every epoch from that activation
+/// onward. Nothing stopped two lawful `register_spec` calls from creating that
+/// tie, and there is no re-derivation path once it exists: `active_snapshot_spec`
+/// returns `None` forever, so `note_snapshot_recorded` can never advance
+/// `SnapshotDeadline`, the 05 §4.8 dead-man latches on its snapshot-overdue
+/// cause, and the deadline's own try-state pairing fails once the wedged epoch's
+/// timing is reaped. Admission control keeps the tie unreachable.
+#[test]
+fn a_second_registration_may_not_tie_the_latest_activation_epoch() {
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(5);
+        assert_ok!(Welfare::register_spec(
+            RuntimeOrigin::signed(governance_acc()),
+            2,
+            bounded(specs_activating(2, 9)),
+        ));
+        // Lawful in every other respect — distinct version, valid lead time,
+        // well-formed spec set — and refused solely for the activation tie.
+        assert_noop!(
+            Welfare::register_spec(
+                RuntimeOrigin::signed(governance_acc()),
+                3,
+                bounded(specs_activating(3, 9)),
+            ),
+            Error::<Test>::BadActivationEpoch
+        );
+        // One epoch over is admissible, and the selector stays unambiguous.
+        assert_ok!(Welfare::register_spec(
+            RuntimeOrigin::signed(governance_acc()),
+            3,
+            bounded(specs_activating(3, 10)),
+        ));
+        assert_eq!(Welfare::active_snapshot_spec(9), Some(2));
+        assert_eq!(Welfare::active_snapshot_spec(10), Some(3));
+        assert_eq!(Welfare::active_snapshot_spec(11), Some(3));
     });
 }

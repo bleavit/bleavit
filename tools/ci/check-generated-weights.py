@@ -148,7 +148,24 @@ def main(argv: list[str]) -> int:
     except CheckError as error:
         print(f"generated-weights: {error}", file=sys.stderr)
         return 2
-    found = scan()
+    # Pass `WEIGHTS` explicitly: `scan`'s default argument binds at definition
+    # time, so the module constant is the single source of truth only if the call
+    # site reads it (audit 2026-07-27, AUD-3).
+    found = scan(WEIGHTS)
+    # A gate that finds nothing to check MUST NOT report a pass (audit
+    # 2026-07-27, AUD-3). `scan` returns an empty map both when the weights
+    # directory is absent and when it holds no parsable weight function, so a
+    # moved/renamed directory or a regex that stops matching the generator's
+    # output would have printed "0 functions checked" and exited 0 — the same
+    # vacuous-pass shape 15 §5 already forbids for an empty artifact inventory.
+    if not found:
+        print(
+            f"generated-weights: no weight function found under {WEIGHTS}. "
+            "This gate cannot pass without an inventory to check — verify the "
+            "weights directory and the generator's output grammar.",
+            file=sys.stderr,
+        )
+        return 2
     unannotated, stale, total = evaluate(found, overrides)
 
     for entry in unannotated:
