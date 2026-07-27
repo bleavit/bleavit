@@ -39,6 +39,7 @@ CORPUS_FAMILY_CONSUMERS = {
     "transcendental_corpus": ("fixed-reference-vectors",),
     "treasury_scenarios": ("treasury-core-reference-vectors",),
     "twap_scenarios": ("market-core-twap-vectors",),
+    "welfare_normalization_scenarios": ("welfare-core-normalization-vectors",),
     "welfare_scenarios": ("welfare-core-reference-vectors",),
 }
 
@@ -56,6 +57,9 @@ TEST_OUTPUTS = {
         0, stdout="test result: ok. 1 passed; 0 failed; 0 ignored\n"
     ),
     "welfare-core-reference-vectors": GATE.CommandResult(
+        0, stdout="test result: ok. 1 passed; 0 failed; 0 ignored\n"
+    ),
+    "welfare-core-normalization-vectors": GATE.CommandResult(
         0, stdout="test result: ok. 1 passed; 0 failed; 0 ignored\n"
     ),
     "treasury-core-reference-vectors": GATE.CommandResult(
@@ -310,6 +314,7 @@ class ReportAndRunnerTests(PhaseGateTestCase):
             "ledger-core-reference-vectors": (4, 4),
             "decision-engine-reference-vectors": (1, 1),
             "welfare-core-reference-vectors": (1, 1),
+            "welfare-core-normalization-vectors": (1, 1),
             "treasury-core-reference-vectors": (1, 1),
             "market-core-twap-vectors": (2, 2),
             "ledger-pallet-core-differential": (1, 1),
@@ -351,7 +356,7 @@ class ReportAndRunnerTests(PhaseGateTestCase):
         self.assertEqual(report["criteria"]["sim-false-pass"]["status"], "pass")
         self.assertEqual(report["criteria"]["calibration-published"]["status"], "pass")
         legs = report["criteria"]["reference-equivalence"]["legs"]
-        self.assertEqual(len(legs), 13)
+        self.assertEqual(len(legs), 14)
         for leg in legs:
             required = {"id", "command", "exit_code", "status"}
             self.assertTrue(required <= set(leg))
