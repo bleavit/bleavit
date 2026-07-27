@@ -2695,6 +2695,10 @@ pub mod benchmarking {
             ParamValue::U32(12),
             1,
             1,
+            // A fresh genesis aggregate has no cohort in flight, which is what
+            // this helper models (SQ-501). Raising the interval is admitted at
+            // any in-flight state anyway, so the measured path is unchanged.
+            InFlightOccupancy::IDLE,
         )
     }
 
