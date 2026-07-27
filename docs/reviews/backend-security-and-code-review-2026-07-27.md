@@ -793,6 +793,19 @@ shipped a permanent chain halt in place of a fail-open.
 | `python3 tools/ci/check-plan-tables.py` | pass |
 | `tools/ci/fuzz-gates.sh` | **exit 0** (run because `market-core` changed) |
 
+**Two defects in these fixes were caught by the gates and repaired before the PR was updated,
+and are recorded because the near-misses are the same shape as findings this review reported.**
+
+1. **A `Config` addition broke a crate no targeted gate compiles.** Adding
+   `type OutflowCustody` to the treasury `Config` broke `runtime/bleavit-xcm`'s own test runtime,
+   which also implements that `Config`. Every targeted run was green; only the **exhaustive**
+   `rust-workspace-gates.sh` caught it (exit **101**, not 0 — the first reading of that run was of
+   a shell wrapper's status, not the gate's). This is the repository's recurring class: a
+   signature change breaking code no hand-run check compiles.
+2. **The new `Error` variant was initially inserted mid-enum**, which shifts the SCALE index of
+   every variant after it — a decode break for the keeper and the monitoring exporters, against
+   02 §13's append-only rule. Moved to the end of the enum before commit.
+
 **Falsification.** The four new `pallet-market` staleness tests were re-run with
 `pallets/market/src/lib.rs` reverted to its pre-fix state: all four fail, with the exact
 assertions the fix repairs. They are regression tests, not restatements.

@@ -794,10 +794,6 @@ pub mod pallet {
         ZeroQuote,
         /// Arithmetic overflow — rejected, never wrapped (G-1).
         Overflow,
-        /// The call's real-asset leg is not wired in this runtime, so it would
-        /// have reported a value movement that never happened (08 §1.4's A9
-        /// fungibles follow-up). Status-quo default: refuse (G-1).
-        OutflowCustodyUnwired,
         /// Signed caller is not the stored Coretime quote authority.
         NotQuoteAuthority,
         /// The ops multisig tried to fund a non-`ops.*` line.
@@ -834,6 +830,14 @@ pub mod pallet {
         CommunityVestingDurationInvalid,
         /// A beneficiary may not be the source pot itself.
         CommunityBeneficiaryIsPot,
+        /// The call's real-asset leg is not wired in this runtime, so it would
+        /// have reported a value movement that never happened (08 §1.4's A9
+        /// fungibles follow-up). Status-quo default: refuse (G-1).
+        ///
+        /// Appended, never inserted: `Error` variants carry SCALE indices that
+        /// off-chain consumers decode, so a new variant goes at the end (02 §13
+        /// append-only rule) rather than shifting every variant after it.
+        OutflowCustodyUnwired,
     }
 
     #[pallet::hooks]

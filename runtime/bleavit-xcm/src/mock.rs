@@ -237,6 +237,9 @@ impl pallet_futarchy_treasury::Config for Test {
     type RenewalDispatch = TestRenewalDispatcher;
     type PotFunding = ();
     type InsuranceSweep = ();
+    // This harness exercises the XCM layer, not treasury outflows; the unit
+    // seam keeps the production fail-closed answer (AUD-NUM-001).
+    type OutflowCustody = ();
     type RebatePayout = ();
     type Integrity = ();
     type WeightInfo = ();
