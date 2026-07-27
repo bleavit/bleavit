@@ -839,6 +839,7 @@ impl SnapshotExtractor {
             sampled_gate_days.as_ref(),
             lookback,
             daily_samples,
+            epoch.and_then(|value| value.length),
         );
         Some(WelfareSnapshot {
             active_spec_version,
@@ -1521,16 +1522,52 @@ fn derive_welfare_candidates(
     (active_spec, candidates.into_iter().collect())
 }
 
+/// The days an epoch of `length` blocks actually contained (05 §4.7): its whole
+/// days, floored at one.
+///
+/// `MaxDailyGateSamples` is the *storage* bound on the on-chain breach bitmap and
+/// not the semantic day domain, so planning against it alone produced cranks for
+/// days the epoch never had. Since SQ-181 the chain refuses those with
+/// `DayOutsideEpoch`, and a refused crank is never marked sampled — so an
+/// unclamped planner would resubmit ~50 doomed extrinsics per measurement epoch
+/// for as long as it ran. `kernel::BLOCKS_PER_DAY` is the one home of the day
+/// length (rule 4); the epoch length comes from the chain.
+///
+/// `None` when the epoch length is unknown, in which case the caller keeps its
+/// `MaxDailyGateSamples` bound: over-planning is the pre-existing behavior and is
+/// visibly noisy, whereas under-planning would silently skip real days and let a
+/// `C_daily` breach go unrecorded.
+fn measurable_days(length: Option<u64>) -> Option<u64> {
+    let length = length?;
+    Some(
+        length
+            .checked_div(u64::from(futarchy_primitives::kernel::BLOCKS_PER_DAY))
+            .unwrap_or(0)
+            .max(1),
+    )
+}
+
 fn derive_daily_gate_candidates(
     current_epoch: Option<u64>,
     spec_activations: &BTreeMap<u64, u64>,
     sampled: Option<&BTreeMap<u64, [u32; 2]>>,
     lookback: usize,
     daily_samples: u8,
+    epoch_length: Option<u64>,
 ) -> Vec<(u64, u8, u64)> {
     let (Some(current_epoch), Some(sampled)) = (current_epoch, sampled) else {
         return Vec::new();
     };
+    // The live epoch's length stands in for the measurement epochs behind it:
+    // `epoch.length` moves only by a governed amendment with a cooldown, and the
+    // clamp is a planning heuristic rather than a correctness rule — the chain's
+    // own guard is authoritative either way. After a length *reduction* an older,
+    // longer epoch's trailing days go unplanned until some keeper covers them,
+    // which costs coverage and never correctness: 05 §4.7 requires one recorded
+    // day per measurement epoch, and day 0 is always inside the set.
+    let planned_days = measurable_days(epoch_length)
+        .and_then(|days| u8::try_from(days).ok())
+        .map_or(daily_samples, |days| days.min(daily_samples));
     let lookback = u64::try_from(lookback).unwrap_or(u64::MAX);
     let first_epoch = current_epoch.saturating_sub(lookback).max(1);
     let mut candidates = Vec::new();
@@ -1543,7 +1580,7 @@ fn derive_daily_gate_candidates(
         else {
             continue;
         };
-        for day in 0..daily_samples {
+        for day in 0..planned_days {
             let bit = 1u32 << (day % 32);
             let already_sampled = sampled
                 .get(&epoch)
@@ -2371,7 +2408,7 @@ mod tests {
         let activations = BTreeMap::from([(1, 1)]);
         let sampled = BTreeMap::from([(2, [1, 0])]);
         assert_eq!(
-            derive_daily_gate_candidates(Some(3), &activations, Some(&sampled), 1, 2),
+            derive_daily_gate_candidates(Some(3), &activations, Some(&sampled), 1, 2, None),
             vec![(2, 1, 1)]
         );
     }
@@ -2379,7 +2416,70 @@ mod tests {
     #[test]
     fn absent_sample_marker_disables_daily_gate_candidates() {
         let activations = BTreeMap::from([(1, 1)]);
-        assert!(derive_daily_gate_candidates(Some(3), &activations, None, 1, 2).is_empty());
+        assert!(derive_daily_gate_candidates(Some(3), &activations, None, 1, 2, None).is_empty());
+    }
+
+    #[test]
+    fn daily_gate_candidates_stop_at_the_epochs_last_whole_day() {
+        // SQ-181: the chain refuses a day the epoch never had, and a refused
+        // crank is never marked sampled — so planning past the epoch's whole-day
+        // count would resubmit doomed extrinsics forever.
+        let day = u64::from(futarchy_primitives::kernel::BLOCKS_PER_DAY);
+        let activations = BTreeMap::from([(1, 1)]);
+        let sampled = BTreeMap::from([(2, [0, 0])]);
+        // A three-and-a-half-day epoch has three measurable days: 0, 1 and 2.
+        assert_eq!(
+            measurable_days(Some(3 * day + day / 2)),
+            Some(3),
+            "the trailing partial day is not a measurement window",
+        );
+        assert_eq!(
+            derive_daily_gate_candidates(
+                Some(3),
+                &activations,
+                Some(&sampled),
+                1,
+                64,
+                Some(3 * day + day / 2),
+            ),
+            vec![(2, 0, 1), (2, 1, 1), (2, 2, 1)],
+        );
+
+        // A sub-day epoch still has one: day 0 is always a measurement window.
+        assert_eq!(measurable_days(Some(day / 4)), Some(1));
+        assert_eq!(
+            derive_daily_gate_candidates(
+                Some(3),
+                &activations,
+                Some(&sampled),
+                1,
+                64,
+                Some(day / 4)
+            ),
+            vec![(2, 0, 1)],
+        );
+
+        // The storage bound still caps the plan when it is the smaller of the two.
+        assert_eq!(
+            derive_daily_gate_candidates(
+                Some(3),
+                &activations,
+                Some(&sampled),
+                1,
+                2,
+                Some(9 * day)
+            )
+            .len(),
+            2,
+        );
+
+        // An unknown epoch length keeps the pre-SQ-181 bound: over-planning is
+        // noisy, under-planning would silently skip a real day.
+        assert_eq!(measurable_days(None), None);
+        assert_eq!(
+            derive_daily_gate_candidates(Some(3), &activations, Some(&sampled), 1, 4, None).len(),
+            4,
+        );
     }
 
     #[test]

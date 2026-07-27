@@ -151,6 +151,44 @@ fn fill_gate_flags(state: &mut WelfareState, count: usize) -> Result<(), Benchma
     Ok(())
 }
 
+/// Seed one 05 §4.3 authorship window at its 13 §4 bound.
+///
+/// The runtime's `MetricInputs` binding reads an authorship window on **every**
+/// `record_snapshot` (the epoch aggregate) and every `record_daily_gate` (the
+/// day window), so both fixtures must present the largest window the bound
+/// admits or the generated weight declares a read of a value smaller than
+/// production can hold. Returned for the caller to assert on: a fixture that
+/// silently stops reaching the work is the defect this exists to close.
+fn authorship_window<T: Config>(bound: u32) -> Result<AuthorshipWindow<T>, BenchmarkError> {
+    let mut authors = Vec::new();
+    for index in 0..bound {
+        authors.push((account::<T::AccountId>("welfare-author", index, 0), 1u32));
+    }
+    Ok(AuthorshipWindow {
+        authors: BoundedVec::try_from(authors)
+            .map_err(|_| BenchmarkError::Stop("benchmark authorship fixture exceeds its bound"))?,
+        truncated: false,
+    })
+}
+
+/// Seed the epoch aggregate and one day window at their bound, and assert it.
+fn seed_authorship_worst_case<T: Config>(epoch: EpochId, day: u8) -> Result<(), BenchmarkError> {
+    let bound = <T as Config>::MaxCollatorAuthorshipEntries::get();
+    CollatorAuthorship::<T>::insert(epoch, day, authorship_window::<T>(bound)?);
+    CollatorAuthorshipEpoch::<T>::insert(epoch, authorship_window::<T>(bound)?);
+    assert_eq!(
+        CollatorAuthorship::<T>::get(epoch, day).authors.len() as u32,
+        bound,
+        "the day authorship window must be seeded at its bound",
+    );
+    assert_eq!(
+        CollatorAuthorshipEpoch::<T>::get(epoch).authors.len() as u32,
+        bound,
+        "the epoch authorship aggregate must be seeded at its bound",
+    );
+    Ok(())
+}
+
 fn fill_specs(state: &mut WelfareState, first_version: u16) -> Result<(), BenchmarkError> {
     for version in first_version..=MAX_METRIC_SPECS as u16 {
         state
@@ -223,13 +261,19 @@ mod benches {
         fill_snapshots(&mut state, MAX_SNAPSHOTS - 1)?;
         fill_gate_flags(&mut state, MAX_GATE_FLAGS)?;
         Pallet::<T>::seed(&state)?;
-        T::BenchmarkHelper::prime_finalized_epoch(MAX_SNAPSHOTS as u32 + 1);
+        let epoch = MAX_SNAPSHOTS as u32 + 1;
+        T::BenchmarkHelper::prime_finalized_epoch(epoch);
         T::BenchmarkHelper::prime_metric_inputs(MAX_COMPONENTS_PER_SPEC as u16);
+        // 05 §4.3: the runtime projection reads this epoch's authorship
+        // aggregate, so the fixture presents it at its bound. Indexed first, or
+        // try-state would see an aggregate the reaper cannot reach.
+        XcmTrafficEpochs::<T>::put(BoundedVec::truncate_from(alloc::vec![epoch]));
+        seed_authorship_worst_case::<T>(epoch, 0)?;
         let caller: T::AccountId = whitelisted_caller();
         T::BenchmarkHelper::prime_keeper_rebate();
 
         #[extrinsic_call]
-        _(RawOrigin::Signed(caller), MAX_SNAPSHOTS as u32 + 1, 1);
+        _(RawOrigin::Signed(caller), epoch, 1);
 
         T::BenchmarkHelper::assert_keeper_rebate_paid(
             futarchy_primitives::keeper::CrankClass::DecisionCritical,
@@ -248,13 +292,19 @@ mod benches {
         fill_snapshots(&mut state, MAX_SNAPSHOTS)?;
         fill_gate_flags(&mut state, MAX_GATE_FLAGS - 1)?;
         Pallet::<T>::seed(&state)?;
-        T::BenchmarkHelper::prime_finalized_epoch(MAX_GATE_FLAGS as u32 + 1);
+        let epoch = MAX_GATE_FLAGS as u32 + 1;
+        T::BenchmarkHelper::prime_finalized_epoch(epoch);
         T::BenchmarkHelper::prime_metric_inputs(MAX_COMPONENTS_PER_SPEC as u16);
+        // The day projection reads day 0's authorship window (05 §4.3) and the
+        // 05 §4.7 day guard reads the epoch's timing; both are seeded worst-case
+        // by `prime_finalized_epoch` and the line below.
+        XcmTrafficEpochs::<T>::put(BoundedVec::truncate_from(alloc::vec![epoch]));
+        seed_authorship_worst_case::<T>(epoch, 0)?;
         let caller: T::AccountId = whitelisted_caller();
         T::BenchmarkHelper::prime_keeper_rebate();
 
         #[extrinsic_call]
-        _(RawOrigin::Signed(caller), MAX_GATE_FLAGS as u32 + 1, 0, 1);
+        _(RawOrigin::Signed(caller), epoch, 0, 1);
 
         T::BenchmarkHelper::assert_keeper_rebate_paid(
             futarchy_primitives::keeper::CrankClass::General,
@@ -265,14 +315,15 @@ mod benches {
 
     /// The 05 §4.3 authorship recorder at its worst case.
     ///
-    /// Worst case is the day vector **full to its bound with the author already
-    /// in it, at the last position**: the scan runs the whole vector and then
-    /// still writes. Seeding a full vector whose author is *absent* would scan
-    /// just as far but drop instead of writing, and seeding a short vector
-    /// would measure neither — so the fixture pins the one shape that pays for
-    /// both the full scan and the write.
+    /// Worst case is **both** windows full to their bound with the author
+    /// already in each, at the last position: every scan runs the whole vector
+    /// and then still writes. Seeding a full window whose author is *absent*
+    /// would scan just as far but drop instead of writing, and seeding a short
+    /// one would measure neither — so the fixture pins the one shape that pays
+    /// for the full scan and the write, in the day window and in the epoch
+    /// aggregate the writer maintains beside it.
     ///
-    /// The epoch is pre-indexed because an unindexed one returns before the
+    /// The epoch is pre-indexed because an unindexed one returns before either
     /// map is touched at all (the cheap path, not the dear one).
     #[benchmark]
     fn note_collator_authorship() -> Result<(), BenchmarkError> {
@@ -288,16 +339,35 @@ mod benches {
         }
         // Last position, so `find` scans every preceding entry first.
         authors.push((author.clone(), 1));
-        let seeded = BoundedVec::try_from(authors)
-            .map_err(|_| BenchmarkError::Stop("benchmark authorship fixture exceeds its bound"))?;
-        CollatorAuthorship::<T>::insert(epoch, day, seeded);
+        let seeded = AuthorshipWindow::<T> {
+            authors: BoundedVec::try_from(authors).map_err(|_| {
+                BenchmarkError::Stop("benchmark authorship fixture exceeds its bound")
+            })?,
+            truncated: false,
+        };
+        CollatorAuthorship::<T>::insert(epoch, day, seeded.clone());
+        CollatorAuthorshipEpoch::<T>::insert(epoch, seeded);
+        assert_eq!(
+            CollatorAuthorship::<T>::get(epoch, day).authors.len() as u32,
+            bound,
+        );
+        assert_eq!(
+            CollatorAuthorshipEpoch::<T>::get(epoch).authors.len() as u32,
+            bound,
+        );
 
         #[block]
         {
             Pallet::<T>::note_collator_authorship(epoch, day, author.clone());
         }
 
+        // Both windows advanced, so the measurement covered both writes.
         assert!(CollatorAuthorship::<T>::get(epoch, day)
+            .authors
+            .iter()
+            .any(|(who, blocks)| *who == author && *blocks == 2));
+        assert!(CollatorAuthorshipEpoch::<T>::get(epoch)
+            .authors
             .iter()
             .any(|(who, blocks)| *who == author && *blocks == 2));
         Ok(())

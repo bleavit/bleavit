@@ -142,6 +142,9 @@ parameter_types! {
     /// `baseline_open` precondition is false and the VOID settlement no-ops.
     pub static BaselineClosed: Vec<EpochId> = Vec::new();
     pub static RecordKeeperRebates: bool = false;
+    /// 05 §4.7's measurable day count for every epoch, as the epoch clock would
+    /// project it. `None` models an epoch whose timing is no longer retained.
+    pub static MeasurableDays: Option<u32> = Some(u32::from(crate::MAX_DAILY_GATE_SAMPLES));
 }
 
 pub struct KeeperRebates;
@@ -264,6 +267,13 @@ pub struct TestSnapshotSchedule;
 impl pallet_welfare::SnapshotSchedule for TestSnapshotSchedule {
     fn snapshot_due(epoch: EpochId) -> Option<futarchy_primitives::BlockNumber> {
         epoch.checked_add(1)?.checked_mul(100)
+    }
+
+    /// Every day the storage bitmap can hold, so the 05 §4.7 day-domain guard is
+    /// a no-op for the suites that predate it and the ones that exercise it set
+    /// this to the epoch shape they mean (including `None` — timing unknown).
+    fn measurable_days(_epoch: EpochId) -> Option<u32> {
+        MeasurableDays::get()
     }
 }
 
