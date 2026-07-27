@@ -352,10 +352,13 @@ pub mod pallet {
         /// has zeroed spendable NAV outright. `PhaseFlags` is left unchanged.
         NavFloorUnmet,
         /// 13 §5 item 6's screening obligation refused this change, fail-closed
-        /// (SQ-303). Either a class-floor key whose proposed value re-derives an
-        /// 08 §4.1 floor above the frozen literal, or an occupancy key — refused
-        /// in either direction while items 1–4 have no comparable literal
-        /// (SQ-501). See `constitution_core::Error::BudgetDerivationRequired`.
+        /// (SQ-303/SQ-501). Either a class-floor key whose proposed value
+        /// re-derives an 08 §4.1 NAV floor above the frozen literal, or an
+        /// occupancy key whose proposed value would grow one of items 1–4's
+        /// envelopes past the frozen figure the runtime compiles against — both
+        /// screened **by value**, and both answering this way when the
+        /// derivation cannot be evaluated at all (G-1). See
+        /// `constitution_core::Error::BudgetDerivationRequired`.
         BudgetDerivationRequired,
         /// 09 §5.2: `phase3.tvl_cap` / `phase3.dep_cap` are raised only by
         /// phase gates and are not PARAM/META-adjustable during Phases ≤ 3.
