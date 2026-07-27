@@ -31,8 +31,9 @@ const KIB: usize = 1024;
 const MAX_LIVE_MARKETS: usize = futarchy_primitives::bounds::MAX_LIVE_MARKETS as usize;
 /// 13 §4: archive-derived present `Markets` rows, including terminal books.
 const MAX_STORED_MARKETS: usize = futarchy_primitives::bounds::MAX_STORED_MARKETS as usize;
-/// 13 §5 item 2: ≤ 32 live + 4 cohorts × 5 settling = 52 vaults.
-const MAX_LIVE_VAULTS: usize = 52;
+/// 13 §5 item 2: ≤ 32 live + 4 cohorts × 5 settling = 52 vaults. Single-homed
+/// in the kernel since SQ-501, where the occupancy screen re-derives it.
+const MAX_LIVE_VAULTS: usize = futarchy_primitives::kernel::LIVE_VAULT_ENVELOPE as usize;
 /// 04 §7 / 13 §4: `TwapCheckpoints: BoundedVec<(BlockNumber, Cum), 8>` at
 /// its implemented maximum:
 /// 8 × (4 B `u32` block + 32 B u256 two-limb cumulative) + 1 length byte.
@@ -79,10 +80,16 @@ fn assert_fits(name: &str, w: Weight) {
 #[test]
 fn market_map_ceiling_within_13_5_budget() {
     let book = market_core::MarketBook::<AccountId>::max_encoded_len();
-    assert_eq!(book, 205, "MarketBook measured MaxEncodedLen drifted");
+    assert_eq!(
+        book,
+        futarchy_primitives::kernel::MARKET_BOOK_MAX_BYTES as usize,
+        "MarketBook measured MaxEncodedLen drifted from the 13 §5 item 1 figure"
+    );
     assert_eq!(MAX_STORED_MARKETS, 2_240, "stored-market bound drifted");
+    let budget = futarchy_primitives::kernel::RETAINED_MARKETS_BUDGET_BYTES as usize;
+    assert_eq!(budget, 512 * KIB);
     assert!(
-        MAX_STORED_MARKETS * book <= 512 * KIB,
+        MAX_STORED_MARKETS * book <= budget,
         "stored-market map ceiling exceeds the 512 KiB budget: {} B",
         MAX_STORED_MARKETS * book
     );
@@ -97,12 +104,23 @@ fn vault_ceiling_within_13_5_budget() {
     // conservative per-entry figure is the larger of the two.
     let vault = conditional_ledger_core::VaultInfo::max_encoded_len()
         .max(conditional_ledger_core::BaselineVaultInfo::max_encoded_len());
+    let pinned = futarchy_primitives::kernel::VAULT_MAX_BYTES as usize;
     assert!(
-        vault <= 256,
+        vault <= pinned,
         "vault storage value grew past the 13 §5 ~256 B model: {vault} B"
     );
+    let budget = futarchy_primitives::kernel::VAULT_OCCUPANCY_BUDGET_BYTES as usize;
+    assert_eq!(budget, 13 * KIB);
+    // The pinned per-vault ceiling is what sized the budget (52 × 256 B), and
+    // it is what the SQ-501 occupancy screen measures a proposed `epoch.slots`
+    // against — so assert the budget at the ceiling, not only at the measurement.
     assert!(
-        MAX_LIVE_VAULTS * vault <= 13 * KIB,
+        MAX_LIVE_VAULTS * pinned <= budget,
+        "52-vault ceiling at the pinned per-vault size exceeds the 13 KiB budget: {} B",
+        MAX_LIVE_VAULTS * pinned
+    );
+    assert!(
+        MAX_LIVE_VAULTS * vault <= budget,
         "52-vault ceiling exceeds the 13 KiB budget: {} B",
         MAX_LIVE_VAULTS * vault
     );
@@ -162,8 +180,27 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
         }),
     );
     all.extend(
+        // `set_param` composes the `BudgetDerivationGuard` seam's declared cost at
+        // its `#[pallet::weight]` attribute (SQ-501): the SQ-501 occupancy screen
+        // reads bounded in-flight epoch state, which the generated function does
+        // not measure. I-20 is a statement about the **dispatched** weight, so the
+        // composed total is what has to fit the class here — the same reason the
+        // three clock-syncing cranks add their collator term below.
         pallet_call_weights!(pallet_constitution as pallet_constitution::WeightInfo {
             set_param, set_capability, set_phase_flag, set_release_channel, amend_registry,
+        })
+        .into_iter()
+        .map(|(name, weight)| {
+            match name {
+            "pallet_constitution::set_param" => (
+                name,
+                weight.saturating_add(
+                    <crate::configs::RuntimeBudgetDerivationGuard as
+                        pallet_constitution::BudgetDerivationGuard>::max_weight(),
+                ),
+            ),
+            _ => (name, weight),
+        }
         }),
     );
     all.extend(

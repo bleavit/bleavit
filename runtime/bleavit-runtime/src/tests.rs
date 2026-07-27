@@ -14810,6 +14810,10 @@ fn registry_archive_delay_retains_the_money_deadline_floor() {
     });
 }
 
+/// The screen refuses in production, and the refusal survives SQ-501's move from
+/// an unconditional occupancy refusal to a value test: `epoch.length + 1` still
+/// fails, now because it carries 13 §5 item 4's full-window observation count
+/// past the frozen 580,320 (`sq_501_*` below pins both sides of that boundary).
 #[test]
 fn sq_303_rederivation_screen_is_fail_closed_in_production() {
     development_ext().execute_with(|| {
@@ -14949,6 +14953,458 @@ fn sq303_screen_does_not_freeze_ledger_archive_or_pol_b_baseline() {
             pallet_constitution::ParamValue::Balance(
                 baseline + futarchy_primitives::currency::USDC
             ),
+        ));
+    });
+}
+
+// ---------------------------------------------------------------- SQ-501 ---
+//
+// The occupancy family (`epoch.slots`, `mkt.obs_interval`, `dec.window`,
+// `epoch.length`) was refused outright by both `ensure_derivations_survive` and
+// `RuntimeBudgetDerivationGuard`, so no value of the four was admissible and
+// their 13 §1 rows were declaratory. It is now the same value test SQ-303 gave
+// the class-floor family, against 13 §5 items 1–4's envelopes single-homed in
+// `futarchy_primitives::kernel`.
+
+/// The genesis registry sits **exactly on** three of the four envelopes, so each
+/// key's admission boundary is its own default — testable from both sides
+/// end-to-end through the real extrinsic.
+#[test]
+fn sq_501_occupancy_screen_admits_and_refuses_at_the_envelope_boundary() {
+    use pallet_constitution::ParamValue;
+
+    // (key, origin, safe value, first breaching value)
+    let cases: [(&[u8], pallet_origins::Origin, ParamValue, ParamValue); 4] = [
+        // item 2 (32 + 4·slots ≤ 52) and item 4 (books = slots·6 + 1).
+        (
+            b"epoch.slots",
+            pallet_origins::Origin::FutarchyMeta,
+            ParamValue::U8(4),
+            ParamValue::U8(6),
+        ),
+        // item 4: load is inversely proportional to the observation interval.
+        (
+            b"mkt.obs_interval",
+            pallet_origins::Origin::FutarchyParam,
+            ParamValue::U32(11),
+            ParamValue::U32(9),
+        ),
+        // item 4 decision-critical: 31 × ceil(dec.window / 10) ≤ 133,920.
+        (
+            b"dec.window",
+            pallet_origins::Origin::FutarchyMeta,
+            ParamValue::U32(43_190),
+            ParamValue::U32(43_201),
+        ),
+        // item 4 full-window: 31 × ceil(epoch·13/21 / 10) ≤ 580,320.
+        (
+            b"epoch.length",
+            pallet_origins::Origin::FutarchyMeta,
+            ParamValue::U32(302_379),
+            ParamValue::U32(302_401),
+        ),
+    ];
+
+    for (name, origin, safe, breaching) in cases {
+        let key = pallet_constitution::key16(name);
+        // Refusal leg — a separate externalities per leg so neither write can
+        // move the other's derivation inputs.
+        development_ext().execute_with(|| {
+            let before = pallet_constitution::Params::<Runtime>::get(key)
+                .expect("13 §1 occupancy row is seeded");
+            pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+                clock.index = clock.index.saturating_add(4)
+            });
+            assert_noop!(
+                Constitution::set_param(origin.into(), key, breaching),
+                pallet_constitution::Error::<Runtime>::BudgetDerivationRequired,
+            );
+            assert_eq!(
+                pallet_constitution::Params::<Runtime>::get(key)
+                    .expect("row survives a refused write")
+                    .value,
+                before.value,
+            );
+        });
+        // Admission leg.
+        development_ext().execute_with(|| {
+            pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+                clock.index = clock.index.saturating_add(4)
+            });
+            assert_ok!(Constitution::set_param(origin.into(), key, safe));
+            assert_eq!(
+                pallet_constitution::Params::<Runtime>::get(key)
+                    .expect("row survives an admitted write")
+                    .value,
+                safe,
+            );
+        });
+    }
+}
+
+/// An equal write is not a change (13 §5 item 6), so it is never screened — not
+/// even for a key whose live value sits exactly on its envelope.
+#[test]
+fn sq_501_equal_writes_reach_no_occupancy_derivation() {
+    development_ext().execute_with(|| {
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        for name in pallet_constitution::OCCUPANCY_PARAM_KEYS {
+            let key = pallet_constitution::key16(name);
+            let record = pallet_constitution::Params::<Runtime>::get(key)
+                .expect("13 §1 occupancy row is seeded");
+            assert!(
+                <crate::configs::RuntimeBudgetDerivationGuard as
+                    pallet_constitution::BudgetDerivationGuard>::permits(
+                        key,
+                        record.value,
+                        record.value,
+                    ),
+                "equal write to {name:?} was screened",
+            );
+        }
+    });
+}
+
+/// The runtime guard and the core aggregate must return the same verdict for the
+/// same inputs. A drifting second copy of the derivation — the guard reads
+/// `Params` storage, the core reads its own vector — is exactly the defect the
+/// shared `occupancy_params_for` / `occupancy_envelopes_survive` pair prevents,
+/// and this is what proves the two are really shared.
+#[test]
+fn sq_501_runtime_guard_and_core_agree_on_every_occupancy_probe() {
+    use pallet_constitution::{BudgetDerivationGuard, ParamValue};
+
+    development_ext().execute_with(|| {
+        let core = pallet_constitution::ConstitutionState::genesis();
+        // The runtime's own reader, so the differential compares the two screens
+        // on one snapshot rather than on two independently-derived ones.
+        let in_flight = crate::configs::in_flight_occupancy()
+            .expect("the development genesis state is readable");
+        let core_lookup = |wanted: futarchy_primitives::ParamKey| {
+            core.params
+                .iter()
+                .find(|record| record.key == wanted)
+                .map(|record| record.value)
+        };
+
+        let probes: [(&[u8], &[ParamValue]); 5] = [
+            (
+                b"epoch.slots",
+                &[
+                    ParamValue::U8(1),
+                    ParamValue::U8(4),
+                    ParamValue::U8(5),
+                    ParamValue::U8(6),
+                    ParamValue::U8(12),
+                ],
+            ),
+            (
+                b"mkt.obs_interval",
+                &[
+                    ParamValue::U32(5),
+                    ParamValue::U32(9),
+                    ParamValue::U32(10),
+                    ParamValue::U32(11),
+                    ParamValue::U32(50),
+                ],
+            ),
+            (
+                b"dec.window",
+                &[
+                    ParamValue::U32(14_400),
+                    ParamValue::U32(43_199),
+                    ParamValue::U32(43_200),
+                    ParamValue::U32(43_201),
+                    ParamValue::U32(86_400),
+                ],
+            ),
+            (
+                b"epoch.length",
+                &[
+                    ParamValue::U32(201_600),
+                    ParamValue::U32(302_399),
+                    ParamValue::U32(302_400),
+                    ParamValue::U32(302_401),
+                    ParamValue::U32(604_800),
+                ],
+            ),
+            // Not a trigger, so both sides must answer "permitted" whatever it
+            // is set to (13 §5 item 6).
+            (
+                b"ledger.archive",
+                &[
+                    ParamValue::U32(1_296_000),
+                    ParamValue::U32(5_255_999),
+                    ParamValue::U32(futarchy_primitives::kernel::MAX_ARCHIVE_DELAY_BLOCKS),
+                ],
+            ),
+        ];
+
+        for (name, values) in probes {
+            let key = pallet_constitution::key16(name);
+            let current = pallet_constitution::Params::<Runtime>::get(key)
+                .expect("13 §1 occupancy row is seeded")
+                .value;
+            // Storage and the core aggregate must agree on the live value first
+            // — the screen is only as good as the parameter set it reads.
+            assert_eq!(core_lookup(key), Some(current), "{name:?} live value");
+            for next in values.iter().copied() {
+                if pallet_constitution::is_occupancy_input(key)
+                    && current.as_u128() != next.as_u128()
+                {
+                    // The two registry readings must agree before the verdicts
+                    // can: the screen is only as good as the parameter set it
+                    // reads out of storage.
+                    let core_params = pallet_constitution::occupancy_params_for(
+                        key,
+                        next,
+                        core_lookup,
+                        in_flight,
+                    )
+                    .expect("the genesis registry is readable");
+                    let storage_params = pallet_constitution::occupancy_params_for(
+                        key,
+                        next,
+                        |wanted| {
+                            pallet_constitution::Params::<Runtime>::get(wanted)
+                                .map(|record| record.value)
+                        },
+                        in_flight,
+                    )
+                    .expect("the seeded registry is readable");
+                    assert_eq!(
+                        core_params, storage_params,
+                        "{name:?} -> {next:?}: core and storage derived different inputs",
+                    );
+                }
+                // The whole verdict, through the one shared entry point — so the
+                // SQ-501 `mkt.obs_interval` rule is part of the differential and
+                // not a runtime-only addition.
+                let expected = pallet_constitution::occupancy_change_permitted(
+                    key,
+                    current,
+                    next,
+                    core_lookup,
+                    in_flight,
+                );
+                assert_eq!(
+                    crate::configs::RuntimeBudgetDerivationGuard::permits(key, current, next),
+                    expected,
+                    "{name:?} -> {next:?}: runtime guard disagrees with the core screen",
+                );
+            }
+        }
+    });
+}
+
+/// The #189 review's P1, end to end through the real extrinsic: the two
+/// individually-safe amendments must not compose into a breach.
+///
+/// `epoch.slots` 5 → 4 is admitted, and a registry-only screen then read
+/// `mkt.obs_interval` 10 → 9 as `25 × 4,800 = 120,000` while the still-live
+/// five-slot cohort needed `31 × 4,800 = 148,800`. With the cohort seeded into
+/// real state the lowering is refused; with nothing in flight the identical
+/// lowering is admitted, which is what makes this a value test on reality rather
+/// than a rule about directions.
+#[test]
+fn sq_501_slots_then_interval_composition_is_refused_at_the_extrinsic() {
+    use pallet_constitution::ParamValue;
+
+    development_ext().execute_with(|| {
+        let slots = pallet_constitution::key16(b"epoch.slots");
+        let interval = pallet_constitution::key16(b"mkt.obs_interval");
+        // Five proposals in one epoch: 31 books whose observation load the
+        // post-cut registry no longer describes.
+        seed_in_flight_cohort(5);
+
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            slots,
+            ParamValue::U8(4),
+        ));
+
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_noop!(
+            Constitution::set_param(
+                pallet_origins::Origin::FutarchyParam.into(),
+                interval,
+                ParamValue::U32(9),
+            ),
+            pallet_constitution::Error::<Runtime>::BudgetDerivationRequired
+        );
+        assert_eq!(
+            pallet_constitution::Params::<Runtime>::get(interval)
+                .expect("mkt.obs_interval row survives a refused write")
+                .value,
+            ParamValue::U32(10),
+        );
+
+        // Raising it stays admitted: a longer interval can only reduce the load
+        // of every book already trading, so no in-flight shape is needed.
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyParam.into(),
+            interval,
+            ParamValue::U32(14),
+        ));
+    });
+}
+
+/// The second #189 counterexample, against **real** in-flight state rather than a
+/// stated snapshot: five proposals seeded into one epoch are 31 books, and
+/// `dec.window` is live-consumed, so raising it applies to them immediately.
+///
+/// `epoch.slots` 5 → 4 and `mkt.obs_interval` 10 → 11 are both admitted — the
+/// interval raise genuinely lowers load. A registry-only screen then read
+/// `dec.window` 43,200 → 51,840 (exactly its 20 % max-Δ) as
+/// `25 × ceil(51,840/11) = 117,825`, while the live cohort incurs
+/// `31 × 4,713 = 146,103`, over the frozen 133,920. The composition refuses it,
+/// and the same write is admitted once nothing is in flight — which is what makes
+/// this a value test rather than a direction rule.
+#[test]
+fn sq_501_live_cohort_shapes_reach_the_guard_from_real_state() {
+    use pallet_constitution::ParamValue;
+
+    let window = pallet_constitution::key16(b"dec.window");
+    let interval = pallet_constitution::key16(b"mkt.obs_interval");
+
+    // Leg 1: five proposals in one epoch => 31 books in flight => refused.
+    development_ext().execute_with(|| {
+        seed_in_flight_cohort(5);
+        let in_flight = crate::configs::in_flight_occupancy().expect("state is readable");
+        assert_eq!(in_flight.max_cohort_proposals, 5);
+
+        // The slot cut is admitted even with the cohort live: its 31 books at the
+        // unchanged interval are exactly the frozen 133,920.
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::key16(b"epoch.slots"),
+            ParamValue::U8(4),
+        ));
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyParam.into(),
+            interval,
+            ParamValue::U32(11),
+        ));
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_noop!(
+            Constitution::set_param(
+                pallet_origins::Origin::FutarchyMeta.into(),
+                window,
+                ParamValue::U32(51_840),
+            ),
+            pallet_constitution::Error::<Runtime>::BudgetDerivationRequired
+        );
+        assert_eq!(
+            pallet_constitution::Params::<Runtime>::get(window)
+                .expect("dec.window row survives a refused write")
+                .value,
+            ParamValue::U32(43_200),
+        );
+    });
+
+    // Leg 2: nothing in flight => the identical sequence is admitted.
+    development_ext().execute_with(|| {
+        let in_flight = crate::configs::in_flight_occupancy().expect("state is readable");
+        assert_eq!(in_flight.max_cohort_proposals, 0);
+
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::key16(b"epoch.slots"),
+            ParamValue::U8(4),
+        ));
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyParam.into(),
+            interval,
+            ParamValue::U32(11),
+        ));
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            window,
+            ParamValue::U32(51_840),
+        ));
+    });
+}
+
+/// Seed `count` non-terminal proposals into one epoch so the in-flight reader
+/// sees a cohort of that size. Only the fields the reader consumes are meaningful
+/// (`epoch`); the rest are inert defaults.
+fn seed_in_flight_cohort(count: u64) {
+    let epoch = pallet_epoch::EpochOf::<Runtime>::get().index;
+    for offset in 0..count {
+        let pid = 7_100_000u64.saturating_add(offset);
+        pallet_epoch::Proposals::<Runtime>::insert(
+            pid,
+            Proposal {
+                id: pid,
+                proposer: account(70),
+                class: ProposalClass::Param,
+                state: ProposalState::Trading,
+                epoch,
+                submitted_at: System::block_number(),
+                payload_hash: [0u8; 32],
+                payload_len: 0,
+                ask: 0,
+                bond: 0,
+                resources: Default::default(),
+                metric_spec: 1,
+                decide_at: System::block_number().saturating_add(43_200),
+                rerun: false,
+                extended: false,
+                delayed_once: false,
+                markets: None,
+                maturity: None,
+                grace_end: None,
+                version_constraint: None,
+                decision: None,
+            },
+        );
+    }
+}
+
+/// A registry the guard cannot read is refused, never passed (G-1). Removing an
+/// input row leaves the derivation unevaluable, which is not the same as "no
+/// envelope was breached".
+#[test]
+fn sq_501_runtime_guard_fails_closed_on_an_unreadable_registry() {
+    use pallet_constitution::{BudgetDerivationGuard, ParamValue};
+
+    development_ext().execute_with(|| {
+        let slots_key = pallet_constitution::key16(b"epoch.slots");
+        // `epoch.slots` 5 -> 4 is admitted while the registry is whole.
+        assert!(crate::configs::RuntimeBudgetDerivationGuard::permits(
+            slots_key,
+            ParamValue::U8(5),
+            ParamValue::U8(4),
+        ));
+        pallet_constitution::Params::<Runtime>::remove(pallet_constitution::key16(b"dec.window"));
+        assert!(!crate::configs::RuntimeBudgetDerivationGuard::permits(
+            slots_key,
+            ParamValue::U8(5),
+            ParamValue::U8(4),
         ));
     });
 }

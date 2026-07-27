@@ -9,6 +9,9 @@ use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
 pub use futarchy_primitives::kernel;
+/// 13 §5 items 1–4's derivation inputs, re-exported so the FRAME shell and the
+/// runtime guard name the same type the screen consumes (SQ-501).
+pub use futarchy_primitives::kernel::{InFlightOccupancy, OccupancyParams};
 pub use futarchy_primitives::INTEGRATION_CONTRACT_VERSION as CONTRACT_VERSION;
 
 /// `twox128("Constitution") ++ twox128("ReleaseChannel")`.
@@ -766,6 +769,11 @@ impl ConstitutionState {
         Ok(())
     }
 
+    /// `in_flight` is what the registry cannot describe (SQ-501); the FRAME
+    /// shell reads it from bounded epoch state and the model's callers state it
+    /// explicitly. It is a required argument rather than an `Option` with an idle
+    /// default on purpose: defaulting to idle is the assumption the second #189
+    /// review falsified.
     pub fn dispatch_set_param(
         &mut self,
         origin: ConstitutionOrigin,
@@ -773,6 +781,7 @@ impl ConstitutionState {
         next: ParamValue,
         epoch: u32,
         block: BlockNumber,
+        in_flight: InFlightOccupancy,
     ) -> Result<(), Error> {
         let record = self
             .params
@@ -794,7 +803,7 @@ impl ConstitutionState {
             Error::PhaseCapRaiseRefused
         );
         let (index, updated) = self.checked_set_param(key, next, epoch, block)?;
-        self.ensure_derivations_survive(key, current, next)?;
+        self.ensure_derivations_survive(key, current, next, in_flight)?;
         self.params[index] = updated;
         Ok(())
     }
@@ -824,21 +833,56 @@ impl ConstitutionState {
     /// delivered the safety property, only the CODE proposal can.
     ///
     /// **Occupancy keys.** Items 1–4's bounded occupancy and PoV arithmetic is
-    /// compiled in the same way, but its re-derivation is a whole-document
-    /// recomputation with no single literal to compare against, so the
-    /// fail-closed refusal stands for those and the row's successor obligation
-    /// keeps them.
+    /// compiled in the same way, and since SQ-501 it is screened the same way:
+    /// the envelopes 13 §5 publishes are single-homed as kernel constants, so a
+    /// proposed `epoch.slots`, `mkt.obs_interval`, `dec.window` or `epoch.length`
+    /// is re-derived against them and refused exactly when one would breach.
+    /// Before that they were refused unconditionally in **both** directions,
+    /// which is the same defect SQ-303 removed from the class-floor family: no
+    /// value of the four keys was admissible, so their 13 §1 registry rows were
+    /// declaratory. As with the class floors, the direction that is currently
+    /// unsafe reopens the moment a CODE change moves the compiled figure — and,
+    /// unlike a direction test, a combination that keeps every envelope inside
+    /// its constant (raise `mkt.obs_interval`, then raise `dec.window`) passes
+    /// today.
     fn ensure_derivations_survive(
         &self,
         key: ParamKey,
         current: ParamValue,
         next: ParamValue,
+        in_flight: InFlightOccupancy,
     ) -> Result<(), Error> {
         if current.as_u128() == next.as_u128() {
             return Ok(());
         }
-        ensure!(!is_occupancy_input(key), Error::BudgetDerivationRequired);
-        if !is_class_floor_input(key) {
+        let occupancy = is_occupancy_input(key);
+        let class_floor = is_class_floor_input(key);
+        // Every other key short-circuits before any registry scan, so ordinary
+        // parameter administration pays for none of the lookups below.
+        if !occupancy && !class_floor {
+            return Ok(());
+        }
+        if occupancy {
+            // One shared entry point, so the core aggregate and the runtime
+            // guard cannot disagree. A missing or non-`u32` row, an overflow or
+            // an unscreenable transition all answer `false` — refuse rather than
+            // screen against a parameter set that does not describe reality
+            // (G-1).
+            ensure!(
+                occupancy_change_permitted(
+                    key,
+                    current,
+                    next,
+                    |wanted| {
+                        self.params
+                            .iter()
+                            .find(|record| record.key == wanted)
+                            .map(|record| record.value)
+                    },
+                    in_flight,
+                ),
+                Error::BudgetDerivationRequired
+            );
             return Ok(());
         }
         let proposed = |name: &[u8]| -> Option<u128> {
@@ -863,6 +907,33 @@ impl ConstitutionState {
             Error::BudgetDerivationRequired
         );
         Ok(())
+    }
+
+    /// Test-only: screen with nothing in flight. Every assertion written before
+    /// the in-flight composition landed screened the registry alone, and
+    /// composing with [`InFlightOccupancy::IDLE`] is the identity on it
+    /// (`max(registry, 0) == registry`), so these keep those cases readable
+    /// without letting production code default to idle.
+    #[cfg(test)]
+    fn dispatch_set_param_idle(
+        &mut self,
+        origin: ConstitutionOrigin,
+        key: ParamKey,
+        next: ParamValue,
+        epoch: u32,
+        block: BlockNumber,
+    ) -> Result<(), Error> {
+        self.dispatch_set_param(origin, key, next, epoch, block, InFlightOccupancy::IDLE)
+    }
+
+    #[cfg(test)]
+    fn ensure_derivations_survive_idle(
+        &self,
+        key: ParamKey,
+        current: ParamValue,
+        next: ParamValue,
+    ) -> Result<(), Error> {
+        self.ensure_derivations_survive(key, current, next, InFlightOccupancy::IDLE)
     }
 
     pub fn set_capability(&mut self, capability: CapabilityRecord) -> Result<(), Error> {
@@ -1048,14 +1119,12 @@ pub enum Error {
     TooManyCapabilities,
     BadOrigin,
     TryStateViolation,
-    /// 13 §5 item 6's screening obligation refused this change (SQ-303, G-1).
-    ///
-    /// Two distinct causes, both fail-closed. A **class-floor** key
-    /// (`pol.budget_epoch`, `pol.b_gate`, `pol.b.*`) whose proposed value would
-    /// push a re-derived 08 §4.1 floor above the frozen literal — including the
-    /// case where the derivation cannot be evaluated at all. Or any **occupancy**
-    /// key ([`is_occupancy_input`]), which is refused in either direction while
-    /// items 1–4's envelopes exist only as prose (SQ-501).
+    /// A 13 §5 derivation would not survive the proposed value: either an
+    /// 08 §4.1 per-class NAV floor would rise above the frozen literal the
+    /// treasury enforces (SQ-303), or one of items 1–4's occupancy envelopes
+    /// would grow past the frozen figure the runtime compiles against
+    /// (SQ-501). Also the fail-closed answer when the derivation cannot be
+    /// evaluated at all (G-1).
     BudgetDerivationRequired,
     /// 09 §5.2: the two Phase-3 exposure caps are raised only by phase gates
     /// and are not PARAM/META-adjustable during Phases ≤ 3 (SQ-197).
@@ -1114,19 +1183,194 @@ pub fn is_coverage_input(key: ParamKey) -> bool {
 pub const POL_B_CLASS_KEYS: [&[u8]; 4] =
     [b"pol.b.param", b"pol.b.trs", b"pol.b.code", b"pol.b.meta"];
 
-/// 13 §5 item 6 keys whose change makes the **bounded occupancy / PoV** arithmetic
-/// of items 1–4 stale, so no re-derivation carried in an artifact can make the
-/// compiled envelopes right again.
+/// 13 §5 item 6 keys whose change moves the **bounded occupancy / PoV**
+/// arithmetic of items 1–4, and which are therefore screened by value at
+/// `set_param` (SQ-501).
 ///
 /// `ledger.archive` is deliberately **not** here. Item 6 states its own reason:
 /// it "can only move downward from its one-year K ceiling, so the compiled
 /// 2,240-row storage envelope remains safe". Screening it was an over-rejection
-/// against the spec's own words (SQ-303).
+/// against the spec's own words (SQ-303). It is still an *input* to item 1's
+/// re-derivation — see [`OCCUPANCY_PARAM_KEYS`] — just not a trigger.
 pub fn is_occupancy_input(key: ParamKey) -> bool {
     key == key16(b"epoch.slots")
         || key == key16(b"mkt.obs_interval")
         || key == key16(b"dec.window")
         || key == key16(b"epoch.length")
+}
+
+/// Every 13 §1 key 13 §5 items 1–4 re-derive from, paired with the
+/// [`OccupancyParams`] field it fills.
+///
+/// Single-homed (SQ-501) for the same reason [`class_floors_survive`] is: the
+/// core aggregate reads them out of its own `params` vector and the runtime
+/// guard reads them out of `Params` storage, and a second copy of this key list
+/// that drifted would screen a different parameter set than the one being
+/// written.
+///
+/// `ledger.archive` appears here although it is not a screening *trigger*: item
+/// 1's retained-map derivation takes it as an input, and reading it live is what
+/// makes that derivation true rather than assumed.
+pub const OCCUPANCY_PARAM_KEYS: [&[u8]; 5] = [
+    b"epoch.length",
+    b"epoch.slots",
+    b"mkt.obs_interval",
+    b"dec.window",
+    b"ledger.archive",
+];
+
+/// The complete 13 §5 items 1–4 verdict for one proposed `set_param`.
+///
+/// The single entry point both screens use, so there is exactly one place where
+/// the equal-write short-circuit, the registry read, the in-flight composition
+/// and the value test compose. `lookup` reads the *live* registry —
+/// `self.params` for the core aggregate, `Params` storage for the FRAME shell —
+/// and `in_flight` carries what the registry cannot describe.
+///
+/// **Why `in_flight` is not optional.** The first #189 review showed two
+/// individually-safe amendments composing into a breach; the second showed the
+/// same shape one step further out, spending a *safe* `mkt.obs_interval` raise to
+/// manufacture registry headroom and converting it into a `dec.window` raise that
+/// books already trading apply immediately. Any live-consumed key has that shape
+/// in whichever direction increases load, so the fix is to stop screening against
+/// the registry alone rather than to enumerate transitions.
+///
+/// `false` is the fail-closed answer for every case that cannot be evaluated
+/// (G-1); `true` for keys outside the occupancy family, which this screen does
+/// not govern.
+pub fn occupancy_change_permitted(
+    key: ParamKey,
+    current: ParamValue,
+    next: ParamValue,
+    lookup: impl Fn(ParamKey) -> Option<ParamValue>,
+    in_flight: InFlightOccupancy,
+) -> bool {
+    // An equal write is not a change (13 §5 item 6).
+    if current.as_u128() == next.as_u128() {
+        return true;
+    }
+    if !is_occupancy_input(key) {
+        return true;
+    }
+    match occupancy_params_for(key, next, lookup, in_flight) {
+        Some(params) => occupancy_envelopes_survive(params),
+        None => false,
+    }
+}
+
+/// Build the 13 §5 items 1–4 derivation inputs from a parameter set, with
+/// `next` substituted for `key` exactly as the class-floor screen substitutes
+/// its proposed value.
+///
+/// `lookup` resolves a key against the *live* registry — `self.params` for the
+/// core aggregate, `Params` storage for the FRAME shell — so the two callers
+/// share this extraction rather than each writing their own.
+///
+/// `None` on a missing row or a value outside `u32`: both are states in which
+/// the envelopes cannot be evaluated, and G-1 makes that a refusal rather than a
+/// pass.
+pub fn occupancy_params_for(
+    key: ParamKey,
+    next: ParamValue,
+    lookup: impl Fn(ParamKey) -> Option<ParamValue>,
+    in_flight: InFlightOccupancy,
+) -> Option<OccupancyParams> {
+    let mut raw = [0u32; 5];
+    for (slot, name) in raw.iter_mut().zip(OCCUPANCY_PARAM_KEYS.iter()) {
+        let wanted = key16(name);
+        let value = if wanted == key { next } else { lookup(wanted)? };
+        *slot = u32::try_from(value.as_u128()).ok()?;
+    }
+    Some(futarchy_primitives::kernel::effective_occupancy(
+        OccupancyParams {
+            epoch_length: raw[0],
+            epoch_slots: raw[1],
+            obs_interval: raw[2],
+            dec_window: raw[3],
+            archive_delay: raw[4],
+        },
+        in_flight,
+    ))
+}
+
+/// Do 13 §5 items 1–4's occupancy envelopes still hold at these parameter
+/// values?
+///
+/// `false` means at least one re-derived envelope — retained `Markets` rows and
+/// their 512 KiB budget, vault occupancy and its 13 KiB budget, the `market.reap`
+/// protocol-position cells, or either keeper observation load — has grown past
+/// the frozen figure 13 §5 publishes and the runtime compiles against. That is
+/// the occupancy family's exact analogue of [`class_floors_survive`]: items 1–4
+/// used to be refused unconditionally in both directions because their envelopes
+/// existed only as prose, which left the four 13 §1 rows declaratory (SQ-501).
+///
+/// Single-homed here because two callers need the identical answer:
+/// [`ConstitutionState::set_param`] for the core aggregate, and the runtime's
+/// `BudgetDerivationGuard` for the pallet's own storage path. A second copy of
+/// this arithmetic that drifted would admit a change the other refuses.
+///
+/// Fail-closed on any inability to evaluate (G-1): an overflow, a zero epoch
+/// length or a zero observation interval answers `false`, never "no envelope was
+/// breached". Every derivation rounds **up**, so the error direction is always
+/// against the proposal (R-7).
+pub fn occupancy_envelopes_survive(params: OccupancyParams) -> bool {
+    use futarchy_primitives::kernel;
+
+    // Item 1 — retained `Markets` rows and their byte budget.
+    let Some(retained) = kernel::derived_retained_markets(&params) else {
+        return false;
+    };
+    if retained > futarchy_primitives::bounds::MAX_STORED_MARKETS {
+        return false;
+    }
+    let Some(retained_bytes) = retained.checked_mul(kernel::MARKET_BOOK_MAX_BYTES) else {
+        return false;
+    };
+    if retained_bytes > kernel::RETAINED_MARKETS_BUDGET_BYTES {
+        return false;
+    }
+
+    // Item 2 — vault occupancy and its byte budget.
+    let Some(vaults) = kernel::derived_vault_occupancy(params.epoch_slots) else {
+        return false;
+    };
+    if vaults > kernel::LIVE_VAULT_ENVELOPE {
+        return false;
+    }
+    let Some(vault_bytes) = vaults.checked_mul(kernel::VAULT_MAX_BYTES) else {
+        return false;
+    };
+    if vault_bytes > kernel::VAULT_OCCUPANCY_BUDGET_BYTES {
+        return false;
+    }
+
+    // Item 3 — the per-reap protocol-position universe. No 13 §1 key moves it;
+    // it is re-derived anyway so this is a complete items-1–4 recomputation and
+    // not a partial one.
+    let Some(cells) = kernel::derived_market_reap_protocol_cells() else {
+        return false;
+    };
+    if cells > kernel::MARKET_REAP_PROTOCOL_POSITION_CELLS {
+        return false;
+    }
+
+    // Item 4 — keeper crank load, both the metered decision-critical figure
+    // `keeper.budget_epoch` is sized against (08 §6.2) and the full-window
+    // figure the `ops.keepers` continuity line is sized against (08 §6.3).
+    let Some(decision_critical) = kernel::derived_decision_critical_observations(&params) else {
+        return false;
+    };
+    if decision_critical > kernel::KEEPER_DECISION_CRITICAL_OBSERVATIONS {
+        return false;
+    }
+    let Some(full_window) = kernel::derived_full_window_observations(&params) else {
+        return false;
+    };
+    if full_window > kernel::KEEPER_FULL_WINDOW_OBSERVATIONS {
+        return false;
+    }
+
+    true
 }
 
 /// Do 08 §4.1's frozen per-class NAV floors still hold at these parameter values?
@@ -2451,6 +2695,10 @@ pub mod benchmarking {
             ParamValue::U32(12),
             1,
             1,
+            // A fresh genesis aggregate has no cohort in flight, which is what
+            // this helper models (SQ-501). Raising the interval is admitted at
+            // any in-flight state anyway, so the measured path is unchanged.
+            InFlightOccupancy::IDLE,
         )
     }
 
@@ -2872,7 +3120,7 @@ mod tests {
     fn dispatch_set_param_checks_origin_and_error_paths() {
         let mut state = ConstitutionState::genesis();
         assert_eq!(
-            state.dispatch_set_param(
+            state.dispatch_set_param_idle(
                 ConstitutionOrigin::Signed,
                 key16(b"mkt.obs_interval"),
                 ParamValue::U32(12),
@@ -2884,7 +3132,7 @@ mod tests {
         // 09 §5.4: bootstrap sudo's exhaustive power list excludes parameter
         // administration — Root must be refused for every class.
         assert_eq!(
-            state.dispatch_set_param(
+            state.dispatch_set_param_idle(
                 ConstitutionOrigin::Root,
                 key16(b"mkt.obs_interval"),
                 ParamValue::U32(12),
@@ -2894,7 +3142,7 @@ mod tests {
             Err(Error::BadOrigin)
         );
         assert_eq!(
-            state.dispatch_set_param(
+            state.dispatch_set_param_idle(
                 ConstitutionOrigin::FutarchyTreasury,
                 key16(b"mkt.obs_interval"),
                 ParamValue::U32(12),
@@ -2904,7 +3152,7 @@ mod tests {
             Err(Error::BadOrigin)
         );
         assert_eq!(
-            state.dispatch_set_param(
+            state.dispatch_set_param_idle(
                 ConstitutionOrigin::FutarchyParam,
                 key16(b"missing"),
                 ParamValue::U32(12),
@@ -2914,11 +3162,17 @@ mod tests {
             Err(Error::UnknownParam)
         );
         let before = state.clone();
+        // SQ-501: the occupancy screen is a value test, so the refusal has to be
+        // a value that actually breaches. *Lowering* the observation interval
+        // raises the 13 §5 item 4 crank load past the frozen 133,920 (10 -> 9 is
+        // 148,800), which is the direction `keeper.budget_epoch` cannot absorb.
+        // Raising it is admitted — see
+        // `sq_501_occupancy_screen_admits_exactly_the_values_the_envelopes_hold_for`.
         assert_eq!(
-            state.dispatch_set_param(
+            state.dispatch_set_param_idle(
                 ConstitutionOrigin::FutarchyParam,
                 key16(b"mkt.obs_interval"),
-                ParamValue::U32(12),
+                ParamValue::U32(9),
                 1,
                 10,
             ),
@@ -2926,7 +3180,7 @@ mod tests {
         );
         assert_eq!(state, before);
         state
-            .dispatch_set_param(
+            .dispatch_set_param_idle(
                 ConstitutionOrigin::FutarchyParam,
                 key16(b"mkt.fee"),
                 ParamValue::Perbill(4_000_000),
@@ -2950,10 +3204,11 @@ mod tests {
         let usdc = futarchy_primitives::currency::USDC;
         let mut state = ConstitutionState::genesis();
 
-        // Occupancy inputs stay fail-closed: items 1-4 have no single literal to
-        // compare a re-derivation against.
+        // Occupancy inputs are judged by value too since SQ-501 (they were
+        // refused outright when this test was written): a raise past the frozen
+        // 13 §5 item 4 full-window figure is refused.
         assert_eq!(
-            state.ensure_derivations_survive(
+            state.ensure_derivations_survive_idle(
                 key16(b"epoch.length"),
                 ParamValue::U32(302_400),
                 ParamValue::U32(302_401)
@@ -2965,7 +3220,7 @@ mod tests {
         // true CODE floor past the frozen literal — which has only 0.39 USDC of
         // slack — so it is refused...
         assert_eq!(
-            state.ensure_derivations_survive(
+            state.ensure_derivations_survive_idle(
                 key16(b"pol.b.code"),
                 ParamValue::Balance(60_000 * usdc),
                 ParamValue::Balance(60_001 * usdc)
@@ -2974,7 +3229,7 @@ mod tests {
         );
         // ... and so is any cut to the POL budget, which raises every floor.
         assert_eq!(
-            state.ensure_derivations_survive(
+            state.ensure_derivations_survive_idle(
                 key16(b"pol.budget_epoch"),
                 ParamValue::Perbill(7_500_000),
                 ParamValue::Perbill(7_499_999)
@@ -2983,7 +3238,7 @@ mod tests {
         );
         // The safe direction is ordinary business.
         assert_eq!(
-            state.ensure_derivations_survive(
+            state.ensure_derivations_survive_idle(
                 key16(b"pol.b.code"),
                 ParamValue::Balance(60_000 * usdc),
                 ParamValue::Balance(59_999 * usdc)
@@ -3001,7 +3256,7 @@ mod tests {
             }
         }
         assert_eq!(
-            state.ensure_derivations_survive(
+            state.ensure_derivations_survive_idle(
                 key16(b"pol.b.code"),
                 ParamValue::Balance(60_000 * usdc),
                 ParamValue::Balance(60_001 * usdc)
@@ -3011,7 +3266,7 @@ mod tests {
 
         // Unrelated keys are untouched.
         assert_eq!(
-            state.ensure_derivations_survive(
+            state.ensure_derivations_survive_idle(
                 key16(b"mkt.fee"),
                 ParamValue::Perbill(30_000_000),
                 ParamValue::Perbill(31_000_000)
@@ -3030,7 +3285,7 @@ mod tests {
         // "can only move downward from its one-year K ceiling, so the compiled
         // 2,240-row storage envelope remains safe".
         assert_eq!(
-            state.ensure_derivations_survive(
+            state.ensure_derivations_survive_idle(
                 key16(b"ledger.archive"),
                 ParamValue::U32(5_256_000),
                 ParamValue::U32(5_255_999)
@@ -3040,10 +3295,582 @@ mod tests {
         // "moves no frozen literal" — 08 §4.3 keeps the Baseline book outside
         // the §4.1 arithmetic and outside `pol.budget_epoch`.
         assert_eq!(
-            state.ensure_derivations_survive(
+            state.ensure_derivations_survive_idle(
                 key16(b"pol.b_baseline"),
                 ParamValue::Balance(25_000 * usdc),
                 ParamValue::Balance(26_000 * usdc)
+            ),
+            Ok(())
+        );
+    }
+
+    // ------------------------------------------------------------ SQ-501 ---
+    //
+    // The occupancy family used to be refused unconditionally in both
+    // directions, so no value of `epoch.slots`, `mkt.obs_interval`,
+    // `dec.window` or `epoch.length` was admissible and their 13 §1 rows were
+    // declaratory. These tests pin the value test that replaced it: admitted
+    // exactly when every 13 §5 item 1–4 envelope still holds.
+
+    /// The genesis registry sits **exactly on** three of the four envelopes
+    /// (52 vaults, 133,920 decision-critical and 580,320 full-window
+    /// observations), which is what makes each key's admission boundary its own
+    /// default and lets both sides of it be tested.
+    ///
+    /// Production magnitudes, so default build only: `fast-timing` compresses
+    /// the epoch clock these figures are derived at (SQ-128), exactly like the
+    /// neighbouring `epoch.length` boundary cases above.
+    #[cfg(not(feature = "fast-timing"))]
+    #[test]
+    fn sq_501_occupancy_screen_admits_exactly_the_values_the_envelopes_hold_for() {
+        let state = ConstitutionState::genesis();
+        let screen = |name: &[u8], current: ParamValue, next: ParamValue| {
+            state.ensure_derivations_survive_idle(key16(name), current, next)
+        };
+
+        // `epoch.slots` — item 2's vault occupancy (32 + 4·slots ≤ 52) and item
+        // 4's book count (slots·6 + 1) both bind at 5. Lowering is safe.
+        assert_eq!(
+            screen(b"epoch.slots", ParamValue::U8(5), ParamValue::U8(4)),
+            Ok(())
+        );
+        assert_eq!(
+            screen(b"epoch.slots", ParamValue::U8(5), ParamValue::U8(6)),
+            Err(Error::BudgetDerivationRequired)
+        );
+
+        // `mkt.obs_interval` — item 4's crank load is inversely proportional to
+        // it, so raising is safe and 10 -> 9 is the first breach.
+        assert_eq!(
+            screen(
+                b"mkt.obs_interval",
+                ParamValue::U32(10),
+                ParamValue::U32(11)
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            screen(b"mkt.obs_interval", ParamValue::U32(10), ParamValue::U32(9)),
+            Err(Error::BudgetDerivationRequired)
+        );
+
+        // `dec.window` — item 4's decision-critical figure is 31 ×
+        // ceil(window / 10), so 43,200 is admissible to the block and 43,201
+        // buys a whole extra observation per book.
+        assert_eq!(
+            screen(
+                b"dec.window",
+                ParamValue::U32(43_200),
+                ParamValue::U32(43_190)
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            screen(
+                b"dec.window",
+                ParamValue::U32(43_200),
+                ParamValue::U32(43_201)
+            ),
+            Err(Error::BudgetDerivationRequired)
+        );
+
+        // `epoch.length` — item 4's full-window figure is 31 ×
+        // ceil(epoch·13/21 / 10); shortening the epoch shortens the Trade phase.
+        assert_eq!(
+            screen(
+                b"epoch.length",
+                ParamValue::U32(302_400),
+                ParamValue::U32(302_379)
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            screen(
+                b"epoch.length",
+                ParamValue::U32(302_400),
+                ParamValue::U32(302_401)
+            ),
+            Err(Error::BudgetDerivationRequired)
+        );
+    }
+
+    /// `OCCUPANCY_PARAM_KEYS` fills [`OccupancyParams`] positionally, so a
+    /// reordering of the list would silently feed `dec.window` into the epoch
+    /// length. Pin the mapping against the genesis registry, whose five values
+    /// are pairwise distinct, and pin that substituting the amended key moves
+    /// **only** its own field.
+    #[cfg(not(feature = "fast-timing"))]
+    #[test]
+    fn sq_501_extractor_maps_each_key_to_its_own_field() {
+        let state = ConstitutionState::genesis();
+        let live = |wanted: ParamKey| {
+            state
+                .params
+                .iter()
+                .find(|record| record.key == wanted)
+                .map(|record| record.value)
+        };
+        let genesis = OccupancyParams {
+            epoch_length: 302_400,
+            epoch_slots: 5,
+            obs_interval: 10,
+            dec_window: 43_200,
+            archive_delay: kernel::MAX_ARCHIVE_DELAY_BLOCKS,
+        };
+        // An unrelated key substitutes nothing, so this is the pure live read.
+        assert_eq!(
+            occupancy_params_for(
+                key16(b"mkt.fee"),
+                ParamValue::Perbill(1),
+                live,
+                InFlightOccupancy::IDLE
+            ),
+            Some(genesis)
+        );
+        for (name, next, expected) in [
+            (
+                b"epoch.length".as_slice(),
+                ParamValue::U32(201_600),
+                OccupancyParams {
+                    epoch_length: 201_600,
+                    ..genesis
+                },
+            ),
+            (
+                b"epoch.slots".as_slice(),
+                ParamValue::U8(3),
+                OccupancyParams {
+                    epoch_slots: 3,
+                    ..genesis
+                },
+            ),
+            (
+                b"mkt.obs_interval".as_slice(),
+                ParamValue::U32(25),
+                OccupancyParams {
+                    obs_interval: 25,
+                    ..genesis
+                },
+            ),
+            (
+                b"dec.window".as_slice(),
+                ParamValue::U32(14_400),
+                OccupancyParams {
+                    dec_window: 14_400,
+                    ..genesis
+                },
+            ),
+            (
+                b"ledger.archive".as_slice(),
+                ParamValue::U32(1_296_000),
+                OccupancyParams {
+                    archive_delay: 1_296_000,
+                    ..genesis
+                },
+            ),
+        ] {
+            assert_eq!(
+                occupancy_params_for(key16(name), next, live, InFlightOccupancy::IDLE),
+                Some(expected),
+                "{name:?} did not substitute into its own field"
+            );
+        }
+    }
+
+    /// An equal write is not a change (13 §5 item 6), so it never reaches the
+    /// derivation at all — including for keys whose live value would fail the
+    /// screen if it were proposed today.
+    #[test]
+    fn sq_501_equal_writes_are_never_screened() {
+        let state = ConstitutionState::genesis();
+        for name in OCCUPANCY_PARAM_KEYS {
+            let record = state
+                .params
+                .iter()
+                .find(|record| record.key == key16(name))
+                .expect("13 §1 occupancy row is seeded");
+            assert_eq!(
+                state.ensure_derivations_survive_idle(record.key, record.value, record.value),
+                Ok(()),
+                "equal write to {name:?} was screened"
+            );
+        }
+    }
+
+    /// 13 §5 item 6 names `ledger.archive` an item-1 *input* but explicitly not
+    /// a screening trigger ("can only move downward from its one-year K
+    /// ceiling"). Reading it live and screening it are different things, and
+    /// SQ-501 must not turn the first into the second.
+    #[test]
+    fn sq_501_ledger_archive_is_an_input_not_a_trigger() {
+        let state = ConstitutionState::genesis();
+        assert!(!is_occupancy_input(key16(b"ledger.archive")));
+        assert!(OCCUPANCY_PARAM_KEYS.contains(&b"ledger.archive".as_slice()));
+        // Every lawful move is downward, and downward shrinks item 1's retained
+        // batch count. Not screened at all, in either direction.
+        for next in [1_296_000_u32, kernel::MAX_ARCHIVE_DELAY_BLOCKS - 1] {
+            assert_eq!(
+                state.ensure_derivations_survive_idle(
+                    key16(b"ledger.archive"),
+                    ParamValue::U32(kernel::MAX_ARCHIVE_DELAY_BLOCKS),
+                    ParamValue::U32(next)
+                ),
+                Ok(())
+            );
+        }
+    }
+
+    /// A registry the screen cannot read is refused, never passed (G-1). The
+    /// derivation has no partial answer: an absent row means the envelopes were
+    /// never evaluated, which is not the same as "no envelope was breached".
+    #[test]
+    fn sq_501_screen_fails_closed_on_an_unreadable_registry() {
+        let mut state = ConstitutionState::genesis();
+        state
+            .params
+            .retain(|record| record.key != key16(b"dec.window"));
+        assert_eq!(
+            state.ensure_derivations_survive_idle(
+                key16(b"epoch.slots"),
+                ParamValue::U8(5),
+                ParamValue::U8(4)
+            ),
+            Err(Error::BudgetDerivationRequired)
+        );
+        // Same answer from the shared extractor, which is what both callers use.
+        assert_eq!(
+            occupancy_params_for(
+                key16(b"epoch.slots"),
+                ParamValue::U8(4),
+                |wanted| {
+                    state
+                        .params
+                        .iter()
+                        .find(|record| record.key == wanted)
+                        .map(|record| record.value)
+                },
+                InFlightOccupancy::IDLE
+            ),
+            None
+        );
+    }
+
+    /// The paired-CODE analogue for the occupancy family: a change that breaches
+    /// today is admitted once another key has paid for it. A direction test
+    /// could not express this at all, which is the SQ-501 defect.
+    #[cfg(not(feature = "fast-timing"))]
+    #[test]
+    fn sq_501_screen_admits_a_breaching_raise_once_another_key_pays_for_it() {
+        let mut state = ConstitutionState::genesis();
+        // 43,200 -> 86,400 doubles the decision-critical load at the default
+        // observation interval.
+        assert_eq!(
+            state.ensure_derivations_survive_idle(
+                key16(b"dec.window"),
+                ParamValue::U32(43_200),
+                ParamValue::U32(86_400)
+            ),
+            Err(Error::BudgetDerivationRequired)
+        );
+        // Halving the observation rate first pays for exactly that doubling:
+        // 31 × ceil(86,400/20) = 133,920, the frozen figure to the observation.
+        for record in state.params.iter_mut() {
+            if record.key == key16(b"mkt.obs_interval") {
+                record.value = ParamValue::U32(20);
+            }
+        }
+        assert_eq!(
+            state.ensure_derivations_survive_idle(
+                key16(b"dec.window"),
+                ParamValue::U32(43_200),
+                ParamValue::U32(86_400)
+            ),
+            Ok(())
+        );
+        // The same raise buys `epoch.length` its whole 13 §1 range: at a 20-block
+        // interval the 604,800-block epoch's Trade phase costs 31 ×
+        // ceil(374,400/20) = 580,320 full-window observations — again exactly the
+        // frozen figure. `epoch.length` is therefore screened, not frozen upward.
+        assert_eq!(
+            state.ensure_derivations_survive_idle(
+                key16(b"epoch.length"),
+                ParamValue::U32(302_400),
+                ParamValue::U32(kernel::PRODUCTION_MAX_EPOCH_LENGTH_BLOCKS)
+            ),
+            Ok(())
+        );
+    }
+
+    /// Re-derive the effective occupancy set from `state`'s registry with `next`
+    /// substituted, at a given in-flight state. A free function rather than a
+    /// closure so it holds no borrow across the writes under test.
+    #[cfg(not(feature = "fast-timing"))]
+    fn derive_at(
+        state: &ConstitutionState,
+        key: &[u8],
+        next: ParamValue,
+        in_flight: InFlightOccupancy,
+    ) -> OccupancyParams {
+        occupancy_params_for(
+            key16(key),
+            next,
+            |wanted| {
+                state
+                    .params
+                    .iter()
+                    .find(|record| record.key == wanted)
+                    .map(|record| record.value)
+            },
+            in_flight,
+        )
+        .expect("the genesis registry is readable")
+    }
+
+    /// A five-slot cohort in flight: 31 books, and the epoch length it was
+    /// created under. This is the state both #189 counterexamples exploit.
+    #[cfg(not(feature = "fast-timing"))]
+    const FIVE_SLOT_COHORT: InFlightOccupancy = InFlightOccupancy {
+        max_cohort_proposals: 5,
+        max_epoch_length: 302_400,
+    };
+
+    /// Both #189 counterexamples, with their exact numbers.
+    ///
+    /// Review 1: `epoch.slots` 5 → 4 then `mkt.obs_interval` 10 → 9 read
+    /// `25 × 4,800 = 120,000` against the registry while the live five-slot
+    /// cohort needs `31 × 4,800 = 148,800`.
+    ///
+    /// Review 2, one step further out: the same slot cut, then an
+    /// `mkt.obs_interval` **raise** 10 → 11 — genuinely safe, and admitted — to
+    /// manufacture registry headroom, then `dec.window` 43,200 → 51,840 (exactly
+    /// its 20 % max-Δ) reading `25 × ceil(51,840/11) = 117,825` against the
+    /// registry while the live cohort immediately incurs
+    /// `31 × 4,713 = 146,103`. `dec.window` is live-consumed, so the raise binds
+    /// books already trading at once.
+    ///
+    /// Both are refused by the same composition, and neither needs a rule about
+    /// directions: with the book count taken from what is in flight, the value
+    /// test is exact.
+    #[cfg(not(feature = "fast-timing"))]
+    #[test]
+    fn sq_501_registry_headroom_cannot_be_spent_on_a_live_cohort() {
+        let mut state = ConstitutionState::genesis();
+
+        // --- review 1 ------------------------------------------------------
+        // The slot cut is admitted even with the cohort live: its 31 books at the
+        // unchanged interval are exactly the frozen 133,920.
+        assert_eq!(
+            state.ensure_derivations_survive(
+                key16(b"epoch.slots"),
+                ParamValue::U8(5),
+                ParamValue::U8(4),
+                FIVE_SLOT_COHORT,
+            ),
+            Ok(())
+        );
+        state
+            .dispatch_set_param(
+                ConstitutionOrigin::FutarchyMeta,
+                key16(b"epoch.slots"),
+                ParamValue::U8(4),
+                2,
+                20,
+                FIVE_SLOT_COHORT,
+            )
+            .expect("lowering the slot count is safe against every envelope");
+
+        // Registry-only reads 120,000 and looks safe; the live cohort needs
+        // 148,800. The composition sees the latter.
+        let interval_9_registry = derive_at(
+            &state,
+            b"mkt.obs_interval",
+            ParamValue::U32(9),
+            InFlightOccupancy::IDLE,
+        );
+        assert_eq!(
+            kernel::derived_decision_critical_observations(&interval_9_registry),
+            Some(120_000),
+        );
+        assert!(occupancy_envelopes_survive(interval_9_registry));
+        let interval_9_live = derive_at(
+            &state,
+            b"mkt.obs_interval",
+            ParamValue::U32(9),
+            FIVE_SLOT_COHORT,
+        );
+        assert_eq!(
+            kernel::derived_decision_critical_observations(&interval_9_live),
+            Some(148_800),
+        );
+        assert!(!occupancy_envelopes_survive(interval_9_live));
+        let before = state.clone();
+        assert_eq!(
+            state.dispatch_set_param(
+                ConstitutionOrigin::FutarchyParam,
+                key16(b"mkt.obs_interval"),
+                ParamValue::U32(9),
+                3,
+                30,
+                FIVE_SLOT_COHORT,
+            ),
+            Err(Error::BudgetDerivationRequired)
+        );
+        assert_eq!(state, before);
+
+        // With nothing in flight the same lowering is admitted — the screen is a
+        // value test against reality, not a direction rule.
+        assert_eq!(
+            state.ensure_derivations_survive_idle(
+                key16(b"mkt.obs_interval"),
+                ParamValue::U32(10),
+                ParamValue::U32(9),
+            ),
+            Ok(())
+        );
+
+        // --- review 2 ------------------------------------------------------
+        // Raising the interval is safe and admitted, even with the cohort live.
+        state
+            .dispatch_set_param(
+                ConstitutionOrigin::FutarchyParam,
+                key16(b"mkt.obs_interval"),
+                ParamValue::U32(11),
+                3,
+                30,
+                FIVE_SLOT_COHORT,
+            )
+            .expect("a longer interval can only reduce every in-flight load");
+
+        // That headroom cannot then be spent on a `dec.window` raise: 51,840 is
+        // exactly the 20 % max-Δ, reads 117,825 against the registry, and costs
+        // the live cohort 146,103.
+        let window_registry = derive_at(
+            &state,
+            b"dec.window",
+            ParamValue::U32(51_840),
+            InFlightOccupancy::IDLE,
+        );
+        assert_eq!(
+            kernel::derived_decision_critical_observations(&window_registry),
+            Some(117_825),
+        );
+        assert!(occupancy_envelopes_survive(window_registry));
+        let window_live = derive_at(
+            &state,
+            b"dec.window",
+            ParamValue::U32(51_840),
+            FIVE_SLOT_COHORT,
+        );
+        assert_eq!(
+            kernel::derived_decision_critical_observations(&window_live),
+            Some(146_103),
+        );
+        assert!(!occupancy_envelopes_survive(window_live));
+        let before = state.clone();
+        assert_eq!(
+            state.dispatch_set_param(
+                ConstitutionOrigin::FutarchyMeta,
+                key16(b"dec.window"),
+                ParamValue::U32(51_840),
+                5,
+                50,
+                FIVE_SLOT_COHORT,
+            ),
+            Err(Error::BudgetDerivationRequired)
+        );
+        assert_eq!(state, before);
+    }
+
+    /// The in-flight composition takes the adverse end of the two **pinned**
+    /// inputs and leaves the three live ones at their proposed values, because
+    /// for those the proposed value is already what is in force everywhere.
+    #[test]
+    fn sq_501_composition_moves_only_the_pinned_inputs() {
+        let proposed = kernel::OccupancyParams {
+            epoch_length: 201_600,
+            epoch_slots: 4,
+            obs_interval: 25,
+            dec_window: 20_000,
+            archive_delay: 1_296_000,
+        };
+        let in_flight = InFlightOccupancy {
+            max_cohort_proposals: 5,
+            max_epoch_length: 302_400,
+        };
+        let effective = kernel::effective_occupancy(proposed, in_flight);
+        // Pinned: the live value wins when it is the adverse one.
+        assert_eq!(effective.epoch_slots, 5);
+        assert_eq!(effective.epoch_length, 302_400);
+        // Live-consumed: untouched.
+        assert_eq!(effective.obs_interval, proposed.obs_interval);
+        assert_eq!(effective.dec_window, proposed.dec_window);
+        assert_eq!(effective.archive_delay, proposed.archive_delay);
+        // A proposal above the in-flight maximum still governs future cohorts.
+        let raised = kernel::effective_occupancy(
+            kernel::OccupancyParams {
+                epoch_slots: 9,
+                ..proposed
+            },
+            in_flight,
+        );
+        assert_eq!(raised.epoch_slots, 9);
+        // Idle is the identity on the registry set.
+        assert_eq!(
+            kernel::effective_occupancy(proposed, InFlightOccupancy::IDLE),
+            proposed
+        );
+    }
+
+    /// The 13 §1 bounds / max-Δ / cooldown checks run **before** the screen, so
+    /// an out-of-registry value still fails as an ordinary registry violation
+    /// and the limit-coverage bindings for these rows stay reachable (15 §4.6).
+    #[cfg(not(feature = "fast-timing"))]
+    #[test]
+    fn sq_501_registry_checks_still_precede_the_occupancy_screen() {
+        let mut state = ConstitutionState::genesis();
+        // Below `epoch.slots`' hard min — and also inside every envelope, so
+        // only the ordering can produce `BelowMin`.
+        assert_eq!(
+            state.dispatch_set_param_idle(
+                ConstitutionOrigin::FutarchyMeta,
+                key16(b"epoch.slots"),
+                ParamValue::U8(0),
+                1,
+                10,
+            ),
+            Err(Error::BelowMin)
+        );
+        // Above `mkt.obs_interval`'s hard max — safe for every envelope
+        // (fewer observations), so again only the ordering yields `AboveMax`.
+        assert_eq!(
+            state.dispatch_set_param_idle(
+                ConstitutionOrigin::FutarchyParam,
+                key16(b"mkt.obs_interval"),
+                ParamValue::U32(51),
+                1,
+                10,
+            ),
+            Err(Error::AboveMax)
+        );
+        // Max-Δ likewise: 10 -> 16 is envelope-safe but a 6-block step.
+        assert_eq!(
+            state.dispatch_set_param_idle(
+                ConstitutionOrigin::FutarchyParam,
+                key16(b"mkt.obs_interval"),
+                ParamValue::U32(16),
+                1,
+                10,
+            ),
+            Err(Error::DeltaTooLarge)
+        );
+        // And an admissible, envelope-safe value goes through end to end.
+        assert_eq!(
+            state.dispatch_set_param_idle(
+                ConstitutionOrigin::FutarchyParam,
+                key16(b"mkt.obs_interval"),
+                ParamValue::U32(15),
+                1,
+                10,
             ),
             Ok(())
         );
@@ -3107,7 +3934,7 @@ mod tests {
             let mut wrong_increase = initial.clone();
             let before = wrong_increase.clone();
             assert_eq!(
-                wrong_increase.dispatch_set_param(
+                wrong_increase.dispatch_set_param_idle(
                     ConstitutionOrigin::EntrenchedTrack,
                     key,
                     raised,
@@ -3120,7 +3947,7 @@ mod tests {
             let mut bare_values = initial.clone();
             let before = bare_values.clone();
             assert_eq!(
-                bare_values.dispatch_set_param(
+                bare_values.dispatch_set_param_idle(
                     ConstitutionOrigin::ConstitutionalValues,
                     key,
                     raised,
@@ -3133,7 +3960,7 @@ mod tests {
 
             let mut raised_state = initial.clone();
             assert_eq!(
-                raised_state.dispatch_set_param(
+                raised_state.dispatch_set_param_idle(
                     ConstitutionOrigin::ConstitutionTrack,
                     key,
                     raised,
@@ -3149,7 +3976,7 @@ mod tests {
             let mut wrong_decrease = raised_state.clone();
             let before = wrong_decrease.clone();
             assert_eq!(
-                wrong_decrease.dispatch_set_param(
+                wrong_decrease.dispatch_set_param_idle(
                     ConstitutionOrigin::ConstitutionTrack,
                     key,
                     record.value,
@@ -3160,7 +3987,7 @@ mod tests {
             );
             assert_eq!(wrong_decrease, before);
             assert_eq!(
-                raised_state.dispatch_set_param(
+                raised_state.dispatch_set_param_idle(
                     ConstitutionOrigin::EntrenchedTrack,
                     key,
                     record.value,
@@ -3174,7 +4001,7 @@ mod tests {
             // neither grants entrenched authority nor admits bare values.
             let mut equal = initial.clone();
             assert_eq!(
-                equal.dispatch_set_param(
+                equal.dispatch_set_param_idle(
                     ConstitutionOrigin::ConstitutionTrack,
                     key,
                     record.value,
@@ -3190,7 +4017,7 @@ mod tests {
                 let mut refused_equal = initial.clone();
                 let before = refused_equal.clone();
                 assert_eq!(
-                    refused_equal.dispatch_set_param(
+                    refused_equal.dispatch_set_param_idle(
                         origin,
                         key,
                         record.value,
@@ -3222,7 +4049,7 @@ mod tests {
             let mut floor_state = initial.clone();
             let before = floor_state.clone();
             assert_eq!(
-                floor_state.dispatch_set_param(
+                floor_state.dispatch_set_param_idle(
                     ConstitutionOrigin::EntrenchedTrack,
                     key,
                     below_floor,
@@ -3318,7 +4145,7 @@ mod tests {
         // META+values dual consent is execute-time ratification (06 §2.2).
         let mut state = ConstitutionState::genesis();
         assert_eq!(
-            state.dispatch_set_param(
+            state.dispatch_set_param_idle(
                 ConstitutionOrigin::ConstitutionalValues,
                 key16(b"epoch.horizon_k"),
                 // 1, not 3: the kernel ceiling is now `MAX_NON_TERMINAL_COHORTS
@@ -3331,7 +4158,7 @@ mod tests {
             Err(Error::BadOrigin)
         );
         state
-            .dispatch_set_param(
+            .dispatch_set_param_idle(
                 ConstitutionOrigin::FutarchyMeta,
                 key16(b"epoch.horizon_k"),
                 ParamValue::U8(1),

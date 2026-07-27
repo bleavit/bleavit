@@ -49,13 +49,15 @@ mod tests;
 // (named, not glob — the pallet defines its own `Error`/storage aliases).
 pub use constitution_core::{
     class_floors_survive, empty_release_channel, genesis_capabilities, genesis_meters,
-    genesis_params, is_class_floor_input, is_coverage_input, is_occupancy_input, key16, Capability,
-    CapabilityRecord, ConstitutionOrigin, ConstitutionState, Error as CoreError, MaxDelta, Meter,
-    ParamClass, ParamRecord, ParamValue, PhaseFlags as PhaseFlagsValue,
-    ReleaseChannel as ReleaseChannelValue, CONTRACT_VERSION, MAX_CAPABILITIES, MAX_METERS,
-    MAX_PARAMS, META_MAX_COOLDOWN_EPOCHS, POL_BUDGET_EPOCH_DEFAULT_PPB, POL_B_CLASS_KEYS,
-    POL_B_DEFAULTS, POL_GATE_B_DEFAULT, RELEASE_CHANNEL_FLAGS, RELEASE_CHANNEL_FLAG_URGENT_UPGRADE,
-    RELEASE_CHANNEL_LEN, RELEASE_CHANNEL_PENDING_AUTHORIZED_AT, RELEASE_CHANNEL_SPEC_VERSION,
+    genesis_params, is_class_floor_input, is_coverage_input, is_occupancy_input, key16,
+    occupancy_change_permitted, occupancy_envelopes_survive, occupancy_params_for, Capability,
+    CapabilityRecord, ConstitutionOrigin, ConstitutionState, Error as CoreError, InFlightOccupancy,
+    MaxDelta, Meter, OccupancyParams, ParamClass, ParamRecord, ParamValue,
+    PhaseFlags as PhaseFlagsValue, ReleaseChannel as ReleaseChannelValue, CONTRACT_VERSION,
+    MAX_CAPABILITIES, MAX_METERS, MAX_PARAMS, META_MAX_COOLDOWN_EPOCHS, OCCUPANCY_PARAM_KEYS,
+    POL_BUDGET_EPOCH_DEFAULT_PPB, POL_B_CLASS_KEYS, POL_B_DEFAULTS, POL_GATE_B_DEFAULT,
+    RELEASE_CHANNEL_FLAGS, RELEASE_CHANNEL_FLAG_URGENT_UPGRADE, RELEASE_CHANNEL_LEN,
+    RELEASE_CHANNEL_PENDING_AUTHORIZED_AT, RELEASE_CHANNEL_SPEC_VERSION,
     RELEASE_CHANNEL_STORAGE_KEY, RELEASE_CHANNEL_UPDATED_AT,
 };
 pub use futarchy_primitives::kernel;
@@ -85,12 +87,31 @@ pub trait PhaseArmingGate {
     fn ensure_armable(class: ProposalClass) -> DispatchResult;
 }
 
-/// Temporary SQ-303 admission seam. The runtime binds the conservative
-/// re-derivation screen; pallet-only mocks keep the core/pallet differential
-/// focused on the registry semantics.
+/// 13 §5 item 6's re-derivation screen (SQ-303, SQ-501).
+///
+/// A `Config` seam rather than pallet logic because the answer must be computed
+/// from the live `Params` **storage** the call is about to write, which the
+/// frame-free core cannot read. The arithmetic itself is single-homed in
+/// `constitution-core` (`class_floors_survive`, `occupancy_envelopes_survive`,
+/// `occupancy_params_for`) so the runtime binding and the core aggregate cannot
+/// answer differently. Pallet-only mocks bind `()` and keep the core/pallet
+/// differential focused on registry semantics.
 pub trait BudgetDerivationGuard {
     /// `true` permits the change after ordinary bounds/Δ/cooldown checks.
     fn permits(key: futarchy_primitives::ParamKey, current: ParamValue, next: ParamValue) -> bool;
+
+    /// Worst-case weight [`Self::permits`] costs, composed into `set_param`'s
+    /// declared weight.
+    ///
+    /// The seam declares its own cost because the pallet cannot know it: SQ-501's
+    /// occupancy screen has to read what is actually in flight, which lives in
+    /// the epoch pallet. Under-declaring it would produce blocks that exceed
+    /// their proof budget at execution (15 §4.5), so the runtime binding states
+    /// the bound its reads are taken inside. The default is zero for the `()`
+    /// impl, which reads nothing.
+    fn max_weight() -> frame_support::weights::Weight {
+        frame_support::weights::Weight::zero()
+    }
 }
 
 impl BudgetDerivationGuard for () {
@@ -344,10 +365,13 @@ pub mod pallet {
         /// has zeroed spendable NAV outright. `PhaseFlags` is left unchanged.
         NavFloorUnmet,
         /// 13 §5 item 6's screening obligation refused this change, fail-closed
-        /// (SQ-303). Either a class-floor key whose proposed value re-derives an
-        /// 08 §4.1 floor above the frozen literal, or an occupancy key — refused
-        /// in either direction while items 1–4 have no comparable literal
-        /// (SQ-501). See `constitution_core::Error::BudgetDerivationRequired`.
+        /// (SQ-303/SQ-501). Either a class-floor key whose proposed value
+        /// re-derives an 08 §4.1 NAV floor above the frozen literal, or an
+        /// occupancy key whose proposed value would grow one of items 1–4's
+        /// envelopes past the frozen figure the runtime compiles against — both
+        /// screened **by value**, and both answering this way when the
+        /// derivation cannot be evaluated at all (G-1). See
+        /// `constitution_core::Error::BudgetDerivationRequired`.
         BudgetDerivationRequired,
         /// 09 §5.2: `phase3.tvl_cap` / `phase3.dep_cap` are raised only by
         /// phase gates and are not PARAM/META-adjustable during Phases ≤ 3.
@@ -391,7 +415,10 @@ pub mod pallet {
         /// No Root path — 09 §5.4's bootstrap-sudo scope is exhaustive and
         /// excludes parameter administration (PLAN SQ-11).
         #[pallet::call_index(0)]
-        #[pallet::weight(T::WeightInfo::set_param())]
+        // The SQ-501 occupancy screen reads in-flight epoch state through the
+        // `BudgetDerivationGuard` seam, and the seam declares that bounded cost.
+        #[pallet::weight(T::WeightInfo::set_param()
+            .saturating_add(T::BudgetDerivationGuard::max_weight()))]
         pub fn set_param(origin: OriginFor<T>, key: ParamKey, value: ParamValue) -> DispatchResult {
             let authority = T::GovernanceOrigin::ensure_origin(origin)?;
             let record = Params::<T>::get(key).ok_or(Error::<T>::UnknownParam)?;
