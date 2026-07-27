@@ -921,6 +921,338 @@ fn xcm_traffic_recorder_drops_only_a_new_epoch_when_the_index_is_full() {
     });
 }
 
+// ------------------------------------------------ 05 §4.3.2 block production
+//
+// The pallet owns only the accumulator: the per-block observation, its two
+// granularities, the shared index and the shared reaper. `U` itself — the
+// clamp, the 25 % weight and the zero-denominator rule — is computed in the
+// runtime binding beside the other 05 §4.3 projections and is pinned in
+// `runtime/bleavit-runtime/src/tests_welfare_inputs.rs`.
+
+/// Record one block: its relay delta and its emptiness classification, the way
+/// the two runtime hooks do.
+fn note_block(epoch: EpochId, day: u8, slots: u32, empty: bool) {
+    Welfare::note_block_production(epoch, day, BlockProductionSignal::RelaySlots(slots));
+    Welfare::note_block_production(epoch, day, BlockProductionSignal::Authored { empty });
+}
+
+#[test]
+fn block_production_accumulates_at_both_granularities() {
+    new_test_ext().execute_with(|| {
+        // Day 0: two non-empty blocks at nominal cadence, then a three-slot gap
+        // before an empty one.
+        note_block(7, 0, 1, false);
+        note_block(7, 0, 1, false);
+        note_block(7, 0, 3, true);
+        // Day 1: one non-empty block.
+        note_block(7, 1, 1, false);
+        // A different epoch must not leak into either projection.
+        note_block(8, 0, 9, true);
+
+        assert_eq!(
+            Welfare::block_production(7, 0),
+            BlockProductionCounters {
+                non_empty_blocks: 2,
+                empty_blocks: 1,
+                relay_slots: 5,
+            }
+        );
+        assert_eq!(
+            Welfare::block_production(7, 1),
+            BlockProductionCounters {
+                non_empty_blocks: 1,
+                empty_blocks: 0,
+                relay_slots: 1,
+            }
+        );
+        // The epoch total is the field-wise sum of its day slots: the two
+        // granularities are sums of the same per-block observation (§4.3.2).
+        // It is maintained on write, so this is one read and not a 256-key fold.
+        assert_eq!(
+            Welfare::block_production_epoch(7),
+            BlockProductionCounters {
+                non_empty_blocks: 3,
+                empty_blocks: 1,
+                relay_slots: 6,
+            }
+        );
+        assert_eq!(
+            Welfare::block_production_epoch(8),
+            BlockProductionCounters {
+                non_empty_blocks: 0,
+                empty_blocks: 1,
+                relay_slots: 9,
+            }
+        );
+        // An unobserved window is all-zero, which the runtime reads as
+        // unavailable rather than as a score.
+        assert_eq!(
+            Welfare::block_production_epoch(9),
+            BlockProductionCounters::default()
+        );
+    });
+}
+
+#[test]
+fn an_outage_spanning_a_window_boundary_is_charged_to_exactly_one_window() {
+    new_test_ext().execute_with(|| {
+        // Day 0 closes on a healthy block, then the chain stalls for 100 relay
+        // slots and the catch-up block lands on day 1 — the boundary case
+        // §4.3.2 rules on, because an endpoint difference would attribute it to
+        // neither window.
+        note_block(7, 0, 1, false);
+        note_block(7, 1, 100, false);
+        note_block(7, 1, 1, false);
+
+        // Day 0 keeps only its own slot: the outage is not back-dated into it.
+        assert_eq!(Welfare::block_production(7, 0).relay_slots, 1);
+        // Day 1 carries the whole catch-up jump, once.
+        assert_eq!(Welfare::block_production(7, 1).relay_slots, 101);
+        // And the epoch sees every slot exactly once — nothing lost at the
+        // boundary, nothing double-counted across it.
+        let epoch = Welfare::block_production_epoch(7);
+        assert_eq!(epoch.relay_slots, 102);
+        assert_eq!(epoch.non_empty_blocks, 3);
+    });
+}
+
+#[test]
+fn a_one_block_window_is_well_defined() {
+    new_test_ext().execute_with(|| {
+        // The case an endpoint difference divides by zero on.
+        note_block(7, 4, 1, false);
+
+        assert_eq!(
+            Welfare::block_production(7, 4),
+            BlockProductionCounters {
+                non_empty_blocks: 1,
+                empty_blocks: 0,
+                relay_slots: 1,
+            }
+        );
+    });
+}
+
+#[test]
+fn a_zero_relay_delta_writes_nothing_at_all() {
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(30);
+        // Two parachain blocks sharing a relay parent: the second contributes a
+        // delta of zero, which is a genuine no-op. Writing it would index the
+        // epoch and store an all-zero triple — a stored zero denominator, which
+        // try-state rejects because it cannot be told apart from a window that
+        // was never observed.
+        Welfare::note_block_production(7, 0, BlockProductionSignal::RelaySlots(0));
+
+        assert!(!BlockProduction::<Test>::contains_key(7, 0));
+        assert!(XcmTrafficEpochs::<Test>::get().is_empty());
+        assert_ok!(Welfare::do_try_state());
+
+        // It is still a no-op once the window is live, and the authored block it
+        // shares its relay parent with is counted normally.
+        note_block(7, 0, 1, false);
+        Welfare::note_block_production(7, 0, BlockProductionSignal::RelaySlots(0));
+        Welfare::note_block_production(7, 0, BlockProductionSignal::Authored { empty: false });
+        assert_eq!(
+            Welfare::block_production(7, 0),
+            BlockProductionCounters {
+                non_empty_blocks: 2,
+                empty_blocks: 0,
+                relay_slots: 1,
+            }
+        );
+        assert_ok!(Welfare::do_try_state());
+    });
+}
+
+#[test]
+fn block_production_counters_saturate() {
+    new_test_ext().execute_with(|| {
+        let full = BlockProductionCounters {
+            non_empty_blocks: u64::MAX,
+            empty_blocks: u64::MAX,
+            relay_slots: u64::MAX,
+        };
+        BlockProduction::<Test>::insert(7, 3, full);
+        BlockProductionEpoch::<Test>::insert(7, full);
+
+        note_block(7, 3, u32::MAX, false);
+        Welfare::note_block_production(7, 3, BlockProductionSignal::Authored { empty: true });
+
+        // Both granularities saturate at the same ceiling, so the try-state
+        // equality between them survives the saturating regime.
+        assert_eq!(Welfare::block_production(7, 3), full);
+        assert_eq!(Welfare::block_production_epoch(7), full);
+    });
+}
+
+/// The epoch total is storage, not arithmetic, so its agreement with the day
+/// slots it summarizes is a try-state invariant — bound in **both** directions.
+#[test]
+fn try_state_binds_the_epoch_total_to_its_day_slots() {
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(30);
+        note_block(29, 0, 1, false);
+        note_block(29, 1, 2, true);
+        assert_ok!(Welfare::do_try_state());
+
+        // A total that drifted high would inflate `U` against a window nobody
+        // can audit from the day slots.
+        BlockProductionEpoch::<Test>::mutate(29, |total| total.relay_slots += 1);
+        assert!(Welfare::do_try_state().is_err());
+        BlockProductionEpoch::<Test>::mutate(29, |total| total.relay_slots -= 1);
+        assert_ok!(Welfare::do_try_state());
+
+        // A missing total reads as a never-observed window and drops `U` for an
+        // epoch that did produce blocks — silently, which is the whole reason
+        // this is checked rather than assumed.
+        BlockProductionEpoch::<Test>::remove(29);
+        assert!(Welfare::do_try_state().is_err());
+
+        // A total whose day slots are gone is the reaper's other half left
+        // behind: a `U` denominator for a window with no record.
+        let _ = BlockProduction::<Test>::clear_prefix(29, u32::MAX, None);
+        BlockProductionEpoch::<Test>::insert(
+            29,
+            BlockProductionCounters {
+                non_empty_blocks: 1,
+                empty_blocks: 1,
+                relay_slots: 3,
+            },
+        );
+        assert!(Welfare::do_try_state().is_err());
+    });
+}
+
+#[test]
+fn block_production_recorder_is_infallible_across_epoch_and_day_boundaries() {
+    new_test_ext().execute_with(|| {
+        for epoch in [0, u32::MAX / 2, u32::MAX] {
+            for day in u8::MIN..=u8::MAX {
+                note_block(epoch, day, 1, day % 2 == 0);
+            }
+            let counters = Welfare::block_production_epoch(epoch);
+            assert_eq!(counters.non_empty_blocks + counters.empty_blocks, 256);
+            assert_eq!(counters.relay_slots, 256);
+        }
+    });
+}
+
+/// The 13 §4 bound on the shared prefix index, from the block-production side.
+/// Classed `value` in `tools/limit-coverage/registry.toml` and therefore not
+/// marker-bound: the writer is a per-block hook, not a dispatch, so the overflow
+/// has no error surface to bind a `// limit-coverage:` marker to.
+#[test]
+fn a_full_index_drops_the_whole_window() {
+    new_test_ext().execute_with(|| {
+        for epoch in 0..MAX_XCM_TRAFFIC_EPOCHS_BOUND {
+            Welfare::note_xcm_traffic(epoch, 0, XcmTrafficKind::Accepted);
+        }
+        // The index is at its 13 §4 bound, so the new epoch cannot be admitted.
+        note_block(MAX_XCM_TRAFFIC_EPOCHS_BOUND, 0, 50, false);
+
+        assert_eq!(
+            XcmTrafficEpochs::<Test>::get().len(),
+            MAX_XCM_TRAFFIC_EPOCHS_BOUND as usize
+        );
+        // Numerator and denominator are refused *together*, so the window keeps
+        // a zero denominator and the runtime resolves `U` absent — backpressure
+        // can never make an unmeasured window look healthy (G-1).
+        assert_eq!(
+            Welfare::block_production_epoch(MAX_XCM_TRAFFIC_EPOCHS_BOUND),
+            BlockProductionCounters::default()
+        );
+        // An already-indexed epoch keeps recording normally.
+        note_block(0, 0, 1, false);
+        assert_eq!(
+            Welfare::block_production(0, 0),
+            BlockProductionCounters {
+                non_empty_blocks: 1,
+                empty_blocks: 0,
+                relay_slots: 1,
+            }
+        );
+    });
+}
+
+#[test]
+fn the_shared_reaper_clears_block_production_in_the_same_walk() {
+    new_test_ext().execute_with(|| {
+        for epoch in [1, 2, 3] {
+            note_block(epoch, 0, 1, false);
+            note_block(epoch, u8::MAX, 1, true);
+        }
+        // Epoch 4 carries block production only — no XCM, no probe — which is
+        // the ordinary case for a quiet epoch and must still be indexed.
+        note_block(4, 0, 1, false);
+        Welfare::note_xcm_traffic(2, 5, XcmTrafficKind::Accepted);
+        Welfare::note_reserve_probe(3, 5, true);
+
+        assert_ok!(Welfare::prune_xcm_traffic(3));
+
+        // Epochs 1 and 2 retire in one bounded walk, and every co-indexed series
+        // retires with them rather than accruing behind the one that moved.
+        for epoch in [1, 2] {
+            assert_eq!(BlockProduction::<Test>::iter_prefix(epoch).count(), 0);
+            // The epoch total retires with the prefix it summarizes; left
+            // behind it would be a `U` denominator for a vanished window.
+            assert!(!BlockProductionEpoch::<Test>::contains_key(epoch));
+            assert_eq!(XcmTraffic::<Test>::iter_prefix(epoch).count(), 0);
+            assert_eq!(ReserveProbeDaily::<Test>::iter_prefix(epoch).count(), 0);
+        }
+        assert_eq!(BlockProduction::<Test>::iter_prefix(3).count(), 2);
+        assert_eq!(BlockProduction::<Test>::iter_prefix(4).count(), 1);
+        assert!(BlockProductionEpoch::<Test>::contains_key(3));
+        assert!(BlockProductionEpoch::<Test>::contains_key(4));
+        assert_eq!(XcmTrafficEpochs::<Test>::get().into_inner(), vec![3, 4]);
+    });
+}
+
+#[test]
+fn try_state_binds_block_production_to_the_shared_index() {
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(30);
+        // A block-production-only prefix is correct state: a block is produced
+        // in every epoch, including one that sent no XCM and ran no probe.
+        note_block(29, 0, 1, false);
+        assert_ok!(Welfare::do_try_state());
+
+        // An unindexed record is unreachable by the bounded reaper (I-20).
+        XcmTrafficEpochs::<Test>::kill();
+        assert!(Welfare::do_try_state().is_err());
+
+        // A record attributed to an epoch the clock has not reached. The day
+        // slot and the epoch total move together, so the *only* violation left
+        // is the future attribution this case is about.
+        let one_block = BlockProductionCounters {
+            non_empty_blocks: 1,
+            empty_blocks: 0,
+            relay_slots: 1,
+        };
+        BlockProduction::<Test>::remove(29, 0);
+        BlockProductionEpoch::<Test>::remove(29);
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![31]));
+        BlockProduction::<Test>::insert(31, 0, one_block);
+        BlockProductionEpoch::<Test>::insert(31, one_block);
+        assert!(Welfare::do_try_state().is_err());
+
+        // An all-zero triple: the writer never stores one, and `U` divides by
+        // `relay_slots`, so a stored zero-denominator row is indistinguishable
+        // from a window that was never observed.
+        BlockProduction::<Test>::remove(31, 0);
+        BlockProductionEpoch::<Test>::remove(31);
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![29]));
+        BlockProduction::<Test>::insert(29, 0, BlockProductionCounters::default());
+        BlockProductionEpoch::<Test>::insert(29, BlockProductionCounters::default());
+        assert!(Welfare::do_try_state().is_err());
+
+        BlockProduction::<Test>::remove(29, 0);
+        BlockProductionEpoch::<Test>::remove(29);
+        note_block(29, 0, 1, true);
+        assert_ok!(Welfare::do_try_state());
+    });
+}
+
 #[test]
 fn try_state_accepts_a_bounded_backlog_and_rejects_structural_corruption() {
     new_test_ext().execute_with(|| {

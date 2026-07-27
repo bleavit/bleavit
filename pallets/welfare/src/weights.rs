@@ -16,6 +16,10 @@ pub trait WeightInfo {
     /// authorship `EventHandler` reserves no weight, so the writer registers
     /// this itself as `Mandatory`.
     fn note_collator_authorship() -> Weight;
+    /// The 05 §4.3.2 block-production recorder. Not an extrinsic: the parachain
+    /// inherent and the post-transaction boundary that drive it reserve no
+    /// weight, so the writer registers this itself as `Mandatory`.
+    fn note_block_production() -> Weight;
 }
 
 const STATE_POV: u64 = 32_000;
@@ -46,6 +50,12 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(3))
             .saturating_add(T::DbWeight::get().writes(3))
     }
+
+    fn note_block_production() -> Weight {
+        Weight::from_parts(15_000_000, STATE_POV)
+            .saturating_add(T::DbWeight::get().reads(3))
+            .saturating_add(T::DbWeight::get().writes(3))
+    }
 }
 
 impl WeightInfo for () {
@@ -68,6 +78,12 @@ impl WeightInfo for () {
     }
 
     fn note_collator_authorship() -> Weight {
+        Weight::from_parts(15_000_000, STATE_POV)
+            .saturating_add(RocksDbWeight::get().reads(3))
+            .saturating_add(RocksDbWeight::get().writes(3))
+    }
+
+    fn note_block_production() -> Weight {
         Weight::from_parts(15_000_000, STATE_POV)
             .saturating_add(RocksDbWeight::get().reads(3))
             .saturating_add(RocksDbWeight::get().writes(3))
