@@ -51,14 +51,26 @@ pub const MAX_CONCURRENT_FROZEN_VERSIONS: usize = 2;
 /// so the epoch bound has to carry 05 §3.3's version multiplicity to mean the
 /// same thing. It did not: at a flat 20 the eviction rule (by epoch age, 19
 /// retained + one spare slot) and the capacity rule (by record count)
-/// disagreed by exactly the factor 05 §269 says every derived `× 2` rests on,
-/// so an activation boundary produced 21 lawful records against 20 slots. A
-/// signed caller could then spend the spare slot on the in-flight cohort's
-/// record before the keeper wrote the active-version one, at which point
-/// `SnapshotDeadline` stopped advancing, the 05 §4.8 dead-man latched, and the
-/// frozen epoch clock froze the prune cutoff that would have released the slot
-/// — with no origin able to clear the flag (SQ-254).
-pub const MAX_SNAPSHOTS: usize = SNAPSHOT_RETENTION_EPOCHS * MAX_CONCURRENT_FROZEN_VERSIONS;
+/// disagreed, so an activation boundary produced more lawful records than
+/// slots. A signed caller could then spend the spare slot on the in-flight
+/// cohort's record before the keeper wrote the active-version one, at which
+/// point `SnapshotDeadline` stopped advancing, the 05 §4.8 dead-man latched,
+/// and the frozen epoch clock froze the prune cutoff that would have released
+/// the slot — with no origin able to clear the flag (SQ-254).
+///
+/// **The multiplier is `k + 1`, not `k`.** `record_snapshot`'s admissible set
+/// is `frozen_spec_versions(e) ∪ {active_snapshot_spec(e)}`, and the active
+/// version need not be a member of the frozen set: `cohort_consumes_measurement`
+/// admits exactly the cohorts created in `[e − k, e − 1]`, so their versions are
+/// the ones active at `e − 1` and `e − 2` — a version activating at `e` itself
+/// is a lawful third. Two `register_spec` calls activating in consecutive
+/// epochs reach that state through the ordinary governance path, with no
+/// attacker and no cadence rule to prevent it, and sizing at `× k` would have
+/// re-created the same wedge one activation cadence later. The active-version
+/// record cannot be dropped from the union instead: it is the only one
+/// `note_snapshot_recorded` will advance `SnapshotDeadline` on, so refusing it
+/// *is* the wedge.
+pub const MAX_SNAPSHOTS: usize = SNAPSHOT_RETENTION_EPOCHS * (MAX_CONCURRENT_FROZEN_VERSIONS + 1);
 /// Gate-breach flags are keyed by **epoch alone** (05 §4.7), so they take the
 /// epoch bound and not the record bound. Formerly written as `MAX_SNAPSHOTS`,
 /// which was numerically right only while that constant was itself an epoch

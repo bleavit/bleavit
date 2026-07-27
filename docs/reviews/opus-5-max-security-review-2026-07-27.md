@@ -927,7 +927,7 @@ where the fix differs from the recommendation above and why.
 
 | Id | Status | Fix |
 |---|---|---|
-| MAX-01 | fixed | Two independent halves, because either alone leaves the wedge reachable. (a) `record_snapshot` admits only the epoch's **admissible set** — its active spec ∪ every version a live cohort froze for it (I-16) — through a new `SnapshotSchedule::frozen_spec_versions` seam the runtime binds to the same projection `pallet-registry` already uses, so welfare and the registry cannot disagree about which versions an epoch carries. The check lives in `welfare-core` *after* `SpecNotFound`/`SpecNotActive`, so the precise errors survive and the frame-free differential oracle models the rule. (b) `MAX_SNAPSHOTS` = `SNAPSHOT_RETENTION_EPOCHS × MAX_CONCURRENT_FROZEN_VERSIONS` = 40. `MAX_GATE_FLAGS` and the 21-epoch shared prefix index are epoch-keyed and were **decoupled** onto the new `SNAPSHOT_RETENTION_EPOCHS_BOUND`, as was the runtime's prune cutoff — it read `current − (MAX_SNAPSHOTS_BOUND − 1)` and would otherwise have doubled the retained window to 39 epochs. Spec: 02 §9/§13 (contract **v16**), 05 §4.6, 13 §4 |
+| MAX-01 | fixed | Two independent halves, because either alone leaves the wedge reachable. (a) `record_snapshot` admits only the epoch's **admissible set** — its active spec ∪ every version a live cohort froze for it (I-16) — through a new `SnapshotSchedule::frozen_spec_versions` seam the runtime binds to the same projection `pallet-registry` already uses, so welfare and the registry cannot disagree about which versions an epoch carries. The check lives in `welfare-core` *after* `SpecNotFound`/`SpecNotActive`, so the precise errors survive and the frame-free differential oracle models the rule. (b) `MAX_SNAPSHOTS` = `SNAPSHOT_RETENTION_EPOCHS × (MAX_CONCURRENT_FROZEN_VERSIONS + 1)` = 60. The multiplier is `k + 1`, not `k`: the cohorts measuring epoch `e` were created at `e−1` and `e−2`, so they carry the versions active *then*, and a version activating at `e` itself is a lawful third that neither froze — reachable through two ordinary `register_spec` calls activating in consecutive epochs. Sizing at `× k` would have re-created the same wedge one activation cadence later. Dropping the active version from the union instead is not available: it is the only version `note_snapshot_recorded` advances the deadline on, so refusing it *is* the wedge. `MAX_GATE_FLAGS` and the 21-epoch shared prefix index are epoch-keyed and were **decoupled** onto the new `SNAPSHOT_RETENTION_EPOCHS_BOUND`, as was the runtime's prune cutoff — it read `current − (MAX_SNAPSHOTS_BOUND − 1)` and would otherwise have doubled the retained window to 39 epochs. Spec: 02 §9/§13 (contract **v16**), 05 §4.6, 13 §4 |
 | MAX-02 | fixed | `attest` refuses a `pid` `pallet-epoch` does not carry (new `AttestorProposalStatus::exists`; `UnknownProposal`), and enforces a per-signer share of the frozen ledger: `MAX_ATTESTATIONS_PER_ATTESTOR = MAX_ATTESTATIONS / MAX_ATTESTORS = 16` (`AttestorQuotaExceeded`). **Derived from the two frozen bounds rather than chosen**, and preferred to re-keying `Attestations` per proposal because that is a 02 §7.5 storage-shape change; the property obtained is the one that matters — no coalition short of the entire roster can exhaust the vector, and every seat retains the room 06 §7's 2-of-N quorum needs. `TooManyAttestations` survives as the storage backstop, now reachable only through genesis, a migration or roster rotation |
 | MAX-03 | fixed | `recovery_trigger` gives the phase-transition cause **precedence** over any cursor cause instead of matching it only at `Cursor == None`; `RecoveryAwareMigrations::step()` discards an SDK cursor auto-onboarded while the wrapper is refusing to service the migrator (`index == 0` with no inner cursor — exactly what `onboard_new_mbms` writes, so a cursor that advanced is never dropped); and `TerminalRecoveryTransition` clears a stray retired cursor rather than hard-refusing its own trigger. The R-1 deviation is resolved in the direction 09 §3.2 describes. The new test **drives a genuinely refused `PhaseFourTransition`** (the SQ-383 under-floor condition) and asserts the trigger is reached, rather than seeding the post-state as the existing `cfg(recovery)` coverage does |
 | MAX-04 | fixed | `validate-chain-spec.py` allowlists top-level `ClientSpec` keys — an allowlist, because `sc-chain-spec` deliberately omits `deny_unknown_fields` — and hard-fails a non-empty `codeSubstitutes`, `forkBlocks` or `badBlocks`. Empty values pass, since `{}`/`[]` is what `#[serde(default)]` produces |
@@ -951,12 +951,19 @@ substitute, and the limitation is stated in `keeper/README.md`.
 **Verification.** Exhaustive `tools/ci/rust-workspace-gates.sh`; `tools/ci/fuzz-gates.sh`; all seven
 `tools/*/tests` suites; reference model 58/58 with vector freshness `--check` clean; the economic
 simulation suite; limit coverage, generated weights, weight storage bounds, plan tables,
-spec-question batches, runbooks, alert coverage and `validate-environments.py`. No committed weight
-artifact needed regenerating: `regenerate-weights.py --check --changed` re-measured all six touched
-pallets against a freshly built benchmark runtime and returned **PASS — committed storage
-dimensions match a fresh measurement**, including `pallet_welfare`, whose `record_snapshot` and
-`record_daily_gate` fixtures changed most (doubled snapshot fixture, cohort-schedule scan, and a
-measured version that is now the epoch's active spec). Only advisory ref_time notes moved, which is
-expected at the smoke gate's 2×1 fidelity against a 50×20 header. `tools/simulation/run-calibration.py --check`
+spec-question batches, runbooks, alert coverage and `validate-environments.py`. `pallet_welfare` and
+`pallet_attestor` weights are **regenerated at the committed 50×20 fidelity** with three
+value-pinned acknowledgements: `record_snapshot` 621 → 706 reads (+80 from the record bound, +5 for
+the `Epoch::CohortSchedules` walk the admissible set needs), `record_daily_gate` 106 → 186,
+`register_spec` 94 → 174, `attest` 7 → 8 (the proposal-existence read). Every delta is accounted for
+by a named key.
+
+An earlier `--check` run reported PASS and was **wrong**: the `runtime-benchmarks` build could not
+compile the branch at that moment, so the tool re-measured a stale wasm and the drift was invisible.
+The Codex connector review caught it. The benchmark runtime is now built explicitly before
+measuring, which also surfaced a fourth defect the stale artifact had hidden —
+`pallet_epoch::settle_cohort` could not be benchmarked at all, because its fixture seeded one
+epoch-keyed `GateBreachFlags` entry per `(epoch, spec_version)` snapshot record and the two bounds
+are no longer the same number. `tools/simulation/run-calibration.py --check`
 is red identically before and after this branch (recorded config vs executable defaults) and is not
 caused by it.

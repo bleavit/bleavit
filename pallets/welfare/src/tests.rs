@@ -3470,23 +3470,37 @@ fn max01_a_version_no_cohort_froze_cannot_take_a_snapshot_slot() {
 }
 
 /// MAX-01, second leg: the record bound must hold the retained epoch window at
-/// the version multiplicity 05 §3.3 mandates. At the former flat 20 this
-/// overflowed at the 21st record — 19 lawful records against 20 slots plus the
-/// live epoch's own — which is what made the wedge reachable with one
-/// extrinsic. Fails at baseline with `TooManySnapshots`.
+/// its full per-epoch multiplicity. At the former flat 20 this overflowed the
+/// moment two versions were live, which is what made the wedge reachable with
+/// one extrinsic. Fails at baseline with `TooManySnapshots`.
+///
+/// The multiplicity is `horizon_k + 1`, not `horizon_k`. The cohorts measuring
+/// epoch `e` were created at `e−1` and `e−2`, so they carry the versions active
+/// *then*; a version activating at `e` itself is a lawful third that neither
+/// froze, reachable through two ordinary `register_spec` calls activating in
+/// consecutive epochs. Sizing at `× horizon_k` would have re-created the same
+/// wedge one activation cadence later, so this fills every retained epoch at
+/// all three.
 #[test]
-fn max01_the_retained_window_holds_every_epoch_at_both_frozen_versions() {
+fn max01_the_retained_window_holds_every_epoch_at_its_full_multiplicity() {
     new_test_ext().execute_with(|| {
         CurrentEpochValue::set(0);
-        assert_ok!(Welfare::register_spec(
-            RuntimeOrigin::signed(governance_acc()),
-            2,
-            bounded(specs_activating(2, 2)),
-        ));
+        for (version, activation) in [(2, 2), (3, 3)] {
+            assert_ok!(Welfare::register_spec(
+                RuntimeOrigin::signed(governance_acc()),
+                version,
+                bounded(specs_activating(version, activation)),
+            ));
+        }
         CurrentEpochValue::set(FINALIZED_NOW);
-        FrozenSpecVersions::set(vec![1]);
-        for epoch in 2..SNAPSHOT_RETENTION_EPOCHS as u32 + 2 {
-            for version in [1, 2] {
+        // v3 is every retained epoch's active spec; v1 and v2 are the two
+        // cohorts' frozen versions, neither of which is v3.
+        assert_eq!(Welfare::active_snapshot_spec(7), Some(3));
+        FrozenSpecVersions::set(vec![1, 2]);
+        // From epoch 3: v3 activates there, so every epoch in the window has
+        // all three admissible.
+        for epoch in 3..SNAPSHOT_RETENTION_EPOCHS as u32 + 3 {
+            for version in [1, 2, 3] {
                 assert_ok!(Welfare::record_snapshot(
                     RuntimeOrigin::signed(keeper()),
                     epoch,
@@ -3496,9 +3510,37 @@ fn max01_the_retained_window_holds_every_epoch_at_both_frozen_versions() {
         }
         assert_eq!(
             Snapshots::<Test>::iter().count(),
-            SNAPSHOT_RETENTION_EPOCHS * MAX_CONCURRENT_FROZEN_VERSIONS
+            SNAPSHOT_RETENTION_EPOCHS * (MAX_CONCURRENT_FROZEN_VERSIONS + 1)
         );
         assert_eq!(Snapshots::<Test>::iter().count(), MAX_SNAPSHOTS);
+        assert_ok!(Welfare::do_try_state());
+    });
+}
+
+/// The admissible set really is the union, not the frozen set: an epoch's own
+/// active spec is recordable even when no live cohort froze it. Dropping it
+/// from the union is the tempting way to hold the bound at `× horizon_k`, and
+/// it is exactly the wedge — `note_snapshot_recorded` advances
+/// `SnapshotDeadline` on the active version and on nothing else.
+#[test]
+fn max01_the_epochs_active_spec_is_admissible_even_if_no_cohort_froze_it() {
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(0);
+        assert_ok!(Welfare::register_spec(
+            RuntimeOrigin::signed(governance_acc()),
+            2,
+            bounded(specs_activating(2, 2)),
+        ));
+        CurrentEpochValue::set(FINALIZED_NOW);
+        assert_eq!(Welfare::active_snapshot_spec(7), Some(2));
+        // Only v1 is frozen by a cohort; v2 is active and frozen by nobody.
+        FrozenSpecVersions::set(vec![1]);
+
+        assert_ok!(Welfare::record_snapshot(
+            RuntimeOrigin::signed(keeper()),
+            7,
+            2,
+        ));
         assert_ok!(Welfare::do_try_state());
     });
 }

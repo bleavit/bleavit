@@ -10802,55 +10802,74 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
         // the cohort settles on, so the fixture must register it. Without it the
         // recompute has no weights to renormalize and silently falls back to the
         // recorded `W` — measuring none of the work `settle_cohort` performs.
-        if let Ok(specs) =
-            frame_support::BoundedVec::try_from(pallet_welfare::benchmarking::full_specs(0))
-        {
-            pallet_welfare::MetricSpecs::<Runtime>::insert(0, specs);
+        // Registered for every version the saturated history below carries, not
+        // only the settling one: `full_specs(v)` activates at `1 + v`, so the
+        // three are distinct activations and the AUD-4 uniqueness invariant
+        // holds. Version 0 stays the one the cohort settles on.
+        for version in 0..PER_EPOCH_SNAPSHOT_VERSIONS {
+            if let Ok(specs) = frame_support::BoundedVec::try_from(
+                pallet_welfare::benchmarking::full_specs(version),
+            ) {
+                pallet_welfare::MetricSpecs::<Runtime>::insert(version, specs);
+            }
         }
         let attested = pallet_welfare::benchmarking::attested_ids();
-        for offset in 1..=pallet_welfare::MAX_SNAPSHOTS_BOUND {
+        // The two welfare maps this path scans have **different** bounds, and
+        // the loop used to drive both from `MAX_SNAPSHOTS_BOUND`: `Snapshots` is
+        // keyed `(epoch, spec_version)` and bounded at 60 records, while
+        // `GateBreachFlags` is keyed by epoch alone and bounded at 20. Seeding
+        // one flag per snapshot therefore overflowed the flag bound the moment
+        // the record bound took its version multiplicity, and `settle_cohort`
+        // stopped benchmarking at all. Saturate each at its own bound: 20
+        // retained epochs, each carrying one flag and one snapshot per
+        // concurrent version. That is exactly the state the two bounds admit
+        // together, so the scan is charged at its real worst case.
+        for offset in 1..=pallet_welfare::SNAPSHOT_RETENTION_EPOCHS_BOUND {
             let measured_epoch = epoch.saturating_add(offset);
-            pallet_welfare::Snapshots::<Runtime>::insert(
-                (measured_epoch, 0),
-                pallet_welfare::StoredSnapshot {
-                    epoch: measured_epoch,
-                    spec_version: 0,
-                    s_pillar: FixedU64(500_000_000),
-                    c_onchain: FixedU64(500_000_000),
-                    c_attested: FixedU64(500_000_000),
-                    p_pillar: FixedU64(500_000_000),
-                    a_pillar: FixedU64(500_000_000),
-                    gate_s: FixedU64(500_000_000),
-                    gate_c: FixedU64(500_000_000),
-                    welfare: FixedU64(500_000_000),
-                    components: frame_support::BoundedVec::truncate_from(
-                        // Interior values: at the former 1.0 every geometric term
-                        // is skipped, so the recompute this fixture exists to
-                        // measure would cost almost nothing.
-                        pallet_welfare::benchmarking::degraded(
-                            pallet_welfare::MAX_COMPONENTS_PER_SPEC as u16,
+            for version in 0..PER_EPOCH_SNAPSHOT_VERSIONS {
+                pallet_welfare::Snapshots::<Runtime>::insert(
+                    (measured_epoch, version),
+                    pallet_welfare::StoredSnapshot {
+                        epoch: measured_epoch,
+                        spec_version: version,
+                        s_pillar: FixedU64(500_000_000),
+                        c_onchain: FixedU64(500_000_000),
+                        c_attested: FixedU64(500_000_000),
+                        p_pillar: FixedU64(500_000_000),
+                        a_pillar: FixedU64(500_000_000),
+                        gate_s: FixedU64(500_000_000),
+                        gate_c: FixedU64(500_000_000),
+                        welfare: FixedU64(500_000_000),
+                        components: frame_support::BoundedVec::truncate_from(
+                            // Interior values: at the former 1.0 every geometric term
+                            // is skipped, so the recompute this fixture exists to
+                            // measure would cost almost nothing.
+                            pallet_welfare::benchmarking::degraded(
+                                pallet_welfare::MAX_COMPONENTS_PER_SPEC as u16,
+                            ),
                         ),
-                    ),
-                },
-            );
-            pallet_welfare::SnapshotContexts::<Runtime>::insert(
-                (measured_epoch, 0),
-                pallet_welfare::StoredSnapshotContext {
-                    epoch: measured_epoch,
-                    spec_version: 0,
-                    // One flagged component, not all of them: 07 §10's recompute
-                    // costs a term per *surviving* component, so the dearest
-                    // non-empty drop set is the smallest one. Flagging every
-                    // attested component would empty the A pillar and let the
-                    // composite renormalize instead of evaluating its terms.
-                    flagged: frame_support::BoundedVec::truncate_from(
-                        attested.iter().copied().take(1).collect::<Vec<_>>(),
-                    ),
-                    incident_multiplier: FixedU64(pallet_welfare::ONE),
-                    params:
-                        <WelfareParams as pallet_welfare::WelfareParamsProvider>::welfare_params(),
-                },
-            );
+                    },
+                );
+                pallet_welfare::SnapshotContexts::<Runtime>::insert(
+                    (measured_epoch, version),
+                    pallet_welfare::StoredSnapshotContext {
+                        epoch: measured_epoch,
+                        spec_version: version,
+                        // One flagged component, not all of them: 07 §10's recompute
+                        // costs a term per *surviving* component, so the dearest
+                        // non-empty drop set is the smallest one. Flagging every
+                        // attested component would empty the A pillar and let the
+                        // composite renormalize instead of evaluating its terms.
+                        flagged: frame_support::BoundedVec::truncate_from(
+                            attested.iter().copied().take(1).collect::<Vec<_>>(),
+                        ),
+                        incident_multiplier: FixedU64(pallet_welfare::ONE),
+                        params:
+                            <WelfareParams as pallet_welfare::WelfareParamsProvider>::welfare_params(
+                            ),
+                    },
+                );
+            }
             pallet_welfare::GateBreachFlags::<Runtime>::insert(
                 measured_epoch,
                 pallet_welfare::CoreGateBreachFlags {
@@ -10862,6 +10881,13 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
         }
     }
 }
+
+/// Snapshot records one retained epoch can carry: one per cohort measuring it
+/// (`epoch.horizon_k`) plus one for its own active spec. `MAX_SNAPSHOTS` is
+/// this times the retained epoch window, so saturating both welfare maps means
+/// `SNAPSHOT_RETENTION_EPOCHS_BOUND` epochs at this multiplicity.
+#[cfg(feature = "runtime-benchmarks")]
+const PER_EPOCH_SNAPSHOT_VERSIONS: u16 = pallet_welfare::MAX_CONCURRENT_FROZEN_VERSIONS as u16 + 1;
 
 #[cfg(feature = "runtime-benchmarks")]
 fn benchmark_epoch_proposal(
