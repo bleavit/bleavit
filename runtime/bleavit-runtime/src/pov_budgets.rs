@@ -180,8 +180,27 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
         }),
     );
     all.extend(
+        // `set_param` composes the `BudgetDerivationGuard` seam's declared cost at
+        // its `#[pallet::weight]` attribute (SQ-501): the SQ-501 occupancy screen
+        // reads bounded in-flight epoch state, which the generated function does
+        // not measure. I-20 is a statement about the **dispatched** weight, so the
+        // composed total is what has to fit the class here — the same reason the
+        // three clock-syncing cranks add their collator term below.
         pallet_call_weights!(pallet_constitution as pallet_constitution::WeightInfo {
             set_param, set_capability, set_phase_flag, set_release_channel, amend_registry,
+        })
+        .into_iter()
+        .map(|(name, weight)| {
+            match name {
+            "pallet_constitution::set_param" => (
+                name,
+                weight.saturating_add(
+                    <crate::configs::RuntimeBudgetDerivationGuard as
+                        pallet_constitution::BudgetDerivationGuard>::max_weight(),
+                ),
+            ),
+            _ => (name, weight),
+        }
         }),
     );
     all.extend(

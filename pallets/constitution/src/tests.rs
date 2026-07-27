@@ -70,7 +70,16 @@ fn assert_set_param_matches_core(
     let events_before = System::events().len();
     let shell = Constitution::set_param(RuntimeOrigin::signed(account), key, value);
     let model = core
-        .dispatch_set_param(authority, key, value, epoch, block)
+        .dispatch_set_param(
+            authority,
+            key,
+            value,
+            epoch,
+            block,
+            // The mock carries no epoch state, so nothing is in flight — the
+            // faithful model, and the identity on the registry set (SQ-501).
+            crate::InFlightOccupancy::IDLE,
+        )
         .map_err(crate::Pallet::<Test>::map_core_error);
     assert_eq!(shell, model, "set_param shell/core result diverged");
     assert_eq!(shell, expected, "unexpected set_param result");
@@ -1141,6 +1150,7 @@ fn shell_and_core_agree_on_the_same_operation_sequence() {
             ParamValue::Perbill(4_000_000),
             1,
             1,
+            crate::InFlightOccupancy::IDLE,
         )
         .unwrap();
 
@@ -1674,7 +1684,14 @@ fn randomized_differential_covers_errors_origins_and_epochs() {
                     };
                     let shell = Constitution::set_param(runtime_origin, key, value);
                     let model = core
-                        .dispatch_set_param(authority, key, value, epoch, 1)
+                        .dispatch_set_param(
+                            authority,
+                            key,
+                            value,
+                            epoch,
+                            1,
+                            crate::InFlightOccupancy::IDLE,
+                        )
                         .map_err(crate::Pallet::<Test>::map_core_error);
                     assert_eq!(shell, model, "set_param result diverged at step {step}");
                 }

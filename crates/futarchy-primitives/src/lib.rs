@@ -1303,6 +1303,76 @@ pub mod kernel {
         pub archive_delay: u32,
     }
 
+    /// What is **actually in flight**, which the proposed registry does not
+    /// describe (SQ-501 amendment, after the second #189 review).
+    ///
+    /// The occupancy screen composes the registry with this. The reason it must
+    /// is that the five inputs split into two kinds, and the split is a property
+    /// of the *code*, audited per key rather than assumed:
+    ///
+    /// * **Pinned** — `epoch.slots` (read only at qualification; a cohort's book
+    ///   count is fixed state thereafter) and `epoch.length` (snapshotted into
+    ///   `EpochInfo`, `ProposalSchedule` and `CohortSchedule`). A reduction binds
+    ///   only cohorts that form later, so the *live* value can exceed the
+    ///   registry and has to be carried here.
+    /// * **Live** — `mkt.obs_interval`, `dec.window` and `ledger.archive` are
+    ///   re-read on every use, so the proposed value is in force everywhere at
+    ///   once, including against books already trading. Nothing to carry: the
+    ///   proposed value *is* the live value.
+    ///
+    /// Composing the two is what makes the screen exact rather than merely
+    /// conservative for the binding leg: with `books` taken from what is in
+    /// flight and the window/interval live, every cohort shares one
+    /// `ceil(window / interval)`, so `books_max × ceil(window / interval)` is the
+    /// true worst-case decision-critical load, not an over-approximation.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct InFlightOccupancy {
+        /// Largest proposal count of any cohort that still holds books or
+        /// vaults. Its book count is `× BOOKS_PER_PROPOSAL + 1`, so this is the
+        /// in-flight counterpart of a proposed `epoch.slots`.
+        pub max_cohort_proposals: u32,
+        /// Largest epoch length any in-flight cohort was created under,
+        /// including the epoch currently running and the one already staged.
+        pub max_epoch_length: u32,
+    }
+
+    impl InFlightOccupancy {
+        /// Nothing in flight: no cohort holds a book or a vault, so the proposed
+        /// registry set is the whole input. This is the genesis state — and it is
+        /// deliberately **not** a fallback for "could not determine", which is a
+        /// refusal (G-1), because reading it as idle is exactly the assumption
+        /// the second #189 review falsified.
+        pub const IDLE: Self = Self {
+            max_cohort_proposals: 0,
+            max_epoch_length: 0,
+        };
+    }
+
+    /// Compose the proposed registry values with what is in flight, taking the
+    /// adverse end for each input.
+    ///
+    /// Only the two **pinned** inputs compose; the three live ones are already
+    /// the values in force. For `epoch.length` the adverse end differs by item —
+    /// item 4 grows with a longer epoch, item 1 with a shorter one — and this
+    /// takes the **longer**, which is adverse for item 4 and lenient for item 1.
+    /// That is sound because item 1 cannot be breached by any in-bounds history
+    /// at all: its frozen 2,240 is the same formula at each input's *compiled
+    /// bound*, and `set_param` cannot move a bound. Carrying a second, shorter
+    /// epoch length just for item 1 would be arithmetic that changes no verdict.
+    pub fn effective_occupancy(
+        proposed: OccupancyParams,
+        in_flight: InFlightOccupancy,
+    ) -> OccupancyParams {
+        OccupancyParams {
+            epoch_slots: proposed.epoch_slots.max(in_flight.max_cohort_proposals),
+            epoch_length: proposed.epoch_length.max(in_flight.max_epoch_length),
+            // Live-consumed: the proposed value is in force everywhere at once.
+            obs_interval: proposed.obs_interval,
+            dec_window: proposed.dec_window,
+            archive_delay: proposed.archive_delay,
+        }
+    }
+
     /// Books trading concurrently in one epoch (13 §4: "31 = 5·6 + 1"): one
     /// book set per active slot plus the epoch's single unconditional Baseline
     /// book.

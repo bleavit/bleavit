@@ -50,9 +50,9 @@ mod tests;
 pub use constitution_core::{
     class_floors_survive, empty_release_channel, genesis_capabilities, genesis_meters,
     genesis_params, is_class_floor_input, is_coverage_input, is_occupancy_input, key16,
-    obs_interval_lowering_refused, occupancy_change_permitted, occupancy_envelopes_survive,
-    occupancy_params_for, Capability, CapabilityRecord, ConstitutionOrigin, ConstitutionState,
-    Error as CoreError, MaxDelta, Meter, OccupancyParams, ParamClass, ParamRecord, ParamValue,
+    occupancy_change_permitted, occupancy_envelopes_survive, occupancy_params_for, Capability,
+    CapabilityRecord, ConstitutionOrigin, ConstitutionState, Error as CoreError, InFlightOccupancy,
+    MaxDelta, Meter, OccupancyParams, ParamClass, ParamRecord, ParamValue,
     PhaseFlags as PhaseFlagsValue, ReleaseChannel as ReleaseChannelValue, CONTRACT_VERSION,
     MAX_CAPABILITIES, MAX_METERS, MAX_PARAMS, META_MAX_COOLDOWN_EPOCHS, OCCUPANCY_PARAM_KEYS,
     POL_BUDGET_EPOCH_DEFAULT_PPB, POL_B_CLASS_KEYS, POL_B_DEFAULTS, POL_GATE_B_DEFAULT,
@@ -99,6 +99,19 @@ pub trait PhaseArmingGate {
 pub trait BudgetDerivationGuard {
     /// `true` permits the change after ordinary bounds/Δ/cooldown checks.
     fn permits(key: futarchy_primitives::ParamKey, current: ParamValue, next: ParamValue) -> bool;
+
+    /// Worst-case weight [`Self::permits`] costs, composed into `set_param`'s
+    /// declared weight.
+    ///
+    /// The seam declares its own cost because the pallet cannot know it: SQ-501's
+    /// occupancy screen has to read what is actually in flight, which lives in
+    /// the epoch pallet. Under-declaring it would produce blocks that exceed
+    /// their proof budget at execution (15 §4.5), so the runtime binding states
+    /// the bound its reads are taken inside. The default is zero for the `()`
+    /// impl, which reads nothing.
+    fn max_weight() -> frame_support::weights::Weight {
+        frame_support::weights::Weight::zero()
+    }
 }
 
 impl BudgetDerivationGuard for () {
@@ -402,7 +415,10 @@ pub mod pallet {
         /// No Root path — 09 §5.4's bootstrap-sudo scope is exhaustive and
         /// excludes parameter administration (PLAN SQ-11).
         #[pallet::call_index(0)]
-        #[pallet::weight(T::WeightInfo::set_param())]
+        // The SQ-501 occupancy screen reads in-flight epoch state through the
+        // `BudgetDerivationGuard` seam, and the seam declares that bounded cost.
+        #[pallet::weight(T::WeightInfo::set_param()
+            .saturating_add(T::BudgetDerivationGuard::max_weight()))]
         pub fn set_param(origin: OriginFor<T>, key: ParamKey, value: ParamValue) -> DispatchResult {
             let authority = T::GovernanceOrigin::ensure_origin(origin)?;
             let record = Params::<T>::get(key).ok_or(Error::<T>::UnknownParam)?;

@@ -1849,6 +1849,56 @@ impl pallet_constitution::PhaseArmingGate for TreasuryPhaseArmingGate {
 /// paths use, and `::occupancy_params_for` the single home of the key list and
 /// the proposed-value substitution — a drifting second copy would admit a change
 /// the core refuses.
+/// What is in flight, for the SQ-501 occupancy screen — read from bounded state.
+///
+/// `epoch.slots` and `epoch.length` are **pinned**: a reduction of either binds
+/// only cohorts that form later, so the live maximum can exceed the registry and
+/// the screen has to see it. The other three inputs are re-read on every use, so
+/// the proposed value is already what is in force everywhere.
+///
+/// Bounds, stated because I-20 requires them:
+///
+/// * the cohort-size maximum groups `pallet_epoch::Proposals` by epoch — a
+///   `CountedStorageMap` whose compiled bound is `bounds::MAX_LIVE_PROPOSALS`
+///   (32). `RuntimeInDecisionWindow::contains` already performs the identical
+///   bounded scan on the observation path, so this is an established cost rather
+///   than a new class of one. `Proposals` is the right source rather than the
+///   <= 4 `Cohorts` rows or the per-epoch `FundedPolSlots` snapshot, because an
+///   extended or rerun proposal trades past its epoch boundary while being in
+///   neither.
+/// * the epoch-length maximum reads `Schedule` (one value: the running length plus
+///   the one already staged) and `CohortSchedules`, pruned to exactly the live
+///   cohort set and so bounded by `bounds::MAX_NON_TERMINAL_COHORTS` (4).
+///
+/// `None` — a refusal — when the proposal count exceeds its own compiled bound.
+/// That is a broken I-21 invariant, and screening against a parameter set drawn
+/// from broken state is exactly the assumption G-1 forbids.
+pub(crate) fn in_flight_occupancy() -> Option<pallet_constitution::InFlightOccupancy> {
+    use alloc::collections::BTreeMap;
+
+    if pallet_epoch::Proposals::<Runtime>::count() > bounds::MAX_LIVE_PROPOSALS {
+        return None;
+    }
+    let mut per_epoch: BTreeMap<futarchy_primitives::EpochId, u32> = BTreeMap::new();
+    for proposal in pallet_epoch::Proposals::<Runtime>::iter_values() {
+        let counter = per_epoch.entry(proposal.epoch).or_insert(0);
+        *counter = counter.checked_add(1)?;
+    }
+    let max_cohort_proposals = per_epoch.into_values().max().unwrap_or(0);
+
+    let clock = pallet_epoch::Schedule::<Runtime>::get();
+    let max_epoch_length = pallet_epoch::CohortSchedules::<Runtime>::iter_values()
+        .map(|schedule| schedule.creation_epoch_length)
+        .chain([clock.length, clock.next_length])
+        .max()
+        .unwrap_or(clock.length);
+
+    Some(pallet_constitution::InFlightOccupancy {
+        max_cohort_proposals,
+        max_epoch_length,
+    })
+}
+
 pub struct RuntimeBudgetDerivationGuard;
 impl pallet_constitution::BudgetDerivationGuard for RuntimeBudgetDerivationGuard {
     fn permits(
@@ -1863,15 +1913,24 @@ impl pallet_constitution::BudgetDerivationGuard for RuntimeBudgetDerivationGuard
             return true;
         }
         if pallet_constitution::is_occupancy_input(key) {
-            // Read the live registry, substituting the proposed value for `key`.
+            // Read the live registry, substituting the proposed value for `key`,
+            // and compose it with what is actually in flight.
             // `occupancy_change_permitted` is the single home of the whole
-            // verdict — the equal-write short-circuit, the SQ-501
-            // `mkt.obs_interval` lowering rule and the value test — so this path
-            // and the core aggregate's cannot drift. A missing or non-`u32` row
-            // is a broken invariant, not a licence: it answers `false` (G-1).
-            return pallet_constitution::occupancy_change_permitted(key, current, next, |wanted| {
-                pallet_constitution::Params::<Runtime>::get(wanted).map(|record| record.value)
-            });
+            // verdict, so this path and the core aggregate's cannot drift. A
+            // missing row, a non-`u32` value or an in-flight maximum that cannot
+            // be established is a refusal, never an assumption (G-1).
+            let Some(in_flight) = in_flight_occupancy() else {
+                return false;
+            };
+            return pallet_constitution::occupancy_change_permitted(
+                key,
+                current,
+                next,
+                |wanted| {
+                    pallet_constitution::Params::<Runtime>::get(wanted).map(|record| record.value)
+                },
+                in_flight,
+            );
         }
         if !pallet_constitution::is_class_floor_input(key) {
             return true;
@@ -1908,6 +1967,21 @@ impl pallet_constitution::BudgetDerivationGuard for RuntimeBudgetDerivationGuard
             }
         }
         pallet_constitution::class_floors_survive(budget_ppb, b_gate, b_class)
+    }
+
+    /// The bounded reads `in_flight_occupancy` performs, plus the five registry
+    /// rows `occupancy_params_for` resolves. Declared rather than benchmarked
+    /// because the seam is bound by the runtime and `set_param`'s generated
+    /// weight predates it; over-declaring costs block capacity while
+    /// under-declaring produces blocks that exceed their proof budget at
+    /// execution (15 §4.5), so every term rounds up to its compiled bound.
+    fn max_weight() -> frame_support::weights::Weight {
+        let reads = u64::from(bounds::MAX_LIVE_PROPOSALS)
+            .saturating_add(u64::from(bounds::MAX_NON_TERMINAL_COHORTS))
+            .saturating_add(1) // `Schedule`
+            .saturating_add(1) // the `Proposals` counter
+            .saturating_add(pallet_constitution::OCCUPANCY_PARAM_KEYS.len() as u64);
+        <Runtime as frame_system::Config>::DbWeight::get().reads(reads)
     }
 }
 

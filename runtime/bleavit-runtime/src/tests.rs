@@ -15078,6 +15078,10 @@ fn sq_501_runtime_guard_and_core_agree_on_every_occupancy_probe() {
 
     development_ext().execute_with(|| {
         let core = pallet_constitution::ConstitutionState::genesis();
+        // The runtime's own reader, so the differential compares the two screens
+        // on one snapshot rather than on two independently-derived ones.
+        let in_flight = crate::configs::in_flight_occupancy()
+            .expect("the development genesis state is readable");
         let core_lookup = |wanted: futarchy_primitives::ParamKey| {
             core.params
                 .iter()
@@ -15153,15 +15157,23 @@ fn sq_501_runtime_guard_and_core_agree_on_every_occupancy_probe() {
                     // The two registry readings must agree before the verdicts
                     // can: the screen is only as good as the parameter set it
                     // reads out of storage.
-                    let core_params =
-                        pallet_constitution::occupancy_params_for(key, next, core_lookup)
-                            .expect("the genesis registry is readable");
-                    let storage_params =
-                        pallet_constitution::occupancy_params_for(key, next, |wanted| {
+                    let core_params = pallet_constitution::occupancy_params_for(
+                        key,
+                        next,
+                        core_lookup,
+                        in_flight,
+                    )
+                    .expect("the genesis registry is readable");
+                    let storage_params = pallet_constitution::occupancy_params_for(
+                        key,
+                        next,
+                        |wanted| {
                             pallet_constitution::Params::<Runtime>::get(wanted)
                                 .map(|record| record.value)
-                        })
-                        .expect("the seeded registry is readable");
+                        },
+                        in_flight,
+                    )
+                    .expect("the seeded registry is readable");
                     assert_eq!(
                         core_params, storage_params,
                         "{name:?} -> {next:?}: core and storage derived different inputs",
@@ -15175,6 +15187,7 @@ fn sq_501_runtime_guard_and_core_agree_on_every_occupancy_probe() {
                     current,
                     next,
                     core_lookup,
+                    in_flight,
                 );
                 assert_eq!(
                     crate::configs::RuntimeBudgetDerivationGuard::permits(key, current, next),
@@ -15191,8 +15204,10 @@ fn sq_501_runtime_guard_and_core_agree_on_every_occupancy_probe() {
 ///
 /// `epoch.slots` 5 → 4 is admitted, and a registry-only screen then read
 /// `mkt.obs_interval` 10 → 9 as `25 × 4,800 = 120,000` while the still-live
-/// five-slot cohort needed `31 × 4,800 = 148,800`. The interval lowering is now
-/// refused — the registry cannot describe the shapes of books already trading.
+/// five-slot cohort needed `31 × 4,800 = 148,800`. With the cohort seeded into
+/// real state the lowering is refused; with nothing in flight the identical
+/// lowering is admitted, which is what makes this a value test on reality rather
+/// than a rule about directions.
 #[test]
 fn sq_501_slots_then_interval_composition_is_refused_at_the_extrinsic() {
     use pallet_constitution::ParamValue;
@@ -15200,6 +15215,9 @@ fn sq_501_slots_then_interval_composition_is_refused_at_the_extrinsic() {
     development_ext().execute_with(|| {
         let slots = pallet_constitution::key16(b"epoch.slots");
         let interval = pallet_constitution::key16(b"mkt.obs_interval");
+        // Five proposals in one epoch: 31 books whose observation load the
+        // post-cut registry no longer describes.
+        seed_in_flight_cohort(5);
 
         pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
             clock.index = clock.index.saturating_add(4)
@@ -15236,6 +15254,135 @@ fn sq_501_slots_then_interval_composition_is_refused_at_the_extrinsic() {
             ParamValue::U32(14),
         ));
     });
+}
+
+/// The second #189 counterexample, against **real** in-flight state rather than a
+/// stated snapshot: five proposals seeded into one epoch are 31 books, and
+/// `dec.window` is live-consumed, so raising it applies to them immediately.
+///
+/// `epoch.slots` 5 → 4 and `mkt.obs_interval` 10 → 11 are both admitted — the
+/// interval raise genuinely lowers load. A registry-only screen then read
+/// `dec.window` 43,200 → 51,840 (exactly its 20 % max-Δ) as
+/// `25 × ceil(51,840/11) = 117,825`, while the live cohort incurs
+/// `31 × 4,713 = 146,103`, over the frozen 133,920. The composition refuses it,
+/// and the same write is admitted once nothing is in flight — which is what makes
+/// this a value test rather than a direction rule.
+#[test]
+fn sq_501_live_cohort_shapes_reach_the_guard_from_real_state() {
+    use pallet_constitution::ParamValue;
+
+    let window = pallet_constitution::key16(b"dec.window");
+    let interval = pallet_constitution::key16(b"mkt.obs_interval");
+
+    // Leg 1: five proposals in one epoch => 31 books in flight => refused.
+    development_ext().execute_with(|| {
+        seed_in_flight_cohort(5);
+        let in_flight = crate::configs::in_flight_occupancy().expect("state is readable");
+        assert_eq!(in_flight.max_cohort_proposals, 5);
+
+        // The slot cut is admitted even with the cohort live: its 31 books at the
+        // unchanged interval are exactly the frozen 133,920.
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::key16(b"epoch.slots"),
+            ParamValue::U8(4),
+        ));
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyParam.into(),
+            interval,
+            ParamValue::U32(11),
+        ));
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_noop!(
+            Constitution::set_param(
+                pallet_origins::Origin::FutarchyMeta.into(),
+                window,
+                ParamValue::U32(51_840),
+            ),
+            pallet_constitution::Error::<Runtime>::BudgetDerivationRequired
+        );
+        assert_eq!(
+            pallet_constitution::Params::<Runtime>::get(window)
+                .expect("dec.window row survives a refused write")
+                .value,
+            ParamValue::U32(43_200),
+        );
+    });
+
+    // Leg 2: nothing in flight => the identical sequence is admitted.
+    development_ext().execute_with(|| {
+        let in_flight = crate::configs::in_flight_occupancy().expect("state is readable");
+        assert_eq!(in_flight.max_cohort_proposals, 0);
+
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::key16(b"epoch.slots"),
+            ParamValue::U8(4),
+        ));
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyParam.into(),
+            interval,
+            ParamValue::U32(11),
+        ));
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(4)
+        });
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            window,
+            ParamValue::U32(51_840),
+        ));
+    });
+}
+
+/// Seed `count` non-terminal proposals into one epoch so the in-flight reader
+/// sees a cohort of that size. Only the fields the reader consumes are meaningful
+/// (`epoch`); the rest are inert defaults.
+fn seed_in_flight_cohort(count: u64) {
+    let epoch = pallet_epoch::EpochOf::<Runtime>::get().index;
+    for offset in 0..count {
+        let pid = 7_100_000u64.saturating_add(offset);
+        pallet_epoch::Proposals::<Runtime>::insert(
+            pid,
+            Proposal {
+                id: pid,
+                proposer: account(70),
+                class: ProposalClass::Param,
+                state: ProposalState::Trading,
+                epoch,
+                submitted_at: System::block_number(),
+                payload_hash: [0u8; 32],
+                payload_len: 0,
+                ask: 0,
+                bond: 0,
+                resources: Default::default(),
+                metric_spec: 1,
+                decide_at: System::block_number().saturating_add(43_200),
+                rerun: false,
+                extended: false,
+                delayed_once: false,
+                markets: None,
+                maturity: None,
+                grace_end: None,
+                version_constraint: None,
+                decision: None,
+            },
+        );
+    }
 }
 
 /// A registry the guard cannot read is refused, never passed (G-1). Removing an
