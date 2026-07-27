@@ -350,9 +350,9 @@ Default v = (0.4, 0.3, 0.3)   (normative values incl. *_req keys: §13)
 
 Every ratio divides a held amount by a **requirement denominated in the same asset** (VIT requirements in VIT, USDC requirements in USDC — requirements are constitution keys). No conversion rate, no external price, no oracle input exists in `E`; it is deterministic and same-block computable, hence lives in `C_onchain`. Raising security by raising requirements is a values/META decision on the `*_req` keys, not a market observable.
 
-#### 4.3.2 Sources for `U`, `F` and `Π` (normative; SQ-181 resolution, 2026-07-26)
+#### 4.3.2 Sources for `U`, `F`, `H` and `Π` (normative; SQ-181 resolution, 2026-07-26)
 
-§4.3's table gives every component a formula, but three of them name a quantity no section supplies. Each is fixed here, and each is anchored to something that already exists rather than to a new tunable.
+§4.3's table gives every component a formula, but four of them name a quantity no section supplies. Each is fixed here, and each is anchored to something that already exists rather than to a new tunable.
 
 **`U` — the denominator is relay slots, not parachain blocks.** Read as parachain blocks, "scheduled slots per epoch" makes `U` identically 1: `epoch.length` is itself denominated in parachain blocks ([13](./13-parameters.md) §1), so the chain authors exactly as many blocks as the epoch is *defined* to contain and the ratio measures nothing. The measuring reading is the relay one. Every parachain block carries `PersistedValidationData.relay_parent_number`, and its advancement between consecutive parachain blocks is the number of relay slots that elapsed — the only relay signal the parachain runtime can observe on stable2606 (the `F` row above; SQ-282). **Scheduled slots for a window are therefore the relay-parent advancement across it**, giving
 
