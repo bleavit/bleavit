@@ -41,6 +41,7 @@ CORPUS_FAMILY_CONSUMERS = {
     "twap_scenarios": ("market-core-twap-vectors",),
     "welfare_normalization_scenarios": ("welfare-core-normalization-vectors",),
     "welfare_scenarios": ("welfare-core-reference-vectors",),
+    "window_stale_scenarios": ("market-core-twap-vectors",),
 }
 
 TEST_OUTPUTS = {
@@ -65,8 +66,10 @@ TEST_OUTPUTS = {
     "treasury-core-reference-vectors": GATE.CommandResult(
         0, stdout="test result: ok. 1 passed; 0 failed; 0 ignored\n"
     ),
+    # twap + contest + window-staleness: the stub must clear the leg's own
+    # `minimum_tests` floor, which tracks the real binary's test count.
     "market-core-twap-vectors": GATE.CommandResult(
-        0, stdout="test result: ok. 2 passed; 0 failed; 0 ignored\n"
+        0, stdout="test result: ok. 3 passed; 0 failed; 0 ignored\n"
     ),
     "ledger-pallet-core-differential": GATE.CommandResult(
         0, stdout="test result: ok. 1 passed; 0 failed; 0 ignored\n"
@@ -316,7 +319,7 @@ class ReportAndRunnerTests(PhaseGateTestCase):
             "welfare-core-reference-vectors": (1, 1),
             "welfare-core-normalization-vectors": (1, 1),
             "treasury-core-reference-vectors": (1, 1),
-            "market-core-twap-vectors": (2, 2),
+            "market-core-twap-vectors": (3, 3),
             "ledger-pallet-core-differential": (1, 1),
             "ledger-pallet-reference-sweep": (1, 1),
             "fixed-full-sweep": (1, 1),
