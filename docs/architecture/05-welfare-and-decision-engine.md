@@ -379,6 +379,26 @@ Dropping it costs nothing structurally, and that is a property of `S` specifical
 
 The formula takes a **median over the window**, so a conforming runtime MUST retain the observed gap *series* for that window. The last gap alone, or the dead-man's boolean cause bit, is not sufficient.
 
+**`H` — the two-dimensional reduction, and the mapping (normative; SQ-181 resolution, 2026-07-26).** §4.3's `1 − mean(block weight used ÷ limit)` names a scalar ratio, but a FRAME block weight is a *pair* — `ref_time` and `proof_size` — so "block weight used ÷ limit" is not yet a number. Fixed here, because the choice moves `H`, `C_onchain` and potentially a §4.7 daily gate outcome, and must not live in a code comment.
+
+Per block, normalize each dimension against its own limit and take the **maximum** of the two:
+
+```
+u_block = max( ref_time_used / ref_time_limit , proof_size_used / proof_size_limit )
+```
+
+rounded **up** on the 1e9 grid. `max` is the only reduction that keeps `H` a *lower bound* on true headroom: a block at 95 % proof and 10 % ref_time has 5 % headroom, not 90 %. A mean or a sum reports a balanced block as healthier than it is, and either dimension alone reports full health while the other saturates. Rounding up carries the same direction — it can never overstate headroom.
+
+The window value is then the arithmetic mean of `u_block` over the blocks *sampled in that window*, mapped by the affine clamp
+
+```
+H = clamp( (1 − mean(u_block)) / (1 − target) , 0, 1 ),   target = 0.40 (K)
+```
+
+so utilization at or below the 40 % target reads exactly 1 and utilization at 100 % reads 0. Spare capacity below target is **not** better than healthy — the clamp is what makes that true, and without it a chronically empty chain would score above a target-utilization one on a metric that is meant to measure *headroom*, not idleness. `target` is a kernel constant, not a [13](./13-parameters.md) key: §4.3's table states it, so it moves only by reopening this document.
+
+**A window with no sampled blocks makes `H` unavailable, not 1.** `frame_system::BlockWeight` is cleared at the start of every block, so `H` exists only where a sampler ran; a window with no samples has no measurement, and resolving it to full headroom would fabricate health out of absence. Contrast `Π` below, whose "no events ⇒ 1" *is* evidence — an absence of recorded failures is a real observation, an absence of measurement is not.
+
 **`Π` — which failures count.** "Defensive-path/integrity counter" is fixed to a decidable class. An event qualifies **iff** the runtime detected a violation of an assumption it holds unconditionally, **and** the fallback discarded correctness-relevant state or engaged a fail-static latch, **and** no defined path later restores what was lost. Qualifying, concretely: an internal cross-pallet call whose failure is discarded rather than propagated; a fail-static latch engaged out of a detected inconsistency; the loss of an accounting accumulator no later crank can reconstruct.
 
 Deliberately **not** qualifying: bounded-maintenance backpressure — a bounded collection at its limit while its cursor-bounded reaper catches up, or an observation dropped to keep a bounded index consistent. Those are designed states with a defined recovery, and the third clause above is exactly the test that separates them. The distinction is load-bearing at this weighting: at 0.25 per event, four qualifying events zero `Π`, and `Π` at weight 0.10 pulls `C` far enough to risk a §4.7 daily breach flag — which arms the guardian's `suspend_on_gate` power ([06](./06-governance-and-guardians.md)). Routine capacity backpressure MUST NOT be able to reach that. The counter is per window, saturating, reset per window, and a single event increments it at most once.
