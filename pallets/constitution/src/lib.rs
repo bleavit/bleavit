@@ -343,9 +343,11 @@ pub mod pallet {
         /// includes the fail-static case where the 08 §1.2 reserve-health flag
         /// has zeroed spendable NAV outright. `PhaseFlags` is left unchanged.
         NavFloorUnmet,
-        /// 13 §5's re-derivation artifact/verifier is not live yet; this
-        /// unsafe-direction timing/capacity/POL change is refused fail-closed
-        /// (SQ-303).
+        /// 13 §5 item 6's screening obligation refused this change, fail-closed
+        /// (SQ-303). Either a class-floor key whose proposed value re-derives an
+        /// 08 §4.1 floor above the frozen literal, or an occupancy key — refused
+        /// in either direction while items 1–4 have no comparable literal
+        /// (SQ-501). See `constitution_core::Error::BudgetDerivationRequired`.
         BudgetDerivationRequired,
         /// 09 §5.2: `phase3.tvl_cap` / `phase3.dep_cap` are raised only by
         /// phase gates and are not PARAM/META-adjustable during Phases ≤ 3.
