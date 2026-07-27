@@ -465,12 +465,18 @@ class RepositoryTests(unittest.TestCase):
             self.assertGreater(len(parsed), 0, pallet)
 
     def test_preserved_functions_are_exactly_the_known_set(self):
-        """Exactly one committed function is not backed by a fresh measurement.
+        """Exactly three committed functions are not backed by a fresh measurement.
 
-        A preserved function needs no `generated-weight-overrides.toml` entry —
-        it *is* generator output, measured-line and all, which is why the purity
-        gate passes it. What it lacks is *freshness*, and nothing else records
-        that. Pinning the set means a second one cannot appear unnoticed.
+        Two declarations confer the exemption and the marker means the same thing
+        under either: this number was not measured against the runtime the file
+        claims. `weight-preservation.toml` covers a fixture that cannot run;
+        `generated-weight-overrides.toml` covers a weight that is deliberately
+        hand-written. The first needs no override entry — it *is* generator
+        output, measured-line and all, which is why the purity gate passes it. The
+        second acquires its marker only when the file is next regenerated, so its
+        absence here would say nothing about whether the exemption exists.
+
+        Pinning the set means a fourth cannot appear unnoticed.
         """
         found = {
             pallet: MODULE.preserved_functions(path.read_text(encoding="utf-8"))
@@ -481,6 +487,12 @@ class RepositoryTests(unittest.TestCase):
             {
                 # Fixture unsatisfiable in this runtime (weight-preservation.toml).
                 "pallet_assets": ["migration_v2_foreign_asset_set_reserve_weight"],
+                # Protocol-disabled by the production XCM filters, holding a
+                # fail-closed `Weight::MAX` (09 §6.2; generated-weight-overrides.toml).
+                # They carry the marker as of the A14 `pallet_xcm` regeneration —
+                # before it the file predated this tool and had never been written
+                # by `--write`, which is what stamps the marker on an override.
+                "pallet_xcm": ["execute", "teleport_assets"],
                 # `pallet_guardian::on_initialize` was here until SQ-500. It held a
                 # hand-written envelope above a fixture that settled one review,
                 # because the sweep had no per-block bound. The bound exists now

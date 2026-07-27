@@ -50,3 +50,54 @@
 # while ref_time rises 1.95 -> 6.08 ms. The guess had over-declared storage and
 # under-declared time. 6.08 ms is 0.30 % of the 2-second block.
 runtime/bleavit-runtime/src/weights/pallet_guardian.rs on_initialize @ ref_time=6076186000: first real measurement of the maintenance hook — SQ-500 bounded the sweep at GuardianMaintenanceBatch = 10 and the fixture now saturates it, replacing a hand-written 1.95 ms envelope that had never been benchmarked. Storage and PoV fall (220->105 r, 150->110 w, 183,055->125,304 B) in the same regeneration; only ref_time rises, to 0.30 % of the 2 s block.
+
+# A14 (2026-07-27) — `exec_migration_fail` is the one benchmarked path that
+# crosses the execution halt's activation edge, and A14 made that edge record a
+# 05 §4.3.2 `Π` event. `FailedMigrationHandler::failed` reaches
+# `set_migration_halt_source`, which on the no-source -> execution-halt-source
+# transition now derives the `(epoch, day)` window (`Epoch::EpochOf`,
+# `Epoch::Schedule`) and increments the counter through the single recorder
+# (`Welfare::XcmTrafficEpochs` read + push, `Welfare::IntegrityFailures`
+# read-modify-write). That is exactly +4 reads and +2 writes, which is exactly
+# what was measured — the delta is fully accounted for by named keys, not a
+# fixture drifting.
+#
+# The increase is the point rather than a cost to be minimised. A migration
+# failing is precisely the fail-static latch §4.3.2 says must be counted, and a
+# function that performs the work while declaring the old number is an
+# under-declaration on a `Mandatory` MBM step — the SQ-490 defect class. `Π` is
+# also the reason the recorder cannot be made cheaper here: it is deliberately
+# one funnel so no site can double-count, so the window derivation is paid once,
+# on the failure path only. The measured worst case remains 27.7 µs / 8 r / 6 w,
+# far inside the MBM's service weight.
+# A14 (2026-07-27) — `record_snapshot` was declaring 107 reads while performing
+# **621**. This entry does not authorize new work; it records the first honest
+# measurement of work the dispatch already did.
+#
+# 05 §4.3's `H` and `Π` are resolved inside `record_snapshot` at *epoch*
+# granularity, and unlike their two sibling series they have no on-write epoch
+# aggregate: `block_weight_epoch` and `integrity_failures_epoch` each fold the
+# whole day prefix, bounded by 13 §4 at 256 day slots. That is 512 reads the
+# fabricating `runtime-benchmarks` arm never touched, so the generated weight
+# declared none of them — the SQ-490 defect class, and the largest instance of it
+# in this file rather than the smallest. The arm now walks and discards both
+# reads and the pallet fixture seeds both prefixes at the bound and asserts the
+# count afterwards, so the number is measured rather than assumed.
+#
+# The three dimensions move together because they are one cause: 514 more reads
+# (512 folded keys plus the two the day path also pays), the PoV those keys
+# occupy (102,684 -> 645,546 B, which `check-weight-storage-bounds.py` accepts
+# against 13's budget), and the time to fold them (0.83 -> 2.03 ms, ~0.10 % of a
+# 2 s block). `record_daily_gate` moves 104 -> 106 reads in the same change and
+# is below the gate's threshold: that path reads one fixed-width key per series.
+#
+# **Follow-up, deliberately not taken here:** #187 and #190 each gave their
+# series an on-write epoch aggregate precisely so the epoch read is one key
+# instead of a 256-key fold, and the same treatment would return this function to
+# roughly its previous cost. That is a pallet design change with its own 13 §4
+# rows and try-state obligations, not a CI fix, and it belongs with the
+# `xcm_traffic_epoch` and `reserve_probe_epoch_value` folds already parked under
+# SQ-503 — which are still unmeasured inside this very function.
+runtime/bleavit-runtime/src/weights/pallet_welfare.rs record_snapshot @ ref_time=2028821000, proof_size=645546, reads=621: first honest measurement, not new work — 05 §4.3's `H` and `Π` have no on-write epoch aggregate, so `record_snapshot` folds both 256-day prefixes (13 §4) and always did; the benchmark arm now walks those reads instead of fabricating past them, and the fixture seeds both prefixes at the bound and asserts the count. Declaring 107 while performing 621 was the SQ-490 under-declaration class on a permissionless crank. PoV stays inside 13's budget and ref_time is ~0.10 % of a 2 s block; an on-write aggregate (the #187/#190 treatment) is the follow-up that would shrink it.
+
+runtime/bleavit-runtime/src/weights/pallet_migrations.rs exec_migration_fail @ reads=8, writes=6: A14 makes the execution-halt activation edge record a 05 §4.3.2 `Π` fail-static-latch event, so this path now derives the (epoch, day) window (Epoch::EpochOf, Epoch::Schedule) and increments through the single recorder (Welfare::XcmTrafficEpochs, Welfare::IntegrityFailures) — exactly +4 reads and +2 writes, all named keys, on the migration-failure path only. Declaring the old 4/4 while performing 8/6 would be the SQ-490 under-declaration class on a Mandatory MBM step.

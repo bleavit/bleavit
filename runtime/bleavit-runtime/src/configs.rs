@@ -6067,6 +6067,34 @@ fn benchmark_measure_block_production_reads(epoch: EpochId, day: Option<u8>) {
     };
 }
 
+/// A14: the same walk-and-discard for the 05 §4.3 `H` and `Π` reads.
+///
+/// These need it more than their neighbours, not less. The authorship and
+/// block-production series each keep an on-write epoch aggregate, so their
+/// epoch-granularity read is one key; `H` and `Π` have none, so
+/// `onchain_components` **folds the whole day prefix** of each
+/// (`block_weight_epoch`, `integrity_failures_epoch`). Left unwalked, the
+/// fabricating arm returns component values having touched neither map, and the
+/// generated weight declares nothing for a dispatch that reads up to 2 × 256
+/// keys — the largest instance of the SQ-490 shape in this file rather than the
+/// smallest. The pallet fixture seeds both prefixes at their 13 §4 bound and
+/// asserts the count afterwards, so the discarded read is the worst-case one and
+/// a fixture that stops reaching it fails loudly instead of quietly
+/// regenerating a smaller number.
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_measure_h_pi_reads(epoch: EpochId, day: Option<u8>) {
+    match day {
+        Some(day) => {
+            let _ = pallet_welfare::Pallet::<Runtime>::block_weight_sample(epoch, day);
+            let _ = pallet_welfare::Pallet::<Runtime>::integrity_failures(epoch, day);
+        }
+        None => {
+            let _ = pallet_welfare::Pallet::<Runtime>::block_weight_epoch(epoch);
+            let _ = pallet_welfare::Pallet::<Runtime>::integrity_failures_epoch(epoch);
+        }
+    }
+}
+
 /// Runtime metric projection. Local XCM traffic and final oracle components
 /// are live. Every other unavailable registered input remains absent so the
 /// welfare pallet rejects an incomplete snapshot (G-1).
@@ -6091,6 +6119,9 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
             // The 05 §4.3.2 block-production read is discarded for the same
             // reason and must be measured for the same reason.
             benchmark_measure_block_production_reads(epoch, None);
+            // A14: and the 05 §4.3 `H` and `Π` reads, which are prefix folds
+            // rather than single keys — see `benchmark_measure_h_pi_reads`.
+            benchmark_measure_h_pi_reads(epoch, None);
             specs
                 .iter()
                 .filter(|spec| spec.activation_epoch <= epoch)
@@ -6255,6 +6286,8 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
             // declare both reads.
             let _ = collator_adequacy(&AuthorshipWindowInput::day(epoch, day));
             benchmark_measure_block_production_reads(epoch, Some(day));
+            // A14: and the day's `H` accumulator and `Π` counter (05 §4.3).
+            benchmark_measure_h_pi_reads(epoch, Some(day));
             pallet_welfare::MetricSpecs::<Runtime>::get(version)
                 .into_iter()
                 .flatten()

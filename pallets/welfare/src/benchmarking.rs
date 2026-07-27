@@ -236,6 +236,67 @@ fn assert_block_production_worst_case<T: Config>(epoch: EpochId, day: u8) {
     );
 }
 
+/// Day slots per epoch prefix for the 05 §4.3 `H` and `Π` series — the 13 §4
+/// bound ("≤ 256 day slots per epoch"), which is the `u8` day key's full range.
+const BENCH_HPI_DAYS: u16 = 256;
+
+/// One seeded block-weight sample. `blocks` is non-zero and the sum stays on the
+/// `[0, ONE]` grid, so `do_try_state` accepts the fixture; both fields are
+/// fixed-width, so the *number* of keys is the whole worst case.
+const BENCH_BLOCK_WEIGHT_SAMPLE: BlockWeightSample = BlockWeightSample {
+    utilization_sum: ONE / 2,
+    blocks: 1,
+};
+
+/// One seeded integrity-failure count. Non-zero because try-state rejects a
+/// stored zero, and `Π` already saturates at four events, so the value is
+/// immaterial — only the key count is measured.
+const BENCH_INTEGRITY_FAILURES: u32 = 1;
+
+/// The 05 §4.3 `H` and `Π` state both welfare cranks read, at the worst case
+/// they can read it in.
+///
+/// `MetricInputs` resolves both inside the measured dispatch. `record_snapshot`
+/// reads them at **epoch** granularity, and unlike the authorship and
+/// block-production series these have no on-write epoch aggregate: the runtime
+/// *folds the whole day prefix* (`block_weight_epoch`,
+/// `integrity_failures_epoch`). The fold's worst case is therefore the 13 §4
+/// bound of 256 day slots per series, and a fixture seeding fewer would generate
+/// a weight declaring fewer reads than the dispatch performs — the SQ-490 defect
+/// class this file already carries two guards against.
+///
+/// `record_daily_gate` reads one `(epoch, day)` slot from each, which the same
+/// fixture provides; a present fixed-width key is that path's whole worst case.
+fn seed_h_pi_worst_case<T: Config>(epoch: EpochId) {
+    XcmTrafficEpochs::<T>::mutate(|epochs| {
+        if !epochs.contains(&epoch) {
+            let _ = epochs.try_push(epoch);
+        }
+    });
+    for day in 0..BENCH_HPI_DAYS {
+        let day = day as u8;
+        BlockWeightSamples::<T>::insert(epoch, day, BENCH_BLOCK_WEIGHT_SAMPLE);
+        IntegrityFailures::<T>::insert(epoch, day, BENCH_INTEGRITY_FAILURES);
+    }
+}
+
+/// Assert the fixture was still in its worst case when the call ran.
+///
+/// Both cranks only read these series, so every seeded key must survive the
+/// dispatch. Counting the prefix rather than probing one key is deliberate: the
+/// epoch-granularity cost *is* the key count, so a fixture that quietly stopped
+/// seeding the full prefix is exactly the regression this must catch.
+fn assert_h_pi_worst_case<T: Config>(epoch: EpochId) {
+    assert_eq!(
+        BlockWeightSamples::<T>::iter_prefix(epoch).count(),
+        BENCH_HPI_DAYS as usize
+    );
+    assert_eq!(
+        IntegrityFailures::<T>::iter_prefix(epoch).count(),
+        BENCH_HPI_DAYS as usize
+    );
+}
+
 fn fill_specs(state: &mut WelfareState, first_version: u16) -> Result<(), BenchmarkError> {
     for version in first_version..=MAX_METRIC_SPECS as u16 {
         state
@@ -320,6 +381,10 @@ mod benches {
         // total inside the same call (05 §4.3.2 `U`); seed it so the weight
         // charges that read too.
         seed_block_production::<T>(epoch, 0);
+        // A14: the same call folds the whole day prefix of the `H` and `Π`
+        // series (05 §4.3), which have no on-write epoch aggregate — so the
+        // fixture presents both at their 13 §4 bound of 256 day slots.
+        seed_h_pi_worst_case::<T>(epoch);
         let caller: T::AccountId = whitelisted_caller();
         T::BenchmarkHelper::prime_keeper_rebate();
 
@@ -331,6 +396,7 @@ mod benches {
         );
         assert_eq!(Snapshots::<T>::iter().count(), MAX_SNAPSHOTS);
         assert_block_production_worst_case::<T>(epoch, 0);
+        assert_h_pi_worst_case::<T>(epoch);
         Ok(())
     }
 
@@ -356,6 +422,10 @@ mod benches {
         // inside the same call (05 §4.3.2 `U^{day}`); seed it so the weight
         // charges that read too.
         seed_block_production::<T>(epoch, 0);
+        // A14: and day 0's `H` accumulator and `Π` counter (05 §4.3), read by
+        // the same call. One fixed-width key from each is this path's whole
+        // worst case; the fixture seeds the full prefix so both cranks share it.
+        seed_h_pi_worst_case::<T>(epoch);
         let caller: T::AccountId = whitelisted_caller();
         T::BenchmarkHelper::prime_keeper_rebate();
 
@@ -367,6 +437,7 @@ mod benches {
         );
         assert_eq!(GateBreachFlags::<T>::iter().count(), MAX_GATE_FLAGS);
         assert_block_production_worst_case::<T>(epoch, 0);
+        assert_h_pi_worst_case::<T>(epoch);
         Ok(())
     }
 
