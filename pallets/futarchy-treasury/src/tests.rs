@@ -14,6 +14,7 @@ use frame_support::{
     assert_err, assert_noop, assert_ok,
     traits::{ConstU32, Hooks, StorageVersion},
 };
+use futarchy_primitives::integrity::IntegrityFault;
 use futarchy_primitives::keeper::CrankClass;
 use futarchy_treasury_core::{
     AssetKind, BudgetLine, Stream, Treasury as CoreTreasury, DAYS_365_BLOCKS, DAY_BLOCKS,
@@ -1457,6 +1458,7 @@ mod renewal_dispatch_seam {
         type RebatePayout = ();
         type PotFunding = ();
         type InsuranceSweep = ();
+        type Integrity = ();
         type WeightInfo = ();
         #[cfg(feature = "runtime-benchmarks")]
         type BenchmarkHelper = DispatchBenchmarkHelper;
@@ -2556,5 +2558,195 @@ fn swept_funds_land_in_main_and_stay_under_every_existing_control() {
         assert_ok!(crate::Pallet::<Test>::set_reserve_impaired(true));
         assert_eq!(Treasury::nav().spendable_nav, 0);
         assert_ok!(Treasury::do_try_state());
+    });
+}
+
+// ------------------------------------------ A14: which losses reach `Π` (05 §4.3.2)
+//
+// 05 §4.3.2 admits a defensive-path failure into `Π` iff the runtime detected a
+// violation of an assumption it holds unconditionally, **and** the fallback
+// discarded correctness-relevant state or engaged a fail-static latch, **and**
+// no defined path later restores what was lost. The third clause is the whole
+// ruling: bounded-maintenance backpressure has a defined recovery and must not
+// increment, because four qualifying events zero `Π` and can arm the guardian's
+// `suspend_on_gate`.
+//
+// 08 §2.4's collator accounting is where this pallet meets the test. A dropped
+// boundary block and an overflowed accumulator both void a whole epoch's payout
+// with no crank able to rebuild it — the ruling's "loss of an accounting
+// accumulator" case. Everything else here is retried or already counted.
+
+#[test]
+fn a_dropped_boundary_block_counts_as_one_lost_accounting_event() {
+    funded_ext().execute_with(|| {
+        reset_rebate_payout();
+        set_rebate_pot_balance(PayoutLine::OpsCollators, 0);
+        // Epoch 0 completes and cannot pay (custody empty), so it occupies the
+        // pending slot; epoch 1 opens the current accumulator.
+        Treasury::note_collator_block(acc(7));
+        set_epoch(1);
+        Treasury::note_collator_block(acc(8));
+        Treasury::pay_collator_compensation();
+        assert_eq!(CollatorPendingEpoch::<Test>::get(), Some(0));
+        assert!(integrity_faults().is_empty(), "nothing lost yet");
+
+        // Epoch 2's first block would need a third accumulator. It is dropped
+        // outright: no crank rebuilds an authored share whose input was the
+        // block stream itself.
+        set_epoch(2);
+        Treasury::note_collator_block(acc(9));
+        assert_eq!(CollatorDroppedEpoch::<Test>::get(), Some(2));
+        assert_eq!(integrity_faults(), vec![IntegrityFault::LostAccounting]);
+
+        // A *repeat* drop of the same epoch is the same loss re-observed, and
+        // §4.3.2 counts an event at most once.
+        Treasury::note_collator_block(acc(10));
+        Treasury::note_collator_block(acc(11));
+        assert_eq!(integrity_faults().len(), 1, "one lost epoch, one event");
+
+        // Consuming the marker into the `Overflowed` latch is the downstream
+        // consequence of the same loss, not a second detection.
+        set_rebate_pot_balance(PayoutLine::OpsCollators, 4_000 * USDC);
+        Treasury::pay_collator_compensation();
+        Treasury::note_collator_block(acc(12));
+        assert!(CollatorAuthoredOverflowed::<Test>::get());
+        assert!(CollatorDroppedEpoch::<Test>::get().is_none());
+        assert_eq!(integrity_faults().len(), 1, "the latch is not a new event");
+    });
+}
+
+#[test]
+fn a_second_distinct_dropped_epoch_is_its_own_event() {
+    funded_ext().execute_with(|| {
+        reset_rebate_payout();
+        set_rebate_pot_balance(PayoutLine::OpsCollators, 0);
+        Treasury::note_collator_block(acc(7));
+        set_epoch(1);
+        Treasury::note_collator_block(acc(8));
+        Treasury::pay_collator_compensation();
+        set_epoch(2);
+        Treasury::note_collator_block(acc(9));
+        assert_eq!(integrity_faults().len(), 1);
+
+        // Epoch 3 losing a boundary block is a *different* epoch's accounting
+        // going missing, and it additionally taints an accumulator that was
+        // payable until now — two independent reasons it is a new event.
+        set_epoch(3);
+        Treasury::note_collator_block(acc(10));
+        assert!(CollatorAuthoredOverflowed::<Test>::get());
+        assert_eq!(
+            integrity_faults(),
+            vec![
+                IntegrityFault::LostAccounting,
+                IntegrityFault::LostAccounting
+            ]
+        );
+    });
+}
+
+#[test]
+fn accumulator_overflow_counts_once_however_many_authors_overflow() {
+    funded_ext().execute_with(|| {
+        // The bound is the active session's collator ceiling (13 §4), so a
+        // 121st distinct author is a population the runtime holds impossible —
+        // not a queue under load — and the latch voids *every* collator's share
+        // for the epoch.
+        for seed in 0..MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND {
+            Treasury::note_collator_block(acc(seed as u8));
+        }
+        assert!(
+            integrity_faults().is_empty(),
+            "a full accumulator is not a loss"
+        );
+
+        Treasury::note_collator_block(acc(200));
+        assert!(CollatorAuthoredOverflowed::<Test>::get());
+        assert_eq!(integrity_faults(), vec![IntegrityFault::LostAccounting]);
+
+        // Further overflowing authors are the same lost epoch.
+        Treasury::note_collator_block(acc(201));
+        Treasury::note_collator_block(acc(202));
+        assert_eq!(integrity_faults().len(), 1);
+    });
+}
+
+#[test]
+fn ordinary_collator_accounting_never_touches_pi() {
+    funded_ext().execute_with(|| {
+        reset_rebate_payout();
+        // A healthy epoch: author, roll, pay. Nothing here is a fault.
+        Treasury::note_collator_block(acc(7));
+        Treasury::note_collator_block(acc(7));
+        Treasury::note_collator_block(acc(8));
+        set_epoch(1);
+        Treasury::pay_collator_compensation();
+        assert_eq!(rebate_payouts().len(), 2);
+        assert!(integrity_faults().is_empty());
+    });
+}
+
+#[test]
+fn a_deferred_payout_is_backpressure_and_does_not_increment_pi() {
+    funded_ext().execute_with(|| {
+        reset_rebate_payout();
+        set_rebate_pot_balance(PayoutLine::OpsCollators, 0);
+        Treasury::note_collator_block(acc(7));
+
+        // Underfunded custody: the storage layer unwinds and `let _ = result;`
+        // discards the error. **Not** a §4.3.2 event — the accumulator survives
+        // intact and the next Housekeeping boundary re-attempts it, which is a
+        // defined recovery path (clause 3 fails).
+        set_epoch(1);
+        Treasury::pay_collator_compensation();
+        assert!(rebate_payouts().is_empty() || CollatorAuthoredBlocks::<Test>::get().len() == 1);
+        assert_eq!(CollatorAuthoredBlocks::<Test>::get().len(), 1);
+        assert!(integrity_faults().is_empty());
+
+        // And the retry does pay, which is what makes it backpressure.
+        reset_rebate_payout();
+        set_rebate_pot_balance(PayoutLine::OpsCollators, 4_000 * USDC);
+        Treasury::pay_collator_compensation();
+        assert_eq!(rebate_payouts().len(), 1);
+        assert!(integrity_faults().is_empty());
+    });
+}
+
+#[test]
+fn tearing_down_a_tainted_epoch_does_not_count_it_twice() {
+    funded_ext().execute_with(|| {
+        for seed in 0..=MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND {
+            Treasury::note_collator_block(acc(seed as u8));
+        }
+        assert_eq!(integrity_faults().len(), 1);
+
+        // Housekeeping discards the tainted accumulator without paying. The
+        // epoch's loss was counted where the latch was set; counting the
+        // teardown too would count one lost epoch twice.
+        set_epoch(1);
+        Treasury::pay_collator_compensation();
+        assert!(rebate_payouts().is_empty());
+        assert!(!CollatorAuthoredOverflowed::<Test>::get());
+        assert_eq!(integrity_faults().len(), 1);
+    });
+}
+
+#[test]
+fn nothing_to_pay_is_not_a_fault() {
+    funded_ext().execute_with(|| {
+        // Every early bail in `pay_collator_compensation` returns with state
+        // intact, so clause 2 of §4.3.2 (state discarded or a latch engaged)
+        // never holds.
+        Treasury::pay_collator_compensation();
+        Treasury::note_collator_block(acc(7));
+        // Epoch not yet complete: the accumulator stays open by design.
+        Treasury::pay_collator_compensation();
+        assert_eq!(CollatorAuthoredBlocks::<Test>::get().len(), 1);
+        // A missing registered-count snapshot stalls the payout without
+        // discarding the accumulator, so it is a liveness stall, not a loss.
+        CollatorAuthoredRegisteredCount::<Test>::kill();
+        set_epoch(1);
+        Treasury::pay_collator_compensation();
+        assert_eq!(CollatorAuthoredBlocks::<Test>::get().len(), 1);
+        assert!(integrity_faults().is_empty());
     });
 }

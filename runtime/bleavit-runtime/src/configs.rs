@@ -861,6 +861,30 @@ fn set_migration_halt_source(source: u8) {
     // operator/monitoring diagnostic, 12 §6.3), so it carries no contract bump.
     if previous & EXECUTION_HALT_SOURCES == 0 && sources & EXECUTION_HALT_SOURCES != 0 {
         emit_migration_halted();
+        // 05 §4.3.2 `Π`, `IntegrityFault::FailStaticLatch` — "a fail-static
+        // latch engaged out of a detected inconsistency". All three clauses
+        // hold: the runtime holds unconditionally that the code it runs is the
+        // code its guard scheduled and that a registered migration completes
+        // within its declared budget; engaging the halt freezes the execution
+        // queue; and nothing restores the boundary that was violated — the halt
+        // lifts only when a *later, different* upgrade applies validly, which
+        // is a new fact, not a repair of the lost one.
+        //
+        // **The activation edge is the increment, not every write.** A second
+        // source setting while the halt is already engaged is the same latch
+        // being re-described, and §4.3.2 counts an event once. It is also the
+        // edge that already gates `emit_migration_halted`, so the counter and
+        // the operator diagnostic can never disagree about how many latches
+        // engaged.
+        //
+        // `EXECUTION_HALT_SOURCES` is what makes this correct rather than
+        // merely convenient: `UPGRADE_ABORT_TRIGGER` is deliberately **not** a
+        // member, so the relay-aborted-upgrade path — where the relay preserved
+        // the status quo, nothing was discarded, and a fresh proposal is the
+        // defined path forward — falls out of the qualifying class by
+        // construction rather than by a hand-maintained exception.
+        <RuntimeIntegrityRecorder as futarchy_primitives::integrity::IntegritySink>::
+            note_integrity_failure(futarchy_primitives::integrity::IntegrityFault::FailStaticLatch);
     }
 }
 
@@ -900,6 +924,19 @@ fn emit_migration_halted() {
     // A source-less halt yields empty bytes.
     let cursor = pallet_execution_guard::pallet::MigrationHaltCursor::truncate_from(cursor_bytes);
     crate::ExecutionGuard::note_migration_halted(cursor, MigrationFailedStep::get());
+}
+
+/// Raise the relay-aborted-upgrade trigger, which is deliberately **not** an
+/// execution-halt source and therefore never a 05 §4.3.2 `Π` event.
+#[cfg(test)]
+pub(crate) fn note_upgrade_abort_trigger_for_test() {
+    set_migration_halt_source(UPGRADE_ABORT_TRIGGER);
+}
+
+/// Engage the fail-static execution halt, which is one.
+#[cfg(test)]
+pub(crate) fn note_migration_stall_halt_for_test() {
+    set_migration_halt_source(MIGRATION_STALL_HALT);
 }
 
 fn clear_migration_halt_sources(mask: u8) {
@@ -2465,6 +2502,46 @@ fn epoch_and_day_at(at: BlockNumber) -> Option<(EpochId, u8)> {
     pallet_epoch::EpochTimings::<Runtime>::get()
         .iter()
         .find_map(day_of)
+}
+
+/// The `(epoch, day)` window the current block is attributed to (05 §3.2).
+///
+/// The welfare pallet's `H` sampler reads this once per block. It is the *same*
+/// derivation the XCM-health and reserve-probe recorders use, deliberately: one
+/// block must not be attributed to two different days by two different
+/// recorders, and the whole `(epoch, day)` series family is retired by one
+/// shared bounded walk keyed on the epoch this returns.
+pub struct RuntimeMeasurementWindow;
+impl Get<(EpochId, u8)> for RuntimeMeasurementWindow {
+    fn get() -> (EpochId, u8) {
+        xcm_traffic_epoch_and_day()
+    }
+}
+
+/// The single runtime endpoint for 05 §4.3.2's qualifying defensive-path
+/// failures (`Π`).
+///
+/// Every increment in the runtime and in the pallets it wires goes through
+/// here, and here derives the `(epoch, day)` window exactly once, so no site can
+/// double-count and no two sites can disagree about which window a fault
+/// belongs to (§4.3.2: "a single event increments it at most once").
+///
+/// **Which sites call it, and why the obvious ones do not.** §4.3.2 admits an
+/// event iff the runtime detected a violation of an assumption it holds
+/// unconditionally, *and* the fallback discarded correctness-relevant state or
+/// engaged a fail-static latch, *and* no defined path later restores what was
+/// lost. The third clause excludes bounded-maintenance backpressure by name, and
+/// the runtime is full of it: a full `XcmTrafficEpochs` index dropping an
+/// observation, a keeper crank that bails and is re-run next boundary, an
+/// `UPGRADE_ABORT_TRIGGER` whose whole point is that the relay preserved the
+/// status quo. None of those increment. The qualifying set is enumerated at each
+/// call site, each carrying the clause that admitted it.
+pub struct RuntimeIntegrityRecorder;
+impl futarchy_primitives::integrity::IntegritySink for RuntimeIntegrityRecorder {
+    fn note_integrity_failure(fault: futarchy_primitives::integrity::IntegrityFault) {
+        let (epoch, day) = xcm_traffic_epoch_and_day();
+        pallet_welfare::Pallet::<Runtime>::note_integrity_failure(epoch, day, fault);
+    }
 }
 
 /// Fail-soft recorder for the three locally observable v1 XCM-health signals.
@@ -5725,6 +5802,81 @@ fn block_production(counters: pallet_welfare::BlockProductionCounters) -> Option
     Some(FixedU64(u64::try_from(scaled).ok()?))
 }
 
+/// Weight headroom `H` for 05 §4.3, or `None` when the window sampled no block.
+///
+/// §4.3 gives `H = 1 − mean(block weight used ÷ limit)`, "mapped so 40% target
+/// utilization ⇒ 1". Two facts fix the mapping and neither is a free choice:
+/// `H` must read **exactly** 1 at the 40 % target, and it must fall as
+/// utilization rises above it. The affine map that does both is
+///
+/// ```text
+/// H = clamp( (1 − mean) / (1 − target), 0, 1 ),  target = 0.40
+/// ```
+///
+/// — the raw `1 − mean` rescaled by the headroom a chain running exactly at
+/// target has left. Below 40 % the quotient exceeds 1 and clamps: spare capacity
+/// is *healthy*, not better than healthy, and letting `H` run above 1 would push
+/// `C_onchain` above the [0,1] domain every other component and both §4.1 gates
+/// are defined on.
+///
+/// **A window with no sampled block is absent, never 1.** §4.3's missing-data
+/// column gives `H` no "no data ⇒ 1" rule — unlike `X` ("no traffic ⇒ 1") and
+/// `Π` ("no events ⇒ 1"), where absence of the *observed thing* is itself the
+/// healthy observation. Absence of a block sample is absence of the
+/// *measurement*, which is a different fact: a chain that produced no block
+/// produced no evidence of headroom, and fabricating 1 there would raise
+/// `C_onchain` out of a window nothing measured. Returning `None` makes
+/// `record_snapshot` refuse and the crank fail status-quo-safe (G-1).
+///
+/// Both divisions truncate, and both truncate in the safe direction: the mean is
+/// rounded **up** (so utilization is never understated) and the quotient down
+/// (so `H` is never overstated).
+#[allow(dead_code)]
+fn weight_headroom(sample: pallet_welfare::BlockWeightSample) -> Option<FixedU64> {
+    let blocks = u128::from(sample.blocks);
+    if blocks == 0 {
+        return None;
+    }
+    let one = u128::from(pallet_welfare::ONE);
+    // Ceiling division: round the mean utilization up.
+    let mean = u128::from(sample.utilization_sum)
+        .checked_add(blocks.saturating_sub(1))?
+        .checked_div(blocks)?
+        .min(one);
+    let target = u128::from(futarchy_primitives::kernel::WEIGHT_HEADROOM_TARGET_UTILIZATION);
+    // `target` is a kernel constant strictly below `ONE`, so the denominator is
+    // positive; `checked_div` is the defensive form rather than a live branch.
+    let denominator = one.checked_sub(target)?;
+    let headroom = one.saturating_sub(mean);
+    let scaled = headroom
+        .checked_mul(one)?
+        .checked_div(denominator)?
+        .min(one);
+    Some(FixedU64(u64::try_from(scaled).ok()?))
+}
+
+/// Runtime integrity `Π` for 05 §4.3: `max(0, 1 − 0.25 · events)`.
+///
+/// **No events is legitimately 1**, and that asymmetry with `H` above is
+/// deliberate, not an oversight. §4.3's missing-data column says so in as many
+/// words ("no events ⇒ 1"), and the reason is that the two components observe
+/// different kinds of thing. `Π` counts *occurrences of a fault*; a window with
+/// none is a window in which the runtime's assumptions held, which is the
+/// healthy observation itself and needs no separate measurement to exist.
+/// `H` averages a *quantity*; a window with no sample has no average, healthy or
+/// otherwise. So absence means "fine" for `Π` and "unavailable" for `H`, and the
+/// counter is `ValueQuery` for exactly that reason — an unwritten key is a real
+/// zero, not a missing one.
+///
+/// Saturating at [`futarchy_primitives::kernel::INTEGRITY_FAILURES_TO_ZERO`]
+/// events, per 05 §4.3.2's per-window saturating counter.
+#[allow(dead_code)]
+fn runtime_integrity(events: u32) -> FixedU64 {
+    FixedU64(pallet_welfare::ONE.saturating_sub(
+        u64::from(events).saturating_mul(futarchy_primitives::kernel::INTEGRITY_FAILURE_PENALTY),
+    ))
+}
+
 /// The already-resolved per-window inputs [`metric_components`] projects into
 /// 05 §4.3 component values.
 ///
@@ -5767,6 +5919,12 @@ struct MetricComponentInputs {
     /// was never observed, and `block_production` resolves it **absent** rather
     /// than scoring it.
     block_production: pallet_welfare::BlockProductionCounters,
+    /// Block-weight utilization accumulator for the window (05 §4.3 `H`).
+    /// A zero block count is *unavailable*, and [`weight_headroom`] says why.
+    headroom: pallet_welfare::BlockWeightSample,
+    /// Qualifying 05 §4.3.2 defensive-path failures counted in the window
+    /// (`Π`). Zero is a legitimate value, not a missing one.
+    integrity_events: u32,
 }
 
 #[allow(dead_code)]
@@ -5781,6 +5939,8 @@ fn metric_components(
     let x = xcm_health(inputs.counters);
     let k = collator_adequacy(&inputs.authorship);
     let u = block_production(inputs.block_production);
+    let h = weight_headroom(inputs.headroom);
+    let pi = runtime_integrity(inputs.integrity_events);
     specs
         .iter()
         .filter(|spec| {
@@ -5843,6 +6003,17 @@ fn metric_components(
                     Some(value) => value,
                     None => return None,
                 },
+                // 05 §4.3 (A14). `None` means the window sampled no block, so
+                // there is no mean to map — absent, never the fabricated 1 that
+                // would raise `C_onchain` out of an unmeasured window.
+                futarchy_primitives::metric_ids::H => match h {
+                    Some(value) => value,
+                    None => return None,
+                },
+                // 05 §4.3/§4.3.2 (A14). Always available: the counter is
+                // `ValueQuery`, so "no qualifying events" is a recorded zero and
+                // `Π` is legitimately 1 — §4.3's own missing-data rule.
+                futarchy_primitives::metric_ids::PI => pi,
                 // Inputs for every other registered component land with the
                 // A8/values wiring. Welfare treats registered-but-missing input
                 // as an error, failing the crank status-quo-safe instead of
@@ -5896,6 +6067,34 @@ fn benchmark_measure_block_production_reads(epoch: EpochId, day: Option<u8>) {
     };
 }
 
+/// A14: the same walk-and-discard for the 05 §4.3 `H` and `Π` reads.
+///
+/// These need it more than their neighbours, not less. The authorship and
+/// block-production series each keep an on-write epoch aggregate, so their
+/// epoch-granularity read is one key; `H` and `Π` have none, so
+/// `onchain_components` **folds the whole day prefix** of each
+/// (`block_weight_epoch`, `integrity_failures_epoch`). Left unwalked, the
+/// fabricating arm returns component values having touched neither map, and the
+/// generated weight declares nothing for a dispatch that reads up to 2 × 256
+/// keys — the largest instance of the SQ-490 shape in this file rather than the
+/// smallest. The pallet fixture seeds both prefixes at their 13 §4 bound and
+/// asserts the count afterwards, so the discarded read is the worst-case one and
+/// a fixture that stops reaching it fails loudly instead of quietly
+/// regenerating a smaller number.
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_measure_h_pi_reads(epoch: EpochId, day: Option<u8>) {
+    match day {
+        Some(day) => {
+            let _ = pallet_welfare::Pallet::<Runtime>::block_weight_sample(epoch, day);
+            let _ = pallet_welfare::Pallet::<Runtime>::integrity_failures(epoch, day);
+        }
+        None => {
+            let _ = pallet_welfare::Pallet::<Runtime>::block_weight_epoch(epoch);
+            let _ = pallet_welfare::Pallet::<Runtime>::integrity_failures_epoch(epoch);
+        }
+    }
+}
+
 /// Runtime metric projection. Local XCM traffic and final oracle components
 /// are live. Every other unavailable registered input remains absent so the
 /// welfare pallet rejects an incomplete snapshot (G-1).
@@ -5920,6 +6119,9 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
             // The 05 §4.3.2 block-production read is discarded for the same
             // reason and must be measured for the same reason.
             benchmark_measure_block_production_reads(epoch, None);
+            // A14: and the 05 §4.3 `H` and `Π` reads, which are prefix folds
+            // rather than single keys — see `benchmark_measure_h_pi_reads`.
+            benchmark_measure_h_pi_reads(epoch, None);
             specs
                 .iter()
                 .filter(|spec| spec.activation_epoch <= epoch)
@@ -5945,6 +6147,10 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
                         .map(|ok| FixedU64(if ok { pallet_welfare::ONE } else { 0 })),
                     authorship: AuthorshipWindowInput::epoch(epoch),
                     block_production: pallet_welfare::Pallet::<Runtime>::block_production_epoch(
+                        epoch,
+                    ),
+                    headroom: pallet_welfare::Pallet::<Runtime>::block_weight_epoch(epoch),
+                    integrity_events: pallet_welfare::Pallet::<Runtime>::integrity_failures_epoch(
                         epoch,
                     ),
                 },
@@ -6080,6 +6286,8 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
             // declare both reads.
             let _ = collator_adequacy(&AuthorshipWindowInput::day(epoch, day));
             benchmark_measure_block_production_reads(epoch, Some(day));
+            // A14: and the day's `H` accumulator and `Π` counter (05 §4.3).
+            benchmark_measure_h_pi_reads(epoch, Some(day));
             pallet_welfare::MetricSpecs::<Runtime>::get(version)
                 .into_iter()
                 .flatten()
@@ -6099,6 +6307,8 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
                 reserve: reserve_probe_daily_value(epoch, day),
                 authorship: AuthorshipWindowInput::day(epoch, day),
                 block_production: pallet_welfare::Pallet::<Runtime>::block_production(epoch, day),
+                headroom: pallet_welfare::Pallet::<Runtime>::block_weight_sample(epoch, day),
+                integrity_events: pallet_welfare::Pallet::<Runtime>::integrity_failures(epoch, day),
             },
         )
     }
@@ -6169,6 +6379,7 @@ impl pallet_welfare::Config for Runtime {
     type MetricInputs = RuntimeMetricInputs;
     type Ledger = WelfareLedger;
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
+    type CurrentWindow = RuntimeMeasurementWindow;
     type SnapshotSchedule = RuntimeSnapshotSchedule;
     type KeeperRebate = FutarchyTreasury;
     type OracleAdmission = RuntimeOracleAdmission;
@@ -7123,6 +7334,7 @@ impl pallet_futarchy_treasury::Config for Runtime {
     type RebatePayout = TreasuryRebatePayout;
     type PotFunding = TreasuryPotFunding;
     type InsuranceSweep = TreasuryInsuranceSweep;
+    type Integrity = RuntimeIntegrityRecorder;
     type WeightInfo = crate::weights::pallet_futarchy_treasury::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
@@ -8806,10 +9018,37 @@ impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEven
         let previous_relay_parent = pallet_epoch::LastRelayParent::<Runtime>::get();
         // The pallet seam accepts only the plain relay number (I-24); detector
         // failure leaves the already-latched status quo untouched.
-        let _ = pallet_epoch::Pallet::<Runtime>::observe_dead_man(
+        //
+        // 05 §4.3.2 `Π`, `IntegrityFault::DiscardedInternalCall` — "an internal
+        // cross-pallet call whose failure is discarded rather than propagated".
+        // This is the shape exactly: the caller is the mandatory parachain
+        // inherent with nowhere to return a `DispatchResult` to, and the callee
+        // runs inside its own storage layer, so a refused
+        // `note_dead_man_engaged` unwinds the *whole* observation — relay
+        // baseline, cause bits and pause instant together — and the block
+        // proceeds as though the detector had run.
+        //
+        // Clause 3 is what admits it. The next block re-observes from the
+        // un-advanced baseline, so the *gap* is not lost — but the latch that
+        // this block's evidence called for was not engaged, and if the
+        // constitution write keeps refusing (the deterministic case, and the
+        // only one that matters) it is never engaged at all. There is no reaper,
+        // no cursor and no crank that reconstructs a missed dead-man
+        // engagement; a per-block retry against a deterministic refusal is not a
+        // defined recovery path, it is the same failure repeated. Counting each
+        // block is correct rather than inflationary: four consecutive blocks
+        // unable to engage the chain's liveness backstop *is* `Π = 0`.
+        if pallet_epoch::Pallet::<Runtime>::observe_dead_man(
             data.relay_parent_number,
             snapshot_overdue,
-        );
+        )
+        .is_err()
+        {
+            <RuntimeIntegrityRecorder as futarchy_primitives::integrity::IntegritySink>::
+                note_integrity_failure(
+                    futarchy_primitives::integrity::IntegrityFault::DiscardedInternalCall,
+                );
+        }
         {
             // §4.3.2's nominal-cadence rule covers both cases where no usable
             // predecessor exists: genesis (no baseline recorded yet) and a relay

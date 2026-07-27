@@ -124,6 +124,10 @@ pub enum LedgerCall {
 
 parameter_types! {
     pub static CurrentEpochValue: EpochId = 0;
+    /// The `(epoch, day)` the current block is attributed to (05 §3.2/§4.3).
+    /// The real runtime derives this from the epoch schedule; the mock lets a
+    /// test move the window directly.
+    pub static CurrentWindowValue: (EpochId, u8) = (0, 0);
     pub static ThetaSLo: FixedU64 = CORE_THETA_S_LO;
     pub static ThetaSHi: FixedU64 = CORE_THETA_S_HI;
     pub static ThetaCLo: FixedU64 = CORE_THETA_C_LO;
@@ -365,6 +369,7 @@ impl pallet_welfare::Config for Test {
     type MetricInputs = TestMetricInputs;
     type Ledger = TestLedger;
     type CurrentEpoch = CurrentEpochValue;
+    type CurrentWindow = CurrentWindowValue;
     type SnapshotSchedule = TestSnapshotSchedule;
     type KeeperRebate = TestKeeperRebate;
     type MaxCollatorAuthorshipEntries = frame_support::traits::ConstU32<MAX_AUTHORSHIP_ENTRIES>;
@@ -407,6 +412,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     WP::set(CORE_W_P);
     WA::set(CORE_W_A);
     CurrentEpochValue::set(FINALIZED_NOW);
+    CurrentWindowValue::set((FINALIZED_NOW, 0));
     OnchainInput::set(healthy_components());
     OnchainInputsByVersion::set(Vec::new());
     DailyInput::set(healthy_components());

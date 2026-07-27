@@ -96,6 +96,87 @@ pub mod keeper {
     }
 }
 
+/// Shared vocabulary for 05 §4.3's runtime-integrity component `Π`.
+///
+/// `Π = max(0, 1 − 0.25 · defensive_failure_events)` per window, and 05 §4.3.2
+/// (SQ-181) fixes *which* failures are countable. An event qualifies **iff all
+/// three** hold:
+///
+/// 1. the runtime detected a violation of an assumption it holds
+///    unconditionally, **and**
+/// 2. the fallback discarded correctness-relevant state or engaged a fail-static
+///    latch, **and**
+/// 3. **no defined path later restores what was lost**.
+///
+/// Clause 3 is the operative one. It excludes *bounded-maintenance
+/// backpressure* — a bounded collection sitting at its limit while its
+/// cursor-bounded reaper catches up, or an observation dropped to keep a bounded
+/// index consistent — because those are designed states with a defined recovery.
+/// The test is literally: **is there a defined path that restores correctness?**
+/// If yes, it is backpressure and MUST NOT increment.
+///
+/// The distinction is load-bearing at this weighting: four qualifying events
+/// zero `Π`, and `Π` at weight 0.10 can pull `C_onchain` far enough to raise a
+/// 05 §4.7 daily breach flag, which arms the guardian's `suspend_on_gate` power
+/// (06). Routine capacity backpressure must not be able to reach that.
+pub mod integrity {
+    use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
+    use scale_info::TypeInfo;
+
+    /// The qualifying shape of one recorded defensive-path failure.
+    ///
+    /// The variants are the three concrete cases 05 §4.3.2 enumerates, not a
+    /// list of call sites: a new site classifies itself into an existing shape
+    /// by applying the three-clause test, which keeps the taxonomy anchored to
+    /// the ruling rather than to whatever the runtime happens to contain.
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        Decode,
+        DecodeWithMemTracking,
+        Encode,
+        Eq,
+        MaxEncodedLen,
+        PartialEq,
+        TypeInfo,
+    )]
+    pub enum IntegrityFault {
+        /// "An internal cross-pallet call whose failure is discarded rather than
+        /// propagated" — the caller is a hook or an infallible seam with nowhere
+        /// to return the error to, so the callee's whole storage layer unwinds
+        /// and the caller proceeds as though it had succeeded.
+        DiscardedInternalCall,
+        /// "A fail-static latch engaged out of a detected inconsistency" — the
+        /// runtime observed state it holds to be impossible and froze rather
+        /// than continuing on it.
+        FailStaticLatch,
+        /// "The loss of an accounting accumulator no later crank can
+        /// reconstruct" — a window's worth of measured, payable bookkeeping is
+        /// discarded, and nothing re-derives it from surviving state.
+        LostAccounting,
+    }
+
+    /// Infallible, fail-soft sink for one qualifying defensive-path failure.
+    ///
+    /// Infallible by construction: every caller is already on a failure path,
+    /// and a recorder that could itself fail would either mask the fault it
+    /// exists to publish or change the outcome of the code that detected it.
+    /// Implementations MUST NEVER alter the caller's control flow (G-1).
+    ///
+    /// Exactly one increment per event: a caller that has already recorded a
+    /// fault MUST NOT record it again when the same fault is later moved,
+    /// mirrored or re-observed (05 §4.3.2, "a single event increments it at most
+    /// once").
+    pub trait IntegritySink {
+        fn note_integrity_failure(fault: IntegrityFault);
+    }
+
+    impl IntegritySink for () {
+        fn note_integrity_failure(_: IntegrityFault) {}
+    }
+}
+
 #[derive(
     Clone,
     Copy,
@@ -1141,6 +1222,30 @@ pub mod kernel {
     pub const DEAD_MAN_RELAY_BLOCKS: u32 = 48;
     /// 13 §2 dead-man snapshot grace: strictly more than four six-second days.
     pub const DEAD_MAN_SNAPSHOT_OVERDUE_BLOCKS: u32 = 4 * BLOCKS_PER_DAY;
+    /// Target block-weight utilization at which 05 §4.3's weight-headroom
+    /// component `H` reads exactly 1, on the [`SCORE_SCALE`] grid (0.40).
+    ///
+    /// §4.3 gives `H = 1 − mean(block weight used ÷ limit)`, "mapped so 40%
+    /// target utilization ⇒ 1". The 40 % is part of the component's normative
+    /// definition, not a tunable: it is the utilization the chain is *designed*
+    /// to run at, and moving it would silently redefine what a healthy `C`
+    /// pillar means for every already-settled cohort. So it lives here with the
+    /// other kernel constants rather than in the [13] registry, and no
+    /// governance track can amend it (13 · Reading rules, rule 4).
+    pub const WEIGHT_HEADROOM_TARGET_UTILIZATION: u64 = 4 * (SCORE_SCALE / 10);
+    /// Per-event penalty applied by 05 §4.3's runtime-integrity component
+    /// `Π = max(0, 1 − 0.25 · defensive_failure_events)`, on the
+    /// [`SCORE_SCALE`] grid (0.25).
+    ///
+    /// Kernel, not a tunable, for the same reason as
+    /// [`WEIGHT_HEADROOM_TARGET_UTILIZATION`]: the coefficient *is* the
+    /// component's definition. It also fixes the saturation point at four
+    /// qualifying events per window, which 05 §4.3.2 relies on when it rules
+    /// bounded-maintenance backpressure out of the qualifying class.
+    pub const INTEGRITY_FAILURE_PENALTY: u64 = SCORE_SCALE / 4;
+    /// Qualifying events that drive `Π` to exactly 0 — derived from
+    /// [`INTEGRITY_FAILURE_PENALTY`], never written as a separate literal.
+    pub const INTEGRITY_FAILURES_TO_ZERO: u32 = (SCORE_SCALE / INTEGRITY_FAILURE_PENALTY) as u32;
     pub const STALE_EPOCH_BOUND_BLOCKS: u32 = 100_800;
     pub const TICK_BATCH: u32 = 10;
     pub const REAP_BATCH: u32 = 100;
@@ -1611,6 +1716,19 @@ mod tests {
             ],
             [1, 2, 3, 4, 5, 6, 10, 11, 12, 20, 21, 22, 30, 31, 32]
         );
+    }
+
+    #[test]
+    fn welfare_c_onchain_kernel_constants_match_05_section_4_3() {
+        // 40 % target utilization, on the score grid.
+        assert_eq!(
+            kernel::WEIGHT_HEADROOM_TARGET_UTILIZATION,
+            400_000_000,
+            "05 §4.3 maps 40% utilization to H = 1"
+        );
+        // 0.25 per qualifying defensive-failure event, saturating at four.
+        assert_eq!(kernel::INTEGRITY_FAILURE_PENALTY, 250_000_000);
+        assert_eq!(kernel::INTEGRITY_FAILURES_TO_ZERO, 4);
     }
 
     #[test]

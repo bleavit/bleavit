@@ -1025,6 +1025,16 @@ error = "Welfare::TooManySnapshots"
 reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
 
 [[entry]]
+key = "Welfare block-weight samples"
+class = "value"
+reason = "13 §4 / 05 §4.3: the `(epoch, day)` block-weight accumulator is written by the `on_finalize` sampler, which is a hook and not a dispatch, so it has no error surface at all — an unindexable window is dropped fail-soft. The drop direction is safe because a window with no sample resolves `H` **absent** rather than healthy, which fails the crank status-quo-safe; pinned by `h_is_absent_without_a_sampled_block` and `sample_is_dropped_when_the_shared_index_is_full` in `pallets/welfare/src/tests.rs`."
+
+[[entry]]
+key = "Welfare integrity-failure counter"
+class = "value"
+reason = "13 §4 / 05 §4.3.2: the per-`(epoch, day)` `Pi` counter is written only by the infallible `note_integrity_failure` sink, which is reached from already-failing hook paths and must never change their control flow, so there is no dispatch and no error surface. Saturating at the integer bound is defensive only — the score already saturates at 4 events — and pinned by `pi_reads_one_zero_seventy_five_and_zero` in `pallets/welfare/src/tests.rs`."
+
+[[entry]]
 key = "ExecutionRecords"
 class = "dispatch-limit"
 behavior = "records[0]"

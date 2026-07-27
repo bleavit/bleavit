@@ -9,6 +9,7 @@ use frame_support::{
     derive_impl, parameter_types,
     traits::{ConstU32, EnsureOrigin},
 };
+use futarchy_primitives::integrity::{IntegrityFault, IntegritySink};
 use sp_core::crypto::AccountId32;
 use sp_runtime::{traits::IdentityLookup, BuildStorage};
 use std::cell::{Cell, RefCell};
@@ -158,6 +159,26 @@ std::thread_local! {
     static FAIL_INSURANCE_SWEEP: Cell<bool> = const { Cell::new(false) };
     static COMMUNITY_VESTING_CALLS: RefCell<Vec<CommunityVestingCall>> = const { RefCell::new(Vec::new()) };
     static FAIL_COMMUNITY_VESTING: Cell<bool> = const { Cell::new(false) };
+    static INTEGRITY_FAULTS: RefCell<Vec<IntegrityFault>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Records every 05 §4.3.2 `Π` increment this pallet asks the runtime for, so a
+/// test can assert both that a qualifying site fires **and** that a
+/// non-qualifying one stays silent.
+pub struct MockIntegrity;
+
+impl IntegritySink for MockIntegrity {
+    fn note_integrity_failure(fault: IntegrityFault) {
+        INTEGRITY_FAULTS.with(|faults| faults.borrow_mut().push(fault));
+    }
+}
+
+pub fn integrity_faults() -> Vec<IntegrityFault> {
+    INTEGRITY_FAULTS.with(|faults| faults.borrow().clone())
+}
+
+pub fn reset_integrity_faults() {
+    INTEGRITY_FAULTS.with(|faults| faults.borrow_mut().clear());
 }
 
 pub struct RecordingCommunityVesting;
@@ -358,6 +379,7 @@ impl pallet_futarchy_treasury::Config for Test {
     type RebatePayout = RecordingRebatePayout;
     type PotFunding = MockPotFunding;
     type InsuranceSweep = MockInsuranceSweep;
+    type Integrity = MockIntegrity;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestBenchmarkHelper;
@@ -422,6 +444,7 @@ pub fn new_test_ext_with(
         reset_pot_funding();
         reset_insurance_sweeps();
         reset_community_vesting();
+        reset_integrity_faults();
     });
     ext
 }

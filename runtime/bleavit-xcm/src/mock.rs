@@ -238,6 +238,7 @@ impl pallet_futarchy_treasury::Config for Test {
     type PotFunding = ();
     type InsuranceSweep = ();
     type RebatePayout = ();
+    type Integrity = ();
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestTreasuryBenchmarkHelper;
