@@ -66,6 +66,7 @@ CORPUS_FAMILY_BINDINGS: Mapping[str, tuple[str, ...] | None] = {
     "transcendental_corpus": ("fixed-reference-vectors",),
     "treasury_scenarios": ("treasury-core-reference-vectors",),
     "twap_scenarios": ("market-core-twap-vectors",),
+    "welfare_normalization_scenarios": ("welfare-core-normalization-vectors",),
     "welfare_scenarios": ("welfare-core-reference-vectors",),
 }
 
@@ -506,6 +507,21 @@ def reference_legs(sweep_dir: Path) -> tuple[list[CommandLeg], CommandLeg, Comma
             minimum_tests=1,
         ),
         CommandLeg(
+            "welfare-core-normalization-vectors",
+            (
+                "cargo",
+                "test",
+                "-p",
+                "welfare-core",
+                "--release",
+                "--locked",
+                "--test",
+                "normalization_vectors",
+            ),
+            test_output="cargo",
+            minimum_tests=1,
+        ),
+        CommandLeg(
             "treasury-core-reference-vectors",
             (
                 "cargo",
@@ -666,6 +682,7 @@ def load_corpus_family_coverage(
         "ledger-pallet-reference-sweep",
         "market-core-twap-vectors",
         "treasury-core-reference-vectors",
+        "welfare-core-normalization-vectors",
         "welfare-core-reference-vectors",
     }
     if used_consumer_legs != expected_consumer_legs:

@@ -59,8 +59,13 @@ from bleavit_reference_model.twap import (
     TwapAccumulator,
 )
 from bleavit_reference_model.welfare import (
+    apply_normalization,
+    floor_fixed,
     full_pipeline,
     full_pipeline_renormalized,
+    is_log1p_series,
+    normalization_constants,
+    normalization_sample,
     settlement_score,
 )
 
@@ -277,6 +282,192 @@ WELFARE_LIVE_GATES_INPUTS = {
     "f": "0.99",
     "hhi": "0.10",
 }
+
+
+# 05 §4.6 normalization scenarios (SQ-502). Every row carries the whole input
+# state a replay needs — the 12 genesis pseudo-observations, the finalized epoch
+# values available, the raw value, and whether §4.3 declares the series
+# heavy-tailed — plus the assembled sample, the frozen constants and the
+# normalized output. `metric_id` binds a row to the canonical v1 component
+# (05 §4.3), so a conforming implementation can replay it through the registered
+# `MetricSpec` rather than through a loose helper: that is the read which makes
+# `MetricSpec.prior_bounds` load-bearing.
+NORMALIZATION_SCENARIOS = [
+    {
+        # Epoch 1: `n = min(e − 1, 12) = 0`, so the sample is the genesis prior
+        # untouched and `s` is deterministically computable from epoch 1 (D-15).
+        "name": "cold_start_epoch_1_pure_priors",
+        "metric_id": 22,
+        "prior_bounds": [
+            "12.5", "18.25", "9.75", "31.5", "22.125", "15.0",
+            "27.375", "11.625", "24.0", "19.5", "33.25", "16.875",
+        ],
+        "finalized": [],
+        "value": "21.0",
+    },
+    {
+        # Epoch 7: six finalized epochs have displaced the six *oldest*
+        # pseudo-observations; six priors still carry the tail of the window.
+        "name": "cold_start_epoch_7_displaces_six_priors",
+        "metric_id": 22,
+        "prior_bounds": [
+            "12.5", "18.25", "9.75", "31.5", "22.125", "15.0",
+            "27.375", "11.625", "24.0", "19.5", "33.25", "16.875",
+        ],
+        "finalized": ["40.0", "38.5", "44.25", "36.75", "41.125", "39.0"],
+        "value": "21.0",
+    },
+    {
+        # Epoch 13: the sample is fully real and the cold-start rule reduces to
+        # the steady-state rule with no discontinuity in mechanism (05 §4.6).
+        "name": "steady_state_epoch_13_priors_fully_displaced",
+        "metric_id": 22,
+        "prior_bounds": [
+            "12.5", "18.25", "9.75", "31.5", "22.125", "15.0",
+            "27.375", "11.625", "24.0", "19.5", "33.25", "16.875",
+        ],
+        "finalized": [
+            "40.0", "38.5", "44.25", "36.75", "41.125", "39.0",
+            "43.5", "37.25", "45.0", "42.625", "35.5", "46.75",
+        ],
+        "value": "41.0",
+    },
+    {
+        # Past the window the oldest *real* values fall out too: the sample is
+        # the trailing 12 of a 15-element finalized history, priors absent.
+        "name": "window_slides_past_the_priors",
+        "metric_id": 22,
+        "prior_bounds": [
+            "12.5", "18.25", "9.75", "31.5", "22.125", "15.0",
+            "27.375", "11.625", "24.0", "19.5", "33.25", "16.875",
+        ],
+        "finalized": [
+            "40.0", "38.5", "44.25", "36.75", "41.125", "39.0",
+            "43.5", "37.25", "45.0", "42.625", "35.5", "46.75",
+            "50.0", "48.125", "52.5",
+        ],
+        "value": "44.0",
+    },
+    {
+        # A raw value above p95 is clipped to the ceiling and maps to exactly 1;
+        # winsorization is what keeps a single outlier epoch from rescaling the
+        # whole series.
+        "name": "winsorized_above_p95_pins_the_ceiling",
+        "metric_id": 22,
+        "prior_bounds": [
+            "12.5", "18.25", "9.75", "31.5", "22.125", "15.0",
+            "27.375", "11.625", "24.0", "19.5", "33.25", "16.875",
+        ],
+        "finalized": [],
+        "value": "9999.0",
+    },
+    {
+        "name": "winsorized_below_p5_pins_the_floor",
+        "metric_id": 22,
+        "prior_bounds": [
+            "12.5", "18.25", "9.75", "31.5", "22.125", "15.0",
+            "27.375", "11.625", "24.0", "19.5", "33.25", "16.875",
+        ],
+        "finalized": [],
+        "value": "0.0",
+    },
+    {
+        # The heavy-tailed `P` fees series, `N(log1p(fees_USDC))` (05 §4.3,
+        # MetricId 20): three orders of magnitude inside one 12-epoch window.
+        "name": "heavy_tail_fees_log1p",
+        "metric_id": 20,
+        "prior_bounds": [
+            "1200.5", "980.25", "1450.75", "1100.0", "15000.5", "1320.125",
+            "1050.375", "1600.0", "890.625", "1250.25", "142000.75", "1180.5",
+        ],
+        "finalized": [],
+        "value": "3200.0",
+    },
+    {
+        # The identical sample and value under the linear map. The pair is a
+        # controlled A/B: the only difference is §4.3's `log1p`, so the two rows
+        # isolate exactly what the transform does to a heavy tail.
+        "name": "heavy_tail_fees_linear_control",
+        "metric_id": 22,
+        "prior_bounds": [
+            "1200.5", "980.25", "1450.75", "1100.0", "15000.5", "1320.125",
+            "1050.375", "1600.0", "890.625", "1250.25", "142000.75", "1180.5",
+        ],
+        "finalized": [],
+        "value": "3200.0",
+    },
+    {
+        # 05 §4.6 rule 3: an unmoved series has no map onto [0,1] and the
+        # computation refuses. It MUST NOT resolve to the adopt-favourable 1.0.
+        "name": "degenerate_constant_sample_fails_closed",
+        "metric_id": 22,
+        "prior_bounds": ["7.5"] * 12,
+        "finalized": [],
+        "value": "7.5",
+    },
+    {
+        # The same refusal reached through the transform rather than the raw
+        # series: p5 and p95 differ by three 1e-9 units, which `log1p` at this
+        # magnitude compresses onto a single grid point. The linear control row
+        # below normalizes the identical sample successfully, so this is the
+        # transform collapsing the range, not the sample being constant.
+        "name": "degenerate_after_log1p_fails_closed",
+        "metric_id": 20,
+        "prior_bounds": [
+            "5.000000000", "5.000000000", "5.000000001", "5.000000001",
+            "5.000000002", "5.000000002", "5.000000002", "5.000000002",
+            "5.000000002", "5.000000002", "5.000000003", "5.000000003",
+        ],
+        "finalized": [],
+        "value": "5.000000002",
+    },
+    {
+        "name": "degenerate_after_log1p_linear_control",
+        "metric_id": 22,
+        "prior_bounds": [
+            "5.000000000", "5.000000000", "5.000000001", "5.000000001",
+            "5.000000002", "5.000000002", "5.000000002", "5.000000002",
+            "5.000000002", "5.000000002", "5.000000003", "5.000000003",
+        ],
+        "finalized": [],
+        "value": "5.000000002",
+    },
+]
+
+
+def _normalization_row(scenario):
+    """One 05 §4.6 row: assemble, freeze, normalize — or record the refusal."""
+    prior = [Decimal(value) for value in scenario["prior_bounds"]]
+    finalized = [Decimal(value) for value in scenario["finalized"]]
+    value = Decimal(scenario["value"])
+    log1p_series = is_log1p_series(scenario["metric_id"])
+    sample = normalization_sample(prior, finalized)
+    row = {
+        "name": scenario["name"],
+        "inputs": {
+            "metric_id": scenario["metric_id"],
+            "log1p": log1p_series,
+            "prior_bounds": [format(item, "f") for item in prior],
+            "finalized": [format(item, "f") for item in finalized],
+            "value": format(floor_fixed(value), "f"),
+        },
+        "sample": [format(item, "f") for item in sample],
+    }
+    try:
+        constants = normalization_constants(sample, log1p_series)
+    except ValueError:
+        # 05 §4.6 rule 3 — the fail-closed outcome is part of the corpus, not an
+        # absence from it. A conforming implementation must refuse this row.
+        row["error"] = "DegenerateNormalizationRange"
+        return row
+    row["constants"] = {
+        "p_low": format(constants["p_low"], "f"),
+        "p_high": format(constants["p_high"], "f"),
+        "lo": format(constants["lo"], "f"),
+        "hi": format(constants["hi"], "f"),
+    }
+    row["normalized"] = format(apply_normalization(constants, value), "f")
+    return row
 
 
 def _decimal_tree(value):
@@ -2174,6 +2365,9 @@ def build():
             _decision_row(scenario) for scenario in DECISION_SCENARIOS
         ],
         "welfare_scenarios": welfare_scenarios,
+        "welfare_normalization_scenarios": [
+            _normalization_row(scenario) for scenario in NORMALIZATION_SCENARIOS
+        ],
         "treasury_scenarios": _treasury_scenarios(),
         "twap_scenarios": twap_scenarios,
         "contest_scenarios": _contest_scenarios(),
