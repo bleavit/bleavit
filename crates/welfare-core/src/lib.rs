@@ -1186,6 +1186,21 @@ impl WelfareState {
                 self.specs[..index].iter().all(|(seen, _)| seen != version),
                 Error::TryStateViolation
             );
+            // 05 §4.6 / I-16: two versions sharing a maximum activation epoch make
+            // the active spec permanently unresolvable from that epoch onward,
+            // which wedges `SnapshotDeadline` and latches the 05 §4.8 dead-man.
+            // `register_metric_spec` refuses to create one, but admission control
+            // alone cannot see state that predates it — an upgrading chain, or any
+            // future raw storage write, could carry a tie in. Checking it here is
+            // what makes the property an invariant rather than a property of one
+            // code path (audit 2026-07-27, AUD-4; 15 §1 try-state coverage rule).
+            let activation = specs.iter().map(|spec| spec.activation_epoch).max();
+            ensure!(
+                self.specs[..index].iter().all(|(_, seen)| {
+                    seen.iter().map(|spec| spec.activation_epoch).max() != activation
+                }),
+                Error::TryStateViolation
+            );
             ensure!(
                 !specs.is_empty() && specs.len() <= MAX_COMPONENTS_PER_SPEC,
                 Error::TryStateViolation

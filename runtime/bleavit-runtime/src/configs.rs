@@ -840,16 +840,8 @@ const MIGRATION_FAILURE_HALT: u8 = 0b001;
 pub(crate) const MIGRATION_STALL_HALT: u8 = 0b010;
 const APPLIED_DETECTION_HALT: u8 = 0b100;
 const UPGRADE_ABORT_TRIGGER: u8 = 0b1000;
-/// The guard's own post-MBM latch: a committed recovery image that could not be
-/// released still pins a preimage the completed migration was supposed to free
-/// (09 §3.2). It is an execution-halt source like the other three — it freezes
-/// the queue and nothing restores the boundary it reports — and it needs a bit
-/// of its own precisely because `sync_execution_migration_halt` derives
-/// `MigrationHalt` from this mask alone: a halt with no bit set here is erased
-/// by the next source transition (audit 2026-07-27, AUD-1).
-const RECOVERY_PIN_HALT: u8 = 0b1_0000;
 const EXECUTION_HALT_SOURCES: u8 =
-    MIGRATION_FAILURE_HALT | MIGRATION_STALL_HALT | APPLIED_DETECTION_HALT | RECOVERY_PIN_HALT;
+    MIGRATION_FAILURE_HALT | MIGRATION_STALL_HALT | APPLIED_DETECTION_HALT;
 
 fn sync_execution_migration_halt(sources: u8) {
     pallet_execution_guard::MigrationHalt::<Runtime>::put(sources & EXECUTION_HALT_SOURCES != 0);
@@ -921,9 +913,6 @@ pub(crate) fn complete_terminal_recovery_state() {
             | APPLIED_DETECTION_HALT
             | UPGRADE_ABORT_TRIGGER,
     );
-    // Same rule as the applied path: terminal recovery clears the pin latch only
-    // when the unreleasable record is actually gone (AUD-1).
-    clear_recovery_pin_halt_if_released();
 }
 
 fn emit_migration_halted() {
@@ -956,19 +945,6 @@ fn clear_migration_halt_sources(mask: u8) {
         *sources
     });
     sync_execution_migration_halt(remaining);
-}
-
-/// Lift [`RECOVERY_PIN_HALT`] only on evidence that the condition it reports is
-/// gone. `release_recovery_image` kills `RecoveryImage` on every success path and
-/// leaves it in place only when `unpin` refused, so the record's absence is that
-/// evidence and its presence is the unrepaired state. Gating the clear this way
-/// is what keeps the new bit from becoming either a fail-open (cleared while the
-/// pin is still broken) or a permanent latch with no exit (audit 2026-07-27,
-/// AUD-1). One O(1) read, on an event edge rather than per block.
-pub(crate) fn clear_recovery_pin_halt_if_released() {
-    if !pallet_execution_guard::RecoveryImage::<Runtime>::exists() {
-        clear_migration_halt_sources(RECOVERY_PIN_HALT);
-    }
 }
 
 pub(crate) fn active_migration_stall_is_live(
@@ -1065,27 +1041,25 @@ impl frame_support::migrations::MigrationStatusHandler for MigrationStatusToGuar
 
     fn completed() {
         MigrationFailedStep::kill();
-        crate::ExecutionGuard::migration_completed();
         // MBM completion clears only migration failure/stall sources. An
         // applied-code mismatch remains halted until a later valid applied
         // callback resolves that condition. The additional try-state-before-
         // lift coupling is intentionally still an open specification question.
-        clear_migration_halt_sources(MIGRATION_FAILURE_HALT | MIGRATION_STALL_HALT);
-        // `migration_completed` raises the guard's own fail-static latch when the
-        // paired recovery image cannot be released, but it writes `MigrationHalt`
-        // directly and sets no source bit — so the `clear_...` above used to erase
-        // it in this very call, and nothing polls the condition afterwards. Record
-        // the source instead, AFTER the clear, so the mask stays the single
-        // authority for `MigrationHalt` and the activation edge reaches both the
-        // 09 §3.2(4) `MigrationHalted` diagnostic and the 05 §4.3.2 `Π` recorder.
         //
-        // `RecoveryImage` surviving `migration_completed` IS the failure
-        // condition, exactly: `release_recovery_image` kills the record on every
-        // success path and leaves it in place only when `unpin` refused
-        // (audit 2026-07-27, AUD-1).
-        if pallet_execution_guard::RecoveryImage::<Runtime>::exists() {
-            set_migration_halt_source(RECOVERY_PIN_HALT);
-        }
+        // **This clear MUST precede `migration_completed` (audit 2026-07-27,
+        // AUD-1).** `migration_completed` raises the guard's own fail-static
+        // latch — a committed recovery image the completed migration could not
+        // release — by writing `MigrationHalt` directly. `MigrationHalt` is
+        // otherwise derived from `MigrationHaltSources` by
+        // `sync_execution_migration_halt`, so running the clear *after* the
+        // callback wrote the halt straight back to `false` in this very call,
+        // and nothing re-raises it: the cursor is gone and
+        // `PendingAnchorCapture` has already been consumed, so the guard's
+        // per-block retry no longer runs. The latch was a no-op on the one path
+        // it exists for. Ordering the clear first is the whole repair; it adds
+        // no storage read or write, so no benchmarked weight moves.
+        clear_migration_halt_sources(MIGRATION_FAILURE_HALT | MIGRATION_STALL_HALT);
+        crate::ExecutionGuard::migration_completed();
     }
 }
 
@@ -9262,10 +9236,6 @@ impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEven
                     | APPLIED_DETECTION_HALT
                     | UPGRADE_ABORT_TRIGGER,
             );
-            // Deliberately NOT in the blanket mask above: a newly applied image
-            // does not repair a recovery pin the guard could not release. The
-            // latch lifts only once the record itself is gone (AUD-1).
-            clear_recovery_pin_halt_if_released();
         }
     }
     fn on_relay_state_proof(

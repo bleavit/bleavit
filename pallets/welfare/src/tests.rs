@@ -3374,3 +3374,25 @@ fn a_second_registration_may_not_tie_the_latest_activation_epoch() {
         assert_eq!(Welfare::active_snapshot_spec(11), Some(3));
     });
 }
+
+/// **Regression (audit 2026-07-27, AUD-4, Codex round 2).** Admission control in
+/// `register_metric_spec` cannot see a tie that predates it — an upgrading chain
+/// carrying two versions registered under the previous runtime, or any raw
+/// storage write. `try-state` is what makes activation uniqueness an invariant
+/// rather than a property of one code path (15 §1 try-state coverage rule).
+#[test]
+fn try_state_rejects_a_pre_existing_activation_tie() {
+    new_test_ext().execute_with(|| {
+        for (version, _) in MetricSpecs::<Test>::iter() {
+            MetricSpecs::<Test>::remove(version);
+        }
+        // Written directly, exactly as an upgrade carrying legacy state would.
+        MetricSpecs::<Test>::insert(2, bounded(specs_activating(2, 9)));
+        MetricSpecs::<Test>::insert(3, bounded(specs_activating(3, 9)));
+        assert!(Welfare::do_try_state().is_err());
+
+        // One epoch apart is lawful and try-state accepts it.
+        MetricSpecs::<Test>::insert(3, bounded(specs_activating(3, 10)));
+        assert_ok!(Welfare::do_try_state());
+    });
+}

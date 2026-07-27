@@ -20,7 +20,7 @@ it was accepted.
 
 **29 candidate findings** were produced by the Claude workstreams and **20 more** by the Codex
 reviews. Adversarial verification **refuted 16 of the 29** outright and corrected the severity or
-mechanism of several more — a refutation rate that is itself part of the result: the codebase
+mechanism of several more; deduplicated and lead-adjudicated, **18 distinct defects** are confirmed (§8) — a refutation rate that is itself part of the result: the codebase
 withstood most of what was thrown at it, and the surviving set is small and specific.
 
 **Five findings were fixed in this PR.** Two of them are the ones that matter:
@@ -36,8 +36,8 @@ withstood most of what was thrown at it, and the surviving set is small and spec
   its snapshot-overdue cause, and the deadline's try-state pairing fails once the wedged epoch's
   timing is reaped. Reproduced through the ordinary governance dispatch path before fixing.
 
-**Three confirmed findings could not be fixed safely inside this scope and remain open.** Two are
-High. They are the reason this PR is a **draft**:
+**Two confirmed High findings could not be fixed safely inside this scope and remain open.**
+They are the reason this PR is a **draft**:
 
 - **AUD-NUM-001 (High)** — `treasury.spend`, `claim_stream`, `issue_vit` and `recover_foreign`
   mutate internal accounting and emit success events while moving **no asset at all**. The
@@ -87,7 +87,7 @@ configuration), `models/tla/`, `reference-model/`, and the test suites throughou
    No frontend file is touched by this PR.
 2. **Milestone G2 and every later milestone.** Nothing in this PR implements, begins, advances,
    prepares, scaffolds or changes the status of G2+. No next milestone was selected. Findings
-   whose remediation would require G2+ work are recorded as out-of-scope observations (§9).
+   whose remediation would require G2+ work are recorded as out-of-scope observations (§10).
 
 ---
 
@@ -105,7 +105,7 @@ The privilege model reviewed:
   check. Values side: the stock scheduler dispatches *filtered*, so a closed admission set of
   bare values-enactment leaves clears the origin-blind base filter, with the pallet's
   `EnsureOrigin` again the second check. Every one of the 17 admitted leaves was checked to carry
-  a real `EnsureOrigin` (§8, AUD-OBS-1).
+  a real `EnsureOrigin`.
 - **A frame-free model of the call graph.** `origins-core` holds a `RuntimeCall` model and the
   filter; `runtime/src/classifier.rs` projects the real `RuntimeCall` onto it with an *exhaustive*
   `match` per pallet, so a newly added call is a compile error rather than a silent allow. This is
@@ -202,19 +202,37 @@ applied. Every Codex finding acted on was independently re-derived from the code
 
 ## 8. Findings summary
 
-After adversarial verification and lead adjudication:
+Counted by **distinct defect**, not by finding ID: the same defect was often raised independently
+by more than one reviewer (AUD-1 = Codex `MIG-01`; AUD-2 = `F-04`; AUD-5 folds `VER-2`-corrected,
+`VER-3` and `VER-4`), and counting IDs would inflate the total.
+
+**A. Lead-adjudicated** — each independently re-derived from the code by the lead against the
+owning specification section:
 
 | Severity | Confirmed | Fixed here | Open |
 |---|---|---|---|
 | Critical | 0 | 0 | 0 |
-| High | 4 | 2 | 2 |
-| Medium | 5 | 1 | 4 |
-| Low | 12 | 2 | 10 |
-| Informational | 9 | 0 | 9 |
-| **Total** | **30** | **5** | **25** |
+| High | 4 | **2** | 2 |
+| Medium | 1 | 1 | 0 |
+| Low | 9 | 2 | 7 |
+| Informational | 4 | 0 | 4 |
+| **Total** | **18** | **5** | **13** |
 
-Additionally: **16 candidate findings refuted** after investigation (§10), and **8 out-of-scope
-observations** recorded (§11).
+- **High:** AUD-1 *(fixed)*, AUD-4 *(fixed)*, AUD-NUM-001 *(open)*, AUD-NUM-002 *(open)*
+- **Medium:** AUD-2 *(fixed)*
+- **Low:** AUD-3 *(fixed)*, AUD-5 *(fixed)*, RT-01, RT-02, ACL-01, F-01, F-03, VER-1, VER-9
+- **Informational:** FIN-03 / AUD-NUM-003, SPEC-04, SPEC-05, SPEC-06
+
+**B. Reported by the independent Codex reviews and recorded, but NOT individually re-adjudicated
+by the lead.** They are listed at the severity Codex assigned. Treating them as confirmed would
+overstate what this review established, and they are excluded from the table above:
+
+`AUD-NUM-004` (Low) · `WGT-01`, `WGT-02`, `WGT-03` (Medium) · `OFF-01`…`OFF-09` (2 High, 5 Medium,
+2 Low) · `MIG-H01` (hypothesis). Of these, `OFF-01` overlaps `F-02`, which the Claude verification
+pass **did** adjudicate and downgraded to Low.
+
+**16 candidate findings were refuted** after investigation (§9), and **8 out-of-scope
+observations** recorded (§10).
 
 ---
 
@@ -246,17 +264,28 @@ observations** recorded (§11).
 - **Root cause:** two writers for one storage item. `MigrationHaltSources` is the derived
   authority for `MigrationHalt`, but the guard writes `MigrationHalt` directly, so any halt it
   raises is invisible to — and erased by — the next source transition.
-- **Fix:** give the guard's condition its own source bit `RECOVERY_PIN_HALT`, include it in
-  `EXECUTION_HALT_SOURCES`, and record it in `completed()` **after** the clear, so the mask stays
-  the single authority and the activation edge reaches both the diagnostic and `Π`. The latch is
-  lifted only on evidence the condition is gone (`clear_recovery_pin_halt_if_released`, gated on
-  `RecoveryImage` no longer existing) — which keeps it from becoming the opposite defect, a halt
-  with no exit.
+- **Fix:** order the clear **before** `migration_completed()`, so the guard's own write is the last
+  one and stands. It adds no storage read or write, so no benchmarked weight moves.
 - **Regression tests:**
   `completed_migration_keeps_the_halt_when_the_recovery_image_cannot_be_released` (fails at
   baseline with *"the execution halt raised by migration_completed was silently cleared"*) and
-  `the_recovery_pin_halt_lifts_only_once_the_image_is_released` (proves both directions of the
-  new exit), both in `runtime/bleavit-runtime/src/tests_migration_guard.rs`.
+  `completed_migration_without_a_pinned_image_lifts_the_halt` (proves the ordinary case still
+  lifts the halt, so the repair does not create a stuck queue), both in
+  `runtime/bleavit-runtime/src/tests_migration_guard.rs`.
+- **The first attempt at this fix was wrong, and the final Codex review caught it (§7).** It
+  introduced a dedicated `RECOVERY_PIN_HALT` source bit so the activation edge would also reach the
+  09 §3.2(4) diagnostic and the 05 §4.3.2 `Π` recorder. Codex established that the intended exit
+  was **unreachable in production**: after an MBM completes, the cursor is gone and
+  `PendingAnchorCapture` has been consumed, so the guard's per-block retry of
+  `release_recovery_image` no longer runs, and `RecoveryImage` is only ever cleared by that
+  retry succeeding. The bit would therefore have latched forever — converting a fail-open into a
+  permanent execution-queue halt, the exact opposite defect. Its test appeared to prove an exit
+  only because it killed the storage item by hand. That version also added an `exists` read and
+  conditional writes to a benchmarked mandatory migration path without regenerating
+  `pallet_migrations` weights. The shipped fix is the ordering change, which is smaller, has no
+  weight consequence, and restores exactly the behaviour the guard's own comment describes.
+  **The `Π`/diagnostic visibility gap this attempt tried to close remains open** and is recorded
+  below as an unfixed residual.
 - **Corroboration:** independently found by the Codex runtime review as `MIG-01`.
 
 #### AUD-4 — A lawful `register_spec` pair can permanently wedge the snapshot deadline and latch the dead-man · **High** · CONFIRMED · FIXED
@@ -297,6 +326,20 @@ observations** recorded (§11).
 - **Regression test:** `a_second_registration_may_not_tie_the_latest_activation_epoch`
   (`pallets/welfare/src/tests.rs`) — asserts the refusal *and* that a one-epoch-later registration
   is admitted and leaves the selector unambiguous at 9, 10 and 11.
+- **Also added after the final Codex review (§7):** `WelfareState::try_state` now checks
+  cross-version activation uniqueness. Admission control cannot see a tie that predates it — an
+  upgrading chain carrying two versions registered under the previous runtime, or any raw storage
+  write — so the try-state check is what makes this an invariant rather than a property of one
+  code path (15 §1 coverage rule). Regression test:
+  `try_state_rejects_a_pre_existing_activation_tie`.
+- **Benchmark fixtures repaired after the final Codex review (§7).** `full_specs` in
+  `pallets/welfare/src/benchmarking.rs` assigned activation epoch 2 to every version, so all three
+  welfare benchmarks (`register_spec`, `record_snapshot`, `record_daily_gate`) failed setup with
+  `BadActivationEpoch` once the admission check landed. This was missed because the local
+  changed-scope gate does not build with `--features runtime-benchmarks`. Activations are now
+  version-derived (`1 + version`, keeping version 1 at epoch 2 so `fill_snapshots` still satisfies
+  `SpecNotActive`), applied to the whole set after the last component push. The measured worst case
+  — a full 16-version history — is unchanged.
 - **Fixture updates forced by the fix (not coverage reductions):** two existing tests registered
   several versions all at the fixture's hardcoded activation epoch 2.
   `metric_spec_history_accepts_16_and_rejects_17th` (the `MetricSpecs` limit-coverage test) now
@@ -326,6 +369,9 @@ observations** recorded (§11).
   baseline on all four) and `test_small_order_public_key_never_verifies`, in
   `tools/monitoring/tests/test_crypto.py`.
 
+**Total added by this PR: 12 new test functions, plus three new call surfaces inside the
+existing `every_callable_surface_rejects_origin_misuse`.** Each fails at baseline.
+
 #### AUD-3 — `check-generated-weights.py` reports a pass when it has nothing to check · **Low (defence-in-depth)** · FIXED
 
 - **Component:** `tools/ci/check-generated-weights.py` (the 15 §4.5 generated-weight purity gate)
@@ -339,7 +385,7 @@ observations** recorded (§11).
 - **Fix:** refuse an empty inventory with exit 2; and pass `WEIGHTS` explicitly at the call site,
   because `scan`'s default argument binds at definition time (a latent footgun the regression test
   surfaced).
-- **Regression tests:** four, in `tools/ci/tests/test_check_generated_weights.py`, including
+- **Regression tests:** four new test functions, in `tools/ci/tests/test_check_generated_weights.py`, including
   `test_main_refuses_an_empty_inventory` and `test_main_passes_on_a_real_inventory`.
 - **Verified non-regressive:** the gate still reports 360 functions checked, 2 justified overrides.
 
@@ -363,7 +409,7 @@ had no wrong-origin test, and one test named an exhaustive claim it did not meet
 
 ---
 
-### 8.2 Confirmed, open — the two High findings blocking this PR
+### 8.2 Confirmed, open — the two High findings that make this PR a draft
 
 #### AUD-NUM-001 — Treasury value-bearing calls perform no asset operation · **High** · CONFIRMED · **NOT FIXED**
 
@@ -432,15 +478,15 @@ had no wrong-origin test, and one test named an exhaustive claim it did not meet
 
 ---
 
-### 8.3 Confirmed, open — Medium
+### 8.3 Open — RT-01, and the benchmark-fidelity set
 
 | ID | Finding | Location | Disposition |
 |---|---|---|---|
-| RT-01 | **META-class runtime upgrades are unexecutable.** The classifier projects `commit_recovery_image` to the CODE-only call domain, but 06 §3.2 line 121 marks that row FutarchyCode ✔ **and** FutarchyMeta ✔, and the pallet's own `RecoveryCommitOrigin` accepts both. Since 09 §3.2 requires every upgrade payload to carry a recovery descriptor, a META upgrade fails screening, enqueue *and* execute. Fail-closed, no escalation — but a mandated governance lane does not exist, and no test exercises it. | `runtime/bleavit-runtime/src/classifier.rs:789`; `crates/execution-guard-core/src/lib.rs` (`domain_allowed`) | **Not fixed.** The remedy needs a new call-domain variant admitted for CODE ∪ META in two crates plus the capability mapping — a widening of a governance capability surface, which a hardening pass must not make unilaterally. Recommended fix recorded; needs its own change with spec review. |
-| WGT-01 | Guardian ratification benchmarks omit the bounded reverse-join scan. | `pallets/guardian/src/benchmarking.rs` | Not fixed — see note below. |
-| WGT-02 | Epoch benchmarks measure only one of six welfare histories reaped. | `pallets/epoch/src/benchmarking.rs` | Not fixed — see note below. |
-| WGT-03 | Runtime benchmark projection skips production XCM and reserve reads. | runtime benchmark wiring | Not fixed — see note below. |
-| OFF-04 | Release evidence executes environment tooling without committed byte/closure pins. | `tools/env/`, `tools/release/` | Not fixed — release-pipeline hardening with its own evidence-contract consequences (15 §5). |
+| RT-01 (Low, lead-adjudicated) | **META-class runtime upgrades are unexecutable.** The classifier projects `commit_recovery_image` to the CODE-only call domain, but 06 §3.2 line 121 marks that row FutarchyCode ✔ **and** FutarchyMeta ✔, and the pallet's own `RecoveryCommitOrigin` accepts both. Since 09 §3.2 requires every upgrade payload to carry a recovery descriptor, a META upgrade fails screening, enqueue *and* execute. Fail-closed, no escalation — but a mandated governance lane does not exist, and no test exercises it. | `runtime/bleavit-runtime/src/classifier.rs:789`; `crates/execution-guard-core/src/lib.rs` (`domain_allowed`) | **Not fixed.** The remedy needs a new call-domain variant admitted for CODE ∪ META in two crates plus the capability mapping — a widening of a governance capability surface, which a hardening pass must not make unilaterally. Recommended fix recorded; needs its own change with spec review. |
+| WGT-01 (Codex, Medium, not re-adjudicated) | Guardian ratification benchmarks omit the bounded reverse-join scan. | `pallets/guardian/src/benchmarking.rs` | Not fixed — see note below. |
+| WGT-02 (Codex, Medium, not re-adjudicated) | Epoch benchmarks measure only one of six welfare histories reaped. | `pallets/epoch/src/benchmarking.rs` | Not fixed — see note below. |
+| WGT-03 (Codex, Medium, not re-adjudicated) | Runtime benchmark projection skips production XCM and reserve reads. | runtime benchmark wiring | Not fixed — see note below. |
+| OFF-04 (Codex, High, not re-adjudicated) | Release evidence executes environment tooling without committed byte/closure pins. | `tools/env/`, `tools/release/` | Not fixed — release-pipeline hardening with its own evidence-contract consequences (15 §5). |
 
 **On WGT-01/02/03 and RT-02 (benchmark fixtures that under-exercise).** This is the repository's
 own recurring defect class — PLAN.md records `pallet_attestor::remove_for_cause` declaring 8 reads
@@ -558,6 +604,37 @@ Recorded exactly, including what did not run and why.
 - **Zombienet / Chopsticks / `try-runtime-cli` snapshot legs** — require external infrastructure
   and pinned tooling not available in this environment; they are phase-gate/release-tier suites.
 - **All frontend checks** — excluded by scope.
+
+---
+
+## 11a. Final independent review of the fixes
+
+After the fixes were applied and locally validated, the baseline-to-HEAD diff was handed back to
+Codex (`gpt-5.6-sol`, `xhigh`) for a fresh adversarial review scoped to incomplete fixes,
+regression-test gaps, newly introduced defects, excessive privilege, changed financial semantics,
+weight/migration regressions, G2+ leakage and frontend changes.
+
+**Its verdict was "no-ship", and it was right.** It found four problems with this review's own
+fixes, two of them High, and all four were confirmed and addressed:
+
+| Codex finding | Verdict | Action |
+|---|---|---|
+| `RECOVERY_PIN_HALT` had no reachable production exit and would latch permanently; the zero-MBM site was still unrouted | **Confirmed** — the intended exit depended on a retry that cannot run after an MBM completes | The source-bit design was **withdrawn** and replaced with the ordering fix, which has no exit to get wrong. The zero-MBM site's visibility gap is recorded as an open residual rather than half-fixed |
+| The activation check broke all three welfare benchmark setups | **Confirmed** — reproduced with `cargo test -p pallet-welfare --features runtime-benchmarks` | Fixtures repaired; all 110 welfare tests including the three benchmarks pass |
+| Pre-existing or migration-written ties stay undetected | **Confirmed** | `try_state` activation-uniqueness check added, with a regression test that starts from tied storage |
+| `migration_completed` gained unmeasured storage work on a benchmarked mandatory path | **Confirmed of the withdrawn design** | Moot for the shipped fix: the ordering change adds no storage read or write, verified against the diff |
+
+Codex also reported clean: the ed25519 projective equality is correct and no other projective
+tuple comparison remains in that module; no privilege, call-filter, financial-semantic, frontend,
+G2+ or `docs/architecture/` change is present; and the two modified welfare test fixtures retain
+their original assertions.
+
+**The lesson worth carrying.** Both High findings against this review's own work were of the same
+shape as the defects it was auditing for — a control that is correct in isolation and wrong in
+interaction (an exit that no production path reaches), and a change validated by a gate that does
+not compile the code it broke (`--all-targets` is not `--all-features`). The value of the final
+adversarial pass was not that it polished the fixes; it is that without it this PR would have
+shipped a permanent chain halt in place of a fail-open.
 
 ---
 

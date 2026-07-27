@@ -2330,12 +2330,14 @@ fn welfare_snapshot_context_migration_try_runtime_proves_the_pairing() {
 /// **Regression (audit 2026-07-27, AUD-1).** `ExecutionGuard::migration_completed`
 /// engages the fail-static execution halt directly when the paired recovery image
 /// cannot be released — the guard's own comment calls it "the only cleanup latch".
-/// `MigrationStatusToGuard::completed` then called `clear_migration_halt_sources`,
-/// whose `sync_execution_migration_halt` **overwrites** `MigrationHalt` from the
-/// `MigrationHaltSources` bitmask alone. Because the guard's condition sets no
-/// source bit, the halt it had just raised was erased in the same call and never
-/// re-raised (nothing polls this condition after an MBM completes), making the
-/// latch a permanent no-op on the one path it exists to guard (09 §3.2; R-7).
+/// `MigrationStatusToGuard::completed` used to call it BEFORE
+/// `clear_migration_halt_sources`, whose `sync_execution_migration_halt`
+/// **overwrites** `MigrationHalt` from the `MigrationHaltSources` bitmask alone.
+/// Because the guard's condition sets no source bit, the halt it had just raised
+/// was erased in the same call — and nothing re-raises it, because by then the
+/// cursor is gone and `PendingAnchorCapture` has been consumed, so the guard's
+/// per-block retry no longer runs. The latch was a no-op on the one path it
+/// exists to guard (09 §3.2; R-7). Ordering the clear first is the repair.
 #[cfg(not(any(
     feature = "runtime-benchmarks",
     feature = "try-runtime",
@@ -2372,43 +2374,24 @@ fn completed_migration_keeps_the_halt_when_the_recovery_image_cannot_be_released
     });
 }
 
-/// The AUD-1 latch must not become the opposite defect: a halt with no exit.
-/// `RECOVERY_PIN_HALT` lifts exactly when the unreleasable record is gone, and
-/// stays up while it survives.
+/// The ordering repair must not turn the ordinary case into a stuck halt: a
+/// completed migration whose recovery image releases cleanly leaves the queue
+/// running and the source mask empty.
 #[cfg(not(any(
     feature = "runtime-benchmarks",
     feature = "try-runtime",
     feature = "recovery"
 )))]
 #[test]
-fn the_recovery_pin_halt_lifts_only_once_the_image_is_released() {
+fn completed_migration_without_a_pinned_image_lifts_the_halt() {
     tests::development_ext().execute_with(|| {
-        pallet_execution_guard::RecoveryImage::<Runtime>::put(
-            pallet_execution_guard::RecoveryImageCommitment {
-                pid: 1,
-                primary_hash: [0xa1; 32],
-                hash: [0xb2; 32],
-                len: 32,
-                target_spec_version: 2,
-                attestation_id: 1,
-                committed_at: 1,
-            },
-        );
-        <crate::configs::MigrationStatusToGuard as frame_support::migrations::MigrationStatusHandler>::completed();
+        crate::configs::note_migration_stall_halt_for_test();
         assert!(pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        assert!(!pallet_execution_guard::RecoveryImage::<Runtime>::exists());
 
-        // A later terminal-recovery completion while the record still survives
-        // must NOT lift the latch.
-        crate::configs::clear_recovery_pin_halt_if_released();
-        assert!(
-            pallet_execution_guard::MigrationHalt::<Runtime>::get(),
-            "the latch lifted while the recovery image was still unreleased"
-        );
+        <crate::configs::MigrationStatusToGuard as frame_support::migrations::MigrationStatusHandler>::completed();
 
-        // Operators repair the pin; the guard's retry releases the record.
-        pallet_execution_guard::RecoveryImage::<Runtime>::kill();
-        crate::configs::clear_recovery_pin_halt_if_released();
-        assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
         assert_eq!(crate::configs::MigrationHaltSources::get(), 0);
+        assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
     });
 }
