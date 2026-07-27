@@ -356,8 +356,27 @@ mod benches {
         let version = MAX_METRIC_SPECS as u16;
         // The extrinsic registers at the live clock, so its specs must clear the
         // two-epoch activation lead (05 §4.6) — unlike the epoch-0 seed above.
-        let activation =
-            <T::CurrentEpoch as frame_support::traits::Get<EpochId>>::get().saturating_add(2);
+        //
+        // It must ALSO not tie the latest seeded activation: a tie means *no
+        // active spec* (05 §4.6 / I-16) and `register_metric_spec` now refuses
+        // it (audit 2026-07-27, AUD-4). The clock alone does not guarantee that
+        // — the mock's `CurrentEpoch` happens to clear the seeded band and the
+        // assembled runtime's, sitting at epoch 0, lands exactly on version 1's
+        // activation. So the floor is derived from the fixture that is actually
+        // seeded, and holds for any clock. Only the activation VALUE moves; the
+        // measured worst case is the same full 16-version history scan.
+        let seeded_high = (1..MAX_METRIC_SPECS as u16)
+            .filter_map(|seeded| {
+                full_specs(seeded)
+                    .into_iter()
+                    .map(|spec| spec.activation_epoch)
+                    .max()
+            })
+            .max()
+            .unwrap_or_default();
+        let activation = <T::CurrentEpoch as frame_support::traits::Get<EpochId>>::get()
+            .saturating_add(2)
+            .max(seeded_high.saturating_add(1));
         let specs_vec = full_specs(version)
             .into_iter()
             .map(|spec| MetricSpec {
