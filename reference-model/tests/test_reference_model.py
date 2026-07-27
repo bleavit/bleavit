@@ -118,6 +118,48 @@ class ReferenceModelTests(unittest.TestCase):
         fresh.observe(50, Decimal("0.900"))
         self.assertEqual(fresh.stale_events, 0)
 
+    def test_window_staleness_clips_to_the_window_and_counts_the_close(self):
+        # 04 §7: gaps > 50 blocks *inside* the decision window, terminal gap
+        # included. The running `stale_events` counter is book-level and cannot
+        # express either half of that rule.
+        twap = TwapAccumulator(Decimal("0.500"))
+        for block in range(10, 101, 10):
+            twap.observe(block, Decimal("0.500"))
+        # Quiet from 100 to the close at 200: one terminal gap.
+        self.assertEqual(twap.stale_events_in(0, 200), 1)
+        # ... and none of it is visible to the book-level counter, which only
+        # ever sees the 10-block intervals it was cranked on.
+        self.assertEqual(twap.stale_events, 0)
+        # Cranked all the way to the close: clean.
+        for block in range(110, 201, 10):
+            twap.observe(block, Decimal("0.500"))
+        self.assertEqual(twap.stale_events_in(0, 200), 0)
+
+        # Clipping: a 120-block gap that lies mostly before the window is
+        # charged only for the 39 blocks the window actually covers.
+        clipped = TwapAccumulator(Decimal("0.500"))
+        clipped.observe(20, Decimal("0.500"))
+        for block in range(140, 201, 10):
+            clipped.observe(block, Decimal("0.500"))
+        self.assertEqual(clipped.stale_events_in(100, 200), 0)
+        self.assertEqual(clipped.stale_events, 1)  # book-level sees 20 -> 140
+
+        # Exactly 50 is not a gap; 51 is. Two gaps force reject.
+        boundary = TwapAccumulator(Decimal("0.500"))
+        for block in [10, 100, 150]:
+            boundary.observe(block, Decimal("0.500"))
+        self.assertEqual(boundary.stale_events_in(0, 150), 1)
+        self.assertEqual(boundary.stale_events_in(0, 300), 2)
+
+        # An entirely uncranked window is one gap, not one per missed interval.
+        self.assertEqual(
+            TwapAccumulator(Decimal("0.500")).stale_events_in(0, 100), 1
+        )
+        # A degenerate window has no interior to be stale in.
+        self.assertEqual(
+            TwapAccumulator(Decimal("0.500")).stale_events_in(100, 100), 0
+        )
+
     def test_ledger_full_operation_families_and_void_leg_floors(self):
         vault = Vault()
         vault.split(10_000_003)

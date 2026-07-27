@@ -68,6 +68,9 @@ CORPUS_FAMILY_BINDINGS: Mapping[str, tuple[str, ...] | None] = {
     "twap_scenarios": ("market-core-twap-vectors",),
     "welfare_normalization_scenarios": ("welfare-core-normalization-vectors",),
     "welfare_scenarios": ("welfare-core-reference-vectors",),
+    # 04 §7 per-window staleness (audit 2026-07-27, AUD-NUM-002). Replayed by
+    # the same `market-core` test binary as the other two TWAP families.
+    "window_stale_scenarios": ("market-core-twap-vectors",),
 }
 
 
@@ -549,7 +552,10 @@ def reference_legs(sweep_dir: Path) -> tuple[list[CommandLeg], CommandLeg, Comma
                 "twap_vectors",
             ),
             test_output="cargo",
-            minimum_tests=2,
+            # twap + contest + window-staleness (AUD-NUM-002). The floor tracks
+            # the binary's actual test count, so a family whose replay is dropped
+            # fails here instead of passing on the two that remain.
+            minimum_tests=3,
         ),
         CommandLeg(
             "ledger-pallet-core-differential",

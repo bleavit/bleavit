@@ -81895,5 +81895,102 @@
       },
       "settlement_with_self": "0.428893718"
     }
+  ],
+  "window_stale_scenarios": [
+    {
+      "inputs": {
+        "end": 200,
+        "observations": [
+          10,
+          20,
+          30,
+          40,
+          50,
+          60,
+          70,
+          80,
+          90,
+          100
+        ],
+        "stale_gap_blocks": 50,
+        "start": 0
+      },
+      "name": "terminal_gap_at_close",
+      "stale_events": 1
+    },
+    {
+      "inputs": {
+        "end": 200,
+        "observations": [
+          10,
+          20,
+          30,
+          40,
+          50,
+          60,
+          70,
+          80,
+          90,
+          100,
+          110,
+          120,
+          130,
+          140,
+          150,
+          160,
+          170,
+          180,
+          190,
+          200
+        ],
+        "stale_gap_blocks": 50,
+        "start": 0
+      },
+      "name": "dense_window_is_fresh",
+      "stale_events": 0
+    },
+    {
+      "inputs": {
+        "end": 200,
+        "observations": [
+          20,
+          140,
+          150,
+          160,
+          170,
+          180,
+          190,
+          200
+        ],
+        "stale_gap_blocks": 50,
+        "start": 100
+      },
+      "name": "pre_window_quiet_not_charged",
+      "stale_events": 0
+    },
+    {
+      "inputs": {
+        "end": 300,
+        "observations": [
+          10,
+          100,
+          150
+        ],
+        "stale_gap_blocks": 50,
+        "start": 0
+      },
+      "name": "mid_and_terminal_gaps_force_reject",
+      "stale_events": 2
+    },
+    {
+      "inputs": {
+        "end": 100,
+        "observations": [],
+        "stale_gap_blocks": 50,
+        "start": 0
+      },
+      "name": "unobserved_window_is_one_gap",
+      "stale_events": 1
+    }
   ]
 }

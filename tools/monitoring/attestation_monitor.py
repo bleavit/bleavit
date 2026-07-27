@@ -142,7 +142,15 @@ def _decode_point(encoded: bytes) -> tuple[int, int, int, int]:
     x = _recover_x(y, value >> 255)
     point = (x, y, 1, x * y % Q)
     # Reject small-order points; they cannot represent a signing identity.
-    if _scalar_mult(point, 8) == IDENTITY:
+    #
+    # The comparison MUST be projective. Points are extended coordinates
+    # (X, Y, Z, T) and `8*P` for a small-order P lands on a non-normalized
+    # representative of the identity — (0, k, k, 0) for some k != 1 — which is
+    # mathematically IDENTITY but never tuple-equal to it. A `==` here therefore
+    # accepted every small-order point, including all four canonical ones, and
+    # the "strict RFC 8032" claim this module makes did not hold
+    # (audit 2026-07-27, AUD-2).
+    if _points_equal(_scalar_mult(point, 8), IDENTITY):
         raise ValueError("Ed25519 small-order point is rejected")
     return point
 

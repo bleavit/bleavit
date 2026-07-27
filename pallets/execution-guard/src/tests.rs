@@ -536,6 +536,37 @@ fn every_callable_surface_rejects_origin_misuse() {
                 DispatchError::BadOrigin
             );
         }
+        // Audit 2026-07-27 (AUD-5): this test names an exhaustive claim, and
+        // three dispatchables were missing from it. 15 §4.1 requires every
+        // extrinsic × every error path × origin misuse, and these three carry
+        // the guard's most sensitive non-`execute` authority: the recovery-image
+        // commitment (`RecoveryCommitOrigin`), the permissionless qualification
+        // crank, and the one-shot Phase-3→4 sudo bridge.
+        for origin in [
+            RuntimeOrigin::signed(keeper()),
+            RuntimeOrigin::root(),
+            RuntimeOrigin::none(),
+        ] {
+            assert_noop!(
+                GuardPallet::commit_recovery_image(origin, [0x11; 32], 32, 2, 1),
+                DispatchError::BadOrigin
+            );
+        }
+        for origin in [RuntimeOrigin::root(), RuntimeOrigin::none()] {
+            assert_noop!(
+                GuardPallet::qualify_recovery_image(origin, 1),
+                DispatchError::BadOrigin
+            );
+        }
+        // The mock wires `PhaseFourBridgeOrigin = EnsureRoot` (production uses
+        // `EnsureCurrentSudoKey`), so Root is this harness's configured authority
+        // and is deliberately not asserted here — it fails later, on state.
+        for origin in [RuntimeOrigin::signed(keeper()), RuntimeOrigin::none()] {
+            assert_noop!(
+                GuardPallet::authorize_phase_four(origin, 1, [0x22; 32]),
+                DispatchError::BadOrigin
+            );
+        }
     });
 }
 

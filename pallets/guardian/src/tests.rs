@@ -2588,3 +2588,24 @@ fn sq500_maintenance_batch_rotates_past_reviews_that_cannot_settle() {
         assert_ok!(Guardian::do_try_state());
     });
 }
+
+/// **Coverage gap closed (audit 2026-07-27, AUD-5).** 15 §4.1 requires every
+/// extrinsic × every error path × **origin misuse**, and I-23 names both of
+/// these as guardian-review transitions: `uphold_veto` is the bounded delay
+/// verdict and `recall` removes a guardian. Neither had a wrong-origin test.
+#[test]
+fn uphold_veto_and_recall_reject_origin_misuse() {
+    new_test_ext().execute_with(|| {
+        for origin in [
+            RuntimeOrigin::none(),
+            RuntimeOrigin::root(),
+            RuntimeOrigin::signed(acct(1)),
+        ] {
+            assert_noop!(
+                Guardian::uphold_veto(origin.clone(), 1),
+                DispatchError::BadOrigin
+            );
+            assert_noop!(Guardian::recall(origin, 1), DispatchError::BadOrigin);
+        }
+    });
+}

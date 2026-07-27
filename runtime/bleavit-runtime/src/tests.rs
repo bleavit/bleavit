@@ -11032,11 +11032,37 @@ fn queued_treasury_outflows_mirror_enqueue_execute_and_terminal_dequeue() {
             RuntimeOrigin::signed(account(151)),
             execute_pid,
         ));
-        assert!(FutarchyTreasury::treasury().pending_outflows.is_empty());
-        assert_eq!(
-            FutarchyTreasury::nav().nav,
-            nav_before.saturating_sub(amount)
-        );
+        // The execution itself succeeds; its `spend` leg reverts, because this
+        // runtime does not wire the 08 §1.4 outflow custody and a call that
+        // cannot move the value must refuse rather than report that it did
+        // (AUD-NUM-001, audit 2026-07-27). So the obligation is NOT released
+        // here — nothing left the treasury — and NAV stays reduced by the
+        // pending amount. **When 08 §1.4's A9 fungibles follow-up lands, the
+        // `runtime-benchmarks` branch below becomes the only one.**
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        {
+            assert_eq!(
+                FutarchyTreasury::treasury().pending_outflows.as_slice(),
+                &[amount],
+                "an unwired outflow must not be dequeued as if it had been paid",
+            );
+            assert_eq!(
+                FutarchyTreasury::nav().nav,
+                nav_before.saturating_sub(amount)
+            );
+            // And nothing is stranded: the terminal dequeue still releases it.
+            assert_ok!(ExecutionGuard::dequeue_terminal(execute_pid));
+            assert!(FutarchyTreasury::treasury().pending_outflows.is_empty());
+            assert_eq!(FutarchyTreasury::nav().nav, nav_before);
+        }
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            assert!(FutarchyTreasury::treasury().pending_outflows.is_empty());
+            assert_eq!(
+                FutarchyTreasury::nav().nav,
+                nav_before.saturating_sub(amount)
+            );
+        }
 
         let dequeue_pid = 8_015;
         if enqueue(dequeue_pid).is_none() {

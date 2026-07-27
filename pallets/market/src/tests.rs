@@ -1844,6 +1844,191 @@ fn pause_shift_extends_only_end_and_preserves_accumulated_evidence() {
     });
 }
 
+// ------------------------------------------- 04 §7 per-window staleness (audit 2026-07-27)
+
+/// A book that goes quiet before its close is stale, and the seal is the only
+/// place that can see it: staleness is otherwise charged only when a *new*
+/// observation arrives, so the interval between the last observation and the
+/// window end was never measured. The closing spot is read from the same
+/// unmoved quote the TWAP already carries, so convergence cannot catch it
+/// either, and at 95 % coverage a terminal gap of this shape passes coverage —
+/// the window graded decision-grade on price data that stopped before the vote
+/// closed. Adopt-favourable, which G-1 forbids.
+#[test]
+fn a_window_that_goes_quiet_before_the_close_records_the_terminal_stale_gap() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            PROPOSAL,
+            1,
+            101,
+            201,
+        ));
+        for block in (10..=100).step_by(10) {
+            System::set_block_number(block);
+            assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        }
+        // Nothing is stale yet: every recorded gap is one 10-block interval.
+        assert_eq!(DecisionWindows::<Test>::get(MARKET_ID)[0].stale_events, 0);
+
+        System::set_block_number(201);
+        assert_ok!(Market::seal_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            201,
+        ));
+        let window = DecisionWindows::<Test>::get(MARKET_ID)[0];
+        assert!(window.sealed);
+        assert_eq!(
+            window.stale_events, 1,
+            "the 101-block gap from the last observation to the close is one 04 §7 stale event",
+        );
+
+        // And it reaches the grade: with coverage, POL, contest and convergence
+        // all satisfied, staleness is the only failing check.
+        let facts = Market::decision_grade_facts_at(
+            MARKET_ID,
+            201,
+            200,
+            0,
+            FixedU64(1_000_000_000),
+            0,
+            0,
+            false,
+        )
+        .expect("the sealed window grades");
+        assert_eq!(facts.stale_events, 1);
+        assert!(facts.coverage_ok && facts.pol_ok && facts.contest_ok && facts.converged);
+        assert!(!Market::decision_grade_at(
+            MARKET_ID,
+            201,
+            200,
+            0,
+            FixedU64(1_000_000_000),
+            0,
+            0,
+            false,
+        ));
+        assert_try_state();
+    });
+}
+
+/// The mirror leg: 04 §7 counts gaps *inside* the decision window, so quiet
+/// time that precedes the window must not be charged to it. The first
+/// in-window observation here sits 39 blocks after the start but 120 blocks
+/// after the previous observation — measuring from the un-clipped previous
+/// observation would fabricate a stale event out of time the window does not
+/// cover, and burn the single 04 §7 extension the pair is allowed.
+#[test]
+fn a_quiet_period_before_the_window_is_not_charged_to_it() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            PROPOSAL,
+            101,
+            151,
+            201,
+        ));
+        System::set_block_number(20);
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        for block in (140..=200).step_by(10) {
+            System::set_block_number(block);
+            assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        }
+        System::set_block_number(201);
+        assert_ok!(Market::seal_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            201,
+        ));
+        let window = DecisionWindows::<Test>::get(MARKET_ID)[0];
+        assert!(window.sealed);
+        assert_eq!(
+            window.stale_events, 0,
+            "the 120-block gap lies mostly before the window; only its 39 in-window blocks count",
+        );
+        assert_try_state();
+    });
+}
+
+/// Two gaps — one interior, one terminal — reach the 04 §7 second stale event,
+/// which forces reject rather than a second extension. The middle interval is
+/// exactly 50 blocks and must NOT count: the rule is *greater than* 50.
+#[test]
+fn an_interior_and_a_terminal_gap_reach_the_second_stale_event() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            PROPOSAL,
+            1,
+            151,
+            301,
+        ));
+        for block in [10, 100, 150] {
+            System::set_block_number(block);
+            assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        }
+        assert_eq!(
+            DecisionWindows::<Test>::get(MARKET_ID)[0].stale_events,
+            1,
+            "only the 90-block interior gap counts; the 100->150 interval is exactly 50",
+        );
+
+        System::set_block_number(301);
+        assert_ok!(Market::seal_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            301,
+        ));
+        assert_eq!(
+            DecisionWindows::<Test>::get(MARKET_ID)[0].stale_events,
+            2,
+            "the 151-block terminal gap is the second event, which forces reject",
+        );
+        assert_try_state();
+    });
+}
+
+/// Sealing is idempotent and the terminal gap is charged exactly once — the
+/// measurement rides inside the same mutate that sets `sealed`, and a sealed
+/// window is never re-measured.
+#[test]
+fn resealing_a_window_does_not_charge_the_terminal_gap_twice() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            PROPOSAL,
+            1,
+            101,
+            201,
+        ));
+        System::set_block_number(10);
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        System::set_block_number(201);
+        for _ in 0..3 {
+            assert_ok!(Market::seal_decision_window(
+                signed(MARKET_ADMIN),
+                MARKET_ID,
+                201,
+            ));
+        }
+        assert_eq!(DecisionWindows::<Test>::get(MARKET_ID)[0].stale_events, 1);
+        assert_try_state();
+    });
+}
+
 #[test]
 fn crank_observe_caps_a_one_interval_price_jump_at_kappa() {
     // limit-coverage: mkt.kappa

@@ -1380,3 +1380,77 @@ fn sweep_insurance_derives_a_zero_treasury_ask_so_sizing_can_complete() {
         );
     });
 }
+
+// ------------------------------------------- unwired outflow custody (AUD-NUM-001)
+//
+// 08 §1.4 defers the outflow custody wiring for lines without a dedicated pot
+// ("their outflow custody wiring is the A9 fungibles follow-up"). Until it
+// lands, this runtime binds `OutflowCustody` to a seam that reports **not
+// wired**, and the four value-bearing calls must refuse rather than report a
+// movement that never happened (G-1). These tests compile without
+// `runtime-benchmarks`, which is the only configuration where that seam reports
+// wired — so the benchmark divergence cannot mask a production regression.
+
+/// Every one of the four refuses under the assembled runtime's real wiring.
+#[test]
+#[cfg(not(feature = "runtime-benchmarks"))]
+fn value_bearing_treasury_calls_fail_closed_under_production_wiring() {
+    development_ext().execute_with(|| {
+        let dest = crate::tests::account(91);
+        assert_noop!(
+            FutarchyTreasury::spend(
+                pallet_origins::Origin::FutarchyTreasury.into(),
+                BudgetLine::OpsCollators,
+                dest.clone(),
+                1_000_000,
+            ),
+            pallet_futarchy_treasury::Error::<Runtime>::OutflowCustodyUnwired
+        );
+        assert_noop!(
+            FutarchyTreasury::issue_vit(
+                pallet_origins::Origin::FutarchyTreasury.into(),
+                1_000_000,
+                BudgetLine::Rewards,
+            ),
+            pallet_futarchy_treasury::Error::<Runtime>::OutflowCustodyUnwired
+        );
+        assert_noop!(
+            FutarchyTreasury::recover_foreign(
+                pallet_origins::Origin::FutarchyTreasury.into(),
+                pallet_futarchy_treasury::AssetKind::Foreign([7u8; 32]),
+                dest.clone(),
+                1_000,
+            ),
+            pallet_futarchy_treasury::Error::<Runtime>::OutflowCustodyUnwired
+        );
+        // Signed, and the sharp one: an unwired claim used to consume the
+        // recipient's vested entitlement and pay nothing. The stream id need not
+        // exist — the custody refusal precedes the lookup precisely so no
+        // stream state can move before the payment leg is known to exist.
+        assert_noop!(
+            FutarchyTreasury::claim_stream(RuntimeOrigin::signed(dest), 0),
+            pallet_futarchy_treasury::Error::<Runtime>::OutflowCustodyUnwired
+        );
+    });
+}
+
+/// The refusal is scoped to the four unwired legs: the treasury's calls whose
+/// custody *is* bound keep working. A fail-closed guard that also stopped the
+/// wired paths would be a liveness regression, not a fix.
+#[test]
+#[cfg(not(feature = "runtime-benchmarks"))]
+fn the_custody_guard_does_not_touch_the_wired_treasury_paths() {
+    development_ext().execute_with(|| {
+        // `fund_budget_line` is the allocation act of 08 §1.1 and must remain
+        // dispatchable — it is an internal MAIN→line move, not one of the four
+        // unwired outflow legs.
+        fund_reserve_probe_line();
+        // And the guard must not leak onto a neighbouring call: `cancel_stream`
+        // reverts a remainder inside the treasury's own accounting and carries
+        // no third-party asset leg, so it still reaches its own error.
+        assert_noop!(
+            FutarchyTreasury::cancel_stream(pallet_origins::Origin::FutarchyTreasury.into(), 0),
+            pallet_futarchy_treasury::Error::<Runtime>::StreamNotFound
+        );
+    });
+}

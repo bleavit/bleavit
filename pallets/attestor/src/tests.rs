@@ -1102,3 +1102,27 @@ fn sq342_unreachable_error_variants_are_exactly_the_documented_three() {
         DispatchError::from(Error::<Test>::ChallengeOpen),
     );
 }
+
+/// **Coverage gap closed (audit 2026-07-27, AUD-5).** 15 §4.1 requires every
+/// extrinsic × every error path × **origin misuse**. `remove_for_cause` is the
+/// I-19 cause-aware removal — it revokes live attestations and slashes a bonded
+/// member — and carried no wrong-origin test at all. `ratify_origin` is asserted
+/// explicitly because the pallet deliberately splits the two values authorities
+/// (`ValuesOrigin` here, `RatifyOrigin` for `resolve_challenge`), and a
+/// regression that collapsed them would otherwise pass silently.
+#[test]
+fn remove_for_cause_rejects_origin_misuse() {
+    new_test_ext_empty().execute_with(|| {
+        for origin in [
+            RuntimeOrigin::none(),
+            RuntimeOrigin::root(),
+            RuntimeOrigin::signed(acct(1)),
+            ratify_origin(),
+        ] {
+            assert_noop!(
+                Attestor::remove_for_cause(origin, acct(1), [0x33; 32]),
+                DispatchError::BadOrigin
+            );
+        }
+    });
+}

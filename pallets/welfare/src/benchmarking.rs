@@ -65,6 +65,15 @@ fn metric_spec(id: u16, pillar: Pillar, weight: u64, version: u16) -> MetricSpec
 /// joint C vector's eight components carry `ONE / 8` each, so the vector sums to
 /// exactly 1 on the 1e9 grid, and both C sources stay live so the attested
 /// incident-multiplier path is exercised too.
+/// A spec set for `version`, activating at a version-derived epoch.
+///
+/// The activation MUST differ per version: 05 §4.6 / I-16 resolve the active spec
+/// as the unique version with the latest activation epoch, and a tie means *no
+/// active spec* for every later epoch — so `register_metric_spec` refuses a
+/// registration that would create one (audit 2026-07-27, AUD-4). Seeding every
+/// benchmark version at the same epoch used to be admissible and no longer is.
+/// The activations stay small and dense so the measured worst case (a full
+/// 16-version history) is unchanged.
 pub fn full_specs(version: u16) -> Vec<MetricSpec> {
     let mut specs = (1..=4)
         .map(|id| metric_spec(id, Pillar::S, 0, version))
@@ -79,6 +88,14 @@ pub fn full_specs(version: u16) -> Vec<MetricSpec> {
     specs.push(metric_spec(14, Pillar::P, ONE / 2, version));
     specs.push(metric_spec(15, Pillar::A, ONE / 2, version));
     specs.push(metric_spec(16, Pillar::A, ONE / 2, version));
+    // Distinct per version (see the doc comment), applied to the WHOLE set after
+    // the last push so no component keeps the fixture default. Version 1 keeps
+    // activation 2, because `fill_snapshots` records version 1 from epoch 2 and
+    // the core refuses a snapshot before every one of its specs has activated
+    // (`SpecNotActive`).
+    for spec in &mut specs {
+        spec.activation_epoch = 1 + u32::from(version);
+    }
     specs
 }
 
@@ -339,8 +356,27 @@ mod benches {
         let version = MAX_METRIC_SPECS as u16;
         // The extrinsic registers at the live clock, so its specs must clear the
         // two-epoch activation lead (05 §4.6) — unlike the epoch-0 seed above.
-        let activation =
-            <T::CurrentEpoch as frame_support::traits::Get<EpochId>>::get().saturating_add(2);
+        //
+        // It must ALSO not tie the latest seeded activation: a tie means *no
+        // active spec* (05 §4.6 / I-16) and `register_metric_spec` now refuses
+        // it (audit 2026-07-27, AUD-4). The clock alone does not guarantee that
+        // — the mock's `CurrentEpoch` happens to clear the seeded band and the
+        // assembled runtime's, sitting at epoch 0, lands exactly on version 1's
+        // activation. So the floor is derived from the fixture that is actually
+        // seeded, and holds for any clock. Only the activation VALUE moves; the
+        // measured worst case is the same full 16-version history scan.
+        let seeded_high = (1..MAX_METRIC_SPECS as u16)
+            .filter_map(|seeded| {
+                full_specs(seeded)
+                    .into_iter()
+                    .map(|spec| spec.activation_epoch)
+                    .max()
+            })
+            .max()
+            .unwrap_or_default();
+        let activation = <T::CurrentEpoch as frame_support::traits::Get<EpochId>>::get()
+            .saturating_add(2)
+            .max(seeded_high.saturating_add(1));
         let specs_vec = full_specs(version)
             .into_iter()
             .map(|spec| MetricSpec {

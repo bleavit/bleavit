@@ -48,6 +48,45 @@ class TwapAccumulator:
             self.points.append(Observation(block, self.last, cumulative))
             return self.last
 
+    def stale_events_in(self, start: int, end: int) -> int:
+        """04 §7 staleness for one decision window: the number of observation
+        gaps longer than `STALE_GAP_BLOCKS` *inside* `[start, end]`.
+
+        Two things the running counter `self.stale_events` deliberately does
+        not model, both read straight off 04 §7's "any observation gap > 50
+        blocks **inside the decision window**":
+
+        * The window **clips** the measurement. Time before `start` is not
+          inside the window, so a book that was quiet before the window opened
+          is not charged for it; `start` inherits the observation value in
+          effect and is therefore itself a fresh point.
+        * The **terminal** interval from the last in-window observation to
+          `end` is a gap like any other. A book that goes quiet at the close is
+          exactly as stale as one that goes quiet in the middle, and the close
+          is the more dangerous of the two: the closing spot is read from the
+          same unmoved quote the TWAP already carries, so the convergence
+          check cannot see the staleness either.
+
+        `self.stale_events` remains the book-level running count (the
+        `MarketBook.stale_events` diagnostic); this is the per-window count the
+        decision grade of 05 §5.2 consumes.
+        """
+        if end <= start:
+            return 0
+        events = 0
+        previous = start
+        for point in self.points:
+            if not start < point.block <= end:
+                continue
+            if point.block <= previous:
+                continue
+            if point.block - previous > STALE_GAP_BLOCKS:
+                events += 1
+            previous = point.block
+        if end - previous > STALE_GAP_BLOCKS:
+            events += 1
+        return events
+
     def cumulative_at(self, block: int) -> Decimal:
         """A(block), where o_i weights the backward interval (t_{i-1}, t_i]."""
         if block < self.points[0].block or block > self.points[-1].block:
