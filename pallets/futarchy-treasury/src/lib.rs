@@ -281,6 +281,50 @@ impl InsuranceSweep for () {
     }
 }
 
+/// The four 08 §1.4 calls whose real-asset leg is the "A9 fungibles follow-up"
+/// that 08 §1.4 names — the outflow custody wiring for lines without a
+/// dedicated pot, which keep their custody in `MAIN`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutflowLeg {
+    /// `spend(line, dest, amount)` — USDC out of `MAIN` to a third party.
+    Spend,
+    /// `claim_stream(id)` — a recipient's vested USDC.
+    StreamClaim,
+    /// `issue_vit(amount, line)` — a native VIT mint into a line.
+    VitIssuance,
+    /// `recover_foreign(asset, dest, amount)` — a non-protocol asset sweep.
+    ForeignRecovery,
+}
+
+/// Does this runtime actually move the asset behind an [`OutflowLeg`]?
+///
+/// The accounting for these four calls is complete and tested, but their asset
+/// leg is not wired: `spend` debits the internal line ledger, `claim_stream`
+/// advances the vesting cursor, `issue_vit` grows the tracked supply and
+/// `recover_foreign` emits an event — and none of them transfers anything.
+/// Every one of them still returned `Ok`, so a passed TREASURY decision would
+/// report a grant that never moved, and `claim_stream` was worse than
+/// cosmetic: it consumed a recipient's vested entitlement, which cannot be
+/// re-claimed once the cursor has advanced (audit 2026-07-27, AUD-NUM-001).
+///
+/// A call that cannot perform its value movement must refuse it, not report
+/// success (G-1). So the pallet asks this seam first and fails closed when the
+/// answer is no. Wiring the custody is 08 §1.4's follow-up and stays out of
+/// scope here; until it lands, arming TREASURY makes these calls stop loudly
+/// instead of silently doing nothing.
+pub trait OutflowCustody {
+    /// `true` only when this runtime really moves the asset for `leg`.
+    fn is_wired(leg: OutflowLeg) -> bool;
+}
+
+/// The unwired default: refuse. A runtime that has not bound real custody
+/// inherits the fail-closed answer rather than a silent no-op.
+impl OutflowCustody for () {
+    fn is_wired(_: OutflowLeg) -> bool {
+        false
+    }
+}
+
 /// B4/B1a seam (09 §4): dispatch the DOT funding transfer for a renewal the
 /// accounting just committed. An `Err` rolls back the whole extrinsic (quote
 /// restored, period not funded) so the keeper can retry — bounded retry via
@@ -441,6 +485,13 @@ pub mod pallet {
 
         /// Custody seam for the 08 §1.2/§1.4 INSURANCE → `MAIN` sweep (SQ-207).
         type InsuranceSweep: InsuranceSweep;
+
+        /// Whether the real-asset leg of `spend`/`claim_stream`/`issue_vit`/
+        /// `recover_foreign` is wired in this runtime (08 §1.4's A9 fungibles
+        /// follow-up). Unwired runtimes refuse those four calls rather than
+        /// reporting a value movement that never happened — see
+        /// [`OutflowCustody`].
+        type OutflowCustody: OutflowCustody;
 
         /// 05 §4.3.2 `Π` recorder for the collator-accounting losses in
         /// [`Pallet::note_collator_block`] (08 §2.4).
@@ -743,6 +794,10 @@ pub mod pallet {
         ZeroQuote,
         /// Arithmetic overflow — rejected, never wrapped (G-1).
         Overflow,
+        /// The call's real-asset leg is not wired in this runtime, so it would
+        /// have reported a value movement that never happened (08 §1.4's A9
+        /// fungibles follow-up). Status-quo default: refuse (G-1).
+        OutflowCustodyUnwired,
         /// Signed caller is not the stored Coretime quote authority.
         NotQuoteAuthority,
         /// The ops multisig tried to fund a non-`ops.*` line.
@@ -959,6 +1014,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             T::TreasuryOrigin::ensure_origin(origin)?;
+            Self::ensure_outflow_custody(OutflowLeg::Spend)?;
             let now = Self::now();
             let dest = Self::to_core_account(dest);
             Self::mutate(|t| t.spend(Origin::FutarchyTreasury, now, line, dest, amount))
@@ -1000,6 +1056,12 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::claim_stream())]
         pub fn claim_stream(origin: OriginFor<T>, id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            // Ahead of the core call, not after it: `claim_stream` advances the
+            // stream's `claimed` cursor to the vested total and hands the
+            // claimable amount back for payment. With no payment leg the amount
+            // was discarded and the entitlement consumed with it — the one case
+            // in this group that destroys value rather than merely misreporting.
+            Self::ensure_outflow_custody(OutflowLeg::StreamClaim)?;
             let now = Self::now();
             let who = Self::to_core_account(who);
             Self::mutate(|t| t.claim_stream(who, now, id).map(|_| ()))
@@ -1026,6 +1088,7 @@ pub mod pallet {
             line: BudgetLine,
         ) -> DispatchResult {
             T::TreasuryOrigin::ensure_origin(origin)?;
+            Self::ensure_outflow_custody(OutflowLeg::VitIssuance)?;
             let now = Self::now();
             Self::mutate(|t| t.issue_vit(Origin::FutarchyTreasury, now, amount, line))
         }
@@ -1042,6 +1105,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             T::TreasuryOrigin::ensure_origin(origin)?;
+            Self::ensure_outflow_custody(OutflowLeg::ForeignRecovery)?;
             let dest = Self::to_core_account(dest);
             Self::mutate(|t| t.recover_foreign(Origin::FutarchyTreasury, asset, dest, amount))
         }
@@ -1838,6 +1902,18 @@ pub mod pallet {
             t.meter_180d.limit_bps = T::Params::cap_180d_bps();
             t.issuance.limit_bps = T::Params::inflation_cap_bps();
             t
+        }
+
+        /// Refuse a value-bearing call whose real-asset leg this runtime does
+        /// not implement (08 §1.4's A9 fungibles follow-up; see
+        /// [`OutflowCustody`]). A pure predicate — no storage is read, so the
+        /// guard moves no benchmarked weight.
+        fn ensure_outflow_custody(leg: OutflowLeg) -> DispatchResult {
+            ensure!(
+                T::OutflowCustody::is_wired(leg),
+                Error::<T>::OutflowCustodyUnwired
+            );
+            Ok(())
         }
 
         /// Load → run the core transition → (on `Ok`) persist and deposit its

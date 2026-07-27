@@ -55,6 +55,7 @@ from bleavit_reference_model.treasury import (
     security_sizing_ok,
 )
 from bleavit_reference_model.twap import (
+    STALE_GAP_BLOCKS,
     ContestCapitalAccumulator,
     TwapAccumulator,
 )
@@ -1779,6 +1780,50 @@ def _treasury_scenarios():
     return rows
 
 
+# 04 §7 per-window staleness: `(name, start, end, observation blocks)`. The
+# price path is irrelevant to the rule — staleness is block geometry alone — so
+# every observation replays the unchanged 0.500 quote and the recorded value
+# never leaves the neutral price. Each row is chosen to separate the window
+# rule from the book-level running counter:
+#
+#   * `terminal_gap_at_close` — the gap the observe-only counter cannot see.
+#   * `dense_window_is_fresh` — the control: a fully cranked window is clean.
+#   * `pre_window_quiet_not_charged` — the clipping leg; the same block geometry
+#     scores 1 if the gap is measured from the last observation *before* the
+#     window instead of from the window start.
+#   * `mid_and_terminal_gaps_force_reject` — two events (one interior, one
+#     terminal) is the 04 §7 reject threshold; it also pins the boundary, since
+#     the exactly-50 interval must NOT count.
+#   * `unobserved_window_is_one_gap` — an entirely uncranked window is one gap,
+#     not one per missed interval.
+WINDOW_STALE_SCENARIOS = [
+    ("terminal_gap_at_close", 0, 200, list(range(10, 101, 10))),
+    ("dense_window_is_fresh", 0, 200, list(range(10, 201, 10))),
+    ("pre_window_quiet_not_charged", 100, 200, [20] + list(range(140, 201, 10))),
+    ("mid_and_terminal_gaps_force_reject", 0, 300, [10, 100, 150]),
+    ("unobserved_window_is_one_gap", 0, 100, []),
+]
+
+
+def _window_stale_row(name, start, end, observations):
+    """04 §7 window-staleness vectors: gaps > 50 blocks inside [start, end],
+    terminal gap included, measured from the window start rather than from an
+    observation that precedes the window."""
+    accumulator = TwapAccumulator(Decimal("0.500"))
+    for block in observations:
+        accumulator.observe(block, Decimal("0.500"))
+    return {
+        "name": name,
+        "inputs": {
+            "start": start,
+            "end": end,
+            "observations": list(observations),
+            "stale_gap_blocks": STALE_GAP_BLOCKS,
+        },
+        "stale_events": accumulator.stale_events_in(start, end),
+    }
+
+
 def _contest_scenarios():
     """04 §7a contest-capital accumulator vectors (SQ-231)."""
     rows = []
@@ -2349,6 +2394,10 @@ def build():
         },
     ]
 
+    window_stale_scenarios = [
+        _window_stale_row(*scenario) for scenario in WINDOW_STALE_SCENARIOS
+    ]
+
     return {
         "schema": "bleavit.reference-model.v4",
         "precision": "Python Decimal with function-local 100-digit working contexts",
@@ -2370,6 +2419,7 @@ def build():
         ],
         "treasury_scenarios": _treasury_scenarios(),
         "twap_scenarios": twap_scenarios,
+        "window_stale_scenarios": window_stale_scenarios,
         "contest_scenarios": _contest_scenarios(),
     }
 

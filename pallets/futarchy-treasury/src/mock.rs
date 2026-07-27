@@ -160,6 +160,7 @@ std::thread_local! {
     static COMMUNITY_VESTING_CALLS: RefCell<Vec<CommunityVestingCall>> = const { RefCell::new(Vec::new()) };
     static FAIL_COMMUNITY_VESTING: Cell<bool> = const { Cell::new(false) };
     static INTEGRITY_FAULTS: RefCell<Vec<IntegrityFault>> = const { RefCell::new(Vec::new()) };
+    static OUTFLOW_CUSTODY_WIRED: Cell<bool> = const { Cell::new(true) };
 }
 
 /// Records every 05 §4.3.2 `Π` increment this pallet asks the runtime for, so a
@@ -248,6 +249,23 @@ pub fn set_insurance_sweep_failure(fail: bool) {
 pub fn reset_insurance_sweeps() {
     INSURANCE_SWEEPS.with(|calls| calls.borrow_mut().clear());
     set_insurance_sweep_failure(false);
+}
+
+/// Stand-in for the 08 §1.4 outflow custody the production runtime does not
+/// wire (`OutflowCustody`). It reports **wired** by default so this suite keeps
+/// exercising the accounting of `spend`/`claim_stream`/`issue_vit`/
+/// `recover_foreign`; `set_outflow_custody_wired(false)` reproduces the
+/// production answer, which the four refusal tests assert against.
+pub struct MockOutflowCustody;
+
+impl crate::OutflowCustody for MockOutflowCustody {
+    fn is_wired(_: crate::OutflowLeg) -> bool {
+        OUTFLOW_CUSTODY_WIRED.with(Cell::get)
+    }
+}
+
+pub fn set_outflow_custody_wired(wired: bool) {
+    OUTFLOW_CUSTODY_WIRED.with(|value| value.set(wired));
 }
 
 pub struct MockPotFunding;
@@ -379,6 +397,7 @@ impl pallet_futarchy_treasury::Config for Test {
     type RebatePayout = RecordingRebatePayout;
     type PotFunding = MockPotFunding;
     type InsuranceSweep = MockInsuranceSweep;
+    type OutflowCustody = MockOutflowCustody;
     type Integrity = MockIntegrity;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]

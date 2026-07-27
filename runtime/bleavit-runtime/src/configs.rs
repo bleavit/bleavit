@@ -7195,6 +7195,36 @@ impl pallet_futarchy_treasury::InsuranceSweep for TreasuryInsuranceSweep {
     }
 }
 
+/// 08 §1.4's outflow custody seam — **deliberately not wired** (audit
+/// 2026-07-27, AUD-NUM-001).
+///
+/// `spend`, `claim_stream`, `issue_vit` and `recover_foreign` have complete
+/// accounting and no asset leg: the four custody seams this runtime does bind
+/// (`PotFunding`, `RenewalDispatch`, `InsuranceSweep`, `CommunityVesting`) are
+/// unreachable from any of them, and the pallet declares no fungibles or
+/// native-currency handle for them. 08 §1.4 states the reason — for lines
+/// without a dedicated pot, "their outflow custody wiring is the A9 fungibles
+/// follow-up" — so building it is deferred milestone work, not a hardening fix.
+///
+/// What a hardening fix owes is the G-1 answer: a call that cannot move the
+/// value must refuse, not report success. Reporting `false` here makes all four
+/// fail closed with `OutflowCustodyUnwired`, so arming TREASURY before the
+/// custody lands stops loudly instead of silently consuming stream entitlements
+/// and reporting grants that never moved.
+///
+/// The `runtime-benchmarks` arm reports them wired for one reason: the
+/// benchmarks must keep measuring the full body these calls execute once
+/// custody is bound. Declaring that larger weight while they fail closed
+/// over-charges, which is the safe direction. `tests_treasury_health.rs`
+/// compiles **without** the feature and asserts every one of the four refuses,
+/// so the divergence cannot hide a production regression.
+pub struct TreasuryOutflowCustody;
+impl pallet_futarchy_treasury::OutflowCustody for TreasuryOutflowCustody {
+    fn is_wired(_: pallet_futarchy_treasury::OutflowLeg) -> bool {
+        cfg!(feature = "runtime-benchmarks")
+    }
+}
+
 #[cfg(all(not(feature = "runtime-benchmarks"), not(test)))]
 pub struct CoretimeTreasuryLocation;
 #[cfg(all(not(feature = "runtime-benchmarks"), not(test)))]
@@ -7347,6 +7377,7 @@ impl pallet_futarchy_treasury::Config for Runtime {
     type RebatePayout = TreasuryRebatePayout;
     type PotFunding = TreasuryPotFunding;
     type InsuranceSweep = TreasuryInsuranceSweep;
+    type OutflowCustody = TreasuryOutflowCustody;
     type Integrity = RuntimeIntegrityRecorder;
     type WeightInfo = crate::weights::pallet_futarchy_treasury::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]

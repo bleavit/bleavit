@@ -192,6 +192,106 @@ fn twap_vectors_match_python_reference_model() {
     }
 }
 
+/// 04 §7 / 15 §4.4 / G0 corpus-family attestation: replay every
+/// `window_stale_scenarios` row against the production window-staleness rule.
+///
+/// The book-level counter checked above is the running `MarketBook` diagnostic;
+/// this family covers the **per-window** count the 05 §5.2 decision grade
+/// actually consumes — gaps clipped to the decision window, terminal gap
+/// included. Unknown scenarios fail loudly; the executed count is pinned.
+#[test]
+fn window_stale_vectors_match_python_reference_model() {
+    let fixture = fixture();
+    let scenarios = fixture["window_stale_scenarios"]
+        .as_array()
+        .expect("window_stale_scenarios family present");
+    assert_eq!(
+        scenarios.len(),
+        5,
+        "window stale family cardinality drifted"
+    );
+    let known = [
+        "terminal_gap_at_close",
+        "dense_window_is_fresh",
+        "pre_window_quiet_not_charged",
+        "mid_and_terminal_gaps_force_reject",
+        "unobserved_window_is_one_gap",
+    ];
+
+    for row in scenarios {
+        let name = row["name"].as_str().expect("scenario name");
+        assert!(
+            known.contains(&name),
+            "unknown window stale scenario: {name}"
+        );
+        let inputs = &row["inputs"];
+        let block = |value: &Value, context: &str| -> u32 {
+            u32::try_from(value.as_u64().unwrap_or_else(|| panic!("{context}")))
+                .unwrap_or_else(|_| panic!("{context} fits BlockNumber"))
+        };
+        let start = block(&inputs["start"], "start");
+        let end = block(&inputs["end"], "end");
+        // The corpus echoes the gap constant it was generated under; it is the
+        // same 13-registry value the production default carries, and a drift on
+        // either side must fail here rather than silently regrade windows.
+        assert_eq!(
+            inputs["stale_gap_blocks"]
+                .as_u64()
+                .expect("stale_gap_blocks"),
+            market_core::STALE_GAP_BLOCKS,
+            "{name}: corpus stale gap disagrees with the production constant"
+        );
+        let observations = inputs["observations"]
+            .as_array()
+            .expect("observations array")
+            .iter()
+            .map(|value| block(value, "observation block"))
+            .collect::<Vec<_>>();
+
+        let expected = u8::try_from(row["stale_events"].as_u64().expect("stale_events"))
+            .expect("stale_events fits u8");
+        assert_eq!(
+            market_core::window_stale_events(
+                start,
+                end,
+                &observations,
+                market_core::STALE_GAP_BLOCKS
+            ),
+            expected,
+            "{name} window staleness"
+        );
+
+        // The pallet cannot hold the observation list, so it charges the same
+        // rule incrementally with `is_stale_gap` over each clipped interval —
+        // one measurement per in-window observation plus the terminal gap at
+        // seal. Replaying that exact shape here pins the two forms together, so
+        // the batch oracle above cannot drift away from the running path.
+        let mut incremental: u8 = 0;
+        let mut previous = start;
+        for observed in observations
+            .iter()
+            .copied()
+            .filter(|b| *b > start && *b <= end)
+        {
+            if market_core::is_stale_gap(
+                previous.max(start),
+                observed,
+                market_core::STALE_GAP_BLOCKS,
+            ) {
+                incremental += 1;
+            }
+            previous = observed;
+        }
+        if market_core::is_stale_gap(previous, end, market_core::STALE_GAP_BLOCKS) {
+            incremental += 1;
+        }
+        assert_eq!(
+            incremental, expected,
+            "{name}: incremental pallet-shaped replay disagrees with the corpus"
+        );
+    }
+}
+
 /// Parse a corpus USDC decimal string into base units, exactly (6 decimals).
 fn exact_usdc(value: &Value, context: &str) -> u128 {
     let text = value

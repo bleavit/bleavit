@@ -23,7 +23,7 @@ reviews. Adversarial verification **refuted 16 of the 29** outright and correcte
 mechanism of several more; deduplicated and lead-adjudicated, **18 distinct defects** are confirmed (§8) — a refutation rate that is itself part of the result: the codebase
 withstood most of what was thrown at it, and the surviving set is small and specific.
 
-**Five findings were fixed in this PR.** Two of them are the ones that matter:
+**Seven findings were fixed in this PR** — five in the original hardening pass, then the two deferred High findings after the user asked for them (§8.1a). Of the original five, two matter most:
 
 - **AUD-1 (High)** — the execution guard's post-migration fail-static latch was a **no-op**. When
   a completed multi-block migration could not release its paired recovery image, the guard raised
@@ -36,20 +36,24 @@ withstood most of what was thrown at it, and the surviving set is small and spec
   its snapshot-overdue cause, and the deadline's try-state pairing fails once the wedged epoch's
   timing is reaped. Reproduced through the ordinary governance dispatch path before fixing.
 
-**Two confirmed High findings could not be fixed safely inside this scope and remain open.**
-They are the reason this PR is a **draft**:
+**Two further High findings were initially left open — this PR was opened as a draft for exactly
+that reason — and were then fixed on the same branch at the user's instruction, later the same
+day.** Both fixes are recorded in §8.1a, and the reasoning that had deferred them is corrected
+there rather than quietly dropped:
 
 - **AUD-NUM-001 (High)** — `treasury.spend`, `claim_stream`, `issue_vit` and `recover_foreign`
-  mutate internal accounting and emit success events while moving **no asset at all**. The
-  treasury pallet has exactly four real-custody seams and none is on those paths.
-- **AUD-NUM-002 (High)** — decision-window staleness is measured against the un-clipped global
-  observation gap and is never evaluated for the terminal interval, so a book that went stale at
-  the end of its decision window can still grade as decision-grade.
+  mutate internal accounting and emit success events while moving **no asset at all**. Fixed
+  **fail-closed**, not by building the custody: 08 §1.4 itself defers that wiring ("their outflow
+  custody wiring is the A9 fungibles follow-up"), so building it here would be milestone work. The
+  four calls now refuse.
+- **AUD-NUM-002 (High)** — decision-window staleness was measured against the un-clipped global
+  observation gap and was never evaluated for the terminal interval, so a book that went stale at
+  the end of its decision window still graded as decision-grade. Fixed by clipping each
+  measurement to the window and charging the terminal gap at seal, paired with an independent
+  window-staleness derivation in the reference model and a new differential corpus family.
 
-Both fixes are feature-shaped (custody adapters; a decision-grading semantics change with
-reference-model parity and vector-corpus consequences) and belong in their own changes with
-spec-compliance review — not in a security-hardening pass whose mandate is the smallest safe fix.
-Neither is reachable on the current rollout phase; both must land before the phase that arms them.
+Neither was reachable on the current rollout phase. Both would have been reachable at the phase
+that arms them (G5 for the treasury calls, Phase 3 for binding decisions).
 
 **No Critical finding was identified.** No unbacked claim, no privilege escalation, no filter
 bypass, and no origin-confusion path survived verification. The SafetyFilter's closure over the
@@ -213,13 +217,13 @@ owning specification section:
 | Severity | Confirmed | Fixed here | Open |
 |---|---|---|---|
 | Critical | 0 | 0 | 0 |
-| High | 4 | **2** | 2 |
+| High | 4 | **4** | 0 |
 | Medium | 1 | 1 | 0 |
 | Low | 9 | 2 | 7 |
 | Informational | 4 | 0 | 4 |
-| **Total** | **18** | **5** | **13** |
+| **Total** | **18** | **7** | **11** |
 
-- **High:** AUD-1 *(fixed)*, AUD-4 *(fixed)*, AUD-NUM-001 *(open)*, AUD-NUM-002 *(open)*
+- **High:** AUD-1 *(fixed)*, AUD-4 *(fixed)*, AUD-NUM-001 *(fixed — §8.1a)*, AUD-NUM-002 *(fixed — §8.1a)*
 - **Medium:** AUD-2 *(fixed)*
 - **Low:** AUD-3 *(fixed)*, AUD-5 *(fixed)*, RT-01, RT-02, ACL-01, F-01, F-03, VER-1, VER-9
 - **Informational:** FIN-03 / AUD-NUM-003, SPEC-04, SPEC-05, SPEC-06
@@ -410,9 +414,136 @@ had no wrong-origin test, and one test named an exhaustive claim it did not meet
 
 ---
 
-### 8.2 Confirmed, open — the two High findings that make this PR a draft
+### 8.1a Fixed in this PR — the two High findings that had been deferred
 
-#### AUD-NUM-001 — Treasury value-bearing calls perform no asset operation · **High** · CONFIRMED · **NOT FIXED**
+Added after the initial draft PR, at the user's instruction ("Fix AUD-NUM-002 and then
+AUD-NUM-001"). Both landed on the same branch; no second PR was opened.
+
+#### AUD-NUM-002 — Decision-window staleness excludes the terminal gap and overcounts pre-window gaps · **High** · CONFIRMED · **FIXED**
+
+- **Location:** `pallets/market/src/lib.rs` (the observation increment and `seal_window`);
+  `crates/market-core/src/lib.rs`; `reference-model/src/bleavit_reference_model/twap.py`
+- **Spec:** 04 §7 — *"any observation gap > 50 blocks **inside the decision window** increments
+  `stale_events`; first event extends the pair once by 3 days, second forces reject"*; I-13
+
+**What was wrong.** `stale_events` was incremented only when a new observation arrived, so the
+interval between a window's last observation and its close was never measured. Nothing else
+covered it: `close_spot` is read from the book's last stored quote, which is the same unmoved
+value the TWAP already carries, so the convergence check `|close_spot − TWAP| ≤ Δ_max` cannot see
+the staleness either; and coverage does not subsume it — at `dec.coverage` = 95 % of a 72 h
+window, a terminal gap of roughly six hours still passes. A decision could therefore be taken on
+a book whose price data stopped moving before the vote closed. That is an **adopt-favourable**
+failure of a staleness control, the direction G-1 forbids. The mirror leg over-counted: the gap
+was measured from the un-clipped previous observation rather than from the window start, so a
+window opening after a quiet period was charged a stale event for time it does not cover — which
+burns the single extension 04 §7 grants.
+
+**The fix.** Both legs reduce to one rule: measure gaps *inside* the window.
+
+- `market_core::is_stale_gap(from, to, stale_gap_blocks)` is the single measurement, and
+  `market_core::window_stale_events(start, end, observations, gap)` is its batch form.
+- The observation path measures from `previous_block.max(window.start)`.
+- `seal_window` charges the terminal gap from the last observation at or before the close (floored
+  at the window start) to `window.end`, **inside the existing `DecisionWindows::mutate` that sets
+  `sealed`** — so it is charged exactly once, and adds no storage read or write. No benchmarked
+  weight moves; `check-weight-regression.py` passes with no new acknowledgement.
+- Where freshness inside the window cannot be established (an observation recorded after the
+  close, or a block number that does not convert), the guard falls back to the window start and
+  charges the gap rather than assuming the data was fresh.
+
+**Correction to this report's earlier reasoning.** §8.2 originally justified deferring this with
+"the reference model implements the same staleness rule and the shared vector corpus encodes its
+outcomes (15 §4.4 differential parity), so a unilateral runtime change would break differential
+agreement or silently move it." The first half is true only of the **book-level** counter
+(`TwapAccumulator.stale_events` ≡ `MarketBook.stale_events`), which is a diagnostic and does not
+grade. The reference model had **no window-aware staleness derivation at all** — `stale_events` is
+fed to `grade_welfare_book`/`decide` as a caller-supplied input — so no existing vector encoded
+the window rule, and the coupling was weaker than stated. The corpus change is consequently
+**purely additive**: 97 insertions, 0 deletions, every prior row byte-identical.
+
+**Second implementation and differential.** `TwapAccumulator.stale_events_in(start, end)` derives
+the rule from the 04 §7 text independently of the Rust (per the reference-model independence
+rule); the running book-level counter is untouched. A new `window_stale_scenarios` corpus family
+pins five cases — terminal gap, fully cranked window, pre-window quiet, interior + terminal gaps
+reaching the reject threshold with an exactly-50 interval that must **not** count, and an entirely
+uncranked window as a single gap. `crates/market-core/tests/twap_vectors.rs` replays each row
+against **both** the batch rule and a reconstruction of the pallet's incremental shape, so the
+oracle cannot drift away from the running path, and asserts the corpus's echoed
+`stale_gap_blocks` equals the production constant.
+
+**Regression tests.** Four in `pallets/market/src/tests.rs`, driven through the real dispatch
+path (`register_decision_window` → `crank_observe` → `seal_decision_window`): the terminal gap
+records one event and flips `decision_grade_at` to false with every other check satisfied; a
+pre-window quiet period is not charged; an interior plus a terminal gap reach the second event
+(with the exactly-50 interval not counting); and re-sealing does not double-charge. **All four
+were verified to fail with the pallet fix reverted** and pass with it.
+
+#### AUD-NUM-001 — Treasury value-bearing calls perform no asset operation · **High** · CONFIRMED · **FIXED (fail-closed)**
+
+- **Location:** `pallets/futarchy-treasury/src/lib.rs` — `spend` (1), `claim_stream` (3),
+  `issue_vit` (5), `recover_foreign` (6); `runtime/bleavit-runtime/src/configs.rs`
+- **Spec:** 08 §1.3 outflow controls, §1.4 calls and custody, §2.3 VIT issuance; I-7 / I-17; G-1
+
+**Why the fix is a refusal and not a custody implementation.** 08 §1.4 states the position
+directly: for lines without a dedicated payout pot, *"Lines without pots keep custody in `MAIN`
+(their outflow custody wiring is the A9 fungibles follow-up)"*, and PLAN.md's A9 row carries
+"asset custody / `fungibles`+XCM" as an open follow-up. The missing asset leg is therefore
+**declared deferred work**, not an undetected omission — building it here would be milestone
+implementation, which this pass excludes, and would require regenerated weights for four
+extrinsics that this review cannot verify at release fidelity.
+
+What a hardening pass does owe is the G-1 answer: a call that cannot perform its value movement
+must refuse, not report success.
+
+**The fix.** A new `OutflowCustody` seam with one predicate, `is_wired(OutflowLeg) -> bool`, over
+the four legs. The unit implementation returns `false`, so a runtime that has not bound real
+custody inherits the fail-closed answer. `Pallet::ensure_outflow_custody` runs **before** any
+state transition in each of the four calls, and the runtime binds `TreasuryOutflowCustody`, which
+reports not-wired. The guard is a pure predicate — no storage is read — so no benchmarked weight
+moves.
+
+Ordering matters most for `claim_stream`, the one case that destroyed value rather than
+misreporting it: the core advances the stream's `claimed` cursor to the vested total and returns
+the claimable amount for payment, which the pallet discarded with `.map(|_| ())`. A legitimate
+entitlement was consumed and could never be re-claimed. The guard now precedes the core call, so
+the claim survives until custody exists.
+
+**Deliberate behavioural consequence, recorded rather than hidden.** An armed TREASURY decision
+whose payload carries a `spend` leg now has that leg revert at execution: `ExecutionGuard::execute`
+still succeeds and records the payload result, but the queued outflow obligation is **not**
+released, so NAV continues to carry it. That is the correct fail-closed reading — nothing left the
+treasury — and nothing is stranded, since `dequeue_terminal` still releases the obligation. The
+existing runtime test `queued_treasury_outflows_mirror_enqueue_execute_and_terminal_dequeue` was
+updated to assert exactly this, with a `runtime-benchmarks` branch showing what the assertion
+becomes once custody lands. The net effect is that **arming TREASURY before the A9 custody wiring
+now stops loudly instead of silently reporting grants that never moved.**
+
+**On the `runtime-benchmarks` divergence.** `TreasuryOutflowCustody::is_wired` returns
+`cfg!(feature = "runtime-benchmarks")`, so the benchmarks keep measuring the full body these calls
+will execute once custody is bound; declaring that larger weight while they fail closed
+over-charges, which is the safe direction. The divergence is compensated, not merely documented:
+the runtime refusal tests are `#[cfg(not(feature = "runtime-benchmarks"))]`, so they run in exactly
+the configuration production ships.
+
+**Regression tests.** Two in `pallets/futarchy-treasury/src/tests.rs` — all four calls refuse with
+`OutflowCustodyUnwired` and leave the whole `State` aggregate byte-identical, and an unwired claim
+leaves `claimed` at zero so the same claim still pays once custody is re-wired (the mock's seam is
+switchable, so both directions are covered). Two in
+`runtime/bleavit-runtime/src/tests_treasury_health.rs` — all four refuse under the assembled
+runtime's real wiring, and the guard does not leak onto neighbouring calls (`fund_budget_line`
+still funds; `cancel_stream` still reaches `StreamNotFound`).
+
+**What remains.** This closes the vulnerability; it does not implement the custody. 08 §1.4's A9
+fungibles follow-up is still required before TREASURY is armed at G5 — and it is now a hard
+prerequisite rather than a silent gap.
+
+---
+
+### 8.2 Superseded — the two High findings that had made this PR a draft
+
+#### AUD-NUM-001 — Treasury value-bearing calls perform no asset operation · **High** · CONFIRMED · **FIXED — see §8.1a**
+
+*The analysis below is the original record, kept intact. The disposition it states was superseded the same day; §8.1a carries the fix and corrects the deferral reasoning.*
 
 - **Component:** `pallets/futarchy-treasury`, `crates/futarchy-treasury-core`
 - **Location:** `pallets/futarchy-treasury/src/lib.rs` — `spend` (call index 1), `claim_stream`
@@ -445,7 +576,9 @@ had no wrong-origin test, and one test named an exhaustive claim it did not meet
   outside the change restriction of a security-hardening pass, where the mandate is the smallest
   safe fix. **It must land before TREASURY arming.**
 
-#### AUD-NUM-002 — Decision-window staleness excludes the terminal gap and overcounts pre-window gaps · **High** · CONFIRMED · **NOT FIXED**
+#### AUD-NUM-002 — Decision-window staleness excludes the terminal gap and overcounts pre-window gaps · **High** · CONFIRMED · **FIXED — see §8.1a**
+
+*The analysis below is the original record, kept intact. The disposition it states was superseded the same day; §8.1a carries the fix and corrects the deferral reasoning — in particular the claim about reference-model coupling, which overstated it.*
 
 - **Component:** `pallets/market`
 - **Location:** `pallets/market/src/lib.rs:1545-1553` (the staleness increment), `:2073`
@@ -544,6 +677,7 @@ recording, because each looked like a real defect until the specification was re
 
 Recorded, not acted on, per the G2+ and frontend exclusions:
 
+0. **`cargo test -p bleavit-runtime --features runtime-benchmarks` fails 66 tests, at baseline and after this PR alike** (331 passed / 66 failed, measured both ways). CI builds the runtime with that feature but never runs the suite under it, so nothing is red today. The cause is the documented one: benchmark-arm input providers fabricate values and skip production scans, so a test asserting production behaviour cannot hold under the feature. Worth a decision — either run the combination in CI and fix the 66, or make the feature's test build explicitly unsupported — but it is neither a security defect nor in this pass's change scope.
 1. Two of doc 02's frozen-contract statements (SPEC-04) and two doc-05/13 figures (SPEC-05,
    SPEC-06) have drifted from the implementation. Correcting the frozen contract requires the
    02 §13 joint backend+frontend sign-off; correcting 05/13 is ordinary spec truing. Both are
@@ -639,6 +773,38 @@ shipped a permanent chain halt in place of a fail-open.
 
 ---
 
+## 11b. Gates re-run for the two follow-up fixes (2026-07-27, same branch)
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | pass |
+| `tools/ci/rust-workspace-gates.sh --changed market-core pallet-market pallet-futarchy-treasury bleavit-runtime` | **exit 0** (fmt · clippy `-D warnings` · tests · `no_std`) |
+| `cargo test -p bleavit-runtime` | **406 passed, 0 failed** |
+| `cargo test -p pallet-market` | **71 passed, 0 failed** |
+| `cargo test -p pallet-futarchy-treasury` | **76 passed, 0 failed**; **90 passed** with `--features runtime-benchmarks` |
+| `cargo test -p market-core --test twap_vectors` | 3 passed (incl. the new `window_stale_scenarios` replay) |
+| `PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests` | **58 passed** |
+| `python3 tools/reference-model/generate-vectors.py --check` | pass (corpus additive: 97 insertions, 0 deletions) |
+| `python3 tools/reference-model/check-doc-table.py` | pass |
+| `python3 tools/limit-coverage/check-limit-coverage.py` | 193 keys covered, 0 unwired |
+| `python3 tools/ci/check-generated-weights.py` | 360 functions, 2 justified overrides |
+| `python3 tools/ci/check-weight-storage-bounds.py` | 22 annotations checked |
+| `python3 tools/ci/check-weight-regression.py` | **PASS**, no new acknowledgement (both fixes add zero storage reads/writes) |
+| `python3 tools/ci/check-plan-tables.py` | pass |
+| `tools/ci/fuzz-gates.sh` | **exit 0** (run because `market-core` changed) |
+
+**Falsification.** The four new `pallet-market` staleness tests were re-run with
+`pallets/market/src/lib.rs` reverted to its pre-fix state: all four fail, with the exact
+assertions the fix repairs. They are regression tests, not restatements.
+
+**Disclosed limitation.** `cargo test -p bleavit-runtime --features runtime-benchmarks` fails 66
+tests. That is **unchanged from the baseline** — measured by stashing this branch's changes and
+re-running (331 passed / 66 failed both before and after). CI builds the runtime with that feature
+but does not run the test suite under it, so this is not a gate; it is recorded here rather than
+left unstated, and as an out-of-scope observation in §10.
+
+---
+
 ## 12. Final assessment
 
 The backend is in materially better shape than a repository of this size and ambition usually is
@@ -659,8 +825,18 @@ rule is implemented for the intervals it observes and silent for the one it neve
 of these is found by reading a function; all of them are found by asking what else writes the same
 state, or what happens after the last call.
 
-Two confirmed High findings remain open because fixing them safely is not this PR's job.
-Neither is reachable on the current rollout phase, and both are gated behind phases that have not
-been entered — but both must be closed before the phase that arms them, and AUD-NUM-001 in
-particular deserves attention well before Phase 5, because a `claim_stream` that consumes an
-entitlement without paying it is a defect a user experiences as loss.
+The two High findings this review first deferred were then fixed on the same branch, and the
+deferral is worth recording honestly because one half of its justification was wrong. AUD-NUM-002
+was held back on the belief that the reference model implemented the same window-staleness rule
+and that the shared corpus encoded its outcomes; it does not — the model carries only the
+book-level counter, so nothing in the corpus constrained the window rule and the fix turned out to
+be purely additive. AUD-NUM-001 was held back on the belief that fixing it meant building the
+custody adapters. It did not: 08 §1.4 already declares that wiring deferred, so the fix a
+hardening pass owes is not the custody but the refusal — a call that cannot move value must not
+report that it did. Both corrections point the same way: *"this needs a bigger change"* deserves
+the same adversarial scrutiny as a finding.
+
+What remains open after those two fixes is smaller and none of it is High. The largest residual
+obligation is not a defect at all but a prerequisite: 08 §1.4's A9 custody wiring must land before
+TREASURY is armed at G5 — and it is now enforced by the runtime rather than by memory, because
+the four calls refuse until it does.

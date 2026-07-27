@@ -1544,11 +1544,16 @@ pub mod pallet {
                     }
                     if observed_block > window.start {
                         window.observations = window.observations.saturating_add(1);
-                        let stale_gap = match u32::try_from(market_core::STALE_GAP_BLOCKS) {
-                            Ok(value) => value,
-                            Err(_) => return,
-                        };
-                        if observed_block.saturating_sub(previous_block) > stale_gap {
+                        // 04 §7 counts gaps *inside* the decision window, so the
+                        // measurement starts at the later of the previous
+                        // observation and the window start: a book that was quiet
+                        // before this window opened must not be charged a stale
+                        // event for time the window does not cover.
+                        if market_core::is_stale_gap(
+                            previous_block.max(window.start),
+                            observed_block,
+                            market_core::STALE_GAP_BLOCKS,
+                        ) {
                             window.stale_events = window.stale_events.saturating_add(1);
                         }
                     }
@@ -2103,8 +2108,42 @@ pub mod pallet {
                 .ok_or(Error::<T>::ArithmeticOverflow)?;
                 Self::insert_checkpoint(id, end, cumulative);
             }
+            // 04 §7's terminal gap. Staleness is otherwise only measured when a
+            // new observation arrives, so the interval between the window's last
+            // observation and its close was never charged: a book that went quiet
+            // before the close still graded decision-grade, with `close_spot`
+            // taken from the same stale quote the TWAP already carries — so the
+            // convergence check could not see it either. That is an
+            // adopt-favourable failure of a staleness control (G-1). Coverage
+            // does not subsume it: at `dec.coverage` = 95 % of a 72 h window a
+            // terminal gap of ~6 h still passes coverage.
+            //
+            // Measured here, inside the same mutate that sets `sealed`, so it is
+            // charged exactly once (a sealed window is never re-measured) and
+            // adds no storage read or write to the sealing path.
+            let last_observed = u32::try_from(book.last_observed_block);
             DecisionWindows::<T>::mutate(id, |windows| {
                 for window in windows.iter_mut().filter(|window| window.end == end) {
+                    // The last block at which this window's price was known
+                    // fresh: the last observation at or before the close, floored
+                    // at the window start (which inherits the value in effect).
+                    // An observation *after* the close, or a block that does not
+                    // fit, says nothing about freshness inside the window, and the
+                    // conservative reading of an unknown is the window start —
+                    // charge the gap rather than assume the data was fresh (G-1).
+                    let fresh_until = match last_observed {
+                        Ok(observed) if observed <= window.end => observed.max(window.start),
+                        _ => window.start,
+                    };
+                    if !window.sealed
+                        && market_core::is_stale_gap(
+                            fresh_until,
+                            window.end,
+                            market_core::STALE_GAP_BLOCKS,
+                        )
+                    {
+                        window.stale_events = window.stale_events.saturating_add(1);
+                    }
                     if window.close_spot.is_none() {
                         window.close_spot = Some(book.last_quote_1e9);
                     }

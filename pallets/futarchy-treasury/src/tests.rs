@@ -699,6 +699,104 @@ fn spend_enforces_stream_threshold_cap_and_line_balance() {
     });
 }
 
+// ---- unwired outflow custody fails closed (08 §1.4; AUD-NUM-001) ------------
+
+/// The four value-bearing calls whose real-asset leg is 08 §1.4's "A9 fungibles
+/// follow-up" must refuse while that leg is unwired, rather than reporting a
+/// movement that never happened (G-1). This is the answer the production
+/// runtime gives; the mock reports wired by default so the rest of this suite
+/// can still exercise the accounting.
+#[test]
+fn value_bearing_calls_refuse_while_outflow_custody_is_unwired() {
+    funded_ext().execute_with(|| {
+        // Open the stream while custody is wired, so the refusal below is the
+        // claim's and not the opening's.
+        assert_ok!(Treasury::open_stream(
+            to(),
+            BudgetLine::Rewards,
+            acc(2),
+            1_000_000 * USDC,
+            0,
+            100,
+        ));
+        System::set_block_number(60);
+        let before = crate::State::<Test>::get();
+
+        set_outflow_custody_wired(false);
+        assert_noop!(
+            Treasury::spend(to(), BudgetLine::OpsCollators, acc(1), 100_000 * USDC),
+            Error::<Test>::OutflowCustodyUnwired
+        );
+        assert_noop!(
+            Treasury::claim_stream(RuntimeOrigin::signed(acc(2)), 0),
+            Error::<Test>::OutflowCustodyUnwired
+        );
+        assert_noop!(
+            Treasury::issue_vit(to(), 1_000_000 * VIT, BudgetLine::Rewards),
+            Error::<Test>::OutflowCustodyUnwired
+        );
+        assert_noop!(
+            Treasury::recover_foreign(to(), AssetKind::Foreign([1u8; 32]), acc(1), 1_000 * USDC),
+            Error::<Test>::OutflowCustodyUnwired
+        );
+        // `assert_noop!` already proves storage is untouched per call; assert the
+        // aggregate too, because the danger this closes is state that moves
+        // while value does not.
+        assert_eq!(crate::State::<Test>::get(), before);
+
+        // The refusal is the custody seam's alone: re-wire it and the same
+        // claim succeeds, so the guard has not disabled the mechanism.
+        set_outflow_custody_wired(true);
+        assert_ok!(Treasury::claim_stream(RuntimeOrigin::signed(acc(2)), 0));
+        set_outflow_custody_wired(true);
+    });
+}
+
+/// The sharp case. `claim_stream` advances the vesting cursor to the vested
+/// total and returns the claimable amount for payment; with no payment leg the
+/// pallet discarded it, so a legitimate entitlement was consumed and could
+/// never be re-claimed. Refusing leaves the cursor where it was, so the claim
+/// survives until custody is wired.
+#[test]
+fn an_unwired_claim_does_not_consume_the_recipients_entitlement() {
+    funded_ext().execute_with(|| {
+        assert_ok!(Treasury::open_stream(
+            to(),
+            BudgetLine::Rewards,
+            acc(2),
+            1_000_000 * USDC,
+            0,
+            100,
+        ));
+        System::set_block_number(60);
+
+        set_outflow_custody_wired(false);
+        assert_noop!(
+            Treasury::claim_stream(RuntimeOrigin::signed(acc(2)), 0),
+            Error::<Test>::OutflowCustodyUnwired
+        );
+        let stream = crate::State::<Test>::get()
+            .streams
+            .into_iter()
+            .find(|s| s.id == 0)
+            .expect("the stream is still open");
+        assert_eq!(stream.claimed, 0, "the refused claim consumed nothing");
+
+        set_outflow_custody_wired(true);
+        assert_ok!(Treasury::claim_stream(RuntimeOrigin::signed(acc(2)), 0));
+        let stream = crate::State::<Test>::get()
+            .streams
+            .into_iter()
+            .find(|s| s.id == 0)
+            .expect("the stream is still recorded");
+        assert_eq!(
+            stream.claimed,
+            600_000 * USDC,
+            "the same claim is still available once custody exists",
+        );
+    });
+}
+
 // ---- reserve haircut fail-static (08 §1.2) ----------------------------------
 
 #[test]
@@ -1458,6 +1556,9 @@ mod renewal_dispatch_seam {
         type RebatePayout = ();
         type PotFunding = ();
         type InsuranceSweep = ();
+        // This harness exercises the coretime-renewal dispatch path only; the
+        // unit seam keeps the production fail-closed answer (AUD-NUM-001).
+        type OutflowCustody = ();
         type Integrity = ();
         type WeightInfo = ();
         #[cfg(feature = "runtime-benchmarks")]

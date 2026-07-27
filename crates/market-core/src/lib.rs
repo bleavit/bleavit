@@ -390,6 +390,64 @@ pub fn twap_between(
     Some(FixedU64(value))
 }
 
+/// One 04 §7 staleness measurement: is the interval `(from, to]` an
+/// observation gap longer than `stale_gap_blocks`?
+///
+/// The caller supplies an interval already **clipped to the decision window**
+/// — 04 §7 counts gaps *inside* the window, so neither the time before
+/// `window.start` nor the time after `window.end` may be charged. Both
+/// endpoints are observation-derived: `from` is the last block at which the
+/// window's price was known fresh (an observation, or the window start, which
+/// inherits the value in effect), and `to` is the next such block, or the
+/// window end when the measurement is the terminal gap.
+pub fn is_stale_gap(from: BlockNumber, to: BlockNumber, stale_gap_blocks: u64) -> bool {
+    u64::from(to.saturating_sub(from)) > stale_gap_blocks
+}
+
+/// 04 §7 window staleness in batch form: the number of observation gaps longer
+/// than `stale_gap_blocks` inside the decision window `[start, end]`.
+///
+/// `observations` is the ordered list of blocks at which the book recorded an
+/// observation; entries outside `[start, end]` are ignored, because a gap
+/// outside the window is not a gap *inside* it. The **terminal** interval from
+/// the last in-window observation to `end` is a gap like any other — a book
+/// that goes quiet at the close of its window is exactly as stale as one that
+/// goes quiet in the middle, and omitting it would let a decision be graded on
+/// price data that stopped moving before the close.
+///
+/// The running pallet cannot hold the observation list, so it applies
+/// [`is_stale_gap`] incrementally over the same clipped intervals; this batch
+/// form is the differential oracle for that path (15 §4.4).
+pub fn window_stale_events(
+    start: BlockNumber,
+    end: BlockNumber,
+    observations: &[BlockNumber],
+    stale_gap_blocks: u64,
+) -> u8 {
+    if end <= start {
+        return 0;
+    }
+    let mut events: u8 = 0;
+    let mut previous = start;
+    for observed in observations
+        .iter()
+        .copied()
+        .filter(|observed| *observed > start && *observed <= end)
+    {
+        if observed <= previous {
+            continue;
+        }
+        if is_stale_gap(previous, observed, stale_gap_blocks) {
+            events = events.saturating_add(1);
+        }
+        previous = observed;
+    }
+    if is_stale_gap(previous, end, stale_gap_blocks) {
+        events = events.saturating_add(1);
+    }
+    events
+}
+
 /// Scheduled-interval coverage check (05 §5). Division is avoided so the
 /// comparison has no rounding ambiguity.
 pub fn coverage_at_least(
