@@ -1087,6 +1087,11 @@ class = "value"
 reason = "13 §4 / 08 §2.4: the authored-share accumulators are bounded storage values (current epoch plus at most one pending completed epoch, 120 entries each, 240 worst case); a 121st distinct author is fail-closed and is not admitted into state, so there is no separate dispatch error surface."
 
 [[entry]]
+key = "Welfare collator-authorship entries"
+class = "value"
+reason = "13 §4 / 05 §4.3: the authorship series (per-`(epoch, day)` window plus the per-epoch aggregate maintained beside it) is written by the block-authorship event handler, which is not a dispatch and has no error surface at all — a 121st distinct author in one window is dropped fail-soft and the window latches a truncation sentinel. The drop is conservative for the count components (`K`, later `U`) and deliberately makes the window unavailable to the distribution component (`D_eff`), pinned by `a_full_day_vector_drops_only_the_new_author`, `a_dropped_author_latches_the_truncation_sentinel_in_the_affected_window` and `a_day_drop_alone_does_not_taint_the_epoch_aggregate` in `pallets/welfare/src/tests.rs` plus `a14_a_truncated_window_withdraws_the_distribution_but_not_the_count` in `runtime/bleavit-runtime/src/tests_welfare_inputs.rs`."
+
+[[entry]]
 key = "Treasury Streams"
 class = "dispatch-limit"
 error = "Treasury::TooManyStreams"

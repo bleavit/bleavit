@@ -975,6 +975,478 @@ fn try_state_accepts_a_bounded_backlog_and_rejects_structural_corruption() {
     });
 }
 
+// ---------------------------------------------------------------- A14
+//
+// The 05 §4.3 collator-authorship series. It is written by the block-authorship
+// event handler, shares the `XcmTrafficEpochs` prefix index and the one bounded
+// reaper with the other two daily series, and feeds `K` today plus `U` and
+// `D_eff` later. Every property below is about the *series*, not about `K`: the
+// component projection is runtime composition and is pinned in
+// `runtime/bleavit-runtime/src/tests_welfare_inputs.rs`.
+
+fn author(n: u8) -> sp_core::crypto::AccountId32 {
+    sp_core::crypto::AccountId32::new([n; 32])
+}
+
+fn window(authors: Vec<(sp_core::crypto::AccountId32, u32)>) -> AuthorshipWindow<Test> {
+    AuthorshipWindow {
+        authors: BoundedVec::truncate_from(authors),
+        truncated: false,
+    }
+}
+
+#[test]
+fn collator_authorship_accumulates_per_author_per_day_and_per_epoch() {
+    new_test_ext().execute_with(|| {
+        // Day 0: author 1 twice, author 2 once.
+        Welfare::note_collator_authorship(7, 0, author(1));
+        Welfare::note_collator_authorship(7, 0, author(1));
+        Welfare::note_collator_authorship(7, 0, author(2));
+        // Day 1: author 1 once, author 3 once.
+        Welfare::note_collator_authorship(7, 1, author(1));
+        Welfare::note_collator_authorship(7, 1, author(3));
+        // A different epoch must not leak into either.
+        Welfare::note_collator_authorship(8, 0, author(9));
+
+        assert_eq!(
+            Welfare::collator_authorship(7, 0).authors.into_inner(),
+            vec![(author(1), 2), (author(2), 1)]
+        );
+        assert_eq!(
+            Welfare::collator_authorship(7, 1).authors.into_inner(),
+            vec![(author(1), 1), (author(3), 1)]
+        );
+        assert_eq!(
+            Welfare::collator_authorship(7, 2).authors.into_inner(),
+            vec![]
+        );
+
+        // The epoch aggregate is maintained on write, one entry per author —
+        // author 1's three blocks are one entry, not two — so a consumer pays
+        // one bounded read instead of folding up to 256 day slots.
+        assert_eq!(
+            Welfare::collator_authorship_epoch(7).authors.into_inner(),
+            vec![(author(1), 3), (author(2), 1), (author(3), 1)]
+        );
+        assert_eq!(
+            Welfare::collator_authorship_epoch(8).authors.into_inner(),
+            vec![(author(9), 1)]
+        );
+        assert_eq!(
+            Welfare::collator_authorship_epoch(9).authors.into_inner(),
+            vec![]
+        );
+        // Nothing was dropped, so every window's distribution is the real one.
+        assert!(!Welfare::collator_authorship(7, 0).truncated);
+        assert!(!Welfare::collator_authorship_epoch(7).truncated);
+    });
+}
+
+#[test]
+fn collator_authorship_saturates_rather_than_overflowing_a_count() {
+    new_test_ext().execute_with(|| {
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![7]));
+        CollatorAuthorship::<Test>::insert(7, 0, window(vec![(author(1), u32::MAX)]));
+        CollatorAuthorshipEpoch::<Test>::insert(7, window(vec![(author(1), u32::MAX)]));
+
+        Welfare::note_collator_authorship(7, 0, author(1));
+
+        assert_eq!(
+            Welfare::collator_authorship(7, 0).authors.into_inner(),
+            vec![(author(1), u32::MAX)]
+        );
+        assert_eq!(
+            Welfare::collator_authorship_epoch(7).authors.into_inner(),
+            vec![(author(1), u32::MAX)]
+        );
+    });
+}
+
+#[test]
+fn a_full_day_vector_drops_only_the_new_author() {
+    new_test_ext().execute_with(|| {
+        for n in 0..MAX_AUTHORSHIP_ENTRIES {
+            Welfare::note_collator_authorship(7, 0, author(n as u8));
+        }
+        let full = Welfare::collator_authorship(7, 0);
+        assert_eq!(full.authors.len(), MAX_AUTHORSHIP_ENTRIES as usize);
+        assert!(!full.truncated);
+
+        // The overflowing author is dropped: no panic, no error, and no state
+        // growth — the vector is still exactly at its bound.
+        Welfare::note_collator_authorship(7, 0, author(200));
+        let after = Welfare::collator_authorship(7, 0);
+        assert_eq!(
+            after.authors, full.authors,
+            "a full day vector must not admit a new author"
+        );
+        assert!(!after.authors.iter().any(|(who, _)| *who == author(200)));
+        assert_eq!(CollatorAuthorship::<Test>::iter().count(), 1);
+
+        // Authors already recorded for the day keep accumulating; the drop
+        // costs the *new* observation only.
+        Welfare::note_collator_authorship(7, 0, author(0));
+        assert_eq!(
+            Welfare::collator_authorship(7, 0).authors[0],
+            (author(0), 2)
+        );
+
+        // Dropping understates `K`/`U`, never overstates them: the
+        // distinct-author count is capped by the bound, never inflated past it.
+        assert_eq!(
+            Welfare::collator_authorship_epoch(7).authors.len(),
+            MAX_AUTHORSHIP_ENTRIES as usize
+        );
+    });
+}
+
+#[test]
+fn a_dropped_author_latches_the_truncation_sentinel_in_the_affected_window() {
+    // The asymmetry the sentinel exists for: a drop is conservative for
+    // a *count* (`K`, `U`) and misleading for a *distribution* (`D_eff`), so the
+    // window records that its distribution is no longer the real one instead of
+    // letting a concentration consumer trust it.
+    new_test_ext().execute_with(|| {
+        for n in 0..MAX_AUTHORSHIP_ENTRIES {
+            Welfare::note_collator_authorship(7, 0, author(n as u8));
+        }
+        assert!(!Welfare::collator_authorship(7, 0).truncated);
+        assert!(!Welfare::collator_authorship_epoch(7).truncated);
+
+        // A newly rotated author arrives with the window full. This is exactly
+        // the shape that makes the *retained* distribution look uniform while
+        // the real one is concentrated in the dropped author.
+        for _ in 0..50 {
+            Welfare::note_collator_authorship(7, 0, author(200));
+        }
+
+        let day = Welfare::collator_authorship(7, 0);
+        assert!(day.truncated, "the day window must latch the drop");
+        assert!(
+            Welfare::collator_authorship_epoch(7).truncated,
+            "the epoch aggregate dropped the same author and must latch it too",
+        );
+        // The counts that survived are unchanged and still usable: the sentinel
+        // withdraws the distribution, not the data.
+        assert_eq!(day.authors.len(), MAX_AUTHORSHIP_ENTRIES as usize);
+        assert!(day.authors.iter().all(|(_, blocks)| *blocks == 1));
+
+        // A different day of the same epoch is a different window: it never
+        // dropped anything, so its own distribution stays available.
+        Welfare::note_collator_authorship(7, 1, author(0));
+        assert!(!Welfare::collator_authorship(7, 1).truncated);
+    });
+}
+
+#[test]
+fn a_day_drop_alone_does_not_taint_the_epoch_aggregate() {
+    // The two windows are maintained independently, so a day that ran out of
+    // room does not make the epoch-wide distribution wrong — and vice versa.
+    // Pinning this stops the flags being collapsed into one, which would make
+    // every epoch containing one full day unusable for concentration.
+    new_test_ext().execute_with(|| {
+        // Fill day 0 to its bound with authors 0..N.
+        for n in 0..MAX_AUTHORSHIP_ENTRIES {
+            Welfare::note_collator_authorship(7, 0, author(n as u8));
+        }
+        // The same authors on day 1, so the epoch aggregate is also exactly at
+        // its bound with no room for a new one.
+        for n in 0..MAX_AUTHORSHIP_ENTRIES {
+            Welfare::note_collator_authorship(7, 1, author(n as u8));
+        }
+        assert!(!Welfare::collator_authorship_epoch(7).truncated);
+
+        // Author 200 is new to both windows, so both drop it and both latch.
+        Welfare::note_collator_authorship(7, 0, author(200));
+        assert!(Welfare::collator_authorship(7, 0).truncated);
+        assert!(Welfare::collator_authorship_epoch(7).truncated);
+
+        // Now the inverse: a fresh epoch whose day 0 is full but whose aggregate
+        // has room, reached by seeding storage directly (the writer cannot
+        // produce it, which is why the read path must not assume it away).
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![7, 8]));
+        let mut full_day = Vec::new();
+        for n in 0..MAX_AUTHORSHIP_ENTRIES {
+            full_day.push((author(n as u8), 1));
+        }
+        CollatorAuthorship::<Test>::insert(
+            8,
+            0,
+            AuthorshipWindow::<Test> {
+                authors: BoundedVec::truncate_from(full_day.clone()),
+                truncated: true,
+            },
+        );
+        CollatorAuthorshipEpoch::<Test>::insert(8, window(full_day));
+        assert!(Welfare::collator_authorship(8, 0).truncated);
+        assert!(
+            !Welfare::collator_authorship_epoch(8).truncated,
+            "a day's drop is not the epoch aggregate's drop",
+        );
+    });
+}
+
+#[test]
+fn a_full_traffic_index_drops_the_whole_authorship_observation() {
+    // The same rule `note_xcm_traffic` follows: recording into an unindexed
+    // prefix would create state the bounded retention walk can never reach.
+    new_test_ext().execute_with(|| {
+        for epoch in 0..MAX_XCM_TRAFFIC_EPOCHS_BOUND {
+            Welfare::note_xcm_traffic(epoch, 0, XcmTrafficKind::Accepted);
+        }
+        assert_eq!(
+            XcmTrafficEpochs::<Test>::get().len(),
+            MAX_XCM_TRAFFIC_EPOCHS_BOUND as usize
+        );
+
+        Welfare::note_collator_authorship(MAX_XCM_TRAFFIC_EPOCHS_BOUND, 0, author(1));
+
+        assert!(!CollatorAuthorship::<Test>::contains_key(
+            MAX_XCM_TRAFFIC_EPOCHS_BOUND,
+            0
+        ));
+        // Nor an aggregate: an unindexed epoch is unreachable by the reaper in
+        // either map, so the whole observation is dropped and no window exists
+        // to carry a sentinel.
+        assert!(!CollatorAuthorshipEpoch::<Test>::contains_key(
+            MAX_XCM_TRAFFIC_EPOCHS_BOUND
+        ));
+        assert_eq!(
+            XcmTrafficEpochs::<Test>::get().len(),
+            MAX_XCM_TRAFFIC_EPOCHS_BOUND as usize
+        );
+
+        // An already-indexed epoch keeps recording normally.
+        Welfare::note_collator_authorship(0, 0, author(1));
+        assert_eq!(
+            Welfare::collator_authorship(0, 0).authors.into_inner(),
+            vec![(author(1), 1)]
+        );
+    });
+}
+
+#[test]
+fn the_reaper_retires_authorship_in_the_same_bounded_walk_as_traffic() {
+    new_test_ext().execute_with(|| {
+        for epoch in [1, 3, 5] {
+            Welfare::note_xcm_traffic(epoch, 0, XcmTrafficKind::Accepted);
+            Welfare::note_collator_authorship(epoch, 0, author(1));
+            Welfare::note_collator_authorship(epoch, u8::MAX, author(2));
+        }
+        // An authorship-only epoch: no XCM was sent and no probe ran, which is
+        // ordinary. It must be reaped by the same walk, not stranded.
+        Welfare::note_collator_authorship(2, 0, author(3));
+
+        // One call retires its bounded batch, oldest first, from *every* map the
+        // shared index governs — including the epoch aggregate, which is keyed
+        // by epoch alone and would otherwise outlive its day series.
+        assert_ok!(Welfare::prune_xcm_traffic(5));
+        assert_eq!(XcmTraffic::<Test>::iter_prefix(1).count(), 0);
+        assert_eq!(CollatorAuthorship::<Test>::iter_prefix(1).count(), 0);
+        assert_eq!(CollatorAuthorship::<Test>::iter_prefix(2).count(), 0);
+        assert!(!CollatorAuthorshipEpoch::<Test>::contains_key(1));
+        assert!(!CollatorAuthorshipEpoch::<Test>::contains_key(2));
+        assert_eq!(XcmTrafficEpochs::<Test>::get().into_inner(), vec![3, 5]);
+
+        // Epoch 3 is still eligible; the next call takes it, and 5 (not below
+        // the cutoff) is retained with its authorship intact.
+        assert_ok!(Welfare::prune_xcm_traffic(5));
+        assert_eq!(CollatorAuthorship::<Test>::iter_prefix(3).count(), 0);
+        assert!(!CollatorAuthorshipEpoch::<Test>::contains_key(3));
+        assert_eq!(CollatorAuthorship::<Test>::iter_prefix(5).count(), 2);
+        assert_eq!(XcmTrafficEpochs::<Test>::get().into_inner(), vec![5]);
+        assert_eq!(
+            Welfare::collator_authorship_epoch(5).authors.into_inner(),
+            vec![(author(1), 1), (author(2), 1)]
+        );
+    });
+}
+
+#[test]
+fn try_state_binds_the_authorship_series_to_the_shared_index() {
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(30);
+
+        // Populated through the writer: indexed, in the past, inside its bound.
+        Welfare::note_collator_authorship(29, 0, author(1));
+        Welfare::note_collator_authorship(29, 0, author(2));
+        Welfare::note_collator_authorship(29, 4, author(1));
+        assert_ok!(Welfare::do_try_state());
+
+        // An authorship-only epoch is legitimate state: the index check must not
+        // demand an XCM counter or a probe outcome alongside it.
+        assert_eq!(XcmTraffic::<Test>::iter_prefix(29).count(), 0);
+        assert_eq!(ReserveProbeDaily::<Test>::iter_prefix(29).count(), 0);
+
+        // An epoch present in the map but absent from the index is unreachable
+        // by the bounded reaper — the exact corruption the index exists to
+        // exclude (I-20).
+        XcmTrafficEpochs::<Test>::kill();
+        assert!(Welfare::do_try_state().is_err());
+
+        // Restoring the index restores the invariant.
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![29]));
+        assert_ok!(Welfare::do_try_state());
+
+        // Authorship attributed to an epoch the clock has not reached.
+        CollatorAuthorship::<Test>::insert(31, 0, window(vec![(author(1), 1)]));
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![29, 31]));
+        assert!(Welfare::do_try_state().is_err());
+
+        // An empty stored author set is not a legal record either: the writer
+        // never produces one, so its presence is corruption.
+        CollatorAuthorship::<Test>::remove(31, 0);
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![29]));
+        assert_ok!(Welfare::do_try_state());
+        CollatorAuthorship::<Test>::insert(29, 9, window(Vec::new()));
+        assert!(Welfare::do_try_state().is_err());
+    });
+}
+
+#[test]
+fn try_state_binds_the_epoch_aggregate_to_its_day_series() {
+    // The aggregate is derived state maintained on write, so nothing but
+    // try-state can catch a writer that stopped updating one of its two windows
+    // — the failure would otherwise be silent and move every component reading
+    // the aggregate.
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(30);
+        Welfare::note_collator_authorship(29, 0, author(1));
+        Welfare::note_collator_authorship(29, 1, author(1));
+        Welfare::note_collator_authorship(29, 1, author(2));
+        assert_ok!(Welfare::do_try_state());
+
+        // The aggregate under-counts the day series: three blocks were authored
+        // and the aggregate accounts for two.
+        CollatorAuthorshipEpoch::<Test>::insert(29, window(vec![(author(1), 1), (author(2), 1)]));
+        assert!(Welfare::do_try_state().is_err());
+
+        // Restoring the true total restores the invariant.
+        CollatorAuthorshipEpoch::<Test>::insert(29, window(vec![(author(1), 2), (author(2), 1)]));
+        assert_ok!(Welfare::do_try_state());
+
+        // An aggregate whose epoch is absent from the shared index is
+        // unreachable by the bounded reaper, exactly like a day window (I-20).
+        CollatorAuthorshipEpoch::<Test>::insert(28, window(vec![(author(1), 1)]));
+        assert!(Welfare::do_try_state().is_err());
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![28, 29]));
+        // Epoch 28 has an aggregate and no day series: the totals disagree, and
+        // that is a real divergence rather than a legal shape.
+        assert!(Welfare::do_try_state().is_err());
+
+        // A truncated aggregate is excused from the totals check — it admits it
+        // dropped observations the day series may still hold.
+        CollatorAuthorshipEpoch::<Test>::insert(
+            28,
+            AuthorshipWindow::<Test> {
+                authors: BoundedVec::truncate_from(vec![(author(1), 1)]),
+                truncated: true,
+            },
+        );
+        assert_ok!(Welfare::do_try_state());
+
+        // The pairing binds in the other direction too. Iterating aggregates
+        // alone would *skip* an epoch whose aggregate went missing, so the
+        // totals check cannot see the failure that matters most: a writer that
+        // stopped maintaining the aggregate while the day series kept growing.
+        CollatorAuthorshipEpoch::<Test>::remove(29);
+        assert!(Welfare::do_try_state().is_err());
+        CollatorAuthorshipEpoch::<Test>::insert(29, window(vec![(author(1), 2), (author(2), 1)]));
+        assert_ok!(Welfare::do_try_state());
+    });
+}
+
+// ---------------------------------------------------------------- SQ-181
+//
+// 05 §4.7's measurable day set: a day index is a measurement window only if the
+// epoch actually contained it. `MAX_DAILY_GATE_SAMPLES` is the storage bound on
+// the breach bitmap, not the semantic bound, so a day below it can still be
+// outside the epoch — and resolving such a day would let a keeper manufacture a
+// `C_daily` breach out of components that were never measured.
+
+#[test]
+fn record_daily_gate_refuses_a_day_the_epoch_never_had() {
+    new_test_ext().execute_with(|| {
+        RecordKeeperRebates::set(true);
+        // A 14-whole-day epoch: days 0..=13 are measurement windows, day 14 is
+        // not, and every one of them is below `MAX_DAILY_GATE_SAMPLES`.
+        MeasurableDays::set(Some(14));
+
+        // The last day inside the set is admitted.
+        assert_ok!(Welfare::record_daily_gate(
+            RuntimeOrigin::signed(keeper()),
+            5,
+            13,
+            1
+        ));
+        assert_eq!(SampledGateDays::<Test>::get(5), Some([1 << 13, 0]));
+        assert_eq!(KeeperRebates::get().len(), 1);
+
+        // The first day outside it is refused — not resolved to any value, so no
+        // sample is recorded, no breach flag is set, and no rebate is paid.
+        let flags_before = GateBreachFlags::<Test>::get(5);
+        assert_noop!(
+            Welfare::record_daily_gate(RuntimeOrigin::signed(keeper()), 5, 14, 1),
+            Error::<Test>::DayOutsideEpoch
+        );
+        assert_eq!(SampledGateDays::<Test>::get(5), Some([1 << 13, 0]));
+        assert_eq!(GateBreachFlags::<Test>::get(5), flags_before);
+        assert_eq!(KeeperRebates::get().len(), 1);
+
+        // And so is a day the storage bitmap could hold.
+        assert_noop!(
+            Welfare::record_daily_gate(RuntimeOrigin::signed(keeper()), 5, 63, 1),
+            Error::<Test>::DayOutsideEpoch
+        );
+        // The bitmap bound still answers first for a day it cannot even address.
+        assert_noop!(
+            Welfare::record_daily_gate(
+                RuntimeOrigin::signed(keeper()),
+                5,
+                MAX_DAILY_GATE_SAMPLES,
+                1
+            ),
+            Error::<Test>::ValueOutOfRange
+        );
+    });
+}
+
+#[test]
+fn a_sub_day_epoch_still_requires_one_recorded_day() {
+    // The floor at one day: a `fast-timing` epoch shorter than a day has one
+    // measurable day, so it cannot pass vacuously — and it has exactly one, so
+    // day 1 is already outside it.
+    new_test_ext().execute_with(|| {
+        MeasurableDays::set(Some(1));
+
+        assert_ok!(Welfare::record_daily_gate(
+            RuntimeOrigin::signed(keeper()),
+            5,
+            0,
+            1
+        ));
+        assert_noop!(
+            Welfare::record_daily_gate(RuntimeOrigin::signed(keeper()), 5, 1, 1),
+            Error::<Test>::DayOutsideEpoch
+        );
+    });
+}
+
+#[test]
+fn an_epoch_whose_timing_is_unknown_admits_no_day_at_all() {
+    // Membership in the measurable set cannot be decided, so every day is
+    // refused rather than assumed inside it (G-1).
+    new_test_ext().execute_with(|| {
+        MeasurableDays::set(None);
+
+        assert_noop!(
+            Welfare::record_daily_gate(RuntimeOrigin::signed(keeper()), 5, 0, 1),
+            Error::<Test>::DayOutsideEpoch
+        );
+        assert_eq!(SampledGateDays::<Test>::get(5), None);
+    });
+}
+
 #[test]
 fn injected_component_vector_over_limit_is_rejected() {
     new_test_ext().execute_with(|| {

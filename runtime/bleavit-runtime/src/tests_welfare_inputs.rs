@@ -6,7 +6,7 @@
 
 use alloc::{vec, vec::Vec};
 
-use frame_support::traits::Get;
+use frame_support::{assert_ok, traits::Get};
 
 use crate::{configs::RuntimeEpochWelfare, Runtime};
 
@@ -670,6 +670,450 @@ fn sq195_sub_day_epoch_armed_after_its_end_is_unmeasured_not_failed() {
                 .find(|c| c.id == futarchy_primitives::metric_ids::R)
                 .map(|c| c.value),
             None,
+        );
+    });
+}
+
+// ----------------------------------------------------------------- A14
+//
+// 05 §4.3 `K` — collator-set adequacy — and the `(epoch, day)` authorship series
+// it reads. The series is written by the block-authorship event handler and
+// shared with the later `U` and `D_eff` bindings; the series' own bounded and
+// fail-soft properties are pinned in `pallets/welfare/src/tests.rs`, and what
+// follows is the runtime *projection*: the live `collator.n_min` divisor, the
+// `min(1, ·)` saturation, and the two granularities agreeing.
+
+/// The live 13 §1 divisor, read exactly as the production path reads it.
+/// Hardcoding 4 here would make the suite pass on a chain whose governance had
+/// legitimately amended the key (rule 4).
+fn collator_n_min() -> u64 {
+    u64::from(crate::configs::u8_param(b"collator.n_min"))
+}
+
+/// `min(1, distinct / collator.n_min)` on the 1e9 grid — the expectation
+/// derived from the spec formula and the live key, never a copied constant.
+fn expected_k(distinct: u64) -> futarchy_primitives::FixedU64 {
+    let n_min = collator_n_min();
+    assert!(n_min > 0, "the genesis registry seeds a positive n_min");
+    futarchy_primitives::FixedU64((distinct * pallet_welfare::ONE / n_min).min(pallet_welfare::ONE))
+}
+
+fn author(n: u8) -> crate::AccountId {
+    crate::tests::account(n)
+}
+
+#[test]
+fn a14_collator_adequacy_is_projected_at_both_granularities() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 50;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::K);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let n_min = collator_n_min();
+        assert!(n_min >= 3, "13 §1 bounds collator.n_min below at 3");
+
+        let k_day = |day: u8| {
+            crate::configs::RuntimeMetricInputs::daily_components(epoch, day, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::K)
+                .map(|c| c.value)
+        };
+        let k_epoch = || {
+            crate::configs::RuntimeMetricInputs::onchain_components(epoch, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::K)
+                .map(|c| c.value)
+        };
+
+        // An empty window is `K = 0`, not an unavailable component: 05 §4.3
+        // gives `K` no missing-data rule because "nobody authored" is itself the
+        // collator-set failure `K` measures, and it needs no mechanism to be
+        // armed first (unlike `R`).
+        assert_eq!(k_day(0), Some(futarchy_primitives::FixedU64(0)));
+        assert_eq!(k_epoch(), Some(futarchy_primitives::FixedU64(0)));
+
+        // Day 0: two distinct authors, one of them twice. Repeat blocks by one
+        // author do not raise `K` — the formula counts *distinct* authors.
+        pallet_welfare::Pallet::<Runtime>::note_collator_authorship(epoch, 0, author(1));
+        pallet_welfare::Pallet::<Runtime>::note_collator_authorship(epoch, 0, author(1));
+        pallet_welfare::Pallet::<Runtime>::note_collator_authorship(epoch, 0, author(2));
+        assert_eq!(k_day(0), Some(expected_k(2)));
+
+        // Day 1: one distinct author, strictly below day 0 — the daily value
+        // tracks that day only and does not inherit day 0's coverage.
+        pallet_welfare::Pallet::<Runtime>::note_collator_authorship(epoch, 1, author(1));
+        assert_eq!(k_day(1), Some(expected_k(1)));
+
+        // The epoch projection is the union across days: {1, 2}, not the sum of
+        // the per-day counts (which would be 3) and not the last day's value.
+        assert_eq!(k_epoch(), Some(expected_k(2)));
+
+        // Enough distinct authors on one day to exceed `n_min`: `min(1, ·)`
+        // saturates and never exceeds 1, which the pillar aggregation requires
+        // of every component (05 §4.4).
+        let over = u8::try_from(n_min).expect("n_min fits u8") + 2;
+        for n in 10..(10 + over) {
+            pallet_welfare::Pallet::<Runtime>::note_collator_authorship(epoch, 2, author(n));
+        }
+        assert_eq!(
+            k_day(2),
+            Some(futarchy_primitives::FixedU64(pallet_welfare::ONE)),
+            "more distinct authors than n_min must saturate at 1, not exceed it",
+        );
+        assert_eq!(
+            k_epoch(),
+            Some(futarchy_primitives::FixedU64(pallet_welfare::ONE)),
+        );
+    });
+}
+
+#[test]
+fn a14_the_authorship_handler_feeds_both_the_payout_and_the_metric() {
+    // The `pallet_authorship::EventHandler` drives two independent consumers off
+    // one authored block: 08 §2.4's payout accumulator and 05 §4.3's measurement
+    // series. Wiring only one of them is the silent failure this pins.
+    crate::tests::development_ext().execute_with(|| {
+        use pallet_authorship::EventHandler;
+
+        let who = author(21);
+        crate::configs::RuntimeCollatorAuthorship::note_author(who.clone());
+
+        assert!(
+            pallet_futarchy_treasury::CollatorAuthoredBlocks::<Runtime>::get()
+                .iter()
+                .any(|(stored, blocks)| *stored == who && *blocks == 1),
+            "the authorship handler must still credit the 08 §2.4 payout accumulator",
+        );
+        // The measurement series is attributed by the *same* `(epoch, day)`
+        // derivation the XCM-health and reserve-probe recorders use.
+        assert!(
+            pallet_welfare::CollatorAuthorship::<Runtime>::iter().any(|(_, _, window)| window
+                .authors
+                .iter()
+                .any(|(stored, blocks)| *stored == who && *blocks == 1)),
+            "the authorship handler must record the 05 §4.3 measurement series",
+        );
+        // And its epoch aggregate, which is what `record_snapshot` reads: a
+        // writer that maintained only the day window would leave every epoch
+        // projection reading zero authors.
+        assert!(
+            pallet_welfare::CollatorAuthorshipEpoch::<Runtime>::iter().any(|(_, window)| window
+                .authors
+                .iter()
+                .any(|(stored, blocks)| *stored == who && *blocks == 1)),
+            "the authorship handler must maintain the 05 §4.3 epoch aggregate",
+        );
+    });
+}
+
+#[test]
+fn a14_a_zero_n_min_leaves_k_absent_and_fails_the_crank_closed() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 51;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::K);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        pallet_welfare::Pallet::<Runtime>::note_collator_authorship(epoch, 0, author(1));
+        pallet_welfare::Pallet::<Runtime>::note_collator_authorship(epoch, 0, author(2));
+
+        // A healthy divisor gives a value, so the refusal below is attributable
+        // to the divisor and to nothing else in the fixture.
+        assert!(
+            crate::configs::RuntimeMetricInputs::onchain_components(epoch, VERSION)
+                .into_iter()
+                .any(|c| c.id == futarchy_primitives::metric_ids::K)
+        );
+
+        // Zero has no defined quotient. 13 §1 bounds the key below at 3, so this
+        // is unreachable through governance; it is the defensive branch for a
+        // key read that answers zero for any other reason.
+        let key = pallet_constitution::key16(b"collator.n_min");
+        pallet_constitution::Params::<Runtime>::mutate(key, |record| {
+            let record = record
+                .as_mut()
+                .expect("collator.n_min is seeded at genesis");
+            record.value = pallet_constitution::ParamValue::U8(0);
+        });
+
+        assert!(
+            !crate::configs::RuntimeMetricInputs::onchain_components(epoch, VERSION)
+                .into_iter()
+                .any(|c| c.id == futarchy_primitives::metric_ids::K),
+            "a zero divisor must leave K absent, never substitute a value",
+        );
+        assert!(
+            !crate::configs::RuntimeMetricInputs::daily_components(epoch, 0, VERSION)
+                .into_iter()
+                .any(|c| c.id == futarchy_primitives::metric_ids::K),
+        );
+
+        // And the crank fails status-quo-safe on the absence (G-1) rather than
+        // recording a snapshot whose `C_onchain` was computed from a fabricated
+        // component.
+        let due = crate::Epoch::scheduled_epoch_end(epoch).expect("the live epoch is scheduled");
+        crate::System::set_block_number(due);
+        assert_ok!(crate::Epoch::tick(
+            crate::RuntimeOrigin::signed(author(77)),
+            Default::default(),
+        ));
+        assert!(
+            crate::Welfare::record_snapshot(
+                crate::RuntimeOrigin::signed(author(77)),
+                epoch,
+                VERSION,
+            )
+            .is_err(),
+            "a snapshot must not be recorded over an unavailable component",
+        );
+        assert!(!pallet_welfare::Snapshots::<Runtime>::contains_key((
+            epoch, VERSION
+        )));
+    });
+}
+
+#[test]
+fn a14_try_state_holds_over_the_populated_authorship_series() {
+    crate::tests::development_ext().execute_with(|| {
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        for day in 0..3u8 {
+            for n in 1..4u8 {
+                pallet_welfare::Pallet::<Runtime>::note_collator_authorship(epoch, day, author(n));
+            }
+        }
+        assert_ok!(pallet_welfare::Pallet::<Runtime>::do_try_state());
+
+        // Severing the shared prefix index leaves the series unreachable by the
+        // bounded reaper, which try-state must catch (I-20).
+        pallet_welfare::XcmTrafficEpochs::<Runtime>::kill();
+        assert!(pallet_welfare::Pallet::<Runtime>::do_try_state().is_err());
+    });
+}
+
+// ----------------------------------------------------------------- A14
+//
+// The overflow sentinel. Dropping an author for want of room lowers a *count*,
+// which is conservative for `K` (and `U`), but it does **not** lower a
+// *concentration*: a window full of early low-count authors that drops a newly
+// rotated author producing most of the remaining blocks keeps a near-uniform
+// retained distribution while the real one is concentrated, so `D_eff` would
+// read better than the truth. The window therefore withdraws its distribution
+// while keeping its counts readable.
+
+#[test]
+fn a14_a_truncated_window_withdraws_the_distribution_but_not_the_count() {
+    use pallet_welfare::MetricInputs;
+    const VERSION: futarchy_primitives::MetricSpecVersion = 52;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::K);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let bound =
+            <<Runtime as pallet_welfare::Config>::MaxCollatorAuthorshipEntries as Get<u32>>::get();
+
+        // Fill day 0 exactly to its bound: nothing dropped yet.
+        for n in 0..bound {
+            let author = crate::tests::account(u8::try_from(n).expect("the bound fits u8"));
+            pallet_welfare::Pallet::<Runtime>::note_collator_authorship(epoch, 0, author);
+        }
+        let full = crate::configs::AuthorshipWindowInput::day(epoch, 0);
+        assert_eq!(full.distinct_active(), bound as usize);
+        assert!(
+            full.distribution().is_some(),
+            "an untruncated window's distribution is the real one",
+        );
+
+        // A newly rotated author now produces most of the window's blocks and is
+        // dropped every time. The retained distribution stays flat at one block
+        // each — which is exactly why it must not be read.
+        let rotated = crate::tests::account(u8::try_from(bound).expect("bound + 1 fits u8"));
+        for _ in 0..40 {
+            pallet_welfare::Pallet::<Runtime>::note_collator_authorship(epoch, 0, rotated.clone());
+        }
+
+        let truncated = crate::configs::AuthorshipWindowInput::day(epoch, 0);
+        assert!(
+            truncated.distribution().is_none(),
+            "a truncated window must read as unavailable to a concentration consumer",
+        );
+        assert_eq!(
+            truncated.distinct_active(),
+            bound as usize,
+            "the counts that survived are still readable and still conservative",
+        );
+
+        // `K` is a count component, so it still computes — and at this many
+        // distinct authors it saturates at 1.
+        assert_eq!(
+            crate::configs::RuntimeMetricInputs::daily_components(epoch, 0, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::K)
+                .map(|c| c.value),
+            Some(futarchy_primitives::FixedU64(pallet_welfare::ONE)),
+        );
+        // The epoch aggregate dropped the same author, so it latched too.
+        assert!(crate::configs::AuthorshipWindowInput::epoch(epoch)
+            .distribution()
+            .is_none());
+
+        // An **empty** window is unavailable to concentration for a different
+        // reason and the same direction: `K` reads it as 0 (nobody authored —
+        // the failure `K` measures), while 05 §4.5's HHI has no value over an
+        // empty author set and the arithmetic that falls out of one would score
+        // a perfect `D_eff` from no observations at all.
+        let unwritten = crate::configs::AuthorshipWindowInput::day(epoch, 200);
+        assert_eq!(unwritten.distinct_active(), 0);
+        assert!(
+            unwritten.distribution().is_none(),
+            "an empty window must not read as an available, perfectly-diverse distribution",
+        );
+        assert_eq!(
+            crate::configs::RuntimeMetricInputs::daily_components(epoch, 200, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::K)
+                .map(|c| c.value),
+            Some(futarchy_primitives::FixedU64(0)),
+            "the same empty window is a real `K = 0`, not an unavailable count",
+        );
+    });
+}
+
+// ---------------------------------------------------------------- SQ-181
+//
+// 05 §4.7's measurable day set, normative: an epoch's whole days, floored at
+// one. `MAX_DAILY_GATE_SAMPLES` (64) is the storage bound on the breach bitmap
+// and not the semantic bound, so for every permitted `epoch.length` there are
+// day indices below it that the epoch never contained. Resolving one of those
+// would let a signed keeper drive `C_daily` down out of components that were
+// never measured — `X` reads its no-traffic 1, `K` reads 0 because nobody
+// authored in a day that never elapsed, and `R` refuses.
+
+#[test]
+fn sq181_measurable_days_are_the_epochs_whole_days_floored_at_one() {
+    use pallet_welfare::{MetricInputs, SnapshotSchedule};
+
+    crate::tests::development_ext().execute_with(|| {
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let day_len = futarchy_primitives::kernel::BLOCKS_PER_DAY;
+        let timing =
+            pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch).expect("live epoch has timing");
+
+        assert_eq!(
+            crate::configs::RuntimeSnapshotSchedule::measurable_days(epoch),
+            Some(timing.length / day_len),
+        );
+
+        // A trailing partial day is not a completed cadence slot.
+        pallet_epoch::Schedule::<Runtime>::mutate(|schedule| {
+            schedule.length = 3 * day_len + day_len / 2;
+        });
+        assert_eq!(
+            crate::configs::RuntimeSnapshotSchedule::measurable_days(epoch),
+            Some(3),
+        );
+
+        // Floored at one, so a sub-day `fast-timing` epoch cannot pass
+        // vacuously by having an empty measurable set.
+        pallet_epoch::Schedule::<Runtime>::mutate(|schedule| {
+            schedule.length = day_len / 4;
+        });
+        assert_eq!(
+            crate::configs::RuntimeSnapshotSchedule::measurable_days(epoch),
+            Some(1),
+        );
+
+        // An epoch whose timing is unknown admits no day at all.
+        assert_eq!(
+            crate::configs::RuntimeSnapshotSchedule::measurable_days(epoch + 5),
+            None,
+        );
+
+        // And the day domain is the *same* one 07 §8's `R` range is built from,
+        // which is the point of single-homing it: the first day outside the set
+        // is refused by the guard and unavailable to `R`, not scored 0.
+        const VERSION: futarchy_primitives::MetricSpecVersion = 53;
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::R);
+        pallet_epoch::Schedule::<Runtime>::mutate(|schedule| {
+            schedule.length = 3 * day_len;
+        });
+        pallet_oracle::ReserveProbeArmed::<Runtime>::put(true);
+        pallet_oracle::ReserveProbeArmedAt::<Runtime>::put(0);
+        let measurable = crate::configs::RuntimeSnapshotSchedule::measurable_days(epoch)
+            .expect("the live epoch has timing");
+        let outside = u8::try_from(measurable).expect("day fits u8");
+        pallet_welfare::Pallet::<Runtime>::note_reserve_probe(epoch, outside, false);
+        assert_eq!(
+            crate::configs::RuntimeMetricInputs::daily_components(epoch, outside, VERSION)
+                .into_iter()
+                .find(|c| c.id == futarchy_primitives::metric_ids::R)
+                .map(|c| c.value),
+            None,
+            "the two consumers of the day domain must agree on its last day",
+        );
+    });
+}
+
+#[test]
+fn sq181_record_daily_gate_refuses_a_day_the_epoch_never_had() {
+    const VERSION: futarchy_primitives::MetricSpecVersion = 54;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::X);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let day_len = futarchy_primitives::kernel::BLOCKS_PER_DAY;
+        let timing =
+            pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch).expect("live epoch has timing");
+        let whole_days = timing.length / day_len;
+        assert!(
+            whole_days < u32::from(pallet_welfare::MAX_DAILY_GATE_SAMPLES),
+            "the exploit needs a day the bitmap can address and the epoch cannot",
+        );
+
+        // Close the epoch so a keeper may crank its days at all.
+        let due = crate::Epoch::scheduled_epoch_end(epoch).expect("the live epoch is scheduled");
+        crate::System::set_block_number(due);
+        assert_ok!(crate::Epoch::tick(
+            crate::RuntimeOrigin::signed(author(77)),
+            Default::default(),
+        ));
+        assert!(pallet_epoch::CurrentEpoch::<Runtime>::get() > epoch);
+
+        let keeper = crate::RuntimeOrigin::signed(author(78));
+        let last_day = u8::try_from(whole_days - 1).expect("day fits u8");
+
+        // The last day inside the measurable set is admitted.
+        assert_ok!(crate::Welfare::record_daily_gate(
+            keeper.clone(),
+            epoch,
+            last_day,
+            VERSION,
+        ));
+        assert!(pallet_welfare::GateBreachFlags::<Runtime>::contains_key(
+            epoch
+        ));
+        let sampled = pallet_welfare::SampledGateDays::<Runtime>::get(epoch);
+
+        // The first day outside it is refused, and nothing about the epoch's
+        // recorded state moves: no sample, no breach flag, no `C_daily` input
+        // resolved for a window that never existed.
+        let beyond = u8::try_from(whole_days).expect("day fits u8");
+        frame_support::assert_noop!(
+            crate::Welfare::record_daily_gate(keeper.clone(), epoch, beyond, VERSION),
+            pallet_welfare::Error::<Runtime>::DayOutsideEpoch,
+        );
+        frame_support::assert_noop!(
+            crate::Welfare::record_daily_gate(
+                keeper,
+                epoch,
+                pallet_welfare::MAX_DAILY_GATE_SAMPLES - 1,
+                VERSION,
+            ),
+            pallet_welfare::Error::<Runtime>::DayOutsideEpoch,
+        );
+        assert_eq!(
+            pallet_welfare::SampledGateDays::<Runtime>::get(epoch),
+            sampled,
         );
     });
 }

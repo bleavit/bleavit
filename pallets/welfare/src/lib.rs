@@ -138,11 +138,21 @@ pub trait MetricInputs {
     ) -> Vec<ComponentValue>;
 }
 
-/// Epoch-owned schedule projection used only to derive snapshot deadlines.
-/// Implementations accept and return plain protocol numbers; welfare remains
-/// independent of FRAME epoch and Cumulus types (I-24).
+/// Epoch-owned schedule projection: snapshot deadlines and the day domain a
+/// daily gate sample may name. Implementations accept and return plain protocol
+/// numbers; welfare remains independent of FRAME epoch and Cumulus types (I-24).
 pub trait SnapshotSchedule {
     fn snapshot_due(epoch: EpochId) -> Option<BlockNumber>;
+    /// The size of `epoch`'s **measurable day set** (05 §4.7, normative): its
+    /// whole days, floored at one. Day indices `0 .. n` are measurement windows
+    /// and every other index is not one at all.
+    ///
+    /// `None` means the epoch's timing is unknown — a day cannot then be shown
+    /// to be inside the set, so `record_daily_gate` refuses it rather than
+    /// resolving it to any value (G-1). The projection is epoch-owned because
+    /// only the epoch clock knows an epoch's length, and a legal `epoch.length`
+    /// need not be a whole number of days.
+    fn measurable_days(epoch: EpochId) -> Option<u32>;
 }
 
 /// Gate-market dimension settled through the conditional ledger seam.
@@ -240,6 +250,15 @@ pub mod pallet {
         /// pallet owns neither oracle state nor constitution parameters, and
         /// must not import the oracle to reach them (I-24).
         type OracleAdmission: OracleAdmission;
+        /// 13 §4 bound on distinct authors tracked in one `(epoch, day)` slot of
+        /// [`CollatorAuthorship`].
+        ///
+        /// The runtime binds this to the same constant as the treasury's
+        /// `MaxCollatorCompensationEntries`: both count *the same population* —
+        /// the collators that can author in one active session — and letting
+        /// them disagree would mean one of the two silently disagrees with the
+        /// chain about how many collators exist.
+        type MaxCollatorAuthorshipEntries: Get<u32>;
         /// Weight information for all extrinsics.
         type WeightInfo: WeightInfo;
         /// Admitted origin construction for benchmarks.
@@ -503,6 +522,104 @@ pub mod pallet {
     pub type ReserveProbeDaily<T: Config> =
         StorageDoubleMap<_, Twox64Concat, EpochId, Twox64Concat, u8, bool, OptionQuery>;
 
+    /// One measurement window of the 05 §4.3 authorship series: the per-author
+    /// authored-block counts, plus the sentinel that says whether the window's
+    /// *distribution* may be read at all.
+    #[derive(
+        Encode,
+        Decode,
+        DecodeWithMemTracking,
+        TypeInfo,
+        MaxEncodedLen,
+        frame_support::CloneNoBound,
+        frame_support::PartialEqNoBound,
+        frame_support::EqNoBound,
+        frame_support::DebugNoBound,
+        frame_support::DefaultNoBound,
+    )]
+    #[scale_info(skip_type_params(T))]
+    pub struct AuthorshipWindow<T: Config> {
+        /// Distinct authors and their authored-block counts over the window,
+        /// bounded by [`Config::MaxCollatorAuthorshipEntries`] (13 §4). Counts
+        /// saturate rather than wrap.
+        pub authors: BoundedVec<(T::AccountId, u32), T::MaxCollatorAuthorshipEntries>,
+        /// Set once this window had to **drop** an author for want of room.
+        ///
+        /// The drop is not equally safe for every consumer, and conflating the
+        /// two readings is the defect this flag exists to prevent:
+        ///
+        ///  - **Count consumers are safe.** `K`
+        ///    (`min(1, distinct_active_authors / collator.n_min)`) and `U` read
+        ///    a *cardinality* or a *total*, and a dropped author can only lower
+        ///    both. They may read a truncated window; it is pessimistic, which
+        ///    is the direction G-1 wants.
+        ///  - **Distribution consumers are not.** `D_eff` (§4.5) reads
+        ///    *concentration*. A window already full of early low-count authors
+        ///    that then drops a newly rotated author producing most of the
+        ///    remaining blocks retains a near-uniform retained distribution
+        ///    while the real one is highly concentrated — so `D_eff` would read
+        ///    **better** than the truth, not worse. A truncated window is
+        ///    therefore *unavailable* to a distribution consumer, never merely
+        ///    conservative.
+        pub truncated: bool,
+    }
+
+    /// Per-author authored-block counts by `(epoch, day)` (05 §4.3).
+    ///
+    /// The shared series behind three welfare components, all of which read
+    /// *distinct authors* or *authored blocks* over a window and none of which
+    /// can be reconstructed from an aggregate count: collator-set adequacy `K`
+    /// (`min(1, distinct_active_authors / collator.n_min)`, live since A14),
+    /// block production `U`, and collator concentration `D_eff` (§4.5), which
+    /// needs the per-author distribution and not merely its cardinality. One
+    /// series serves all three so the three can never disagree about who
+    /// authored what.
+    ///
+    /// This pallet records only the counts and deliberately computes no
+    /// component from them — the same division of labour [`XcmTraffic`] makes.
+    ///
+    /// Keyed exactly like [`XcmTraffic`] and retired by the same bounded walk,
+    /// so it inherits that map's `MAX_XCM_TRAFFIC_EPOCHS_BOUND` prefix index and
+    /// its `u8`-bounded 256-day second key (I-20/I-21). The per-day vector is
+    /// bounded by [`Config::MaxCollatorAuthorshipEntries`] (13 §4).
+    #[pallet::storage]
+    pub type CollatorAuthorship<T: Config> = StorageDoubleMap<
+        _,
+        Twox64Concat,
+        EpochId,
+        Twox64Concat,
+        u8,
+        AuthorshipWindow<T>,
+        ValueQuery,
+    >;
+
+    /// The same series aggregated over an epoch's days, maintained **on write**
+    /// (05 §4.3).
+    ///
+    /// Deliberately stored rather than folded on read. The day dimension is
+    /// keyed by a `u8`, and the day index of the *live* epoch keeps advancing
+    /// while the clock is paused (05 §4.8 — the live epoch has no end bound), so
+    /// the fold's honest worst case is 256 day slots × the per-day bound: about
+    /// 1 MB of proof and a quadratic per-author merge, charged to
+    /// `record_snapshot` on every epoch. Restricting the fold to the epoch's
+    /// measurable days instead would make that charge a function of a
+    /// governance-tunable `epoch.length`, so the weight would silently
+    /// understate the moment the key moved. Maintaining the aggregate costs one
+    /// extra bounded read/write on the authorship path and makes the read O(1)
+    /// and constant.
+    ///
+    /// Its `truncated` flag is **its own**, not the disjunction of its days': the
+    /// aggregate is maintained independently, so a day that dropped an author
+    /// for want of room in *that day's* vector does not make the epoch-wide
+    /// distribution wrong. try-state ties the two together where both are
+    /// untruncated.
+    ///
+    /// Keyed by epoch only, and retired by the same bounded walk from the same
+    /// shared [`XcmTrafficEpochs`] index (I-20/I-21).
+    #[pallet::storage]
+    pub type CollatorAuthorshipEpoch<T: Config> =
+        StorageMap<_, Twox64Concat, EpochId, AuthorshipWindow<T>, ValueQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -605,6 +722,11 @@ pub mod pallet {
         /// series has no map onto [0,1]. Refused rather than resolved to the
         /// adopt-favourable 1.0 (G-1).
         DegenerateNormalizationRange,
+        /// The named day is not in the epoch's measurable day set (05 §4.7): the
+        /// epoch had fewer whole days than that, or its timing is no longer
+        /// retained so membership cannot be decided. Appended, not inserted —
+        /// error indices are part of the decoded surface (02 §13).
+        DayOutsideEpoch,
     }
 
     #[pallet::hooks]
@@ -680,6 +802,16 @@ pub mod pallet {
         /// Permissionless signed keeper crank for a **finalized** epoch's daily
         /// S/C gate sample. Like `record_snapshot`, the epoch must have closed
         /// (`epoch < CurrentEpoch`) so the day's counters are final (05 §4.7).
+        ///
+        /// `day` must lie in the epoch's **measurable day set** (05 §4.7): its
+        /// whole days, floored at one. `MAX_DAILY_GATE_SAMPLES` is the *storage*
+        /// bound on the breach bitmap and is not the semantic bound — for every
+        /// permitted `epoch.length` there are day indices below it that the epoch
+        /// never contained, and resolving one of those would let a keeper drive
+        /// `C_daily` down out of components that were never measured (`X` reads
+        /// its no-traffic 1, `K` reads 0 because nobody authored in a day that
+        /// never elapsed, `R` refuses). The day is therefore refused, not
+        /// resolved to any value.
         #[pallet::call_index(2)]
         // B5: recalibrate for the keeper-rebate sink's additional storage path.
         #[pallet::weight(T::WeightInfo::record_daily_gate())]
@@ -694,9 +826,18 @@ pub mod pallet {
                 epoch < T::CurrentEpoch::get(),
                 Error::<T>::EpochNotFinalized
             );
+            // Both day guards run before any component is projected: an
+            // inadmissible day must not reach the input seam at all, let alone
+            // have a value resolved for it.
+            frame_support::ensure!(day < MAX_DAILY_GATE_SAMPLES, Error::<T>::ValueOutOfRange);
+            // An unknown timing takes the same refusal as an out-of-range day:
+            // membership in the measurable set cannot be *shown*, and a day that
+            // cannot be shown to be a measurement window is not treated as one.
+            let measurable =
+                T::SnapshotSchedule::measurable_days(epoch).ok_or(Error::<T>::DayOutsideEpoch)?;
+            frame_support::ensure!(u32::from(day) < measurable, Error::<T>::DayOutsideEpoch);
             let components = T::MetricInputs::daily_components(epoch, day, spec_version);
             let params = Self::live_params()?;
-            frame_support::ensure!(day < MAX_DAILY_GATE_SAMPLES, Error::<T>::ValueOutOfRange);
             let word_index = usize::from(day / 32);
             let bit = 1u32 << (day % 32);
             let mut sampled_days = SampledGateDays::<T>::get(epoch).unwrap_or([0; 2]);
@@ -1086,6 +1227,14 @@ pub mod pallet {
                     // prefix index and retention window, so they retire in the
                     // same bounded step rather than accruing behind it.
                     let _ = ReserveProbeDaily::<T>::clear_prefix(epoch, u8::MAX as u32 + 1, None);
+                    // A14: so does the collator-authorship series. A second
+                    // index or a second reaper would be two retention policies
+                    // over one epoch window, and the one that fell behind would
+                    // be the one holding unbounded state.
+                    let _ = CollatorAuthorship::<T>::clear_prefix(epoch, u8::MAX as u32 + 1, None);
+                    // Its epoch aggregate retires in the same step: it is keyed
+                    // by the same epoch and reachable only through this index.
+                    CollatorAuthorshipEpoch::<T>::remove(epoch);
                     if let Some(position) = epochs.iter().position(|stored| *stored == epoch) {
                         epochs.remove(position);
                     }
@@ -1156,6 +1305,87 @@ pub mod pallet {
         /// Read one day's reserve-probe outcome; `None` means unrecorded.
         pub fn reserve_probe_daily(epoch: EpochId, day: u8) -> Option<bool> {
             ReserveProbeDaily::<T>::get(epoch, day)
+        }
+
+        /// Record one authored parachain block against its `(epoch, day)` slot
+        /// (05 §4.3).
+        ///
+        /// Fail-soft in the strongest sense: `pallet_authorship` drives its
+        /// `EventHandler` from `on_initialize` and reserves no weight for it, so
+        /// this registers its own benchmarked worst-case weight as `Mandatory`
+        /// before touching storage (the `note_collator_block` pattern) and can
+        /// then neither error nor panic. Counts saturate.
+        ///
+        /// **Overflow drops the observation, and the drop is conservative for
+        /// the count components only.** Three bounds can bind: the shared
+        /// [`XcmTrafficEpochs`] index (a new epoch arriving while bounded
+        /// maintenance catches up), the day's own author vector, and the epoch
+        /// aggregate's. A dropped author lowers a *count* — `K` is
+        /// `min(1, distinct_active_authors / collator.n_min)` and `U` is monotone
+        /// in recorded authorship — so for those two the drop costs a healthy
+        /// chain welfare and cannot hand a degraded one a gate it did not earn
+        /// (G-1). It is **not** conservative for `D_eff`, whose input is a
+        /// distribution rather than a count: dropping a newly rotated author who
+        /// then produces most of the window's blocks leaves the retained
+        /// distribution looking more uniform than the real one, i.e. a *better*
+        /// score than the truth. Each affected window therefore latches
+        /// [`AuthorshipWindow::truncated`], which makes it unavailable to a
+        /// concentration consumer while remaining readable by `K` and `U`.
+        /// Recording into an unindexed prefix is different again: it would
+        /// create state the bounded retention walk can never reach (I-20), so it
+        /// is dropped whole and no window exists to flag.
+        pub fn note_collator_authorship(epoch: EpochId, day: u8, who: T::AccountId) {
+            frame_system::Pallet::<T>::register_extra_weight_unchecked(
+                T::WeightInfo::note_collator_authorship(),
+                DispatchClass::Mandatory,
+            );
+            // Bound the new prefix to the shared traffic index so the retention
+            // walk can always find and retire it.
+            let tracked = XcmTrafficEpochs::<T>::mutate(|epochs| {
+                if epochs.contains(&epoch) {
+                    true
+                } else {
+                    epochs.try_push(epoch).is_ok()
+                }
+            });
+            if !tracked {
+                return;
+            }
+            CollatorAuthorship::<T>::mutate(epoch, day, |window| {
+                Self::observe_authorship(window, who.clone())
+            });
+            // The epoch aggregate is maintained here rather than folded on read,
+            // so `record_snapshot` pays one bounded read instead of up to 256
+            // (see [`CollatorAuthorshipEpoch`]).
+            CollatorAuthorshipEpoch::<T>::mutate(epoch, |window| {
+                Self::observe_authorship(window, who)
+            });
+        }
+
+        /// Add one authored block for `who` to one window, latching the
+        /// truncation sentinel if the window has no room for a new author.
+        fn observe_authorship(window: &mut AuthorshipWindow<T>, who: T::AccountId) {
+            if let Some(entry) = window.authors.iter_mut().find(|(stored, _)| *stored == who) {
+                entry.1 = entry.1.saturating_add(1);
+                return;
+            }
+            // A full window drops the *new* author only; the authors already
+            // recorded keep accumulating. The sentinel records that the retained
+            // distribution is no longer the real one.
+            if window.authors.try_push((who, 1)).is_err() {
+                window.truncated = true;
+            }
+        }
+
+        /// Return one day's authorship window.
+        pub fn collator_authorship(epoch: EpochId, day: u8) -> AuthorshipWindow<T> {
+            CollatorAuthorship::<T>::get(epoch, day)
+        }
+
+        /// Return an epoch's authorship window — the aggregate maintained on
+        /// write, so this is one bounded read and not a fold over 256 days.
+        pub fn collator_authorship_epoch(epoch: EpochId) -> AuthorshipWindow<T> {
+            CollatorAuthorshipEpoch::<T>::get(epoch)
         }
 
         /// Return the local XCM counters for one epoch/day window.
@@ -1541,11 +1771,18 @@ pub mod pallet {
                 // a budget refusal, which happens before the router is ever
                 // observed — so requiring traffic here would fail try-state on
                 // correct state.
+                // A14 adds the third co-indexed series for the same reason: a
+                // block can be authored in an epoch that sent no XCM and ran no
+                // probe, so an authorship-only prefix is correct state.
                 if XcmTraffic::<T>::iter_prefix(*epoch).next().is_none()
                     && ReserveProbeDaily::<T>::iter_prefix(*epoch).next().is_none()
+                    && CollatorAuthorship::<T>::iter_prefix(*epoch)
+                        .next()
+                        .is_none()
+                    && !CollatorAuthorshipEpoch::<T>::contains_key(*epoch)
                 {
                     return Err(TryRuntimeError::Other(
-                        "welfare traffic index has no corresponding counter or probe outcome",
+                        "welfare traffic index has no corresponding counter, probe outcome, or authorship record",
                     ));
                 }
             }
@@ -1580,6 +1817,93 @@ pub mod pallet {
                         "welfare reserve-probe outcome has no indexed epoch",
                     ));
                 }
+            }
+            // A14: the same two properties for the collator-authorship series —
+            // every recorded window is indexed, so the bounded retention walk
+            // can reach and retire it (I-20/I-21), and no authorship is
+            // attributed to an epoch the clock has not reached.
+            for (epoch, _, window) in CollatorAuthorship::<T>::iter() {
+                Self::check_authorship_window(&window, epoch, current_epoch, &traffic_epochs)?;
+                // The pairing is checked in **both** directions, like the
+                // snapshot ↔ settlement-context one above: the writer maintains
+                // the day window and the aggregate in the same call, so an
+                // aggregate missing beneath a recorded day is a writer that
+                // stopped maintaining it — and the totals check below cannot see
+                // that, because it iterates aggregates and would simply skip the
+                // epoch.
+                if !CollatorAuthorshipEpoch::<T>::contains_key(epoch) {
+                    return Err(TryRuntimeError::Other(
+                        "welfare collator authorship day window has no epoch aggregate",
+                    ));
+                }
+            }
+            // The epoch aggregate is derived state maintained on write,
+            // so its agreement with the day series is an invariant and not an
+            // assumption. Where neither side dropped an observation the two must
+            // account for the same blocks; a divergence means the writer missed
+            // one of its two windows, which would silently move every component
+            // reading the aggregate.
+            for (epoch, window) in CollatorAuthorshipEpoch::<T>::iter() {
+                Self::check_authorship_window(&window, epoch, current_epoch, &traffic_epochs)?;
+                if window.truncated {
+                    continue;
+                }
+                let mut day_total: u64 = 0;
+                let mut day_truncated = false;
+                for (_, day_window) in CollatorAuthorship::<T>::iter_prefix(epoch) {
+                    day_truncated |= day_window.truncated;
+                    for (_, blocks) in day_window.authors.iter() {
+                        day_total = day_total.saturating_add(u64::from(*blocks));
+                    }
+                }
+                let epoch_total = window.authors.iter().fold(0u64, |sum, (_, blocks)| {
+                    sum.saturating_add(u64::from(*blocks))
+                });
+                // A count that saturated at `u32::MAX` would diverge honestly,
+                // but a retained epoch spans at most `epoch.length` blocks
+                // (13 §2, days not billions), so the case is unreachable and is
+                // skipped rather than encoded as a legal divergence.
+                if !day_truncated && day_total <= u64::from(u32::MAX) && day_total != epoch_total {
+                    return Err(TryRuntimeError::Other(
+                        "welfare collator authorship aggregate disagrees with its day series",
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        /// The properties every 05 §4.3 authorship window shares, whichever map
+        /// holds it.
+        ///
+        /// The per-window bound is checked explicitly rather than trusted to the
+        /// decoder: a `BoundedVec` decoded from corrupt state is exactly what
+        /// try-state exists to catch, and `K` divides a distinct-author count by
+        /// a live parameter, so an over-long vector would read as extra authors.
+        fn check_authorship_window(
+            window: &AuthorshipWindow<T>,
+            epoch: EpochId,
+            current_epoch: EpochId,
+            traffic_epochs: &[EpochId],
+        ) -> Result<(), TryRuntimeError> {
+            if epoch > current_epoch {
+                return Err(TryRuntimeError::Other(
+                    "welfare collator authorship lies in the future",
+                ));
+            }
+            if !traffic_epochs.contains(&epoch) {
+                return Err(TryRuntimeError::Other(
+                    "welfare collator authorship has no indexed epoch",
+                ));
+            }
+            if window.authors.len() > T::MaxCollatorAuthorshipEntries::get() as usize {
+                return Err(TryRuntimeError::Other(
+                    "welfare collator authorship exceeds its per-window bound",
+                ));
+            }
+            if window.authors.is_empty() {
+                return Err(TryRuntimeError::Other(
+                    "welfare collator authorship stores an empty author set",
+                ));
             }
             Ok(())
         }

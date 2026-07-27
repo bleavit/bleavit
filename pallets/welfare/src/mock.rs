@@ -142,6 +142,9 @@ parameter_types! {
     /// `baseline_open` precondition is false and the VOID settlement no-ops.
     pub static BaselineClosed: Vec<EpochId> = Vec::new();
     pub static RecordKeeperRebates: bool = false;
+    /// 05 §4.7's measurable day count for every epoch, as the epoch clock would
+    /// project it. `None` models an epoch whose timing is no longer retained.
+    pub static MeasurableDays: Option<u32> = Some(u32::from(crate::MAX_DAILY_GATE_SAMPLES));
 }
 
 pub struct KeeperRebates;
@@ -265,6 +268,13 @@ impl pallet_welfare::SnapshotSchedule for TestSnapshotSchedule {
     fn snapshot_due(epoch: EpochId) -> Option<futarchy_primitives::BlockNumber> {
         epoch.checked_add(1)?.checked_mul(100)
     }
+
+    /// Every day the storage bitmap can hold, so the 05 §4.7 day-domain guard is
+    /// a no-op for the suites that predate it and the ones that exercise it set
+    /// this to the epoch shape they mean (including `None` — timing unknown).
+    fn measurable_days(_epoch: EpochId) -> Option<u32> {
+        MeasurableDays::get()
+    }
 }
 
 pub struct TestLedger;
@@ -343,6 +353,11 @@ impl pallet_welfare::OracleAdmission for SeatedOracle {
     }
 }
 
+/// Deliberately far below the runtime's 120: the overflow direction of the
+/// 05 §4.3 authorship series is a behavior these suites must exercise, and a
+/// mock that needs 120 distinct accounts to reach it would not.
+pub const MAX_AUTHORSHIP_ENTRIES: u32 = 3;
+
 impl pallet_welfare::Config for Test {
     type OracleAdmission = SeatedOracle;
     type MetricGovernanceOrigin = TestMetricGovernanceOrigin;
@@ -352,6 +367,7 @@ impl pallet_welfare::Config for Test {
     type CurrentEpoch = CurrentEpochValue;
     type SnapshotSchedule = TestSnapshotSchedule;
     type KeeperRebate = TestKeeperRebate;
+    type MaxCollatorAuthorshipEntries = frame_support::traits::ConstU32<MAX_AUTHORSHIP_ENTRIES>;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestBenchmarkHelper;

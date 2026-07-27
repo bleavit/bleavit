@@ -1434,7 +1434,19 @@ impl cumulus_pallet_aura_ext::Config for Runtime {}
 pub struct RuntimeCollatorAuthorship;
 impl pallet_authorship::EventHandler<AccountId, BlockNumber> for RuntimeCollatorAuthorship {
     fn note_author(author: AccountId) {
-        FutarchyTreasury::note_collator_block(author);
+        // 08 §2.4: the authored-share accumulator that pays the author.
+        FutarchyTreasury::note_collator_block(author.clone());
+        // 05 §4.3: the `(epoch, day)` authorship series behind `K` (and, once
+        // wired, `U` and `D_eff`). Deliberately the *same* derivation the
+        // reserve-probe and XCM-health recorders use, so a block authored
+        // across an epoch boundary is attributed to one day by one rule.
+        //
+        // Kept separate from the treasury accumulator on purpose: that one is a
+        // payout ledger that is drained and reset every epoch, while this is a
+        // measurement window welfare reads back per day. Deriving one from the
+        // other would make a payout retire a measurement.
+        let (epoch, day) = xcm_traffic_epoch_and_day();
+        pallet_welfare::Pallet::<Runtime>::note_collator_authorship(epoch, day, author);
     }
 }
 
@@ -2322,7 +2334,7 @@ fn percent_param_or(name: &[u8], default: u8) -> u8 {
         },
     }
 }
-fn u8_param(name: &[u8]) -> u8 {
+pub(crate) fn u8_param(name: &[u8]) -> u8 {
     u8_param_or(name, 0)
 }
 fn u8_param_or(name: &[u8], default: u8) -> u8 {
@@ -5233,6 +5245,47 @@ fn xcm_health(counters: pallet_welfare::XcmTrafficCounters) -> FixedU64 {
     FixedU64(value)
 }
 
+/// The size of an epoch's **measurable day set** (05 §4.7, normative; SQ-181):
+/// its whole days, floored at one.
+///
+/// The single home of the day *domain* every daily component shares. A legal
+/// `epoch.length` need not be a day multiple, and a trailing partial day is not
+/// a completed cadence slot, so the count floor-divides; the floor at one keeps
+/// a sub-day epoch — the shape the compressed `fast-timing` build produces —
+/// from having an empty measurable set and therefore passing vacuously.
+///
+/// Read by two callers that must not disagree: 07 §8's `R` range below, which
+/// intersects this with the probe's arming day, and `record_daily_gate`'s day
+/// guard through [`RuntimeSnapshotSchedule`]. Before SQ-181 only the former
+/// existed and the latter bounded `day` by `MAX_DAILY_GATE_SAMPLES` alone — a
+/// *storage* bound on the breach bitmap — so a keeper could name a day the
+/// epoch never had and the three daily components each improvised a different
+/// answer for it (`X` = 1, `K` = 0, `R` refuses).
+///
+/// `None` means the epoch's timing is unknown: membership cannot be decided, and
+/// both callers refuse rather than assume (G-1).
+///
+/// The set is read off the epoch's **scheduled** length, not the span it
+/// physically occupied. Those differ under a 05 §4.8 pause or a late crank,
+/// where the live epoch has no end bound and the day index keeps advancing past
+/// `length / BLOCKS_PER_DAY`; authorship recorded on such a day is then held but
+/// not samplable. That is the fail-closed reading of §4.7's "the epoch actually
+/// contained it" — it can only cost daily coverage, never manufacture a breach
+/// out of a day whose components were not all measured, and §4.7 requires one
+/// recorded day per measurement epoch rather than a coverage fraction.
+fn epoch_measurable_days(epoch: EpochId) -> Option<u32> {
+    pallet_epoch::Pallet::<Runtime>::epoch_timing(epoch).map(measurable_days_of)
+}
+
+/// [`epoch_measurable_days`] over an already-read timing.
+fn measurable_days_of(timing: pallet_epoch::EpochTiming) -> u32 {
+    timing
+        .length
+        .checked_div(kernel::BLOCKS_PER_DAY)
+        .unwrap_or(0)
+        .max(1)
+}
+
 /// The epoch's **measured day range** `[first, last)` for 07 §8's `R`, or
 /// `None` when nothing was measured (SQ-195).
 ///
@@ -5263,7 +5316,10 @@ fn reserve_probe_measured_range(epoch: EpochId) -> Option<(u32, u32)> {
     {
         return None;
     }
-    let last = timing.length.checked_div(day_len).unwrap_or(0).max(1);
+    // 05 §4.7's measurable day set, shared with `record_daily_gate`'s day guard
+    // rather than recomputed: `R`'s range is that set intersected with the
+    // probe's arming day, and the two disagreeing is the failure SQ-181 closes.
+    let last = measurable_days_of(timing);
     let first = match pallet_oracle::Pallet::<Runtime>::reserve_probe_armed_at() {
         Some(armed_at) if armed_at > timing.start => armed_at
             .saturating_sub(timing.start)
@@ -5350,21 +5406,160 @@ fn reserve_probe_epoch_value(epoch: EpochId) -> Option<bool> {
     Some(true)
 }
 
+/// One window's authorship observations as the 05 §4.3 projection reads them.
+///
+/// The two readings are deliberately separate methods rather than one slice,
+/// because a truncated window is safe for one and misleading for the other and
+/// nothing about a bare `&[(AccountId, u32)]` says so.
+#[allow(dead_code)]
+pub(crate) struct AuthorshipWindowInput {
+    authors: Vec<(AccountId, u32)>,
+    /// The window dropped an author for want of room (13 §4 bound).
+    truncated: bool,
+}
+
+#[allow(dead_code)]
+impl AuthorshipWindowInput {
+    /// Read the window from pallet storage at the epoch granularity.
+    pub(crate) fn epoch(epoch: EpochId) -> Self {
+        let window = pallet_welfare::Pallet::<Runtime>::collator_authorship_epoch(epoch);
+        Self {
+            authors: window.authors.into_inner(),
+            truncated: window.truncated,
+        }
+    }
+
+    /// Read the window from pallet storage at the day granularity.
+    pub(crate) fn day(epoch: EpochId, day: u8) -> Self {
+        let window = pallet_welfare::Pallet::<Runtime>::collator_authorship(epoch, day);
+        Self {
+            authors: window.authors.into_inner(),
+            truncated: window.truncated,
+        }
+    }
+
+    /// Distinct authors that produced at least one block in the window.
+    ///
+    /// Usable on a **truncated** window: a dropped author lowers the count, and
+    /// every count consumer (`K`, and `U` when it lands) reads a lower count as
+    /// less healthy. The error direction is therefore pessimistic, which is the
+    /// one G-1 permits.
+    pub(crate) fn distinct_active(&self) -> usize {
+        self.authors
+            .iter()
+            .filter(|(_, blocks)| *blocks > 0)
+            .count()
+    }
+
+    /// The per-author distribution, or `None` when the window is truncated.
+    ///
+    /// **Not** usable on a truncated window, and that asymmetry is the point:
+    /// `D_eff` (05 §4.5) reads concentration, and a window full of early
+    /// low-count authors that then drops a newly rotated author producing most
+    /// of the remaining blocks retains a near-uniform distribution while the
+    /// real one is concentrated — a *better* reading than the truth, not a worse
+    /// one. A concentration consumer must therefore treat the window as
+    /// unavailable (and fail its crank status-quo-safe) rather than read it.
+    ///
+    /// An **empty** window is unavailable for the same reason, and this is where
+    /// the count and distribution readings part company most sharply. `K` reads
+    /// an empty window as 0 — nobody authored, which is precisely the
+    /// collator-set failure it measures. Concentration has no such reading: 05
+    /// §4.5's `D_eff = min(1, (1 − HHI)/(1 − 1/n_cap))` over an empty author set
+    /// has no defined HHI, and the arithmetic that falls out of one (a zero sum)
+    /// would score a *perfect* 1.0 out of no observations at all — absence read
+    /// as health, which §4.4 already refuses for `H`.
+    pub(crate) fn distribution(&self) -> Option<&[(AccountId, u32)]> {
+        (!self.truncated && !self.authors.is_empty()).then_some(self.authors.as_slice())
+    }
+}
+
+/// Collator-set adequacy `K` for 05 §4.3: `min(1, distinct_active_authors /
+/// collator.n_min)` on the 1e9 grid.
+///
+/// "Active" is *authored at least one block in the window* — a registered
+/// collator that produced nothing is not evidence of an adequate set, which is
+/// exactly the failure `K` exists to see. The series already holds one entry per
+/// author, so the count is over entries carrying a non-zero count.
+///
+/// A **truncated** window is read anyway: `K` is a count, and the drop can only
+/// lower it (see [`AuthorshipWindowInput::distinct_active`]).
+///
+/// `collator.n_min` is a live 13 §1 key (rule 4 — never the literal 4), and a
+/// zero denominator has no defined quotient. Rather than substitute anything,
+/// `K` goes **absent** and the crank fails status-quo-safe, the same answer
+/// every other unavailable input gets. The registry's own `min` bound is 3, so
+/// zero is unreachable through governance; this is the defensive branch for a
+/// key read that answers zero for any other reason, and fabricating a value
+/// there would raise `C_onchain` out of a denominator the chain does not have.
+///
+/// The division truncates, which rounds `K` **down** — the maker-adverse
+/// direction for a health score (rule 2 / I-5): a partially-covered collator
+/// set never rounds up into adequacy.
+#[allow(dead_code)]
+fn collator_adequacy(authorship: &AuthorshipWindowInput) -> Option<FixedU64> {
+    let n_min = u128::from(u8_param(b"collator.n_min"));
+    if n_min == 0 {
+        return None;
+    }
+    let distinct = authorship.distinct_active() as u128;
+    let scaled = distinct
+        .saturating_mul(u128::from(pallet_welfare::ONE))
+        .checked_div(n_min)?
+        .min(u128::from(pallet_welfare::ONE));
+    Some(FixedU64(u64::try_from(scaled).ok()?))
+}
+
+/// The already-resolved per-window inputs [`metric_components`] projects into
+/// 05 §4.3 component values.
+///
+/// A struct rather than a positional list because the two callers differ only
+/// in the *granularity* each field was resolved at — epoch-wide for
+/// `onchain_components`, one day for `daily_components` — and a positional
+/// call site makes that invisible at exactly the place it matters. It also
+/// stops the list growing a fourth, fifth and sixth unnamed argument as `Π`,
+/// `H` and `E` land.
+#[allow(dead_code)]
+struct MetricComponentInputs {
+    /// Local XCM transport/probe counters for the window (09 §6.4).
+    counters: pallet_welfare::XcmTrafficCounters,
+    /// Already-resolved `R`, or `None` meaning **unavailable** — a distinct fact
+    /// from a recorded breach. Callers resolve it because the two granularities
+    /// treat absence differently: an unrecorded *day* is a fail (07 §8), while
+    /// an epoch with no measurable range is not measured at all.
+    reserve: Option<FixedU64>,
+    /// The window's authorship observations (05 §4.3). Absence is simply an
+    /// empty window here — no author, no block — which yields `K = 0` rather
+    /// than an unavailable component: a chain that authored nothing in the
+    /// window is precisely the collator-set failure `K` measures, and it is
+    /// observable without any mechanism having to be armed first.
+    ///
+    /// One boundary case follows from that and is deliberately *not* given an
+    /// `R`-style measured-range guard, because it is closed elsewhere: **the
+    /// runtime upgrade that introduces the series.** Days before it recorded
+    /// nothing and would read `K = 0`. 05 §4.6 requires any spec registering `K`
+    /// to activate at `now + 2` at the earliest, so by the first epoch `K` is
+    /// ever scored the series has covered it whole — and no registered spec
+    /// carries id 6 today.
+    ///
+    /// A day index past the epoch's real span used to be a second such case, and
+    /// is now impossible rather than tolerated: 05 §4.7's measurable day set is
+    /// normative and `record_daily_gate` refuses a day outside it (SQ-181), so
+    /// the projection is never asked for a window that does not exist.
+    authorship: AuthorshipWindowInput,
+}
+
 #[allow(dead_code)]
 fn metric_components(
     epoch: EpochId,
     spec_version: u16,
-    counters: pallet_welfare::XcmTrafficCounters,
-    // Already-resolved `R`, or `None` meaning **unavailable** — a distinct fact
-    // from a recorded breach. Callers resolve it because the two granularities
-    // treat absence differently: an unrecorded *day* is a fail (07 §8), while
-    // an epoch with no measurable range is not measured at all.
-    reserve: Option<FixedU64>,
+    inputs: MetricComponentInputs,
 ) -> Vec<pallet_welfare::ComponentValue> {
     let Some(specs) = pallet_welfare::MetricSpecs::<Runtime>::get(spec_version) else {
         return Vec::new();
     };
-    let x = xcm_health(counters);
+    let x = xcm_health(inputs.counters);
+    let k = collator_adequacy(&inputs.authorship);
     specs
         .iter()
         .filter(|spec| {
@@ -5394,15 +5589,30 @@ fn metric_components(
                     // flattening it to 0 would settle gate books as breached out
                     // of an epoch the probe never measured. Absence of a *day*
                     // is still a fail — the caller has already resolved that.
-                    match reserve {
+                    match inputs.reserve {
                         Some(value) => value,
                         None => return None,
                     }
                 }
+                // 05 §4.3 (A14). `None` here means `collator.n_min` read zero,
+                // so the quotient is undefined — absent, never substituted. `K`
+                // reads the window's author *count*, which a truncated window
+                // only understates, so it needs no availability check of its own.
+                futarchy_primitives::metric_ids::K => match k {
+                    Some(value) => value,
+                    None => return None,
+                },
                 // Inputs for every other registered component land with the
                 // A8/values wiring. Welfare treats registered-but-missing input
                 // as an error, failing the crank status-quo-safe instead of
                 // fabricating health.
+                //
+                // 05 §4.5's `D_eff` lands here, and when it does it MUST read
+                // `inputs.authorship.distribution()` — `None` on a truncated
+                // window — rather than the counts `K` uses. A dropped author
+                // makes the retained distribution look *more* uniform than the
+                // real one, so a concentration component reading through the
+                // count accessor would score better than the truth.
                 _ => return None,
             };
             Some(pallet_welfare::ComponentValue { id: spec.id, value })
@@ -5421,6 +5631,16 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
         };
         #[cfg(feature = "runtime-benchmarks")]
         {
+            // The 05 §4.3 authorship read is **performed and discarded**, not
+            // skipped (the SQ-489 pattern). Production reads this epoch's
+            // authorship aggregate on every `record_snapshot`; a fixture that
+            // returns fabricated values without touching it generates a weight
+            // declaring no `CollatorAuthorshipEpoch` read at all, so the call is
+            // charged for less storage than it touches — far from the first
+            // instance of that shape here (SQ-490, SQ-500). The fixture seeds
+            // the window at its 13 §4 bound and asserts it, so the discarded
+            // read is also the worst-case-sized one.
+            let _ = collator_adequacy(&AuthorshipWindowInput::epoch(epoch));
             specs
                 .iter()
                 .filter(|spec| spec.activation_epoch <= epoch)
@@ -5440,9 +5660,12 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
             let mut components = metric_components(
                 epoch,
                 version,
-                pallet_welfare::Pallet::<Runtime>::xcm_traffic_epoch(epoch),
-                reserve_probe_epoch_value(epoch)
-                    .map(|ok| FixedU64(if ok { pallet_welfare::ONE } else { 0 })),
+                MetricComponentInputs {
+                    counters: pallet_welfare::Pallet::<Runtime>::xcm_traffic_epoch(epoch),
+                    reserve: reserve_probe_epoch_value(epoch)
+                        .map(|ok| FixedU64(if ok { pallet_welfare::ONE } else { 0 })),
+                    authorship: AuthorshipWindowInput::epoch(epoch),
+                },
             );
             components.extend(
                 specs
@@ -5569,7 +5792,10 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
     ) -> Vec<pallet_welfare::ComponentValue> {
         #[cfg(feature = "runtime-benchmarks")]
         {
-            let _ = day;
+            // Walked and discarded, exactly as in `onchain_components` above:
+            // `record_daily_gate` reads the day's authorship window in
+            // production, so its weight must declare that read.
+            let _ = collator_adequacy(&AuthorshipWindowInput::day(epoch, day));
             pallet_welfare::MetricSpecs::<Runtime>::get(version)
                 .into_iter()
                 .flatten()
@@ -5584,8 +5810,11 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
         metric_components(
             epoch,
             version,
-            pallet_welfare::Pallet::<Runtime>::xcm_traffic(epoch, day),
-            reserve_probe_daily_value(epoch, day),
+            MetricComponentInputs {
+                counters: pallet_welfare::Pallet::<Runtime>::xcm_traffic(epoch, day),
+                reserve: reserve_probe_daily_value(epoch, day),
+                authorship: AuthorshipWindowInput::day(epoch, day),
+            },
         )
     }
 }
@@ -5641,6 +5870,12 @@ impl pallet_welfare::SnapshotSchedule for RuntimeSnapshotSchedule {
     fn snapshot_due(epoch: EpochId) -> Option<BlockNumber> {
         pallet_epoch::Pallet::<Runtime>::scheduled_epoch_end(epoch)
     }
+    fn measurable_days(epoch: EpochId) -> Option<u32> {
+        // 05 §4.7 (SQ-181), single-homed with 07 §8's `R` range so a day either
+        // is a measurement window for all three daily components or is one for
+        // none of them.
+        epoch_measurable_days(epoch)
+    }
 }
 
 impl pallet_welfare::Config for Runtime {
@@ -5652,6 +5887,11 @@ impl pallet_welfare::Config for Runtime {
     type SnapshotSchedule = RuntimeSnapshotSchedule;
     type KeeperRebate = FutarchyTreasury;
     type OracleAdmission = RuntimeOracleAdmission;
+    // The same constant the treasury's `MaxCollatorCompensationEntries` takes:
+    // both bound the collators that can author in one active session, and 05
+    // §4.3's `K` and 08 §2.4's payout must not disagree about that population.
+    type MaxCollatorAuthorshipEntries =
+        ConstU32<{ pallet_futarchy_treasury::MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND }>;
     type WeightInfo = crate::weights::pallet_welfare::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
@@ -9060,6 +9300,32 @@ impl pallet_welfare::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
     }
     fn prime_finalized_epoch(epoch: EpochId) {
         pallet_epoch::EpochOf::<Runtime>::mutate(|info| info.index = epoch.saturating_add(1));
+        // 05 §4.7's day guard resolves the *finalized* epoch's timing from the
+        // retained ring (SQ-181), so the fixture fills the ring to its bound and
+        // puts the cranked epoch **last** — the position `epoch_timing`'s linear
+        // search reaches only after scanning every other entry. A benchmark
+        // whose guard read a shorter ring would undercharge the search, and one
+        // whose epoch had no timing at all would abort on `DayOutsideEpoch`
+        // before measuring anything.
+        let length = <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get().epoch_length;
+        let mut timings = Vec::new();
+        for slot in 0..pallet_epoch::RECENT_COHORTS_BOUND.saturating_sub(1) {
+            timings.push(pallet_epoch::EpochTiming {
+                // Deliberately disjoint from `epoch` so the search cannot end
+                // early on a filler entry.
+                index: u32::MAX.saturating_sub(slot),
+                start: 0,
+                length,
+            });
+        }
+        timings.push(pallet_epoch::EpochTiming {
+            index: epoch,
+            start: epoch.saturating_mul(length),
+            length,
+        });
+        pallet_epoch::EpochTimings::<Runtime>::put(frame_support::BoundedVec::truncate_from(
+            timings,
+        ));
     }
     fn prime_metric_inputs(_: u16) {}
     fn seat_oracle() {

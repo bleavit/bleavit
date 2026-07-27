@@ -12,6 +12,11 @@ rust-version = "1.89"
 anyhow = "1.0.100"
 clap = { version = "4.5.54", features = ["derive"] }
 futures = "0.3.31"
+# The kernel constants only (rule 4: `K` values have exactly one home, and 01
+# §5.2 keeps this crate frame-free precisely so off-chain consumers can take it
+# standalone). `default-features = false` keeps `std` out of the decision: the
+# keeper needs `kernel::` constants, not the codec/scale-info std surface.
+futarchy-primitives = { path = "../crates/futarchy-primitives", default-features = false }
 parity-scale-codec = { version = "3.7.5", features = ["derive"] }
 prometheus = { version = "0.14.0", default-features = false }
 rand = "0.10.2"
