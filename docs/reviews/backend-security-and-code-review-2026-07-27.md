@@ -64,7 +64,8 @@ posture were each attacked directly and each held.
 |---|---|
 | Baseline (`origin/main` at review start) | `efaf866db3996adad381ef471468e5a7824ef4e7` |
 | Branch | `audit/backend-security-hardening-2026-07-27` |
-| Final commit | recorded in the PR description (this file is written before the final commit) |
+| Last code commit | `0c700a9dbada813a23f8605ccbbda3b9d28d6d78` |
+| Branch head | this file is finalized in the commit that follows it; the exact head SHA is in the PR description |
 
 The working tree was clean at `efaf866`; `HEAD == origin/main`, 0 ahead / 0 behind.
 
