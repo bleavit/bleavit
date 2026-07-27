@@ -53,8 +53,8 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 
     fn note_block_production() -> Weight {
         Weight::from_parts(15_000_000, STATE_POV)
-            .saturating_add(T::DbWeight::get().reads(2))
-            .saturating_add(T::DbWeight::get().writes(2))
+            .saturating_add(T::DbWeight::get().reads(3))
+            .saturating_add(T::DbWeight::get().writes(3))
     }
 }
 
@@ -85,7 +85,7 @@ impl WeightInfo for () {
 
     fn note_block_production() -> Weight {
         Weight::from_parts(15_000_000, STATE_POV)
-            .saturating_add(RocksDbWeight::get().reads(2))
-            .saturating_add(RocksDbWeight::get().writes(2))
+            .saturating_add(RocksDbWeight::get().reads(3))
+            .saturating_add(RocksDbWeight::get().writes(3))
     }
 }

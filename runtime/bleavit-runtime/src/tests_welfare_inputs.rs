@@ -1424,26 +1424,29 @@ fn the_per_block_hooks_record_the_relay_delta_and_the_emptiness_class() {
         // observation, read by both consumers.
         assert_eq!(pallet_epoch::LastRelayParent::<Runtime>::get(), Some(1_000));
 
-        // The next block's delta is measured against that baseline.
-        crate::configs::ExecutionGuardSystemEvent::on_validation_data(&validation_data(1_007));
-        assert_eq!(
-            pallet_welfare::Pallet::<Runtime>::block_production_epoch(epoch).relay_slots,
-            8,
-        );
-
-        // Emptiness: `post_inherents` captures the inherent boundary and
-        // `post_transactions` classifies against the final extrinsic count.
-        // Two inherents and nothing else is an all-inherent block.
+        // Emptiness: the inherent published the window, `post_inherents`
+        // captures the inherent boundary, and `post_transactions` classifies
+        // against the final extrinsic count. Two inherents and nothing else is
+        // an all-inherent block.
         frame_system::Pallet::<Runtime>::set_extrinsic_index(2);
         crate::configs::BlockProductionInherentBoundary::post_inherents();
         frame_system::Pallet::<Runtime>::note_finished_extrinsics();
         crate::configs::BlockProductionRecorder::post_transactions();
         let counters = pallet_welfare::Pallet::<Runtime>::block_production_epoch(epoch);
         assert_eq!((counters.empty_blocks, counters.non_empty_blocks), (1, 0));
+        // The window is consumed, so nothing can be attributed twice.
+        assert!(crate::configs::BlockProductionWindow::get().is_none());
 
-        // Two inherents plus one transaction: not empty. A block whose call
-        // failed or was filtered lands here too — it consumed its slot, and
-        // `note_applied_extrinsic` counted it whatever the dispatch returned.
+        // Next block: two inherents plus one transaction is not empty. A block
+        // whose call failed or was filtered lands here too — it consumed its
+        // slot, and `note_applied_extrinsic` counted it whatever the dispatch
+        // returned. The delta is measured against the previous block's baseline.
+        frame_system::Pallet::<Runtime>::set_block_number(2);
+        crate::configs::ExecutionGuardSystemEvent::on_validation_data(&validation_data(1_007));
+        assert_eq!(
+            pallet_welfare::Pallet::<Runtime>::block_production_epoch(epoch).relay_slots,
+            8,
+        );
         frame_system::Pallet::<Runtime>::set_extrinsic_index(2);
         crate::configs::BlockProductionInherentBoundary::post_inherents();
         frame_system::Pallet::<Runtime>::set_extrinsic_index(3);
@@ -1454,12 +1457,145 @@ fn the_per_block_hooks_record_the_relay_delta_and_the_emptiness_class() {
 
         // A block with no inherents at all is still classified, not skipped:
         // the boundary is zero and its transactions decide.
+        frame_system::Pallet::<Runtime>::set_block_number(3);
+        crate::configs::ExecutionGuardSystemEvent::on_validation_data(&validation_data(1_008));
         frame_system::Pallet::<Runtime>::set_extrinsic_index(0);
         crate::configs::BlockProductionInherentBoundary::post_inherents();
         frame_system::Pallet::<Runtime>::note_finished_extrinsics();
         crate::configs::BlockProductionRecorder::post_transactions();
         let counters = pallet_welfare::Pallet::<Runtime>::block_production_epoch(epoch);
         assert_eq!((counters.empty_blocks, counters.non_empty_blocks), (2, 1));
+    });
+}
+
+/// A post-transaction hook with no window published for **this** block records
+/// nothing: an observation that cannot be attributed is dropped, not guessed.
+///
+/// Reachable through the inherent's own early returns — a recovery-abort block
+/// returns before publishing a window, and its authored count must not be
+/// recorded either. A numerator with no denominator is the direction that
+/// *overstates* liveness, which is the one G-1 forbids.
+#[test]
+fn an_unattributable_block_is_dropped_rather_than_guessed_into_a_window() {
+    use cumulus_pallet_parachain_system::OnSystemEvent;
+    use frame_support::traits::{PostInherents, PostTransactions};
+
+    crate::tests::development_ext().execute_with(|| {
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+
+        // No inherent ran, so no window exists.
+        frame_system::Pallet::<Runtime>::set_extrinsic_index(3);
+        crate::configs::BlockProductionInherentBoundary::post_inherents();
+        frame_system::Pallet::<Runtime>::note_finished_extrinsics();
+        crate::configs::BlockProductionRecorder::post_transactions();
+        assert_eq!(
+            pallet_welfare::Pallet::<Runtime>::block_production_epoch(epoch),
+            pallet_welfare::BlockProductionCounters::default(),
+        );
+
+        // A window left behind by an earlier block is equally unusable: the
+        // stamp, not merely the presence of a value, is what authorizes the
+        // attribution.
+        crate::configs::ExecutionGuardSystemEvent::on_validation_data(&validation_data(2_000));
+        frame_system::Pallet::<Runtime>::set_block_number(9);
+        frame_system::Pallet::<Runtime>::set_extrinsic_index(1);
+        crate::configs::BlockProductionInherentBoundary::post_inherents();
+        frame_system::Pallet::<Runtime>::note_finished_extrinsics();
+        crate::configs::BlockProductionRecorder::post_transactions();
+        let counters = pallet_welfare::Pallet::<Runtime>::block_production_epoch(epoch);
+        // The relay slot the inherent did record stands; the authored block does
+        // not, because it could not be attributed to the window that recorded it.
+        assert_eq!(counters.relay_slots, 1);
+        assert_eq!((counters.empty_blocks, counters.non_empty_blocks), (0, 0));
+        // And the stale capture is gone, so it cannot be reused a third time.
+        assert!(crate::configs::BlockProductionWindow::get().is_none());
+    });
+}
+
+/// A boundary block carrying a real `Epoch::tick` is **one** block in **one**
+/// window.
+///
+/// The relay-slot delta is recorded by the parachain inherent, before any
+/// transaction; the emptiness classification cannot be decided until after all
+/// of them. `Epoch::tick` is a permissionless *transaction*, so it lands between
+/// the two and advances `EpochOf`/`Schedule`. Recomputing the window in the
+/// post-transaction hook therefore split the block across two epochs — the
+/// completed epoch received a relay slot with no authored block (depressing its
+/// `U`, an `S`-pillar input to gate settlement) and the opening epoch received an
+/// authored block with no slot of its own.
+#[test]
+fn a_boundary_block_with_a_real_tick_lands_wholly_in_one_window() {
+    use cumulus_pallet_parachain_system::OnSystemEvent;
+    use frame_support::traits::{PostInherents, PostTransactions};
+
+    crate::tests::development_ext().execute_with(|| {
+        let closing = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let schedule = pallet_epoch::Schedule::<Runtime>::get();
+        let boundary = schedule.epoch_start_block.saturating_add(schedule.length);
+        let closing_day = u8::try_from(
+            boundary.saturating_sub(schedule.epoch_start_block)
+                / futarchy_primitives::kernel::BLOCKS_PER_DAY,
+        )
+        .expect("the epoch's day index fits the u8 second key");
+        frame_system::Pallet::<Runtime>::set_block_number(boundary);
+
+        // 1. The parachain inherent: relay slot recorded, window published.
+        crate::configs::ExecutionGuardSystemEvent::on_validation_data(&validation_data(7_000));
+        assert_eq!(
+            crate::configs::BlockProductionWindow::get(),
+            Some((boundary, closing, closing_day)),
+        );
+
+        // 2. `post_inherents` — two inherents in this block.
+        frame_system::Pallet::<Runtime>::set_extrinsic_index(2);
+        crate::configs::BlockProductionInherentBoundary::post_inherents();
+
+        // 3. The block's transaction is a real `Epoch::tick`, which crosses the
+        //    epoch clock. This is the hazard: the window the recomputation would
+        //    now see is not the one this block's relay slot went into.
+        frame_system::Pallet::<Runtime>::set_extrinsic_index(3);
+        frame_support::assert_ok!(crate::Epoch::tick(
+            crate::RuntimeOrigin::signed(crate::tests::account(94)),
+            Default::default(),
+        ));
+        let opening = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        assert_eq!(opening, closing.saturating_add(1), "the tick must cross");
+        assert_ne!(
+            crate::configs::xcm_traffic_epoch_and_day(),
+            (closing, closing_day),
+            "the recomputed window must differ, or this test proves nothing",
+        );
+
+        // 4. `post_transactions` classifies the block and attributes it to the
+        //    window captured in step 1 — not the one the clock reads now.
+        frame_system::Pallet::<Runtime>::note_finished_extrinsics();
+        crate::configs::BlockProductionRecorder::post_transactions();
+
+        // Both halves in the closing epoch's window: one slot, one non-empty
+        // authored block. `U` for it is 1, not 0.
+        assert_eq!(
+            pallet_welfare::Pallet::<Runtime>::block_production(closing, closing_day),
+            pallet_welfare::BlockProductionCounters {
+                non_empty_blocks: 1,
+                empty_blocks: 0,
+                relay_slots: 1,
+            },
+        );
+        // And the opening epoch is untouched — no authored block without a slot,
+        // so no window whose ratio exceeds 1 and clamps the inflation out of
+        // sight.
+        assert_eq!(
+            pallet_welfare::Pallet::<Runtime>::block_production_epoch(opening),
+            pallet_welfare::BlockProductionCounters::default(),
+        );
+        assert_eq!(
+            pallet_welfare::Pallet::<Runtime>::block_production_epoch(closing),
+            pallet_welfare::BlockProductionCounters {
+                non_empty_blocks: 1,
+                empty_blocks: 0,
+                relay_slots: 1,
+            },
+        );
     });
 }
 

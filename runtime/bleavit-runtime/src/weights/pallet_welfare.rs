@@ -13,7 +13,7 @@
 // benchmark
 // pallet
 // --runtime
-// target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
+// /home/development/bleavit/.claude/worktrees/agent-a4a86832e7451af80/target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
 // --pallet
 // pallet_welfare
 // --extrinsic
@@ -63,8 +63,8 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `62877`
 		//  Estimated: `102684`
-		// Minimum execution time: 631_600_000 picoseconds.
-		Weight::from_parts(653_140_000, 0)
+		// Minimum execution time: 584_321_000 picoseconds.
+		Weight::from_parts(632_891_000, 0)
 			.saturating_add(Weight::from_parts(0, 102684))
 			.saturating_add(T::DbWeight::get().reads(94))
 			.saturating_add(T::DbWeight::get().writes(2))
@@ -77,6 +77,8 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 	/// Proof: `Welfare::CollatorAuthorshipEpoch` (`max_values`: None, `max_size`: Some(4335), added: 6810, mode: `MaxEncodedLen`)
 	/// Storage: `Constitution::Params` (r:14 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
+	/// Storage: `Welfare::BlockProductionEpoch` (r:1 w:0)
+	/// Proof: `Welfare::BlockProductionEpoch` (`max_values`: None, `max_size`: Some(36), added: 2511, mode: `MaxEncodedLen`)
 	/// Storage: `IncidentRegistry::Aggregates` (r:1 w:0)
 	/// Proof: `IncidentRegistry::Aggregates` (`max_values`: None, `max_size`: Some(38), added: 2513, mode: `MaxEncodedLen`)
 	/// Storage: `IncidentRegistry::FilingCount` (r:1 w:0)
@@ -103,12 +105,12 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn record_snapshot() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `86696`
+		//  Measured:  `82485`
 		//  Estimated: `102684`
-		// Minimum execution time: 799_051_000 picoseconds.
-		Weight::from_parts(856_241_000, 0)
+		// Minimum execution time: 759_381_000 picoseconds.
+		Weight::from_parts(832_350_000, 0)
 			.saturating_add(Weight::from_parts(0, 102684))
-			.saturating_add(T::DbWeight::get().reads(106))
+			.saturating_add(T::DbWeight::get().reads(107))
 			.saturating_add(T::DbWeight::get().writes(6))
 	}
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
@@ -121,6 +123,8 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 	/// Proof: `Welfare::CollatorAuthorship` (`max_values`: None, `max_size`: Some(4344), added: 6819, mode: `MaxEncodedLen`)
 	/// Storage: `Constitution::Params` (r:14 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
+	/// Storage: `Welfare::BlockProduction` (r:1 w:0)
+	/// Proof: `Welfare::BlockProduction` (`max_values`: None, `max_size`: Some(45), added: 2520, mode: `MaxEncodedLen`)
 	/// Storage: `Welfare::MetricSpecs` (r:17 w:0)
 	/// Proof: `Welfare::MetricSpecs` (`max_values`: None, `max_size`: Some(3507), added: 5982, mode: `MaxEncodedLen`)
 	/// Storage: `Welfare::SampledGateDays` (r:1 w:1)
@@ -139,12 +143,12 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn record_daily_gate() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `86873`
+		//  Measured:  `86996`
 		//  Estimated: `102684`
-		// Minimum execution time: 666_221_000 picoseconds.
-		Weight::from_parts(701_040_000, 0)
+		// Minimum execution time: 659_770_000 picoseconds.
+		Weight::from_parts(677_711_000, 0)
 			.saturating_add(Weight::from_parts(0, 102684))
-			.saturating_add(T::DbWeight::get().reads(103))
+			.saturating_add(T::DbWeight::get().reads(104))
 			.saturating_add(T::DbWeight::get().writes(6))
 	}
 	/// Storage: `Welfare::XcmTrafficEpochs` (r:1 w:1)
@@ -157,22 +161,26 @@ impl<T: frame_system::Config> pallet_welfare::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `8760`
 		//  Estimated: `7809`
-		// Minimum execution time: 12_650_000 picoseconds.
-		Weight::from_parts(13_820_000, 0)
+		// Minimum execution time: 12_490_000 picoseconds.
+		Weight::from_parts(13_970_000, 0)
 			.saturating_add(Weight::from_parts(0, 7809))
 			.saturating_add(T::DbWeight::get().reads(3))
 			.saturating_add(T::DbWeight::get().writes(3))
 	}
+	/// Storage: `Welfare::XcmTrafficEpochs` (r:1 w:1)
+	/// Proof: `Welfare::XcmTrafficEpochs` (`max_values`: Some(1), `max_size`: Some(85), added: 580, mode: `MaxEncodedLen`)
 	/// Storage: `Welfare::BlockProduction` (r:1 w:1)
 	/// Proof: `Welfare::BlockProduction` (`max_values`: None, `max_size`: Some(45), added: 2520, mode: `MaxEncodedLen`)
+	/// Storage: `Welfare::BlockProductionEpoch` (r:1 w:1)
+	/// Proof: `Welfare::BlockProductionEpoch` (`max_values`: None, `max_size`: Some(36), added: 2511, mode: `MaxEncodedLen`)
 	fn note_block_production() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `182`
+		//  Measured:  `238`
 		//  Estimated: `3510`
-		// Minimum execution time: 6_551_000 picoseconds.
-		Weight::from_parts(7_170_000, 0)
+		// Minimum execution time: 9_240_000 picoseconds.
+		Weight::from_parts(10_000_000, 0)
 			.saturating_add(Weight::from_parts(0, 3510))
-			.saturating_add(T::DbWeight::get().reads(2))
-			.saturating_add(T::DbWeight::get().writes(2))
+			.saturating_add(T::DbWeight::get().reads(3))
+			.saturating_add(T::DbWeight::get().writes(3))
 	}
 }

@@ -971,8 +971,10 @@ pub(crate) fn dead_man_detector_hook_weight() -> Weight {
 ///
 /// `epoch_and_day_at` reads the live epoch and its schedule, plus the retained
 /// timing ring for a block that predates the live epoch's start — charged at
-/// that three-read worst case. Neither of the two per-block hooks that perform
-/// this work reserves any weight for a caller, so both charge it themselves.
+/// that three-read worst case. It runs **once per block**, in the parachain
+/// inherent, which reserves no weight for a caller and so charges it itself; the
+/// post-transaction hook consumes the published window instead of repeating the
+/// attribution (see [`BlockProductionWindow`]).
 pub(crate) fn block_production_window_weight() -> Weight {
     <Runtime as frame_system::Config>::DbWeight::get().reads(3)
 }
@@ -2426,7 +2428,7 @@ impl Get<EpochId> for GuardianReviewDeadline {
     }
 }
 
-fn xcm_traffic_epoch_and_day() -> (EpochId, u8) {
+pub(crate) fn xcm_traffic_epoch_and_day() -> (EpochId, u8) {
     // The current block is never before the live epoch's start.
     epoch_and_day_at(System::block_number())
         .unwrap_or_else(|| (pallet_epoch::EpochOf::<Runtime>::get().index, 0))
@@ -2505,6 +2507,64 @@ pub type InherentBoundary = frame_support::storage::types::StorageValue<
     frame_support::pallet_prelude::ValueQuery,
 >;
 
+pub struct BlockProductionWindowStorage;
+impl StorageInstance for BlockProductionWindowStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeWelfare"
+    }
+    const STORAGE_PREFIX: &'static str = "BlockProductionWindow";
+}
+/// The `(epoch, day)` window this block's production is attributed to, stamped
+/// with the block that captured it.
+///
+/// **Why it exists.** 05 §4.3.2 splits one block's observation across two hooks:
+/// the relay-slot delta rides the parachain inherent (it must read
+/// `LastRelayParent` before the detector advances it) and the emptiness
+/// classification cannot be decided until the extrinsic count is final. Between
+/// them sit the block's *transactions* — including the permissionless
+/// `Epoch::tick`, which advances `EpochOf`/`Schedule`. Attributing each half
+/// independently therefore split a boundary block across two epochs: the
+/// completed epoch got a relay slot with no authored block (depressing its `U`)
+/// and the opening epoch got an authored block with no slot (inflating its `U`
+/// against a clamp that hides the inflation). Both feed the `S` pillar and gate
+/// settlement, so the error is not cosmetic.
+///
+/// So the window is resolved **once**, at the inherent, and the post-transaction
+/// hook consumes what was captured rather than recomputing it.
+///
+/// **Why the inherent's window and not the post-tick one.** 05 §4.3.2 fixes the
+/// *deltas* — each block contributes `relay_parent(this) − relay_parent(previous)`
+/// and `previous` crosses the window boundary — but leaves the partition of
+/// blocks into windows to the epoch clock, so either window would charge every
+/// relay slot exactly once and lose no outage. The inherent's answer is chosen
+/// because it is the instant the slot is *observed*: the delta is measured
+/// against a predecessor authored while this epoch was live, the relay-parent
+/// read exists nowhere later in the block, and `epoch_and_day_at` already gives
+/// the pre-tick epoch every other observation in the same block ("the live epoch
+/// has no end bound yet"), so `U` stays attributed exactly like `X` and `R`.
+///
+/// One property follows and is accepted: a keeper that cranks
+/// `record_snapshot(closing)` in the *same* block as the tick reads a denominator
+/// that already carries this block's slot and a numerator that does not yet carry
+/// its authored count, which cannot be avoided while emptiness is only decidable
+/// after the transactions. It understates `U` by one block in `epoch.length`, and
+/// understating is the safe direction (G-1).
+///
+/// **The block stamp makes the missing-capture case total.** The value is
+/// consumed with `take`, and the consumer additionally requires the stamp to be
+/// this block: an observation that cannot be attributed to the block that
+/// captured it is *dropped*, never guessed into a window. That covers the
+/// inherent's own early-return paths (a recovery-abort block never captures a
+/// window, and so must not record an authored block either — a numerator with
+/// no denominator is exactly the direction that overstates liveness) and any
+/// execution path that reaches the post-transaction hook without the parachain
+/// inherent having run.
+pub type BlockProductionWindow = frame_support::storage::types::StorageValue<
+    BlockProductionWindowStorage,
+    (BlockNumber, EpochId, u8),
+    frame_support::pallet_prelude::OptionQuery,
+>;
+
 /// Capture the inherent/transaction boundary for 05 §4.3.2's emptiness rule.
 ///
 /// **How an inherent is distinguished.** Not by pallet, not by call name, and
@@ -2550,20 +2610,34 @@ impl PostInherents for BlockProductionInherentBoundary {
 /// returned. The comparison is `<=` rather than `==` so that a boundary left
 /// stale-high by any path that skipped the boundary hook reads *empty* — the
 /// direction that understates `U` rather than overstating it (G-1).
+///
+/// **The window is not recomputed here.** It is taken from
+/// [`BlockProductionWindow`], captured by the parachain inherent before any
+/// transaction could move the epoch clock. Recomputing it attributed this half of
+/// the observation to a *different* window than its own relay slot whenever the
+/// block carried an `Epoch::tick`, splitting one block across two epochs. A
+/// missing or stale capture drops the observation entirely rather than choosing a
+/// window for it.
 pub struct BlockProductionRecorder;
 impl PostTransactions for BlockProductionRecorder {
     fn post_transactions() {
         frame_system::Pallet::<Runtime>::register_extra_weight_unchecked(
-            // The boundary and the extrinsic count, plus the `(epoch, day)`
-            // attribution; the accumulator write itself is benchmarked and
+            // The boundary, the extrinsic count, and the captured window — which
+            // is consumed, hence the write. No `(epoch, day)` attribution runs
+            // here any more; the accumulator write itself is benchmarked and
             // charged by the pallet writer.
-            <Runtime as frame_system::Config>::DbWeight::get()
-                .reads(2)
-                .saturating_add(block_production_window_weight()),
+            <Runtime as frame_system::Config>::DbWeight::get().reads_writes(3, 1),
             DispatchClass::Mandatory,
         );
+        // Total and fail-soft: an observation that cannot be attributed to the
+        // block that captured it is dropped, never guessed into a window.
+        let Some((captured_at, epoch, day)) = BlockProductionWindow::take() else {
+            return;
+        };
+        if captured_at != frame_system::Pallet::<Runtime>::block_number() {
+            return;
+        }
         let empty = frame_system::Pallet::<Runtime>::extrinsic_count() <= InherentBoundary::get();
-        let (epoch, day) = xcm_traffic_epoch_and_day();
         pallet_welfare::Pallet::<Runtime>::note_block_production(
             epoch,
             day,
@@ -5787,6 +5861,41 @@ fn metric_components(
         .collect()
 }
 
+/// Perform the 05 §4.3.2 block-production reads the production projection
+/// performs, so that `record_snapshot`/`record_daily_gate` **measure** them.
+///
+/// The values these dispatches consume must still be fabricated under
+/// `runtime-benchmarks` (not every 05 §4.3 input is wired, and one missing
+/// component makes the extrinsic return before the aggregation the benchmark
+/// exists to measure — see the arms below). But a *read* only the production arm
+/// performs is a read the generated weight never declares, and the live dispatch
+/// then executes storage work block construction never admitted. That is exactly
+/// the SQ-490 defect class, and it recurred here: the fabricated arm returned a
+/// component set without ever touching the block-production series.
+///
+/// Because the epoch total is maintained on write
+/// (`pallet_welfare::BlockProductionEpoch`), the worst case is **one key** and
+/// the fixture cannot understate it by seeding too few days — the fold that
+/// could read up to 256 keys no longer exists. The pallet's own benchmarks seed
+/// the key present (its `MaxEncodedLen` is fixed-width, so a present key *is*
+/// the worst case) and assert it, so the fixture cannot silently stop reaching
+/// the work either.
+///
+/// **Still unmeasured, and pre-existing (SQ-503):** `xcm_traffic_epoch` folds up
+/// to 256 `Welfare::XcmTraffic` keys and `reserve_probe_epoch_value` reads up to
+/// 256 `Welfare::ReserveProbeDaily` keys, both inside `record_snapshot`, and
+/// neither appears in its generated weight. They predate A14 and are
+/// deliberately not touched here; the traffic fold wants the same on-write total
+/// this series and the authorship series now have, and the probe cover check
+/// wants a per-epoch summary of its own.
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_measure_block_production_reads(epoch: EpochId, day: Option<u8>) {
+    let _ = match day {
+        Some(day) => pallet_welfare::Pallet::<Runtime>::block_production(epoch, day),
+        None => pallet_welfare::Pallet::<Runtime>::block_production_epoch(epoch),
+    };
+}
+
 /// Runtime metric projection. Local XCM traffic and final oracle components
 /// are live. Every other unavailable registered input remains absent so the
 /// welfare pallet rejects an incomplete snapshot (G-1).
@@ -5808,6 +5917,9 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
             // the window at its 13 §4 bound and asserts it, so the discarded
             // read is also the worst-case-sized one.
             let _ = collator_adequacy(&AuthorshipWindowInput::epoch(epoch));
+            // The 05 §4.3.2 block-production read is discarded for the same
+            // reason and must be measured for the same reason.
+            benchmark_measure_block_production_reads(epoch, None);
             specs
                 .iter()
                 .filter(|spec| spec.activation_epoch <= epoch)
@@ -5963,9 +6075,11 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
         #[cfg(feature = "runtime-benchmarks")]
         {
             // Walked and discarded, exactly as in `onchain_components` above:
-            // `record_daily_gate` reads the day's authorship window in
-            // production, so its weight must declare that read.
+            // `record_daily_gate` reads the day's authorship window and the
+            // day's block-production slot in production, so its weight must
+            // declare both reads.
             let _ = collator_adequacy(&AuthorshipWindowInput::day(epoch, day));
+            benchmark_measure_block_production_reads(epoch, Some(day));
             pallet_welfare::MetricSpecs::<Runtime>::get(version)
                 .into_iter()
                 .flatten()
@@ -8646,12 +8760,15 @@ impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEven
             migration_validation_hook_weight()
                 .saturating_add(dead_man_detector_hook_weight())
                 // 05 §4.3.2's relay-slot observation below: the `(epoch, day)`
-                // attribution plus the one extra `LastRelayParent` read the
-                // detector's own envelope does not include. Charged here, ahead
-                // of the abort branches that can return early, because
+                // attribution, the one extra `LastRelayParent` read the
+                // detector's own envelope does not include, and the window
+                // publication the post-transaction hook consumes. Charged here,
+                // ahead of the abort branches that can return early, because
                 // over-charging a halting block is the safe direction.
                 .saturating_add(block_production_window_weight())
-                .saturating_add(<Runtime as frame_system::Config>::DbWeight::get().reads(1)),
+                .saturating_add(
+                    <Runtime as frame_system::Config>::DbWeight::get().reads_writes(1, 1),
+                ),
             DispatchClass::Mandatory,
         );
         // Called once by the mandatory parachain inherent before the
@@ -8709,6 +8826,18 @@ impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEven
                 None => 1,
             };
             let (epoch, day) = xcm_traffic_epoch_and_day();
+            // Publish the window this block's production belongs to, for
+            // `BlockProductionRecorder` to consume after the transactions. The
+            // attribution happens exactly once, here, because the transactions
+            // in between can include the permissionless `Epoch::tick` — and a
+            // second, post-tick attribution put the block's authored count in
+            // the *next* epoch while its relay slot stayed in this one.
+            //
+            // Stamped with the block, so a post-transaction hook that runs
+            // without this seam having run drops the observation instead of
+            // inheriting a previous block's window (see
+            // [`BlockProductionWindow`]).
+            BlockProductionWindow::put((now, epoch, day));
             pallet_welfare::Pallet::<Runtime>::note_block_production(
                 epoch,
                 day,

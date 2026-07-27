@@ -189,6 +189,53 @@ fn seed_authorship_worst_case<T: Config>(epoch: EpochId, day: u8) -> Result<(), 
     Ok(())
 }
 
+/// The 05 §4.3.2 block-production state both welfare cranks read, at the worst
+/// case they can read it in.
+///
+/// `MetricInputs` resolves `U` inside the measured dispatch — from
+/// [`BlockProductionEpoch`] for `record_snapshot` and from the `(epoch, day)`
+/// slot for `record_daily_gate`. Without this fixture those keys are absent and
+/// the generated weight declares no block-production read at all, which is the
+/// SQ-490 defect class: the dispatch then performs storage work block
+/// construction never admitted.
+///
+/// Both keys are **fixed-width** ([`BlockProductionCounters`] is three `u64`s)
+/// and the epoch total is maintained on write rather than folded from the day
+/// prefix, so a *present* key is the whole worst case — there is no larger
+/// encoding and no longer prefix to walk. The total is seeded equal to the field
+/// sum of the single seeded day so the series satisfies `do_try_state`.
+const BENCH_BLOCK_PRODUCTION: BlockProductionCounters = BlockProductionCounters {
+    non_empty_blocks: 3,
+    empty_blocks: 1,
+    relay_slots: 5,
+};
+
+fn seed_block_production<T: Config>(epoch: EpochId, day: u8) {
+    XcmTrafficEpochs::<T>::mutate(|epochs| {
+        if !epochs.contains(&epoch) {
+            let _ = epochs.try_push(epoch);
+        }
+    });
+    BlockProduction::<T>::insert(epoch, day, BENCH_BLOCK_PRODUCTION);
+    BlockProductionEpoch::<T>::insert(epoch, BENCH_BLOCK_PRODUCTION);
+}
+
+/// Assert the fixture was still in its worst case when the call ran.
+///
+/// The cranks only read this series, so both keys must survive the dispatch
+/// unchanged. If a future edit drops [`seed_block_production`], this fails
+/// instead of silently regenerating a weight with the read missing.
+fn assert_block_production_worst_case<T: Config>(epoch: EpochId, day: u8) {
+    assert_eq!(
+        BlockProductionEpoch::<T>::get(epoch),
+        BENCH_BLOCK_PRODUCTION
+    );
+    assert_eq!(
+        BlockProduction::<T>::get(epoch, day),
+        BENCH_BLOCK_PRODUCTION
+    );
+}
+
 fn fill_specs(state: &mut WelfareState, first_version: u16) -> Result<(), BenchmarkError> {
     for version in first_version..=MAX_METRIC_SPECS as u16 {
         state
@@ -261,7 +308,7 @@ mod benches {
         fill_snapshots(&mut state, MAX_SNAPSHOTS - 1)?;
         fill_gate_flags(&mut state, MAX_GATE_FLAGS)?;
         Pallet::<T>::seed(&state)?;
-        let epoch = MAX_SNAPSHOTS as u32 + 1;
+        let epoch: EpochId = MAX_SNAPSHOTS as u32 + 1;
         T::BenchmarkHelper::prime_finalized_epoch(epoch);
         T::BenchmarkHelper::prime_metric_inputs(MAX_COMPONENTS_PER_SPEC as u16);
         // 05 §4.3: the runtime projection reads this epoch's authorship
@@ -269,6 +316,10 @@ mod benches {
         // try-state would see an aggregate the reaper cannot reach.
         XcmTrafficEpochs::<T>::put(BoundedVec::truncate_from(alloc::vec![epoch]));
         seed_authorship_worst_case::<T>(epoch, 0)?;
+        // `MetricInputs::onchain_components` reads the epoch's block-production
+        // total inside the same call (05 §4.3.2 `U`); seed it so the weight
+        // charges that read too.
+        seed_block_production::<T>(epoch, 0);
         let caller: T::AccountId = whitelisted_caller();
         T::BenchmarkHelper::prime_keeper_rebate();
 
@@ -279,6 +330,7 @@ mod benches {
             futarchy_primitives::keeper::CrankClass::DecisionCritical,
         );
         assert_eq!(Snapshots::<T>::iter().count(), MAX_SNAPSHOTS);
+        assert_block_production_worst_case::<T>(epoch, 0);
         Ok(())
     }
 
@@ -292,7 +344,7 @@ mod benches {
         fill_snapshots(&mut state, MAX_SNAPSHOTS)?;
         fill_gate_flags(&mut state, MAX_GATE_FLAGS - 1)?;
         Pallet::<T>::seed(&state)?;
-        let epoch = MAX_GATE_FLAGS as u32 + 1;
+        let epoch: EpochId = MAX_GATE_FLAGS as u32 + 1;
         T::BenchmarkHelper::prime_finalized_epoch(epoch);
         T::BenchmarkHelper::prime_metric_inputs(MAX_COMPONENTS_PER_SPEC as u16);
         // The day projection reads day 0's authorship window (05 §4.3) and the
@@ -300,6 +352,10 @@ mod benches {
         // by `prime_finalized_epoch` and the line below.
         XcmTrafficEpochs::<T>::put(BoundedVec::truncate_from(alloc::vec![epoch]));
         seed_authorship_worst_case::<T>(epoch, 0)?;
+        // `MetricInputs::daily_components` reads the day's block-production slot
+        // inside the same call (05 §4.3.2 `U^{day}`); seed it so the weight
+        // charges that read too.
+        seed_block_production::<T>(epoch, 0);
         let caller: T::AccountId = whitelisted_caller();
         T::BenchmarkHelper::prime_keeper_rebate();
 
@@ -310,6 +366,7 @@ mod benches {
             futarchy_primitives::keeper::CrankClass::General,
         );
         assert_eq!(GateBreachFlags::<T>::iter().count(), MAX_GATE_FLAGS);
+        assert_block_production_worst_case::<T>(epoch, 0);
         Ok(())
     }
 
@@ -376,15 +433,16 @@ mod benches {
     /// The 05 §4.3.2 block-production recorder at its worst case.
     ///
     /// Worst case is the shared epoch index **full to its bound with the target
-    /// epoch at the last position**, and the `(epoch, day)` slot already
-    /// populated: the index scan runs the whole vector before matching, the
-    /// index is written back regardless, and the counter read proves an existing
-    /// value rather than a default. An unindexed epoch returns before the
-    /// counter map is touched at all (the cheap path, not the dear one).
+    /// epoch at the last position**, and both the `(epoch, day)` slot and the
+    /// epoch total already populated: the index scan runs the whole vector
+    /// before matching, the index is written back regardless, and the two
+    /// counter reads prove existing values rather than defaults. An unindexed
+    /// epoch returns before either counter is touched (the cheap path, not the
+    /// dear one).
     ///
-    /// Both signal arms perform exactly one saturating field update over the
-    /// same read/write pair, so measuring either measures both; the authored
-    /// arm is used because it is the one every block takes.
+    /// Both signal arms fold through the same `apply` over the same two
+    /// read/write pairs, so measuring either measures both; the authored arm is
+    /// used because it is the one every block takes.
     #[benchmark]
     fn note_block_production() -> Result<(), BenchmarkError> {
         let epoch: EpochId = MAX_XCM_TRAFFIC_EPOCHS_BOUND - 1;
@@ -392,15 +450,7 @@ mod benches {
         // Last position, so `contains` scans every preceding entry first.
         let indexed = (0..MAX_XCM_TRAFFIC_EPOCHS_BOUND).collect::<Vec<EpochId>>();
         XcmTrafficEpochs::<T>::put(BoundedVec::truncate_from(indexed));
-        BlockProduction::<T>::insert(
-            epoch,
-            day,
-            BlockProductionCounters {
-                non_empty_blocks: 1,
-                empty_blocks: 1,
-                relay_slots: 2,
-            },
-        );
+        seed_block_production::<T>(epoch, day);
 
         #[block]
         {
@@ -411,7 +461,18 @@ mod benches {
             );
         }
 
-        assert_eq!(BlockProduction::<T>::get(epoch, day).non_empty_blocks, 2);
+        // Both granularities advanced, so both writes are inside the measured
+        // block — the epoch total is what keeps `record_snapshot`'s read of `U`
+        // O(1), and it is paid for here.
+        let expected = BENCH_BLOCK_PRODUCTION.non_empty_blocks.saturating_add(1);
+        assert_eq!(
+            BlockProduction::<T>::get(epoch, day).non_empty_blocks,
+            expected
+        );
+        assert_eq!(
+            BlockProductionEpoch::<T>::get(epoch).non_empty_blocks,
+            expected
+        );
         Ok(())
     }
 

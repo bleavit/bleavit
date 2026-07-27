@@ -1100,7 +1100,7 @@ reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
 [[entry]]
 key = "Welfare block-production entries"
 class = "value"
-reason = "13 §4 / 05 §4.3.2: the per-`(epoch, day)` block-production series is written by the parachain inherent and the post-transaction boundary, neither of which is a dispatch, so there is no error surface at all — an epoch the shared prefix index cannot admit is dropped fail-soft. The drop refuses the numerator and the relay-slot denominator together, so the window keeps a zero denominator and `U` resolves absent rather than healthy; that is pinned by `a_full_index_drops_the_whole_window` in `pallets/welfare/src/tests.rs` and by `zero_denominator_leaves_u_absent_and_fails_the_crank_closed` in `runtime/bleavit-runtime/src/tests_welfare_inputs.rs`."
+reason = "13 §4 / 05 §4.3.2: the per-`(epoch, day)` block-production series and its per-epoch total are written by the parachain inherent and the post-transaction boundary, neither of which is a dispatch, so there is no error surface at all — an epoch the shared prefix index cannot admit is dropped fail-soft, day slot and total together. The drop refuses the numerator and the relay-slot denominator together, so the window keeps a zero denominator and `U` resolves absent rather than healthy; that is pinned by `a_full_index_drops_the_whole_window` in `pallets/welfare/src/tests.rs` and by `zero_denominator_leaves_u_absent_and_fails_the_crank_closed` in `runtime/bleavit-runtime/src/tests_welfare_inputs.rs`. The total's agreement with its day slots is pinned in both directions by `do_try_state`."
 
 [[entry]]
 key = "Treasury budget lines"
