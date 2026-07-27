@@ -1117,6 +1117,53 @@ def criterion_sim_false_pass(
                 "status": "fail",
                 "detail": f"false_pass_rate.{name} must be strictly < 0.01 (got {value})",
             }
+    # The denominator travels with the rate, because `0/742` and `0/0` render
+    # identically as 0.0 and only the second one means "measured nothing".
+    # `decidable_harm` is `harmful and |true_effect| >= delta`, strictly
+    # decreasing in the very floor this evidence calibrates, so an empty class
+    # is a reachable outcome of raising a floor — not a corrupt artifact.
+    counts = document.get("false_pass_counts")
+    if not isinstance(counts, dict) or set(counts) != FALSE_PASS_CLASSES:
+        return {
+            "status": "fail",
+            "detail": "false_pass_counts must contain exactly param, trs, code, meta",
+        }
+    for name in sorted(FALSE_PASS_CLASSES):
+        row = counts[name]
+        if not isinstance(row, dict):
+            return {"status": "fail", "detail": f"false_pass_counts.{name} must be an object"}
+        denominator = row.get("decidable_harm")
+        numerator = row.get("decidable_harm_false_pass_count")
+        for label, count in (("decidable_harm", denominator),
+                             ("decidable_harm_false_pass_count", numerator)):
+            if type(count) is not int or count < 0:
+                return {
+                    "status": "fail",
+                    "detail": f"false_pass_counts.{name}.{label} must be a non-negative integer",
+                }
+        if denominator == 0:
+            return {
+                "status": "fail",
+                "detail": (
+                    f"false_pass_counts.{name}.decidable_harm is zero: the class "
+                    "measured no decidable harm, so its false-pass rate is "
+                    "undefined rather than < 1% (15 §4.9 requires it measured "
+                    "per class)"
+                ),
+            }
+        if numerator > denominator:
+            return {
+                "status": "fail",
+                "detail": f"false_pass_counts.{name} numerator exceeds its denominator",
+            }
+        if abs(numerator / denominator - rates[name]) > 1e-6:
+            return {
+                "status": "fail",
+                "detail": (
+                    f"false_pass_rate.{name} disagrees with its exported counts "
+                    f"({numerator}/{denominator})"
+                ),
+            }
     attack = document.get("attack_cost_validation")
     if not isinstance(attack, dict):
         return {"status": "fail", "detail": "attack_cost_validation must be an object"}

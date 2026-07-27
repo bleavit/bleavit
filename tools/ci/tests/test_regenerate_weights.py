@@ -79,6 +79,35 @@ def weight_file(body: str, steps: int = 50, repeat: int = 20) -> str:
 BASE = weight_file(constant_fn("alpha", 5_000, 1_200, 4, 2))
 
 
+def forged_range_fn(name: str, ref_time: int, proof: int, reads: int, writes: int) -> str:
+    """A constant-weight body carrying a spliced degenerate component range.
+
+    `[0, 0]` is the shape that slips every other check: the range cross-check
+    compares `lo == hi == 0`, and `worst_case_totals` adds `slope x high = 0`,
+    so nothing downstream registers it. The parameter is declared in the
+    signature so the file still parses — an unbound range is rejected outright
+    by `check-weight-regression.parse_weight_file` — which isolates exactly the
+    `has_components` decision this exercises.
+    """
+    return (
+        f"\t/// The range of component `n` is `[0, 0]`.\n"
+        f"\tfn {name}(_n: u32, ) -> Weight {{\n"
+        f"\t\t// Minimum execution time: {ref_time}_000 picoseconds.\n"
+        f"\t\tWeight::from_parts({ref_time}_000, 0)\n"
+        f"\t\t\t.saturating_add(Weight::from_parts(0, {proof}))\n"
+        f"\t\t\t.saturating_add(T::DbWeight::get().reads({reads}))\n"
+        f"\t\t\t.saturating_add(T::DbWeight::get().writes({writes}))\n"
+        f"\t}}\n"
+    )
+
+
+def unbound_range_fn(name: str) -> str:
+    """A range naming a component the signature does not declare at all."""
+    return "\t/// The range of component `n` is `[0, 0]`.\n" + constant_fn(
+        name, 5_000, 1_200, 4, 2
+    )
+
+
 class HeaderTests(unittest.TestCase):
     def test_fidelity_is_parsed(self):
         self.assertEqual(MODULE.parse_fidelity(BASE), MODULE.Fidelity(50, 20))
@@ -538,3 +567,82 @@ class RepositoryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Max11ForgeryTests(unittest.TestCase):
+    """MAX-11. The gate must not read its own pass/fail decision out of the
+    artifact it is auditing."""
+
+    def compare(self, committed: str, fresh: str) -> object:
+        return MODULE.compare_pallet("pallet_example", committed, fresh, [], PARSE)
+
+    def test_spliced_degenerate_range_cannot_demote_storage_drift(self):
+        # The literal SQ-490 defect — a function declaring 4 reads while
+        # performing 261 — plus one `///` line. At baseline `has_components`
+        # was `bool(before.ranges or after.ranges)`, so the committed file's
+        # own comment moved the 4 -> 261 drift from hard to advisory and
+        # `failed` became False.
+        committed = weight_file(forged_range_fn("alpha", 5_000, 1_200, 4, 2))
+        fresh = weight_file(constant_fn("alpha", 5_000, 1_200, 261, 2), steps=2, repeat=1)
+        result = self.compare(committed, fresh)
+
+        self.assertTrue(result.failed)
+        self.assertTrue(
+            any(drift.quantity == "worst_case.reads" for drift in result.hard), result.hard
+        )
+
+    def test_real_component_function_is_still_advisory_at_reduced_fidelity(self):
+        # The demotion itself is legitimate and must survive: a 2-point fit can
+        # lose a linear term outright, so a fitted slope is only trusted at the
+        # canonical fidelity.
+        committed = weight_file(linear_fn("beta", 7))
+        fresh = weight_file(linear_fn("beta", 9), steps=2, repeat=1)
+        result = self.compare(committed, fresh)
+
+        self.assertFalse(result.failed)
+        self.assertTrue(
+            any(drift.quantity == "worst_case.reads" for drift in result.advisory),
+            result.advisory,
+        )
+
+    def test_edited_committed_header_cannot_manufacture_a_fidelity_match(self):
+        # One character: `REPEAT: 20` -> `21` in the committed file made the
+        # run's fidelity "match" at baseline, because `matches` was text
+        # equality between the two headers and nothing pinned either.
+        committed = weight_file(linear_fn("beta", 7), steps=2, repeat=1)
+        fresh = weight_file(linear_fn("beta", 9), steps=2, repeat=1)
+        result = self.compare(committed, fresh)
+
+        self.assertFalse(result.fidelity_matches)
+        self.assertTrue(result.failed)
+        self.assertTrue(
+            any(drift.quantity == "committed_fidelity" for drift in result.hard),
+            result.hard,
+        )
+
+    def test_canonical_committed_fidelity_passes(self):
+        result = self.compare(BASE, BASE)
+
+        self.assertTrue(result.fidelity_matches)
+        self.assertFalse(result.failed)
+
+    def test_parser_rejects_a_range_binding_no_slope_and_no_parameter(self):
+        # Closes the forgery at the parser, for every consumer of
+        # `parse_weight_file`, not only for this tool.
+        with self.assertRaises(Exception) as raised:
+            PARSE(weight_file(unbound_range_fn("alpha")))
+        self.assertIn("bind no slope", str(raised.exception))
+
+    def test_every_committed_weight_file_declares_the_canonical_fidelity(self):
+        # The pin is only a control if the tree already satisfies it.
+        weights = ROOT / "runtime" / "bleavit-runtime" / "src" / "weights"
+        files = sorted(weights.glob("*.rs"))
+        self.assertTrue(files)
+        for path in files:
+            if path.name == "mod.rs":
+                continue
+            with self.subTest(path=path.name):
+                self.assertEqual(
+                    MODULE.parse_fidelity(path.read_text(encoding="utf-8")),
+                    MODULE.CANONICAL_FIDELITY,
+                )

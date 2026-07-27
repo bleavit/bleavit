@@ -38,6 +38,10 @@ parameter_types! {
     pub const InsuranceAccount: AccountId32 = AccountId32::new([240; 32]);
     pub static ProposalExecuted: bool = false;
     pub static ProposalTerminal: bool = false;
+    /// Whether `pallet-epoch` carries the attested proposal. Defaults to
+    /// `true` so the ordinary paths under test attest against a real proposal;
+    /// the negative case flips it.
+    pub static ProposalKnown: bool = true;
 }
 
 pub struct TestProposalStatus;
@@ -47,6 +51,9 @@ impl pallet_attestor::AttestorProposalStatus for TestProposalStatus {
     }
     fn is_terminal(_pid: futarchy_primitives::ProposalId) -> bool {
         ProposalTerminal::get()
+    }
+    fn exists(_pid: futarchy_primitives::ProposalId) -> bool {
+        ProposalKnown::get()
     }
 }
 

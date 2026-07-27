@@ -318,7 +318,7 @@ fn daily_c_equals(inputs: &PipelineInputs, expected: u64) {
             });
         }
         let (flags, _changed) = state
-            .record_daily_gate(1, 0, 1, components, &params)
+            .record_daily_gate(1, 0, 1, Some(1), components, &params)
             .expect("daily gate records");
         assert_eq!(
             flags.c_breached, expect_breach,
@@ -389,6 +389,7 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
                     .record_snapshot(
                         1,
                         1,
+                        &[1],
                         snapshot_components(&parsed),
                         FixedU64(parsed.incident),
                         Vec::new(),
@@ -453,6 +454,7 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
                     .record_snapshot(
                         1,
                         1,
+                        &[1],
                         snapshot_components(&parsed),
                         FixedU64(parsed.incident),
                         Vec::new(),
@@ -503,7 +505,7 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
                     });
                 }
                 let (flags, _changed) = daily_state
-                    .record_daily_gate(1, 0, 1, daily_components, &WelfareParams::DEFAULT)
+                    .record_daily_gate(1, 0, 1, Some(1), daily_components, &WelfareParams::DEFAULT)
                     .expect("daily gate records");
                 // Directional, not one-sided: `full_pipeline_live_gates` sits
                 // *above* `welfare.thetaS`, and an assertion that only ever
@@ -580,6 +582,7 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
                         .record_snapshot(
                             epoch,
                             1,
+                            &[1],
                             snapshot_components(&parsed),
                             FixedU64(parsed.incident),
                             flagged,

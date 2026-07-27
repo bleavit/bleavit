@@ -128,6 +128,13 @@ class Fidelity:
         return f"{self.steps}x{self.repeat}"
 
 
+#: The fidelity every committed weight artifact must declare, and the only one
+#: at which a fitted component slope is trusted (15 §4.5). Pinned here rather
+#: than compared header-to-header, because a header the audited file supplies
+#: is not evidence about the audited file.
+CANONICAL_FIDELITY = Fidelity(50, 20)
+
+
 @dataclass(frozen=True)
 class Drift:
     """One function's disagreement between committed and freshly measured."""
@@ -586,8 +593,30 @@ def compare_pallet(
     new = parse_weight_file(fresh)
     old_fidelity = parse_fidelity(committed)
     new_fidelity = parse_fidelity(fresh)
-    matches = bool(old_fidelity and new_fidelity and old_fidelity == new_fidelity)
+    # Fidelity is judged against the pinned canonical value, NOT against the
+    # committed file's own header. Text-equality against the artifact under
+    # audit is a one-character gate bypass: nothing anywhere pinned the header,
+    # so changing `REPEAT: 20` to `21` in the committed file made *this run's*
+    # fidelity "match" without a single benchmark executing, demoting every
+    # component-bearing function to advisory — including inside the
+    # release-blocking `Component weights at committed fidelity` job that
+    # `publish` depends on.
+    matches = bool(
+        new_fidelity == CANONICAL_FIDELITY and old_fidelity == CANONICAL_FIDELITY
+    )
     comparison = Comparison(pallet=pallet, fidelity_matches=matches)
+    if committed and old_fidelity != CANONICAL_FIDELITY:
+        # Hard, not advisory: a committed artifact that does not declare the
+        # canonical fidelity was either generated at a fidelity whose fitted
+        # slopes were never verified, or had its header edited.
+        comparison.hard.append(
+            Drift(
+                "<header>",
+                "committed_fidelity",
+                str(CANONICAL_FIDELITY),
+                str(old_fidelity),
+            )
+        )
 
     for function in sorted(set(old) | set(new)):
         if function in preserved:
@@ -633,7 +662,22 @@ def compare_pallet(
         # writes 100 at 50x20 against 3 at 2x1. A 2-point fit can miss a linear
         # term, which is exactly the direction that would mask an understatement,
         # so component functions are hard-gated only at matching fidelity.
-        has_components = bool(before.ranges or after.ranges)
+        # Derived from the **fresh** regeneration only. `before` is the file
+        # under audit, and `before.ranges` is populated exclusively from free
+        # text — a `///` line the generator writes and nothing structurally
+        # verifies. Reading it here let a PR declare a degenerate `[0, 0]`
+        # range on a constant-weight function and thereby demote that
+        # function's storage comparison from HARD to ADVISORY: `[0, 0]` also
+        # slips the range cross-check above (lo == hi == 0) and contributes
+        # `slope x high = 0` to the totals, so nothing else notices. That is
+        # the literal SQ-490 shape — an understated read count — with the gate
+        # that exists to catch it disabled by one comment line inside the
+        # artifact it is checking.
+        #
+        # `after` is this tool's own output, so it cannot be forged by a diff.
+        # The legitimate "committed had a component, the fresh run lost it"
+        # case is already a hard failure via the range cross-check above.
+        has_components = bool(after.ranges)
         bucket = (
             comparison.hard
             if (matches or not has_components)

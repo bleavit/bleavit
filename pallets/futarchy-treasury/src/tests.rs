@@ -2172,7 +2172,12 @@ fn open_stream_reaps_a_terminal_stream_at_the_bound() {
             t.streams.push(Stream {
                 id: i,
                 recipient: [1u8; 32],
-                line: BudgetLine::Rewards,
+                // A line with no dedicated custody pot: the 08 §6.3 drift
+                // alarm now measures `line + outstanding stream
+                // obligations` against the pot, so hand-injected streams on
+                // a pot-backed line would be seeding an inconsistent
+                // fixture rather than testing the stream-table bound.
+                line: BudgetLine::OpsCoretime,
                 total: USDC,
                 // Make exactly one stream terminal (fully claimed).
                 claimed: if i == 3 { USDC } else { 0 },
@@ -2187,7 +2192,7 @@ fn open_stream_reaps_a_terminal_stream_at_the_bound() {
         // stays at the bound and try_state still holds.
         assert_ok!(Treasury::open_stream(
             to(),
-            BudgetLine::OpsCollators,
+            BudgetLine::OpsCoretime,
             acc(2),
             300_000 * USDC,
             0,
@@ -2849,5 +2854,92 @@ fn nothing_to_pay_is_not_a_fault() {
         Treasury::pay_collator_compensation();
         assert_eq!(CollatorAuthoredBlocks::<Test>::get().len(), 1);
         assert!(integrity_faults().is_empty());
+    });
+}
+
+/// MAX-10 regression. `fund_budget_line` keeps a pot-backed line and its
+/// custody pot in step by moving the real USDC MAIN → pot. `open_stream` then
+/// debited the line with **no** custody leg, and `cancel_stream` credited the
+/// remainder to `main_usdc` — recording MAIN money that physically sits in the
+/// pot. Re-funding moves *fresh* MAIN USDC in, so the residual never shrinks
+/// and no ordinary extrinsic recovers it: `recover_foreign` rejects USDC,
+/// `sweep_insurance` is INSURANCE→MAIN only, and the USDC admin is itself a
+/// keyless pallet account. 08 §1.4 states the correct behaviour outright —
+/// "`open_stream` funds the stream from `line` and reverts its remainder
+/// **there** on cancellation".
+///
+/// Fails at baseline: the line ended at 0 and `main_usdc` ended one stream
+/// higher, with the real USDC still in the REWARDS pot.
+#[test]
+fn max10_a_cancelled_stream_reverts_to_its_own_line_not_to_main() {
+    funded_ext().execute_with(|| {
+        let before = crate::Pallet::<Test>::treasury();
+        let line_before = before.line_balance(BudgetLine::Rewards);
+        let main_before = before.main_usdc;
+        let pot_before = RewardsPayoutPotBalance::get();
+        assert!(line_before > 0 && pot_before >= line_before);
+
+        let total = 300_000 * USDC;
+        assert_ok!(Treasury::open_stream(
+            to(),
+            BudgetLine::Rewards,
+            acc(2),
+            total,
+            0,
+            100
+        ));
+        let opened = crate::Pallet::<Test>::treasury();
+        assert_eq!(
+            opened.line_balance(BudgetLine::Rewards),
+            line_before - total
+        );
+        // No custody leg either way: the asset never moved.
+        assert_eq!(RewardsPayoutPotBalance::get(), pot_before);
+        // The debited line no longer covers the obligation on its own, but the
+        // obligation is still visible to the drift alarm.
+        assert_eq!(opened.outstanding_stream_total(BudgetLine::Rewards), total);
+        assert_ok!(crate::Pallet::<Test>::do_try_state());
+
+        let id = opened.streams.last().expect("stream opened").id;
+        assert_ok!(Treasury::cancel_stream(to(), id));
+
+        let after = crate::Pallet::<Test>::treasury();
+        assert_eq!(
+            after.line_balance(BudgetLine::Rewards),
+            line_before,
+            "the remainder returns to the line that funded the stream (08 §1.4)"
+        );
+        assert_eq!(
+            after.main_usdc, main_before,
+            "MAIN accounting must not grow against USDC that sits in the pot"
+        );
+        assert_eq!(RewardsPayoutPotBalance::get(), pot_before);
+        assert_eq!(after.outstanding_stream_total(BudgetLine::Rewards), 0);
+        assert_ok!(crate::Pallet::<Test>::do_try_state());
+    });
+}
+
+/// The strengthened 08 §6.3 alarm must actually detect the drift it now covers
+/// (15 §1): a line drained by an open stream used to read as needing nothing.
+#[test]
+fn try_state_sees_an_outstanding_stream_as_a_claim_on_the_pot() {
+    funded_ext().execute_with(|| {
+        let mut t = crate::Pallet::<Test>::treasury();
+        // Custody the pot cannot cover once the stream's claim is counted.
+        let pot = RewardsPayoutPotBalance::get();
+        t.streams.push(Stream {
+            id: t.next_stream_id,
+            recipient: [1u8; 32],
+            line: BudgetLine::Rewards,
+            total: pot.saturating_add(USDC),
+            claimed: 0,
+            start: 0,
+            duration: 100,
+            cancelled: false,
+        });
+        t.next_stream_id += 1;
+        crate::Pallet::<Test>::seed(&t);
+
+        assert!(crate::Pallet::<Test>::do_try_state().is_err());
     });
 }

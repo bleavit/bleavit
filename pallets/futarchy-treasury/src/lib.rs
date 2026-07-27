@@ -2166,19 +2166,34 @@ pub mod pallet {
             // Loud custody-drift alarm: `fund_budget_line` is custody-synced,
             // while this remains the backstop for every other drift source
             // (genesis funding, recover_foreign and direct transfers into pots).
-            if t.line_balance(BudgetLine::Keeper) > T::RebatePayout::pot_balance(PayoutLine::Keeper)
+            //
+            // The claim measured is `line + outstanding stream obligations`,
+            // not the line alone. `open_stream` debits the line without moving
+            // custody, so a line drained by a stream used to read as needing
+            // nothing while the stream's recipient still had a claim on the
+            // same pot — the alarm went quiet exactly where MAX-10 lived. The
+            // reverse direction (pot above the claim) is deliberately not an
+            // error: it is the over-collateralised direction, and anyone can
+            // reach it by transferring USDC into a keyless pot, so asserting
+            // it would let an outsider break try-state.
+            if t.line_balance(BudgetLine::Keeper)
+                .saturating_add(t.outstanding_stream_total(BudgetLine::Keeper))
+                > T::RebatePayout::pot_balance(PayoutLine::Keeper)
             {
                 return Err(TryRuntimeError::Other(
                     "treasury: KEEPER line exceeds real USDC custody pot",
                 ));
             }
-            if t.line_balance(BudgetLine::Oracle) > T::RebatePayout::pot_balance(PayoutLine::Oracle)
+            if t.line_balance(BudgetLine::Oracle)
+                .saturating_add(t.outstanding_stream_total(BudgetLine::Oracle))
+                > T::RebatePayout::pot_balance(PayoutLine::Oracle)
             {
                 return Err(TryRuntimeError::Other(
                     "treasury: ORACLE line exceeds real USDC custody pot",
                 ));
             }
             if t.line_balance(BudgetLine::Rewards)
+                .saturating_add(t.outstanding_stream_total(BudgetLine::Rewards))
                 > T::RebatePayout::pot_balance(PayoutLine::Rewards)
             {
                 return Err(TryRuntimeError::Other(
@@ -2186,6 +2201,7 @@ pub mod pallet {
                 ));
             }
             if t.line_balance(BudgetLine::OpsCollators)
+                .saturating_add(t.outstanding_stream_total(BudgetLine::OpsCollators))
                 > T::RebatePayout::pot_balance(PayoutLine::OpsCollators)
             {
                 return Err(TryRuntimeError::Other(

@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import ModuleType
-from typing import Any
+from typing import Any, Iterable
 
 import yaml
 
@@ -476,12 +476,92 @@ def require_free_zombienet_ports(root: Path, suites: list[Suite]) -> None:
             ) from error
 
 
-def validate_artifact_binding(root: Path, wasm: Path) -> str:
+#: Zombienet topology directive naming a node's chain spec.
+TOPOLOGY_CHAIN_SPEC = re.compile(
+    r"^\s*chain_spec_path\s*=\s*[\"']([^\"']+)[\"']", re.MULTILINE
+)
+#: The drill's `Network:` header, naming the topology it boots.
+DRILL_NETWORK = re.compile(r"^\s*Network:\s*(\S+)\s*$", re.MULTILINE)
+#: Chain specs this repository builds from its own runtime. Relay, Asset Hub
+#: and Coretime specs come from the pinned Paseo tree and carry a different
+#: `:code` by construction, so binding them to `runtime.wasm` would be wrong.
+BLEAVIT_SPEC_PREFIX = "bleavit-"
+
+
+def suite_chain_specs(root: Path, suites: Iterable["Suite"]) -> list[str]:
+    """The Bleavit chain specs the *selected* suites actually boot.
+
+    Derived per suite rather than hardcoded. The fixed pair bound exactly two
+    files, but `06-pb-migration` boots `bleavit-drill-migration.json` and the
+    compressed-timing drills boot `bleavit-drill-fast*.json` — none of which
+    appeared anywhere in this file. The emitted `bleavit.env-evidence.v1` then
+    asserted that, for example, the 09 §3.2 PB-MIGRATION path had been
+    exercised *on the release runtime* without ever having verified that the
+    spec it ran against carried the release runtime's code.
+    """
+    names: dict[str, None] = {}
+    for suite in suites:
+        if suite.kind == "zombienet":
+            drill_path = suite.path if suite.path.is_absolute() else root / suite.path
+            try:
+                drill = drill_path.read_text(encoding="utf-8")
+            except OSError as error:
+                raise EvidenceError(
+                    f"15 §5: cannot read drill {suite.identifier}: {error}"
+                ) from error
+            network = DRILL_NETWORK.search(drill)
+            if network is None:
+                raise EvidenceError(
+                    f"15 §5: drill {suite.identifier} declares no Network: topology, "
+                    "so the chain spec it boots cannot be bound to the release runtime"
+                )
+            topology = (root / Path(network.group(1).lstrip("./"))).resolve()
+            try:
+                text = topology.read_text(encoding="utf-8")
+            except OSError as error:
+                raise EvidenceError(
+                    f"15 §5: cannot read topology {network.group(1)} for suite "
+                    f"{suite.identifier}: {error}"
+                ) from error
+            spec_paths = TOPOLOGY_CHAIN_SPEC.findall(text)
+        elif suite.kind == "chopsticks":
+            # Every scenario is required to fork exactly `CHOPSTICKS_GENESIS`
+            # (validated where the config is loaded), so its spec set is that
+            # one file — already in the base pair below.
+            spec_paths = [CHOPSTICKS_GENESIS]
+        else:
+            continue
+
+        matched = False
+        for spec_path in spec_paths:
+            name = PurePosixPath(spec_path).name
+            if not name.startswith(BLEAVIT_SPEC_PREFIX):
+                continue
+            names.setdefault(name, None)
+            matched = True
+        if not matched:
+            raise EvidenceError(
+                f"15 §5: suite {suite.identifier} names no Bleavit chain spec, so "
+                "nothing binds its run to the release runtime"
+            )
+    return sorted(names)
+
+
+def validate_artifact_binding(
+    root: Path, wasm: Path, suites: Iterable["Suite"] | None = None
+) -> str:
     if not wasm.is_file():
         raise EvidenceError(f"15 §5: release runtime.wasm is missing: {wasm}")
     wasm_hash = sha256_file(wasm)
     consumer = load_assemble_release()
-    for name in ("bleavit-drill.json", "bleavit-drill-raw.json"):
+    # Always include the base pair: it is what the Chopsticks scenarios fork
+    # and what a `--no-evidence`/no-suite invocation still has to verify.
+    names = ["bleavit-drill.json", "bleavit-drill-raw.json"]
+    if suites is not None:
+        for name in suite_chain_specs(root, suites):
+            if name not in names:
+                names.append(name)
+    for name in names:
         path = root / "zombienet" / "specs" / "out" / name
         require_file(path, f"generated chain spec {name}")
         try:
@@ -1573,6 +1653,7 @@ def validate_release_evidence_completeness(
 def emit_evidence(
     root: Path,
     suites: list[Suite],
+    selected: list[Suite],
     rows: list[dict[str, Any]],
     wasm: Path,
     runtime_wasm_sha256: str,
@@ -1602,7 +1683,7 @@ def emit_evidence(
             directory = root / kind
             targets[kind] = (directory, {}, passing)
 
-        reverified_hash = validate_artifact_binding(root, wasm)
+        reverified_hash = validate_artifact_binding(root, wasm, selected)
         if reverified_hash != runtime_wasm_sha256:
             raise EvidenceError(
                 "15 §5: release runtime.wasm changed after the environment suites ran"
@@ -1737,7 +1818,7 @@ def run() -> int:
     runtime_wasm_sha256: str | None = None
     if not args.no_evidence:
         assert wasm is not None
-        runtime_wasm_sha256 = validate_artifact_binding(root, wasm)
+        runtime_wasm_sha256 = validate_artifact_binding(root, wasm, selected)
     elif wasm is not None:
         if not wasm.is_file():
             raise EvidenceError(f"release runtime.wasm is missing: {wasm}")
@@ -1830,6 +1911,7 @@ def run() -> int:
     produced = emit_evidence(
         root,
         suites,
+        selected,
         rows,
         wasm,
         runtime_wasm_sha256,

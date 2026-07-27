@@ -1043,25 +1043,109 @@ fn resolve_without_open_challenge_is_a_precise_error() {
     });
 }
 
+/// MAX-02 regression. `attest`'s only uniqueness key is
+/// `(pid, artifact_hash, attestor)`, so before the fair-share quota a single
+/// seated attestor could fill the whole 256-record ledger by varying only the
+/// artifact hash — after which `has_quorum` could never be satisfied for a new
+/// artifact again, and quorum gates CODE admission, execution and
+/// `commit_recovery_image`. Fails at baseline: every call below returned `Ok`.
 #[test]
-fn attestation_storage_cap_rejects_without_mutating_existing_rows() {
+fn one_signer_cannot_monopolize_the_attestation_ledger() {
     new_test_ext().execute_with(|| {
-        for pid in 0..256u64 {
+        for artifact in 0..crate::MAX_ATTESTATIONS_PER_ATTESTOR {
             assert_ok!(Attestor::attest(
                 RuntimeOrigin::signed(acct(1)),
-                pid,
-                hash(1),
+                1,
+                hash(artifact as u8),
                 hash(2),
             ));
         }
-        assert_eq!(Attestations::<Test>::get().len(), 256);
-        assert_eq!(NextAttestationId::<Test>::get(), 256);
+        assert_eq!(
+            Attestations::<Test>::get().len(),
+            crate::MAX_ATTESTATIONS_PER_ATTESTOR as usize
+        );
+        // At quota, and 240 of the 256 slots still free.
+        assert_noop!(
+            Attestor::attest(RuntimeOrigin::signed(acct(1)), 1, hash(200), hash(2)),
+            Error::<Test>::AttestorQuotaExceeded
+        );
+        // The quota is per signer, so quorum is still fundable by others.
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(acct(2)),
+            1,
+            hash(200),
+            hash(2),
+        ));
+        assert_ok!(Attestor::do_try_state());
+    });
+}
+
+/// The global bound survives as the storage backstop. It is no longer
+/// reachable from a single signer's dispatches (the quota binds first), but a
+/// ledger that arrived full by another route — genesis, a migration, or roster
+/// rotation retaining departed members' unreaped records — must still refuse
+/// without mutating.
+#[test]
+fn attestation_storage_cap_rejects_without_mutating_existing_rows() {
+    new_test_ext().execute_with(|| {
+        let full = (0..crate::MAX_ATTESTATIONS)
+            .map(|id| attestor_core::Attestation {
+                id,
+                pid: u64::from(id),
+                artifact_hash: hash(1),
+                statement_hash: hash(2),
+                // Owned by acct(2), so acct(1) below clears the quota check
+                // and is refused by the global bound alone.
+                attestor: [2; 32],
+                submitted_at: 0,
+                challenge_deadline: CHALLENGE_WINDOW_BLOCKS,
+                challenge: None,
+            })
+            .collect::<Vec<_>>();
+        Attestations::<Test>::put(
+            frame_support::BoundedVec::try_from(full).expect("exactly the bound"),
+        );
+        NextAttestationId::<Test>::put(crate::MAX_ATTESTATIONS);
+
+        assert_eq!(
+            Attestations::<Test>::get().len(),
+            crate::MAX_ATTESTATIONS as usize
+        );
         assert_noop!(
             Attestor::attest(RuntimeOrigin::signed(acct(1)), 256, hash(1), hash(2)),
             Error::<Test>::TooManyAttestations
         );
-        assert_eq!(Attestations::<Test>::get().len(), 256);
-        assert_eq!(NextAttestationId::<Test>::get(), 256);
+        assert_eq!(
+            Attestations::<Test>::get().len(),
+            crate::MAX_ATTESTATIONS as usize
+        );
+        assert_eq!(NextAttestationId::<Test>::get(), crate::MAX_ATTESTATIONS);
+    });
+}
+
+/// MAX-02 regression, second leg. `attest` never checked that `pid` named a
+/// real proposal, and `ProposalId` is a bare `u64` — so a record on
+/// `u64::MAX` could be admitted to a bounded ledger it could never leave,
+/// because reap terminality is read from the proposal. Fails at baseline: the
+/// call returned `Ok`.
+#[test]
+fn attest_refuses_a_pid_the_runtime_does_not_carry() {
+    new_test_ext().execute_with(|| {
+        ProposalKnown::set(false);
+        assert_noop!(
+            Attestor::attest(RuntimeOrigin::signed(acct(1)), u64::MAX, hash(1), hash(2)),
+            Error::<Test>::UnknownProposal
+        );
+        assert_eq!(Attestations::<Test>::get().len(), 0);
+        // Membership is still checked, and existence does not weaken it.
+        ProposalKnown::set(true);
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(acct(1)),
+            u64::MAX,
+            hash(1),
+            hash(2),
+        ));
+        assert_ok!(Attestor::do_try_state());
     });
 }
 

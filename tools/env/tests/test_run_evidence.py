@@ -138,7 +138,13 @@ class RunEvidenceTests(unittest.TestCase):
         # The closing try-state endpoint is resolved from the topology's pinned
         # collator rpc_port (15 §1; SQ-204), so the fixture must pin one.
         (self.root / "zombienet" / "networks" / "bleavit-local.toml").write_text(
-            "[relaychain]\nchain = 'fixture'\nrpc_port = 19944\n", encoding="utf-8"
+            "[relaychain]\nchain = 'fixture'\nrpc_port = 19944\n"
+            # The artifact binding derives its spec set from each selected
+            # suite's own topology, so the fixture topology has to name one.
+            "chain_spec_path = \"zombienet/specs/out/paseo-local.json\"\n"
+            "[[parachains]]\n"
+            "chain_spec_path = \"zombienet/specs/out/bleavit-drill.json\"\n",
+            encoding="utf-8",
         )
         for name in ("01-smoke", "03-keeper-loss", "09-soak"):
             (self.root / "zombienet" / "drills" / f"{name}.zndsl").write_text(
@@ -551,6 +557,7 @@ class RunEvidenceTests(unittest.TestCase):
         suites, rows = self.synthetic_passing_rows(*kinds)
         return RUNNER.emit_evidence(
             self.root,
+            suites,
             suites,
             rows,
             self.wasm,
@@ -1499,3 +1506,61 @@ class TryStateLegTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SuiteChainSpecBindingTests(unittest.TestCase):
+    """MAX-S2. The artifact binding must cover every spec the selected suites
+    actually boot, not a hardcoded pair."""
+
+    def suites(self, *identifiers: str) -> list[object]:
+        root = Path(RUNNER.__file__).resolve().parents[2]
+        return [
+            suite
+            for suite in RUNNER.load_manifest(root)
+            if suite.identifier in identifiers
+        ]
+
+    def root(self) -> Path:
+        return Path(RUNNER.__file__).resolve().parents[2]
+
+    def test_migration_drill_binds_its_own_chain_spec(self) -> None:
+        # Fails at baseline: `bleavit-drill-migration.json` appeared nowhere in
+        # run-evidence.py, so the emitted evidence asserted the 09 §3.2
+        # PB-MIGRATION path had been exercised on the release runtime without
+        # having verified the spec it ran against carried that runtime.
+        names = RUNNER.suite_chain_specs(self.root(), self.suites("06-pb-migration"))
+
+        self.assertIn("bleavit-drill-migration.json", names)
+
+    def test_compressed_timing_drills_bind_their_own_chain_specs(self) -> None:
+        names = RUNNER.suite_chain_specs(
+            self.root(), self.suites("09-three-unattended-epochs")
+        )
+
+        self.assertTrue(
+            any(name.startswith("bleavit-drill-fast") for name in names), names
+        )
+
+    def test_every_release_and_g1_drill_names_a_bleavit_spec(self) -> None:
+        # Fail-closed: a suite whose topology names no Bleavit spec would
+        # otherwise run unbound to the release runtime and say nothing.
+        root = self.root()
+        drills = [
+            suite for suite in RUNNER.load_manifest(root) if suite.kind == "zombienet"
+        ]
+        self.assertTrue(drills)
+        for suite in drills:
+            with self.subTest(suite=suite.identifier):
+                self.assertTrue(RUNNER.suite_chain_specs(root, [suite]))
+
+    def test_relay_and_system_parachain_specs_are_not_bound(self) -> None:
+        # They come from the pinned Paseo tree and carry a different `:code`;
+        # binding them to runtime.wasm would be a false assertion, not a
+        # stricter one.
+        names = RUNNER.suite_chain_specs(
+            self.root(), self.suites("07-xcm-reserve-transfer")
+        )
+
+        self.assertTrue(names)
+        for name in names:
+            self.assertTrue(name.startswith("bleavit-"), name)

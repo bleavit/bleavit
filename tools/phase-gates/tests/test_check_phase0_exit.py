@@ -133,6 +133,11 @@ def valid_sim_document() -> dict[str, object]:
             "code": 0.0099,
             "meta": 0.0099,
         },
+        # 99/10000 = 0.0099 exactly, so the rate/count cross-check agrees.
+        "false_pass_counts": {
+            name: {"decidable_harm": 10_000, "decidable_harm_false_pass_count": 99}
+            for name in ("param", "trs", "code", "meta")
+        },
         "attack_cost_validation": {
             "validated": True,
             "method": "measured-depth adversarial replay",
@@ -964,10 +969,50 @@ class SimulationEvidenceTests(PhaseGateTestCase):
         assert isinstance(rates, dict)
         rates["param"] = 0
         document["false_pass_rate"] = rates
+        # A real zero: measured against a non-empty denominator.
+        counts = copy.deepcopy(document["false_pass_counts"])
+        assert isinstance(counts, dict)
+        counts["param"]["decidable_harm_false_pass_count"] = 0
+        document["false_pass_counts"] = counts
 
         criterion = GATE.criterion_sim_false_pass(self.evidence(document))
 
         self.assertEqual(criterion["status"], "pass")
+
+    def test_zero_rate_on_an_empty_denominator_is_rejected(self) -> None:
+        """MAX-12. `0/0` renders as 0.0 exactly like `0/742`, and only the
+        first means the class measured nothing. Fails at baseline: the gate
+        exported no counts, so it was structurally unable to tell them apart
+        and reported `sim-false-pass: pass` for a class with no evidence."""
+        document = valid_sim_document()
+        rates = copy.deepcopy(document["false_pass_rate"])
+        assert isinstance(rates, dict)
+        rates["param"] = 0.0
+        document["false_pass_rate"] = rates
+        counts = copy.deepcopy(document["false_pass_counts"])
+        assert isinstance(counts, dict)
+        counts["param"] = {
+            "decidable_harm": 0,
+            "decidable_harm_false_pass_count": 0,
+        }
+        document["false_pass_counts"] = counts
+
+        self.assert_sim_fails(document, "measured no decidable harm")
+
+    def test_missing_counts_block_is_rejected(self) -> None:
+        document = valid_sim_document()
+        document.pop("false_pass_counts")
+
+        self.assert_sim_fails(document, "false_pass_counts must contain")
+
+    def test_counts_must_agree_with_the_exported_rate(self) -> None:
+        document = valid_sim_document()
+        counts = copy.deepcopy(document["false_pass_counts"])
+        assert isinstance(counts, dict)
+        counts["param"]["decidable_harm_false_pass_count"] = 1
+        document["false_pass_counts"] = counts
+
+        self.assert_sim_fails(document, "disagrees with its exported counts")
 
     def test_nonfinite_json_rate_is_rejected_before_validation(self) -> None:
         for value in (float("inf"), float("nan")):

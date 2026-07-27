@@ -59,7 +59,9 @@ def _rate(numerator: int, denominator: int) -> str:
     return format(Decimal(numerator) / Decimal(denominator), ".6f")
 
 
-def _check_metric_row(row: dict, label: str, errors: list[str]) -> None:
+def _check_metric_row(
+    row: dict, label: str, errors: list[str], *, require_evidence: bool = False
+) -> None:
     total = _count(row.get("total"), f"{label}.total", errors)
     harmful = _count(row.get("harmful"), f"{label}.harmful", errors)
     beneficial = _count(row.get("beneficial"), f"{label}.beneficial", errors)
@@ -81,6 +83,17 @@ def _check_metric_row(row: dict, label: str, errors: list[str]) -> None:
     for field, numerator, denominator in checks:
         if row.get(field) != _rate(numerator, denominator):
             errors.append(f"{label}.{field} disagrees with counts")
+    if require_evidence and decidable == 0:
+        # Only the four normative class rows demand a denominator. A stratum
+        # legitimately empties — the committed artifact already carries three
+        # PARAM effect bands at `decidable_harm: 0` — and the strata-level
+        # aggregate already filters those out. The class-level rate has no such
+        # guard, which is the asymmetry this closes.
+        errors.append(
+            f"{label}.decidable_harm is zero, so its false-pass rate is "
+            "undefined rather than measured (15 §4.9 requires the rate to be "
+            "measured per class)"
+        )
 
 
 def _check_metrics(payload: dict, config: SimulationConfig, errors: list[str]) -> None:
@@ -91,7 +104,7 @@ def _check_metrics(payload: dict, config: SimulationConfig, errors: list[str]) -
     expected_axes = {"effect_delta_band", "attack_strategy", "gate_exposure", "market_formation"}
     for name in CLASSES:
         row = metrics[name]
-        _check_metric_row(row, name, errors)
+        _check_metric_row(row, name, errors, require_evidence=True)
         strata = row.get("strata", {})
         if set(strata) != expected_axes:
             errors.append(f"{name} strata axes are incomplete")
@@ -318,8 +331,14 @@ def check_artifact(path: Path) -> dict:
     attack = derived_attack
     try:
         derived_violations = normative_violations(metrics, attack)
+        # `_rate(0, 0)` is "0.000000", so a class that measured nothing would
+        # otherwise satisfy the `< 1%` gate on an empty denominator and carry
+        # `designation: published` with `violations: []`. The gate is
+        # per-class and decidable-harm (15 §4.9, SQ-269); it is not a licence
+        # to pass a class with no evidence.
         class_gate = {
-            name: Decimal(metrics[name]["decidable_harm_false_pass_rate"])
+            name: metrics[name]["decidable_harm"] > 0
+            and Decimal(metrics[name]["decidable_harm_false_pass_rate"])
             < Decimal("0.01")
             for name in CLASSES
         }

@@ -39,6 +39,51 @@ pub struct Submitter {
     retry_base: Duration,
     cooldown_depth: u64,
     cooldowns: BTreeMap<String, u64>,
+    /// `Pallet.call` -> the metadata call shape this keeper will sign.
+    ///
+    /// Empty means unpinned, which is the pre-existing trust posture and is
+    /// reported as such at startup.
+    call_hashes: BTreeMap<String, [u8; 32]>,
+}
+
+/// The pin decision, factored out of the metadata lookup so it is testable
+/// without a live node.
+fn shape_decision(
+    observed: Option<[u8; 32]>,
+    pins: &BTreeMap<String, [u8; 32]>,
+    key: &str,
+) -> Result<(), ShapeRefusal> {
+    let observed = observed.ok_or(ShapeRefusal::Unknown)?;
+    match pins.get(key) {
+        Some(pinned) if *pinned == observed => Ok(()),
+        Some(_) => Err(ShapeRefusal::Mismatch),
+        // Fail closed only once the operator has opted in: with no pins at all
+        // the keeper is in its pre-existing posture and says so loudly at
+        // startup instead of refusing every crank.
+        None if pins.is_empty() => Ok(()),
+        None => Err(ShapeRefusal::Unpinned),
+    }
+}
+
+/// Why a crank was refused before anything was signed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ShapeRefusal {
+    /// The node's metadata declares no such call.
+    Unknown,
+    /// The node's metadata declares a different shape than the pinned one.
+    Mismatch,
+    /// Pins are configured but this call has none, so its shape is unverified.
+    Unpinned,
+}
+
+impl std::fmt::Display for ShapeRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Unknown => "the node's metadata declares no such call",
+            Self::Mismatch => "the node's metadata declares a different call shape",
+            Self::Unpinned => "no pinned call shape for this call",
+        })
+    }
 }
 
 impl Submitter {
@@ -49,6 +94,7 @@ impl Submitter {
         max_retries: u32,
         retry_base: Duration,
         cooldown_depth: u64,
+        call_hashes: BTreeMap<String, [u8; 32]>,
     ) -> Self {
         Self {
             client,
@@ -59,7 +105,39 @@ impl Submitter {
             retry_base,
             cooldown_depth,
             cooldowns: BTreeMap::new(),
+            call_hashes,
         }
+    }
+
+    /// Validate the call shape the node's metadata declares against the pin,
+    /// before a single byte is signed.
+    ///
+    /// This is the check that closes the same-chain forgery. A hostile RPC
+    /// provider can keep the real genesis hash, spec version, transaction
+    /// version, mortality anchor and nonce — so the extrinsic is unambiguously
+    /// valid on this chain — and forge only the call shape: metadata declaring
+    /// `Epoch` at `Balances`' pallet index and `tick` at
+    /// `transfer_allow_death`'s call index, with an argument field typed so its
+    /// SCALE encoding is `MultiAddress::Id(attacker) ++ Compact(amount)`.
+    /// `dynamic::tx` carries `validation_hash: None`, subxt 0.50.2 encodes
+    /// RFC-78's `CheckMetadataHash` as `Disabled` on every signature, and
+    /// `SafetyFilter` does not object because `transfer_allow_death` is an
+    /// ordinary public leaf. Nothing else in the path looks at the shape.
+    pub fn validate_call_shape(
+        metadata: &subxt::Metadata,
+        pins: &BTreeMap<String, [u8; 32]>,
+        pallet: &str,
+        call: &str,
+    ) -> Result<(), ShapeRefusal> {
+        let key = format!("{pallet}.{call}");
+        let observed = metadata
+            .pallet_by_name(pallet)
+            .and_then(|declared| declared.call_hash(call));
+        shape_decision(observed, pins, &key)
+    }
+
+    pub fn call_hashes(&self) -> &BTreeMap<String, [u8; 32]> {
+        &self.call_hashes
     }
 
     pub fn cooldowns(&self) -> &BTreeMap<String, u64> {
@@ -127,6 +205,42 @@ impl Submitter {
         current_block: u64,
         metrics: &KeeperMetrics,
     ) -> SubmissionOutcome {
+        // Before anything is signed: the node's declared call shape must be
+        // the pinned one. Refused cranks are an expected failure, not a
+        // transport failure — reconnecting to the same hostile endpoint would
+        // change nothing, and the keeper must not fall back to signing an
+        // unvalidated shape.
+        match self.client.at_current_block().await {
+            Ok(block) => {
+                if let Err(refusal) = Self::validate_call_shape(
+                    &block.metadata(),
+                    &self.call_hashes,
+                    crank.pallet,
+                    crank.call,
+                ) {
+                    metrics.failed(crank.role);
+                    warn!(
+                        role = %crank.role,
+                        pallet = crank.pallet,
+                        call = crank.call,
+                        %refusal,
+                        "refusing to sign: unvalidated call shape"
+                    );
+                    return SubmissionOutcome::ExpectedFailure;
+                }
+            }
+            Err(error) => {
+                metrics.failed(crank.role);
+                warn!(
+                    role = %crank.role,
+                    pallet = crank.pallet,
+                    call = crank.call,
+                    %error,
+                    "metadata unavailable for call-shape validation"
+                );
+                return SubmissionOutcome::TransportFailure;
+            }
+        }
         for attempt in 0..=self.max_retries {
             if self.nonce.is_none() {
                 match timeout(self.timeout, self.fetch_nonce()).await {
@@ -339,5 +453,65 @@ mod tests {
         assert_eq!(backoff(base, 0), base);
         assert_eq!(backoff(base, 3), Duration::from_millis(800));
         assert!(backoff(base, u32::MAX) >= backoff(base, 3));
+    }
+}
+
+#[cfg(test)]
+mod call_shape_tests {
+    use super::*;
+
+    fn pins(entries: &[(&str, [u8; 32])]) -> BTreeMap<String, [u8; 32]> {
+        entries
+            .iter()
+            .map(|(key, hash)| ((*key).to_owned(), *hash))
+            .collect()
+    }
+
+    /// MAX-07. With pins configured, a call the operator did not pin is
+    /// refused rather than signed on the node's word — otherwise a hostile
+    /// endpoint would only have to declare a *new* call name to bypass every
+    /// pin. Fails at baseline: no shape check existed at all.
+    #[test]
+    fn an_unpinned_call_is_refused_once_any_pin_exists() {
+        let configured = pins(&[("Epoch.tick", [7u8; 32])]);
+        // The lookup itself needs metadata, so this exercises the decision
+        // table directly: `Some(pinned) == observed` -> Ok, `Some(_)` ->
+        // Mismatch, `None` with a non-empty map -> Unpinned.
+        assert_eq!(
+            shape_decision(Some([7u8; 32]), &configured, "Epoch.tick"),
+            Ok(())
+        );
+        assert_eq!(
+            shape_decision(Some([9u8; 32]), &configured, "Epoch.tick"),
+            Err(ShapeRefusal::Mismatch)
+        );
+        assert_eq!(
+            shape_decision(
+                Some([9u8; 32]),
+                &configured,
+                "Balances.transfer_allow_death"
+            ),
+            Err(ShapeRefusal::Unpinned)
+        );
+        assert_eq!(
+            shape_decision(None, &configured, "Epoch.tick"),
+            Err(ShapeRefusal::Unknown)
+        );
+    }
+
+    /// With no pins at all the keeper keeps its pre-existing posture: it warns
+    /// at startup and does not refuse every crank, so an operator who has not
+    /// adopted pinning is not silently taken offline by an upgrade.
+    #[test]
+    fn no_pins_at_all_keeps_the_previous_posture() {
+        let empty = BTreeMap::new();
+        assert_eq!(
+            shape_decision(Some([1u8; 32]), &empty, "Epoch.tick"),
+            Ok(())
+        );
+        assert_eq!(
+            shape_decision(None, &empty, "Epoch.tick"),
+            Err(ShapeRefusal::Unknown)
+        );
     }
 }

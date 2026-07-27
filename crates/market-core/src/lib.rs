@@ -1684,6 +1684,39 @@ pub fn pow_1e9_up(base: u64, mut exp: u64) -> u64 {
 fn price_1e9<A>(m: &MarketBook<A>) -> Result<FixedU64, Error> {
     price_1e9_quantities(m.q_long, m.q_short, m.b)
 }
+
+/// The book's LMSR quote, recomputed from `(q_long, q_short, b)`.
+///
+/// Exported so consumers can *verify* the cached `last_quote_1e9` rather than
+/// trust it. Nothing outside this crate could reach the price function before,
+/// which is why the guardian rerun's depth doubling shipped without the
+/// kernel-side support it needed.
+pub fn quote_1e9<A>(m: &MarketBook<A>) -> Result<FixedU64, Error> {
+    price_1e9(m)
+}
+
+/// Double the book's LMSR depth for a guardian rerun (05 T13; 06 §5.3),
+/// refreshing the cached quote from the post-doubling state.
+///
+/// `b` and `last_quote_1e9` are one fact, not two. Since
+/// `p_L = sigma((q_L - q_S) / b)`, doubling `b` moves the true quote toward 0.5
+/// — that movement *is* the point of the 2x rerun depth. But `last_quote_1e9`
+/// was written in exactly two places, both at the tail of a trade, so a
+/// depth change left the cached scalar at the pre-doubling price and
+/// `observe_book` went on reading it. With `reopen_for_rerun` anchoring
+/// `last_observation_1e9` to that same stale value, the kappa clamp is a
+/// provable fixed point and `close_spot` is read from the same field, so the
+/// convergence check compares the stale value against itself: an untraded
+/// rerun re-certified the manipulated price at zero marginal cost, and the 2x
+/// POL the treasury committed bought nothing.
+///
+/// Doubling and refreshing therefore live in one kernel operation that callers
+/// cannot half-apply.
+pub fn double_depth<A>(m: &mut MarketBook<A>) -> Result<(), Error> {
+    m.b = m.b.checked_mul(2).ok_or(Error::ArithmeticOverflow)?;
+    m.last_quote_1e9 = price_1e9(m)?;
+    Ok(())
+}
 fn price_1e9_quantities(q_long: Balance, q_short: Balance, b: Balance) -> Result<FixedU64, Error> {
     let p = lmsr_price_long(fx(q_long)?, fx(q_short)?, fx(b)?).map_err(map_fixed)?;
     Ok(FixedU64(

@@ -50,17 +50,27 @@ pub use welfare_core::{
     GateBreachFlags as CoreGateBreachFlags, MetricSpec, Pillar, Registration,
     Snapshot as CoreSnapshot, SnapshotContext as CoreSnapshotContext, SourceClass,
     WelfareParams as CoreWelfareParams, WelfareState, EPSILON, EPSILON_PILLAR, HISTORY_PRIORS,
-    MAX_COMPONENTS_PER_SPEC, MAX_DAILY_GATE_SAMPLES, MAX_GATE_FLAGS, MAX_METRIC_SPECS,
-    MAX_SNAPSHOTS, ONE, THETA_C_HI, THETA_C_LO, THETA_S_HI, THETA_S_LO, W_A, W_P,
+    MAX_COMPONENTS_PER_SPEC, MAX_CONCURRENT_FROZEN_VERSIONS, MAX_DAILY_GATE_SAMPLES,
+    MAX_GATE_FLAGS, MAX_METRIC_SPECS, MAX_SNAPSHOTS, ONE, SNAPSHOT_RETENTION_EPOCHS, THETA_C_HI,
+    THETA_C_LO, THETA_S_HI, THETA_S_LO, W_A, W_P,
 };
 
 /// Core bounds in the `u32` form required by FRAME's `ConstU32`.
 pub const MAX_METRIC_SPECS_BOUND: u32 = MAX_METRIC_SPECS as u32;
 pub const MAX_SNAPSHOTS_BOUND: u32 = MAX_SNAPSHOTS as u32;
+/// The retained **epoch** window (13 §4's "≤ 20 epochs"). This is what the
+/// prune cutoff is expressed against — 05 §4.6's `current − 19` — and it is
+/// deliberately *not* [`MAX_SNAPSHOTS_BOUND`], which counts
+/// `(epoch, spec_version)` records and therefore carries 05 §3.3's version
+/// multiplicity. Deriving the cutoff from the record bound would silently
+/// double the retained window the moment that multiplicity was applied.
+pub const SNAPSHOT_RETENTION_EPOCHS_BOUND: u32 = SNAPSHOT_RETENTION_EPOCHS as u32;
 pub const MAX_GATE_FLAGS_BOUND: u32 = MAX_GATE_FLAGS as u32;
 pub const MAX_COMPONENTS_PER_SPEC_BOUND: u32 = MAX_COMPONENTS_PER_SPEC as u32;
-/// Current epoch plus the retained snapshot-history window.
-pub const MAX_XCM_TRAFFIC_EPOCHS_BOUND: u32 = MAX_SNAPSHOTS_BOUND + 1;
+/// Current epoch plus the retained snapshot-history window. Keyed by epoch, so
+/// it takes the epoch bound — the 21-epoch shared prefix index of 13 §4 — and
+/// not the `(epoch, spec_version)` record bound.
+pub const MAX_XCM_TRAFFIC_EPOCHS_BOUND: u32 = SNAPSHOT_RETENTION_EPOCHS as u32 + 1;
 /// Maximum retired XCM-traffic epoch prefixes removed by one maintenance call.
 ///
 /// Steady state retires at most one epoch per clock roll, so this cap binds only
@@ -199,6 +209,22 @@ pub trait SnapshotSchedule {
     /// only the epoch clock knows an epoch's length, and a legal `epoch.length`
     /// need not be a whole number of days.
     fn measurable_days(epoch: EpochId) -> Option<u32>;
+    /// Every MetricSpec version some live cohort froze for `epoch`'s
+    /// measurement (I-16). Epoch-owned for the same reason
+    /// [`Self::measurable_days`] is: only the epoch clock carries the cohort
+    /// schedules, and `pallet-welfare` must not import `pallet-epoch`.
+    ///
+    /// This is the *admissible* half of `record_snapshot`'s version rule. The
+    /// other half is the epoch's own active spec
+    /// ([`Pallet::active_snapshot_spec`]); anything outside their union is a
+    /// record no consumer will ever read, and admitting one is what let a
+    /// permissionless caller consume the epoch's single spare snapshot slot
+    /// and wedge `SnapshotDeadline` permanently.
+    ///
+    /// `pallet-registry` binds the identical runtime projection under
+    /// `EpochContext::frozen_spec_versions` and uses it against exactly this
+    /// attack shape (`SpecVersionMismatch`).
+    fn frozen_spec_versions(epoch: EpochId) -> Vec<MetricSpecVersion>;
 }
 
 /// Gate-market dimension settled through the conditional ledger seam.
@@ -252,6 +278,14 @@ pub trait BenchmarkHelper<RuntimeOrigin> {
     /// real storage reads the gate performs — the exact fixture-instead-of-work
     /// shape SQ-489 was raised for.
     fn seat_oracle();
+    /// Seed the cohort schedules `SnapshotSchedule::frozen_spec_versions`
+    /// walks for `epoch`, at their I-21 bound and each binding `version`.
+    ///
+    /// A seeding seam and not a stubbed answer, for the SQ-489 reason: the
+    /// runtime resolves the admissible set from real `pallet-epoch` storage,
+    /// so an unseeded chain charges `record_snapshot` for a scan of an empty
+    /// map while production scans the full non-terminal cohort set.
+    fn prime_frozen_cohorts(_epoch: EpochId, _version: MetricSpecVersion) {}
     fn prime_keeper_rebate() {}
     fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 }
@@ -1018,6 +1052,13 @@ pub mod pallet {
         /// retained so membership cannot be decided. Appended, not inserted —
         /// error indices are part of the decoded surface (02 §13).
         DayOutsideEpoch,
+        /// The named `spec_version` is activated by the epoch but is not one
+        /// the epoch may be measured under: for `record_snapshot`, neither the
+        /// epoch's active spec nor a version any live cohort froze for it
+        /// (I-16); for `record_daily_gate`, not the epoch's active spec at all
+        /// — `GateBreachFlags` is keyed by epoch alone and settles money, so
+        /// it admits exactly one version. Appended, not inserted (02 §13).
+        SpecVersionNotAdmissible,
     }
 
     #[pallet::hooks]
@@ -1092,6 +1133,18 @@ pub mod pallet {
                 epoch < T::CurrentEpoch::get(),
                 Error::<T>::EpochNotFinalized
             );
+            // The core validates only that the named version is *activated* by
+            // `epoch`. That is strictly weaker than the set of versions the
+            // epoch can actually be measured under, and the gap is a permanent
+            // wedge, not a nuisance: capacity counts records (`MAX_SNAPSHOTS`)
+            // while eviction is by epoch age, so an epoch carries exactly one
+            // spare slot. A signed caller could burn it on a `(epoch, version)`
+            // pair no consumer will ever read, after which the active-version
+            // record fails `TooManySnapshots`, `SnapshotDeadline` never
+            // advances, the 05 §4.8 dead-man latches, and the frozen epoch
+            // clock freezes the prune cutoff that would have released the slot.
+            // No origin can clear that flag (05 §4.8, SQ-254).
+            let admissible = Self::admissible_snapshot_specs(epoch);
             let components = T::MetricInputs::onchain_components(epoch, spec_version);
             let incident = T::MetricInputs::incident_multiplier(epoch, spec_version)
                 .ok_or(Error::<T>::IncidentAggregateUnavailable)?;
@@ -1099,7 +1152,15 @@ pub mod pallet {
             let params = Self::live_params()?;
             Self::mutate(|state| {
                 state
-                    .record_snapshot(epoch, spec_version, components, incident, flagged, &params)
+                    .record_snapshot(
+                        epoch,
+                        spec_version,
+                        &admissible,
+                        components,
+                        incident,
+                        flagged,
+                        &params,
+                    )
                     .map(|_| ())
             })?;
             Self::note_snapshot_recorded(epoch, spec_version);
@@ -1138,6 +1199,19 @@ pub mod pallet {
             // inadmissible day must not reach the input seam at all, let alone
             // have a value resolved for it.
             frame_support::ensure!(day < MAX_DAILY_GATE_SAMPLES, Error::<T>::ValueOutOfRange);
+            // `GateBreachFlags` is keyed by **epoch alone**, OR-merged and
+            // never cleared, and 05 §4.7 makes it the sole settlement source
+            // for gate markets — `gate_window_outcomes` takes no
+            // `spec_version`. A version-independent flag must therefore be
+            // computed under a version-independent rule, and the epoch's
+            // active spec is the only one 05 §4.6 / I-16 name. Accepting any
+            // merely *activated* version let a holder of gate-YES positions
+            // pick whichever of two lawfully registered versions aggregated
+            // `S_daily`/`C_daily` lower — different component sets, different
+            // renormalization denominators, identical chain state — and one
+            // monotone write then settled every cohort whose window contains
+            // the epoch, including cohorts frozen at the other version.
+            let active = Self::active_snapshot_spec(epoch);
             // An unknown timing takes the same refusal as an out-of-range day:
             // membership in the measurable set cannot be *shown*, and a day that
             // cannot be shown to be a measurement window is not treated as one.
@@ -1157,7 +1231,7 @@ pub mod pallet {
             let mut new_breach_flags = false;
             Self::mutate(|state| {
                 state
-                    .record_daily_gate(epoch, day, spec_version, components, &params)
+                    .record_daily_gate(epoch, day, spec_version, active, components, &params)
                     .map(|(_, did_change)| new_breach_flags = did_change)
             })?;
             SampledGateDays::<T>::insert(epoch, sampled_days);
@@ -1300,6 +1374,25 @@ pub mod pallet {
 
         /// Canonical active spec: the unique version at the latest fully-live
         /// activation epoch. An activation tie is fail-closed as ambiguous.
+        /// The versions `epoch` may legally be snapshotted under: its own
+        /// active spec, plus every version a live cohort froze for it (I-16).
+        ///
+        /// Deliberately a union rather than just the active version. 05 §3.3
+        /// mandates up to two concurrent frozen versions, so across an
+        /// activation boundary the *in-flight* cohort's `(epoch, V_old)`
+        /// record is legitimate work `compute_settlement` needs — refusing it
+        /// would break settlement instead of the attack. The union is bounded
+        /// by `MAX_CONCURRENT_FROZEN_VERSIONS + 1`, hence by `MAX_METRIC_SPECS`.
+        pub fn admissible_snapshot_specs(epoch: EpochId) -> Vec<MetricSpecVersion> {
+            let mut admissible = T::SnapshotSchedule::frozen_spec_versions(epoch);
+            if let Some(active) = Self::active_snapshot_spec(epoch) {
+                if !admissible.contains(&active) {
+                    admissible.push(active);
+                }
+            }
+            admissible
+        }
+
         pub fn active_snapshot_spec(epoch: EpochId) -> Option<MetricSpecVersion> {
             let mut selected = None;
             let mut ambiguous = false;
@@ -2600,6 +2693,7 @@ pub mod pallet {
                 CoreError::DegenerateNormalizationRange => {
                     Error::<T>::DegenerateNormalizationRange.into()
                 }
+                CoreError::SpecVersionNotAdmissible => Error::<T>::SpecVersionNotAdmissible.into(),
             }
         }
     }

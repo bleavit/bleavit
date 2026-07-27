@@ -31,8 +31,39 @@ pub const ONE: u64 = 1_000_000_000;
 pub const EPSILON: FixedU64 = FixedU64(1);
 pub const EPSILON_PILLAR: FixedU64 = FixedU64(10_000_000);
 pub const MAX_METRIC_SPECS: usize = 16;
-pub const MAX_SNAPSHOTS: usize = 20;
-pub const MAX_GATE_FLAGS: usize = MAX_SNAPSHOTS;
+/// Retained snapshot **epochs** — the bound 13 §4 states ("Snapshots: ≤ 20
+/// epochs (H + challenge + 12)"). 05 §4.6 (SQ-200) fixes the prune cutoff at
+/// `current − 19`, so the retained window is 19 historical epochs plus the
+/// live one.
+pub const SNAPSHOT_RETENTION_EPOCHS: usize = 20;
+/// Distinct MetricSpec versions that can consume one measurement epoch.
+///
+/// Derived, not chosen: cohorts freeze their version at qualification (I-16),
+/// an activation boundary can leave adjacent cohorts on different versions, so
+/// the count is bounded by the cohorts consuming the epoch — `epoch.horizon_k`,
+/// whose kernel ceiling is 2 (05 §3.3, SQ-496). Same factor as
+/// `oracle_core::MAX_ROUNDS`'s and `registry_core::MAX_AGGREGATES`'s.
+pub const MAX_CONCURRENT_FROZEN_VERSIONS: usize = 2;
+/// Retained snapshot **records**.
+///
+/// 13 §4 bounds the retained window in *epochs*, but `Snapshots` is keyed
+/// `(epoch, spec_version)` and capacity is enforced against the record count,
+/// so the epoch bound has to carry 05 §3.3's version multiplicity to mean the
+/// same thing. It did not: at a flat 20 the eviction rule (by epoch age, 19
+/// retained + one spare slot) and the capacity rule (by record count)
+/// disagreed by exactly the factor 05 §269 says every derived `× 2` rests on,
+/// so an activation boundary produced 21 lawful records against 20 slots. A
+/// signed caller could then spend the spare slot on the in-flight cohort's
+/// record before the keeper wrote the active-version one, at which point
+/// `SnapshotDeadline` stopped advancing, the 05 §4.8 dead-man latched, and the
+/// frozen epoch clock froze the prune cutoff that would have released the slot
+/// — with no origin able to clear the flag (SQ-254).
+pub const MAX_SNAPSHOTS: usize = SNAPSHOT_RETENTION_EPOCHS * MAX_CONCURRENT_FROZEN_VERSIONS;
+/// Gate-breach flags are keyed by **epoch alone** (05 §4.7), so they take the
+/// epoch bound and not the record bound. Formerly written as `MAX_SNAPSHOTS`,
+/// which was numerically right only while that constant was itself an epoch
+/// count.
+pub const MAX_GATE_FLAGS: usize = SNAPSHOT_RETENTION_EPOCHS;
 /// Number of day indices accepted by the daily-gate recorder. The two-word
 /// frozen breach bitmap covers this whole range (05 §4.7).
 pub const MAX_DAILY_GATE_SAMPLES: u8 = 64;
@@ -541,6 +572,11 @@ pub enum Error {
     /// perfect component computed from a series that never moved, which is the
     /// opposite of the status-quo default (G-1). Trailing variant.
     DegenerateNormalizationRange,
+    /// The named version is activated by the epoch but is not one the epoch
+    /// may be measured under: for a snapshot, outside the epoch's admissible
+    /// set (its active spec ∪ the versions live cohorts froze for it, I-16);
+    /// for a daily gate, not the epoch's active spec at all. Trailing variant.
+    SpecVersionNotAdmissible,
 }
 
 /// The 07 §2(5) admission inputs that [`WelfareState::register_metric_spec`]
@@ -811,10 +847,26 @@ impl WelfareState {
     /// consecutive* one drops the component, which is a per-cohort fact resolved
     /// in [`Self::compute_settlement`]. Recording them is what makes that
     /// resolution possible without re-reading reapable oracle history.
+    /// `admissible` is the epoch's admissible version set — its active spec
+    /// plus every version a live cohort froze for it (I-16). Supplied by the
+    /// caller because both halves are runtime state this crate does not hold.
+    ///
+    /// Checked *after* `SpecNotFound`/`SpecNotActive` so the precise error
+    /// survives, and *before* any capacity accounting: "activated by `epoch`"
+    /// is strictly weaker than "measurable at `epoch`", and admitting the
+    /// difference let a caller spend the epoch's single spare snapshot slot on
+    /// a record no consumer reads.
+    // Eight arguments, one past clippy's threshold. A parameter struct would
+    // hide the very thing the extra argument exists to make explicit: the
+    // admissible set is *caller-supplied runtime state*, not something this
+    // frame-free crate can derive. Keeping it in the signature is what stops a
+    // caller from forgetting it.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_snapshot(
         &mut self,
         epoch: EpochId,
         spec_version: MetricSpecVersion,
+        admissible: &[MetricSpecVersion],
         components: Vec<ComponentValue>,
         incident_multiplier: FixedU64,
         flagged: Vec<MetricId>,
@@ -825,6 +877,10 @@ impl WelfareState {
         ensure!(
             specs.iter().all(|spec| spec.activation_epoch <= epoch),
             Error::SpecNotActive
+        );
+        ensure!(
+            admissible.contains(&spec_version),
+            Error::SpecVersionNotAdmissible
         );
         ensure!(
             self.snapshots.len() < MAX_SNAPSHOTS,
@@ -878,11 +934,18 @@ impl WelfareState {
         Ok(welfare)
     }
 
+    /// `active` is the epoch's **active** spec version (05 §4.6 / I-16), not
+    /// the wider admissible set [`Self::record_snapshot`] takes.
+    /// `GateBreachFlags` is keyed by epoch alone, OR-merged, never cleared and
+    /// is 05 §4.7's sole settlement source for gate markets — a
+    /// version-independent flag admits exactly one version, or a caller picks
+    /// whichever lawfully registered version aggregates lower.
     pub fn record_daily_gate(
         &mut self,
         epoch: EpochId,
         day: u8,
         spec_version: MetricSpecVersion,
+        active: Option<MetricSpecVersion>,
         components: Vec<ComponentValue>,
         params: &WelfareParams,
     ) -> Result<(GateBreachFlags, bool), Error> {
@@ -891,6 +954,10 @@ impl WelfareState {
         ensure!(
             specs.iter().all(|spec| spec.activation_epoch <= epoch),
             Error::SpecNotActive
+        );
+        ensure!(
+            active == Some(spec_version),
+            Error::SpecVersionNotAdmissible
         );
         ensure!(day < MAX_DAILY_GATE_SAMPLES, Error::ValueOutOfRange);
         ensure!(
@@ -2077,6 +2144,7 @@ mod tests {
             w.record_snapshot(
                 *epoch,
                 1,
+                &[1],
                 renorm_components(),
                 FixedU64(ONE),
                 flagged,
@@ -2138,6 +2206,7 @@ mod tests {
                 .record_snapshot(
                     epoch,
                     1,
+                    &[1],
                     renorm_components(),
                     FixedU64(ONE),
                     Vec::new(),
@@ -2245,6 +2314,7 @@ mod tests {
             w.record_snapshot(
                 epoch,
                 1,
+                &[1],
                 components.clone(),
                 FixedU64(ONE),
                 flagged,
@@ -2284,6 +2354,7 @@ mod tests {
             w.record_snapshot(
                 epoch,
                 1,
+                &[1],
                 renorm_components(),
                 FixedU64(ONE),
                 if epoch == 5 { Vec::new() } else { vec![3] },
@@ -2320,6 +2391,7 @@ mod tests {
             w.record_snapshot(
                 epoch,
                 1,
+                &[1],
                 renorm_components(),
                 FixedU64(ONE),
                 flagged,
@@ -2477,6 +2549,7 @@ mod tests {
             w.record_snapshot(
                 1,
                 1,
+                &[1],
                 healthy_components(),
                 FixedU64(ONE),
                 Vec::new(),
@@ -2571,6 +2644,7 @@ mod tests {
             w.record_snapshot(
                 1,
                 1,
+                &[1],
                 healthy_components(),
                 FixedU64(ONE),
                 Vec::new(),
@@ -2579,7 +2653,14 @@ mod tests {
             Err(Error::SpecNotActive)
         );
         assert_eq!(
-            w.record_daily_gate(1, 0, 1, healthy_components(), &WelfareParams::DEFAULT,),
+            w.record_daily_gate(
+                1,
+                0,
+                1,
+                Some(1),
+                healthy_components(),
+                &WelfareParams::DEFAULT,
+            ),
             Err(Error::SpecNotActive)
         );
         assert!(w.snapshots.is_empty());
@@ -2592,18 +2673,28 @@ mod tests {
         w.register_metric_spec(Registration::Genesis, 1, default_specs(1), &seated())
             .unwrap();
         w.events.clear();
-        for epoch in 2..MAX_SNAPSHOTS as u32 + 2 {
+        // Both windows are driven by the *epoch* bound: gate flags are keyed by
+        // epoch alone, and a single-version epoch takes one snapshot slot.
+        for epoch in 2..SNAPSHOT_RETENTION_EPOCHS as u32 + 2 {
             w.record_snapshot(
                 epoch,
                 1,
+                &[1],
                 healthy_components(),
                 FixedU64(ONE),
                 Vec::new(),
                 &WelfareParams::DEFAULT,
             )
             .unwrap();
-            w.record_daily_gate(epoch, 0, 1, healthy_components(), &WelfareParams::DEFAULT)
-                .unwrap();
+            w.record_daily_gate(
+                epoch,
+                0,
+                1,
+                Some(1),
+                healthy_components(),
+                &WelfareParams::DEFAULT,
+            )
+            .unwrap();
         }
         w.events.clear();
         w.prune_before(3);
@@ -2612,11 +2703,12 @@ mod tests {
         assert!(w.gate_flags.iter().all(|(epoch, _)| *epoch >= 3));
         assert_eq!(w.specs.len(), 1);
 
-        let next = MAX_SNAPSHOTS as u32 + 2;
+        let next = SNAPSHOT_RETENTION_EPOCHS as u32 + 2;
         assert!(w
             .record_snapshot(
                 next,
                 1,
+                &[1],
                 healthy_components(),
                 FixedU64(ONE),
                 Vec::new(),
@@ -2624,7 +2716,14 @@ mod tests {
             )
             .is_ok());
         assert!(w
-            .record_daily_gate(next, 0, 1, healthy_components(), &WelfareParams::DEFAULT,)
+            .record_daily_gate(
+                next,
+                0,
+                1,
+                Some(1),
+                healthy_components(),
+                &WelfareParams::DEFAULT,
+            )
             .is_ok());
     }
     #[test]
@@ -2637,6 +2736,7 @@ mod tests {
                 2,
                 0,
                 1,
+                Some(1),
                 vec![
                     ComponentValue {
                         id: 1,
@@ -2663,10 +2763,24 @@ mod tests {
             .unwrap();
 
         let (_, first_changed) = w
-            .record_daily_gate(2, 0, 1, healthy_components(), &WelfareParams::DEFAULT)
+            .record_daily_gate(
+                2,
+                0,
+                1,
+                Some(1),
+                healthy_components(),
+                &WelfareParams::DEFAULT,
+            )
             .unwrap();
         let (_, duplicate_changed) = w
-            .record_daily_gate(2, 0, 1, healthy_components(), &WelfareParams::DEFAULT)
+            .record_daily_gate(
+                2,
+                0,
+                1,
+                Some(1),
+                healthy_components(),
+                &WelfareParams::DEFAULT,
+            )
             .unwrap();
         assert!(!first_changed);
         assert!(!duplicate_changed);
@@ -2678,10 +2792,10 @@ mod tests {
             .expect("default specs include the S component")
             .value = FixedU64(0);
         let (flags, augmented) = w
-            .record_daily_gate(2, 0, 1, breached.clone(), &WelfareParams::DEFAULT)
+            .record_daily_gate(2, 0, 1, Some(1), breached.clone(), &WelfareParams::DEFAULT)
             .unwrap();
         let (_, repeated_augmentation) = w
-            .record_daily_gate(2, 0, 1, breached, &WelfareParams::DEFAULT)
+            .record_daily_gate(2, 0, 1, Some(1), breached, &WelfareParams::DEFAULT)
             .unwrap();
         assert!(augmented);
         assert!(flags.s_breached);
@@ -2696,7 +2810,14 @@ mod tests {
             .unwrap();
 
         let (healthy, changed) = w
-            .record_daily_gate(2, 3, 1, healthy_components(), &WelfareParams::DEFAULT)
+            .record_daily_gate(
+                2,
+                3,
+                1,
+                Some(1),
+                healthy_components(),
+                &WelfareParams::DEFAULT,
+            )
             .unwrap();
         assert!(!changed);
         assert_eq!(healthy.day_bitmap, [0, 0]);
@@ -2708,7 +2829,7 @@ mod tests {
             .expect("default specs include the S component")
             .value = FixedU64(0);
         let (flags, changed) = w
-            .record_daily_gate(2, 5, 1, breached, &WelfareParams::DEFAULT)
+            .record_daily_gate(2, 5, 1, Some(1), breached, &WelfareParams::DEFAULT)
             .unwrap();
         assert!(changed);
         assert_eq!(flags.day_bitmap, [1 << 5, 0]);
@@ -2757,6 +2878,7 @@ mod tests {
                 2,
                 0,
                 1,
+                Some(1),
                 vec![
                     ComponentValue {
                         id: 1,
@@ -2896,6 +3018,7 @@ mod tests {
             w.record_snapshot(
                 7,
                 1,
+                &[1],
                 comps.clone(),
                 FixedU64(ONE + 1),
                 Vec::new(),
@@ -2906,6 +3029,7 @@ mod tests {
         w.record_snapshot(
             7,
             1,
+            &[1],
             comps.clone(),
             FixedU64(ONE),
             Vec::new(),
@@ -2916,6 +3040,7 @@ mod tests {
             w.record_snapshot(
                 7,
                 1,
+                &[1],
                 comps,
                 FixedU64(ONE),
                 Vec::new(),
@@ -2960,6 +3085,7 @@ mod tests {
         w.record_snapshot(
             11,
             1,
+            &[1],
             comps.clone(),
             FixedU64(ONE),
             Vec::new(),
@@ -2969,6 +3095,7 @@ mod tests {
         w.record_snapshot(
             12,
             1,
+            &[1],
             comps,
             FixedU64(ONE),
             Vec::new(),

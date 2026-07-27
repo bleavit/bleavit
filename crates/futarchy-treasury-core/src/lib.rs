@@ -842,13 +842,34 @@ impl Treasury {
             .total
             .checked_sub(self.streams[idx].claimed)
             .ok_or(Error::Overflow)?;
-        // Compute the reverted MAIN balance before mutating (G-1 atomicity).
-        let new_main = self
-            .main_usdc
+        // 08 §1.4: "`open_stream` funds the stream from `line` and reverts its
+        // remainder **there** on cancellation." Reverting to MAIN instead was
+        // the older §1.3 reading, and for the four pot-backed lines (`Keeper`,
+        // `Oracle`, `Rewards`, `OpsCollators`) it permanently stranded real
+        // USDC: `fund_budget_line` had already moved the asset MAIN -> pot, so
+        // crediting `main_usdc` recorded MAIN money that physically sits in the
+        // pot. Re-funding moves *fresh* MAIN USDC in, so the residual never
+        // shrinks; no ordinary extrinsic recovers it (`recover_foreign` rejects
+        // USDC, `sweep_insurance` is INSURANCE->MAIN only, and the USDC admin
+        // is itself a keyless pallet account), leaving a CODE-class runtime
+        // upgrade with a migration as the only exit.
+        //
+        // Returning it to the originating line is also the only reading under
+        // which the line's internal credit and its pot stay in step: the debit
+        // and the revert now cancel exactly.
+        let line = self.streams[idx].line;
+        let line_idx = self
+            .lines
+            .iter()
+            .position(|(name, _)| *name == line)
+            .ok_or(Error::UnknownBudgetLine)?;
+        // Compute the reverted line balance before mutating (G-1 atomicity).
+        let new_balance = self.lines[line_idx]
+            .1
             .checked_add(remainder)
             .ok_or(Error::Overflow)?;
         self.streams[idx].cancelled = true;
-        self.main_usdc = new_main;
+        self.lines[line_idx].1 = new_balance;
         self.events.push(Event::StreamCancelled {
             id,
             reverted: remainder,
@@ -906,6 +927,21 @@ impl Treasury {
             meter_after: next,
         });
         Ok(())
+    }
+
+    /// Unclaimed obligations of live streams drawn on `line`.
+    ///
+    /// `open_stream` debits the line but the money is still owed from the same
+    /// custody, so an outstanding stream is a claim on the line's pot that the
+    /// line balance alone no longer shows. Without it the 08 §6.3 drift alarm
+    /// reads a debited line as needing nothing.
+    pub fn outstanding_stream_total(&self, line: BudgetLine) -> Balance {
+        self.streams
+            .iter()
+            .filter(|stream| stream.line == line && !stream.cancelled)
+            .fold(0, |total, stream| {
+                total.saturating_add(stream.total.saturating_sub(stream.claimed))
+            })
     }
 
     pub fn line_balance(&self, line: BudgetLine) -> Balance {

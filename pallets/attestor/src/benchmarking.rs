@@ -56,6 +56,37 @@ fn seed_attestations<T: Config>(count: u32, open_last: bool) -> AttestationId {
     count.saturating_sub(1)
 }
 
+/// Saturated ledger for the `attest` measurement: `MAX_ATTESTATIONS - 1`
+/// records, of which the measured signer `[1; 32]` owns exactly
+/// `MAX_ATTESTATIONS_PER_ATTESTOR - 1` and the remaining 15 seats own the rest
+/// in equal shares. Both quantities are derived from the two frozen bounds, so
+/// the fixture stays exact if either moves.
+fn seed_attest_ledger<T: Config>() {
+    seed_members::<T>();
+    let signer_share = MAX_ATTESTATIONS_PER_ATTESTOR - 1;
+    let mut attestations = Vec::new();
+    for id in 0..MAX_ATTESTATIONS - 1 {
+        // Seats are `[1; 32]..=[MAX_ATTESTORS; 32]`; index 0 is the signer.
+        let seat = if id < signer_share {
+            0
+        } else {
+            1 + (id - signer_share) % (MAX_ATTESTORS - 1)
+        };
+        attestations.push(Attestation {
+            id,
+            pid: id as futarchy_primitives::ProposalId,
+            artifact_hash: [id as u8; 32],
+            statement_hash: [7; 32],
+            attestor: [seat as u8 + 1; 32],
+            submitted_at: 0,
+            challenge_deadline: CHALLENGE_WINDOW_BLOCKS,
+            challenge: None,
+        });
+    }
+    Attestations::<T>::put(BoundedVec::truncate_from(attestations));
+    NextAttestationId::<T>::put(MAX_ATTESTATIONS - 1);
+}
+
 /// The liability record `remove_for_cause`/`reap_attestation` dispose of, held
 /// against the bond `prime_funds` already placed for the first members.
 fn seed_liability<T: Config>(who: CoreAccountId) {
@@ -147,12 +178,21 @@ mod benches {
 
     #[benchmark]
     fn attest() {
-        seed_attestations::<T>(MAX_ATTESTATIONS - 1, false);
+        // The ledger is still saturated at `MAX_ATTESTATIONS - 1`, so the
+        // measured call performs the same worst-case scan as before. What
+        // changed is *ownership*: the fair-share quota caps one signer at
+        // `MAX_ATTESTATIONS_PER_ATTESTOR`, so a fixture in which `[1; 32]`
+        // owns all 255 records would measure `AttestorQuotaExceeded` instead
+        // of the work. The signer is seeded at exactly one below its quota and
+        // the remainder is spread over the other seats.
+        seed_attest_ledger::<T>();
+        let pid = MAX_ATTESTATIONS as futarchy_primitives::ProposalId;
+        T::BenchmarkHelper::prime_live_proposal(pid);
 
         #[extrinsic_call]
         _(
             T::BenchmarkHelper::signed([1; 32]),
-            MAX_ATTESTATIONS as futarchy_primitives::ProposalId,
+            pid,
             [250; 32],
             [251; 32],
         );

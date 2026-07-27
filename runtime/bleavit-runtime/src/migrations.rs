@@ -1197,12 +1197,19 @@ impl frame_support::traits::OnRuntimeUpgrade for TerminalRecoveryTransition {
             );
 
             if crate::configs::PhaseTransitionLock::get() {
-                frame_support::ensure!(
-                    !crate::configs::RetiredMigrationCursor::exists(),
-                    sp_runtime::DispatchError::Other(
-                        "terminal recovery has conflicting phase and MBM causes"
-                    )
-                );
+                // Formerly a hard refusal on "conflicting phase and MBM
+                // causes". That turned the presence of a retired cursor into a
+                // permanent wedge on the *only* exit from a refused
+                // `PhaseFourTransition`, and 09 §3.2 does not declare the two
+                // causes exclusive — it puts them in one lane and says a
+                // successful terminal repair clears "the cursor/transition
+                // cause". `recovery_trigger` now gives the phase cause
+                // precedence, so this branch can no longer be entered with a
+                // retired cursor written by this runtime; a cursor carried in
+                // by any other route is discarded here rather than allowed to
+                // strand the repair, because the terminal image replaces the
+                // runtime that owned the MBM.
+                crate::configs::RetiredMigrationCursor::kill();
                 let plan = match pallet_execution_guard::PhaseFourBridge::<Runtime>::get() {
                     pallet_execution_guard::PhaseFourBridgeState::Scheduled {
                         pid,

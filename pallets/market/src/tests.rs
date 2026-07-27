@@ -692,6 +692,7 @@ fn v6_domain_edge_is_rejected_without_mutation() {
         Markets::<Test>::mutate(MARKET_ID, |maybe_book| {
             if let Some(book) = maybe_book {
                 book.q_long = 48 * book.b;
+                book.last_quote_1e9 = market_core::quote_1e9(book).expect("price is defined");
             }
         });
         let before = Markets::<Test>::get(MARKET_ID).expect("created market exists");
@@ -2038,7 +2039,11 @@ fn crank_observe_caps_a_one_interval_price_jump_at_kappa() {
         Markets::<Test>::mutate(MARKET_ID, |maybe_book| {
             let book = maybe_book.as_mut().expect("book exists");
             book.q_long = 48 * book.b;
-            book.last_quote_1e9 = futarchy_primitives::FixedU64(999_000_000);
+            // The cached quote is now a try-state invariant against
+            // `(q_long, q_short, b)`, so a fixture that moves `q` must move it
+            // too. At the domain edge the real price is ~1.0, still far above
+            // the one-interval kappa cap this asserts.
+            book.last_quote_1e9 = market_core::quote_1e9(book).expect("price is defined");
         });
 
         System::set_block_number(ObsInterval::get());
@@ -3158,6 +3163,110 @@ fn delay_rerun_adds_one_original_seed_and_doubles_lmsr_depth_once() {
             E::AlreadySeeded
         );
         assert_try_state();
+    });
+}
+
+/// MAX-05 regression. `p_L = sigma((q_L - q_S) / b)`, so doubling `b` moves
+/// the true quote toward 0.5 — that movement is the entire point of the 2x
+/// rerun depth. `last_quote_1e9` was written only at the tail of a trade, so
+/// the doubling left the cached scalar at the pre-doubling price and
+/// `observe_book` went on reading it; with `reopen_for_rerun` anchoring
+/// `last_observation_1e9` to that same value the kappa clamp is a fixed point
+/// and `close_spot` comes from the same field, so an untraded rerun graded at
+/// the manipulated price for free.
+///
+/// Fails at baseline on both assertions below: the quote stayed at its
+/// pre-doubling value and the try-state consistency check did not exist.
+#[test]
+fn max05_the_rerun_depth_doubling_refreshes_the_cached_quote() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        // Walk the book away from 0.5 so the doubling has something to move.
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        let before = Markets::<Test>::get(MARKET_ID).expect("book exists");
+        assert!(
+            before.last_quote_1e9.0 > 500_000_000,
+            "the walk moved the quote"
+        );
+
+        System::set_block_number(ObsInterval::get());
+        assert_ok!(Market::reopen_for_rerun(signed(MARKET_ADMIN), MARKET_ID));
+        assert_ok!(Market::seed_rerun(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            TREASURY,
+        ));
+
+        let after = Markets::<Test>::get(MARKET_ID).expect("book exists");
+        assert_eq!(after.b, before.b * 2);
+        assert_eq!(after.q_long, before.q_long, "positions are preserved (T13)");
+        // The cached quote now agrees with the post-doubling book...
+        assert_eq!(
+            after.last_quote_1e9,
+            market_core::quote_1e9(&after).expect("price is defined"),
+        );
+        // ...and has actually moved toward 0.5, which is what the doubled depth
+        // means. Strictly between the two: the true price at 2b is nearer 0.5.
+        assert!(after.last_quote_1e9.0 < before.last_quote_1e9.0);
+        assert!(after.last_quote_1e9.0 > 500_000_000);
+        assert_try_state();
+    });
+}
+
+/// Both rerun seeding paths — single book (T13) and branch pair — call the same
+/// kernel operation, so neither can drift from the other. This pins the
+/// operation itself: doubling and refreshing are one step, for any book.
+#[test]
+fn max05_double_depth_is_one_step_for_any_book() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        let book = Markets::<Test>::get(MARKET_ID).expect("book exists");
+        assert!(book.last_quote_1e9.0 > 500_000_000);
+
+        let mut doubled = book;
+        assert_ok!(market_core::double_depth(&mut doubled));
+
+        assert_eq!(doubled.b, book.b * 2);
+        assert_eq!(doubled.q_long, book.q_long);
+        assert_eq!(doubled.q_short, book.q_short);
+        assert_eq!(
+            doubled.last_quote_1e9,
+            market_core::quote_1e9(&doubled).expect("price is defined"),
+        );
+        assert!(doubled.last_quote_1e9.0 < book.last_quote_1e9.0);
+        assert!(doubled.last_quote_1e9.0 > 500_000_000);
+    });
+}
+
+/// The try-state consistency check must actually detect drift, not merely pass
+/// on the happy path (15 §1).
+#[test]
+fn do_try_state_rejects_a_cached_quote_that_disagrees_with_the_book() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        assert_try_state();
+        Markets::<Test>::mutate(MARKET_ID, |maybe_book| {
+            let book = maybe_book.as_mut().expect("book exists");
+            book.b *= 2;
+        });
+
+        assert!(Market::do_try_state().is_err());
     });
 }
 

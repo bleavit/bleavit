@@ -63,6 +63,20 @@ pub const MAX_ATTESTATIONS: u32 = 256;
 /// Retained liability rows are bounded by the same maximum as the roster.
 pub const MAX_LIABILITIES: u32 = MAX_ATTESTORS;
 
+/// Per-signer share of [`MAX_ATTESTATIONS`]. **Derived, not chosen**: an equal
+/// split of the frozen 256-record ledger across the frozen 16 seats.
+///
+/// The global bound alone is monopolizable. `attest`'s only uniqueness key is
+/// `(pid, artifact_hash, attestor)`, so one seated attestor varying only
+/// `artifact_hash` could fill all 256 slots; from that block every `attest`
+/// fails `TooManyAttestations`, `has_quorum` can never be satisfied for a new
+/// artifact again, and since quorum gates CODE admission, execution and
+/// `commit_recovery_image`, the chain loses the ability to ship its own fix.
+/// The equal share makes the global bound unreachable by any coalition short
+/// of the entire roster, and guarantees every seat the room 06 §7's 2-of-N
+/// quorum needs.
+pub const MAX_ATTESTATIONS_PER_ATTESTOR: u32 = MAX_ATTESTATIONS / MAX_ATTESTORS;
+
 /// Live attestor tunables sourced from `pallet-constitution::Params`.
 pub trait AttestorParamsProvider {
     fn get() -> AttestorParams;
@@ -72,7 +86,15 @@ pub trait AttestorParamsProvider {
 /// cause-aware revocation. The runtime owns the concrete epoch lookup.
 pub trait AttestorProposalStatus {
     fn has_executed(pid: futarchy_primitives::ProposalId) -> bool;
+    /// MUST be **total**: a proposal the runtime does not carry is terminal.
+    /// The epoch pallet does not retain terminal proposals, so a predicate
+    /// that reads `false` for a missing key never opens the reap window for
+    /// the common case and strands the liability bond forever.
     fn is_terminal(pid: futarchy_primitives::ProposalId) -> bool;
+    /// Whether `pid` names a proposal the runtime currently carries. Used only
+    /// as an admission check on `attest`; it is deliberately **not** the
+    /// negation of [`Self::is_terminal`], which is monotone by contract.
+    fn exists(pid: futarchy_primitives::ProposalId) -> bool;
 }
 
 /// Maps authority roles to concrete origins for the v2 benchmark harness.
@@ -97,6 +119,12 @@ pub trait BenchmarkHelper<RuntimeOrigin> {
     /// measures nothing (SQ-489's fixture-instead-of-work shape). Pallet-only
     /// mocks flip their own switch.
     fn prime_terminal_proposal(_pid: futarchy_primitives::ProposalId) {}
+    /// Make `pid` read **present** through [`AttestorProposalStatus::exists`],
+    /// so `attest` reaches the work it is supposed to measure. Same seeding
+    /// discipline as [`Self::prime_terminal_proposal`]: the runtime binding
+    /// reads real `pallet-epoch` storage, so an unseeded chain fails
+    /// `UnknownProposal` during setup and measures nothing.
+    fn prime_live_proposal(_pid: futarchy_primitives::ProposalId) {}
 }
 
 #[frame_support::pallet]
@@ -274,6 +302,14 @@ pub mod pallet {
         ChallengeOpen,
         ReapNotAllowed,
         BondAccounting,
+        /// `attest` named a `pid` that `pallet-epoch` does not carry. 06 §7
+        /// scopes an attestation to "a CODE/META artifact" of a real proposal;
+        /// a record naming no proposal can never be reaped, because
+        /// terminality is read from the proposal.
+        UnknownProposal,
+        /// The signer already holds their [`MAX_ATTESTATIONS_PER_ATTESTOR`]
+        /// share of the frozen 256-record ledger.
+        AttestorQuotaExceeded,
     }
 
     #[pallet::hooks]
@@ -363,7 +399,9 @@ pub mod pallet {
         }
 
         /// Submit a member's bonded artifact attestation (06 §7). Membership
-        /// and duplicate checks are enforced by the core.
+        /// and duplicate checks are enforced by the core; the two admission
+        /// checks below are runtime-state questions the frame-free core cannot
+        /// answer, and both are evaluated before any write (G-1).
         #[pallet::call_index(1)]
         #[pallet::weight(T::WeightInfo::attest())]
         pub fn attest(
@@ -373,10 +411,29 @@ pub mod pallet {
             statement_hash: futarchy_primitives::H256,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            let signer = Self::to_core_authorized(&who)?;
             let mut registry = Self::load().ok_or(Error::<T>::NotInitialized)?;
+            // 06 §7 attests "a CODE/META artifact" — of a proposal. A record
+            // naming a `pid` the runtime never carried is unreapable by
+            // construction (terminality is read from the proposal), so it is
+            // refused rather than admitted into a bounded ledger it can never
+            // leave.
+            frame_support::ensure!(T::ProposalStatus::exists(pid), Error::<T>::UnknownProposal);
+            // Fair-share admission: no single signer may occupy more than
+            // their equal share of the frozen 256-record ledger. Counted over
+            // the registry already decoded above, so this adds no read.
+            let held = registry
+                .attestations
+                .iter()
+                .filter(|attestation| attestation.attestor == signer)
+                .count();
+            frame_support::ensure!(
+                (held as u32) < MAX_ATTESTATIONS_PER_ATTESTOR,
+                Error::<T>::AttestorQuotaExceeded
+            );
             registry
                 .attest(
-                    Self::to_core_authorized(&who)?,
+                    signer,
                     pid,
                     artifact_hash,
                     statement_hash,

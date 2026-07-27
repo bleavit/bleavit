@@ -208,10 +208,15 @@ def synthetic_production_spec() -> dict[str, object]:
     runtime's fail-closed `None` default.
     """
     spec = synthetic_dev_spec()
-    spec["genesis"]["runtimeGenesis"]["patch"]["futarchyTreasury"] = {
+    patch = spec["genesis"]["runtimeGenesis"]["patch"]
+    patch["futarchyTreasury"] = {
         "coretimeQuoteAuthority": ALICE,
         "coretimeRenewalAccount": ALICE_PUBLIC,
     }
+    # Mainnet launches at Phase 3 with sudo present (09 §3.2), so a production
+    # spec seats the Root key and declares the matching phase flags.
+    patch["sudo"] = {"key": ALICE}
+    patch["constitution"] = {"phaseFlags": validator.BOOTSTRAP_PHASE_FLAGS}
     return spec
 
 
@@ -712,6 +717,97 @@ class ValidateGenesisTests(unittest.TestCase):
         self.assertEqual(seats["coretime_quote_authority"], "TODO")
         self.assertEqual(seats["coretime_renewal_account"], "TODO")
 
+    def test_production_template_carries_the_root_key_seat_as_todo(self) -> None:
+        # MAX-06. The Root key is a launch-ceremony output, so it takes the
+        # same treatment as the Coretime seats: an explicit unfilled seat the
+        # `contains_todo` scan refuses to let an operator ship.
+        template = json.loads(ALLOCATIONS_TEMPLATE.read_text(encoding="utf-8"))
+
+        self.assertEqual(template["sudo"]["key"], "TODO")
+        self.assertEqual(
+            template["constitution"]["phase_flags"], validator.BOOTSTRAP_PHASE_FLAGS
+        )
+
+    def test_production_genesis_requires_a_root_key(self) -> None:
+        # MAX-06 regression. `patch["sudo"]` was never validated by any tool —
+        # `runtime_profiles.py` asserts only that the pallet is in metadata,
+        # never the key's value — so an attacker with release-prep or ceremony
+        # access could seat their own Root key and this gate printed OK.
+        # Fails at baseline: every case below returned no failures.
+        for mutate, expected in (
+            (lambda patch: patch.pop("sudo"), "must carry a sudo section"),
+            (lambda patch: patch["sudo"].pop("key"), "sudo.key must seat"),
+            (lambda patch: patch["sudo"].update(key="not-an-ss58"), "not a valid 32-byte"),
+            (lambda patch: patch["sudo"].update(key=ALICE[:-1]), "not a valid 32-byte"),
+        ):
+            for profile in ("paseo", "polkadot"):
+                with self.subTest(expected=expected, profile=profile):
+                    spec = copy.deepcopy(self.valid_production_spec)
+                    mutate(spec["genesis"]["runtimeGenesis"]["patch"])
+                    failures = self.validate(spec, profile)
+                    self.assertTrue(
+                        any(expected in failure for failure in failures), failures
+                    )
+
+    def test_production_genesis_requires_the_bootstrap_phase_flags(self) -> None:
+        # A sudo key with `SUDO_PRESENT` clear misrepresents sudo-era state as
+        # trust-equivalent to post-sudo state on the frontend banner (09 §5.2).
+        for flags in (None, 0, validator.PHASE_FLAG_SHADOW_MODE, 0xFF):
+            with self.subTest(flags=flags):
+                spec = copy.deepcopy(self.valid_production_spec)
+                patch = spec["genesis"]["runtimeGenesis"]["patch"]
+                if flags is None:
+                    patch.pop("constitution")
+                else:
+                    patch["constitution"]["phaseFlags"] = flags
+                failures = self.validate(spec, "polkadot")
+                self.assertTrue(
+                    any("phaseFlags" in failure for failure in failures), failures
+                )
+
+    def test_dev_and_local_presets_are_exempt_from_the_root_key_seat(self) -> None:
+        # The dev/local presets install their own well-known sudo key through
+        # the runtime preset, not through a hand-assembled patch.
+        for profile in ("dev", "local"):
+            with self.subTest(profile=profile):
+                self.assertEqual(self.validate(copy.deepcopy(self.valid_spec), profile), [])
+
+    def test_unknown_genesis_section_fails(self) -> None:
+        # An unrecognised section is either a misspelling that silently
+        # defaults a real one, or pallet genesis nothing here reviews.
+        spec = copy.deepcopy(self.valid_spec)
+        spec["genesis"]["runtimeGenesis"]["patch"]["treasury"] = {"balance": 1}
+        failures = self.validate(spec)
+        self.assertTrue(
+            any("unknown section(s) ['treasury']" in failure for failure in failures),
+            failures,
+        )
+
+    def test_unbacked_non_usdc_genesis_endowment_fails(self) -> None:
+        # MAX-S1 regression. Non-USDC rows `continue`d before the
+        # exhaustiveness check, so an arbitrary genesis DOT balance passed the
+        # gate while `pallet-assets` really minted it. Fails at baseline: the
+        # validator returned no failures.
+        spec = copy.deepcopy(self.valid_spec)
+        accounts = spec["genesis"]["runtimeGenesis"]["patch"]["foreignAssets"]["accounts"]
+        accounts.append([copy.deepcopy(validator.DOT_LOCATION), ALICE, 10**18])
+        failures = self.validate(spec)
+        self.assertTrue(
+            any("unbacked DOT genesis endowment" in failure for failure in failures),
+            failures,
+        )
+
+    def test_endowment_of_an_undeclared_asset_fails(self) -> None:
+        spec = copy.deepcopy(self.valid_spec)
+        accounts = spec["genesis"]["runtimeGenesis"]["patch"]["foreignAssets"]["accounts"]
+        accounts.append([{"parents": 9, "interior": "Here"}, ALICE, 1])
+        failures = self.validate(spec)
+        self.assertTrue(
+            any("the runtime does not declare" in failure for failure in failures),
+            failures,
+        )
+
+
     def test_missing_team_vesting_row_fails(self) -> None:
         spec = copy.deepcopy(self.valid_spec)
         patch = spec["genesis"]["runtimeGenesis"]["patch"]
@@ -722,6 +818,75 @@ class ValidateGenesisTests(unittest.TestCase):
         self.assertTrue(
             any("vesting" in failure.casefold() for failure in failures), failures
         )
+
+
+
+class ValidateClientSpecSurfaceTests(unittest.TestCase):
+    """MAX-04. `sc-chain-spec`'s `ClientSpec` deliberately does not
+    `deny_unknown_fields` and flattens alongside `genesis`, so a field the node
+    understands rides a spec whose every *named* key is correct."""
+
+    def validate(self, spec: dict[str, object]) -> list[str]:
+        failures: list[str] = []
+        validator.validate_client_spec_surface(spec, failures)
+        return failures
+
+    def base(self) -> dict[str, object]:
+        return {
+            "name": "Bleavit",
+            "id": "bleavit",
+            "chainType": "Live",
+            "bootNodes": [],
+            "properties": {},
+            "relay_chain": "polkadot",
+            "para_id": 3000,
+            "genesis": {},
+        }
+
+    def test_clean_spec_passes(self) -> None:
+        self.assertEqual(self.validate(self.base()), [])
+
+    def test_code_substitutes_is_rejected(self) -> None:
+        # Fails at baseline: `main()` asserted values only for keys it named
+        # and never rejected an unknown one, so this printed OK while
+        # `sc-service` loaded the substitute and `code_provider.rs` selected it
+        # over the on-chain :code — with genesis state, and therefore the
+        # genesis hash, unchanged.
+        spec = self.base()
+        spec["codeSubstitutes"] = {"1": "0xdeadbeef"}
+        failures = self.validate(spec)
+        self.assertTrue(
+            any("codeSubstitutes" in failure for failure in failures), failures
+        )
+
+    def test_empty_code_substitutes_passes(self) -> None:
+        # `#[serde(default)]` produces `{}`; only content is a finding.
+        spec = self.base()
+        spec["codeSubstitutes"] = {}
+        self.assertEqual(self.validate(spec), [])
+
+    def test_fork_and_bad_blocks_are_rejected_when_populated(self) -> None:
+        for key in ("forkBlocks", "badBlocks"):
+            with self.subTest(key=key):
+                spec = self.base()
+                spec[key] = ["0x00"]
+                failures = self.validate(spec)
+                self.assertTrue(any(key in failure for failure in failures), failures)
+
+    def test_unknown_top_level_key_is_rejected(self) -> None:
+        spec = self.base()
+        spec["someFutureClientSpecField"] = {"x": 1}
+        failures = self.validate(spec)
+        self.assertTrue(
+            any("someFutureClientSpecField" in failure for failure in failures), failures
+        )
+
+    def test_allowlist_covers_the_generated_dev_spec(self) -> None:
+        # The allowlist must not reject what the project itself produces.
+        if not GENERATED_DEV_SPEC.exists():
+            self.skipTest("generated chain spec absent (run generate-chain-specs.sh)")
+        spec = json.loads(GENERATED_DEV_SPEC.read_text(encoding="utf-8"))
+        self.assertEqual(self.validate(spec), [])
 
 
 if __name__ == "__main__":

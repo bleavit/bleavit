@@ -124,7 +124,7 @@ The `MetricId` assignment registry is owned by [05](05-welfare-and-decision-engi
 
 Proposal positions MUST project a settled proposal vault as `ScalarSettled { winner, s }`; Baseline positions MUST project a settled epoch vault as `BaselineSettled { s }` and MUST NOT fabricate a proposal branch. `RatificationStatus::NoPassedRecord` means only that the execution guard has no passing ratification record. It is deliberately agnostic between no referendum, an in-flight referendum and a failed referendum; the frontend MUST derive that lifecycle from `pallet-referenda` ([06](06-governance-and-guardians.md) §2.2). `Pending` and `Failed` are removed because the guard cannot truthfully produce them in the deployed design. This `RatificationStatus` restructure is a pre-genesis contract-v6 repair; no deployed SCALE value requires migration.
 
-The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 15`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
+The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 16`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
 
 ---
 
@@ -474,7 +474,7 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 | VIT decimals | 12 |
 | VIT existential deposit | **0.01 VIT** (= 10^10 plancks) |
 | Phase flag storage | `pallet-constitution::PhaseFlags` (§7.3) — the trading-enablement key |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 15` (runtime constant) |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 16` (runtime constant) |
 
 ---
 
@@ -518,7 +518,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 
 | Pallet | Constant name | Type | Value source |
 |---|---|---|---|
-| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 15) |
+| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 16) |
 | Constitution | `MaxParams` | `u32` | `constitution_core::MAX_PARAMS` (= 128) |
 | Constitution | `MaxCapabilities` | `u32` | `constitution_core::MAX_CAPABILITIES` (= 64) |
 | Constitution | `MaxMeters` | `u32` | `constitution_core::MAX_METERS` (= 16) |
@@ -568,7 +568,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Epoch | `DecisionSigmaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.sigma.*` K hard minima (= `[0; 4]`) |
 | Welfare | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 15) |
 | Welfare | `MaxMetricSpecs` | `u32` | `welfare_core::MAX_METRIC_SPECS` (= 16) |
-| Welfare | `MaxSnapshots` | `u32` | `welfare_core::MAX_SNAPSHOTS` (= 20) |
+| Welfare | `MaxSnapshots` | `u32` | `welfare_core::MAX_SNAPSHOTS` (= 40 = 20 retained epochs × 2 concurrent frozen versions; contract v16) |
 | Welfare | `MaxGateFlags` | `u32` | `welfare_core::MAX_GATE_FLAGS` (= 20) |
 | Welfare | `MaxDailyGateSamples` | `u8` | `welfare_core::MAX_DAILY_GATE_SAMPLES` (= 64) |
 | FutarchyTreasury | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 15) |
@@ -654,6 +654,7 @@ No other origin can write the record. The layout MUST NEVER change except by app
 
 **Version history.**
 
+- **v16 (2026-07-27) — the retained snapshot bound carries its version multiplicity.** §9's `MaxSnapshots` moves **20 → 40**. `Snapshots` is keyed `(epoch, spec_version)` and capacity is enforced against the *record* count, while [13](13-parameters.md) §4 states the bound in **epochs** ("≤ 20 epochs") and [05](05-welfare-and-decision-engine.md) §4.6's prune cutoff evicts by epoch age. At a flat 20 those two rules disagreed by exactly the factor [05](05-welfare-and-decision-engine.md) §3.3 says every derived `× 2` rests on — `epoch.horizon_k ≤ 2` concurrent frozen MetricSpec versions (SQ-496) — so an activation boundary produced 21 lawful records against 20 slots, and a signed caller could spend the epoch's single spare slot before the deadline-advancing record was written: `SnapshotDeadline` then stopped advancing, the §4.8 dead-man latched, and the frozen epoch clock froze the prune cutoff that would have released the slot, with no origin able to clear the flag (SQ-254). The retained **epoch** window is unchanged at 20, so `MaxGateFlags` (epoch-keyed) and the 21-epoch shared prefix index of [13](13-parameters.md) §4 keep their values; only the record bound moves. No SCALE type, key, event, call or view shape changes — a metadata constant's *value* changes, which §13 requires be versioned because the frontend reads it. **Pre-genesis revision** — no runtime is deployed, so §13's point-3 migration clause does not apply, and `transaction_version` is untouched (§13 rule 7). Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-27, through the standing autonomous-resolution delegation.**
 - **v15 (2026-07-25) — bounded oracle retention and settled-value reaping (SQ-492).** Two changes, both in §7.2, both consequences of the same defect: [07](07-oracle-and-disputes.md) §11(1) and §13 each name a reaper that no code drove. (i) A new **trailing** event `RetentionExpired { component, epoch, round, reporter_bond, challenger_bond }`, emitted when §11(1)'s retention window closes with no terminal verdict — the stacks are refunded to their posters rather than forfeited, because the values track's failure to rule is not a finding against either party. Appended last; no existing variant's SCALE discriminant moves. (ii) `ComponentValues`' retention **rule** changes: entries are reaped on an epoch cutoff (`current − 3` measurement epochs, bounded per crank) rather than "at cohort settlement". This is a correction of the note rather than of behaviour, because there *was* no behaviour: `settle_cohort` reads the welfare snapshot, never this map (§11's own SQ-182 resolution establishes it), so the stated trigger named a caller that could not have fired — and the map grew to `MAX_COMPONENT_VALUES`, after which every further settlement fails. It is listed as a contract change and not a silent fix because a frontend reading `ComponentValues` directly can now observe an entry disappear on a schedule the old note did not describe. No SCALE type, key or view-type shape changes. **Pre-genesis revision** — no runtime is deployed, so §13's point-3 migration clause does not apply, and `transaction_version` is untouched (§13 rule 7). Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-25, through the standing autonomous-resolution delegation.**
 
 - **v14 (2026-07-25) — the versioned MetricSpec surface (SQ-175, SQ-341, SQ-141).** Three changes, all **additive**, landing together because none is independently verifiable. (i) `MetricSpec` (read by the frontend through §7.4's `pallet-welfare::MetricSpecs`) gains two **trailing** fields: `target: u32`, the A-pillar milestone divisor of [05](05-welfare-and-decision-engine.md) §4.3's `min(1, points ÷ target)` — previously specified with no home in any struct, so the MilestoneRegistry could not normalize a filing (SQ-175); and `delta_s_max_bps: u32`, the documented maximum single-epoch settlement impact `Δs_max` that [07](07-oracle-and-disputes.md) §6.3's bond-coverage admission rule is stated against — previously unrepresentable, so the rule that makes an attested lie cost more than it can move was unimplementable regardless of where it was called (SQ-341). Both are appended after `prior_bounds`; every existing field keeps its name, type and offset. (ii) §6's `RegistryEpochClosed` gains `spec_version: MetricSpecVersion`, because 07 §7's registry lifecycle is now keyed by `(epoch, spec_version)` — one epoch closes once per frozen version (SQ-141). The other ten registry event shapes, including the `(epoch, filing_id)` key every filing event carries, are untouched: filing-id allocation stays per-epoch precisely so they can be. (iii) No storage **key** in §7 changes: 07 §7's `Aggregates` re-key is a registry-internal item this contract does not freeze. **Pre-genesis revision** — no runtime is deployed, so §13's post-genesis append-only/migration clause (point 3) does not apply, and `transaction_version` is untouched (§13 rule 7). Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-25, through the standing autonomous-resolution delegation.**

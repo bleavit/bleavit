@@ -164,6 +164,37 @@ def false_pass_rates(document: Mapping[str, Any]) -> dict[str, float]:
     return rates
 
 
+def false_pass_counts(document: Mapping[str, Any]) -> dict[str, dict[str, int]]:
+    """The counts behind each class rate, so the consumer is not rate-blind.
+
+    Exporting only the rate made `0/742` and `0/0` indistinguishable
+    downstream: `_rate(0, 0)` is "0.000000", so a class that measured nothing
+    reported a perfect score and `check-phase0-exit.py` was structurally unable
+    to tell the difference. The denominator travels with the rate from here on.
+    """
+    metrics = document["metrics"]
+    counts: dict[str, dict[str, int]] = {}
+    for source, target in CLASS_MAP.items():
+        block = metrics[source]
+        row: dict[str, int] = {}
+        for field in ("decidable_harm", "decidable_harm_false_pass_count"):
+            value = block.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ExportError(
+                    f"metrics.{source}.{field} must be a non-negative integer"
+                )
+            row[field] = value
+        if row["decidable_harm"] == 0:
+            raise ExportError(
+                f"metrics.{source} measured no decidable-harm proposals, so its "
+                "false-pass rate is undefined rather than zero; refusing to export"
+            )
+        if row["decidable_harm_false_pass_count"] > row["decidable_harm"]:
+            raise ExportError(f"metrics.{source} false-pass count exceeds denominator")
+        counts[target] = row
+    return counts
+
+
 def calibration_map(document: Mapping[str, Any]) -> dict[str, float | int]:
     published = document["published"]
     values = published.get("values")
@@ -209,6 +240,7 @@ def build_evidence(document: Mapping[str, Any], head: str) -> dict[str, Any]:
         "git_commit": head,
         "synthetic_proposals": proposals,
         "false_pass_rate": false_pass_rates(document),
+        "false_pass_counts": false_pass_counts(document),
         "attack_cost_validation": {
             "validated": True,
             "method": (

@@ -149,6 +149,9 @@ parameter_types! {
     /// 05 §4.7's measurable day count for every epoch, as the epoch clock would
     /// project it. `None` models an epoch whose timing is no longer retained.
     pub static MeasurableDays: Option<u32> = Some(u32::from(crate::MAX_DAILY_GATE_SAMPLES));
+    /// MetricSpec versions live cohorts froze for the measurement epoch
+    /// (I-16), as `pallet-epoch` would project them.
+    pub static FrozenSpecVersions: Vec<MetricSpecVersion> = Vec::new();
 }
 
 pub struct KeeperRebates;
@@ -278,6 +281,14 @@ impl pallet_welfare::SnapshotSchedule for TestSnapshotSchedule {
     /// this to the epoch shape they mean (including `None` — timing unknown).
     fn measurable_days(_epoch: EpochId) -> Option<u32> {
         MeasurableDays::get()
+    }
+
+    /// Versions live cohorts froze for the epoch. Empty by default, so the
+    /// admissible set is exactly the epoch's active spec and the suites that
+    /// predate the check keep their behaviour; the ones that exercise the
+    /// two-version regime seed it.
+    fn frozen_spec_versions(_epoch: EpochId) -> Vec<MetricSpecVersion> {
+        FrozenSpecVersions::get()
     }
 }
 
