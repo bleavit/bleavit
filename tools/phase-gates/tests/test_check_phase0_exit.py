@@ -1012,7 +1012,40 @@ class SimulationEvidenceTests(PhaseGateTestCase):
         counts["param"]["decidable_harm_false_pass_count"] = 1
         document["false_pass_counts"] = counts
 
-        self.assert_sim_fails(document, "disagrees with its exported counts")
+        self.assert_sim_fails(document, "not the exporter's rendering of 1/10000")
+
+    def test_counts_at_one_percent_fail_however_the_rate_is_declared(self) -> None:
+        # The counts decide, exactly. `100/10_000` is 1% — a fail — but the
+        # rate travelling with it can be declared just under the threshold and
+        # within any float tolerance of the true value: `0.0099991` clears
+        # `< 0.01` and sits 9e-7 from 0.01, which the former 1e-6 agreement
+        # tolerance accepted. This checker is the release decision boundary,
+        # so it must not have a side of the threshold it can be talked onto.
+        for declared in (0.0099991, 0.009999, 0.0):
+            with self.subTest(declared=declared):
+                document = valid_sim_document()
+                rates = copy.deepcopy(document["false_pass_rate"])
+                counts = copy.deepcopy(document["false_pass_counts"])
+                assert isinstance(rates, dict) and isinstance(counts, dict)
+                rates["param"] = declared
+                counts["param"]["decidable_harm_false_pass_count"] = 100
+                document["false_pass_rate"] = rates
+                document["false_pass_counts"] = counts
+
+                self.assert_sim_fails(document, "is not strictly < 1% (15 §4.9)")
+
+    def test_the_largest_admissible_count_still_passes(self) -> None:
+        # One below the boundary must remain a pass, so the exact comparison is
+        # not quietly off by one: 99/10_000 is 0.99%.
+        document = valid_sim_document()
+        counts = copy.deepcopy(document["false_pass_counts"])
+        assert isinstance(counts, dict)
+        counts["param"]["decidable_harm_false_pass_count"] = 99
+        document["false_pass_counts"] = counts
+
+        self.assertEqual(
+            GATE.criterion_sim_false_pass(self.evidence(document))["status"], "pass"
+        )
 
     def test_nonfinite_json_rate_is_rejected_before_validation(self) -> None:
         for value in (float("inf"), float("nan")):

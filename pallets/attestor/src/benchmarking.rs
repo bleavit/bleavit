@@ -59,8 +59,9 @@ fn seed_attestations<T: Config>(count: u32, open_last: bool) -> AttestationId {
 /// Saturated ledger for the `attest` measurement: `MAX_ATTESTATIONS - 1`
 /// records, of which the measured signer `[1; 32]` owns exactly
 /// `MAX_ATTESTATIONS_PER_ATTESTOR - 1` and the remaining 15 seats own the rest
-/// in equal shares. Both quantities are derived from the two frozen bounds, so
-/// the fixture stays exact if either moves.
+/// in equal shares. Both quantities are read from the constants rather than
+/// written out, so the fixture stays exact if either moves — and the scan the
+/// measurement charges is the full `MAX_ATTESTATIONS - 1` either way.
 fn seed_attest_ledger<T: Config>() {
     seed_members::<T>();
     let signer_share = MAX_ATTESTATIONS_PER_ATTESTOR - 1;
@@ -180,7 +181,7 @@ mod benches {
     fn attest() {
         // The ledger is still saturated at `MAX_ATTESTATIONS - 1`, so the
         // measured call performs the same worst-case scan as before. What
-        // changed is *ownership*: the fair-share quota caps one signer at
+        // changed is *ownership*: the per-signer quota caps one signer at
         // `MAX_ATTESTATIONS_PER_ATTESTOR`, so a fixture in which `[1; 32]`
         // owns all 255 records would measure `AttestorQuotaExceeded` instead
         // of the work. The signer is seeded at exactly one below its quota and

@@ -928,8 +928,8 @@ where the fix differs from the recommendation above and why.
 | Id | Status | Fix |
 |---|---|---|
 | MAX-01 | fixed | Two independent halves, because either alone leaves the wedge reachable. (a) `record_snapshot` admits only the epoch's **admissible set** — its active spec ∪ every version a live cohort froze for it (I-16) — through a new `SnapshotSchedule::frozen_spec_versions` seam the runtime binds to the same projection `pallet-registry` already uses, so welfare and the registry cannot disagree about which versions an epoch carries. The check lives in `welfare-core` *after* `SpecNotFound`/`SpecNotActive`, so the precise errors survive and the frame-free differential oracle models the rule. (b) `MAX_SNAPSHOTS` = `SNAPSHOT_RETENTION_EPOCHS × (MAX_CONCURRENT_FROZEN_VERSIONS + 1)` = 60. The multiplier is `k + 1`, not `k`: the cohorts measuring epoch `e` were created at `e−1` and `e−2`, so they carry the versions active *then*, and a version activating at `e` itself is a lawful third that neither froze — reachable through two ordinary `register_spec` calls activating in consecutive epochs. Sizing at `× k` would have re-created the same wedge one activation cadence later. Dropping the active version from the union instead is not available: it is the only version `note_snapshot_recorded` advances the deadline on, so refusing it *is* the wedge. `MAX_GATE_FLAGS` and the 21-epoch shared prefix index are epoch-keyed and were **decoupled** onto the new `SNAPSHOT_RETENTION_EPOCHS_BOUND`, as was the runtime's prune cutoff — it read `current − (MAX_SNAPSHOTS_BOUND − 1)` and would otherwise have doubled the retained window to 39 epochs. Spec: 02 §9/§13 (contract **v16**), 05 §4.6, 13 §4 |
-| MAX-02 | fixed | `attest` refuses a `pid` `pallet-epoch` does not carry (new `AttestorProposalStatus::exists`; `UnknownProposal`), and enforces a per-signer share of the frozen ledger: `MAX_ATTESTATIONS_PER_ATTESTOR = MAX_ATTESTATIONS / MAX_ATTESTORS = 16` (`AttestorQuotaExceeded`). **Derived from the two frozen bounds rather than chosen**, and preferred to re-keying `Attestations` per proposal because that is a 02 §7.5 storage-shape change; the property obtained is the one that matters — no coalition short of the entire roster can exhaust the vector, and every seat retains the room 06 §7's 2-of-N quorum needs. `TooManyAttestations` survives as the storage backstop, now reachable only through genesis, a migration or roster rotation |
-| MAX-03 | fixed | `recovery_trigger` gives the phase-transition cause **precedence** over any cursor cause instead of matching it only at `Cursor == None`; `RecoveryAwareMigrations::step()` discards an SDK cursor auto-onboarded while the wrapper is refusing to service the migrator (`index == 0` with no inner cursor — exactly what `onboard_new_mbms` writes, so a cursor that advanced is never dropped); and `TerminalRecoveryTransition` clears a stray retired cursor rather than hard-refusing its own trigger. The R-1 deviation is resolved in the direction 09 §3.2 describes. The new test **drives a genuinely refused `PhaseFourTransition`** (the SQ-383 under-floor condition) and asserts the trigger is reached, rather than seeding the post-state as the existing `cfg(recovery)` coverage does |
+| MAX-02 | fixed | `attest` refuses a `pid` `pallet-epoch` does not carry (new `AttestorProposalStatus::exists`; `UnknownProposal`), and enforces a per-signer bound on the frozen ledger: `MAX_ATTESTATIONS_PER_ATTESTOR = bounds::MAX_LIVE_PROPOSALS = 32` (`AttestorQuotaExceeded`). **Derived from demand, not from a split of supply** — one record per concurrently live proposal — and preferred to re-keying `Attestations` per proposal because that is a 02 §7.5 storage-shape change. Both properties hold: any pair can carry 06 §7's 2-of-N quorum for all 32 live proposals, while one seat reaches only an eighth of the 256-record ledger and the lawful minimum roster (`att.min_members` = 3) cannot reach the global bound at all. The first sizing was `MAX_ATTESTATIONS / MAX_ATTESTORS = 16` — see the third Codex round below. `TooManyAttestations` survives as the storage backstop, now reachable only through genesis, a migration or roster rotation |
+| MAX-03 | fixed | `recovery_trigger` gives the phase-transition cause **precedence** over any cursor cause instead of matching it only at `Cursor == None`; `RecoveryAwareMigrations::step()` discards an SDK cursor auto-onboarded while the wrapper is refusing to service the migrator (`index == 0` with no inner cursor — exactly what `onboard_new_mbms` writes, so a cursor that advanced is never dropped); and `TerminalRecoveryTransition` clears a stray retired cursor rather than hard-refusing its own trigger. `schedule_committed_recovery_image` **retires** a cursor that coexists with the phase cause instead of refusing it — see the third Codex round below. The R-1 deviation is resolved in the direction 09 §3.2 describes. The new test **drives a genuinely refused `PhaseFourTransition`** (the SQ-383 under-floor condition) and asserts the trigger is reached, rather than seeding the post-state as the existing `cfg(recovery)` coverage does |
 | MAX-04 | fixed | `validate-chain-spec.py` allowlists top-level `ClientSpec` keys — an allowlist, because `sc-chain-spec` deliberately omits `deny_unknown_fields` — and hard-fails a non-empty `codeSubstitutes`, `forkBlocks` or `badBlocks`. Empty values pass, since `{}`/`[]` is what `#[serde(default)]` produces |
 | MAX-05 | fixed | `market_core::double_depth` makes doubling `b` and recomputing `last_quote_1e9` one kernel operation both seeding paths call, so neither can half-apply it; `quote_1e9` is exported so consumers can verify rather than trust the cached scalar. A try-state assertion that `last_quote_1e9 == price(q_long, q_short, b)` for every book **closes the class** — it immediately caught two pre-existing fixtures that moved `q` without the quote |
 | MAX-06 | fixed | Production specs must carry `sudo.key` (present and SS58-valid) and `constitution.phaseFlags == SHADOW_MODE\|SUDO_PRESENT`; genesis-patch sections are allowlisted. The key is a launch-ceremony output, so it takes the Coretime-seat treatment rather than a pinned constant: an explicit `"TODO"` seat in `deploy/genesis/allocations.template.json` that the existing `contains_todo` scan refuses to let an operator ship |
@@ -938,7 +938,7 @@ where the fix differs from the recommendation above and why.
 | MAX-09 | fixed | `RuntimeAttestorProposalStatus::is_terminal` is `is_none_or`, matching the execution guard's twin, with the contract that the predicate is total stated on the trait method |
 | MAX-10 | fixed | `cancel_stream` reverts the remainder to the **originating line**, which is what 08 §1.4 says and what keeps a pot-backed line and its pot in step. The 08 §6.3 drift alarm now measures `line + outstanding stream obligations` against the pot, so a line drained by an open stream no longer reads as needing nothing. The reverse direction is deliberately still not an error: anyone can transfer USDC into a keyless pot, so asserting it would let an outsider break try-state |
 | MAX-11 | fixed | `has_components` reads `after.ranges` (the tool's own regeneration) only; the canonical 50×20 fidelity is **pinned** and a committed file declaring anything else is a hard failure, rather than fidelity being text-equality against the audited file's own header; and `parse_weight_file` rejects a declared range binding no slope **and** no function parameter, closing the forgery at the parser for every consumer. A real component-bearing function is still advisory at reduced fidelity — that demotion is legitimate and is pinned by its own test |
-| MAX-12 | fixed | A class with `decidable_harm == 0` is a normative violation rather than a `0.000000` pass, in `normative_violations`, in the artifact's class gate, and in `_check_metric_row` (class rows only — a *stratum* legitimately empties, and the committed artifact already carries three PARAM bands at zero). `bleavit.sim-calibration.v1` now exports `false_pass_counts`, and `check-phase0-exit.py` enforces a non-zero denominator and rate/count agreement itself rather than trusting the rate |
+| MAX-12 | fixed | A class with `decidable_harm == 0` is a normative violation rather than a `0.000000` pass, in `normative_violations`, in the artifact's class gate, and in `_check_metric_row` (class rows only — a *stratum* legitimately empties, and the committed artifact already carries three PARAM bands at zero). `bleavit.sim-calibration.v1` now exports `false_pass_counts`, and `check-phase0-exit.py` enforces a non-zero denominator itself rather than trusting the rate. The `< 1%` criterion is decided on the **integers**, with no tolerance anywhere near the threshold — see the third Codex round below |
 | MAX-S1 | fixed | The `foreignAssets.accounts` exhaustiveness rule applies per **declared asset**, and an endowment naming an undeclared Location is rejected outright |
 | MAX-S2 | fixed | `validate_artifact_binding` derives its spec set from each **selected** suite's own topology (`Network:` → `chain_spec_path`), binding only Bleavit-built specs — relay/Asset-Hub/Coretime specs come from the pinned Paseo tree and carry a different `:code` by construction. A suite naming no Bleavit spec is a fail-closed error. The path each topology declares is what gets hashed — see the second Codex round below |
 
@@ -994,3 +994,48 @@ The declared path is now resolved and hashed as declared, with paths escaping th
 refused outright, and a new test asserts every committed topology keeps its specs in the generated
 directory so a future one that does not is caught here. The regression test fails at baseline
 against a matching decoy in `specs/out`: `EvidenceError not raised`.
+
+**Third Codex round (2026-07-28).** Three P1 findings, all against fixes in this branch, all verified
+from source and fixed. Every one of them is a case where the remedy was correct about the defect and
+wrong about a boundary.
+
+*MAX-03's precedence created a second permanent stall.* Giving the phase cause precedence was right,
+but `schedule_committed_recovery_image`'s phase arm still `ensure!`d that no migration cursor
+existed. A cursor that had **progressed** before the Phase-4 code was installed is never discarded by
+`discard_unserviceable_cursor` (deliberately — a cursor that advanced is a genuine cause) and can
+never finish, because the wrapper stops servicing the migrator as soon as `PhaseTransitionLock` is
+set. Under the old ordering that state resolved through the cursor lane; under the new precedence it
+selected the phase cause and then refused it, so scheduling rolled back every block and
+`extrinsic_mode()` stayed `OnlyInherents` with no dispatchable writer for either flag — the same
+class of wedge MAX-03 was raised to remove, reached from the other side. Both causes now **retire**
+the cursor through one `retire_cursor_for`, so an aborted image still restores the pre-recovery state
+and the success path discards it in `TerminalRecoveryTransition`. Codex also noted, correctly, that
+the round-1 test asserted trigger selection and never drove the disposition; the test now drives it.
+The full scheduling path applies a real authorized upgrade and needs a genuine runtime blob, which no
+test in this suite builds — every other recovery test seeds post-scheduling state for that reason —
+so the disposition is exercised directly and the test says so rather than implying more coverage than
+it has.
+
+*MAX-02's quota capped the chain below its own admitted load.* `MAX_ATTESTATIONS / MAX_ATTESTORS`
+reads as the natural fair share and divides by the wrong roster: the divisor is the **maximum** 16
+seats, while the roster that must function is the lawful minimum of 3 (`att.min_members`, 13 §4). At
+16 records per signer a three-seat roster held 48 of 256, and since 06 §7's quorum is 2-of-N, any
+fixed pair stalled after 16 artifacts — against `bounds::MAX_LIVE_PROPOSALS` = 32 admitted
+concurrently. A storage-monopolization mitigation must not do that; it trades an attacker-triggered
+denial for an unconditional one. The bound is now derived from demand — one record per concurrently
+live proposal, `= 32` — which keeps both properties: any pair carries quorum for all 32, and one seat
+still reaches only an eighth of the ledger, with the minimum roster unable to reach the global bound
+at all. Codex's own suggestion (divide by the *seated* roster) fixes the three-seat case but leaves a
+fixed pair at 16 on a full 16-seat roster, still under 32; deriving from demand fixes both. The
+regression test is the lawful-minimum roster carrying quorum for all 32 live proposals, and it fails
+at 16 with `AttestorQuotaExceeded`.
+
+*MAX-12's rate/count agreement had a tolerance on the wrong side of the threshold.* The check was
+`abs(numerator / denominator - rate) > 1e-6`. `100/10_000` is exactly 1% — a fail — but a document
+declaring `0.0099991` clears the `< 0.01` threshold check and sits `9e-7` from the true value, inside
+that tolerance. Verified rather than reasoned: at baseline that document returns
+`{'status': 'pass'}`. Since this checker is the release decision boundary and not a display
+validator, the criterion is now decided on the **integers** (`numerator * 100 < denominator`), with
+the declared rate required to be exactly the exporter's rendering
+(`format(Decimal(n) / Decimal(d), ".6f")`, per `bleavit_simulation.calibration._rate`). There is no
+tolerance that separates those two cases, so there is no tolerance.

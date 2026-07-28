@@ -2530,9 +2530,40 @@ fn max03_a_progressed_cursor_is_preserved_but_cannot_bury_the_phase_cause() {
             pallet_migrations::Cursor::<Runtime>::exists(),
             "a cursor that advanced is a genuine cause and is never discarded",
         );
+        let trigger = crate::configs::recovery_trigger();
         assert_eq!(
-            crate::configs::recovery_trigger(),
+            trigger,
             Some(crate::configs::RecoveryTrigger::PhaseTransition),
+        );
+
+        // Selecting the phase cause is only half of it. The selected cause must
+        // also be *schedulable*, and this is the step that decides: the phase
+        // arm formerly refused outright while a cursor existed, so scheduling
+        // rolled back every block and the runtime stayed in `OnlyInherents`
+        // with nothing able to clear either flag. Fails at baseline, where this
+        // was an `ensure!` both cursors are absent.
+        //
+        // Driven here rather than through `schedule_committed_recovery_image`
+        // because the surrounding path applies a real authorized upgrade: it
+        // needs a genuine runtime blob and preimage, which this harness does
+        // not build (every other recovery test seeds the post-scheduling state
+        // for the same reason).
+        crate::configs::retire_cursor_for(trigger.expect("the phase cause is selected"));
+
+        assert!(
+            !pallet_migrations::Cursor::<Runtime>::exists(),
+            "the cursor is moved out of the recovery image's way, not refused",
+        );
+        assert_eq!(
+            crate::configs::RetiredMigrationCursor::get(),
+            Some(pallet_migrations::MigrationCursor::Active(
+                pallet_migrations::ActiveCursor {
+                    index: 1,
+                    inner_cursor: None,
+                    started_at: frame_system::Pallet::<Runtime>::block_number(),
+                }
+            )),
+            "retired, so an aborted image restores the pre-recovery state",
         );
     });
 }

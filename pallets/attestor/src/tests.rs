@@ -1064,7 +1064,7 @@ fn one_signer_cannot_monopolize_the_attestation_ledger() {
             Attestations::<Test>::get().len(),
             crate::MAX_ATTESTATIONS_PER_ATTESTOR as usize
         );
-        // At quota, and 240 of the 256 slots still free.
+        // At quota, and 224 of the 256 slots still free.
         assert_noop!(
             Attestor::attest(RuntimeOrigin::signed(acct(1)), 1, hash(200), hash(2)),
             Error::<Test>::AttestorQuotaExceeded
@@ -1076,6 +1076,48 @@ fn one_signer_cannot_monopolize_the_attestation_ledger() {
             hash(200),
             hash(2),
         ));
+        assert_ok!(Attestor::do_try_state());
+    });
+}
+
+/// The other half of MAX-02's quota, and the one the first sizing got wrong:
+/// the bound must not cap the chain below its own admitted load.
+///
+/// The mock seats exactly the lawful minimum roster (`att.min_members` = 3,
+/// 13 §4). With the quota derived as `MAX_ATTESTATIONS / MAX_ATTESTORS` = 16 —
+/// an equal split of supply across the *maximum* roster — that roster held 48
+/// of 256 records and any fixed pair of signers stalled after 16 artifacts,
+/// while `bounds::MAX_LIVE_PROPOSALS` = 32 proposals may be live at once. A
+/// storage-monopolization mitigation that does that has traded an
+/// attacker-triggered denial for an unconditional one.
+///
+/// Fails at 16: the 17th proposal returns `AttestorQuotaExceeded`.
+#[test]
+fn max02_a_minimum_roster_can_carry_quorum_for_every_concurrently_live_proposal() {
+    new_test_ext().execute_with(|| {
+        set_block(10);
+        for pid in 0..futarchy_primitives::bounds::MAX_LIVE_PROPOSALS {
+            for signer in [acct(1), acct(2)] {
+                assert_ok!(Attestor::attest(
+                    RuntimeOrigin::signed(signer),
+                    pid as futarchy_primitives::ProposalId,
+                    hash(9),
+                    hash(2),
+                ));
+            }
+        }
+        assert_eq!(
+            Attestations::<Test>::get().len(),
+            2 * futarchy_primitives::bounds::MAX_LIVE_PROPOSALS as usize
+        );
+
+        set_block(u64::from(11 + CHALLENGE_WINDOW_BLOCKS));
+        for pid in 0..futarchy_primitives::bounds::MAX_LIVE_PROPOSALS {
+            assert!(
+                Attestor::has_quorum(pid as futarchy_primitives::ProposalId, hash(9)),
+                "06 §7's 2-of-N quorum must be formable for every live proposal",
+            );
+        }
         assert_ok!(Attestor::do_try_state());
     });
 }

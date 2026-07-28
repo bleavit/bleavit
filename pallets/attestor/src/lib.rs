@@ -45,7 +45,7 @@ pub use attestor_core::{
     FALSE_EJECTION_THRESHOLD, MIN_MEMBERS, QUORUM,
 };
 
-use futarchy_primitives::AccountId as CoreAccountId;
+use futarchy_primitives::{bounds, AccountId as CoreAccountId};
 
 /// Maximum elected attestors. `13 §4` has no attestor storage-bound row; the
 /// pallet-owned value and its `Members` storage shape are frozen in 02 §7.5
@@ -63,8 +63,10 @@ pub const MAX_ATTESTATIONS: u32 = 256;
 /// Retained liability rows are bounded by the same maximum as the roster.
 pub const MAX_LIABILITIES: u32 = MAX_ATTESTORS;
 
-/// Per-signer share of [`MAX_ATTESTATIONS`]. **Derived, not chosen**: an equal
-/// split of the frozen 256-record ledger across the frozen 16 seats.
+/// Per-signer admission bound on [`MAX_ATTESTATIONS`]. **Derived from demand,
+/// not from a split of supply**: one record per concurrently live proposal, so
+/// every seat can attest everything the protocol admits at once and nothing
+/// beyond it.
 ///
 /// The global bound alone is monopolizable. `attest`'s only uniqueness key is
 /// `(pid, artifact_hash, attestor)`, so one seated attestor varying only
@@ -72,10 +74,31 @@ pub const MAX_LIABILITIES: u32 = MAX_ATTESTORS;
 /// fails `TooManyAttestations`, `has_quorum` can never be satisfied for a new
 /// artifact again, and since quorum gates CODE admission, execution and
 /// `commit_recovery_image`, the chain loses the ability to ship its own fix.
-/// The equal share makes the global bound unreachable by any coalition short
-/// of the entire roster, and guarantees every seat the room 06 §7's 2-of-N
-/// quorum needs.
-pub const MAX_ATTESTATIONS_PER_ATTESTOR: u32 = MAX_ATTESTATIONS / MAX_ATTESTORS;
+///
+/// **Why demand and not `MAX_ATTESTATIONS / MAX_ATTESTORS`.** That split reads
+/// as the natural fair share and is wrong in the direction that matters,
+/// because the divisor is the maximum roster while the roster that must
+/// function is the *lawful minimum* — `att.min_members` = 3 (13 §4). At 16 it
+/// left a three-seat roster holding 48 of 256 records, and since 06 §7's
+/// quorum is 2-of-N, any fixed pair of signers stalled after 16 artifacts —
+/// below the [`bounds::MAX_LIVE_PROPOSALS`] = 32 the protocol admits
+/// concurrently. A mitigation for storage monopolization must not cap the
+/// chain below its own admitted load; that trades an attacker-triggered denial
+/// for an unconditional one.
+///
+/// Both properties hold at 32:
+///
+///  * **Liveness** — every seat has room for one record per live proposal, so
+///    *any* pair can carry the 2-of-N quorum for all 32 of them.
+///  * **Bounded monopoly** — one seat reaches 32 of 256, an eighth. Filling the
+///    ledger needs eight distinct seated attestors, where the lawful minimum
+///    roster tops out at 96 records and cannot reach the global bound at all.
+///    Every record must also name a proposal the runtime carries (see
+///    [`Error::UnknownProposal`]), so a full ledger is 256 genuine attestations
+///    of live proposals rather than an attacker's padding.
+///
+/// `TooManyAttestations` remains the storage backstop behind this.
+pub const MAX_ATTESTATIONS_PER_ATTESTOR: u32 = bounds::MAX_LIVE_PROPOSALS;
 
 /// Live attestor tunables sourced from `pallet-constitution::Params`.
 pub trait AttestorParamsProvider {

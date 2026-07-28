@@ -8999,6 +8999,44 @@ pub(crate) fn recovery_schedule_hook_weight(bytes: u32) -> Weight {
         ))
 }
 
+/// Move the migration cursor out of the way of the recovery image, for either
+/// cause.
+///
+/// **Both causes retire the cursor; neither refuses it.** The phase arm used to
+/// `ensure!` that no cursor existed, and since `recovery_trigger` gives the
+/// phase cause precedence, that turned a legitimate state into a permanent
+/// stall: an MBM that had already progressed when the Phase-4 code was
+/// installed is left in place, and this wrapper stops servicing the migrator
+/// the moment `PhaseTransitionLock` is set, so the cursor can never clear
+/// itself. Scheduling then rolled back on every block, `RecoveryLockdown` and
+/// `PhaseTransitionLock` stayed set, and `frame_executive::extrinsic_mode()`
+/// returned `OnlyInherents` indefinitely with no dispatchable writer for either
+/// flag. Refusing to schedule a repair is never the safe reading of a cause the
+/// runtime cannot repair on its own.
+///
+/// Retiring preserves the pre-recovery state for
+/// [`restore_recovery_cursor_after_abort`] if the relay rejects the image. On
+/// the success path `TerminalRecoveryTransition` discards it, because the
+/// terminal image replaces the runtime that owned the MBM and there is nothing
+/// left for it to repair.
+///
+/// Called inside `schedule_committed_recovery_image`'s storage layer, so it is
+/// rolled back with everything else if scheduling fails.
+pub(crate) fn retire_cursor_for(trigger: RecoveryTrigger) {
+    let cursor = match trigger {
+        RecoveryTrigger::Cursor(cursor) => Some(cursor),
+        RecoveryTrigger::PhaseTransition => pallet_migrations::Cursor::<Runtime>::get(),
+    };
+    if let Some(cursor) = cursor {
+        // Never overwrite a cursor already retired: one slot restores one
+        // cursor, and the older record is the one an abort has to put back.
+        if !RetiredMigrationCursor::exists() {
+            RetiredMigrationCursor::put(cursor);
+        }
+        pallet_migrations::Cursor::<Runtime>::kill();
+    }
+}
+
 fn schedule_committed_recovery_image() -> DispatchResult {
     if RecoveryLockdown::get() || RecoveryAborted::get() || RecoveryScheduledHash::exists() {
         return Ok(());
@@ -9012,19 +9050,7 @@ fn schedule_committed_recovery_image() -> DispatchResult {
         // OnlyInherents even though frame-system requires the SDK cursor to be
         // absent while applying the authorization.
         RecoveryLockdown::put(true);
-        match trigger {
-            RecoveryTrigger::Cursor(cursor) => {
-                RetiredMigrationCursor::put(cursor);
-                pallet_migrations::Cursor::<Runtime>::kill();
-            }
-            RecoveryTrigger::PhaseTransition => {
-                frame_support::ensure!(
-                    !RetiredMigrationCursor::exists()
-                        && !pallet_migrations::Cursor::<Runtime>::exists(),
-                    DispatchError::Other("phase recovery cursor conflict")
-                );
-            }
-        }
+        retire_cursor_for(trigger);
         RecoveryCodeApplied::kill();
         RecoveryBypass::put(true);
         let result = (|| {
