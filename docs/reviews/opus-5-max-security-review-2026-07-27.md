@@ -933,7 +933,7 @@ where the fix differs from the recommendation above and why.
 | MAX-04 | fixed | `validate-chain-spec.py` allowlists top-level `ClientSpec` keys — an allowlist, because `sc-chain-spec` deliberately omits `deny_unknown_fields` — and hard-fails a non-empty `codeSubstitutes`, `forkBlocks` or `badBlocks`. Empty values pass, since `{}`/`[]` is what `#[serde(default)]` produces |
 | MAX-05 | fixed | `market_core::double_depth` makes doubling `b` and recomputing `last_quote_1e9` one kernel operation both seeding paths call, so neither can half-apply it; `quote_1e9` is exported so consumers can verify rather than trust the cached scalar. A try-state assertion that `last_quote_1e9 == price(q_long, q_short, b)` for every book **closes the class** — it immediately caught two pre-existing fixtures that moved `q` without the quote |
 | MAX-06 | fixed | Production specs must carry `sudo.key` (present and SS58-valid) and `constitution.phaseFlags == SHADOW_MODE\|SUDO_PRESENT`; genesis-patch sections are allowlisted. The key is a launch-ceremony output, so it takes the Coretime-seat treatment rather than a pinned constant: an explicit `"TODO"` seat in `deploy/genesis/allocations.template.json` that the existing `contains_todo` scan refuses to let an operator ship |
-| MAX-07 | fixed | The keeper pins chain identity (`genesis_hash`) and the metadata **call shapes** it will sign (`call_hashes`, validated per crank before signing, via `PalletMetadata::call_hash`). Refusals are expected failures, not transport failures — reconnecting to the same hostile endpoint changes nothing and the keeper must not fall back to an unvalidated shape. With no pins configured the keeper keeps its previous posture and logs every observed shape for adoption, so an upgrade does not silently take an operator offline; both pins are documented in `keeper/README.md`. The validated metadata instance is also the **encoding** instance — see the second Codex round below. RFC-78 remains waived by subxt 0.50.2 and is not addressed here |
+| MAX-07 | fixed | The keeper pins chain identity (`genesis_hash`) and the **dispatch target** of every call it will sign (`call_hashes`, validated per crank before signing). Each pin binds the metadata call shape *and* the pallet/call index pair the encoder prepends — `PalletMetadata::call_hash` alone identifies neither the dispatchable nor even the pallet, and in this runtime it already collides across real pallets (see the fourth Codex round below). Refusals are expected failures, not transport failures — reconnecting to the same hostile endpoint changes nothing and the keeper must not fall back to an unvalidated call. With no pins configured the keeper keeps its previous posture and logs every observed value for adoption, so an upgrade does not silently take an operator offline; both pins are documented in `keeper/README.md`. The validated metadata instance is also the **encoding** instance — see the second Codex round below. RFC-78 remains waived by subxt 0.50.2 and is not addressed here |
 | MAX-08 | fixed | `record_daily_gate` requires `spec_version == active_snapshot_spec(epoch)`. A cohort having frozen another version deliberately does **not** widen it: `GateBreachFlags` is keyed by epoch alone and settles money, so it admits exactly one version |
 | MAX-09 | fixed | `RuntimeAttestorProposalStatus::is_terminal` is `is_none_or`, matching the execution guard's twin, with the contract that the predicate is total stated on the trait method |
 | MAX-10 | fixed | `cancel_stream` reverts the remainder to the **originating line**, which is what 08 §1.4 says and what keeps a pot-backed line and its pot in step. The 08 §6.3 drift alarm now measures `line + outstanding stream obligations` against the pot, so a line drained by an open stream no longer reads as needing nothing. The reverse direction is deliberately still not an error: anyone can transfer USDC into a keyless pot, so asserting it would let an outsider break try-state |
@@ -945,8 +945,8 @@ where the fix differs from the recommendation above and why.
 **Not addressed, deliberately.** The A7 sequencing constraint recorded in §7 (`Recomputable` must not be
 populated before `hash_evidence` is a real cryptographic hash) is a note for a future milestone, not a
 defect in the current tree; nothing was changed for it. RFC-78 `CheckMetadataHash` remains `Disabled`
-on every keeper signature because subxt 0.50.2 hard-codes it — the call-shape pins are the
-substitute, and the limitation is stated in `keeper/README.md`.
+on every keeper signature because subxt 0.50.2 hard-codes it — the call pins are the substitute, and
+the limitation is stated in `keeper/README.md`.
 
 **Verification.** Exhaustive `tools/ci/rust-workspace-gates.sh`; `tools/ci/fuzz-gates.sh`; all seven
 `tools/*/tests` suites; reference model 58/58 with vector freshness `--check` clean; the economic
@@ -1039,3 +1039,33 @@ validator, the criterion is now decided on the **integers** (`numerator * 100 < 
 the declared rate required to be exactly the exporter's rendering
 (`format(Decimal(n) / Decimal(d), ".6f")`, per `bleavit_simulation.calibration._rate`). There is no
 tolerance that separates those two cases, so there is no tolerance.
+
+**Fourth Codex round (2026-07-28).** One P1, against MAX-07's own remedy, and it was already live in
+this runtime rather than merely reachable through forged metadata.
+
+*The call-shape pin did not identify the call.* subxt 0.50.2's `get_call_hash` is `get_variant_hash`
+— `H(variant name)` concatenated with the XOR of its field name/type hashes — and it hashes neither
+the pallet index nor the call variant index. The encoder reads exactly those two: `frame_decode`'s
+`encode_call_data_to` writes `call_info.pallet_index` then `call_info.call_index`, which
+`subxt_metadata`'s `extrinsic_call_info_by_name` fills from `pallet.call_index()` and `call.index`.
+The pinned facts and the dispatching facts were therefore disjoint, so an endpoint could serve the
+pinned shape at other indices and the keeper would validate it and sign bytes the real runtime
+dispatches somewhere else — the same-chain redirection the pin was added to close, one level down.
+
+The collisions are not hypothetical, and finding that changed the severity rather than confirming it.
+A scan of the committed runtime metadata shows `IncidentRegistry` and `MilestoneRegistry` producing
+**byte-identical** call hashes across all six of their calls, and `ConditionalLedger.set_frozen`
+colliding with `Market.set_frozen`. The keeper cranks *both* registries (`planner::registry_pallet`),
+so an operator who pinned `IncidentRegistry.crank_close` had also, without any way to know it,
+authorized `MilestoneRegistry.crank_close`: no forged shape is required, only a swap of two pallet
+indices. A pin that cannot distinguish two calls the same keeper legitimately signs is not a pin.
+
+Each pin is now `blake2_256(call_hash ++ pallet_call_index ++ call_variant_index)` — the shape bound
+to precisely the two bytes the encoder prepends, in the encoder's order. The startup reporter that
+gives operators their values calls the *same* function the gate compares against, so the two cannot
+drift apart. Pin values from an earlier build no longer match and fail closed with `Mismatch`, which
+is the correct direction; `keeper/README.md` records why the shape hash alone is insufficient. The
+two regression tests fail at baseline against the real metadata — the twin registries yielding one
+identical 32-byte pin, and `Market.set_frozen`/`ConditionalLedger.set_frozen` sharing another — and
+the second test also asserts that the runtime still *contains* shape collisions, so it degrades
+loudly if the fixture ever stops exercising the defect.

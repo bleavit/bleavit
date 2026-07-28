@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, time::Duration};
 use futures::{stream::FuturesUnordered, StreamExt};
 use subxt::{
     client::{ClientAtBlock, OfflineClientAtBlockT, OnlineClientAtBlockImpl, OnlineClientAtBlockT},
-    config::polkadot::PolkadotExtrinsicParamsBuilder,
+    config::{polkadot::PolkadotExtrinsicParamsBuilder, substrate::BlakeTwo256, Hasher},
     dynamic,
     transactions::{TransactionProgress, TransactionsClient},
     OnlineClient, PolkadotConfig,
@@ -47,6 +47,41 @@ pub struct Submitter {
     /// Empty means unpinned, which is the pre-existing trust posture and is
     /// reported as such at startup.
     call_hashes: BTreeMap<String, [u8; 32]>,
+}
+
+/// What this keeper pins for one call: the variant shape **and** the two bytes
+/// that decide which dispatchable actually runs.
+///
+/// A shape hash alone is not the dispatch target. `PalletMetadata::call_hash`
+/// is subxt 0.50.2's `get_variant_hash` — `H(variant name) ++ XOR(field name
+/// and type hashes)` — and nothing else. The encoder reads a disjoint pair of
+/// facts: `frame_decode`'s `encode_call_data_to` writes `call_info.pallet_index`
+/// then `call_info.call_index`, which subxt fills from `pallet.call_index()`
+/// and `variant.index`. Neither index is hashed, so a shape-only pin leaves the
+/// endpoint free to keep the pinned shape and move it to other indices; the
+/// keeper would validate and sign bytes the real runtime dispatches elsewhere.
+/// That is the same-chain redirection the pin exists to stop, one level down.
+///
+/// This is not hypothetical for this runtime. Shape hashes already collide
+/// across its own pallets: `IncidentRegistry` and `MilestoneRegistry` are
+/// shape-identical in all six of their calls, and this keeper cranks both
+/// (`planner::registry_pallet`), so one shape pin cannot say which registry it
+/// authorized. `ConditionalLedger.set_frozen` and `Market.set_frozen` collide
+/// too. Mixing the indices in gives every call a distinct pin, and
+/// `keeper_shape_pins::the_twin_registries_are_one_shape_but_two_pins` holds
+/// that line against the real metadata.
+pub fn dispatch_pin(metadata: &subxt::Metadata, pallet: &str, call: &str) -> Option<[u8; 32]> {
+    let declared = metadata.pallet_by_name(pallet)?;
+    let variant = declared.call_variant_by_name(call)?;
+    let shape = declared.call_hash(call)?;
+
+    // Exactly the bytes `encode_call_data_to` prepends, in its order, after the
+    // shape they are being bound to.
+    let mut preimage = [0u8; 34];
+    preimage[..32].copy_from_slice(&shape);
+    preimage[32] = declared.call_index();
+    preimage[33] = variant.index;
+    Some(BlakeTwo256::new(metadata).hash(&preimage).0)
 }
 
 /// The pin decision, factored out of the metadata lookup so it is testable
@@ -127,6 +162,11 @@ impl Submitter {
     /// `SafetyFilter` does not object because `transfer_allow_death` is an
     /// ordinary public leaf. Nothing else in the path looks at the shape.
     ///
+    /// What is compared is [`dispatch_pin`], not the bare shape hash: the shape
+    /// says what the call *looks* like, and the two index bytes say which
+    /// dispatchable actually runs. Both must be pinned or the redirection just
+    /// moves down one level — see that function.
+    ///
     /// This checks a metadata *instance*. Which instance is the whole point —
     /// see [`Submitter::validated_tx`], the only caller.
     pub fn validate_call_shape(
@@ -136,10 +176,7 @@ impl Submitter {
         call: &str,
     ) -> Result<(), ShapeRefusal> {
         let key = format!("{pallet}.{call}");
-        let observed = metadata
-            .pallet_by_name(pallet)
-            .and_then(|declared| declared.call_hash(call));
-        shape_decision(observed, pins, &key)
+        shape_decision(dispatch_pin(metadata, pallet, call), pins, &key)
     }
 
     /// Validate `block`'s declared call shape and hand back **that block's own**
@@ -632,9 +669,7 @@ mod validated_tx_tests {
     #[test]
     fn the_gate_admits_only_the_shape_the_block_itself_declares() {
         let metadata = production_metadata();
-        let declared = metadata
-            .pallet_by_name("Epoch")
-            .and_then(|pallet| pallet.call_hash("tick"))
+        let declared = dispatch_pin(&metadata, "Epoch", "tick")
             .expect("the production runtime declares Epoch.tick");
         let block = offline_block(metadata);
 
@@ -665,6 +700,93 @@ mod validated_tx_tests {
         assert_eq!(
             Submitter::validated_tx(&block, &pins, "Epoch", "not_a_call").err(),
             Some(ShapeRefusal::Unknown)
+        );
+    }
+}
+
+#[cfg(test)]
+mod keeper_shape_pins {
+    use super::*;
+    use subxt::{ext::codec::Decode, Metadata};
+
+    fn production_metadata() -> Metadata {
+        let encoded = include_bytes!("../tests/fixtures/runtime-metadata.scale");
+        Metadata::decode(&mut &encoded[..]).expect("actual runtime metadata decodes for Subxt")
+    }
+
+    /// The collision this pin has to survive, taken from the real runtime
+    /// rather than from forged metadata.
+    ///
+    /// `IncidentRegistry` and `MilestoneRegistry` declare identically-shaped
+    /// calls, so `call_hash` returns one value for both — and the keeper cranks
+    /// both pallets. Under a shape-only pin, an operator who pinned
+    /// `IncidentRegistry.crank_close` had also, unknowingly, authorized
+    /// `MilestoneRegistry.crank_close`: an endpoint that swaps the two pallets'
+    /// indices redirects the signature to the other registry without inventing
+    /// a single byte of shape. The pin must separate them.
+    #[test]
+    fn the_twin_registries_are_one_shape_but_two_pins() {
+        let metadata = production_metadata();
+        let shape = |pallet: &str| {
+            metadata
+                .pallet_by_name(pallet)
+                .and_then(|declared| declared.call_hash("crank_close"))
+                .expect("both registries declare crank_close")
+        };
+
+        assert_eq!(
+            shape("IncidentRegistry"),
+            shape("MilestoneRegistry"),
+            "the premise: subxt's call hash cannot tell these two calls apart",
+        );
+
+        let incident = dispatch_pin(&metadata, "IncidentRegistry", "crank_close")
+            .expect("IncidentRegistry.crank_close resolves");
+        let milestone = dispatch_pin(&metadata, "MilestoneRegistry", "crank_close")
+            .expect("MilestoneRegistry.crank_close resolves");
+        assert_ne!(
+            incident, milestone,
+            "a pin for one registry's crank must not authorize the other's",
+        );
+
+        // And the gate, not just the derivation, keeps them apart.
+        let pins = BTreeMap::from([("MilestoneRegistry.crank_close".to_owned(), incident)]);
+        assert_eq!(
+            Submitter::validate_call_shape(&metadata, &pins, "MilestoneRegistry", "crank_close"),
+            Err(ShapeRefusal::Mismatch),
+            "the other registry's pin is refused before anything is signed",
+        );
+    }
+
+    /// The pin covers the two bytes `encode_call_data_to` prepends, so no two
+    /// calls in the runtime the keeper signs against can share one.
+    #[test]
+    fn every_call_this_runtime_declares_has_its_own_pin() {
+        let metadata = production_metadata();
+        let mut seen: BTreeMap<[u8; 32], String> = BTreeMap::new();
+        let mut shapes: BTreeMap<[u8; 32], String> = BTreeMap::new();
+        let mut shape_collisions = 0usize;
+
+        for pallet in metadata.pallets() {
+            for call in pallet.call_variants().into_iter().flatten() {
+                let key = format!("{}.{}", pallet.name(), call.name);
+                let pin = dispatch_pin(&metadata, pallet.name(), &call.name)
+                    .expect("a declared call resolves a pin");
+                if let Some(previous) = seen.insert(pin, key.clone()) {
+                    panic!("{key} and {previous} share a dispatch pin");
+                }
+                if let Some(shape) = pallet.call_hash(&call.name) {
+                    if shapes.insert(shape, key).is_some() {
+                        shape_collisions += 1;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            shape_collisions > 0,
+            "this runtime is supposed to contain shape collisions; if it no \
+             longer does, the test above is no longer exercising the defect",
         );
     }
 }

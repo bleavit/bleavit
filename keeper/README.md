@@ -89,14 +89,19 @@ tx_timeout_secs = 90
 max_retries = 2
 retry_base_ms = 500
 
-# The call shapes this keeper will sign. Every byte it signs is derived from
-# metadata the node serves, `dynamic::tx` payloads carry no validation hash,
-# and subxt 0.50.2 encodes RFC-78's `CheckMetadataHash` as `Disabled` on every
-# signature — so a compromised endpoint can keep the real genesis, spec and
-# transaction versions and forge only the call shape. Pinning the shapes is
-# what closes that; the genesis pin alone does not, because the forgery never
-# leaves this chain. Start the keeper with no pins and it logs every observed
-# shape for you to adopt.
+# The calls this keeper will sign. Every byte it signs is derived from metadata
+# the node serves, `dynamic::tx` payloads carry no validation hash, and subxt
+# 0.50.2 encodes RFC-78's `CheckMetadataHash` as `Disabled` on every signature
+# — so a compromised endpoint can keep the real genesis, spec and transaction
+# versions and forge only the call. Pinning is what closes that; the genesis pin
+# alone does not, because the forgery never leaves this chain. Start the keeper
+# with no pins and it logs every observed value for you to adopt.
+#
+# Each value binds the call's metadata shape *and* the pallet/call index pair
+# the encoder prepends. Both are needed: subxt's call hash covers only the
+# variant name and its field types, so it does not identify the dispatchable —
+# in this runtime `IncidentRegistry` and `MilestoneRegistry` hash identically in
+# all six of their calls, and the keeper cranks both.
 [call_hashes]
 "Epoch.tick" = "0x…"
 "Market.crank_observe" = "0x…"

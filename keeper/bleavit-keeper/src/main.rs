@@ -12,6 +12,7 @@ use bleavit_keeper::{
         DEFAULT_OBSERVATION_INTERVAL_BLOCKS, DEFAULT_RESERVE_PROBE_INTERVAL_BLOCKS,
         DEFAULT_RESERVE_PROBE_TIMEOUT_BLOCKS,
     },
+    submit,
     submit::Submitter,
     Cli,
 };
@@ -440,8 +441,10 @@ async fn report_call_shapes(client: &OnlineClient<PolkadotConfig>, config: &Conf
     let mut observed = BTreeMap::new();
     for pallet in metadata.pallets() {
         for call in pallet.call_variants().into_iter().flatten() {
-            if let Some(hash) = pallet.call_hash(&call.name) {
-                observed.insert(format!("{}.{}", pallet.name(), call.name), hash);
+            // The gate's own derivation, not a second one that happens to agree
+            // today: an operator pins what `validate_call_shape` will compare.
+            if let Some(pin) = submit::dispatch_pin(&metadata, pallet.name(), &call.name) {
+                observed.insert(format!("{}.{}", pallet.name(), call.name), pin);
             }
         }
     }
