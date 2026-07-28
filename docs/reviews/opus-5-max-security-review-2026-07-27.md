@@ -933,14 +933,14 @@ where the fix differs from the recommendation above and why.
 | MAX-04 | fixed | `validate-chain-spec.py` allowlists top-level `ClientSpec` keys — an allowlist, because `sc-chain-spec` deliberately omits `deny_unknown_fields` — and hard-fails a non-empty `codeSubstitutes`, `forkBlocks` or `badBlocks`. Empty values pass, since `{}`/`[]` is what `#[serde(default)]` produces |
 | MAX-05 | fixed | `market_core::double_depth` makes doubling `b` and recomputing `last_quote_1e9` one kernel operation both seeding paths call, so neither can half-apply it; `quote_1e9` is exported so consumers can verify rather than trust the cached scalar. A try-state assertion that `last_quote_1e9 == price(q_long, q_short, b)` for every book **closes the class** — it immediately caught two pre-existing fixtures that moved `q` without the quote |
 | MAX-06 | fixed | Production specs must carry `sudo.key` (present and SS58-valid) and `constitution.phaseFlags == SHADOW_MODE\|SUDO_PRESENT`; genesis-patch sections are allowlisted. The key is a launch-ceremony output, so it takes the Coretime-seat treatment rather than a pinned constant: an explicit `"TODO"` seat in `deploy/genesis/allocations.template.json` that the existing `contains_todo` scan refuses to let an operator ship |
-| MAX-07 | fixed | The keeper pins chain identity (`genesis_hash`) and the metadata **call shapes** it will sign (`call_hashes`, validated per crank before signing, via `PalletMetadata::call_hash`). Refusals are expected failures, not transport failures — reconnecting to the same hostile endpoint changes nothing and the keeper must not fall back to an unvalidated shape. With no pins configured the keeper keeps its previous posture and logs every observed shape for adoption, so an upgrade does not silently take an operator offline; both pins are documented in `keeper/README.md`. RFC-78 remains waived by subxt 0.50.2 and is not addressed here |
+| MAX-07 | fixed | The keeper pins chain identity (`genesis_hash`) and the metadata **call shapes** it will sign (`call_hashes`, validated per crank before signing, via `PalletMetadata::call_hash`). Refusals are expected failures, not transport failures — reconnecting to the same hostile endpoint changes nothing and the keeper must not fall back to an unvalidated shape. With no pins configured the keeper keeps its previous posture and logs every observed shape for adoption, so an upgrade does not silently take an operator offline; both pins are documented in `keeper/README.md`. The validated metadata instance is also the **encoding** instance — see the second Codex round below. RFC-78 remains waived by subxt 0.50.2 and is not addressed here |
 | MAX-08 | fixed | `record_daily_gate` requires `spec_version == active_snapshot_spec(epoch)`. A cohort having frozen another version deliberately does **not** widen it: `GateBreachFlags` is keyed by epoch alone and settles money, so it admits exactly one version |
 | MAX-09 | fixed | `RuntimeAttestorProposalStatus::is_terminal` is `is_none_or`, matching the execution guard's twin, with the contract that the predicate is total stated on the trait method |
 | MAX-10 | fixed | `cancel_stream` reverts the remainder to the **originating line**, which is what 08 §1.4 says and what keeps a pot-backed line and its pot in step. The 08 §6.3 drift alarm now measures `line + outstanding stream obligations` against the pot, so a line drained by an open stream no longer reads as needing nothing. The reverse direction is deliberately still not an error: anyone can transfer USDC into a keyless pot, so asserting it would let an outsider break try-state |
 | MAX-11 | fixed | `has_components` reads `after.ranges` (the tool's own regeneration) only; the canonical 50×20 fidelity is **pinned** and a committed file declaring anything else is a hard failure, rather than fidelity being text-equality against the audited file's own header; and `parse_weight_file` rejects a declared range binding no slope **and** no function parameter, closing the forgery at the parser for every consumer. A real component-bearing function is still advisory at reduced fidelity — that demotion is legitimate and is pinned by its own test |
 | MAX-12 | fixed | A class with `decidable_harm == 0` is a normative violation rather than a `0.000000` pass, in `normative_violations`, in the artifact's class gate, and in `_check_metric_row` (class rows only — a *stratum* legitimately empties, and the committed artifact already carries three PARAM bands at zero). `bleavit.sim-calibration.v1` now exports `false_pass_counts`, and `check-phase0-exit.py` enforces a non-zero denominator and rate/count agreement itself rather than trusting the rate |
 | MAX-S1 | fixed | The `foreignAssets.accounts` exhaustiveness rule applies per **declared asset**, and an endowment naming an undeclared Location is rejected outright |
-| MAX-S2 | fixed | `validate_artifact_binding` derives its spec set from each **selected** suite's own topology (`Network:` → `chain_spec_path`), binding only Bleavit-built specs — relay/Asset-Hub/Coretime specs come from the pinned Paseo tree and carry a different `:code` by construction. A suite naming no Bleavit spec is a fail-closed error |
+| MAX-S2 | fixed | `validate_artifact_binding` derives its spec set from each **selected** suite's own topology (`Network:` → `chain_spec_path`), binding only Bleavit-built specs — relay/Asset-Hub/Coretime specs come from the pinned Paseo tree and carry a different `:code` by construction. A suite naming no Bleavit spec is a fail-closed error. The path each topology declares is what gets hashed — see the second Codex round below |
 
 **Not addressed, deliberately.** The A7 sequencing constraint recorded in §7 (`Recomputable` must not be
 populated before `hash_evidence` is a real cryptographic hash) is a note for a future milestone, not a
@@ -967,3 +967,30 @@ epoch-keyed `GateBreachFlags` entry per `(epoch, spec_version)` snapshot record 
 are no longer the same number. `tools/simulation/run-calibration.py --check`
 is red identically before and after this branch (recorded config vs executable defaults) and is not
 caused by it.
+
+**Second Codex round (2026-07-28).** Two P1 findings, both against code this branch introduced, both
+verified from source and fixed. Neither was a false positive.
+
+*The keeper validated one metadata instance and signed through another.* `validate_call_shape` ran
+against `client.at_current_block()`, but the submission then called `self.client.tx()` — which
+subxt 0.50.2 defines as `at_current_block().await?.transactions()`, a **second** block view with its
+own `Core_version` call and its own metadata fetch (`online_client.rs`; the config's cache is keyed
+by spec version, and the endpoint states the spec version). A hostile endpoint could therefore serve
+the pinned metadata to the check and forged metadata to the encoder, passing MAX-07's gate and still
+redirecting the signature — the exact forgery the pins exist to stop. `Submitter::validated_tx` now
+validates a `ClientAtBlock` and returns **that block's own** `TransactionsClient`, and is the only
+place in the module that produces one; the nonce read moved onto the same block. The instance
+binding is enforced by construction rather than by assertion, which the new tests say plainly:
+they exercise the gate over the real `tests/fixtures/runtime-metadata.scale` through a genuine
+`ClientAtBlock`, and no offline test can observe a second fetch that no longer happens.
+
+*The evidence binding hashed a re-derived path.* MAX-S2's `suite_chain_specs` reduced each declared
+`chain_spec_path` to its basename and `validate_artifact_binding` re-rooted it under
+`zombienet/specs/out`. Every committed topology does keep its specs there, so this was latent — but
+a topology naming a spec elsewhere, or a second file of the same basename, would have had the
+binding hash one file while Zombienet booted another, emitting release evidence for a runtime that
+was never exercised. That is the same false assertion MAX-S2 was raised to remove, one level down.
+The declared path is now resolved and hashed as declared, with paths escaping the repository
+refused outright, and a new test asserts every committed topology keeps its specs in the generated
+directory so a future one that does not is caught here. The regression test fails at baseline
+against a matching decoy in `specs/out`: `EvidenceError not raised`.

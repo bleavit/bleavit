@@ -2,8 +2,11 @@ use std::{collections::BTreeMap, time::Duration};
 
 use futures::{stream::FuturesUnordered, StreamExt};
 use subxt::{
-    client::OnlineClientAtBlockImpl, config::polkadot::PolkadotExtrinsicParamsBuilder, dynamic,
-    transactions::TransactionProgress, OnlineClient, PolkadotConfig,
+    client::{ClientAtBlock, OfflineClientAtBlockT, OnlineClientAtBlockImpl, OnlineClientAtBlockT},
+    config::polkadot::PolkadotExtrinsicParamsBuilder,
+    dynamic,
+    transactions::{TransactionProgress, TransactionsClient},
+    OnlineClient, PolkadotConfig,
 };
 use subxt_signer::sr25519::Keypair;
 use tokio::time::{sleep, timeout};
@@ -123,6 +126,9 @@ impl Submitter {
     /// RFC-78's `CheckMetadataHash` as `Disabled` on every signature, and
     /// `SafetyFilter` does not object because `transfer_allow_death` is an
     /// ordinary public leaf. Nothing else in the path looks at the shape.
+    ///
+    /// This checks a metadata *instance*. Which instance is the whole point —
+    /// see [`Submitter::validated_tx`], the only caller.
     pub fn validate_call_shape(
         metadata: &subxt::Metadata,
         pins: &BTreeMap<String, [u8; 32]>,
@@ -134,6 +140,35 @@ impl Submitter {
             .pallet_by_name(pallet)
             .and_then(|declared| declared.call_hash(call));
         shape_decision(observed, pins, &key)
+    }
+
+    /// Validate `block`'s declared call shape and hand back **that block's own**
+    /// transactions client.
+    ///
+    /// The only way this module obtains a `TransactionsClient`, so a signature
+    /// cannot be produced by metadata that did not pass the check above.
+    ///
+    /// Checking one instance and signing through another is not a check.
+    /// `OnlineClient::tx()` is `at_current_block().await?.transactions()`, so it
+    /// opens a *second* block view with its own `Core_version` call and its own
+    /// metadata fetch — the config's cache is keyed by spec version, and the
+    /// endpoint states the spec version. An endpoint could therefore answer the
+    /// validation call with the pinned metadata and the encoding call with
+    /// forged metadata, passing the check and still redirecting the signature to
+    /// another call. Deriving both from one `ClientAtBlock` removes the second
+    /// fetch entirely: `create_signable_offline` encodes against the metadata
+    /// this instance already holds.
+    fn validated_tx<Client>(
+        block: &ClientAtBlock<PolkadotConfig, Client>,
+        pins: &BTreeMap<String, [u8; 32]>,
+        pallet: &str,
+        call: &str,
+    ) -> Result<TransactionsClient<PolkadotConfig, Client>, ShapeRefusal>
+    where
+        Client: OfflineClientAtBlockT<PolkadotConfig>,
+    {
+        Self::validate_call_shape(block.metadata_ref(), pins, pallet, call)?;
+        Ok(block.tx())
     }
 
     pub fn call_hashes(&self) -> &BTreeMap<String, [u8; 32]> {
@@ -205,45 +240,68 @@ impl Submitter {
         current_block: u64,
         metrics: &KeeperMetrics,
     ) -> SubmissionOutcome {
-        // Before anything is signed: the node's declared call shape must be
-        // the pinned one. Refused cranks are an expected failure, not a
-        // transport failure — reconnecting to the same hostile endpoint would
-        // change nothing, and the keeper must not fall back to signing an
-        // unvalidated shape.
-        match self.client.at_current_block().await {
-            Ok(block) => {
-                if let Err(refusal) = Self::validate_call_shape(
-                    &block.metadata(),
-                    &self.call_hashes,
-                    crank.pallet,
-                    crank.call,
-                ) {
+        for attempt in 0..=self.max_retries {
+            // Exactly one block view per attempt, and every later step is built
+            // from it — see `validated_tx` for why validating one metadata
+            // instance and signing through another closes nothing.
+            let block = match timeout(self.timeout, self.client.at_current_block()).await {
+                Ok(Ok(block)) => block,
+                Ok(Err(error)) => {
                     metrics.failed(crank.role);
                     warn!(
                         role = %crank.role,
                         pallet = crank.pallet,
                         call = crank.call,
-                        %refusal,
-                        "refusing to sign: unvalidated call shape"
+                        attempt,
+                        %error,
+                        "metadata unavailable for call-shape validation"
                     );
-                    return SubmissionOutcome::ExpectedFailure;
+                    if attempt < self.max_retries {
+                        sleep(backoff(self.retry_base, attempt)).await;
+                        continue;
+                    }
+                    return SubmissionOutcome::TransportFailure;
                 }
-            }
-            Err(error) => {
-                metrics.failed(crank.role);
-                warn!(
-                    role = %crank.role,
-                    pallet = crank.pallet,
-                    call = crank.call,
-                    %error,
-                    "metadata unavailable for call-shape validation"
-                );
-                return SubmissionOutcome::TransportFailure;
-            }
-        }
-        for attempt in 0..=self.max_retries {
+                Err(_) => {
+                    metrics.failed(crank.role);
+                    warn!(
+                        role = %crank.role,
+                        pallet = crank.pallet,
+                        call = crank.call,
+                        attempt,
+                        "timed out fetching metadata for call-shape validation"
+                    );
+                    if attempt < self.max_retries {
+                        sleep(backoff(self.retry_base, attempt)).await;
+                        continue;
+                    }
+                    return SubmissionOutcome::TransportFailure;
+                }
+            };
+
+            // Before anything is signed: the node's declared call shape must be
+            // the pinned one. Refused cranks are an expected failure, not a
+            // transport failure — reconnecting to the same hostile endpoint would
+            // change nothing, and the keeper must not fall back to signing an
+            // unvalidated shape.
+            let mut tx =
+                match Self::validated_tx(&block, &self.call_hashes, crank.pallet, crank.call) {
+                    Ok(tx) => tx,
+                    Err(refusal) => {
+                        metrics.failed(crank.role);
+                        warn!(
+                            role = %crank.role,
+                            pallet = crank.pallet,
+                            call = crank.call,
+                            %refusal,
+                            "refusing to sign: unvalidated call shape"
+                        );
+                        return SubmissionOutcome::ExpectedFailure;
+                    }
+                };
+
             if self.nonce.is_none() {
-                match timeout(self.timeout, self.fetch_nonce()).await {
+                match timeout(self.timeout, fetch_nonce(&tx, &self.signer)).await {
                     Ok(Ok(nonce)) => self.nonce = Some(nonce),
                     Ok(Err(error)) => {
                         metrics.failed(crank.role);
@@ -288,7 +346,9 @@ impl Submitter {
                 .mortal(64)
                 .build();
             let submission = timeout(self.timeout, async {
-                let mut tx = self.client.tx().await?;
+                // `tx` is the validated block's own transactions client, so the
+                // metadata that passed the shape check is the metadata that
+                // encodes this payload.
                 let progress = tx
                     .sign_and_submit_then_watch(&payload, &self.signer, params)
                     .await?;
@@ -368,12 +428,19 @@ impl Submitter {
         }
         SubmissionOutcome::TransportFailure
     }
+}
 
-    async fn fetch_nonce(&self) -> Result<u64, subxt::Error> {
-        let account = self.signer.public_key().to_account_id();
-        let tx = self.client.tx().await?;
-        Ok(tx.account_nonce(&account).await?)
-    }
+/// Read the signer's nonce at the block whose shape was validated, rather than
+/// opening a fresh block view for it.
+async fn fetch_nonce<Client>(
+    tx: &TransactionsClient<PolkadotConfig, Client>,
+    signer: &Keypair,
+) -> Result<u64, subxt::Error>
+where
+    Client: OnlineClientAtBlockT<PolkadotConfig>,
+{
+    let account = signer.public_key().to_account_id();
+    Ok(tx.account_nonce(&account).await?)
 }
 
 async fn await_finality(
@@ -512,6 +579,92 @@ mod call_shape_tests {
         assert_eq!(
             shape_decision(None, &empty, "Epoch.tick"),
             Err(ShapeRefusal::Unknown)
+        );
+    }
+}
+
+/// `validated_tx` over the production metadata, through a real `ClientAtBlock`.
+///
+/// What this proves: the gate returns a transactions client only when the
+/// block's own metadata carries the pinned shape, and the pin key format is the
+/// one this repository's metadata actually answers to.
+///
+/// What it does not prove, because no offline test can: that the validated
+/// instance is the encoding instance. That is enforced by construction —
+/// `validated_tx` derives the client from the block it checked and is the only
+/// place in this module that produces one — not by an assertion here.
+#[cfg(test)]
+mod validated_tx_tests {
+    use super::*;
+    use subxt::{
+        client::OfflineClient, config::substrate::SpecVersionForRange, ext::codec::Decode,
+        ArcMetadata, Metadata, PolkadotConfig,
+    };
+
+    type OfflineBlock =
+        ClientAtBlock<PolkadotConfig, subxt::client::OfflineClientAtBlockImpl<PolkadotConfig>>;
+
+    fn production_metadata() -> Metadata {
+        // The same artifact `snapshot.rs` uses: this repository's bootstrap
+        // runtime metadata, extracted with `subwasm metadata --format scale`.
+        let encoded = include_bytes!("../tests/fixtures/runtime-metadata.scale");
+        Metadata::decode(&mut &encoded[..]).expect("actual runtime metadata decodes for Subxt")
+    }
+
+    fn offline_block(metadata: Metadata) -> OfflineBlock {
+        let config = PolkadotConfig::builder()
+            .set_metadata_for_spec_versions([(1u32, ArcMetadata::new(metadata))])
+            .set_spec_version_for_block_ranges([SpecVersionForRange {
+                block_range: 0..u64::MAX,
+                spec_version: 1,
+                transaction_version: 1,
+            }])
+            .build();
+        OfflineClient::new_with_config(config)
+            .at_block(0u64)
+            .expect("the configured spec version and metadata resolve")
+    }
+
+    fn pinned(key: &str, hash: [u8; 32]) -> BTreeMap<String, [u8; 32]> {
+        BTreeMap::from([(key.to_owned(), hash)])
+    }
+
+    #[test]
+    fn the_gate_admits_only_the_shape_the_block_itself_declares() {
+        let metadata = production_metadata();
+        let declared = metadata
+            .pallet_by_name("Epoch")
+            .and_then(|pallet| pallet.call_hash("tick"))
+            .expect("the production runtime declares Epoch.tick");
+        let block = offline_block(metadata);
+
+        assert!(
+            Submitter::validated_tx(&block, &pinned("Epoch.tick", declared), "Epoch", "tick")
+                .is_ok(),
+            "the shape this block declares is the shape the operator pinned"
+        );
+
+        let mut forged = declared;
+        forged[0] ^= 0xff;
+        assert_eq!(
+            Submitter::validated_tx(&block, &pinned("Epoch.tick", forged), "Epoch", "tick").err(),
+            Some(ShapeRefusal::Mismatch),
+            "no transactions client is produced for a shape that is not the pinned one"
+        );
+    }
+
+    #[test]
+    fn a_call_the_block_does_not_declare_is_refused_not_signed() {
+        let block = offline_block(production_metadata());
+        let pins = pinned("Epoch.tick", [7u8; 32]);
+
+        assert_eq!(
+            Submitter::validated_tx(&block, &pins, "NotAPallet", "tick").err(),
+            Some(ShapeRefusal::Unknown)
+        );
+        assert_eq!(
+            Submitter::validated_tx(&block, &pins, "Epoch", "not_a_call").err(),
+            Some(ShapeRefusal::Unknown)
         );
     }
 }
