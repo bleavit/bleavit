@@ -928,7 +928,7 @@ where the fix differs from the recommendation above and why.
 | Id | Status | Fix |
 |---|---|---|
 | MAX-01 | fixed | Two independent halves, because either alone leaves the wedge reachable. (a) `record_snapshot` admits only the epoch's **admissible set** — its active spec ∪ every version a live cohort froze for it (I-16) — through a new `SnapshotSchedule::frozen_spec_versions` seam the runtime binds to the same projection `pallet-registry` already uses, so welfare and the registry cannot disagree about which versions an epoch carries. The check lives in `welfare-core` *after* `SpecNotFound`/`SpecNotActive`, so the precise errors survive and the frame-free differential oracle models the rule. (b) `MAX_SNAPSHOTS` = `SNAPSHOT_RETENTION_EPOCHS × (MAX_CONCURRENT_FROZEN_VERSIONS + 1)` = 60. The multiplier is `k + 1`, not `k`: the cohorts measuring epoch `e` were created at `e−1` and `e−2`, so they carry the versions active *then*, and a version activating at `e` itself is a lawful third that neither froze — reachable through two ordinary `register_spec` calls activating in consecutive epochs. Sizing at `× k` would have re-created the same wedge one activation cadence later. Dropping the active version from the union instead is not available: it is the only version `note_snapshot_recorded` advances the deadline on, so refusing it *is* the wedge. `MAX_GATE_FLAGS` and the 21-epoch shared prefix index are epoch-keyed and were **decoupled** onto the new `SNAPSHOT_RETENTION_EPOCHS_BOUND`, as was the runtime's prune cutoff — it read `current − (MAX_SNAPSHOTS_BOUND − 1)` and would otherwise have doubled the retained window to 39 epochs. Spec: 02 §9/§13 (contract **v16**), 05 §4.6, 13 §4 |
-| MAX-02 | fixed | `attest` refuses a `pid` `pallet-epoch` does not carry (new `AttestorProposalStatus::exists`; `UnknownProposal`), and enforces a per-signer bound on the frozen ledger: `MAX_ATTESTATIONS_PER_ATTESTOR = bounds::MAX_LIVE_PROPOSALS = 32` (`AttestorQuotaExceeded`). **Derived from demand, not from a split of supply** — one record per concurrently live proposal — and preferred to re-keying `Attestations` per proposal because that is a 02 §7.5 storage-shape change. Both properties hold: any pair can carry 06 §7's 2-of-N quorum for all 32 live proposals, while one seat reaches only an eighth of the 256-record ledger and the lawful minimum roster (`att.min_members` = 3) cannot reach the global bound at all. The first sizing was `MAX_ATTESTATIONS / MAX_ATTESTORS = 16` — see the third Codex round below. `TooManyAttestations` survives as the storage backstop, now reachable only through genesis, a migration or roster rotation |
+| MAX-02 | fixed | `attest` refuses a `pid` `pallet-epoch` does not carry (new `AttestorProposalStatus::exists`; `UnknownProposal`), and enforces a per-signer bound on the frozen ledger: `MAX_ATTESTATIONS_PER_ATTESTOR = bounds::MAX_LIVE_PROPOSALS × ARTIFACTS_PER_UPGRADE = 64` (`AttestorQuotaExceeded`). **Derived from demand, not from a split of supply** — room for every artifact the protocol can require of one signer at once — and preferred to re-keying `Attestations` per proposal because that is a 02 §7.5 storage-shape change. Both properties hold: any *fixed pair* carries 06 §7's 2-of-N quorum for both 09 §3.2 artifacts of all 32 live proposals (the property that matters, since `MIN_MEMBERS` = 3 at 2-of-N means surviving on one working pair), while one seat reaches only a quarter of the 256-record ledger and the lawful minimum roster's full 192 still fits inside the global bound. Two earlier sizings were too small in the same direction — `MAX_ATTESTATIONS / MAX_ATTESTORS = 16` (third Codex round) and `MAX_LIVE_PROPOSALS = 32` (fifth) — see below. `TooManyAttestations` survives as the storage backstop, now reachable only through genesis, a migration or roster rotation |
 | MAX-03 | fixed | `recovery_trigger` gives the phase-transition cause **precedence** over any cursor cause instead of matching it only at `Cursor == None`; `RecoveryAwareMigrations::step()` discards an SDK cursor auto-onboarded while the wrapper is refusing to service the migrator (`index == 0` with no inner cursor — exactly what `onboard_new_mbms` writes, so a cursor that advanced is never dropped); and `TerminalRecoveryTransition` clears a stray retired cursor rather than hard-refusing its own trigger. `schedule_committed_recovery_image` **retires** a cursor that coexists with the phase cause instead of refusing it — see the third Codex round below. The R-1 deviation is resolved in the direction 09 §3.2 describes. The new test **drives a genuinely refused `PhaseFourTransition`** (the SQ-383 under-floor condition) and asserts the trigger is reached, rather than seeding the post-state as the existing `cfg(recovery)` coverage does |
 | MAX-04 | fixed | `validate-chain-spec.py` allowlists top-level `ClientSpec` keys — an allowlist, because `sc-chain-spec` deliberately omits `deny_unknown_fields` — and hard-fails a non-empty `codeSubstitutes`, `forkBlocks` or `badBlocks`. Empty values pass, since `{}`/`[]` is what `#[serde(default)]` produces |
 | MAX-05 | fixed | `market_core::double_depth` makes doubling `b` and recomputing `last_quote_1e9` one kernel operation both seeding paths call, so neither can half-apply it; `quote_1e9` is exported so consumers can verify rather than trust the cached scalar. A try-state assertion that `last_quote_1e9 == price(q_long, q_short, b)` for every book **closes the class** — it immediately caught two pre-existing fixtures that moved `q` without the quote |
@@ -1028,7 +1028,10 @@ still reaches only an eighth of the ledger, with the minimum roster unable to re
 at all. Codex's own suggestion (divide by the *seated* roster) fixes the three-seat case but leaves a
 fixed pair at 16 on a full 16-seat roster, still under 32; deriving from demand fixes both. The
 regression test is the lawful-minimum roster carrying quorum for all 32 live proposals, and it fails
-at 16 with `AttestorQuotaExceeded`.
+at 16 with `AttestorQuotaExceeded`. **Superseded by the fifth round below:** the demand model was
+right and the count in it was not — a proposal needs *two* attested artifacts, so this round's `= 32`
+was still under the admitted load, and the "eighth of the ledger" figure belongs to that superseded
+value.
 
 *MAX-12's rate/count agreement had a tolerance on the wrong side of the threshold.* The check was
 `abs(numerator / denominator - rate) > 1e-6`. `100/10_000` is exactly 1% — a fail — but a document
@@ -1069,3 +1072,32 @@ two regression tests fail at baseline against the real metadata — the twin reg
 identical 32-byte pin, and `Market.set_frozen`/`ConditionalLedger.set_frozen` sharing another — and
 the second test also asserts that the runtime still *contains* shape collisions, so it degrades
 loudly if the fixture ever stops exercising the defect.
+
+**Fifth Codex round (2026-07-28).** One P1: MAX-02's quota was *still* too small, and wrong the same
+way twice.
+
+Round 3 replaced a supply split (`MAX_ATTESTATIONS / MAX_ATTESTORS` = 16) with a demand derivation,
+`bounds::MAX_LIVE_PROPOSALS` = 32 — one record per concurrently live proposal. The demand model was
+the improvement; the count inside it was wrong. 09 §3.2 pairs **every** primary runtime artifact with
+a separately built terminal-recovery artifact ("A CODE/META payload carries one primary authorization
+and one distinct recovery descriptor"), the two carry distinct hashes, and `has_quorum` is keyed by
+`(pid, artifact_hash)` — so the guard demands an independent 2-of-N quorum on each
+(`has_record_quorum(pid, artifact)` at `execution-guard/src/lib.rs:1836` and
+`has_record_quorum(pid, recovery.hash)` at `:1845`). §3.2's own worked example states it outright:
+"Attestors 1 and 3 sign both artifacts."
+
+So a CODE/META proposal costs each signer of its quorum pair **two** records, not one. 32 concurrent
+proposals need 32 × 2 artifacts × 2 signers = 128 records, while a lawful minimum roster at a quota of
+32 could hold only 96 — capping the chain below its own admitted load however signatures were
+distributed, which is the exact failure round 3 was raised to remove. The quota is now
+`MAX_LIVE_PROPOSALS × ARTIFACTS_PER_UPGRADE` = 64, with the artifact multiplicity named as its own
+constant carrying the §3.2 citation, so a spec change to that count moves the quota with it instead of
+silently invalidating the derivation a third time.
+
+64 is the value the *fixed-pair* property forces, and that is the property to hold: `MIN_MEMBERS` = 3
+with a 2-of-N quorum means the system must keep working when exactly one pair is available, so
+"optimally distributed across the roster" (which would admit 43) is not a safe reading. At 64 the pair
+holds 128 records — half the ledger — and a fully loaded minimum roster holds 192, still inside the
+256 bound; one seat reaches a quarter, so filling the ledger takes four distinct seated attestors.
+The regression test now attests both artifacts for all 32 proposals from a minimum roster; it fails at
+a quota of 32 on the 17th proposal and at 16 on the 9th, both with `AttestorQuotaExceeded`.

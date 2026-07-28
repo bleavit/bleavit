@@ -1064,7 +1064,7 @@ fn one_signer_cannot_monopolize_the_attestation_ledger() {
             Attestations::<Test>::get().len(),
             crate::MAX_ATTESTATIONS_PER_ATTESTOR as usize
         );
-        // At quota, and 224 of the 256 slots still free.
+        // At quota, and 192 of the 256 slots still free.
         assert_noop!(
             Attestor::attest(RuntimeOrigin::signed(acct(1)), 1, hash(200), hash(2)),
             Error::<Test>::AttestorQuotaExceeded
@@ -1084,39 +1084,59 @@ fn one_signer_cannot_monopolize_the_attestation_ledger() {
 /// the bound must not cap the chain below its own admitted load.
 ///
 /// The mock seats exactly the lawful minimum roster (`att.min_members` = 3,
-/// 13 §4). With the quota derived as `MAX_ATTESTATIONS / MAX_ATTESTORS` = 16 —
-/// an equal split of supply across the *maximum* roster — that roster held 48
-/// of 256 records and any fixed pair of signers stalled after 16 artifacts,
-/// while `bounds::MAX_LIVE_PROPOSALS` = 32 proposals may be live at once. A
-/// storage-monopolization mitigation that does that has traded an
-/// attacker-triggered denial for an unconditional one.
+/// 13 §4), so with 06 §7's 2-of-N quorum the system must work on a single
+/// fixed pair. That pair has to cover the whole admitted load: 09 §3.2 pairs
+/// every primary runtime artifact with a distinct terminal-recovery artifact
+/// and the guard demands a separate quorum on each, so
+/// `bounds::MAX_LIVE_PROPOSALS` = 32 concurrent CODE/META proposals need
+/// 32 × `ARTIFACTS_PER_UPGRADE` × 2 signers = 128 records, 64 per signer.
 ///
-/// Fails at 16: the 17th proposal returns `AttestorQuotaExceeded`.
+/// Two earlier quotas failed this, both by capping the chain below its own
+/// admitted load. `MAX_ATTESTATIONS / MAX_ATTESTORS` = 16 split supply across
+/// the *maximum* roster; `MAX_LIVE_PROPOSALS` = 32 then counted one artifact
+/// per proposal and left the pair able to carry both artifacts for only 16.
+///
+/// Fails at 16 on the 9th proposal and at 32 on the 17th, each with
+/// `AttestorQuotaExceeded`.
 #[test]
 fn max02_a_minimum_roster_can_carry_quorum_for_every_concurrently_live_proposal() {
     new_test_ext().execute_with(|| {
         set_block(10);
+        // The primary artifact and its paired terminal recovery (09 §3.2),
+        // distinct hashes so each needs its own quorum.
+        let artifacts = [hash(9), hash(10)];
+        assert_eq!(artifacts.len() as u32, crate::ARTIFACTS_PER_UPGRADE);
+
         for pid in 0..futarchy_primitives::bounds::MAX_LIVE_PROPOSALS {
-            for signer in [acct(1), acct(2)] {
-                assert_ok!(Attestor::attest(
-                    RuntimeOrigin::signed(signer),
-                    pid as futarchy_primitives::ProposalId,
-                    hash(9),
-                    hash(2),
-                ));
+            for artifact in artifacts {
+                for signer in [acct(1), acct(2)] {
+                    assert_ok!(Attestor::attest(
+                        RuntimeOrigin::signed(signer),
+                        pid as futarchy_primitives::ProposalId,
+                        artifact,
+                        hash(2),
+                    ));
+                }
             }
         }
-        assert_eq!(
-            Attestations::<Test>::get().len(),
-            2 * futarchy_primitives::bounds::MAX_LIVE_PROPOSALS as usize
+        let expected = 2
+            * crate::ARTIFACTS_PER_UPGRADE as usize
+            * futarchy_primitives::bounds::MAX_LIVE_PROPOSALS as usize;
+        assert_eq!(Attestations::<Test>::get().len(), expected);
+        assert!(
+            expected <= crate::MAX_ATTESTATIONS as usize,
+            "the lawful load must fit inside the frozen ledger bound",
         );
 
         set_block(u64::from(11 + CHALLENGE_WINDOW_BLOCKS));
         for pid in 0..futarchy_primitives::bounds::MAX_LIVE_PROPOSALS {
-            assert!(
-                Attestor::has_quorum(pid as futarchy_primitives::ProposalId, hash(9)),
-                "06 §7's 2-of-N quorum must be formable for every live proposal",
-            );
+            for artifact in artifacts {
+                assert!(
+                    Attestor::has_quorum(pid as futarchy_primitives::ProposalId, artifact),
+                    "06 §7's 2-of-N quorum must be formable for every artifact \
+                     of every live proposal",
+                );
+            }
         }
         assert_ok!(Attestor::do_try_state());
     });
