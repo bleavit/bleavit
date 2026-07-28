@@ -376,6 +376,10 @@ fn tied_latest_activations_cannot_suppress_the_snapshot_detector() {
         });
 
         assert_eq!(Welfare::active_snapshot_spec(7), None);
+        // A tie leaves no active spec, so the only admissible versions are the
+        // ones live cohorts froze. Seeding one keeps this test about the
+        // detector rather than about admission.
+        FrozenSpecVersions::set(vec![9]);
         assert_ok!(Welfare::record_snapshot(
             RuntimeOrigin::signed(keeper()),
             7,
@@ -573,6 +577,9 @@ fn metric_inputs_are_scoped_by_spec_version() {
             bounded(default_specs(2)),
         ));
         CurrentEpochValue::set(FINALIZED_NOW);
+        // Epoch 7's active spec is v2; v1 is admissible only because a live
+        // cohort froze it (I-16), which is the whole two-version regime.
+        FrozenSpecVersions::set(vec![1]);
         OnchainInputsByVersion::set(vec![
             (1, components(ONE, ONE, ONE, ONE)),
             (2, components(ONE, 900_000_000, ONE, ONE)),
@@ -653,8 +660,10 @@ fn metric_spec_history_accepts_16_and_rejects_17th() {
 }
 
 #[test]
-fn snapshot_history_accepts_20_and_rejects_21st() {
+fn snapshot_history_fills_the_record_bound_and_rejects_the_next() {
     // limit-coverage: Snapshots
+    // The bound is `SNAPSHOT_RETENTION_EPOCHS × MAX_CONCURRENT_FROZEN_VERSIONS`
+    // records, not 20 epochs — see `welfare_core::MAX_SNAPSHOTS`.
     new_test_ext().execute_with(|| {
         for epoch in 2..MAX_SNAPSHOTS as u32 + 2 {
             assert_ok!(Welfare::record_snapshot(
@@ -696,7 +705,8 @@ fn gate_history_accepts_20_epochs_and_rejects_21st() {
 #[test]
 fn prune_rolls_the_snapshot_and_gate_windows() {
     new_test_ext().execute_with(|| {
-        for epoch in 2..MAX_SNAPSHOTS as u32 + 2 {
+        // One version per epoch, so both windows are driven by the epoch bound.
+        for epoch in 2..SNAPSHOT_RETENTION_EPOCHS as u32 + 2 {
             assert_ok!(Welfare::record_snapshot(
                 RuntimeOrigin::signed(keeper()),
                 epoch,
@@ -709,7 +719,7 @@ fn prune_rolls_the_snapshot_and_gate_windows() {
                 1,
             ));
         }
-        assert_eq!(Snapshots::<Test>::iter().count(), MAX_SNAPSHOTS);
+        assert_eq!(Snapshots::<Test>::iter().count(), SNAPSHOT_RETENTION_EPOCHS);
         assert_eq!(GateBreachFlags::<Test>::iter().count(), MAX_GATE_FLAGS);
         assert_eq!(SampledGateDays::<Test>::iter().count(), MAX_GATE_FLAGS);
         Welfare::note_xcm_traffic(2, 0, XcmTrafficKind::Accepted);
@@ -728,7 +738,7 @@ fn prune_rolls_the_snapshot_and_gate_windows() {
         assert_eq!(XcmTrafficEpochs::<Test>::get().into_inner(), vec![3]);
         assert_eq!(MetricSpecs::<Test>::iter().count(), 1);
 
-        let next = MAX_SNAPSHOTS as u32 + 2;
+        let next = SNAPSHOT_RETENTION_EPOCHS as u32 + 2;
         assert_ok!(Welfare::record_snapshot(
             RuntimeOrigin::signed(keeper()),
             next,
@@ -743,7 +753,7 @@ fn prune_rolls_the_snapshot_and_gate_windows() {
         assert!(Snapshots::<Test>::contains_key((next, 1)));
         assert!(GateBreachFlags::<Test>::contains_key(next));
         assert!(SampledGateDays::<Test>::contains_key(next));
-        assert_eq!(Snapshots::<Test>::iter().count(), MAX_SNAPSHOTS);
+        assert_eq!(Snapshots::<Test>::iter().count(), SNAPSHOT_RETENTION_EPOCHS);
         assert_eq!(GateBreachFlags::<Test>::iter().count(), MAX_GATE_FLAGS);
         assert_eq!(SampledGateDays::<Test>::iter().count(), MAX_GATE_FLAGS);
     });
@@ -1816,6 +1826,10 @@ fn try_state_passes_after_representative_sequence() {
             bounded(default_specs(2)),
         ));
         CurrentEpochValue::set(FINALIZED_NOW);
+        // v2 activates at epoch 2, so it is epoch 7's active spec: the daily
+        // gate must take it, and v1 is recordable only as a frozen cohort's
+        // version.
+        FrozenSpecVersions::set(vec![1]);
         assert_ok!(Welfare::record_snapshot(
             RuntimeOrigin::signed(keeper()),
             7,
@@ -1825,7 +1839,7 @@ fn try_state_passes_after_representative_sequence() {
             RuntimeOrigin::signed(keeper()),
             7,
             0,
-            1,
+            2,
         ));
         assert_ok!(Welfare::do_try_state());
     });
@@ -2227,9 +2241,14 @@ fn shell_matches_core_over_400_step_fixed_seed_sequence() {
                     let p = 500_000_000 + ((seed >> 7) % 500_000_001);
                     let values = components(ONE, c, p, ONE);
                     OnchainInput::set(values.clone());
+                    // The admissible set is runtime state, so the shell reads
+                    // it and hands the core the same answer — the seam, not a
+                    // second derivation that could drift.
+                    let admissible = Welfare::admissible_snapshot_specs(epoch);
                     let core_result = core.record_snapshot(
                         epoch,
                         version,
+                        &admissible,
                         values,
                         FixedU64(ONE),
                         Vec::new(),
@@ -2248,7 +2267,9 @@ fn shell_matches_core_over_400_step_fixed_seed_sequence() {
                     let c = 800_000_000 + ((seed >> 6) % 200_000_001);
                     let values = components(s, c, ONE, ONE);
                     DailyInput::set(values.clone());
-                    let core_result = core.record_daily_gate(epoch, day, version, values, &params);
+                    let active = Welfare::active_snapshot_spec(epoch);
+                    let core_result =
+                        core.record_daily_gate(epoch, day, version, active, values, &params);
                     let pallet_result = Welfare::record_daily_gate(
                         RuntimeOrigin::signed(keeper()),
                         epoch,
@@ -2626,7 +2647,7 @@ fn sq201_cohortless_epochs_wedge_snapshot_recording_without_the_epoch_roll_prune
 #[test]
 fn sq201_epoch_roll_prune_is_bounded_and_retires_oldest_first() {
     new_test_ext().execute_with(|| {
-        for epoch in 2..MAX_SNAPSHOTS as u32 + 2 {
+        for epoch in 2..SNAPSHOT_RETENTION_EPOCHS as u32 + 2 {
             assert_ok!(Welfare::record_snapshot(
                 RuntimeOrigin::signed(keeper()),
                 epoch,
@@ -2641,10 +2662,12 @@ fn sq201_epoch_roll_prune_is_bounded_and_retires_oldest_first() {
         }
         // A cutoff far above the window: only EPOCH_ROLL_PRUNE_MAX_EPOCHS go per
         // call, oldest first, so a backlog is spread across ticks (I-20).
-        assert_ok!(Welfare::prune_epoch_roll(MAX_SNAPSHOTS as u32 + 2));
+        assert_ok!(Welfare::prune_epoch_roll(
+            SNAPSHOT_RETENTION_EPOCHS as u32 + 2
+        ));
         assert_eq!(
             Snapshots::<Test>::iter().count(),
-            MAX_SNAPSHOTS - EPOCH_ROLL_PRUNE_MAX_EPOCHS
+            SNAPSHOT_RETENTION_EPOCHS - EPOCH_ROLL_PRUNE_MAX_EPOCHS
         );
         for epoch in 2..2 + EPOCH_ROLL_PRUNE_MAX_EPOCHS as u32 {
             assert!(!Snapshots::<Test>::contains_key((epoch, 1)));
@@ -3393,6 +3416,191 @@ fn try_state_rejects_a_pre_existing_activation_tie() {
 
         // One epoch apart is lawful and try-state accepts it.
         MetricSpecs::<Test>::insert(3, bounded(specs_activating(3, 10)));
+        assert_ok!(Welfare::do_try_state());
+    });
+}
+
+/// MAX-01 regression. `record_snapshot` validated only that the named version
+/// was *activated* by the epoch, which is strictly weaker than the set the
+/// epoch can be measured under. Since capacity counts records while eviction
+/// is by epoch age, the epoch carries exactly one spare slot — so a signed
+/// caller could spend it on a `(epoch, version)` pair no consumer reads, and
+/// the deadline-advancing record then failed `TooManySnapshots`.
+/// `SnapshotDeadline` stops advancing, the 05 §4.8 dead-man latches, and the
+/// frozen clock freezes the prune cutoff that would have released the slot —
+/// with no origin able to clear the flag (SQ-254). Fails at baseline: the
+/// stale-version call returned `Ok`.
+#[test]
+fn max01_a_version_no_cohort_froze_cannot_take_a_snapshot_slot() {
+    new_test_ext().execute_with(|| {
+        // v2 activates at epoch 2, so it is epoch 7's active spec; v1 is the
+        // genesis version, activated but superseded.
+        CurrentEpochValue::set(0);
+        assert_ok!(Welfare::register_spec(
+            RuntimeOrigin::signed(governance_acc()),
+            2,
+            bounded(specs_activating(2, 2)),
+        ));
+        CurrentEpochValue::set(FINALIZED_NOW);
+        assert_eq!(Welfare::active_snapshot_spec(7), Some(2));
+
+        // No live cohort froze v1, so a v1 record is work nothing consumes.
+        assert_noop!(
+            Welfare::record_snapshot(RuntimeOrigin::signed(keeper()), 7, 1),
+            Error::<Test>::SpecVersionNotAdmissible
+        );
+        assert_eq!(Snapshots::<Test>::iter().count(), 0);
+
+        // The deadline-advancing active-version record is unaffected.
+        assert_ok!(Welfare::record_snapshot(
+            RuntimeOrigin::signed(keeper()),
+            7,
+            2,
+        ));
+
+        // Once a cohort does freeze v1, the same call is legitimate work.
+        FrozenSpecVersions::set(vec![1]);
+        assert_ok!(Welfare::record_snapshot(
+            RuntimeOrigin::signed(keeper()),
+            7,
+            1,
+        ));
+        assert_ok!(Welfare::do_try_state());
+    });
+}
+
+/// MAX-01, second leg: the record bound must hold the retained epoch window at
+/// its full per-epoch multiplicity. At the former flat 20 this overflowed the
+/// moment two versions were live, which is what made the wedge reachable with
+/// one extrinsic. Fails at baseline with `TooManySnapshots`.
+///
+/// The multiplicity is `horizon_k + 1`, not `horizon_k`. The cohorts measuring
+/// epoch `e` were created at `e−1` and `e−2`, so they carry the versions active
+/// *then*; a version activating at `e` itself is a lawful third that neither
+/// froze, reachable through two ordinary `register_spec` calls activating in
+/// consecutive epochs. Sizing at `× horizon_k` would have re-created the same
+/// wedge one activation cadence later, so this fills every retained epoch at
+/// all three.
+#[test]
+fn max01_the_retained_window_holds_every_epoch_at_its_full_multiplicity() {
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(0);
+        for (version, activation) in [(2, 2), (3, 3)] {
+            assert_ok!(Welfare::register_spec(
+                RuntimeOrigin::signed(governance_acc()),
+                version,
+                bounded(specs_activating(version, activation)),
+            ));
+        }
+        CurrentEpochValue::set(FINALIZED_NOW);
+        // v3 is every retained epoch's active spec; v1 and v2 are the two
+        // cohorts' frozen versions, neither of which is v3.
+        assert_eq!(Welfare::active_snapshot_spec(7), Some(3));
+        FrozenSpecVersions::set(vec![1, 2]);
+        // From epoch 3: v3 activates there, so every epoch in the window has
+        // all three admissible.
+        for epoch in 3..SNAPSHOT_RETENTION_EPOCHS as u32 + 3 {
+            for version in [1, 2, 3] {
+                assert_ok!(Welfare::record_snapshot(
+                    RuntimeOrigin::signed(keeper()),
+                    epoch,
+                    version,
+                ));
+            }
+        }
+        assert_eq!(
+            Snapshots::<Test>::iter().count(),
+            SNAPSHOT_RETENTION_EPOCHS * (MAX_CONCURRENT_FROZEN_VERSIONS + 1)
+        );
+        assert_eq!(Snapshots::<Test>::iter().count(), MAX_SNAPSHOTS);
+        assert_ok!(Welfare::do_try_state());
+    });
+}
+
+/// The admissible set really is the union, not the frozen set: an epoch's own
+/// active spec is recordable even when no live cohort froze it. Dropping it
+/// from the union is the tempting way to hold the bound at `× horizon_k`, and
+/// it is exactly the wedge — `note_snapshot_recorded` advances
+/// `SnapshotDeadline` on the active version and on nothing else.
+#[test]
+fn max01_the_epochs_active_spec_is_admissible_even_if_no_cohort_froze_it() {
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(0);
+        assert_ok!(Welfare::register_spec(
+            RuntimeOrigin::signed(governance_acc()),
+            2,
+            bounded(specs_activating(2, 2)),
+        ));
+        CurrentEpochValue::set(FINALIZED_NOW);
+        assert_eq!(Welfare::active_snapshot_spec(7), Some(2));
+        // Only v1 is frozen by a cohort; v2 is active and frozen by nobody.
+        FrozenSpecVersions::set(vec![1]);
+
+        assert_ok!(Welfare::record_snapshot(
+            RuntimeOrigin::signed(keeper()),
+            7,
+            2,
+        ));
+        assert_ok!(Welfare::do_try_state());
+    });
+}
+
+/// MAX-08 regression. `GateBreachFlags` is keyed by epoch alone, OR-merged,
+/// never cleared, and 05 §4.7 makes it the sole settlement source for gate
+/// markets — `gate_window_outcomes` takes no `spec_version`. Accepting any
+/// merely *activated* version let a holder of gate-YES positions record one
+/// favourable day under whichever of two lawfully registered versions
+/// aggregated lower (different `S` component sets, different `C_onchain`
+/// renormalization denominators, identical chain state), and the monotone
+/// write then settled every cohort whose window contains that epoch.
+///
+/// The defect is the *caller's choice*, not the flag's epoch scope. Gate
+/// outcomes are system-wide by design — 05 §7(2) settles scalar books at `s`
+/// on the cohort's creation-time MetricSpec and gate books on the §4.7 flags,
+/// which 05 §4.6 calls "deterministic system-wide breach facts" and 02 §7.4
+/// freezes keyed by epoch. So the fix pins the one version the epoch itself
+/// determines; it does not, and must not, make the flag cohort-scoped.
+///
+/// Fails at baseline: the non-active call returned `Ok` and set the flags.
+#[test]
+fn max08_a_daily_gate_is_recordable_only_under_the_epochs_active_spec() {
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(0);
+        assert_ok!(Welfare::register_spec(
+            RuntimeOrigin::signed(governance_acc()),
+            2,
+            bounded(specs_activating(2, 2)),
+        ));
+        CurrentEpochValue::set(FINALIZED_NOW);
+        assert_eq!(Welfare::active_snapshot_spec(7), Some(2));
+        // v1 reads breached, v2 reads healthy, from the same chain state.
+        DailyInputsByVersion::set(vec![
+            (1, components(500_000_000, 500_000_000, ONE, ONE)),
+            (2, components(ONE, ONE, ONE, ONE)),
+        ]);
+
+        assert_noop!(
+            Welfare::record_daily_gate(RuntimeOrigin::signed(keeper()), 7, 0, 1),
+            Error::<Test>::SpecVersionNotAdmissible
+        );
+        assert!(!GateBreachFlags::<Test>::contains_key(7));
+
+        // A cohort having frozen v1 does not widen the gate rule: the flag is
+        // version-independent, so it admits exactly one version.
+        FrozenSpecVersions::set(vec![1]);
+        assert_noop!(
+            Welfare::record_daily_gate(RuntimeOrigin::signed(keeper()), 7, 0, 1),
+            Error::<Test>::SpecVersionNotAdmissible
+        );
+
+        assert_ok!(Welfare::record_daily_gate(
+            RuntimeOrigin::signed(keeper()),
+            7,
+            0,
+            2,
+        ));
+        let flags = GateBreachFlags::<Test>::get(7).expect("recorded under the active spec");
+        assert!(!flags.s_breached && !flags.c_breached);
         assert_ok!(Welfare::do_try_state());
     });
 }

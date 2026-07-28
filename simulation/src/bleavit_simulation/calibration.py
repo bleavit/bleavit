@@ -558,7 +558,23 @@ def normative_violations(metrics: dict, attack: dict) -> list[str]:
     """Derive normative failures from measured evidence, never committed labels."""
     violations = []
     for name in CLASSES:
-        if Decimal(metrics[name]["decidable_harm_false_pass_rate"]) >= Decimal(
+        # A class with no decidable-harm proposals measured nothing, and
+        # `_rate(0, 0)` renders that as a perfect "0.000000". 15 §4.9 requires
+        # the rate to be *measured* per class; nothing in it grants a vacuous
+        # pass. The hazard is not hypothetical and needs no file edited:
+        # `decidable_harm` is `harmful and |true_effect| >= delta`, strictly
+        # decreasing in delta — the very parameter this run calibrates — while
+        # `proposals.py` freezes the effect strata at the pre-calibration
+        # scale. PARAM already took a 2.5x floor raise that cut its denominator
+        # from 1,255 harmful to 168 and emptied three of its four bands; one
+        # more step along the same documented procedure empties the last, and
+        # the class would have scored a clean 0.000000 on zero evidence.
+        if metrics[name]["decidable_harm"] == 0:
+            violations.append(
+                f"{name}: no decidable-harm proposals were measured, so the "
+                "false-pass rate is undefined rather than zero"
+            )
+        elif Decimal(metrics[name]["decidable_harm_false_pass_rate"]) >= Decimal(
             "0.01"
         ):
             violations.append(

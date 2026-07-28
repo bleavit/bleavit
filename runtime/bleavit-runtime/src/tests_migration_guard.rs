@@ -402,6 +402,8 @@ fn exact_phase_four_meta_payload_queues_and_commits_both_cap_raises() {
             members.to_vec(),
         )
         .is_ok());
+        // `attest` requires the proposal to exist (06 §7; MAX-02).
+        tests::seed_live_proposal(PID);
         for (artifact, statement_base) in [
             (candidate_hash, 0x41_u8),
             (recovery_hash, 0x51_u8),
@@ -2393,5 +2395,175 @@ fn completed_migration_without_a_pinned_image_lifts_the_halt() {
 
         assert_eq!(crate::configs::MigrationHaltSources::get(), 0);
         assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
+    });
+}
+
+/// MAX-03 regression. `PhaseFourTransition` is deliberately fail-static: on
+/// refusal `with_storage_layer` rolls back and the Phase-3 flags, sudo key and
+/// `OnlyInherents` lock survive, with terminal recovery named as the repair.
+/// That repair provably could not execute.
+///
+/// `frame_executive` runs `on_runtime_upgrade` before `MultiStepMigrations`,
+/// and `pallet_migrations::onboard_new_mbms` writes an `Active` cursor
+/// unconditionally whenever the runtime registers any MBM — the phase-four
+/// primary profile always registers one. `RecoveryAwareMigrations::step()`
+/// then refuses to service the migrator while `PhaseTransitionLock` is set, so
+/// the cursor never advanced; after `MIGRATION_STALL_BLOCKS` it raised
+/// `MIGRATION_STALL_HALT`, and `recovery_trigger`'s `PhaseTransition` arm
+/// required `Cursor == None` and was therefore structurally unreachable. The
+/// cursor branch ran instead, wrote `RetiredMigrationCursor`, and
+/// `TerminalRecoveryTransition` hard-refused with "conflicting phase and MBM
+/// causes" — so `complete_terminal_recovery_state()` never ran,
+/// `RecoveryLockdown` and `PhaseTransitionLock` stayed set with no dispatchable
+/// writer, and `extrinsic_mode()` returned `OnlyInherents` forever.
+///
+/// This drives the genuinely refused transition rather than seeding its
+/// post-state, which is what the existing `cfg(recovery)` coverage does.
+///
+/// Fails at baseline on the `recovery_trigger` assertion: it returned
+/// `Cursor(..)`, not `PhaseTransition`.
+#[cfg(all(feature = "phase-four", not(feature = "recovery")))]
+#[test]
+fn max03_a_refused_phase_four_transition_still_reaches_terminal_recovery() {
+    tests::development_ext().execute_with(|| {
+        let mut sudo_key = [0u8; 32];
+        sudo_key[..16].copy_from_slice(&sp_io::hashing::twox_128(b"Sudo"));
+        sudo_key[16..].copy_from_slice(&sp_io::hashing::twox_128(b"Key"));
+        sp_io::storage::set(&sudo_key, &[1]);
+
+        // The SQ-383 condition the arming gate exists for: spendable NAV below
+        // the PARAM floor. No adversary is involved.
+        assert!(
+            crate::FutarchyTreasury::nav().spendable_nav
+                < crate::FutarchyTreasury::floor(futarchy_primitives::ProposalClass::Param)
+        );
+        pallet_constitution::PhaseFlags::<Runtime>::put(
+            pallet_constitution::PhaseFlagsValue::SHADOW_MODE
+                | pallet_constitution::PhaseFlagsValue::SUDO_PRESENT,
+        );
+        crate::configs::PhaseTransitionLock::put(true);
+        crate::configs::PhaseTransitionApplied::put(true);
+        pallet_execution_guard::PhaseFourBridge::<Runtime>::put(
+            pallet_execution_guard::PhaseFourBridgeState::Scheduled {
+                pid: 4_010,
+                code_hash: [0x47; 32],
+                plan: pallet_execution_guard::PhaseFourPlan {
+                    tvl_cap: 1,
+                    deposit_cap: 1,
+                },
+            },
+        );
+
+        let _ = crate::migrations::PhaseFourTransition::on_runtime_upgrade();
+
+        // Fail-static, exactly as designed: the lock survives the rollback and
+        // the failure is marked.
+        assert!(crate::configs::PhaseTransitionLock::get());
+        assert!(!crate::configs::RuntimePhaseState::exact_phase_four());
+        assert_ne!(
+            crate::configs::MigrationHaltSources::get() & 0b100,
+            0,
+            "the refusal raises the applied-detection halt source",
+        );
+
+        // Now reproduce what `pallet_migrations::on_runtime_upgrade` does in
+        // the very same block: onboard a cursor unconditionally.
+        pallet_migrations::Cursor::<Runtime>::put(
+            pallet_migrations::MigrationCursor::Active(pallet_migrations::ActiveCursor {
+                index: 0,
+                inner_cursor: None,
+                started_at: frame_system::Pallet::<Runtime>::block_number(),
+            }),
+        );
+
+        // The wrapper refuses to service that cursor, so it discards it rather
+        // than leaving unreachable state behind.
+        let _ = <crate::configs::RecoveryAwareMigrations as frame_support::migrations::MultiStepMigrator>::step();
+        assert!(
+            !pallet_migrations::Cursor::<Runtime>::exists(),
+            "an auto-onboarded cursor nothing will service must not survive",
+        );
+
+        // And the phase cause is reachable — the property that was structurally
+        // false before.
+        assert_eq!(
+            crate::configs::recovery_trigger(),
+            Some(crate::configs::RecoveryTrigger::PhaseTransition),
+        );
+        assert!(
+            !crate::configs::RetiredMigrationCursor::exists(),
+            "the cursor branch must not claim a phase-transition refusal",
+        );
+    });
+}
+
+/// The phase cause takes precedence even over a cursor that *did* progress, so
+/// no cursor state can bury the only repair for a refused transition.
+#[cfg(all(feature = "phase-four", not(feature = "recovery")))]
+#[test]
+fn max03_a_progressed_cursor_is_preserved_but_cannot_bury_the_phase_cause() {
+    tests::development_ext().execute_with(|| {
+        crate::configs::PhaseTransitionLock::put(true);
+        crate::configs::note_phase_transition_failure();
+        pallet_execution_guard::PhaseFourBridge::<Runtime>::put(
+            pallet_execution_guard::PhaseFourBridgeState::Scheduled {
+                pid: 4_011,
+                code_hash: [0x48; 32],
+                plan: pallet_execution_guard::PhaseFourPlan {
+                    tvl_cap: 1,
+                    deposit_cap: 1,
+                },
+            },
+        );
+        // A cursor that has produced progress: index advanced past 0.
+        pallet_migrations::Cursor::<Runtime>::put(pallet_migrations::MigrationCursor::Active(
+            pallet_migrations::ActiveCursor {
+                index: 1,
+                inner_cursor: None,
+                started_at: frame_system::Pallet::<Runtime>::block_number(),
+            },
+        ));
+
+        let _ = <crate::configs::RecoveryAwareMigrations as frame_support::migrations::MultiStepMigrator>::step();
+
+        assert!(
+            pallet_migrations::Cursor::<Runtime>::exists(),
+            "a cursor that advanced is a genuine cause and is never discarded",
+        );
+        let trigger = crate::configs::recovery_trigger();
+        assert_eq!(
+            trigger,
+            Some(crate::configs::RecoveryTrigger::PhaseTransition),
+        );
+
+        // Selecting the phase cause is only half of it. The selected cause must
+        // also be *schedulable*, and this is the step that decides: the phase
+        // arm formerly refused outright while a cursor existed, so scheduling
+        // rolled back every block and the runtime stayed in `OnlyInherents`
+        // with nothing able to clear either flag. Fails at baseline, where this
+        // was an `ensure!` both cursors are absent.
+        //
+        // Driven here rather than through `schedule_committed_recovery_image`
+        // because the surrounding path applies a real authorized upgrade: it
+        // needs a genuine runtime blob and preimage, which this harness does
+        // not build (every other recovery test seeds the post-scheduling state
+        // for the same reason).
+        crate::configs::retire_cursor_for(trigger.expect("the phase cause is selected"));
+
+        assert!(
+            !pallet_migrations::Cursor::<Runtime>::exists(),
+            "the cursor is moved out of the recovery image's way, not refused",
+        );
+        assert_eq!(
+            crate::configs::RetiredMigrationCursor::get(),
+            Some(pallet_migrations::MigrationCursor::Active(
+                pallet_migrations::ActiveCursor {
+                    index: 1,
+                    inner_cursor: None,
+                    started_at: frame_system::Pallet::<Runtime>::block_number(),
+                }
+            )),
+            "retired, so an aborted image restores the pre-recovery state",
+        );
     });
 }

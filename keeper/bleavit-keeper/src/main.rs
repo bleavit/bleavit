@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, str::FromStr};
 
 use anyhow::Context;
 use bleavit_keeper::{
+    config,
     config::{Config, Role, RoleSet},
     metrics::KeeperMetrics,
     plan,
@@ -11,6 +12,7 @@ use bleavit_keeper::{
         DEFAULT_OBSERVATION_INTERVAL_BLOCKS, DEFAULT_RESERVE_PROBE_INTERVAL_BLOCKS,
         DEFAULT_RESERVE_PROBE_TIMEOUT_BLOCKS,
     },
+    submit,
     submit::Submitter,
     Cli,
 };
@@ -113,6 +115,26 @@ async fn run_connection(
     reported_roles: &mut BTreeMap<Role, bool>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> ConnectionOutcome {
+    // The chain identity is checked before the keeper does anything else with
+    // this endpoint. `PolkadotConfig::default()` carries `genesis_hash: None`,
+    // so subxt otherwise takes the node's own answer for which chain this is.
+    if let Some(pinned) = config.genesis_hash {
+        let observed = client.genesis_hash();
+        if observed.0 != pinned {
+            warn!(
+                expected = %config::format_h256(&pinned),
+                observed = %config::format_h256(&observed.0),
+                "endpoint serves a different chain; refusing to sign for it"
+            );
+            return ConnectionOutcome::Reconnect;
+        }
+    } else {
+        warn!(
+            "no genesis_hash pinned: this keeper will sign for whichever chain \
+             the endpoint claims to be"
+        );
+    }
+
     let extractor = match SnapshotExtractor::new(client.clone()).await {
         Ok(extractor) => extractor,
         Err(error) => {
@@ -120,6 +142,7 @@ async fn run_connection(
             return ConnectionOutcome::Reconnect;
         }
     };
+    report_call_shapes(&client, config).await;
     report_capabilities(config, &extractor, reported_roles);
     let enabled_roles: RoleSet = config
         .enabled_roles
@@ -134,6 +157,7 @@ async fn run_connection(
             config.max_retries,
             config.retry_base,
             config.cooldown_depth,
+            config.call_hashes.clone(),
         );
         submitter.import_cooldowns(std::mem::take(shared_cooldowns));
         submitter
@@ -402,4 +426,54 @@ fn init_tracing() {
 enum ConnectionOutcome {
     Shutdown,
     Reconnect,
+}
+
+/// Log the call shapes this endpoint declares for the calls the keeper signs.
+///
+/// With pins configured this is a one-line confirmation; without them it is
+/// how an operator obtains the values to pin, and a standing reminder that the
+/// keeper is currently signing whatever shape the node describes.
+async fn report_call_shapes(client: &OnlineClient<PolkadotConfig>, config: &Config) {
+    let Ok(block) = client.at_current_block().await else {
+        return;
+    };
+    let metadata = block.metadata();
+    let mut observed = BTreeMap::new();
+    for pallet in metadata.pallets() {
+        for call in pallet.call_variants().into_iter().flatten() {
+            // The gate's own derivation, not a second one that happens to agree
+            // today: an operator pins what `validate_call_shape` will compare.
+            if let Some(pin) = submit::dispatch_pin(&metadata, pallet.name(), &call.name) {
+                observed.insert(format!("{}.{}", pallet.name(), call.name), pin);
+            }
+        }
+    }
+    if config.call_hashes.is_empty() {
+        warn!(
+            calls = observed.len(),
+            "no call_hashes pinned: every signed call shape is taken from the \
+             node's own metadata. Pin them in the keeper config; the observed \
+             values follow."
+        );
+        for (key, hash) in &observed {
+            info!(call = %key, hash = %config::format_h256(hash), "observed call shape");
+        }
+        return;
+    }
+    for (key, pinned) in &config.call_hashes {
+        match observed.get(key) {
+            Some(hash) if hash == pinned => {}
+            Some(hash) => warn!(
+                call = %key,
+                expected = %config::format_h256(pinned),
+                observed = %config::format_h256(hash),
+                "pinned call shape does not match this endpoint",
+            ),
+            None => warn!(call = %key, "pinned call is absent from this endpoint's metadata"),
+        }
+    }
+    info!(
+        pinned = config.call_hashes.len(),
+        "call shapes validated against pins"
+    );
 }

@@ -75,7 +75,13 @@ struct XcmTrafficFixture {
 }
 
 struct WelfareRetirementFixture {
+    /// `Snapshots` **records** — keyed `(epoch, spec_version)`.
     snapshots: usize,
+    /// Distinct epochs those records cover. No longer equal to `snapshots`:
+    /// one retained epoch carries one record per concurrent frozen version
+    /// plus one for its own active spec (05 §3.3).
+    epochs: usize,
+    /// `GateBreachFlags` — keyed by epoch alone, so one per epoch.
     gate_flags: usize,
     traffic: XcmTrafficFixture,
 }
@@ -169,13 +175,20 @@ fn seed_welfare_retirement_history() -> Option<WelfareRetirementFixture> {
     for epoch in &gate_epochs {
         BenchmarkSampledGateDays::insert(epoch, [u32::MAX; 2]);
     }
+    let epochs = traffic_epochs.len().saturating_sub(1);
     let traffic = seed_xcm_traffic_history(traffic_epochs);
 
-    assert_eq!(snapshots, gate_epochs.len());
-    assert_eq!(BenchmarkSampledGateDays::iter_keys().count(), snapshots);
+    // The two maps are bounded differently and the fixture must reach both
+    // bounds, so the invariant is per-key-shape rather than a single count:
+    // one gate flag and one sampled-day mask per retained *epoch*, and one
+    // snapshot record per (epoch, version) pair.
+    assert_eq!(epochs, gate_epochs.len());
+    assert_eq!(BenchmarkSampledGateDays::iter_keys().count(), epochs);
+    assert!(snapshots >= epochs);
 
     Some(WelfareRetirementFixture {
         snapshots,
+        epochs,
         gate_flags: gate_epochs.len(),
         traffic,
     })
@@ -680,10 +693,17 @@ mod benches {
         T::BenchmarkHelper::assert_settlement_renormalized(0);
         assert!(!crate::Cohorts::<T>::contains_key(0));
         if let Some(welfare) = welfare {
-            assert_eq!(welfare.snapshots, welfare.gate_flags);
+            assert_eq!(welfare.epochs, welfare.gate_flags);
+            // Records are keyed `(epoch, spec_version)` and flags by epoch
+            // alone, so the two counts are no longer equal; what must hold is
+            // that the history is *uniformly* saturated — every retained epoch
+            // carrying the same number of versions — which is the state the
+            // two bounds admit together.
+            assert!(welfare.epochs > 0 && welfare.snapshots >= welfare.epochs);
+            assert_eq!(welfare.snapshots % welfare.epochs, 0);
             assert_eq!(
                 welfare.traffic.epochs.len(),
-                welfare.snapshots.saturating_add(1)
+                welfare.epochs.saturating_add(1)
             );
             assert_eq!(
                 welfare.traffic.entries,

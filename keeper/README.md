@@ -59,6 +59,10 @@ CLI options override an optional TOML file:
 ```toml
 node_urls = ["wss://rpc-a.example/wss", "wss://rpc-b.example/wss"]
 signer_file = "/run/secrets/bleavit-keeper.suri"
+# Chain identity. Without it the keeper signs for whichever chain the endpoint
+# claims to be: `PolkadotConfig::default()` carries no genesis hash, so subxt
+# falls back to the node's own answer.
+genesis_hash = "0x…"
 enabled_roles = [
   "tick",
   "observe",
@@ -84,6 +88,23 @@ cooldown_depth = 3
 tx_timeout_secs = 90
 max_retries = 2
 retry_base_ms = 500
+
+# The calls this keeper will sign. Every byte it signs is derived from metadata
+# the node serves, `dynamic::tx` payloads carry no validation hash, and subxt
+# 0.50.2 encodes RFC-78's `CheckMetadataHash` as `Disabled` on every signature
+# — so a compromised endpoint can keep the real genesis, spec and transaction
+# versions and forge only the call. Pinning is what closes that; the genesis pin
+# alone does not, because the forgery never leaves this chain. Start the keeper
+# with no pins and it logs every observed value for you to adopt.
+#
+# Each value binds the call's metadata shape *and* the pallet/call index pair
+# the encoder prepends. Both are needed: subxt's call hash covers only the
+# variant name and its field types, so it does not identify the dispatchable —
+# in this runtime `IncidentRegistry` and `MilestoneRegistry` hash identically in
+# all six of their calls, and the keeper cranks both.
+[call_hashes]
+"Epoch.tick" = "0x…"
+"Market.crank_observe" = "0x…"
 ```
 
 Start it with `cargo run --locked -p bleavit-keeper -- --config keeper.toml`. Node URLs are tried in

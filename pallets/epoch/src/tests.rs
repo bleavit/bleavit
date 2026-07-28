@@ -799,7 +799,7 @@ fn genesis_uses_the_frozen_three_field_epoch_shape() {
             <CurrentEpoch<Test> as frame_support::traits::Get<EpochId>>::get(),
             0
         );
-        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 15);
+        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 16);
         assert_ok!(Epoch::do_try_state());
     });
 }

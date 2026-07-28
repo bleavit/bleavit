@@ -1255,10 +1255,10 @@ pub mod pallet {
                 for id in [accept, reject] {
                     Markets::<T>::try_mutate(id, |maybe_book| -> DispatchResult {
                         let book = maybe_book.as_mut().ok_or(Error::<T>::UnknownMarket)?;
-                        book.b = book
-                            .b
-                            .checked_mul(2)
-                            .ok_or(Error::<T>::ArithmeticOverflow)?;
+                        // Doubling `b` moves the true quote toward 0.5, so the
+                        // cached one must move with it — the kernel does both
+                        // or neither (MAX-05).
+                        market_core::double_depth(book).map_err(Error::<T>::from)?;
                         Ok(())
                     })?;
                     RerunSeededMarkets::<T>::insert(id, ());
@@ -1297,10 +1297,7 @@ pub mod pallet {
                     .map_err(Error::<T>::from)?;
                 Markets::<T>::try_mutate(id, |maybe_book| -> DispatchResult {
                     let stored = maybe_book.as_mut().ok_or(Error::<T>::UnknownMarket)?;
-                    stored.b = stored
-                        .b
-                        .checked_mul(2)
-                        .ok_or(Error::<T>::ArithmeticOverflow)?;
+                    market_core::double_depth(stored).map_err(Error::<T>::from)?;
                     Ok(())
                 })?;
                 RerunSeededMarkets::<T>::insert(id, ());
@@ -2285,6 +2282,18 @@ pub mod pallet {
                 ensure!(
                     book.last_quote_1e9.0 <= market_core::PRICE_ONE_1E9
                         && book.last_observation_1e9.0 <= market_core::PRICE_ONE_1E9,
+                    Error::<T>::TryStateViolation
+                );
+                // The cached quote must equal the LMSR price of the book's own
+                // state. It is an input to the 04 §7 TWAP series, the kappa
+                // slew anchor and `close_spot`, so a value that has drifted
+                // from `(q_long, q_short, b)` is a decision-grade input nobody
+                // else can check — the class the rerun depth doubling fell
+                // into. Asserting it here closes the class rather than the one
+                // instance.
+                ensure!(
+                    market_core::quote_1e9(&book).map_err(|_| Error::<T>::TryStateViolation)?
+                        == book.last_quote_1e9,
                     Error::<T>::TryStateViolation
                 );
                 // I-12 (structural): the book is backed by a live ledger vault.

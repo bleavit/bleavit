@@ -1117,6 +1117,75 @@ def criterion_sim_false_pass(
                 "status": "fail",
                 "detail": f"false_pass_rate.{name} must be strictly < 0.01 (got {value})",
             }
+    # The denominator travels with the rate, because `0/742` and `0/0` render
+    # identically as 0.0 and only the second one means "measured nothing".
+    # `decidable_harm` is `harmful and |true_effect| >= delta`, strictly
+    # decreasing in the very floor this evidence calibrates, so an empty class
+    # is a reachable outcome of raising a floor — not a corrupt artifact.
+    counts = document.get("false_pass_counts")
+    if not isinstance(counts, dict) or set(counts) != FALSE_PASS_CLASSES:
+        return {
+            "status": "fail",
+            "detail": "false_pass_counts must contain exactly param, trs, code, meta",
+        }
+    for name in sorted(FALSE_PASS_CLASSES):
+        row = counts[name]
+        if not isinstance(row, dict):
+            return {"status": "fail", "detail": f"false_pass_counts.{name} must be an object"}
+        denominator = row.get("decidable_harm")
+        numerator = row.get("decidable_harm_false_pass_count")
+        for label, count in (("decidable_harm", denominator),
+                             ("decidable_harm_false_pass_count", numerator)):
+            if type(count) is not int or count < 0:
+                return {
+                    "status": "fail",
+                    "detail": f"false_pass_counts.{name}.{label} must be a non-negative integer",
+                }
+        if denominator == 0:
+            return {
+                "status": "fail",
+                "detail": (
+                    f"false_pass_counts.{name}.decidable_harm is zero: the class "
+                    "measured no decidable harm, so its false-pass rate is "
+                    "undefined rather than < 1% (15 §4.9 requires it measured "
+                    "per class)"
+                ),
+            }
+        if numerator > denominator:
+            return {
+                "status": "fail",
+                "detail": f"false_pass_counts.{name} numerator exceeds its denominator",
+            }
+        # **The counts decide, exactly.** This checker is the release boundary,
+        # not a display validator, so the 15 §4.9 `< 1%` criterion is evaluated
+        # on the integers and never on the declared rate. A rate is a rendering
+        # of the counts, and a rendering is not evidence: `100/10_000` is
+        # exactly 1% — a fail — while a document claiming `0.0099991` clears the
+        # threshold check above and sits `9e-7` from the true value, inside any
+        # float tolerance wide enough to absorb the exporter's own rounding.
+        # There is no tolerance that separates those two cases, so there is no
+        # tolerance here.
+        if numerator * 100 >= denominator:
+            return {
+                "status": "fail",
+                "detail": (
+                    f"false_pass_counts.{name} is {numerator}/{denominator}, which is "
+                    "not strictly < 1% (15 §4.9), whatever false_pass_rate declares"
+                ),
+            }
+        # The rate must then be exactly what the exporter renders from those
+        # counts — `format(Decimal(n) / Decimal(d), ".6f")`, per
+        # `bleavit_simulation.calibration._rate` — so a document whose rate and
+        # counts tell different stories is rejected rather than reconciled.
+        rendered = float(format(Decimal(numerator) / Decimal(denominator), ".6f"))
+        if rates[name] != rendered:
+            return {
+                "status": "fail",
+                "detail": (
+                    f"false_pass_rate.{name} is {rates[name]}, not the exporter's "
+                    f"rendering of {numerator}/{denominator} ({rendered})"
+                ),
+            }
     attack = document.get("attack_cost_validation")
     if not isinstance(attack, dict):
         return {"status": "fail", "detail": "attack_cost_validation must be an object"}

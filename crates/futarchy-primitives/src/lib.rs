@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 15;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 16;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -1691,7 +1691,7 @@ mod tests {
         // SQ-186 adds `Epoch::TreasuryBondAskBps` — the kernel slope of 08 §7's
         // TREASURY intake bond — to 02 §9's frozen metadata-constant list. Purely
         // additive, so `transaction_version` is untouched (02 §13 rule 7).
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 15);
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 16);
     }
 
     #[test]

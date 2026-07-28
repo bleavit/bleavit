@@ -931,7 +931,7 @@ fn apply_phase_four_plan(plan: pallet_execution_guard::PhaseFourPlan) -> Dispatc
 }
 
 #[cfg(any(feature = "phase-four", feature = "recovery"))]
-fn transition_phase_four(
+pub(crate) fn transition_phase_four(
     plan: pallet_execution_guard::PhaseFourPlan,
     enforce_arming_gate: bool,
 ) -> DispatchResult {
@@ -1119,9 +1119,27 @@ pub struct TerminalRecoveryTransition;
 /// beginning. The recovery profile itself registers zero SDK MBMs; its
 /// runtime-local cursor is serviced under `RecoveryLockdown`, and ordinary
 /// calls remain impossible until the exact total commits.
+/// Whether the sole registered ledger segment still owes its terminal
+/// mirror/version write. The backfill is version-gated on 0 and commits
+/// `TotalEscrowed` and version 1 together, so this is the exact predicate for
+/// "the repair is still owed" — and it does not depend on a cursor having
+/// survived.
+#[cfg(feature = "recovery")]
+fn ledger_segment_unmigrated() -> bool {
+    use frame_support::traits::{GetStorageVersion, StorageVersion};
+    crate::ConditionalLedger::on_chain_storage_version() == StorageVersion::new(0)
+}
+
+/// `cursor` is `None` when the segment is registered and un-migrated but no
+/// cursor survived to describe it — the shape
+/// [`crate::configs::discard_unserviceable_cursor`] leaves behind. There is
+/// nothing to validate in that case and the repair is still owed: the scan
+/// restarts from the beginning either way, because every nonterminal step is
+/// read-only, so a retired cursor is evidence about the source state rather
+/// than progress to resume from.
 #[cfg(feature = "recovery")]
 fn repair_retired_mbm(
-    cursor: &pallet_migrations::CursorOf<Runtime>,
+    cursor: Option<&pallet_migrations::CursorOf<Runtime>>,
 ) -> Result<(), sp_runtime::DispatchError> {
     use frame_support::traits::{GetStorageVersion, StorageVersion};
 
@@ -1138,24 +1156,28 @@ fn repair_retired_mbm(
         sp_runtime::DispatchError::Other("ledger recovery cursor already exists")
     );
 
-    match cursor {
-        pallet_migrations::MigrationCursor::Active(active) => {
-            frame_support::ensure!(
-                active.index == 0,
-                sp_runtime::DispatchError::Other("ledger recovery segment index is invalid")
-            );
-            if let Some(inner) = active.inner_cursor.as_ref() {
-                pallet_conditional_ledger::migration::BackfillCursor::decode_all(&mut &inner[..])
+    if let Some(cursor) = cursor {
+        match cursor {
+            pallet_migrations::MigrationCursor::Active(active) => {
+                frame_support::ensure!(
+                    active.index == 0,
+                    sp_runtime::DispatchError::Other("ledger recovery segment index is invalid")
+                );
+                if let Some(inner) = active.inner_cursor.as_ref() {
+                    pallet_conditional_ledger::migration::BackfillCursor::decode_all(
+                        &mut &inner[..],
+                    )
                     .map_err(|_| {
-                    sp_runtime::DispatchError::Other("ledger recovery cursor is malformed")
-                })?;
+                        sp_runtime::DispatchError::Other("ledger recovery cursor is malformed")
+                    })?;
+                }
             }
-        }
-        pallet_migrations::MigrationCursor::Stuck => {
-            frame_support::ensure!(
-                crate::configs::MigrationFailedStep::get() == Some(0),
-                sp_runtime::DispatchError::Other("ledger recovery failed segment is invalid")
-            );
+            pallet_migrations::MigrationCursor::Stuck => {
+                frame_support::ensure!(
+                    crate::configs::MigrationFailedStep::get() == Some(0),
+                    sp_runtime::DispatchError::Other("ledger recovery failed segment is invalid")
+                );
+            }
         }
     }
 
@@ -1197,12 +1219,8 @@ impl frame_support::traits::OnRuntimeUpgrade for TerminalRecoveryTransition {
             );
 
             if crate::configs::PhaseTransitionLock::get() {
-                frame_support::ensure!(
-                    !crate::configs::RetiredMigrationCursor::exists(),
-                    sp_runtime::DispatchError::Other(
-                        "terminal recovery has conflicting phase and MBM causes"
-                    )
-                );
+                // Resolved before anything is seeded or discarded, so a missing
+                // or mismatched bridge still fails closed with no state moved.
                 let plan = match pallet_execution_guard::PhaseFourBridge::<Runtime>::get() {
                     pallet_execution_guard::PhaseFourBridgeState::Scheduled {
                         pid,
@@ -1215,6 +1233,48 @@ impl frame_support::traits::OnRuntimeUpgrade for TerminalRecoveryTransition {
                         ))
                     }
                 };
+                // Formerly a hard refusal on "conflicting phase and MBM
+                // causes", which turned a retired cursor into a permanent
+                // wedge on the *only* exit from a refused
+                // `PhaseFourTransition`. 09 §3.2 does not declare the two
+                // causes exclusive — it puts them in one lane and says a
+                // successful terminal repair clears "the cursor/transition
+                // cause" — so this branch is reachable with a registered
+                // segment still owed its repair, and refusing is wrong.
+                //
+                // Discarding the cursor is equally wrong, and was: 09 §3.2
+                // admits a primary MBM only against a "cutpoint-total repair
+                // for every registered segment", and this segment's
+                // nonterminal steps are **read-only** — only its terminal step
+                // writes `TotalEscrowed` and storage version 1. Completing the
+                // phase transition without the repair therefore clears
+                // `OnlyInherents` into Phase 4 with the ledger mirror never
+                // committed, and `TotalEscrowed` is `ValueQuery`, so it reads
+                // 0 rather than absent: `maintained_collateral_totals` would
+                // understate the I-4 liability by every pre-migration vault
+                // and the drift detector would report healthy. Nothing later
+                // repairs it either — `onboard_new_mbms` runs only on a
+                // runtime upgrade, `progress_mbms` returns early on a `None`
+                // cursor, and the recovery profile registers no MBMs at all.
+                //
+                // So the repair is owed whenever the segment is un-migrated,
+                // whether or not a cursor survived to describe it (a
+                // zero-progress cursor is discarded by
+                // `discard_unserviceable_cursor` one block earlier, which is
+                // the same hole reached without any retired cursor). It is
+                // seeded here and the phase transition completes on its
+                // terminal step in `configs::step_ledger_recovery`, so both
+                // causes clear in one lane, under `OnlyInherents` throughout,
+                // exactly once.
+                if ledger_segment_unmigrated() {
+                    repair_retired_mbm(crate::configs::RetiredMigrationCursor::get().as_ref())?;
+                    return Ok(());
+                }
+                // The segment already reached its terminal state, so any
+                // retired cursor is a spent record with nothing left to
+                // repair, and disposing of it is what keeps the retirement
+                // from stranding this exit.
+                crate::configs::RetiredMigrationCursor::kill();
                 // SQ-383: the arming gate is deliberately NOT enforced on the
                 // terminal recovery lane — see `transition_phase_four`.
                 transition_phase_four(plan, false)?;
@@ -1224,7 +1284,7 @@ impl frame_support::traits::OnRuntimeUpgrade for TerminalRecoveryTransition {
                 let cursor = crate::configs::RetiredMigrationCursor::get().ok_or(
                     sp_runtime::DispatchError::Other("terminal recovery cause missing"),
                 )?;
-                repair_retired_mbm(&cursor)?;
+                repair_retired_mbm(Some(&cursor))?;
             }
             Ok::<(), sp_runtime::DispatchError>(())
         });
@@ -1255,6 +1315,31 @@ impl frame_support::traits::OnRuntimeUpgrade for TerminalRecoveryTransition {
     #[cfg(feature = "try-runtime")]
     fn post_upgrade(state: Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
         if state.as_slice() == [1] {
+            // The phase cause now has two lawful outcomes. When the ledger
+            // segment still owed its repair, this migration seeds it and
+            // returns, and the Phase-4 transition completes on the repair's
+            // terminal step — so the phase state is *expected* to survive here,
+            // with the repair armed and `OnlyInherents` retained.
+            if crate::configs::RecoveryLedgerRepairActive::get() {
+                frame_support::ensure!(
+                    crate::configs::RecoveryCodeApplied::get()
+                        && crate::configs::RecoveryLockdown::get()
+                        && crate::configs::PhaseTransitionLock::get()
+                        && crate::configs::RecoveryScheduledHash::exists()
+                        && pallet_execution_guard::RecoveryImage::<Runtime>::exists()
+                        && !crate::configs::RecoveryLedgerRepairFailed::get(),
+                    "terminal recovery migration: deferred phase repair is not armed"
+                );
+                frame_support::ensure!(
+                    matches!(
+                        pallet_execution_guard::PhaseFourBridge::<Runtime>::get(),
+                        pallet_execution_guard::PhaseFourBridgeState::Scheduled { .. }
+                    ) && pallet_constitution::PhaseFlags::<Runtime>::get()
+                        != pallet_constitution::PhaseFlagsValue::PARAM_ARMED,
+                    "terminal recovery migration: phase transition applied before its repair"
+                );
+                return Ok(());
+            }
             frame_support::ensure!(
                 !crate::configs::RecoveryCodeApplied::get()
                     && !crate::configs::RecoveryLockdown::get()

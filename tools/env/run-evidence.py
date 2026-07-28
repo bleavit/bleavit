@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import ModuleType
-from typing import Any
+from typing import Any, Iterable
 
 import yaml
 
@@ -476,14 +476,128 @@ def require_free_zombienet_ports(root: Path, suites: list[Suite]) -> None:
             ) from error
 
 
-def validate_artifact_binding(root: Path, wasm: Path) -> str:
+#: Zombienet topology directive naming a node's chain spec.
+TOPOLOGY_CHAIN_SPEC = re.compile(
+    r"^\s*chain_spec_path\s*=\s*[\"']([^\"']+)[\"']", re.MULTILINE
+)
+#: The drill's `Network:` header, naming the topology it boots.
+DRILL_NETWORK = re.compile(r"^\s*Network:\s*(\S+)\s*$", re.MULTILINE)
+#: Chain specs this repository builds from its own runtime. Relay, Asset Hub
+#: and Coretime specs come from the pinned Paseo tree and carry a different
+#: `:code` by construction, so binding them to `runtime.wasm` would be wrong.
+BLEAVIT_SPEC_PREFIX = "bleavit-"
+
+
+def resolve_declared_path(root: Path, declared: str, context: str) -> Path:
+    """Resolve a repository-relative path a drill or topology declares.
+
+    Zombienet resolves `chain_spec_path` and `Network:` against the repository
+    root it is invoked from, so the declared string — not a re-derivation of it
+    — is what actually boots. Refuse anything absolute or escaping the tree:
+    such a path names a file this repository does not build, and a hash taken
+    over it would bind release evidence to something outside the release.
+    """
+    candidate = PurePosixPath(declared)
+    resolved = (root / Path(*candidate.parts)).resolve()
+    if candidate.is_absolute() or not resolved.is_relative_to(root.resolve()):
+        raise EvidenceError(
+            f"15 §5: {context} names {declared!r}, which resolves outside the "
+            "repository; only paths this repository builds can be bound to the "
+            "release runtime"
+        )
+    return resolved
+
+
+def suite_chain_specs(root: Path, suites: Iterable["Suite"]) -> list[Path]:
+    """The Bleavit chain specs the *selected* suites actually boot.
+
+    Derived per suite rather than hardcoded. The fixed pair bound exactly two
+    files, but `06-pb-migration` boots `bleavit-drill-migration.json` and the
+    compressed-timing drills boot `bleavit-drill-fast*.json` — none of which
+    appeared anywhere in this file. The emitted `bleavit.env-evidence.v1` then
+    asserted that, for example, the 09 §3.2 PB-MIGRATION path had been
+    exercised *on the release runtime* without ever having verified that the
+    spec it ran against carried the release runtime's code.
+
+    Returns the resolved **paths**, not their basenames. Every topology in the
+    tree happens to keep its specs in `zombienet/specs/out`, but reducing a
+    declaration to its name and re-rooting it there is an assumption the
+    caller cannot check: a topology naming a spec elsewhere — or a second file
+    of the same name — would have the binding hash one file while Zombienet
+    booted another, which is precisely the false assertion this function
+    exists to prevent.
+    """
+    paths: dict[Path, None] = {}
+    for suite in suites:
+        if suite.kind == "zombienet":
+            drill_path = suite.path if suite.path.is_absolute() else root / suite.path
+            try:
+                drill = drill_path.read_text(encoding="utf-8")
+            except OSError as error:
+                raise EvidenceError(
+                    f"15 §5: cannot read drill {suite.identifier}: {error}"
+                ) from error
+            network = DRILL_NETWORK.search(drill)
+            if network is None:
+                raise EvidenceError(
+                    f"15 §5: drill {suite.identifier} declares no Network: topology, "
+                    "so the chain spec it boots cannot be bound to the release runtime"
+                )
+            topology = resolve_declared_path(
+                root, network.group(1), f"drill {suite.identifier}"
+            )
+            try:
+                text = topology.read_text(encoding="utf-8")
+            except OSError as error:
+                raise EvidenceError(
+                    f"15 §5: cannot read topology {network.group(1)} for suite "
+                    f"{suite.identifier}: {error}"
+                ) from error
+            spec_paths = TOPOLOGY_CHAIN_SPEC.findall(text)
+            context = f"topology {network.group(1)}"
+        elif suite.kind == "chopsticks":
+            # Every scenario is required to fork exactly `CHOPSTICKS_GENESIS`
+            # (validated where the config is loaded), so its spec set is that
+            # one file — already in the base pair below.
+            spec_paths = [CHOPSTICKS_GENESIS]
+            context = f"suite {suite.identifier}"
+        else:
+            continue
+
+        matched = False
+        for spec_path in spec_paths:
+            if not PurePosixPath(spec_path).name.startswith(BLEAVIT_SPEC_PREFIX):
+                continue
+            paths.setdefault(resolve_declared_path(root, spec_path, context), None)
+            matched = True
+        if not matched:
+            raise EvidenceError(
+                f"15 §5: suite {suite.identifier} names no Bleavit chain spec, so "
+                "nothing binds its run to the release runtime"
+            )
+    return sorted(paths)
+
+
+def validate_artifact_binding(
+    root: Path, wasm: Path, suites: Iterable["Suite"] | None = None
+) -> str:
     if not wasm.is_file():
         raise EvidenceError(f"15 §5: release runtime.wasm is missing: {wasm}")
     wasm_hash = sha256_file(wasm)
     consumer = load_assemble_release()
-    for name in ("bleavit-drill.json", "bleavit-drill-raw.json"):
-        path = root / "zombienet" / "specs" / "out" / name
-        require_file(path, f"generated chain spec {name}")
+    # Always include the base pair: it is what the Chopsticks scenarios fork
+    # and what a `--no-evidence`/no-suite invocation still has to verify.
+    generated = (root / "zombienet" / "specs" / "out").resolve()
+    paths = [generated / "bleavit-drill.json", generated / "bleavit-drill-raw.json"]
+    if suites is not None:
+        # Each suite's own declaration, resolved — hashing a re-derived path
+        # would let a suite boot one spec while the evidence vouched for another.
+        for path in suite_chain_specs(root, suites):
+            if path not in paths:
+                paths.append(path)
+    for path in paths:
+        label = path.relative_to(root.resolve()) if path.is_relative_to(root.resolve()) else path
+        require_file(path, f"generated chain spec {label}")
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(document, dict):
@@ -494,11 +608,11 @@ def validate_artifact_binding(root: Path, wasm: Path) -> str:
         if actual != wasm_hash:
             source = (
                 'genesis.raw.top["0x3a636f6465"]'
-                if name.endswith("-raw.json")
+                if path.name.endswith("-raw.json")
                 else "genesis.runtimeGenesis.code"
             )
             raise EvidenceError(
-                f"15 §5: {name} {source} sha256 {actual} does not match "
+                f"15 §5: {label} {source} sha256 {actual} does not match "
                 f"release runtime.wasm sha256 {wasm_hash}"
             )
     return wasm_hash
@@ -1573,6 +1687,7 @@ def validate_release_evidence_completeness(
 def emit_evidence(
     root: Path,
     suites: list[Suite],
+    selected: list[Suite],
     rows: list[dict[str, Any]],
     wasm: Path,
     runtime_wasm_sha256: str,
@@ -1602,7 +1717,7 @@ def emit_evidence(
             directory = root / kind
             targets[kind] = (directory, {}, passing)
 
-        reverified_hash = validate_artifact_binding(root, wasm)
+        reverified_hash = validate_artifact_binding(root, wasm, selected)
         if reverified_hash != runtime_wasm_sha256:
             raise EvidenceError(
                 "15 §5: release runtime.wasm changed after the environment suites ran"
@@ -1737,7 +1852,7 @@ def run() -> int:
     runtime_wasm_sha256: str | None = None
     if not args.no_evidence:
         assert wasm is not None
-        runtime_wasm_sha256 = validate_artifact_binding(root, wasm)
+        runtime_wasm_sha256 = validate_artifact_binding(root, wasm, selected)
     elif wasm is not None:
         if not wasm.is_file():
             raise EvidenceError(f"release runtime.wasm is missing: {wasm}")
@@ -1830,6 +1945,7 @@ def run() -> int:
     produced = emit_evidence(
         root,
         suites,
+        selected,
         rows,
         wasm,
         runtime_wasm_sha256,

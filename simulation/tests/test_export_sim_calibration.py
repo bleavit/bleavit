@@ -43,12 +43,18 @@ def passing_document() -> dict:
         "outcome_digest_root": "ab" * 32,
         "violations": [],
         "metrics": {
-            name: {"decidable_harm_false_pass_rate": rate}
-            for name, rate in (
-                ("param", "0.004000"),
-                ("treasury", "0.002500"),
-                ("code", 0),
-                ("meta", "0.000000"),
+            name: {
+                "decidable_harm_false_pass_rate": rate,
+                # The counts behind each rate now travel with it, so `0/0` and
+                # `0/1000` stop rendering identically downstream (MAX-12).
+                "decidable_harm": 1_000,
+                "decidable_harm_false_pass_count": count,
+            }
+            for name, rate, count in (
+                ("param", "0.004000", 4),
+                ("treasury", "0.002500", 2),
+                ("code", 0, 0),
+                ("meta", "0.000000", 0),
             )
         },
         "published": {
@@ -193,3 +199,26 @@ class MainFlowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Max12EvidenceDenominatorTests(unittest.TestCase):
+    """A class that measured nothing must not export a perfect score."""
+
+    def test_zero_denominator_refuses_export(self) -> None:
+        document = passing_document()
+        document["metrics"]["param"]["decidable_harm"] = 0
+        document["metrics"]["param"]["decidable_harm_false_pass_count"] = 0
+        with self.assertRaisesRegex(module.ExportError, "measured no decidable-harm"):
+            module.false_pass_counts(document)
+
+    def test_counts_are_exported_per_class(self) -> None:
+        counts = module.false_pass_counts(passing_document())
+        self.assertEqual(set(counts), {"param", "trs", "code", "meta"})
+        self.assertEqual(counts["param"]["decidable_harm"], 1_000)
+        self.assertEqual(counts["param"]["decidable_harm_false_pass_count"], 4)
+
+    def test_numerator_above_denominator_refuses_export(self) -> None:
+        document = passing_document()
+        document["metrics"]["code"]["decidable_harm_false_pass_count"] = 1_001
+        with self.assertRaisesRegex(module.ExportError, "exceeds denominator"):
+            module.false_pass_counts(document)

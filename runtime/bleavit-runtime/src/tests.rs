@@ -78,6 +78,65 @@ pub(crate) fn account(seed: u8) -> AccountId {
 
 /// Runtime fixtures seat arbitrary accounts, so explicitly endow the native
 /// attestor bond before exercising the production pallet's custody path.
+/// Seed a live `pallet-epoch` proposal for `pid` if the runtime does not
+/// already carry one.
+///
+/// `attestor.attest` refuses a `pid` the runtime does not carry (MAX-02): 06 §7
+/// scopes an attestation to a CODE/META artifact *of a proposal*, and a record
+/// naming no proposal can never be reaped because terminality is read from the
+/// proposal. Fixtures that exercise attestation mechanics against a synthetic
+/// pid therefore have to present the proposal too. Insert-if-absent, so a test
+/// that submits the real proposal itself is untouched.
+pub(crate) fn seed_live_proposal(pid: futarchy_primitives::ProposalId) {
+    if pallet_epoch::Proposals::<Runtime>::contains_key(pid) {
+        return;
+    }
+    // Same shape `seed_queued_epoch_proposal` writes, so the epoch pallet's
+    // own try-state accepts it and a later, fuller seeding of the same pid
+    // overwrites it cleanly.
+    let epoch = pallet_epoch::EpochOf::<Runtime>::get().index;
+    let first_market = pid.saturating_mul(10);
+    pallet_epoch::Proposals::<Runtime>::insert(
+        pid,
+        Proposal {
+            id: pid,
+            proposer: account(70),
+            class: ProposalClass::Code,
+            state: ProposalState::Queued,
+            epoch,
+            submitted_at: System::block_number(),
+            payload_hash: [0u8; 32],
+            payload_len: 0,
+            ask: 0,
+            bond: 0,
+            resources: Default::default(),
+            metric_spec: 1,
+            decide_at: System::block_number(),
+            rerun: false,
+            extended: false,
+            delayed_once: false,
+            markets: Some(MarketSet {
+                accept: first_market.saturating_add(1),
+                reject: first_market.saturating_add(2),
+                gates: Some([
+                    first_market.saturating_add(3),
+                    first_market.saturating_add(4),
+                    first_market.saturating_add(5),
+                    first_market.saturating_add(6),
+                ]),
+                baseline: 9_000u64.saturating_add(epoch.into()),
+            }),
+            maturity: Some(System::block_number()),
+            grace_end: Some(System::block_number().saturating_add(1)),
+            version_constraint: pallet_execution_guard::CurrentSpecName::<Runtime>::get(),
+            decision: Some(DecisionOutcome::Adopt),
+        },
+    );
+    pallet_epoch::NextProposalId::<Runtime>::mutate(|next| {
+        *next = (*next).max(pid.saturating_add(1));
+    });
+}
+
 pub(crate) fn fund_attestor_members(members: &[AccountId]) {
     for member in members {
         assert_ok!(Balances::force_set_balance(
@@ -704,6 +763,8 @@ fn enqueue_attested_code_upgrade_pending_ratification(
         pallet_origins::Origin::ConstitutionalValues.into(),
         members.to_vec(),
     ));
+    // `attest` requires the proposal to exist (06 §7; MAX-02).
+    seed_live_proposal(pid);
     let artifact = H256::from(sp_io::hashing::blake2_256(candidate));
     let mut recovery = candidate.to_vec();
     recovery.extend_from_slice(b"-terminal-recovery");
@@ -1986,7 +2047,7 @@ fn identity_and_version_pins_match_the_integration_contract() {
     // makes a future re-coupling fail here.
     assert_eq!(VERSION.transaction_version, TRANSACTION_VERSION);
     assert_eq!(VERSION.transaction_version, 1);
-    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 15);
+    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 16);
     assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
@@ -2547,6 +2608,7 @@ fn attestation_creation_snapshots_the_live_constitution_window() {
             members.to_vec(),
         ));
         let submitted_at = System::block_number();
+        seed_live_proposal(9_101);
         assert_ok!(Attestor::attest(
             RuntimeOrigin::signed(members[0].clone()),
             9_101,
@@ -7012,6 +7074,7 @@ fn code_queue_rejects_real_under_quorum_attestation_without_storage_changes() {
             members.to_vec(),
         ));
         let artifact = sp_io::hashing::blake2_256(&candidate);
+        seed_live_proposal(PID);
         assert_ok!(Attestor::attest(
             RuntimeOrigin::signed(members[0].clone()),
             PID,
@@ -19454,7 +19517,7 @@ fn sq186_metadata_exposes_the_treasury_bond_ask_slope() {
                     .expect("Epoch advertises the contract version");
                 assert_eq!(
                     u32::decode(&mut &contract.value[..]).expect("version decodes"),
-                    15,
+                    16,
                 );
             }};
         }

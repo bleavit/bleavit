@@ -71,6 +71,8 @@ WEIGHT_FN_RE = re.compile(
     r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^\{;]*?\)\s*->\s*Weight\s*\{",
     re.DOTALL,
 )
+# Component parameters of a generated weight function, e.g. `fn foo(r: u32,)`.
+WEIGHT_FN_PARAM_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*:\s*u32\b")
 INTEGER_RE = r"([0-9][0-9_]*)(?:u64)?"
 FROM_PARTS_RE = re.compile(
     r"Weight\s*::\s*from_parts\s*\(\s*"
@@ -336,6 +338,31 @@ def parse_weight_file(text: str) -> dict[str, FunctionWeight]:
                     add_slope(read_slopes, component, value)
                 else:
                     add_slope(write_slopes, component, value)
+
+            # A declared range must correspond to something real. The generator
+            # only ever emits one for a component the benchmark actually takes,
+            # so a range naming a component that binds no slope *and* appears in
+            # no parameter of the signature is not generated output — it is a
+            # `///` line spliced into the file. That matters because
+            # `regenerate-weights.py` used to read "is this function
+            # constant-weight?" out of these comments, so a fabricated
+            # (especially degenerate `[0, 0]`) range silently demoted the
+            # function's storage drift from hard to advisory. Rejecting it here
+            # closes the forgery at the parser, for every consumer.
+            bound = set(slopes) | set(read_slopes) | set(write_slopes)
+            # The generator names a component whose measured slope rounded to
+            # zero `_p` rather than `p` (`pallet_proxy::proxy_announced`), so
+            # the underscore prefix is stripped before matching the range.
+            declared = {
+                parameter.lstrip("_")
+                for parameter in WEIGHT_FN_PARAM_RE.findall(function.group(0))
+            }
+            unbound = sorted(set(ranges) - bound - declared)
+            if unbound:
+                raise CheckError(
+                    f"{name}: declared component range(s) bind no slope and no "
+                    "function parameter: " + ", ".join(unbound)
+                )
 
             function_weight = FunctionWeight(
                 ref_time=ref_time,

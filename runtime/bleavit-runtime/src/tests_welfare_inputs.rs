@@ -125,7 +125,7 @@ fn sq201_cohortless_rolls_keep_welfare_history_inside_its_bound() {
     crate::tests::development_ext().execute_with(|| {
         install_spec(1, 1);
         // Far more cohortless epochs than the retained window is deep.
-        let rolls = 6 * pallet_welfare::MAX_SNAPSHOTS_BOUND;
+        let rolls = 6 * pallet_welfare::SNAPSHOT_RETENTION_EPOCHS_BOUND;
         let mut observed_peak = 0usize;
         for current in 1..=rolls {
             // One epoch of history arrives per roll and no cohort ever settles,
@@ -152,9 +152,9 @@ fn sq201_the_roll_seam_retires_nothing_inside_the_retained_window() {
     // reap-driven prune, so it can never remove state reap would have kept.
     crate::tests::development_ext().execute_with(|| {
         install_spec(1, 1);
-        let current = pallet_welfare::MAX_SNAPSHOTS_BOUND;
-        let first = current.saturating_sub(pallet_welfare::MAX_SNAPSHOTS_BOUND - 1);
-        seed_history(first, pallet_welfare::MAX_SNAPSHOTS_BOUND);
+        let current = pallet_welfare::SNAPSHOT_RETENTION_EPOCHS_BOUND;
+        let first = current.saturating_sub(pallet_welfare::SNAPSHOT_RETENTION_EPOCHS_BOUND - 1);
+        seed_history(first, pallet_welfare::SNAPSHOT_RETENTION_EPOCHS_BOUND);
         let before = pallet_welfare::GateBreachFlags::<Runtime>::iter().count();
         RuntimeEpochWelfare::roll_maintenance(current).expect("roll maintenance is infallible");
         assert_eq!(
@@ -171,10 +171,10 @@ fn sq201_a_backlog_is_drained_across_rolls_not_in_one_call() {
     // backlog is spread over successive ticks instead of one unbounded call.
     crate::tests::development_ext().execute_with(|| {
         install_spec(1, 1);
-        seed_history(1, pallet_welfare::MAX_SNAPSHOTS_BOUND);
+        seed_history(1, pallet_welfare::SNAPSHOT_RETENTION_EPOCHS_BOUND);
         let seeded = pallet_welfare::GateBreachFlags::<Runtime>::iter().count();
         // A clock far past the whole seeded history: every epoch is retirable.
-        let current = 10 * pallet_welfare::MAX_SNAPSHOTS_BOUND;
+        let current = 10 * pallet_welfare::SNAPSHOT_RETENTION_EPOCHS_BOUND;
         RuntimeEpochWelfare::roll_maintenance(current).expect("roll maintenance is infallible");
         let after_one = pallet_welfare::GateBreachFlags::<Runtime>::iter().count();
         assert_eq!(

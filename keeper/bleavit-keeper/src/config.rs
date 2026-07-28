@@ -1,4 +1,10 @@
-use std::{collections::BTreeSet, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::SocketAddr,
+    path::PathBuf,
+    str::FromStr,
+    time::Duration,
+};
 
 use anyhow::{bail, Context};
 use clap::{Parser, ValueEnum};
@@ -72,6 +78,11 @@ pub struct Cli {
     #[arg(long = "node-url")]
     pub node_urls: Vec<String>,
 
+    /// 0x-prefixed genesis hash of the chain this keeper may sign for. A node
+    /// serving any other chain is refused rather than trusted.
+    #[arg(long)]
+    pub genesis_hash: Option<String>,
+
     /// Development/secret URI, for example //Alice. Never use a dev URI in production.
     #[arg(long, conflicts_with = "signer_file")]
     pub signer_uri: Option<String>,
@@ -142,6 +153,28 @@ pub enum SignerSource {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub node_urls: Vec<String>,
+    /// The chain this keeper may sign for, as a 0x-prefixed genesis hash.
+    ///
+    /// `PolkadotConfig::default()` carries `genesis_hash: None`, so subxt falls
+    /// back to `backend.genesis_hash()` — the node's own answer. Pinning it
+    /// makes a hostile endpoint unable to move the keeper onto another chain.
+    pub genesis_hash: Option<[u8; 32]>,
+    /// `Pallet.call` -> the metadata call hash the keeper will sign.
+    ///
+    /// Every byte the keeper signs is derived from metadata the node serves,
+    /// every call is built with `dynamic::tx` (whose payload carries
+    /// `validation_hash: None`), and subxt 0.50.2 always encodes RFC-78's
+    /// `CheckMetadataHash` as `Disabled` — so the runtime's own metadata-hash
+    /// control is waived on every keeper signature. A compromised endpoint can
+    /// therefore keep the real genesis, spec and transaction versions and forge
+    /// only the *call shape*, and the extrinsic is unambiguously valid on this
+    /// chain. Pinning the shapes is what closes that; the genesis pin alone
+    /// does not, because the forgery never leaves the chain.
+    ///
+    /// Empty means unpinned: the keeper logs the shapes it observes so an
+    /// operator can adopt them, and warns that it is signing unvalidated call
+    /// shapes.
+    pub call_hashes: BTreeMap<String, [u8; 32]>,
     pub signer: Option<SignerSource>,
     pub enabled_roles: RoleSet,
     pub obs_interval: Option<u64>,
@@ -162,6 +195,8 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 struct FileConfig {
     node_urls: Option<Vec<String>>,
+    genesis_hash: Option<String>,
+    call_hashes: Option<BTreeMap<String, String>>,
     signer_uri: Option<String>,
     signer_file: Option<PathBuf>,
     enabled_roles: Option<Vec<Role>>,
@@ -236,6 +271,21 @@ impl Config {
             bail!("at least one keeper role must be enabled");
         }
 
+        let genesis_hash = match cli.genesis_hash.or(file.genesis_hash) {
+            Some(raw) => Some(parse_h256(&raw).context("invalid genesis_hash")?),
+            None => None,
+        };
+        let mut call_hashes = BTreeMap::new();
+        for (key, raw) in file.call_hashes.unwrap_or_default() {
+            if key.split('.').count() != 2 || key.split('.').any(str::is_empty) {
+                bail!("call_hashes key {key:?} must be \"Pallet.call\"");
+            }
+            call_hashes.insert(
+                key.clone(),
+                parse_h256(&raw).with_context(|| format!("invalid call_hashes.{key}"))?,
+            );
+        }
+
         let obs_interval = cli.obs_interval.or(file.obs_interval);
         let decision_window = cli.decision_window.or(file.decision_window);
         let reserve_probe_interval = cli.reserve_probe_interval.or(file.reserve_probe_interval);
@@ -262,6 +312,8 @@ impl Config {
 
         Ok(Self {
             node_urls,
+            genesis_hash,
+            call_hashes,
             signer,
             enabled_roles,
             obs_interval,
@@ -383,5 +435,98 @@ mod tests {
             Config::merge(cli, FileConfig::default()).expect("dry-run should not require a signer");
         assert!(config.dry_run);
         assert_eq!(config.signer, None);
+    }
+}
+
+/// Parse a 0x-prefixed 32-byte hex string.
+fn parse_h256(raw: &str) -> anyhow::Result<[u8; 32]> {
+    let trimmed = raw.trim();
+    let body = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    if body.len() != 64 {
+        bail!("expected 32 hex bytes, got {} characters", body.len());
+    }
+    let mut out = [0u8; 32];
+    for (index, byte) in out.iter_mut().enumerate() {
+        let pair = body
+            .get(index * 2..index * 2 + 2)
+            .ok_or_else(|| anyhow::anyhow!("truncated hex"))?;
+        *byte = u8::from_str_radix(pair, 16).context("non-hexadecimal digit")?;
+    }
+    Ok(out)
+}
+
+/// Render a 32-byte hash the way the config file accepts it.
+pub fn format_h256(bytes: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(66);
+    out.push_str("0x");
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+#[cfg(test)]
+mod chain_identity_tests {
+    use super::*;
+
+    /// MAX-07. The keeper holds a funded signing key and derived every byte it
+    /// signed from the node it was asking. `node_urls` legitimately names a
+    /// third party (doc 01 §4.2 provisions RPC operators as a role distinct
+    /// from keeper operators, and `main.rs` rotates the endpoint on every
+    /// connection attempt), so the data that party serves is untrusted network
+    /// input — while `PolkadotConfig::default()` carries `genesis_hash: None`
+    /// and subxt therefore takes the node's own answer for which chain this is.
+    #[test]
+    fn genesis_hash_pins_parse_and_round_trip() {
+        let raw = "0x".to_owned() + &"ab".repeat(32);
+        let parsed = parse_h256(&raw).expect("valid pin");
+        assert_eq!(parsed, [0xabu8; 32]);
+        assert_eq!(format_h256(&parsed), raw);
+        // The 0x prefix is optional and surrounding whitespace is ignored.
+        assert_eq!(
+            parse_h256(&format!("  {}  ", "ab".repeat(32))).unwrap(),
+            parsed
+        );
+    }
+
+    #[test]
+    fn malformed_pins_are_rejected_rather_than_truncated() {
+        for raw in ["0x", "0xzz", &"ab".repeat(31), &"ab".repeat(33)] {
+            assert!(parse_h256(raw).is_err(), "{raw:?} must not parse");
+        }
+    }
+
+    #[test]
+    fn call_hash_keys_must_name_a_pallet_and_a_call() {
+        let hash = "0x".to_owned() + &"cd".repeat(32);
+        for key in ["Epoch", "Epoch.", ".tick", "Epoch.tick.extra"] {
+            let file = FileConfig {
+                call_hashes: Some(BTreeMap::from([(key.to_owned(), hash.clone())])),
+                dry_run: Some(true),
+                ..Default::default()
+            };
+            assert!(
+                Config::merge(Cli::parse_from(["keeper", "--dry-run"]), file).is_err(),
+                "{key:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn well_formed_pins_are_accepted() {
+        let file = FileConfig {
+            genesis_hash: Some("0x".to_owned() + &"11".repeat(32)),
+            call_hashes: Some(BTreeMap::from([(
+                "Epoch.tick".to_owned(),
+                "0x".to_owned() + &"22".repeat(32),
+            )])),
+            dry_run: Some(true),
+            ..Default::default()
+        };
+        let config = Config::merge(Cli::parse_from(["keeper", "--dry-run"]), file)
+            .expect("pins are well formed");
+
+        assert_eq!(config.genesis_hash, Some([0x11u8; 32]));
+        assert_eq!(config.call_hashes.get("Epoch.tick"), Some(&[0x22u8; 32]));
     }
 }

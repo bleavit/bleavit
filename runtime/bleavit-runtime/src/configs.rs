@@ -740,8 +740,20 @@ fn step_ledger_recovery() -> Weight {
     let mut meter = WeightMeter::with_limit(
         MigrationMaxServiceWeight::get().saturating_sub(recovery_aware_migration_detector_weight()),
     );
-    let overhead =
-        recovery_ledger_bookkeeping_weight().saturating_add(recovery_guard_finalization_weight());
+    // When the phase cause rode in with this segment, the terminal step also
+    // performs the one-shot Phase-4 transition, so its envelope is reserved
+    // too. Precharged on every step for the same reason as the guard
+    // finalization above — discovering that the cursor is terminal requires
+    // the read — but only in the combined lane, so an ordinary MBM recovery
+    // keeps its full per-block row budget. The lock read itself is inside
+    // `recovery_ledger_bookkeeping_weight`'s fixed runtime-local envelope.
+    let overhead = recovery_ledger_bookkeeping_weight()
+        .saturating_add(recovery_guard_finalization_weight())
+        .saturating_add(if PhaseTransitionLock::get() {
+            crate::migrations::phase_four_transition_weight()
+        } else {
+            Weight::zero()
+        });
     let outcome = with_storage_layer(|| {
         meter
             .try_consume(overhead)
@@ -781,6 +793,30 @@ fn step_ledger_recovery() -> Weight {
         let recovery = pallet_execution_guard::RecoveryImage::<Runtime>::get().ok_or(
             DispatchError::Other("ledger recovery commitment is missing"),
         )?;
+        // Both causes clear together. `TerminalRecoveryTransition` defers the
+        // phase transition to here whenever the segment was still owed its
+        // repair, so that the chain never leaves `OnlyInherents` for Phase 4
+        // on an unapplied ledger migration (09 §3.2's cutpoint-total rule).
+        // Still one transition, still exactly once: this runs only on the
+        // terminal step, and `complete_terminal_recovery_state` below clears
+        // `PhaseTransitionLock` with the rest of the recovery state.
+        if PhaseTransitionLock::get() {
+            let plan = match pallet_execution_guard::PhaseFourBridge::<Runtime>::get() {
+                pallet_execution_guard::PhaseFourBridgeState::Scheduled {
+                    pid,
+                    code_hash,
+                    plan,
+                } if pid == recovery.pid && code_hash == recovery.primary_hash => plan,
+                _ => {
+                    return Err(DispatchError::Other(
+                        "ledger recovery phase commitment missing",
+                    ))
+                }
+            };
+            // SQ-383: the arming gate is deliberately NOT enforced on the
+            // terminal recovery lane — see `transition_phase_four`.
+            crate::migrations::transition_phase_four(plan, false)?;
+        }
         let mut installed = pallet_execution_guard::CurrentSpecName::<Runtime>::get().ok_or(
             DispatchError::Other("ledger recovery current spec is missing"),
         )?;
@@ -822,6 +858,7 @@ impl frame_support::migrations::MultiStepMigrator for RecoveryAwareMigrations {
             return detector.saturating_add(step_ledger_recovery());
         }
         if RecoveryLockdown::get() || PhaseTransitionLock::get() {
+            discard_unserviceable_cursor();
             detector
         } else {
             detector.saturating_add(
@@ -835,6 +872,39 @@ impl frame_support::migrations::MultiStepMigrator for RecoveryAwareMigrations {
 // and its blake2 cursor hash were retired by B16 (SQ-132): the stall predicate
 // now reads the SDK `cursor.started_at` directly (09 §3.2(d)(i)). The orphaned
 // key is cleared by `crate::migrations::RetireB16State`.
+
+/// Drop an SDK migration cursor that was auto-onboarded while this wrapper is
+/// refusing to service the migrator.
+///
+/// `frame_executive` runs `on_runtime_upgrade` before `MultiStepMigrations`,
+/// and `pallet_migrations::onboard_new_mbms` writes an `Active` cursor
+/// **unconditionally** whenever the runtime registers any MBM — it does not
+/// consult this wrapper. So a `PhaseFourTransition` that refuses (rolling its
+/// own storage layer back, leaving `PhaseTransitionLock` set from the previous
+/// block) came up with a cursor that nothing would ever advance:
+///
+///  * after `MIGRATION_STALL_BLOCKS` it raised `MIGRATION_STALL_HALT`, and
+///  * `recovery_trigger`'s `PhaseTransition` arm requires `Cursor == None`, so
+///    the phase cause became **structurally unreachable** and the terminal
+///    recovery lane — the documented repair for exactly this refusal — could
+///    not fire at all. `RecoveryLockdown` and `PhaseTransitionLock` then stayed
+///    set forever and `frame_executive::extrinsic_mode()` returned
+///    `OnlyInherents` permanently, with no dispatchable writer for either flag.
+///
+/// Only a cursor that has produced **no** progress is discarded: `index == 0`
+/// with no inner cursor is exactly the shape `onboard_new_mbms` writes and
+/// nothing else. A cursor that any step advanced is left alone, so a genuine
+/// MBM cause is never silently dropped.
+pub(crate) fn discard_unserviceable_cursor() {
+    let fresh = matches!(
+        pallet_migrations::Cursor::<Runtime>::get(),
+        Some(pallet_migrations::MigrationCursor::Active(ref cursor))
+            if cursor.index == 0 && cursor.inner_cursor.is_none()
+    );
+    if fresh {
+        pallet_migrations::Cursor::<Runtime>::kill();
+    }
+}
 
 const MIGRATION_FAILURE_HALT: u8 = 0b001;
 pub(crate) const MIGRATION_STALL_HALT: u8 = 0b010;
@@ -5349,22 +5419,26 @@ impl pallet_epoch::WelfareSettlement for RuntimeEpochWelfare {
     }
     fn prune(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
         // 05 §3.3: cutoff e−19 removes exactly ≤ e−20 and retains one
-        // capacity slot for the next snapshot.
-        let cutoff =
-            current_epoch.saturating_sub(pallet_welfare::MAX_SNAPSHOTS_BOUND.saturating_sub(1));
+        // capacity slot for the next snapshot. Expressed against the retained
+        // **epoch** window, not the record bound — the two stopped being the
+        // same number once `MAX_SNAPSHOTS` took 05 §3.3's version
+        // multiplicity, and taking the record bound here would have doubled
+        // the retained window to 39 epochs.
+        let cutoff = current_epoch
+            .saturating_sub(pallet_welfare::SNAPSHOT_RETENTION_EPOCHS_BOUND.saturating_sub(1));
         pallet_welfare::Pallet::<Runtime>::prune(cutoff)
     }
 
     fn roll_maintenance(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
-        let cutoff = current_epoch.saturating_sub(pallet_welfare::MAX_SNAPSHOTS_BOUND);
+        let cutoff = current_epoch.saturating_sub(pallet_welfare::SNAPSHOT_RETENTION_EPOCHS_BOUND);
         pallet_welfare::Pallet::<Runtime>::prune_xcm_traffic(cutoff)?;
         // SQ-201 / 05 §3.3: cohort reap is not the only prune trigger. Tick
         // invokes this seam on every successful roll — including rolls that
         // settle no cohort — so it is the epoch-roll hook the snapshot/gate
         // window needs. The cutoff is the same `current - 19` used by `prune`
         // above, so this retires strictly nothing that reap would have kept.
-        let history_cutoff =
-            current_epoch.saturating_sub(pallet_welfare::MAX_SNAPSHOTS_BOUND.saturating_sub(1));
+        let history_cutoff = current_epoch
+            .saturating_sub(pallet_welfare::SNAPSHOT_RETENTION_EPOCHS_BOUND.saturating_sub(1));
         pallet_welfare::Pallet::<Runtime>::prune_epoch_roll(history_cutoff)
     }
 }
@@ -6383,6 +6457,12 @@ impl pallet_welfare::SnapshotSchedule for RuntimeSnapshotSchedule {
         // is a measurement window for all three daily components or is one for
         // none of them.
         epoch_measurable_days(epoch)
+    }
+    fn frozen_spec_versions(epoch: EpochId) -> Vec<u16> {
+        // Exactly the projection `pallet-registry` consumes, so welfare and
+        // the registry cannot disagree about which versions an epoch legally
+        // carries.
+        <RuntimeRegistryEpoch as pallet_registry::EpochContext>::frozen_spec_versions(epoch)
     }
 }
 
@@ -7430,8 +7510,21 @@ impl pallet_attestor::AttestorProposalStatus for RuntimeAttestorProposalStatus {
         })
     }
 
+    /// Total by contract, hence `is_none_or` rather than `is_some_and`.
+    ///
+    /// `pallet-epoch` does not retain terminal proposals: `checked_state`
+    /// excludes `Cancelled | Settled | Rejected(_) | Expired`, `persist` is a
+    /// full re-sync that re-inserts only the live set, and `settle_cohort`
+    /// deletes its members outright. Intersecting "still present" with "in an
+    /// accepted terminal state" therefore left only `{Executed, Measuring}`,
+    /// so a proposal that never executed — the common case, since most
+    /// CODE/META proposals lose the market decision — never opened its reap
+    /// window at all, and `reap_attestation` is the only bond-release path for
+    /// an account already carried in `Liabilities`. A pruned proposal is
+    /// terminal; reading it as non-terminal locked the bond permanently. This
+    /// matches the execution guard's twin below, which was already total.
     fn is_terminal(pid: futarchy_primitives::ProposalId) -> bool {
-        pallet_epoch::Proposals::<Runtime>::get(pid).is_some_and(|proposal| {
+        pallet_epoch::Proposals::<Runtime>::get(pid).is_none_or(|proposal| {
             matches!(
                 proposal.state,
                 futarchy_primitives::ProposalState::Executed
@@ -7442,6 +7535,10 @@ impl pallet_attestor::AttestorProposalStatus for RuntimeAttestorProposalStatus {
                     | futarchy_primitives::ProposalState::Rejected(_)
             )
         })
+    }
+
+    fn exists(pid: futarchy_primitives::ProposalId) -> bool {
+        pallet_epoch::Proposals::<Runtime>::contains_key(pid)
     }
 }
 pub struct RuntimeGuardianTriggers;
@@ -8855,13 +8952,38 @@ fn installed_code_differs(expected: futarchy_primitives::H256) -> bool {
         .unwrap_or(true)
 }
 
-enum RecoveryTrigger {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RecoveryTrigger {
     Cursor(pallet_migrations::CursorOf<Runtime>),
     PhaseTransition,
 }
 
-fn recovery_trigger() -> Option<RecoveryTrigger> {
+pub(crate) fn recovery_trigger() -> Option<RecoveryTrigger> {
     let sources = MigrationHaltSources::get();
+    // The phase-transition cause takes precedence over any cursor cause, and
+    // is matched **before** the cursor arms rather than beside them.
+    //
+    // Both arms used to match the same scrutinee with the phase arm requiring
+    // `Cursor == None`, so a cursor — including one auto-onboarded by
+    // `pallet_migrations` and never serviced — made the phase cause
+    // unreachable and buried the only repair for a refused
+    // `PhaseFourTransition`. 09 §3.2 puts both causes in one lane and nowhere
+    // declares them exclusive; the exclusivity was an implementation artifact.
+    //
+    // Precedence rather than a second lane, because the terminal image
+    // replaces the runtime wholesale at the next spec version: an MBM
+    // belonging to the runtime being replaced has nothing left to repair, and
+    // 09 §3.2 says a successful terminal repair clears "the cursor/transition
+    // cause".
+    if PhaseTransitionLock::get()
+        && matches!(
+            pallet_execution_guard::PhaseFourBridge::<Runtime>::get(),
+            pallet_execution_guard::PhaseFourBridgeState::Scheduled { .. }
+        )
+        && sources & APPLIED_DETECTION_HALT != 0
+    {
+        return Some(RecoveryTrigger::PhaseTransition);
+    }
     match pallet_migrations::Cursor::<Runtime>::get() {
         Some(cursor @ pallet_migrations::MigrationCursor::Stuck)
             if sources & MIGRATION_FAILURE_HALT != 0 =>
@@ -8875,15 +8997,6 @@ fn recovery_trigger() -> Option<RecoveryTrigger> {
                 ))
         }
         Some(_) => None,
-        None if PhaseTransitionLock::get()
-            && matches!(
-                pallet_execution_guard::PhaseFourBridge::<Runtime>::get(),
-                pallet_execution_guard::PhaseFourBridgeState::Scheduled { .. }
-            )
-            && sources & APPLIED_DETECTION_HALT != 0 =>
-        {
-            Some(RecoveryTrigger::PhaseTransition)
-        }
         None => None,
     }
 }
@@ -8922,6 +9035,44 @@ pub(crate) fn recovery_schedule_hook_weight(bytes: u32) -> Weight {
         ))
 }
 
+/// Move the migration cursor out of the way of the recovery image, for either
+/// cause.
+///
+/// **Both causes retire the cursor; neither refuses it.** The phase arm used to
+/// `ensure!` that no cursor existed, and since `recovery_trigger` gives the
+/// phase cause precedence, that turned a legitimate state into a permanent
+/// stall: an MBM that had already progressed when the Phase-4 code was
+/// installed is left in place, and this wrapper stops servicing the migrator
+/// the moment `PhaseTransitionLock` is set, so the cursor can never clear
+/// itself. Scheduling then rolled back on every block, `RecoveryLockdown` and
+/// `PhaseTransitionLock` stayed set, and `frame_executive::extrinsic_mode()`
+/// returned `OnlyInherents` indefinitely with no dispatchable writer for either
+/// flag. Refusing to schedule a repair is never the safe reading of a cause the
+/// runtime cannot repair on its own.
+///
+/// Retiring preserves the pre-recovery state for
+/// [`restore_recovery_cursor_after_abort`] if the relay rejects the image. On
+/// the success path `TerminalRecoveryTransition` discards it, because the
+/// terminal image replaces the runtime that owned the MBM and there is nothing
+/// left for it to repair.
+///
+/// Called inside `schedule_committed_recovery_image`'s storage layer, so it is
+/// rolled back with everything else if scheduling fails.
+pub(crate) fn retire_cursor_for(trigger: RecoveryTrigger) {
+    let cursor = match trigger {
+        RecoveryTrigger::Cursor(cursor) => Some(cursor),
+        RecoveryTrigger::PhaseTransition => pallet_migrations::Cursor::<Runtime>::get(),
+    };
+    if let Some(cursor) = cursor {
+        // Never overwrite a cursor already retired: one slot restores one
+        // cursor, and the older record is the one an abort has to put back.
+        if !RetiredMigrationCursor::exists() {
+            RetiredMigrationCursor::put(cursor);
+        }
+        pallet_migrations::Cursor::<Runtime>::kill();
+    }
+}
+
 fn schedule_committed_recovery_image() -> DispatchResult {
     if RecoveryLockdown::get() || RecoveryAborted::get() || RecoveryScheduledHash::exists() {
         return Ok(());
@@ -8935,19 +9086,7 @@ fn schedule_committed_recovery_image() -> DispatchResult {
         // OnlyInherents even though frame-system requires the SDK cursor to be
         // absent while applying the authorization.
         RecoveryLockdown::put(true);
-        match trigger {
-            RecoveryTrigger::Cursor(cursor) => {
-                RetiredMigrationCursor::put(cursor);
-                pallet_migrations::Cursor::<Runtime>::kill();
-            }
-            RecoveryTrigger::PhaseTransition => {
-                frame_support::ensure!(
-                    !RetiredMigrationCursor::exists()
-                        && !pallet_migrations::Cursor::<Runtime>::exists(),
-                    DispatchError::Other("phase recovery cursor conflict")
-                );
-            }
-        }
+        retire_cursor_for(trigger);
         RecoveryCodeApplied::kill();
         RecoveryBypass::put(true);
         let result = (|| {
@@ -9951,6 +10090,31 @@ impl pallet_welfare::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
         ));
     }
     fn prime_metric_inputs(_: u16) {}
+    fn prime_frozen_cohorts(epoch: EpochId, version: futarchy_primitives::MetricSpecVersion) {
+        // `frozen_spec_versions` iterates `CohortSchedules` and, for every
+        // schedule consuming `epoch`, reads `MetricSpecs` per bound version.
+        // I-21 caps non-terminal cohorts at `MAX_NON_TERMINAL_COHORTS`, so the
+        // fixture presents that many, each binding the measured version at its
+        // 12-proposal `SpecBindings` bound — the largest scan the admissible
+        // set can cost.
+        let bound = pallet_epoch::MAX_NON_TERMINAL_COHORTS_BOUND;
+        for slot in 0..bound {
+            let cohort = epoch.saturating_sub(slot).saturating_sub(1);
+            let specs = (0..pallet_epoch::MAX_COHORT_PROPOSALS_BOUND)
+                .map(|index| (u64::from(index), version))
+                .collect::<Vec<_>>();
+            pallet_epoch::CohortSchedules::<Runtime>::insert(
+                cohort,
+                pallet_epoch::CohortSchedule {
+                    epoch: cohort,
+                    creation_epoch_length: 1,
+                    measurement_until: epoch.saturating_add(1),
+                    settlement_epoch: epoch.saturating_add(2),
+                    specs: frame_support::BoundedVec::truncate_from(specs),
+                },
+            );
+        }
+    }
     fn seat_oracle() {
         // Real oracle storage, so the admission gate's reads are measured rather
         // than assumed: `Reporters`/`Watchtowers` are counted maps, and the
@@ -10264,6 +10428,19 @@ impl pallet_attestor::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper 
             futarchy_primitives::H256::from([7u8; 32]),
             0,
             futarchy_primitives::ProposalState::Settled,
+        );
+        pallet_epoch::Proposals::<Runtime>::insert(pid, proposal);
+    }
+    fn prime_live_proposal(pid: futarchy_primitives::ProposalId) {
+        // `attest` now refuses a `pid` `pallet-epoch` does not carry, so the
+        // benchmark must attest against a real proposal or it measures the
+        // refusal instead of the work. `Queued` is the live state a CODE
+        // artifact is attested in, and is not in `is_terminal`'s accepted set.
+        let proposal = benchmark_epoch_proposal(
+            pid,
+            futarchy_primitives::H256::from([7u8; 32]),
+            0,
+            futarchy_primitives::ProposalState::Queued,
         );
         pallet_epoch::Proposals::<Runtime>::insert(pid, proposal);
     }
@@ -10687,55 +10864,74 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
         // the cohort settles on, so the fixture must register it. Without it the
         // recompute has no weights to renormalize and silently falls back to the
         // recorded `W` — measuring none of the work `settle_cohort` performs.
-        if let Ok(specs) =
-            frame_support::BoundedVec::try_from(pallet_welfare::benchmarking::full_specs(0))
-        {
-            pallet_welfare::MetricSpecs::<Runtime>::insert(0, specs);
+        // Registered for every version the saturated history below carries, not
+        // only the settling one: `full_specs(v)` activates at `1 + v`, so the
+        // three are distinct activations and the AUD-4 uniqueness invariant
+        // holds. Version 0 stays the one the cohort settles on.
+        for version in 0..PER_EPOCH_SNAPSHOT_VERSIONS {
+            if let Ok(specs) = frame_support::BoundedVec::try_from(
+                pallet_welfare::benchmarking::full_specs(version),
+            ) {
+                pallet_welfare::MetricSpecs::<Runtime>::insert(version, specs);
+            }
         }
         let attested = pallet_welfare::benchmarking::attested_ids();
-        for offset in 1..=pallet_welfare::MAX_SNAPSHOTS_BOUND {
+        // The two welfare maps this path scans have **different** bounds, and
+        // the loop used to drive both from `MAX_SNAPSHOTS_BOUND`: `Snapshots` is
+        // keyed `(epoch, spec_version)` and bounded at 60 records, while
+        // `GateBreachFlags` is keyed by epoch alone and bounded at 20. Seeding
+        // one flag per snapshot therefore overflowed the flag bound the moment
+        // the record bound took its version multiplicity, and `settle_cohort`
+        // stopped benchmarking at all. Saturate each at its own bound: 20
+        // retained epochs, each carrying one flag and one snapshot per
+        // concurrent version. That is exactly the state the two bounds admit
+        // together, so the scan is charged at its real worst case.
+        for offset in 1..=pallet_welfare::SNAPSHOT_RETENTION_EPOCHS_BOUND {
             let measured_epoch = epoch.saturating_add(offset);
-            pallet_welfare::Snapshots::<Runtime>::insert(
-                (measured_epoch, 0),
-                pallet_welfare::StoredSnapshot {
-                    epoch: measured_epoch,
-                    spec_version: 0,
-                    s_pillar: FixedU64(500_000_000),
-                    c_onchain: FixedU64(500_000_000),
-                    c_attested: FixedU64(500_000_000),
-                    p_pillar: FixedU64(500_000_000),
-                    a_pillar: FixedU64(500_000_000),
-                    gate_s: FixedU64(500_000_000),
-                    gate_c: FixedU64(500_000_000),
-                    welfare: FixedU64(500_000_000),
-                    components: frame_support::BoundedVec::truncate_from(
-                        // Interior values: at the former 1.0 every geometric term
-                        // is skipped, so the recompute this fixture exists to
-                        // measure would cost almost nothing.
-                        pallet_welfare::benchmarking::degraded(
-                            pallet_welfare::MAX_COMPONENTS_PER_SPEC as u16,
+            for version in 0..PER_EPOCH_SNAPSHOT_VERSIONS {
+                pallet_welfare::Snapshots::<Runtime>::insert(
+                    (measured_epoch, version),
+                    pallet_welfare::StoredSnapshot {
+                        epoch: measured_epoch,
+                        spec_version: version,
+                        s_pillar: FixedU64(500_000_000),
+                        c_onchain: FixedU64(500_000_000),
+                        c_attested: FixedU64(500_000_000),
+                        p_pillar: FixedU64(500_000_000),
+                        a_pillar: FixedU64(500_000_000),
+                        gate_s: FixedU64(500_000_000),
+                        gate_c: FixedU64(500_000_000),
+                        welfare: FixedU64(500_000_000),
+                        components: frame_support::BoundedVec::truncate_from(
+                            // Interior values: at the former 1.0 every geometric term
+                            // is skipped, so the recompute this fixture exists to
+                            // measure would cost almost nothing.
+                            pallet_welfare::benchmarking::degraded(
+                                pallet_welfare::MAX_COMPONENTS_PER_SPEC as u16,
+                            ),
                         ),
-                    ),
-                },
-            );
-            pallet_welfare::SnapshotContexts::<Runtime>::insert(
-                (measured_epoch, 0),
-                pallet_welfare::StoredSnapshotContext {
-                    epoch: measured_epoch,
-                    spec_version: 0,
-                    // One flagged component, not all of them: 07 §10's recompute
-                    // costs a term per *surviving* component, so the dearest
-                    // non-empty drop set is the smallest one. Flagging every
-                    // attested component would empty the A pillar and let the
-                    // composite renormalize instead of evaluating its terms.
-                    flagged: frame_support::BoundedVec::truncate_from(
-                        attested.iter().copied().take(1).collect::<Vec<_>>(),
-                    ),
-                    incident_multiplier: FixedU64(pallet_welfare::ONE),
-                    params:
-                        <WelfareParams as pallet_welfare::WelfareParamsProvider>::welfare_params(),
-                },
-            );
+                    },
+                );
+                pallet_welfare::SnapshotContexts::<Runtime>::insert(
+                    (measured_epoch, version),
+                    pallet_welfare::StoredSnapshotContext {
+                        epoch: measured_epoch,
+                        spec_version: version,
+                        // One flagged component, not all of them: 07 §10's recompute
+                        // costs a term per *surviving* component, so the dearest
+                        // non-empty drop set is the smallest one. Flagging every
+                        // attested component would empty the A pillar and let the
+                        // composite renormalize instead of evaluating its terms.
+                        flagged: frame_support::BoundedVec::truncate_from(
+                            attested.iter().copied().take(1).collect::<Vec<_>>(),
+                        ),
+                        incident_multiplier: FixedU64(pallet_welfare::ONE),
+                        params:
+                            <WelfareParams as pallet_welfare::WelfareParamsProvider>::welfare_params(
+                            ),
+                    },
+                );
+            }
             pallet_welfare::GateBreachFlags::<Runtime>::insert(
                 measured_epoch,
                 pallet_welfare::CoreGateBreachFlags {
@@ -10747,6 +10943,13 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
         }
     }
 }
+
+/// Snapshot records one retained epoch can carry: one per cohort measuring it
+/// (`epoch.horizon_k`) plus one for its own active spec. `MAX_SNAPSHOTS` is
+/// this times the retained epoch window, so saturating both welfare maps means
+/// `SNAPSHOT_RETENTION_EPOCHS_BOUND` epochs at this multiplicity.
+#[cfg(feature = "runtime-benchmarks")]
+const PER_EPOCH_SNAPSHOT_VERSIONS: u16 = pallet_welfare::MAX_CONCURRENT_FROZEN_VERSIONS as u16 + 1;
 
 #[cfg(feature = "runtime-benchmarks")]
 fn benchmark_epoch_proposal(

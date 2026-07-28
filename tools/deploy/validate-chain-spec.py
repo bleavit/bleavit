@@ -101,11 +101,90 @@ DOT_LOCATION = {"parents": 1, "interior": "Here"}
 DOT_MIN_BALANCE = 1
 # Every asset the runtime declares in `foreignAssets.assets` at genesis, with
 # the doc section that owns it. Both carry the same catastrophic authority if
-# their owner is wrong, so both are gated identically.
+# their owner is wrong, so both are gated identically — in `assets` *and*, since
+# the 2026-07-27 review, in `accounts`, where the exhaustiveness rule previously
+# reached USDC only.
 DECLARED_ASSETS = {
     "USDC": (USDC_LOCATION, USDC_MIN_BALANCE, "03 §7 R-4"),
     "DOT": (DOT_LOCATION, DOT_MIN_BALANCE, "09 §4/§6.1"),
 }
+
+# Top-level chain-spec keys this project legitimately ships. An **allowlist**,
+# because `sc-chain-spec`'s `ClientSpec` deliberately does not set
+# `deny_unknown_fields` and flattens straight into the same JSON object as
+# `genesis` — so any field the node's serde knows about rides a spec that names
+# only the keys below without this check ever looking at it.
+ALLOWED_TOP_LEVEL_KEYS = frozenset(
+    {
+        "name",
+        "id",
+        "chainType",
+        "bootNodes",
+        "telemetryEndpoints",
+        "protocolId",
+        "forkId",
+        "properties",
+        "relay_chain",
+        "para_id",
+        "codeSubstitutes",
+        "genesis",
+        "consensusEngine",
+        "lightSyncState",
+        "extensions",
+        "badBlocks",
+        "forkBlocks",
+    }
+)
+# Keys whose *presence with content* redirects or invalidates execution. Each
+# is a `ClientSpec` field the node consumes and no Bleavit release uses.
+#
+# `codeSubstitutes` is the sharp one: `sc-service` loads it into
+# `ClientConfig.wasm_runtime_substitutes` and `code_provider.rs` then selects
+# the substitute *over the on-chain code*, logging only at `debug!`. Because it
+# is not genesis state, the release assembler's `:code` <-> `runtime.wasm`
+# binding cannot see it and the genesis hash is unchanged — so a poisoned node
+# joins the same chain, peers normally, and serves attacker-chosen answers to
+# every runtime-API call (02 §3 `FutarchyApi` results are not
+# state-proof-verifiable) while leaving every other release control green.
+FORBIDDEN_NONEMPTY_TOP_LEVEL_KEYS = {
+    "codeSubstitutes": (
+        "02 §11",
+        "redirects runtime execution away from the on-chain :code without "
+        "changing genesis state, so neither the genesis hash nor the release "
+        "manifest's :code<->runtime.wasm binding can detect it",
+    ),
+    "forkBlocks": ("02 §11", "pins the node to a hand-chosen fork"),
+    "badBlocks": ("02 §11", "makes the node reject canonical blocks"),
+}
+# Genesis-patch sections the runtime's `RuntimeGenesisConfig` declares and a
+# Bleavit spec may carry (`runtime/bleavit-runtime/src/genesis.rs`). Also an
+# allowlist: an unknown section is either a typo that silently defaults a real
+# one, or a pallet config nothing here reviews.
+ALLOWED_GENESIS_SECTIONS = frozenset(
+    {
+        "balances",
+        "vesting",
+        "foreignAssets",
+        "parachainInfo",
+        "collatorSelection",
+        "session",
+        "polkadotXcm",
+        "constitution",
+        "epoch",
+        "futarchyTreasury",
+        "executionGuard",
+        "sudo",
+    }
+)
+# 02 §7.3 phase-flag bits (`constitution_core::PhaseFlagsValue`).
+PHASE_FLAG_SHADOW_MODE = 1 << 0
+PHASE_FLAG_SUDO_PRESENT = 1 << 4
+# `genesis.rs::BOOTSTRAP_PHASE_FLAGS` — the exact value a bootstrap-profile
+# launch spec must declare. `SUDO_PRESENT` is load-bearing beyond bookkeeping:
+# the frontend binds its persistent "bootstrap governance (sudo active)" banner
+# to it (09 §5.2), so a spec that ships a sudo key with the bit clear
+# misrepresents sudo-era state as trust-equivalent to post-sudo state.
+BOOTSTRAP_PHASE_FLAGS = PHASE_FLAG_SHADOW_MODE | PHASE_FLAG_SUDO_PRESENT
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 BASE58_VALUES = {character: index for index, character in enumerate(BASE58_ALPHABET)}
 
@@ -329,6 +408,38 @@ def validate_usdc_genesis(patch: dict[str, Any], failures: list[str]) -> None:
             )
             continue
         if not is_usdc:
+            # The exhaustiveness rule below is per **declared asset**, not per
+            # spec. Previously every non-USDC row `continue`d before it, so an
+            # arbitrary genesis DOT endowment passed the gate while
+            # `pallet-assets`'s genesis builder really minted it — even though
+            # this file's own header claims USDC and DOT "are gated
+            # identically", which was true for `assets` and false for
+            # `accounts`. That balance is inert only because the pinned
+            # `pallet-xcm` rejects reserve transfers of the network-native
+            # asset, and that guard documents itself as "a temporary patch in
+            # preparation for the Asset Hub Migration … will be removed after
+            # the migration" — an SDK-pin-dependent mitigation, not a control
+            # this repository owns.
+            declared = next(
+                (
+                    label
+                    for label, (location, _minimum, _citation) in DECLARED_ASSETS.items()
+                    if row[0] == location
+                ),
+                None,
+            )
+            if declared is None:
+                failures.append(
+                    f"03 §7 R-4: foreignAssets.accounts[{index}] endows an asset "
+                    f"Location the runtime does not declare: {row[0]!r}"
+                )
+            else:
+                _, _, citation = DECLARED_ASSETS[declared]
+                failures.append(
+                    f"{citation}: unbacked {declared} genesis endowment to "
+                    f"{row[1]!r} is forbidden — no genesis account may be "
+                    f"credited {declared} that has no reserve behind it"
+                )
             continue
 
         if account in seen_usdc_accounts:
@@ -384,6 +495,88 @@ def validate_usdc_genesis(patch: dict[str, Any], failures: list[str]) -> None:
                 )
 
 
+def validate_client_spec_surface(spec: dict[str, Any], failures: list[str]) -> None:
+    """Reject `ClientSpec` fields this project does not ship (02 §11).
+
+    Everything else in this file asserts values for keys it names, which is
+    exactly the shape a `codeSubstitutes` entry rides through: it changes no
+    value any check reads, and it is not genesis state, so the release
+    assembler's :code binding and the unchanged genesis hash both stay green
+    while the node executes attacker-supplied Wasm.
+    """
+    for key, (citation, why) in FORBIDDEN_NONEMPTY_TOP_LEVEL_KEYS.items():
+        value = spec.get(key)
+        if value is None:
+            continue
+        # `{}`/`[]` are what `#[serde(default)]` produces; only content is a
+        # finding, so a spec that spells the key out empty still passes.
+        if isinstance(value, (dict, list)) and not value:
+            continue
+        failures.append(f"{citation}: chain spec must not carry a non-empty {key!r} — it {why}")
+
+    unknown = sorted(set(spec) - ALLOWED_TOP_LEVEL_KEYS)
+    if unknown:
+        failures.append(
+            "02 §11: chain spec carries unknown top-level key(s) "
+            f"{unknown} — `sc-chain-spec` does not `deny_unknown_fields`, so "
+            "every field it understands must be reviewed here explicitly"
+        )
+
+
+def validate_root_key(patch: dict[str, Any], profile: str, failures: list[str]) -> None:
+    """Validate the genesis Root key and the phase flags that must match it.
+
+    Production launches at Phase 3 with sudo present (09 §3.2), and doc 14
+    TH-29 states the residual plainly: "sudo can still upgrade the runtime and
+    thereby do anything." Nothing else validates it — `runtime_profiles.py`
+    asserts only that the *pallet* is in metadata, never the key's value — so
+    this file, whose declared threat model is "a release spec that hands an
+    external key control of protocol collateral", had a hole in the
+    highest-privilege field inside its own scope.
+
+    The key itself is a launch-ceremony output, like the Coretime ops seats
+    above, so it cannot be pinned to a constant here. It takes the identical
+    treatment: required, well-formed, and carried as an explicit unfilled
+    "TODO" seat in the allocation template so `contains_todo` confronts the
+    operator with it rather than letting a spec default past it.
+    """
+    sudo = patch.get("sudo")
+    if not isinstance(sudo, dict):
+        failures.append(
+            "09 §3.2: production genesis patch must carry a sudo section — "
+            "mainnet launches at Phase 3 with sudo present, and an absent "
+            "section is indistinguishable from one still awaiting the "
+            "launch ceremony"
+        )
+        return
+    key = sudo.get("key")
+    if key is None:
+        failures.append(
+            "09 §3.2: genesis patch sudo.key must seat the founding multisig "
+            "(14 TH-29: sudo can upgrade the runtime and thereby do anything)"
+        )
+    elif not isinstance(key, str) or ss58_account_id(key) is None:
+        failures.append(
+            f"09 §3.2: genesis patch sudo.key {key!r} is not a valid 32-byte "
+            "SS58 account"
+        )
+
+    constitution = patch.get("constitution")
+    phase_flags = constitution.get("phaseFlags") if isinstance(constitution, dict) else None
+    if phase_flags is None:
+        failures.append(
+            "02 §7.3: genesis patch constitution.phaseFlags must be set "
+            f"explicitly to the bootstrap value {BOOTSTRAP_PHASE_FLAGS} "
+            "(SHADOW_MODE|SUDO_PRESENT)"
+        )
+    elif phase_flags != BOOTSTRAP_PHASE_FLAGS:
+        failures.append(
+            "02 §7.3: genesis patch constitution.phaseFlags must be "
+            f"{BOOTSTRAP_PHASE_FLAGS} (SHADOW_MODE|SUDO_PRESENT) for a "
+            f"bootstrap launch spec; found {phase_flags!r}"
+        )
+
+
 def validate_genesis(
     spec: dict[str, Any], profile: str, failures: list[str]
 ) -> None:
@@ -404,7 +597,19 @@ def validate_genesis(
     if contains_todo(patch):
         failures.append('08 §2.1: genesis runtime patch must not contain a "TODO" string')
 
+    unknown_sections = sorted(set(patch) - ALLOWED_GENESIS_SECTIONS)
+    if unknown_sections:
+        failures.append(
+            "08 §2.1: genesis patch carries unknown section(s) "
+            f"{unknown_sections} — an unrecognised section is either a "
+            "misspelling that silently defaults a real one, or pallet genesis "
+            "nothing here reviews"
+        )
+
     validate_usdc_genesis(patch, failures)
+
+    if profile in ("paseo", "polkadot"):
+        validate_root_key(patch, profile, failures)
 
     # The runtime reads its para id from genesis (`staging_parachain_info`), not
     # from the chain-spec extension — a release spec whose top-level `para_id`
@@ -741,6 +946,7 @@ def main() -> int:
     elif not isinstance(para_id, int) or isinstance(para_id, bool) or para_id <= 0:
         failures.append("02 §8: production/Paseo para_id must be assigned")
 
+    validate_client_spec_surface(spec, failures)
     validate_genesis(spec, args.profile, failures)
 
     if args.profile in ("paseo", "polkadot"):

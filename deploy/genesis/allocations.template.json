@@ -100,12 +100,20 @@
         {
           "account": "TODO",
           "amount_plancks": "100000000000000000000",
-          "vesting": { "begin": 5256000, "length": 15768000, "liquid": "0" }
+          "vesting": {
+            "begin": 5256000,
+            "length": 15768000,
+            "liquid": "0"
+          }
         },
         {
           "account": "TODO",
           "amount_plancks": "100000000000000000000",
-          "vesting": { "begin": 5256000, "length": 15768000, "liquid": "0" }
+          "vesting": {
+            "begin": 5256000,
+            "length": 15768000,
+            "liquid": "0"
+          }
         }
       ]
     },
@@ -121,5 +129,13 @@
       "amount_plancks": "100000000000000000000",
       "account": "fvGJck7fS1t2fpsb9pwQuhjP1DQpWe6PyTT4rDGaDE3Lo1J9Z"
     }
-  ]
+  ],
+  "sudo": {
+    "_comment": "09 §3.2 Root key, patched into the runtime's sudo genesis section (patch key `sudo.key`). Mainnet launches at Phase 3 with sudo present, and 14 TH-29 states the residual plainly: sudo can still upgrade the runtime and thereby do anything. The founding multisig is a launch-ceremony output, so like the Coretime ops seats it has no correct value in advance and is carried here as an explicit unfilled seat rather than left to default past the release gate.",
+    "key": "TODO"
+  },
+  "constitution": {
+    "_comment": "02 §7.3 phase flags. A bootstrap launch spec MUST declare exactly SHADOW_MODE|SUDO_PRESENT = 17, matching `genesis.rs::BOOTSTRAP_PHASE_FLAGS`: the frontend binds its persistent \"bootstrap governance (sudo active)\" banner to bit 4 (09 §5.2), so shipping a sudo key with the bit clear misrepresents sudo-era state.",
+    "phase_flags": 17
+  }
 }

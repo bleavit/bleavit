@@ -141,6 +141,10 @@ fn fill_snapshots(state: &mut WelfareState, count: usize) -> Result<(), Benchmar
             .record_snapshot(
                 epoch,
                 1,
+                // Storage seeding, not a measured dispatch: the fixture states
+                // the admissible set it is seeding under. The measured call
+                // below goes through the real runtime projection.
+                &[1],
                 degraded(MAX_COMPONENTS_PER_SPEC as u16),
                 FixedU64(ONE),
                 // Worst-case 07 §10 context: every flaggable component flagged,
@@ -160,6 +164,8 @@ fn fill_gate_flags(state: &mut WelfareState, count: usize) -> Result<(), Benchma
                 epoch,
                 0,
                 1,
+                // Fixture-declared active version; see `fill_snapshots`.
+                Some(1),
                 degraded(MAX_COMPONENTS_PER_SPEC as u16),
                 &CoreWelfareParams::DEFAULT,
             )
@@ -406,8 +412,18 @@ mod benches {
         fill_gate_flags(&mut state, MAX_GATE_FLAGS)?;
         Pallet::<T>::seed(&state)?;
         let epoch: EpochId = MAX_SNAPSHOTS as u32 + 1;
+        // The measured version must be the epoch's **active** spec, not the
+        // fixture's seeded version 1: `record_snapshot` admits only the active
+        // spec plus the versions live cohorts froze, and only a record at the
+        // active version advances `SnapshotDeadline` — so this is also the
+        // longer of the two paths. `full_specs` activates version `v` at
+        // `1 + v`, so the highest seeded version is the unambiguous latest.
+        let measured_version = MAX_METRIC_SPECS as u16;
         T::BenchmarkHelper::prime_finalized_epoch(epoch);
         T::BenchmarkHelper::prime_metric_inputs(MAX_COMPONENTS_PER_SPEC as u16);
+        // …and the admissible-set derivation walks the non-terminal cohort
+        // schedules, so present them at their I-21 bound.
+        T::BenchmarkHelper::prime_frozen_cohorts(epoch, measured_version);
         // 05 §4.3: the runtime projection reads this epoch's authorship
         // aggregate, so the fixture presents it at its bound. Indexed first, or
         // try-state would see an aggregate the reaper cannot reach.
@@ -425,7 +441,7 @@ mod benches {
         T::BenchmarkHelper::prime_keeper_rebate();
 
         #[extrinsic_call]
-        _(RawOrigin::Signed(caller), epoch, 1);
+        _(RawOrigin::Signed(caller), epoch, measured_version);
 
         T::BenchmarkHelper::assert_keeper_rebate_paid(
             futarchy_primitives::keeper::CrankClass::DecisionCritical,
@@ -447,6 +463,10 @@ mod benches {
         fill_gate_flags(&mut state, MAX_GATE_FLAGS - 1)?;
         Pallet::<T>::seed(&state)?;
         let epoch: EpochId = MAX_GATE_FLAGS as u32 + 1;
+        // `GateBreachFlags` is keyed by epoch alone and settles money, so the
+        // gate admits exactly the epoch's active spec (05 §4.7) — see
+        // `record_snapshot` above for why that is the highest seeded version.
+        let measured_version = MAX_METRIC_SPECS as u16;
         T::BenchmarkHelper::prime_finalized_epoch(epoch);
         T::BenchmarkHelper::prime_metric_inputs(MAX_COMPONENTS_PER_SPEC as u16);
         // The day projection reads day 0's authorship window (05 §4.3) and the
@@ -466,7 +486,7 @@ mod benches {
         T::BenchmarkHelper::prime_keeper_rebate();
 
         #[extrinsic_call]
-        _(RawOrigin::Signed(caller), epoch, 0, 1);
+        _(RawOrigin::Signed(caller), epoch, 0, measured_version);
 
         T::BenchmarkHelper::assert_keeper_rebate_paid(
             futarchy_primitives::keeper::CrankClass::General,
