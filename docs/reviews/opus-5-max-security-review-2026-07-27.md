@@ -1141,3 +1141,47 @@ resolves the same single version.
 No behavior changed. The code and test comments did: both had compressed this into "against I-16",
 which is the reading that produced the finding, and they now state the §7(2) split and why the flag
 must not become cohort-scoped.
+
+**Seventh Codex round (2026-07-28).** One P1, valid, and the most consequential of the series: MAX-03's
+phase-recovery lane could enter Phase 4 on an **unapplied ledger migration**.
+
+The round-3 fix replaced a hard refusal with `RetiredMigrationCursor::kill()`, on the stated reasoning
+that "the terminal image replaces the runtime that owned the MBM, so there is nothing left to repair".
+That reasoning was wrong, and the code comment asserting it was the defect. Replacing a runtime does
+not migrate its storage. `BackfillTotalEscrowedV1`'s nonterminal steps are **read-only** — they
+accumulate a running total inside the cursor — and only the terminal step writes `TotalEscrowed` and
+storage version 1. Killing the cursor therefore discards the entire obligation.
+
+Nothing recovers it afterwards. `onboard_new_mbms` is reachable only from `on_runtime_upgrade` (and
+the root-only `force_onboard_mbms`); `progress_mbms` returns early when the cursor is `None`; the
+wrapper does not delegate to the inner migrator while locked; and the recovery profile registers
+`type Migrations = ()`. So the segment is skipped permanently.
+
+The consequence is solvency-visible and silent. `TotalEscrowed` is `ValueQuery`, so it reads **0**
+rather than absent: `maintained_collateral_totals` computes `liability = TotalEscrowed +
+DepositsHeld`, understating the I-4 liability by every pre-migration vault, and `reconcile`'s drift
+test is `liability > custody` — which is exactly the direction that stays *false*. The 03 §5.4 drift
+detector would report healthy on a ledger whose mirror was never built, and the chain would be out of
+`OnlyInherents` and in Phase 4 while it did.
+
+Codex also noted the second entry shape, correctly: `discard_unserviceable_cursor` kills a
+zero-progress cursor one block earlier, so the hole is reachable with **no** retired cursor at all.
+The fix therefore keys on the segment's own state — `on_chain_storage_version() == 0`, the migration's
+own version gate — rather than on a cursor having survived, and `repair_retired_mbm` now takes
+`Option<&CursorOf<Runtime>>`: a retired cursor is *evidence about the source state*, validated when
+present, never progress to resume from.
+
+Sequencing: the phase branch now resolves its bridge commitment first (so a missing or mismatched
+commitment still fails closed with nothing moved), seeds the repair, and returns.
+`configs::step_ledger_recovery` performs the Phase-4 transition on its terminal step, after the mirror
+and version commit and before `recovery_code_applied`, so both causes clear in the one lane 09 §3.2
+puts them in, under `OnlyInherents` throughout, exactly once. Its weight envelope reserves
+`phase_four_transition_weight()` in that lane only, leaving an ordinary MBM recovery its full
+per-block row budget.
+
+The existing SQ-383 test had encoded the defect: its fixture seeds an un-migrated ledger, kills the
+retired cursor, and asserted `PARAM_ARMED` immediately after `on_runtime_upgrade` — i.e. asserted
+entry into Phase 4 on an unrepaired segment as correct behavior. It now drives the repair and asserts
+the transition at its terminal step, which preserves what SQ-383 was actually about (the arming gate
+must not bind on the recovery lane) without asserting the sequencing bug alongside it. The new
+regression covers both entry shapes and fails at baseline on its first assertion.

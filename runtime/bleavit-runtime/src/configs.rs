@@ -740,8 +740,20 @@ fn step_ledger_recovery() -> Weight {
     let mut meter = WeightMeter::with_limit(
         MigrationMaxServiceWeight::get().saturating_sub(recovery_aware_migration_detector_weight()),
     );
-    let overhead =
-        recovery_ledger_bookkeeping_weight().saturating_add(recovery_guard_finalization_weight());
+    // When the phase cause rode in with this segment, the terminal step also
+    // performs the one-shot Phase-4 transition, so its envelope is reserved
+    // too. Precharged on every step for the same reason as the guard
+    // finalization above — discovering that the cursor is terminal requires
+    // the read — but only in the combined lane, so an ordinary MBM recovery
+    // keeps its full per-block row budget. The lock read itself is inside
+    // `recovery_ledger_bookkeeping_weight`'s fixed runtime-local envelope.
+    let overhead = recovery_ledger_bookkeeping_weight()
+        .saturating_add(recovery_guard_finalization_weight())
+        .saturating_add(if PhaseTransitionLock::get() {
+            crate::migrations::phase_four_transition_weight()
+        } else {
+            Weight::zero()
+        });
     let outcome = with_storage_layer(|| {
         meter
             .try_consume(overhead)
@@ -781,6 +793,30 @@ fn step_ledger_recovery() -> Weight {
         let recovery = pallet_execution_guard::RecoveryImage::<Runtime>::get().ok_or(
             DispatchError::Other("ledger recovery commitment is missing"),
         )?;
+        // Both causes clear together. `TerminalRecoveryTransition` defers the
+        // phase transition to here whenever the segment was still owed its
+        // repair, so that the chain never leaves `OnlyInherents` for Phase 4
+        // on an unapplied ledger migration (09 §3.2's cutpoint-total rule).
+        // Still one transition, still exactly once: this runs only on the
+        // terminal step, and `complete_terminal_recovery_state` below clears
+        // `PhaseTransitionLock` with the rest of the recovery state.
+        if PhaseTransitionLock::get() {
+            let plan = match pallet_execution_guard::PhaseFourBridge::<Runtime>::get() {
+                pallet_execution_guard::PhaseFourBridgeState::Scheduled {
+                    pid,
+                    code_hash,
+                    plan,
+                } if pid == recovery.pid && code_hash == recovery.primary_hash => plan,
+                _ => {
+                    return Err(DispatchError::Other(
+                        "ledger recovery phase commitment missing",
+                    ))
+                }
+            };
+            // SQ-383: the arming gate is deliberately NOT enforced on the
+            // terminal recovery lane — see `transition_phase_four`.
+            crate::migrations::transition_phase_four(plan, false)?;
+        }
         let mut installed = pallet_execution_guard::CurrentSpecName::<Runtime>::get().ok_or(
             DispatchError::Other("ledger recovery current spec is missing"),
         )?;

@@ -375,10 +375,27 @@ fn sq383_terminal_recovery_completes_the_phase_transition_below_the_nav_floor() 
 
         let _ = crate::migrations::TerminalRecoveryTransition::on_runtime_upgrade();
 
+        // The fixture's ledger segment is un-migrated, so the transition is
+        // owed its repair first (MAX-03/round 6). SQ-383's property is about
+        // the arming gate, not the sequencing: drive the repair and the
+        // below-floor transition must still complete at its terminal step.
+        assert!(crate::configs::RecoveryLedgerRepairActive::get());
+        assert_ne!(
+            pallet_constitution::PhaseFlags::<Runtime>::get(),
+            pallet_constitution::PhaseFlagsValue::PARAM_ARMED,
+            "Phase 4 must not be entered before the registered segment is repaired",
+        );
+        drive_repair_to_completion();
+
         assert_eq!(
             pallet_constitution::PhaseFlags::<Runtime>::get(),
             pallet_constitution::PhaseFlagsValue::PARAM_ARMED,
             "terminal recovery must complete the already-authorized transition",
+        );
+        assert_eq!(
+            crate::ConditionalLedger::on_chain_storage_version(),
+            StorageVersion::new(1),
+            "and only on a ledger segment that actually migrated",
         );
         // The rest of the transition committed with it: the scheduled cap
         // raise landed, which also exercises SQ-197's ordering (the arming bits
@@ -391,6 +408,101 @@ fn sq383_terminal_recovery_completes_the_phase_transition_below_the_nav_floor() 
             Some(2_000_000_000_001),
         );
     });
+}
+
+/// Round-6 regression. The phase-recovery lane completed the Phase-3→4
+/// transition and cleared `OnlyInherents` **without** running the registered
+/// ledger segment's repair.
+///
+/// 09 §3.2 admits a primary MBM only against a "cutpoint-total repair for every
+/// registered segment", and this segment's nonterminal steps are read-only —
+/// only its terminal step writes `TotalEscrowed` and storage version 1. So the
+/// chain entered Phase 4 with the mirror never committed, and since
+/// `TotalEscrowed` is `ValueQuery` it reads 0 rather than absent:
+/// `maintained_collateral_totals` understates the I-4 liability by every
+/// pre-migration vault, and the drift detector reports healthy.
+///
+/// Nothing repaired it afterwards either — `onboard_new_mbms` runs only on a
+/// runtime upgrade, `progress_mbms` returns early on a `None` cursor, and the
+/// recovery profile registers no MBMs.
+///
+/// Both entry shapes are covered: a cursor that survived retirement, and none
+/// at all (what `discard_unserviceable_cursor` leaves one block earlier, which
+/// reaches the same hole without any retired cursor).
+///
+/// Fails at baseline on the first assertion — recovery completed, the ledger
+/// still at version 0 with `TotalEscrowed` absent.
+#[cfg(feature = "recovery")]
+#[test]
+fn round6_phase_recovery_cannot_enter_phase_four_on_an_unrepaired_ledger_segment() {
+    for retired_survives in [true, false] {
+        with_recovery_state(active_cursor(None, 0), |_| {
+            let image = pallet_execution_guard::RecoveryImage::<Runtime>::get()
+                .expect("the recovery fixture commits an image");
+            pallet_execution_guard::PhaseFourBridge::<Runtime>::put(
+                pallet_execution_guard::PhaseFourBridgeState::Scheduled {
+                    pid: image.pid,
+                    code_hash: image.primary_hash,
+                    plan: pallet_execution_guard::PhaseFourPlan {
+                        tvl_cap: 2_000_000_000_001,
+                        deposit_cap: 1,
+                    },
+                },
+            );
+            if !retired_survives {
+                crate::configs::RetiredMigrationCursor::kill();
+            }
+            crate::configs::PhaseTransitionLock::put(true);
+            pallet_constitution::PhaseFlags::<Runtime>::put(
+                pallet_constitution::PhaseFlagsValue::SHADOW_MODE
+                    | pallet_constitution::PhaseFlagsValue::SUDO_PRESENT,
+            );
+
+            // Precondition: the segment is registered and un-migrated.
+            assert_eq!(
+                crate::ConditionalLedger::on_chain_storage_version(),
+                StorageVersion::new(0)
+            );
+            assert!(!pallet_conditional_ledger::TotalEscrowed::<Runtime>::exists());
+
+            let _ = crate::migrations::TerminalRecoveryTransition::on_runtime_upgrade();
+
+            assert!(
+                crate::configs::RecoveryLedgerRepairActive::get(),
+                "the registered segment must be repaired, not discarded \
+                 (retired cursor present: {retired_survives})",
+            );
+            assert_only_inherents();
+            assert_ne!(
+                pallet_constitution::PhaseFlags::<Runtime>::get(),
+                pallet_constitution::PhaseFlagsValue::PARAM_ARMED,
+                "Phase 4 must not be entered before the repair commits",
+            );
+
+            drive_repair_to_completion();
+
+            // Both causes clear, once, and only after the mirror commits.
+            assert_eq!(
+                pallet_conditional_ledger::TotalEscrowed::<Runtime>::get(),
+                EXPECTED_TOTAL
+            );
+            assert_eq!(
+                crate::ConditionalLedger::on_chain_storage_version(),
+                StorageVersion::new(1)
+            );
+            assert_eq!(
+                pallet_constitution::PhaseFlags::<Runtime>::get(),
+                pallet_constitution::PhaseFlagsValue::PARAM_ARMED
+            );
+            assert!(matches!(
+                pallet_execution_guard::PhaseFourBridge::<Runtime>::get(),
+                pallet_execution_guard::PhaseFourBridgeState::Consumed
+            ));
+            assert!(!crate::configs::PhaseTransitionLock::get());
+            assert!(!crate::configs::RecoveryLockdown::get());
+            assert!(!crate::configs::RecoveryAwareMigrations::ongoing());
+        });
+    }
 }
 
 #[cfg(feature = "recovery")]
