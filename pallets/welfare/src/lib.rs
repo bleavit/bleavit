@@ -1204,13 +1204,28 @@ pub mod pallet {
             // for gate markets — `gate_window_outcomes` takes no
             // `spec_version`. A version-independent flag must therefore be
             // computed under a version-independent rule, and the epoch's
-            // active spec is the only one 05 §4.6 / I-16 name. Accepting any
-            // merely *activated* version let a holder of gate-YES positions
-            // pick whichever of two lawfully registered versions aggregated
-            // `S_daily`/`C_daily` lower — different component sets, different
-            // renormalization denominators, identical chain state — and one
-            // monotone write then settled every cohort whose window contains
-            // the epoch, including cohorts frozen at the other version.
+            // active spec (05 §4.6) is the only such rule the spec names.
+            // Accepting any merely *activated* version let a holder of
+            // gate-YES positions pick whichever of two lawfully registered
+            // versions aggregated `S_daily`/`C_daily` lower — different
+            // component sets, different renormalization denominators,
+            // identical chain state — and one monotone write then settled
+            // every cohort whose window contains the epoch.
+            //
+            // **This is deliberately not I-16's rule, and must not be made
+            // into it.** I-16 binds the *snapshot* path (15 §1, "where
+            // enforced": welfare snapshot binding), and 05 §7(2) splits the
+            // two explicitly: realized-branch scalar books settle at `s` on
+            // the cohort's creation-time MetricSpec, while **gate books
+            // settle on the §4.7 flags**. Those flags are the "deterministic
+            // system-wide breach facts" of 05 §4.6's gate-book definition —
+            // one answer per epoch to "was the daily floor breached", shared
+            // by every overlapping cohort and by the 06 `suspend_on_gate`
+            // guardian power, which has no cohort to take a frozen version
+            // from. Re-keying them `(epoch, spec_version)` would give one
+            // factual question several contradictory answers, change the
+            // frozen 02 §7.4 storage shape, and contradict 05 §4.7's "these
+            // flags — and nothing else — settle the gate markets".
             let active = Self::active_snapshot_spec(epoch);
             // An unknown timing takes the same refusal as an out-of-range day:
             // membership in the measurable set cannot be *shown*, and a day that

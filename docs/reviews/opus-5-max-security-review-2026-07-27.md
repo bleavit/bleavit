@@ -1101,3 +1101,43 @@ holds 128 records — half the ledger — and a fully loaded minimum roster hold
 256 bound; one seat reaches a quarter, so filling the ledger takes four distinct seated attestors.
 The regression test now attests both artifacts for all 32 proposals from a minimum roster; it fails at
 a quota of 32 on the 17th proposal and at 16 on the 9th, both with `AttestorQuotaExceeded`.
+
+**Sixth Codex round (2026-07-28) — one P1 examined and *not* accepted.** The finding held that MAX-08,
+by pinning `record_daily_gate` to the epoch's active spec, makes an older cohort settle its gate
+positions under a MetricSpec version it did not freeze, contradicting I-16, and proposed re-keying the
+outcomes `(epoch, spec_version)`.
+
+The mechanism is described correctly and the conclusion does not follow, because gate outcomes are
+system-wide by design rather than cohort-scoped. Three pre-existing statements fix that, all present
+at this branch's merge base `8a95ef4` and none of them written by this PR:
+
+* 05 §4.7 — `GateBreachFlags: map EpochId → { s_breached, c_breached, day_bitmap }`, keyed by epoch
+  alone, and "these flags — and nothing else — settle the gate markets and arm the guardian
+  `suspend_on_gate` power".
+* 05 §7(2) — the split, stated outright: "Realized-branch scalar books settle at `s`; **gate books
+  settle on the §4.7 flags**", where `s` alone is the quantity computed "on each proposal's
+  creation-time MetricSpec".
+* 05 §4.6's gate-book definition — the gate question resolves "the same deterministic **system-wide**
+  breach facts" for every class.
+
+I-16 is consistent with that: 15 §1's "where enforced" column binds it to the *welfare snapshot*
+binding and the shared active-spec selector — the `s` path — not to the gate flag. The implementation
+matches: `gate_window_outcomes(cohort_epoch)` takes no `spec_version`.
+
+So the gate flag is one answer per epoch to "was the daily floor breached", shared by every
+overlapping cohort. Keying it `(epoch, spec_version)` would give a single factual question several
+contradictory answers, change the frozen 02 §7.4 storage shape (contract bump plus the joint sign-off
+02 §13 mandates), contradict 05 §4.7's "nothing else" clause, and leave `suspend_on_gate` — a
+system-wide guardian power with no cohort to take a frozen version from — undefined as to which
+version arms it.
+
+What MAX-08 actually removed was the *caller's* choice: previously any merely activated version was
+accepted, so a gate-YES holder could select whichever aggregated lower. The fix pins the one version
+the epoch itself determines, which is strictly the direction this finding wants. A later registration
+cannot move it retroactively either — `activation_epoch ≥ current_epoch + 2` (`welfare-core`
+`BadActivationEpoch`) and `record_daily_gate` accepts only finalized epochs, so every day of an epoch
+resolves the same single version.
+
+No behavior changed. The code and test comments did: both had compressed this into "against I-16",
+which is the reading that produced the finding, and they now state the §7(2) split and why the flag
+must not become cohort-scoped.

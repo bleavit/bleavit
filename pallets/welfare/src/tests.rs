@@ -3552,9 +3552,16 @@ fn max01_the_epochs_active_spec_is_admissible_even_if_no_cohort_froze_it() {
 /// favourable day under whichever of two lawfully registered versions
 /// aggregated lower (different `S` component sets, different `C_onchain`
 /// renormalization denominators, identical chain state), and the monotone
-/// write then settled every cohort whose window contains that epoch —
-/// including cohorts frozen at the other version, against I-16. Fails at
-/// baseline: the non-active call returned `Ok` and set the breach flags.
+/// write then settled every cohort whose window contains that epoch.
+///
+/// The defect is the *caller's choice*, not the flag's epoch scope. Gate
+/// outcomes are system-wide by design — 05 §7(2) settles scalar books at `s`
+/// on the cohort's creation-time MetricSpec and gate books on the §4.7 flags,
+/// which 05 §4.6 calls "deterministic system-wide breach facts" and 02 §7.4
+/// freezes keyed by epoch. So the fix pins the one version the epoch itself
+/// determines; it does not, and must not, make the flag cohort-scoped.
+///
+/// Fails at baseline: the non-active call returned `Ok` and set the flags.
 #[test]
 fn max08_a_daily_gate_is_recordable_only_under_the_epochs_active_spec() {
     new_test_ext().execute_with(|| {
