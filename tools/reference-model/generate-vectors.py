@@ -43,6 +43,7 @@ from bleavit_reference_model.lmsr import (
     vectors_v1_v6,
     worked_maker_example,
 )
+from bleavit_reference_model.market import baseline_market_scenarios
 from bleavit_reference_model.treasury import (
     attack_cost_hat,
     baseline_commitment,
@@ -3044,6 +3045,7 @@ def build():
         "ledger_score_scenarios": _ledger_score_scenarios(),
         "ledger_sweep_scenarios": _ledger_sweep_scenarios(),
         "ledger_error_scenarios": _ledger_error_scenarios(),
+        "baseline_market_scenarios": baseline_market_scenarios(),
         "decision_scenarios": [
             _decision_row(scenario) for scenario in DECISION_SCENARIOS
         ],

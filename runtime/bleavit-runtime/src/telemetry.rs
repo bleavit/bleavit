@@ -80,9 +80,10 @@ fn book_positions(book: &MarketBook<crate::AccountId>) -> (PositionId, PositionI
 /// `H - [max(q)-premium]`; therefore `H - min(inventory)` is the realized
 /// worst-world maker loss and tends to `b·ln 2`. It is checked against the
 /// canonical `seed_headroom(book.b)` bound. Decision/gate fees live in a
-/// separate fee account. Baseline fees are temporarily held in the book as
-/// either complete sets (buys) or plain USDC (sells), so both the accumulated
-/// fee claim and its plain-USDC realization are removed from the curve P&L.
+/// separate fee account. Baseline fees have two custody shapes: buy fees are
+/// complete sets in the fee account, while sell fees are plain USDC in the
+/// book. Both are revenue rather than curve P&L, so the accumulated fee claim
+/// and both retained forms are removed from the loss.
 fn realized_book_loss(
     book: &MarketBook<crate::AccountId>,
     seed_capital: Balance,
@@ -94,9 +95,18 @@ fn realized_book_loss(
         );
     let (capital, retained) = if matches!(book.kind, BookKind::Baseline { .. }) {
         let capital = seed_capital.checked_add(book.fees_accrued)?;
+        let retained_fee_sets =
+            pallet_conditional_ledger::Positions::<Runtime>::get(long, &book.fees_account).min(
+                pallet_conditional_ledger::Positions::<Runtime>::get(short, &book.fees_account),
+            );
         let plain_usdc =
             <ForeignAssets as Inspect<crate::AccountId>>::balance(usdc_location(), &book.account);
-        (capital, retained_sets.checked_add(plain_usdc)?)
+        (
+            capital,
+            retained_sets
+                .checked_add(retained_fee_sets)?
+                .checked_add(plain_usdc)?,
+        )
     } else {
         (seed_capital, retained_sets)
     };

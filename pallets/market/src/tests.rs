@@ -618,15 +618,15 @@ fn voided_fee_realizes_the_neutral_schedule_on_both_branches() {
 }
 
 #[test]
-fn baseline_book_remits_its_retained_plain_usdc_fee_above_the_min_balance_floor() {
-    // 04 §6.1: the Baseline sell wrapper has no mirror leg, so the **book**
-    // funds the payout and retains the fee as plain USDC — a different custody
-    // path from every other book, and the same crank must remit it. 03 §7 R-4
-    // scopes it: the sweep closes the *fee* component of the residue and leaves
-    // the `min_balance` endowment exactly where R-4 puts it.
+fn baseline_sweep_routes_both_fee_legs_to_main_without_inflating_pol_return() {
+    // 04 §6.1 / SQ-519: the buy fee is a complete Baseline set in FEES,
+    // while the sell fee is plain USDC retained by BOOK. The same Sweep must
+    // realize both to MAIN, return exactly the seeded subsidy to POL_BASELINE,
+    // and leave the R-4 `min_balance` endowment where the spec puts it.
     new_test_ext().execute_with(|| {
         create_baseline();
         seed(BASELINE_ID);
+        let headroom = seeded_headroom(BASELINE_ID);
         // R-4 endows the Baseline book at Seed; the mock's genesis funds every
         // fixture account, so establish the floor explicitly and measure from it.
         let floor = <Assets as Inspect<AccountId>>::minimum_balance(USDC);
@@ -646,26 +646,86 @@ fn baseline_book_remits_its_retained_plain_usdc_fee_above_the_min_balance_floor(
             TRADE,
             Balance::MAX,
         ));
+        let buy_fee = Markets::<Test>::get(BASELINE_ID)
+            .expect("created baseline exists")
+            .fees_accrued;
+        assert!(buy_fee > 0);
+        assert_eq!(
+            position_balance(baseline(EPOCH, ScalarSide::Long), FEES),
+            buy_fee,
+        );
+        assert_eq!(
+            position_balance(baseline(EPOCH, ScalarSide::Short), FEES),
+            buy_fee,
+        );
         System::set_block_number(20);
         assert_ok!(Market::sell(
             signed(ALICE),
             BASELINE_ID,
             ScalarSide::Long,
-            TRADE,
+            TRADE / 2,
             1,
         ));
         let retained = usdc(BOOK) - floor;
         assert!(retained > 0, "the sell fee is retained as plain USDC");
+        let accrued = Markets::<Test>::get(BASELINE_ID)
+            .expect("created baseline exists")
+            .fees_accrued;
+        assert_eq!(
+            accrued - buy_fee,
+            retained,
+            "the sell-side fee alone is retained as plain USDC",
+        );
 
         System::set_block_number(30);
         assert_ok!(Market::close(signed(MARKET_ADMIN), BASELINE_ID));
-        settle_baseline();
+        // Pick the settlement score that makes the post-trade book inventory
+        // worth exactly its seed. This isolates fee routing from ordinary LMSR
+        // trading P&L: any `pol_returned > headroom` below would therefore be
+        // fee contamination, not a favourable settlement or rounding spread.
+        let book_long = position_balance(baseline(EPOCH, ScalarSide::Long), BOOK);
+        let book_short = position_balance(baseline(EPOCH, ScalarSide::Short), BOOK);
+        let pairs = book_long.min(book_short);
+        assert!(pairs <= headroom);
+        let residual_short = book_short - pairs;
+        assert!(residual_short > 0);
+        let target_short_payout = headroom - pairs;
+        assert!(target_short_payout <= residual_short);
+        let price_one = Balance::from(market_core::PRICE_ONE_1E9);
+        let one_minus_score = target_short_payout
+            .checked_mul(price_one)
+            .and_then(|value| value.checked_add(residual_short - 1))
+            .expect("fixture arithmetic fits")
+            / residual_short;
+        assert_eq!(
+            residual_short * one_minus_score / price_one,
+            target_short_payout,
+            "the 1e9 settlement grid must represent the zero-P&L fixture",
+        );
+        let score = price_one - one_minus_score;
+        assert_ok!(Ledger::settle_baseline(
+            signed(SETTLER),
+            EPOCH,
+            FixedU64(u64::try_from(score).expect("score fits the price grid")),
+        ));
+        assert_ok!(Market::observe_baseline_terminal(EPOCH));
         let main_before = usdc(MAIN);
         sweep(BASELINE_ID);
 
-        assert_eq!(swept_fee_to_main(BASELINE_ID), retained);
-        assert_eq!(usdc(MAIN) - main_before, retained);
-        assert_eq!(MainCreditedTotal::get(), retained);
+        let expected_fee_to_main = buy_fee + retained;
+        assert_eq!(swept_fee_to_main(BASELINE_ID), expected_fee_to_main);
+        assert_eq!(usdc(MAIN) - main_before, expected_fee_to_main);
+        assert_eq!(MainCreditedTotal::get(), expected_fee_to_main);
+        assert_eq!(
+            swept_pol_returned(BASELINE_ID),
+            headroom,
+            "fee revenue must not be returned as excess POL subsidy",
+        );
+        assert_eq!(position_balance(baseline(EPOCH, ScalarSide::Long), FEES), 0,);
+        assert_eq!(
+            position_balance(baseline(EPOCH, ScalarSide::Short), FEES),
+            0,
+        );
         assert_eq!(
             usdc(BOOK),
             floor,

@@ -26,6 +26,7 @@ SPEC.loader.exec_module(GATE)
 HEAD = "ab" * 20
 
 CORPUS_FAMILY_CONSUMERS = {
+    "baseline_market_scenarios": ("market-core-twap-vectors",),
     "contest_scenarios": ("market-core-twap-vectors",),
     "decision_scenarios": ("decision-engine-reference-vectors",),
     "high_precision_corpus": ("fixed-reference-vectors",),
@@ -67,10 +68,10 @@ TEST_OUTPUTS = {
     "treasury-core-reference-vectors": GATE.CommandResult(
         0, stdout="test result: ok. 1 passed; 0 failed; 0 ignored\n"
     ),
-    # twap + contest + window-staleness: the stub must clear the leg's own
-    # `minimum_tests` floor, which tracks the real binary's test count.
+    # Baseline wrapper + twap + contest + window-staleness: the stub must clear
+    # the leg's own `minimum_tests` floor, which tracks the real binary's count.
     "market-core-twap-vectors": GATE.CommandResult(
-        0, stdout="test result: ok. 3 passed; 0 failed; 0 ignored\n"
+        0, stdout="test result: ok. 4 passed; 0 failed; 0 ignored\n"
     ),
     "ledger-pallet-core-differential": GATE.CommandResult(
         0, stdout="test result: ok. 1 passed; 0 failed; 0 ignored\n"
@@ -325,7 +326,7 @@ class ReportAndRunnerTests(PhaseGateTestCase):
             "welfare-core-reference-vectors": (1, 1),
             "welfare-core-normalization-vectors": (1, 1),
             "treasury-core-reference-vectors": (1, 1),
-            "market-core-twap-vectors": (3, 3),
+            "market-core-twap-vectors": (4, 4),
             "ledger-pallet-core-differential": (1, 1),
             "ledger-pallet-reference-sweep": (1, 1),
             "fixed-full-sweep": (1, 1),

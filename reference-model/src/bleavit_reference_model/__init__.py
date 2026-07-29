@@ -2,6 +2,7 @@
 from .lmsr import *
 from .twap import *
 from .ledger import *
+from .market import *
 from .welfare import *
 from .decision import *
 from .treasury import *
