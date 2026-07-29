@@ -23,8 +23,20 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 > ### ⇨ HAND-OFF (2026-07-29, end of the Track E implementation session) — READ THIS FIRST
 >
 > **PR #195 (E1) is MERGED** — squashed to `main` as `bdec21d`, 20/20 checks green.
-> **PR #196 (E2–E4) now targets `main` directly** and is MERGEABLE.
+> **PR #197 (the POL_BASELINE hotfix) is MERGED** — `af2e5a0`; `main` no longer carries
+> the release-blocking try-state defect.
+> **PR #196 (E2–E4) targets `main` directly**, is MERGEABLE, and its merge base is now
+> `af2e5a0`, so its diff is the real remaining delta (53 files / +5,794).
 > Working tree **clean**; everything below is committed and pushed except where stated.
+>
+> **The merge-bar lesson, which cost a hotfix (2026-07-29).** #195 merged on **20/20
+> green CI** — genuinely complete, nothing pending — while a `spec-reviewer` audit of
+> 03/04/08/13/15 was *still running against that same code*. That audit found a
+> release-blocking defect in what #195 had just shipped. **CI green is not the merge bar
+> when a deeper review is in flight**: a full CI pass says the suites that exist agree,
+> not that they cover the case. Here every existing test seeded at most one Baseline
+> book and the defect needs two, so no amount of CI would have caught it. Wait for a
+> review you deliberately commissioned before merging the code it is auditing.
 >
 > **Squash-merging the base of a stacked PR needs one deliberate step, and skipping it
 > silently doubles the review surface.** #195 was squashed, so `main` gained one commit
@@ -96,7 +108,9 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 > independently corroborated Codex's P1.
 >
 > **Closed this session:**
-> - **Blocker — POL_BASELINE endowment with no line debit** (`0e5e798` + `e4c2112`).
+> - **Blocker — POL_BASELINE endowment with no line debit** (`0e5e798` + `e4c2112` on
+>   this branch; shipped to `main` on its own as **#197**/`af2e5a0`, because a
+>   release-blocking try-state defect should not wait on a large PR's review).
 >   The R-4 `min_balance` endowment moved real USDC out of the POL_BASELINE pot while
 >   `pallet_market::seed` debited only the LMSR `headroom`. The pot carries exactly one
 >   `min_balance` of genesis slack, so the *second* Baseline book made the try-state this
