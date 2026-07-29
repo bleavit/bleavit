@@ -10,6 +10,25 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "surface-manifest.json"
 CONTRACT = ROOT.parents[1] / "docs" / "architecture" / "02-integration-contract.md"
+PRIMITIVES = ROOT.parents[1] / "crates" / "futarchy-primitives" / "src" / "lib.rs"
+
+
+def declared_contract_version() -> int:
+    """Read `INTEGRATION_CONTRACT_VERSION` from its single Rust home.
+
+    The manifest gates the runtime, so it has to agree with the constant that
+    runtime actually compiles. Asserting it against a literal here is what let
+    the manifest sit at 15 while the contract had already moved to 16: the
+    suite stayed green because both copies of the number were wrong together.
+    A test that owns its own copy of a value cannot detect that value drifting.
+    """
+    match = re.search(
+        r"^pub const INTEGRATION_CONTRACT_VERSION: u32 = (\d+);",
+        PRIMITIVES.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    assert match is not None, f"INTEGRATION_CONTRACT_VERSION not found in {PRIMITIVES}"
+    return int(match.group(1))
 MASK = (1 << 64) - 1
 P1 = 11400714785074694791
 P2 = 14029467366897019727
@@ -85,7 +104,17 @@ class SurfaceManifestTests(unittest.TestCase):
 
     def test_schema_and_entry_shapes(self) -> None:
         self.assertEqual(self.manifest["schema"], "bleavit.critical-surface.v1")
-        self.assertEqual(self.manifest["integration_contract_version"], 15)
+        # Derived, never pinned. The manifest declared 15 while the contract
+        # constant had already moved to 16 — invisible because this assertion
+        # carried its own literal and the two stale numbers agreed with each
+        # other. `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` is the one
+        # home for the value (02 §13); every other site asserts agreement with
+        # it, so a bump that misses the manifest now fails here instead of
+        # shipping a manifest that gates a runtime it no longer describes.
+        self.assertEqual(
+            self.manifest["integration_contract_version"],
+            declared_contract_version(),
+        )
         identifiers = [entry["id"] for entry in self.entries]
         self.assertEqual(len(identifiers), len(set(identifiers)))
         for entry in self.entries:
@@ -151,6 +180,8 @@ class SurfaceManifestTests(unittest.TestCase):
                 "BaselineRedeemed",
                 "VaultReaped",
                 "BaselineVaultReaped",
+                # contract v17 (E4): the 03 §5.3a fee sweep.
+                "RedemptionFeesSwept",
             },
             "pallet-market": {
                 "Traded",
@@ -158,6 +189,8 @@ class SurfaceManifestTests(unittest.TestCase):
                 "MarketCreated",
                 "MarketClosed",
                 "MarketReaped",
+                # contract v17 (E1/E2): the 04 §2 Sweep stage.
+                "RevenueSwept",
             },
             "pallet-epoch": {
                 "ProposalSubmitted",

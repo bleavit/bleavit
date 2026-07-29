@@ -30,6 +30,7 @@ CORPUS_FAMILY_CONSUMERS = {
     "decision_scenarios": ("decision-engine-reference-vectors",),
     "high_precision_corpus": ("fixed-reference-vectors",),
     "ledger_error_scenarios": ("ledger-core-reference-vectors",),
+    "ledger_fee_scenarios": ("ledger-core-reference-vectors",),
     "ledger_scenarios": ("ledger-core-reference-vectors",),
     "ledger_score_scenarios": ("ledger-core-reference-vectors",),
     "ledger_sequence_scenarios": ("ledger-core-reference-vectors",),

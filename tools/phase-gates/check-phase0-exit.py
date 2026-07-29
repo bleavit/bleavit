@@ -56,6 +56,11 @@ CORPUS_FAMILY_BINDINGS: Mapping[str, tuple[str, ...] | None] = {
     "contest_scenarios": ("market-core-twap-vectors",),
     "decision_scenarios": ("decision-engine-reference-vectors",),
     "high_precision_corpus": ("fixed-reference-vectors",),
+    # 03 §5.3a redemption-fee rows (E4). Replayed by the same differential
+    # command as the other ledger-core families — `differential_vectors.rs`
+    # dispatches on the row's own `params.contract_version`, so v16 and v17
+    # rows share one binary and one Phase-0 leg.
+    "ledger_fee_scenarios": ("ledger-core-reference-vectors",),
     "ledger_error_scenarios": ("ledger-core-reference-vectors",),
     "ledger_scenarios": ("ledger-core-reference-vectors",),
     "ledger_score_scenarios": ("ledger-core-reference-vectors",),
