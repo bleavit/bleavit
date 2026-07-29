@@ -22,10 +22,21 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 
 > ### ⇨ HAND-OFF (2026-07-29, end of the Track E implementation session) — READ THIS FIRST
 >
-> **Branch `feat/e2-e4-revenue-instruments` → PR #196, stacked on PR #195 (`feat/e1-treasury-sustainability`).**
+> **PR #195 (E1) is MERGED** — squashed to `main` as `bdec21d`, 20/20 checks green.
+> **PR #196 (E2–E4) now targets `main` directly** and is MERGEABLE.
 > Working tree **clean**; everything below is committed and pushed except where stated.
-> #195 is **19 pass / 1 pending / 0 fail**. #196 is **MERGEABLE and its CI is finally
-> running** — 11 pass / 4 pending / 0 fail.
+>
+> **Squash-merging the base of a stacked PR needs one deliberate step, and skipping it
+> silently doubles the review surface.** #195 was squashed, so `main` gained one commit
+> whose tree is byte-identical to the E1 tip but which shares **no ancestry** with it.
+> #196's merge base stayed at the pre-E1 commit, so GitHub's three-dot diff showed
+> **73 files / +14,543** — all of E1 again — where only **53 files / +5,695** were
+> actually left to review. Retargeting the PR does *not* fix that; the base has to move.
+> Merging `main` in (`2a16288`) did it: 18 files conflicted because E2–E4 had modified
+> E1's lines after the earlier `febe7a3` merge, and **every one resolves to `ours`** —
+> provably, because `theirs` is a tree identical to a commit already in our ancestry.
+> The check that proves it is tree equality, not a clean-looking merge: the merged tree
+> is byte-identical to the pre-merge tree, so the merge changed no content at all.
 >
 > **#196 had never run CI at all until 2026-07-29, and the cause is worth knowing.**
 > The PR was `CONFLICTING` against its base, and GitHub builds `pull_request` events on
@@ -66,9 +77,12 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 > see the Decision log row for the 15 §4.3 correction.
 >
 > **Next, in order:**
-> 1. Let #196's CI finish and request its round-2 Codex review — all four round-1
->    findings (2×P1, 2×P2) are closed in `a2de0ff`.
-> 2. Merge #195, then #196 (GitHub retargets #196 to `main` automatically).
+> 1. Let #196's CI finish (it re-runs on each push; the base change re-triggered it).
+> 2. Land the round-2 adversarial Codex review and the spec-reviewer pass on
+>    03/04/08/13/15 — all four round-1 findings (2×P1, 2×P2) are closed in `a2de0ff`,
+>    and round 2 is instructed to verify each is *actually* closed rather than described
+>    as closed.
+> 3. Merge #196.
 >
 > **Two items are deliberately NOT coded around — they are R-1 spec rulings, and
 > changing code before the spec rules would be the wrong order:**
