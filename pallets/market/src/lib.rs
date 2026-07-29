@@ -362,6 +362,25 @@ pub mod pallet {
     /// names the account the 04 §2 Sweep returns that custody to, so the
     /// permissionless crank cannot be pointed at a payee of the caller's
     /// choosing (08 §8 step 5(b)). Removed at reap.
+    ///
+    /// **No migration accompanies the E1 value widening `()` → `AccountId`, and
+    /// that is deliberate.** Raised as a P1 by review, on the correct general
+    /// reasoning that an old zero-byte `()` value cannot decode as an
+    /// `AccountId`, so `contains_key` would report a market seeded while `get`
+    /// returned `None`. That failure needs a chain carrying pre-widening values,
+    /// and none exists: Bleavit is **pre-genesis** — no runtime is deployed, the
+    /// Track G rollout gates are unmet, and every environment that has ever held
+    /// this key is an ephemeral zombienet/chopsticks fixture rebuilt from
+    /// genesis. This is the same clause 02 §13 applies to v15, v16 and v17
+    /// ("Pre-genesis revision — no runtime is deployed, so §13's point-3
+    /// migration clause does not apply").
+    ///
+    /// The note is here rather than only in a review reply because the argument
+    /// is not visible from this file, so the next reader would reasonably raise
+    /// it again. **It expires at genesis:** once a runtime is deployed, any
+    /// further change to this value shape needs a real migration, and the repo's
+    /// standing constraint that additional MBMs require their own exhaustive
+    /// cutpoint repair (B15/B16) applies in full.
     #[pallet::storage]
     pub type SeededMarkets<T: Config> =
         StorageMap<_, Blake2_128Concat, MarketId, T::AccountId, OptionQuery>;
