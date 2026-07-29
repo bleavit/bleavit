@@ -124,7 +124,7 @@ The `MetricId` assignment registry is owned by [05](05-welfare-and-decision-engi
 
 Proposal positions MUST project a settled proposal vault as `ScalarSettled { winner, s }`; Baseline positions MUST project a settled epoch vault as `BaselineSettled { s }` and MUST NOT fabricate a proposal branch. `RatificationStatus::NoPassedRecord` means only that the execution guard has no passing ratification record. It is deliberately agnostic between no referendum, an in-flight referendum and a failed referendum; the frontend MUST derive that lifecycle from `pallet-referenda` ([06](06-governance-and-guardians.md) §2.2). `Pending` and `Failed` are removed because the guard cannot truthfully produce them in the deployed design. This `RatificationStatus` restructure is a pre-genesis contract-v6 repair; no deployed SCALE value requires migration.
 
-The crate re-exports `INTEGRATION_CONTRACT_VERSION`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9). **It reads `16` until the v17 surface of §13 lands; the bump is atomic with that surface and is not in force before it** — see the v17 entry.
+The crate re-exports `INTEGRATION_CONTRACT_VERSION`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9). **It reads whichever version §13's history marks IN FORCE — currently v17.** A bump is always atomic with the surface it describes and is never in force ahead of it, so a consumer reads the constant rather than any prose statement of its value: this sentence used to name the pending version and the condition under which it would change, which made it a second copy of the number that went stale the moment the surface landed (corrected 2026-07-29, milestone E4).
 
 ---
 
@@ -483,7 +483,7 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 | VIT decimals | 12 |
 | VIT existential deposit | **0.01 VIT** (= 10^10 plancks) |
 | Phase flag storage | `pallet-constitution::PhaseFlags` (§7.3) — the trading-enablement key |
-| Contract version | `INTEGRATION_CONTRACT_VERSION` (runtime constant) — **`16` in force; `17` specified, lands with its surface (§13)** |
+| Contract version | `INTEGRATION_CONTRACT_VERSION` (runtime constant) — **`17` in force** (§13's history is the authority; read the constant, never a prose copy of it) |
 
 ---
 
