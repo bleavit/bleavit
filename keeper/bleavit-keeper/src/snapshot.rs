@@ -62,6 +62,11 @@ pub struct ChainSnapshot {
     pub qualified_recovery_proposals: BTreeSet<u64>,
     pub coretime: Option<CoretimeSnapshot>,
     pub market_reaps: Vec<ReapSnapshot>,
+    /// `Market::SweptMarkets` (04 §2), the swept marker `reap` requires since
+    /// milestone E1. `None` means the runtime predates the Sweep stage and
+    /// exposes no marker map at all, so its `reap` still carries the pre-E1
+    /// preconditions and must not be gated on a surface it does not have.
+    pub swept_markets: Option<BTreeSet<u64>>,
     pub proposal_dust: Vec<ReapSnapshot>,
     pub baseline_dust: Vec<ReapSnapshot>,
     pub baseline_vaults: Vec<BaselineVaultSnapshot>,
@@ -335,6 +340,7 @@ impl SnapshotExtractor {
             capability(
                 Role::Cleanup,
                 has_call("Market", "reap")
+                    || has_call("Market", "sweep_revenue")
                     || has_call("ConditionalLedger", "sweep_dust")
                     || has_call("ConditionalLedger", "sweep_dust_baseline")
                     || any_registry,
@@ -452,6 +458,7 @@ impl SnapshotExtractor {
             market_reaps: self
                 .extract_reaps(&at_block, "Market", "SettlementObservedAt", market_archive)
                 .await,
+            swept_markets: self.extract_swept_markets(&at_block).await,
             proposal_dust: self
                 .extract_reaps(
                     &at_block,
@@ -758,6 +765,31 @@ impl SnapshotExtractor {
                 })
             })
             .collect()
+    }
+
+    /// `Market::SweptMarkets` (04 §2), the marker the E1 Sweep stage writes and
+    /// `reap` requires. Only the key carries meaning — the map's value is `()` —
+    /// so a market is reported swept exactly when its entry is readable.
+    ///
+    /// The two degradations point the safe way on their own. An entry missed by
+    /// a partial read re-plans an idempotent `sweep_revenue` (a successful
+    /// no-op) and delays that book's reap; neither direction can invent a marker
+    /// that is not there, which is the only error that would let a reap discard
+    /// unswept inventory.
+    async fn extract_swept_markets(
+        &self,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
+    ) -> Option<BTreeSet<u64>> {
+        if !self.has_storage("Market", "SweptMarkets") {
+            return None;
+        }
+        Some(
+            self.iter_values(at_block, "Market", "SweptMarkets")
+                .await
+                .into_iter()
+                .filter_map(|(keys, _)| keys.first().and_then(as_u64))
+                .collect(),
+        )
     }
 
     async fn extract_reaps(

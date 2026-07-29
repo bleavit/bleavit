@@ -31,8 +31,18 @@ pub const PRIORITY_OBSERVE: u16 = 500;
 /// terminal-block latch that the Baseline dust sweep and the book reap both
 /// require (05 §7(6)), so it has to land before the cleanup work it unblocks.
 pub const PRIORITY_BASELINE_FINALIZE: u16 = 150;
+/// Above `PRIORITY_CLEANUP` for two independent reasons (04 §2, milestone E1).
+/// The 04 §2 Sweep stage is the precondition of the book reap, so it has to hold
+/// the lower nonce in any batch that carries both. And the custody it returns is
+/// exactly what the ledger's independent `sweep_dust*` would otherwise route to
+/// `INSURANCE` (03 §5.4) — the two are bounded a whole `ledger.archive_delay`
+/// apart, but nothing locks them, so the keeper does not leave the order to
+/// chance (SQ-512). Below `PRIORITY_BASELINE_FINALIZE`, which writes the very
+/// terminal latch the sweep needs.
+pub const PRIORITY_MARKET_SWEEP: u16 = 125;
 pub const PRIORITY_CLEANUP: u16 = 100;
-const _: () = assert!(PRIORITY_BASELINE_FINALIZE > PRIORITY_CLEANUP);
+const _: () = assert!(PRIORITY_BASELINE_FINALIZE > PRIORITY_MARKET_SWEEP);
+const _: () = assert!(PRIORITY_MARKET_SWEEP > PRIORITY_CLEANUP);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlannedCrank {
@@ -657,8 +667,23 @@ fn plan_cleanup(snapshot: &ChainSnapshot, config: &PlannerConfig, cranks: &mut V
             PRIORITY_CLEANUP,
         ));
     }
+    // 04 §2's Sweep and Reap stages. Both are gated by the same
+    // `SettlementObservedAt` latch — which is what `market_reaps` is — so they
+    // are planned together and their ordering is visible in one place. Sweep is
+    // admissible from the terminal block with no delay; reap only after
+    // `ledger.archive_delay` **and** the marker the sweep writes.
     for candidate in &snapshot.market_reaps {
+        if snapshot.has_call("Market", "sweep_revenue") && sweep_due(snapshot, candidate.id) {
+            cranks.push(crank(
+                Role::Cleanup,
+                "Market",
+                "sweep_revenue",
+                [("market", number(candidate.id))],
+                PRIORITY_MARKET_SWEEP,
+            ));
+        }
         if snapshot.has_call("Market", "reap")
+            && reap_swept(snapshot, candidate.id)
             && reap_due(
                 snapshot.current_block,
                 candidate.terminal_at,
@@ -742,6 +767,29 @@ fn reap_due(current: u64, terminal_at: Option<u64>, archive_delay: Option<u64>) 
     terminal_at
         .zip(archive_delay)
         .is_some_and(|(at, delay)| current >= at.saturating_add(delay))
+}
+
+/// The book still owes its 04 §2 Sweep: the marker map is readable and carries
+/// no entry for it. `sweep_revenue` is idempotent, so a stale `true` costs one
+/// no-op submission, but suppressing the repeat is what keeps a settled slate
+/// from re-planning the whole set on every finalized block.
+fn sweep_due(snapshot: &ChainSnapshot, market: u64) -> bool {
+    snapshot
+        .swept_markets
+        .as_ref()
+        .is_some_and(|swept| !swept.contains(&market))
+}
+
+/// `reap` requires that marker in addition to the terminal latch and the
+/// archive delay, and answers `NotReapable` without it (04 §2, milestone E1).
+/// A runtime predating the Sweep stage exposes no marker map — `None` — and
+/// keeps its pre-E1 preconditions, so its reaps are not gated on a surface that
+/// chain does not have.
+fn reap_swept(snapshot: &ChainSnapshot, market: u64) -> bool {
+    snapshot
+        .swept_markets
+        .as_ref()
+        .is_none_or(|swept| swept.contains(&market))
 }
 
 fn enabled(config: &PlannerConfig, role: Role) -> bool {
@@ -828,6 +876,7 @@ mod tests {
                 "Epoch.finalize_epoch_baseline",
                 "Market.crank_observe",
                 "Market.reap",
+                "Market.sweep_revenue",
                 "Oracle.crank_round_close",
                 "Oracle.crank_reserve_probe",
                 "IncidentRegistry.crank_close",
@@ -945,6 +994,10 @@ mod tests {
                 terminal_at: Some(900),
                 archive_delay: Some(50),
             }],
+            // Swept, so the fixture's book is reapable: 04 §2 makes the marker
+            // a reap precondition, and the two stages are mutually exclusive on
+            // any one book.
+            swept_markets: Some(BTreeSet::from([88])),
             proposal_dust: vec![ReapSnapshot {
                 id: 3,
                 terminal_at: Some(900),
@@ -1736,5 +1789,88 @@ mod tests {
         assert_eq!(reaps.len(), 1, "got {planned:?}");
         assert_eq!(argument(reaps[0], "epoch"), Some(3));
         assert_eq!(argument(reaps[0], "spec_version"), Some(3));
+    }
+
+    /// SQ-511: 04 §2's Sweep stage is admissible from the terminal block with no
+    /// delay, and `reap` answers `NotReapable` until it has run — so an unswept
+    /// latched book is swept and is *not* offered to reap, however long its
+    /// archive delay has been elapsed.
+    #[test]
+    fn an_unswept_book_is_swept_and_is_not_reaped_before_it() {
+        let mut snapshot = snapshot();
+        snapshot.swept_markets = Some(BTreeSet::new());
+        let planned = plan(&snapshot, &config_for(Role::Cleanup));
+        let sweep = planned
+            .iter()
+            .find(|crank| crank.call == "sweep_revenue")
+            .expect("a latched, unswept book is sweepable");
+        assert_eq!(sweep.pallet, "Market");
+        assert_eq!(argument(sweep, "market"), Some(88));
+        assert_eq!(sweep.priority, PRIORITY_MARKET_SWEEP);
+        assert!(
+            !planned.iter().any(|crank| crank.call == "reap"),
+            "reap must not be planned before the sweep it requires: {planned:?}"
+        );
+    }
+
+    /// The marker makes the two stages mutually exclusive on one book, so the
+    /// ordering is proved across two: the sweep of a still-owing book outranks
+    /// both the reap of a swept one and the ledger dust sweeps. `sweep_dust*` is
+    /// independent of the market and routes residue to `INSURANCE` (03 §5.4), so
+    /// losing that race is what SQ-512 costs.
+    #[test]
+    fn sweep_outranks_the_reap_and_the_dust_sweeps_it_must_precede() {
+        let mut snapshot = snapshot();
+        snapshot.market_reaps.push(ReapSnapshot {
+            id: 89,
+            terminal_at: Some(900),
+            archive_delay: Some(50),
+        });
+        let planned = plan(&snapshot, &config_for(Role::Cleanup));
+        let position = |call: &str| {
+            planned
+                .iter()
+                .position(|crank| crank.call == call)
+                .unwrap_or_else(|| panic!("fixture has due {call} work; got {planned:?}"))
+        };
+        let sweep = position("sweep_revenue");
+        assert_eq!(argument(&planned[sweep], "market"), Some(89));
+        assert!(sweep < position("reap"));
+        assert!(sweep < position("sweep_dust"));
+        assert!(planned[sweep].priority > PRIORITY_CLEANUP);
+    }
+
+    /// The marker is durable until reap, so a settled slate must not re-plan its
+    /// whole sweep set on every finalized block.
+    #[test]
+    fn an_already_swept_book_is_not_swept_again() {
+        let planned = plan(&snapshot(), &config_for(Role::Cleanup));
+        assert!(
+            !planned.iter().any(|crank| crank.call == "sweep_revenue"),
+            "the fixture's book is already swept: {planned:?}"
+        );
+        assert!(planned.iter().any(|crank| crank.call == "reap"));
+    }
+
+    /// A runtime predating the Sweep stage carries neither the call nor the
+    /// marker map, and its `reap` never needed one. Gating that chain's reaps on
+    /// an absent surface would stall its cleanup outright.
+    #[test]
+    fn reap_is_not_gated_on_a_marker_surface_the_runtime_lacks() {
+        let mut snapshot = snapshot();
+        snapshot.swept_markets = None;
+        snapshot.available_calls.remove("Market.sweep_revenue");
+        let planned = plan(&snapshot, &config_for(Role::Cleanup));
+        assert!(planned.iter().any(|crank| crank.call == "reap"));
+        assert!(!planned.iter().any(|crank| crank.call == "sweep_revenue"));
+
+        // And the sweep is equally suppressed when only the call is missing:
+        // planning it against a chain that cannot dispatch it is a doomed
+        // submission, not a degradation.
+        let mut half_present = snapshot.clone();
+        half_present.swept_markets = Some(BTreeSet::new());
+        assert!(!plan(&half_present, &config_for(Role::Cleanup))
+            .iter()
+            .any(|crank| crank.call == "sweep_revenue"));
     }
 }
