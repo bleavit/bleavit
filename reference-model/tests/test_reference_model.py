@@ -1790,6 +1790,18 @@ class RedemptionFeeTests(unittest.TestCase):
                 scenario["fees_charged_total"],
                 scenario["fees_accrued"] + scenario["fees_swept_total"],
             )
+            # 03 §5.3a(4): `RedemptionFeesAccrued` is pallet storage, so a
+            # differential comparing only `final_state` must still see it.
+            self.assertEqual(
+                scenario["final_state"]["redemption_fees_accrued"],
+                scenario["fees_accrued"],
+            )
+            self.assertEqual(
+                scenario["initial_state"]["digest"][
+                    "redemption_fees_accrued"
+                ],
+                0,
+            )
         self.assertEqual(
             charged_calls,
             {
@@ -1805,6 +1817,82 @@ class RedemptionFeeTests(unittest.TestCase):
                 exempt_calls
             )
         )
+
+    # -- 02 §6 contract-v17 event shape -------------------------------------
+
+    def test_fee_corpus_events_carry_the_gross_with_a_trailing_fee(self):
+        # 02 §6 rule 1: the pre-existing `amount`/`payout` field keeps its
+        # meaning — the GROSS claim value — and `fee` is appended, so a
+        # consumer computes `net = payout − fee` and no frozen field moves.
+        # Emitting the net there would ship a wrong frozen event.
+        fee_bearing = {
+            "redeem_scalar": "ScalarRedeemed",
+            "redeem_scalar_pair": "ScalarPairRedeemed",
+            "redeem_gate": "GateRedeemed",
+            "redeem_baseline": "BaselineRedeemed",
+            "redeem_baseline_pair": "BaselineRedeemed",
+        }
+        # Rule 3: these two are exempt and MUST NOT gain a `fee` field.
+        exempt = {
+            "redeem": "Redeemed",
+            "redeem_void": "VoidRedeemed",
+            "merge": "Merged",
+            "merge_baseline": "BaselineMerged",
+        }
+        witnessed = set()
+        net_differs = 0
+        for scenario in _fixture()["ledger_fee_scenarios"]:
+            self.assertEqual(scenario["params"]["contract_version"], 17)
+            events = {
+                index: event
+                for index, event in enumerate(
+                    scenario["final_state"]["events"]
+                )
+            }
+            emitted = [events[index] for index in sorted(events)]
+            cursor = 0
+            for op in scenario["ops"]:
+                if "err" in op["outcome"]:
+                    continue
+                if op["op"] not in fee_bearing and op["op"] not in exempt:
+                    cursor += 1
+                    continue
+                event = emitted[cursor]
+                cursor += 1
+                if op["op"] in fee_bearing:
+                    self.assertEqual(event["kind"], fee_bearing[op["op"]])
+                    # trailing `fee`, gross immediately before it
+                    self.assertEqual(event["fields"][-1], op["fee"])
+                    self.assertEqual(event["fields"][-2], op["gross"])
+                    # the outcome speaks the same language as the event
+                    self.assertEqual(
+                        op["outcome"]["ok"]["payout"], op["gross"]
+                    )
+                    self.assertEqual(op["outcome"]["ok"]["fee"], op["fee"])
+                    self.assertEqual(
+                        op["outcome"]["ok"]["payout"]
+                        - op["outcome"]["ok"]["fee"],
+                        op["net"],
+                    )
+                    witnessed.add(op["op"])
+                    if op["net"] != op["gross"]:
+                        net_differs += 1
+                else:
+                    self.assertEqual(event["kind"], exempt[op["op"]])
+                    self.assertNotIn("fee", op["outcome"]["ok"])
+                    self.assertEqual(op["fee"], 0)
+                    # `Merged`/`BaselineMerged` carry `amount`, and the two
+                    # exempt redemption events carry the gross payout; either
+                    # way no trailing fee exists to be mistaken for one.
+                    self.assertIn(
+                        op["gross"], event["fields"][1:]
+                    )
+                    witnessed.add(op["op"])
+        # Every fee-bearing and every exempt redemption call is witnessed,
+        # and the gross is provably not the net somewhere — otherwise the
+        # assertions above would pass on a corpus that emitted the net.
+        self.assertEqual(set(fee_bearing) | set(exempt), witnessed)
+        self.assertGreater(net_differs, 0)
 
     # -- the two rules that exist because the model found their absence -----
 

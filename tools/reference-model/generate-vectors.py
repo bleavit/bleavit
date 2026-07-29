@@ -10,6 +10,7 @@ import random
 import sys
 from decimal import Decimal, getcontext
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(
     0, str(Path(__file__).resolve().parents[2] / "reference-model" / "src")
@@ -673,6 +674,41 @@ class _SequenceError(Exception):
         self.error_class = error_class
 
 
+# 02 §6 "Redemption-fee field append" (contract v17): exactly these four
+# ledger events gain a **trailing** `fee: Balance`. `Redeemed` and
+# `VoidRedeemed` do NOT gain it and MUST NOT — a `fee` field on either would
+# be identically zero forever while implying a charge the ledger is forbidden
+# to make (rule 3). The set is written out here, not derived, because it is
+# frozen contract surface.
+_FEE_BEARING_EVENTS = frozenset(
+    {
+        "ScalarRedeemed",
+        "ScalarPairRedeemed",
+        "GateRedeemed",
+        "BaselineRedeemed",
+    }
+)
+
+_CONTRACT_V16 = 16
+_CONTRACT_V17 = 17
+
+
+class _Payout(NamedTuple):
+    """One redemption's three distinct quantities, never interchangeable.
+
+    02 §6 rule 1: the event's pre-existing `amount`/`payout` field carries the
+    **gross** — the claim value burned, the quantity 03 §5.3 decrements
+    `escrowed` by — and `fee` is the trailing append, so a consumer computes
+    `net = payout − fee`. The **net** is the dispatch return, never an event
+    field. Naming all three at the point they are derived is what stops a net
+    value reaching a gross field.
+    """
+
+    gross: int
+    fee: int
+    net: int
+
+
 def _proposal_key(branch, kind, gate=None):
     key = f"proposal/{branch.value}/{kind.value}"
     return f"{key}/{gate.value}" if gate is not None else key
@@ -701,7 +737,17 @@ class _LedgerSequenceModel:
         redeem_fee: int = 0,
         min_split: int = MIN_SPLIT,
         protocol_accounts=(),
+        contract_version: int = _CONTRACT_V16,
     ):
+        # 02 §13/§14: the redemption-fee field append is contract **v17**, and
+        # that entry is explicit that the bump is atomic with the surface —
+        # `INTEGRATION_CONTRACT_VERSION` stays 16 until E1 ships. So the model
+        # emits the shape of the version it is configured for: the pre-E1
+        # sequence corpus stays v16 (the in-force surface), and the E1 fee
+        # corpus is v17 (the target it exists to pin). A v16 model that
+        # somehow charged a fee would be emitting an event that cannot carry
+        # it, so that combination is refused outright below.
+        self.contract_version = contract_version
         # 03 §5.3a: the rate defaults to 0, so the 64 pre-E1 sequence rows are
         # generated at exactly their historical behaviour and the fee corpus
         # opts in explicitly.
@@ -789,6 +835,54 @@ class _LedgerSequenceModel:
 
     def _emit(self, kind, *fields):
         self.events.append({"kind": kind, "fields": list(fields)})
+
+    def _measure(self, vault, call):
+        """Run one redemption and name its three quantities separately.
+
+        The vault call returns the **net** (what the dispatch hands back); the
+        **gross** is read from the escrow outflow and the **fee** from the
+        accrual counter, so each is derived from the quantity it actually is.
+        """
+        before_gross = vault.total_payouts
+        before_fee = vault.fees_charged_total
+        net = call()
+        gross = vault.total_payouts - before_gross
+        fee = vault.fees_charged_total - before_fee
+        if net + fee != gross:
+            raise AssertionError("net + fee != gross")
+        return _Payout(gross=gross, fee=fee, net=net)
+
+    def _emit_redemption(self, kind, leading, payout):
+        """02 §6 emit seam for the redemption events.
+
+        `payout` is a `_Payout`, so the gross cannot be confused with the net:
+        the pre-existing `amount`/`payout` field is filled from `.gross`
+        (rule 1) and `.net` is never emitted at all. The trailing `fee` is
+        appended only for the four fee-bearing events of the append block, and
+        only at contract v17; `Redeemed` and `VoidRedeemed` can never receive
+        one (rule 3), which is enforced here rather than left to each site.
+        """
+        if kind in _FEE_BEARING_EVENTS:
+            if self.contract_version >= _CONTRACT_V17:
+                self._emit(kind, *leading, payout.gross, payout.fee)
+                return
+            if payout.fee:
+                raise AssertionError(
+                    f"{kind} charged a fee at contract v"
+                    f"{self.contract_version}, which has no field to carry it"
+                )
+        elif payout.fee:
+            raise AssertionError(f"{kind} is fee-exempt but charged a fee")
+        self._emit(kind, *leading, payout.gross)
+
+    def _redemption_outcome(self, kind, burned, payout):
+        """The per-op result, in the same gross+fee language as the event."""
+        result = {"burned": burned, "payout": payout.gross}
+        if kind in _FEE_BEARING_EVENTS and (
+            self.contract_version >= _CONTRACT_V17
+        ):
+            result["fee"] = payout.fee
+        return result
 
     def _proposal_state(self, *states):
         if self.proposal.state not in states:
@@ -967,10 +1061,12 @@ class _LedgerSequenceModel:
             branch = self.proposal.winner
             key = _proposal_key(branch, PositionKind.BRANCH_USDC)
             self._ensure_holds(account, key, amount)
-            payout = self.proposal.redeem(branch, amount)
+            payout = self._measure(
+                self.proposal, lambda: self.proposal.redeem(branch, amount)
+            )
             self._burn(account, key, amount)
-            self._emit("Redeemed", 1, payout)
-            return {"burned": amount, "payout": payout}
+            self._emit_redemption("Redeemed", (1,), payout)
+            return self._redemption_outcome("Redeemed", amount, payout)
 
         if name in ("redeem_scalar", "redeem_scalar_pair"):
             self._proposal_state(VaultState.SCALAR_SETTLED)
@@ -981,24 +1077,30 @@ class _LedgerSequenceModel:
             if name == "redeem_scalar_pair":
                 self._ensure_holds(account, long_key, amount)
                 self._ensure_holds(account, short_key, amount)
-                payout = self.proposal.redeem_scalar_pair(
-                    branch, amount, protocol_account=protocol
+                payout = self._measure(
+                    self.proposal,
+                    lambda: self.proposal.redeem_scalar_pair(
+                        branch, amount, protocol_account=protocol
+                    ),
                 )
                 self._burn(account, long_key, amount)
                 self._burn(account, short_key, amount)
-                self._emit("ScalarPairRedeemed", 1, payout)
+                event = "ScalarPairRedeemed"
+                self._emit_redemption(event, (1,), payout)
             else:
                 side = ScalarSide(args["side"])
                 key = long_key if side is ScalarSide.LONG else short_key
                 self._ensure_holds(account, key, amount)
-                payout = self.proposal.redeem_scalar(
-                    branch, side, amount, protocol_account=protocol
+                payout = self._measure(
+                    self.proposal,
+                    lambda: self.proposal.redeem_scalar(
+                        branch, side, amount, protocol_account=protocol
+                    ),
                 )
                 self._burn(account, key, amount)
-                self._emit(
-                    "ScalarRedeemed", 1, side.value, payout
-                )
-            return {"burned": amount, "payout": payout}
+                event = "ScalarRedeemed"
+                self._emit_redemption(event, (1, side.value), payout)
+            return self._redemption_outcome(event, amount, payout)
 
         if name == "redeem_gate":
             self._proposal_state(VaultState.SCALAR_SETTLED)
@@ -1011,16 +1113,24 @@ class _LedgerSequenceModel:
             kind = PositionKind.GATE_YES if outcome else PositionKind.GATE_NO
             key = _proposal_key(branch, kind, gate)
             self._ensure_holds(account, key, amount)
-            payout = self.proposal.redeem_gate(
-                branch,
-                gate,
-                side,
-                amount,
-                protocol_account=self._is_protocol(account),
+            protocol = self._is_protocol(account)
+            payout = self._measure(
+                self.proposal,
+                lambda: self.proposal.redeem_gate(
+                    branch,
+                    gate,
+                    side,
+                    amount,
+                    protocol_account=protocol,
+                ),
             )
             self._burn(account, key, amount)
-            self._emit("GateRedeemed", 1, gate.value, payout)
-            return {"burned": amount, "payout": payout}
+            self._emit_redemption(
+                "GateRedeemed", (1, gate.value), payout
+            )
+            return self._redemption_outcome(
+                "GateRedeemed", amount, payout
+            )
 
         if name == "redeem_void":
             self._proposal_state(VaultState.VOIDED)
@@ -1029,15 +1139,23 @@ class _LedgerSequenceModel:
             gate = GateType(args["gate"]) if "gate" in args else None
             key = _proposal_key(branch, kind, gate)
             self._ensure_holds(account, key, amount)
-            payout = self.proposal.redeem_void(
-                branch, kind, amount, gate
+            payout = self._measure(
+                self.proposal,
+                lambda: self.proposal.redeem_void(
+                    branch, kind, amount, gate
+                ),
             )
             self._burn(account, key, amount)
             event_kind = kind.value
             if gate is not None:
                 event_kind = f"{event_kind}/{gate.value}"
-            self._emit("VoidRedeemed", 1, event_kind, amount, payout)
-            return {"burned": amount, "payout": payout}
+            # 02 §6 rule 3: `VoidRedeemed` never gains a `fee` field.
+            self._emit_redemption(
+                "VoidRedeemed", (1, event_kind, amount), payout
+            )
+            return self._redemption_outcome(
+                "VoidRedeemed", amount, payout
+            )
 
         if name == "split_baseline":
             if amount < _MIN_LEDGER_AMOUNT:
@@ -1075,26 +1193,33 @@ class _LedgerSequenceModel:
             if name == "redeem_baseline_pair":
                 self._ensure_holds(account, long_key, amount)
                 self._ensure_holds(account, short_key, amount)
-                payout = self.baseline.redeem_baseline_pair(
-                    amount, protocol_account=protocol
+                payout = self._measure(
+                    self.baseline,
+                    lambda: self.baseline.redeem_baseline_pair(
+                        amount, protocol_account=protocol
+                    ),
                 )
                 self._burn(account, long_key, amount)
                 self._burn(account, short_key, amount)
-                self._emit(
-                    "BaselineRedeemed", 7, ScalarSide.LONG.value, payout
-                )
+                emitted_side = ScalarSide.LONG.value
             else:
                 side = ScalarSide(args["side"])
                 key = long_key if side is ScalarSide.LONG else short_key
                 self._ensure_holds(account, key, amount)
-                payout = self.baseline.redeem_baseline(
-                    side, amount, protocol_account=protocol
+                payout = self._measure(
+                    self.baseline,
+                    lambda: self.baseline.redeem_baseline(
+                        side, amount, protocol_account=protocol
+                    ),
                 )
                 self._burn(account, key, amount)
-                self._emit(
-                    "BaselineRedeemed", 7, side.value, payout
-                )
-            return {"burned": amount, "payout": payout}
+                emitted_side = side.value
+            self._emit_redemption(
+                "BaselineRedeemed", (7, emitted_side), payout
+            )
+            return self._redemption_outcome(
+                "BaselineRedeemed", amount, payout
+            )
 
         if name == "sweep_redemption_fees":
             # 03 §5.4 / §5.3a(4): move the whole accrued balance to the fee
@@ -1140,7 +1265,7 @@ class _LedgerSequenceModel:
                     }
                 )
                 totals[key] = totals.get(key, 0) + balance
-        return {
+        state = {
             "proposal": {
                 "proposal_id": 1,
                 "escrowed": self.proposal.escrowed,
@@ -1199,6 +1324,13 @@ class _LedgerSequenceModel:
             # pre-E1 row, so those digests are byte-identical.
             "protocol_accounts": sorted(self.protocol_accounts),
         }
+        if self.contract_version >= _CONTRACT_V17:
+            # 03 §5.3a(4): `RedemptionFeesAccrued` is real pallet storage, so
+            # a differential that compares only `final_state` must be able to
+            # see it. It exists only from E1, hence the version gate — the
+            # pre-E1 rows describe a runtime that has no such item.
+            state["redemption_fees_accrued"] = self.fees_accrued()
+        return state
 
 
 def _op(name, **args):
@@ -1590,8 +1722,19 @@ _PAYOUT_OPS = frozenset(
 )
 
 
+# Appended to every fee row's `coverage_intent`. 02 §6 rule 1 splits the two
+# quantities across two surfaces, and a porter who swaps them ships a frozen
+# event that is wrong forever — so each row says which is which, standalone.
+_FEE_INTENT_SUFFIX = (
+    " [contract v17 shape: the event and this row's `outcome.payout` carry "
+    "the GROSS with a trailing `fee`, so net = payout - fee (02 §6 rule 1); "
+    "the dispatch/model return value is the NET. `Redeemed` and "
+    "`VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]"
+)
+
+
 def _fee_scenario(name, intent, params, operations):
-    model = _LedgerSequenceModel(**params)
+    model = _LedgerSequenceModel(contract_version=_CONTRACT_V17, **params)
     initial = model.digest()
     rows = []
     for operation in operations:
@@ -1606,11 +1749,21 @@ def _fee_scenario(name, intent, params, operations):
             model.proposal.total_payouts + model.baseline.total_payouts
         ) - gross_before
         if operation["op"] in _PAYOUT_OPS and "ok" in row["outcome"]:
-            net = row["outcome"]["ok"]["payout"]
-            # 03 §5.3a(4)/§6.5: `gross` is measured as the escrow outflow and
-            # `net` as the amount the claimant received, so this is a real
-            # identity and not a restatement of the subtraction that produced
-            # them.
+            # 03 §5.3a(4)/§6.5: `gross` is measured here as the escrow outflow
+            # and `fee` as the accrual-counter delta, independently of what
+            # the model reported, so the identity below is a real check.
+            net = gross - fee
+            emitted = row["outcome"]["ok"]
+            if emitted["payout"] != gross:
+                raise AssertionError(
+                    f"{name}/{operation['op']}: emitted payout "
+                    f"{emitted['payout']} is not the gross {gross}"
+                )
+            if emitted.get("fee", 0) != fee:
+                raise AssertionError(
+                    f"{name}/{operation['op']}: emitted fee "
+                    f"{emitted.get('fee')} != {fee}"
+                )
             if net + fee != gross:
                 raise AssertionError(
                     f"{name}/{operation['op']}: net {net} + fee {fee} "
@@ -1628,8 +1781,9 @@ def _fee_scenario(name, intent, params, operations):
     return {
         "name": name,
         "unit": "USDC base units (1e-6)",
-        "coverage_intent": intent,
+        "coverage_intent": intent + _FEE_INTENT_SUFFIX,
         "params": {
+            "contract_version": _CONTRACT_V17,
             "redeem_fee_perbill": params["redeem_fee"],
             "min_split": params.get("min_split", MIN_SPLIT),
             "protocol_accounts": sorted(params.get("protocol_accounts", ())),

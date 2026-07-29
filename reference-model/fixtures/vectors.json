@@ -578,7 +578,7 @@
   ],
   "ledger_fee_scenarios": [
     {
-      "coverage_intent": "redeem_scalar charged with ceil != floor (42.003 -> 43); the mirror leg's gross falls under ledger.min_split and is waived; sweep_redemption_fees zeroes the counter",
+      "coverage_intent": "redeem_scalar charged with ceil != floor (42.003 -> 43); the mirror leg's gross falls under ledger.min_split and is waived; sweep_redemption_fees zeroes the counter [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
       "fees_accrued": 0,
       "fees_charged_total": 43,
       "fees_swept_total": 43,
@@ -634,7 +634,8 @@
             "fields": [
               1,
               "Long",
-              13958
+              14001,
+              43
             ],
             "kind": "ScalarRedeemed"
           },
@@ -642,7 +643,8 @@
             "fields": [
               1,
               "Short",
-              5999
+              5999,
+              0
             ],
             "kind": "ScalarRedeemed"
           },
@@ -711,7 +713,8 @@
             "winner": "Accept"
           }
         },
-        "protocol_accounts": []
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 0
       },
       "initial_state": {
         "baseline_epoch": 7,
@@ -764,7 +767,8 @@
               "kind": "Open"
             }
           },
-          "protocol_accounts": []
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
         },
         "proposal_id": 1
       },
@@ -834,7 +838,8 @@
           "outcome": {
             "ok": {
               "burned": 20000,
-              "payout": 13958
+              "fee": 43,
+              "payout": 14001
             }
           }
         },
@@ -852,6 +857,7 @@
           "outcome": {
             "ok": {
               "burned": 20000,
+              "fee": 0,
               "payout": 5999
             }
           }
@@ -878,6 +884,7 @@
         }
       ],
       "params": {
+        "contract_version": 17,
         "min_split": 10000,
         "protocol_accounts": [],
         "redeem_fee_perbill": 3000000
@@ -885,7 +892,7 @@
       "unit": "USDC base units (1e-6)"
     },
     {
-      "coverage_intent": "03 \u00a75.3a(2a) PT-7 witness: identical holdings redeemed as a pair and leg-by-leg at the same rate and score. The pair's fee base is its own two legs, so both routes now net 19957 \u2014 the pair is never the worse choice. Charging fee(a) on the combined gross instead would net the pair 19940",
+      "coverage_intent": "03 \u00a75.3a(2a) PT-7 witness: identical holdings redeemed as a pair and leg-by-leg at the same rate and score. The pair's fee base is its own two legs, so both routes now net 19957 \u2014 the pair is never the worse choice. Charging fee(a) on the combined gross instead would net the pair 19940 [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
       "fees_accrued": 86,
       "fees_charged_total": 86,
       "fees_swept_total": 0,
@@ -940,7 +947,8 @@
           {
             "fields": [
               1,
-              19957
+              20000,
+              43
             ],
             "kind": "ScalarPairRedeemed"
           },
@@ -948,7 +956,8 @@
             "fields": [
               1,
               "Long",
-              13958
+              14001,
+              43
             ],
             "kind": "ScalarRedeemed"
           },
@@ -956,7 +965,8 @@
             "fields": [
               1,
               "Short",
-              5999
+              5999,
+              0
             ],
             "kind": "ScalarRedeemed"
           }
@@ -1013,7 +1023,8 @@
             "winner": "Accept"
           }
         },
-        "protocol_accounts": []
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 86
       },
       "initial_state": {
         "baseline_epoch": 7,
@@ -1066,7 +1077,8 @@
               "kind": "Open"
             }
           },
-          "protocol_accounts": []
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
         },
         "proposal_id": 1
       },
@@ -1135,7 +1147,8 @@
           "outcome": {
             "ok": {
               "burned": 20000,
-              "payout": 19957
+              "fee": 43,
+              "payout": 20000
             }
           }
         },
@@ -1153,7 +1166,8 @@
           "outcome": {
             "ok": {
               "burned": 20000,
-              "payout": 13958
+              "fee": 43,
+              "payout": 14001
             }
           }
         },
@@ -1171,12 +1185,14 @@
           "outcome": {
             "ok": {
               "burned": 20000,
+              "fee": 0,
               "payout": 5999
             }
           }
         }
       ],
       "params": {
+        "contract_version": 17,
         "min_split": 10000,
         "protocol_accounts": [],
         "redeem_fee_perbill": 3000000
@@ -1184,7 +1200,7 @@
       "unit": "USDC base units (1e-6)"
     },
     {
-      "coverage_intent": "redeem_gate on the winning side is charged at the full 1:1 gross",
+      "coverage_intent": "redeem_gate on the winning side is charged at the full 1:1 gross [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
       "fees_accrued": 3000,
       "fees_charged_total": 3000,
       "fees_swept_total": 0,
@@ -1251,7 +1267,8 @@
             "fields": [
               1,
               "Survival",
-              997000
+              1000000,
+              3000
             ],
             "kind": "GateRedeemed"
           }
@@ -1318,7 +1335,8 @@
             "winner": "Accept"
           }
         },
-        "protocol_accounts": []
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 3000
       },
       "initial_state": {
         "baseline_epoch": 7,
@@ -1371,7 +1389,8 @@
               "kind": "Open"
             }
           },
-          "protocol_accounts": []
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
         },
         "proposal_id": 1
       },
@@ -1455,12 +1474,14 @@
           "outcome": {
             "ok": {
               "burned": 1000000,
-              "payout": 997000
+              "fee": 3000,
+              "payout": 1000000
             }
           }
         }
       ],
       "params": {
+        "contract_version": 17,
         "min_split": 10000,
         "protocol_accounts": [],
         "redeem_fee_perbill": 3000000
@@ -1468,7 +1489,7 @@
       "unit": "USDC base units (1e-6)"
     },
     {
-      "coverage_intent": "03 \u00a75.3a(1): `merge` and the `redeem` par leg pay no fee at a non-zero rate \u2014 G-3 and I-5's 1:1 guarantee survive verbatim",
+      "coverage_intent": "03 \u00a75.3a(1): `merge` and the `redeem` par leg pay no fee at a non-zero rate \u2014 G-3 and I-5's 1:1 guarantee survive verbatim [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
       "fees_accrued": 0,
       "fees_charged_total": 0,
       "fees_swept_total": 0,
@@ -1579,7 +1600,8 @@
             "winner": "Accept"
           }
         },
-        "protocol_accounts": []
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 0
       },
       "initial_state": {
         "baseline_epoch": 7,
@@ -1632,7 +1654,8 @@
               "kind": "Open"
             }
           },
-          "protocol_accounts": []
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
         },
         "proposal_id": 1
       },
@@ -1709,6 +1732,7 @@
         }
       ],
       "params": {
+        "contract_version": 17,
         "min_split": 10000,
         "protocol_accounts": [],
         "redeem_fee_perbill": 3000000
@@ -1716,7 +1740,7 @@
       "unit": "USDC base units (1e-6)"
     },
     {
-      "coverage_intent": "03 \u00a75.3a(1): nothing admissible under `Voided` is fee-bearing, so \u00a76.4's D-1 valuation argument is unchanged",
+      "coverage_intent": "03 \u00a75.3a(1): nothing admissible under `Voided` is fee-bearing, so \u00a76.4's D-1 valuation argument is unchanged [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
       "fees_accrued": 0,
       "fees_charged_total": 0,
       "fees_swept_total": 0,
@@ -1834,7 +1858,8 @@
             "kind": "Voided"
           }
         },
-        "protocol_accounts": []
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 0
       },
       "initial_state": {
         "baseline_epoch": 7,
@@ -1887,7 +1912,8 @@
               "kind": "Open"
             }
           },
-          "protocol_accounts": []
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
         },
         "proposal_id": 1
       },
@@ -1982,6 +2008,7 @@
         }
       ],
       "params": {
+        "contract_version": 17,
         "min_split": 10000,
         "protocol_accounts": [],
         "redeem_fee_perbill": 3000000
@@ -1989,7 +2016,7 @@
       "unit": "USDC base units (1e-6)"
     },
     {
-      "coverage_intent": "redeem_baseline and redeem_baseline_pair are charged; merge_baseline is exempt; the counter accrues across vaults",
+      "coverage_intent": "redeem_baseline and redeem_baseline_pair are charged; merge_baseline is exempt; the counter accrues across vaults [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
       "fees_accrued": 0,
       "fees_charged_total": 5102,
       "fees_swept_total": 5102,
@@ -2037,7 +2064,8 @@
             "fields": [
               7,
               "Long",
-              697949
+              700050,
+              2101
             ],
             "kind": "BaselineRedeemed"
           },
@@ -2045,7 +2073,8 @@
             "fields": [
               7,
               "Long",
-              996999
+              1000000,
+              3001
             ],
             "kind": "BaselineRedeemed"
           },
@@ -2106,7 +2135,8 @@
             "kind": "Open"
           }
         },
-        "protocol_accounts": []
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 0
       },
       "initial_state": {
         "baseline_epoch": 7,
@@ -2159,7 +2189,8 @@
               "kind": "Open"
             }
           },
-          "protocol_accounts": []
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
         },
         "proposal_id": 1
       },
@@ -2221,7 +2252,8 @@
           "outcome": {
             "ok": {
               "burned": 1000000,
-              "payout": 697949
+              "fee": 2101,
+              "payout": 700050
             }
           }
         },
@@ -2238,7 +2270,8 @@
           "outcome": {
             "ok": {
               "burned": 1000000,
-              "payout": 996999
+              "fee": 3001,
+              "payout": 1000000
             }
           }
         },
@@ -2254,6 +2287,7 @@
         }
       ],
       "params": {
+        "contract_version": 17,
         "min_split": 10000,
         "protocol_accounts": [],
         "redeem_fee_perbill": 3000000
@@ -2261,7 +2295,7 @@
       "unit": "USDC base units (1e-6)"
     },
     {
-      "coverage_intent": "03 \u00a75.3a(2)/I-32(b): the waiver tests the NET. A gross of exactly min_balance (10000) is waived and nets 10000 \u2014 a gross-based test would have charged it 30 and netted 9970, below min_balance, on the very BelowMinimum path the waiver removes. 10030 is the last waived gross and 10031 the first charged one, and it nets exactly min_balance",
+      "coverage_intent": "03 \u00a75.3a(2)/I-32(b): the waiver tests the NET. A gross of exactly min_balance (10000) is waived and nets 10000 \u2014 a gross-based test would have charged it 30 and netted 9970, below min_balance, on the very BelowMinimum path the waiver removes. 10030 is the last waived gross and 10031 the first charged one, and it nets exactly min_balance [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
       "fees_accrued": 31,
       "fees_charged_total": 31,
       "fees_swept_total": 0,
@@ -2319,7 +2353,8 @@
             "fields": [
               1,
               "Long",
-              9999
+              9999,
+              0
             ],
             "kind": "ScalarRedeemed"
           },
@@ -2327,7 +2362,8 @@
             "fields": [
               1,
               "Long",
-              10000
+              10000,
+              0
             ],
             "kind": "ScalarRedeemed"
           },
@@ -2335,7 +2371,8 @@
             "fields": [
               1,
               "Long",
-              10030
+              10030,
+              0
             ],
             "kind": "ScalarRedeemed"
           },
@@ -2343,7 +2380,8 @@
             "fields": [
               1,
               "Long",
-              10000
+              10031,
+              31
             ],
             "kind": "ScalarRedeemed"
           }
@@ -2420,7 +2458,8 @@
             "winner": "Accept"
           }
         },
-        "protocol_accounts": []
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 31
       },
       "initial_state": {
         "baseline_epoch": 7,
@@ -2473,7 +2512,8 @@
               "kind": "Open"
             }
           },
-          "protocol_accounts": []
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
         },
         "proposal_id": 1
       },
@@ -2543,6 +2583,7 @@
           "outcome": {
             "ok": {
               "burned": 9999,
+              "fee": 0,
               "payout": 9999
             }
           }
@@ -2561,6 +2602,7 @@
           "outcome": {
             "ok": {
               "burned": 10000,
+              "fee": 0,
               "payout": 10000
             }
           }
@@ -2579,6 +2621,7 @@
           "outcome": {
             "ok": {
               "burned": 10030,
+              "fee": 0,
               "payout": 10030
             }
           }
@@ -2597,12 +2640,14 @@
           "outcome": {
             "ok": {
               "burned": 10031,
-              "payout": 10000
+              "fee": 31,
+              "payout": 10031
             }
           }
         }
       ],
       "params": {
+        "contract_version": 17,
         "min_split": 10000,
         "protocol_accounts": [],
         "redeem_fee_perbill": 3000000
@@ -2610,7 +2655,7 @@
       "unit": "USDC base units (1e-6)"
     },
     {
-      "coverage_intent": "03 \u00a75.3a(1): identical redemptions by a claimant and by a ProtocolAccount; only the claimant is charged. The protocol holder acquires its inventory through the \u00a75.5 MarketAuthority wrapper, modelled here as a direct split",
+      "coverage_intent": "03 \u00a75.3a(1): identical redemptions by a claimant and by a ProtocolAccount; only the claimant is charged. The protocol holder acquires its inventory through the \u00a75.5 MarketAuthority wrapper, modelled here as a direct split [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
       "fees_accrued": 300,
       "fees_charged_total": 300,
       "fees_swept_total": 0,
@@ -2685,7 +2730,8 @@
             "fields": [
               1,
               "Long",
-              99700
+              100000,
+              300
             ],
             "kind": "ScalarRedeemed"
           },
@@ -2693,7 +2739,8 @@
             "fields": [
               1,
               "Long",
-              100000
+              100000,
+              0
             ],
             "kind": "ScalarRedeemed"
           }
@@ -2778,7 +2825,8 @@
         },
         "protocol_accounts": [
           "carol"
-        ]
+        ],
+        "redemption_fees_accrued": 300
       },
       "initial_state": {
         "baseline_epoch": 7,
@@ -2833,7 +2881,8 @@
           },
           "protocol_accounts": [
             "carol"
-          ]
+          ],
+          "redemption_fees_accrued": 0
         },
         "proposal_id": 1
       },
@@ -2931,7 +2980,8 @@
           "outcome": {
             "ok": {
               "burned": 100000,
-              "payout": 99700
+              "fee": 300,
+              "payout": 100000
             }
           }
         },
@@ -2949,12 +2999,14 @@
           "outcome": {
             "ok": {
               "burned": 100000,
+              "fee": 0,
               "payout": 100000
             }
           }
         }
       ],
       "params": {
+        "contract_version": 17,
         "min_split": 10000,
         "protocol_accounts": [
           "carol"
@@ -2964,7 +3016,7 @@
       "unit": "USDC base units (1e-6)"
     },
     {
-      "coverage_intent": "I-31 at a hypothetical 100 % rate: the net-based waiver always fires because the net would be 0, so nothing is charged and the claimant is paid in full. The rate governs distribution, never solvency \u2014 and the waiver bounds it from the claimant's side",
+      "coverage_intent": "I-31 at a hypothetical 100 % rate: the net-based waiver always fires because the net would be 0, so nothing is charged and the claimant is paid in full. The rate governs distribution, never solvency \u2014 and the waiver bounds it from the claimant's side [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
       "fees_accrued": 0,
       "fees_charged_total": 0,
       "fees_swept_total": 0,
@@ -3019,7 +3071,8 @@
           {
             "fields": [
               1,
-              100000
+              100000,
+              0
             ],
             "kind": "ScalarPairRedeemed"
           },
@@ -3082,7 +3135,8 @@
             "winner": "Accept"
           }
         },
-        "protocol_accounts": []
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 0
       },
       "initial_state": {
         "baseline_epoch": 7,
@@ -3135,7 +3189,8 @@
               "kind": "Open"
             }
           },
-          "protocol_accounts": []
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
         },
         "proposal_id": 1
       },
@@ -3204,6 +3259,7 @@
           "outcome": {
             "ok": {
               "burned": 100000,
+              "fee": 0,
               "payout": 100000
             }
           }
@@ -3220,6 +3276,7 @@
         }
       ],
       "params": {
+        "contract_version": 17,
         "min_split": 10000,
         "protocol_accounts": [],
         "redeem_fee_perbill": 1000000000
@@ -3227,7 +3284,7 @@
       "unit": "USDC base units (1e-6)"
     },
     {
-      "coverage_intent": "03 \u00a75.3a(5)/I-32(d): a rate outside the Perbill domain is a malformed record and reads as 0 \u2014 the fail-OPEN direction, because it is the claimant-favouring one",
+      "coverage_intent": "03 \u00a75.3a(5)/I-32(d): a rate outside the Perbill domain is a malformed record and reads as 0 \u2014 the fail-OPEN direction, because it is the claimant-favouring one [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
       "fees_accrued": 0,
       "fees_charged_total": 0,
       "fees_swept_total": 0,
@@ -3282,7 +3339,8 @@
           {
             "fields": [
               1,
-              100000
+              100000,
+              0
             ],
             "kind": "ScalarPairRedeemed"
           }
@@ -3339,7 +3397,8 @@
             "winner": "Accept"
           }
         },
-        "protocol_accounts": []
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 0
       },
       "initial_state": {
         "baseline_epoch": 7,
@@ -3392,7 +3451,8 @@
               "kind": "Open"
             }
           },
-          "protocol_accounts": []
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
         },
         "proposal_id": 1
       },
@@ -3461,12 +3521,14 @@
           "outcome": {
             "ok": {
               "burned": 100000,
+              "fee": 0,
               "payout": 100000
             }
           }
         }
       ],
       "params": {
+        "contract_version": 17,
         "min_split": 10000,
         "protocol_accounts": [],
         "redeem_fee_perbill": 1000000001
@@ -3474,7 +3536,7 @@
       "unit": "USDC base units (1e-6)"
     },
     {
-      "coverage_intent": "At 50 % the net-based waiver moves the charging threshold to 2\u00b7min_split: a 19999 gross is waived outright while a 20000 gross is charged 10000 and nets exactly min_split. fee <= gross at every rate (I-32(a))",
+      "coverage_intent": "At 50 % the net-based waiver moves the charging threshold to 2\u00b7min_split: a 19999 gross is waived outright while a 20000 gross is charged 10000 and nets exactly min_split. fee <= gross at every rate (I-32(a)) [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
       "fees_accrued": 0,
       "fees_charged_total": 10000,
       "fees_swept_total": 10000,
@@ -3532,7 +3594,8 @@
             "fields": [
               1,
               "Long",
-              19999
+              19999,
+              0
             ],
             "kind": "ScalarRedeemed"
           },
@@ -3540,6 +3603,7 @@
             "fields": [
               1,
               "Long",
+              20000,
               10000
             ],
             "kind": "ScalarRedeemed"
@@ -3623,7 +3687,8 @@
             "winner": "Accept"
           }
         },
-        "protocol_accounts": []
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 0
       },
       "initial_state": {
         "baseline_epoch": 7,
@@ -3676,7 +3741,8 @@
               "kind": "Open"
             }
           },
-          "protocol_accounts": []
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
         },
         "proposal_id": 1
       },
@@ -3746,6 +3812,7 @@
           "outcome": {
             "ok": {
               "burned": 19999,
+              "fee": 0,
               "payout": 19999
             }
           }
@@ -3764,7 +3831,8 @@
           "outcome": {
             "ok": {
               "burned": 20000,
-              "payout": 10000
+              "fee": 10000,
+              "payout": 20000
             }
           }
         },
@@ -3780,6 +3848,7 @@
         }
       ],
       "params": {
+        "contract_version": 17,
         "min_split": 10000,
         "protocol_accounts": [],
         "redeem_fee_perbill": 500000000
