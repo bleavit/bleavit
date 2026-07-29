@@ -799,7 +799,13 @@ fn genesis_uses_the_frozen_three_field_epoch_shape() {
             <CurrentEpoch<Test> as frame_support::traits::Get<EpochId>>::get(),
             0
         );
-        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 16);
+        // The contract-version literal that used to sit here is deleted, not
+        // relaxed. This test's subject is the frozen three-field genesis epoch
+        // shape; the version was incidental drive-by coverage, and being
+        // incidental is exactly why it was left at 16 through v17. The property
+        // is pinned once in `futarchy-primitives` and its metadata exposure is
+        // asserted in the runtime, so nothing is lost. A vacuous stand-in
+        // (`>= 1`) would have been worse than either.
         assert_ok!(Epoch::do_try_state());
     });
 }

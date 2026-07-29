@@ -275,7 +275,7 @@ net_pair    = a − fee_pair(a)
 
 | Call | Origin | Preconditions | Effect | Event |
 |---|---|---|---|---|
-| `sweep_dust(pid)` / `sweep_dust_baseline(epoch)` | Signed (keeper) | vault terminal + `RedemptionArchiveDelay` elapsed (hard maximum one year) | drain ≤ `ReapBatch(=100)` claimant `Positions` entries per call across the vault's 14 (resp. 2) `PositionId` prefixes; refund deposits to entry owners; residual escrow → INSURANCE; storage and terminal marker reaped when drained. This cleanup is independent of the owning market-book reap | `VaultReaped { pid, residue }` (proposal crank) / `BaselineVaultReaped { epoch, residue }` (Baseline crank) — each identifies its vault; only the name `VaultReaped` is frozen in [`02-integration-contract.md`](./02-integration-contract.md) §6 (fields open) |
+| `sweep_dust(pid)` / `sweep_dust_baseline(epoch)` | Signed (keeper) | vault terminal + `RedemptionArchiveDelay` elapsed (hard maximum one year) **+ every associated *seeded* market book has recorded its [04](04-markets-and-pricing.md) §2 Sweep** (amended 2026-07-29, milestone E4 — see §5.4a) | drain ≤ `ReapBatch(=100)` claimant `Positions` entries per call across the vault's 14 (resp. 2) `PositionId` prefixes; refund deposits to entry owners; residual escrow → INSURANCE; storage and terminal marker reaped when drained. This cleanup remains independent of the owning market-book **reap**, but is now *ordered after* that book's **Sweep** (§5.4a) | `VaultReaped { pid, residue }` (proposal crank) / `BaselineVaultReaped { epoch, residue }` (Baseline crank) — each identifies its vault; only the name `VaultReaped` is frozen in [`02-integration-contract.md`](./02-integration-contract.md) §6 (fields open) |
 | `reconcile()` | Signed (keeper) | checked `TotalEscrowed + DepositsHeld` succeeds | compare the O(1) maintained liability with the sovereign's actual USDC custody; set the persistent I-4 drift latch iff `liability > custody`; record the exact sample. Emit only on a latch edge | `LedgerDriftDetected { liability, custody }` / `LedgerDriftCleared { liability, custody }` |
 | `sweep_redemption_fees()` | Signed (keeper) | none; a sweep on an empty counter is a successful **no-op** (§6.5(3); [`15`](./15-invariants-and-testing.md) I-31; [`02`](./02-integration-contract.md) §6) | transfer the whole accrued balance from the sovereign to the treasury `MAIN` account — the same sink [`04`](./04-markets-and-pricing.md) §2's `sweep_revenue` remits to ([`08`](./08-treasury-and-economics.md) §1.1) — and zero the counter, atomically; `Preservation::Preserve` on the sovereign; O(1) | `RedemptionFeesSwept { amount }` |
 
@@ -317,6 +317,43 @@ framework's `Stuck` form.
 **Protocol inventory at market reap (normative).** Every per-market book and fee address belongs to a canonical, domain-separated `AccountId32` namespace reserved permanently — before creation, throughout the book lifetime, and after reap. `MarketProtocolAccounts` is only the bounded ownership/refcount index; inserting or removing it MUST NOT change deposit classification. Market creation MUST reject a non-canonical pair before creating a vault or index entry. Signed `transfer` MUST reject every `ProtocolAccount` destination (`ProtocolDestination`), including a predictable future book/fee address; the origin-gated `MarketAuthority` wrapper is the sole position ingress, so pre-creation squatting cannot poison an address, reclassify a deposit-backed claimant row, or wedge market creation. Immediately before one archived market row unregisters its two accounts, `MarketAuthority` MUST atomically discard positions owned by exactly those accounts across exactly that book's owning vault universe: 14 fixed proposal instruments (≤ 28 storage cells) or two fixed Baseline instruments (≤ 4 cells). It MUST decrement `PositionTotals` by the discarded balances, move no collateral or held deposit, and touch no claimant-owned row. If any later step of market reap fails, this discard rolls back with it (G-1). The vault and its claimant rows remain independently redeemable/sweepable, so ledger-first and market-first interleavings are both safe.
 
 The BE §5.2.1 note on SGF §9.3 settlement perpetuity carries forward unchanged: after reaping, unredeemed claims remain redeemable through a Merkle-archived claims procedure executed by a TREASURY-class proposal (deliberate v1 compromise, recorded in BE §31).
+
+#### 5.4a Dust-sweep ordering against the market Sweep (normative; added 2026-07-29, milestone E4)
+
+A terminal vault's dust sweep MUST NOT drain a vault while any **seeded** market
+book owned by that vault has not recorded its [04](04-markets-and-pricing.md) §2
+Sweep. The refusal is a status-quo no-op (G-1), not a failure of the claim.
+
+**Why this ordering is mandatory rather than advisory.** Both cranks are
+permissionless Signed calls. Without the ordering, any account could call
+`sweep_dust` first: it drains the book's *protocol-owned* positions along with the
+claimant rows, transfers the residual escrow to `INSURANCE`, and removes the
+vault. `market.sweep_revenue` then finds an archived vault, realizes **nothing**,
+and still writes its swept marker — reporting success for a return that did not
+happen and permitting reap. The POL and fee value is not stolen (it reaches the
+treasury through `INSURANCE` and the §1.2 overflow), but the `POL`/`POL_BASELINE`
+budget line is never credited, so NAV attribution is wrong and [08](08-treasury-and-economics.md)
+§8 step 5's "committed POL withdraws at settlement" silently does not hold. An
+off-chain keeper ordering the two cranks is an A-1 liveness assumption and cannot
+substitute for this, because the attack path is permissionless.
+
+**The predicate is `seeded ∧ ¬swept`, and the `seeded` half is load-bearing.** A
+book that was never seeded holds no protocol custody to return, so nothing is lost
+by archiving its vault; and a book that can never *become* sweepable — one whose
+`sweep_revenue` refuses permanently, e.g. a book with no recorded funder — would
+otherwise pin its vault forever. Blocking on `¬swept` alone would therefore
+convert a value leak into a permanent liveness stall, which is the worse trade.
+
+**Interaction with §4's `Vaults` bound.** §4 sizes `Vaults` on terminal vaults
+being permissionlessly drainable after `RedemptionArchiveDelay` (hard maximum one
+year). That guarantee is now **conditional on the vault's seeded books becoming
+sweepable**, and the conditionality is bounded by construction: `sweep_revenue` is
+itself permissionless, requires only the terminal latch, and is idempotent, so any
+account can discharge the precondition without permission or coordination. A vault
+whose seeded book is nevertheless permanently unsweepable is a defect in that
+book's own accounting, not a lawful resting state; it MUST surface as a
+`try-state` violation (the market pallet asserts that a seeded, unswept book still
+has its owning vault) rather than as silent unbounded retention.
 
 ### 5.5 Internal API for the D-3 trade wrapper (no extrinsic surface)
 

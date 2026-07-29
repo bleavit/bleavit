@@ -201,7 +201,15 @@ fn phase_flag_bit_assignments_match_02_7_3() {
 
 #[test]
 fn contract_version_and_bounds_reexports_hold() {
-    assert_eq!(CONTRACT_VERSION, 16); // v16: MaxSnapshots carries its version multiplicity (MAX-01)
+    // Assert AGREEMENT, not the number. The re-export's job is to equal the
+    // primitive; pinning a literal here made this a fifth place a contract bump
+    // had to be remembered, and it was duly forgotten (found by the exhaustive
+    // gate at v17, still reading 16). One literal pin lives in
+    // `futarchy-primitives`; everything else proves it agrees.
+    assert_eq!(
+        CONTRACT_VERSION,
+        futarchy_primitives::INTEGRATION_CONTRACT_VERSION
+    );
     assert_eq!(MAX_PARAMS, 128); // 13 §4 registry bound
     assert_eq!(MAX_CAPABILITIES, 64);
     assert_eq!(crate::MAX_METERS, 16);
