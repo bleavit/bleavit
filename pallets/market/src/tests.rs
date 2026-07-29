@@ -1013,36 +1013,91 @@ fn sweep_refuses_a_live_or_unlatched_book_and_reap_refuses_an_unswept_one() {
 }
 
 #[test]
-fn sweep_survives_a_ledger_first_vault_sweep_and_pays_nothing_twice() {
-    // 04 §2 "Reap interleavings": ledger-first and market-first must both be
-    // safe. A vault the ledger already archived has nothing left to value, so
-    // the sweep is a zero-value success rather than a failure.
-    //
-    // This is also the documented hazard boundary. 03 §5.4 makes `sweep_dust`
-    // explicitly independent of the market, and it routes residual escrow to
-    // INSURANCE — so a book whose Sweep has not run by the time
-    // `ledger.archive_delay` elapses loses its return to that account. The
-    // orderings are bounded apart by design rather than by a lock: the Sweep
-    // stage is available from the terminal block with NO delay (04 §2), while
-    // `sweep_dust` only becomes callable a whole `archive_delay` later, and
-    // the crank is permissionless throughout that window.
+fn permissionless_dust_cannot_archive_seeded_fee_inventory_before_revenue_sweep() {
+    // Review P1: both cranks are permissionless. An attacker must not be able
+    // to archive the vault first, turn the fee account's paying claims into
+    // INSURANCE residue, and then let `sweep_revenue` acknowledge zero.
     new_test_ext().execute_with(|| {
         create_decision();
         seed(MARKET_ID);
+        System::set_block_number(5);
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        assert!(
+            position_balance(
+                position(PROPOSAL, Branch::Accept, PositionKind::BranchUsdc),
+                FEES,
+            ) > 0,
+            "the attacker fixture must carry realizable fee inventory",
+        );
         System::set_block_number(7);
         assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
         settle_decision();
 
         System::set_block_number(7 + LedgerArchiveDelay::get() + 1);
+        let vault_before = pallet_conditional_ledger::Vaults::<Test>::get(PROPOSAL);
+        let positions_before =
+            pallet_conditional_ledger::Positions::<Test>::iter().collect::<Vec<_>>();
+        assert_noop!(
+            Ledger::sweep_dust(signed(CHARLIE), PROPOSAL),
+            pallet_conditional_ledger::Error::<Test>::ReapNotDue,
+        );
+        assert_eq!(
+            pallet_conditional_ledger::Vaults::<Test>::get(PROPOSAL),
+            vault_before,
+        );
+        assert_eq!(
+            pallet_conditional_ledger::Positions::<Test>::iter().collect::<Vec<_>>(),
+            positions_before,
+            "the ordering guard runs before the first bounded drain",
+        );
+
+        sweep(MARKET_ID);
+        assert!(
+            swept_fee_to_main(MARKET_ID) > 0,
+            "the fee leg must be realized before the vault can archive",
+        );
         sweep_proposal_vault(PROPOSAL);
         assert!(pallet_conditional_ledger::Vaults::<Test>::get(PROPOSAL).is_none());
-
-        let treasury_before = usdc(TREASURY);
-        sweep(MARKET_ID);
-        assert_eq!(swept_pol_returned(MARKET_ID), 0);
-        assert_eq!(usdc(TREASURY), treasury_before);
         assert_ok!(Market::reap(signed(BOB), MARKET_ID));
         assert_try_state();
+    });
+}
+
+#[test]
+fn an_unseeded_book_does_not_block_its_vault_dust_sweep() {
+    // The ordering predicate is deliberately `seeded && !swept`. Without the
+    // seeded exemption a book with no recorded funder could hold its vault
+    // forever even though there is no lawful POL destination to wait for.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        System::set_block_number(7);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+        settle_decision();
+        assert!(!crate::SeededMarkets::<Test>::contains_key(MARKET_ID));
+
+        System::set_block_number(7 + LedgerArchiveDelay::get() + 1);
+        assert_ok!(Ledger::sweep_dust(signed(CHARLIE), PROPOSAL));
+        assert!(!pallet_conditional_ledger::Vaults::<Test>::contains_key(
+            PROPOSAL,
+        ));
+    });
+}
+
+#[test]
+fn try_state_rejects_a_seeded_unswept_book_whose_vault_disappeared() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        assert_try_state();
+
+        pallet_conditional_ledger::Vaults::<Test>::remove(PROPOSAL);
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
     });
 }
 

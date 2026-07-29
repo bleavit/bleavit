@@ -5,7 +5,7 @@ use subxt::ext::scale_value::{Composite, Value};
 use crate::{
     config::{Role, RoleSet},
     snapshot::{
-        ChainSnapshot, RegistryEpochSnapshot, DEFAULT_DECISION_WINDOW_BLOCKS,
+        ChainSnapshot, InsuranceSnapshot, RegistryEpochSnapshot, DEFAULT_DECISION_WINDOW_BLOCKS,
         DEFAULT_OBSERVATION_INTERVAL_BLOCKS, DEFAULT_RESERVE_PROBE_INTERVAL_BLOCKS,
         DEFAULT_RESERVE_PROBE_TIMEOUT_BLOCKS, DEFAULT_TICK_BATCH,
     },
@@ -667,6 +667,38 @@ fn plan_cleanup(snapshot: &ChainSnapshot, config: &PlannerConfig, cranks: &mut V
             PRIORITY_CLEANUP,
         ));
     }
+    // 03 §5.4: only pay to submit the permissionless revenue sweep when its
+    // ValueQuery counter proves there is custody to move. It shares the
+    // market-revenue priority because both calls recognize liquid USDC in
+    // treasury MAIN and must run before lower-priority archival cleanup.
+    if snapshot.has_call("ConditionalLedger", "sweep_redemption_fees")
+        && snapshot
+            .redemption_fees_accrued
+            .is_some_and(|amount| amount > 0)
+    {
+        cranks.push(crank(
+            Role::Cleanup,
+            "ConditionalLedger",
+            "sweep_redemption_fees",
+            core::iter::empty::<(&str, Value<()>)>(),
+            PRIORITY_MARKET_SWEEP,
+        ));
+    }
+    // 08 §1.2: a permissionless reconciliation is useful only above the
+    // derived reserve target. Checked arithmetic is deliberate: an overflowing
+    // target is undefined, so G-1 suppresses the call instead of treating the
+    // wrapped/saturated result as spendable surplus.
+    if snapshot.has_call("FutarchyTreasury", "reconcile_insurance")
+        && insurance_reconciliation_due(snapshot.insurance.as_ref())
+    {
+        cranks.push(crank(
+            Role::Cleanup,
+            "FutarchyTreasury",
+            "reconcile_insurance",
+            core::iter::empty::<(&str, Value<()>)>(),
+            PRIORITY_MARKET_SWEEP,
+        ));
+    }
     // 04 §2's Sweep and Reap stages. Both are gated by the same
     // `SettlementObservedAt` latch — which is what `market_reaps` is — so they
     // are planned together and their ordering is visible in one place. Sweep is
@@ -767,6 +799,15 @@ fn reap_due(current: u64, terminal_at: Option<u64>, archive_delay: Option<u64>) 
     terminal_at
         .zip(archive_delay)
         .is_some_and(|(at, delay)| current >= at.saturating_add(delay))
+}
+
+fn insurance_reconciliation_due(insurance: Option<&InsuranceSnapshot>) -> bool {
+    insurance.is_some_and(|insurance| {
+        insurance
+            .swept_residue_unreclaimed
+            .checked_add(insurance.min_balance)
+            .is_some_and(|target| insurance.balance > target)
+    })
 }
 
 /// The book still owes its 04 §2 Sweep: the marker map is readable and carries
@@ -884,12 +925,14 @@ mod tests {
                 "IncidentRegistry.reap_epoch",
                 "ConditionalLedger.sweep_dust",
                 "ConditionalLedger.sweep_dust_baseline",
+                "ConditionalLedger.sweep_redemption_fees",
                 "ConditionalLedger.reconcile",
                 "ExecutionGuard.execute",
                 "ExecutionGuard.expire_failed_execution",
                 "ExecutionGuard.qualify_recovery_image",
                 "FutarchyTreasury.execute_coretime_renewal",
                 "FutarchyTreasury.prune_coretime_quote",
+                "FutarchyTreasury.reconcile_insurance",
                 "Welfare.record_snapshot",
                 "Welfare.record_daily_gate",
             ]
@@ -988,6 +1031,12 @@ mod tests {
                     noted_at: 950,
                 }],
                 funded_periods: BTreeSet::new(),
+            }),
+            redemption_fees_accrued: Some(0),
+            insurance: Some(InsuranceSnapshot {
+                balance: 110,
+                swept_residue_unreclaimed: 100,
+                min_balance: 10,
             }),
             market_reaps: vec![ReapSnapshot {
                 id: 88,
@@ -1789,6 +1838,74 @@ mod tests {
         assert_eq!(reaps.len(), 1, "got {planned:?}");
         assert_eq!(argument(reaps[0], "epoch"), Some(3));
         assert_eq!(argument(reaps[0], "spec_version"), Some(3));
+    }
+
+    #[test]
+    fn redemption_fee_sweep_is_planned_only_for_a_nonzero_due_signal() {
+        let mut snapshot = snapshot();
+        snapshot.redemption_fees_accrued = Some(43);
+        let planned = plan(&snapshot, &config_for(Role::Cleanup));
+        let sweep = planned
+            .iter()
+            .find(|crank| crank.call == "sweep_redemption_fees")
+            .expect("nonzero accrued redemption fees are due");
+        assert_eq!(sweep.role, Role::Cleanup);
+        assert_eq!(sweep.pallet, "ConditionalLedger");
+        assert_eq!(sweep.priority, PRIORITY_MARKET_SWEEP);
+
+        snapshot.redemption_fees_accrued = Some(0);
+        assert!(!plan(&snapshot, &config_for(Role::Cleanup))
+            .iter()
+            .any(|crank| crank.call == "sweep_redemption_fees"));
+        snapshot.redemption_fees_accrued = None;
+        assert!(!plan(&snapshot, &config_for(Role::Cleanup))
+            .iter()
+            .any(|crank| crank.call == "sweep_redemption_fees"));
+    }
+
+    #[test]
+    fn insurance_reconciliation_is_planned_only_strictly_above_the_derived_target() {
+        let mut snapshot = snapshot();
+        snapshot.insurance = Some(InsuranceSnapshot {
+            balance: 111,
+            swept_residue_unreclaimed: 100,
+            min_balance: 10,
+        });
+        let planned = plan(&snapshot, &config_for(Role::Cleanup));
+        let reconcile = planned
+            .iter()
+            .find(|crank| crank.call == "reconcile_insurance")
+            .expect("custody above T_ins is due");
+        assert_eq!(reconcile.role, Role::Cleanup);
+        assert_eq!(reconcile.pallet, "FutarchyTreasury");
+        assert_eq!(reconcile.priority, PRIORITY_MARKET_SWEEP);
+
+        for signal in [
+            Some(InsuranceSnapshot {
+                balance: 110,
+                swept_residue_unreclaimed: 100,
+                min_balance: 10,
+            }),
+            Some(InsuranceSnapshot {
+                balance: 109,
+                swept_residue_unreclaimed: 100,
+                min_balance: 10,
+            }),
+            Some(InsuranceSnapshot {
+                balance: u128::MAX,
+                swept_residue_unreclaimed: u128::MAX,
+                min_balance: 1,
+            }),
+            None,
+        ] {
+            snapshot.insurance = signal;
+            assert!(
+                !plan(&snapshot, &config_for(Role::Cleanup))
+                    .iter()
+                    .any(|crank| crank.call == "reconcile_insurance"),
+                "at/below/undefined targets must preserve the status quo"
+            );
+        }
     }
 
     /// SQ-511: 04 §2's Sweep stage is admissible from the terminal block with no

@@ -14,6 +14,7 @@ use futarchy_primitives::{BlockNumber, MarketId};
 
 pub use market_core as core_market;
 pub use pallet::*;
+pub use pallet_conditional_ledger::MainRevenueSink;
 pub use weights::WeightInfo;
 
 pub mod weights;
@@ -106,30 +107,6 @@ pub trait PolCommitmentSync {
     ) -> frame_support::dispatch::DispatchResult;
 }
 
-/// Runtime treasury mirror for the 04 §2 Sweep's **revenue** leg (08 §1.1, as
-/// amended by E1: realized market-fee value routes 100 % to `MAIN`).
-///
-/// The custody half needs no seam — the ledger redemption pays `MAIN` directly
-/// and the Baseline book's retained plain USDC is an ordinary transfer — but
-/// custody alone raises no NAV: `nav()` is computed from the treasury's
-/// **internal** `main_usdc` counter plus its lines (08 §1.2), so the arrival
-/// has to be *recognized* as well as received. That is this trait, and it is the
-/// exact mirror of what `sweep_insurance` does for the INSURANCE → `MAIN` path.
-/// A failure aborts the whole sweep (status quo, G-1): the book stays unswept,
-/// unreapable and the crank retryable, rather than banking value NAV never sees.
-pub trait MainRevenueSink {
-    fn credit_main(amount: futarchy_primitives::Balance)
-        -> frame_support::dispatch::DispatchResult;
-}
-
-/// Accounting-free test environments may use the unit implementation.
-/// Production binds `pallet-futarchy-treasury`'s recognition entry point.
-impl MainRevenueSink for () {
-    fn credit_main(_: futarchy_primitives::Balance) -> frame_support::dispatch::DispatchResult {
-        Ok(())
-    }
-}
-
 /// Which 08 §1.1 subsidy line a book's seed custody moves through. Named here
 /// rather than shared with the treasury's `BudgetLine` so `pallet-market` stays
 /// treasury-free; the runtime binds the two (I-24-style layering, 01 §5.2).
@@ -150,6 +127,24 @@ impl PolLine {
                 Self::Proposal
             }
         }
+    }
+}
+
+impl<T: pallet::Config> pallet_conditional_ledger::MarketSweepStatus for pallet::Pallet<T> {
+    fn proposal_books_swept(pid: futarchy_primitives::ProposalId) -> bool {
+        pallet::ProposalMarketIds::<T>::get(pid)
+            .iter()
+            .all(|market| {
+                !pallet::SeededMarkets::<T>::contains_key(market)
+                    || pallet::SweptMarkets::<T>::contains_key(market)
+            })
+    }
+
+    fn baseline_book_swept(epoch: futarchy_primitives::EpochId) -> bool {
+        pallet::BaselineMarketOf::<T>::get(epoch).is_none_or(|market| {
+            !pallet::SeededMarkets::<T>::contains_key(market)
+                || pallet::SweptMarkets::<T>::contains_key(market)
+        })
     }
 }
 
@@ -285,7 +280,7 @@ pub mod pallet {
         type MainAccount: Get<Self::AccountId>;
 
         /// NAV recognition for value the Sweep just moved into `MAIN` custody.
-        type MainRevenueSink: crate::MainRevenueSink;
+        type MainRevenueSink: pallet_conditional_ledger::MainRevenueSink;
 
         /// Runtime-owned decision-grade predicate for sealed Baseline carry.
         /// The predicate is read-only and must fail closed when governed grade
@@ -1143,7 +1138,7 @@ pub mod pallet {
                     .checked_add(Self::withdraw_baseline_fee_usdc(&book, &main)?)
                     .ok_or(Error::<T>::ArithmeticOverflow)?;
                 if fee_to_main > 0 {
-                    T::MainRevenueSink::credit_main(fee_to_main)?;
+                    <T as Config>::MainRevenueSink::credit_main(fee_to_main)?;
                 }
                 let pol_returned = match SeededMarkets::<T>::get(market) {
                     Some(treasury) => {
@@ -3101,10 +3096,25 @@ pub mod pallet {
                 }
             }
             for id in SeededMarkets::<T>::iter_keys() {
-                ensure!(
-                    Markets::<T>::contains_key(id),
-                    Error::<T>::TryStateViolation
-                );
+                let book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
+                // 03 §5.4 / 04 §2 ordering guard: while a seeded book has not
+                // recorded its Sweep, the owning vault must still exist. A
+                // missing vault here means a dust crank archived realizable
+                // protocol inventory before revenue/POL custody was returned.
+                // Once `SweptMarkets` is present the vault may be independently
+                // archived, which preserves the specified market-first and
+                // ledger-first cleanup interleavings.
+                if !SweptMarkets::<T>::contains_key(id) {
+                    let vault_present = match book.kind {
+                        BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. } => {
+                            pallet_conditional_ledger::Vaults::<T>::contains_key(proposal)
+                        }
+                        BookKind::Baseline { epoch } => {
+                            pallet_conditional_ledger::BaselineVaults::<T>::contains_key(epoch)
+                        }
+                    };
+                    ensure!(vault_present, Error::<T>::TryStateViolation);
+                }
             }
             // I-33, book half (15 §1): no latched, swept book retains seed
             // inventory it has not returned, and no returned book is

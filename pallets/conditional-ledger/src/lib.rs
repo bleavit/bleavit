@@ -83,9 +83,49 @@ impl<AccountId> InflowCapGate<AccountId> for () {
     }
 }
 
+/// Runtime-owned ordering guard between the ledger's terminal-vault dust sweep
+/// and the market's 04 §2 revenue sweep.
+///
+/// The ledger stays independent of `pallet-market`: production binds this seam
+/// to that pallet, while standalone ledger tests provide an explicit fixture.
+/// Implementations must inspect only the bounded book index for the named
+/// vault. A seeded, unswept book returns `false`; an unseeded book is exempt
+/// because it has no subsidy inventory and may never acquire a lawful POL
+/// return destination.
+pub trait MarketSweepStatus {
+    fn proposal_books_swept(pid: futarchy_primitives::ProposalId) -> bool;
+    fn baseline_book_swept(epoch: futarchy_primitives::EpochId) -> bool;
+}
+
+/// Runtime-owned reporter for 03 §5.4 residue transferred into INSURANCE.
+///
+/// The transfer and this report are one accounting operation: production
+/// delegates to `pallet-futarchy-treasury::note_swept_residue`, which raises
+/// the derived 08 §1.2 target by exactly the event's `residue`. There is
+/// deliberately no implementation for `()`; a runtime must select an explicit
+/// reporter and cannot silently compile with the liability unreported.
+pub trait ResidueReporter {
+    fn note_swept_residue(
+        amount: futarchy_primitives::Balance,
+    ) -> frame_support::dispatch::DispatchResult;
+}
+
+/// Shared recognition seam for USDC that has reached treasury `MAIN` custody.
+///
+/// Both the 04 §2 market revenue sweep and the 03 §5.4 redemption-fee sweep
+/// use this exact trait. Custody alone does not move NAV because treasury
+/// accounting reads its internal `main_usdc` plus pending-credit counter.
+/// Returning an error leaves the enclosing sweep wholly unchanged (G-1).
+pub trait MainRevenueSink {
+    fn credit_main(amount: futarchy_primitives::Balance)
+        -> frame_support::dispatch::DispatchResult;
+}
+
 #[frame_support::pallet]
 pub mod pallet {
-    use crate::{weights::WeightInfo, InflowCapGate};
+    use crate::{
+        weights::WeightInfo, InflowCapGate, MainRevenueSink, MarketSweepStatus, ResidueReporter,
+    };
     use alloc::{collections::BTreeMap, vec::Vec};
     use conditional_ledger_core::{
         baseline as baseline_id, position as proposal_position, BaselineVaultInfo,
@@ -229,11 +269,26 @@ pub mod pallet {
         /// the INSURANCE sub-account (03 §7 R-5).
         type InsuranceAccount: Get<Self::AccountId>;
 
+        /// Bounded 04 §2 ordering predicate. A terminal vault may not be
+        /// archived while any associated **seeded** book still owes its revenue
+        /// sweep; unseeded books are explicitly non-blocking.
+        type MarketSweepStatus: crate::MarketSweepStatus;
+
+        /// Reports the exact residue transferred to INSURANCE into the
+        /// treasury's O(1) unreclaimed-residue liability counter. No unit
+        /// implementation exists, so production cannot select a silent no-op.
+        type ResidueReporter: crate::ResidueReporter;
+
         /// Destination for the swept redemption fee: the treasury `MAIN`
         /// account (03 §5.4; 08 §1.1) — the same sink 04 §2's `sweep_revenue`
         /// remits to. Kept separate from redemption itself so no payout can
         /// fail because a treasury credit failed (03 §5.3a(4), G-1).
         type TreasuryMainAccount: Get<Self::AccountId>;
+
+        /// NAV recognition for the custody transferred to
+        /// [`Config::TreasuryMainAccount`]. This is the same seam the market's
+        /// fee leg uses, so the two revenue instruments cannot drift apart.
+        type MainRevenueSink: crate::MainRevenueSink;
 
         /// The ledger's own `PalletId`; its derived sovereign account custodies all
         /// escrow and held deposits (03 §1).
@@ -528,7 +583,8 @@ pub mod pallet {
         /// internal consistency guards; try-state maps drift to I-4).
         TryStateViolation,
         /// The vault is not yet reap-eligible: not terminal, or `ArchiveDelay` has
-        /// not elapsed (03 §5.4).
+        /// not elapsed, or an associated seeded market has not completed its
+        /// 04 §2 Sweep (03 §5.4 / 04 §2).
         ReapNotDue,
         /// The position-storage deposit could not be taken from the entry owner
         /// (03 §4 / §8).
@@ -1137,6 +1193,7 @@ pub mod pallet {
                     amount,
                     Preservation::Preserve,
                 )?;
+                T::MainRevenueSink::credit_main(amount)?;
                 RedemptionFeesAccrued::<T>::kill();
                 T::KeeperRebate::rebate(&who, CrankClass::General);
             }
@@ -2146,6 +2203,10 @@ pub mod pallet {
                 frame_system::Pallet::<T>::block_number() >= Self::reap_eligible_at(terminal_at),
                 Error::<T>::ReapNotDue
             );
+            ensure!(
+                T::MarketSweepStatus::proposal_books_swept(pid),
+                Error::<T>::ReapNotDue
+            );
             let budget = T::ReapBatch::get();
             let mut drained = 0u32;
             let sovereign = Self::account_id();
@@ -2175,6 +2236,7 @@ pub mod pallet {
                         residue,
                         Preservation::Preserve,
                     )?;
+                    T::ResidueReporter::note_swept_residue(residue)?;
                 }
                 Vaults::<T>::remove(pid);
                 VaultTerminalAt::<T>::remove(pid);
@@ -2187,6 +2249,10 @@ pub mod pallet {
             let terminal_at = BaselineTerminalAt::<T>::get(epoch).ok_or(Error::<T>::ReapNotDue)?;
             ensure!(
                 frame_system::Pallet::<T>::block_number() >= Self::reap_eligible_at(terminal_at),
+                Error::<T>::ReapNotDue
+            );
+            ensure!(
+                T::MarketSweepStatus::baseline_book_swept(epoch),
                 Error::<T>::ReapNotDue
             );
             let budget = T::ReapBatch::get();
@@ -2218,6 +2284,7 @@ pub mod pallet {
                         residue,
                         Preservation::Preserve,
                     )?;
+                    T::ResidueReporter::note_swept_residue(residue)?;
                 }
                 BaselineVaults::<T>::remove(epoch);
                 BaselineTerminalAt::<T>::remove(epoch);

@@ -2923,11 +2923,26 @@ impl pallet_epoch::EpochParamsProvider for RuntimeEpochParams {
 pub struct LedgerRedemptionFee;
 impl frame_support::traits::Get<Perbill> for LedgerRedemptionFee {
     fn get() -> Perbill {
-        let parts = perbill_param(b"ledger.rdm_fee");
-        if parts > Perbill::one().deconstruct() {
-            return Perbill::zero();
+        // Deliberately NOT `perbill_param`. That helper falls back to
+        // `default_param` — the genesis seed, 30 bps — before it falls back to
+        // zero, so a missing or wrong-kind record would charge a claimant from
+        // state the runtime could not read. 15 §1 I-32(d) forbids exactly that:
+        // "A missing, malformed or out-of-bounds rate record reads as **zero**,
+        // not as a charge — the one place the ledger's fail-**open** direction
+        // is the correct one, because it is the claimant-favouring one."
+        //
+        // The generic helper is right for `mkt.fee`, whose unreadable-record
+        // direction is the opposite (a market that silently stopped charging a
+        // maker fee is the unsafe one). This key is the exception, so it reads
+        // `live_param` directly and every non-conforming shape resolves to zero.
+        match live_param(pallet_constitution::key16(b"ledger.rdm_fee")) {
+            Some(pallet_constitution::ParamValue::Perbill(parts))
+                if parts <= Perbill::one().deconstruct() =>
+            {
+                Perbill::from_parts(parts)
+            }
+            _ => Perbill::zero(),
         }
-        Perbill::from_parts(parts)
     }
 }
 
@@ -3160,6 +3175,19 @@ impl Contains<AccountId> for ProtocolAccounts {
     }
 }
 parameter_types! { pub InsuranceAccount: AccountId = insurance_account(); }
+
+/// Bind the ledger's treasury-free 03 §5.4 residue seam to the exact
+/// `SweptResidueUnreclaimed` writer that derives 08 §1.2's INSURANCE target.
+/// No unit implementation exists on the trait, so production cannot silently
+/// replace this with a no-op.
+pub struct RuntimeResidueReporter;
+
+impl pallet_conditional_ledger::ResidueReporter for RuntimeResidueReporter {
+    fn note_swept_residue(amount: Balance) -> DispatchResult {
+        FutarchyTreasury::note_swept_residue(amount)
+    }
+}
+
 impl pallet_conditional_ledger::Config for Runtime {
     type Collateral = ForeignAssets;
     type UsdcAssetId = UsdcAssetId;
@@ -3179,6 +3207,9 @@ impl pallet_conditional_ledger::Config for Runtime {
     type ReapBatch = ConstU32<{ kernel::REAP_BATCH }>;
     type ProtocolAccounts = ProtocolAccounts;
     type InsuranceAccount = InsuranceAccount;
+    type MarketSweepStatus = Market;
+    type ResidueReporter = RuntimeResidueReporter;
+    type MainRevenueSink = RuntimeMainRevenueSink;
     type PalletId = LedgerPalletId;
     type KeeperRebate = FutarchyTreasury;
     type InflowCapGate = RuntimeLedgerInflowCapGate;
@@ -4439,7 +4470,7 @@ impl pallet_market::PolCommitmentSync for RuntimePolCommitmentSync {
 /// alone would leave NAV exactly where it was. A failure aborts the sweep.
 pub struct RuntimeMainRevenueSink;
 
-impl pallet_market::MainRevenueSink for RuntimeMainRevenueSink {
+impl pallet_conditional_ledger::MainRevenueSink for RuntimeMainRevenueSink {
     fn credit_main(amount: Balance) -> DispatchResult {
         crate::FutarchyTreasury::credit_main(amount);
         Ok(())

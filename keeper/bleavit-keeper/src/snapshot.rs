@@ -18,6 +18,8 @@ use subxt::{
 };
 use tracing::{debug, warn};
 
+use futarchy_primitives::chain_identity;
+
 use crate::{
     config::{Role, RoleSet},
     transport::is_transport,
@@ -61,6 +63,14 @@ pub struct ChainSnapshot {
     pub execution_queue: Vec<ExecutionSnapshot>,
     pub qualified_recovery_proposals: BTreeSet<u64>,
     pub coretime: Option<CoretimeSnapshot>,
+    /// Nonzero exactly when 03 §5.4's permissionless redemption-fee sweep has
+    /// useful work. `None` is an unavailable/undecodable signal and suppresses
+    /// the call; the ValueQuery default is decoded as `Some(0)`.
+    pub redemption_fees_accrued: Option<u128>,
+    /// The three live terms of 08 §1.2's derived INSURANCE target. All are
+    /// required before the keeper may conclude that above-target custody is
+    /// due for reconciliation.
+    pub insurance: Option<InsuranceSnapshot>,
     pub market_reaps: Vec<ReapSnapshot>,
     /// `Market::SweptMarkets` (04 §2), the swept marker `reap` requires since
     /// milestone E1. `None` means the runtime predates the Sweep stage and
@@ -226,6 +236,13 @@ pub struct CoretimeQuoteSnapshot {
     pub noted_at: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InsuranceSnapshot {
+    pub balance: u128,
+    pub swept_residue_unreclaimed: u128,
+    pub min_balance: u128,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReapSnapshot {
     pub id: u64,
@@ -343,6 +360,8 @@ impl SnapshotExtractor {
                     || has_call("Market", "sweep_revenue")
                     || has_call("ConditionalLedger", "sweep_dust")
                     || has_call("ConditionalLedger", "sweep_dust_baseline")
+                    || has_call("ConditionalLedger", "sweep_redemption_fees")
+                    || has_call("FutarchyTreasury", "reconcile_insurance")
                     || any_registry,
                 "cleanup calls absent",
             ),
@@ -455,6 +474,8 @@ impl SnapshotExtractor {
                 .filter_map(|(keys, _)| keys.first().and_then(as_u64))
                 .collect(),
             coretime: self.extract_coretime(&at_block).await,
+            redemption_fees_accrued: self.extract_redemption_fees(&at_block).await,
+            insurance: self.extract_insurance(&at_block).await,
             market_reaps: self
                 .extract_reaps(&at_block, "Market", "SettlementObservedAt", market_archive)
                 .await,
@@ -747,6 +768,62 @@ impl SnapshotExtractor {
         })
     }
 
+    async fn extract_redemption_fees(
+        &self,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
+    ) -> Option<u128> {
+        self.fetch_value_or_default_with_keys(
+            at_block,
+            "ConditionalLedger",
+            "RedemptionFeesAccrued",
+            Vec::new(),
+        )
+        .await?
+        .as_u128()
+    }
+
+    /// Read every term of 08 §1.2's `T_ins =
+    /// SweptResidueUnreclaimed + min_balance` from the same finalized block.
+    /// The deterministic INSURANCE account is derived from the runtime's live
+    /// `ConditionalLedger::PalletId` constant, never from a keeper-side copy.
+    ///
+    /// Any missing or malformed term returns `None`; the planner then preserves
+    /// the status quo instead of guessing whether custody is surplus (G-1).
+    async fn extract_insurance(
+        &self,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
+    ) -> Option<InsuranceSnapshot> {
+        let pallet_id =
+            self.constant_fixed_bytes::<8>(at_block, "ConditionalLedger", "PalletId")?;
+        let insurance = pallet_sub_account(pallet_id, *b"INSURANC");
+        let asset_key = usdc_location_value();
+        let residue = self
+            .fetch_value_or_default_with_keys(
+                at_block,
+                "FutarchyTreasury",
+                "SweptResidueUnreclaimed",
+                Vec::new(),
+            )
+            .await?
+            .as_u128()?;
+        let asset = self
+            .fetch_value_with_keys(at_block, "ForeignAssets", "Asset", vec![asset_key.clone()])
+            .await?;
+        let account = self
+            .fetch_value_with_keys(
+                at_block,
+                "ForeignAssets",
+                "Account",
+                vec![asset_key, account_id_value(insurance)],
+            )
+            .await?;
+        Some(InsuranceSnapshot {
+            balance: account.at("balance")?.as_u128()?,
+            swept_residue_unreclaimed: residue,
+            min_balance: asset.at("min_balance")?.as_u128()?,
+        })
+    }
+
     /// `ConditionalLedger::BaselineVaults` (03 §2.2), the epoch-keyed Baseline
     /// vault map. Fails closed: an absent storage entry or an undecodable
     /// `state` field yields no candidate, so the 05 §7(6) crank is never
@@ -967,6 +1044,44 @@ impl SnapshotExtractor {
         }
     }
 
+    /// Fetch a ValueQuery storage item with its metadata-declared default.
+    /// This is used only where absence has a protocol meaning of zero; all
+    /// errors and malformed values still fail closed as `None`.
+    async fn fetch_value_or_default_with_keys(
+        &self,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
+        pallet: &str,
+        storage_name: &str,
+        keys: Vec<Value<()>>,
+    ) -> Option<Value<()>> {
+        if !self.has_storage(pallet, storage_name) {
+            return None;
+        }
+        let address = dynamic::storage::<Vec<Value<()>>, Value<()>>(pallet, storage_name);
+        let entry = match at_block.storage().entry(address) {
+            Ok(entry) => entry,
+            Err(error) => {
+                warn!(pallet, storage = storage_name, %error, "dynamic storage entry unavailable");
+                return None;
+            }
+        };
+        match entry.fetch(keys).await {
+            Ok(value) => match value.decode() {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    warn!(pallet, storage = storage_name, %error, "dynamic storage decode failed");
+                    None
+                }
+            },
+            Err(error) => {
+                let error = subxt::Error::from(error);
+                self.note_transport_error(&error);
+                warn!(pallet, storage = storage_name, %error, "dynamic storage read failed");
+                None
+            }
+        }
+    }
+
     async fn iter_values(
         &self,
         at_block: &OnlineClientAtBlock<PolkadotConfig>,
@@ -1078,6 +1193,25 @@ impl SnapshotExtractor {
         }
     }
 
+    fn constant_fixed_bytes<const N: usize>(
+        &self,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
+        pallet: &str,
+        constant: &str,
+    ) -> Option<[u8; N]> {
+        if !self.pallets.contains(pallet) {
+            return None;
+        }
+        let address = dynamic::constant::<Value<()>>(pallet, constant);
+        match at_block.constants().entry(address) {
+            Ok(value) => fixed_bytes(&value),
+            Err(error) => {
+                debug!(pallet, constant, %error, "dynamic constant unavailable");
+                None
+            }
+        }
+    }
+
     fn constant_phase_offsets(
         &self,
         at_block: &OnlineClientAtBlock<PolkadotConfig>,
@@ -1094,6 +1228,67 @@ impl SnapshotExtractor {
             }
         }
     }
+}
+
+fn usdc_location_value() -> Value<()> {
+    Value::named_composite([
+        ("parents", Value::u128(1)),
+        (
+            "interior",
+            Value::unnamed_variant(
+                "X3",
+                [Value::unnamed_composite([
+                    Value::unnamed_variant(
+                        "Parachain",
+                        [Value::u128(u128::from(chain_identity::ASSET_HUB_PARA_ID))],
+                    ),
+                    Value::unnamed_variant(
+                        "PalletInstance",
+                        [Value::u128(u128::from(
+                            chain_identity::USDC_PALLET_INSTANCE,
+                        ))],
+                    ),
+                    Value::unnamed_variant(
+                        "GeneralIndex",
+                        [Value::u128(chain_identity::USDC_ASSET_INDEX)],
+                    ),
+                ])],
+            ),
+        ),
+    ])
+}
+
+fn account_id_value(account: [u8; 32]) -> Value<()> {
+    Value::unnamed_composite(
+        account
+            .into_iter()
+            .map(|byte| Value::u128(u128::from(byte))),
+    )
+}
+
+/// `AccountIdConversion::into_sub_account_truncating` for a 32-byte account:
+/// SCALE(`b"modl"`, `PalletId`, sub-id), then trailing-zero decode.
+fn pallet_sub_account(pallet_id: [u8; 8], sub_id: [u8; 8]) -> [u8; 32] {
+    let mut account = [0_u8; 32];
+    account[..4].copy_from_slice(b"modl");
+    account[4..12].copy_from_slice(&pallet_id);
+    account[12..20].copy_from_slice(&sub_id);
+    account
+}
+
+fn fixed_bytes<const N: usize, C>(value: &Value<C>) -> Option<[u8; N]> {
+    let values = composite_values(value).collect::<Vec<_>>();
+    if values.len() == 1 && values[0].as_u128().is_none() {
+        return fixed_bytes(values[0]);
+    }
+    if values.len() != N {
+        return None;
+    }
+    let bytes = values
+        .into_iter()
+        .map(|value| u8::try_from(value.as_u128()?).ok())
+        .collect::<Option<Vec<_>>>()?;
+    bytes.try_into().ok()
 }
 
 fn call_key(pallet: &str, call: &str) -> String {
@@ -1978,6 +2173,67 @@ mod tests {
             .encode_as_type(keys[0].key_id, metadata.types())
             .expect("snapshot key follows actual PreimageFor tuple metadata");
         assert_eq!(dynamically_encoded, (hash, len).encode());
+    }
+
+    #[test]
+    fn insurance_storage_keys_follow_actual_runtime_metadata() {
+        let metadata = actual_runtime_metadata();
+        let pallet_id_constant = metadata
+            .pallet_by_name("ConditionalLedger")
+            .and_then(|pallet| pallet.constant_by_name("PalletId"))
+            .expect("actual runtime exposes ConditionalLedger.PalletId");
+        let pallet_id = Value::decode_as_type(
+            &mut pallet_id_constant.value(),
+            pallet_id_constant.ty(),
+            metadata.types(),
+        )
+        .expect("actual runtime PalletId decodes dynamically");
+        assert_eq!(fixed_bytes::<8, _>(&pallet_id), Some(*b"bl/ledgr"));
+
+        let asset_entry = metadata
+            .pallet_by_name("ForeignAssets")
+            .and_then(|pallet| pallet.storage())
+            .and_then(|storage| storage.entry_by_name("Asset"))
+            .expect("actual runtime exposes ForeignAssets.Asset");
+        let asset_keys = asset_entry.keys().collect::<Vec<_>>();
+        assert_eq!(asset_keys.len(), 1);
+        usdc_location_value()
+            .encode_as_type(asset_keys[0].key_id, metadata.types())
+            .expect("canonical USDC Location follows the live AssetId key type");
+
+        let account_entry = metadata
+            .pallet_by_name("ForeignAssets")
+            .and_then(|pallet| pallet.storage())
+            .and_then(|storage| storage.entry_by_name("Account"))
+            .expect("actual runtime exposes ForeignAssets.Account");
+        let account_keys = account_entry.keys().collect::<Vec<_>>();
+        assert_eq!(account_keys.len(), 2);
+        usdc_location_value()
+            .encode_as_type(account_keys[0].key_id, metadata.types())
+            .expect("canonical USDC Location follows the live Account AssetId key type");
+
+        let insurance = pallet_sub_account(
+            fixed_bytes::<8, _>(&pallet_id).expect("PalletId has its declared width"),
+            *b"INSURANC",
+        );
+        let encoded_account = account_id_value(insurance)
+            .encode_as_type(account_keys[1].key_id, metadata.types())
+            .expect("derived INSURANCE account follows the live AccountId key type");
+        assert_eq!(encoded_account, insurance.encode());
+        assert_eq!(&insurance[..20], b"modlbl/ledgrINSURANC");
+        assert_eq!(&insurance[20..], &[0_u8; 12]);
+    }
+
+    #[test]
+    fn pallet_id_constant_byte_decoder_accepts_wrapper_shape_only_at_exact_width() {
+        let wrapped = Value::unnamed_composite([Value::unnamed_composite(
+            b"bl/ledgr"
+                .iter()
+                .copied()
+                .map(|byte| Value::u128(u128::from(byte))),
+        )]);
+        assert_eq!(fixed_bytes::<8, _>(&wrapped), Some(*b"bl/ledgr"));
+        assert_eq!(fixed_bytes::<7, _>(&wrapped), None);
     }
 
     #[test]

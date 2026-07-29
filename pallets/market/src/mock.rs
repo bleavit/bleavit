@@ -265,7 +265,7 @@ impl pallet_market::PolCommitmentSync for TestPolCommitmentSync {
 /// custody alone moves no NAV, which is exactly the failure this mirrors.
 pub struct TestMainRevenueSink;
 
-impl pallet_market::MainRevenueSink for TestMainRevenueSink {
+impl pallet_conditional_ledger::MainRevenueSink for TestMainRevenueSink {
     fn credit_main(amount: Balance) -> frame_support::dispatch::DispatchResult {
         if MainRevenueRefuses::get() {
             return Err(sp_runtime::DispatchError::Other(
@@ -276,6 +276,14 @@ impl pallet_market::MainRevenueSink for TestMainRevenueSink {
             .checked_add(amount)
             .ok_or(sp_runtime::DispatchError::Other("MAIN credit overflow"))?;
         MainCreditedTotal::set(credited);
+        Ok(())
+    }
+}
+
+pub struct TestResidueReporter;
+
+impl pallet_conditional_ledger::ResidueReporter for TestResidueReporter {
+    fn note_swept_residue(_: Balance) -> frame_support::dispatch::DispatchResult {
         Ok(())
     }
 }
@@ -347,7 +355,10 @@ impl pallet_conditional_ledger::Config for Test {
     type ProtocolAccounts = Protocol;
     type RedemptionFee = RedemptionFee;
     type InsuranceAccount = InsuranceAccount;
+    type MarketSweepStatus = Market;
+    type ResidueReporter = TestResidueReporter;
     type TreasuryMainAccount = TreasuryMainAccount;
+    type MainRevenueSink = TestMainRevenueSink;
     type PalletId = LedgerPalletId;
     type KeeperRebate = ();
     type InflowCapGate = ();

@@ -1402,11 +1402,59 @@ fn sweep_dust_reaps_after_archive_delay_and_sweeps_residue() {
 
         // Vault gone, residue swept to INSURANCE, deposits refunded, held zeroed.
         assert!(Vaults::<Test>::get(1).is_none());
-        assert!(usdc(INSURANCE) >= insurance_before); // residual escrow → INSURANCE
-        assert_eq!(DepositsHeld::<Test>::get(), 0);
-        assert!(ledger_events()
+        let residue = ledger_events()
             .iter()
-            .any(|e| matches!(e, Event::VaultReaped { pid: 1, .. })));
+            .find_map(|event| match event {
+                Event::VaultReaped { pid: 1, residue } => Some(*residue),
+                _ => None,
+            })
+            .expect("the completed dust sweep reports its exact residue");
+        assert_eq!(usdc(INSURANCE) - insurance_before, residue);
+        assert_eq!(
+            ReportedResidue::get(),
+            vec![residue],
+            "the treasury liability report must equal the custody/event amount",
+        );
+        assert_eq!(DepositsHeld::<Test>::get(), 0);
+        try_state();
+    });
+}
+
+#[test]
+fn residue_report_failure_rolls_back_the_permissionless_dust_sweep() {
+    new_test_ext().execute_with(|| {
+        create(1);
+        assert_ok!(Ledger::split(signed(ALICE), 1, 10 * UNIT));
+        assert_ok!(Ledger::resolve(signed(RESOLVER), 1, Branch::Accept));
+        assert_ok!(Ledger::settle_scalar(
+            signed(SETTLER),
+            1,
+            FixedU64(500_000_000),
+        ));
+        System::set_block_number(1 + ArchiveDelay::get() + 1);
+
+        let vault_before = Vaults::<Test>::get(1);
+        let positions_before = Positions::<Test>::iter().collect::<Vec<_>>();
+        let escrow_before = TotalEscrowed::<Test>::get();
+        let insurance_before = usdc(INSURANCE);
+        ResidueReporterRefuses::set(true);
+
+        assert_noop!(
+            Ledger::sweep_dust(signed(CHARLIE), 1),
+            DispatchError::Other("residue recognition refused"),
+        );
+        assert_eq!(Vaults::<Test>::get(1), vault_before);
+        assert_eq!(
+            Positions::<Test>::iter().collect::<Vec<_>>(),
+            positions_before
+        );
+        assert_eq!(TotalEscrowed::<Test>::get(), escrow_before);
+        assert_eq!(usdc(INSURANCE), insurance_before);
+        assert!(ReportedResidue::get().is_empty());
+
+        ResidueReporterRefuses::set(false);
+        assert_ok!(Ledger::sweep_dust(signed(CHARLIE), 1));
+        assert!(!ReportedResidue::get().is_empty());
         try_state();
     });
 }
@@ -2486,6 +2534,11 @@ fn sweep_redemption_fees_pays_the_treasury_and_an_empty_counter_is_a_no_op() {
         assert_ok!(Ledger::sweep_redemption_fees(signed(CHARLIE)));
         assert_eq!(usdc(TREASURY_MAIN) - treasury_before, 43);
         assert_eq!(sovereign_paid_since(sovereign_probe), 43);
+        assert_eq!(
+            MainCreditedTotal::get(),
+            43,
+            "MAIN custody and NAV recognition move by the same amount",
+        );
         // 03 §6.5(3): the sweep moves surplus, never escrow.
         assert_eq!(TotalEscrowed::<Test>::get(), escrow_before);
         assert_eq!(accrued(), 0);
@@ -2505,6 +2558,39 @@ fn sweep_redemption_fees_pays_the_treasury_and_an_empty_counter_is_a_no_op() {
             Some(Event::RedemptionFeesSwept { amount: 0 })
         ));
         assert_eq!(KeeperRebates::get(), vec![(CHARLIE, CrankClass::General)]);
+        try_state();
+    });
+}
+
+#[test]
+fn a_refused_main_credit_rolls_back_redemption_fee_custody_and_counter() {
+    new_test_ext().execute_with(|| {
+        RedemptionFee::set(registry_redeem_fee());
+        settled_scalar_at_070005(1, ALICE, 20_000);
+        assert_ok!(Ledger::redeem_scalar(
+            signed(ALICE),
+            1,
+            ScalarSide::Long,
+            20_000,
+        ));
+        assert_eq!(accrued(), 43);
+
+        let sovereign_before = usdc(ledger_account());
+        let treasury_before = usdc(TREASURY_MAIN);
+        MainRevenueRefuses::set(true);
+        assert_noop!(
+            Ledger::sweep_redemption_fees(signed(CHARLIE)),
+            DispatchError::Other("MAIN revenue recognition refused"),
+        );
+        assert_eq!(accrued(), 43);
+        assert_eq!(usdc(ledger_account()), sovereign_before);
+        assert_eq!(usdc(TREASURY_MAIN), treasury_before);
+        assert_eq!(MainCreditedTotal::get(), 0);
+
+        MainRevenueRefuses::set(false);
+        assert_ok!(Ledger::sweep_redemption_fees(signed(CHARLIE)));
+        assert_eq!(accrued(), 0);
+        assert_eq!(MainCreditedTotal::get(), 43);
         try_state();
     });
 }

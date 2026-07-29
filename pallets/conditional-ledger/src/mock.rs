@@ -134,6 +134,18 @@ parameter_types! {
     pub static MockTvlCap: Balance = u128::MAX;
     pub static MockCumulativeDeposits: Vec<(AccountId, Balance)> = Vec::new();
     pub static MockDepCap: Balance = u128::MAX;
+    /// Explicit market-ordering fixture. Standalone ledger tests have no
+    /// market pallet, so both vault classes are sweepable unless a regression
+    /// opts into the blocking state.
+    pub static ProposalMarketsSwept: bool = true;
+    pub static BaselineMarketSwept: bool = true;
+    /// Treasury seam fixtures. They are explicit types rather than `()` so the
+    /// production-required residue and revenue paths cannot disappear behind
+    /// an accounting-free default.
+    pub static ReportedResidue: Vec<Balance> = Vec::new();
+    pub static ResidueReporterRefuses: bool = false;
+    pub static MainCreditedTotal: Balance = 0;
+    pub static MainRevenueRefuses: bool = false;
 }
 
 pub struct TestKeeperRebate;
@@ -163,6 +175,51 @@ impl pallet_conditional_ledger::InflowCapGate<AccountId> for TestInflowCapGate {
     }
 }
 
+pub struct TestMarketSweepStatus;
+
+impl pallet_conditional_ledger::MarketSweepStatus for TestMarketSweepStatus {
+    fn proposal_books_swept(_: futarchy_primitives::ProposalId) -> bool {
+        ProposalMarketsSwept::get()
+    }
+
+    fn baseline_book_swept(_: futarchy_primitives::EpochId) -> bool {
+        BaselineMarketSwept::get()
+    }
+}
+
+pub struct TestResidueReporter;
+
+impl pallet_conditional_ledger::ResidueReporter for TestResidueReporter {
+    fn note_swept_residue(amount: Balance) -> frame_support::dispatch::DispatchResult {
+        if ResidueReporterRefuses::get() {
+            return Err(sp_runtime::DispatchError::Other(
+                "residue recognition refused",
+            ));
+        }
+        let mut reported = ReportedResidue::get();
+        reported.push(amount);
+        ReportedResidue::set(reported);
+        Ok(())
+    }
+}
+
+pub struct TestMainRevenueSink;
+
+impl pallet_conditional_ledger::MainRevenueSink for TestMainRevenueSink {
+    fn credit_main(amount: Balance) -> frame_support::dispatch::DispatchResult {
+        if MainRevenueRefuses::get() {
+            return Err(sp_runtime::DispatchError::Other(
+                "MAIN revenue recognition refused",
+            ));
+        }
+        let credited = MainCreditedTotal::get()
+            .checked_add(amount)
+            .ok_or(sp_runtime::DispatchError::Other("MAIN credit overflow"))?;
+        MainCreditedTotal::set(credited);
+        Ok(())
+    }
+}
+
 impl pallet_conditional_ledger::Config for Test {
     type Collateral = Assets;
     type UsdcAssetId = UsdcAssetId;
@@ -178,7 +235,10 @@ impl pallet_conditional_ledger::Config for Test {
     type ProtocolAccounts = Protocol;
     type RedemptionFee = RedemptionFee;
     type InsuranceAccount = InsuranceAccount;
+    type MarketSweepStatus = TestMarketSweepStatus;
+    type ResidueReporter = TestResidueReporter;
     type TreasuryMainAccount = TreasuryMainAccount;
+    type MainRevenueSink = TestMainRevenueSink;
     type PalletId = LedgerPalletId;
     type KeeperRebate = TestKeeperRebate;
     type InflowCapGate = TestInflowCapGate;
@@ -251,6 +311,12 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         MockTvlCap::set(u128::MAX);
         MockCumulativeDeposits::set(Vec::new());
         MockDepCap::set(u128::MAX);
+        ProposalMarketsSwept::set(true);
+        BaselineMarketSwept::set(true);
+        ReportedResidue::set(Vec::new());
+        ResidueReporterRefuses::set(false);
+        MainCreditedTotal::set(0);
+        MainRevenueRefuses::set(false);
     });
     ext
 }

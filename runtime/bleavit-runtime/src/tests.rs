@@ -11723,6 +11723,100 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
 }
 
 #[test]
+fn permissionless_dust_reports_exact_residue_before_insurance_reconciliation() {
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 80_161;
+        let holder = account(154);
+        let attacker = account(155);
+        let amount = currency::USDC.saturating_mul(5);
+        let holder_funding = amount
+            .saturating_add(crate::configs::LedgerPositionDeposit::get().saturating_mul(2))
+            .saturating_add(ForeignAssets::minimum_balance(usdc_location()));
+
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &holder,
+            holder_funding,
+        ));
+        assert_ok!(ConditionalLedger::create_vault(
+            RuntimeOrigin::signed(crate::configs::market_account()),
+            PID,
+            0,
+        ));
+        assert_ok!(ConditionalLedger::split(
+            RuntimeOrigin::signed(holder.clone()),
+            PID,
+            amount,
+        ));
+        assert_ok!(ConditionalLedger::resolve(
+            RuntimeOrigin::signed(crate::configs::epoch_account()),
+            PID,
+            futarchy_primitives::Branch::Accept,
+        ));
+        assert_ok!(ConditionalLedger::settle_scalar(
+            RuntimeOrigin::signed(crate::configs::welfare_settlement_account()),
+            PID,
+            futarchy_primitives::FixedU64(500_000_000),
+        ));
+
+        let insurance_before =
+            ForeignAssets::balance(usdc_location(), crate::configs::insurance_account());
+        let residue_before = pallet_futarchy_treasury::SweptResidueUnreclaimed::<Runtime>::get();
+        let main_credit_before = pallet_futarchy_treasury::PendingMainCredit::<Runtime>::get();
+        let terminal = pallet_conditional_ledger::VaultTerminalAt::<Runtime>::get(PID)
+            .expect("settled vault records its terminal block");
+        System::set_block_number(
+            terminal.saturating_add(crate::configs::LedgerArchiveDelay::get()),
+        );
+
+        assert_ok!(ConditionalLedger::sweep_dust(
+            RuntimeOrigin::signed(attacker.clone()),
+            PID,
+        ));
+        let residue = System::events()
+            .iter()
+            .rev()
+            .find_map(|record| match &record.event {
+                crate::RuntimeEvent::ConditionalLedger(
+                    pallet_conditional_ledger::Event::VaultReaped { pid, residue },
+                ) if *pid == PID => Some(*residue),
+                _ => None,
+            })
+            .expect("permissionless dust sweep emits its exact residue");
+        assert!(residue > 0);
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), crate::configs::insurance_account()),
+            insurance_before.saturating_add(residue),
+        );
+        assert_eq!(
+            pallet_futarchy_treasury::SweptResidueUnreclaimed::<Runtime>::get(),
+            residue_before.saturating_add(residue),
+        );
+        assert_eq!(
+            FutarchyTreasury::insurance_target(),
+            residue_before.saturating_add(residue).saturating_add(
+                <ForeignAssets as FungiblesInspect<AccountId>>::minimum_balance(usdc_location(),)
+            ),
+        );
+
+        // Any signed account may crank reconciliation. With the residue
+        // reported atomically, the just-swept buffer is target, not surplus.
+        assert_ok!(FutarchyTreasury::reconcile_insurance(
+            RuntimeOrigin::signed(attacker),
+        ));
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), crate::configs::insurance_account()),
+            insurance_before.saturating_add(residue),
+        );
+        assert_eq!(
+            pallet_futarchy_treasury::PendingMainCredit::<Runtime>::get(),
+            main_credit_before,
+        );
+        assert!(FutarchyTreasury::do_try_state().is_ok());
+    });
+}
+
+#[test]
 fn market_try_state_rejects_treasury_pol_mirror_drift() {
     development_ext().execute_with(|| {
         let markets = open_seeded_param_market_set(8_016)
@@ -11869,8 +11963,14 @@ fn seeded_force_reject_void_closes_and_reaps_all_proposal_books() {
         System::set_block_number(
             void_block.saturating_add(crate::configs::LedgerArchiveDelay::get()),
         );
-        assert_ok!(ConditionalLedger::sweep_dust(
-            RuntimeOrigin::signed(account(153)),
+        // Both paths are permissionless. The assembled runtime must bind the
+        // ledger ordering seam to the market pallet, so an attacker cannot
+        // archive seeded protocol inventory before the 04 §2 Sweep.
+        assert_noop!(
+            ConditionalLedger::sweep_dust(RuntimeOrigin::signed(account(155)), PID),
+            pallet_conditional_ledger::Error::<Runtime>::ReapNotDue,
+        );
+        assert!(pallet_conditional_ledger::Vaults::<Runtime>::contains_key(
             PID,
         ));
         for id in &proposal_books {
@@ -11878,6 +11978,12 @@ fn seeded_force_reject_void_closes_and_reaps_all_proposal_books() {
                 RuntimeOrigin::signed(account(153)),
                 *id
             ));
+        }
+        assert_ok!(ConditionalLedger::sweep_dust(
+            RuntimeOrigin::signed(account(155)),
+            PID,
+        ));
+        for id in &proposal_books {
             assert_ok!(Market::reap(RuntimeOrigin::signed(account(153)), *id));
         }
         assert!(!pallet_market::ProposalMarketIds::<Runtime>::contains_key(
