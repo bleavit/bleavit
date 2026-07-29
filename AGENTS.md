@@ -144,6 +144,20 @@ Read this file first. Then read `PLAN.md`. Then work.
   changed-scope feedback loop, while the no-argument script remains exhaustive.
   When CI polling is useful, poll no more than once every five minutes. Standing
   user instruction (2026-07-23).
+- **R-13 — Delegated tools always run sandboxed.** Every `codex exec` invocation
+  passes an **explicit** `--sandbox` mode, and it is `read-only` unless the task
+  genuinely must write files. Never `--dangerously-bypass-approvals-and-sandbox`
+  (no sandbox at all), never `--dangerously-bypass-hook-trust`, and never the
+  Claude Code Bash tool's own `dangerouslyDisableSandbox`. **Do not let the mode be
+  implicit:** `~/.codex/config.toml` marks this repository `trust_level =
+  "trusted"`, and trust suppresses *approval prompts*, not confinement — an
+  invocation that omits `--sandbox` silently inherits whatever the CLI default is.
+  Two operational corollaries, both learned the expensive way: pass `</dev/null`
+  or `codex exec` hangs on `Reading additional input from stdin...`, and never
+  point a `workspace-write` job at a tree another agent is editing, because its
+  turn-level snapshot/restore reverts concurrent edits — including in files it was
+  told not to touch. Verify the mode from the job log after launching rather than
+  assuming it. Standing user instruction (2026-07-29).
 
 ## Session protocol
 
