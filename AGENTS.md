@@ -182,6 +182,30 @@ encode this loop verbatim.
 Run what exists; gates grow with the repo (PLAN.md's *Verify* column is authoritative
 per milestone):
 
+> **Local prerequisites for the exhaustive Rust gate (verified 2026-07-29).** The
+> no-argument `rust-workspace-gates.sh` does not run on this workstation as-is;
+> three environment gaps stop it, none of them code defects, and CI hits none of
+> them (ext4 + `libclang-dev`). Export all three:
+>
+> ```bash
+> export CARGO_TARGET_DIR=/tmp/<scratch>/wtarget          # $HOME is ecryptfs: ~143-char
+>                                                          # filename cap kills the
+>                                                          # release+benchmarks build
+> export LIBCLANG_PATH=/tmp/<scratch>/libclang             # dir containing a symlink named
+>                                                          # exactly `libclang.so`; clang-sys
+>                                                          # matches only `libclang.so` /
+>                                                          # `libclang-*.so`, and this box has
+>                                                          # only `libclang.so.1` and
+>                                                          # `libclang-14.so.13`
+> export WASM_BUILD_WORKSPACE_HINT=$PWD                    # the wasm builder cannot find
+>                                                          # Cargo.lock from an out-of-tree
+>                                                          # target dir
+> ```
+>
+> `tools/ci/regenerate-weights.py` needs the same first variable **plus**
+> `--runtime <CARGO_TARGET_DIR>/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm`,
+> because it defaults to the in-repo `target/`.
+
 | Area | Gate (current) |
 |---|---|
 | Rust | `tools/ci/rust-workspace-gates.sh` (runs `cargo fmt --all -- --check` · `cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace` · runtime release/`runtime-benchmarks`/`try-runtime` builds + the try-runtime-enabled runtime suite (B6; the 15 §4.7 snapshot `try-runtime-cli` leg lands with B7/B8) · `tools/ci/runtime-profile-gates.sh` for the bootstrap/Phase-4 primary+recovery matrix, exact-one bounded primary ledger MBM, exhaustive paired repair, and recovery zero-SDK-MBM proof (B15/B16) · `no_std` build · generated-weight storage-bound check (`python3 tools/ci/check-weight-storage-bounds.py`) · the 15 §4.5 generated-weight purity gate (`python3 tools/ci/check-generated-weights.py` — every function in a `runtime/bleavit-runtime/src/weights/*.rs` file must carry the generator's `Minimum execution time:` line **and** contain nothing outside the generator's own grammar, since a term spliced into an already-generated function keeps that line and a marker-only check would pass it; a deliberate hand-written override needs a justified, **mechanically expiring** entry in `tools/ci/generated-weight-overrides.toml`, because a hand-spliced term is deleted by the next regeneration and that reads as a weight *decrease* the growth-only regression gate cannot see — SQ-490) · the S3 limit-coverage leg: `python3 -m unittest discover -s tools/limit-coverage/tests` + `python3 tools/limit-coverage/check-limit-coverage.py` — the 15 §4.6 / I-22 gate: every 13-registry key must be classified in `tools/limit-coverage/registry.toml` and every dispatch-limit key bound to a `// limit-coverage:` marked test) |

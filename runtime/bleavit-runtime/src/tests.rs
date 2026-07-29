@@ -2279,7 +2279,7 @@ fn vit_transaction_fees_still_burn_and_the_native_adapter_is_untouched() {
         let fee_call = remark();
         let dispatch_info = fee_call.get_dispatch_info();
         let issuance_before = Balances::total_issuance();
-        let main_before = Balances::free_balance(&crate::genesis::treasury_account());
+        let main_before = Balances::free_balance(crate::genesis::treasury_account());
 
         type NativeFeeCharger = <Runtime as pallet_transaction_payment::Config>::OnChargeTransaction;
         let liquidity = <NativeFeeCharger as pallet_transaction_payment::OnChargeTransaction<
@@ -2303,7 +2303,7 @@ fn vit_transaction_fees_still_burn_and_the_native_adapter_is_untouched() {
             "VIT fees keep burning (08 §9)",
         );
         assert_eq!(
-            Balances::free_balance(&crate::genesis::treasury_account()),
+            Balances::free_balance(crate::genesis::treasury_account()),
             main_before,
             "and are never routed to MAIN",
         );
