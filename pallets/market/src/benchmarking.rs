@@ -8,7 +8,9 @@ use frame_support::{
     BoundedVec,
 };
 use frame_system::RawOrigin;
-use futarchy_primitives::{bounds, kernel, Balance, Branch, FixedU64, MarketId, ScalarSide};
+use futarchy_primitives::{
+    bounds, kernel, Balance, Branch, EpochId, FixedU64, MarketId, ScalarSide,
+};
 use market_core::{BookKind, MarketPhase, TwapCumulative, TwapWindow};
 use pallet_conditional_ledger::core_ledger::proposal_positions;
 use sp_runtime::traits::Saturating;
@@ -74,6 +76,90 @@ fn seeded_decision<T: Config>(market: MarketId) -> (T::AccountId, T::AccountId, 
     (book, fees, treasury)
 }
 
+/// A seeded **Baseline** book (SQ-520).
+///
+/// `buy` and `sweep_revenue` each carry **one** weight across all three book
+/// kinds, so 15 §4.5 requires their fixtures to be the *heaviest* kind, not a
+/// representative one. Before this helper existed the harness could only build
+/// decision books, so the Baseline arm of both calls was unmeasured — and after
+/// SQ-519 gave `buy_baseline` two extra fee-segregation transfers, the
+/// regenerated file still showed no change, because the fixture could not reach
+/// them. This helper is what makes the comparison possible; the measured
+/// outcome is recorded at each `#[benchmark]` below.
+///
+/// 04 §8.2's wrapper degenerates here: no mirror leg, and a two-instrument
+/// vault instead of the proposal universe's fourteen.
+///
+/// Deliberately retained while unused. It is the *comparison* arm: a fixture
+/// selects one kind, so the losing kind's builder is dead by construction, and
+/// deleting it is exactly what left the Baseline path unmeasured across three
+/// book kinds until SQ-520. Re-point `buy` or `sweep_revenue` at it to re-check
+/// the worst case whenever either wrapper changes shape.
+#[allow(dead_code)]
+fn seeded_baseline<T: Config>(
+    market: MarketId,
+    epoch: EpochId,
+) -> (T::AccountId, T::AccountId, T::AccountId) {
+    let book = T::MarketAccounts::book(market);
+    let fees = T::MarketAccounts::fees(market);
+    let treasury = pol_stand_in::<T>();
+    fund::<T>(&book, 10_000 * UNIT);
+    fund::<T>(&fees, 10_000 * UNIT);
+    fund::<T>(&treasury, 10_000 * UNIT);
+    // 08 §4.3: a Baseline book is funded from `POL_BASELINE`, a different line
+    // from the proposal books', and the seed debits it by the cash that leaves
+    // custody (I-33) plus the 03 §7 R-4 `min_balance` endowment.
+    <T as Config>::BenchmarkHelper::prime_pol_custody(PolLine::Baseline, 10_000 * UNIT);
+    Pallet::<T>::create_market(
+        admin_origin::<T>(),
+        market,
+        BookKind::Baseline { epoch },
+        epoch,
+        book.clone(),
+        fees.clone(),
+        B,
+    )
+    .expect("benchmark baseline market creation succeeds");
+    Pallet::<T>::seed(admin_origin::<T>(), market, treasury.clone())
+        .expect("benchmark baseline seeding succeeds");
+    (book, fees, treasury)
+}
+
+/// Drive a proposal vault to **`Voided`** and latch the market-side
+/// observation (SQ-520).
+///
+/// The `Voided` terminal is what makes a decision book's sweep heaviest: under
+/// D-1 every branch pays ½, so the fee account holds a *paying* position on
+/// **both** branches and `withdraw_fees` performs two `do_redeem_void`
+/// operations where the scalar-settled fixture performs one winning-branch
+/// redemption and discards the loser.
+fn void_and_latch<T: Config>(proposal: u64) {
+    let resolve_origin =
+        <T as pallet_conditional_ledger::Config>::ResolveAuthority::try_successful_origin()
+            .expect("benchmark resolve authority origin exists");
+    pallet_conditional_ledger::Pallet::<T>::void(resolve_origin, proposal)
+        .expect("benchmark vault void succeeds");
+    Pallet::<T>::observe_proposal_terminal(proposal)
+        .expect("benchmark terminal observation succeeds");
+}
+
+/// Settle an epoch's Baseline vault and latch the market-side observation
+/// (SQ-520), the Baseline counterpart of [`settle_and_latch`].
+///
+/// Retained unused for the same reason as [`seeded_baseline`]: it is the other
+/// half of the Baseline comparison arm, and a fixture can only select one
+/// terminal.
+#[allow(dead_code)]
+fn settle_baseline_and_latch<T: Config>(epoch: EpochId) {
+    let settle_origin =
+        <T as pallet_conditional_ledger::Config>::SettleAuthority::try_successful_origin()
+            .expect("benchmark settle authority origin exists");
+    pallet_conditional_ledger::Pallet::<T>::settle_baseline(settle_origin, epoch, SETTLE_SCORE)
+        .expect("benchmark baseline settlement succeeds");
+    Pallet::<T>::observe_baseline_terminal(epoch)
+        .expect("benchmark baseline terminal observation succeeds");
+}
+
 /// Drive a proposal vault to its scalar-settled terminal through the production
 /// authorities and latch the market-side observation, releasing the POL
 /// obligation exactly as `pallet-epoch` does (04 §2 "Reap interleavings").
@@ -96,6 +182,22 @@ fn settle_and_latch<T: Config>(proposal: u64) {
 mod benchmarks {
     use super::*;
 
+    /// One weight covers all three book kinds, so this fixture must be the
+    /// heaviest of them (15 §4.5), not a representative one (SQ-520).
+    ///
+    /// **Measured at 50x20: the decision book is the worst case, by a wide
+    /// margin.** Re-pointing this fixture at `seeded_baseline` moves every
+    /// block-bounding dimension sharply *down* — proof_size 108,804 -> 16,632
+    /// (-84.7 %), reads 77 -> 29, writes 67 -> 19, ref_time -55 %. The decision
+    /// wrapper walks the proposal vault's fourteen-instrument universe
+    /// (`Positions` r:42 w:42, `PositionTotals` r:14 w:14) and posts the mirror
+    /// credit; 04 §8.2's Baseline wrapper degenerates to a two-instrument vault
+    /// with no mirror leg, so even after SQ-519 added its two fee-segregation
+    /// transfers it stays far below. That is why SQ-519's regeneration showed
+    /// no storage change: the delta was real but three orders of magnitude
+    /// below the fixture that sets the weight. `seeded_baseline` is retained so
+    /// this stays a measurement — re-point and re-run whenever either wrapper
+    /// changes shape.
     #[benchmark]
     fn buy() {
         let caller: T::AccountId = whitelisted_caller();
@@ -156,9 +258,36 @@ mod benchmarks {
         );
     }
 
-    /// The 04 §2 Sweep worst case: a settled decision book whose inventory is
-    /// unbalanced, so the return runs the full pair-first schedule — a paired
-    /// redemption, the floored residual leg, and the branch-USDC par leg.
+    /// The 04 §2 Sweep worst case: a **`Voided`** decision book whose inventory
+    /// is unbalanced (SQ-520).
+    ///
+    /// This fixture measured the *settled* terminal until SQ-520, and that
+    /// understated the call. The two legs move in opposite directions and only
+    /// one of them dominates:
+    ///
+    /// * **Book leg** — comparable either way. `withdraw_settled_scalar` runs a
+    ///   paired redemption, the floored residual legs and the branch-USDC par
+    ///   leg; `withdraw_voided` runs a merge, the residual legs and the merged
+    ///   branch-USDC leg. Roughly four ledger operations each.
+    /// * **Fee leg** — strictly heavier under `Voided`, and this is the whole
+    ///   of the difference. Under D-1 every branch pays ½, so the fee account
+    ///   holds a *paying* position on **both** branches and `withdraw_fees`
+    ///   performs two `do_redeem_void` operations. The settled arm redeems the
+    ///   winning branch once and discards the loser as provably worthless.
+    ///
+    /// **Measured at 50x20, the cost lands entirely in execution time:**
+    /// ref_time 773,310,000 -> 857,390,000 (+10.9 %), while reads (72), writes
+    /// (55) and estimated PoV (72,866) are *identical* on both terminals. Worth
+    /// stating precisely, because the review that raised this described the
+    /// committed weight as omitting the second redemption "outright" — true of
+    /// ref_time, but not of the storage dimensions, which the settled fixture
+    /// already covered. Both paths touch the same fixed instrument universe;
+    /// only the work done over it differs.
+    ///
+    /// The Baseline arm is lighter than both — a two-instrument vault settling
+    /// through a single `do_redeem_baseline_pair` — so it is not the fixture.
+    /// Staging un-recycled branch-USDC while the vault is still Open keeps the
+    /// par-redemption path in the measurement (04 §6.3).
     #[benchmark]
     fn sweep_revenue() {
         let caller: T::AccountId = whitelisted_caller();
@@ -184,7 +313,7 @@ mod benchmarks {
         )
         .expect("benchmark buy succeeds");
         Pallet::<T>::close(admin_origin::<T>(), 1).expect("benchmark close succeeds");
-        settle_and_latch::<T>(1);
+        void_and_latch::<T>(1);
         <T as Config>::BenchmarkHelper::prime_keeper_rebate();
         #[extrinsic_call]
         _(RawOrigin::Signed(caller.clone()), 1);
