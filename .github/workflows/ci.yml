@@ -106,7 +106,7 @@ jobs:
           python-version: '3.12'
       - name: Check local Markdown links
         run: python3 tools/ci/check-doc-links.py
-      - name: Check PLAN.md table structure
+      - name: Check Markdown table structure (PLAN, living docs, spec)
         run: python3 tools/ci/check-plan-tables.py
       - name: Check spec-question batch index
         run: python3 tools/ci/check-spec-question-batches.py

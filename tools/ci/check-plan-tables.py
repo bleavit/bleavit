@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check PLAN.md Markdown table structure.
+"""Check Markdown table structure in PLAN.md, the living documents, and the spec.
 
 Guards against the table-drift class fixed on 2026-07-17: a blank line (or any
 non-table line) splitting a table strands the rows below it from the header, so
@@ -17,6 +17,14 @@ Rules, per contiguous block of `|`-prefixed lines (outside fenced code blocks):
 
 Standing user instruction (2026-07-17): PLAN.md table formatting must never
 drift/break. Enforced by the `guard-plan-tables.sh` Stop hook and the docs CI job.
+
+The default target set is **not** PLAN.md alone (widened 2026-07-29). `docs/architecture/`
+is the source of truth per R-1, so a table that renders wrong there is worse than one in
+a status file — and it went ungated long enough to accumulate 15 rows in 13 §4 whose
+`Scope` and `Doc` columns had collapsed into one cell, silently blanking the Doc column
+of every storage bound they described. Widening the *default* rather than passing paths
+at one call site is deliberate: CI, the Stop hook and `check-ci-parity.py` all invoke
+this with no arguments, so a per-site argument would have to be remembered three times.
 """
 from __future__ import annotations
 
@@ -110,12 +118,28 @@ def check_text(text: str, name: str) -> list[str]:
     return errors
 
 
+def default_targets() -> list[Path]:
+    """PLAN.md, the living documents, and every architecture doc.
+
+    Sorted and relative-to-ROOT so failures cite a stable, clickable path
+    regardless of the working directory the caller ran from."""
+    targets = [ROOT / name for name in ("PLAN.md", "README.md", "AGENTS.md", "CLAUDE.md")]
+    targets.extend(sorted((ROOT / "docs" / "architecture").glob("*.md")))
+    return [t for t in targets if t.is_file()]
+
+
 def main(argv: list[str]) -> int:
-    targets = [Path(a) for a in argv] or [ROOT / "PLAN.md"]
+    targets = [Path(a) for a in argv] or default_targets()
     errors: list[str] = []
     for target in targets:
-        rel = target if target.is_absolute() else ROOT / target
-        errors.extend(check_text(rel.read_text(encoding="utf-8"), str(target)))
+        path = target if target.is_absolute() else ROOT / target
+        # Cite paths relative to the repo root: the defaults are absolute, and an
+        # absolute path in the failure text is neither clickable nor diffable.
+        try:
+            name = str(path.relative_to(ROOT))
+        except ValueError:
+            name = str(target)
+        errors.extend(check_text(path.read_text(encoding="utf-8"), name))
     if errors:
         print("Markdown table structure errors:")
         for err in errors:
