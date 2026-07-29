@@ -69,8 +69,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `2985`
 		//  Estimated: `36928`
-		// Minimum execution time: 225_120_000 picoseconds.
-		Weight::from_parts(233_450_000, 0)
+		// Minimum execution time: 226_340_000 picoseconds.
+		Weight::from_parts(235_180_000, 0)
 			.saturating_add(Weight::from_parts(0, 36928))
 			.saturating_add(T::DbWeight::get().reads(45))
 			.saturating_add(T::DbWeight::get().writes(35))
@@ -103,8 +103,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `2935`
 		//  Estimated: `36928`
-		// Minimum execution time: 227_990_000 picoseconds.
-		Weight::from_parts(236_069_000, 0)
+		// Minimum execution time: 229_870_000 picoseconds.
+		Weight::from_parts(237_140_000, 0)
 			.saturating_add(Weight::from_parts(0, 36928))
 			.saturating_add(T::DbWeight::get().reads(41))
 			.saturating_add(T::DbWeight::get().writes(35))
@@ -139,8 +139,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `3440`
 		//  Estimated: `36928`
-		// Minimum execution time: 215_630_000 picoseconds.
-		Weight::from_parts(220_860_000, 0)
+		// Minimum execution time: 216_330_000 picoseconds.
+		Weight::from_parts(223_670_000, 0)
 			.saturating_add(Weight::from_parts(0, 36928))
 			.saturating_add(T::DbWeight::get().reads(44))
 			.saturating_add(T::DbWeight::get().writes(34))
@@ -171,8 +171,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `3059`
 		//  Estimated: `36928`
-		// Minimum execution time: 205_350_000 picoseconds.
-		Weight::from_parts(209_950_000, 0)
+		// Minimum execution time: 193_270_000 picoseconds.
+		Weight::from_parts(213_669_000, 0)
 			.saturating_add(Weight::from_parts(0, 36928))
 			.saturating_add(T::DbWeight::get().reads(40))
 			.saturating_add(T::DbWeight::get().writes(34))
@@ -207,8 +207,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `3440`
 		//  Estimated: `36928`
-		// Minimum execution time: 214_970_000 picoseconds.
-		Weight::from_parts(220_970_000, 0)
+		// Minimum execution time: 201_990_000 picoseconds.
+		Weight::from_parts(219_870_000, 0)
 			.saturating_add(Weight::from_parts(0, 36928))
 			.saturating_add(T::DbWeight::get().reads(44))
 			.saturating_add(T::DbWeight::get().writes(34))
@@ -239,8 +239,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `3056`
 		//  Estimated: `36928`
-		// Minimum execution time: 192_020_000 picoseconds.
-		Weight::from_parts(208_860_000, 0)
+		// Minimum execution time: 206_959_000 picoseconds.
+		Weight::from_parts(211_750_000, 0)
 			.saturating_add(Weight::from_parts(0, 36928))
 			.saturating_add(T::DbWeight::get().reads(40))
 			.saturating_add(T::DbWeight::get().writes(34))
@@ -271,8 +271,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `2984`
 		//  Estimated: `72866`
-		// Minimum execution time: 293_640_000 picoseconds.
-		Weight::from_parts(319_009_000, 0)
+		// Minimum execution time: 309_290_000 picoseconds.
+		Weight::from_parts(317_420_000, 0)
 			.saturating_add(Weight::from_parts(0, 72866))
 			.saturating_add(T::DbWeight::get().reads(57))
 			.saturating_add(T::DbWeight::get().writes(49))
@@ -309,8 +309,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `2864`
 		//  Estimated: `14025`
-		// Minimum execution time: 137_380_000 picoseconds.
-		Weight::from_parts(142_520_000, 0)
+		// Minimum execution time: 139_100_000 picoseconds.
+		Weight::from_parts(144_910_000, 0)
 			.saturating_add(Weight::from_parts(0, 14025))
 			.saturating_add(T::DbWeight::get().reads(21))
 			.saturating_add(T::DbWeight::get().writes(11))
@@ -343,8 +343,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `2798`
 		//  Estimated: `8811`
-		// Minimum execution time: 138_200_000 picoseconds.
-		Weight::from_parts(141_810_000, 0)
+		// Minimum execution time: 139_569_000 picoseconds.
+		Weight::from_parts(143_280_000, 0)
 			.saturating_add(Weight::from_parts(0, 8811))
 			.saturating_add(T::DbWeight::get().reads(17))
 			.saturating_add(T::DbWeight::get().writes(11))
@@ -363,8 +363,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `1608`
 		//  Estimated: `36256`
-		// Minimum execution time: 69_160_000 picoseconds.
-		Weight::from_parts(71_300_000, 0)
+		// Minimum execution time: 69_240_000 picoseconds.
+		Weight::from_parts(71_620_000, 0)
 			.saturating_add(Weight::from_parts(0, 36256))
 			.saturating_add(T::DbWeight::get().reads(19))
 			.saturating_add(T::DbWeight::get().writes(15))
@@ -385,8 +385,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `1608`
 		//  Estimated: `36256`
-		// Minimum execution time: 70_980_000 picoseconds.
-		Weight::from_parts(73_040_000, 0)
+		// Minimum execution time: 71_310_000 picoseconds.
+		Weight::from_parts(73_460_000, 0)
 			.saturating_add(Weight::from_parts(0, 36256))
 			.saturating_add(T::DbWeight::get().reads(19))
 			.saturating_add(T::DbWeight::get().writes(16))
@@ -407,8 +407,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `1609`
 		//  Estimated: `36256`
-		// Minimum execution time: 66_260_000 picoseconds.
-		Weight::from_parts(72_860_000, 0)
+		// Minimum execution time: 70_980_000 picoseconds.
+		Weight::from_parts(73_280_000, 0)
 			.saturating_add(Weight::from_parts(0, 36256))
 			.saturating_add(T::DbWeight::get().reads(19))
 			.saturating_add(T::DbWeight::get().writes(16))
@@ -427,8 +427,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `1609`
 		//  Estimated: `36256`
-		// Minimum execution time: 69_430_000 picoseconds.
-		Weight::from_parts(71_710_000, 0)
+		// Minimum execution time: 69_650_000 picoseconds.
+		Weight::from_parts(71_810_000, 0)
 			.saturating_add(Weight::from_parts(0, 36256))
 			.saturating_add(T::DbWeight::get().reads(19))
 			.saturating_add(T::DbWeight::get().writes(15))
@@ -449,8 +449,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `1481`
 		//  Estimated: `6204`
-		// Minimum execution time: 34_090_000 picoseconds.
-		Weight::from_parts(35_350_000, 0)
+		// Minimum execution time: 33_530_000 picoseconds.
+		Weight::from_parts(36_150_000, 0)
 			.saturating_add(Weight::from_parts(0, 6204))
 			.saturating_add(T::DbWeight::get().reads(7))
 			.saturating_add(T::DbWeight::get().writes(4))
@@ -483,8 +483,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `2977`
 		//  Estimated: `36928`
-		// Minimum execution time: 229_010_000 picoseconds.
-		Weight::from_parts(234_380_000, 0)
+		// Minimum execution time: 214_340_000 picoseconds.
+		Weight::from_parts(230_440_000, 0)
 			.saturating_add(Weight::from_parts(0, 36928))
 			.saturating_add(T::DbWeight::get().reads(41))
 			.saturating_add(T::DbWeight::get().writes(35))
@@ -517,8 +517,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `3128`
 		//  Estimated: `36928`
-		// Minimum execution time: 237_190_000 picoseconds.
-		Weight::from_parts(241_920_000, 0)
+		// Minimum execution time: 222_100_000 picoseconds.
+		Weight::from_parts(234_810_000, 0)
 			.saturating_add(Weight::from_parts(0, 36928))
 			.saturating_add(T::DbWeight::get().reads(41))
 			.saturating_add(T::DbWeight::get().writes(36))
@@ -551,8 +551,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `3128`
 		//  Estimated: `36928`
-		// Minimum execution time: 236_290_000 picoseconds.
-		Weight::from_parts(242_520_000, 0)
+		// Minimum execution time: 222_000_000 picoseconds.
+		Weight::from_parts(235_250_000, 0)
 			.saturating_add(Weight::from_parts(0, 36928))
 			.saturating_add(T::DbWeight::get().reads(41))
 			.saturating_add(T::DbWeight::get().writes(36))
@@ -585,8 +585,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `3127`
 		//  Estimated: `36928`
-		// Minimum execution time: 235_460_000 picoseconds.
-		Weight::from_parts(242_030_000, 0)
+		// Minimum execution time: 221_820_000 picoseconds.
+		Weight::from_parts(231_930_000, 0)
 			.saturating_add(Weight::from_parts(0, 36928))
 			.saturating_add(T::DbWeight::get().reads(41))
 			.saturating_add(T::DbWeight::get().writes(36))
@@ -619,8 +619,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `2968`
 		//  Estimated: `36928`
-		// Minimum execution time: 215_220_000 picoseconds.
-		Weight::from_parts(232_950_000, 0)
+		// Minimum execution time: 213_650_000 picoseconds.
+		Weight::from_parts(225_370_000, 0)
 			.saturating_add(Weight::from_parts(0, 36928))
 			.saturating_add(T::DbWeight::get().reads(41))
 			.saturating_add(T::DbWeight::get().writes(35))
@@ -653,8 +653,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `2839`
 		//  Estimated: `8811`
-		// Minimum execution time: 130_150_000 picoseconds.
-		Weight::from_parts(141_600_000, 0)
+		// Minimum execution time: 130_350_000 picoseconds.
+		Weight::from_parts(137_600_000, 0)
 			.saturating_add(Weight::from_parts(0, 8811))
 			.saturating_add(T::DbWeight::get().reads(17))
 			.saturating_add(T::DbWeight::get().writes(12))
@@ -687,8 +687,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `2839`
 		//  Estimated: `8811`
-		// Minimum execution time: 129_730_000 picoseconds.
-		Weight::from_parts(140_740_000, 0)
+		// Minimum execution time: 130_110_000 picoseconds.
+		Weight::from_parts(137_810_000, 0)
 			.saturating_add(Weight::from_parts(0, 8811))
 			.saturating_add(T::DbWeight::get().reads(17))
 			.saturating_add(T::DbWeight::get().writes(12))
@@ -731,8 +731,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `41867`
 		//  Estimated: `334518`
-		// Minimum execution time: 5_559_699_000 picoseconds.
-		Weight::from_parts(5_790_669_000, 0)
+		// Minimum execution time: 5_567_259_000 picoseconds.
+		Weight::from_parts(5_859_639_000, 0)
 			.saturating_add(Weight::from_parts(0, 334518))
 			.saturating_add(T::DbWeight::get().reads(539))
 			.saturating_add(T::DbWeight::get().writes(313))
@@ -775,12 +775,14 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `41611`
 		//  Estimated: `334518`
-		// Minimum execution time: 5_124_999_000 picoseconds.
-		Weight::from_parts(5_537_000_000, 0)
+		// Minimum execution time: 5_141_079_000 picoseconds.
+		Weight::from_parts(5_377_419_000, 0)
 			.saturating_add(Weight::from_parts(0, 334518))
 			.saturating_add(T::DbWeight::get().reads(527))
 			.saturating_add(T::DbWeight::get().writes(313))
 	}
+	/// Storage: `ConditionalLedger::FrozenUntil` (r:1 w:0)
+	/// Proof: `ConditionalLedger::FrozenUntil` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::RedemptionFeesAccrued` (r:1 w:1)
 	/// Proof: `ConditionalLedger::RedemptionFeesAccrued` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
@@ -799,10 +801,10 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `12653`
 		//  Estimated: `26846`
-		// Minimum execution time: 131_030_000 picoseconds.
-		Weight::from_parts(137_220_000, 0)
+		// Minimum execution time: 123_380_000 picoseconds.
+		Weight::from_parts(135_640_000, 0)
 			.saturating_add(Weight::from_parts(0, 26846))
-			.saturating_add(T::DbWeight::get().reads(16))
+			.saturating_add(T::DbWeight::get().reads(17))
 			.saturating_add(T::DbWeight::get().writes(8))
 	}
 	/// Storage: `ConditionalLedger::SplitPausedUntil` (r:0 w:1)
@@ -811,8 +813,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `0`
 		//  Estimated: `0`
-		// Minimum execution time: 4_190_000 picoseconds.
-		Weight::from_parts(4_600_000, 0)
+		// Minimum execution time: 4_260_000 picoseconds.
+		Weight::from_parts(4_660_000, 0)
 			.saturating_add(Weight::from_parts(0, 0))
 			.saturating_add(T::DbWeight::get().writes(1))
 	}
@@ -824,8 +826,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `42`
 		//  Estimated: `1489`
-		// Minimum execution time: 6_160_000 picoseconds.
-		Weight::from_parts(6_640_000, 0)
+		// Minimum execution time: 5_700_000 picoseconds.
+		Weight::from_parts(6_170_000, 0)
 			.saturating_add(Weight::from_parts(0, 1489))
 			.saturating_add(T::DbWeight::get().reads(1))
 			.saturating_add(T::DbWeight::get().writes(2))
@@ -854,8 +856,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `12652`
 		//  Estimated: `26846`
-		// Minimum execution time: 103_730_000 picoseconds.
-		Weight::from_parts(108_480_000, 0)
+		// Minimum execution time: 96_790_000 picoseconds.
+		Weight::from_parts(106_190_000, 0)
 			.saturating_add(Weight::from_parts(0, 26846))
 			.saturating_add(T::DbWeight::get().reads(17))
 			.saturating_add(T::DbWeight::get().writes(6))
@@ -868,8 +870,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `243`
 		//  Estimated: `6308`
-		// Minimum execution time: 8_250_000 picoseconds.
-		Weight::from_parts(8_830_000, 0)
+		// Minimum execution time: 7_690_000 picoseconds.
+		Weight::from_parts(8_550_000, 0)
 			.saturating_add(Weight::from_parts(0, 6308))
 			.saturating_add(T::DbWeight::get().reads(3))
 	}
@@ -883,8 +885,8 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 		// Proof Size summary in bytes:
 		//  Measured:  `46`
 		//  Estimated: `3526`
-		// Minimum execution time: 6_650_000 picoseconds.
-		Weight::from_parts(7_150_000, 0)
+		// Minimum execution time: 6_250_000 picoseconds.
+		Weight::from_parts(6_780_000, 0)
 			.saturating_add(Weight::from_parts(0, 3526))
 			.saturating_add(T::DbWeight::get().reads(2))
 			.saturating_add(T::DbWeight::get().writes(2))

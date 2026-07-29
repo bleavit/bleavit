@@ -2596,6 +2596,57 @@ fn a_refused_main_credit_rolls_back_redemption_fee_custody_and_counter() {
 }
 
 #[test]
+fn sweep_redemption_fees_is_refused_while_a_ledger_freeze_is_active() {
+    new_test_ext().execute_with(|| {
+        RedemptionFee::set(registry_redeem_fee());
+        settled_scalar_at_070005(1, ALICE, 20_000);
+        assert_ok!(Ledger::redeem_scalar(
+            signed(ALICE),
+            1,
+            ScalarSide::Long,
+            20_000,
+        ));
+        assert_eq!(accrued(), 43);
+
+        // 06 §6.3 / SQ-517. `PB-LEDGER-FREEZE` is admissible only under the
+        // I-4 drift flag, and that flag is precisely the state in which L-7's
+        // bound — `RedemptionFeesAccrued ≤ balance − TotalEscrowed −
+        // held_deposits − min_balance` — goes negative. Under a freeze there
+        // is no surplus to sweep, so this transfer would be paid out of escrow
+        // backing while every claimant's own redemption is refused.
+        System::set_block_number(10);
+        assert_ok!(Ledger::set_frozen(signed(SETTLER), true));
+        let sovereign_before = usdc(ledger_account());
+        let treasury_before = usdc(TREASURY_MAIN);
+        assert_noop!(Ledger::sweep_redemption_fees(signed(CHARLIE)), E::Frozen);
+        assert_eq!(accrued(), 43);
+        assert_eq!(usdc(ledger_account()), sovereign_before);
+        assert_eq!(usdc(TREASURY_MAIN), treasury_before);
+        assert_eq!(MainCreditedTotal::get(), 0);
+
+        // A delay, not a forfeiture: the accrual survives the freeze intact
+        // and sweeps in full once it lifts.
+        assert_ok!(Ledger::set_frozen(signed(SETTLER), false));
+        assert_ok!(Ledger::sweep_redemption_fees(signed(CHARLIE)));
+        assert_eq!(accrued(), 0);
+        assert_eq!(MainCreditedTotal::get(), 43);
+        try_state();
+    });
+
+    // The freeze check deliberately precedes the I-31 empty-counter no-op: a
+    // frozen sweep reports `Frozen` rather than succeeding vacuously, so the
+    // refusal cannot be mistaken for "nothing to do". Nothing is lost either
+    // way — with an empty counter both answers move zero value.
+    new_test_ext().execute_with(|| {
+        System::set_block_number(10);
+        assert_ok!(Ledger::set_frozen(signed(SETTLER), true));
+        assert_eq!(accrued(), 0);
+        assert_noop!(Ledger::sweep_redemption_fees(signed(CHARLIE)), E::Frozen);
+        try_state();
+    });
+}
+
+#[test]
 fn sweep_redemption_fees_rejects_an_unsigned_origin() {
     new_test_ext().execute_with(|| {
         assert_noop!(

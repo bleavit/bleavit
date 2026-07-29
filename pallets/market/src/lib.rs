@@ -1111,6 +1111,15 @@ pub mod pallet {
         /// R-4 puts it. Reaching `MAIN` custody is only half of it — `nav()` is
         /// computed from the treasury's internal `main_usdc` counter, so the
         /// arrival is recognized through [`MainRevenueSink`] in the same layer.
+        ///
+        /// **Frozen under `PB-LEDGER-FREEZE`** (06 §6.3; SQ-517), because the
+        /// fee leg redeems through the ledger's *internal* path, which carries
+        /// no `Frozen` check — so an unguarded sweep would collect the
+        /// protocol's own claim out of a possibly-short sovereign at the moment
+        /// every claimant's `redeem` is refused. Freezing it strands nothing:
+        /// the crank effects no terminal transition, the value stays fully
+        /// collateralized in place, and the cost is an NAV-recognition delay
+        /// bounded by the freeze's own ≤ 28-day ceiling.
         #[pallet::call_index(6)]
         #[pallet::weight(<T as Config>::WeightInfo::sweep_revenue())]
         pub fn sweep_revenue(origin: OriginFor<T>, market: MarketId) -> DispatchResult {
@@ -1122,6 +1131,17 @@ pub mod pallet {
             if SweptMarkets::<T>::contains_key(market) {
                 return Ok(());
             }
+            // 06 §6.3 (SQ-517): the revenue cranks freeze with the rest of the
+            // value-moving surface. The fee leg below redeems through the
+            // ledger's *internal* path, which carries no `Frozen` check — so
+            // without this the protocol would collect its own claim out of a
+            // possibly-short sovereign at the moment every claimant's `redeem`
+            // is refused. Placed after the idempotence return, so a freeze
+            // never changes what an already-swept book answers, and before
+            // every sweepability check, so `Frozen` is the reported reason
+            // wherever it applies — the same precedence 06 §6.3 gives the
+            // freeze test over the decide-time static guards.
+            Self::ensure_not_frozen()?;
             ensure!(
                 matches!(book.phase, MarketPhase::Closed)
                     && SettlementObservedAt::<T>::contains_key(market),

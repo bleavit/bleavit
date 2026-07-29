@@ -1717,7 +1717,7 @@ fn emergency_creation_freeze_is_bounded_origin_gated_and_lazily_expires() {
 }
 
 #[test]
-fn ledger_freeze_blocks_trading_but_not_recovery_and_renews_once() {
+fn ledger_freeze_blocks_trading_and_the_revenue_crank_and_renews_once() {
     new_test_ext().execute_with(|| {
         create_decision();
         seed(MARKET_ID);
@@ -1746,13 +1746,26 @@ fn ledger_freeze_blocks_trading_but_not_recovery_and_renews_once() {
         assert_ok!(Market::extend_freeze_once());
         assert_noop!(Market::extend_freeze_once(), E::FreezeRenewalExhausted);
         System::set_block_number(110);
-        sweep(MARKET_ID);
-        assert_ok!(Market::reap(signed(BOB), MARKET_ID));
+
+        // 06 §6.3 / SQ-517: the E2 revenue crank freezes with the rest of the
+        // value-moving surface. Its fee leg redeems through the ledger's
+        // internal path, which carries no `Frozen` check of its own, so an
+        // unguarded sweep would collect the protocol's own claim out of a
+        // possibly-short sovereign at the moment every claimant's `redeem` is
+        // refused. Reap is delayed transitively — it requires the swept marker
+        // — and that delay is inert, since reap only discards residue that is
+        // worthless at any settlement.
+        assert_noop!(Market::sweep_revenue(signed(BOB), MARKET_ID), E::Frozen);
+        assert_noop!(Market::reap(signed(BOB), MARKET_ID), E::NotReapable);
+
         assert_noop!(
             Market::set_frozen(signed(ALICE), false),
             sp_runtime::DispatchError::BadOrigin
         );
         assert_ok!(Market::set_frozen(signed(MARKET_ADMIN), false));
+        // Both resume unchanged once the freeze lifts: a delay, not a loss.
+        sweep(MARKET_ID);
+        assert_ok!(Market::reap(signed(BOB), MARKET_ID));
         assert_try_state();
     });
 
@@ -1771,6 +1784,23 @@ fn ledger_freeze_blocks_trading_but_not_recovery_and_renews_once() {
             TRADE,
             Balance::MAX,
         ));
+        assert_try_state();
+    });
+
+    // The freeze check sits *after* the idempotence early-return, so what an
+    // already-swept book answers never depends on freeze state (04 §2). This
+    // is the placement's whole justification, so it is asserted rather than
+    // left to the comment: a freeze installed after a completed sweep must not
+    // retroactively turn its `Ok` into `Frozen`.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(10);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+        settle_decision();
+        sweep(MARKET_ID);
+        assert_ok!(Market::set_frozen(signed(MARKET_ADMIN), true));
+        assert_ok!(Market::sweep_revenue(signed(BOB), MARKET_ID));
         assert_try_state();
     });
 }

@@ -1180,10 +1180,23 @@ pub mod pallet {
         /// sovereign above its R-4 permanent floor, which L-7 is what makes
         /// safe: the accrual is bounded by the surplus **above** `min_balance`,
         /// so the crank can always pay out in full.
+        ///
+        /// **Frozen under `PB-LEDGER-FREEZE`** (06 §6.3; SQ-517). L-7 is a
+        /// conditional, and its condition is the negation of the I-4 drift
+        /// flag: the bound reads `RedemptionFeesAccrued ≤ balance −
+        /// TotalEscrowed − held_deposits − min_balance`, while the flag says
+        /// exactly that `TotalEscrowed + held_deposits > balance` — so under
+        /// the one state that authorizes a freeze the bound is *negative* and
+        /// there is no surplus to sweep. "Moves surplus, never escrow" then
+        /// stops being true, and `Preservation::Preserve` does not rescue it:
+        /// it protects `min_balance` and is indifferent to escrow. Refusing
+        /// here is what keeps the paragraph above accurate on every path this
+        /// crank can actually take.
         #[pallet::call_index(26)]
         #[pallet::weight(T::WeightInfo::sweep_redemption_fees())]
         pub fn sweep_redemption_fees(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
             let amount = RedemptionFeesAccrued::<T>::get();
             if amount > 0 {
                 T::Collateral::transfer(
