@@ -3883,6 +3883,152 @@ fn baseline_book_is_endowed_at_seed() {
 }
 
 #[test]
+fn consecutive_epoch_baseline_endowments_debit_pol_baseline_custody_line() {
+    use pallet_futarchy_treasury::{BudgetLine, PayoutLine, RebatePayout};
+    use pallet_market::core_market::seed_headroom;
+
+    development_ext().execute_with(|| {
+        const FIRST_PID: futarchy_primitives::ProposalId = 14_008;
+        const SECOND_PID: futarchy_primitives::ProposalId = 14_009;
+
+        let minimum_balance = ForeignAssets::minimum_balance(usdc_location());
+        let decision_headroom = seed_headroom(crate::configs::balance_param(b"pol.b.param"))
+            .expect("bounded decision b");
+        let gate_headroom =
+            seed_headroom(crate::configs::balance_param(b"pol.b_gate")).expect("bounded gate b");
+        let baseline_headroom = seed_headroom(crate::configs::balance_param(b"pol.b_baseline"))
+            .expect("bounded Baseline b");
+        let proposal_cash_per_epoch =
+            decision_headroom.saturating_add(gate_headroom.saturating_mul(2));
+        let baseline_cash_per_epoch = baseline_headroom.saturating_add(minimum_balance);
+
+        // Fund exactly two full market sets. Genesis already contributed the
+        // permanent floor that must remain in each custody account after both
+        // seeds have run.
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &crate::configs::pol_account(),
+            proposal_cash_per_epoch.saturating_mul(2),
+        ));
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &crate::configs::pol_baseline_account(),
+            baseline_cash_per_epoch.saturating_mul(2),
+        ));
+        // This is deliberately the only sync in the test. Re-leveling after
+        // either seed would conceal the missing R-4 endowment debit.
+        sync_pol_lines_to_custody();
+
+        let line_before = FutarchyTreasury::line_balance(BudgetLine::PolBaseline);
+        assert_eq!(line_before, baseline_cash_per_epoch.saturating_mul(2));
+        let commitment_per_epoch = decision_headroom
+            .saturating_mul(2)
+            .saturating_add(gate_headroom.saturating_mul(4))
+            .saturating_add(baseline_headroom);
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.main_usdc = commitment_per_epoch.saturating_mul(100);
+        });
+
+        let seed_qualified_proposal = |pid: futarchy_primitives::ProposalId,
+                                       proposer: AccountId| {
+            let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+            let schedule = pallet_epoch::Schedule::<Runtime>::get();
+            let decide_at = schedule.epoch_start_block.saturating_add(
+                schedule
+                    .length
+                    .saturating_mul(futarchy_primitives::phase_offsets::DECIDE_NUM)
+                    / futarchy_primitives::phase_offsets::DENOMINATOR,
+            );
+            let mut proposal = empty_param_proposal(pid, proposer, H256::zero(), 0);
+            proposal.metric_spec = 1;
+            proposal.state = ProposalState::Qualified;
+            proposal.decide_at = decide_at;
+            pallet_epoch::Proposals::<Runtime>::insert(pid, proposal);
+            pallet_epoch::ProposalSchedules::<Runtime>::insert(
+                pid,
+                pallet_epoch::ProposalSchedule {
+                    epoch,
+                    epoch_start_block: schedule.epoch_start_block,
+                    epoch_length: schedule.length,
+                    decide_at,
+                    metric_spec: 1,
+                },
+            );
+            pallet_epoch::NextProposalId::<Runtime>::mutate(|next| {
+                *next = (*next).max(pid.saturating_add(1));
+            });
+
+            let seed_at = schedule.epoch_start_block.saturating_add(
+                schedule
+                    .length
+                    .saturating_mul(futarchy_primitives::phase_offsets::SEED_NUM)
+                    / futarchy_primitives::phase_offsets::DENOMINATOR,
+            );
+            System::set_block_number(seed_at);
+            let batch =
+                pallet_epoch::TickBatch::try_from(vec![pid]).expect("one pid fits TickBatch");
+            assert_ok!(Epoch::tick(RuntimeOrigin::signed(account(223)), batch));
+            let baseline = pallet_epoch::Proposals::<Runtime>::get(pid)
+                .and_then(|stored| stored.markets)
+                .map(|markets| markets.baseline)
+                .expect("qualified proposal opens its epoch Baseline book");
+            assert_eq!(
+                pallet_market::BaselineMarketOf::<Runtime>::get(epoch),
+                Some(baseline),
+            );
+            (epoch, baseline)
+        };
+
+        let (first_epoch, first_baseline) = seed_qualified_proposal(FIRST_PID, account(224));
+
+        // Cross through the next epoch's Submit phase before entering Seed.
+        // Jumping directly Seed→Seed would not exercise the real entered-Seed
+        // funding transition.
+        let first_schedule = pallet_epoch::Schedule::<Runtime>::get();
+        System::set_block_number(
+            first_schedule
+                .epoch_start_block
+                .saturating_add(first_schedule.length),
+        );
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(account(223)),
+            Default::default(),
+        ));
+        assert_eq!(
+            pallet_epoch::CurrentEpoch::<Runtime>::get(),
+            first_epoch.saturating_add(1),
+        );
+
+        let (second_epoch, second_baseline) = seed_qualified_proposal(SECOND_PID, account(225));
+        assert_eq!(second_epoch, first_epoch.saturating_add(1));
+        assert_ne!(
+            first_baseline, second_baseline,
+            "different epochs must own distinct Baseline books",
+        );
+
+        let line_after = FutarchyTreasury::line_balance(BudgetLine::PolBaseline);
+        let pot_after =
+            <crate::configs::TreasuryRebatePayout as RebatePayout<AccountId>>::pot_balance(
+                PayoutLine::PolBaseline,
+            );
+        let expected_headroom_debit = baseline_headroom.saturating_mul(2);
+        let expected_endowment_debit = minimum_balance.saturating_mul(2);
+        assert_ok!(FutarchyTreasury::do_try_state());
+        assert_eq!(
+            line_after,
+            line_before
+                .saturating_sub(expected_headroom_debit)
+                .saturating_sub(expected_endowment_debit),
+            "each Baseline book must debit min_balance on top of LMSR headroom",
+        );
+        assert!(
+            line_after <= pot_after,
+            "POL_BASELINE line {line_after} must not exceed custody pot {pot_after}",
+        );
+    });
+}
+
+#[test]
 fn small_baseline_sell_below_the_fee_floor_succeeds() {
     use futarchy_primitives::{ScalarSide, TradeSide};
 
@@ -11437,10 +11583,13 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
         // Since milestone E1 the seed also debits the subsidy lines by the cash
         // that physically left them, so NAV falls by the live commitments AND
         // by the spend — one `split` funds a branch pair, so the cash is half
-        // the pair's commitment (08 §8 step 5, §10.5; I-33).
+        // the pair's commitment. The Baseline spend also includes its
+        // unrecoverable R-4 floor (03 §7; 08 §8 step 5, §10.5; I-33).
+        let baseline_endowment = ForeignAssets::minimum_balance(usdc_location());
         let cash_spent = decision_headroom
             .saturating_add(gate_headroom.saturating_mul(2))
-            .saturating_add(baseline_headroom);
+            .saturating_add(baseline_headroom)
+            .saturating_add(baseline_endowment);
         assert_eq!(
             FutarchyTreasury::nav().nav,
             nav_before.saturating_sub(total).saturating_sub(cash_spent),
@@ -11523,10 +11672,11 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
                 market
             ));
         }
-        // The full I-33 cycle closes: these books never traded, so the whole
-        // seed comes back and NAV is exactly restored — released obligation
-        // AND returned custody, never one without the other.
-        assert_eq!(FutarchyTreasury::nav().nav, nav_before);
+        // The full I-33 cycle closes: these books never traded, so every
+        // recoverable seed unit comes back. The Baseline account's R-4 floor
+        // deliberately remains in that account and therefore stays debited.
+        let nav_after_sweep = nav_before.saturating_sub(baseline_endowment);
+        assert_eq!(FutarchyTreasury::nav().nav, nav_after_sweep);
         assert!(Market::do_try_state().is_ok());
         assert!(FutarchyTreasury::do_try_state().is_ok());
 
@@ -11549,7 +11699,7 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
         assert!(FutarchyTreasury::treasury().pol_commitments.is_empty());
         assert_eq!(pallet_market::Markets::<Runtime>::count(), 0);
         // Reap moved no further POL: what it discarded was worthless residue.
-        assert_eq!(FutarchyTreasury::nav().nav, nav_before);
+        assert_eq!(FutarchyTreasury::nav().nav, nav_after_sweep);
     });
 }
 
