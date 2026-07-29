@@ -3873,13 +3873,35 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
                         // matching pre-B14 behavior. Propagating it would roll
                         // back the whole epoch tick and wedge every proposal in
                         // the batch, a strictly broader liveness failure.
-                        let _ = <ForeignAssets as Mutate<AccountId>>::transfer(
-                            asset,
-                            &source,
-                            &book,
-                            shortfall,
-                            Preservation::Preserve,
-                        );
+                        //
+                        // **The line debit is not optional and must be atomic
+                        // with the transfer (08 §8 step 5; I-33).** This
+                        // endowment moves real USDC *out of the POL_BASELINE
+                        // custody pot*, and `pallet_market::seed` above debited
+                        // only the LMSR `headroom` — nothing covers the R-4
+                        // floor. Left unmirrored, `line` stays put while `pot`
+                        // shrinks by one `min_balance` per Baseline book, so the
+                        // genesis slack absorbs the first book and the **second**
+                        // makes the treasury try-state's
+                        // `line + streams <= pot` false ("POL_BASELINE line
+                        // exceeds real USDC custody pot"). Every existing test
+                        // seeds at most one Baseline book, which is exactly why
+                        // nothing caught it. Committing the two together keeps
+                        // the failure mode the one G-1 already chose: the
+                        // endowment is skipped whole, never applied half.
+                        let _ = frame_support::storage::with_storage_layer(|| -> DispatchResult {
+                            <ForeignAssets as Mutate<AccountId>>::transfer(
+                                asset,
+                                &source,
+                                &book,
+                                shortfall,
+                                Preservation::Preserve,
+                            )?;
+                            crate::FutarchyTreasury::debit_pol_custody(
+                                pallet_futarchy_treasury::BudgetLine::PolBaseline,
+                                shortfall,
+                            )
+                        });
                     }
                 }
                 id
