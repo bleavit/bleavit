@@ -121,3 +121,40 @@ runtime/bleavit-runtime/src/weights/pallet_conditional_ledger.rs void @ reads=19
 # idempotent behind the `SweptMarkets` marker (04 §2: exactly one `RevenueSwept`
 # per market), so a repeat call is refused rather than re-charged.
 runtime/bleavit-runtime/src/weights/pallet_market.rs sweep_revenue @ proof_size=72866, reads=72, writes=55: E2, plus one read from E4. The 04 §6.1 fee leg adds one `withdraw_fees(.., &main)` ledger walk ahead of E1's `withdraw_book(.., &treasury)` POL return — the same 14 proposal instruments for a second owner, so `Positions` goes r:14 w:14 -> r:28 w:28 (a fixed count, not a scan). The rest are named keys: `PositionCount` +1r/+1w for the second owner, `ForeignAssets::Account` +1r/+1w for the Baseline book's retained plain-USDC remittance above the 03 §7 R-4 `min_balance` floor, `Constitution::Params` +2r for the `ledger.rdm_fee`/`ledger.min_split` overlay, `RedemptionFeesAccrued` +1r, and `PendingMainCredit` +1r/+1w. Exactly +20 reads and +17 writes for that leg, nothing unaccounted. **One further read, +1, is E4/SQ-517**: `Market::FrozenUntil`, the 06 §6.3 freeze guard the two Track-E revenue cranks acquired — the fee leg redeems through the ledger's *internal* path, which carries no `Frozen` check, so without it the protocol would collect its own claim out of a possibly-short sovereign while every claimant's `redeem` is refused. It is a single `OptionQuery` value read on a call that already performs 71, and the estimated PoV does not move at all (72,866 B before and after) because the key fits inside the existing bound; only `Measured` shifts 15,020 -> 15,062. Total +21 reads and +17 writes against the merge base. The `PendingMainCredit` write is load-bearing rather than incidental: `nav()` reads the treasury's internal `main_usdc` counter and not asset balances, so USDC that reaches `MAIN` without `credit_main` never reaches NAV — the precise shape of the custody leak this track closes. PoV 72,866 B is inside 13 §5's budget and the call is idempotent behind the `SweptMarkets` marker, so the permissionless surface cannot be re-charged.
+
+# --- SQ-518: the 08 §1.2 automatic INSURANCE overflow on the USDC slash paths ---
+#
+# `adjudicate` is the oracle's reporter-bond slash. Its writes move 8 -> 10 and
+# its reads 478 -> 481; only the writes cross the 10 % limit (+25 % on a small
+# base), and all five units reconcile to named keys with nothing unaccounted:
+#
+#   ForeignAssets::Account   +1r/+1w  the INSURANCE -> MAIN transfer touches
+#                                     MAIN's account row
+#   SweptResidueUnreclaimed  +1r      the liability term of `T_ins`, read to
+#                                     derive the target and the surplus
+#   PendingMainCredit        +1r/+1w  `credit_main` — the accounting half, and
+#                                     the load-bearing one: `nav()` reads the
+#                                     treasury's internal counter, not asset
+#                                     balances, so USDC that reaches MAIN
+#                                     without this write never reaches NAV
+#
+# Why the cost is taken at all: 08 §1.2 requires above-target USDC to overflow
+# to MAIN "automatically, in the same transaction as the inflow ... no crank for
+# those", naming slash proceeds explicitly. The permissionless
+# `reconcile_insurance` exists one bullet later for *direct* transfers, which
+# cannot be intercepted; it is a backstop, not the intended path here.
+#
+# Why it cannot grief: the added work is O(1) and bounded — three named
+# single-value reads and two writes, no scan — and it runs only on a path that
+# already performs 478 reads to adjudicate a dispute. The overflow itself is a
+# no-op at or below target, so the common case adds a comparison and nothing
+# else. The call is not permissionless.
+#
+# Direction of error, deliberately chosen: the overflow is best-effort at the
+# call site, inside its own storage layer. The slash is the security-critical
+# act and must not be voided by a cleanup failure (G-1); anything left above
+# target is exactly what the crank clears. The layer is what keeps that safe —
+# `overflow_insurance` credits `main_usdc` before moving custody, so swallowing
+# the error without a layer would retain the credit and overstate NAV against
+# custody that never moved.
+runtime/bleavit-runtime/src/weights/pallet_oracle.rs adjudicate @ writes=10: SQ-518. The 08 §1.2 automatic INSURANCE overflow now runs in the reporter-bond slash's own transaction. +2 writes reconcile exactly: `ForeignAssets::Account` +1w for the INSURANCE -> MAIN transfer and `PendingMainCredit` +1w for `credit_main`, the accounting half without which USDC reaching MAIN never reaches `nav()`. Reads move 478 -> 481 (+0.6 %, under the limit) for the same two keys plus `SweptResidueUnreclaimed`, the liability term of `T_ins`. All O(1) named single-value keys, no scan, on a path already performing 478 reads; the overflow is a no-op at or below target. Best-effort inside its own storage layer so a cleanup failure cannot void a confiscation (G-1) and cannot leave `main_usdc` credited against custody that never moved.

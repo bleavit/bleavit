@@ -13448,6 +13448,36 @@ fn proposal_bond_custody_rejects_unfunded_and_second_intake_then_refunds_withdra
     });
 }
 
+/// Total confiscated USDC still held by the protocol, across the two accounts
+/// 08 §1.2 splits it between (SQ-518).
+///
+/// A USDC slash executes treasury code, so the above-target surplus overflows
+/// to `MAIN` **in the slash's own transaction** — INSURANCE is left holding
+/// exactly its derived target `T_ins`, not the inflow. Asserting on INSURANCE
+/// alone would therefore measure the *target*, which is a constant, rather than
+/// the confiscation, which is what these tests are about; the sum is invariant
+/// under where §1.2 chooses to park the money and is the honest subject.
+///
+/// Pair every use with an `insurance_target()` assertion: the sum alone would
+/// also hold if the overflow silently stopped running, and that regression is
+/// exactly what SQ-518 fixed.
+fn confiscated_usdc() -> Balance {
+    ForeignAssets::balance(usdc_location(), crate::configs::insurance_account()).saturating_add(
+        ForeignAssets::balance(usdc_location(), crate::genesis::treasury_account()),
+    )
+}
+
+/// INSURANCE retains exactly `T_ins` once an inflow that executes treasury code
+/// has settled (08 §1.2). This is the half of the SQ-518 obligation that proves
+/// the automatic overflow actually ran.
+fn assert_insurance_at_target() {
+    assert_eq!(
+        ForeignAssets::balance(usdc_location(), crate::configs::insurance_account()),
+        FutarchyTreasury::insurance_target(),
+        "08 §1.2: INSURANCE retains exactly T_ins after an inflow that executes treasury code",
+    );
+}
+
 #[test]
 fn proposal_bond_custody_blocks_late_withdrawal_refunds_terminal_reject_and_slashes_t18_once() {
     use frame_support::traits::tokens::{Fortitude, Preservation};
@@ -13521,8 +13551,7 @@ fn proposal_bond_custody_blocks_late_withdrawal_refunds_terminal_reject_and_slas
             assert!(false, "qualification fixture must be constructible");
             return;
         };
-        let insurance = crate::configs::insurance_account();
-        let insurance_before = ForeignAssets::balance(usdc_location(), &insurance);
+        let confiscated_before = confiscated_usdc();
         pallet_epoch::Proposals::<Runtime>::mutate(pid, |proposal| {
             if let Some(proposal) = proposal {
                 proposal.state = ProposalState::Queued;
@@ -13553,10 +13582,11 @@ fn proposal_bond_custody_blocks_late_withdrawal_refunds_terminal_reject_and_slas
             Some(retained),
         );
         assert_eq!(
-            ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(slash),
+            confiscated_usdc(),
+            confiscated_before.saturating_add(slash),
             "T18 slashes exactly one claimant-adverse half into insurance",
         );
+        assert_insurance_at_target();
 
         assert!(Epoch::mark_failed_executed(
             RuntimeOrigin::signed(crate::configs::execution_guard_account()),
@@ -13564,8 +13594,8 @@ fn proposal_bond_custody_blocks_late_withdrawal_refunds_terminal_reject_and_slas
         )
         .is_err());
         assert_eq!(
-            ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(slash),
+            confiscated_usdc(),
+            confiscated_before.saturating_add(slash),
             "a repeated T18 callback cannot slash twice",
         );
 
@@ -13610,8 +13640,7 @@ fn missing_preimage_terminal_path_slashes_the_live_param_fraction_to_insurance()
             }
         };
         let slash = bond.saturating_mul(Balance::from(slash_pct)) / 100;
-        let insurance = crate::configs::insurance_account();
-        let insurance_before = ForeignAssets::balance(usdc_location(), &insurance);
+        let confiscated_before = confiscated_usdc();
         assert_ok!(ForeignAssets::mint_into(usdc_location(), &proposer, bond));
         let missing_hash = H256::repeat_byte(151);
         let pid = pallet_epoch::NextProposalId::<Runtime>::get();
@@ -13665,10 +13694,8 @@ fn missing_preimage_terminal_path_slashes_the_live_param_fraction_to_insurance()
             ),
             bond.saturating_sub(slash),
         );
-        assert_eq!(
-            ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(slash),
-        );
+        assert_eq!(confiscated_usdc(), confiscated_before.saturating_add(slash),);
+        assert_insurance_at_target();
         assert!(System::events().iter().any(|record| matches!(
             record.event,
             crate::RuntimeEvent::Epoch(pallet_epoch::Event::IntakeSlashed {
@@ -13689,8 +13716,7 @@ fn real_proposal_bond_custody_covers_full_static_slash_and_not_decision_grade_pa
         assert!(install_single_active_metric_spec(19).is_some());
         let proposer = account(151);
         let bond = crate::configs::balance_param(b"prop.bond.param");
-        let insurance = crate::configs::insurance_account();
-        let insurance_before = ForeignAssets::balance(usdc_location(), &insurance);
+        let confiscated_before = confiscated_usdc();
         let batch =
             match pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(Vec::new()) {
                 Ok(batch) => batch,
@@ -13775,18 +13801,15 @@ fn real_proposal_bond_custody_covers_full_static_slash_and_not_decision_grade_pa
             0,
             "a false resource declaration loses the complete real bond",
         );
-        assert_eq!(
-            ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(bond),
-        );
+        assert_eq!(confiscated_usdc(), confiscated_before.saturating_add(bond),);
+        assert_insurance_at_target();
     });
 
     development_ext().execute_with(|| {
         assert!(install_single_active_metric_spec(20).is_some());
         let proposer = account(153);
         let bond = crate::configs::balance_param(b"prop.bond.param");
-        let insurance = crate::configs::insurance_account();
-        let insurance_before = ForeignAssets::balance(usdc_location(), &insurance);
+        let confiscated_before = confiscated_usdc();
         let batch =
             match pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(Vec::new()) {
                 Ok(batch) => batch,
@@ -13959,10 +13982,7 @@ fn real_proposal_bond_custody_covers_full_static_slash_and_not_decision_grade_pa
             ),
             bond.saturating_sub(slash),
         );
-        assert_eq!(
-            ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(slash),
-        );
+        assert_eq!(confiscated_usdc(), confiscated_before.saturating_add(slash),);
     });
 }
 
@@ -14131,8 +14151,7 @@ fn false_resource_declarations_under_over_and_wrong_fully_slash() {
         let wrong = expected_resource_key(0x01, Some(&pallet_constitution::key16(b"mkt.fee")));
         let declarations = [Vec::new(), vec![correct, wrong], vec![wrong]];
         let bond = crate::configs::balance_param(b"prop.bond.param");
-        let insurance = crate::configs::insurance_account();
-        let insurance_before = ForeignAssets::balance(usdc_location(), &insurance);
+        let confiscated_before = confiscated_usdc();
         let mut submitted = Vec::new();
 
         for (index, resources) in declarations.into_iter().enumerate() {
@@ -14187,9 +14206,10 @@ fn false_resource_declarations_under_over_and_wrong_fully_slash() {
             );
         }
         assert_eq!(
-            ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(bond.saturating_mul(3)),
+            confiscated_usdc(),
+            confiscated_before.saturating_add(bond.saturating_mul(3)),
         );
+        assert_insurance_at_target();
         assert!(pallet_epoch::ResourceLocks::<Runtime>::get().is_empty());
     });
 }
@@ -14247,8 +14267,7 @@ fn mixed_valid_and_values_scope_leaves_use_unclassifiable_refund_slash_taxonomy(
             }
         };
         let bond = crate::configs::balance_param(b"prop.bond.param");
-        let insurance = crate::configs::insurance_account();
-        let insurance_before = ForeignAssets::balance(usdc_location(), &insurance);
+        let confiscated_before = confiscated_usdc();
         assert!(tick_qualification(vec![refund_pid, slash_pid]).is_some());
         for (pid, reason) in [
             (refund_pid, RejectReason::ProcessHold),
@@ -14280,10 +14299,8 @@ fn mixed_valid_and_values_scope_leaves_use_unclassifiable_refund_slash_taxonomy(
             ),
             0,
         );
-        assert_eq!(
-            ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(bond),
-        );
+        assert_eq!(confiscated_usdc(), confiscated_before.saturating_add(bond),);
+        assert_insurance_at_target();
     });
 }
 
@@ -14579,8 +14596,7 @@ fn overbound_footprint_slashes_empty_declaration_but_unknown_wrapper_refunds() {
             return;
         };
         let bond = crate::configs::balance_param(b"prop.bond.param");
-        let insurance = crate::configs::insurance_account();
-        let insurance_before = ForeignAssets::balance(usdc_location(), &insurance);
+        let confiscated_before = confiscated_usdc();
         assert!(tick_qualification(vec![
             empty_overbound_pid,
             nonempty_overbound_pid,
@@ -14633,9 +14649,10 @@ fn overbound_footprint_slashes_empty_declaration_but_unknown_wrapper_refunds() {
             bond,
         );
         assert_eq!(
-            ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(bond.saturating_mul(2)),
+            confiscated_usdc(),
+            confiscated_before.saturating_add(bond.saturating_mul(2)),
         );
+        assert_insurance_at_target();
     });
 }
 

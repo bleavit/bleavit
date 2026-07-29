@@ -1921,6 +1921,32 @@ pub mod pallet {
             Ok(())
         }
 
+        /// 08 §1.2: a USDC inflow that executes treasury code but, unlike swept
+        /// residue, raises **no** liability the reserve backs — so the whole
+        /// arrival is surplus the moment it lands and the automatic overflow
+        /// runs in the inflow's own transaction. §1.2 names slash proceeds in
+        /// exactly the class it says needs "no crank": the permissionless
+        /// `reconcile_insurance` exists one bullet later for *direct*
+        /// transfers, which cannot be intercepted because `ForeignAssets`
+        /// `transfer` is a public call — a backstop for the un-interceptable
+        /// case, not the intended path for inflows that do run treasury code.
+        ///
+        /// Deliberately does **not** touch `SweptResidueUnreclaimed`: raising
+        /// `T_ins` here would have INSURANCE retain the slash forever, which
+        /// is the §1.2 reading for forfeited deposits, not for confiscations.
+        /// Contrast [`Self::note_swept_residue`], whose amount *is* a
+        /// contingent liability and therefore does raise the target.
+        ///
+        /// Callers treat this as **best-effort** (SQ-518). The slash is the
+        /// security-critical act; no invariant breaks if the overflow does not
+        /// run, because above-target USDC is precisely what
+        /// `reconcile_insurance` clears. Propagating the error would let a
+        /// cleanup failure void a confiscation, which inverts G-1.
+        pub fn note_insurance_inflow() -> DispatchResult {
+            Self::overflow_insurance()?;
+            Ok(())
+        }
+
         /// 08 §1.2's derived INSURANCE target `T_ins`, scoped to USDC.
         pub fn insurance_target() -> Balance {
             futarchy_treasury_core::insurance_target(

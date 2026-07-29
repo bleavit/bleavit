@@ -5680,8 +5680,25 @@ impl pallet_epoch::ProposalBondCurrency<AccountId> for RuntimeProposalBond {
             &insurance_account(),
             amount,
             Preservation::Expendable,
-        )
-        .map(|_| ())
+        )?;
+        // 08 §1.2 (SQ-518): slash proceeds are one of the three inflow classes
+        // that execute treasury code, so the above-target surplus overflows to
+        // `MAIN` in this same transaction — "no crank for those". The
+        // permissionless `reconcile_insurance` is the backstop for *direct*
+        // transfers, which cannot be intercepted, not the intended path here.
+        //
+        // Best-effort by design: the confiscation is the security-critical act
+        // and a cleanup failure must not void it (G-1); whatever is left above
+        // target is exactly what the crank clears. The inner storage layer is
+        // load-bearing rather than defensive — `overflow_insurance` credits
+        // `main_usdc` before moving custody and relies on the *dispatch* to
+        // undo the credit if custody refuses. Swallowing the error without a
+        // layer would keep that credit, overstating NAV against custody that
+        // never moved.
+        let _ = frame_support::storage::with_storage_layer(|| {
+            FutarchyTreasury::note_insurance_inflow()
+        });
+        Ok(())
     }
 
     fn escrow_balance() -> Balance {
@@ -6838,8 +6855,15 @@ impl pallet_oracle::OracleCustody<AccountId> for RuntimeOracleCustody {
             &insurance_account(),
             amount,
             Preservation::Expendable,
-        )
-        .map(|_| ())
+        )?;
+        // 08 §1.2 (SQ-518): the reporter-bond slash is the second USDC inflow
+        // that executes treasury code. Same reading, same best-effort contract
+        // and same inner storage layer as `slash_to_insurance` above — see the
+        // comment there for why the layer is load-bearing.
+        let _ = frame_support::storage::with_storage_layer(|| {
+            FutarchyTreasury::note_insurance_inflow()
+        });
+        Ok(())
     }
 
     fn balance() -> Balance {
