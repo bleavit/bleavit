@@ -1264,6 +1264,147 @@ pub mod pallet {
                 st.do_merge_baseline(epoch, &who, amount)
             })
         }
+
+        // ------------------------------------ 08 §8 step 5(b) POL custody return
+        //
+        // The `MarketAuthority` half of 03 §5.3, and the inverse of the seeding
+        // ops above: `holder`'s terminal claims burn and the gross payout is
+        // routed to `recipient` — the market's `sweep_revenue` crank names the
+        // funding line that paid for the seed (04 §2; 08 §8 step 5(b)). Each
+        // wrapper returns the real USDC released, which the crank reports as
+        // `RevenueSwept.pol_returned` and the treasury credits back to its
+        // `POL`/`POL_BASELINE` budget line (I-33).
+        //
+        // Both parties MUST be protocol accounts. That is the same containment
+        // `discard_protocol_inventory` uses and it is exactly the 03 §5.3a
+        // `ProtocolAccounts` exemption boundary: this surface can only ever move
+        // protocol inventory to a protocol custody account, so a miswired market
+        // authority cannot redeem a claimant's position or pay an arbitrary
+        // payee, and the payouts are fee-free by construction (I-32(c)).
+
+        /// Winning branch-USDC at par (03 §5.3 `redeem`). `MarketAuthority`.
+        pub fn do_redeem(
+            origin: OriginFor<T>,
+            pid: ProposalId,
+            holder: T::AccountId,
+            recipient: T::AccountId,
+            amount: Balance,
+        ) -> Result<Balance, DispatchError> {
+            T::MarketAuthority::ensure_origin(origin)?;
+            Self::ensure_protocol_return(&holder, &recipient)?;
+            Self::run_proposal_paid(pid, core::slice::from_ref(&holder), &recipient, |st| {
+                st.redeem(pid, &holder, amount)
+            })
+        }
+
+        /// Single settled scalar leg, floored against the claimant (03 §5.3).
+        pub fn do_redeem_scalar(
+            origin: OriginFor<T>,
+            pid: ProposalId,
+            side: ScalarSide,
+            holder: T::AccountId,
+            recipient: T::AccountId,
+            amount: Balance,
+        ) -> Result<Balance, DispatchError> {
+            T::MarketAuthority::ensure_origin(origin)?;
+            Self::ensure_protocol_return(&holder, &recipient)?;
+            Self::run_proposal_paid(pid, core::slice::from_ref(&holder), &recipient, |st| {
+                st.redeem_scalar(pid, side, &holder, amount)
+            })
+        }
+
+        /// Complete LONG+SHORT sets at par, no double flooring (03 §5.3).
+        pub fn do_redeem_scalar_pair(
+            origin: OriginFor<T>,
+            pid: ProposalId,
+            holder: T::AccountId,
+            recipient: T::AccountId,
+            amount: Balance,
+        ) -> Result<Balance, DispatchError> {
+            T::MarketAuthority::ensure_origin(origin)?;
+            Self::ensure_protocol_return(&holder, &recipient)?;
+            Self::run_proposal_paid(pid, core::slice::from_ref(&holder), &recipient, |st| {
+                st.redeem_scalar_pair(pid, &holder, amount)
+            })
+        }
+
+        /// Winning gate side 1:1 per the recorded outcome (03 §5.3).
+        pub fn do_redeem_gate(
+            origin: OriginFor<T>,
+            pid: ProposalId,
+            gate: GateType,
+            holder: T::AccountId,
+            recipient: T::AccountId,
+            amount: Balance,
+        ) -> Result<Balance, DispatchError> {
+            T::MarketAuthority::ensure_origin(origin)?;
+            Self::ensure_protocol_return(&holder, &recipient)?;
+            Self::run_proposal_paid(pid, core::slice::from_ref(&holder), &recipient, |st| {
+                st.redeem_gate(pid, gate, &holder, amount)
+            })
+        }
+
+        /// D-1 neutral schedule out of a `Voided` vault (03 §5.3/§6.4).
+        pub fn do_redeem_void(
+            origin: OriginFor<T>,
+            pid: ProposalId,
+            branch: Branch,
+            kind: PositionKind,
+            holder: T::AccountId,
+            recipient: T::AccountId,
+            amount: Balance,
+        ) -> Result<Balance, DispatchError> {
+            T::MarketAuthority::ensure_origin(origin)?;
+            Self::ensure_protocol_return(&holder, &recipient)?;
+            Self::run_proposal_paid(pid, core::slice::from_ref(&holder), &recipient, |st| {
+                st.redeem_void(pid, branch, kind, &holder, amount)
+            })
+        }
+
+        /// Single settled Baseline leg, floored against the claimant (03 §5.3).
+        pub fn do_redeem_baseline(
+            origin: OriginFor<T>,
+            epoch: EpochId,
+            side: ScalarSide,
+            holder: T::AccountId,
+            recipient: T::AccountId,
+            amount: Balance,
+        ) -> Result<Balance, DispatchError> {
+            T::MarketAuthority::ensure_origin(origin)?;
+            Self::ensure_protocol_return(&holder, &recipient)?;
+            Self::run_baseline_paid(epoch, core::slice::from_ref(&holder), &recipient, |st| {
+                st.redeem_baseline(epoch, side, &holder, amount)
+            })
+        }
+
+        /// Complete Baseline sets at par (03 §5.3). `MarketAuthority`.
+        pub fn do_redeem_baseline_pair(
+            origin: OriginFor<T>,
+            epoch: EpochId,
+            holder: T::AccountId,
+            recipient: T::AccountId,
+            amount: Balance,
+        ) -> Result<Balance, DispatchError> {
+            T::MarketAuthority::ensure_origin(origin)?;
+            Self::ensure_protocol_return(&holder, &recipient)?;
+            Self::run_baseline_paid(epoch, core::slice::from_ref(&holder), &recipient, |st| {
+                st.redeem_baseline_pair(epoch, &holder, amount)
+            })
+        }
+
+        /// Containment for the return surface above: protocol inventory only,
+        /// protocol custody only. `TryStateViolation` mirrors the identical
+        /// classification refusal in `discard_protocol_inventory`.
+        fn ensure_protocol_return(
+            holder: &T::AccountId,
+            recipient: &T::AccountId,
+        ) -> DispatchResult {
+            ensure!(
+                Self::is_protocol(holder) && Self::is_protocol(recipient),
+                Error::<T>::TryStateViolation
+            );
+            Ok(())
+        }
     }
 
     // -------------------------------------------------------- scoped-state adapter
@@ -1548,6 +1689,22 @@ pub mod pallet {
                 &mut LedgerState<T::AccountId>,
             ) -> Result<(), conditional_ledger_core::Error>,
         ) -> DispatchResult {
+            Self::run_proposal_paid(pid, accts, escrow_party, op).map(|_| ())
+        }
+
+        /// [`Self::run_proposal`] additionally reporting the USDC the op paid
+        /// out of escrow to `escrow_party` — the exact amount `settle_collateral`
+        /// transferred. Redemptions never grow a vault's escrow, so a payout of
+        /// zero means the op moved no collateral, never that it moved some the
+        /// caller cannot see.
+        fn run_proposal_paid(
+            pid: ProposalId,
+            accts: &[T::AccountId],
+            escrow_party: &T::AccountId,
+            op: impl FnOnce(
+                &mut LedgerState<T::AccountId>,
+            ) -> Result<(), conditional_ledger_core::Error>,
+        ) -> Result<Balance, DispatchError> {
             let mut st = Self::load_proposal(pid, accts).ok_or(Error::<T>::UnknownVault)?;
             let escrow_before = Self::vault_escrow(&st, pid);
             let counts_before: Vec<u32> =
@@ -1560,7 +1717,7 @@ pub mod pallet {
             Self::settle_collateral(escrow_party, escrow_before, escrow_after)?;
             Self::settle_deposits(accts, &counts_before, &counts_after)?;
             Self::emit_core_events(&st);
-            Ok(())
+            Ok(escrow_before.saturating_sub(escrow_after))
         }
 
         fn run_baseline(
@@ -1571,6 +1728,18 @@ pub mod pallet {
                 &mut LedgerState<T::AccountId>,
             ) -> Result<(), conditional_ledger_core::Error>,
         ) -> DispatchResult {
+            Self::run_baseline_paid(epoch, accts, escrow_party, op).map(|_| ())
+        }
+
+        /// Baseline counterpart of [`Self::run_proposal_paid`].
+        fn run_baseline_paid(
+            epoch: EpochId,
+            accts: &[T::AccountId],
+            escrow_party: &T::AccountId,
+            op: impl FnOnce(
+                &mut LedgerState<T::AccountId>,
+            ) -> Result<(), conditional_ledger_core::Error>,
+        ) -> Result<Balance, DispatchError> {
             let mut st =
                 Self::load_baseline(epoch, accts).ok_or(Error::<T>::UnknownBaselineVault)?;
             let escrow_before = Self::baseline_escrow(&st, epoch);
@@ -1584,7 +1753,7 @@ pub mod pallet {
             Self::settle_collateral(escrow_party, escrow_before, escrow_after)?;
             Self::settle_deposits(accts, &counts_before, &counts_after)?;
             Self::emit_core_events(&st);
-            Ok(())
+            Ok(escrow_before.saturating_sub(escrow_after))
         }
 
         /// Authority-only ops touch just the vault (no positions, no collateral).

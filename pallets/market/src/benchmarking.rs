@@ -20,6 +20,9 @@ const SETTLE_SCORE: FixedU64 = FixedU64(500_000_000);
 // Keep the synthetic saturation range disjoint from compact mock-runtime ids.
 // Production AccountId32 derivation remains canonical for the same ids.
 const TRY_STATE_MARKET_ID_BASE: MarketId = 1 << 32;
+// Disjoint from both the compact unit-test ids and the try-state saturation
+// range, so the POL stand-in never collides with a book under test.
+const POL_STAND_IN_MARKET_ID: MarketId = (1 << 32) + (1 << 24);
 // Generated benchmark accounts are not necessarily runtime protocol accounts;
 // keep the fee leg above the ledger's live position-creation floor.
 const TRADE: Balance = 10 * UNIT;
@@ -29,6 +32,16 @@ fn fund<T: Config>(who: &T::AccountId, amount: Balance) {
         .expect("benchmark collateral mint succeeds");
 }
 
+/// A protocol-classified stand-in for the runtime's `POL` custody account.
+/// The seeding treasury must be one: the 08 §8 step 5(b) return pays the seed
+/// back to it, and that surface admits protocol custody only (03 §5.3a). The
+/// canonical market namespace is permanently protocol-classified — before
+/// creation and after reap — so a book address outside the ids under test is
+/// the one such account a `T: Config`-generic fixture can name.
+fn pol_stand_in<T: Config>() -> T::AccountId {
+    T::MarketAccounts::book(POL_STAND_IN_MARKET_ID)
+}
+
 fn admin_origin<T: Config>() -> T::RuntimeOrigin {
     T::MarketAdmin::try_successful_origin().expect("benchmark MarketAdmin origin exists")
 }
@@ -36,10 +49,13 @@ fn admin_origin<T: Config>() -> T::RuntimeOrigin {
 fn seeded_decision<T: Config>(market: MarketId) -> (T::AccountId, T::AccountId, T::AccountId) {
     let book = T::MarketAccounts::book(market);
     let fees = T::MarketAccounts::fees(market);
-    let treasury: T::AccountId = account("treasury", market as u32, 0);
+    let treasury = pol_stand_in::<T>();
     fund::<T>(&book, 10_000 * UNIT);
     fund::<T>(&fees, 10_000 * UNIT);
     fund::<T>(&treasury, 10_000 * UNIT);
+    // The seed debits the subsidy budget line by the cash that leaves custody
+    // (I-33), so the line must carry it before the measured call runs.
+    <T as Config>::BenchmarkHelper::prime_pol_custody(PolLine::Proposal, 10_000 * UNIT);
     Pallet::<T>::create_market(
         admin_origin::<T>(),
         market,
@@ -56,6 +72,24 @@ fn seeded_decision<T: Config>(market: MarketId) -> (T::AccountId, T::AccountId, 
     Pallet::<T>::seed(admin_origin::<T>(), market, treasury.clone())
         .expect("benchmark seeding succeeds");
     (book, fees, treasury)
+}
+
+/// Drive a proposal vault to its scalar-settled terminal through the production
+/// authorities and latch the market-side observation, releasing the POL
+/// obligation exactly as `pallet-epoch` does (04 §2 "Reap interleavings").
+fn settle_and_latch<T: Config>(proposal: u64) {
+    let resolve_origin =
+        <T as pallet_conditional_ledger::Config>::ResolveAuthority::try_successful_origin()
+            .expect("benchmark resolve authority origin exists");
+    pallet_conditional_ledger::Pallet::<T>::resolve(resolve_origin, proposal, Branch::Accept)
+        .expect("benchmark vault resolution succeeds");
+    let settle_origin =
+        <T as pallet_conditional_ledger::Config>::SettleAuthority::try_successful_origin()
+            .expect("benchmark settle authority origin exists");
+    pallet_conditional_ledger::Pallet::<T>::settle_scalar(settle_origin, proposal, SETTLE_SCORE)
+        .expect("benchmark vault settlement succeeds");
+    Pallet::<T>::observe_proposal_terminal(proposal)
+        .expect("benchmark terminal observation succeeds");
 }
 
 #[benchmarks]
@@ -122,6 +156,44 @@ mod benchmarks {
         );
     }
 
+    /// The 04 §2 Sweep worst case: a settled decision book whose inventory is
+    /// unbalanced, so the return runs the full pair-first schedule — a paired
+    /// redemption, the floored residual leg, and the branch-USDC par leg.
+    #[benchmark]
+    fn sweep_revenue() {
+        let caller: T::AccountId = whitelisted_caller();
+        let trader: T::AccountId = account("trader", 0, 0);
+        fund::<T>(&trader, 10_000 * UNIT);
+        let (book, _, _) = seeded_decision::<T>(1);
+        // Un-recycled branch-USDC is the one leg ordinary flow clears (04 §6.3);
+        // stage it while the vault is still Open so the measured sweep also
+        // drives the par redemption path.
+        pallet_conditional_ledger::Pallet::<T>::do_split(
+            RawOrigin::Signed(Pallet::<T>::account_id()).into(),
+            1,
+            book.clone(),
+            kernel::MIN_SPLIT_USDC,
+        )
+        .expect("benchmark branch-USDC stage succeeds");
+        Pallet::<T>::buy(
+            RawOrigin::Signed(trader.clone()).into(),
+            1,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        )
+        .expect("benchmark buy succeeds");
+        Pallet::<T>::close(admin_origin::<T>(), 1).expect("benchmark close succeeds");
+        settle_and_latch::<T>(1);
+        <T as Config>::BenchmarkHelper::prime_keeper_rebate();
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller.clone()), 1);
+        <T as Config>::BenchmarkHelper::assert_keeper_rebate_paid(
+            futarchy_primitives::keeper::CrankClass::General,
+        );
+        assert!(SweptMarkets::<T>::contains_key(1));
+    }
+
     #[benchmark]
     fn reap() {
         let caller: T::AccountId = whitelisted_caller();
@@ -131,17 +203,11 @@ mod benchmarks {
         // (04 §2): drive the shared vault to its scalar-settled terminal through
         // the production authorities and latch the market-side settlement
         // observation so the POL obligation is released before the book ages.
-        let resolve_origin =
-            <T as pallet_conditional_ledger::Config>::ResolveAuthority::try_successful_origin()
-                .expect("benchmark resolve authority origin exists");
-        pallet_conditional_ledger::Pallet::<T>::resolve(resolve_origin, 1, Branch::Accept)
-            .expect("benchmark vault resolution succeeds");
-        let settle_origin =
-            <T as pallet_conditional_ledger::Config>::SettleAuthority::try_successful_origin()
-                .expect("benchmark settle authority origin exists");
-        pallet_conditional_ledger::Pallet::<T>::settle_scalar(settle_origin, 1, SETTLE_SCORE)
-            .expect("benchmark vault settlement succeeds");
-        Pallet::<T>::observe_proposal_terminal(1).expect("benchmark terminal observation succeeds");
+        settle_and_latch::<T>(1);
+        // 04 §2 also makes the Sweep stage a precondition of reap; run it here
+        // so the measured call is the discard of the worthless residue alone.
+        Pallet::<T>::sweep_revenue(RawOrigin::Signed(caller.clone()).into(), 1)
+            .expect("benchmark sweep succeeds");
         let market = Markets::<T>::get(1).expect("benchmark book exists");
         // Saturate the bounded protocol-inventory cleanup: two owners across all
         // 14 proposal instruments. These writes are setup, while the measured
@@ -214,10 +280,11 @@ mod benchmarks {
     fn seed() {
         let book = T::MarketAccounts::book(1);
         let fees = T::MarketAccounts::fees(1);
-        let treasury: T::AccountId = account("treasury", 0, 0);
+        let treasury = pol_stand_in::<T>();
         fund::<T>(&book, 10_000 * UNIT);
         fund::<T>(&fees, 10_000 * UNIT);
         fund::<T>(&treasury, 10_000 * UNIT);
+        <T as Config>::BenchmarkHelper::prime_pol_custody(PolLine::Proposal, 10_000 * UNIT);
         Pallet::<T>::create_market(
             admin_origin::<T>(),
             1,
@@ -274,8 +341,16 @@ mod benchmarks {
         // 4,480 distinct ownership-index accounts, while 196 active books carry
         // full checkpoint/window/owner vectors (including the bounded quadratic
         // duplicate-owner check), seed/rerun markers and the full POL vector.
-        // The remaining books are seeded/rerun terminal archives, maximizing
-        // both unbounded-map scans under their Markets-derived bound.
+        // The remaining books are seeded/rerun/swept terminal archives,
+        // maximizing both unbounded-map scans under their Markets-derived bound
+        // — including the I-33 book-half return check, which is only reached for
+        // a book that carries the 04 §2 swept marker.
+        let seed_funder: T::AccountId = account("treasury", 0, 0);
+        let mut settled_vault = vault_template;
+        settled_vault.state = futarchy_primitives::VaultState::ScalarSettled {
+            winner: Branch::Accept,
+            s: SETTLE_SCORE,
+        };
         let mut commitments =
             BoundedVec::<(MarketId, Balance), ConstU32<{ bounds::MAX_LIVE_MARKETS }>>::default();
         for offset in 0..u64::from(bounds::MAX_STORED_MARKETS).saturating_sub(1) {
@@ -301,7 +376,7 @@ mod benchmarks {
                 ids.try_push(id).map_err(|_| "proposal market id fits")
             })
             .expect("one market id fits the proposal bound");
-            SeededMarkets::<T>::insert(id, ());
+            SeededMarkets::<T>::insert(id, seed_funder.clone());
             RerunSeededMarkets::<T>::insert(id, ());
             if active {
                 pallet_conditional_ledger::Vaults::<T>::insert(id, vault_template);
@@ -353,6 +428,13 @@ mod benchmarks {
                 ClosedAt::<T>::insert(id, now);
                 SettlementObservedAt::<T>::insert(id, now);
                 pallet_conditional_ledger::VaultTerminalAt::<T>::insert(id, now);
+                // Swept-but-not-yet-reapable is the archive's normal resting
+                // state: the sweep is permissionless while reap still waits out
+                // `ledger.archive_delay`. Give each one a settled vault so the
+                // measured scan actually runs the I-33 return check rather than
+                // short-circuiting on an already-archived vault.
+                pallet_conditional_ledger::Vaults::<T>::insert(id, settled_vault);
+                SweptMarkets::<T>::insert(id, ());
             }
         }
         LivePolCommitments::<T>::put(commitments);
@@ -371,6 +453,12 @@ mod benchmarks {
         assert_eq!(
             RerunSeededMarkets::<T>::iter_keys().count(),
             bounds::MAX_STORED_MARKETS as usize,
+        );
+        assert_eq!(
+            SweptMarkets::<T>::iter_keys().count(),
+            bounds::MAX_STORED_MARKETS
+                .saturating_sub(bounds::MAX_LIVE_MARKETS)
+                .saturating_sub(1) as usize,
         );
         assert_eq!(
             LivePolCommitments::<T>::get().len(),

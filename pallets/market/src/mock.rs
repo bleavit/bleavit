@@ -185,6 +185,9 @@ parameter_types! {
     pub static DecisionWindowMarkets: Vec<MarketId> = Vec::new();
     pub static RecordKeeperRebates: bool = false;
     pub static PolSyncRefuses: bool = false;
+    pub static PolCustodyCreditRefuses: bool = false;
+    pub static PolLineProposal: Balance = 1_000_000 * UNIT;
+    pub static PolLineBaseline: Balance = 1_000_000 * UNIT;
 }
 
 pub struct TestInDecisionWindow;
@@ -210,6 +213,55 @@ impl pallet_market::PolCommitmentSync for TestPolCommitmentSync {
 
     fn pol_commitments_synced() -> bool {
         !PolSyncRefuses::get()
+    }
+
+    fn debit_pol_custody(
+        line: pallet_market::PolLine,
+        amount: Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        let balance = PolLineBalance::get(line);
+        let remaining = balance
+            .checked_sub(amount)
+            .ok_or(sp_runtime::DispatchError::Other("POL line underfunded"))?;
+        PolLineBalance::set(line, remaining);
+        Ok(())
+    }
+
+    fn credit_pol_custody(
+        line: pallet_market::PolLine,
+        amount: Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        if PolCustodyCreditRefuses::get() {
+            return Err(sp_runtime::DispatchError::Other(
+                "POL custody credit refused",
+            ));
+        }
+        let credited = PolLineBalance::get(line)
+            .checked_add(amount)
+            .ok_or(sp_runtime::DispatchError::Other("POL line overflow"))?;
+        PolLineBalance::set(line, credited);
+        Ok(())
+    }
+}
+
+/// The mock's stand-in for the treasury's two subsidy budget lines (08 §1.1).
+/// Seeds debit it and the 04 §2 Sweep credits it, so a test can assert the
+/// I-33 mirror without pulling `pallet-futarchy-treasury` into this runtime.
+pub struct PolLineBalance;
+
+impl PolLineBalance {
+    pub fn get(line: pallet_market::PolLine) -> Balance {
+        match line {
+            pallet_market::PolLine::Proposal => PolLineProposal::get(),
+            pallet_market::PolLine::Baseline => PolLineBaseline::get(),
+        }
+    }
+
+    pub fn set(line: pallet_market::PolLine, balance: Balance) {
+        match line {
+            pallet_market::PolLine::Proposal => PolLineProposal::set(balance),
+            pallet_market::PolLine::Baseline => PolLineBaseline::set(balance),
+        }
     }
 }
 
@@ -297,6 +349,9 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     DecisionWindowMarkets::set(Vec::new());
     RecordKeeperRebates::set(false);
     PolSyncRefuses::set(false);
+    PolCustodyCreditRefuses::set(false);
+    PolLineProposal::set(1_000_000 * UNIT);
+    PolLineBaseline::set(1_000_000 * UNIT);
     let mut storage = frame_system::GenesisConfig::<Test>::default()
         .build_storage()
         .expect("mock system genesis builds");

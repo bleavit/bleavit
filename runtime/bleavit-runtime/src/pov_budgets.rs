@@ -223,7 +223,7 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
     ));
     all.extend(
         pallet_call_weights!(pallet_market as pallet_market::WeightInfo {
-            buy, sell, crank_observe, reap, freeze_creation, set_frozen,
+            buy, sell, crank_observe, sweep_revenue, reap, freeze_creation, set_frozen,
             create_market, seed, close,
         }),
     );

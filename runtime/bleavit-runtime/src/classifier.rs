@@ -638,6 +638,10 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             pallet_market::Call::buy { .. }
             | pallet_market::Call::sell { .. }
             | pallet_market::Call::crank_observe { .. }
+            // 04 §2 Sweep: a permissionless keeper crank exactly like `reap`,
+            // and, like it, not a privileged act — it moves protocol inventory
+            // to the funding line that paid for it and nowhere else (E1).
+            | pallet_market::Call::sweep_revenue { .. }
             | pallet_market::Call::reap { .. } => leaf(CallDomain::Public),
             pallet_market::Call::freeze_creation { .. }
             | pallet_market::Call::set_frozen { .. } => leaf(CallDomain::EmergencyPlaybook),

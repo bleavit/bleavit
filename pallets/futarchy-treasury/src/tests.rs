@@ -623,8 +623,10 @@ fn pot_funding_failure_rolls_back_internal_credit_and_event() {
 #[test]
 fn non_pot_budget_lines_credit_without_custody_calls() {
     funded_ext().execute_with(|| {
+        // `Pol`/`PolBaseline` left this set in milestone E1 — a book seed spends
+        // their real USDC, so they are custody-synced now (08 §8 step 5; I-33).
         let cases = [
-            (BudgetLine::Pol, 11 * USDC),
+            (BudgetLine::OpsBootnodes, 11 * USDC),
             (BudgetLine::OpsCoretime, 12 * USDC),
         ];
         let before = cases
@@ -640,6 +642,47 @@ fn non_pot_budget_lines_credit_without_custody_calls() {
         for ((line, amount), (_, old_balance)) in cases.into_iter().zip(before) {
             assert_eq!(Treasury::line_balance(line), old_balance + amount);
         }
+    });
+}
+
+#[test]
+fn the_two_subsidy_lines_are_custody_synced_and_move_with_their_seed_and_return() {
+    // I-33: `fund_budget_line` moves the cash with the credit, a seed debits the
+    // line by exactly what leaves custody, and the 04 §2 Sweep credits back
+    // exactly what returned. `MAIN` is untouched by the return: the USDC comes
+    // from the ledger sovereign, so debiting `MAIN` would spend it twice.
+    funded_ext().execute_with(|| {
+        for (line, payout, amount) in [
+            (BudgetLine::Pol, PayoutLine::Pol, 11 * USDC),
+            (BudgetLine::PolBaseline, PayoutLine::PolBaseline, 7 * USDC),
+        ] {
+            assert_ok!(Treasury::fund_budget_line(to(), line, amount));
+            assert!(pot_funding_calls().contains(&(payout, amount)));
+            assert_eq!(Treasury::line_balance(line), amount);
+
+            let main_before = crate::Pallet::<Test>::treasury().main_usdc;
+            assert_ok!(crate::Pallet::<Test>::debit_pol_custody(line, 4 * USDC));
+            assert_eq!(Treasury::line_balance(line), amount - 4 * USDC);
+            // A seed the treasury cannot account for is refused, not recorded
+            // wrong (G-1).
+            assert_noop!(
+                crate::Pallet::<Test>::debit_pol_custody(line, amount),
+                Error::<Test>::InsufficientFunds,
+            );
+            // The return may exceed the seed: recycled book revenue is income.
+            assert_ok!(crate::Pallet::<Test>::credit_pol_custody(line, 5 * USDC));
+            assert_eq!(Treasury::line_balance(line), amount + USDC);
+            assert_eq!(crate::Pallet::<Test>::treasury().main_usdc, main_before);
+        }
+        // Only the two subsidy lines have a custody account a seed can spend.
+        assert_noop!(
+            crate::Pallet::<Test>::debit_pol_custody(BudgetLine::Keeper, USDC),
+            Error::<Test>::UnknownBudgetLine,
+        );
+        assert_noop!(
+            crate::Pallet::<Test>::credit_pol_custody(BudgetLine::Keeper, USDC),
+            Error::<Test>::UnknownBudgetLine,
+        );
     });
 }
 

@@ -11,6 +11,7 @@ pub trait WeightInfo {
     fn buy() -> Weight;
     fn sell() -> Weight;
     fn crank_observe() -> Weight;
+    fn sweep_revenue() -> Weight;
     fn reap() -> Weight;
     fn create_market() -> Weight;
     fn seed() -> Weight;
@@ -53,6 +54,7 @@ ref_impl!(
     buy,
     sell,
     crank_observe,
+    sweep_revenue,
     reap,
     create_market,
     seed,

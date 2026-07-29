@@ -216,6 +216,13 @@ pub enum PayoutLine {
     Oracle,
     Rewards,
     OpsCollators,
+    /// 08 §1.1 `POL` subsidy custody (appended, milestone E1). Book seeding
+    /// spends real USDC out of this account, so `fund_budget_line` must move the
+    /// cash with the credit or the line and its custody diverge from the first
+    /// seed onward (08 §8 step 5; I-33).
+    Pol,
+    /// 08 §1.1/§4.3 `POL_BASELINE` subsidy custody (appended, milestone E1).
+    PolBaseline,
 }
 
 /// Narrow runtime custody seam for real-USDC keeper payouts.
@@ -734,6 +741,15 @@ pub mod pallet {
         },
         /// INSURANCE was swept into `MAIN` by a TREASURY decision (08 §1.2/§1.4).
         InsuranceSwept { amount: Balance },
+        /// A subsidy line moved with its custody: `spent` on a book seed,
+        /// cleared on the 04 §2 Sweep return (08 §8 step 5; I-33). Treasury-owned
+        /// operational history, outside the frozen 02 §6 ingest set; it is the
+        /// POL revolving-balance gauge's series.
+        PolCustodyMoved {
+            line: BudgetLine,
+            amount: Balance,
+            spent: bool,
+        },
         /// A bounded Phase-4 community tranche was transferred into an SDK
         /// vesting schedule. This is treasury-owned operational history, not a
         /// frozen integration-contract event.
@@ -989,6 +1005,13 @@ pub mod pallet {
                         BudgetLine::Oracle => Some(PayoutLine::Oracle),
                         BudgetLine::Rewards => Some(PayoutLine::Rewards),
                         BudgetLine::OpsCollators => Some(PayoutLine::OpsCollators),
+                        // E1: the two subsidy lines are custody-synced for the
+                        // same reason the pot lines are — a book seed spends
+                        // their real USDC, so credit without custody would make
+                        // the first seed fail on an unfunded account while NAV
+                        // still counted the credit (08 §8 step 5; I-33).
+                        BudgetLine::Pol => Some(PayoutLine::Pol),
+                        BudgetLine::PolBaseline => Some(PayoutLine::PolBaseline),
                         _ => None,
                     };
                     if let Some(payout_line) = payout_line {
@@ -1746,6 +1769,26 @@ pub mod pallet {
             Self::persist(t)
         }
 
+        /// 08 §8 step 5 / I-33: mirror a book seed's real-USDC spend out of the
+        /// `POL`/`POL_BASELINE` custody account into the matching budget line.
+        /// Runtime-internal — the market lifecycle owns the trigger, exactly as
+        /// it does for `set_pol_commitments` above.
+        pub fn debit_pol_custody(line: BudgetLine, amount: Balance) -> DispatchResult {
+            let mut t = Self::load();
+            t.debit_pol_custody(line, amount)
+                .map_err(Self::map_core_error)?;
+            Self::persist(t)
+        }
+
+        /// 08 §8 step 5(b) / I-33: the mirror of [`Self::debit_pol_custody`] —
+        /// the 04 §2 Sweep returned real USDC to the same custody account.
+        pub fn credit_pol_custody(line: BudgetLine, amount: Balance) -> DispatchResult {
+            let mut t = Self::load();
+            t.credit_pol_custody(line, amount)
+                .map_err(Self::map_core_error)?;
+            Self::persist(t)
+        }
+
         /// 08 §1.2/§1.3: sync the queued in-cap proposal outflows `nav()` nets as
         /// obligations. Runtime-internal — the execution-guard queue (A11) owns
         /// them; B1a wires this (PLAN SQ-47).
@@ -2067,6 +2110,15 @@ pub mod pallet {
                     Event::KeeperBudgetExhausted { epoch, spent }
                 }
                 CoreEvent::InsuranceSwept { amount } => Event::InsuranceSwept { amount },
+                CoreEvent::PolCustodyMoved {
+                    line,
+                    amount,
+                    spent,
+                } => Event::PolCustodyMoved {
+                    line,
+                    amount,
+                    spent,
+                },
             };
             Self::deposit_event(fe);
         }
@@ -2206,6 +2258,28 @@ pub mod pallet {
             {
                 return Err(TryRuntimeError::Other(
                     "treasury: OPS_COLLATOR line exceeds real USDC custody pot",
+                ));
+            }
+            // I-33, budget-line half (15 §1): the two subsidy lines are debited
+            // by every seed that spends their custody and credited by every 04
+            // §2 Sweep that returns it, so the line can never sit above the cash
+            // the treasury actually holds. This is the exact predicate that was
+            // false for two milestones — a released obligation against custody
+            // that had physically left (08 §10.5).
+            if t.line_balance(BudgetLine::Pol)
+                .saturating_add(t.outstanding_stream_total(BudgetLine::Pol))
+                > T::RebatePayout::pot_balance(PayoutLine::Pol)
+            {
+                return Err(TryRuntimeError::Other(
+                    "treasury: POL line exceeds real USDC custody pot",
+                ));
+            }
+            if t.line_balance(BudgetLine::PolBaseline)
+                .saturating_add(t.outstanding_stream_total(BudgetLine::PolBaseline))
+                > T::RebatePayout::pot_balance(PayoutLine::PolBaseline)
+            {
+                return Err(TryRuntimeError::Other(
+                    "treasury: POL_BASELINE line exceeds real USDC custody pot",
                 ));
             }
             Ok(())

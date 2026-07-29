@@ -222,7 +222,7 @@ inventory! {
         leaf emergency_playbook => ["set_split_paused", "set_frozen"];
     }
     "Market" {
-        leaf public => ["buy", "sell", "crank_observe", "reap"];
+        leaf public => ["buy", "sell", "crank_observe", "sweep_revenue", "reap"];
         leaf emergency_playbook => ["freeze_creation", "set_frozen"];
     }
     "Welfare" {

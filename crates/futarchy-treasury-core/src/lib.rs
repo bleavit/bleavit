@@ -380,6 +380,14 @@ pub enum Event {
     InsuranceSwept {
         amount: Balance,
     },
+    /// 08 §8 step 5 / I-33: real USDC left (`spent = true`) or came back to
+    /// (`spent = false`) a subsidy custody account, and the matching budget line
+    /// moved with it. The POL revolving-balance gauge reads these.
+    PolCustodyMoved {
+        line: BudgetLine,
+        amount: Balance,
+        spent: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
@@ -1168,6 +1176,78 @@ impl Treasury {
         self.pol_commitments = commitments.to_vec();
         Ok(())
     }
+    /// 08 §8 step 5 / I-33, seeding side: a book seed moved `amount` of real
+    /// USDC out of the subsidy custody account behind `line`, so the line is
+    /// debited by exactly that amount. Without it `Σlines` — and therefore NAV
+    /// — keeps counting POL cash that has physically left, in the
+    /// over-permissive direction that inflates every NAV-derived control
+    /// (`trs.cap_proposal`·NAV, `pol.budget_epoch`·NAV, the §4.1 arming floors).
+    ///
+    /// Runtime-internal, like the two `set_*` syncs below: the market lifecycle
+    /// owns the trigger and no governance origin reaches it. It fails closed on
+    /// an unfunded or under-funded line — a seed the treasury cannot account for
+    /// is refused rather than recorded wrong (G-1; 08 §4.4).
+    pub fn debit_pol_custody(&mut self, line: BudgetLine, amount: Balance) -> Result<(), Error> {
+        Self::ensure_pol_line(line)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        self.debit_line(line, amount)?;
+        self.events.push(Event::PolCustodyMoved {
+            line,
+            amount,
+            spent: true,
+        });
+        Ok(())
+    }
+
+    /// 08 §8 step 5(b) / I-33, returning side: the 04 §2 Sweep returned
+    /// `amount` of real USDC to the custody account behind `line`, so the line
+    /// is credited back by exactly that amount. The credit is **not** a
+    /// `fund_budget_line`: the USDC comes from the ledger sovereign, not from
+    /// `MAIN`, so `main_usdc` must not move — debiting it would spend the same
+    /// value twice.
+    ///
+    /// A return may exceed the seed that funded it: recycled book revenue
+    /// (04 §6.3) is treasury income and comes back with the seed, which is
+    /// exactly why "realized cost = divergence loss" (08 §3) holds only when
+    /// this credit is the real payout rather than the recorded commitment.
+    pub fn credit_pol_custody(&mut self, line: BudgetLine, amount: Balance) -> Result<(), Error> {
+        Self::ensure_pol_line(line)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        match self.lines.iter().position(|(l, _)| *l == line) {
+            Some(i) => {
+                self.lines[i].1 = self.lines[i].1.checked_add(amount).ok_or(Error::Overflow)?;
+            }
+            None => {
+                ensure!(
+                    self.lines.len() < MAX_BUDGET_LINES,
+                    Error::TooManyBudgetLines
+                );
+                self.lines.push((line, amount));
+            }
+        }
+        self.events.push(Event::PolCustodyMoved {
+            line,
+            amount,
+            spent: false,
+        });
+        Ok(())
+    }
+
+    /// The two subsidy lines of 08 §1.1 are the only ones with a custody
+    /// account a book seed can spend from; every other line is spent by an
+    /// ordinary metered outflow.
+    fn ensure_pol_line(line: BudgetLine) -> Result<(), Error> {
+        ensure!(
+            matches!(line, BudgetLine::Pol | BudgetLine::PolBaseline),
+            Error::UnknownBudgetLine
+        );
+        Ok(())
+    }
+
     /// Runtime-internal (08 §1.2/§1.3): sync the queued in-cap proposal outflows
     /// `nav()` nets as obligations. The execution-guard queue (A11) owns them;
     /// B1a wires the sync (PLAN SQ-47). Bounded (13 §4).

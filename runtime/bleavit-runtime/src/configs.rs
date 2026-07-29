@@ -4338,6 +4338,24 @@ impl pallet_market::PolCommitmentSync for RuntimePolCommitmentSync {
         live_pol_commitments()
             .is_ok_and(|expected| crate::FutarchyTreasury::treasury().pol_commitments == expected)
     }
+
+    fn debit_pol_custody(line: pallet_market::PolLine, amount: Balance) -> DispatchResult {
+        crate::FutarchyTreasury::debit_pol_custody(budget_line_of(line), amount)
+    }
+
+    fn credit_pol_custody(line: pallet_market::PolLine, amount: Balance) -> DispatchResult {
+        crate::FutarchyTreasury::credit_pol_custody(budget_line_of(line), amount)
+    }
+}
+
+/// Bind the market's treasury-free subsidy-line discriminant to the treasury's
+/// own `BudgetLine` (08 §8 step 5(b): `POL` for decision and gate books,
+/// `POL_BASELINE` for the Baseline book).
+const fn budget_line_of(line: pallet_market::PolLine) -> pallet_futarchy_treasury::BudgetLine {
+    match line {
+        pallet_market::PolLine::Proposal => pallet_futarchy_treasury::BudgetLine::Pol,
+        pallet_market::PolLine::Baseline => pallet_futarchy_treasury::BudgetLine::PolBaseline,
+    }
 }
 
 impl pallet_market::Config for Runtime {
@@ -7200,12 +7218,7 @@ impl pallet_futarchy_treasury::RebatePayout<AccountId> for TreasuryRebatePayout 
         amount: Balance,
         line: pallet_futarchy_treasury::PayoutLine,
     ) -> frame_support::pallet_prelude::DispatchResult {
-        let source = match line {
-            pallet_futarchy_treasury::PayoutLine::Keeper => treasury_keeper_account(),
-            pallet_futarchy_treasury::PayoutLine::Oracle => treasury_oracle_account(),
-            pallet_futarchy_treasury::PayoutLine::Rewards => treasury_rewards_account(),
-            pallet_futarchy_treasury::PayoutLine::OpsCollators => treasury_collators_account(),
-        };
+        let source = payout_line_account(line);
         <ForeignAssets as Mutate<AccountId>>::transfer(
             usdc_location(),
             &source,
@@ -7217,13 +7230,22 @@ impl pallet_futarchy_treasury::RebatePayout<AccountId> for TreasuryRebatePayout 
     }
 
     fn pot_balance(line: pallet_futarchy_treasury::PayoutLine) -> Balance {
-        let source = match line {
-            pallet_futarchy_treasury::PayoutLine::Keeper => treasury_keeper_account(),
-            pallet_futarchy_treasury::PayoutLine::Oracle => treasury_oracle_account(),
-            pallet_futarchy_treasury::PayoutLine::Rewards => treasury_rewards_account(),
-            pallet_futarchy_treasury::PayoutLine::OpsCollators => treasury_collators_account(),
-        };
+        let source = payout_line_account(line);
         <ForeignAssets as Inspect<AccountId>>::balance(usdc_location(), &source)
+    }
+}
+
+/// The real-USDC custody account behind each 08 §1.1 pot-backed line. The two
+/// subsidy lines joined the set in milestone E1: book seeding spends their cash
+/// directly, so `fund_budget_line` must move it with the credit (I-33).
+fn payout_line_account(line: pallet_futarchy_treasury::PayoutLine) -> AccountId {
+    match line {
+        pallet_futarchy_treasury::PayoutLine::Keeper => treasury_keeper_account(),
+        pallet_futarchy_treasury::PayoutLine::Oracle => treasury_oracle_account(),
+        pallet_futarchy_treasury::PayoutLine::Rewards => treasury_rewards_account(),
+        pallet_futarchy_treasury::PayoutLine::OpsCollators => treasury_collators_account(),
+        pallet_futarchy_treasury::PayoutLine::Pol => pol_account(),
+        pallet_futarchy_treasury::PayoutLine::PolBaseline => pol_baseline_account(),
     }
 }
 /// Atomically synchronize pot-backed internal budget credit with real USDC
@@ -7235,12 +7257,7 @@ impl pallet_futarchy_treasury::PotFunding<AccountId> for TreasuryPotFunding {
         line: pallet_futarchy_treasury::PayoutLine,
         amount: Balance,
     ) -> frame_support::dispatch::DispatchResult {
-        let destination = match line {
-            pallet_futarchy_treasury::PayoutLine::Keeper => treasury_keeper_account(),
-            pallet_futarchy_treasury::PayoutLine::Oracle => treasury_oracle_account(),
-            pallet_futarchy_treasury::PayoutLine::Rewards => treasury_rewards_account(),
-            pallet_futarchy_treasury::PayoutLine::OpsCollators => treasury_collators_account(),
-        };
+        let destination = payout_line_account(line);
         <ForeignAssets as Mutate<AccountId>>::transfer(
             usdc_location(),
             &crate::genesis::treasury_account(),
@@ -9957,6 +9974,18 @@ impl pallet_conditional_ledger::BenchmarkHelper for RuntimeBenchmarkHelper {
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_market::BenchmarkHelper for RuntimeBenchmarkHelper {
     benchmark_keeper_rebate_hooks!();
+
+    fn prime_pol_custody(line: pallet_market::PolLine, amount: Balance) {
+        let line = budget_line_of(line);
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            match state.lines.iter_mut().find(|(stored, _)| *stored == line) {
+                Some(entry) => entry.1 = entry.1.saturating_add(amount),
+                None => {
+                    let _ = state.lines.try_push((line, amount));
+                }
+            }
+        });
+    }
 }
 
 #[cfg(feature = "runtime-benchmarks")]

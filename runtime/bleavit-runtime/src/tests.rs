@@ -425,7 +425,7 @@ fn seed_decision_grade_market(
         .ok_or(DispatchError::Other("twap accumulator"))?
         .into();
     pallet_market::Markets::<Runtime>::insert(id, book);
-    pallet_market::SeededMarkets::<Runtime>::insert(id, ());
+    pallet_market::SeededMarkets::<Runtime>::insert(id, crate::configs::pol_account());
     let interval = u32::try_from(crate::configs::MarketObsInterval::get())
         .map_err(|_| DispatchError::Other("observation interval"))?;
     let observations = window
@@ -676,7 +676,7 @@ fn seed_two_window_baseline(
     book.last_observed_block = u64::from(late_end);
     book.cumulative_price_blocks = late_total.into();
     pallet_market::Markets::<Runtime>::insert(id, book);
-    pallet_market::SeededMarkets::<Runtime>::insert(id, ());
+    pallet_market::SeededMarkets::<Runtime>::insert(id, crate::configs::pol_account());
 
     let interval = u32::try_from(crate::configs::MarketObsInterval::get())
         .map_err(|_| DispatchError::Other("observation interval"))?;
@@ -958,6 +958,47 @@ pub(crate) fn empty_param_proposal(
     }
 }
 
+/// Back an internal `MAIN` credit with the real USDC `fund_budget_line` moves
+/// for a custody-synced line. Since milestone E1 `Pol`/`PolBaseline` are in that
+/// set (I-33), so a fixture that only credits `main_usdc` cannot fund them.
+fn back_main_usdc(amount: Balance) {
+    assert_ok!(ForeignAssets::mint_into(
+        usdc_location(),
+        &crate::genesis::treasury_account(),
+        amount,
+    ));
+}
+
+/// Bring the two 08 §1.1 subsidy budget lines up to the spendable USDC their
+/// custody accounts actually hold. Since milestone E1 `treasury.fund_budget_line`
+/// moves cash and credit together for these lines and a book seed debits the line
+/// by exactly what leaves custody (I-33), so a fixture that mints straight into
+/// the account must credit the line too or the seed fails closed.
+pub(crate) fn sync_pol_lines_to_custody() {
+    let minimum = ForeignAssets::minimum_balance(usdc_location());
+    for (line, account) in [
+        (
+            pallet_futarchy_treasury::BudgetLine::Pol,
+            crate::configs::pol_account(),
+        ),
+        (
+            pallet_futarchy_treasury::BudgetLine::PolBaseline,
+            crate::configs::pol_baseline_account(),
+        ),
+    ] {
+        let spendable = ForeignAssets::balance(usdc_location(), &account).saturating_sub(minimum);
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            match state.lines.iter_mut().find(|(stored, _)| *stored == line) {
+                Some(entry) => entry.1 = spendable,
+                None => state
+                    .lines
+                    .try_push((line, spendable))
+                    .expect("two subsidy lines fit the budget-line bound"),
+            }
+        });
+    }
+}
+
 fn fund_param_market_lifecycles(decision_seed_count: u128) {
     let decision_b = crate::configs::balance_param(b"pol.b.param");
     let gate_b = crate::configs::balance_param(b"pol.b_gate");
@@ -980,6 +1021,7 @@ fn fund_param_market_lifecycles(decision_seed_count: u128) {
         &crate::configs::pol_baseline_account(),
         baseline_headroom.saturating_add(currency::USDC),
     ));
+    sync_pol_lines_to_custody();
     pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
         state.main_usdc = decision_headroom
             .saturating_mul(decision_seed_count.saturating_mul(4))
@@ -2377,6 +2419,7 @@ fn param_seed_plan_opens_six_proposal_books() {
             &crate::configs::pol_baseline_account(),
             baseline_headroom.saturating_add(currency::USDC),
         ));
+        sync_pol_lines_to_custody();
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
             state.main_usdc = decision_headroom
                 .saturating_mul(2)
@@ -2446,6 +2489,7 @@ fn low_ask_treasury_seed_plan_opens_six_proposal_books() {
             &crate::configs::pol_baseline_account(),
             baseline_headroom.saturating_add(currency::USDC),
         ));
+        sync_pol_lines_to_custody();
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
             state.main_usdc = decision_headroom
                 .saturating_mul(2)
@@ -3681,6 +3725,7 @@ fn pol_account_funded_to_exact_seed_amount_can_seed() {
         // Genesis already supplies the permanent R-4 floor; mint only the
         // exact spendable amount required by this book's seed.
         assert_ok!(ForeignAssets::mint_into(usdc_location(), &pol, headroom,));
+        sync_pol_lines_to_custody();
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &pol),
             headroom.saturating_add(currency::USDC_CENT),
@@ -3738,6 +3783,7 @@ fn baseline_seed_survives_pol_baseline_funded_to_exact_headroom() {
             &pol_baseline,
             baseline_headroom,
         ));
+        sync_pol_lines_to_custody();
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &pol_baseline),
             minimum_balance.saturating_add(baseline_headroom),
@@ -4267,6 +4313,7 @@ fn pause_across_decision_boundary_resumes_and_decides_at_shifted_window_end() {
             &crate::configs::pol_baseline_account(),
             baseline_headroom.saturating_add(currency::USDC),
         ));
+        sync_pol_lines_to_custody();
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
             state.main_usdc = decision_headroom
                 .saturating_mul(4)
@@ -4958,6 +5005,57 @@ fn treasury_non_pot_line_funding_does_not_move_foreign_assets() {
         let pot_before = ForeignAssets::balance(usdc_location(), &keeper_pot);
         let issuance_before = ForeignAssets::total_issuance(usdc_location());
 
+        // `Pol`/`PolBaseline` left the custody-free set in milestone E1 — a book
+        // seed spends their real USDC, so they are pot-backed now (I-33). An
+        // `ops.*` line is still credit-only: its consumer debits the line, never
+        // a dedicated account.
+        assert_ok!(FutarchyTreasury::fund_budget_line(
+            pallet_origins::Origin::FutarchyTreasury.into(),
+            BudgetLine::OpsBootnodes,
+            amount,
+        ));
+
+        assert_eq!(
+            FutarchyTreasury::line_balance(BudgetLine::OpsBootnodes),
+            amount
+        );
+        assert_eq!(ForeignAssets::balance(usdc_location(), &main), main_before);
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &keeper_pot),
+            pot_before
+        );
+        assert_eq!(
+            ForeignAssets::total_issuance(usdc_location()),
+            issuance_before
+        );
+    });
+}
+
+#[test]
+fn treasury_pol_line_funding_moves_matching_real_usdc_into_the_subsidy_account() {
+    // I-33's seeding side needs the line and its custody to move together, so
+    // `fund_budget_line(Pol, …)` transfers `MAIN → POL` exactly as it already
+    // did for the four pot-backed lines (08 §1.4).
+    use crate::genesis::treasury_account;
+    use pallet_futarchy_treasury::BudgetLine;
+
+    development_ext().execute_with(|| {
+        let main = treasury_account();
+        let amount = 25 * currency::USDC;
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.main_usdc = amount;
+        });
+        assert!(<ForeignAssets as FungiblesMutate<AccountId>>::mint_into(
+            usdc_location(),
+            &main,
+            amount + currency::USDC,
+        )
+        .is_ok());
+        let main_before = ForeignAssets::balance(usdc_location(), &main);
+        let pol = crate::configs::pol_account();
+        let pol_before = ForeignAssets::balance(usdc_location(), &pol);
+        let issuance_before = ForeignAssets::total_issuance(usdc_location());
+
         assert_ok!(FutarchyTreasury::fund_budget_line(
             pallet_origins::Origin::FutarchyTreasury.into(),
             BudgetLine::Pol,
@@ -4965,10 +5063,13 @@ fn treasury_non_pot_line_funding_does_not_move_foreign_assets() {
         ));
 
         assert_eq!(FutarchyTreasury::line_balance(BudgetLine::Pol), amount);
-        assert_eq!(ForeignAssets::balance(usdc_location(), &main), main_before);
         assert_eq!(
-            ForeignAssets::balance(usdc_location(), &keeper_pot),
-            pot_before
+            ForeignAssets::balance(usdc_location(), &main),
+            main_before - amount
+        );
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &pol),
+            pol_before + amount
         );
         assert_eq!(
             ForeignAssets::total_issuance(usdc_location()),
@@ -7349,6 +7450,7 @@ fn live_treasury_capability_disables_queued_call_without_state_change_then_reena
         const PID: futarchy_primitives::ProposalId = 6_009;
         let capability = pallet_constitution::Capability::TreasurySpend;
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| state.main_usdc = 10);
+        back_main_usdc(10);
         let call =
             RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::fund_budget_line {
                 line: pallet_futarchy_treasury::BudgetLine::Pol,
@@ -10703,6 +10805,7 @@ fn i9_epoch_enqueue_guard_execute_and_epoch_callback_are_real_and_origin_narrow(
         arm_all_classes_for_tests();
         const PID: futarchy_primitives::ProposalId = 8_001;
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| state.main_usdc = 10);
+        back_main_usdc(10);
         assert_ok!(Constitution::set_capability(
             pallet_origins::Origin::FutarchyMeta.into(),
             pallet_constitution::CapabilityRecord {
@@ -11018,6 +11121,7 @@ fn queued_treasury_outflows_mirror_enqueue_execute_and_terminal_dequeue() {
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
             state.main_usdc = main;
         });
+        back_main_usdc(amount.saturating_mul(2));
         assert_ok!(FutarchyTreasury::fund_budget_line(
             pallet_origins::Origin::FutarchyTreasury.into(),
             BudgetLine::Pol,
@@ -11283,6 +11387,7 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
             &crate::configs::pol_baseline_account(),
             baseline_headroom.saturating_add(currency::USDC),
         ));
+        sync_pol_lines_to_custody();
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
             state.main_usdc = total.saturating_mul(2);
         });
@@ -11329,9 +11434,16 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
             ],
             "Baseline is a live-book NAV obligation even though its budget line is separate",
         );
+        // Since milestone E1 the seed also debits the subsidy lines by the cash
+        // that physically left them, so NAV falls by the live commitments AND
+        // by the spend — one `split` funds a branch pair, so the cash is half
+        // the pair's commitment (08 §8 step 5, §10.5; I-33).
+        let cash_spent = decision_headroom
+            .saturating_add(gate_headroom.saturating_mul(2))
+            .saturating_add(baseline_headroom);
         assert_eq!(
             FutarchyTreasury::nav().nav,
-            nav_before.saturating_sub(total)
+            nav_before.saturating_sub(total).saturating_sub(cash_spent),
         );
 
         System::set_block_number(proposal.decide_at);
@@ -11360,8 +11472,21 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
         );
         assert_eq!(
             FutarchyTreasury::nav().nav,
-            nav_before.saturating_sub(baseline_headroom)
+            nav_before
+                .saturating_sub(baseline_headroom)
+                .saturating_sub(cash_spent),
         );
+        // 05 §6 settles the two gates in the same atomic step as the scalar
+        // leg whenever the proposal has gate books, and a gate book cannot be
+        // swept before its outcome is recorded — the winning side is what pays.
+        for gate in [
+            pallet_welfare::GateKind::Survival,
+            pallet_welfare::GateKind::Security,
+        ] {
+            assert_ok!(
+                <crate::configs::WelfareLedger as LedgerSettlement>::settle_gate(pid, gate, false)
+            );
+        }
         assert_ok!(
             <crate::configs::WelfareLedger as LedgerSettlement>::settle_baseline(
                 proposal.epoch,
@@ -11369,7 +11494,41 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
             )
         );
         assert!(FutarchyTreasury::treasury().pol_commitments.is_empty());
+        // 08 §8 step 5: releasing the obligation is only half of "POL withdraws
+        // at settlement". Until the 04 §2 Sweep returns the custody, NAV stays
+        // down by the cash that physically left — the bounded NAV-recognition
+        // delay I-33 permits, and never the over-stating direction.
+        assert_eq!(
+            FutarchyTreasury::nav().nav,
+            nav_before.saturating_sub(cash_spent)
+        );
+
+        // 04 §2 makes the Sweep stage available from the terminal block, with
+        // no archive delay — deliberately, so it lands well before 03 §5.4's
+        // independent `sweep_dust` can route un-returned inventory to
+        // INSURANCE. Crank it here, in that intended order.
+        let gates = markets.gates.expect("PARAM proposal has gate books");
+        let books = [
+            markets.accept,
+            markets.reject,
+            gates[0],
+            gates[1],
+            gates[2],
+            gates[3],
+            markets.baseline,
+        ];
+        for market in books {
+            assert_ok!(Market::sweep_revenue(
+                RuntimeOrigin::signed(account(153)),
+                market
+            ));
+        }
+        // The full I-33 cycle closes: these books never traded, so the whole
+        // seed comes back and NAV is exactly restored — released obligation
+        // AND returned custody, never one without the other.
         assert_eq!(FutarchyTreasury::nav().nav, nav_before);
+        assert!(Market::do_try_state().is_ok());
+        assert!(FutarchyTreasury::do_try_state().is_ok());
 
         System::set_block_number(
             proposal
@@ -11384,20 +11543,13 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
             RuntimeOrigin::signed(account(153)),
             proposal.epoch,
         ));
-        let gates = markets.gates.expect("PARAM proposal has gate books");
-        for market in [
-            markets.accept,
-            markets.reject,
-            gates[0],
-            gates[1],
-            gates[2],
-            gates[3],
-            markets.baseline,
-        ] {
+        for market in books {
             assert_ok!(Market::reap(RuntimeOrigin::signed(account(153)), market));
         }
         assert!(FutarchyTreasury::treasury().pol_commitments.is_empty());
         assert_eq!(pallet_market::Markets::<Runtime>::count(), 0);
+        // Reap moved no further POL: what it discarded was worthless residue.
+        assert_eq!(FutarchyTreasury::nav().nav, nav_before);
     });
 }
 
@@ -11463,6 +11615,7 @@ fn seeded_force_reject_void_closes_and_reaps_all_proposal_books() {
             &crate::configs::pol_baseline_account(),
             baseline_headroom.saturating_add(currency::USDC),
         ));
+        sync_pol_lines_to_custody();
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
             state.main_usdc = decision_headroom
                 .saturating_mul(2)
@@ -11552,6 +11705,10 @@ fn seeded_force_reject_void_closes_and_reaps_all_proposal_books() {
             PID,
         ));
         for id in &proposal_books {
+            assert_ok!(Market::sweep_revenue(
+                RuntimeOrigin::signed(account(153)),
+                *id
+            ));
             assert_ok!(Market::reap(RuntimeOrigin::signed(account(153)), *id));
         }
         assert!(!pallet_market::ProposalMarketIds::<Runtime>::contains_key(
@@ -11626,6 +11783,7 @@ fn sq320_orphaned_epoch_baseline_is_settled_by_the_permissionless_crank() {
             &crate::configs::pol_baseline_account(),
             baseline_headroom.saturating_add(currency::USDC),
         ));
+        sync_pol_lines_to_custody();
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
             state.main_usdc = decision_headroom
                 .saturating_mul(2)
@@ -14251,6 +14409,7 @@ fn qualified_real_payload_passes_guard_domain_rederivation_and_executes() {
         arm_all_classes_for_tests();
         assert!(install_single_active_metric_spec(28).is_some());
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| state.main_usdc = 10);
+        back_main_usdc(10);
         let line = pallet_futarchy_treasury::BudgetLine::Pol;
         let resource = expected_resource_key(0x09, Some(&line.encode()));
         let call =
@@ -18991,6 +19150,7 @@ fn trap_recovery_payload_screens_qualifies_and_executes_end_to_end() {
         arm_all_classes_for_tests();
         assert!(install_single_active_metric_spec(28).is_some());
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| state.main_usdc = 10);
+        back_main_usdc(10);
         let protocol = crate::configs::treasury_protocol_account();
         let amount = 20 * currency::USDC;
         let protocol_before = ForeignAssets::balance(usdc_location(), &protocol);

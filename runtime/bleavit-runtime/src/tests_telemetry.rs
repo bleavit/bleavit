@@ -94,7 +94,7 @@ fn telemetry_market_books_matches_v1_v3_premium_loss_and_seed_bound() -> Result<
                     retained,
                 );
             }
-            pallet_market::SeededMarkets::<Runtime>::insert(book.id, ());
+            pallet_market::SeededMarkets::<Runtime>::insert(book.id, crate::configs::pol_account());
         }
         pallet_market::Markets::<Runtime>::insert(V1_MARKET, v1);
         pallet_market::Markets::<Runtime>::insert(V3_MARKET, v3);
@@ -169,6 +169,9 @@ fn telemetry_market_book_loss_tracks_real_baseline_buy_and_sell_fee_custody(
         )
         .is_ok());
         assert!(ForeignAssets::mint_into(asset.clone(), &trader, trader_funding).is_ok());
+        // The seed debits the `POL_BASELINE` budget line by the cash that leaves
+        // its custody account, so the line must carry it (I-33).
+        tests::sync_pol_lines_to_custody();
         assert!(Market::create_market(
             frame_system::RawOrigin::Signed(crate::configs::epoch_account()).into(),
             MARKET,
