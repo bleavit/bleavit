@@ -33,6 +33,11 @@ mod tests;
 pub trait BenchmarkHelper {
     fn prime_keeper_rebate() {}
     fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
+
+    /// Credit the runtime's `POL`/`POL_BASELINE` budget line so a benchmark
+    /// seed has a line to debit (08 §8 step 5; I-33). Setup only — the measured
+    /// call still performs the real debit and its storage writes.
+    fn prime_pol_custody(_: PolLine, _: futarchy_primitives::Balance) {}
 }
 
 #[cfg(feature = "runtime-benchmarks")]
@@ -82,6 +87,46 @@ pub struct DecisionGradeFacts {
 pub trait PolCommitmentSync {
     fn sync_pol_commitments() -> frame_support::dispatch::DispatchResult;
     fn pol_commitments_synced() -> bool;
+
+    /// A seed moved `amount` of real USDC out of this book's subsidy custody
+    /// account. The treasury MUST debit the matching budget line by exactly
+    /// that amount, or `NAV` keeps counting cash the treasury no longer holds
+    /// (08 §8 step 5; I-33). A failure aborts the seed (status quo, G-1).
+    fn debit_pol_custody(
+        line: PolLine,
+        amount: futarchy_primitives::Balance,
+    ) -> frame_support::dispatch::DispatchResult;
+
+    /// The mirror: `amount` of real USDC came back to the same custody account
+    /// from the 04 §2 Sweep. A failure rolls the whole sweep back, leaving the
+    /// book unswept and the crank retryable (08 §8 step 5; I-33).
+    fn credit_pol_custody(
+        line: PolLine,
+        amount: futarchy_primitives::Balance,
+    ) -> frame_support::dispatch::DispatchResult;
+}
+
+/// Which 08 §1.1 subsidy line a book's seed custody moves through. Named here
+/// rather than shared with the treasury's `BudgetLine` so `pallet-market` stays
+/// treasury-free; the runtime binds the two (I-24-style layering, 01 §5.2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PolLine {
+    /// `POL` — decision and gate books (08 §8 step 5(b)).
+    Proposal,
+    /// `POL_BASELINE` — the epoch's Baseline book (08 §4.3).
+    Baseline,
+}
+
+impl PolLine {
+    /// The funding line a book of this kind is seeded from and returns to.
+    pub const fn of(kind: market_core::BookKind) -> Self {
+        match kind {
+            market_core::BookKind::Baseline { .. } => Self::Baseline,
+            market_core::BookKind::Decision { .. } | market_core::BookKind::Gate { .. } => {
+                Self::Proposal
+            }
+        }
+    }
 }
 
 /// Production decision-grade predicate for a sealed Baseline boundary.
@@ -106,6 +151,20 @@ impl PolCommitmentSync for () {
     fn pol_commitments_synced() -> bool {
         true
     }
+
+    fn debit_pol_custody(
+        _: PolLine,
+        _: futarchy_primitives::Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
+
+    fn credit_pol_custody(
+        _: PolLine,
+        _: futarchy_primitives::Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
 }
 
 #[frame_support::pallet]
@@ -115,6 +174,7 @@ pub mod pallet {
     use crate::DecisionGradeFacts;
     use crate::MarketAccountProvider;
     use crate::PolCommitmentSync;
+    use crate::PolLine;
     use alloc::{collections::BTreeMap, vec::Vec};
     use core::marker::PhantomData;
     use frame_support::{pallet_prelude::*, traits::Contains, PalletId};
@@ -123,10 +183,13 @@ pub mod pallet {
         bounds,
         keeper::{CrankClass, KeeperRebateSink},
         kernel, Balance, BlockNumber, Branch, EpochId, FixedU64, GateType, MarketId, MarketKind,
-        PositionId, ProposalId, ScalarSide, TradeSide,
+        PositionId, PositionKind, ProposalId, ScalarSide, TradeSide, VaultState,
     };
     use market_core::{
         BookKind, MarketBook, MarketParams, MarketPhase, TwapCumulative, TwapWindow,
+    };
+    use pallet_conditional_ledger::core_ledger::{
+        baseline as baseline_position, position as proposal_position, BaselineState,
     };
     use sp_runtime::{
         traits::{AccountIdConversion, CheckedAdd, Saturating, UniqueSaturatedInto},
@@ -249,11 +312,24 @@ pub mod pallet {
     pub type ClosedAt<T: Config> =
         StorageMap<_, Blake2_128Concat, MarketId, BlockNumberFor<T>, OptionQuery>;
 
-    /// Markets whose POL headroom has already been seeded (04 §10). Guards `seed`
-    /// against re-splitting POL into an already-collateralized book (idempotence);
-    /// removed at reap.
+    /// Markets whose POL headroom has already been seeded (04 §10), keyed to the
+    /// subsidy custody account that funded them. Guards `seed` against
+    /// re-splitting POL into an already-collateralized book (idempotence), and
+    /// names the account the 04 §2 Sweep returns that custody to, so the
+    /// permissionless crank cannot be pointed at a payee of the caller's
+    /// choosing (08 §8 step 5(b)). Removed at reap.
     #[pallet::storage]
-    pub type SeededMarkets<T: Config> = StorageMap<_, Blake2_128Concat, MarketId, (), OptionQuery>;
+    pub type SeededMarkets<T: Config> =
+        StorageMap<_, Blake2_128Concat, MarketId, T::AccountId, OptionQuery>;
+
+    /// Books whose 04 §2 Sweep stage has run. Written in the same storage layer
+    /// as the two remittances, so a repeat call is a silent no-op rather than a
+    /// second payment and a partially applied sweep is unreachable. Reap
+    /// requires it in addition to the terminal latch and archive delay —
+    /// reap-before-sweep is the one ordering that must not be reachable, being
+    /// the only irreversible one. Removed with the `Markets` row.
+    #[pallet::storage]
+    pub type SweptMarkets<T: Config> = StorageMap<_, Blake2_128Concat, MarketId, (), OptionQuery>;
 
     /// Monotonic internal id allocator used by epoch's bounded market-opening
     /// orchestration. Zero means no id has yet been allocated.
@@ -375,6 +451,18 @@ pub mod pallet {
         FreezeCleared,
         /// Operational event outside the frozen 02 ingest schema.
         FreezeExtended { until: BlockNumberFor<T> },
+        /// Frozen 02 §5 sweep event (contract v17). Both amounts are real USDC
+        /// and either MAY be zero; exactly one exists per market, because the
+        /// swept marker makes a repeat run a silent no-op (04 §2/§11).
+        ///
+        /// Appended rather than grouped with the other §5 rows above: 02 §13
+        /// makes contract additions append-only, and inserting a variant would
+        /// renumber every SCALE discriminant after it.
+        RevenueSwept {
+            market: MarketId,
+            fee_to_main: Balance,
+            pol_returned: Balance,
+        },
     }
 
     #[pallet::error]
@@ -414,6 +502,10 @@ pub mod pallet {
         /// This is append-only: the market error discriminants above are part
         /// of retained dispatch metadata and must not be renumbered.
         EpochMismatch,
+        /// The book's 04 §2 Sweep preconditions are unmet: it is still open, its
+        /// owning vault is not terminal, or a gate outcome it must price is not
+        /// recorded yet. Status-quo and retryable — never a silent empty sweep.
+        NotSweepable,
     }
 
     impl<T: Config> From<market_core::Error> for Error<T> {
@@ -432,7 +524,16 @@ pub mod pallet {
                 Core::ArithmeticOverflow => Self::ArithmeticOverflow,
                 Core::Ledger => Self::Ledger,
                 Core::TryStateViolation => Self::TryStateViolation,
+                Core::NotTerminal => Self::NotSweepable,
             }
+        }
+    }
+
+    /// `VaultInfo::gate_outcomes` index, mirroring the ledger core's own `gix`.
+    const fn gate_index(gate: GateType) -> usize {
+        match gate {
+            GateType::Survival => 0,
+            GateType::Security => 1,
         }
     }
 
@@ -606,6 +707,162 @@ pub mod pallet {
         fn position_balance(&self, id: PositionId, who: &T::AccountId) -> Balance {
             pallet_conditional_ledger::Positions::<T>::get(id, who)
         }
+
+        fn vault_terminal(&self, pid: ProposalId) -> Option<market_core::VaultTerminal> {
+            let Some(info) = pallet_conditional_ledger::Vaults::<T>::get(pid) else {
+                return Some(market_core::VaultTerminal::Archived);
+            };
+            match info.state {
+                VaultState::ScalarSettled { winner, .. } => {
+                    Some(market_core::VaultTerminal::Settled { winner })
+                }
+                VaultState::Voided => Some(market_core::VaultTerminal::Voided),
+                _ => None,
+            }
+        }
+
+        fn gate_outcome(&self, pid: ProposalId, gate: GateType) -> Option<bool> {
+            pallet_conditional_ledger::Vaults::<T>::get(pid)?.gate_outcomes[gate_index(gate)]
+        }
+
+        fn baseline_terminal(&self, epoch: EpochId) -> Option<market_core::BaselineTerminal> {
+            let Some(info) = pallet_conditional_ledger::BaselineVaults::<T>::get(epoch) else {
+                return Some(market_core::BaselineTerminal::Archived);
+            };
+            match info.state {
+                BaselineState::Settled(_) => Some(market_core::BaselineTerminal::Settled),
+                BaselineState::Open => None,
+            }
+        }
+
+        fn do_redeem(
+            &mut self,
+            pid: ProposalId,
+            holder: &T::AccountId,
+            recipient: &T::AccountId,
+            amount: Balance,
+        ) -> Result<Balance, ()> {
+            pallet_conditional_ledger::Pallet::<T>::do_redeem(
+                Self::authority_origin(),
+                pid,
+                holder.clone(),
+                recipient.clone(),
+                amount,
+            )
+            .map_err(|_| ())
+        }
+
+        fn do_redeem_scalar(
+            &mut self,
+            pid: ProposalId,
+            side: ScalarSide,
+            holder: &T::AccountId,
+            recipient: &T::AccountId,
+            amount: Balance,
+        ) -> Result<Balance, ()> {
+            pallet_conditional_ledger::Pallet::<T>::do_redeem_scalar(
+                Self::authority_origin(),
+                pid,
+                side,
+                holder.clone(),
+                recipient.clone(),
+                amount,
+            )
+            .map_err(|_| ())
+        }
+
+        fn do_redeem_scalar_pair(
+            &mut self,
+            pid: ProposalId,
+            holder: &T::AccountId,
+            recipient: &T::AccountId,
+            amount: Balance,
+        ) -> Result<Balance, ()> {
+            pallet_conditional_ledger::Pallet::<T>::do_redeem_scalar_pair(
+                Self::authority_origin(),
+                pid,
+                holder.clone(),
+                recipient.clone(),
+                amount,
+            )
+            .map_err(|_| ())
+        }
+
+        fn do_redeem_gate(
+            &mut self,
+            pid: ProposalId,
+            gate: GateType,
+            holder: &T::AccountId,
+            recipient: &T::AccountId,
+            amount: Balance,
+        ) -> Result<Balance, ()> {
+            pallet_conditional_ledger::Pallet::<T>::do_redeem_gate(
+                Self::authority_origin(),
+                pid,
+                gate,
+                holder.clone(),
+                recipient.clone(),
+                amount,
+            )
+            .map_err(|_| ())
+        }
+
+        fn do_redeem_void(
+            &mut self,
+            pid: ProposalId,
+            branch: Branch,
+            kind: PositionKind,
+            holder: &T::AccountId,
+            recipient: &T::AccountId,
+            amount: Balance,
+        ) -> Result<Balance, ()> {
+            pallet_conditional_ledger::Pallet::<T>::do_redeem_void(
+                Self::authority_origin(),
+                pid,
+                branch,
+                kind,
+                holder.clone(),
+                recipient.clone(),
+                amount,
+            )
+            .map_err(|_| ())
+        }
+
+        fn do_redeem_baseline(
+            &mut self,
+            epoch: EpochId,
+            side: ScalarSide,
+            holder: &T::AccountId,
+            recipient: &T::AccountId,
+            amount: Balance,
+        ) -> Result<Balance, ()> {
+            pallet_conditional_ledger::Pallet::<T>::do_redeem_baseline(
+                Self::authority_origin(),
+                epoch,
+                side,
+                holder.clone(),
+                recipient.clone(),
+                amount,
+            )
+            .map_err(|_| ())
+        }
+
+        fn do_redeem_baseline_pair(
+            &mut self,
+            epoch: EpochId,
+            holder: &T::AccountId,
+            recipient: &T::AccountId,
+            amount: Balance,
+        ) -> Result<Balance, ()> {
+            pallet_conditional_ledger::Pallet::<T>::do_redeem_baseline_pair(
+                Self::authority_origin(),
+                epoch,
+                holder.clone(),
+                recipient.clone(),
+                amount,
+            )
+            .map_err(|_| ())
+        }
     }
 
     #[pallet::extra_constants]
@@ -759,6 +1016,94 @@ pub mod pallet {
             Ok(())
         }
 
+        /// Permissionlessly realize a closed book's protocol value once its
+        /// owning vault is terminal — the 04 §2 **Sweep** stage, and the custody
+        /// half of 08 §8 step 5. Every **realizable** position the book account
+        /// holds is redeemed to real USDC and returned to the account that
+        /// funded the seed (`POL` for decision and gate books, `POL_BASELINE`
+        /// for the Baseline book), and the treasury's matching budget line is
+        /// credited so `NAV` recognizes the custody again.
+        ///
+        /// "Realizable" is not "complete sets": after any asymmetric walk the
+        /// book holds complete sets **plus an unmatched residual leg**, because
+        /// delivery removes single legs while revenue recycling mints pairs, and
+        /// at an interior `s` that leg pays `floor(a·s)`/`floor(a·(1−s)) > 0`.
+        /// Returning only the sets would leave exactly that value for reap to
+        /// discard into ledger residue bound for `INSURANCE` — the 08 §10.5 leak
+        /// this milestone exists to close. Only provably zero-payout positions
+        /// are left behind: losing-branch instruments and the losing side of a
+        /// settled gate.
+        ///
+        /// Idempotent: the swept marker is written in the same storage layer as
+        /// the remittance, so a repeat call is a successful no-op rather than a
+        /// second payment and a partially applied sweep is unreachable.
+        /// Fail-soft: it is a separate crank that no settlement path calls, so
+        /// it can never fail a settlement (G-1); a failure leaves the book
+        /// unswept, unreapable and retryable — an NAV-recognition delay, not a
+        /// solvency defect, since the value is still fully collateralized in the
+        /// ledger sovereign.
+        ///
+        /// The **fee leg is E2** (04 §6.1: the fee account's realizable claims
+        /// remit 100 % to the treasury `MAIN` account). Until it lands the event
+        /// reports `fee_to_main: 0`; the marker's meaning does not change, since
+        /// 04 §2 makes one marker cover both remittances of one sweep.
+        #[pallet::call_index(6)]
+        #[pallet::weight(<T as Config>::WeightInfo::sweep_revenue())]
+        pub fn sweep_revenue(origin: OriginFor<T>, market: MarketId) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
+            // Idempotence before every other check: an already-swept book must
+            // answer `Ok` on any later call, including after its funding account
+            // or vault state has moved on.
+            if SweptMarkets::<T>::contains_key(market) {
+                return Ok(());
+            }
+            ensure!(
+                matches!(book.phase, MarketPhase::Closed)
+                    && SettlementObservedAt::<T>::contains_key(market),
+                Error::<T>::NotSweepable
+            );
+            frame_support::storage::with_storage_layer(|| -> DispatchResult {
+                let pol_returned = match SeededMarkets::<T>::get(market) {
+                    Some(treasury) => {
+                        let mut ledger = PalletLedger::<T>::new();
+                        let returned = market_core::withdraw_book(&book, &mut ledger, &treasury)
+                            .map_err(Error::<T>::from)?;
+                        if returned > 0 {
+                            T::PolCommitmentSync::credit_pol_custody(
+                                PolLine::of(book.kind),
+                                returned,
+                            )?;
+                        }
+                        returned
+                    }
+                    // An unseeded book has no funding line to return to, and
+                    // normally no subsidy custody either — it is swept for the
+                    // marker alone so reap keeps exactly one precondition
+                    // shape. If it nevertheless holds a claim that still pays,
+                    // refuse: marking it swept would let reap discard value
+                    // with no lawful recipient (G-1).
+                    None => {
+                        ensure!(
+                            Self::book_return_is_complete(&book),
+                            Error::<T>::NotSweepable
+                        );
+                        0
+                    }
+                };
+                SweptMarkets::<T>::insert(market, ());
+                Self::deposit_event(Event::RevenueSwept {
+                    market,
+                    // E2 wires the 04 §6.1 fee remittance into this same leg.
+                    fee_to_main: 0,
+                    pol_returned,
+                });
+                Ok(())
+            })?;
+            <T as Config>::KeeperRebate::rebate(&who, CrankClass::General);
+            Ok(())
+        }
+
         /// Permissionlessly reap a closed book after `ArchiveDelay` (04 §2).
         #[pallet::call_index(3)]
         // B5: recalibrate for the keeper-rebate sink's additional storage path.
@@ -782,6 +1127,16 @@ pub mod pallet {
             // been permissionlessly swept.
             ensure!(
                 !Self::pol_obligation_live(market, &book),
+                Error::<T>::NotReapable
+            );
+            // 04 §2: reap discards only the worthless residue the Sweep stage
+            // left behind, so it requires the swept marker in addition to the
+            // latch and the archive delay. Reap-before-sweep is the one
+            // ordering that must not be reachable — unlike every other
+            // interleaving here it is irreversible, converting treasury capital
+            // into ledger residue bound for INSURANCE (08 §10.5).
+            ensure!(
+                SweptMarkets::<T>::contains_key(market),
                 Error::<T>::NotReapable
             );
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
@@ -819,6 +1174,7 @@ pub mod pallet {
                 Markets::<T>::remove(market);
                 ClosedAt::<T>::remove(market);
                 SeededMarkets::<T>::remove(market);
+                SweptMarkets::<T>::remove(market);
                 RerunSeededMarkets::<T>::remove(market);
                 SettlementObservedAt::<T>::remove(market);
                 Self::remove_pol_commitment(market);
@@ -1211,13 +1567,17 @@ pub mod pallet {
                 )
                 .map_err(Error::<T>::from)?;
                 for id in [accept, reject] {
-                    SeededMarkets::<T>::insert(id, ());
+                    SeededMarkets::<T>::insert(id, treasury.clone());
                     Self::insert_pol_commitment(id, headroom)?;
                     Self::deposit_event(Event::Seeded {
                         market: id,
                         headroom,
                     });
                 }
+                // One dual-minting split funds both branches, so the cash that
+                // left the line is `headroom` once — half the pair's §3
+                // commitment, exactly as 08 §10.5 computes it (I-33).
+                T::PolCommitmentSync::debit_pol_custody(PolLine::of(accept_book.kind), headroom)?;
                 T::PolCommitmentSync::sync_pol_commitments()?;
                 Ok(())
             })
@@ -1232,9 +1592,13 @@ pub mod pallet {
             treasury: T::AccountId,
         ) -> DispatchResult {
             T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            // The rerun top-up must come from the same custody account as the
+            // original seed: the Sweep returns one book's whole inventory to one
+            // recorded funder, so a second funder would silently transfer value
+            // between subsidy lines (08 §8 step 5(b); G-1).
             ensure!(
-                SeededMarkets::<T>::contains_key(accept)
-                    && SeededMarkets::<T>::contains_key(reject)
+                SeededMarkets::<T>::get(accept).as_ref() == Some(&treasury)
+                    && SeededMarkets::<T>::get(reject).as_ref() == Some(&treasury)
                     && !RerunSeededMarkets::<T>::contains_key(accept)
                     && !RerunSeededMarkets::<T>::contains_key(reject),
                 Error::<T>::AlreadySeeded
@@ -1268,6 +1632,7 @@ pub mod pallet {
                         headroom,
                     });
                 }
+                T::PolCommitmentSync::debit_pol_custody(PolLine::of(accept_book.kind), headroom)?;
                 T::PolCommitmentSync::sync_pol_commitments()?;
                 Ok(())
             })
@@ -1282,7 +1647,7 @@ pub mod pallet {
         ) -> DispatchResult {
             T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
             ensure!(
-                SeededMarkets::<T>::contains_key(id),
+                SeededMarkets::<T>::get(id).as_ref() == Some(&treasury),
                 Error::<T>::TryStateViolation
             );
             ensure!(
@@ -1306,6 +1671,7 @@ pub mod pallet {
                     market: id,
                     headroom,
                 });
+                T::PolCommitmentSync::debit_pol_custody(PolLine::of(book.kind), headroom)?;
                 T::PolCommitmentSync::sync_pol_commitments()?;
                 Ok(())
             })
@@ -1682,8 +2048,13 @@ pub mod pallet {
                 let mut ledger = PalletLedger::<T>::new();
                 let headroom = market_core::seed_book(&book, &mut ledger, &treasury)
                     .map_err(Error::<T>::from)?;
-                SeededMarkets::<T>::insert(id, ());
+                SeededMarkets::<T>::insert(id, treasury);
                 Self::insert_pol_commitment(id, headroom)?;
+                // The split above moved exactly `headroom` of real USDC out of
+                // the funding line's custody account (08 §8 steps 1–2), so the
+                // line is debited by the same amount or NAV counts cash the
+                // treasury no longer holds (08 §8 step 5; I-33).
+                T::PolCommitmentSync::debit_pol_custody(PolLine::of(book.kind), headroom)?;
                 Self::deposit_event(Event::Seeded {
                     market: id,
                     headroom,
@@ -1836,6 +2207,83 @@ pub mod pallet {
                 Self::remove_pol_commitment(id);
                 T::PolCommitmentSync::sync_pol_commitments()
             })
+        }
+
+        /// I-33's book half: whether a swept book retains any claim that still
+        /// pays at the recorded settlement. What may remain is exactly the
+        /// worthless residue reap discards — losing-branch and unrealized-branch
+        /// legs, and the losing side of a settled gate (04 §2).
+        ///
+        /// A vault the ledger's independent archive crank already swept carries
+        /// nothing left to value; the market-side latch stays authoritative.
+        fn book_return_is_complete(book: &MarketBook<T::AccountId>) -> bool {
+            let (proposal, branch, gate) = match book.kind {
+                BookKind::Decision { proposal, branch } => (proposal, branch, None),
+                BookKind::Gate {
+                    proposal,
+                    branch,
+                    gate,
+                } => (proposal, branch, Some(gate)),
+                BookKind::Baseline { epoch } => {
+                    if !pallet_conditional_ledger::BaselineVaults::<T>::contains_key(epoch) {
+                        return true;
+                    }
+                    return [ScalarSide::Long, ScalarSide::Short]
+                        .into_iter()
+                        .all(|side| {
+                            pallet_conditional_ledger::Positions::<T>::get(
+                                baseline_position(epoch, side),
+                                &book.account,
+                            ) == 0
+                        });
+                }
+            };
+            let Some(info) = pallet_conditional_ledger::Vaults::<T>::get(proposal) else {
+                return true;
+            };
+            let held = |kind| {
+                pallet_conditional_ledger::Positions::<T>::get(
+                    proposal_position(proposal, branch, kind),
+                    &book.account,
+                )
+            };
+            // A book only ever holds its own branch's own instruments — seeding,
+            // the D-3 wrapper and revenue recycling all mint into that one set —
+            // so this is the whole of what a return has to clear (04 §6, §10).
+            let legs = match gate {
+                Some(gate) => [PositionKind::GateYes(gate), PositionKind::GateNo(gate)],
+                None => [PositionKind::Long, PositionKind::Short],
+            };
+            match info.state {
+                VaultState::ScalarSettled { winner, .. } => {
+                    // On the losing branch every leg pays 0: that is exactly the
+                    // worthless residue reap is allowed to discard.
+                    if winner != branch {
+                        return true;
+                    }
+                    if held(PositionKind::BranchUsdc) != 0 {
+                        return false;
+                    }
+                    match gate {
+                        // The losing gate side is reap-only; an unrecorded
+                        // outcome leaves both live, and the sweep refuses such a
+                        // book rather than leaving one behind.
+                        Some(gate) => match info.gate_outcomes[gate_index(gate)] {
+                            Some(true) => held(PositionKind::GateYes(gate)) == 0,
+                            Some(false) => held(PositionKind::GateNo(gate)) == 0,
+                            None => legs.into_iter().all(|leg| held(leg) == 0),
+                        },
+                        None => legs.into_iter().all(|leg| held(leg) == 0),
+                    }
+                }
+                // Under VOID every instrument carries the D-1 neutral value, so
+                // nothing the book holds may remain.
+                VaultState::Voided => {
+                    held(PositionKind::BranchUsdc) == 0
+                        && legs.into_iter().all(|leg| held(leg) == 0)
+                }
+                _ => false,
+            }
         }
 
         /// Whether a seeded book still carries its worst-case-loss obligation.
@@ -2529,6 +2977,23 @@ pub mod pallet {
             for id in SeededMarkets::<T>::iter_keys() {
                 ensure!(
                     Markets::<T>::contains_key(id),
+                    Error::<T>::TryStateViolation
+                );
+            }
+            // I-33, book half (15 §1): no latched, swept book retains seed
+            // inventory it has not returned, and no returned book is
+            // re-returnable. The marker is the idempotence half; the emptiness
+            // check is the return half — after the 04 §2 Sweep the book account
+            // holds only legs that pay 0 at the recorded settlement, which is
+            // exactly what reap is then allowed to discard.
+            for id in SweptMarkets::<T>::iter_keys() {
+                let book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
+                ensure!(
+                    SettlementObservedAt::<T>::contains_key(id),
+                    Error::<T>::TryStateViolation
+                );
+                ensure!(
+                    Self::book_return_is_complete(&book),
                     Error::<T>::TryStateViolation
                 );
             }

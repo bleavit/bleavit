@@ -47,6 +47,7 @@
   "ledger.archive",
   "ledger.min_split",
   "ledger.pos_dep",
+  "ledger.rdm_fee",
   "mkt.fee",
   "mkt.kappa",
   "mkt.obs_interval",

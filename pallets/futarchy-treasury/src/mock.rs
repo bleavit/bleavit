@@ -81,6 +81,8 @@ parameter_types! {
     pub static OracleRebatePotBalance: u128 = 0;
     pub static RewardsPayoutPotBalance: u128 = 0;
     pub static OpsCollatorPayoutPotBalance: u128 = 0;
+    pub static PolPotBalance: u128 = 0;
+    pub static PolBaselinePotBalance: u128 = 0;
     pub CommunityPot: AccountId32 = AccountId32::new([77u8; 32]);
     pub static CommunityDistributionAmount: u128 = 250_000_000 * futarchy_treasury_core::VIT;
     pub static CommunityVestingDuration: u64 = 100;
@@ -325,6 +327,8 @@ impl RebatePayout<AccountId32> for RecordingRebatePayout {
             PayoutLine::Oracle => OracleRebatePotBalance::get(),
             PayoutLine::Rewards => RewardsPayoutPotBalance::get(),
             PayoutLine::OpsCollators => OpsCollatorPayoutPotBalance::get(),
+            PayoutLine::Pol => PolPotBalance::get(),
+            PayoutLine::PolBaseline => PolBaselinePotBalance::get(),
         }
     }
 }
@@ -343,6 +347,8 @@ pub fn set_rebate_pot_balance(line: PayoutLine, balance: u128) {
         PayoutLine::Oracle => OracleRebatePotBalance::set(balance),
         PayoutLine::Rewards => RewardsPayoutPotBalance::set(balance),
         PayoutLine::OpsCollators => OpsCollatorPayoutPotBalance::set(balance),
+        PayoutLine::Pol => PolPotBalance::set(balance),
+        PayoutLine::PolBaseline => PolBaselinePotBalance::set(balance),
     }
 }
 
@@ -460,6 +466,8 @@ pub fn new_test_ext_with(
         // starts with an empty custody fixture.
         RewardsPayoutPotBalance::set(0);
         OpsCollatorPayoutPotBalance::set(0);
+        PolPotBalance::set(0);
+        PolBaselinePotBalance::set(0);
         reset_pot_funding();
         reset_insurance_sweeps();
         reset_community_vesting();

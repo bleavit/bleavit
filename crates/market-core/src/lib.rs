@@ -5,14 +5,14 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use conditional_ledger_core::{baseline, position, LedgerOrigin, LedgerState};
+use conditional_ledger_core::{baseline, position, BaselineState, LedgerOrigin, LedgerState};
 use futarchy_fixed::{
     lmsr_buy_cost, lmsr_cost, lmsr_price_long, lmsr_sell_proceeds, round_charge_up,
     round_payout_down, FixedError, FixedU64x64, LmsrSide, LN_2,
 };
 use futarchy_primitives::{
     kernel, Balance, BlockNumber, Branch, EpochId, FixedU64, GateType, MarketId, PositionId,
-    PositionKind, ProposalId, QuoteView, ScalarSide, TradeSide,
+    PositionKind, ProposalId, QuoteView, ScalarSide, TradeSide, VaultState,
 };
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
@@ -96,6 +96,101 @@ pub trait LedgerOps<AccountId> {
     fn do_merge_baseline(&mut self, epoch: EpochId, who: &AccountId, a: Balance) -> Result<(), ()>;
     fn note_protocol_account(&mut self, who: AccountId);
     fn position_balance(&self, id: PositionId, who: &AccountId) -> Balance;
+
+    // ------------------------------------------------ 08 §8 step 5(b) return
+    // The inverse of the seeding ops above: redeem `holder`'s terminal claims
+    // and pay the proceeds to `recipient`. Each returns the **real USDC** the
+    // redemption released from escrow, which is what `RevenueSwept` reports and
+    // what the treasury's `POL`/`POL_BASELINE` line is credited by (04 §2, §11).
+
+    /// Terminal disposition of a proposal vault, or `None` while it is live.
+    fn vault_terminal(&self, pid: ProposalId) -> Option<VaultTerminal>;
+    /// The recorded `settle_gate` outcome, or `None` while it is unrecorded.
+    fn gate_outcome(&self, pid: ProposalId, g: GateType) -> Option<bool>;
+    /// Terminal disposition of an epoch's Baseline vault, or `None` while it
+    /// is live (03 §5.2).
+    fn baseline_terminal(&self, epoch: EpochId) -> Option<BaselineTerminal>;
+
+    fn do_redeem(
+        &mut self,
+        pid: ProposalId,
+        holder: &AccountId,
+        recipient: &AccountId,
+        a: Balance,
+    ) -> Result<Balance, ()>;
+    fn do_redeem_scalar(
+        &mut self,
+        pid: ProposalId,
+        side: ScalarSide,
+        holder: &AccountId,
+        recipient: &AccountId,
+        a: Balance,
+    ) -> Result<Balance, ()>;
+    fn do_redeem_scalar_pair(
+        &mut self,
+        pid: ProposalId,
+        holder: &AccountId,
+        recipient: &AccountId,
+        a: Balance,
+    ) -> Result<Balance, ()>;
+    fn do_redeem_gate(
+        &mut self,
+        pid: ProposalId,
+        g: GateType,
+        holder: &AccountId,
+        recipient: &AccountId,
+        a: Balance,
+    ) -> Result<Balance, ()>;
+    fn do_redeem_void(
+        &mut self,
+        pid: ProposalId,
+        b: Branch,
+        kind: PositionKind,
+        holder: &AccountId,
+        recipient: &AccountId,
+        a: Balance,
+    ) -> Result<Balance, ()>;
+    fn do_redeem_baseline(
+        &mut self,
+        epoch: EpochId,
+        side: ScalarSide,
+        holder: &AccountId,
+        recipient: &AccountId,
+        a: Balance,
+    ) -> Result<Balance, ()>;
+    fn do_redeem_baseline_pair(
+        &mut self,
+        epoch: EpochId,
+        holder: &AccountId,
+        recipient: &AccountId,
+        a: Balance,
+    ) -> Result<Balance, ()>;
+}
+
+/// A proposal vault's terminal disposition as the 03 §5.3 redemption schedule
+/// sees it. The market only ever needs the branch discriminant: on `Settled`
+/// the losing branch's instruments pay 0 and are the worthless residue reap
+/// discards (04 §2), while `Voided` pays the D-1 neutral schedule on both.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VaultTerminal {
+    Settled {
+        winner: Branch,
+    },
+    Voided,
+    /// The vault row is gone: the ledger's independent archive crank already
+    /// swept it, so there is nothing left to value. The market's own terminal
+    /// latch stays authoritative and the sweep succeeds returning zero — the
+    /// ledger's markers are swept state and MUST NOT gate the market
+    /// (04 §2 "Reap interleavings").
+    Archived,
+}
+
+/// The Baseline vault's counterpart. It is unbranched, so its only live
+/// distinction is settled-versus-archived (03 §5.2; 04 §8.2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BaselineTerminal {
+    Settled,
+    Archived,
 }
 
 impl<A: Clone + Eq> LedgerOps<A> for LedgerState<A> {
@@ -180,6 +275,167 @@ impl<A: Clone + Eq> LedgerOps<A> for LedgerState<A> {
             .find(|p| p.id == id && &p.owner == who)
             .map_or(0, |p| p.balance)
     }
+
+    fn vault_terminal(&self, pid: ProposalId) -> Option<VaultTerminal> {
+        let Some(record) = self.vaults.iter().find(|v| v.proposal == pid) else {
+            return Some(VaultTerminal::Archived);
+        };
+        match record.info.state {
+            VaultState::ScalarSettled { winner, .. } => Some(VaultTerminal::Settled { winner }),
+            VaultState::Voided => Some(VaultTerminal::Voided),
+            _ => None,
+        }
+    }
+
+    fn gate_outcome(&self, pid: ProposalId, g: GateType) -> Option<bool> {
+        self.vaults
+            .iter()
+            .find(|v| v.proposal == pid)?
+            .info
+            .gate_outcomes[gate_index(g)]
+    }
+
+    fn baseline_terminal(&self, epoch: EpochId) -> Option<BaselineTerminal> {
+        let Some(record) = self.baseline_vaults.iter().find(|v| v.epoch == epoch) else {
+            return Some(BaselineTerminal::Archived);
+        };
+        match record.info.state {
+            BaselineState::Settled(_) => Some(BaselineTerminal::Settled),
+            BaselineState::Open => None,
+        }
+    }
+
+    fn do_redeem(
+        &mut self,
+        pid: ProposalId,
+        holder: &A,
+        recipient: &A,
+        a: Balance,
+    ) -> Result<Balance, ()> {
+        let _ = recipient;
+        proposal_payout(self, pid, |st| st.redeem(pid, holder, a))
+    }
+
+    fn do_redeem_scalar(
+        &mut self,
+        pid: ProposalId,
+        side: ScalarSide,
+        holder: &A,
+        recipient: &A,
+        a: Balance,
+    ) -> Result<Balance, ()> {
+        let _ = recipient;
+        proposal_payout(self, pid, |st| st.redeem_scalar(pid, side, holder, a))
+    }
+
+    fn do_redeem_scalar_pair(
+        &mut self,
+        pid: ProposalId,
+        holder: &A,
+        recipient: &A,
+        a: Balance,
+    ) -> Result<Balance, ()> {
+        let _ = recipient;
+        proposal_payout(self, pid, |st| st.redeem_scalar_pair(pid, holder, a))
+    }
+
+    fn do_redeem_gate(
+        &mut self,
+        pid: ProposalId,
+        g: GateType,
+        holder: &A,
+        recipient: &A,
+        a: Balance,
+    ) -> Result<Balance, ()> {
+        let _ = recipient;
+        proposal_payout(self, pid, |st| st.redeem_gate(pid, g, holder, a))
+    }
+
+    fn do_redeem_void(
+        &mut self,
+        pid: ProposalId,
+        b: Branch,
+        kind: PositionKind,
+        holder: &A,
+        recipient: &A,
+        a: Balance,
+    ) -> Result<Balance, ()> {
+        let _ = recipient;
+        proposal_payout(self, pid, |st| st.redeem_void(pid, b, kind, holder, a))
+    }
+
+    fn do_redeem_baseline(
+        &mut self,
+        epoch: EpochId,
+        side: ScalarSide,
+        holder: &A,
+        recipient: &A,
+        a: Balance,
+    ) -> Result<Balance, ()> {
+        let _ = recipient;
+        baseline_payout(self, epoch, |st| st.redeem_baseline(epoch, side, holder, a))
+    }
+
+    fn do_redeem_baseline_pair(
+        &mut self,
+        epoch: EpochId,
+        holder: &A,
+        recipient: &A,
+        a: Balance,
+    ) -> Result<Balance, ()> {
+        let _ = recipient;
+        baseline_payout(self, epoch, |st| st.redeem_baseline_pair(epoch, holder, a))
+    }
+}
+
+/// `gate_outcomes` index, mirroring the ledger core's own `gix`.
+const fn gate_index(g: GateType) -> usize {
+    match g {
+        GateType::Survival => 0,
+        GateType::Security => 1,
+    }
+}
+
+/// The USDC a proposal-vault redemption released, read off the escrow delta —
+/// the same quantity the FRAME shell's `settle_collateral` transfers, so the
+/// oracle and the pallet report identical `pol_returned` figures. Redemptions
+/// never grow escrow, so the subtraction cannot underflow on a successful op.
+///
+/// The in-memory oracle keeps a single custody pool rather than per-account
+/// USDC balances, so `recipient` has no effect here; the FRAME shell is where
+/// the payout is actually routed to the funding line (04 §2).
+fn proposal_payout<A: Clone + Eq>(
+    st: &mut LedgerState<A>,
+    pid: ProposalId,
+    op: impl FnOnce(&mut LedgerState<A>) -> Result<(), conditional_ledger_core::Error>,
+) -> Result<Balance, ()> {
+    let before = proposal_escrow(st, pid);
+    op(st).map_err(|_| ())?;
+    before.checked_sub(proposal_escrow(st, pid)).ok_or(())
+}
+
+fn baseline_payout<A: Clone + Eq>(
+    st: &mut LedgerState<A>,
+    epoch: EpochId,
+    op: impl FnOnce(&mut LedgerState<A>) -> Result<(), conditional_ledger_core::Error>,
+) -> Result<Balance, ()> {
+    let before = baseline_escrow(st, epoch);
+    op(st).map_err(|_| ())?;
+    before.checked_sub(baseline_escrow(st, epoch)).ok_or(())
+}
+
+fn proposal_escrow<A>(st: &LedgerState<A>, pid: ProposalId) -> Balance {
+    st.vaults
+        .iter()
+        .find(|v| v.proposal == pid)
+        .map_or(0, |v| v.info.escrowed)
+}
+
+fn baseline_escrow<A>(st: &LedgerState<A>, epoch: EpochId) -> Balance {
+    st.baseline_vaults
+        .iter()
+        .find(|v| v.epoch == epoch)
+        .map_or(0, |v| v.info.escrowed)
 }
 
 #[derive(
@@ -664,6 +920,9 @@ pub enum Error {
     ArithmeticOverflow,
     Ledger,
     TryStateViolation,
+    /// The book's owning vault has not reached a redeemable terminal state, so
+    /// its subsidy custody cannot be returned yet (04 §2 Sweep; 08 §8 step 5).
+    NotTerminal,
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
@@ -1272,6 +1531,297 @@ pub fn seed_branch_pair<A: Clone + Eq, L: LedgerOps<A>>(
         }
     }
     Ok(headroom)
+}
+
+/// Return one book's surviving subsidy inventory to the funding line — the
+/// inverse of [`seed_book`] and the custody half of 08 §8 step 5 (04 §2 Sweep,
+/// §10). **Every realizable position returns**, in two steps: the atomic pair
+/// call wherever a pair exists (03 §5.3/§6.4 — it pays exactly `a`, so flooring
+/// two single legs instead would round twice against the treasury), then the
+/// remaining unmatched legs individually. The proceeds are paid to `treasury` —
+/// `POL` for decision and gate books, `POL_BASELINE` for the Baseline book.
+///
+/// Returning only *complete sets* would be wrong, and expensively so: after any
+/// asymmetric walk the book holds sets **plus an unmatched residual leg**,
+/// because delivery removes single legs while revenue recycling mints pairs.
+/// At an interior settlement that leg pays `floor(a·s)`/`floor(a·(1−s)) > 0`,
+/// and 04 §2 lets reap discard whatever Sweep leaves — so a set-only return
+/// routes it to ledger residue and on to `INSURANCE`, recreating the 08 §10.5
+/// leak. It is also the very inventory whose value makes realized cost
+/// `b·[ln 2 − H(p)]` rather than the whole seed.
+///
+/// What is left behind is therefore **only** what pays 0 at the recorded
+/// settlement: losing-branch and unrealized-branch legs, and the losing side of
+/// a settled gate (04 §2). `ProtocolAccounts` are exempt from the 03 §5.3a
+/// redemption fee throughout, so none of the return is haircut.
+///
+/// Errors are status-quo (G-1): the caller's storage layer rolls the whole
+/// return back, no swept marker is written, and the crank is retried. A book
+/// whose owning vault is not terminal — or whose gate outcome is not yet
+/// recorded — is not sweepable yet, never silently swept empty.
+pub fn withdraw_book<A: Clone + Eq, L: LedgerOps<A>>(
+    m: &MarketBook<A>,
+    ledger: &mut L,
+    treasury: &A,
+) -> Result<Balance, Error> {
+    let (proposal, branch, gate) = match m.kind {
+        BookKind::Decision { proposal, branch } => (proposal, branch, None),
+        BookKind::Gate {
+            proposal,
+            branch,
+            gate,
+        } => (proposal, branch, Some(gate)),
+        BookKind::Baseline { epoch } => {
+            return match ledger.baseline_terminal(epoch).ok_or(Error::NotTerminal)? {
+                BaselineTerminal::Settled => withdraw_baseline(epoch, ledger, &m.account, treasury),
+                BaselineTerminal::Archived => Ok(0),
+            }
+        }
+    };
+    match ledger.vault_terminal(proposal).ok_or(Error::NotTerminal)? {
+        // The losing branch's instruments pay 0 at the recorded settlement.
+        VaultTerminal::Settled { winner } if winner != branch => Ok(0),
+        VaultTerminal::Settled { .. } => match gate {
+            Some(gate) => {
+                withdraw_settled_gate(proposal, branch, gate, ledger, &m.account, treasury)
+            }
+            None => withdraw_settled_scalar(proposal, branch, ledger, &m.account, treasury),
+        },
+        VaultTerminal::Voided => {
+            withdraw_voided(proposal, branch, gate, ledger, &m.account, treasury)
+        }
+        VaultTerminal::Archived => Ok(0),
+    }
+}
+
+/// Return both books of one Accept/Reject pair — the inverse of
+/// [`seed_branch_pair`], which funds them from a single dual-minting `split`.
+/// Unlike seeding, the two legs share no ledger operation: each book redeems
+/// only its own branch, and the pair form exists so the seed and its return
+/// have the same shape. Under `Voided` that is exactly what recovers the seed:
+/// each book's inventory pays the D-1 half rate, and the two halves are the
+/// mirror legs one `split` minted, so the pair returns par less dust (I-2(d)).
+pub fn withdraw_branch_pair<A: Clone + Eq, L: LedgerOps<A>>(
+    accept: &MarketBook<A>,
+    reject: &MarketBook<A>,
+    ledger: &mut L,
+    treasury: &A,
+) -> Result<Balance, Error> {
+    ensure!(accept.id != reject.id, Error::TryStateViolation);
+    ensure!(
+        matches!(
+            (accept.kind, reject.kind),
+            (
+                BookKind::Decision {
+                    proposal: left,
+                    branch: Branch::Accept
+                },
+                BookKind::Decision {
+                    proposal: right,
+                    branch: Branch::Reject
+                }
+            ) if left == right
+        ) || matches!(
+            (accept.kind, reject.kind),
+            (
+                BookKind::Gate {
+                    proposal: left,
+                    branch: Branch::Accept,
+                    gate: left_gate
+                },
+                BookKind::Gate {
+                    proposal: right,
+                    branch: Branch::Reject,
+                    gate: right_gate
+                }
+            ) if left == right && left_gate == right_gate
+        ),
+        Error::TryStateViolation
+    );
+    let returned = withdraw_book(accept, ledger, treasury)?;
+    add(returned, withdraw_book(reject, ledger, treasury)?)
+}
+
+/// `ScalarSettled` decision book on the realized branch: complete sets pay par,
+/// the unmatched remainder pays the 03 §5.3 floored single-leg rate, and any
+/// branch-USDC the §6.3 recycle left behind redeems 1:1.
+fn withdraw_settled_scalar<A: Clone + Eq, L: LedgerOps<A>>(
+    pid: ProposalId,
+    branch: Branch,
+    ledger: &mut L,
+    book: &A,
+    treasury: &A,
+) -> Result<Balance, Error> {
+    let long = ledger.position_balance(position(pid, branch, PositionKind::Long), book);
+    let short = ledger.position_balance(position(pid, branch, PositionKind::Short), book);
+    let pairs = long.min(short);
+    let mut returned = 0;
+    if pairs > 0 {
+        returned = add(
+            returned,
+            ledger
+                .do_redeem_scalar_pair(pid, book, treasury, pairs)
+                .map_err(|_| Error::Ledger)?,
+        )?;
+    }
+    for (side, held) in [(ScalarSide::Long, long), (ScalarSide::Short, short)] {
+        let residual = sub(held, pairs)?;
+        if residual > 0 {
+            returned = add(
+                returned,
+                ledger
+                    .do_redeem_scalar(pid, side, book, treasury, residual)
+                    .map_err(|_| Error::Ledger)?,
+            )?;
+        }
+    }
+    add(
+        returned,
+        redeem_branch_usdc(pid, branch, ledger, book, treasury)?,
+    )
+}
+
+/// `ScalarSettled` gate book on the realized branch: the winning side pays 1:0
+/// per `settle_gate`, the losing side is reap-only (03 §5.3).
+fn withdraw_settled_gate<A: Clone + Eq, L: LedgerOps<A>>(
+    pid: ProposalId,
+    branch: Branch,
+    gate: GateType,
+    ledger: &mut L,
+    book: &A,
+    treasury: &A,
+) -> Result<Balance, Error> {
+    // No outcome yet means no side is known to pay. Refuse rather than sweep
+    // the book empty: the crank is retried once `settle_gate` lands, and reap
+    // stays blocked meanwhile (04 §2 — an unswept book is not reapable).
+    let outcome = ledger.gate_outcome(pid, gate).ok_or(Error::NotTerminal)?;
+    let winning = if outcome {
+        PositionKind::GateYes(gate)
+    } else {
+        PositionKind::GateNo(gate)
+    };
+    let held = ledger.position_balance(position(pid, branch, winning), book);
+    let mut returned = 0;
+    if held > 0 {
+        returned = ledger
+            .do_redeem_gate(pid, gate, book, treasury, held)
+            .map_err(|_| Error::Ledger)?;
+    }
+    add(
+        returned,
+        redeem_branch_usdc(pid, branch, ledger, book, treasury)?,
+    )
+}
+
+/// `Voided` book, decision (`gate == None`) or gate. Pair-first exactly as
+/// 03 §6.4 values the position: same-branch complete sets merge back into
+/// branch-USDC, which pays `floor(a/2)`, while any unmatched leg pays
+/// `floor(a/4)`. Merging first is never worse for the treasury and is what the
+/// ledger's own VOID liability model provisions.
+fn withdraw_voided<A: Clone + Eq, L: LedgerOps<A>>(
+    pid: ProposalId,
+    branch: Branch,
+    gate: Option<GateType>,
+    ledger: &mut L,
+    book: &A,
+    treasury: &A,
+) -> Result<Balance, Error> {
+    let legs = match gate {
+        Some(gate) => [PositionKind::GateYes(gate), PositionKind::GateNo(gate)],
+        None => [PositionKind::Long, PositionKind::Short],
+    };
+    let yes = ledger.position_balance(position(pid, branch, legs[0]), book);
+    let no = ledger.position_balance(position(pid, branch, legs[1]), book);
+    let pairs = yes.min(no);
+    if pairs > 0 {
+        match gate {
+            Some(gate) => ledger
+                .do_merge_gate(pid, branch, gate, book, pairs)
+                .map_err(|_| Error::Ledger)?,
+            None => ledger
+                .do_merge_scalar(pid, branch, book, pairs)
+                .map_err(|_| Error::Ledger)?,
+        }
+    }
+    let mut returned = 0;
+    for leg in legs {
+        let residual = ledger.position_balance(position(pid, branch, leg), book);
+        if residual > 0 {
+            returned = add(
+                returned,
+                ledger
+                    .do_redeem_void(pid, branch, leg, book, treasury, residual)
+                    .map_err(|_| Error::Ledger)?,
+            )?;
+        }
+    }
+    let merged = ledger.position_balance(position(pid, branch, PositionKind::BranchUsdc), book);
+    if merged > 0 {
+        returned = add(
+            returned,
+            ledger
+                .do_redeem_void(
+                    pid,
+                    branch,
+                    PositionKind::BranchUsdc,
+                    book,
+                    treasury,
+                    merged,
+                )
+                .map_err(|_| Error::Ledger)?,
+        )?;
+    }
+    Ok(returned)
+}
+
+/// Settled Baseline book: unbranched complete sets pay par, the remainder the
+/// floored single-leg rate (03 §5.3; 04 §8.2).
+fn withdraw_baseline<A: Clone + Eq, L: LedgerOps<A>>(
+    epoch: EpochId,
+    ledger: &mut L,
+    book: &A,
+    treasury: &A,
+) -> Result<Balance, Error> {
+    let long = ledger.position_balance(baseline(epoch, ScalarSide::Long), book);
+    let short = ledger.position_balance(baseline(epoch, ScalarSide::Short), book);
+    let pairs = long.min(short);
+    let mut returned = 0;
+    if pairs > 0 {
+        returned = ledger
+            .do_redeem_baseline_pair(epoch, book, treasury, pairs)
+            .map_err(|_| Error::Ledger)?;
+    }
+    for (side, held) in [(ScalarSide::Long, long), (ScalarSide::Short, short)] {
+        let residual = sub(held, pairs)?;
+        if residual > 0 {
+            returned = add(
+                returned,
+                ledger
+                    .do_redeem_baseline(epoch, side, book, treasury, residual)
+                    .map_err(|_| Error::Ledger)?,
+            )?;
+        }
+    }
+    Ok(returned)
+}
+
+/// Winning-branch branch-USDC the book still holds redeems at par (03 §5.3
+/// `redeem`). Ordinary flow recycles revenue immediately (04 §6.3), so this is
+/// normally zero — it exists so no path can strand a par claim (R-7).
+fn redeem_branch_usdc<A: Clone + Eq, L: LedgerOps<A>>(
+    pid: ProposalId,
+    branch: Branch,
+    ledger: &mut L,
+    book: &A,
+    treasury: &A,
+) -> Result<Balance, Error> {
+    let held = ledger.position_balance(position(pid, branch, PositionKind::BranchUsdc), book);
+    if held == 0 {
+        return Ok(0);
+    }
+    ledger
+        .do_redeem(pid, book, treasury, held)
+        .map_err(|_| Error::Ledger)
 }
 
 fn buy_branch<A: Clone + Eq, L: LedgerOps<A>>(
@@ -1893,6 +2443,254 @@ mod tests {
         [n; 32]
     }
     const B: Balance = 10_000_000_000;
+
+    /// Seeded decision book on `pid = 1`, Accept branch, book account `a(9)`.
+    fn seeded_decision_book() -> (LedgerState<[u8; 32]>, MarketState<[u8; 32]>) {
+        let mut ledger = LedgerState::new();
+        ledger.create_vault(1, 0).unwrap();
+        let mut m = MarketState::new();
+        m.create_market(
+            7,
+            BookKind::Decision {
+                proposal: 1,
+                branch: Branch::Accept,
+            },
+            a(9),
+            a(8),
+            B,
+        )
+        .unwrap();
+        m.seed(&mut ledger, 7, &a(1)).unwrap();
+        (ledger, m)
+    }
+
+    #[test]
+    fn withdraw_book_returns_the_untraded_seed_at_par() {
+        // 08 §8 step 5(b): an untraded book's complete sets are worth exactly
+        // one branch-USDC each, so the whole seed comes back.
+        let (mut ledger, m) = seeded_decision_book();
+        let headroom = seed_headroom(B).unwrap();
+        ledger
+            .resolve(LedgerOrigin::ResolveAuthority, 1, Branch::Accept)
+            .unwrap();
+        ledger
+            .settle_scalar(LedgerOrigin::SettleAuthority, 1, FixedU64(600_000_000))
+            .unwrap();
+        assert_eq!(
+            withdraw_book(&m.markets[0], &mut ledger, &a(1)).unwrap(),
+            headroom,
+        );
+        // Nothing of value is left behind, and a second run is a no-op.
+        assert_eq!(withdraw_book(&m.markets[0], &mut ledger, &a(1)).unwrap(), 0);
+        ledger.try_state().unwrap();
+    }
+
+    #[test]
+    fn withdraw_book_realizes_only_the_divergence_loss_on_a_walked_book() {
+        // 08 §3: realized cost is the live-branch divergence loss, not the
+        // seed — the pair-first schedule pays par per complete set and the
+        // floored single-leg rate on the residual (03 §5.3).
+        //
+        // The fixture is deliberately a ONE-SIDED walk settled at an interior
+        // `s`: delivery removes single legs while revenue recycling mints
+        // pairs, so the book ends holding complete sets PLUS an unmatched leg
+        // worth `floor(a·(1−s)) > 0`. A set-only return would strand exactly
+        // that leg in ledger residue bound for INSURANCE, recreating the
+        // 08 §10.5 leak — so this test pins the payout exactly rather than
+        // merely bounding it. A symmetric walk would pass either form.
+        let (mut ledger, mut m) = seeded_decision_book();
+        let headroom = seed_headroom(B).unwrap();
+        m.buy(
+            &mut ledger,
+            7,
+            &a(2),
+            ScalarSide::Long,
+            1_000_000_000,
+            u128::MAX,
+            10,
+        )
+        .unwrap();
+        ledger
+            .resolve(LedgerOrigin::ResolveAuthority, 1, Branch::Accept)
+            .unwrap();
+        // Settle far above the walked quote: the residual SHORT leg loses.
+        const SCORE: u128 = 900_000_000;
+        ledger
+            .settle_scalar(LedgerOrigin::SettleAuthority, 1, FixedU64(SCORE as u64))
+            .unwrap();
+
+        // Independent oracle over the book's pre-sweep inventory: pairs redeem
+        // at par, the unmatched leg at the floored single-leg rate.
+        let long = ledger.position_balance(position(1, Branch::Accept, PositionKind::Long), &a(9));
+        let short =
+            ledger.position_balance(position(1, Branch::Accept, PositionKind::Short), &a(9));
+        let pairs = long.min(short);
+        let residual = short - pairs;
+        assert!(
+            residual > 0,
+            "a one-sided walk must leave an unmatched leg for this test to bite",
+        );
+        let residual_value = residual * (PRICE_ONE_1E9 as u128 - SCORE) / PRICE_ONE_1E9 as u128;
+        assert!(residual_value > 0, "the stranded leg must be worth money");
+        let expected = pairs + residual_value;
+
+        let returned = withdraw_book(&m.markets[0], &mut ledger, &a(1)).unwrap();
+        assert_eq!(
+            returned, expected,
+            "the return is pairs-at-par plus the floored residual leg, not sets alone",
+        );
+        let realized = headroom - returned;
+        assert!(
+            realized > 0 && realized < headroom,
+            "realized {realized} must be a divergence loss inside (0, {headroom})",
+        );
+        // I-12: a book's maker loss never exceeds its `b·ln 2` seed.
+        assert!(realized <= maker_loss_floor(B).unwrap());
+        // A set-only return would have realized `headroom - pairs` instead.
+        assert!(
+            realized < headroom - pairs,
+            "discarding the residual leg would have cost {} more",
+            residual_value,
+        );
+        ledger.try_state().unwrap();
+    }
+
+    #[test]
+    fn withdraw_book_refuses_a_live_vault_and_returns_zero_on_the_losing_branch() {
+        let (mut ledger, m) = seeded_decision_book();
+        assert_eq!(
+            withdraw_book(&m.markets[0], &mut ledger, &a(1)),
+            Err(Error::NotTerminal),
+        );
+        ledger
+            .resolve(LedgerOrigin::ResolveAuthority, 1, Branch::Reject)
+            .unwrap();
+        ledger
+            .settle_scalar(LedgerOrigin::SettleAuthority, 1, FixedU64(500_000_000))
+            .unwrap();
+        // The Accept book is on the losing branch: every leg pays 0 and is the
+        // worthless residue reap discards (04 §2).
+        assert_eq!(withdraw_book(&m.markets[0], &mut ledger, &a(1)).unwrap(), 0);
+        ledger.try_state().unwrap();
+    }
+
+    #[test]
+    fn withdraw_branch_pair_recovers_a_voided_seed_at_par() {
+        // One dual-minting `split` funds both branches, and under VOID each
+        // book's inventory pays the D-1 half rate — so the pair returns par
+        // less dust, in escrow's favour (I-2(d); 03 §6.4).
+        let mut ledger = LedgerState::new();
+        ledger.create_vault(1, 0).unwrap();
+        let mut m = MarketState::new();
+        for (id, branch, book, fees) in [
+            (7, Branch::Accept, a(9), a(8)),
+            (8, Branch::Reject, a(7), a(6)),
+        ] {
+            m.create_market(
+                id,
+                BookKind::Decision {
+                    proposal: 1,
+                    branch,
+                },
+                book,
+                fees,
+                B,
+            )
+            .unwrap();
+        }
+        let headroom = seed_branch_pair(&m.markets[0], &m.markets[1], &mut ledger, &a(1)).unwrap();
+        ledger.void(LedgerOrigin::ResolveAuthority, 1).unwrap();
+        let returned =
+            withdraw_branch_pair(&m.markets[0], &m.markets[1], &mut ledger, &a(1)).unwrap();
+        assert_eq!(returned, headroom);
+        assert_eq!(
+            withdraw_branch_pair(&m.markets[0], &m.markets[1], &mut ledger, &a(1)).unwrap(),
+            0,
+        );
+        ledger.try_state().unwrap();
+    }
+
+    #[test]
+    fn withdraw_branch_pair_rejects_a_mismatched_pair() {
+        let (mut ledger, mut m) = seeded_decision_book();
+        m.create_market(
+            8,
+            BookKind::Decision {
+                proposal: 2,
+                branch: Branch::Reject,
+            },
+            a(7),
+            a(6),
+            B,
+        )
+        .unwrap();
+        assert_eq!(
+            withdraw_branch_pair(&m.markets[0], &m.markets[1], &mut ledger, &a(1)),
+            Err(Error::TryStateViolation),
+        );
+    }
+
+    #[test]
+    fn withdraw_book_returns_the_settled_baseline_seed() {
+        let mut ledger = LedgerState::new();
+        ledger.create_baseline_vault(1).unwrap();
+        let mut m = MarketState::new();
+        m.create_market(11, BookKind::Baseline { epoch: 1 }, a(9), a(8), B)
+            .unwrap();
+        let headroom = m.seed(&mut ledger, 11, &a(1)).unwrap();
+        assert_eq!(
+            withdraw_book(&m.markets[0], &mut ledger, &a(1)),
+            Err(Error::NotTerminal),
+        );
+        ledger
+            .settle_baseline(LedgerOrigin::SettleAuthority, 1, FixedU64(700_000_000))
+            .unwrap();
+        assert_eq!(
+            withdraw_book(&m.markets[0], &mut ledger, &a(1)).unwrap(),
+            headroom,
+        );
+        ledger.try_state().unwrap();
+    }
+
+    #[test]
+    fn withdraw_book_returns_the_winning_gate_side_and_refuses_an_unsettled_gate() {
+        let mut ledger = LedgerState::new();
+        ledger.create_vault(1, 0).unwrap();
+        let mut m = MarketState::new();
+        m.create_market(
+            9,
+            BookKind::Gate {
+                proposal: 1,
+                branch: Branch::Accept,
+                gate: GateType::Survival,
+            },
+            a(9),
+            a(8),
+            B,
+        )
+        .unwrap();
+        let headroom = m.seed(&mut ledger, 9, &a(1)).unwrap();
+        ledger
+            .resolve(LedgerOrigin::ResolveAuthority, 1, Branch::Accept)
+            .unwrap();
+        ledger
+            .settle_scalar(LedgerOrigin::SettleAuthority, 1, FixedU64(500_000_000))
+            .unwrap();
+        // No outcome yet: refuse rather than sweep the book empty.
+        assert_eq!(
+            withdraw_book(&m.markets[0], &mut ledger, &a(1)),
+            Err(Error::NotTerminal),
+        );
+        ledger
+            .settle_gate(LedgerOrigin::SettleAuthority, 1, GateType::Survival, true)
+            .unwrap();
+        // The winning side pays 1:1; the losing side is reap-only.
+        assert_eq!(
+            withdraw_book(&m.markets[0], &mut ledger, &a(1)).unwrap(),
+            headroom,
+        );
+        ledger.try_state().unwrap();
+    }
 
     #[test]
     fn twap_cumulative_checked_math_spans_both_limbs() {

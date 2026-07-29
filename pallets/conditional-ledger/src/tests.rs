@@ -1994,3 +1994,203 @@ fn transfer_remainder_sweep_uses_live_min_split() {
         try_state();
     });
 }
+
+// -------------------------------------------- E1: the MarketAuthority return
+//
+// The 08 §8 step 5(b) POL custody return runs through this pallet's redeem
+// surface: `pallet-market`'s `sweep_revenue` crank burns the book account's
+// terminal claims and routes the gross payout to the funding line. The tests
+// below pin the three properties that surface must have — an explicit origin
+// gate, protocol-only containment, and an exact payout report.
+
+#[test]
+fn the_market_return_surface_is_market_authority_only() {
+    new_test_ext().execute_with(|| {
+        create(1);
+        assert_ok!(Ledger::do_split(signed(MARKET), 1, BOOK, 4 * UNIT));
+        assert_ok!(Ledger::do_split_scalar(
+            signed(MARKET),
+            1,
+            Branch::Accept,
+            BOOK,
+            4 * UNIT,
+        ));
+        assert_ok!(Ledger::resolve(signed(RESOLVER), 1, Branch::Accept));
+        assert_ok!(Ledger::settle_scalar(
+            signed(SETTLER),
+            1,
+            FixedU64(500_000_000)
+        ));
+
+        for origin in [signed(ALICE), signed(RESOLVER), RawOrigin::Root.into()] {
+            assert_noop!(
+                Ledger::do_redeem_scalar_pair(origin, 1, BOOK, POL, UNIT),
+                DispatchError::BadOrigin,
+            );
+        }
+        assert_eq!(
+            Positions::<Test>::get(pos(1, Branch::Accept, PositionKind::Long), BOOK),
+            4 * UNIT
+        );
+        try_state();
+    });
+}
+
+#[test]
+fn the_market_return_surface_moves_protocol_inventory_to_protocol_custody_only() {
+    // 03 §5.3a's `ProtocolAccounts` boundary, enforced structurally: a miswired
+    // market authority can neither redeem a claimant's position nor pay an
+    // arbitrary payee.
+    new_test_ext().execute_with(|| {
+        create(1);
+        assert_ok!(Ledger::split(signed(ALICE), 1, 4 * UNIT));
+        assert_ok!(Ledger::split_scalar(
+            signed(ALICE),
+            1,
+            Branch::Accept,
+            4 * UNIT
+        ));
+        assert_ok!(Ledger::do_split(signed(MARKET), 1, BOOK, 4 * UNIT));
+        assert_ok!(Ledger::do_split_scalar(
+            signed(MARKET),
+            1,
+            Branch::Accept,
+            BOOK,
+            4 * UNIT,
+        ));
+        assert_ok!(Ledger::resolve(signed(RESOLVER), 1, Branch::Accept));
+        assert_ok!(Ledger::settle_scalar(
+            signed(SETTLER),
+            1,
+            FixedU64(500_000_000)
+        ));
+        let alice_before = usdc(ALICE);
+
+        // A claimant holder is refused.
+        assert_noop!(
+            Ledger::do_redeem_scalar_pair(signed(MARKET), 1, ALICE, POL, UNIT),
+            E::TryStateViolation,
+        );
+        // A claimant payee is refused.
+        assert_noop!(
+            Ledger::do_redeem_scalar_pair(signed(MARKET), 1, BOOK, ALICE, UNIT),
+            E::TryStateViolation,
+        );
+        assert_eq!(usdc(ALICE), alice_before);
+        assert_eq!(
+            Positions::<Test>::get(pos(1, Branch::Accept, PositionKind::Long), ALICE),
+            4 * UNIT
+        );
+        try_state();
+    });
+}
+
+#[test]
+fn the_market_return_surface_reports_the_exact_gross_payout() {
+    // The reported payout is the escrow decrement, which is what
+    // `RevenueSwept.pol_returned` publishes and what the treasury credits back
+    // to its subsidy line (I-33). Pair-first pays par; the residual leg is
+    // floored against the claimant (03 §5.3, R-1).
+    new_test_ext().execute_with(|| {
+        create(1);
+        assert_ok!(Ledger::do_split(signed(MARKET), 1, BOOK, 5 * UNIT));
+        assert_ok!(Ledger::do_split_scalar(
+            signed(MARKET),
+            1,
+            Branch::Accept,
+            BOOK,
+            5 * UNIT,
+        ));
+        // Move one unit of LONG out so the book carries an unmatched SHORT leg.
+        assert_ok!(Ledger::do_transfer(
+            signed(MARKET),
+            pos(1, Branch::Accept, PositionKind::Long),
+            BOOK,
+            POL,
+            UNIT,
+        ));
+        assert_ok!(Ledger::resolve(signed(RESOLVER), 1, Branch::Accept));
+        assert_ok!(Ledger::settle_scalar(
+            signed(SETTLER),
+            1,
+            FixedU64(750_000_000)
+        ));
+
+        let pol_before = usdc(POL);
+        let escrow_before = escrow(1);
+        assert_eq!(
+            Ledger::do_redeem_scalar_pair(signed(MARKET), 1, BOOK, POL, 4 * UNIT),
+            Ok(4 * UNIT),
+        );
+        // `floor(a·(1−s))` on the residual SHORT: 1 USDC × 0.25.
+        assert_eq!(
+            Ledger::do_redeem_scalar(signed(MARKET), 1, ScalarSide::Short, BOOK, POL, UNIT),
+            Ok(UNIT / 4),
+        );
+        let paid = 4 * UNIT + UNIT / 4;
+        assert_eq!(usdc(POL), pol_before + paid);
+        assert_eq!(escrow(1), escrow_before - paid);
+        assert_eq!(
+            Positions::<Test>::get(pos(1, Branch::Accept, PositionKind::Short), BOOK),
+            0
+        );
+        try_state();
+    });
+}
+
+#[test]
+fn the_market_return_surface_pays_the_void_schedule_and_the_baseline_pair() {
+    new_test_ext().execute_with(|| {
+        create(1);
+        create_base(9);
+        assert_ok!(Ledger::do_split(signed(MARKET), 1, BOOK, 4 * UNIT));
+        assert_ok!(Ledger::do_split_scalar(
+            signed(MARKET),
+            1,
+            Branch::Accept,
+            BOOK,
+            4 * UNIT,
+        ));
+        assert_ok!(Ledger::do_split_baseline(signed(MARKET), 9, BOOK, 4 * UNIT));
+        assert_ok!(Ledger::void(signed(RESOLVER), 1));
+        assert_ok!(Ledger::settle_baseline(
+            signed(SETTLER),
+            9,
+            FixedU64(500_000_000)
+        ));
+
+        // D-1: an unpaired leg recovers a quarter, branch-USDC a half.
+        let pol_before = usdc(POL);
+        assert_eq!(
+            Ledger::do_redeem_void(
+                signed(MARKET),
+                1,
+                Branch::Accept,
+                PositionKind::Long,
+                BOOK,
+                POL,
+                4 * UNIT,
+            ),
+            Ok(UNIT),
+        );
+        assert_eq!(
+            Ledger::do_redeem_void(
+                signed(MARKET),
+                1,
+                Branch::Reject,
+                PositionKind::BranchUsdc,
+                BOOK,
+                POL,
+                4 * UNIT,
+            ),
+            Ok(2 * UNIT),
+        );
+        // Baseline complete sets pay par.
+        assert_eq!(
+            Ledger::do_redeem_baseline_pair(signed(MARKET), 9, BOOK, POL, 4 * UNIT),
+            Ok(4 * UNIT),
+        );
+        assert_eq!(usdc(POL), pol_before + UNIT + 2 * UNIT + 4 * UNIT);
+        try_state();
+    });
+}

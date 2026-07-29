@@ -132,6 +132,97 @@ impl LedgerOps<u8> for TestLedger {
     fn position_balance(&self, id: PositionId, who: &u8) -> Balance {
         self.0.position_balance(id, who)
     }
+
+    fn vault_terminal(&self, pid: u64) -> Option<market_core::VaultTerminal> {
+        self.0.vault_terminal(pid)
+    }
+
+    fn gate_outcome(&self, pid: u64, gate: GateType) -> Option<bool> {
+        self.0.gate_outcome(pid, gate)
+    }
+
+    fn baseline_terminal(&self, epoch: u32) -> Option<market_core::BaselineTerminal> {
+        self.0.baseline_terminal(epoch)
+    }
+
+    fn do_redeem(
+        &mut self,
+        pid: u64,
+        holder: &u8,
+        recipient: &u8,
+        amount: Balance,
+    ) -> Result<Balance, ()> {
+        self.0.do_redeem(pid, holder, recipient, amount)
+    }
+
+    fn do_redeem_scalar(
+        &mut self,
+        pid: u64,
+        side: ScalarSide,
+        holder: &u8,
+        recipient: &u8,
+        amount: Balance,
+    ) -> Result<Balance, ()> {
+        self.0
+            .do_redeem_scalar(pid, side, holder, recipient, amount)
+    }
+
+    fn do_redeem_scalar_pair(
+        &mut self,
+        pid: u64,
+        holder: &u8,
+        recipient: &u8,
+        amount: Balance,
+    ) -> Result<Balance, ()> {
+        self.0.do_redeem_scalar_pair(pid, holder, recipient, amount)
+    }
+
+    fn do_redeem_gate(
+        &mut self,
+        pid: u64,
+        gate: GateType,
+        holder: &u8,
+        recipient: &u8,
+        amount: Balance,
+    ) -> Result<Balance, ()> {
+        self.0.do_redeem_gate(pid, gate, holder, recipient, amount)
+    }
+
+    fn do_redeem_void(
+        &mut self,
+        pid: u64,
+        branch: Branch,
+        kind: PositionKind,
+        holder: &u8,
+        recipient: &u8,
+        amount: Balance,
+    ) -> Result<Balance, ()> {
+        self.0
+            .do_redeem_void(pid, branch, kind, holder, recipient, amount)
+    }
+
+    fn do_redeem_baseline(
+        &mut self,
+        epoch: u32,
+        side: ScalarSide,
+        holder: &u8,
+        recipient: &u8,
+        amount: Balance,
+    ) -> Result<Balance, ()> {
+        self.0
+            .do_redeem_baseline(epoch, side, holder, recipient, amount)
+    }
+
+    fn do_redeem_baseline_pair(
+        &mut self,
+        epoch: u32,
+        holder: &u8,
+        recipient: &u8,
+        amount: Balance,
+    ) -> Result<Balance, ()> {
+        self.0
+            .do_redeem_baseline_pair(epoch, holder, recipient, amount)
+    }
 }
 
 /// 04 §4's composed-cost approximation term, rounded up to USDC base units.

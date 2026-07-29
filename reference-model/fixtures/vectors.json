@@ -576,6 +576,3286 @@
       }
     }
   ],
+  "ledger_fee_scenarios": [
+    {
+      "coverage_intent": "redeem_scalar charged with ceil != floor (42.003 -> 43); the mirror leg's gross falls under ledger.min_split and is waived; sweep_redemption_fees zeroes the counter [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
+      "fees_accrued": 0,
+      "fees_charged_total": 43,
+      "fees_swept_total": 43,
+      "final_state": {
+        "balances": {
+          "alice": {
+            "proposal/Reject/BranchUsdc": 20000
+          },
+          "bob": {},
+          "carol": {}
+        },
+        "baseline": {
+          "epoch": 7,
+          "escrowed": 0,
+          "sets": 0,
+          "state": {
+            "kind": "Open"
+          }
+        },
+        "deposits_held": 100000,
+        "events": [
+          {
+            "fields": [
+              1,
+              20000
+            ],
+            "kind": "Split"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              20000
+            ],
+            "kind": "ScalarSplit"
+          },
+          {
+            "fields": [
+              1,
+              "Accept"
+            ],
+            "kind": "VaultResolved"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              700050000
+            ],
+            "kind": "ScalarSettlementSet"
+          },
+          {
+            "fields": [
+              1,
+              "Long",
+              14001,
+              43
+            ],
+            "kind": "ScalarRedeemed"
+          },
+          {
+            "fields": [
+              1,
+              "Short",
+              5999,
+              0
+            ],
+            "kind": "ScalarRedeemed"
+          },
+          {
+            "fields": [
+              43
+            ],
+            "kind": "RedemptionFeesSwept"
+          },
+          {
+            "fields": [
+              0
+            ],
+            "kind": "RedemptionFeesSwept"
+          }
+        ],
+        "position_counts": [
+          {
+            "count": 1,
+            "owner": "alice"
+          }
+        ],
+        "position_totals": [
+          {
+            "position": "proposal/Reject/BranchUsdc",
+            "total": 20000
+          }
+        ],
+        "positions": [
+          {
+            "balance": 20000,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "proposal/Reject/BranchUsdc"
+          }
+        ],
+        "proposal": {
+          "branches": {
+            "Accept": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 20000,
+              "usdc": 0
+            },
+            "Reject": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 0,
+              "usdc": 20000
+            }
+          },
+          "escrowed": 0,
+          "gate_outcomes": {
+            "Security": null,
+            "Survival": null
+          },
+          "proposal_id": 1,
+          "spec": 0,
+          "state": {
+            "kind": "ScalarSettled",
+            "s": 700050000,
+            "winner": "Accept"
+          }
+        },
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 0
+      },
+      "initial_state": {
+        "baseline_epoch": 7,
+        "digest": {
+          "balances": {
+            "alice": {},
+            "bob": {},
+            "carol": {}
+          },
+          "baseline": {
+            "epoch": 7,
+            "escrowed": 0,
+            "sets": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "deposits_held": 0,
+          "events": [],
+          "position_counts": [],
+          "position_totals": [],
+          "positions": [],
+          "proposal": {
+            "branches": {
+              "Accept": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              },
+              "Reject": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              }
+            },
+            "escrowed": 0,
+            "gate_outcomes": {
+              "Security": null,
+              "Survival": null
+            },
+            "proposal_id": 1,
+            "spec": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
+        },
+        "proposal_id": 1
+      },
+      "name": "fee-01-scalar-legs-charged-waived-and-swept",
+      "ops": [
+        {
+          "args": {
+            "account": "alice",
+            "amount": 20000
+          },
+          "fees_accrued_after": 0,
+          "op": "split",
+          "outcome": {
+            "ok": {
+              "minted": 20000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 20000,
+            "branch": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "split_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 20000,
+              "minted": 20000
+            }
+          }
+        },
+        {
+          "args": {
+            "winner": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "resolve",
+          "outcome": {
+            "ok": {}
+          }
+        },
+        {
+          "args": {
+            "s": 700050000
+          },
+          "fees_accrued_after": 0,
+          "op": "settle_scalar",
+          "outcome": {
+            "ok": {
+              "s": 700050000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 20000,
+            "side": "Long"
+          },
+          "fee": 43,
+          "fees_accrued_after": 43,
+          "gross": 14001,
+          "net": 13958,
+          "op": "redeem_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 20000,
+              "fee": 43,
+              "payout": 14001
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 20000,
+            "side": "Short"
+          },
+          "fee": 0,
+          "fees_accrued_after": 43,
+          "gross": 5999,
+          "net": 5999,
+          "op": "redeem_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 20000,
+              "fee": 0,
+              "payout": 5999
+            }
+          }
+        },
+        {
+          "args": {},
+          "fees_accrued_after": 0,
+          "op": "sweep_redemption_fees",
+          "outcome": {
+            "ok": {
+              "swept": 43
+            }
+          }
+        },
+        {
+          "args": {},
+          "fees_accrued_after": 0,
+          "op": "sweep_redemption_fees",
+          "outcome": {
+            "ok": {
+              "swept": 0
+            }
+          }
+        }
+      ],
+      "params": {
+        "contract_version": 17,
+        "min_split": 10000,
+        "protocol_accounts": [],
+        "redeem_fee_perbill": 3000000
+      },
+      "unit": "USDC base units (1e-6)"
+    },
+    {
+      "coverage_intent": "03 \u00a75.3a(2a) PT-7 witness: identical holdings redeemed as a pair and leg-by-leg at the same rate and score. The pair's fee base is its own two legs, so both routes now net 19957 \u2014 the pair is never the worse choice. Charging fee(a) on the combined gross instead would net the pair 19940 [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
+      "fees_accrued": 86,
+      "fees_charged_total": 86,
+      "fees_swept_total": 0,
+      "final_state": {
+        "balances": {
+          "alice": {
+            "proposal/Reject/BranchUsdc": 40000
+          },
+          "bob": {},
+          "carol": {}
+        },
+        "baseline": {
+          "epoch": 7,
+          "escrowed": 0,
+          "sets": 0,
+          "state": {
+            "kind": "Open"
+          }
+        },
+        "deposits_held": 100000,
+        "events": [
+          {
+            "fields": [
+              1,
+              40000
+            ],
+            "kind": "Split"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              40000
+            ],
+            "kind": "ScalarSplit"
+          },
+          {
+            "fields": [
+              1,
+              "Accept"
+            ],
+            "kind": "VaultResolved"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              700050000
+            ],
+            "kind": "ScalarSettlementSet"
+          },
+          {
+            "fields": [
+              1,
+              20000,
+              43
+            ],
+            "kind": "ScalarPairRedeemed"
+          },
+          {
+            "fields": [
+              1,
+              "Long",
+              14001,
+              43
+            ],
+            "kind": "ScalarRedeemed"
+          },
+          {
+            "fields": [
+              1,
+              "Short",
+              5999,
+              0
+            ],
+            "kind": "ScalarRedeemed"
+          }
+        ],
+        "position_counts": [
+          {
+            "count": 1,
+            "owner": "alice"
+          }
+        ],
+        "position_totals": [
+          {
+            "position": "proposal/Reject/BranchUsdc",
+            "total": 40000
+          }
+        ],
+        "positions": [
+          {
+            "balance": 40000,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "proposal/Reject/BranchUsdc"
+          }
+        ],
+        "proposal": {
+          "branches": {
+            "Accept": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 20000,
+              "usdc": 0
+            },
+            "Reject": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 0,
+              "usdc": 40000
+            }
+          },
+          "escrowed": 0,
+          "gate_outcomes": {
+            "Security": null,
+            "Survival": null
+          },
+          "proposal_id": 1,
+          "spec": 0,
+          "state": {
+            "kind": "ScalarSettled",
+            "s": 700050000,
+            "winner": "Accept"
+          }
+        },
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 86
+      },
+      "initial_state": {
+        "baseline_epoch": 7,
+        "digest": {
+          "balances": {
+            "alice": {},
+            "bob": {},
+            "carol": {}
+          },
+          "baseline": {
+            "epoch": 7,
+            "escrowed": 0,
+            "sets": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "deposits_held": 0,
+          "events": [],
+          "position_counts": [],
+          "position_totals": [],
+          "positions": [],
+          "proposal": {
+            "branches": {
+              "Accept": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              },
+              "Reject": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              }
+            },
+            "escrowed": 0,
+            "gate_outcomes": {
+              "Security": null,
+              "Survival": null
+            },
+            "proposal_id": 1,
+            "spec": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
+        },
+        "proposal_id": 1
+      },
+      "name": "fee-02-pair-equals-leg-by-leg-under-the-waiver",
+      "ops": [
+        {
+          "args": {
+            "account": "alice",
+            "amount": 40000
+          },
+          "fees_accrued_after": 0,
+          "op": "split",
+          "outcome": {
+            "ok": {
+              "minted": 40000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 40000,
+            "branch": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "split_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 40000,
+              "minted": 40000
+            }
+          }
+        },
+        {
+          "args": {
+            "winner": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "resolve",
+          "outcome": {
+            "ok": {}
+          }
+        },
+        {
+          "args": {
+            "s": 700050000
+          },
+          "fees_accrued_after": 0,
+          "op": "settle_scalar",
+          "outcome": {
+            "ok": {
+              "s": 700050000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 20000
+          },
+          "fee": 43,
+          "fees_accrued_after": 43,
+          "gross": 20000,
+          "net": 19957,
+          "op": "redeem_scalar_pair",
+          "outcome": {
+            "ok": {
+              "burned": 20000,
+              "fee": 43,
+              "payout": 20000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 20000,
+            "side": "Long"
+          },
+          "fee": 43,
+          "fees_accrued_after": 86,
+          "gross": 14001,
+          "net": 13958,
+          "op": "redeem_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 20000,
+              "fee": 43,
+              "payout": 14001
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 20000,
+            "side": "Short"
+          },
+          "fee": 0,
+          "fees_accrued_after": 86,
+          "gross": 5999,
+          "net": 5999,
+          "op": "redeem_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 20000,
+              "fee": 0,
+              "payout": 5999
+            }
+          }
+        }
+      ],
+      "params": {
+        "contract_version": 17,
+        "min_split": 10000,
+        "protocol_accounts": [],
+        "redeem_fee_perbill": 3000000
+      },
+      "unit": "USDC base units (1e-6)"
+    },
+    {
+      "coverage_intent": "redeem_gate on the winning side is charged at the full 1:1 gross [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
+      "fees_accrued": 3000,
+      "fees_charged_total": 3000,
+      "fees_swept_total": 0,
+      "final_state": {
+        "balances": {
+          "alice": {
+            "proposal/Accept/GateNo/Survival": 1000000,
+            "proposal/Reject/BranchUsdc": 1000000
+          },
+          "bob": {},
+          "carol": {}
+        },
+        "baseline": {
+          "epoch": 7,
+          "escrowed": 0,
+          "sets": 0,
+          "state": {
+            "kind": "Open"
+          }
+        },
+        "deposits_held": 200000,
+        "events": [
+          {
+            "fields": [
+              1,
+              1000000
+            ],
+            "kind": "Split"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              "Survival",
+              1000000
+            ],
+            "kind": "GateSplit"
+          },
+          {
+            "fields": [
+              1,
+              "Accept"
+            ],
+            "kind": "VaultResolved"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              "Survival",
+              true
+            ],
+            "kind": "GateSettled"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              500000000
+            ],
+            "kind": "ScalarSettlementSet"
+          },
+          {
+            "fields": [
+              1,
+              "Survival",
+              1000000,
+              3000
+            ],
+            "kind": "GateRedeemed"
+          }
+        ],
+        "position_counts": [
+          {
+            "count": 2,
+            "owner": "alice"
+          }
+        ],
+        "position_totals": [
+          {
+            "position": "proposal/Accept/GateNo/Survival",
+            "total": 1000000
+          },
+          {
+            "position": "proposal/Reject/BranchUsdc",
+            "total": 1000000
+          }
+        ],
+        "positions": [
+          {
+            "balance": 1000000,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "proposal/Accept/GateNo/Survival"
+          },
+          {
+            "balance": 1000000,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "proposal/Reject/BranchUsdc"
+          }
+        ],
+        "proposal": {
+          "branches": {
+            "Accept": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 1000000
+              },
+              "scalar_sets": 0,
+              "usdc": 0
+            },
+            "Reject": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 0,
+              "usdc": 1000000
+            }
+          },
+          "escrowed": 0,
+          "gate_outcomes": {
+            "Security": null,
+            "Survival": true
+          },
+          "proposal_id": 1,
+          "spec": 0,
+          "state": {
+            "kind": "ScalarSettled",
+            "s": 500000000,
+            "winner": "Accept"
+          }
+        },
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 3000
+      },
+      "initial_state": {
+        "baseline_epoch": 7,
+        "digest": {
+          "balances": {
+            "alice": {},
+            "bob": {},
+            "carol": {}
+          },
+          "baseline": {
+            "epoch": 7,
+            "escrowed": 0,
+            "sets": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "deposits_held": 0,
+          "events": [],
+          "position_counts": [],
+          "position_totals": [],
+          "positions": [],
+          "proposal": {
+            "branches": {
+              "Accept": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              },
+              "Reject": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              }
+            },
+            "escrowed": 0,
+            "gate_outcomes": {
+              "Security": null,
+              "Survival": null
+            },
+            "proposal_id": 1,
+            "spec": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
+        },
+        "proposal_id": 1
+      },
+      "name": "fee-03-gate-winning-side-charged",
+      "ops": [
+        {
+          "args": {
+            "account": "alice",
+            "amount": 1000000
+          },
+          "fees_accrued_after": 0,
+          "op": "split",
+          "outcome": {
+            "ok": {
+              "minted": 1000000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 1000000,
+            "branch": "Accept",
+            "gate": "Survival"
+          },
+          "fees_accrued_after": 0,
+          "op": "split_gate",
+          "outcome": {
+            "ok": {
+              "burned": 1000000,
+              "minted": 1000000
+            }
+          }
+        },
+        {
+          "args": {
+            "winner": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "resolve",
+          "outcome": {
+            "ok": {}
+          }
+        },
+        {
+          "args": {
+            "gate": "Survival",
+            "outcome": true
+          },
+          "fees_accrued_after": 0,
+          "op": "settle_gate",
+          "outcome": {
+            "ok": {
+              "outcome": true
+            }
+          }
+        },
+        {
+          "args": {
+            "s": 500000000
+          },
+          "fees_accrued_after": 0,
+          "op": "settle_scalar",
+          "outcome": {
+            "ok": {
+              "s": 500000000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 1000000,
+            "gate": "Survival"
+          },
+          "fee": 3000,
+          "fees_accrued_after": 3000,
+          "gross": 1000000,
+          "net": 997000,
+          "op": "redeem_gate",
+          "outcome": {
+            "ok": {
+              "burned": 1000000,
+              "fee": 3000,
+              "payout": 1000000
+            }
+          }
+        }
+      ],
+      "params": {
+        "contract_version": 17,
+        "min_split": 10000,
+        "protocol_accounts": [],
+        "redeem_fee_perbill": 3000000
+      },
+      "unit": "USDC base units (1e-6)"
+    },
+    {
+      "coverage_intent": "03 \u00a75.3a(1): `merge` and the `redeem` par leg pay no fee at a non-zero rate \u2014 G-3 and I-5's 1:1 guarantee survive verbatim [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
+      "fees_accrued": 0,
+      "fees_charged_total": 0,
+      "fees_swept_total": 0,
+      "final_state": {
+        "balances": {
+          "alice": {
+            "proposal/Reject/BranchUsdc": 1000000
+          },
+          "bob": {},
+          "carol": {}
+        },
+        "baseline": {
+          "epoch": 7,
+          "escrowed": 0,
+          "sets": 0,
+          "state": {
+            "kind": "Open"
+          }
+        },
+        "deposits_held": 100000,
+        "events": [
+          {
+            "fields": [
+              1,
+              2000000
+            ],
+            "kind": "Split"
+          },
+          {
+            "fields": [
+              1,
+              1000000
+            ],
+            "kind": "Merged"
+          },
+          {
+            "fields": [
+              1,
+              "Accept"
+            ],
+            "kind": "VaultResolved"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              500000000
+            ],
+            "kind": "ScalarSettlementSet"
+          },
+          {
+            "fields": [
+              1,
+              1000000
+            ],
+            "kind": "Redeemed"
+          }
+        ],
+        "position_counts": [
+          {
+            "count": 1,
+            "owner": "alice"
+          }
+        ],
+        "position_totals": [
+          {
+            "position": "proposal/Reject/BranchUsdc",
+            "total": 1000000
+          }
+        ],
+        "positions": [
+          {
+            "balance": 1000000,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "proposal/Reject/BranchUsdc"
+          }
+        ],
+        "proposal": {
+          "branches": {
+            "Accept": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 0,
+              "usdc": 0
+            },
+            "Reject": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 0,
+              "usdc": 1000000
+            }
+          },
+          "escrowed": 0,
+          "gate_outcomes": {
+            "Security": null,
+            "Survival": null
+          },
+          "proposal_id": 1,
+          "spec": 0,
+          "state": {
+            "kind": "ScalarSettled",
+            "s": 500000000,
+            "winner": "Accept"
+          }
+        },
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 0
+      },
+      "initial_state": {
+        "baseline_epoch": 7,
+        "digest": {
+          "balances": {
+            "alice": {},
+            "bob": {},
+            "carol": {}
+          },
+          "baseline": {
+            "epoch": 7,
+            "escrowed": 0,
+            "sets": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "deposits_held": 0,
+          "events": [],
+          "position_counts": [],
+          "position_totals": [],
+          "positions": [],
+          "proposal": {
+            "branches": {
+              "Accept": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              },
+              "Reject": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              }
+            },
+            "escrowed": 0,
+            "gate_outcomes": {
+              "Security": null,
+              "Survival": null
+            },
+            "proposal_id": 1,
+            "spec": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
+        },
+        "proposal_id": 1
+      },
+      "name": "fee-04-par-leg-and-merge-are-exempt",
+      "ops": [
+        {
+          "args": {
+            "account": "alice",
+            "amount": 2000000
+          },
+          "fees_accrued_after": 0,
+          "op": "split",
+          "outcome": {
+            "ok": {
+              "minted": 2000000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 1000000
+          },
+          "fee": 0,
+          "fees_accrued_after": 0,
+          "gross": 1000000,
+          "net": 1000000,
+          "op": "merge",
+          "outcome": {
+            "ok": {
+              "burned": 1000000,
+              "payout": 1000000
+            }
+          }
+        },
+        {
+          "args": {
+            "winner": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "resolve",
+          "outcome": {
+            "ok": {}
+          }
+        },
+        {
+          "args": {
+            "s": 500000000
+          },
+          "fees_accrued_after": 0,
+          "op": "settle_scalar",
+          "outcome": {
+            "ok": {
+              "s": 500000000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 1000000
+          },
+          "fee": 0,
+          "fees_accrued_after": 0,
+          "gross": 1000000,
+          "net": 1000000,
+          "op": "redeem",
+          "outcome": {
+            "ok": {
+              "burned": 1000000,
+              "payout": 1000000
+            }
+          }
+        }
+      ],
+      "params": {
+        "contract_version": 17,
+        "min_split": 10000,
+        "protocol_accounts": [],
+        "redeem_fee_perbill": 3000000
+      },
+      "unit": "USDC base units (1e-6)"
+    },
+    {
+      "coverage_intent": "03 \u00a75.3a(1): nothing admissible under `Voided` is fee-bearing, so \u00a76.4's D-1 valuation argument is unchanged [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
+      "fees_accrued": 0,
+      "fees_charged_total": 0,
+      "fees_swept_total": 0,
+      "final_state": {
+        "balances": {
+          "alice": {
+            "proposal/Accept/BranchUsdc": 500000
+          },
+          "bob": {},
+          "carol": {}
+        },
+        "baseline": {
+          "epoch": 7,
+          "escrowed": 0,
+          "sets": 0,
+          "state": {
+            "kind": "Open"
+          }
+        },
+        "deposits_held": 100000,
+        "events": [
+          {
+            "fields": [
+              1,
+              1000000
+            ],
+            "kind": "Split"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              400000
+            ],
+            "kind": "ScalarSplit"
+          },
+          {
+            "fields": [
+              1
+            ],
+            "kind": "VaultVoided"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              400000
+            ],
+            "kind": "ScalarMerged"
+          },
+          {
+            "fields": [
+              1,
+              500000
+            ],
+            "kind": "Merged"
+          },
+          {
+            "fields": [
+              1,
+              "BranchUsdc",
+              500000,
+              250000
+            ],
+            "kind": "VoidRedeemed"
+          }
+        ],
+        "position_counts": [
+          {
+            "count": 1,
+            "owner": "alice"
+          }
+        ],
+        "position_totals": [
+          {
+            "position": "proposal/Accept/BranchUsdc",
+            "total": 500000
+          }
+        ],
+        "positions": [
+          {
+            "balance": 500000,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "proposal/Accept/BranchUsdc"
+          }
+        ],
+        "proposal": {
+          "branches": {
+            "Accept": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 0,
+              "usdc": 500000
+            },
+            "Reject": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 0,
+              "usdc": 0
+            }
+          },
+          "escrowed": 250000,
+          "gate_outcomes": {
+            "Security": null,
+            "Survival": null
+          },
+          "proposal_id": 1,
+          "spec": 0,
+          "state": {
+            "kind": "Voided"
+          }
+        },
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 0
+      },
+      "initial_state": {
+        "baseline_epoch": 7,
+        "digest": {
+          "balances": {
+            "alice": {},
+            "bob": {},
+            "carol": {}
+          },
+          "baseline": {
+            "epoch": 7,
+            "escrowed": 0,
+            "sets": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "deposits_held": 0,
+          "events": [],
+          "position_counts": [],
+          "position_totals": [],
+          "positions": [],
+          "proposal": {
+            "branches": {
+              "Accept": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              },
+              "Reject": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              }
+            },
+            "escrowed": 0,
+            "gate_outcomes": {
+              "Security": null,
+              "Survival": null
+            },
+            "proposal_id": 1,
+            "spec": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
+        },
+        "proposal_id": 1
+      },
+      "name": "fee-05-void-and-scalar-merge-are-exempt",
+      "ops": [
+        {
+          "args": {
+            "account": "alice",
+            "amount": 1000000
+          },
+          "fees_accrued_after": 0,
+          "op": "split",
+          "outcome": {
+            "ok": {
+              "minted": 1000000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 400000,
+            "branch": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "split_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 400000,
+              "minted": 400000
+            }
+          }
+        },
+        {
+          "args": {},
+          "fees_accrued_after": 0,
+          "op": "void",
+          "outcome": {
+            "ok": {}
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 400000,
+            "branch": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "merge_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 400000,
+              "minted": 400000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 500000
+          },
+          "fee": 0,
+          "fees_accrued_after": 0,
+          "gross": 500000,
+          "net": 500000,
+          "op": "merge",
+          "outcome": {
+            "ok": {
+              "burned": 500000,
+              "payout": 500000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 500000,
+            "branch": "Reject",
+            "kind": "BranchUsdc"
+          },
+          "fee": 0,
+          "fees_accrued_after": 0,
+          "gross": 250000,
+          "net": 250000,
+          "op": "redeem_void",
+          "outcome": {
+            "ok": {
+              "burned": 500000,
+              "payout": 250000
+            }
+          }
+        }
+      ],
+      "params": {
+        "contract_version": 17,
+        "min_split": 10000,
+        "protocol_accounts": [],
+        "redeem_fee_perbill": 3000000
+      },
+      "unit": "USDC base units (1e-6)"
+    },
+    {
+      "coverage_intent": "redeem_baseline and redeem_baseline_pair are charged; merge_baseline is exempt; the counter accrues across vaults [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
+      "fees_accrued": 0,
+      "fees_charged_total": 5102,
+      "fees_swept_total": 5102,
+      "final_state": {
+        "balances": {
+          "alice": {
+            "baseline/Short": 1000000
+          },
+          "bob": {},
+          "carol": {}
+        },
+        "baseline": {
+          "epoch": 7,
+          "escrowed": 299950,
+          "sets": 1000000,
+          "state": {
+            "kind": "Settled",
+            "s": 700050000
+          }
+        },
+        "deposits_held": 100000,
+        "events": [
+          {
+            "fields": [
+              7,
+              3000000
+            ],
+            "kind": "BaselineSplit"
+          },
+          {
+            "fields": [
+              7,
+              1000000
+            ],
+            "kind": "BaselineMerged"
+          },
+          {
+            "fields": [
+              7,
+              700050000
+            ],
+            "kind": "BaselineSettled"
+          },
+          {
+            "fields": [
+              7,
+              "Long",
+              700050,
+              2101
+            ],
+            "kind": "BaselineRedeemed"
+          },
+          {
+            "fields": [
+              7,
+              "Long",
+              1000000,
+              3001
+            ],
+            "kind": "BaselineRedeemed"
+          },
+          {
+            "fields": [
+              5102
+            ],
+            "kind": "RedemptionFeesSwept"
+          }
+        ],
+        "position_counts": [
+          {
+            "count": 1,
+            "owner": "alice"
+          }
+        ],
+        "position_totals": [
+          {
+            "position": "baseline/Short",
+            "total": 1000000
+          }
+        ],
+        "positions": [
+          {
+            "balance": 1000000,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "baseline/Short"
+          }
+        ],
+        "proposal": {
+          "branches": {
+            "Accept": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 0,
+              "usdc": 0
+            },
+            "Reject": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 0,
+              "usdc": 0
+            }
+          },
+          "escrowed": 0,
+          "gate_outcomes": {
+            "Security": null,
+            "Survival": null
+          },
+          "proposal_id": 1,
+          "spec": 0,
+          "state": {
+            "kind": "Open"
+          }
+        },
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 0
+      },
+      "initial_state": {
+        "baseline_epoch": 7,
+        "digest": {
+          "balances": {
+            "alice": {},
+            "bob": {},
+            "carol": {}
+          },
+          "baseline": {
+            "epoch": 7,
+            "escrowed": 0,
+            "sets": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "deposits_held": 0,
+          "events": [],
+          "position_counts": [],
+          "position_totals": [],
+          "positions": [],
+          "proposal": {
+            "branches": {
+              "Accept": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              },
+              "Reject": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              }
+            },
+            "escrowed": 0,
+            "gate_outcomes": {
+              "Security": null,
+              "Survival": null
+            },
+            "proposal_id": 1,
+            "spec": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
+        },
+        "proposal_id": 1
+      },
+      "name": "fee-06-baseline-legs-charged-merge-exempt",
+      "ops": [
+        {
+          "args": {
+            "account": "alice",
+            "amount": 3000000
+          },
+          "fees_accrued_after": 0,
+          "op": "split_baseline",
+          "outcome": {
+            "ok": {
+              "minted": 3000000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 1000000
+          },
+          "fee": 0,
+          "fees_accrued_after": 0,
+          "gross": 1000000,
+          "net": 1000000,
+          "op": "merge_baseline",
+          "outcome": {
+            "ok": {
+              "burned": 1000000,
+              "payout": 1000000
+            }
+          }
+        },
+        {
+          "args": {
+            "s": 700050000
+          },
+          "fees_accrued_after": 0,
+          "op": "settle_baseline",
+          "outcome": {
+            "ok": {
+              "s": 700050000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 1000000,
+            "side": "Long"
+          },
+          "fee": 2101,
+          "fees_accrued_after": 2101,
+          "gross": 700050,
+          "net": 697949,
+          "op": "redeem_baseline",
+          "outcome": {
+            "ok": {
+              "burned": 1000000,
+              "fee": 2101,
+              "payout": 700050
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 1000000
+          },
+          "fee": 3001,
+          "fees_accrued_after": 5102,
+          "gross": 1000000,
+          "net": 996999,
+          "op": "redeem_baseline_pair",
+          "outcome": {
+            "ok": {
+              "burned": 1000000,
+              "fee": 3001,
+              "payout": 1000000
+            }
+          }
+        },
+        {
+          "args": {},
+          "fees_accrued_after": 0,
+          "op": "sweep_redemption_fees",
+          "outcome": {
+            "ok": {
+              "swept": 5102
+            }
+          }
+        }
+      ],
+      "params": {
+        "contract_version": 17,
+        "min_split": 10000,
+        "protocol_accounts": [],
+        "redeem_fee_perbill": 3000000
+      },
+      "unit": "USDC base units (1e-6)"
+    },
+    {
+      "coverage_intent": "03 \u00a75.3a(2)/I-32(b): the waiver tests the NET. A gross of exactly min_balance (10000) is waived and nets 10000 \u2014 a gross-based test would have charged it 30 and netted 9970, below min_balance, on the very BelowMinimum path the waiver removes. 10030 is the last waived gross and 10031 the first charged one, and it nets exactly min_balance [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
+      "fees_accrued": 31,
+      "fees_charged_total": 31,
+      "fees_swept_total": 0,
+      "final_state": {
+        "balances": {
+          "alice": {
+            "proposal/Accept/Long": 59940,
+            "proposal/Accept/Short": 100000,
+            "proposal/Reject/BranchUsdc": 100000
+          },
+          "bob": {},
+          "carol": {}
+        },
+        "baseline": {
+          "epoch": 7,
+          "escrowed": 0,
+          "sets": 0,
+          "state": {
+            "kind": "Open"
+          }
+        },
+        "deposits_held": 300000,
+        "events": [
+          {
+            "fields": [
+              1,
+              100000
+            ],
+            "kind": "Split"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              100000
+            ],
+            "kind": "ScalarSplit"
+          },
+          {
+            "fields": [
+              1,
+              "Accept"
+            ],
+            "kind": "VaultResolved"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              1000000000
+            ],
+            "kind": "ScalarSettlementSet"
+          },
+          {
+            "fields": [
+              1,
+              "Long",
+              9999,
+              0
+            ],
+            "kind": "ScalarRedeemed"
+          },
+          {
+            "fields": [
+              1,
+              "Long",
+              10000,
+              0
+            ],
+            "kind": "ScalarRedeemed"
+          },
+          {
+            "fields": [
+              1,
+              "Long",
+              10030,
+              0
+            ],
+            "kind": "ScalarRedeemed"
+          },
+          {
+            "fields": [
+              1,
+              "Long",
+              10031,
+              31
+            ],
+            "kind": "ScalarRedeemed"
+          }
+        ],
+        "position_counts": [
+          {
+            "count": 3,
+            "owner": "alice"
+          }
+        ],
+        "position_totals": [
+          {
+            "position": "proposal/Accept/Long",
+            "total": 59940
+          },
+          {
+            "position": "proposal/Accept/Short",
+            "total": 100000
+          },
+          {
+            "position": "proposal/Reject/BranchUsdc",
+            "total": 100000
+          }
+        ],
+        "positions": [
+          {
+            "balance": 59940,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "proposal/Accept/Long"
+          },
+          {
+            "balance": 100000,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "proposal/Accept/Short"
+          },
+          {
+            "balance": 100000,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "proposal/Reject/BranchUsdc"
+          }
+        ],
+        "proposal": {
+          "branches": {
+            "Accept": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 100000,
+              "usdc": 0
+            },
+            "Reject": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 0,
+              "usdc": 100000
+            }
+          },
+          "escrowed": 59940,
+          "gate_outcomes": {
+            "Security": null,
+            "Survival": null
+          },
+          "proposal_id": 1,
+          "spec": 0,
+          "state": {
+            "kind": "ScalarSettled",
+            "s": 1000000000,
+            "winner": "Accept"
+          }
+        },
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 31
+      },
+      "initial_state": {
+        "baseline_epoch": 7,
+        "digest": {
+          "balances": {
+            "alice": {},
+            "bob": {},
+            "carol": {}
+          },
+          "baseline": {
+            "epoch": 7,
+            "escrowed": 0,
+            "sets": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "deposits_held": 0,
+          "events": [],
+          "position_counts": [],
+          "position_totals": [],
+          "positions": [],
+          "proposal": {
+            "branches": {
+              "Accept": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              },
+              "Reject": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              }
+            },
+            "escrowed": 0,
+            "gate_outcomes": {
+              "Security": null,
+              "Survival": null
+            },
+            "proposal_id": 1,
+            "spec": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
+        },
+        "proposal_id": 1
+      },
+      "name": "fee-07-net-waiver-boundary-at-min-balance",
+      "ops": [
+        {
+          "args": {
+            "account": "alice",
+            "amount": 100000
+          },
+          "fees_accrued_after": 0,
+          "op": "split",
+          "outcome": {
+            "ok": {
+              "minted": 100000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 100000,
+            "branch": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "split_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 100000,
+              "minted": 100000
+            }
+          }
+        },
+        {
+          "args": {
+            "winner": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "resolve",
+          "outcome": {
+            "ok": {}
+          }
+        },
+        {
+          "args": {
+            "s": 1000000000
+          },
+          "fees_accrued_after": 0,
+          "op": "settle_scalar",
+          "outcome": {
+            "ok": {
+              "s": 1000000000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 9999,
+            "side": "Long"
+          },
+          "fee": 0,
+          "fees_accrued_after": 0,
+          "gross": 9999,
+          "net": 9999,
+          "op": "redeem_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 9999,
+              "fee": 0,
+              "payout": 9999
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 10000,
+            "side": "Long"
+          },
+          "fee": 0,
+          "fees_accrued_after": 0,
+          "gross": 10000,
+          "net": 10000,
+          "op": "redeem_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 10000,
+              "fee": 0,
+              "payout": 10000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 10030,
+            "side": "Long"
+          },
+          "fee": 0,
+          "fees_accrued_after": 0,
+          "gross": 10030,
+          "net": 10030,
+          "op": "redeem_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 10030,
+              "fee": 0,
+              "payout": 10030
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 10031,
+            "side": "Long"
+          },
+          "fee": 31,
+          "fees_accrued_after": 31,
+          "gross": 10031,
+          "net": 10000,
+          "op": "redeem_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 10031,
+              "fee": 31,
+              "payout": 10031
+            }
+          }
+        }
+      ],
+      "params": {
+        "contract_version": 17,
+        "min_split": 10000,
+        "protocol_accounts": [],
+        "redeem_fee_perbill": 3000000
+      },
+      "unit": "USDC base units (1e-6)"
+    },
+    {
+      "coverage_intent": "03 \u00a75.3a(1): identical redemptions by a claimant and by a ProtocolAccount; only the claimant is charged. The protocol holder acquires its inventory through the \u00a75.5 MarketAuthority wrapper, modelled here as a direct split [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
+      "fees_accrued": 300,
+      "fees_charged_total": 300,
+      "fees_swept_total": 0,
+      "final_state": {
+        "balances": {
+          "alice": {
+            "proposal/Accept/Short": 100000,
+            "proposal/Reject/BranchUsdc": 100000
+          },
+          "bob": {},
+          "carol": {
+            "proposal/Accept/Short": 100000,
+            "proposal/Reject/BranchUsdc": 100000
+          }
+        },
+        "baseline": {
+          "epoch": 7,
+          "escrowed": 0,
+          "sets": 0,
+          "state": {
+            "kind": "Open"
+          }
+        },
+        "deposits_held": 400000,
+        "events": [
+          {
+            "fields": [
+              1,
+              100000
+            ],
+            "kind": "Split"
+          },
+          {
+            "fields": [
+              1,
+              100000
+            ],
+            "kind": "Split"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              100000
+            ],
+            "kind": "ScalarSplit"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              100000
+            ],
+            "kind": "ScalarSplit"
+          },
+          {
+            "fields": [
+              1,
+              "Accept"
+            ],
+            "kind": "VaultResolved"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              1000000000
+            ],
+            "kind": "ScalarSettlementSet"
+          },
+          {
+            "fields": [
+              1,
+              "Long",
+              100000,
+              300
+            ],
+            "kind": "ScalarRedeemed"
+          },
+          {
+            "fields": [
+              1,
+              "Long",
+              100000,
+              0
+            ],
+            "kind": "ScalarRedeemed"
+          }
+        ],
+        "position_counts": [
+          {
+            "count": 2,
+            "owner": "alice"
+          },
+          {
+            "count": 2,
+            "owner": "carol"
+          }
+        ],
+        "position_totals": [
+          {
+            "position": "proposal/Accept/Short",
+            "total": 200000
+          },
+          {
+            "position": "proposal/Reject/BranchUsdc",
+            "total": 200000
+          }
+        ],
+        "positions": [
+          {
+            "balance": 100000,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "proposal/Accept/Short"
+          },
+          {
+            "balance": 100000,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "proposal/Reject/BranchUsdc"
+          },
+          {
+            "balance": 100000,
+            "deposit": 100000,
+            "owner": "carol",
+            "position": "proposal/Accept/Short"
+          },
+          {
+            "balance": 100000,
+            "deposit": 100000,
+            "owner": "carol",
+            "position": "proposal/Reject/BranchUsdc"
+          }
+        ],
+        "proposal": {
+          "branches": {
+            "Accept": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 200000,
+              "usdc": 0
+            },
+            "Reject": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 0,
+              "usdc": 200000
+            }
+          },
+          "escrowed": 0,
+          "gate_outcomes": {
+            "Security": null,
+            "Survival": null
+          },
+          "proposal_id": 1,
+          "spec": 0,
+          "state": {
+            "kind": "ScalarSettled",
+            "s": 1000000000,
+            "winner": "Accept"
+          }
+        },
+        "protocol_accounts": [
+          "carol"
+        ],
+        "redemption_fees_accrued": 300
+      },
+      "initial_state": {
+        "baseline_epoch": 7,
+        "digest": {
+          "balances": {
+            "alice": {},
+            "bob": {},
+            "carol": {}
+          },
+          "baseline": {
+            "epoch": 7,
+            "escrowed": 0,
+            "sets": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "deposits_held": 0,
+          "events": [],
+          "position_counts": [],
+          "position_totals": [],
+          "positions": [],
+          "proposal": {
+            "branches": {
+              "Accept": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              },
+              "Reject": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              }
+            },
+            "escrowed": 0,
+            "gate_outcomes": {
+              "Security": null,
+              "Survival": null
+            },
+            "proposal_id": 1,
+            "spec": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "protocol_accounts": [
+            "carol"
+          ],
+          "redemption_fees_accrued": 0
+        },
+        "proposal_id": 1
+      },
+      "name": "fee-08-protocol-account-is-exempt",
+      "ops": [
+        {
+          "args": {
+            "account": "alice",
+            "amount": 100000
+          },
+          "fees_accrued_after": 0,
+          "op": "split",
+          "outcome": {
+            "ok": {
+              "minted": 100000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "carol",
+            "amount": 100000
+          },
+          "fees_accrued_after": 0,
+          "op": "split",
+          "outcome": {
+            "ok": {
+              "minted": 100000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 100000,
+            "branch": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "split_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 100000,
+              "minted": 100000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "carol",
+            "amount": 100000,
+            "branch": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "split_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 100000,
+              "minted": 100000
+            }
+          }
+        },
+        {
+          "args": {
+            "winner": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "resolve",
+          "outcome": {
+            "ok": {}
+          }
+        },
+        {
+          "args": {
+            "s": 1000000000
+          },
+          "fees_accrued_after": 0,
+          "op": "settle_scalar",
+          "outcome": {
+            "ok": {
+              "s": 1000000000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 100000,
+            "side": "Long"
+          },
+          "fee": 300,
+          "fees_accrued_after": 300,
+          "gross": 100000,
+          "net": 99700,
+          "op": "redeem_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 100000,
+              "fee": 300,
+              "payout": 100000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "carol",
+            "amount": 100000,
+            "side": "Long"
+          },
+          "fee": 0,
+          "fees_accrued_after": 300,
+          "gross": 100000,
+          "net": 100000,
+          "op": "redeem_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 100000,
+              "fee": 0,
+              "payout": 100000
+            }
+          }
+        }
+      ],
+      "params": {
+        "contract_version": 17,
+        "min_split": 10000,
+        "protocol_accounts": [
+          "carol"
+        ],
+        "redeem_fee_perbill": 3000000
+      },
+      "unit": "USDC base units (1e-6)"
+    },
+    {
+      "coverage_intent": "I-31 at a hypothetical 100 % rate: the net-based waiver always fires because the net would be 0, so nothing is charged and the claimant is paid in full. The rate governs distribution, never solvency \u2014 and the waiver bounds it from the claimant's side [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
+      "fees_accrued": 0,
+      "fees_charged_total": 0,
+      "fees_swept_total": 0,
+      "final_state": {
+        "balances": {
+          "alice": {
+            "proposal/Reject/BranchUsdc": 100000
+          },
+          "bob": {},
+          "carol": {}
+        },
+        "baseline": {
+          "epoch": 7,
+          "escrowed": 0,
+          "sets": 0,
+          "state": {
+            "kind": "Open"
+          }
+        },
+        "deposits_held": 100000,
+        "events": [
+          {
+            "fields": [
+              1,
+              100000
+            ],
+            "kind": "Split"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              100000
+            ],
+            "kind": "ScalarSplit"
+          },
+          {
+            "fields": [
+              1,
+              "Accept"
+            ],
+            "kind": "VaultResolved"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              1000000000
+            ],
+            "kind": "ScalarSettlementSet"
+          },
+          {
+            "fields": [
+              1,
+              100000,
+              0
+            ],
+            "kind": "ScalarPairRedeemed"
+          },
+          {
+            "fields": [
+              0
+            ],
+            "kind": "RedemptionFeesSwept"
+          }
+        ],
+        "position_counts": [
+          {
+            "count": 1,
+            "owner": "alice"
+          }
+        ],
+        "position_totals": [
+          {
+            "position": "proposal/Reject/BranchUsdc",
+            "total": 100000
+          }
+        ],
+        "positions": [
+          {
+            "balance": 100000,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "proposal/Reject/BranchUsdc"
+          }
+        ],
+        "proposal": {
+          "branches": {
+            "Accept": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 0,
+              "usdc": 0
+            },
+            "Reject": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 0,
+              "usdc": 100000
+            }
+          },
+          "escrowed": 0,
+          "gate_outcomes": {
+            "Security": null,
+            "Survival": null
+          },
+          "proposal_id": 1,
+          "spec": 0,
+          "state": {
+            "kind": "ScalarSettled",
+            "s": 1000000000,
+            "winner": "Accept"
+          }
+        },
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 0
+      },
+      "initial_state": {
+        "baseline_epoch": 7,
+        "digest": {
+          "balances": {
+            "alice": {},
+            "bob": {},
+            "carol": {}
+          },
+          "baseline": {
+            "epoch": 7,
+            "escrowed": 0,
+            "sets": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "deposits_held": 0,
+          "events": [],
+          "position_counts": [],
+          "position_totals": [],
+          "positions": [],
+          "proposal": {
+            "branches": {
+              "Accept": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              },
+              "Reject": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              }
+            },
+            "escrowed": 0,
+            "gate_outcomes": {
+              "Security": null,
+              "Survival": null
+            },
+            "proposal_id": 1,
+            "spec": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
+        },
+        "proposal_id": 1
+      },
+      "name": "fee-09-full-rate-collects-nothing-under-the-net-waiver",
+      "ops": [
+        {
+          "args": {
+            "account": "alice",
+            "amount": 100000
+          },
+          "fees_accrued_after": 0,
+          "op": "split",
+          "outcome": {
+            "ok": {
+              "minted": 100000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 100000,
+            "branch": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "split_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 100000,
+              "minted": 100000
+            }
+          }
+        },
+        {
+          "args": {
+            "winner": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "resolve",
+          "outcome": {
+            "ok": {}
+          }
+        },
+        {
+          "args": {
+            "s": 1000000000
+          },
+          "fees_accrued_after": 0,
+          "op": "settle_scalar",
+          "outcome": {
+            "ok": {
+              "s": 1000000000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 100000
+          },
+          "fee": 0,
+          "fees_accrued_after": 0,
+          "gross": 100000,
+          "net": 100000,
+          "op": "redeem_scalar_pair",
+          "outcome": {
+            "ok": {
+              "burned": 100000,
+              "fee": 0,
+              "payout": 100000
+            }
+          }
+        },
+        {
+          "args": {},
+          "fees_accrued_after": 0,
+          "op": "sweep_redemption_fees",
+          "outcome": {
+            "ok": {
+              "swept": 0
+            }
+          }
+        }
+      ],
+      "params": {
+        "contract_version": 17,
+        "min_split": 10000,
+        "protocol_accounts": [],
+        "redeem_fee_perbill": 1000000000
+      },
+      "unit": "USDC base units (1e-6)"
+    },
+    {
+      "coverage_intent": "03 \u00a75.3a(5)/I-32(d): a rate outside the Perbill domain is a malformed record and reads as 0 \u2014 the fail-OPEN direction, because it is the claimant-favouring one [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
+      "fees_accrued": 0,
+      "fees_charged_total": 0,
+      "fees_swept_total": 0,
+      "final_state": {
+        "balances": {
+          "alice": {
+            "proposal/Reject/BranchUsdc": 100000
+          },
+          "bob": {},
+          "carol": {}
+        },
+        "baseline": {
+          "epoch": 7,
+          "escrowed": 0,
+          "sets": 0,
+          "state": {
+            "kind": "Open"
+          }
+        },
+        "deposits_held": 100000,
+        "events": [
+          {
+            "fields": [
+              1,
+              100000
+            ],
+            "kind": "Split"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              100000
+            ],
+            "kind": "ScalarSplit"
+          },
+          {
+            "fields": [
+              1,
+              "Accept"
+            ],
+            "kind": "VaultResolved"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              1000000000
+            ],
+            "kind": "ScalarSettlementSet"
+          },
+          {
+            "fields": [
+              1,
+              100000,
+              0
+            ],
+            "kind": "ScalarPairRedeemed"
+          }
+        ],
+        "position_counts": [
+          {
+            "count": 1,
+            "owner": "alice"
+          }
+        ],
+        "position_totals": [
+          {
+            "position": "proposal/Reject/BranchUsdc",
+            "total": 100000
+          }
+        ],
+        "positions": [
+          {
+            "balance": 100000,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "proposal/Reject/BranchUsdc"
+          }
+        ],
+        "proposal": {
+          "branches": {
+            "Accept": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 0,
+              "usdc": 0
+            },
+            "Reject": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 0,
+              "usdc": 100000
+            }
+          },
+          "escrowed": 0,
+          "gate_outcomes": {
+            "Security": null,
+            "Survival": null
+          },
+          "proposal_id": 1,
+          "spec": 0,
+          "state": {
+            "kind": "ScalarSettled",
+            "s": 1000000000,
+            "winner": "Accept"
+          }
+        },
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 0
+      },
+      "initial_state": {
+        "baseline_epoch": 7,
+        "digest": {
+          "balances": {
+            "alice": {},
+            "bob": {},
+            "carol": {}
+          },
+          "baseline": {
+            "epoch": 7,
+            "escrowed": 0,
+            "sets": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "deposits_held": 0,
+          "events": [],
+          "position_counts": [],
+          "position_totals": [],
+          "positions": [],
+          "proposal": {
+            "branches": {
+              "Accept": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              },
+              "Reject": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              }
+            },
+            "escrowed": 0,
+            "gate_outcomes": {
+              "Security": null,
+              "Survival": null
+            },
+            "proposal_id": 1,
+            "spec": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
+        },
+        "proposal_id": 1
+      },
+      "name": "fee-10-out-of-domain-rate-reads-as-zero",
+      "ops": [
+        {
+          "args": {
+            "account": "alice",
+            "amount": 100000
+          },
+          "fees_accrued_after": 0,
+          "op": "split",
+          "outcome": {
+            "ok": {
+              "minted": 100000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 100000,
+            "branch": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "split_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 100000,
+              "minted": 100000
+            }
+          }
+        },
+        {
+          "args": {
+            "winner": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "resolve",
+          "outcome": {
+            "ok": {}
+          }
+        },
+        {
+          "args": {
+            "s": 1000000000
+          },
+          "fees_accrued_after": 0,
+          "op": "settle_scalar",
+          "outcome": {
+            "ok": {
+              "s": 1000000000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 100000
+          },
+          "fee": 0,
+          "fees_accrued_after": 0,
+          "gross": 100000,
+          "net": 100000,
+          "op": "redeem_scalar_pair",
+          "outcome": {
+            "ok": {
+              "burned": 100000,
+              "fee": 0,
+              "payout": 100000
+            }
+          }
+        }
+      ],
+      "params": {
+        "contract_version": 17,
+        "min_split": 10000,
+        "protocol_accounts": [],
+        "redeem_fee_perbill": 1000000001
+      },
+      "unit": "USDC base units (1e-6)"
+    },
+    {
+      "coverage_intent": "At 50 % the net-based waiver moves the charging threshold to 2\u00b7min_split: a 19999 gross is waived outright while a 20000 gross is charged 10000 and nets exactly min_split. fee <= gross at every rate (I-32(a)) [contract v17 shape: the event and this row's `outcome.payout` carry the GROSS with a trailing `fee`, so net = payout - fee (02 \u00a76 rule 1); the dispatch/model return value is the NET. `Redeemed` and `VoidRedeemed` are exempt and carry no `fee` field at all (rule 3).]",
+      "fees_accrued": 0,
+      "fees_charged_total": 10000,
+      "fees_swept_total": 10000,
+      "final_state": {
+        "balances": {
+          "alice": {
+            "proposal/Accept/Long": 60001,
+            "proposal/Accept/Short": 100000,
+            "proposal/Reject/BranchUsdc": 100000
+          },
+          "bob": {},
+          "carol": {}
+        },
+        "baseline": {
+          "epoch": 7,
+          "escrowed": 0,
+          "sets": 0,
+          "state": {
+            "kind": "Open"
+          }
+        },
+        "deposits_held": 300000,
+        "events": [
+          {
+            "fields": [
+              1,
+              100000
+            ],
+            "kind": "Split"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              100000
+            ],
+            "kind": "ScalarSplit"
+          },
+          {
+            "fields": [
+              1,
+              "Accept"
+            ],
+            "kind": "VaultResolved"
+          },
+          {
+            "fields": [
+              1,
+              "Accept",
+              1000000000
+            ],
+            "kind": "ScalarSettlementSet"
+          },
+          {
+            "fields": [
+              1,
+              "Long",
+              19999,
+              0
+            ],
+            "kind": "ScalarRedeemed"
+          },
+          {
+            "fields": [
+              1,
+              "Long",
+              20000,
+              10000
+            ],
+            "kind": "ScalarRedeemed"
+          },
+          {
+            "fields": [
+              10000
+            ],
+            "kind": "RedemptionFeesSwept"
+          }
+        ],
+        "position_counts": [
+          {
+            "count": 3,
+            "owner": "alice"
+          }
+        ],
+        "position_totals": [
+          {
+            "position": "proposal/Accept/Long",
+            "total": 60001
+          },
+          {
+            "position": "proposal/Accept/Short",
+            "total": 100000
+          },
+          {
+            "position": "proposal/Reject/BranchUsdc",
+            "total": 100000
+          }
+        ],
+        "positions": [
+          {
+            "balance": 60001,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "proposal/Accept/Long"
+          },
+          {
+            "balance": 100000,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "proposal/Accept/Short"
+          },
+          {
+            "balance": 100000,
+            "deposit": 100000,
+            "owner": "alice",
+            "position": "proposal/Reject/BranchUsdc"
+          }
+        ],
+        "proposal": {
+          "branches": {
+            "Accept": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 100000,
+              "usdc": 0
+            },
+            "Reject": {
+              "gate_sets": {
+                "Security": 0,
+                "Survival": 0
+              },
+              "scalar_sets": 0,
+              "usdc": 100000
+            }
+          },
+          "escrowed": 60001,
+          "gate_outcomes": {
+            "Security": null,
+            "Survival": null
+          },
+          "proposal_id": 1,
+          "spec": 0,
+          "state": {
+            "kind": "ScalarSettled",
+            "s": 1000000000,
+            "winner": "Accept"
+          }
+        },
+        "protocol_accounts": [],
+        "redemption_fees_accrued": 0
+      },
+      "initial_state": {
+        "baseline_epoch": 7,
+        "digest": {
+          "balances": {
+            "alice": {},
+            "bob": {},
+            "carol": {}
+          },
+          "baseline": {
+            "epoch": 7,
+            "escrowed": 0,
+            "sets": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "deposits_held": 0,
+          "events": [],
+          "position_counts": [],
+          "position_totals": [],
+          "positions": [],
+          "proposal": {
+            "branches": {
+              "Accept": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              },
+              "Reject": {
+                "gate_sets": {
+                  "Security": 0,
+                  "Survival": 0
+                },
+                "scalar_sets": 0,
+                "usdc": 0
+              }
+            },
+            "escrowed": 0,
+            "gate_outcomes": {
+              "Security": null,
+              "Survival": null
+            },
+            "proposal_id": 1,
+            "spec": 0,
+            "state": {
+              "kind": "Open"
+            }
+          },
+          "protocol_accounts": [],
+          "redemption_fees_accrued": 0
+        },
+        "proposal_id": 1
+      },
+      "name": "fee-11-high-rate-charges-above-the-net-threshold",
+      "ops": [
+        {
+          "args": {
+            "account": "alice",
+            "amount": 100000
+          },
+          "fees_accrued_after": 0,
+          "op": "split",
+          "outcome": {
+            "ok": {
+              "minted": 100000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 100000,
+            "branch": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "split_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 100000,
+              "minted": 100000
+            }
+          }
+        },
+        {
+          "args": {
+            "winner": "Accept"
+          },
+          "fees_accrued_after": 0,
+          "op": "resolve",
+          "outcome": {
+            "ok": {}
+          }
+        },
+        {
+          "args": {
+            "s": 1000000000
+          },
+          "fees_accrued_after": 0,
+          "op": "settle_scalar",
+          "outcome": {
+            "ok": {
+              "s": 1000000000
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 19999,
+            "side": "Long"
+          },
+          "fee": 0,
+          "fees_accrued_after": 0,
+          "gross": 19999,
+          "net": 19999,
+          "op": "redeem_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 19999,
+              "fee": 0,
+              "payout": 19999
+            }
+          }
+        },
+        {
+          "args": {
+            "account": "alice",
+            "amount": 20000,
+            "side": "Long"
+          },
+          "fee": 10000,
+          "fees_accrued_after": 10000,
+          "gross": 20000,
+          "net": 10000,
+          "op": "redeem_scalar",
+          "outcome": {
+            "ok": {
+              "burned": 20000,
+              "fee": 10000,
+              "payout": 20000
+            }
+          }
+        },
+        {
+          "args": {},
+          "fees_accrued_after": 0,
+          "op": "sweep_redemption_fees",
+          "outcome": {
+            "ok": {
+              "swept": 10000
+            }
+          }
+        }
+      ],
+      "params": {
+        "contract_version": 17,
+        "min_split": 10000,
+        "protocol_accounts": [],
+        "redeem_fee_perbill": 500000000
+      },
+      "unit": "USDC base units (1e-6)"
+    }
+  ],
   "ledger_scenarios": [
     {
       "branch_payout": 5000001,

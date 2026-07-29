@@ -1,6 +1,6 @@
 {
   "schema": "bleavit.critical-surface.v1",
-  "integration_contract_version": 15,
+  "integration_contract_version": 16,
   "description": "Critical chain/frontend surface frozen by architecture 02 sections 3, 6-9, and 12.",
   "release_blockers": [
     {
@@ -757,7 +757,7 @@
       "citation": "02 §8; 02 §13",
       "layout": {
         "type": "u32",
-        "value": "0x0f000000"
+        "value": "0x10000000"
       }
     },
     {
@@ -1565,6 +1565,22 @@
       }
     },
     {
+      "id": "event.ledger.redemption_fees_swept",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "RedemptionFeesSwept",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
       "id": "event.market.traded",
       "kind": "event",
       "pallet": "Market",
@@ -1680,6 +1696,30 @@
           {
             "name": "market",
             "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.market.revenue_swept",
+      "kind": "event",
+      "pallet": "Market",
+      "event": "RevenueSwept",
+      "required": true,
+      "citation": "02 §5; 02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "market",
+            "type": "u64"
+          },
+          {
+            "name": "fee_to_main",
+            "type": "u128"
+          },
+          {
+            "name": "pol_returned",
+            "type": "u128"
           }
         ]
       }

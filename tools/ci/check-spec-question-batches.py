@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[2]
 BATCH_HEADER = ("Batch", "Rows", "Members")
 QUESTION_HEADER = ("ID", "Question", "Spec ref", "Raised", "Status")
 
-BATCH_LABEL_RE = re.compile(r"^\*\*([BDCX][0-9]?)\s*[·.]")
+BATCH_LABEL_RE = re.compile(r"^\*\*([BDCXE][0-9]?)\s*[·.]")
 QUESTION_ID_RE = re.compile(r"^SQ-(\d+)$")
 SQ_RE = re.compile(r"SQ-(\d+)")
 SEPARATOR_CELL_RE = re.compile(r"^:?-+:?$")

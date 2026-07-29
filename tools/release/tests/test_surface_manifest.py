@@ -85,7 +85,12 @@ class SurfaceManifestTests(unittest.TestCase):
 
     def test_schema_and_entry_shapes(self) -> None:
         self.assertEqual(self.manifest["schema"], "bleavit.critical-surface.v1")
-        self.assertEqual(self.manifest["integration_contract_version"], 15)
+        # 15 -> 16. The manifest was pinned at 15 while the contract had
+        # already moved to 16, so it never tracked v16 at all — that drift
+        # is pre-existing, not introduced here (recorded in PLAN.md). It
+        # moves to 17 with E2-E4, which is where the constant is bumped;
+        # this branch declares 16 and the manifest must agree with it.
+        self.assertEqual(self.manifest["integration_contract_version"], 16)
         identifiers = [entry["id"] for entry in self.entries]
         self.assertEqual(len(identifiers), len(set(identifiers)))
         for entry in self.entries:
@@ -151,6 +156,8 @@ class SurfaceManifestTests(unittest.TestCase):
                 "BaselineRedeemed",
                 "VaultReaped",
                 "BaselineVaultReaped",
+                # contract v17 (E4): the 03 §5.3a fee sweep.
+                "RedemptionFeesSwept",
             },
             "pallet-market": {
                 "Traded",
@@ -158,6 +165,8 @@ class SurfaceManifestTests(unittest.TestCase):
                 "MarketCreated",
                 "MarketClosed",
                 "MarketReaped",
+                # contract v17 (E1/E2): the 04 §2 Sweep stage.
+                "RevenueSwept",
             },
             "pallet-epoch": {
                 "ProposalSubmitted",

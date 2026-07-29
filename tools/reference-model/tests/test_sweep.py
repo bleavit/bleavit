@@ -238,5 +238,113 @@ class SweepGeneratorTests(unittest.TestCase):
         )
 
 
+class RedemptionEventShapeTests(unittest.TestCase):
+    """02 §6 "Redemption-fee field append" — the emit seam's structure."""
+
+    def setUp(self):
+        self.gen = load_generator()
+
+    def _op(self, name, **args):
+        return {"op": name, "args": args}
+
+    def _settled(self, model, amount, score):
+        for operation in (
+            self._op("split", account="alice", amount=amount),
+            self._op(
+                "split_scalar",
+                account="alice",
+                branch="Accept",
+                amount=amount,
+            ),
+            self._op("resolve", winner="Accept"),
+            self._op("settle_scalar", s=score),
+        ):
+            self.assertIn("ok", model.apply(operation))
+
+    def test_the_four_fee_bearing_events_are_exactly_the_contract_set(self):
+        # Frozen surface: written out, never derived from the charged calls.
+        self.assertEqual(
+            self.gen._FEE_BEARING_EVENTS,
+            {
+                "ScalarRedeemed",
+                "ScalarPairRedeemed",
+                "GateRedeemed",
+                "BaselineRedeemed",
+            },
+        )
+        # Rule 3: the two exempt events are not in it and must never be.
+        self.assertNotIn("Redeemed", self.gen._FEE_BEARING_EVENTS)
+        self.assertNotIn("VoidRedeemed", self.gen._FEE_BEARING_EVENTS)
+
+    def test_v16_model_refuses_to_drop_a_charged_fee(self):
+        # The `fee` field is contract v17. A v16 model that charged one would
+        # have to emit an event with nowhere to put it, silently turning a
+        # gross into an unexplained number — so it fails loudly instead.
+        model = self.gen._LedgerSequenceModel(
+            redeem_fee=3_000_000, contract_version=16
+        )
+        self._settled(model, 100_000, 1_000_000_000)
+        with self.assertRaises(AssertionError):
+            model.apply(
+                self._op(
+                    "redeem_scalar",
+                    account="alice",
+                    side="Long",
+                    amount=100_000,
+                )
+            )
+
+    def test_exempt_events_never_receive_a_fee_field(self):
+        seam = self.gen._LedgerSequenceModel(contract_version=17)
+        charged = self.gen._Payout(gross=1_000, fee=3, net=997)
+        with self.assertRaises(AssertionError):
+            seam._emit_redemption("Redeemed", (1,), charged)
+        with self.assertRaises(AssertionError):
+            seam._emit_redemption("VoidRedeemed", (1, "BranchUsdc", 2), charged)
+        self.assertEqual(seam.events, [])
+        # And an exempt payout emits the gross with no trailing field.
+        exempt = self.gen._Payout(gross=1_000, fee=0, net=1_000)
+        seam._emit_redemption("Redeemed", (1,), exempt)
+        self.assertEqual(
+            seam.events, [{"kind": "Redeemed", "fields": [1, 1_000]}]
+        )
+
+    def test_the_emit_seam_puts_the_gross_in_the_payout_field(self):
+        seam = self.gen._LedgerSequenceModel(contract_version=17)
+        payout = self.gen._Payout(gross=14_001, fee=43, net=13_958)
+        seam._emit_redemption("ScalarRedeemed", (1, "Long"), payout)
+        self.assertEqual(
+            seam.events,
+            [{"kind": "ScalarRedeemed", "fields": [1, "Long", 14_001, 43]}],
+        )
+        self.assertEqual(
+            seam._redemption_outcome("ScalarRedeemed", 20_000, payout),
+            {"burned": 20_000, "payout": 14_001, "fee": 43},
+        )
+        # The net is never an event field and never the emitted payout.
+        self.assertNotIn(payout.net, seam.events[0]["fields"])
+
+    def test_measure_derives_each_quantity_from_what_it_actually_is(self):
+        model = self.gen._LedgerSequenceModel(
+            redeem_fee=3_000_000, contract_version=17
+        )
+        self._settled(model, 100_000, 700_050_000)
+        outcome = model.apply(
+            self._op(
+                "redeem_scalar",
+                account="alice",
+                side="Long",
+                amount=100_000,
+            )
+        )
+        # gross = escrow outflow, fee = accrual delta, net = model return.
+        self.assertEqual(outcome["ok"]["payout"], 70_005)
+        self.assertEqual(outcome["ok"]["fee"], 211)
+        self.assertEqual(model.proposal.redemption_fees_accrued, 211)
+        self.assertEqual(
+            outcome["ok"]["payout"] - outcome["ok"]["fee"], 69_794
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

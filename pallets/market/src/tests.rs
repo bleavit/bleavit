@@ -37,6 +37,28 @@ fn error_scale_discriminants_are_append_only() {
     assert_eq!(E::FreezeRenewalExhausted.encode(), vec![19]);
     assert_eq!(E::UnreservedProtocolAccount.encode(), vec![20]);
     assert_eq!(E::EpochMismatch.encode(), vec![21]);
+    assert_eq!(E::NotSweepable.encode(), vec![22]);
+}
+
+#[test]
+fn event_scale_discriminants_are_append_only() {
+    // 02 §13 rule 3: contract additions are append-only. E1's `RevenueSwept`
+    // therefore trails every existing variant instead of joining the other
+    // frozen §5 rows at the top, which would renumber all of them.
+    assert_eq!(
+        Event::<Test>::MarketReaped { market: 0 }.encode()[0],
+        4,
+        "the frozen 02 §5 lifecycle events keep their discriminants",
+    );
+    assert_eq!(
+        Event::<Test>::RevenueSwept {
+            market: 0,
+            fee_to_main: 0,
+            pol_returned: 0,
+        }
+        .encode()[0],
+        11,
+    );
 }
 
 const MARKET_ID: MarketId = 7;
@@ -113,6 +135,22 @@ fn settle_baseline() {
         FixedU64(500_000_000),
     ));
     assert_ok!(Market::observe_baseline_terminal(EPOCH));
+}
+
+/// The 04 §2 Sweep stage, which reap now requires. Permissionless, so any
+/// signed account will do.
+fn sweep(id: MarketId) {
+    assert_ok!(Market::sweep_revenue(signed(BOB), id));
+}
+
+fn settle_decision_at(score: u64) {
+    assert_ok!(Ledger::resolve(signed(RESOLVER), PROPOSAL, Branch::Accept));
+    assert_ok!(Ledger::settle_scalar(
+        signed(SETTLER),
+        PROPOSAL,
+        FixedU64(score),
+    ));
+    assert_ok!(Market::observe_proposal_terminal(PROPOSAL));
 }
 
 fn sweep_proposal_vault(pid: u64) {
@@ -402,6 +440,402 @@ fn market_events() -> Vec<Event<Test>> {
 fn assert_try_state() {
     assert_ok!(Market::do_try_state());
     assert_ok!(Ledger::do_try_state());
+}
+
+// ------------------------------------------------------- E1: the POL return
+//
+// 08 §8 step 5 splits "POL withdraws at settlement" into the NAV obligation
+// release (a) and the custody return (b). The tests below cover (b) and its
+// mirror on the seeding side: the 04 §2 Sweep stage, its idempotence and
+// fail-softness, the budget-line debit/credit of I-33, and the sweep-before-reap
+// ordering that keeps the return from being discarded into ledger residue.
+
+fn swept_pol_returned(id: MarketId) -> Balance {
+    market_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::RevenueSwept {
+                market,
+                pol_returned,
+                ..
+            } if market == id => Some(pol_returned),
+            _ => None,
+        })
+        .sum()
+}
+
+#[test]
+fn settled_book_returns_its_seed_to_the_funding_line_less_divergence_loss() {
+    // 08 §3/§8 step 5(b): "realized cost = the live-branch divergence loss only"
+    // is an identity that holds ONLY if the custody comes back. Walk one book
+    // through seed → trade → settle → sweep → reap and assert exactly that.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        let treasury_before = usdc(TREASURY);
+        let line_before = PolLineBalance::get(crate::PolLine::Proposal);
+        seed(MARKET_ID);
+        let headroom = seeded_headroom(MARKET_ID);
+        assert!(headroom > 0);
+        // The seed spends real USDC, so both custody and the budget line move
+        // by exactly the headroom (I-33, seeding side).
+        assert_eq!(usdc(TREASURY), treasury_before - headroom);
+        assert_eq!(
+            PolLineBalance::get(crate::PolLine::Proposal),
+            line_before - headroom,
+        );
+
+        System::set_block_number(10);
+        assert_ok!(Market::buy(
+            signed(BOB),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+
+        System::set_block_number(20);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+        // Settle above the walked price so the book's residual SHORT leg is the
+        // losing one: the maker's realized loss is exactly the divergence
+        // between where the book was pushed and where the metric landed.
+        settle_decision_at(900_000_000);
+        // (a) alone: the obligation is released while the cash is still out.
+        assert!(Market::live_pol_commitments().is_empty());
+        assert_eq!(usdc(TREASURY), treasury_before - headroom);
+
+        // Independent oracle over the book's pre-sweep inventory. The walk was
+        // one-sided and the settlement is interior, so the book holds complete
+        // sets PLUS an unmatched SHORT leg worth `floor(a·(1−s))`. Returning
+        // only the sets would strand that leg in ledger residue bound for
+        // INSURANCE — the 08 §10.5 leak — so the payout is pinned exactly.
+        let long = position_balance(position(PROPOSAL, Branch::Accept, PositionKind::Long), BOOK);
+        let short = position_balance(
+            position(PROPOSAL, Branch::Accept, PositionKind::Short),
+            BOOK,
+        );
+        let pairs = long.min(short);
+        let residual = short - pairs;
+        assert!(residual > 0, "a one-sided walk must leave an unmatched leg");
+        let residual_value = residual * (1_000_000_000 - 900_000_000) / 1_000_000_000;
+        assert!(residual_value > 0, "the stranded leg must be worth money");
+
+        sweep(MARKET_ID);
+        let returned = swept_pol_returned(MARKET_ID);
+        assert_eq!(
+            returned,
+            pairs + residual_value,
+            "the return is pairs-at-par plus the floored residual leg, not sets alone",
+        );
+        assert_eq!(usdc(TREASURY), treasury_before - headroom + returned);
+        assert_eq!(
+            PolLineBalance::get(crate::PolLine::Proposal),
+            line_before - headroom + returned,
+        );
+        // Realized cost is a divergence loss, not the whole seed: strictly less
+        // than the I-12 per-book worst case `b·ln 2`, and strictly positive
+        // because the book delivered LONG into a walked price.
+        let realized_cost = headroom - returned;
+        assert!(
+            realized_cost > 0 && realized_cost < headroom,
+            "realized cost {realized_cost} must be a divergence loss inside (0, {headroom})",
+        );
+        assert!(
+            realized_cost < headroom - pairs,
+            "a set-only return would have cost {residual_value} more",
+        );
+
+        System::set_block_number(20 + MarketArchiveDelay::get());
+        assert_ok!(Market::reap(signed(BOB), MARKET_ID));
+        // Reap moved no further POL: what it discarded was worthless residue.
+        assert_eq!(usdc(TREASURY), treasury_before - headroom + returned);
+        assert_try_state();
+    });
+}
+
+#[test]
+fn sweep_is_idempotent_and_emits_exactly_one_revenue_swept() {
+    // 04 §2 "Sweep/reap ordering": a repeat call is a successful no-op rather
+    // than a second payment, and exactly one `RevenueSwept` exists per market.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(20);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+        settle_decision();
+
+        sweep(MARKET_ID);
+        let after_first = usdc(TREASURY);
+        let line_after_first = PolLineBalance::get(crate::PolLine::Proposal);
+        RecordKeeperRebates::set(true);
+
+        sweep(MARKET_ID);
+        sweep(MARKET_ID);
+        assert_eq!(usdc(TREASURY), after_first);
+        assert_eq!(
+            PolLineBalance::get(crate::PolLine::Proposal),
+            line_after_first
+        );
+        assert_eq!(
+            market_events()
+                .into_iter()
+                .filter(|event| matches!(event, Event::RevenueSwept { market, .. } if *market == MARKET_ID))
+                .count(),
+            1,
+        );
+        // A no-op crank earns no rebate — the keeper did no work.
+        assert!(KeeperRebates::get().is_empty());
+        assert_try_state();
+    });
+}
+
+#[test]
+fn a_failing_return_leaves_state_unchanged_and_stays_retryable() {
+    // 08 §8 step 5: the return is fail-soft. It is a separate crank, so it can
+    // never fail a settlement (G-1), and a failure leaves the book unswept,
+    // unreapable and retryable — an NAV-recognition delay, not a solvency loss.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(20);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+        // The settlement itself succeeds with the return already broken.
+        PolCustodyCreditRefuses::set(true);
+        settle_decision();
+
+        let treasury_before = usdc(TREASURY);
+        let positions_before =
+            pallet_conditional_ledger::Positions::<Test>::iter().collect::<Vec<_>>();
+        let escrow_before = pallet_conditional_ledger::Vaults::<Test>::get(PROPOSAL)
+            .expect("vault survives")
+            .escrowed;
+        assert_err!(
+            Market::sweep_revenue(signed(BOB), MARKET_ID),
+            sp_runtime::DispatchError::Other("POL custody credit refused"),
+        );
+        assert!(!crate::SweptMarkets::<Test>::contains_key(MARKET_ID));
+        assert_eq!(usdc(TREASURY), treasury_before);
+        assert_eq!(
+            pallet_conditional_ledger::Positions::<Test>::iter().collect::<Vec<_>>(),
+            positions_before,
+        );
+        assert_eq!(
+            pallet_conditional_ledger::Vaults::<Test>::get(PROPOSAL)
+                .expect("vault survives")
+                .escrowed,
+            escrow_before,
+        );
+        assert_try_state();
+
+        // Unswept means unreapable: the value is never discarded into residue.
+        System::set_block_number(20 + MarketArchiveDelay::get());
+        assert_noop!(Market::reap(signed(BOB), MARKET_ID), E::NotReapable);
+
+        // Retryable, with nothing lost.
+        PolCustodyCreditRefuses::set(false);
+        sweep(MARKET_ID);
+        assert!(usdc(TREASURY) > treasury_before);
+        assert_ok!(Market::reap(signed(BOB), MARKET_ID));
+        assert_try_state();
+    });
+}
+
+#[test]
+fn a_voided_branch_pair_returns_the_whole_seed_across_its_two_books() {
+    // Under VOID each book's inventory pays the D-1 half rate, and the two
+    // halves are the mirror legs one dual-minting `split` created — so the pair
+    // returns par less dust, in escrow's favour (I-2(d); 03 §6.4).
+    const ACCEPT_ID: MarketId = 21;
+    const REJECT_ID: MarketId = 22;
+    new_test_ext().execute_with(|| {
+        for (id, branch) in [(ACCEPT_ID, Branch::Accept), (REJECT_ID, Branch::Reject)] {
+            assert_ok!(Market::create_market(
+                signed(MARKET_ADMIN),
+                id,
+                BookKind::Decision {
+                    proposal: PROPOSAL,
+                    branch,
+                },
+                EPOCH,
+                TestMarketAccounts::book(id),
+                TestMarketAccounts::fees(id),
+                B,
+            ));
+        }
+        let treasury_before = usdc(TREASURY);
+        assert_ok!(Market::seed_branch_pair(
+            signed(MARKET_ADMIN),
+            ACCEPT_ID,
+            REJECT_ID,
+            TREASURY,
+        ));
+        // One split funds both branches, so the cash is half the pair's
+        // commitment (08 §10.5).
+        let headroom = seeded_headroom(ACCEPT_ID);
+        assert_eq!(usdc(TREASURY), treasury_before - headroom);
+
+        System::set_block_number(7);
+        for id in [ACCEPT_ID, REJECT_ID] {
+            assert_ok!(Market::close(signed(MARKET_ADMIN), id));
+        }
+        assert_ok!(Ledger::void(signed(RESOLVER), PROPOSAL));
+        assert_ok!(Market::observe_proposal_terminal(PROPOSAL));
+
+        for id in [ACCEPT_ID, REJECT_ID] {
+            sweep(id);
+        }
+        let returned = swept_pol_returned(ACCEPT_ID) + swept_pol_returned(REJECT_ID);
+        assert_eq!(returned, headroom, "VOID recovers the pair at par");
+        assert_eq!(usdc(TREASURY), treasury_before);
+        assert_try_state();
+    });
+}
+
+#[test]
+fn baseline_book_returns_its_seed_to_the_baseline_line() {
+    // 08 §8 step 5(b): the Baseline book returns to `POL_BASELINE`, not `POL`.
+    new_test_ext().execute_with(|| {
+        create_baseline();
+        let treasury_before = usdc(TREASURY);
+        let proposal_line_before = PolLineBalance::get(crate::PolLine::Proposal);
+        let baseline_line_before = PolLineBalance::get(crate::PolLine::Baseline);
+        seed(BASELINE_ID);
+        let headroom = seeded_headroom(BASELINE_ID);
+        assert_eq!(
+            PolLineBalance::get(crate::PolLine::Baseline),
+            baseline_line_before - headroom,
+        );
+        assert_eq!(
+            PolLineBalance::get(crate::PolLine::Proposal),
+            proposal_line_before,
+        );
+
+        System::set_block_number(5);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), BASELINE_ID));
+        settle_baseline();
+        sweep(BASELINE_ID);
+        // Untraded, unbranched complete sets redeem at par: the whole seed.
+        assert_eq!(swept_pol_returned(BASELINE_ID), headroom);
+        assert_eq!(usdc(TREASURY), treasury_before);
+        assert_eq!(
+            PolLineBalance::get(crate::PolLine::Baseline),
+            baseline_line_before,
+        );
+        assert_eq!(
+            PolLineBalance::get(crate::PolLine::Proposal),
+            proposal_line_before,
+        );
+        assert_try_state();
+    });
+}
+
+#[test]
+fn sweep_refuses_a_live_or_unlatched_book_and_reap_refuses_an_unswept_one() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        // Still trading.
+        assert_noop!(
+            Market::sweep_revenue(signed(BOB), MARKET_ID),
+            E::NotSweepable
+        );
+        System::set_block_number(20);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+        // Closed, but the owning vault has not reached a terminal state.
+        assert_noop!(
+            Market::sweep_revenue(signed(BOB), MARKET_ID),
+            E::NotSweepable
+        );
+        assert_noop!(
+            Market::sweep_revenue(signed(BOB), MARKET_ID + 999),
+            E::UnknownMarket
+        );
+
+        settle_decision();
+        System::set_block_number(20 + MarketArchiveDelay::get());
+        // 04 §2: reap-before-sweep is the one ordering that must not be
+        // reachable, so the aged, latched book is still refused.
+        assert_noop!(Market::reap(signed(BOB), MARKET_ID), E::NotReapable);
+        sweep(MARKET_ID);
+        assert_ok!(Market::reap(signed(BOB), MARKET_ID));
+        assert_try_state();
+    });
+}
+
+#[test]
+fn sweep_survives_a_ledger_first_vault_sweep_and_pays_nothing_twice() {
+    // 04 §2 "Reap interleavings": ledger-first and market-first must both be
+    // safe. A vault the ledger already archived has nothing left to value, so
+    // the sweep is a zero-value success rather than a failure.
+    //
+    // This is also the documented hazard boundary. 03 §5.4 makes `sweep_dust`
+    // explicitly independent of the market, and it routes residual escrow to
+    // INSURANCE — so a book whose Sweep has not run by the time
+    // `ledger.archive_delay` elapses loses its return to that account. The
+    // orderings are bounded apart by design rather than by a lock: the Sweep
+    // stage is available from the terminal block with NO delay (04 §2), while
+    // `sweep_dust` only becomes callable a whole `archive_delay` later, and
+    // the crank is permissionless throughout that window.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(7);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+        settle_decision();
+
+        System::set_block_number(7 + LedgerArchiveDelay::get() + 1);
+        sweep_proposal_vault(PROPOSAL);
+        assert!(pallet_conditional_ledger::Vaults::<Test>::get(PROPOSAL).is_none());
+
+        let treasury_before = usdc(TREASURY);
+        sweep(MARKET_ID);
+        assert_eq!(swept_pol_returned(MARKET_ID), 0);
+        assert_eq!(usdc(TREASURY), treasury_before);
+        assert_ok!(Market::reap(signed(BOB), MARKET_ID));
+        assert_try_state();
+    });
+}
+
+#[test]
+fn try_state_rejects_a_swept_book_that_still_holds_a_paying_claim() {
+    // I-33, book half (15 §1): a swept book may retain only the worthless
+    // residue reap discards.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(20);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+        settle_decision();
+        sweep(MARKET_ID);
+        assert_try_state();
+
+        // Re-inject a winning-branch claim into the swept book account.
+        pallet_conditional_ledger::Positions::<Test>::insert(
+            position(PROPOSAL, Branch::Accept, PositionKind::Long),
+            BOOK,
+            1,
+        );
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
+    });
+}
+
+#[test]
+fn a_rerun_top_up_must_come_from_the_same_funding_line() {
+    // The Sweep returns one book's whole inventory to one recorded funder, so a
+    // second funder would silently move value between subsidy lines.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        assert_err!(
+            Market::seed_rerun(signed(MARKET_ADMIN), MARKET_ID, POL),
+            E::TryStateViolation
+        );
+        assert_ok!(Market::seed_rerun(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            TREASURY
+        ));
+        assert_try_state();
+    });
 }
 
 #[test]
@@ -812,6 +1246,7 @@ fn stored_market_bound_retains_archives_and_recycles_after_bounded_book_reap() {
         ));
 
         System::set_block_number(1 + MarketArchiveDelay::get());
+        sweep(first_market);
         assert_ok!(Market::reap(signed(BOB), first_market));
         assert_eq!(
             Markets::<Test>::count(),
@@ -945,6 +1380,7 @@ fn ledger_freeze_blocks_trading_but_not_recovery_and_renews_once() {
         assert_ok!(Market::extend_freeze_once());
         assert_noop!(Market::extend_freeze_once(), E::FreezeRenewalExhausted);
         System::set_block_number(110);
+        sweep(MARKET_ID);
         assert_ok!(Market::reap(signed(BOB), MARKET_ID));
         assert_noop!(
             Market::set_frozen(signed(ALICE), false),
@@ -1216,6 +1652,7 @@ fn reap_respects_archive_delay_then_removes_decision_book() {
 
         // Exactly at the boundary: the permissionless reap removes book and ClosedAt.
         System::set_block_number(9 + delay);
+        sweep(MARKET_ID);
         assert_ok!(Market::reap(signed(BOB), MARKET_ID));
         assert!(!Markets::<Test>::contains_key(MARKET_ID));
         assert!(!ClosedAt::<Test>::contains_key(MARKET_ID));
@@ -1240,6 +1677,7 @@ fn protocol_account_index_tracks_create_and_reap_and_try_state_detects_drift() {
         System::set_block_number(5);
         assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
         settle_decision();
+        sweep(MARKET_ID);
         System::set_block_number(5 + MarketArchiveDelay::get());
         assert_ok!(Market::reap(signed(BOB), MARKET_ID));
         assert!(!Market::is_market_protocol_account(&BOOK));
@@ -1281,6 +1719,7 @@ fn market_first_reap_discards_only_bounded_protocol_inventory() {
         assert!(!claimant_before.is_empty());
 
         System::set_block_number(7 + MarketArchiveDelay::get());
+        sweep(MARKET_ID);
         assert_ok!(Market::reap(signed(ALICE), MARKET_ID));
 
         assert!(!Markets::<Test>::contains_key(MARKET_ID));
@@ -1401,6 +1840,7 @@ fn reserved_protocol_membership_blocks_signed_ingress_before_during_and_after_re
         assert!(position_balance(accept, BOOK) > 0);
 
         System::set_block_number(7 + MarketArchiveDelay::get());
+        sweep(MARKET_ID);
         assert_ok!(Market::reap(signed(ALICE), MARKET_ID));
         assert!(!Market::is_market_protocol_account(&BOOK));
         assert!(!Market::is_market_protocol_account(&FEES));
@@ -1434,6 +1874,7 @@ fn ledger_reap_before_market_reap_keeps_pol_released_and_book_reapable() {
         System::set_block_number(7);
         assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
         settle_decision();
+        sweep(MARKET_ID);
         assert_eq!(SettlementObservedAt::<Test>::get(MARKET_ID), Some(7));
         assert!(Market::live_pol_commitments().is_empty());
 
@@ -1511,6 +1952,7 @@ fn reap_of_baseline_book_prunes_baseline_mapping() {
         System::set_block_number(5);
         assert_ok!(Market::close(signed(MARKET_ADMIN), BASELINE_ID));
         settle_baseline();
+        sweep(BASELINE_ID);
         System::set_block_number(5 + MarketArchiveDelay::get());
         assert_ok!(Market::reap(signed(CHARLIE), BASELINE_ID));
 
@@ -1535,6 +1977,7 @@ fn reap_of_baseline_book_fails_static_on_a_mismatched_mapping() {
         System::set_block_number(5);
         assert_ok!(Market::close(signed(MARKET_ADMIN), BASELINE_ID));
         settle_baseline();
+        sweep(BASELINE_ID);
         System::set_block_number(5 + MarketArchiveDelay::get());
         BaselineMarketOf::<Test>::insert(EPOCH, BASELINE_ID + 1);
 
@@ -2103,6 +2546,7 @@ fn reap_rebates_only_after_a_book_is_actually_reaped() {
         System::set_block_number(5);
         assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
         settle_decision();
+        sweep(MARKET_ID);
         RecordKeeperRebates::set(true);
 
         System::set_block_number(5 + MarketArchiveDelay::get() - 1);
@@ -2394,6 +2838,14 @@ fn unsigned_origin_is_rejected_for_signed_calls() {
             Market::reap(RawOrigin::None.into(), MARKET_ID),
             sp_runtime::DispatchError::BadOrigin
         );
+        assert_noop!(
+            Market::sweep_revenue(RawOrigin::None.into(), MARKET_ID),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert_noop!(
+            Market::sweep_revenue(RawOrigin::Root.into(), MARKET_ID),
+            sp_runtime::DispatchError::BadOrigin
+        );
         assert_try_state();
     });
 }
@@ -2411,9 +2863,11 @@ fn permissionless_crank_and_reap_accept_any_signed_user() {
             Event::Observed { market, .. } if *market == MARKET_ID
         )));
 
-        // reap is permissionless once the book is closed and aged.
+        // sweep_revenue and reap are permissionless once the book is closed,
+        // latched and aged — any signed user, and neither is an admin act.
         assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
         settle_decision();
+        assert_ok!(Market::sweep_revenue(signed(CHARLIE), MARKET_ID));
         System::set_block_number(ObsInterval::get() + MarketArchiveDelay::get());
         assert_ok!(Market::reap(signed(BOB), MARKET_ID));
         assert!(!Markets::<Test>::contains_key(MARKET_ID));
