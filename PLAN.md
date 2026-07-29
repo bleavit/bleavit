@@ -22,12 +22,25 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 
 > ### ⇨ HAND-OFF (2026-07-29, end of the Track E implementation session) — READ THIS FIRST
 >
-> **PR #195 (E1) is MERGED** — squashed to `main` as `bdec21d`, 20/20 checks green.
-> **PR #197 (the POL_BASELINE hotfix) is MERGED** — `af2e5a0`; `main` no longer carries
-> the release-blocking try-state defect.
-> **PR #196 (E2–E4) targets `main` directly**, is MERGEABLE, and its merge base is now
-> `af2e5a0`, so its diff is the real remaining delta (53 files / +5,794).
-> Working tree **clean**; everything below is committed and pushed except where stated.
+> **`main` is `af2e5a0`.** #195 (E1) merged as `bdec21d`; #197 (the POL_BASELINE hotfix)
+> merged on top. `main` carries no known release-blocking defect.
+> **PR #196 (E2–E4) targets `main`, is MERGEABLE**, head `2cab7bb`, merge base `af2e5a0`
+> so its diff is the true remaining delta (53 files / +5,794). CI green-so-far, nothing
+> failing. **Do not merge it yet** — three items below are open, one of them a major.
+> Working tree **clean**, everything committed and pushed. The repo is checked out on
+> `feat/e2-e4-revenue-instruments` (I switched back to it from `main` to land the fuzz fix).
+>
+> **Three gates exist that no local `rust-workspace-gates.sh` run can see. All three
+> caught a real defect today; none of them is optional.**
+> 1. **`fuzz/`** — a separate nightly workspace the gate deliberately does not build. It
+>    failed on SQ-519 (`mock inventory diverged from exact 04 §6.3 drain accounting`)
+>    *after* a green 1,737-test workspace run. Run `cd fuzz && cargo test` after any
+>    `market-core` or ledger-custody change.
+> 2. **`keeper/`** — same shape, but it *is* run by the exhaustive leg.
+> 3. **`check-weight-regression.py`** — diffs against `git merge-base HEAD origin/main`,
+>    so **a stacked PR's weight gate is blind to every function its own base introduces**.
+>    `sweep_revenue` had no baseline until #195 merged; the regression appeared within
+>    minutes of the base moving, having been invisible for the branch's whole life.
 >
 > **The merge-bar lesson, which cost a hotfix (2026-07-29).** #195 merged on **20/20
 > green CI** — genuinely complete, nothing pending — while a `spec-reviewer` audit of
@@ -131,19 +144,60 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 >   model and corpus now cover both the successful custody path and the thin-book
 >   fail-static path. Weights were deliberately not regenerated in this task.
 >
-> **Still open, and deliberately NOT coded around — each needs an R-1 ruling first:**
-> - **SQ-517 (major)** — freeze scope of the permissionless crank family. **I coded this
->   one before ruling it and reverted.** The substantive case for freezing is strong
->   (L-7's "surplus" premise is false exactly when a freeze is admissible), but
->   `ledger_freeze_blocks_trading_but_not_recovery_and_renews_once` *deliberately*
->   asserts `sweep_revenue` and `reap` succeed under a freeze — a tested posture
->   predating Track E — and `sweep_dust`/`reap` sit on the same reading. A ruling has to
->   settle the family, and a revenue-instruments PR is the wrong place to reverse an
->   emergency-brake semantic.
-> - **SQ-518 (major)** — 08 §1.2's automatic INSURANCE overflow reaches one of the three
->   inflow classes it names; neither USDC slash adapter calls it.
+> **Closed since, with evidence:**
+> - **SQ-519 (P1)** — Baseline buy-side fee now routes to `MAIN` (`9abdedb`). Verified
+>   independently, not on report: `cargo test --workspace` exit 0, **1,737 passed / 39
+>   suites / 0 failed**, plus reference-model 84, vector freshness, doc-table,
+>   phase-gates and limit-coverage. `pallet_market` weights regenerated at 50x20.
+>   Its fuzz fallout is fixed too (`2cab7bb`) — see below.
 >
-> **Then:** let #196's CI finish and merge only once the above are disposed of.
+> **OPEN WORK, in the order I would take it:**
+>
+> 1. **SQ-518 (major) — written, verified, deliberately reverted from #196.** The
+>    `note_insurance_inflow()` seam and both USDC slash-adapter call sites are correct
+>    and need **no ruling**: 08 §1.2 already says slash proceeds overflow "automatically
+>    ... **no crank for those**", and introduces the crank one bullet later only for
+>    un-interceptable *direct* transfers. It is reverted because verifying it showed the
+>    size: **6 runtime tests fail**, all asserting INSURANCE's *end-state* balance after a
+>    slash. Their expectations encode pre-fix routing — the routing itself is right (the
+>    slash still lands in INSURANCE; §1.2's surplus then overflows to `MAIN` in the same
+>    transaction), so the assertions are stale, not the change. Landing it needs those 6
+>    rewritten **plus** `pallet_epoch`/`pallet_oracle` weights regenerated, since the seam
+>    adds storage access to every slashing dispatch. **Do it as its own PR, on the #197
+>    precedent.** VIT proceeds must stay untouched (§1.2 scopes overflow to USDC; §2.2
+>    marks VIT at 0 in NAV).
+>
+> 2. **SQ-517 (major) — narrowed, and my first reading of the evidence was wrong.** I
+>    reverted a *correct* freeze-guard change because the market freeze test looked like
+>    it deliberately asserted `sweep_revenue` survives a freeze, "a tested posture
+>    predating Track E". `git log -S` disproves both halves: the `sweep()` helper and its
+>    call were added **today by E1 (`3f716ca`)** as plumbing so the test still passed once
+>    `reap` gained its swept-marker precondition. No Decision-log entry rules on crank
+>    freeze scope, so 06 §6.3 governs unopposed — "**all** ledger calls ... and all market
+>    calls error `Frozen`", with a live-list (reconciliation crank, guardian calls, values
+>    referenda, oracle/dispute calls) that excludes both cranks, and a settlement carve-out
+>    that cannot reach them since they run strictly *after* terminality. **Scope: the two
+>    Track-E cranks only.** `reap`/`sweep_dust` are pre-B1b behaviour and stay open — and
+>    the coupling defuses the urgency, since with `sweep_revenue` frozen `reap` cannot
+>    proceed anyway (it needs the marker). Re-point the freeze test when doing it.
+>
+> 3. **SQ-520 — `buy` is one weight for three book kinds, benchmarked on one.** Filed
+>    this session. `fn buy()` seeds `seeded_decision` and the harness has **no Baseline
+>    helper at all**, so `buy_baseline`'s two new transfers are unmeasured — the
+>    regenerated `pallet_market.rs` showed *no* storage change precisely because the
+>    fixture cannot see them. A clean "PASS" was the symptom. Same shape as the audit's
+>    note that `sweep_revenue`'s fixture measures the settled Decision path while `Voided`
+>    is strictly heavier. Add a Baseline seeding helper, measure both kinds, pin each
+>    fixture to the worst.
+>
+> 4. **#196 round-3 review, then merge** — only after 1-3 are disposed of.
+>
+> **Six spec-audit minors remain unaddressed** (03 §3 `ProtocolAccounts` wider than the
+> normative enumeration; 15 §1's L-7 restatement missing the `- min_balance` term; two 08
+> §10 figures that do not derive from their own tables — 8.2 vs 9.7 years, 77,864 vs
+> 65,864; the `sweep_revenue` `Voided`-path benchmark; unweighted `PendingMainCredit`
+> access in `pallet_asset_tx_payment`'s post-dispatch).
+>
 >
 > **Older rulings, still open and still not coded around:**
 > - **SQ-513** — the POL seed is subtracted from NAV **twice** (the seed-time
@@ -1789,3 +1843,4 @@ Append-only; newest last. Format: `| Date | Milestone(s) | Done | Next |`
 | 2026-07-29 | **SQ-519 verified and SQ-518 fixed — and both "spec questions" were code defects the owning section had already settled** | SQ-519's implementation verified **independently**, not on report: the delegated agent's log had been truncated by my own `tail`, so the only captured test results were doc-tests with zero tests. Re-ran `cargo test --workspace` myself — **exit 0, 1,737 passed across 39 suites, 0 failures** — plus reference-model 84, phase-gates, vector freshness, doc-table and limit-coverage all green. All four required assertions are present, including `position_balance(baseline(EPOCH, Long), FEES) == buy_fee`, which is the one that actually proves the fee left book inventory. Two things the agent found that the brief did not name, both real: **`telemetry.rs`** — `realized_book_loss` derives maker P&L from the *book's* positions, so moving the buy fee to the fee account would have made the telemetry report **revenue as a maker loss**; it added the fee-account term. And the **phase-0 gate** — the new corpus family was registered in the gate *and* its test's mirror table with `minimum_tests` 3→4, which is the bidirectional lesson from the earlier round applied without being told. **SQ-518** then resolved the same way SQ-519 did: 08 §1.2 already says USDC above `T_ins` overflows "automatically … for every inflow that executes treasury code — slash proceeds … **no crank for those**", and introduces the crank one bullet later only for un-interceptable *direct* transfers. So it needed no ruling either; both USDC slash adapters now call a named `note_insurance_inflow()` seam. **The pattern, which is the transferable part:** three consecutive items filed as questions for the user were answered by re-reading their own owning section. R-1 already says to check that first, and I did not — the cost was a filed question, a wrong severity, and in SQ-517's case code written before the ruling. | Regenerate `pallet_market` (SQ-519) and `pallet_epoch`/`pallet_oracle` (SQ-518, the seam adds storage access to every slashing dispatch); then SQ-517 |
 | 2026-07-29 | **SQ-517 corrected, SQ-518 verified-then-deferred, SQ-520 filed** | **SQ-517 — I had the evidence backwards and said so.** I reverted a correct freeze-guard change because `ledger_freeze_blocks_trading_but_not_recovery_and_renews_once` looked like it *deliberately* asserted `sweep_revenue` survives a freeze, "a tested posture predating Track E". `git log -S` disproves both halves: the `sweep()` helper and its call in that test were added **today, by E1 (`3f716ca`)**, as plumbing so the test still passed once `reap` gained its swept-marker precondition — not a ruling, and not predating anything. With no Decision-log entry on crank freeze scope, 06 §6.3 governs unopposed and the two Track-E cranks should freeze. Narrowed to them; `reap`/`sweep_dust` stay open as pre-B1b behaviour, and the coupling defuses the urgency (with `sweep_revenue` frozen, `reap` cannot proceed anyway — it needs the marker). **SQ-518 — written, verified, deliberately reverted from #196.** 6 runtime tests fail, all asserting INSURANCE's end-state balance after a slash; their expectations encode pre-fix routing, and fixing them properly plus regenerating two pallets' weights is its own PR (the #197 precedent). Shipping it half-verified would be worse than leaving it open and documented. **SQ-520 — filed.** Regenerating `pallet_market` showed *no* storage change despite `buy_baseline` gaining two transfers, because `fn buy()` benchmarks a Decision book and the harness has no Baseline helper at all: one weight covers three book kinds, measured on one. **The through-line for all three, and for SQ-519 before them:** every one was settled by reading the owning section or the actual git history, and in two cases my first answer was wrong because I trusted a plausible-looking artifact — a test's apparent intent, a delegated agent's summary — instead of checking its provenance. | Land SQ-518 as its own PR; then SQ-517's two cranks; SQ-520's benchmark harness; #196 review round 3 |
 | 2026-07-29 | **The fuzz gate caught SQ-519 — the one workspace no local gate builds** | CI's `Fuzzing (15 §4.5)` job failed on `lmsr_harness_covers_gate_and_baseline_books`: *"mock inventory diverged from exact 04 §6.3 drain accounting"*. Bisected across CI runs — green at `ca5c4fa5`, red at `9abdedb0` and `1e8eb1c6` — so SQ-519 caused it, and **my green 1,737-test workspace run could not see it**: `fuzz/` is a deliberately separate nightly workspace that `rust-workspace-gates.sh` does not build, the same blind spot recorded when E1 hit it. The finding was real and the oracle was right to fire. `inventory_inflow_on_buy` encoded the *old* 04 §6.1 reading — "the unbranched Baseline wrapper retains the whole `cost + fee` complete pair in the book" — with that exact citation. SQ-519 amended the cited text, so the Baseline arm was stale: with the buy fee segregated at trade time, every kind absorbs exactly `cost` and the kind split collapses. Updated the oracle to the amended spec, **not** to the implementation — an independent oracle that is edited to match the code stops being evidence. Fuzz workspace now 10/10 green, fmt and Clippy clean. | Push; then SQ-518's own PR, SQ-517's two cranks, SQ-520's benchmark harness |
+| 2026-07-29 | **Session close — hand-off rewritten; #196 open with 3 items, `main` clean** | The hand-off block at the top of *Current focus* is the artifact; this row is the audit trail. Landed today: #195 (E1) merged, #197 (POL_BASELINE hotfix) merged, and on #196 — SQ-515 (both-rate PT-2/PT-6), the 15 §4.3 self-contradiction, contract-v17 literal consolidation, the `sweep_revenue` weight acknowledgement, SQ-519 (Baseline buy-side fee to `MAIN`, spec-amended in 04 §6.1 + 08 §10.2 and verified at 1,737 tests), and its fuzz-oracle fallout. Open: SQ-518 (written, verified, reverted — needs its own PR), SQ-517 (narrowed to the two Track-E cranks), SQ-520 (`buy` benchmarked on one of three book kinds), six audit minors, and a round-3 review. **What a next session should take from this one more than any individual fix:** four items I filed as questions for the user were answered by re-reading their own owning spec section or the actual `git log`, exactly as R-1 instructs — and in two of them my *first* answer was wrong because I trusted a plausible-looking artifact instead of checking its provenance: a test whose intent looked deliberate but was same-day plumbing, and a delegated agent's green summary whose evidence my own `tail` had truncated to zero tests. Check where a claim came from before treating it as evidence. | SQ-518's own PR; SQ-517's two cranks; SQ-520's benchmark harness; #196 round-3 review, then merge |
