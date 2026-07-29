@@ -25,8 +25,28 @@ Everything above (imported from AGENTS.md) is binding. Below is the Claude-Code-
 
 - **SessionStart** injects git state + PLAN.md focus/milestones/last log rows. Trust it
   for orientation, but still read PLAN.md before implementing.
-- **Stop guard** blocks ending a session when the tree changed but PLAN.md wasn't
-  updated. Comply (update PLAN.md) instead of retrying.
+- **Stop guard** (`stop-plan-guard.sh`) blocks ending a session when the tree changed
+  but PLAN.md wasn't updated. Comply (update PLAN.md) instead of retrying.
+
+  **Its exact condition is about the *working tree*, not the session** (clarified
+  2026-07-29): it blocks when `git status --porcelain` shows non-`PLAN.md` changes
+  **and** PLAN.md itself is *clean*. Two consequences that are not obvious and that
+  cost a session real time:
+
+  1. **Committing PLAN.md incrementally re-arms it.** A session that commits its
+     PLAN update, then keeps working, makes PLAN clean while other files stay dirty —
+     so the guard fires again, and again, however thoroughly PLAN already describes
+     the work. Do not answer that by appending near-duplicate Session log rows; the
+     log is append-only and padding it to satisfy a checker degrades the one artifact
+     the next session actually reads. Either finish and commit the remaining work, or
+     leave the PLAN edit **uncommitted** alongside it so the pending state is
+     self-describing.
+  2. **Background agents writing into the tree keep it armed.** When a subagent is
+     still writing while you try to stop, the guard is correct to object: an unfinished
+     write is exactly the state a next session cannot interpret. Treat a repeat block
+     as a signal to wait for the agent or to record the in-flight state precisely —
+     what exists, whether it compiles, which gates have *not* been run — rather than
+     as an obstacle to route around.
 - **Stop guard (`guard-readme.sh`)** blocks ending a session if README.md's pinned
   opening (thank-you to Prof. Robin Hanson) or closing (Bon appétit) line has been
   altered (rule R-11, AGENTS.md). Restore the exact wording instead of retrying.
