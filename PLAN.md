@@ -31,20 +31,24 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 > ledger 85, market 89, treasury 90, constitution 61, primitives 112, runtime `--lib`
 > 410, keeper 83 — all 0 failed.
 >
-> **The one thing not yet proven: a green exhaustive `rust-workspace-gates.sh`.**
-> The last run was at **79 suites green / 0 errors** when this session ended — further
-> than any previous attempt. It has failed six times, *every time on something real*
-> (clang-sys ×2, clippy, a benchmark fixture measuring unreachable state, and two stale
-> contract-version pins the runtime suite structurally could not see). **Re-run it
-> first.** On this workstation it needs three env vars or it cannot run at all — the
-> full incantation is in AGENTS.md · *Quality gates*; the short form is
-> `CARGO_TARGET_DIR` on ext4 (`$HOME` is ecryptfs), `LIBCLANG_PATH` pointing at a dir
+> **The exhaustive gate is GREEN** — `tools/ci/rust-workspace-gates.sh` (no arguments)
+> exits **0** with **92 test suites passing, zero failures**, and limit coverage at
+> `unwired = 0`. Measured against the code at `118f812`; the only commit after it
+> (`593f9a2`) is documentation-only, so R-12 does not require a rerun for it.
+>
+> Getting there took **seven** runs and every failure was real, which is the reason
+> to trust this one: clang-sys ×2, a clippy error the package-scoped runs never
+> compile, a benchmark fixture measuring state the new ordering guard makes
+> unreachable, and two stale contract-version pins the runtime suite structurally
+> could not see. **On this workstation the gate cannot run at all without three
+> environment variables** — full incantation in AGENTS.md · *Quality gates*; short
+> form: `CARGO_TARGET_DIR` on ext4 (`$HOME` is ecryptfs), `LIBCLANG_PATH` at a dir
 > containing a symlink literally named `libclang.so`, and `WASM_BUILD_WORKSPACE_HINT`
 > at the repo root.
 >
-> **Then, in order:**
-> 1. Push, let #196's CI run, and request its round-2 Codex review — all four
->    round-1 findings (2×P1, 2×P2) are closed in `a2de0ff`.
+> **Next, in order:**
+> 1. Let #196's CI run and request its round-2 Codex review — all four round-1
+>    findings (2×P1, 2×P2) are closed in `a2de0ff`.
 > 2. **SQ-515** — PT-2 and PT-6 run at a single rate; 15 §4.3 says that "is **not** a
 >    discharge of its obligation". Wrap both bodies in the existing `sequence_rates()`
 >    helper. This is the only *code* item left in the doc-15 regime.
@@ -1677,3 +1681,4 @@ Append-only; newest last. Format: `| Date | Milestone(s) | Done | Next |`
 | 2026-07-29 | **The contract-version bump had SIX sites, not two — fixed structurally** | 02 §13 claimed the v17 bump "moves exactly two code sites". It moved six, and I corrected the entry twice before finding them all, because each surfaced only when a bump turned it red: sites 3 and 4 from the runtime suite, sites **5 and 6 from the exhaustive gate after the runtime suite was already green**. Two were literals left stale through three bumps — one inside a test still named `contract_version_is_v13` while asserting 16, the other a drive-by line in an unrelated genesis-epoch-shape test. **The remedy is structural rather than a longer checklist**, because a checklist is what already failed: exactly **one** literal now exists (the constant plus the unit test beside it), and every other site asserts *agreement* with that constant instead of repeating the number. The drive-by pin was **deleted, not relaxed** — I first replaced it with `>= 1`, which is a vacuous assertion that removes coverage while looking like it kept some; incidental coverage in a test whose subject is something else is exactly what goes stale, and the property is pinned once in `futarchy-primitives` and asserted through runtime metadata anyway. Renamed the surviving test `contract_version_is_pinned`: a name carrying a version number is guaranteed to go stale at the next bump, and a test whose name contradicts its assertion is worse than an unnamed one. | — |
 | 2026-07-29 | **R-1 spec amendments: 03 §5.4a added, 02 §13 storage claim trued** | The `MarketSweepStatus` guard had put the **code ahead of the spec** — 03 §5.4 still said the dust cleanup "is independent of the owning market-book reap", which the guard contradicts. New normative **§5.4a** authorizes it and states the two things the audit demanded: *why* the ordering must be on-chain (both cranks are permissionless, so keeper ordering is an A-1 liveness assumption and not a guarantee — the attack is reachable deliberately), and *why* the predicate is `seeded ∧ ¬swept` (blocking on `¬swept` alone converts a value leak into a permanent liveness stall for a book that can never become sweepable). It also states how §4's one-year `Vaults` drain guarantee survives: the precondition is itself permissionlessly dischargeable, and a permanently-unsweepable seeded book is a try-state violation rather than a lawful resting state. 02 §13's v17 entry now **names** the `SeededMarkets` `()` → `AccountId` widening instead of claiming no existing storage shape changed. | — |
 | 2026-07-29 | **Session close — Track E implemented, integrated and reviewed; one gate outstanding** | Hand-off is the block at the top of *Current focus*; this row is the audit trail. Landed across 12 commits on `feat/e2-e4-revenue-instruments` (PR #196, stacked on #195): E2/E3/E4 implementation and integration, contract **v17 in force**, three weight files genuinely regenerated, four review findings closed, one spec-audit major of my own fixed, two R-1 spec amendments (03 §5.4a; 02 §13's storage claim), and four spec questions filed (SQ-513…516) with SQ-511/512 resolved. **What a next session should carry forward more than any individual row:** every one of the last eight defects was found by a **gate, an audit or an adversarial review — none by a test written alongside the code**, and both implementing agents reported package-scoped green while three of them were live. The specific blind spots, each now documented where it bites: `rust-workspace-gates.sh` does not build `fuzz/` (separate workspace, same shape as `keeper/` which *is* built); `check-generated-weights.py` validates a weight's provenance grammar and never its value, so a hand-written number passes in either direction; and package-scoped `cargo test` compiles neither the runtime's test target nor sibling crates' unit tests, which is where two contract-version pins sat stale through three bumps. | Re-run the exhaustive gate; then SQ-515, review round 2, merge |
+| 2026-07-29 | **Exhaustive gate GREEN — `rust-workspace-gates.sh` exit 0, 92 suites, 0 failures** | The goal's first criterion is met, measured at `118f812` (the later `593f9a2` is documentation-only, so R-12 does not require a rerun). Limit coverage reports `unwired = 0`, `consumer-binding = 0`, 194 registry keys covered. **It took seven runs, and every one of the six failures was a real defect** — not flakiness, not environment noise once the three env vars were in place: clang-sys ×2 (a genuine environment gap now documented in AGENTS.md), a `needless_borrows` clippy error in a target no package-scoped run compiles, a benchmark fixture building state the new `MarketSweepStatus` ordering guard makes unreachable, and **two stale contract-version pins the runtime suite structurally could not see**. That last pair is the one to remember: both were literals left behind by three consecutive bumps, one inside a test still named `contract_version_is_v13` while asserting 16, and the fix was structural (exactly one literal survives; every other site asserts *agreement* with the constant) rather than a longer checklist — because a checklist is precisely what had already failed. | #196 CI + round-2 review; SQ-515; merge #195 then #196 |
