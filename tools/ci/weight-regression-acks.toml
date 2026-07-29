@@ -85,4 +85,39 @@ runtime/bleavit-runtime/src/weights/pallet_conditional_ledger.rs settle_gate @ r
 runtime/bleavit-runtime/src/weights/pallet_conditional_ledger.rs settle_scalar @ reads=19: E4. Cost of making `ledger.redeem_fee` a LIVE parameter rather than a compile-time constant: 13 §1 defines it as a PARAM row, so `.claude/rules/runtime-code.md` rule 4 forbids hardcoding it, and every dispatch that constructs `LedgerState` therefore reads `Params[ledger.rdm_fee]` (and `ledger.min_split`, which the §5.3a small-payout waiver needs) to overlay the fee config. That is the whole of the increase — the added reads are two named constitution keys, not an unbounded scan, and they are charged identically on paths that never collect a fee because the overlay happens before the dispatch knows whether it will. The alternative — a compile-time rate — would be a rule-4 defect and would silently ignore a lawful governance amendment, which is the unsafe direction for a fee the constitution is supposed to control.
 runtime/bleavit-runtime/src/weights/pallet_conditional_ledger.rs split_baseline @ proof_size=14025, reads=21: E4. Cost of making `ledger.redeem_fee` a LIVE parameter rather than a compile-time constant: 13 §1 defines it as a PARAM row, so `.claude/rules/runtime-code.md` rule 4 forbids hardcoding it, and every dispatch that constructs `LedgerState` therefore reads `Params[ledger.rdm_fee]` (and `ledger.min_split`, which the §5.3a small-payout waiver needs) to overlay the fee config. That is the whole of the increase — the added reads are two named constitution keys, not an unbounded scan, and they are charged identically on paths that never collect a fee because the overlay happens before the dispatch knows whether it will. The alternative — a compile-time rate — would be a rule-4 defect and would silently ignore a lawful governance amendment, which is the unsafe direction for a fee the constitution is supposed to control.
 runtime/bleavit-runtime/src/weights/pallet_conditional_ledger.rs void @ reads=19: E4. Cost of making `ledger.redeem_fee` a LIVE parameter rather than a compile-time constant: 13 §1 defines it as a PARAM row, so `.claude/rules/runtime-code.md` rule 4 forbids hardcoding it, and every dispatch that constructs `LedgerState` therefore reads `Params[ledger.rdm_fee]` (and `ledger.min_split`, which the §5.3a small-payout waiver needs) to overlay the fee config. That is the whole of the increase — the added reads are two named constitution keys, not an unbounded scan, and they are charged identically on paths that never collect a fee because the overlay happens before the dispatch knows whether it will. The alternative — a compile-time rate — would be a rule-4 defect and would silently ignore a lawful governance amendment, which is the unsafe direction for a fee the constitution is supposed to control.
-runtime/bleavit-runtime/src/weights/pallet_market.rs try_state @ ref_time=321064078000, reads=37316: E1/E2. `try_state` is a verification hook, not a dispatch path — it runs only in test and try-runtime environments and is never charged to a caller, so growth here buys invariant coverage at no user cost. The increase is exactly the new state: the run walks `SweptMarkets` to prove the 04 §2 Sweep marker agrees with the ledger's terminal latch, and re-derives each seeded book's POL custody and fee-account realizability so an unswept, double-swept or mis-credited book cannot pass. Reads track `MaxStoredMarkets` = 2,240 books gaining a marker probe plus the per-book re-derivation. The unsafe direction here would be a `try_state` that checked LESS — the POL custody leak this milestone closes is precisely what survived while nothing verified custody.
+# E2 (2026-07-29) — the market Sweep's revenue leg. This entry only became
+# *reachable* when E1 merged: `check-weight-regression.py` diffs against
+# `git merge-base HEAD origin/main`, and while that base predated E1 the function
+# did not exist there at all — a new function has no baseline and cannot regress.
+# The moment E1 landed, `sweep_revenue` acquired one, and this is the first run
+# that could see the delta. Worth remembering: a stacked PR's weight gate is
+# blind to every function its own base introduces.
+#
+# **The whole increase is one added ledger walk, and it reconciles exactly.**
+# E1's sweep performed a single `withdraw_book(&book, .., &treasury)` — the POL
+# return. E2 runs `market_core::withdraw_fees(&book, .., &main)` *before* it, a
+# structurally identical walk of the same 14 proposal instruments for a different
+# owner (the fee account instead of the treasury), because 04 §6.1 makes the fee
+# account's realizable claims remit 100 % to `MAIN`. Hence `Positions`
+# r:14 w:14 -> r:28 w:28: two owners x 14 instruments, a fixed count, not a scan.
+# Every remaining unit is a named key: `PositionCount` +1r/+1w (the second
+# owner's), `ForeignAssets::Account` +1r/+1w (`withdraw_baseline_fee_usdc` moving
+# the Baseline book's retained plain USDC above the 03 §7 R-4 `min_balance`
+# floor), `Constitution::Params` +2r (the `ledger.rdm_fee` / `ledger.min_split`
+# overlay every `LedgerState` construction now reads), `RedemptionFeesAccrued`
+# +1r, and `FutarchyTreasury::PendingMainCredit` +1r/+1w. Those sum to exactly
+# +20 reads and +17 writes, with nothing unaccounted.
+#
+# **Why the cost is not optional.** Reaching `MAIN` custody is only half the job:
+# `nav()` is computed from the treasury's internal `main_usdc` counter, not from
+# asset balances, so value that arrives without a `credit_main` is invisible to
+# NAV — which is the exact shape of the POL custody leak E1 exists to close. The
+# `PendingMainCredit` read/write is what makes the arrival recognized. Dropping
+# it would restore a silent leak in the over-permissive direction.
+#
+# PoV: 72,866 bytes, inside 13 §5's budget (`check-weight-storage-bounds.py`
+# green in the exhaustive gate). ref_time 752 us is ~0.04 % of a 2 s block. The
+# call is permissionless, so the relevant risk is griefing — but it is
+# idempotent behind the `SweptMarkets` marker (04 §2: exactly one `RevenueSwept`
+# per market), so a repeat call is refused rather than re-charged.
+runtime/bleavit-runtime/src/weights/pallet_market.rs sweep_revenue @ proof_size=72866, reads=71, writes=55: E2. The 04 §6.1 fee leg adds one `withdraw_fees(.., &main)` ledger walk ahead of E1's `withdraw_book(.., &treasury)` POL return — the same 14 proposal instruments for a second owner, so `Positions` goes r:14 w:14 -> r:28 w:28 (a fixed count, not a scan). The rest are named keys: `PositionCount` +1r/+1w for the second owner, `ForeignAssets::Account` +1r/+1w for the Baseline book's retained plain-USDC remittance above the 03 §7 R-4 `min_balance` floor, `Constitution::Params` +2r for the `ledger.rdm_fee`/`ledger.min_split` overlay, `RedemptionFeesAccrued` +1r, and `PendingMainCredit` +1r/+1w. Exactly +20 reads and +17 writes, nothing unaccounted. The `PendingMainCredit` write is load-bearing rather than incidental: `nav()` reads the treasury's internal `main_usdc` counter and not asset balances, so USDC that reaches `MAIN` without `credit_main` never reaches NAV — the precise shape of the custody leak this track closes. PoV 72,866 B is inside 13 §5's budget and the call is idempotent behind the `SweptMarkets` marker, so the permissionless surface cannot be re-charged.
