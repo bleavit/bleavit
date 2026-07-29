@@ -20,6 +20,63 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 
 ## Current focus
 
+> ### ⇨ HAND-OFF (2026-07-29, end of the Track E implementation session) — READ THIS FIRST
+>
+> **Branch `feat/e2-e4-revenue-instruments` → PR #196, stacked on PR #195 (`feat/e1-treasury-sustainability`).**
+> Working tree **clean**; everything below is committed and pushed except where stated.
+> Head is `118f812`. #195 is **19 pass / 1 pending / 0 fail**.
+>
+> **State: E1–E4 are implemented, integrated, weight-measured and spec-reviewed.**
+> Contract is **v17 in force**. Limit coverage is `unwired = 0`. Package suites:
+> ledger 85, market 89, treasury 90, constitution 61, primitives 112, runtime `--lib`
+> 410, keeper 83 — all 0 failed.
+>
+> **The one thing not yet proven: a green exhaustive `rust-workspace-gates.sh`.**
+> The last run was at **79 suites green / 0 errors** when this session ended — further
+> than any previous attempt. It has failed six times, *every time on something real*
+> (clang-sys ×2, clippy, a benchmark fixture measuring unreachable state, and two stale
+> contract-version pins the runtime suite structurally could not see). **Re-run it
+> first.** On this workstation it needs three env vars or it cannot run at all — the
+> full incantation is in AGENTS.md · *Quality gates*; the short form is
+> `CARGO_TARGET_DIR` on ext4 (`$HOME` is ecryptfs), `LIBCLANG_PATH` pointing at a dir
+> containing a symlink literally named `libclang.so`, and `WASM_BUILD_WORKSPACE_HINT`
+> at the repo root.
+>
+> **Then, in order:**
+> 1. Push, let #196's CI run, and request its round-2 Codex review — all four
+>    round-1 findings (2×P1, 2×P2) are closed in `a2de0ff`.
+> 2. **SQ-515** — PT-2 and PT-6 run at a single rate; 15 §4.3 says that "is **not** a
+>    discharge of its obligation". Wrap both bodies in the existing `sequence_rates()`
+>    helper. This is the only *code* item left in the doc-15 regime.
+> 3. Merge #195, then #196 (GitHub retargets #196 to `main` automatically).
+>
+> **Two items are deliberately NOT coded around — they are R-1 spec rulings, and
+> changing code before the spec rules would be the wrong order:**
+> - **SQ-513** — the POL seed is subtracted from NAV **twice** (the seed-time
+>   `POL` line debit *and* the `obligations()` commitment), making live-book drag 1.5×
+>   the 08 §3 commitment for a branched proposal and 2× for the Baseline. Direction is
+>   safe (understatement, fail-static) but no §3/§4.1/§10.1 figure computes it, and it
+>   silently tightens the §4.2 arming gate. **08 must rule which term is the exposure;
+>   §4.1's floors then need re-deriving against whichever wins.**
+> - **SQ-514** — 15 §4.6's `ledger.redeem_fee` obligation contradicts itself
+>   (`param-bounds` treatment vs. a demand for a `// limit-coverage:` marked test,
+>   which the gate rejects on non-`dispatch-limit` keys).
+>
+> **Do not re-litigate these; they are settled and recorded:** `Archived => Ok(0)` is
+> deliberately retained (making it an error strands already-archived books — the 03
+> §5.4a ordering guard prevents the bad ordering instead); `SeededMarkets`' `()` →
+> `AccountId` widening ships without a migration because the chain is **pre-genesis**
+> (same clause 02 §13 applies to v15/v16/v17), and that reasoning is pinned at the
+> storage item and written to **expire at genesis**.
+>
+> **The honest headline, unchanged:** Bleavit is **not** self-funding at launch and
+> cannot be. What the arithmetic supports is that the crossover sits *at* the chain's
+> own security-calibrated depth rather than beyond it. See *Track E — crossover
+> arithmetic and the self-funding statement* (its own top-level section, deliberately
+> not under *Milestones* — the monitoring coverage checker parses every table there as
+> a milestone table).
+
+
 **Track E is open and is the active work (2026-07-29).** The "self-funding permanent institution" work order landed its **spec layer in full** — 03, 04, 08 (new **§10 Sustainability**), 13, 14, 15, 02 (contract **v16 → v17**), 00, 01, 05, 10, 11 — and staged the code layer as **E1 → E4** in value order. Read **08 §10** for the normative arithmetic; Track E's own section carries the status and the headline figures.
 
 The single most important finding is not one of the work order's: **the POL custody leak (E1)**. 08 §3 and §8(5) mandate that committed POL *withdraws* at settlement; the implementation releases only the NAV **obligation** and never recovers the cash, which is discarded at market reap and swept wholly to `INSURANCE` — **≈ 1.79M USDC/yr** on a 5×PARAM slate, **156 % of the entire derivable operating cost base**, and, worse, `lines[Pol]` is never debited at seed, so **NAV over-states custody cumulatively in the over-permissive direction**. That is audit scope A (R-7) and it outranks both revenue instruments at any launch-realistic volume. Fix it first.
@@ -1619,3 +1676,4 @@ Append-only; newest last. Format: `| Date | Milestone(s) | Done | Next |`
 | 2026-07-29 | **All four #196 findings closed; a benchmark fixture was building unreachable state** | `a2de0ff` lands the two P1s and two P2s with required `Config` seams — `ResidueReporter` (both dust sweeps report the exact event `residue` in the same dispatch transaction, so `T_ins` rises with swept liability and a reporter failure rolls the whole sweep back) and `MarketSweepStatus` (the dust sweep answers `ReapNotDue` while an associated **seeded** book is unswept; never-seeded books exempt, or a permanently-unsweepable book would pin its vault forever). `MainRevenueSink` now serves market **and** ledger, so `sweep_redemption_fees` moves custody, recognizes `PendingMainCredit` and clears the accrual atomically. Keeper plans both new cranks on real due signals. **`Archived => Ok(0)` is deliberately retained** — making it an error strands already-archived books; the guard prevents the bad ordering instead. Gates: ledger 85, market 89, treasury 90, runtime 410, keeper 83, all 0 failed. **The weight run then found something the tests could not:** `pallet_market::try_state` could not be benchmarked, because its fixture removed book 1's vault while that book stayed seeded and unswept — a combination the new ordering guard makes **unreachable on-chain**. The fixture was measuring a scan that cannot happen. Fixed by retaining the vault rather than weakening the invariant or buying a `weight-preservation.toml` exemption; the vault-absent branch is still measured by the 2,239 bulk books, which are swept *and* keep settled vaults. **Second time this milestone a fixture encoded an assumption the code had outgrown** (the first: runtime tests expecting par payouts after the fee landed) — both caught by gates, not review. | Market/treasury weights; then one exhaustive gate |
 | 2026-07-29 | **The contract-version bump had SIX sites, not two — fixed structurally** | 02 §13 claimed the v17 bump "moves exactly two code sites". It moved six, and I corrected the entry twice before finding them all, because each surfaced only when a bump turned it red: sites 3 and 4 from the runtime suite, sites **5 and 6 from the exhaustive gate after the runtime suite was already green**. Two were literals left stale through three bumps — one inside a test still named `contract_version_is_v13` while asserting 16, the other a drive-by line in an unrelated genesis-epoch-shape test. **The remedy is structural rather than a longer checklist**, because a checklist is what already failed: exactly **one** literal now exists (the constant plus the unit test beside it), and every other site asserts *agreement* with that constant instead of repeating the number. The drive-by pin was **deleted, not relaxed** — I first replaced it with `>= 1`, which is a vacuous assertion that removes coverage while looking like it kept some; incidental coverage in a test whose subject is something else is exactly what goes stale, and the property is pinned once in `futarchy-primitives` and asserted through runtime metadata anyway. Renamed the surviving test `contract_version_is_pinned`: a name carrying a version number is guaranteed to go stale at the next bump, and a test whose name contradicts its assertion is worse than an unnamed one. | — |
 | 2026-07-29 | **R-1 spec amendments: 03 §5.4a added, 02 §13 storage claim trued** | The `MarketSweepStatus` guard had put the **code ahead of the spec** — 03 §5.4 still said the dust cleanup "is independent of the owning market-book reap", which the guard contradicts. New normative **§5.4a** authorizes it and states the two things the audit demanded: *why* the ordering must be on-chain (both cranks are permissionless, so keeper ordering is an A-1 liveness assumption and not a guarantee — the attack is reachable deliberately), and *why* the predicate is `seeded ∧ ¬swept` (blocking on `¬swept` alone converts a value leak into a permanent liveness stall for a book that can never become sweepable). It also states how §4's one-year `Vaults` drain guarantee survives: the precondition is itself permissionlessly dischargeable, and a permanently-unsweepable seeded book is a try-state violation rather than a lawful resting state. 02 §13's v17 entry now **names** the `SeededMarkets` `()` → `AccountId` widening instead of claiming no existing storage shape changed. | — |
+| 2026-07-29 | **Session close — Track E implemented, integrated and reviewed; one gate outstanding** | Hand-off is the block at the top of *Current focus*; this row is the audit trail. Landed across 12 commits on `feat/e2-e4-revenue-instruments` (PR #196, stacked on #195): E2/E3/E4 implementation and integration, contract **v17 in force**, three weight files genuinely regenerated, four review findings closed, one spec-audit major of my own fixed, two R-1 spec amendments (03 §5.4a; 02 §13's storage claim), and four spec questions filed (SQ-513…516) with SQ-511/512 resolved. **What a next session should carry forward more than any individual row:** every one of the last eight defects was found by a **gate, an audit or an adversarial review — none by a test written alongside the code**, and both implementing agents reported package-scoped green while three of them were live. The specific blind spots, each now documented where it bites: `rust-workspace-gates.sh` does not build `fuzz/` (separate workspace, same shape as `keeper/` which *is* built); `check-generated-weights.py` validates a weight's provenance grammar and never its value, so a hand-written number passes in either direction; and package-scoped `cargo test` compiles neither the runtime's test target nor sibling crates' unit tests, which is where two contract-version pins sat stale through three bumps. | Re-run the exhaustive gate; then SQ-515, review round 2, merge |
