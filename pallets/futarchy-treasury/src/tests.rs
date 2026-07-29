@@ -2774,6 +2774,50 @@ fn the_reconciliation_crank_is_permissionless_idempotent_and_a_noop_at_target() 
 }
 
 #[test]
+fn the_reconciliation_crank_is_rebated_only_when_it_moves_surplus() {
+    // 08 §6.3 (SQ-523): the closed decision-critical list puts every *other*
+    // sanctioned permissionless keeper crank on the <= 20 % general tranche,
+    // and this is one — it was the only such crank left unpaid. The `> 0`
+    // condition is the orphan-Baseline precedent from the same section: a
+    // crank requests a rebate only when it changes state, so repeated cranking
+    // at target cannot drain the meter.
+    funded_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Keeper,
+            100 * USDC
+        ));
+        KeeperBudgetEpoch::set(100 * USDC);
+        KeeperRebate::set(10 * USDC);
+        reset_rebate_payout();
+        set_rebate_pot_balance(PayoutLine::Keeper, 100 * USDC);
+
+        // At or below target the crank is a no-op, so it earns nothing.
+        assert_ok!(Treasury::reconcile_insurance(RuntimeOrigin::signed(acc(7))));
+        assert!(rebate_payouts().is_empty());
+        assert_eq!(Treasury::treasury().keeper_meter.general_spent, 0);
+
+        // A direct push above target is real work, and is paid for once.
+        set_insurance_usdc(INSURANCE_MIN_BALANCE + 42_000 * USDC);
+        assert_ok!(Treasury::reconcile_insurance(RuntimeOrigin::signed(acc(7))));
+        assert_eq!(
+            rebate_payouts(),
+            vec![(acc(7), 10 * USDC, PayoutLine::Keeper)]
+        );
+        assert_eq!(Treasury::treasury().keeper_meter.general_spent, 10 * USDC);
+
+        // The idempotent repeat moves nothing, so it is not paid a second time.
+        assert_ok!(Treasury::reconcile_insurance(RuntimeOrigin::signed(acc(7))));
+        assert_eq!(
+            rebate_payouts(),
+            vec![(acc(7), 10 * USDC, PayoutLine::Keeper)]
+        );
+        assert_eq!(Treasury::treasury().keeper_meter.general_spent, 10 * USDC);
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
 fn the_reconciliation_crank_never_draws_insurance_below_its_liability() {
     // `T_ins` is a floor on the liability, so an account holding exactly its
     // residue plus the floor has no surplus at all — releasing reserve against a

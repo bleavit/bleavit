@@ -1335,11 +1335,24 @@ pub mod pallet {
         /// exactly one place — `MAIN` — so there is nothing for a caller to
         /// steer. Idempotent and a **no-op at or below target** (`Ok`, no
         /// custody move, no event), which is what makes repeated cranking free.
+        ///
+        /// **Rebated from the ≤ 20 % general tranche when it actually moves
+        /// surplus** (08 §6.3; SQ-523). §6.3's closed decision-critical list
+        /// puts every *other* sanctioned permissionless keeper crank on the
+        /// general tranche, and this is one — it was the only such crank left
+        /// unpaid, which mattered more once SQ-518 made it the sole backstop
+        /// for un-interceptable direct transfers. The `> 0` condition follows
+        /// the orphan-Baseline precedent in the same section: a crank requests
+        /// a rebate only when it changes state, so the idempotent no-op at or
+        /// below target stays unrebated and repeated cranking cannot drain the
+        /// meter.
         #[pallet::call_index(13)]
         #[pallet::weight(T::WeightInfo::reconcile_insurance())]
         pub fn reconcile_insurance(origin: OriginFor<T>) -> DispatchResult {
-            ensure_signed(origin)?;
-            Self::overflow_insurance()?;
+            let who = ensure_signed(origin)?;
+            if Self::overflow_insurance()? > 0 {
+                Self::do_keeper_rebate(&who, CrankClass::General);
+            }
             Ok(())
         }
 
