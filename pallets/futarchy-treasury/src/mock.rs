@@ -150,6 +150,11 @@ impl TreasuryParams for TestParams {
     }
 }
 
+/// The modelled USDC `min_balance`: 10⁴ base units (13 §3.5), the same value
+/// the ledger's own mock configures on the USDC asset. It is the 03 §7 R-4
+/// permanent-account floor and the second term of 08 §1.2's `T_ins`.
+pub const INSURANCE_MIN_BALANCE: u128 = 10_000;
+
 type CommunityVestingCall = (AccountId32, AccountId32, u128, u128, u64);
 
 std::thread_local! {
@@ -159,6 +164,8 @@ std::thread_local! {
     static FAIL_POT_FUNDING: Cell<bool> = const { Cell::new(false) };
     static INSURANCE_SWEEPS: RefCell<Vec<u128>> = const { RefCell::new(Vec::new()) };
     static FAIL_INSURANCE_SWEEP: Cell<bool> = const { Cell::new(false) };
+    static INSURANCE_USDC: Cell<u128> = const { Cell::new(INSURANCE_MIN_BALANCE) };
+    static INSURANCE_USDC_MIN: Cell<u128> = const { Cell::new(INSURANCE_MIN_BALANCE) };
     static COMMUNITY_VESTING_CALLS: RefCell<Vec<CommunityVestingCall>> = const { RefCell::new(Vec::new()) };
     static FAIL_COMMUNITY_VESTING: Cell<bool> = const { Cell::new(false) };
     static INTEGRITY_FAULTS: RefCell<Vec<IntegrityFault>> = const { RefCell::new(Vec::new()) };
@@ -236,7 +243,18 @@ impl crate::InsuranceSweep for MockInsuranceSweep {
                 "insurance sweep would reap the account",
             ));
         }
+        // Model the real custody: a successful sweep leaves the account exactly
+        // `amount` lighter, which is what makes the 08 §1.2 crank idempotent.
+        INSURANCE_USDC.with(|balance| balance.set(balance.get().saturating_sub(amount)));
         Ok(())
+    }
+
+    fn usdc_balance() -> u128 {
+        INSURANCE_USDC.with(Cell::get)
+    }
+
+    fn usdc_min_balance() -> u128 {
+        INSURANCE_USDC_MIN.with(Cell::get)
     }
 }
 
@@ -248,9 +266,20 @@ pub fn set_insurance_sweep_failure(fail: bool) {
     FAIL_INSURANCE_SWEEP.with(|value| value.set(fail));
 }
 
+/// Drive the modelled INSURANCE USDC custody balance (08 §1.2's `T_ins` input).
+pub fn set_insurance_usdc(balance: u128) {
+    INSURANCE_USDC.with(|value| value.set(balance));
+}
+
+pub fn insurance_usdc() -> u128 {
+    INSURANCE_USDC.with(Cell::get)
+}
+
 pub fn reset_insurance_sweeps() {
     INSURANCE_SWEEPS.with(|calls| calls.borrow_mut().clear());
     set_insurance_sweep_failure(false);
+    INSURANCE_USDC.with(|value| value.set(INSURANCE_MIN_BALANCE));
+    INSURANCE_USDC_MIN.with(|value| value.set(INSURANCE_MIN_BALANCE));
 }
 
 /// Stand-in for the 08 §1.4 outflow custody the production runtime does not

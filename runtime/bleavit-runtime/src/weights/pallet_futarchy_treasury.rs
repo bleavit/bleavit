@@ -238,6 +238,16 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 			.saturating_add(T::DbWeight::get().reads(9))
 			.saturating_add(T::DbWeight::get().writes(4))
 	}
+	fn reconcile_insurance() -> Weight {
+		// Proof Size summary in bytes:
+		//  Measured:  `12244`
+		//  Estimated: `26846`
+		// Minimum execution time: 73_160_000 picoseconds.
+		Weight::from_parts(77_550_000, 0)
+			.saturating_add(Weight::from_parts(0, 26846))
+			.saturating_add(T::DbWeight::get().reads(9))
+			.saturating_add(T::DbWeight::get().writes(4))
+	}
 	/// Storage: `FutarchyTreasury::CommunityDistributionArmedAt` (r:1 w:0)
 	/// Proof: `FutarchyTreasury::CommunityDistributionArmedAt` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `FutarchyTreasury::CommunityDistributionRemaining` (r:1 w:1)

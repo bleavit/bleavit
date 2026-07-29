@@ -445,6 +445,25 @@ mod benchmarks {
         );
     }
 
+    /// 03 §5.4 / §5.3a(4): the worst case is a **non-empty** counter — the
+    /// empty-counter path is a successful no-op that moves no custody, so it is
+    /// strictly cheaper and is not what the weight must cover.
+    #[benchmark]
+    fn sweep_redemption_fees() {
+        let caller: T::AccountId = whitelisted_caller();
+        // Fund the sovereign so the transfer has real custody behind the
+        // counter, exactly as a charged redemption would have left it.
+        fund_sovereign_reserve::<T>();
+        RedemptionFeesAccrued::<T>::put(UNIT);
+        T::BenchmarkHelper::prime_keeper_rebate();
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller.clone()));
+        assert_eq!(RedemptionFeesAccrued::<T>::get(), 0);
+        T::BenchmarkHelper::assert_keeper_rebate_paid(
+            futarchy_primitives::keeper::CrankClass::General,
+        );
+    }
+
     #[benchmark]
     fn set_split_paused() -> Result<(), BenchmarkError> {
         let expiry = frame_system::Pallet::<T>::block_number()

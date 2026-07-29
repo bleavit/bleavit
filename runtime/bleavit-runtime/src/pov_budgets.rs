@@ -209,7 +209,8 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
             split_baseline, merge_baseline, resolve, void, settle_scalar, settle_gate,
             settle_baseline, redeem, redeem_scalar, redeem_scalar_pair, redeem_gate,
             redeem_void, redeem_baseline, redeem_baseline_pair, sweep_dust,
-            sweep_dust_baseline, set_split_paused, set_frozen, reconcile,
+            sweep_dust_baseline, sweep_redemption_fees, set_split_paused, set_frozen,
+            reconcile,
         }),
     );
     all.push((
@@ -252,7 +253,7 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
             spend, open_stream, claim_stream, cancel_stream, fund_budget_line, issue_vit,
             recover_foreign, execute_coretime_renewal, note_coretime_quote,
             prune_coretime_quote, set_coretime_authority, sweep_insurance,
-            create_community_schedule,
+            reconcile_insurance, create_community_schedule,
         }),
     );
     all.extend(

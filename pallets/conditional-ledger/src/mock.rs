@@ -17,7 +17,7 @@ use futarchy_primitives::{
     keeper::{CrankClass, KeeperRebateSink},
     kernel, Balance,
 };
-use sp_runtime::{traits::AccountIdConversion, BuildStorage};
+use sp_runtime::{traits::AccountIdConversion, BuildStorage, Perbill};
 
 pub type AccountId = u64;
 pub type AssetId = u32;
@@ -30,10 +30,13 @@ pub const SETTLER: AccountId = 102;
 pub const ALICE: AccountId = 1;
 pub const BOB: AccountId = 2;
 pub const CHARLIE: AccountId = 3;
-/// Protocol accounts (POL/book/fee/INSURANCE) — cap- and deposit-exempt.
+/// Protocol accounts (POL/book/fee/INSURANCE) — cap-, deposit- and (03 §5.3a)
+/// redemption-fee-exempt.
 pub const BOOK: AccountId = 900;
 pub const POL: AccountId = 901;
 pub const INSURANCE: AccountId = 902;
+/// The treasury `MAIN` sub-account — the 03 §5.4 redemption-fee sink (08 §1.1).
+pub const TREASURY_MAIN: AccountId = 903;
 
 /// The USDC asset id inside the mock `Assets` instance.
 pub const USDC: AssetId = 1337;
@@ -115,6 +118,11 @@ parameter_types! {
     pub static ReapBatch: u32 = kernel::REAP_BATCH;
     pub UsdcAssetId: AssetId = USDC;
     pub InsuranceAccount: AccountId = INSURANCE;
+    pub TreasuryMainAccount: AccountId = TREASURY_MAIN;
+    // `static` so a test can drive the live 13 §1 `ledger.redeem_fee` rate.
+    // Defaults to **0** — the pre-E1 regression 03 §11 makes normative — so
+    // every existing suite keeps its exact behaviour unless it opts in.
+    pub static RedemptionFee: Perbill = Perbill::zero();
     /// Disabled by default, so the mock behaves like the `()` sink unless a
     /// keeper-rebate regression explicitly enables recording.
     pub static RecordKeeperRebates: bool = false;
@@ -168,7 +176,9 @@ impl pallet_conditional_ledger::Config for Test {
     type ArchiveDelay = ArchiveDelay;
     type ReapBatch = ReapBatch;
     type ProtocolAccounts = Protocol;
+    type RedemptionFee = RedemptionFee;
     type InsuranceAccount = InsuranceAccount;
+    type TreasuryMainAccount = TreasuryMainAccount;
     type PalletId = LedgerPalletId;
     type KeeperRebate = TestKeeperRebate;
     type InflowCapGate = TestInflowCapGate;
@@ -200,6 +210,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
             (BOOK, 1_000_000_000),
             (POL, 1_000_000_000),
             (INSURANCE, 1_000_000_000),
+            (TREASURY_MAIN, 1_000_000_000),
             (ledger_account(), 1_000_000_000),
         ],
         ..Default::default()
@@ -219,6 +230,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
             (USDC, BOOK, 100_000 * UNIT),
             (USDC, POL, 100_000 * UNIT),
             (USDC, INSURANCE, 100_000 * UNIT),
+            (USDC, TREASURY_MAIN, 100_000 * UNIT),
             (USDC, ledger_account(), 10_000), // one-ED genesis endowment (03 §1)
         ],
         next_asset_id: None,
@@ -232,6 +244,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         System::set_block_number(1);
         StorageVersion::new(1).put::<pallet_conditional_ledger::Pallet<Test>>();
         ReapBatch::set(kernel::REAP_BATCH);
+        RedemptionFee::set(Perbill::zero());
         RecordKeeperRebates::set(false);
         KeeperRebates::set(Vec::new());
         MockLocalUsdcIssuance::set(0);

@@ -58,12 +58,13 @@ enum OpTag {
     RedeemGate,
     RedeemBaseline,
     RedeemBaselinePair,
+    SweepRedemptionFees,
     SweepDust,
     SweepDustBaseline,
 }
 
 impl OpTag {
-    const ALL: [Self; 23] = [
+    const ALL: [Self; 24] = [
         Self::Split,
         Self::Merge,
         Self::SplitScalar,
@@ -85,6 +86,7 @@ impl OpTag {
         Self::RedeemGate,
         Self::RedeemBaseline,
         Self::RedeemBaselinePair,
+        Self::SweepRedemptionFees,
         Self::SweepDust,
         Self::SweepDustBaseline,
     ];
@@ -183,6 +185,7 @@ enum Op {
         who: u8,
         amount: Balance,
     },
+    SweepRedemptionFees,
     SweepDust,
     SweepDustBaseline,
 }
@@ -211,6 +214,7 @@ impl Op {
             Self::RedeemGate { .. } => OpTag::RedeemGate,
             Self::RedeemBaseline { .. } => OpTag::RedeemBaseline,
             Self::RedeemBaselinePair { .. } => OpTag::RedeemBaselinePair,
+            Self::SweepRedemptionFees => OpTag::SweepRedemptionFees,
             Self::SweepDust => OpTag::SweepDust,
             Self::SweepDustBaseline => OpTag::SweepDustBaseline,
         }
@@ -461,6 +465,7 @@ fn generator_arm(tag: OpTag) -> BoxedStrategy<Op> {
         OpTag::RedeemBaselinePair => (0u8..6, amount_strategy())
             .prop_map(|(who, amount)| Op::RedeemBaselinePair { who, amount })
             .boxed(),
+        OpTag::SweepRedemptionFees => Just(Op::SweepRedemptionFees).boxed(),
         OpTag::SweepDust => Just(Op::SweepDust).boxed(),
         OpTag::SweepDustBaseline => Just(Op::SweepDustBaseline).boxed(),
     }
@@ -468,13 +473,41 @@ fn generator_arm(tag: OpTag) -> BoxedStrategy<Op> {
 
 fn op_strategy() -> impl Strategy<Value = Op> {
     // The frame-free core has no archive clock. Its sequence alphabet uses
-    // the 21 core operations; the two remaining registered arms are routed
-    // to real FRAME dispatches by PT-5b below.
-    prop::sample::select(OpTag::ALL[..21].to_vec()).prop_flat_map(generator_arm)
+    // the 22 core operations (03 §11's alphabet, `sweep_redemption_fees`
+    // included); the two remaining registered arms are routed to real FRAME
+    // dispatches by PT-5b below.
+    prop::sample::select(OpTag::ALL[..22].to_vec()).prop_flat_map(generator_arm)
 }
 
-fn initial_core() -> LedgerState<u8> {
+/// The 13 §1 `ledger.redeem_fee` launch default (30 bps), read from the
+/// registry's own genesis seed rather than restated.
+///
+/// A numeric literal duplicating a 13-owned value is a defect in tests as much
+/// as in runtime code (`.claude/rules/runtime-code.md` rule 4), and this is the
+/// value 03 §5.3a's worked witnesses are stated "at defaults".
+fn registry_redeem_fee() -> u32 {
+    let key = constitution_core::key16(b"ledger.rdm_fee");
+    let record = constitution_core::genesis_params()
+        .into_iter()
+        .find(|record| record.key == key)
+        .expect("13 §1 seeds `ledger.rdm_fee`");
+    match record.value {
+        constitution_core::ParamValue::Perbill(rate) => rate,
+        other => panic!("13 §1: `ledger.rdm_fee` must be a Perbill row, got {other:?}"),
+    }
+}
+
+/// 03 §11: **every** sequence-based suite runs at both a zero and a non-zero
+/// `ledger.redeem_fee`. The zero leg is the pre-E1 regression; only the
+/// non-zero leg exercises §5.3a at all, so a suite that ran one of them would
+/// agree with an implementation that ignored the rate completely.
+fn sequence_rates() -> [u32; 2] {
+    [0, registry_redeem_fee()]
+}
+
+fn initial_core(redeem_fee: u32) -> LedgerState<u8> {
     let mut state = LedgerState::new();
+    state.redeem_fee = redeem_fee;
     state.create_vault(PID, 0).expect("fresh proposal vault");
     state
         .create_baseline_vault(BASELINE_EPOCH)
@@ -548,6 +581,10 @@ fn apply_op(state: &mut LedgerState<u8>, op: &Op) -> Result<(), CoreError> {
         Op::RedeemBaselinePair { who, amount } => {
             state.redeem_baseline_pair(BASELINE_EPOCH, &who, amount)
         }
+        // 03 §5.4: the counter half of the sweep lives in the core; the custody
+        // move to the treasury `MAIN` account is the shell's (PT-5b's mock
+        // dispatch exercises that half).
+        Op::SweepRedemptionFees => state.sweep_redemption_fees().map(|_| ()),
         Op::SweepDust | Op::SweepDustBaseline => {
             unreachable!("shell-only generator arms are routed through PT-5b")
         }
@@ -579,14 +616,18 @@ fn assert_escrow_equation(before: &LedgerState<u8>, after: &LedgerState<u8>) -> 
         CoreEvent::Split(_, amount) | CoreEvent::BaselineSplit(_, amount) => {
             before_escrow.checked_add(amount)
         }
+        // 03 §6 (E1): every `E −=` is the **gross** and is unchanged by the
+        // §5.3a fee, which splits only the *destination* of that outflow. The
+        // trailing fee field is therefore deliberately ignored here — an
+        // implementation that decremented escrow by the net instead would fail
+        // exactly this assertion.
         CoreEvent::Merged(_, amount)
         | CoreEvent::BaselineMerged(_, amount)
         | CoreEvent::Redeemed(_, amount)
-        | CoreEvent::ScalarPairRedeemed(_, amount)
-        | CoreEvent::GateRedeemed(_, _, amount) => before_escrow.checked_sub(amount),
-        CoreEvent::ScalarRedeemed(_, _, payout) | CoreEvent::BaselineRedeemed(_, _, payout) => {
-            before_escrow.checked_sub(payout)
-        }
+        | CoreEvent::ScalarPairRedeemed(_, amount, _)
+        | CoreEvent::GateRedeemed(_, _, amount, _) => before_escrow.checked_sub(amount),
+        CoreEvent::ScalarRedeemed(_, _, payout, _)
+        | CoreEvent::BaselineRedeemed(_, _, payout, _) => before_escrow.checked_sub(payout),
         CoreEvent::VoidRedeemed(_, _, _, payout) => before_escrow.checked_sub(payout),
         _ => Some(before_escrow),
     };
@@ -871,7 +912,17 @@ fn assert_no_undeclared_mint(
 }
 
 fn exercise_sequence(ops: &[Op], check_mint_paths: bool) -> TestCaseResult {
-    let mut state = initial_core();
+    for rate in sequence_rates() {
+        exercise_sequence_at(ops, check_mint_paths, rate)?;
+    }
+    Ok(())
+}
+
+fn exercise_sequence_at(ops: &[Op], check_mint_paths: bool, rate: u32) -> TestCaseResult {
+    let mut state = initial_core(rate);
+    // 03 §5.3a(4)/L-7: the accrual is monotone non-decreasing between sweeps.
+    let mut charged: Balance = 0;
+    let mut swept: Balance = 0;
     for op in ops {
         let before = state.clone();
         let result = apply_op(&mut state, op);
@@ -883,6 +934,51 @@ fn exercise_sequence(ops: &[Op], check_mint_paths: bool) -> TestCaseResult {
             if check_mint_paths {
                 assert_no_undeclared_mint(&before, &state, op)?;
             }
+            if matches!(op, Op::SweepRedemptionFees) {
+                prop_assert_eq!(
+                    state.redemption_fees_accrued,
+                    0,
+                    "03 §5.4: the sweep zeroes the counter"
+                );
+                swept += before.redemption_fees_accrued;
+            } else {
+                let delta = state
+                    .redemption_fees_accrued
+                    .checked_sub(before.redemption_fees_accrued)
+                    .ok_or_else(|| {
+                        TestCaseError::fail(
+                            "L-7: only sweep_redemption_fees may decrement the accrual",
+                        )
+                    })?;
+                charged += delta;
+                // 03 §5.3a(1): every exempt operation charges exactly zero, at
+                // any rate. This is the structural half of the exemption — a
+                // widening of the charged set fails here, not in a payout table.
+                if !matches!(
+                    op,
+                    Op::RedeemScalar { .. }
+                        | Op::RedeemScalarPair { .. }
+                        | Op::RedeemGate { .. }
+                        | Op::RedeemBaseline { .. }
+                        | Op::RedeemBaselinePair { .. }
+                ) {
+                    prop_assert_eq!(
+                        delta,
+                        0,
+                        "03 §5.3a(1): {:?} is fee-exempt and charged {}",
+                        op.tag(),
+                        delta
+                    );
+                }
+                if rate == 0 {
+                    prop_assert_eq!(delta, 0, "a zero rate charges nothing");
+                }
+            }
+            prop_assert_eq!(
+                state.redemption_fees_accrued,
+                charged - swept,
+                "L-7: the counter is exactly charged minus swept"
+            );
         }
         prop_assert_eq!(state.try_state(), Ok(()), "after {:?}", op.tag());
     }
@@ -942,6 +1038,36 @@ fn full_redemption_band(total: Balance, remaining: Balance, holders: usize) -> T
     prop_assert!(
         payout >= total.saturating_sub(holders as u128),
         "PT-3 payout {payout}, E {total}, holders {holders}"
+    );
+    Ok(())
+}
+
+/// PT-3 after E1 (03 §11): Σ **net** payouts ∈ `[E − r − F, E − F]`, where `F`
+/// is the total §5.3a fee retained over the same pair-first schedule.
+///
+/// Both halves are asserted and they are different claims. The **gross** band
+/// is the pre-E1 statement and the fee must not move it at all — `escrowed`
+/// falls by the gross on every charged call, so an implementation that drew the
+/// fee a second time out of escrow fails here. The **net** band is the new one:
+/// `Σ net + F` is bounded exactly as the pre-E1 form bounded Σ payouts, i.e.
+/// the fee moves value between claimants and the protocol without leaving the
+/// accounted total. `F = 0` in `Voided`, where every operation is exempt.
+fn full_redemption_band_with_fee(
+    total: Balance,
+    remaining: Balance,
+    holders: usize,
+    fee: Balance,
+) -> TestCaseResult {
+    full_redemption_band(total, remaining, holders)?;
+    let gross = total - remaining;
+    let net = gross
+        .checked_sub(fee)
+        .ok_or_else(|| TestCaseError::fail("PT-3: the retained fee exceeds the gross paid"))?;
+    prop_assert_eq!(net + fee, gross, "PT-3: Σ net + F != Σ gross");
+    prop_assert!(net <= total - fee, "PT-3 upper bound E − F");
+    prop_assert!(
+        net >= total.saturating_sub(holders as u128 + fee),
+        "PT-3 lower bound E − r − F: net {net}, E {total}, holders {holders}, F {fee}"
     );
     Ok(())
 }
@@ -1115,14 +1241,28 @@ proptest! {
         amount in (4 * kernel::MIN_SPLIT_USDC)..=2_000_000u128,
         wrapper_buys in wrapper_buys_strategy(),
     ) {
+        // 03 §11: PT-2 is preserved verbatim by E1 and the suite MUST assert it
+        // **with a non-zero `ledger.redeem_fee` configured** — that is the
+        // regression that catches any future widening of the charged set into
+        // the par leg, which would falsify G-3, D-3, I-2(b) and this property
+        // together. Every state below therefore runs at the live registry rate
+        // and is checked to have accrued exactly nothing.
+        let rate = registry_redeem_fee();
+        prop_assert!(rate > 0, "13 §1 seeds a non-zero ledger.redeem_fee");
+
         // (a) A complete Accept+Reject holder recovers par.
         let mut paired = LedgerState::new();
+        paired.redeem_fee = rate;
         paired.create_vault(1, 0).unwrap();
         paired.split(LedgerOrigin::Signed, 1, &0, amount).unwrap();
         paired.void(LedgerOrigin::ResolveAuthority, 1).unwrap();
         let before = proposal_escrow(&paired, 1);
         paired.merge(LedgerOrigin::Signed, 1, &0, amount).unwrap();
         prop_assert_eq!(before - proposal_escrow(&paired, 1), amount);
+        prop_assert_eq!(
+            paired.redemption_fees_accrued, 0,
+            "03 §5.3a(1): `merge` is the D-1 primary recovery path and is exempt"
+        );
 
         // (b) Drive several buys on both sides of both branch books through
         // the exact plain-ledger accounting of 04 §6.1 / market-core's
@@ -1131,6 +1271,7 @@ proptest! {
         const TREASURY: u8 = 1;
         const FEES: u8 = 7;
         let mut wrapper = LedgerState::new();
+        wrapper.redeem_fee = rate;
         wrapper.create_vault(2, 0).unwrap();
         wrapper.add_protocol_account(wrapper_book(Branch::Accept));
         wrapper.add_protocol_account(wrapper_book(Branch::Reject));
@@ -1159,10 +1300,18 @@ proptest! {
             neutral_premium_delta - fees as i128,
             "04 §6.2/03 §6.4 guarantee neutral-prior recovery, net of the chosen market premium and fees",
         );
+        // G-3: the net principal delta above is `−fees` meaning **trade** fees
+        // alone. `recovery` is a gross escrow delta, so the assertion is only
+        // honest if no redemption fee was taken out of it.
+        prop_assert_eq!(
+            wrapper.redemption_fees_accrued, 0,
+            "03 §5.3a(1): the wrapper buyer's VOID recovery path is entirely exempt"
+        );
 
         // (c) Deliberately unpaired branch claims pay half; scalar/gate legs
         // pay quarter, all with claimant-adverse floors.
         let mut unpaired = LedgerState::new();
+        unpaired.redeem_fee = rate;
         unpaired.create_vault(3, 0).unwrap();
         unpaired.split(LedgerOrigin::Signed, 3, &0, amount).unwrap();
         unpaired.split_scalar(LedgerOrigin::Signed, 3, Branch::Accept, &0, amount).unwrap();
@@ -1184,8 +1333,13 @@ proptest! {
         unpaired.redeem_void(3, Branch::Accept, PositionKind::Short, &1, amount).unwrap();
         prop_assert_eq!(last - proposal_escrow(&unpaired, 3), amount / 4);
         prop_assert_eq!(unpaired.try_state(), Ok(()));
+        prop_assert_eq!(
+            unpaired.redemption_fees_accrued, 0,
+            "03 §5.3a(1): `redeem_void` is exempt — VOID is protocol failure"
+        );
 
         let mut gate_unpaired = LedgerState::new();
+        gate_unpaired.redeem_fee = rate;
         gate_unpaired.create_vault(4, 0).unwrap();
         gate_unpaired.split(LedgerOrigin::Signed, 4, &0, amount).unwrap();
         gate_unpaired.split_gate(
@@ -1202,6 +1356,23 @@ proptest! {
             4, Branch::Accept, PositionKind::GateNo(GateType::Security), &0, amount
         ).unwrap();
         prop_assert_eq!(last - proposal_escrow(&gate_unpaired, 4), amount / 4);
+        prop_assert_eq!(gate_unpaired.redemption_fees_accrued, 0);
+
+        // (d) The par leg itself, at the same non-zero rate: winning
+        // branch-USDC still redeems 1:1 with nothing withheld (G-3, I-5).
+        let mut par = LedgerState::new();
+        par.redeem_fee = rate;
+        par.create_vault(5, 0).unwrap();
+        par.split(LedgerOrigin::Signed, 5, &0, amount).unwrap();
+        par.resolve(LedgerOrigin::ResolveAuthority, 5, Branch::Accept).unwrap();
+        par.settle_scalar(LedgerOrigin::SettleAuthority, 5, FixedU64(500_000_000)).unwrap();
+        let before = proposal_escrow(&par, 5);
+        par.redeem(5, &0, amount).unwrap();
+        prop_assert_eq!(before - proposal_escrow(&par, 5), amount);
+        prop_assert_eq!(
+            par.redemption_fees_accrued, 0,
+            "03 §5.3a(1): charging the par leg falsifies G-3, D-3, I-2(b), I-5 and PT-2"
+        );
     }
 
     /// PT-3: a mixed proposal portfolio puts branch, scalar, and gate claims
@@ -1226,182 +1397,204 @@ proptest! {
         gate in gate_strategy(),
         outcome in any::<bool>(),
     ) {
-        let holder_floor = kernel::MIN_TRANSFER_USDC * HOLDERS.len() as u128;
-        let branch_total = holder_floor + branch_extra;
-        let scalar_total = holder_floor + scalar_extra;
-        let gate_total = holder_floor + gate_extra;
-        let total = branch_total + scalar_total + gate_total;
-        let branch_fragments = split_fragments(branch_total, &branch_weights);
-        let long_fragments = split_fragments(scalar_total, &long_weights);
-        let short_fragments = split_fragments(scalar_total, &short_weights);
-        let gate_yes_fragments = split_fragments(gate_total, &gate_yes_weights);
-        let gate_no_fragments = split_fragments(gate_total, &gate_no_weights);
+        // 03 §11: run the whole pair-first schedule at BOTH a zero and a
+        // non-zero `ledger.redeem_fee`. The zero leg is the pre-E1 regression;
+        // only the non-zero leg exercises the §5.3a band `[E − r − F, E − F]`.
+        let portfolio = |redeem_fee: u32| -> TestCaseResult {
+            let holder_floor = kernel::MIN_TRANSFER_USDC * HOLDERS.len() as u128;
+            let branch_total = holder_floor + branch_extra;
+            let scalar_total = holder_floor + scalar_extra;
+            let gate_total = holder_floor + gate_extra;
+            let total = branch_total + scalar_total + gate_total;
+            let branch_fragments = split_fragments(branch_total, &branch_weights);
+            let long_fragments = split_fragments(scalar_total, &long_weights);
+            let short_fragments = split_fragments(scalar_total, &short_weights);
+            let gate_yes_fragments = split_fragments(gate_total, &gate_yes_weights);
+            let gate_no_fragments = split_fragments(gate_total, &gate_no_weights);
 
-        let mut scalar = LedgerState::new();
-        scalar.create_vault(10, 0).unwrap();
-        scalar.split(LedgerOrigin::Signed, 10, &0, total).unwrap();
-        scalar.split_scalar(
-            LedgerOrigin::Signed, 10, Branch::Accept, &0, scalar_total
-        ).unwrap();
-        scalar.split_gate(
-            LedgerOrigin::Signed, 10, Branch::Accept, gate, &0, gate_total
-        ).unwrap();
-        distribute(
-            &mut scalar,
-            position(10, Branch::Accept, PositionKind::BranchUsdc),
-            0,
-            &branch_fragments,
-        );
-        distribute(
-            &mut scalar,
-            position(10, Branch::Accept, PositionKind::Long),
-            0,
-            &long_fragments,
-        );
-        distribute(
-            &mut scalar,
-            position(10, Branch::Accept, PositionKind::Short),
-            0,
-            &short_fragments,
-        );
-        distribute(
-            &mut scalar,
-            position(10, Branch::Accept, PositionKind::GateYes(gate)),
-            0,
-            &gate_yes_fragments,
-        );
-        distribute(
-            &mut scalar,
-            position(10, Branch::Accept, PositionKind::GateNo(gate)),
-            0,
-            &gate_no_fragments,
-        );
-        scalar.resolve(LedgerOrigin::ResolveAuthority, 10, Branch::Accept).unwrap();
-        scalar.settle_gate(LedgerOrigin::SettleAuthority, 10, gate, outcome).unwrap();
-        scalar.settle_scalar(LedgerOrigin::SettleAuthority, 10, FixedU64(score)).unwrap();
-        let winning_gate = if outcome {
-            PositionKind::GateYes(gate)
-        } else {
-            PositionKind::GateNo(gate)
-        };
-        for (holder, branch_amount) in HOLDERS.iter().zip(&branch_fragments) {
-            scalar.redeem(10, holder, *branch_amount).unwrap();
-            let holder_long = core_balance(
-                &scalar,
+            let mut scalar = LedgerState::new();
+            scalar.redeem_fee = redeem_fee;
+            scalar.create_vault(10, 0).unwrap();
+            scalar.split(LedgerOrigin::Signed, 10, &0, total).unwrap();
+            scalar.split_scalar(
+                LedgerOrigin::Signed, 10, Branch::Accept, &0, scalar_total
+            ).unwrap();
+            scalar.split_gate(
+                LedgerOrigin::Signed, 10, Branch::Accept, gate, &0, gate_total
+            ).unwrap();
+            distribute(
+                &mut scalar,
+                position(10, Branch::Accept, PositionKind::BranchUsdc),
+                0,
+                &branch_fragments,
+            );
+            distribute(
+                &mut scalar,
                 position(10, Branch::Accept, PositionKind::Long),
-                *holder,
+                0,
+                &long_fragments,
             );
-            let holder_short = core_balance(
-                &scalar,
+            distribute(
+                &mut scalar,
                 position(10, Branch::Accept, PositionKind::Short),
-                *holder,
+                0,
+                &short_fragments,
             );
-            let paired = holder_long.min(holder_short);
-            if paired > 0 {
-                scalar.redeem_scalar_pair(10, holder, paired).unwrap();
-            }
-            let long_left = holder_long - paired;
-            let short_left = holder_short - paired;
-            if long_left > 0 {
-                scalar.redeem_scalar(10, ScalarSide::Long, holder, long_left).unwrap();
-            }
-            if short_left > 0 {
-                scalar.redeem_scalar(10, ScalarSide::Short, holder, short_left).unwrap();
-            }
-            let gate_amount = core_balance(
-                &scalar,
-                position(10, Branch::Accept, winning_gate),
-                *holder,
+            distribute(
+                &mut scalar,
+                position(10, Branch::Accept, PositionKind::GateYes(gate)),
+                0,
+                &gate_yes_fragments,
             );
-            scalar.redeem_gate(10, gate, holder, gate_amount).unwrap();
-        }
-        full_redemption_band(total, proposal_escrow(&scalar, 10), HOLDERS.len())?;
+            distribute(
+                &mut scalar,
+                position(10, Branch::Accept, PositionKind::GateNo(gate)),
+                0,
+                &gate_no_fragments,
+            );
+            scalar.resolve(LedgerOrigin::ResolveAuthority, 10, Branch::Accept).unwrap();
+            scalar.settle_gate(LedgerOrigin::SettleAuthority, 10, gate, outcome).unwrap();
+            scalar.settle_scalar(LedgerOrigin::SettleAuthority, 10, FixedU64(score)).unwrap();
+            let winning_gate = if outcome {
+                PositionKind::GateYes(gate)
+            } else {
+                PositionKind::GateNo(gate)
+            };
+            for (holder, branch_amount) in HOLDERS.iter().zip(&branch_fragments) {
+                scalar.redeem(10, holder, *branch_amount).unwrap();
+                let holder_long = core_balance(
+                    &scalar,
+                    position(10, Branch::Accept, PositionKind::Long),
+                    *holder,
+                );
+                let holder_short = core_balance(
+                    &scalar,
+                    position(10, Branch::Accept, PositionKind::Short),
+                    *holder,
+                );
+                let paired = holder_long.min(holder_short);
+                if paired > 0 {
+                    scalar.redeem_scalar_pair(10, holder, paired).unwrap();
+                }
+                let long_left = holder_long - paired;
+                let short_left = holder_short - paired;
+                if long_left > 0 {
+                    scalar.redeem_scalar(10, ScalarSide::Long, holder, long_left).unwrap();
+                }
+                if short_left > 0 {
+                    scalar.redeem_scalar(10, ScalarSide::Short, holder, short_left).unwrap();
+                }
+                let gate_amount = core_balance(
+                    &scalar,
+                    position(10, Branch::Accept, winning_gate),
+                    *holder,
+                );
+                scalar.redeem_gate(10, gate, holder, gate_amount).unwrap();
+            }
+            full_redemption_band_with_fee(
+                total,
+                proposal_escrow(&scalar, 10),
+                HOLDERS.len(),
+                scalar.redemption_fees_accrued,
+            )?;
 
-        let mut base = LedgerState::new();
-        base.create_baseline_vault(10).unwrap();
-        base.split_baseline(LedgerOrigin::Signed, 10, &0, scalar_total).unwrap();
-        let base_long = split_fragments(scalar_total, &baseline_long_weights);
-        let base_short = split_fragments(scalar_total, &baseline_short_weights);
-        distribute(&mut base, baseline(10, ScalarSide::Long), 0, &base_long);
-        distribute(&mut base, baseline(10, ScalarSide::Short), 0, &base_short);
-        base.settle_baseline(LedgerOrigin::SettleAuthority, 10, FixedU64(score)).unwrap();
-        for holder in HOLDERS {
-            let long = core_balance(&base, baseline(10, ScalarSide::Long), holder);
-            let short = core_balance(&base, baseline(10, ScalarSide::Short), holder);
-            let paired = long.min(short);
-            if paired > 0 {
-                base.redeem_baseline_pair(10, &holder, paired).unwrap();
+            let mut base = LedgerState::new();
+            base.redeem_fee = redeem_fee;
+            base.create_baseline_vault(10).unwrap();
+            base.split_baseline(LedgerOrigin::Signed, 10, &0, scalar_total).unwrap();
+            let base_long = split_fragments(scalar_total, &baseline_long_weights);
+            let base_short = split_fragments(scalar_total, &baseline_short_weights);
+            distribute(&mut base, baseline(10, ScalarSide::Long), 0, &base_long);
+            distribute(&mut base, baseline(10, ScalarSide::Short), 0, &base_short);
+            base.settle_baseline(LedgerOrigin::SettleAuthority, 10, FixedU64(score)).unwrap();
+            for holder in HOLDERS {
+                let long = core_balance(&base, baseline(10, ScalarSide::Long), holder);
+                let short = core_balance(&base, baseline(10, ScalarSide::Short), holder);
+                let paired = long.min(short);
+                if paired > 0 {
+                    base.redeem_baseline_pair(10, &holder, paired).unwrap();
+                }
+                if long > paired {
+                    base.redeem_baseline(10, ScalarSide::Long, &holder, long - paired).unwrap();
+                }
+                if short > paired {
+                    base.redeem_baseline(10, ScalarSide::Short, &holder, short - paired).unwrap();
+                }
             }
-            if long > paired {
-                base.redeem_baseline(10, ScalarSide::Long, &holder, long - paired).unwrap();
-            }
-            if short > paired {
-                base.redeem_baseline(10, ScalarSide::Short, &holder, short - paired).unwrap();
-            }
-        }
-        full_redemption_band(
-            scalar_total,
-            baseline_escrow(&base, 10),
-            HOLDERS.len(),
-        )?;
+            full_redemption_band_with_fee(
+                scalar_total,
+                baseline_escrow(&base, 10),
+                HOLDERS.len(),
+                base.redemption_fees_accrued,
+            )?;
 
-        let mut voided = LedgerState::new();
-        voided.create_vault(11, 0).unwrap();
-        voided.split(LedgerOrigin::Signed, 11, &0, branch_total).unwrap();
-        let void_accept = split_fragments(branch_total, &void_accept_weights);
-        let void_reject = split_fragments(branch_total, &void_reject_weights);
-        distribute(
-            &mut voided,
-            position(11, Branch::Accept, PositionKind::BranchUsdc),
-            0,
-            &void_accept,
-        );
-        distribute(
-            &mut voided,
-            position(11, Branch::Reject, PositionKind::BranchUsdc),
-            0,
-            &void_reject,
-        );
-        voided.void(LedgerOrigin::ResolveAuthority, 11).unwrap();
-        for holder in HOLDERS {
-            let accept = core_balance(
-                &voided,
+            let mut voided = LedgerState::new();
+            voided.redeem_fee = redeem_fee;
+            voided.create_vault(11, 0).unwrap();
+            voided.split(LedgerOrigin::Signed, 11, &0, branch_total).unwrap();
+            let void_accept = split_fragments(branch_total, &void_accept_weights);
+            let void_reject = split_fragments(branch_total, &void_reject_weights);
+            distribute(
+                &mut voided,
                 position(11, Branch::Accept, PositionKind::BranchUsdc),
-                holder,
+                0,
+                &void_accept,
             );
-            let reject = core_balance(
-                &voided,
+            distribute(
+                &mut voided,
                 position(11, Branch::Reject, PositionKind::BranchUsdc),
-                holder,
+                0,
+                &void_reject,
             );
-            let paired = accept.min(reject);
-            if paired > 0 {
-                voided.merge(LedgerOrigin::Signed, 11, &holder, paired).unwrap();
+            voided.void(LedgerOrigin::ResolveAuthority, 11).unwrap();
+            for holder in HOLDERS {
+                let accept = core_balance(
+                    &voided,
+                    position(11, Branch::Accept, PositionKind::BranchUsdc),
+                    holder,
+                );
+                let reject = core_balance(
+                    &voided,
+                    position(11, Branch::Reject, PositionKind::BranchUsdc),
+                    holder,
+                );
+                let paired = accept.min(reject);
+                if paired > 0 {
+                    voided.merge(LedgerOrigin::Signed, 11, &holder, paired).unwrap();
+                }
+                if accept > paired {
+                    voided.redeem_void(
+                        11,
+                        Branch::Accept,
+                        PositionKind::BranchUsdc,
+                        &holder,
+                        accept - paired,
+                    ).unwrap();
+                }
+                if reject > paired {
+                    voided.redeem_void(
+                        11,
+                        Branch::Reject,
+                        PositionKind::BranchUsdc,
+                        &holder,
+                        reject - paired,
+                    ).unwrap();
+                }
             }
-            if accept > paired {
-                voided.redeem_void(
-                    11,
-                    Branch::Accept,
-                    PositionKind::BranchUsdc,
-                    &holder,
-                    accept - paired,
-                ).unwrap();
-            }
-            if reject > paired {
-                voided.redeem_void(
-                    11,
-                    Branch::Reject,
-                    PositionKind::BranchUsdc,
-                    &holder,
-                    reject - paired,
-                ).unwrap();
-            }
+            // 03 §11: `F = 0` in `Voided`, where every operation is exempt —
+            // asserted rather than assumed, at a non-zero rate.
+            prop_assert_eq!(voided.redemption_fees_accrued, 0);
+            full_redemption_band_with_fee(
+                branch_total,
+                proposal_escrow(&voided, 11),
+                HOLDERS.len(),
+                voided.redemption_fees_accrued,
+            )?;
+            Ok(())
+        };
+        for redeem_fee in sequence_rates() {
+            portfolio(redeem_fee)?;
         }
-        full_redemption_band(
-            branch_total,
-            proposal_escrow(&voided, 11),
-            HOLDERS.len(),
-        )?;
     }
 
     /// PT-4: total supply can increase only in split families.  All other
@@ -1642,7 +1835,14 @@ proptest! {
     ) {
         let tranche = tranche_raw - tranche_raw % 4;
         let amount = 4 * tranche;
+        // 03 §11/§6.5(4): run the entire I-27 `Voided` surface at a non-zero
+        // `ledger.redeem_fee`. §6.4's D-1 valuation argument is re-verified
+        // *unchanged* only because no operation admissible under `Voided` is
+        // fee-bearing, so the exactness assertions below must still hold and
+        // the accrual must stay at zero throughout.
+        let rate = registry_redeem_fee();
         let mut open = LedgerState::new();
+        open.redeem_fee = rate;
         open.create_vault(60, 0).unwrap();
         open.split(LedgerOrigin::Signed, 60, &0, amount).unwrap();
         let mut resolved = open.clone();
@@ -1651,6 +1851,7 @@ proptest! {
         prop_assert_eq!(resolved.void(LedgerOrigin::ResolveAuthority, 60), Ok(()));
 
         let mut settled = LedgerState::new();
+        settled.redeem_fee = rate;
         settled.create_vault(61, 0).unwrap();
         settled.split(LedgerOrigin::Signed, 61, &0, amount).unwrap();
         settled.resolve(LedgerOrigin::ResolveAuthority, 61, Branch::Accept).unwrap();
@@ -1663,6 +1864,7 @@ proptest! {
         prop_assert_eq!(settled, snapshot);
 
         let mut recover = LedgerState::new();
+        recover.redeem_fee = rate;
         recover.create_vault(62, 0).unwrap();
         recover.split(LedgerOrigin::Signed, 62, &0, amount).unwrap();
         // Mixed holder inventory: branch pair, scalar pair, gate pair, and an
@@ -1718,6 +1920,10 @@ proptest! {
         prop_assert!(permuted_payout <= amount);
         prop_assert_eq!(permuted_payout, canonical_payout, "first-redeemer advantage");
         prop_assert_eq!(canonical_payout, amount, "multiple-of-four portfolio is exact");
+        prop_assert_eq!(
+            recover.redemption_fees_accrued, 0,
+            "03 §5.3a(1)/§6.5(4): the `Voided` recovery surface is entirely exempt"
+        );
     }
 
     /// PT-7: atomic scalar/Baseline pair redemption is exactly `a`; separate
@@ -1730,7 +1936,14 @@ proptest! {
         gate in gate_strategy(),
         outcome in any::<bool>(),
     ) {
+        // 03 §11 (PT-7 after E1): the pair path keeps paying exactly `a`
+        // **gross**, and the *relative* guarantee — leg-by-leg never beats the
+        // pair — is the normative one and MUST be asserted **net** at a
+        // non-zero `ledger.redeem_fee`. A fee applied per call rather than per
+        // unit is exactly how the pair path could silently become the worse one.
+        for redeem_fee in sequence_rates() {
         let mut scalar = LedgerState::new();
+        scalar.redeem_fee = redeem_fee;
         scalar.create_vault(70, 0).unwrap();
         scalar.split(LedgerOrigin::Signed, 70, &0, amount).unwrap();
         scalar.split_scalar(LedgerOrigin::Signed, 70, Branch::Accept, &0, amount).unwrap();
@@ -1740,13 +1953,21 @@ proptest! {
         let before = proposal_escrow(&atomic, 70);
         atomic.redeem_scalar_pair(70, &0, amount).unwrap();
         prop_assert_eq!(before - proposal_escrow(&atomic, 70), amount);
+        let pair_net = amount - atomic.redemption_fees_accrued;
         let mut legs = scalar;
         let before = proposal_escrow(&legs, 70);
         legs.redeem_scalar(70, ScalarSide::Long, &0, amount).unwrap();
         legs.redeem_scalar(70, ScalarSide::Short, &0, amount).unwrap();
-        prop_assert!(before - proposal_escrow(&legs, 70) <= amount);
+        let legs_gross = before - proposal_escrow(&legs, 70);
+        prop_assert!(legs_gross <= amount);
+        let legs_net = legs_gross - legs.redemption_fees_accrued;
+        prop_assert!(
+            legs_net <= pair_net,
+            "PT-7 net: leg-by-leg {legs_net} beat the pair {pair_net} at rate {redeem_fee}"
+        );
 
         let mut base = LedgerState::new();
+        base.redeem_fee = redeem_fee;
         base.create_baseline_vault(70).unwrap();
         base.split_baseline(LedgerOrigin::Signed, 70, &0, amount).unwrap();
         base.settle_baseline(LedgerOrigin::SettleAuthority, 70, FixedU64(score)).unwrap();
@@ -1754,13 +1975,38 @@ proptest! {
         let before = baseline_escrow(&atomic, 70);
         atomic.redeem_baseline_pair(70, &0, amount).unwrap();
         prop_assert_eq!(before - baseline_escrow(&atomic, 70), amount);
+        let base_pair_net = amount - atomic.redemption_fees_accrued;
         let mut legs = base;
         let before = baseline_escrow(&legs, 70);
         legs.redeem_baseline(70, ScalarSide::Long, &0, amount).unwrap();
         legs.redeem_baseline(70, ScalarSide::Short, &0, amount).unwrap();
-        prop_assert!(before - baseline_escrow(&legs, 70) <= amount);
+        let base_legs_gross = before - baseline_escrow(&legs, 70);
+        prop_assert!(base_legs_gross <= amount);
+        prop_assert!(
+            base_legs_gross - legs.redemption_fees_accrued <= base_pair_net,
+            "PT-7 net (Baseline): leg-by-leg beat the pair at rate {redeem_fee}"
+        );
+
+        // 03 §5.3a(1)/PT-7: a `ProtocolAccounts` pair holder and a
+        // sub-`min_split` payout both pay exactly `a` — no deduction at all.
+        let mut protocol = LedgerState::new();
+        protocol.redeem_fee = redeem_fee;
+        protocol.create_vault(72, 0).unwrap();
+        protocol.add_protocol_account(9);
+        protocol.split(LedgerOrigin::Signed, 72, &9, amount).unwrap();
+        protocol.split_scalar(LedgerOrigin::Signed, 72, Branch::Accept, &9, amount).unwrap();
+        protocol.resolve(LedgerOrigin::ResolveAuthority, 72, Branch::Accept).unwrap();
+        protocol.settle_scalar(LedgerOrigin::SettleAuthority, 72, FixedU64(score)).unwrap();
+        let before = proposal_escrow(&protocol, 72);
+        protocol.redeem_scalar_pair(72, &9, amount).unwrap();
+        prop_assert_eq!(before - proposal_escrow(&protocol, 72), amount);
+        prop_assert_eq!(
+            protocol.redemption_fees_accrued, 0,
+            "03 §5.3a(1): a ProtocolAccounts claimant is never charged"
+        );
 
         let mut gated = LedgerState::new();
+        gated.redeem_fee = redeem_fee;
         gated.create_vault(71, 0).unwrap();
         gated.split(LedgerOrigin::Signed, 71, &0, amount).unwrap();
         gated.split_gate(LedgerOrigin::Signed, 71, Branch::Accept, gate, &0, amount).unwrap();
@@ -1809,6 +2055,7 @@ proptest! {
             amount,
             "losing gate side must pay exactly zero and remain reap-only"
         );
+        }
     }
 
     /// PT-8 (prefix/churn half): reaping one vault leaves every other prefix
@@ -1931,12 +2178,137 @@ fn pt3_named_scalar_070005_vector_is_exact() {
         .events
         .iter()
         .filter_map(|event| match event {
-            CoreEvent::ScalarRedeemed(_, _, payout) => Some(*payout),
+            CoreEvent::ScalarRedeemed(_, _, payout, _) => Some(*payout),
             _ => None,
         })
         .collect();
     assert_eq!(payouts, vec![14_001, 2_999, 2_999]);
     assert_eq!(proposal_escrow(&state, 90), 1);
+    assert_eq!(
+        state.redemption_fees_accrued, 0,
+        "the zero-rate leg charges nothing"
+    );
+}
+
+/// The same 03 §6.3 counterexample at the live 13 §1 rate — the fee half of
+/// PT-3's mandatory named regression.
+///
+/// The gross schedule is unchanged (14,001 + 2,999 + 2,999, residue 1), which
+/// is the point: `escrowed` falls by the gross on every charged call. What the
+/// fee changes is only the split of that outflow. The LONG leg's 14,001 is
+/// charged `ceil(14,001 × 30 bps) = 43` and nets 13,958; each 2,999 SHORT leg
+/// is **waived**, because its net would fall below `ledger.min_split`
+/// (03 §5.3a(2) — and note the waiver tests that net, not the 2,999 gross).
+#[test]
+fn pt3_named_scalar_070005_vector_at_the_registry_rate() {
+    let mut state = LedgerState::new();
+    state.redeem_fee = registry_redeem_fee();
+    state.create_vault(90, 0).unwrap();
+    state.split(LedgerOrigin::Signed, 90, &0, 20_000).unwrap();
+    state
+        .split_scalar(LedgerOrigin::Signed, 90, Branch::Accept, &0, 20_000)
+        .unwrap();
+    for holder in [1u8, 2] {
+        state
+            .transfer(
+                LedgerOrigin::Signed,
+                position(90, Branch::Accept, PositionKind::Short),
+                &0,
+                &holder,
+                10_000,
+            )
+            .unwrap();
+    }
+    state
+        .resolve(LedgerOrigin::ResolveAuthority, 90, Branch::Accept)
+        .unwrap();
+    state
+        .settle_scalar(LedgerOrigin::SettleAuthority, 90, FixedU64(700_050_000))
+        .unwrap();
+    state
+        .redeem_scalar(90, ScalarSide::Long, &0, 20_000)
+        .unwrap();
+    state
+        .redeem_scalar(90, ScalarSide::Short, &1, 10_000)
+        .unwrap();
+    state
+        .redeem_scalar(90, ScalarSide::Short, &2, 10_000)
+        .unwrap();
+    let rows: Vec<_> = state
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            CoreEvent::ScalarRedeemed(_, _, payout, fee) => Some((*payout, *fee)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows, vec![(14_001, 43), (2_999, 0), (2_999, 0)]);
+    assert_eq!(
+        proposal_escrow(&state, 90),
+        1,
+        "the gross schedule is unchanged"
+    );
+    assert_eq!(state.redemption_fees_accrued, 43);
+    // PT-3: Σ net ∈ [E − r − F, E − F] = [20,000 − 3 − 43, 20,000 − 43].
+    let net: u128 = 13_958 + 2_999 + 2_999;
+    assert_eq!(net, 20_000 - 1 - 43);
+    assert!((20_000 - 3 - 43..=20_000 - 43).contains(&net));
+    // 03 §5.4: the sweep zeroes the counter and the second one is a no-op.
+    assert_eq!(state.sweep_redemption_fees(), Ok(43));
+    assert_eq!(state.sweep_redemption_fees(), Ok(0));
+    state.try_state().expect("L-1..L-6 survive the fee path");
+}
+
+/// 03 §5.3a(2a)'s named witness, and the whole reason the pair calls charge
+/// `fee_pair(a)` rather than `fee(a)`.
+///
+/// At `a = 20,000`, `s = 0.70005` and the live registry rate, **both** routes
+/// net exactly 19,957. Charging `fee(20,000) = 60` on the combined gross would
+/// net the pair 19,940 — worse than fragmenting, which inverts the entire point
+/// of the atomic call and would make fragmentation the rational strategy.
+#[test]
+fn pt7_named_pair_equals_leg_by_leg_at_the_registry_rate() {
+    const AMOUNT: Balance = 20_000;
+    let settled = |vault: u64| {
+        let mut state = LedgerState::new();
+        state.redeem_fee = registry_redeem_fee();
+        state.create_vault(vault, 0).unwrap();
+        state
+            .split(LedgerOrigin::Signed, vault, &0, AMOUNT)
+            .unwrap();
+        state
+            .split_scalar(LedgerOrigin::Signed, vault, Branch::Accept, &0, AMOUNT)
+            .unwrap();
+        state
+            .resolve(LedgerOrigin::ResolveAuthority, vault, Branch::Accept)
+            .unwrap();
+        state
+            .settle_scalar(LedgerOrigin::SettleAuthority, vault, FixedU64(700_050_000))
+            .unwrap();
+        state
+    };
+
+    let mut pair = settled(92);
+    pair.redeem_scalar_pair(92, &0, AMOUNT).unwrap();
+    let CoreEvent::ScalarPairRedeemed(_, gross, fee) = pair.events.last().unwrap() else {
+        panic!("pair redemption emitted the wrong event")
+    };
+    assert_eq!(*gross, AMOUNT, "the pair still pays exactly `a` gross");
+    assert_eq!(*fee, 43, "fee_pair(a) = fee(14_001) + fee(5_999) = 43 + 0");
+    assert_eq!(AMOUNT - *fee, 19_957);
+
+    let mut legs = settled(93);
+    legs.redeem_scalar(93, ScalarSide::Long, &0, AMOUNT)
+        .unwrap();
+    legs.redeem_scalar(93, ScalarSide::Short, &0, AMOUNT)
+        .unwrap();
+    let leg_gross = AMOUNT - proposal_escrow(&legs, 93);
+    assert_eq!(leg_gross, 14_001 + 5_999);
+    assert_eq!(leg_gross - legs.redemption_fees_accrued, 19_957);
+
+    // The relative guarantee, stated as the spec states it: net as well as
+    // gross, the pair is never the worse route.
+    assert!(leg_gross - legs.redemption_fees_accrued <= AMOUNT - *fee);
 }
 
 #[test]
@@ -2091,6 +2463,7 @@ fn operation_generator_is_complete_against_call_metadata() {
         LedgerCall::sweep_dust_baseline {
             epoch: BASELINE_EPOCH,
         },
+        LedgerCall::sweep_redemption_fees {},
         LedgerCall::set_split_paused {
             paused: false,
             expiry: 0,
@@ -2155,6 +2528,7 @@ fn call_tag(call: &crate::pallet::Call<Test>) -> Option<OpTag> {
         crate::pallet::Call::redeem_baseline_pair { .. } => OpTag::RedeemBaselinePair,
         crate::pallet::Call::sweep_dust { .. } => OpTag::SweepDust,
         crate::pallet::Call::sweep_dust_baseline { .. } => OpTag::SweepDustBaseline,
+        crate::pallet::Call::sweep_redemption_fees { .. } => OpTag::SweepRedemptionFees,
         crate::pallet::Call::set_split_paused { .. }
         | crate::pallet::Call::set_frozen { .. }
         | crate::pallet::Call::reconcile { .. } => return None,

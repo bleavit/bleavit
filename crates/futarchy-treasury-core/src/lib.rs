@@ -1475,6 +1475,56 @@ impl Treasury {
     }
 }
 
+/// 08 §1.2: INSURANCE's derived USDC target `T_ins`.
+///
+/// ```text
+/// T_ins = swept_residue_unreclaimed   // the 03 §5.4 / §7 R-5 sweep total
+///       + min_balance                 // the 03 §7 R-4 permanent-account floor
+/// ```
+///
+/// The ceiling is **derived, never chosen**: swept residue is the escrow of
+/// claims that were never redeemed before `ledger.archive_delay` elapsed and
+/// that 03 §5.4 keeps live through the Merkle-archived claims procedure, so it
+/// is a contingent liability and INSURANCE is the reserve against it. `T_ins` is
+/// a *floor* on that liability rather than a match to it, and both slacks run
+/// safe: R-5 residue includes rounding dust that is nobody's live claim, and
+/// R-7 forfeited position deposits arrive without entering the counter at all.
+///
+/// **Scoped to USDC and only USDC.** Both terms are USDC amounts, so comparing
+/// any other asset's balance against `T_ins` is a units error. VIT slash
+/// proceeds stay in INSURANCE: 08 §2.2 marks VIT at 0 in NAV, so moving them to
+/// `MAIN` would add exactly nothing — there is nothing to overflow *for*.
+///
+/// The counter is **monotone** in v1: 08 §1.2 requires the archived-claims
+/// payout path to decrement it, and that procedure is not yet specified, so
+/// `T_ins` is a deliberate over-estimate — INSURANCE retains more than it owes
+/// and less overflows to `MAIN`. Over-reserving is the safe direction.
+pub fn insurance_target(
+    swept_residue_unreclaimed: Balance,
+    min_balance: Balance,
+) -> Result<Balance, Error> {
+    swept_residue_unreclaimed
+        .checked_add(min_balance)
+        .ok_or(Error::Overflow)
+}
+
+/// The USDC surplus above [`insurance_target`] — what 08 §1.2 requires to
+/// overflow to `MAIN`, automatically for every inflow that executes treasury
+/// code and through the permissionless reconciliation crank for the direct
+/// `ForeignAssets.transfer` arrivals no treasury code can intercept.
+///
+/// Zero at or below target, so the crank is idempotent and a no-op by
+/// construction. Because `min_balance` is a term of the target, the surplus can
+/// never encroach on the 03 §7 R-4 existential floor: the overflow is always
+/// strictly inside what `Preservation::Preserve` custody permits.
+pub fn insurance_overflow(
+    balance: Balance,
+    swept_residue_unreclaimed: Balance,
+    min_balance: Balance,
+) -> Result<Balance, Error> {
+    Ok(balance.saturating_sub(insurance_target(swept_residue_unreclaimed, min_balance)?))
+}
+
 /// Exact ceil-rounded local line debit for one reserve-probe DOT envelope.
 pub fn reserve_probe_fee_debit(dot_fee: Balance, dot_rate: Balance) -> Result<Balance, Error> {
     ensure!(dot_rate > 0, Error::RateUnset);
@@ -1576,6 +1626,46 @@ mod tests {
         t.fund_budget_line(TREASURY, BudgetLine::OpsCoretime, 500_000 * USDC)
             .unwrap();
         t
+    }
+
+    #[test]
+    fn insurance_target_is_derived_and_the_overflow_is_the_surplus_above_it() {
+        // 08 §1.2: `T_ins = swept_residue_unreclaimed + min_balance`, and the
+        // overflow is everything above it — zero at or below target, so the
+        // crank is idempotent by construction.
+        const FLOOR: Balance = 10_000;
+        assert_eq!(insurance_target(0, FLOOR), Ok(FLOOR));
+        assert_eq!(insurance_target(7 * USDC, FLOOR), Ok(7 * USDC + FLOOR));
+
+        // Below, at, and above target.
+        assert_eq!(insurance_overflow(0, 0, FLOOR), Ok(0));
+        assert_eq!(insurance_overflow(FLOOR, 0, FLOOR), Ok(0));
+        assert_eq!(insurance_overflow(FLOOR + 1, 0, FLOOR), Ok(1));
+
+        // Residue raises the target by its own amount, so residue that arrives
+        // in the account never overflows.
+        assert_eq!(insurance_overflow(FLOOR + 9 * USDC, 9 * USDC, FLOOR), Ok(0));
+        // …while an unrelated direct transfer on top of it does, by exactly its
+        // own amount and no more.
+        assert_eq!(
+            insurance_overflow(FLOOR + 9 * USDC + 4 * USDC, 9 * USDC, FLOOR),
+            Ok(4 * USDC),
+        );
+
+        // The floor is a term of the target, so the surplus can never encroach
+        // on the 03 §7 R-4 existential balance.
+        for balance in [FLOOR, FLOOR + 1, Balance::MAX] {
+            let surplus = insurance_overflow(balance, 3 * USDC, FLOOR).unwrap();
+            assert!(surplus <= balance - FLOOR);
+        }
+
+        // A target that cannot be represented is an error, never a silent zero
+        // that would let the crank drain the whole account.
+        assert_eq!(insurance_target(Balance::MAX, 1), Err(Error::Overflow));
+        assert_eq!(
+            insurance_overflow(Balance::MAX, Balance::MAX, 1),
+            Err(Error::Overflow),
+        );
     }
 
     fn rebate_funded(keeper: Balance, oracle: Balance) -> Treasury {

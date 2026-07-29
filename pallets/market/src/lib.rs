@@ -106,6 +106,30 @@ pub trait PolCommitmentSync {
     ) -> frame_support::dispatch::DispatchResult;
 }
 
+/// Runtime treasury mirror for the 04 §2 Sweep's **revenue** leg (08 §1.1, as
+/// amended by E1: realized market-fee value routes 100 % to `MAIN`).
+///
+/// The custody half needs no seam — the ledger redemption pays `MAIN` directly
+/// and the Baseline book's retained plain USDC is an ordinary transfer — but
+/// custody alone raises no NAV: `nav()` is computed from the treasury's
+/// **internal** `main_usdc` counter plus its lines (08 §1.2), so the arrival
+/// has to be *recognized* as well as received. That is this trait, and it is the
+/// exact mirror of what `sweep_insurance` does for the INSURANCE → `MAIN` path.
+/// A failure aborts the whole sweep (status quo, G-1): the book stays unswept,
+/// unreapable and the crank retryable, rather than banking value NAV never sees.
+pub trait MainRevenueSink {
+    fn credit_main(amount: futarchy_primitives::Balance)
+        -> frame_support::dispatch::DispatchResult;
+}
+
+/// Accounting-free test environments may use the unit implementation.
+/// Production binds `pallet-futarchy-treasury`'s recognition entry point.
+impl MainRevenueSink for () {
+    fn credit_main(_: futarchy_primitives::Balance) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
+}
+
 /// Which 08 §1.1 subsidy line a book's seed custody moves through. Named here
 /// rather than shared with the treasury's `BudgetLine` so `pallet-market` stays
 /// treasury-free; the runtime binds the two (I-24-style layering, 01 §5.2).
@@ -172,12 +196,21 @@ pub mod pallet {
     use crate::weights::WeightInfo;
     use crate::BaselineGrade;
     use crate::DecisionGradeFacts;
+    use crate::MainRevenueSink;
     use crate::MarketAccountProvider;
     use crate::PolCommitmentSync;
     use crate::PolLine;
     use alloc::{collections::BTreeMap, vec::Vec};
     use core::marker::PhantomData;
-    use frame_support::{pallet_prelude::*, traits::Contains, PalletId};
+    use frame_support::{
+        pallet_prelude::*,
+        traits::{
+            fungibles::{Inspect, Mutate},
+            tokens::{Fortitude, Preservation},
+            Contains,
+        },
+        PalletId,
+    };
     use frame_system::pallet_prelude::*;
     use futarchy_primitives::{
         bounds,
@@ -242,6 +275,17 @@ pub mod pallet {
         /// Transactional treasury obligation mirror. A lifecycle transition is
         /// rolled back if its exact NAV obligation cannot be mirrored.
         type PolCommitmentSync: crate::PolCommitmentSync;
+
+        /// The 08 §1.1 treasury `MAIN` custody account — the single lawful
+        /// recipient of realized market-fee value (04 §2 Sweep, 04 §6.1). It is
+        /// a `Get`, never a call argument, so a permissionless crank cannot be
+        /// pointed at a payee of the caller's choosing. The enclosing runtime's
+        /// `ProtocolAccounts` classifier MUST recognize it, because the ledger's
+        /// return surface only ever pays protocol custody (03 §5.5).
+        type MainAccount: Get<Self::AccountId>;
+
+        /// NAV recognition for value the Sweep just moved into `MAIN` custody.
+        type MainRevenueSink: crate::MainRevenueSink;
 
         /// Runtime-owned decision-grade predicate for sealed Baseline carry.
         /// The predicate is read-only and must fail closed when governed grade
@@ -1043,10 +1087,16 @@ pub mod pallet {
         /// solvency defect, since the value is still fully collateralized in the
         /// ledger sovereign.
         ///
-        /// The **fee leg is E2** (04 §6.1: the fee account's realizable claims
-        /// remit 100 % to the treasury `MAIN` account). Until it lands the event
-        /// reports `fee_to_main: 0`; the marker's meaning does not change, since
-        /// 04 §2 makes one marker cover both remittances of one sweep.
+        /// The **fee leg** (E2) runs in the same atomic layer and is what makes
+        /// the market fee a revenue instrument rather than a sink (04 §6.1;
+        /// 08 §1.1). It has two shapes because collection has two: a decision or
+        /// gate book accrues branch-USDC into its fee account, which redeems to
+        /// USDC paid straight to `MAIN`; a Baseline book retains its sell-side
+        /// fee as **plain USDC** in the book account, which is transferred above
+        /// the 03 §7 R-4 `min_balance` floor and leaves that floor exactly where
+        /// R-4 puts it. Reaching `MAIN` custody is only half of it — `nav()` is
+        /// computed from the treasury's internal `main_usdc` counter, so the
+        /// arrival is recognized through [`MainRevenueSink`] in the same layer.
         #[pallet::call_index(6)]
         #[pallet::weight(<T as Config>::WeightInfo::sweep_revenue())]
         pub fn sweep_revenue(origin: OriginFor<T>, market: MarketId) -> DispatchResult {
@@ -1064,9 +1114,20 @@ pub mod pallet {
                 Error::<T>::NotSweepable
             );
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
+                let main = T::MainAccount::get();
+                // 04 §2 / 04 §6.1 revenue leg. It runs for every book, seeded or
+                // not: a book that traded accrued fee value regardless of who
+                // funded its subsidy, and reap would discard it (08 §10.5).
+                let mut ledger = PalletLedger::<T>::new();
+                let fee_to_main = market_core::withdraw_fees(&book, &mut ledger, &main)
+                    .map_err(Error::<T>::from)?
+                    .checked_add(Self::withdraw_baseline_fee_usdc(&book, &main)?)
+                    .ok_or(Error::<T>::ArithmeticOverflow)?;
+                if fee_to_main > 0 {
+                    T::MainRevenueSink::credit_main(fee_to_main)?;
+                }
                 let pol_returned = match SeededMarkets::<T>::get(market) {
                     Some(treasury) => {
-                        let mut ledger = PalletLedger::<T>::new();
                         let returned = market_core::withdraw_book(&book, &mut ledger, &treasury)
                             .map_err(Error::<T>::from)?;
                         if returned > 0 {
@@ -1094,8 +1155,7 @@ pub mod pallet {
                 SweptMarkets::<T>::insert(market, ());
                 Self::deposit_event(Event::RevenueSwept {
                     market,
-                    // E2 wires the 04 §6.1 fee remittance into this same leg.
-                    fee_to_main: 0,
+                    fee_to_main,
                     pol_returned,
                 });
                 Ok(())
@@ -2207,6 +2267,53 @@ pub mod pallet {
                 Self::remove_pol_commitment(id);
                 T::PolCommitmentSync::sync_pol_commitments()
             })
+        }
+
+        /// The Baseline half of the 04 §2 Sweep's revenue leg (04 §6.1).
+        ///
+        /// A Baseline book is the one per-market account that custodies plain
+        /// USDC: its degenerate sell wrapper has no mirror leg to merge against,
+        /// so the **book** funds the payout, merges `net + fee` and re-splits
+        /// `net`, retaining the fee as real USDC. That balance needs no
+        /// redemption — it is already USDC — and is remitted to `MAIN` here.
+        ///
+        /// Only the balance **above `min_balance`** moves, and that is
+        /// normative, not defensive: 03 §7 R-4 endows this account at Seed and
+        /// every protocol path out of it preserves, so `Preservation::Preserve`
+        /// caps the transfer at `balance − min_balance` by construction. R-4 is
+        /// explicit that the sweep closes the *fee* component of the residue and
+        /// not the floor component, which stays exactly where R-4 puts it.
+        ///
+        /// Decision and gate books custody positions only — a scalar or gate
+        /// merge leaves the vault's `escrowed` unchanged, so no plain custody
+        /// moves (03 §7 R-4) — hence they return 0 without touching custody.
+        fn withdraw_baseline_fee_usdc(
+            book: &MarketBook<T::AccountId>,
+            main: &T::AccountId,
+        ) -> Result<Balance, DispatchError> {
+            if !matches!(book.kind, BookKind::Baseline { .. }) {
+                return Ok(0);
+            }
+            let asset = <T as pallet_conditional_ledger::Config>::UsdcAssetId::get();
+            let reducible = <<T as pallet_conditional_ledger::Config>::Collateral as Inspect<
+                T::AccountId,
+            >>::reducible_balance(
+                asset.clone(),
+                &book.account,
+                Preservation::Preserve,
+                Fortitude::Polite,
+            );
+            if reducible == 0 {
+                return Ok(0);
+            }
+            <<T as pallet_conditional_ledger::Config>::Collateral as Mutate<T::AccountId>>::transfer(
+                asset,
+                &book.account,
+                main,
+                reducible,
+                Preservation::Preserve,
+            )?;
+            Ok(reducible)
         }
 
         /// I-33's book half: whether a swept book retains any claim that still

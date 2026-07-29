@@ -2164,6 +2164,152 @@ fn usdc_fee_conversion_scales_decimals_and_rounds_against_the_payer() {
     });
 }
 
+/// Install the 13 §1 `fee.vit_usdc` rate so the USDC fee path is live.
+fn set_fee_vit_usdc_rate(rate_1e9: u64) {
+    pallet_constitution::Params::<Runtime>::insert(
+        FEE_VIT_USDC_RATE_KEY,
+        pallet_constitution::ParamRecord {
+            key: FEE_VIT_USDC_RATE_KEY,
+            value: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(rate_1e9)),
+            min: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(1)),
+            max: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(u64::MAX)),
+            max_delta: None,
+            cooldown_epochs: 0,
+            last_changed_epoch: 0,
+            last_change_block: 0,
+            class: pallet_constitution::ParamClass::Treasury,
+            kernel_bounded: false,
+        },
+    );
+}
+
+#[test]
+fn usdc_transaction_fees_land_in_main_instead_of_reducing_issuance() {
+    // 08 §9 Fee destination (E3). The SDK's default `HandleCredit` for `()`
+    // drops the collected credit, which **burns** it from `ForeignAssets`
+    // issuance — and USDC here is a claim against a reserve held on Asset Hub,
+    // so destroying the local claim orphans the remote reserve rather than
+    // destroying it (§7.1). 08 §9 marks any runtime that does so non-conforming.
+    //
+    // Two things are asserted, and the second is the one custody alone does not
+    // give: the fee reaches `MAIN`, **and** `nav()` moves by it, because NAV is
+    // computed from the treasury's internal `main_usdc` counter.
+    type AssetFeeCharger = <Runtime as pallet_asset_tx_payment::Config>::OnChargeAssetTransaction;
+
+    development_ext().execute_with(|| {
+        set_fee_vit_usdc_rate(2_000_000_000);
+        let payer = account(41);
+        let main = crate::genesis::treasury_account();
+        let fee_call = remark();
+        let dispatch_info = fee_call.get_dispatch_info();
+        let native_fee = currency::VIT;
+        let expected_usdc = crate::configs::LiveFeeConversion::to_asset_balance(
+            native_fee,
+            usdc_location(),
+        )
+        .expect("the governed rate is installed");
+        assert!(expected_usdc > 0);
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &payer,
+            expected_usdc * 10,
+        ));
+
+        let issuance_before =
+            <ForeignAssets as FungiblesInspect<AccountId>>::total_issuance(usdc_location());
+        let main_before =
+            <ForeignAssets as FungiblesInspect<AccountId>>::balance(usdc_location(), &main);
+        let nav_before = FutarchyTreasury::nav().nav;
+
+        let liquidity = <AssetFeeCharger as pallet_asset_tx_payment::OnChargeAssetTransaction<
+            Runtime,
+        >>::withdraw_fee(
+            &payer,
+            &fee_call,
+            &dispatch_info,
+            usdc_location(),
+            native_fee,
+            0,
+        )
+        .expect("a funded USDC payer can pay the fee");
+        assert_ok!(
+            <AssetFeeCharger as pallet_asset_tx_payment::OnChargeAssetTransaction<Runtime>>::correct_and_deposit_fee(
+                &payer,
+                &dispatch_info,
+                &frame_support::dispatch::PostDispatchInfo::default(),
+                native_fee,
+                0,
+                liquidity,
+            )
+        );
+
+        assert_eq!(
+            <ForeignAssets as FungiblesInspect<AccountId>>::total_issuance(usdc_location()),
+            issuance_before,
+            "08 §9: the USDC fee must not be burned out of issuance",
+        );
+        assert_eq!(
+            <ForeignAssets as FungiblesInspect<AccountId>>::balance(usdc_location(), &main)
+                - main_before,
+            expected_usdc,
+            "custody: the fee arrives in MAIN",
+        );
+        assert_eq!(
+            FutarchyTreasury::nav().nav - nav_before,
+            expected_usdc,
+            "recognition: NAV moves with it (08 §1.2)",
+        );
+    });
+}
+
+#[test]
+fn vit_transaction_fees_still_burn_and_the_native_adapter_is_untouched() {
+    // 08 §9: VIT is natively issued here, so burning strands no reserve and
+    // orphans no claim, and routing it would credit the treasury an asset
+    // 08 §2.2 marks at **0 in NAV**. The asymmetry is deliberate and E3 must
+    // not "fix" it — pin the native adapter's destination as `()`.
+    development_ext().execute_with(|| {
+        let payer = account(42);
+        let endowment = 1_000 * currency::VIT;
+        assert_ok!(Balances::force_set_balance(
+            RuntimeOrigin::root(),
+            MultiAddress::Id(payer.clone()),
+            endowment,
+        ));
+        let fee_call = remark();
+        let dispatch_info = fee_call.get_dispatch_info();
+        let issuance_before = Balances::total_issuance();
+        let main_before = Balances::free_balance(&crate::genesis::treasury_account());
+
+        type NativeFeeCharger = <Runtime as pallet_transaction_payment::Config>::OnChargeTransaction;
+        let liquidity = <NativeFeeCharger as pallet_transaction_payment::OnChargeTransaction<
+            Runtime,
+        >>::withdraw_fee(&payer, &fee_call, &dispatch_info, currency::VIT, 0)
+        .expect("a funded VIT payer can pay the fee");
+        assert_ok!(
+            <NativeFeeCharger as pallet_transaction_payment::OnChargeTransaction<Runtime>>::correct_and_deposit_fee(
+                &payer,
+                &dispatch_info,
+                &frame_support::dispatch::PostDispatchInfo::default(),
+                currency::VIT,
+                0,
+                liquidity,
+            )
+        );
+
+        assert_eq!(
+            Balances::total_issuance(),
+            issuance_before - currency::VIT,
+            "VIT fees keep burning (08 §9)",
+        );
+        assert_eq!(
+            Balances::free_balance(&crate::genesis::treasury_account()),
+            main_before,
+            "and are never routed to MAIN",
+        );
+    });
+}
+
 #[test]
 fn governed_xcm_rates_are_read_from_genesis_params_and_live_updates() {
     development_ext().execute_with(|| {
@@ -10416,6 +10562,29 @@ fn void_cohort_releases_a_retained_rerun_pin_and_guard_records() {
 /// This is the end-to-end regression over the real
 /// epoch → welfare (SettleAuthority) → ledger wiring; the pallet suites cover
 /// the seams individually.
+///
+/// 03 §5.3a: `redeem_baseline` is in the charged family, so a holder receives the
+/// payout **net** of `ceil(g · ledger.redeem_fee)`. The position deposit is not a
+/// payout — it is a storage-deposit refund — so it is returned whole and is added
+/// after the fee, which is why these tests take the fee on `long_payout` alone.
+///
+/// Derived from the live PARAM row (13 §1) rather than written as a literal, so
+/// the expectation follows a lawful amendment instead of pinning today's 30 bps.
+/// The §5.3a small-payout waiver cannot bind here: these fixtures redeem millions
+/// of base units against a `ledger.min_split` of 10^4, so `g − fee` is never below
+/// it. `debug_assert` states that rather than leaving it as an unstated premise.
+fn redeem_payout_net_of_fee(gross: Balance) -> Balance {
+    let rate = <crate::configs::LedgerRedemptionFee as frame_support::traits::Get<
+        sp_runtime::Perbill,
+    >>::get();
+    let net = gross.saturating_sub(rate.mul_ceil(gross));
+    debug_assert!(
+        net >= crate::configs::balance_param(b"ledger.min_split"),
+        "fixture must not straddle the §5.3a small-payout waiver: net {net} < min_split"
+    );
+    net
+}
+
 #[test]
 fn sq92_epoch_void_settles_the_baseline_and_unstrands_a_single_sided_holder() {
     use futarchy_primitives::{PositionId, ScalarSide};
@@ -10547,7 +10716,7 @@ fn sq92_epoch_void_settles_the_baseline_and_unstrands_a_single_sided_holder() {
         ));
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &holder).saturating_sub(holder_before),
-            long_payout.saturating_add(deposit),
+            redeem_payout_net_of_fee(long_payout).saturating_add(deposit),
         );
 
         let counterparty_before = ForeignAssets::balance(usdc_location(), &counterparty);
@@ -10560,7 +10729,7 @@ fn sq92_epoch_void_settles_the_baseline_and_unstrands_a_single_sided_holder() {
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &counterparty)
                 .saturating_sub(counterparty_before),
-            short_payout.saturating_add(deposit),
+            redeem_payout_net_of_fee(short_payout).saturating_add(deposit),
         );
 
         // R-1/L-2: the two floors never over-draw the vault's escrow.
@@ -11930,7 +12099,7 @@ fn sq320_orphaned_epoch_baseline_is_settled_by_the_permissionless_crank() {
         ));
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &holder).saturating_sub(holder_before),
-            long_payout.saturating_add(deposit),
+            redeem_payout_net_of_fee(long_payout).saturating_add(deposit),
         );
 
         // §7(6): a second crank is a harmless no-op, never an error (G-1).

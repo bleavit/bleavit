@@ -2194,3 +2194,408 @@ fn the_market_return_surface_pays_the_void_schedule_and_the_baseline_pair() {
         try_state();
     });
 }
+
+// ---------------------------------------------------------------- 03 §5.3a
+//
+// The redemption fee at the FRAME surface. The frame-free core carries the
+// arithmetic and its differential against the reference model; what these
+// exercise is what only the shell can be wrong about — real USDC custody, the
+// live-`Params` read, the L-7 accrual bound, and the sweep's treasury leg.
+
+/// The 13 §1 `ledger.redeem_fee` launch default, read from the registry's own
+/// genesis seed. A numeric literal duplicating a 13-owned value is a defect in
+/// tests as much as in runtime code.
+fn registry_redeem_fee() -> sp_runtime::Perbill {
+    let key = constitution_core::key16(b"ledger.rdm_fee");
+    let record = constitution_core::genesis_params()
+        .into_iter()
+        .find(|record| record.key == key)
+        .expect("13 §1 seeds `ledger.rdm_fee`");
+    match record.value {
+        constitution_core::ParamValue::Perbill(rate) => sp_runtime::Perbill::from_parts(rate),
+        other => panic!("13 §1: `ledger.rdm_fee` must be a Perbill row, got {other:?}"),
+    }
+}
+
+fn accrued() -> u128 {
+    crate::RedemptionFeesAccrued::<Test>::get()
+}
+
+/// A `(USDC, DepositsHeld)` snapshot, so a payout assertion measures the payout
+/// and not a position-storage-deposit refund riding alongside it.
+///
+/// 03 §4/§7 R-7: deposits are accounted strictly **outside** `escrowed` and are
+/// refunded when an entry's balance reaches zero — which a full redemption
+/// always does. Netting them out is what lets these tests state the 03 §5.3a
+/// figures exactly rather than approximately.
+fn payout_probe(who: AccountId) -> (u128, u128) {
+    (usdc(who), DepositsHeld::<Test>::get())
+}
+
+/// The USDC `who` received since `probe`, net of any deposit refund.
+fn payout_since(who: AccountId, probe: (u128, u128)) -> u128 {
+    let refunded = probe.1.saturating_sub(DepositsHeld::<Test>::get());
+    usdc(who) - probe.0 - refunded
+}
+
+/// The USDC the sovereign paid out since `probe`, net of any deposit refund.
+fn sovereign_paid_since(probe: (u128, u128)) -> u128 {
+    let refunded = probe.1.saturating_sub(DepositsHeld::<Test>::get());
+    probe.0 - usdc(ledger_account()) - refunded
+}
+
+/// A `ScalarSettled` vault at `s = 0.70005` holding `a` of both scalar legs —
+/// the 03 §6.3 / §5.3a(2a) witness geometry.
+fn settled_scalar_at_070005(pid: ProposalId, who: AccountId, amount: u128) {
+    create(pid);
+    assert_ok!(Ledger::split(signed(who), pid, amount));
+    assert_ok!(Ledger::split_scalar(
+        signed(who),
+        pid,
+        Branch::Accept,
+        amount
+    ));
+    assert_ok!(Ledger::resolve(signed(RESOLVER), pid, Branch::Accept));
+    assert_ok!(Ledger::settle_scalar(
+        signed(SETTLER),
+        pid,
+        FixedU64(700_050_000)
+    ));
+}
+
+#[test]
+fn redemption_fee_withholds_from_custody_without_a_second_draw_on_escrow() {
+    new_test_ext().execute_with(|| {
+        RedemptionFee::set(registry_redeem_fee());
+        settled_scalar_at_070005(1, ALICE, 20_000);
+        let sovereign_probe = payout_probe(ledger_account());
+        let alice_probe = payout_probe(ALICE);
+        let escrow_before = escrow(1);
+        let total_before = TotalEscrowed::<Test>::get();
+
+        assert_ok!(Ledger::redeem_scalar(
+            signed(ALICE),
+            1,
+            ScalarSide::Long,
+            20_000
+        ));
+
+        // 03 §5.3a(4): `escrowed` — and its O(1) mirror — fall by the GROSS.
+        assert_eq!(escrow_before - escrow(1), 14_001);
+        assert_eq!(total_before - TotalEscrowed::<Test>::get(), 14_001);
+        // The claimant receives the NET; the fee never leaves the sovereign.
+        assert_eq!(payout_since(ALICE, alice_probe), 13_958);
+        assert_eq!(sovereign_paid_since(sovereign_probe), 13_958);
+        assert_eq!(accrued(), 43);
+        assert!(matches!(
+            ledger_events().last(),
+            Some(Event::ScalarRedeemed {
+                payout: 14_001,
+                fee: 43,
+                ..
+            })
+        ));
+
+        // The SHORT leg's gross nets below `ledger.min_split`, so the waiver
+        // fires and the mirror leg is paid in full (03 §5.3a(2)).
+        let alice_probe = payout_probe(ALICE);
+        assert_ok!(Ledger::redeem_scalar(
+            signed(ALICE),
+            1,
+            ScalarSide::Short,
+            20_000
+        ));
+        assert_eq!(payout_since(ALICE, alice_probe), 5_999);
+        assert_eq!(accrued(), 43);
+        try_state();
+    });
+}
+
+#[test]
+fn the_pair_call_charges_its_legs_not_its_combined_gross() {
+    new_test_ext().execute_with(|| {
+        RedemptionFee::set(registry_redeem_fee());
+        settled_scalar_at_070005(1, ALICE, 20_000);
+        let probe = payout_probe(ALICE);
+        assert_ok!(Ledger::redeem_scalar_pair(signed(ALICE), 1, 20_000));
+        // 03 §5.3a(2a): `fee_pair(20_000) = fee(14_001) + fee(5_999) = 43`, so
+        // the pair nets 19_957 — exactly what leg-by-leg pays. Charging
+        // `fee(20_000) = 60` would net 19_940 and make fragmenting rational.
+        assert_eq!(payout_since(ALICE, probe), 19_957);
+        assert_eq!(accrued(), 43);
+        assert!(matches!(
+            ledger_events().last(),
+            Some(Event::ScalarPairRedeemed {
+                amount: 20_000,
+                fee: 43,
+                ..
+            })
+        ));
+        try_state();
+    });
+}
+
+#[test]
+fn every_exempt_path_charges_nothing_at_a_non_zero_rate() {
+    new_test_ext().execute_with(|| {
+        RedemptionFee::set(registry_redeem_fee());
+
+        // `merge` — the D-1 primary recovery path (03 §5.3a(1)).
+        create(1);
+        assert_ok!(Ledger::split(signed(ALICE), 1, 4 * UNIT));
+        let probe = payout_probe(ALICE);
+        assert_ok!(Ledger::merge(signed(ALICE), 1, 2 * UNIT));
+        assert_eq!(payout_since(ALICE, probe), 2 * UNIT);
+        assert_eq!(accrued(), 0);
+
+        // `redeem` — the G-3 par leg.
+        assert_ok!(Ledger::resolve(signed(RESOLVER), 1, Branch::Accept));
+        assert_ok!(Ledger::settle_scalar(
+            signed(SETTLER),
+            1,
+            FixedU64(500_000_000)
+        ));
+        let probe = payout_probe(ALICE);
+        assert_ok!(Ledger::redeem(signed(ALICE), 1, 2 * UNIT));
+        assert_eq!(payout_since(ALICE, probe), 2 * UNIT);
+        assert_eq!(accrued(), 0);
+
+        // `redeem_void` and `merge_baseline` — protocol failure and the
+        // Baseline complete-set primitive.
+        create(2);
+        create_base(9);
+        assert_ok!(Ledger::split(signed(BOB), 2, 4 * UNIT));
+        assert_ok!(Ledger::split_baseline(signed(BOB), 9, 4 * UNIT));
+        assert_ok!(Ledger::void(signed(RESOLVER), 2));
+        let probe = payout_probe(BOB);
+        assert_ok!(Ledger::redeem_void(
+            signed(BOB),
+            2,
+            Branch::Accept,
+            PositionKind::BranchUsdc,
+            4 * UNIT
+        ));
+        assert_ok!(Ledger::merge_baseline(signed(BOB), 9, 4 * UNIT));
+        assert_eq!(payout_since(BOB, probe), 2 * UNIT + 4 * UNIT);
+        assert_eq!(accrued(), 0);
+        try_state();
+    });
+}
+
+#[test]
+fn protocol_accounts_are_exempt_on_every_charged_call() {
+    new_test_ext().execute_with(|| {
+        RedemptionFee::set(registry_redeem_fee());
+        // The `MarketAuthority` return surface is the only ingress into
+        // protocol custody, and 08 §8 step 5(b)'s POL return must not be
+        // haircut (03 §5.3a(1)).
+        create(1);
+        assert_ok!(Ledger::do_split(signed(MARKET), 1, BOOK, 20_000));
+        assert_ok!(Ledger::do_split_scalar(
+            signed(MARKET),
+            1,
+            Branch::Accept,
+            BOOK,
+            20_000
+        ));
+        assert_ok!(Ledger::resolve(signed(RESOLVER), 1, Branch::Accept));
+        assert_ok!(Ledger::settle_scalar(
+            signed(SETTLER),
+            1,
+            FixedU64(700_050_000)
+        ));
+        let pol_before = usdc(POL);
+        // The gross is returned in full, and the wrapper's reported figure is
+        // the real custody move.
+        assert_eq!(
+            Ledger::do_redeem_scalar_pair(signed(MARKET), 1, BOOK, POL, 20_000),
+            Ok(20_000)
+        );
+        assert_eq!(usdc(POL) - pol_before, 20_000);
+        assert_eq!(accrued(), 0);
+        try_state();
+    });
+}
+
+#[test]
+fn a_malformed_rate_record_reads_as_zero_the_claimant_favouring_direction() {
+    new_test_ext().execute_with(|| {
+        // 03 §5.3a(5): `Perbill` is structurally confined to `[0, 1]`, so the
+        // shell can only ever hand the core an in-domain scalar — the "out of
+        // bounds" reading is not evaluable at this site. The core still screens
+        // the domain itself, because the reference model, the frontend port and
+        // any auditor consume it standalone, and it fails **open**. Both ends
+        // are pinned here so neither can drift into failing closed and taking
+        // value from a claimant on the strength of an unparseable record.
+        assert_eq!(
+            conditional_ledger_core::effective_redeem_fee(conditional_ledger_core::PERBILL_ONE + 1),
+            0
+        );
+        assert_eq!(
+            conditional_ledger_core::effective_redeem_fee(u32::MAX),
+            0,
+            "a malformed record is waived, never charged"
+        );
+        assert_eq!(
+            conditional_ledger_core::effective_redeem_fee(conditional_ledger_core::PERBILL_ONE),
+            conditional_ledger_core::PERBILL_ONE,
+            "100 % is in-domain and must not be screened away"
+        );
+        assert_eq!(
+            sp_runtime::Perbill::one().deconstruct(),
+            conditional_ledger_core::PERBILL_ONE,
+            "the core's raw scalar must be the `Perbill` the shell deconstructs"
+        );
+
+        RedemptionFee::set(sp_runtime::Perbill::zero());
+        settled_scalar_at_070005(1, ALICE, 20_000);
+        let probe = payout_probe(ALICE);
+        assert_ok!(Ledger::redeem_scalar(
+            signed(ALICE),
+            1,
+            ScalarSide::Long,
+            20_000
+        ));
+        assert_eq!(
+            payout_since(ALICE, probe),
+            14_001,
+            "a zero rate charges nothing"
+        );
+        assert_eq!(accrued(), 0);
+        try_state();
+    });
+}
+
+#[test]
+fn sweep_redemption_fees_pays_the_treasury_and_an_empty_counter_is_a_no_op() {
+    new_test_ext().execute_with(|| {
+        RedemptionFee::set(registry_redeem_fee());
+        RecordKeeperRebates::set(true);
+        settled_scalar_at_070005(1, ALICE, 20_000);
+        assert_ok!(Ledger::redeem_scalar(
+            signed(ALICE),
+            1,
+            ScalarSide::Long,
+            20_000
+        ));
+        assert_eq!(accrued(), 43);
+
+        let sovereign_probe = payout_probe(ledger_account());
+        let treasury_before = usdc(TREASURY_MAIN);
+        let escrow_before = TotalEscrowed::<Test>::get();
+        assert_ok!(Ledger::sweep_redemption_fees(signed(CHARLIE)));
+        assert_eq!(usdc(TREASURY_MAIN) - treasury_before, 43);
+        assert_eq!(sovereign_paid_since(sovereign_probe), 43);
+        // 03 §6.5(3): the sweep moves surplus, never escrow.
+        assert_eq!(TotalEscrowed::<Test>::get(), escrow_before);
+        assert_eq!(accrued(), 0);
+        assert!(matches!(
+            ledger_events().last(),
+            Some(Event::RedemptionFeesSwept { amount: 43 })
+        ));
+        assert_eq!(KeeperRebates::get(), vec![(CHARLIE, CrankClass::General)]);
+
+        // 03 §5.4 / I-31: a sweep on an empty counter is a successful no-op,
+        // not an error — it still emits, moves nothing, and pays no rebate.
+        let treasury_before = usdc(TREASURY_MAIN);
+        assert_ok!(Ledger::sweep_redemption_fees(signed(BOB)));
+        assert_eq!(usdc(TREASURY_MAIN), treasury_before);
+        assert!(matches!(
+            ledger_events().last(),
+            Some(Event::RedemptionFeesSwept { amount: 0 })
+        ));
+        assert_eq!(KeeperRebates::get(), vec![(CHARLIE, CrankClass::General)]);
+        try_state();
+    });
+}
+
+#[test]
+fn sweep_redemption_fees_rejects_an_unsigned_origin() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            Ledger::sweep_redemption_fees(RuntimeOrigin::root()),
+            DispatchError::BadOrigin
+        );
+        assert_noop!(
+            Ledger::sweep_redemption_fees(RuntimeOrigin::none()),
+            DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn try_state_l7_rejects_an_accrual_above_the_movable_surplus() {
+    new_test_ext().execute_with(|| {
+        RedemptionFee::set(registry_redeem_fee());
+        settled_scalar_at_070005(1, ALICE, 20_000);
+        assert_ok!(Ledger::redeem_scalar(
+            signed(ALICE),
+            1,
+            ScalarSide::Long,
+            20_000
+        ));
+        try_state();
+
+        // L-7 bounds the accrual by the surplus **above** the R-4 permanent
+        // floor, because §5.4 moves it under `Preservation::Preserve`. An
+        // accrual reaching into that floor is precisely the state in which the
+        // crank would fail on its last unit — which the row says cannot happen.
+        let custody = usdc(ledger_account());
+        let liability = TotalEscrowed::<Test>::get() + DepositsHeld::<Test>::get();
+        let min_balance = <Assets as Inspect<AccountId>>::minimum_balance(USDC);
+        let movable = custody - liability - min_balance;
+        crate::RedemptionFeesAccrued::<Test>::put(movable);
+        try_state();
+        crate::RedemptionFeesAccrued::<Test>::put(movable + 1);
+        assert!(Ledger::do_try_state().is_err());
+    });
+}
+
+#[test]
+fn the_redemption_fee_metadata_constant_is_the_basis_point_projection() {
+    new_test_ext().execute_with(|| {
+        // 02 §9 (contract v17): `ConditionalLedger::RedemptionFee` mirrors
+        // `Market::Fee` exactly — the floored `Perbill / 100_000` projection,
+        // launch 30 — and a frontend cross-checks it against the raw scalar
+        // from `params()` before displaying a net redemption payout. Read from
+        // real runtime metadata, which is the surface 02 §9 actually freezes.
+        RedemptionFee::set(registry_redeem_fee());
+        let version = Test::metadata_versions()
+            .into_iter()
+            .filter(|version| matches!(version, 15 | 16))
+            .max()
+            .expect("stable2606 exposes V15 or V16 metadata");
+        let encoded =
+            Test::metadata_at_version(version).expect("metadata version is constructible");
+        let prefixed =
+            RuntimeMetadataPrefixed::decode(&mut &encoded[..]).expect("metadata decodes");
+
+        macro_rules! assert_constant {
+            ($metadata:expr) => {{
+                let pallet = $metadata
+                    .pallets
+                    .iter()
+                    .find(|pallet| pallet.name == "ConditionalLedger")
+                    .expect("ConditionalLedger pallet is present");
+                let constant = pallet
+                    .constants
+                    .iter()
+                    .find(|constant| constant.name == "RedemptionFee")
+                    .expect("02 §9 freezes `ConditionalLedger::RedemptionFee`");
+                let value = u128::decode(&mut &constant.value[..])
+                    .expect("02 §9 types the constant as `u128` basis points");
+                assert_eq!(
+                    value,
+                    u128::from(registry_redeem_fee().deconstruct() / 100_000)
+                );
+                assert_eq!(value, 30, "13 §1 launch default is 30 bps");
+            }};
+        }
+
+        match prefixed.1 {
+            RuntimeMetadata::V15(metadata) => assert_constant!(metadata),
+            RuntimeMetadata::V16(metadata) => assert_constant!(metadata),
+            metadata => panic!("runtime returned V{}", metadata.version()),
+        }
+    });
+}

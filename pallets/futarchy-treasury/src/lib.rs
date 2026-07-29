@@ -270,21 +270,45 @@ impl<AccountId> PotFunding<AccountId> for () {
     }
 }
 
-/// Runtime custody seam for the 08 §1.2/§1.4 INSURANCE → `MAIN` sweep (SQ-207).
+/// Runtime custody seam for the 08 §1.2/§1.4 INSURANCE → `MAIN` paths (SQ-207;
+/// E2 adds the bounded-reserve readers).
 ///
 /// Implementations MUST move the real USDC with `Preservation::Preserve`:
 /// INSURANCE is a genesis-endowed permanent custody account under 03 §7 R-4, so
 /// at most `balance − min_balance` is sweepable and an over-large `amount` MUST
 /// fail whole rather than reap the account (G-1).
+///
+/// The two readers exist for 08 §1.2's derived target `T_ins`. They are
+/// deliberately **USDC-scoped**: both terms of `T_ins` are USDC, so comparing
+/// any other asset's balance against it is a units error. VIT slash proceeds
+/// (06 §7) live in the same account and never overflow — 08 §2.2 marks VIT at 0
+/// in NAV, so moving them would add nothing to spendable NAV.
 pub trait InsuranceSweep {
     fn sweep(amount: futarchy_primitives::Balance) -> frame_support::dispatch::DispatchResult;
+
+    /// INSURANCE's live **USDC** balance.
+    fn usdc_balance() -> futarchy_primitives::Balance;
+
+    /// The live USDC `min_balance` — the 03 §7 R-4 permanent-account floor and
+    /// the second term of `T_ins`.
+    fn usdc_min_balance() -> futarchy_primitives::Balance;
 }
 
 /// Custody-free test environments may use the unit implementation. Production
 /// binds the real INSURANCE-to-MAIN USDC transfer at the runtime boundary.
+/// Reporting a zero balance keeps the overflow a no-op, which is the
+/// status-quo answer for an environment that models no custody (G-1).
 impl InsuranceSweep for () {
     fn sweep(_: futarchy_primitives::Balance) -> frame_support::dispatch::DispatchResult {
         Ok(())
+    }
+
+    fn usdc_balance() -> futarchy_primitives::Balance {
+        0
+    }
+
+    fn usdc_min_balance() -> futarchy_primitives::Balance {
+        0
     }
 }
 
@@ -588,6 +612,38 @@ pub mod pallet {
     #[pallet::storage]
     pub type State<T: Config> = StorageValue<_, TreasuryState, ValueQuery>;
 
+    /// Real USDC that has arrived in `MAIN` custody but is not yet folded into
+    /// [`State`]'s `main_usdc` — realized market-fee value (04 §2 Sweep),
+    /// transaction fees (08 §9) and the INSURANCE above-target overflow
+    /// (08 §1.2). `nav()` is computed from `main_usdc`, so custody alone raises
+    /// nothing; this is the recognition half of every such inflow.
+    ///
+    /// It is a small dedicated counter rather than a direct write to [`State`]
+    /// **because of the transaction-fee caller**: that path runs on every
+    /// USDC-paying extrinsic, and reading + writing the multi-kilobyte treasury
+    /// aggregate there would put the whole of it into every block's proof.
+    /// [`Pallet::load`] folds this value into `main_usdc` and [`Pallet::persist`]
+    /// clears it in the same write, so `nav()`, `treasury()`, try-state and every
+    /// mutation observe the credit immediately and exactly once.
+    #[pallet::storage]
+    pub type PendingMainCredit<T: Config> = StorageValue<_, Balance, ValueQuery>;
+
+    /// 08 §1.2 / 03 §7 R-5: cumulative ledger residue swept into INSURANCE and
+    /// not yet reclaimed — the liability term of `T_ins`. Reported by the
+    /// ledger's `sweep_dust*` cranks through [`Pallet::note_swept_residue`],
+    /// because a transfer alone leaves the reserve target unable to track the
+    /// liability it backs.
+    ///
+    /// **Monotone in v1, deliberately.** 08 §1.2 requires the 03 §5.4
+    /// Merkle-archived claims payout to decrement it atomically with the
+    /// payment; that procedure is not yet specified, so the counter only rises
+    /// and `T_ins` is an over-estimate — INSURANCE retains more than it owes and
+    /// less overflows. Over-reserving is the safe direction, and no decrement is
+    /// invented here. `sweep_insurance` is explicitly *not* that path: it
+    /// identifies no claim and discharges no liability, so it MUST NOT decrement.
+    #[pallet::storage]
+    pub type SweptResidueUnreclaimed<T: Config> = StorageValue<_, Balance, ValueQuery>;
+
     /// Phase≤4 operations multisig: authorized to note Coretime renewal quotes
     /// and, while the one-way latch is open, to top up only `OpsReserveProbe`
     /// within the live runway ceiling (08 §1.1; 09 §4).
@@ -741,6 +797,13 @@ pub mod pallet {
         },
         /// INSURANCE was swept into `MAIN` by a TREASURY decision (08 §1.2/§1.4).
         InsuranceSwept { amount: Balance },
+        /// INSURANCE held USDC above its derived target `T_ins` and the surplus
+        /// overflowed to `MAIN` (08 §1.2) — automatically inside the inflow's own
+        /// transaction, or through the permissionless reconciliation crank for
+        /// balance that arrived by direct transfer. Treasury-owned operational
+        /// history, outside the frozen 02 §6 ingest set, exactly like
+        /// `PolCustodyMoved` and the two keeper-budget events.
+        InsuranceOverflowed { amount: Balance },
         /// A subsidy line moved with its custody: `spent` on a book seed,
         /// cleared on the 04 §2 Sweep return (08 §8 step 5; I-33). Treasury-owned
         /// operational history, outside the frozen 02 §6 ingest set; it is the
@@ -1253,6 +1316,30 @@ pub mod pallet {
             if amount != 0 {
                 T::InsuranceSweep::sweep(amount)?;
             }
+            Ok(())
+        }
+
+        /// `treasury.reconcile_insurance()` — the 08 §1.2 permissionless
+        /// reconciliation crank for the bounded INSURANCE reserve.
+        ///
+        /// The automatic above-target overflow covers every inflow that executes
+        /// treasury code. It cannot cover the rest, and 08 §1.2 says so plainly:
+        /// INSURANCE has a deterministic address and `ForeignAssets.transfer`
+        /// and its siblings are **public** calls (06 §3.3), so any account may
+        /// push USDC into it with no treasury code running and no interception
+        /// point to hook. Such a balance sits above `T_ins` until something
+        /// looks; this is what looks.
+        ///
+        /// Signed and permissionless, like every other keeper crank here: it
+        /// names no beneficiary, chooses no amount, and can move value to
+        /// exactly one place — `MAIN` — so there is nothing for a caller to
+        /// steer. Idempotent and a **no-op at or below target** (`Ok`, no
+        /// custody move, no event), which is what makes repeated cranking free.
+        #[pallet::call_index(13)]
+        #[pallet::weight(T::WeightInfo::reconcile_insurance())]
+        pub fn reconcile_insurance(origin: OriginFor<T>) -> DispatchResult {
+            ensure_signed(origin)?;
+            Self::overflow_insurance()?;
             Ok(())
         }
 
@@ -1789,6 +1876,83 @@ pub mod pallet {
             Self::persist(t)
         }
 
+        /// Recognize real USDC that has arrived in `MAIN` custody outside the
+        /// budget-line machinery: realized market-fee value (04 §2 Sweep),
+        /// transaction fees (08 §9), and the INSURANCE above-target overflow
+        /// (08 §1.2). Runtime-internal — the caller owns the custody move and
+        /// MUST have completed it in the same storage transaction.
+        ///
+        /// All three arrive as liquid USDC in `MAIN` and therefore enter
+        /// `NavView.total` at par under the §1.2 definition, with no new NAV
+        /// term and no new haircut (08 §1.2, "NAV effect of the E1 inflows").
+        ///
+        /// Infallible by construction, because the transaction-fee caller is a
+        /// `HandleCredit` handler that cannot return an error: the credit has
+        /// already left `ForeignAssets` issuance by the time recognition runs, so
+        /// refusing here would burn it. `Balance` is `u128` against a 6-decimal
+        /// asset, so the saturating add is unreachable arithmetic, not a
+        /// silently-dropped failure.
+        pub fn credit_main(amount: Balance) {
+            if amount == 0 {
+                return;
+            }
+            PendingMainCredit::<T>::mutate(|pending| *pending = pending.saturating_add(amount));
+        }
+
+        /// 08 §1.2 / 03 §7 R-5: the ledger swept `amount` of vault residue into
+        /// INSURANCE. Runtime-internal — `sweep_dust`/`sweep_dust_baseline` call
+        /// this in the same storage transaction as the transfer, because R-5
+        /// requires the residue to be **reported**, not merely moved: the reserve
+        /// target cannot track the liability it backs otherwise.
+        ///
+        /// Raises `T_ins` by exactly `amount`, so swept residue never overflows —
+        /// that is what makes the rule O(1) and self-balancing. The automatic
+        /// overflow then runs in this same transaction, which is 08 §1.2's
+        /// "in the same transaction as the inflow" for every inflow that
+        /// executes treasury code.
+        pub fn note_swept_residue(amount: Balance) -> DispatchResult {
+            if amount > 0 {
+                let next = SweptResidueUnreclaimed::<T>::get()
+                    .checked_add(amount)
+                    .ok_or(Error::<T>::Overflow)?;
+                SweptResidueUnreclaimed::<T>::put(next);
+            }
+            Self::overflow_insurance()?;
+            Ok(())
+        }
+
+        /// 08 §1.2's derived INSURANCE target `T_ins`, scoped to USDC.
+        pub fn insurance_target() -> Balance {
+            futarchy_treasury_core::insurance_target(
+                SweptResidueUnreclaimed::<T>::get(),
+                T::InsuranceSweep::usdc_min_balance(),
+            )
+            .unwrap_or(Balance::MAX)
+        }
+
+        /// Move INSURANCE's above-target USDC surplus to `MAIN` — custody and
+        /// recognition together, in one transaction (08 §1.2).
+        ///
+        /// A no-op at or below target, so both callers — the automatic inflow
+        /// path and the permissionless crank — are idempotent. Accounting is
+        /// credited first and custody second, exactly as `sweep_insurance` does,
+        /// so a custody refusal rolls the credit back with the dispatch (G-1).
+        fn overflow_insurance() -> Result<Balance, DispatchError> {
+            let surplus = futarchy_treasury_core::insurance_overflow(
+                T::InsuranceSweep::usdc_balance(),
+                SweptResidueUnreclaimed::<T>::get(),
+                T::InsuranceSweep::usdc_min_balance(),
+            )
+            .map_err(Self::map_core_error)?;
+            if surplus == 0 {
+                return Ok(0);
+            }
+            Self::credit_main(surplus);
+            T::InsuranceSweep::sweep(surplus)?;
+            Self::deposit_event(Event::InsuranceOverflowed { amount: surplus });
+            Ok(surplus)
+        }
+
         /// 08 §1.2/§1.3: sync the queued in-cap proposal outflows `nav()` nets as
         /// obligations. Runtime-internal — the execution-guard queue (A11) owns
         /// them; B1a wires this (PLAN SQ-47).
@@ -1924,7 +2088,12 @@ pub mod pallet {
         fn load() -> Treasury {
             let s = State::<T>::get();
             let mut t = Treasury {
-                main_usdc: s.main_usdc,
+                // Fold the deferred `MAIN` credits of [`PendingMainCredit`]
+                // (08 §1.1/§1.2/§9). Every read of the aggregate — `nav()`,
+                // `treasury()`, try-state — therefore sees fee and overflow
+                // income at par immediately, and every mutation persists it,
+                // because `persist` clears the counter in the same write.
+                main_usdc: s.main_usdc.saturating_add(PendingMainCredit::<T>::get()),
                 vit_supply: s.vit_supply,
                 reserve_impaired: s.reserve_impaired,
                 lines: s.lines.into_inner(),
@@ -1982,6 +2151,11 @@ pub mod pallet {
         fn persist(t: Treasury) -> DispatchResult {
             let state = Self::checked_state(&t)?;
             State::<T>::put(state);
+            // `load` folded the deferred credits into the value just written, so
+            // the counter is discharged. Clearing it after the bounded
+            // conversion keeps the pair exact: a rejected conversion returns
+            // before either write and leaves the credit pending (G-1).
+            PendingMainCredit::<T>::kill();
             for ev in t.events {
                 Self::deposit_core_event(ev);
             }
@@ -2192,6 +2366,38 @@ pub mod pallet {
             if CommunityScheduleCount::<T>::get() > T::MaxCommunitySchedules::get() {
                 return Err(TryRuntimeError::Other(
                     "treasury: community schedule count exceeds its bound",
+                ));
+            }
+            // 08 §1.2 INSURANCE target relation. The bounded-reserve claim is a
+            // property of the *crank*, not of every block: INSURANCE has a
+            // deterministic address and anyone may push USDC into it with no
+            // treasury code running, so `balance <= T_ins` is reachable-false
+            // between reconciliations and asserting it would let an outsider
+            // break try-state. What must hold at every block is the safety
+            // envelope of the overflow itself.
+            let residue = SweptResidueUnreclaimed::<T>::get();
+            let min_balance = T::InsuranceSweep::usdc_min_balance();
+            let Ok(target) = futarchy_treasury_core::insurance_target(residue, min_balance) else {
+                // A target that does not compute would make the surplus — and so
+                // the amount the crank moves — undefined.
+                return Err(TryRuntimeError::Other(
+                    "treasury: INSURANCE target T_ins overflows its own derivation",
+                ));
+            };
+            if target < min_balance {
+                return Err(TryRuntimeError::Other(
+                    "treasury: INSURANCE target T_ins is below the 03 §7 R-4 floor",
+                ));
+            }
+            // The 03 §7 R-4 floor is a term of `T_ins`, so the surplus the crank
+            // would move is always strictly inside what `Preservation::Preserve`
+            // custody permits: the overflow can never reap this permanent
+            // account, and the crank can always pay out exactly what it computes
+            // (the same argument 03 §9 L-7 makes for the redemption-fee sweep).
+            let balance = T::InsuranceSweep::usdc_balance();
+            if balance.saturating_sub(target) > balance.saturating_sub(min_balance) {
+                return Err(TryRuntimeError::Other(
+                    "treasury: INSURANCE overflow would encroach on the R-4 floor",
                 ));
             }
             let t = Self::load();

@@ -464,6 +464,257 @@ fn swept_pol_returned(id: MarketId) -> Balance {
         .sum()
 }
 
+fn swept_fee_to_main(id: MarketId) -> Balance {
+    market_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::RevenueSwept {
+                market,
+                fee_to_main,
+                ..
+            } if market == id => Some(fee_to_main),
+            _ => None,
+        })
+        .sum()
+}
+
+#[test]
+fn settled_fee_reaches_main_custody_and_is_recognized_as_treasury_credit() {
+    // 08 §1.1 (amended) / 04 §6.1: realized market-fee value routes **100 %**
+    // to `MAIN`. Two halves, and the second is the one that was missing: the
+    // asset must reach `MAIN` custody *and* the treasury must recognize it,
+    // because `nav()` is computed from the internal `main_usdc` counter, not
+    // from the real balance. A sweep that moved only the asset would leave NAV
+    // exactly where it was — the value would be received and never spendable.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(10);
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        // A sell withholds its fee single-sided in the target branch, so the two
+        // branches end unequal — the ρ < 1 shape 08 §10.2 prices in.
+        System::set_block_number(20);
+        assert_ok!(Market::sell(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE / 2,
+            1,
+        ));
+
+        System::set_block_number(30);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+        // Accept wins, so Accept-branch fee bUSDC redeems at par and the
+        // Reject-branch leg pays 0 and is left for reap as worthless residue.
+        settle_decision_at(500_000_000);
+
+        let accept_fee = position_balance(
+            position(PROPOSAL, Branch::Accept, PositionKind::BranchUsdc),
+            FEES,
+        );
+        let reject_fee = position_balance(
+            position(PROPOSAL, Branch::Reject, PositionKind::BranchUsdc),
+            FEES,
+        );
+        assert!(accept_fee > reject_fee, "the sell fee is single-sided");
+        assert!(reject_fee > 0, "the buy fee is a complete pair");
+
+        let main_before = usdc(MAIN);
+        sweep(MARKET_ID);
+
+        assert_eq!(
+            swept_fee_to_main(MARKET_ID),
+            accept_fee,
+            "the winning branch's whole fee balance realizes at par",
+        );
+        assert_eq!(
+            usdc(MAIN) - main_before,
+            accept_fee,
+            "custody: the value really arrives in MAIN",
+        );
+        assert_eq!(
+            MainCreditedTotal::get(),
+            accept_fee,
+            "recognition: NAV's `main_usdc` counter moves with it (08 §1.2)",
+        );
+        // The losing branch stays behind, worth 0, exactly as 04 §2 permits.
+        assert_eq!(
+            position_balance(
+                position(PROPOSAL, Branch::Reject, PositionKind::BranchUsdc),
+                FEES,
+            ),
+            reject_fee,
+        );
+        assert_try_state();
+    });
+}
+
+#[test]
+fn voided_fee_realizes_the_neutral_schedule_on_both_branches() {
+    // 03 §6.4 / 04 §6.2: under VOID unpaired branch-USDC pays `floor(a/2)`, on
+    // each branch, and both legs are paid straight to `MAIN`. This is also the
+    // regression pin for the rejected alternative: merging the cross-branch pair
+    // first would realize one extra base unit, but `merge` pays its holder, and
+    // a per-market fee account custodies no plain USDC (03 §7 R-4), so a merge
+    // below `min_balance` fails and — since 04 §2 makes the sweep a precondition
+    // of reap — would strand the book unreapable forever (G-1).
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(10);
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+
+        System::set_block_number(20);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+        assert_ok!(Ledger::void(signed(RESOLVER), PROPOSAL));
+        assert_ok!(Market::observe_proposal_terminal(PROPOSAL));
+
+        let accept_fee = position_balance(
+            position(PROPOSAL, Branch::Accept, PositionKind::BranchUsdc),
+            FEES,
+        );
+        let reject_fee = position_balance(
+            position(PROPOSAL, Branch::Reject, PositionKind::BranchUsdc),
+            FEES,
+        );
+        assert!(accept_fee > 0 && accept_fee == reject_fee);
+
+        let main_before = usdc(MAIN);
+        sweep(MARKET_ID);
+
+        let expected = accept_fee / 2 + reject_fee / 2;
+        assert_eq!(swept_fee_to_main(MARKET_ID), expected);
+        assert_eq!(usdc(MAIN) - main_before, expected);
+        assert_eq!(MainCreditedTotal::get(), expected);
+        // Both legs burned: nothing valuable is left for reap to discard.
+        assert_eq!(
+            position_balance(
+                position(PROPOSAL, Branch::Accept, PositionKind::BranchUsdc),
+                FEES,
+            ),
+            0,
+        );
+        assert_eq!(
+            position_balance(
+                position(PROPOSAL, Branch::Reject, PositionKind::BranchUsdc),
+                FEES,
+            ),
+            0,
+        );
+        assert_try_state();
+    });
+}
+
+#[test]
+fn baseline_book_remits_its_retained_plain_usdc_fee_above_the_min_balance_floor() {
+    // 04 §6.1: the Baseline sell wrapper has no mirror leg, so the **book**
+    // funds the payout and retains the fee as plain USDC — a different custody
+    // path from every other book, and the same crank must remit it. 03 §7 R-4
+    // scopes it: the sweep closes the *fee* component of the residue and leaves
+    // the `min_balance` endowment exactly where R-4 puts it.
+    new_test_ext().execute_with(|| {
+        create_baseline();
+        seed(BASELINE_ID);
+        // R-4 endows the Baseline book at Seed; the mock's genesis funds every
+        // fixture account, so establish the floor explicitly and measure from it.
+        let floor = <Assets as Inspect<AccountId>>::minimum_balance(USDC);
+        assert_ok!(Assets::transfer(
+            signed(BOOK),
+            USDC,
+            MAIN,
+            usdc(BOOK) - floor,
+        ));
+        assert_eq!(usdc(BOOK), floor);
+
+        System::set_block_number(10);
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            BASELINE_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        System::set_block_number(20);
+        assert_ok!(Market::sell(
+            signed(ALICE),
+            BASELINE_ID,
+            ScalarSide::Long,
+            TRADE,
+            1,
+        ));
+        let retained = usdc(BOOK) - floor;
+        assert!(retained > 0, "the sell fee is retained as plain USDC");
+
+        System::set_block_number(30);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), BASELINE_ID));
+        settle_baseline();
+        let main_before = usdc(MAIN);
+        sweep(BASELINE_ID);
+
+        assert_eq!(swept_fee_to_main(BASELINE_ID), retained);
+        assert_eq!(usdc(MAIN) - main_before, retained);
+        assert_eq!(MainCreditedTotal::get(), retained);
+        assert_eq!(
+            usdc(BOOK),
+            floor,
+            "the R-4 existential floor stays with the account",
+        );
+        assert_try_state();
+    });
+}
+
+#[test]
+fn a_refused_main_recognition_rolls_the_whole_sweep_back() {
+    // G-1: banking fee custody the treasury never recognizes would silently
+    // destroy NAV, so a recognition failure must abort the sweep whole — book
+    // unswept, unreapable, crank retryable — exactly as a POL credit failure does.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(10);
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        System::set_block_number(20);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+        settle_decision_at(500_000_000);
+
+        let main_before = usdc(MAIN);
+        let treasury_before = usdc(TREASURY);
+        MainRevenueRefuses::set(true);
+        assert_err!(
+            Market::sweep_revenue(signed(BOB), MARKET_ID),
+            sp_runtime::DispatchError::Other("MAIN revenue recognition refused"),
+        );
+        assert!(!crate::SweptMarkets::<Test>::contains_key(MARKET_ID));
+        assert_eq!(usdc(MAIN), main_before);
+        assert_eq!(usdc(TREASURY), treasury_before);
+        assert_eq!(MainCreditedTotal::get(), 0);
+
+        MainRevenueRefuses::set(false);
+        sweep(MARKET_ID);
+        assert!(crate::SweptMarkets::<Test>::contains_key(MARKET_ID));
+        assert!(swept_fee_to_main(MARKET_ID) > 0);
+        assert_try_state();
+    });
+}
+
 #[test]
 fn settled_book_returns_its_seed_to_the_funding_line_less_divergence_loss() {
     // 08 §3/§8 step 5(b): "realized cost = the live-branch divergence loss only"

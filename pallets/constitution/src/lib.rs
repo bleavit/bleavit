@@ -387,6 +387,18 @@ pub mod pallet {
         /// not `BadOrigin` — the origin is authorized, the resulting state is
         /// not.
         CoverageBreaksAdmission,
+        /// 13 rule 7 / 08 §10.6 (E1): the amendment would carry the live pair
+        /// `ledger.redeem_fee ≤ mkt.fee` out of band. Both rows are **PARAM**,
+        /// so a single PARAM decision can move either side and both directions
+        /// are refused: raising `ledger.redeem_fee` above the live `mkt.fee`,
+        /// and lowering `mkt.fee` beneath the live `ledger.redeem_fee`.
+        /// Deliberately not `TryStateViolation` (nothing stored is violating an
+        /// invariant — the refusal is what keeps it that way), not `AboveMax`
+        /// (the row's own `[0, 100]` bps bounds are satisfied; the live coupling
+        /// is what binds) and not `BadOrigin` (the origin is authorized, the
+        /// resulting pair is not). Appended last — the preceding discriminants
+        /// are SCALE-stable.
+        RedemptionFeeAboveMarketFee,
     }
 
     #[pallet::hooks]
@@ -446,6 +458,16 @@ pub mod pallet {
                     _ => return Err(Error::<T>::WrongType.into()),
                 }
             }
+            // 13 rule 7's second live coupling (E1): `ledger.redeem_fee ≤
+            // mkt.fee`, screened jointly over the pair and in **both**
+            // directions — both rows are PARAM, so a single PARAM decision can
+            // move either side, and screening only one would leave the
+            // invariant breakable from the other. The predicate and the key set
+            // are single-homed in the core so shell and core cannot drift.
+            constitution_core::screen_redeem_fee_coupling(key, updated.value, |pair| {
+                Params::<T>::get(pair).map(|record| record.value)
+            })
+            .map_err(Self::map_core_error)?;
             ensure!(
                 !constitution_core::phase_cap_raise_refused(
                     key,
@@ -994,6 +1016,9 @@ pub mod pallet {
                 CoreError::TooManyCapabilities => Error::<T>::TooManyCapabilities.into(),
                 CoreError::BadOrigin => DispatchError::BadOrigin,
                 CoreError::TryStateViolation => Error::<T>::TryStateViolation.into(),
+                CoreError::RedemptionFeeAboveMarketFee => {
+                    Error::<T>::RedemptionFeeAboveMarketFee.into()
+                }
             }
         }
     }

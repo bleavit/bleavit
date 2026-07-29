@@ -2277,25 +2277,23 @@ fn sq_36_ledger_position_deposit_is_frozen_at_its_kernel_floor() {
     });
 }
 
-/// E1 — 13 §1 row `ledger.redeem_fee` (rule-6 key `ledger.rdm_fee`), relation
+/// E1/E4 — 13 §1 row `ledger.redeem_fee` (rule-6 key `ledger.rdm_fee`), relation
 /// derived in 08 §10.6: the live coupling `ledger.redeem_fee <= mkt.fee` is
 /// screened **jointly over the pair at the amendment boundary**, in both
 /// directions, and is the second such coupling after `gate.v_min` <->
 /// `dec.v_min` (13 rule 7). Above `mkt.fee`, holding to settlement is dearer
-/// than round-tripping through the book in every state of the world, so the
-/// schedule pays traders to close before d18 — draining exactly the contest
-/// capital `dec.v_min` requires. The unsafe direction is upward, so the row's
-/// own static `[0, 100]` bps bounds are not what binds: the live coupling is
-/// strictly tighter whenever `mkt.fee < 100`.
+/// than round-tripping through the book conditional on the position surviving
+/// to a charged redemption, so the schedule pays traders to close before d18 —
+/// draining exactly the contest capital `dec.v_min` requires. The unsafe
+/// direction is upward, so the row's own static `[0, 100]` bps bounds are not
+/// what binds: the live coupling is strictly tighter whenever `mkt.fee < 100`.
 ///
-/// **Ignored: the screen itself is a separate E1 work item and is not wired
-/// yet.** What is in place is the seeded registry row and its static bounds
-/// (covered by the generated per-key `set_param`/`amend_registry` suite). When
-/// E1 lands the joint screen, drop the `#[ignore]` and tighten the two refusal
-/// legs from `is_err()` to `assert_noop!` on whichever variant it chooses —
-/// the `gate.v_min` path answers `Error::TryStateViolation`.
+/// The refusal is `RedemptionFeeAboveMarketFee`, not the `TryStateViolation`
+/// the `gate.v_min` path answers: nothing stored is violating an invariant
+/// here — the refusal is what keeps it that way — and reporting a try-state
+/// violation for a screened amendment tells a governance client the chain is
+/// broken when it is not.
 #[test]
-#[ignore = "E1: the joint ledger.redeem_fee <= mkt.fee amendment screen is not implemented yet"]
 fn e1_no_amendment_may_carry_the_redemption_fee_above_the_market_fee() {
     new_test_ext().execute_with(|| {
         let redeem = key16(b"ledger.rdm_fee");
@@ -2316,9 +2314,9 @@ fn e1_no_amendment_may_carry_the_redemption_fee_above_the_market_fee() {
         // in bounds for its own record (30 bps + 1 part is far below the 100 bps
         // max and inside the 10 bps max-Δ), so only the coupling can refuse it.
         let above = ParamValue::Perbill(seeded.saturating_add(1));
-        assert!(
-            Constitution::set_param(RuntimeOrigin::signed(PARAM_ACC), redeem, above).is_err(),
-            "13 §1 / 08 §10.6: ledger.redeem_fee must not be amendable above the live mkt.fee"
+        assert_noop!(
+            Constitution::set_param(RuntimeOrigin::signed(PARAM_ACC), redeem, above),
+            Error::<Test>::RedemptionFeeAboveMarketFee
         );
         assert_eq!(value_of(redeem), Some(ParamValue::Perbill(seeded)));
 
@@ -2326,37 +2324,115 @@ fn e1_no_amendment_may_carry_the_redemption_fee_above_the_market_fee() {
         // the market fee under the live redemption fee is the same violation and
         // must be refused rather than left for the ledger to reconcile.
         let below = ParamValue::Perbill(seeded.saturating_sub(1));
-        assert!(
-            Constitution::set_param(RuntimeOrigin::signed(PARAM_ACC), market, below).is_err(),
-            "13 rule 7: the coupling is screened over the pair, not over one key"
+        assert_noop!(
+            Constitution::set_param(RuntimeOrigin::signed(PARAM_ACC), market, below),
+            Error::<Test>::RedemptionFeeAboveMarketFee
         );
         assert_eq!(value_of(market), Some(ParamValue::Perbill(seeded)));
 
+        // (2b) The `mkt.fee`-lowering direction is not only refused at the
+        // boundary case above: a lawful-for-its-own-record step that lands
+        // strictly under the live redemption fee is refused just the same. This
+        // is the leg that a one-sided screen would let through, and the one 13
+        // rule 7 calls out explicitly because both rows are PARAM — a single
+        // PARAM decision can move either side of the relation.
+        // The largest step *downward* both records admit — derived from their
+        // own max-Δ rules, so this leg is a plainly lawful amendment for its own
+        // record and only the coupling can refuse it.
+        let step = absolute_perbill_delta(redeem).min(absolute_perbill_delta(market));
+        let far_below = ParamValue::Perbill(seeded.saturating_sub(step));
+        assert_noop!(
+            Constitution::set_param(RuntimeOrigin::signed(PARAM_ACC), market, far_below),
+            Error::<Test>::RedemptionFeeAboveMarketFee
+        );
+        assert_eq!(value_of(market), Some(ParamValue::Perbill(seeded)));
+
+        // (2c) Lowering `mkt.fee` is otherwise perfectly legal — the screen is
+        // over the resulting *pair*, not a freeze on the market fee. Drop the
+        // redemption fee first and the identical step passes.
+        assert_ok!(Constitution::set_param(
+            RuntimeOrigin::signed(PARAM_ACC),
+            redeem,
+            far_below
+        ));
+        assert_ok!(Constitution::set_param(
+            RuntimeOrigin::signed(PARAM_ACC),
+            market,
+            far_below
+        ));
+        assert_eq!(value_of(market), Some(far_below));
+        assert_ok!(Constitution::do_try_state());
+        // Restore the seeded pair so the numbered legs below read as written.
+        set_epoch(2);
+        assert_ok!(Constitution::set_param(
+            RuntimeOrigin::signed(PARAM_ACC),
+            market,
+            ParamValue::Perbill(seeded)
+        ));
+        assert_ok!(Constitution::set_param(
+            RuntimeOrigin::signed(PARAM_ACC),
+            redeem,
+            ParamValue::Perbill(seeded)
+        ));
+
         // (3) Raising the ceiling first makes the very same raise lawful: the
         // screen tests the resulting pair, so both keys stay amendable in step.
-        let raised = ParamValue::Perbill(seeded.saturating_add(1_000_000)); // +10 bps, the max-Δ
+        // The step is each record's own max-Δ, read from the registry.
+        let raised = ParamValue::Perbill(seeded.saturating_add(step));
+        set_epoch(3);
         assert_ok!(Constitution::set_param(
             RuntimeOrigin::signed(PARAM_ACC),
             market,
             raised
         ));
-        set_epoch(2);
+        set_epoch(4);
         assert_ok!(Constitution::set_param(
             RuntimeOrigin::signed(PARAM_ACC),
             redeem,
             raised
         ));
 
-        // (4) Lowering the redemption fee is always legal — 0 is the safe
+        // (4) Lowering the redemption fee is always legal — down is the safe
         // direction, and the screen is directional, not a freeze on the keys.
-        set_epoch(3);
+        set_epoch(5);
         assert_ok!(Constitution::set_param(
             RuntimeOrigin::signed(PARAM_ACC),
             redeem,
             ParamValue::Perbill(seeded)
         ));
         assert_ok!(Constitution::do_try_state());
+
+        // (5) try-state is the backstop for both directions and is the only
+        // machine check an unscreened writer (a genesis seed, a migration)
+        // cannot slip past — the ledger deliberately does not re-derive the
+        // coupling per redemption (03 §5.3a(5)), so nothing downstream would
+        // notice. Write the violating pair directly and prove it fires.
+        let breaking = Params::<Test>::get(redeem).map(|mut record| {
+            record.value = ParamValue::Perbill(raised_parts(raised).saturating_add(1));
+            record
+        });
+        Params::<Test>::insert(redeem, breaking.expect("seeded row"));
+        assert!(
+            Constitution::do_try_state().is_err(),
+            "13 rule 7: try-state asserts `ledger.redeem_fee <= mkt.fee`"
+        );
     });
+}
+
+fn raised_parts(value: ParamValue) -> u32 {
+    match value {
+        ParamValue::Perbill(parts) => parts,
+        other => panic!("expected a Perbill, got {other:?}"),
+    }
+}
+
+/// A `Perbill` row's own absolute max-Δ, read from the registry rather than
+/// restated: 13 rule 7's step limits are 13-owned values.
+fn absolute_perbill_delta(key: ParamKey) -> u32 {
+    match Params::<Test>::get(key).and_then(|record| record.max_delta) {
+        Some(crate::MaxDelta::Absolute(ParamValue::Perbill(parts))) => parts,
+        other => panic!("13 §1: {key:?} must carry an absolute Perbill max-Δ, got {other:?}"),
+    }
 }
 
 #[test]

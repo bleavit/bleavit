@@ -69,6 +69,81 @@ pub const fn gate_v_min_coupled(decision: Balance, gate: Balance) -> bool {
     gate >= decision / 20 && gate <= decision / 2
 }
 
+/// 13 rule 7's **second** live coupling: `ledger.redeem_fee ≤ mkt.fee`
+/// (03 §5.3a; 08 §10.6). Returns the partner key of either side.
+///
+/// It takes the identical shape to the `gate.v_min` ↔ `dec.v_min` precedent —
+/// the relation is the standing invariant, it is screened **jointly over the
+/// pair** at the amendment boundary, and it is asserted in `try_state`. It
+/// binds earlier than the consuming engine for the same reason: the consumer is
+/// a payout deduction in audit-scope-A code with no admissible way to fail
+/// closed on a bad rate without stranding a claimant (03 §5.3a(5) makes it read
+/// a bad record as zero), so the only safe place to refuse is before the value
+/// is stored.
+///
+/// **Both directions are in scope**, and that is not decoration. Unlike the
+/// `gate.v_min` pair, these two rows are both **PARAM**, so a single PARAM
+/// decision can move either side: the screen MUST refuse a *lowering* of
+/// `mkt.fee` that would carry the pair out of band exactly as it refuses a
+/// *raising* of `ledger.redeem_fee`. Screening only the second key would leave
+/// the invariant breakable from the first — precisely the "left for a consumer
+/// to reconcile" failure rule 7 exists to prevent (13 rule 7, E1).
+pub fn redeem_fee_pair(key: ParamKey) -> Option<ParamKey> {
+    let redeem = key16(b"ledger.rdm_fee");
+    let market = key16(b"mkt.fee");
+    if key == redeem {
+        return Some(market);
+    }
+    if key == market {
+        return Some(redeem);
+    }
+    None
+}
+
+/// The 13 rule 7 / 08 §10.6 relation itself, over the two raw `Perbill`
+/// scalars. Exit-neutrality: above `mkt.fee`, holding to settlement is dearer
+/// than round-tripping through the book conditional on the position surviving
+/// to a charged redemption, so the schedule would pay traders to close before
+/// d18 — draining exactly the contest capital `dec.v_min` requires and `L̂`
+/// measures. The unsafe direction is upward, so equality is admissible and the
+/// launch default deliberately sits *at* the bound.
+pub const fn redeem_fee_coupled(redeem_fee: u128, market_fee: u128) -> bool {
+    redeem_fee <= market_fee
+}
+
+/// Screen the 13 rule 7 live coupling over the **resulting pair**, given the
+/// amended key's post-image value and a reader for the partner's live value.
+///
+/// Single-homed so the frame-free core and the FRAME shell cannot drift on the
+/// predicate, the key set, or which side of the relation each key is.
+pub fn screen_redeem_fee_coupling(
+    key: ParamKey,
+    updated: ParamValue,
+    paired: impl FnOnce(ParamKey) -> Option<ParamValue>,
+) -> Result<(), Error> {
+    let Some(pair) = redeem_fee_pair(key) else {
+        return Ok(());
+    };
+    // A missing partner row cannot be reconciled, and 13 §1 seeds both. Fail
+    // closed rather than admitting an unscreened amendment (G-1).
+    let partner = paired(pair).ok_or(Error::TryStateViolation)?;
+    let (redeem_fee, market_fee) = if key == key16(b"ledger.rdm_fee") {
+        (updated, partner)
+    } else {
+        (partner, updated)
+    };
+    match (redeem_fee, market_fee) {
+        (ParamValue::Perbill(redeem_fee), ParamValue::Perbill(market_fee)) => {
+            ensure!(
+                redeem_fee_coupled(redeem_fee as u128, market_fee as u128),
+                Error::RedemptionFeeAboveMarketFee
+            );
+            Ok(())
+        }
+        _ => Err(Error::WrongType),
+    }
+}
+
 #[derive(
     Clone,
     Copy,
@@ -754,6 +829,14 @@ impl ConstitutionState {
                 _ => return Err(Error::WrongType),
             }
         }
+        // 13 rule 7's second live coupling (E1): `ledger.redeem_fee ≤ mkt.fee`,
+        // screened jointly over the pair in both directions.
+        screen_redeem_fee_coupling(key, updated.value, |pair| {
+            self.params
+                .iter()
+                .find(|record| record.key == pair)
+                .map(|record| record.value)
+        })?;
         Ok((index, updated))
     }
 
@@ -1091,6 +1174,34 @@ impl ConstitutionState {
                 _ => return Err(Error::WrongType),
             }
         }
+        // 13 rule 7 / 03 §5.3a(5): the `ledger.redeem_fee ≤ mkt.fee` coupling is
+        // asserted here as well as screened at the amendment boundary. The
+        // backstop is load-bearing in both directions — these are two PARAM
+        // rows, so either side can move — and it is the only machine check that
+        // a genesis seed, a migration or an unscreened writer cannot slip past.
+        // The ledger deliberately does not re-derive it per redemption
+        // (03 §5.3a(5)), so nothing downstream would notice.
+        let redeem_key = key16(b"ledger.rdm_fee");
+        let redeem_fee = self
+            .params
+            .iter()
+            .find(|record| record.key == redeem_key)
+            .ok_or(Error::TryStateViolation)?;
+        let market_key = redeem_fee_pair(redeem_key).ok_or(Error::TryStateViolation)?;
+        let market_fee = self
+            .params
+            .iter()
+            .find(|record| record.key == market_key)
+            .ok_or(Error::TryStateViolation)?;
+        match (redeem_fee.value, market_fee.value) {
+            (ParamValue::Perbill(redeem_fee), ParamValue::Perbill(market_fee)) => {
+                ensure!(
+                    redeem_fee_coupled(redeem_fee as u128, market_fee as u128),
+                    Error::TryStateViolation
+                );
+            }
+            _ => return Err(Error::WrongType),
+        }
         for meter in &self.meters {
             ensure!(meter.spent <= meter.limit, Error::MeterExhausted);
         }
@@ -1136,6 +1247,22 @@ pub enum Error {
     /// can move. Raising coverage is always permitted. Appended last — the
     /// preceding discriminants are SCALE-stable.
     CoverageBreaksAdmission,
+    /// 13 rule 7 / 08 §10.6 (E1): the amendment would carry the pair
+    /// `ledger.redeem_fee ≤ mkt.fee` out of band — either by raising the
+    /// redemption fee above the live market fee, or by lowering the market fee
+    /// beneath the live redemption fee. Both rows are PARAM, so both directions
+    /// are refusable and both are refused.
+    ///
+    /// Deliberately **not** `TryStateViolation`, which is what the `gate.v_min`
+    /// screen answers: nothing has violated try-state here. Try-state is a
+    /// machine-checked assertion about *stored* state, and this refusal happens
+    /// precisely so that state is never reached — reporting a violation of an
+    /// invariant that still holds tells a governance client the chain is broken
+    /// when the truth is that its amendment was screened. Also not `AboveMax`
+    /// or `BadOrigin`: the record's own static `[0, 100]` bps bounds are
+    /// satisfied and the origin is authorized; it is the *resulting pair* that
+    /// is not. Appended last — the preceding discriminants are SCALE-stable.
+    RedemptionFeeAboveMarketFee,
 }
 
 /// 09 §5.2 (SQ-197): `phase3.tvl_cap` and `phase3.dep_cap` are "raised only by
@@ -2751,6 +2878,72 @@ mod tests {
         assert_eq!(Error::BadReleaseSchema.encode(), vec![13]);
         assert_eq!(Error::TryStateViolation.encode(), vec![18]);
         assert_eq!(Error::BudgetDerivationRequired.encode(), vec![19]);
+        // E4 appends the 13 rule 7 coupling refusal last, after
+        // `PhaseCapRaiseRefused` (20) and `CoverageBreaksAdmission` (21).
+        assert_eq!(Error::RedemptionFeeAboveMarketFee.encode(), vec![22]);
+    }
+
+    /// 13 rule 7 (E1/E4): `ledger.redeem_fee ≤ mkt.fee` is screened jointly
+    /// over the pair at the amendment boundary — **in both directions**,
+    /// because both rows are PARAM and a single PARAM decision can move either
+    /// side — and asserted in try-state.
+    #[test]
+    fn redeem_fee_coupling_is_screened_over_the_pair_in_both_directions() {
+        let redeem = key16(b"ledger.rdm_fee");
+        let market = key16(b"mkt.fee");
+        assert_eq!(redeem_fee_pair(redeem), Some(market));
+        assert_eq!(redeem_fee_pair(market), Some(redeem));
+        assert_eq!(redeem_fee_pair(key16(b"epoch.length")), None);
+
+        let mut state = ConstitutionState::genesis();
+        let value_of = |state: &ConstitutionState, key| {
+            state
+                .params
+                .iter()
+                .find(|record| record.key == key)
+                .map(|record| record.value)
+                .expect("13 §1 seeds the row")
+        };
+        let ParamValue::Perbill(seeded) = value_of(&state, redeem) else {
+            panic!("13 §1: `ledger.rdm_fee` is a Perbill row")
+        };
+        // 08 §10.6: the launch default sits *at* the coupling ceiling, so the
+        // smallest step in either direction breaks the pair.
+        assert_eq!(value_of(&state, market), ParamValue::Perbill(seeded));
+        assert!(state.try_state().is_ok());
+
+        let before = state.clone();
+        assert_eq!(
+            state.set_param(redeem, ParamValue::Perbill(seeded + 1), 1, 1),
+            Err(Error::RedemptionFeeAboveMarketFee)
+        );
+        assert_eq!(state, before, "a refused amendment is a strict no-op");
+        assert_eq!(
+            state.set_param(market, ParamValue::Perbill(seeded - 1), 1, 1),
+            Err(Error::RedemptionFeeAboveMarketFee),
+            "13 rule 7: screening only `ledger.redeem_fee` leaves the invariant \
+             breakable from `mkt.fee`"
+        );
+        assert_eq!(state, before);
+
+        // Equality is admissible (the relation is `≤`), and raising the ceiling
+        // first makes the identical raise lawful.
+        assert!(redeem_fee_coupled(seeded as u128, seeded as u128));
+        assert!(state
+            .set_param(market, ParamValue::Perbill(seeded + 1), 1, 1)
+            .is_ok());
+        assert!(state
+            .set_param(redeem, ParamValue::Perbill(seeded + 1), 1, 1)
+            .is_ok());
+        assert!(state.try_state().is_ok());
+
+        // try-state is the backstop an unscreened writer cannot slip past.
+        for record in &mut state.params {
+            if record.key == redeem {
+                record.value = ParamValue::Perbill(seeded + 2);
+            }
+        }
+        assert_eq!(state.try_state(), Err(Error::TryStateViolation));
     }
 
     #[test]

@@ -1642,6 +1642,92 @@ pub fn withdraw_branch_pair<A: Clone + Eq, L: LedgerOps<A>>(
     add(returned, withdraw_book(reject, ledger, treasury)?)
 }
 
+/// Realize one book's **fee** custody and remit it to the treasury `MAIN`
+/// account — the revenue half of the 04 §2 Sweep stage (04 §6.1; 08 §1.1, whose
+/// amended Fee routing paragraph routes realized fee value 100 % to `MAIN`).
+///
+/// The fee account of a decision or gate book holds **branch-USDC of both
+/// branches** and nothing else: a `buy` withholds the fee as a complete
+/// Accept+Reject pair, a `sell` withholds it single-sided in the target branch
+/// (04 §6.1). So realization is exactly the branch-USDC schedule of 03 §5.3:
+///
+/// * `ScalarSettled` — the winning branch's balance redeems **at par**, which
+///   is why 04 §6.1 can call the buy-side pair "worth exactly `fee` USDC at any
+///   settlement"; the losing branch pays 0 and is the worthless residue reap
+///   discards. A single-sided `sell` fee follows its branch, which is the
+///   income haircut behind the `ρ = 0.75` realization factor of 08 §10.2.
+/// * `Voided` — each branch's balance pays the D-1 neutral `floor(a/2)`
+///   (03 §6.4), paid straight to `MAIN`.
+///
+///   **Why not merge the pair first.** A cross-branch pair merges to par, so
+///   merging would realize one extra base unit when *both* branch totals are
+///   odd. It is rejected anyway: `merge` pays its **holder**, and a per-market
+///   fee account is not genesis-endowed and custodies no plain USDC (03 §7
+///   R-4), so a merge below the USDC `min_balance` fails `BelowMinimum` — and
+///   because the sweep is a precondition of reap (04 §2), that failure would
+///   strand the book unswept, unreapable and its POL unreturned **forever**.
+///   One base unit of dust, swept per 03 §7 R-5, against a permanent liveness
+///   trap is not a close call (G-1, R-7).
+/// * `Archived` — the ledger's independent crank already reaped the vault;
+///   there is nothing left to value (04 §2 "Reap interleavings").
+///
+/// A **Baseline** book collects no branch-USDC fee at all: its degenerate
+/// wrapper retains the sell-side fee as **plain USDC** in the *book* account
+/// (04 §6.1). That balance needs no redemption leg — it is already USDC — so it
+/// is the caller's custody move, and only above `min_balance` (03 §7 R-4).
+///
+/// Returns the real USDC the redemptions released to `MAIN`, which is the
+/// `fee_to_main` leg of `RevenueSwept` (02 §5). Errors are status-quo (G-1):
+/// the caller's storage layer rolls the whole sweep back and the crank retries.
+pub fn withdraw_fees<A: Clone + Eq, L: LedgerOps<A>>(
+    m: &MarketBook<A>,
+    ledger: &mut L,
+    main: &A,
+) -> Result<Balance, Error> {
+    let proposal = match m.kind {
+        BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. } => proposal,
+        BookKind::Baseline { .. } => return Ok(0),
+    };
+    let fees = &m.fees_account;
+    match ledger.vault_terminal(proposal).ok_or(Error::NotTerminal)? {
+        VaultTerminal::Settled { winner } => {
+            let held =
+                ledger.position_balance(position(proposal, winner, PositionKind::BranchUsdc), fees);
+            if held == 0 {
+                return Ok(0);
+            }
+            ledger
+                .do_redeem(proposal, fees, main, held)
+                .map_err(|_| Error::Ledger)
+        }
+        VaultTerminal::Voided => {
+            let mut returned = 0;
+            for branch in [Branch::Accept, Branch::Reject] {
+                let held = ledger
+                    .position_balance(position(proposal, branch, PositionKind::BranchUsdc), fees);
+                if held == 0 {
+                    continue;
+                }
+                returned = add(
+                    returned,
+                    ledger
+                        .do_redeem_void(
+                            proposal,
+                            branch,
+                            PositionKind::BranchUsdc,
+                            fees,
+                            main,
+                            held,
+                        )
+                        .map_err(|_| Error::Ledger)?,
+                )?;
+            }
+            Ok(returned)
+        }
+        VaultTerminal::Archived => Ok(0),
+    }
+}
+
 /// `ScalarSettled` decision book on the realized branch: complete sets pay par,
 /// the unmatched remainder pays the 03 §5.3 floored single-leg rate, and any
 /// branch-USDC the §6.3 recycle left behind redeems 1:1.

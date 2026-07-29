@@ -14,6 +14,127 @@ use scale_info::TypeInfo;
 pub const MAX_POSITIONS_PER_ACCOUNT: u32 = 64;
 pub const SCALE_1E9: u128 = kernel::SCORE_SCALE as u128;
 
+/// The `Perbill` denominator (02 §4 stores a `Perbill` as parts per billion).
+///
+/// This is the *type's* scale, not a 13-owned value: the ledger carries the
+/// live `ledger.redeem_fee` rate as that raw scalar so the frame-free core
+/// needs no `sp_runtime` dependency (01 §5.2).
+pub const PERBILL_ONE: u32 = 1_000_000_000;
+
+/// 03 §5.3a(1): the fee treatment of one escrow outflow.
+///
+/// The treatment is **named at every call site**, never inferred from the
+/// payout, the vault state or the shape of the helper — which is what makes the
+/// exemptions structural. A later edit to the shared payout seam cannot make
+/// `redeem` (the G-3 par leg) or `redeem_void` (protocol failure) start paying
+/// a fee, because those call sites say what they are.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
+pub enum FeeTreatment {
+    /// A settlement payout to a non-`ProtocolAccounts` claimant.
+    Charged,
+    /// `redeem` — winning branch-USDC at par; charging it falsifies G-3, D-3,
+    /// I-2(b), I-5 and PT-2 together (03 §5.3a(1)).
+    ExemptParLeg,
+    /// `redeem_void` — VOID is protocol failure (D-1); charging users for the
+    /// protocol's own failure inverts G-1.
+    ExemptVoid,
+    /// Every `merge*` — the complete-set primitives. A fee opens a spread
+    /// around par and makes the D-1 primary recovery path lossy.
+    ExemptMerge,
+    /// A `ProtocolAccounts` claimant — the treasury would be taxing itself.
+    ExemptProtocol,
+}
+
+impl FeeTreatment {
+    pub const fn charged(self) -> bool {
+        matches!(self, Self::Charged)
+    }
+}
+
+/// 03 §5.3a(5): read the rate, and fail **open**.
+///
+/// A malformed (out-of-domain) record reads as **zero**, i.e. the fee is
+/// waived. This is the one place in the ledger where the fail-open direction is
+/// the correct one, because it is the claimant-favouring one: a waived fee
+/// costs revenue, while a fee charged from an unreadable record takes value
+/// from a claimant on the strength of state the runtime could not parse.
+///
+/// Only the `Perbill` **domain** is screened here. The 13 §1 record bounds and
+/// the live `ledger.redeem_fee ≤ mkt.fee` coupling are screened at the
+/// amendment boundary (13 rule 7), never by this consumer, and per I-31 no
+/// admissible rate — including a hypothetical 100 % — can create an unbacked
+/// claim, so the ledger must not reject a merely large rate.
+pub const fn effective_redeem_fee(rate: u32) -> u32 {
+    if rate > PERBILL_ONE {
+        0
+    } else {
+        rate
+    }
+}
+
+/// 03 §5.3a(2): the redemption fee on one gross payout.
+///
+/// ```text
+/// fee(g) = 0                if g − ceil(g · rate) < ledger.min_split
+///        = ceil(g · rate)   otherwise
+/// ```
+///
+/// The fee rounds **up**, i.e. against the claimant and in favour of the
+/// protocol, matching 03 §7 R-1's direction for every other division.
+///
+/// **The waiver tests the net, not the gross**, and that is load-bearing:
+/// `ledger.min_split` and the USDC `min_balance` are the same 10⁴ (§7 R-2,
+/// R-4), so a gross-based test would let a gross of exactly `min_balance`
+/// through, charge it, and net it *below* `min_balance` — landing on the very
+/// R-4 `BelowMinimum` path the waiver exists to remove. The net-based predicate
+/// is monotone in `g`, so the waived set is a prefix interval and there is no
+/// second band to search for (§5.3a(2b)).
+pub fn redemption_fee(gross: Balance, rate: u32, min_split: Balance) -> Result<Balance, Error> {
+    let rate = effective_redeem_fee(rate) as Balance;
+    if rate == 0 {
+        return Ok(0);
+    }
+    // `ceil(gross · rate / 1e9)` without ever forming `gross · rate`: the true
+    // product/1e9 is ≤ `gross` for every admissible rate, so splitting the
+    // multiplication across the quotient and remainder of `gross / 1e9` keeps
+    // every intermediate inside `u128` (`remainder · rate < 1e18`). A checked
+    // `gross · rate` would instead reject a large-but-legal payout, which is a
+    // liveness failure the claimant pays for.
+    let scale = PERBILL_ONE as Balance;
+    let quotient = gross / scale;
+    let remainder = gross % scale;
+    let partial = remainder
+        .checked_mul(rate)
+        .ok_or(Error::ArithmeticOverflow)?;
+    let mut fee = quotient
+        .checked_mul(rate)
+        .ok_or(Error::ArithmeticOverflow)?
+        .checked_add(partial / scale)
+        .ok_or(Error::ArithmeticOverflow)?;
+    if partial % scale != 0 {
+        fee = add(fee, 1)?;
+    }
+    // §5.3a(2): `fee(g) ≤ g` holds for every admissible rate, so no payout can
+    // go negative and no branch of the arithmetic can underflow. Defensive:
+    // reaching this is a bug in the arithmetic above, never a caller error.
+    ensure!(fee <= gross, Error::ArithmeticOverflow);
+    if sub(gross, fee)? < min_split {
+        return Ok(0);
+    }
+    Ok(fee)
+}
+
 #[derive(
     Clone,
     Copy,
@@ -168,11 +289,17 @@ pub enum Event {
     GateSettled(ProposalId, Branch, GateType, bool),
     BaselineSettled(EpochId, FixedU64),
     Redeemed(ProposalId, Balance),
-    ScalarRedeemed(ProposalId, ScalarSide, Balance),
-    ScalarPairRedeemed(ProposalId, Balance),
-    GateRedeemed(ProposalId, GateType, Balance),
+    // 02 §6 (contract v17) appends a trailing `fee` to exactly the four
+    // fee-bearing redemption events. The pre-existing payout field keeps its
+    // exact meaning — the **gross** claim value `escrowed` decremented by — so
+    // no offset moves and `net = payout − fee`. `Redeemed` and `VoidRedeemed`
+    // are exempt and never carry one (03 §5.3a(1)).
+    ScalarRedeemed(ProposalId, ScalarSide, Balance, Balance),
+    ScalarPairRedeemed(ProposalId, Balance, Balance),
+    GateRedeemed(ProposalId, GateType, Balance, Balance),
     VoidRedeemed(ProposalId, PositionKind, Balance, Balance),
-    BaselineRedeemed(EpochId, ScalarSide, Balance),
+    BaselineRedeemed(EpochId, ScalarSide, Balance, Balance),
+    RedemptionFeesSwept(Balance),
     VaultReaped(ProposalId, Balance),
     BaselineVaultReaped(EpochId, Balance),
 }
@@ -242,6 +369,23 @@ pub struct LedgerState<AccountId> {
     pub deposits_held: Balance,
     pub events: Vec<Event>,
     pub protocol_accounts: Vec<AccountId>,
+    /// 03 §5.3a: the live `ledger.redeem_fee` rate, as the raw `Perbill` scalar
+    /// (parts per billion). Configuration, not state: the FRAME shell overlays
+    /// it from `pallet-constitution::Params` on every load (13 · Reading
+    /// rules). It defaults to **0** so the fee is opt-in and every pre-E1
+    /// caller keeps its exact behaviour — the zero-rate leg is the regression
+    /// 03 §11 makes normative.
+    pub redeem_fee: u32,
+    /// 03 §5.3a(2): the live `ledger.min_split` the small-payout waiver tests
+    /// the **net** against. Also configuration, overlaid by the shell; defaults
+    /// to the K floor the core enforces for `split` (03 §7 R-2).
+    pub min_split: Balance,
+    /// 03 §5.3a(4): the O(1) maintained `RedemptionFeesAccrued` counter. The
+    /// fee is retained as sovereign surplus here rather than transferred during
+    /// the redemption, so no payout can fail because a treasury credit failed
+    /// (G-1). Monotone non-decreasing between sweeps; only
+    /// [`Self::sweep_redemption_fees`] removes from it (L-7).
+    pub redemption_fees_accrued: Balance,
 }
 
 impl<AccountId: Clone + Eq> LedgerState<AccountId> {
@@ -255,6 +399,9 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
             deposits_held: 0,
             events: Vec::new(),
             protocol_accounts: Vec::new(),
+            redeem_fee: 0,
+            min_split: kernel::MIN_SPLIT_USDC,
+            redemption_fees_accrued: 0,
         }
     }
     pub fn create_vault(&mut self, pid: ProposalId, spec: MetricSpecVersion) -> Result<(), Error> {
@@ -461,6 +608,24 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         self.atomically(|led| led.redeem_baseline_pair_impl(epoch, who, a))
     }
 
+    /// 03 §5.4 / §5.3a(4) / §6.5(3): pay the accrued redemption fee out and
+    /// zero the counter, returning the swept amount.
+    ///
+    /// Touches no escrow, no supply field and no vault state — it is the
+    /// induction's class (ii): `E` fixed, `V` unchanged. It spends *surplus*,
+    /// which the induction bounds, not escrow, which the induction conserves.
+    /// A sweep on an empty counter is a successful **no-op**, not an error
+    /// (I-31; §5.3a(6) adds no new error and the §8 list is frozen). The real
+    /// USDC transfer to the treasury `MAIN` account is the FRAME shell's half.
+    pub fn sweep_redemption_fees(&mut self) -> Result<Balance, Error> {
+        self.atomically(|led| {
+            let amount = led.redemption_fees_accrued;
+            led.redemption_fees_accrued = 0;
+            led.events.push(Event::RedemptionFeesSwept(amount));
+            Ok(amount)
+        })
+    }
+
     fn split_impl(
         &mut self,
         origin: LedgerOrigin,
@@ -529,11 +694,15 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
             a,
         )?;
         self.with_vault_mut(pid, |v| {
-            v.escrowed = sub(v.escrowed, a)?;
             v.branches[0].usdc = sub(v.branches[0].usdc, a)?;
             v.branches[1].usdc = sub(v.branches[1].usdc, a)?;
             Ok(())
         })?;
+        // 03 §5.3a(1): every `merge*` is exempt. These are the complete-set
+        // primitives; a fee on them opens a spread around par, breaks the
+        // arbitrage-free structure the LMSR construction rests on, and makes
+        // the D-1 primary recovery path lossy.
+        self.pay_out_proposal(pid, a, FeeTreatment::ExemptMerge, &[a])?;
         self.events.push(Event::Merged(pid, a));
         Ok(())
     }
@@ -852,6 +1021,12 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         Ok(())
     }
 
+    /// 03 §5.3: winning branch-USDC 1:1. **Fee-exempt** (§5.3a(1)).
+    ///
+    /// This is the par leg — the mirror credit every D-3 wrapper buy leaves
+    /// with the buyer — and G-3 promises it redeems at par. The exemption is
+    /// named at this call site rather than derived, so it cannot be lost to an
+    /// edit of the shared payout seam.
     fn redeem_impl(&mut self, pid: ProposalId, who: &AccountId, a: Balance) -> Result<(), Error> {
         let w = self.settled_winner(pid)?;
         self.burn(position(pid, w, PositionKind::BranchUsdc), who, a)?;
@@ -860,7 +1035,7 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
             v.branches[bix(w)].usdc = sub(v.branches[bix(w)].usdc, a)?;
             Ok(())
         })?;
-        self.pay_proposal(pid, a)?;
+        self.pay_out_proposal(pid, a, FeeTreatment::ExemptParLeg, &[a])?;
         self.events.push(Event::Redeemed(pid, a));
         Ok(())
     }
@@ -892,17 +1067,26 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
                 SCALE_1E9 - s.0 as u128
             },
         )?;
-        self.pay_proposal(pid, pay)?;
-        self.events.push(Event::ScalarRedeemed(pid, side, pay));
+        // 03 §5.3a(1): an unpaired settlement payout is **charged**.
+        let treatment = self.claimant_treatment(who);
+        let fee = self.pay_out_proposal(pid, pay, treatment, &[pay])?;
+        self.events.push(Event::ScalarRedeemed(pid, side, pay, fee));
         Ok(())
     }
+    /// 03 §5.3: atomic complete set, gross exactly `a`. **Charged**.
+    ///
+    /// §5.3a(1): exempting the pair path would tax the *fragmented* holder and
+    /// spare the *assembled* one, which inverts R-1's whole direction.
+    /// §5.3a(2a): the fee base is the pair's own two legs, **not** the combined
+    /// gross — that is what keeps the PT-7 relative guarantee that the pair
+    /// never pays less than leg-by-leg redemption of the same holdings.
     fn redeem_scalar_pair_impl(
         &mut self,
         pid: ProposalId,
         who: &AccountId,
         a: Balance,
     ) -> Result<(), Error> {
-        let w = self.settled_winner(pid)?;
+        let (w, s) = self.settled(pid)?;
         self.ensure_holds(position(pid, w, PositionKind::Long), who, a)?;
         self.ensure_holds(position(pid, w, PositionKind::Short), who, a)?;
         self.burn(position(pid, w, PositionKind::Long), who, a)?;
@@ -912,8 +1096,10 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
             v.branches[bix(w)].scalar_sets = sub(v.branches[bix(w)].scalar_sets, a)?;
             Ok(())
         })?;
-        self.pay_proposal(pid, a)?;
-        self.events.push(Event::ScalarPairRedeemed(pid, a));
+        let treatment = self.claimant_treatment(who);
+        let legs = pair_legs(a, s)?;
+        let fee = self.pay_out_proposal(pid, a, treatment, &legs)?;
+        self.events.push(Event::ScalarPairRedeemed(pid, a, fee));
         Ok(())
     }
     fn redeem_gate_impl(
@@ -940,8 +1126,12 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
             who,
             a,
         )?;
-        self.pay_proposal(pid, a)?;
-        self.events.push(Event::GateRedeemed(pid, g, a));
+        // 03 §5.3/§5.3a: the winning side pays 1:1 and is **charged**; the
+        // losing side has no redemption path at all, so its zero payout is not
+        // a waived charge but an absent one.
+        let treatment = self.claimant_treatment(who);
+        let fee = self.pay_out_proposal(pid, a, treatment, &[a])?;
+        self.events.push(Event::GateRedeemed(pid, g, a, fee));
         Ok(())
     }
     fn redeem_void_impl(
@@ -971,7 +1161,10 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
             PositionKind::BranchUsdc => a / 2,
             _ => a / 4,
         };
-        self.pay_proposal(pid, pay)?;
+        // 03 §5.3a(1): VOID is protocol failure (D-1); charging users for the
+        // protocol's own failure inverts G-1. Named here so §6.4's D-1
+        // valuation argument survives verbatim.
+        self.pay_out_proposal(pid, pay, FeeTreatment::ExemptVoid, &[pay])?;
         self.events.push(Event::VoidRedeemed(pid, kind, a, pay));
         Ok(())
     }
@@ -1023,10 +1216,11 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
                 matches!(v.state, BaselineState::Open),
                 Error::WrongVaultState
             );
-            v.escrowed = sub(v.escrowed, a)?;
             v.sets = sub(v.sets, a)?;
             Ok(())
         })?;
+        // 03 §5.3a(1): every `merge*` is exempt, `merge_baseline` included.
+        self.pay_out_baseline(epoch, a, FeeTreatment::ExemptMerge, &[a])?;
         self.events.push(Event::BaselineMerged(epoch, a));
         Ok(())
     }
@@ -1049,6 +1243,7 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         self.events.push(Event::BaselineSettled(epoch, s));
         Ok(())
     }
+    /// 03 §5.3: unpaired Baseline leg. **Charged** (§5.3a).
     fn redeem_baseline_impl(
         &mut self,
         epoch: EpochId,
@@ -1069,18 +1264,22 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
                 SCALE_1E9 - s.0 as u128
             },
         )?;
-        self.pay_baseline(epoch, pay)?;
-        self.events.push(Event::BaselineRedeemed(epoch, side, pay));
+        let treatment = self.claimant_treatment(who);
+        let fee = self.pay_out_baseline(epoch, pay, treatment, &[pay])?;
+        self.events
+            .push(Event::BaselineRedeemed(epoch, side, pay, fee));
         Ok(())
     }
+    /// 03 §5.3: atomic Baseline set, gross exactly `a`. **Charged**, with the
+    /// §5.3a(2a) leg-derived fee base, as for `redeem_scalar_pair`.
     fn redeem_baseline_pair_impl(
         &mut self,
         epoch: EpochId,
         who: &AccountId,
         a: Balance,
     ) -> Result<(), Error> {
-        self.with_base(epoch, |v| match v.state {
-            BaselineState::Settled(_) => Ok(()),
+        let s = self.with_base(epoch, |v| match v.state {
+            BaselineState::Settled(s) => Ok(s),
             _ => Err(Error::WrongVaultState),
         })??;
         self.ensure_holds(baseline(epoch, ScalarSide::Long), who, a)?;
@@ -1092,9 +1291,11 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
             v.sets = sub(v.sets, a)?;
             Ok(())
         })?;
-        self.pay_baseline(epoch, a)?;
+        let treatment = self.claimant_treatment(who);
+        let legs = pair_legs(a, s)?;
+        let fee = self.pay_out_baseline(epoch, a, treatment, &legs)?;
         self.events
-            .push(Event::BaselineRedeemed(epoch, ScalarSide::Long, a));
+            .push(Event::BaselineRedeemed(epoch, ScalarSide::Long, a, fee));
         Ok(())
     }
 
@@ -1449,17 +1650,86 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
     fn settled_winner(&self, pid: ProposalId) -> Result<Branch, Error> {
         Ok(self.settled(pid)?.0)
     }
-    fn pay_proposal(&mut self, pid: ProposalId, a: Balance) -> Result<(), Error> {
-        self.with_vault_mut(pid, |v| {
-            v.escrowed = sub(v.escrowed, a)?;
-            Ok(())
-        })
+    /// 03 §5.3a(1): `ProtocolAccounts` are exempt on every charged call — the
+    /// book, fee, POL, POL_BASELINE, INSURANCE and treasury sub-accounts redeem
+    /// protocol inventory, and charging them would be the treasury taxing
+    /// itself and would corrupt the 08 §8 POL return with a circular transfer.
+    fn claimant_treatment(&self, who: &AccountId) -> FeeTreatment {
+        if self.protocol_accounts.contains(who) {
+            FeeTreatment::ExemptProtocol
+        } else {
+            FeeTreatment::Charged
+        }
     }
-    fn pay_baseline(&mut self, e: EpochId, a: Balance) -> Result<(), Error> {
-        self.with_base_mut(e, |v| {
-            v.escrowed = sub(v.escrowed, a)?;
+
+    /// 03 §5.3a(2)/(2a): the fee this outflow withholds, given its treatment.
+    ///
+    /// `basis` is the sequence of amounts the fee is computed over, **each
+    /// applying its own waiver**. It is the gross itself for every call except
+    /// the two pair calls, which pass their own two legs — the only place the
+    /// base ever differs from the gross, and the reason `net_pair ≥ net_legs`
+    /// holds for every `a`, `s` and rate.
+    fn fee_for(&self, treatment: FeeTreatment, basis: &[Balance]) -> Result<Balance, Error> {
+        if !treatment.charged() {
+            return Ok(0);
+        }
+        let mut fee: Balance = 0;
+        for part in basis {
+            fee = add(fee, redemption_fee(*part, self.redeem_fee, self.min_split)?)?;
+        }
+        Ok(fee)
+    }
+
+    /// The single proposal-vault escrow-outflow seam (03 §5.3a(4)).
+    ///
+    /// `escrowed` decrements by the **gross**, always: the fee is never a
+    /// second draw on escrow. The withheld difference stays in the sovereign
+    /// account as lawful surplus and is recorded in `RedemptionFeesAccrued`,
+    /// so the I-4 drift predicate (`liability > custody`) moves strictly *away*
+    /// from firing. Returns the fee, which the caller reports in its event
+    /// (02 §6 rule 1: the event carries the gross plus a trailing fee).
+    ///
+    /// `treatment` is a **required** argument so a new redemption path cannot
+    /// reach this seam without deciding its §5.3a(1) treatment.
+    fn pay_out_proposal(
+        &mut self,
+        pid: ProposalId,
+        gross: Balance,
+        treatment: FeeTreatment,
+        basis: &[Balance],
+    ) -> Result<Balance, Error> {
+        let fee = self.fee_for(treatment, basis)?;
+        self.with_vault_mut(pid, |v| {
+            v.escrowed = sub(v.escrowed, gross)?;
             Ok(())
-        })
+        })?;
+        self.accrue_fee(gross, fee)
+    }
+
+    /// Baseline counterpart of [`Self::pay_out_proposal`].
+    fn pay_out_baseline(
+        &mut self,
+        e: EpochId,
+        gross: Balance,
+        treatment: FeeTreatment,
+        basis: &[Balance],
+    ) -> Result<Balance, Error> {
+        let fee = self.fee_for(treatment, basis)?;
+        self.with_base_mut(e, |v| {
+            v.escrowed = sub(v.escrowed, gross)?;
+            Ok(())
+        })?;
+        self.accrue_fee(gross, fee)
+    }
+
+    fn accrue_fee(&mut self, gross: Balance, fee: Balance) -> Result<Balance, Error> {
+        // §5.3a(2)/(2a): the legs sum to at most the gross and each leg's fee
+        // is at most its leg, so `fee ≤ gross` is structural. Checked anyway —
+        // a violated bound must reject the whole operation (G-1), never pay a
+        // claimant a wrapped-around net.
+        ensure!(fee <= gross, Error::ArithmeticOverflow);
+        self.redemption_fees_accrued = add(self.redemption_fees_accrued, fee)?;
+        Ok(fee)
     }
 }
 
@@ -1526,6 +1796,22 @@ fn add(a: Balance, b: Balance) -> Result<Balance, Error> {
 }
 fn sub(a: Balance, b: Balance) -> Result<Balance, Error> {
     a.checked_sub(b).ok_or(Error::ArithmeticOverflow)
+}
+/// 03 §5.3a(2a): the LONG/SHORT gross payouts a complete set's holdings would
+/// take redeemed leg by leg — the pair calls' fee base.
+///
+/// Charging `fee(a)` on the combined gross instead breaks the guarantee the
+/// pair call exists to provide: at `a = 20,000`, `s = 0.70005` and 30 bps it
+/// nets the pair 19,940 against leg-by-leg's 19,957, so the holder of a
+/// complete set would be worse off for holding one. Computing the pair's fee
+/// from its own legs removes the interaction — both routes then apply the
+/// identical fee function to identical bases — while the pair keeps paying
+/// exactly `a` gross.
+fn pair_legs(a: Balance, s: FixedU64) -> Result<[Balance; 2], Error> {
+    Ok([
+        mul_score(a, s.0 as u128)?,
+        mul_score(a, SCALE_1E9 - s.0 as u128)?,
+    ])
 }
 fn mul_score(a: Balance, s: u128) -> Result<Balance, Error> {
     a.checked_mul(s)

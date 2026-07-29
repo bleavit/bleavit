@@ -2621,6 +2621,232 @@ fn shell_matches_core_over_a_randomized_op_stream() {
 // NAV, so a sweep raises NAV by exactly the swept amount; custody preserves,
 // and the origin is a passed TREASURY decision and nothing else.
 
+// --------------------- E2: MAIN revenue recognition and the bounded reserve --
+
+#[test]
+fn credited_main_revenue_raises_nav_immediately_and_survives_a_mutation() {
+    // 08 §1.2 "NAV effect of the E1 inflows": market-fee, redemption-fee and
+    // transaction-fee value all arrive as liquid USDC in `MAIN` and enter
+    // `NavView.total` at par. Custody is the caller's job; this is the
+    // recognition half, and it must be visible to `nav()` on the very next read
+    // — a deferred counter that only folded on the next governance act would
+    // understate NAV for as long as the treasury happened to be idle.
+    funded_ext().execute_with(|| {
+        let nav_before = Treasury::nav().nav;
+        let main_before = Treasury::treasury().main_usdc;
+
+        Treasury::credit_main(1_234 * USDC);
+
+        assert_eq!(Treasury::nav().nav, nav_before + 1_234 * USDC);
+        assert_eq!(
+            Treasury::treasury().main_usdc,
+            main_before + 1_234 * USDC,
+            "the aggregate read folds the deferred credit",
+        );
+        assert_ok!(Treasury::do_try_state());
+
+        // Any later mutation persists the fold exactly once: the counter is
+        // discharged, and a second read must not double-count it.
+        assert_ok!(Treasury::fund_budget_line(to(), BudgetLine::Rewards, 0));
+        assert_eq!(crate::PendingMainCredit::<Test>::get(), 0);
+        assert_eq!(Treasury::treasury().main_usdc, main_before + 1_234 * USDC);
+        assert_eq!(Treasury::nav().nav, nav_before + 1_234 * USDC);
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
+fn credited_main_revenue_is_spendable_like_any_other_treasury_credit() {
+    // The whole point of routing to `MAIN` rather than INSURANCE (08 §1.1's
+    // first dispositive reason): the value must be ordinary treasury credit, not
+    // a balance whose only exit is a proposal slot.
+    funded_ext().execute_with(|| {
+        let line_before = Treasury::line_balance(BudgetLine::Rewards);
+        Treasury::credit_main(10_000 * USDC);
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Rewards,
+            10_000 * USDC
+        ));
+        assert_eq!(
+            Treasury::line_balance(BudgetLine::Rewards),
+            line_before + 10_000 * USDC
+        );
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
+fn insurance_target_is_the_swept_residue_plus_the_r4_floor() {
+    // 08 §1.2: `T_ins = swept_residue_unreclaimed + min_balance`. Derived from
+    // the liability the account backs, never chosen.
+    funded_ext().execute_with(|| {
+        assert_eq!(Treasury::insurance_target(), INSURANCE_MIN_BALANCE);
+        set_insurance_usdc(INSURANCE_MIN_BALANCE);
+        assert_ok!(Treasury::note_swept_residue(5_000 * USDC));
+        assert_eq!(
+            Treasury::insurance_target(),
+            5_000 * USDC + INSURANCE_MIN_BALANCE
+        );
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
+fn swept_residue_raises_the_target_by_its_own_amount_and_never_overflows() {
+    // 08 §1.2: "Swept residue raises `T_ins` by its own amount as it arrives, so
+    // it never overflows. This is what makes the rule O(1) and self-balancing."
+    // The residue arrives in INSURANCE *and* is reported in the same
+    // transaction (03 §7 R-5), so model both.
+    funded_ext().execute_with(|| {
+        let main_before = Treasury::treasury().main_usdc;
+        set_insurance_usdc(INSURANCE_MIN_BALANCE + 5_000 * USDC);
+        assert_ok!(Treasury::note_swept_residue(5_000 * USDC));
+
+        assert!(insurance_sweeps().is_empty(), "nothing overflowed");
+        assert_eq!(Treasury::treasury().main_usdc, main_before);
+        assert_eq!(insurance_usdc(), INSURANCE_MIN_BALANCE + 5_000 * USDC);
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
+fn an_inflow_through_treasury_code_overflows_in_its_own_transaction() {
+    // 08 §1.2: above `T_ins`, surplus overflows to `MAIN` **automatically, in
+    // the same transaction as the inflow**, for every inflow that executes
+    // treasury code. Here the account is already above target when the residue
+    // report runs, so the report's own transaction must carry the surplus out.
+    funded_ext().execute_with(|| {
+        let main_before = Treasury::treasury().main_usdc;
+        let nav_before = Treasury::nav().nav;
+        // 3,000 arrived by direct transfer earlier; 5,000 of residue arrives now.
+        set_insurance_usdc(INSURANCE_MIN_BALANCE + 3_000 * USDC + 5_000 * USDC);
+
+        assert_ok!(Treasury::note_swept_residue(5_000 * USDC));
+
+        assert_eq!(insurance_sweeps(), vec![3_000 * USDC]);
+        assert_eq!(Treasury::treasury().main_usdc, main_before + 3_000 * USDC);
+        assert_eq!(Treasury::nav().nav, nav_before + 3_000 * USDC);
+        System::assert_has_event(RuntimeEvent::Treasury(Event::InsuranceOverflowed {
+            amount: 3_000 * USDC,
+        }));
+        // The reserve retains exactly its liability plus the R-4 floor.
+        assert_eq!(insurance_usdc(), Treasury::insurance_target());
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
+fn the_reconciliation_crank_is_permissionless_idempotent_and_a_noop_at_target() {
+    // 08 §1.2: INSURANCE has a deterministic address and `ForeignAssets.transfer`
+    // is a public call, so balance arrives with no treasury code running and no
+    // interception point. The crank is what makes the bounded-reserve claim true
+    // for those arrivals — and it must be free to run at any time.
+    funded_ext().execute_with(|| {
+        let main_before = Treasury::treasury().main_usdc;
+        let nav_before = Treasury::nav().nav;
+
+        // At target: a successful no-op, no custody move, no event.
+        assert_ok!(Treasury::reconcile_insurance(RuntimeOrigin::signed(
+            nobody()
+        )));
+        assert!(insurance_sweeps().is_empty());
+        assert_eq!(Treasury::treasury().main_usdc, main_before);
+        assert!(!System::events().iter().any(|record| matches!(
+            record.event,
+            RuntimeEvent::Treasury(Event::InsuranceOverflowed { .. })
+        )));
+
+        // A direct push lands above target; any signed account may crank it out.
+        set_insurance_usdc(INSURANCE_MIN_BALANCE + 42_000 * USDC);
+        assert_ok!(Treasury::reconcile_insurance(RuntimeOrigin::signed(acc(7))));
+        assert_eq!(insurance_sweeps(), vec![42_000 * USDC]);
+        assert_eq!(Treasury::treasury().main_usdc, main_before + 42_000 * USDC);
+        assert_eq!(Treasury::nav().nav, nav_before + 42_000 * USDC);
+
+        // Idempotent: a repeat run at target moves nothing a second time.
+        assert_ok!(Treasury::reconcile_insurance(RuntimeOrigin::signed(acc(7))));
+        assert_eq!(insurance_sweeps(), vec![42_000 * USDC]);
+        assert_eq!(Treasury::treasury().main_usdc, main_before + 42_000 * USDC);
+        assert_eq!(insurance_usdc(), INSURANCE_MIN_BALANCE);
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
+fn the_reconciliation_crank_never_draws_insurance_below_its_liability() {
+    // `T_ins` is a floor on the liability, so an account holding exactly its
+    // residue plus the floor has no surplus at all — releasing reserve against a
+    // live liability stays a decided act under `sweep_insurance` (08 §1.2).
+    funded_ext().execute_with(|| {
+        set_insurance_usdc(INSURANCE_MIN_BALANCE + 9_000 * USDC);
+        assert_ok!(Treasury::note_swept_residue(9_000 * USDC));
+        assert!(insurance_sweeps().is_empty());
+
+        assert_ok!(Treasury::reconcile_insurance(RuntimeOrigin::signed(acc(3))));
+        assert!(insurance_sweeps().is_empty());
+        assert_eq!(insurance_usdc(), INSURANCE_MIN_BALANCE + 9_000 * USDC);
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
+fn the_reconciliation_crank_rejects_unsigned_and_root_origins() {
+    funded_ext().execute_with(|| {
+        set_insurance_usdc(INSURANCE_MIN_BALANCE + 1_000 * USDC);
+        for bad in [RuntimeOrigin::none(), RuntimeOrigin::root()] {
+            assert_noop!(
+                Treasury::reconcile_insurance(bad),
+                sp_runtime::DispatchError::BadOrigin
+            );
+        }
+        assert!(insurance_sweeps().is_empty());
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
+fn a_refused_overflow_custody_move_rolls_the_credit_back() {
+    // G-1, and the same shape `sweep_insurance` already has: NAV must never
+    // record USDC the treasury did not actually receive.
+    funded_ext().execute_with(|| {
+        let main_before = Treasury::treasury().main_usdc;
+        let nav_before = Treasury::nav().nav;
+        set_insurance_usdc(INSURANCE_MIN_BALANCE + 1_000 * USDC);
+        set_insurance_sweep_failure(true);
+
+        assert_noop!(
+            Treasury::reconcile_insurance(RuntimeOrigin::signed(acc(4))),
+            sp_runtime::DispatchError::Other("insurance sweep would reap the account")
+        );
+        assert_eq!(Treasury::treasury().main_usdc, main_before);
+        assert_eq!(Treasury::nav().nav, nav_before);
+        assert_eq!(crate::PendingMainCredit::<Test>::get(), 0);
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
+fn sweep_insurance_does_not_decrement_the_residue_counter() {
+    // 08 §1.2 is explicit: `sweep_insurance` "identifies no claim and discharges
+    // no liability, so it MUST NOT decrement". Only the 03 §5.4 archived-claims
+    // payout may, and that procedure is not specified in v1 — the counter is
+    // monotone and `T_ins` a deliberate over-estimate in the safe direction.
+    funded_ext().execute_with(|| {
+        set_insurance_usdc(INSURANCE_MIN_BALANCE + 8_000 * USDC);
+        assert_ok!(Treasury::note_swept_residue(8_000 * USDC));
+        let target = Treasury::insurance_target();
+
+        assert_ok!(Treasury::sweep_insurance(to(), 8_000 * USDC));
+        assert_eq!(
+            Treasury::insurance_target(),
+            target,
+            "the reserve target still reflects the liability it backs",
+        );
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
 #[test]
 fn sweep_insurance_credits_main_raises_nav_and_emits() {
     funded_ext().execute_with(|| {

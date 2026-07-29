@@ -32,6 +32,11 @@ pub const FEES: AccountId = 901;
 pub const POL: AccountId = 902;
 pub const TREASURY: AccountId = 903;
 pub const INSURANCE: AccountId = 904;
+/// The treasury `MAIN` account — the single lawful sink of realized fee value
+/// (04 §2 Sweep, 08 §1.1). Deliberately distinct from `TREASURY`, which this
+/// mock uses as the POL subsidy custody, so a test can tell the two remittances
+/// of one sweep apart.
+pub const MAIN: AccountId = 905;
 pub const USDC: AssetId = 1337;
 pub const UNIT: Balance = 1_000_000;
 // Benchmark-only ids use unique canonical pairs so the try-state fixture can
@@ -123,7 +128,7 @@ impl Contains<AccountId> for Protocol {
     fn contains(who: &AccountId) -> bool {
         let benchmark_account_end = BENCHMARK_MARKET_ACCOUNT_BASE
             .saturating_add(u64::from(bounds::MAX_STORED_MARKETS).saturating_mul(2));
-        matches!(*who, BOOK | FEES | POL | TREASURY | INSURANCE)
+        matches!(*who, BOOK | FEES | POL | TREASURY | INSURANCE | MAIN)
             || *who == market_account()
             || *who == ledger_account()
             || (BENCHMARK_MARKET_ACCOUNT_BASE..benchmark_account_end).contains(who)
@@ -178,6 +183,12 @@ parameter_types! {
     pub const ReapBatch: u32 = kernel::REAP_BATCH;
     pub UsdcAssetId: AssetId = USDC;
     pub InsuranceAccount: AccountId = INSURANCE;
+    // 03 §5.3a: the ledger's redemption-fee rate. Zero here because every
+    // payout this pallet's tests drive goes to a `ProtocolAccounts` holder,
+    // which §5.3a(1) exempts — the rate itself is exercised by the ledger's
+    // own suite.
+    pub static RedemptionFee: sp_runtime::Perbill = sp_runtime::Perbill::zero();
+    pub TreasuryMainAccount: AccountId = MAIN;
     pub const Fee: u128 = 30;
     pub const ObsInterval: u64 = 10;
     pub const Kappa1e9: u64 = 5_000_000;
@@ -188,6 +199,9 @@ parameter_types! {
     pub static PolCustodyCreditRefuses: bool = false;
     pub static PolLineProposal: Balance = 1_000_000 * UNIT;
     pub static PolLineBaseline: Balance = 1_000_000 * UNIT;
+    pub static MainCreditedTotal: Balance = 0;
+    pub static MainRevenueRefuses: bool = false;
+    pub MainAccount: AccountId = MAIN;
 }
 
 pub struct TestInDecisionWindow;
@@ -240,6 +254,28 @@ impl pallet_market::PolCommitmentSync for TestPolCommitmentSync {
             .checked_add(amount)
             .ok_or(sp_runtime::DispatchError::Other("POL line overflow"))?;
         PolLineBalance::set(line, credited);
+        Ok(())
+    }
+}
+
+/// The mock's stand-in for the treasury's `main_usdc` recognition counter
+/// (08 §1.1/§1.2). The 04 §2 Sweep's fee leg credits it, so a test can assert
+/// that realized fee value is *recognized* — not merely received — without
+/// pulling `pallet-futarchy-treasury` into this runtime. Reaching `MAIN`
+/// custody alone moves no NAV, which is exactly the failure this mirrors.
+pub struct TestMainRevenueSink;
+
+impl pallet_market::MainRevenueSink for TestMainRevenueSink {
+    fn credit_main(amount: Balance) -> frame_support::dispatch::DispatchResult {
+        if MainRevenueRefuses::get() {
+            return Err(sp_runtime::DispatchError::Other(
+                "MAIN revenue recognition refused",
+            ));
+        }
+        let credited = MainCreditedTotal::get()
+            .checked_add(amount)
+            .ok_or(sp_runtime::DispatchError::Other("MAIN credit overflow"))?;
+        MainCreditedTotal::set(credited);
         Ok(())
     }
 }
@@ -309,7 +345,9 @@ impl pallet_conditional_ledger::Config for Test {
     type ArchiveDelay = LedgerArchiveDelay;
     type ReapBatch = ReapBatch;
     type ProtocolAccounts = Protocol;
+    type RedemptionFee = RedemptionFee;
     type InsuranceAccount = InsuranceAccount;
+    type TreasuryMainAccount = TreasuryMainAccount;
     type PalletId = LedgerPalletId;
     type KeeperRebate = ();
     type InflowCapGate = ();
@@ -333,6 +371,8 @@ impl pallet_market::Config for Test {
     type KeeperRebate = TestKeeperRebate;
     type InDecisionWindow = TestInDecisionWindow;
     type PolCommitmentSync = TestPolCommitmentSync;
+    type MainAccount = MainAccount;
+    type MainRevenueSink = TestMainRevenueSink;
     type BaselineGrade = TestBaselineGrade;
 }
 
@@ -352,6 +392,8 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     PolCustodyCreditRefuses::set(false);
     PolLineProposal::set(1_000_000 * UNIT);
     PolLineBaseline::set(1_000_000 * UNIT);
+    MainCreditedTotal::set(0);
+    MainRevenueRefuses::set(false);
     let mut storage = frame_system::GenesisConfig::<Test>::default()
         .build_storage()
         .expect("mock system genesis builds");
@@ -368,6 +410,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         POL,
         TREASURY,
         INSURANCE,
+        MAIN,
         ledger_account(),
         market_account(),
     ];
@@ -390,6 +433,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         POL,
         TREASURY,
         INSURANCE,
+        MAIN,
         market_account(),
     ];
     pallet_assets::GenesisConfig::<Test> {

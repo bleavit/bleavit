@@ -294,6 +294,22 @@ mod benches {
         );
     }
 
+    /// 08 §1.2: the permissionless INSURANCE reconciliation crank. Worst case is
+    /// an above-target balance, which moves custody and writes the deferred
+    /// `MAIN` credit on top of the two reads every call performs; the at-target
+    /// no-op is strictly cheaper.
+    #[benchmark]
+    fn reconcile_insurance() {
+        Pallet::<T>::seed(&funded());
+        let caller: T::AccountId = T::BenchmarkHelper::account(5);
+        let amount = 100_000 * USDC;
+        let custody_seeded = T::BenchmarkHelper::prime_insurance_custody(amount);
+        assert!(custody_seeded.is_ok());
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller));
+    }
+
     #[benchmark]
     fn create_community_schedule() {
         let beneficiary: T::AccountId = T::BenchmarkHelper::account(9);
