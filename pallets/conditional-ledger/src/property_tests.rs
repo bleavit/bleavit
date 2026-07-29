@@ -1241,138 +1241,143 @@ proptest! {
         amount in (4 * kernel::MIN_SPLIT_USDC)..=2_000_000u128,
         wrapper_buys in wrapper_buys_strategy(),
     ) {
-        // 03 §11: PT-2 is preserved verbatim by E1 and the suite MUST assert it
-        // **with a non-zero `ledger.redeem_fee` configured** — that is the
-        // regression that catches any future widening of the charged set into
-        // the par leg, which would falsify G-3, D-3, I-2(b) and this property
-        // together. Every state below therefore runs at the live registry rate
-        // and is checked to have accrued exactly nothing.
-        let rate = registry_redeem_fee();
-        prop_assert!(rate > 0, "13 §1 seeds a non-zero ledger.redeem_fee");
-
-        // (a) A complete Accept+Reject holder recovers par.
-        let mut paired = LedgerState::new();
-        paired.redeem_fee = rate;
-        paired.create_vault(1, 0).unwrap();
-        paired.split(LedgerOrigin::Signed, 1, &0, amount).unwrap();
-        paired.void(LedgerOrigin::ResolveAuthority, 1).unwrap();
-        let before = proposal_escrow(&paired, 1);
-        paired.merge(LedgerOrigin::Signed, 1, &0, amount).unwrap();
-        prop_assert_eq!(before - proposal_escrow(&paired, 1), amount);
-        prop_assert_eq!(
-            paired.redemption_fees_accrued, 0,
-            "03 §5.3a(1): `merge` is the D-1 primary recovery path and is exempt"
+        // 03 §11: run PT-2 at BOTH zero and non-zero `ledger.redeem_fee`.
+        // The non-zero leg is load-bearing for I-2/PT-2: widening the charged
+        // set into `redeem` passes a zero-rate suite silently, because every
+        // fee computation yields zero whatever the charged set contains.
+        prop_assert!(
+            registry_redeem_fee() > 0,
+            "13 §1 seeds a non-zero ledger.redeem_fee"
         );
+        let profiles = |redeem_fee: u32| -> TestCaseResult {
+            // (a) A complete Accept+Reject holder recovers par.
+            let mut paired = LedgerState::new();
+            paired.redeem_fee = redeem_fee;
+            paired.create_vault(1, 0).unwrap();
+            paired.split(LedgerOrigin::Signed, 1, &0, amount).unwrap();
+            paired.void(LedgerOrigin::ResolveAuthority, 1).unwrap();
+            let before = proposal_escrow(&paired, 1);
+            paired.merge(LedgerOrigin::Signed, 1, &0, amount).unwrap();
+            prop_assert_eq!(before - proposal_escrow(&paired, 1), amount);
+            prop_assert_eq!(
+                paired.redemption_fees_accrued, 0,
+                "03 §5.3a(1): `merge` is the D-1 primary recovery path and is exempt"
+            );
 
-        // (b) Drive several buys on both sides of both branch books through
-        // the exact plain-ledger accounting of 04 §6.1 / market-core's
-        // buy_branch.  No post-VOID transfer supplies a free complement.
-        const BUYER: u8 = 0;
-        const TREASURY: u8 = 1;
-        const FEES: u8 = 7;
-        let mut wrapper = LedgerState::new();
-        wrapper.redeem_fee = rate;
-        wrapper.create_vault(2, 0).unwrap();
-        wrapper.add_protocol_account(wrapper_book(Branch::Accept));
-        wrapper.add_protocol_account(wrapper_book(Branch::Reject));
-        wrapper.add_protocol_account(FEES);
-        let inventory = wrapper_buys.iter().map(|buy| buy.amount).sum();
-        seed_wrapper_books(&mut wrapper, 2, TREASURY, inventory);
-        for buy in &wrapper_buys {
-            prop_assert!(buy.cost < buy.amount, "LMSR buy cost must be below amount");
-            apply_wrapper_buy(&mut wrapper, 2, BUYER, FEES, *buy);
+            // (b) Drive several buys on both sides of both branch books through
+            // the exact plain-ledger accounting of 04 §6.1 / market-core's
+            // buy_branch.  No post-VOID transfer supplies a free complement.
+            const BUYER: u8 = 0;
+            const TREASURY: u8 = 1;
+            const FEES: u8 = 7;
+            let mut wrapper = LedgerState::new();
+            wrapper.redeem_fee = redeem_fee;
+            wrapper.create_vault(2, 0).unwrap();
+            wrapper.add_protocol_account(wrapper_book(Branch::Accept));
+            wrapper.add_protocol_account(wrapper_book(Branch::Reject));
+            wrapper.add_protocol_account(FEES);
+            let inventory = wrapper_buys.iter().map(|buy| buy.amount).sum();
+            seed_wrapper_books(&mut wrapper, 2, TREASURY, inventory);
+            for buy in &wrapper_buys {
+                prop_assert!(buy.cost < buy.amount, "LMSR buy cost must be below amount");
+                apply_wrapper_buy(&mut wrapper, 2, BUYER, FEES, *buy);
+            }
+            prop_assert_eq!(wrapper.try_state(), Ok(()));
+
+            wrapper.void(LedgerOrigin::ResolveAuthority, 2).unwrap();
+            let recovery = recover_wrapper_buyer(&mut wrapper, 2, BUYER)
+                .expect("the buyer's own VOID claims have a terminating recovery path");
+            let expected_recovery = expected_wrapper_void_recovery(&wrapper_buys);
+            prop_assert_eq!(recovery, expected_recovery);
+            prop_assert_eq!(wrapper.try_state(), Ok(()));
+
+            let costs: Balance = wrapper_buys.iter().map(|buy| buy.cost).sum();
+            let fees: Balance = wrapper_buys.iter().map(|buy| buy.fee()).sum();
+            let debited = costs + fees;
+            let neutral_premium_delta = expected_recovery as i128 - costs as i128;
+            prop_assert_eq!(
+                recovery as i128 - debited as i128,
+                neutral_premium_delta - fees as i128,
+                "04 §6.2/03 §6.4 guarantee neutral-prior recovery, net of the chosen market premium and fees",
+            );
+            // G-3: the net principal delta above is `−fees` meaning **trade** fees
+            // alone. `recovery` is a gross escrow delta, so the assertion is only
+            // honest if no redemption fee was taken out of it.
+            prop_assert_eq!(
+                wrapper.redemption_fees_accrued, 0,
+                "03 §5.3a(1): the wrapper buyer's VOID recovery path is entirely exempt"
+            );
+
+            // (c) Deliberately unpaired branch claims pay half; scalar/gate legs
+            // pay quarter, all with claimant-adverse floors.
+            let mut unpaired = LedgerState::new();
+            unpaired.redeem_fee = redeem_fee;
+            unpaired.create_vault(3, 0).unwrap();
+            unpaired.split(LedgerOrigin::Signed, 3, &0, amount).unwrap();
+            unpaired.split_scalar(LedgerOrigin::Signed, 3, Branch::Accept, &0, amount).unwrap();
+            unpaired.transfer(
+                LedgerOrigin::Signed,
+                position(3, Branch::Accept, PositionKind::Short),
+                &0,
+                &1,
+                amount,
+            ).unwrap();
+            unpaired.void(LedgerOrigin::ResolveAuthority, 3).unwrap();
+            let mut last = proposal_escrow(&unpaired, 3);
+            unpaired.redeem_void(3, Branch::Reject, PositionKind::BranchUsdc, &0, amount).unwrap();
+            prop_assert_eq!(last - proposal_escrow(&unpaired, 3), amount / 2);
+            last = proposal_escrow(&unpaired, 3);
+            unpaired.redeem_void(3, Branch::Accept, PositionKind::Long, &0, amount).unwrap();
+            prop_assert_eq!(last - proposal_escrow(&unpaired, 3), amount / 4);
+            last = proposal_escrow(&unpaired, 3);
+            unpaired.redeem_void(3, Branch::Accept, PositionKind::Short, &1, amount).unwrap();
+            prop_assert_eq!(last - proposal_escrow(&unpaired, 3), amount / 4);
+            prop_assert_eq!(unpaired.try_state(), Ok(()));
+            prop_assert_eq!(
+                unpaired.redemption_fees_accrued, 0,
+                "03 §5.3a(1): `redeem_void` is exempt — VOID is protocol failure"
+            );
+
+            let mut gate_unpaired = LedgerState::new();
+            gate_unpaired.redeem_fee = redeem_fee;
+            gate_unpaired.create_vault(4, 0).unwrap();
+            gate_unpaired.split(LedgerOrigin::Signed, 4, &0, amount).unwrap();
+            gate_unpaired.split_gate(
+                LedgerOrigin::Signed, 4, Branch::Accept, GateType::Security, &0, amount
+            ).unwrap();
+            gate_unpaired.void(LedgerOrigin::ResolveAuthority, 4).unwrap();
+            let mut last = proposal_escrow(&gate_unpaired, 4);
+            gate_unpaired.redeem_void(
+                4, Branch::Accept, PositionKind::GateYes(GateType::Security), &0, amount
+            ).unwrap();
+            prop_assert_eq!(last - proposal_escrow(&gate_unpaired, 4), amount / 4);
+            last = proposal_escrow(&gate_unpaired, 4);
+            gate_unpaired.redeem_void(
+                4, Branch::Accept, PositionKind::GateNo(GateType::Security), &0, amount
+            ).unwrap();
+            prop_assert_eq!(last - proposal_escrow(&gate_unpaired, 4), amount / 4);
+            prop_assert_eq!(gate_unpaired.redemption_fees_accrued, 0);
+
+            // (d) The par leg itself: winning branch-USDC still redeems 1:1 with
+            // nothing withheld at either rate (G-3, I-5).
+            let mut par = LedgerState::new();
+            par.redeem_fee = redeem_fee;
+            par.create_vault(5, 0).unwrap();
+            par.split(LedgerOrigin::Signed, 5, &0, amount).unwrap();
+            par.resolve(LedgerOrigin::ResolveAuthority, 5, Branch::Accept).unwrap();
+            par.settle_scalar(LedgerOrigin::SettleAuthority, 5, FixedU64(500_000_000)).unwrap();
+            let before = proposal_escrow(&par, 5);
+            par.redeem(5, &0, amount).unwrap();
+            prop_assert_eq!(before - proposal_escrow(&par, 5), amount);
+            prop_assert_eq!(
+                par.redemption_fees_accrued, 0,
+                "03 §5.3a(1): charging the par leg falsifies G-3, D-3, I-2(b), I-5 and PT-2"
+            );
+            Ok(())
+        };
+        for redeem_fee in sequence_rates() {
+            profiles(redeem_fee)?;
         }
-        prop_assert_eq!(wrapper.try_state(), Ok(()));
-
-        wrapper.void(LedgerOrigin::ResolveAuthority, 2).unwrap();
-        let recovery = recover_wrapper_buyer(&mut wrapper, 2, BUYER)
-            .expect("the buyer's own VOID claims have a terminating recovery path");
-        let expected_recovery = expected_wrapper_void_recovery(&wrapper_buys);
-        prop_assert_eq!(recovery, expected_recovery);
-        prop_assert_eq!(wrapper.try_state(), Ok(()));
-
-        let costs: Balance = wrapper_buys.iter().map(|buy| buy.cost).sum();
-        let fees: Balance = wrapper_buys.iter().map(|buy| buy.fee()).sum();
-        let debited = costs + fees;
-        let neutral_premium_delta = expected_recovery as i128 - costs as i128;
-        prop_assert_eq!(
-            recovery as i128 - debited as i128,
-            neutral_premium_delta - fees as i128,
-            "04 §6.2/03 §6.4 guarantee neutral-prior recovery, net of the chosen market premium and fees",
-        );
-        // G-3: the net principal delta above is `−fees` meaning **trade** fees
-        // alone. `recovery` is a gross escrow delta, so the assertion is only
-        // honest if no redemption fee was taken out of it.
-        prop_assert_eq!(
-            wrapper.redemption_fees_accrued, 0,
-            "03 §5.3a(1): the wrapper buyer's VOID recovery path is entirely exempt"
-        );
-
-        // (c) Deliberately unpaired branch claims pay half; scalar/gate legs
-        // pay quarter, all with claimant-adverse floors.
-        let mut unpaired = LedgerState::new();
-        unpaired.redeem_fee = rate;
-        unpaired.create_vault(3, 0).unwrap();
-        unpaired.split(LedgerOrigin::Signed, 3, &0, amount).unwrap();
-        unpaired.split_scalar(LedgerOrigin::Signed, 3, Branch::Accept, &0, amount).unwrap();
-        unpaired.transfer(
-            LedgerOrigin::Signed,
-            position(3, Branch::Accept, PositionKind::Short),
-            &0,
-            &1,
-            amount,
-        ).unwrap();
-        unpaired.void(LedgerOrigin::ResolveAuthority, 3).unwrap();
-        let mut last = proposal_escrow(&unpaired, 3);
-        unpaired.redeem_void(3, Branch::Reject, PositionKind::BranchUsdc, &0, amount).unwrap();
-        prop_assert_eq!(last - proposal_escrow(&unpaired, 3), amount / 2);
-        last = proposal_escrow(&unpaired, 3);
-        unpaired.redeem_void(3, Branch::Accept, PositionKind::Long, &0, amount).unwrap();
-        prop_assert_eq!(last - proposal_escrow(&unpaired, 3), amount / 4);
-        last = proposal_escrow(&unpaired, 3);
-        unpaired.redeem_void(3, Branch::Accept, PositionKind::Short, &1, amount).unwrap();
-        prop_assert_eq!(last - proposal_escrow(&unpaired, 3), amount / 4);
-        prop_assert_eq!(unpaired.try_state(), Ok(()));
-        prop_assert_eq!(
-            unpaired.redemption_fees_accrued, 0,
-            "03 §5.3a(1): `redeem_void` is exempt — VOID is protocol failure"
-        );
-
-        let mut gate_unpaired = LedgerState::new();
-        gate_unpaired.redeem_fee = rate;
-        gate_unpaired.create_vault(4, 0).unwrap();
-        gate_unpaired.split(LedgerOrigin::Signed, 4, &0, amount).unwrap();
-        gate_unpaired.split_gate(
-            LedgerOrigin::Signed, 4, Branch::Accept, GateType::Security, &0, amount
-        ).unwrap();
-        gate_unpaired.void(LedgerOrigin::ResolveAuthority, 4).unwrap();
-        let mut last = proposal_escrow(&gate_unpaired, 4);
-        gate_unpaired.redeem_void(
-            4, Branch::Accept, PositionKind::GateYes(GateType::Security), &0, amount
-        ).unwrap();
-        prop_assert_eq!(last - proposal_escrow(&gate_unpaired, 4), amount / 4);
-        last = proposal_escrow(&gate_unpaired, 4);
-        gate_unpaired.redeem_void(
-            4, Branch::Accept, PositionKind::GateNo(GateType::Security), &0, amount
-        ).unwrap();
-        prop_assert_eq!(last - proposal_escrow(&gate_unpaired, 4), amount / 4);
-        prop_assert_eq!(gate_unpaired.redemption_fees_accrued, 0);
-
-        // (d) The par leg itself, at the same non-zero rate: winning
-        // branch-USDC still redeems 1:1 with nothing withheld (G-3, I-5).
-        let mut par = LedgerState::new();
-        par.redeem_fee = rate;
-        par.create_vault(5, 0).unwrap();
-        par.split(LedgerOrigin::Signed, 5, &0, amount).unwrap();
-        par.resolve(LedgerOrigin::ResolveAuthority, 5, Branch::Accept).unwrap();
-        par.settle_scalar(LedgerOrigin::SettleAuthority, 5, FixedU64(500_000_000)).unwrap();
-        let before = proposal_escrow(&par, 5);
-        par.redeem(5, &0, amount).unwrap();
-        prop_assert_eq!(before - proposal_escrow(&par, 5), amount);
-        prop_assert_eq!(
-            par.redemption_fees_accrued, 0,
-            "03 §5.3a(1): charging the par leg falsifies G-3, D-3, I-2(b), I-5 and PT-2"
-        );
     }
 
     /// PT-3: a mixed proposal portfolio puts branch, scalar, and gate claims
@@ -1835,95 +1840,102 @@ proptest! {
     ) {
         let tranche = tranche_raw - tranche_raw % 4;
         let amount = 4 * tranche;
-        // 03 §11/§6.5(4): run the entire I-27 `Voided` surface at a non-zero
-        // `ledger.redeem_fee`. §6.4's D-1 valuation argument is re-verified
-        // *unchanged* only because no operation admissible under `Voided` is
-        // fee-bearing, so the exactness assertions below must still hold and
-        // the accrual must stay at zero throughout.
-        let rate = registry_redeem_fee();
-        let mut open = LedgerState::new();
-        open.redeem_fee = rate;
-        open.create_vault(60, 0).unwrap();
-        open.split(LedgerOrigin::Signed, 60, &0, amount).unwrap();
-        let mut resolved = open.clone();
-        resolved.resolve(LedgerOrigin::ResolveAuthority, 60, Branch::Accept).unwrap();
-        prop_assert_eq!(open.void(LedgerOrigin::ResolveAuthority, 60), Ok(()));
-        prop_assert_eq!(resolved.void(LedgerOrigin::ResolveAuthority, 60), Ok(()));
+        // 03 §11/§6.5(4): run the entire I-27 `Voided` surface at BOTH zero
+        // and non-zero `ledger.redeem_fee`; payouts must be byte-identical
+        // because every admissible operation is exempt, so the non-zero leg
+        // catches any fee leakage into the VOID surface. It is likewise the
+        // load-bearing half for I-2/PT-2: widening the charged set into
+        // `redeem` passes at zero because every fee computation still yields
+        // zero.
+        let recovery = |redeem_fee: u32| -> TestCaseResult {
+            let mut open = LedgerState::new();
+            open.redeem_fee = redeem_fee;
+            open.create_vault(60, 0).unwrap();
+            open.split(LedgerOrigin::Signed, 60, &0, amount).unwrap();
+            let mut resolved = open.clone();
+            resolved.resolve(LedgerOrigin::ResolveAuthority, 60, Branch::Accept).unwrap();
+            prop_assert_eq!(open.void(LedgerOrigin::ResolveAuthority, 60), Ok(()));
+            prop_assert_eq!(resolved.void(LedgerOrigin::ResolveAuthority, 60), Ok(()));
 
-        let mut settled = LedgerState::new();
-        settled.redeem_fee = rate;
-        settled.create_vault(61, 0).unwrap();
-        settled.split(LedgerOrigin::Signed, 61, &0, amount).unwrap();
-        settled.resolve(LedgerOrigin::ResolveAuthority, 61, Branch::Accept).unwrap();
-        settled.settle_scalar(LedgerOrigin::SettleAuthority, 61, FixedU64(500_000_000)).unwrap();
-        let snapshot = settled.clone();
-        prop_assert_eq!(
-            settled.void(LedgerOrigin::ResolveAuthority, 61),
-            Err(CoreError::WrongVaultState)
-        );
-        prop_assert_eq!(settled, snapshot);
+            let mut settled = LedgerState::new();
+            settled.redeem_fee = redeem_fee;
+            settled.create_vault(61, 0).unwrap();
+            settled.split(LedgerOrigin::Signed, 61, &0, amount).unwrap();
+            settled.resolve(LedgerOrigin::ResolveAuthority, 61, Branch::Accept).unwrap();
+            settled.settle_scalar(LedgerOrigin::SettleAuthority, 61, FixedU64(500_000_000)).unwrap();
+            let snapshot = settled.clone();
+            prop_assert_eq!(
+                settled.void(LedgerOrigin::ResolveAuthority, 61),
+                Err(CoreError::WrongVaultState)
+            );
+            prop_assert_eq!(settled, snapshot);
 
-        let mut recover = LedgerState::new();
-        recover.redeem_fee = rate;
-        recover.create_vault(62, 0).unwrap();
-        recover.split(LedgerOrigin::Signed, 62, &0, amount).unwrap();
-        // Mixed holder inventory: branch pair, scalar pair, gate pair, and an
-        // independently transferable branch claim all coexist.
-        for branch in [Branch::Accept, Branch::Reject] {
+            let mut recover = LedgerState::new();
+            recover.redeem_fee = redeem_fee;
+            recover.create_vault(62, 0).unwrap();
+            recover.split(LedgerOrigin::Signed, 62, &0, amount).unwrap();
+            // Mixed holder inventory: branch pair, scalar pair, gate pair, and an
+            // independently transferable branch claim all coexist.
+            for branch in [Branch::Accept, Branch::Reject] {
+                recover.transfer(
+                    LedgerOrigin::Signed,
+                    position(62, branch, PositionKind::BranchUsdc),
+                    &0,
+                    &10,
+                    tranche,
+                ).unwrap();
+            }
+            recover.split_scalar(
+                LedgerOrigin::Signed, 62, Branch::Accept, &0, tranche
+            ).unwrap();
+            for kind in [PositionKind::Long, PositionKind::Short] {
+                recover.transfer(
+                    LedgerOrigin::Signed,
+                    position(62, Branch::Accept, kind),
+                    &0,
+                    &11,
+                    tranche,
+                ).unwrap();
+            }
+            recover.split_gate(
+                LedgerOrigin::Signed, 62, Branch::Accept, gate, &0, tranche
+            ).unwrap();
+            for kind in [PositionKind::GateYes(gate), PositionKind::GateNo(gate)] {
+                recover.transfer(
+                    LedgerOrigin::Signed,
+                    position(62, Branch::Accept, kind),
+                    &0,
+                    &12,
+                    tranche,
+                ).unwrap();
+            }
             recover.transfer(
                 LedgerOrigin::Signed,
-                position(62, branch, PositionKind::BranchUsdc),
+                position(62, Branch::Accept, PositionKind::BranchUsdc),
                 &0,
-                &10,
+                &13,
                 tranche,
             ).unwrap();
-        }
-        recover.split_scalar(
-            LedgerOrigin::Signed, 62, Branch::Accept, &0, tranche
-        ).unwrap();
-        for kind in [PositionKind::Long, PositionKind::Short] {
-            recover.transfer(
-                LedgerOrigin::Signed,
-                position(62, Branch::Accept, kind),
-                &0,
-                &11,
-                tranche,
-            ).unwrap();
-        }
-        recover.split_gate(
-            LedgerOrigin::Signed, 62, Branch::Accept, gate, &0, tranche
-        ).unwrap();
-        for kind in [PositionKind::GateYes(gate), PositionKind::GateNo(gate)] {
-            recover.transfer(
-                LedgerOrigin::Signed,
-                position(62, Branch::Accept, kind),
-                &0,
-                &12,
-                tranche,
-            ).unwrap();
-        }
-        recover.transfer(
-            LedgerOrigin::Signed,
-            position(62, Branch::Accept, PositionKind::BranchUsdc),
-            &0,
-            &13,
-            tranche,
-        ).unwrap();
-        recover.void(LedgerOrigin::ResolveAuthority, 62).unwrap();
+            recover.void(LedgerOrigin::ResolveAuthority, 62).unwrap();
 
-        let canonical: Vec<_> = (0..VOID_ACTIONS.len()).collect();
-        let canonical_remaining = run_void_permutation(&recover, &canonical, tranche, gate)?;
-        let permuted_remaining = run_void_permutation(&recover, &order, tranche, gate)?;
-        let canonical_payout = amount - canonical_remaining;
-        let permuted_payout = amount - permuted_remaining;
-        prop_assert!(canonical_payout <= amount);
-        prop_assert!(permuted_payout <= amount);
-        prop_assert_eq!(permuted_payout, canonical_payout, "first-redeemer advantage");
-        prop_assert_eq!(canonical_payout, amount, "multiple-of-four portfolio is exact");
-        prop_assert_eq!(
-            recover.redemption_fees_accrued, 0,
-            "03 §5.3a(1)/§6.5(4): the `Voided` recovery surface is entirely exempt"
-        );
+            let canonical: Vec<_> = (0..VOID_ACTIONS.len()).collect();
+            let canonical_remaining = run_void_permutation(&recover, &canonical, tranche, gate)?;
+            let permuted_remaining = run_void_permutation(&recover, &order, tranche, gate)?;
+            let canonical_payout = amount - canonical_remaining;
+            let permuted_payout = amount - permuted_remaining;
+            prop_assert!(canonical_payout <= amount);
+            prop_assert!(permuted_payout <= amount);
+            prop_assert_eq!(permuted_payout, canonical_payout, "first-redeemer advantage");
+            prop_assert_eq!(canonical_payout, amount, "multiple-of-four portfolio is exact");
+            prop_assert_eq!(
+                recover.redemption_fees_accrued, 0,
+                "03 §5.3a(1)/§6.5(4): the `Voided` recovery surface is entirely exempt"
+            );
+            Ok(())
+        };
+        for redeem_fee in sequence_rates() {
+            recovery(redeem_fee)?;
+        }
     }
 
     /// PT-7: atomic scalar/Baseline pair redemption is exactly `a`; separate
