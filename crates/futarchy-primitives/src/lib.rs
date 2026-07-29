@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 16;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 17;
 
 pub type Balance = u128;
 pub type ProposalId = u64;

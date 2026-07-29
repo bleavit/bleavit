@@ -2089,7 +2089,7 @@ fn identity_and_version_pins_match_the_integration_contract() {
     // makes a future re-coupling fail here.
     assert_eq!(VERSION.transaction_version, TRANSACTION_VERSION);
     assert_eq!(VERSION.transaction_version, 1);
-    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 16);
+    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 17);
     assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
@@ -19844,9 +19844,15 @@ fn sq186_metadata_exposes_the_treasury_bond_ask_slope() {
                     .iter()
                     .find(|constant| constant.name == "INTEGRATION_CONTRACT_VERSION")
                     .expect("Epoch advertises the contract version");
+                // Asserted against the constant, not a literal: exactly one site
+                // pins the number (the `= 17` assertion above), and this one
+                // proves the metadata a client reads agrees with it. Two literals
+                // would let metadata and constant drift apart while both tests
+                // stayed green — the failure that makes the version useless as a
+                // schema selector (02 §13).
                 assert_eq!(
                     u32::decode(&mut &contract.value[..]).expect("version decodes"),
-                    16,
+                    futarchy_primitives::INTEGRATION_CONTRACT_VERSION,
                 );
             }};
         }
