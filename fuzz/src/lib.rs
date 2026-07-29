@@ -16,8 +16,9 @@ use futarchy_primitives::{
     Balance, BoundedVec, Branch, GateType, PositionId, PositionKind, ProposalClass, ScalarSide,
 };
 use market_core::{
-    buy_book, fee_up, seed_book, sell_book, BookKind, Error as MarketError, Event as MarketEvent,
-    LedgerOps, MarketBook, MarketParams, MarketState, FEE_BPS, MIN_TRADE,
+    buy_book, fee_up, seed_book, sell_book, BaselineTerminal, BookKind, Error as MarketError,
+    Event as MarketEvent, LedgerOps, MarketBook, MarketParams, MarketState, VaultTerminal, FEE_BPS,
+    MIN_TRADE,
 };
 use origins_core::{
     BoxedCall, CallDomain, Error as FilterError, Origin, RuntimeCall, SafetyFilter,
@@ -1160,6 +1161,84 @@ impl LedgerOps<u8> for MockLedger {
 
     fn position_balance(&self, id: PositionId, who: &u8) -> Balance {
         self.balance(id, who)
+    }
+
+    // This oracle models only live, open books: it has no settlement state or
+    // real-USDC escrow. Report that absence explicitly so a future withdrawal
+    // path fails status-quo instead of inventing a terminal outcome or payout.
+    fn vault_terminal(&self, _: u64) -> Option<VaultTerminal> {
+        None
+    }
+
+    fn gate_outcome(&self, _: u64, _: GateType) -> Option<bool> {
+        None
+    }
+
+    fn baseline_terminal(&self, _: u32) -> Option<BaselineTerminal> {
+        None
+    }
+
+    fn do_redeem(&mut self, _: u64, _: &u8, _: &u8, _: Balance) -> Result<Balance, ()> {
+        Err(())
+    }
+
+    fn do_redeem_scalar(
+        &mut self,
+        _: u64,
+        _: ScalarSide,
+        _: &u8,
+        _: &u8,
+        _: Balance,
+    ) -> Result<Balance, ()> {
+        Err(())
+    }
+
+    fn do_redeem_scalar_pair(&mut self, _: u64, _: &u8, _: &u8, _: Balance) -> Result<Balance, ()> {
+        Err(())
+    }
+
+    fn do_redeem_gate(
+        &mut self,
+        _: u64,
+        _: GateType,
+        _: &u8,
+        _: &u8,
+        _: Balance,
+    ) -> Result<Balance, ()> {
+        Err(())
+    }
+
+    fn do_redeem_void(
+        &mut self,
+        _: u64,
+        _: Branch,
+        _: PositionKind,
+        _: &u8,
+        _: &u8,
+        _: Balance,
+    ) -> Result<Balance, ()> {
+        Err(())
+    }
+
+    fn do_redeem_baseline(
+        &mut self,
+        _: u32,
+        _: ScalarSide,
+        _: &u8,
+        _: &u8,
+        _: Balance,
+    ) -> Result<Balance, ()> {
+        Err(())
+    }
+
+    fn do_redeem_baseline_pair(
+        &mut self,
+        _: u32,
+        _: &u8,
+        _: &u8,
+        _: Balance,
+    ) -> Result<Balance, ()> {
+        Err(())
     }
 }
 
