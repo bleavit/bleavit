@@ -1023,23 +1023,27 @@ fn liquid_position(kind: BookKind) -> Option<PositionId> {
     }
 }
 
-/// USDC-equivalent the book's inventory absorbs on a buy. Decision/Gate route the
-/// fee to the fees account, so the book keeps `cost`; the unbranched Baseline
-/// wrapper retains the whole `cost + fee` complete pair in the book (04 §6.1), so
-/// its inventory grows by the fee-inclusive total.
+/// USDC-equivalent the book's inventory absorbs on a buy: **`cost`, on every book
+/// kind**. The fee never joins book inventory, because every kind now routes it
+/// to the fees account when it is charged (04 §6.1).
 ///
-/// Sells need no kind split: the 04 §6.1 payout-sized merge converts exactly
-/// `net + fee == proceeds` of paired legs into USDC on every kind (Decision/Gate
-/// pay the fees account and the seller out of the liquid branch-USDC leg;
-/// Baseline re-splits `net` into the seller's pairs and holds the withheld fee
-/// as USDC custody outside the tracked legs) while the seller's returned
-/// `amount` joins book inventory — every sell drains the tracked inventory by
-/// the gross `proceeds`.
-fn inventory_inflow_on_buy(kind: BookKind, cost: Balance) -> Balance {
-    match kind {
-        BookKind::Baseline { .. } => cost + fee_up(cost, FEE_BPS).expect("fee in range"),
-        _ => cost,
-    }
+/// This carried a Baseline exception until milestone E4 (SQ-519) — the
+/// unbranched wrapper retained the whole `cost + fee` complete pair in the book.
+/// That is exactly what E4 removed: leaving the buy fee in book inventory made
+/// it indistinguishable from seed subsidy, so `withdraw_fees` returned zero for
+/// Baseline and Sweep handed the fee to `POL_BASELINE` instead of `MAIN`. With
+/// the fee segregated at trade time the kind split disappears and this identity
+/// becomes uniform across kinds.
+///
+/// Sells need no kind split either: the 04 §6.1 payout-sized merge converts
+/// exactly `net + fee == proceeds` of paired legs into USDC on every kind
+/// (Decision/Gate pay the fees account and the seller out of the liquid
+/// branch-USDC leg; Baseline re-splits `net` into the seller's pairs and holds
+/// the withheld sell fee as USDC custody outside the tracked legs) while the
+/// seller's returned `amount` joins book inventory — every sell drains the
+/// tracked inventory by the gross `proceeds`.
+fn inventory_inflow_on_buy(cost: Balance) -> Balance {
+    cost
 }
 
 impl LedgerOps<u8> for MockLedger {
@@ -1423,7 +1427,7 @@ fn assert_round_trip(kind: BookKind, b: Balance, selector: u16) {
     assert_eq!((book.q_long, book.q_short), (0, 0));
     let cash =
         i128::try_from(buy_cost).expect("range") - i128::try_from(sell_proceeds).expect("range");
-    let inventory = i128::try_from(inventory_inflow_on_buy(kind, buy_cost)).expect("range")
+    let inventory = i128::try_from(inventory_inflow_on_buy(buy_cost)).expect("range")
         - i128::try_from(sell_proceeds).expect("range");
     assert_book_state(&book, &ledger, headroom, cash, inventory);
 }
@@ -1473,7 +1477,7 @@ pub fn assert_lmsr_case(case: &TradeCase) {
                 assert!(after > before, "LMSR cost must strictly increase on buys");
                 let cost = traded_cost(&events);
                 net_revenue += i128::try_from(cost).expect("range");
-                inventory += i128::try_from(inventory_inflow_on_buy(kind, cost)).expect("range");
+                inventory += i128::try_from(inventory_inflow_on_buy(cost)).expect("range");
             }
         } else {
             let held = ledger.balance(side_position(kind, operation.side), &2);
