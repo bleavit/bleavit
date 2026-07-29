@@ -333,7 +333,16 @@ mod benchmarks {
         pallet_conditional_ledger::VaultTerminalAt::<T>::insert(1, now);
         ActiveMarketCount::<T>::put(0);
         LivePolCommitments::<T>::kill();
-        pallet_conditional_ledger::Vaults::<T>::remove(1);
+        // Book 1's vault is deliberately RETAINED. It used to be removed here to
+        // stand for an already-archived vault, but book 1 is seeded and carries no
+        // 04 §2 swept marker, and the ordering guard added with the
+        // `MarketSweepStatus` seam makes "seeded, unswept, vault archived"
+        // unreachable on-chain — the dust sweep now refuses while a seeded book is
+        // unswept. A benchmark fixture that builds state the runtime cannot reach
+        // measures a scan that cannot happen, so the removal is dropped rather
+        // than the invariant weakened. The vault-absent branch is still measured:
+        // the 2,239 bulk books below are swept *and* keep settled vaults, which is
+        // the archive's real resting state and the heavier scan of the two.
         RerunSeededMarkets::<T>::insert(1, ());
 
         // `try_state` has no dispatch parameter, so its benchmark fixture must
