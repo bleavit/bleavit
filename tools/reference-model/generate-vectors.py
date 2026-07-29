@@ -17,6 +17,9 @@ sys.path.insert(
 
 from bleavit_reference_model.decision import Grade, decide
 from bleavit_reference_model.ledger import (
+    DEFAULT_REDEEM_FEE_PERBILL,
+    MIN_SPLIT,
+    PERBILL_ONE,
     BaselineState,
     BaselineVault,
     Branch,
@@ -693,9 +696,22 @@ def _position_key(position):
 class _LedgerSequenceModel:
     """Transactional per-account driver for the 03 §11 operation alphabet."""
 
-    def __init__(self):
-        self.proposal = Vault()
-        self.baseline = BaselineVault(epoch=7)
+    def __init__(
+        self,
+        redeem_fee: int = 0,
+        min_split: int = MIN_SPLIT,
+        protocol_accounts=(),
+    ):
+        # 03 §5.3a: the rate defaults to 0, so the 64 pre-E1 sequence rows are
+        # generated at exactly their historical behaviour and the fee corpus
+        # opts in explicitly.
+        self.redeem_fee = redeem_fee
+        self.min_split = min_split
+        self.protocol_accounts = tuple(protocol_accounts)
+        self.proposal = Vault(redeem_fee=redeem_fee, min_split=min_split)
+        self.baseline = BaselineVault(
+            epoch=7, redeem_fee=redeem_fee, min_split=min_split
+        )
         self.balances = {account: {} for account in _SEQUENCE_ACCOUNTS}
         self.events = []
         self.count_accounts = []
@@ -728,6 +744,28 @@ class _LedgerSequenceModel:
 
     def _balance(self, account, key):
         return self.balances[account].get(key, 0)
+
+    def _is_protocol(self, account):
+        """03 §5.3a(1): `ProtocolAccounts` are exempt from the redemption fee."""
+        return account in self.protocol_accounts
+
+    def fees_accrued(self):
+        """The §5.3a(4) counter, summed over both vaults."""
+        return (
+            self.proposal.redemption_fees_accrued
+            + self.baseline.redemption_fees_accrued
+        )
+
+    def fees_charged_total(self):
+        return (
+            self.proposal.fees_charged_total
+            + self.baseline.fees_charged_total
+        )
+
+    def fees_swept_total(self):
+        return (
+            self.proposal.fees_swept_total + self.baseline.fees_swept_total
+        )
 
     def _ensure_holds(self, account, key, amount):
         if self._balance(account, key) < amount:
@@ -939,10 +977,13 @@ class _LedgerSequenceModel:
             branch = self.proposal.winner
             long_key = _proposal_key(branch, PositionKind.LONG)
             short_key = _proposal_key(branch, PositionKind.SHORT)
+            protocol = self._is_protocol(account)
             if name == "redeem_scalar_pair":
                 self._ensure_holds(account, long_key, amount)
                 self._ensure_holds(account, short_key, amount)
-                payout = self.proposal.redeem_scalar_pair(branch, amount)
+                payout = self.proposal.redeem_scalar_pair(
+                    branch, amount, protocol_account=protocol
+                )
                 self._burn(account, long_key, amount)
                 self._burn(account, short_key, amount)
                 self._emit("ScalarPairRedeemed", 1, payout)
@@ -951,7 +992,7 @@ class _LedgerSequenceModel:
                 key = long_key if side is ScalarSide.LONG else short_key
                 self._ensure_holds(account, key, amount)
                 payout = self.proposal.redeem_scalar(
-                    branch, side, amount
+                    branch, side, amount, protocol_account=protocol
                 )
                 self._burn(account, key, amount)
                 self._emit(
@@ -971,7 +1012,11 @@ class _LedgerSequenceModel:
             key = _proposal_key(branch, kind, gate)
             self._ensure_holds(account, key, amount)
             payout = self.proposal.redeem_gate(
-                branch, gate, side, amount
+                branch,
+                gate,
+                side,
+                amount,
+                protocol_account=self._is_protocol(account),
             )
             self._burn(account, key, amount)
             self._emit("GateRedeemed", 1, gate.value, payout)
@@ -1026,10 +1071,13 @@ class _LedgerSequenceModel:
             self._baseline_state(BaselineState.SETTLED)
             long_key = _baseline_key(ScalarSide.LONG)
             short_key = _baseline_key(ScalarSide.SHORT)
+            protocol = self._is_protocol(account)
             if name == "redeem_baseline_pair":
                 self._ensure_holds(account, long_key, amount)
                 self._ensure_holds(account, short_key, amount)
-                payout = self.baseline.redeem_baseline_pair(amount)
+                payout = self.baseline.redeem_baseline_pair(
+                    amount, protocol_account=protocol
+                )
                 self._burn(account, long_key, amount)
                 self._burn(account, short_key, amount)
                 self._emit(
@@ -1039,12 +1087,27 @@ class _LedgerSequenceModel:
                 side = ScalarSide(args["side"])
                 key = long_key if side is ScalarSide.LONG else short_key
                 self._ensure_holds(account, key, amount)
-                payout = self.baseline.redeem_baseline(side, amount)
+                payout = self.baseline.redeem_baseline(
+                    side, amount, protocol_account=protocol
+                )
                 self._burn(account, key, amount)
                 self._emit(
                     "BaselineRedeemed", 7, side.value, payout
                 )
             return {"burned": amount, "payout": payout}
+
+        if name == "sweep_redemption_fees":
+            # 03 §5.4 / §5.3a(4): move the whole accrued balance to the fee
+            # sink and zero the counter. Touches no escrow and no supply
+            # field, so it is outside the §6.5 induction. An empty counter is
+            # a **no-op**, not a failure: §5.3a(6) adds no new error and the
+            # §8 error list is frozen, so there is nothing to raise.
+            swept = (
+                self.proposal.sweep_redemption_fees()
+                + self.baseline.sweep_redemption_fees()
+            )
+            self._emit("RedemptionFeesSwept", swept)
+            return {"swept": swept}
 
         raise AssertionError(f"unhandled ledger sequence operation {name}")
 
@@ -1132,7 +1195,9 @@ class _LedgerSequenceModel:
             ],
             "deposits_held": len(positions) * _POSITION_DEPOSIT,
             "events": self.events,
-            "protocol_accounts": [],
+            # 03 §5.3a(1): the fee-exempt claimant set. Empty for every
+            # pre-E1 row, so those digests are byte-identical.
+            "protocol_accounts": sorted(self.protocol_accounts),
         }
 
 
@@ -1502,6 +1567,416 @@ def _ledger_score_scenarios():
             }
         )
     return rows
+
+
+# 03 §5.3a / 15 §4.3 "rate coverage": the fee-bearing redemption corpus.
+# Every row is a standalone program — it carries the rate, the `min_split`
+# waiver threshold and the exempt-account set alongside its ops, so a port
+# replays it without consulting 13. The op alphabet and the `outcome` shape are
+# exactly those of `ledger_sequence_scenarios`; the per-op `gross`/`fee`/`net`
+# triple and the accrual counters are the only new fields.
+_PAYOUT_OPS = frozenset(
+    {
+        "merge",
+        "merge_baseline",
+        "redeem",
+        "redeem_scalar",
+        "redeem_scalar_pair",
+        "redeem_gate",
+        "redeem_void",
+        "redeem_baseline",
+        "redeem_baseline_pair",
+    }
+)
+
+
+def _fee_scenario(name, intent, params, operations):
+    model = _LedgerSequenceModel(**params)
+    initial = model.digest()
+    rows = []
+    for operation in operations:
+        row = dict(operation)
+        charged_before = model.fees_charged_total()
+        gross_before = (
+            model.proposal.total_payouts + model.baseline.total_payouts
+        )
+        row["outcome"] = model.apply(operation)
+        fee = model.fees_charged_total() - charged_before
+        gross = (
+            model.proposal.total_payouts + model.baseline.total_payouts
+        ) - gross_before
+        if operation["op"] in _PAYOUT_OPS and "ok" in row["outcome"]:
+            net = row["outcome"]["ok"]["payout"]
+            # 03 §5.3a(4)/§6.5: `gross` is measured as the escrow outflow and
+            # `net` as the amount the claimant received, so this is a real
+            # identity and not a restatement of the subtraction that produced
+            # them.
+            if net + fee != gross:
+                raise AssertionError(
+                    f"{name}/{operation['op']}: net {net} + fee {fee} "
+                    f"!= gross {gross}"
+                )
+            row["gross"] = gross
+            row["fee"] = fee
+            row["net"] = net
+        elif fee:
+            raise AssertionError(f"{name}: non-payout op accrued a fee")
+        row["fees_accrued_after"] = model.fees_accrued()
+        rows.append(row)
+    model.proposal.check_conservation()
+    model.baseline.check_conservation()
+    return {
+        "name": name,
+        "unit": "USDC base units (1e-6)",
+        "coverage_intent": intent,
+        "params": {
+            "redeem_fee_perbill": params["redeem_fee"],
+            "min_split": params.get("min_split", MIN_SPLIT),
+            "protocol_accounts": sorted(params.get("protocol_accounts", ())),
+        },
+        "initial_state": {
+            "proposal_id": 1,
+            "baseline_epoch": 7,
+            "digest": initial,
+        },
+        "ops": rows,
+        "fees_accrued": model.fees_accrued(),
+        "fees_charged_total": model.fees_charged_total(),
+        "fees_swept_total": model.fees_swept_total(),
+        "final_state": model.digest(),
+    }
+
+
+def _ledger_fee_scenarios():
+    """03 §5.3a: charged calls, every exemption, the waiver, and the sweep."""
+
+    default = {"redeem_fee": DEFAULT_REDEEM_FEE_PERBILL}
+    scenarios = [
+        _fee_scenario(
+            "fee-01-scalar-legs-charged-waived-and-swept",
+            "redeem_scalar charged with ceil != floor (42.003 -> 43); the "
+            "mirror leg's gross falls under ledger.min_split and is waived; "
+            "sweep_redemption_fees zeroes the counter",
+            default,
+            [
+                _op("split", account="alice", amount=20_000),
+                _op(
+                    "split_scalar",
+                    account="alice",
+                    branch=Branch.ACCEPT.value,
+                    amount=20_000,
+                ),
+                _op("resolve", winner=Branch.ACCEPT.value),
+                _op("settle_scalar", s=700_050_000),
+                _op(
+                    "redeem_scalar",
+                    account="alice",
+                    side=ScalarSide.LONG.value,
+                    amount=20_000,
+                ),
+                _op(
+                    "redeem_scalar",
+                    account="alice",
+                    side=ScalarSide.SHORT.value,
+                    amount=20_000,
+                ),
+                _op("sweep_redemption_fees"),
+                _op("sweep_redemption_fees"),
+            ],
+        ),
+        _fee_scenario(
+            "fee-02-pair-equals-leg-by-leg-under-the-waiver",
+            "03 §5.3a(2a) PT-7 witness: identical holdings redeemed as a "
+            "pair and leg-by-leg at the same rate and score. The pair's fee "
+            "base is its own two legs, so both routes now net 19957 — the "
+            "pair is never the worse choice. Charging fee(a) on the combined "
+            "gross instead would net the pair 19940",
+            default,
+            [
+                _op("split", account="alice", amount=40_000),
+                _op(
+                    "split_scalar",
+                    account="alice",
+                    branch=Branch.ACCEPT.value,
+                    amount=40_000,
+                ),
+                _op("resolve", winner=Branch.ACCEPT.value),
+                _op("settle_scalar", s=700_050_000),
+                _op(
+                    "redeem_scalar_pair", account="alice", amount=20_000
+                ),
+                _op(
+                    "redeem_scalar",
+                    account="alice",
+                    side=ScalarSide.LONG.value,
+                    amount=20_000,
+                ),
+                _op(
+                    "redeem_scalar",
+                    account="alice",
+                    side=ScalarSide.SHORT.value,
+                    amount=20_000,
+                ),
+            ],
+        ),
+        _fee_scenario(
+            "fee-03-gate-winning-side-charged",
+            "redeem_gate on the winning side is charged at the full 1:1 gross",
+            default,
+            [
+                _op("split", account="alice", amount=1_000_000),
+                _op(
+                    "split_gate",
+                    account="alice",
+                    branch=Branch.ACCEPT.value,
+                    gate=GateType.SURVIVAL.value,
+                    amount=1_000_000,
+                ),
+                _op("resolve", winner=Branch.ACCEPT.value),
+                _op(
+                    "settle_gate",
+                    gate=GateType.SURVIVAL.value,
+                    outcome=True,
+                ),
+                _op("settle_scalar", s=500_000_000),
+                _op(
+                    "redeem_gate",
+                    account="alice",
+                    gate=GateType.SURVIVAL.value,
+                    amount=1_000_000,
+                ),
+            ],
+        ),
+        _fee_scenario(
+            "fee-04-par-leg-and-merge-are-exempt",
+            "03 §5.3a(1): `merge` and the `redeem` par leg pay no fee at a "
+            "non-zero rate — G-3 and I-5's 1:1 guarantee survive verbatim",
+            default,
+            [
+                _op("split", account="alice", amount=2_000_000),
+                _op("merge", account="alice", amount=1_000_000),
+                _op("resolve", winner=Branch.ACCEPT.value),
+                _op("settle_scalar", s=500_000_000),
+                _op("redeem", account="alice", amount=1_000_000),
+            ],
+        ),
+        _fee_scenario(
+            "fee-05-void-and-scalar-merge-are-exempt",
+            "03 §5.3a(1): nothing admissible under `Voided` is fee-bearing, "
+            "so §6.4's D-1 valuation argument is unchanged",
+            default,
+            [
+                _op("split", account="alice", amount=1_000_000),
+                _op(
+                    "split_scalar",
+                    account="alice",
+                    branch=Branch.ACCEPT.value,
+                    amount=400_000,
+                ),
+                _op("void"),
+                _op(
+                    "merge_scalar",
+                    account="alice",
+                    branch=Branch.ACCEPT.value,
+                    amount=400_000,
+                ),
+                _op("merge", account="alice", amount=500_000),
+                _op(
+                    "redeem_void",
+                    account="alice",
+                    branch=Branch.REJECT.value,
+                    kind=PositionKind.BRANCH_USDC.value,
+                    amount=500_000,
+                ),
+            ],
+        ),
+        _fee_scenario(
+            "fee-06-baseline-legs-charged-merge-exempt",
+            "redeem_baseline and redeem_baseline_pair are charged; "
+            "merge_baseline is exempt; the counter accrues across vaults",
+            default,
+            [
+                _op("split_baseline", account="alice", amount=3_000_000),
+                _op("merge_baseline", account="alice", amount=1_000_000),
+                _op("settle_baseline", s=700_050_000),
+                _op(
+                    "redeem_baseline",
+                    account="alice",
+                    side=ScalarSide.LONG.value,
+                    amount=1_000_000,
+                ),
+                _op(
+                    "redeem_baseline_pair",
+                    account="alice",
+                    amount=1_000_000,
+                ),
+                _op("sweep_redemption_fees"),
+            ],
+        ),
+        _fee_scenario(
+            "fee-07-net-waiver-boundary-at-min-balance",
+            "03 §5.3a(2)/I-32(b): the waiver tests the NET. A gross of "
+            "exactly min_balance (10000) is waived and nets 10000 — a "
+            "gross-based test would have charged it 30 and netted 9970, "
+            "below min_balance, on the very BelowMinimum path the waiver "
+            "removes. 10030 is the last waived gross and 10031 the first "
+            "charged one, and it nets exactly min_balance",
+            default,
+            [
+                _op("split", account="alice", amount=100_000),
+                _op(
+                    "split_scalar",
+                    account="alice",
+                    branch=Branch.ACCEPT.value,
+                    amount=100_000,
+                ),
+                _op("resolve", winner=Branch.ACCEPT.value),
+                _op("settle_scalar", s=PERBILL_ONE),
+                _op(
+                    "redeem_scalar",
+                    account="alice",
+                    side=ScalarSide.LONG.value,
+                    amount=9_999,
+                ),
+                _op(
+                    "redeem_scalar",
+                    account="alice",
+                    side=ScalarSide.LONG.value,
+                    amount=10_000,
+                ),
+                _op(
+                    "redeem_scalar",
+                    account="alice",
+                    side=ScalarSide.LONG.value,
+                    amount=10_030,
+                ),
+                _op(
+                    "redeem_scalar",
+                    account="alice",
+                    side=ScalarSide.LONG.value,
+                    amount=10_031,
+                ),
+            ],
+        ),
+        _fee_scenario(
+            "fee-08-protocol-account-is-exempt",
+            "03 §5.3a(1): identical redemptions by a claimant and by a "
+            "ProtocolAccount; only the claimant is charged. The protocol "
+            "holder acquires its inventory through the §5.5 MarketAuthority "
+            "wrapper, modelled here as a direct split",
+            {
+                "redeem_fee": DEFAULT_REDEEM_FEE_PERBILL,
+                "protocol_accounts": ("carol",),
+            },
+            [
+                _op("split", account="alice", amount=100_000),
+                _op("split", account="carol", amount=100_000),
+                _op(
+                    "split_scalar",
+                    account="alice",
+                    branch=Branch.ACCEPT.value,
+                    amount=100_000,
+                ),
+                _op(
+                    "split_scalar",
+                    account="carol",
+                    branch=Branch.ACCEPT.value,
+                    amount=100_000,
+                ),
+                _op("resolve", winner=Branch.ACCEPT.value),
+                _op("settle_scalar", s=PERBILL_ONE),
+                _op(
+                    "redeem_scalar",
+                    account="alice",
+                    side=ScalarSide.LONG.value,
+                    amount=100_000,
+                ),
+                _op(
+                    "redeem_scalar",
+                    account="carol",
+                    side=ScalarSide.LONG.value,
+                    amount=100_000,
+                ),
+            ],
+        ),
+        _fee_scenario(
+            "fee-09-full-rate-collects-nothing-under-the-net-waiver",
+            "I-31 at a hypothetical 100 % rate: the net-based waiver always "
+            "fires because the net would be 0, so nothing is charged and the "
+            "claimant is paid in full. The rate governs distribution, never "
+            "solvency — and the waiver bounds it from the claimant's side",
+            {"redeem_fee": PERBILL_ONE},
+            [
+                _op("split", account="alice", amount=100_000),
+                _op(
+                    "split_scalar",
+                    account="alice",
+                    branch=Branch.ACCEPT.value,
+                    amount=100_000,
+                ),
+                _op("resolve", winner=Branch.ACCEPT.value),
+                _op("settle_scalar", s=PERBILL_ONE),
+                _op(
+                    "redeem_scalar_pair", account="alice", amount=100_000
+                ),
+                _op("sweep_redemption_fees"),
+            ],
+        ),
+        _fee_scenario(
+            "fee-10-out-of-domain-rate-reads-as-zero",
+            "03 §5.3a(5)/I-32(d): a rate outside the Perbill domain is a "
+            "malformed record and reads as 0 — the fail-OPEN direction, "
+            "because it is the claimant-favouring one",
+            {"redeem_fee": PERBILL_ONE + 1},
+            [
+                _op("split", account="alice", amount=100_000),
+                _op(
+                    "split_scalar",
+                    account="alice",
+                    branch=Branch.ACCEPT.value,
+                    amount=100_000,
+                ),
+                _op("resolve", winner=Branch.ACCEPT.value),
+                _op("settle_scalar", s=PERBILL_ONE),
+                _op(
+                    "redeem_scalar_pair", account="alice", amount=100_000
+                ),
+            ],
+        ),
+        _fee_scenario(
+            "fee-11-high-rate-charges-above-the-net-threshold",
+            "At 50 % the net-based waiver moves the charging threshold to "
+            "2·min_split: a 19999 gross is waived outright while a 20000 "
+            "gross is charged 10000 and nets exactly min_split. fee <= gross "
+            "at every rate (I-32(a))",
+            {"redeem_fee": 500_000_000},
+            [
+                _op("split", account="alice", amount=100_000),
+                _op(
+                    "split_scalar",
+                    account="alice",
+                    branch=Branch.ACCEPT.value,
+                    amount=100_000,
+                ),
+                _op("resolve", winner=Branch.ACCEPT.value),
+                _op("settle_scalar", s=PERBILL_ONE),
+                _op(
+                    "redeem_scalar",
+                    account="alice",
+                    side=ScalarSide.LONG.value,
+                    amount=19_999,
+                ),
+                _op(
+                    "redeem_scalar",
+                    account="alice",
+                    side=ScalarSide.LONG.value,
+                    amount=20_000,
+                ),
+                _op("sweep_redemption_fees"),
+            ],
+        ),
+    ]
+    return scenarios
 
 
 def _ledger_sweep_scenarios():
@@ -2406,6 +2881,7 @@ def build():
         "high_precision_corpus": {"b": "10000", "samples": samples},
         "transcendental_corpus": _transcendental_corpus(),
         "ledger_scenarios": _ledger_scenarios(),
+        "ledger_fee_scenarios": _ledger_fee_scenarios(),
         "ledger_sequence_scenarios": _ledger_sequence_scenarios(),
         "ledger_score_scenarios": _ledger_score_scenarios(),
         "ledger_sweep_scenarios": _ledger_sweep_scenarios(),

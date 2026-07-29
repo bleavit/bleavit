@@ -690,6 +690,12 @@ error = "ConditionalLedger::BelowMinimum"
 reason = "13 §1; 15 §4.6: dispatch-path limit coverage."
 
 [[entry]]
+key = "ledger.rdm_fee"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: the [0, 100] bps record bounds are covered by the generated per-key set_param/amend_registry suite. The live `ledger.redeem_fee <= mkt.fee` coupling is enforced jointly at the amendment boundary and is pinned by `e1_no_amendment_may_carry_the_redemption_fee_above_the_market_fee`, not by a `// limit-coverage:` marker -- this class admits none (SQ-495 precedent; 08 §10.6, E1)."
+
+[[entry]]
 key = "ledger.archive"
 class = "dispatch-limit"
 genesis = true

@@ -2521,6 +2521,24 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             true
         ),
         row(
+            // 13 §1 / 08 §10.6 (E1): the 03 §5.3a redemption fee. The default is
+            // the largest exit-neutral rate, which is `mkt.fee` itself — above
+            // it, holding to settlement costs more than round-tripping through
+            // the book in every state of the world. The static max mirrors
+            // `mkt.fee`'s, but the **binding** bound is the live
+            // `ledger.redeem_fee <= mkt.fee` coupling screened jointly over the
+            // pair at the amendment boundary (13 rule 7, the second key after
+            // `gate.v_min`); the unsafe direction is upward.
+            b"ledger.rdm_fee",
+            ParamValue::Perbill(3_000_000),
+            ParamValue::Perbill(0),
+            ParamValue::Perbill(10_000_000),
+            Some(MaxDelta::Absolute(ParamValue::Perbill(1_000_000))),
+            1,
+            ParamClass::Param,
+            false
+        ),
+        row(
             b"ledger.archive",
             ParamValue::U32(kernel::MAX_ARCHIVE_DELAY_BLOCKS),
             ParamValue::U32(1_296_000),

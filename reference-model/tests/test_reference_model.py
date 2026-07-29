@@ -1,3 +1,4 @@
+import copy
 from decimal import Decimal, ROUND_HALF_UP, getcontext
 import json
 from pathlib import Path
@@ -14,14 +15,22 @@ from bleavit_reference_model.decision import (
     requires_gate_markets,
 )
 from bleavit_reference_model.ledger import (
+    DEFAULT_REDEEM_FEE_PERBILL,
+    MIN_SPLIT,
+    PERBILL_ONE,
+    BaselineState,
     BaselineVault,
     Branch,
+    FeeTreatment,
     GateSide,
     GateType,
     PositionKind,
     ScalarSide,
     Vault,
     VaultState,
+    effective_redeem_fee,
+    redemption_fee,
+    redemption_fee_pair,
 )
 from bleavit_reference_model.lmsr import (
     PriceBoundExceeded,
@@ -1198,6 +1207,750 @@ class ContestCapitalTests(unittest.TestCase):
         self.assertTrue(gate_decision_grade(**in_band))
         self.assertFalse(
             gate_decision_grade(**{**in_band, "pol_undisturbed": False})
+        )
+
+
+def _fixture():
+    return json.loads(
+        (
+            Path(__file__).resolve().parents[1] / "fixtures" / "vectors.json"
+        ).read_text()
+    )
+
+
+def _settled_scalar_vault(rate=0, escrow=20_000, score="0.70005", **kwargs):
+    vault = Vault(redeem_fee=rate, **kwargs)
+    vault.split(escrow)
+    vault.split_scalar(Branch.ACCEPT, escrow)
+    vault.resolve(Branch.ACCEPT)
+    vault.settle_scalar(Decimal(score))
+    return vault
+
+
+def _settled_baseline_vault(rate=0, escrow=2_000_000, score="0.70005"):
+    baseline = BaselineVault(epoch=7, redeem_fee=rate)
+    baseline.split_baseline(escrow)
+    baseline.settle_baseline(Decimal(score))
+    return baseline
+
+
+class RedemptionFeeTests(unittest.TestCase):
+    """03 §5.3a redemption fee, §5.4 sweep, §6.5 closing paragraph."""
+
+    RATE = DEFAULT_REDEEM_FEE_PERBILL  # 30 bps
+
+    # -- §5.3a(2) arithmetic -------------------------------------------------
+
+    def test_fee_rounds_up_and_the_waiver_tests_the_net(self):
+        # ceil, not floor: the fee rounds against the claimant and in favour
+        # of the protocol, matching 03 §7 R-1's direction.
+        self.assertEqual((14_001 * self.RATE) // PERBILL_ONE, 42)
+        self.assertEqual(redemption_fee(14_001, self.RATE), 43)
+        # §5.3a(2): the waiver predicate is `g − ceil(g·rate) < min_split`.
+        # 10_030 is the last waived gross; 10_031 is the first charged one and
+        # nets exactly `min_split`.
+        self.assertEqual(redemption_fee(10_030, self.RATE), 0)
+        self.assertEqual(redemption_fee(10_031, self.RATE), 31)
+        self.assertEqual(10_031 - 31, MIN_SPLIT)
+        # The waived set is a prefix interval: the predicate is monotone in g.
+        charged = [
+            g for g in range(0, 30_000) if redemption_fee(g, self.RATE)
+        ]
+        self.assertEqual(charged, list(range(10_031, 30_000)))
+        # A zero gross (losing gate side) is waived by the same rule.
+        self.assertEqual(redemption_fee(0, self.RATE), 0)
+        # A zero rate is a zero fee at every size, waived branch or not.
+        self.assertEqual(redemption_fee(10 ** 12, 0), 0)
+        self.assertEqual(redemption_fee(1, 0), 0)
+
+    def test_fee_never_exceeds_the_gross_at_any_admissible_rate(self):
+        # §5.3a(2)/I-32(a): `fee(g) ≤ g`, so no net payout can go negative.
+        for rate in (0, 1, self.RATE, 500_000_000, PERBILL_ONE):
+            for gross in (0, 1, MIN_SPLIT - 1, MIN_SPLIT, 14_001, 10 ** 9):
+                fee = redemption_fee(gross, rate)
+                self.assertGreaterEqual(fee, 0)
+                self.assertLessEqual(fee, gross)
+
+    def test_rate_read_fails_open_on_a_malformed_record(self):
+        # §5.3a(5)/I-32(d): a missing, malformed or out-of-domain record reads
+        # as ZERO. This is the one place the ledger's fail-open direction is
+        # correct, because it is the claimant-favouring one.
+        for bad in (None, "3000000", -1, PERBILL_ONE + 1, True, 1.5):
+            self.assertEqual(effective_redeem_fee(bad), 0)
+            self.assertEqual(redemption_fee(1_000_000, bad), 0)
+        self.assertEqual(effective_redeem_fee(PERBILL_ONE), PERBILL_ONE)
+        self.assertEqual(effective_redeem_fee(self.RATE), self.RATE)
+
+    # -- §5.3a(1) charged calls ---------------------------------------------
+
+    def test_redeem_scalar_is_charged_and_escrow_falls_by_the_gross(self):
+        vault = _settled_scalar_vault(self.RATE)
+        before = vault.escrowed
+        net = vault.redeem_scalar(Branch.ACCEPT, ScalarSide.LONG, 20_000)
+        self.assertEqual(net, 13_958)
+        self.assertEqual(vault.redemption_fees_accrued, 43)
+        # §5.3a(4): escrow decrements by the GROSS, always — never the net,
+        # and never a second time for the fee.
+        self.assertEqual(before - vault.escrowed, 14_001)
+        self.assertEqual(net + vault.redemption_fees_accrued, 14_001)
+        vault.check_conservation()
+
+    def test_redeem_scalar_pair_charges_its_legs_not_its_gross(self):
+        # §5.3a(2a): `fee_pair(a) = fee(floor(a·s)) + fee(floor(a·(1−s)))`.
+        # Here that is fee(14_001) + fee(5_999) = 43 + 0, NOT fee(20_000) = 60.
+        vault = _settled_scalar_vault(self.RATE)
+        before = vault.escrowed
+        self.assertEqual(
+            vault.redeem_scalar_pair(Branch.ACCEPT, 20_000), 19_957
+        )
+        self.assertEqual(vault.redemption_fees_accrued, 43)
+        self.assertEqual(
+            redemption_fee_pair(20_000, Decimal("0.70005"), self.RATE), 43
+        )
+        self.assertEqual(redemption_fee(20_000, self.RATE), 60)
+        # The gross is still exactly `a`; only the fee base changed.
+        self.assertEqual(before - vault.escrowed, 20_000)
+
+    def test_redeem_gate_is_charged_on_the_winning_side_only(self):
+        vault = Vault(redeem_fee=self.RATE)
+        vault.split(1_000_000)
+        vault.split_gate(Branch.ACCEPT, GateType.SURVIVAL, 1_000_000)
+        vault.resolve(Branch.ACCEPT)
+        vault.settle_gate(GateType.SURVIVAL, True)
+        vault.settle_scalar(Decimal("0.5"))
+        self.assertEqual(
+            vault.redeem_gate(
+                Branch.ACCEPT, GateType.SURVIVAL, GateSide.YES, 500_000
+            ),
+            498_500,
+        )
+        self.assertEqual(vault.redemption_fees_accrued, 1_500)
+        # The losing side pays a zero gross, so it is waived, not charged.
+        self.assertEqual(
+            vault.redeem_gate(
+                Branch.ACCEPT, GateType.SURVIVAL, GateSide.NO, 500_000
+            ),
+            0,
+        )
+        self.assertEqual(vault.redemption_fees_accrued, 1_500)
+        vault.check_conservation()
+
+    def test_baseline_legs_are_charged(self):
+        baseline = _settled_baseline_vault(self.RATE)
+        self.assertEqual(
+            baseline.redeem_baseline(ScalarSide.LONG, 1_000_000), 697_949
+        )
+        self.assertEqual(baseline.redemption_fees_accrued, 2_101)
+        # §5.3a(2a) again: fee(700_050) + fee(299_950) = 2101 + 900 = 3001,
+        # not fee(1_000_000) = 3000.
+        self.assertEqual(baseline.redeem_baseline_pair(1_000_000), 996_999)
+        self.assertEqual(baseline.redemption_fees_accrued, 5_102)
+        baseline.check_conservation()
+
+    # -- §5.3a(1) exemptions -------------------------------------------------
+
+    def test_par_leg_redeem_is_exempt(self):
+        # G-3/I-5: winning branch-USDC redeems 1:1 verbatim at any rate.
+        vault = Vault(redeem_fee=self.RATE)
+        vault.split(1_000_000)
+        vault.resolve(Branch.ACCEPT)
+        vault.settle_scalar(Decimal("0.5"))
+        self.assertEqual(vault.redeem(Branch.ACCEPT, 1_000_000), 1_000_000)
+        self.assertEqual(vault.redemption_fees_accrued, 0)
+        self.assertEqual(vault.fees_charged_total, 0)
+
+    def test_redeem_void_is_exempt(self):
+        # D-1/I-26: VOID is protocol failure; the schedule is unmoved.
+        vault = Vault(redeem_fee=self.RATE)
+        vault.split(1_000_000)
+        vault.split_scalar(Branch.ACCEPT, 400_000)
+        vault.void()
+        self.assertEqual(
+            vault.redeem_void(
+                Branch.REJECT, PositionKind.BRANCH_USDC, 1_000_000
+            ),
+            500_000,
+        )
+        self.assertEqual(
+            vault.redeem_void(Branch.ACCEPT, PositionKind.LONG, 400_000),
+            100_000,
+        )
+        self.assertEqual(vault.fees_charged_total, 0)
+
+    def test_every_merge_primitive_is_exempt(self):
+        vault = Vault(redeem_fee=self.RATE)
+        vault.split(1_000_000)
+        vault.split_scalar(Branch.ACCEPT, 400_000)
+        vault.split_gate(Branch.REJECT, GateType.SECURITY, 400_000)
+        # `merge_scalar`/`merge_gate` pay no USDC at all — value moves inside
+        # the vault — so there is nothing for a fee to attach to.
+        vault.merge_scalar(Branch.ACCEPT, 400_000)
+        vault.merge_gate(Branch.REJECT, GateType.SECURITY, 400_000)
+        self.assertEqual(vault.total_payouts, 0)
+        # `merge` pays par, and stays par.
+        self.assertEqual(vault.merge(1_000_000), 1_000_000)
+        self.assertEqual(vault.fees_charged_total, 0)
+
+        baseline = BaselineVault(epoch=7, redeem_fee=self.RATE)
+        baseline.split_baseline(1_000_000)
+        self.assertEqual(baseline.merge_baseline(1_000_000), 1_000_000)
+        self.assertEqual(baseline.fees_charged_total, 0)
+
+    def test_sweep_dust_residue_is_not_a_settlement_payout(self):
+        vault = _settled_scalar_vault(self.RATE)
+        residue = vault.sweep_dust()
+        self.assertEqual(residue, 20_000)
+        self.assertEqual(vault.fees_charged_total, 0)
+
+    def test_protocol_account_claimants_are_exempt(self):
+        # §5.3a(1): charging them would be the treasury taxing itself.
+        charged = _settled_scalar_vault(self.RATE)
+        exempt = _settled_scalar_vault(self.RATE)
+        self.assertEqual(
+            charged.redeem_scalar(Branch.ACCEPT, ScalarSide.LONG, 20_000),
+            13_958,
+        )
+        self.assertEqual(
+            exempt.redeem_scalar(
+                Branch.ACCEPT,
+                ScalarSide.LONG,
+                20_000,
+                protocol_account=True,
+            ),
+            14_001,
+        )
+        self.assertEqual(exempt.fees_charged_total, 0)
+
+        pair = _settled_scalar_vault(self.RATE)
+        self.assertEqual(
+            pair.redeem_scalar_pair(
+                Branch.ACCEPT, 20_000, protocol_account=True
+            ),
+            20_000,
+        )
+        self.assertEqual(pair.fees_charged_total, 0)
+
+        baseline = _settled_baseline_vault(self.RATE)
+        self.assertEqual(
+            baseline.redeem_baseline(
+                ScalarSide.LONG, 1_000_000, protocol_account=True
+            ),
+            700_050,
+        )
+        self.assertEqual(
+            baseline.redeem_baseline_pair(
+                1_000_000, protocol_account=True
+            ),
+            1_000_000,
+        )
+        self.assertEqual(baseline.fees_charged_total, 0)
+
+    # -- structural: the exemption cannot be lost to an edit -----------------
+
+    def test_the_shared_payout_seam_never_guesses_a_fee_treatment(self):
+        # The chargeability is passed at every call site, never inferred, so
+        # `redeem`/`redeem_void` cannot acquire a fee by a later edit here.
+        vault = _settled_scalar_vault(self.RATE)
+        with self.assertRaises(TypeError):
+            vault._terminal_pay(1_000)
+        with self.assertRaises(ValueError):
+            vault._terminal_pay(1_000, "charged")
+        with self.assertRaises(ValueError):
+            vault._pay_out(1_000, True)
+        self.assertFalse(FeeTreatment.EXEMPT_PAR_LEG.charged)
+        self.assertFalse(FeeTreatment.EXEMPT_VOID.charged)
+        self.assertTrue(FeeTreatment.CHARGED.charged)
+
+    # -- §6.5 closing paragraph / I-31 --------------------------------------
+
+    def test_net_plus_fee_equals_gross_for_every_charged_call(self):
+        for rate in (0, 1, self.RATE, 500_000_000, PERBILL_ONE):
+            for call in ("long", "short", "pair", "gate"):
+                vault = _settled_scalar_vault(rate, escrow=1_000_000)
+                if call == "gate":
+                    vault = Vault(redeem_fee=rate)
+                    vault.split(1_000_000)
+                    vault.split_gate(
+                        Branch.ACCEPT, GateType.SURVIVAL, 1_000_000
+                    )
+                    vault.resolve(Branch.ACCEPT)
+                    vault.settle_gate(GateType.SURVIVAL, True)
+                    vault.settle_scalar(Decimal("0.5"))
+                before_escrow = vault.escrowed
+                before_fees = vault.fees_charged_total
+                if call == "long":
+                    net = vault.redeem_scalar(
+                        Branch.ACCEPT, ScalarSide.LONG, 1_000_000
+                    )
+                elif call == "short":
+                    net = vault.redeem_scalar(
+                        Branch.ACCEPT, ScalarSide.SHORT, 1_000_000
+                    )
+                elif call == "pair":
+                    net = vault.redeem_scalar_pair(Branch.ACCEPT, 1_000_000)
+                else:
+                    net = vault.redeem_gate(
+                        Branch.ACCEPT,
+                        GateType.SURVIVAL,
+                        GateSide.YES,
+                        1_000_000,
+                    )
+                gross = before_escrow - vault.escrowed
+                fee = vault.fees_charged_total - before_fees
+                self.assertEqual(net + fee, gross, (rate, call))
+                expected = (
+                    redemption_fee_pair(1_000_000, vault.s, rate)
+                    if call == "pair"
+                    else redemption_fee(gross, rate)
+                )
+                self.assertEqual(fee, expected, (rate, call))
+                vault.check_conservation()
+
+    def test_conservation_checks_the_counter_and_the_custody_surplus(self):
+        vault = _settled_scalar_vault(self.RATE)
+        vault.redeem_scalar(Branch.ACCEPT, ScalarSide.LONG, 20_000)
+        vault.check_conservation()
+        # Each of the three §6.5 obligations is load-bearing: break one and
+        # the check must fail rather than pass quietly.
+        broken = copy.deepcopy(vault)
+        broken.net_payouts += 1  # net + fee != gross
+        with self.assertRaises(AssertionError):
+            broken.check_conservation()
+        broken = copy.deepcopy(vault)
+        broken.redemption_fees_accrued -= 1  # counter not sweep-exact
+        with self.assertRaises(AssertionError):
+            broken.check_conservation()
+        broken = copy.deepcopy(vault)
+        # Drawing the fee out of custody a SECOND time — paying the claimant
+        # the net AND forwarding the fee inside the redemption — is the
+        # failure mode §5.3a(4) exists to forbid. `sovereign` follows the real
+        # transfers, so the custody identity is what catches it.
+        broken.sovereign -= 43
+        with self.assertRaises(AssertionError):
+            broken.check_conservation()
+        # And the retained fee is exactly the L-2 surplus, never more.
+        self.assertEqual(
+            vault.sovereign - vault.escrowed, vault.redemption_fees_accrued
+        )
+
+    def test_sweep_zeroes_the_counter_and_touches_nothing_else(self):
+        vault = _settled_scalar_vault(self.RATE)
+        vault.redeem_scalar(Branch.ACCEPT, ScalarSide.LONG, 20_000)
+        self.assertEqual(vault.redemption_fees_accrued, 43)
+        escrow = vault.escrowed
+        supplies = copy.deepcopy(vault.branches)
+        payouts = vault.total_payouts
+        self.assertEqual(vault.sweep_redemption_fees(), 43)
+        self.assertEqual(vault.redemption_fees_accrued, 0)
+        self.assertEqual(vault.fees_swept_total, 43)
+        self.assertEqual(vault.escrowed, escrow)
+        self.assertEqual(vault.branches, supplies)
+        self.assertEqual(vault.total_payouts, payouts)
+        self.assertEqual(vault.state, VaultState.SCALAR_SETTLED)
+        # A sweep on an empty counter is a no-op (I-31, §6.5(3)). §5.3a(6)
+        # adds no new error and the §8 list is frozen, so it cannot fail.
+        self.assertEqual(vault.sweep_redemption_fees(), 0)
+        self.assertEqual(vault.fees_swept_total, 43)
+        vault.check_conservation()
+
+    def test_counter_is_monotone_between_sweeps(self):
+        vault = _settled_scalar_vault(self.RATE, escrow=1_000_000)
+        seen = [vault.redemption_fees_accrued]
+        for amount in (100_000, 200_000, 300_000):
+            vault.redeem_scalar(Branch.ACCEPT, ScalarSide.LONG, amount)
+            seen.append(vault.redemption_fees_accrued)
+        self.assertEqual(seen, sorted(seen))
+        self.assertGreater(seen[-1], seen[0])
+        self.assertEqual(
+            vault.sweep_redemption_fees(), vault.fees_charged_total
+        )
+        self.assertEqual(vault.redemption_fees_accrued, 0)
+        vault.redeem_scalar(Branch.ACCEPT, ScalarSide.LONG, 100_000)
+        self.assertGreater(vault.redemption_fees_accrued, 0)
+        vault.check_conservation()
+
+    # -- 15 §4.3 rate coverage: the zero-rate regression ---------------------
+
+    def test_zero_rate_model_reproduces_the_pre_change_corpus_exactly(self):
+        # The committed rows were generated before the fee existed and are
+        # byte-unchanged by it. Replaying them through a default-constructed
+        # model is therefore the pre-E1 regression 15 §4.3 makes normative:
+        # any leakage of a non-zero default into any call site fails here.
+        fixture = _fixture()
+        for row in fixture["ledger_score_scenarios"]:
+            score = Decimal(row["score"]) / Decimal(PERBILL_ONE)
+            amount = row["amount"]
+            for side, expected in (
+                (ScalarSide.LONG, row["long_payout"]),
+                (ScalarSide.SHORT, row["short_payout"]),
+            ):
+                vault = Vault()
+                vault.split(amount)
+                vault.split_scalar(Branch.ACCEPT, amount)
+                vault.resolve(Branch.ACCEPT)
+                vault.settle_scalar(score)
+                self.assertEqual(
+                    vault.redeem_scalar(Branch.ACCEPT, side, amount),
+                    expected,
+                    row["name"],
+                )
+                self.assertEqual(vault.fees_charged_total, 0)
+            vault = Vault()
+            vault.split(amount)
+            vault.split_scalar(Branch.ACCEPT, amount)
+            vault.resolve(Branch.ACCEPT)
+            vault.settle_scalar(score)
+            self.assertEqual(
+                vault.redeem_scalar_pair(Branch.ACCEPT, amount),
+                row["pair_payout"],
+                row["name"],
+            )
+            self.assertEqual(vault.fees_charged_total, 0)
+
+        rows = {row["name"]: row for row in fixture["ledger_scenarios"]}
+        self.assertEqual(len(rows), 5)
+
+        row = rows["void_branch_and_leg_floors"]
+        vault = Vault()
+        vault.split(row["inputs"]["branch_amount"])
+        vault.split_scalar(
+            Branch.ACCEPT, row["inputs"]["scalar_leg_amount"]
+        )
+        vault.void()
+        self.assertEqual(
+            vault.redeem_void(
+                Branch.REJECT,
+                PositionKind.BRANCH_USDC,
+                row["inputs"]["branch_amount"],
+            ),
+            row["branch_payout"],
+        )
+        self.assertEqual(
+            vault.redeem_void(
+                Branch.ACCEPT,
+                PositionKind.LONG,
+                row["inputs"]["scalar_leg_amount"],
+            ),
+            row["leg_payout"],
+        )
+
+        row = rows["b5_scalar_fragmentation"]
+        vault = _settled_scalar_vault(
+            escrow=row["inputs"]["escrow"], score=row["inputs"]["s"]
+        )
+        self.assertEqual(
+            vault.redeem_scalar(
+                Branch.ACCEPT, ScalarSide.LONG, row["inputs"]["escrow"]
+            ),
+            row["long_payout"],
+        )
+        self.assertEqual(
+            [
+                vault.redeem_scalar(
+                    Branch.ACCEPT,
+                    ScalarSide.SHORT,
+                    row["inputs"]["escrow"] // 2,
+                )
+                for _ in range(2)
+            ],
+            row["short_payouts"],
+        )
+
+        row = rows["scalar_pair_exact"]
+        vault = _settled_scalar_vault(
+            escrow=row["inputs"]["amount"], score=row["inputs"]["s"]
+        )
+        self.assertEqual(
+            vault.redeem_scalar_pair(
+                Branch.ACCEPT, row["inputs"]["amount"]
+            ),
+            row["payout"],
+        )
+
+        row = rows["gate_settlement_one_zero"]
+        vault = Vault()
+        vault.split(1_000)
+        vault.split_gate(Branch.ACCEPT, GateType.SURVIVAL, 1_000)
+        vault.resolve(Branch.ACCEPT)
+        vault.settle_gate(GateType.SURVIVAL, row["inputs"]["outcome"])
+        vault.settle_scalar(Decimal("0.5"))
+        self.assertEqual(
+            vault.redeem_gate(
+                Branch.ACCEPT,
+                GateType.SURVIVAL,
+                GateSide.YES,
+                row["inputs"]["amount_each"],
+            ),
+            row["yes_payout"],
+        )
+        self.assertEqual(
+            vault.redeem_gate(
+                Branch.ACCEPT,
+                GateType.SURVIVAL,
+                GateSide.NO,
+                row["inputs"]["amount_each"],
+            ),
+            row["no_payout"],
+        )
+
+        row = rows["baseline_scalar_and_pair"]
+        baseline = BaselineVault(epoch=row["inputs"]["epoch"])
+        baseline.split_baseline(2 * row["inputs"]["amount"])
+        baseline.settle_baseline(Decimal(row["inputs"]["s"]))
+        self.assertEqual(
+            baseline.redeem_baseline(
+                ScalarSide.LONG, row["inputs"]["amount"]
+            ),
+            row["long_payout"],
+        )
+        self.assertEqual(
+            baseline.redeem_baseline_pair(row["inputs"]["amount"]),
+            row["pair_payout"],
+        )
+        self.assertEqual(baseline.fees_charged_total, 0)
+        self.assertEqual(baseline.state, BaselineState.SETTLED)
+
+    # -- the generated fee corpus -------------------------------------------
+
+    def test_fee_corpus_rows_are_standalone_and_internally_consistent(self):
+        fixture = _fixture()
+        scenarios = fixture["ledger_fee_scenarios"]
+        self.assertEqual(fixture["schema"], "bleavit.reference-model.v4")
+        self.assertEqual(len(scenarios), 11)
+        charged_calls = set()
+        exempt_calls = set()
+        for scenario in scenarios:
+            params = scenario["params"]
+            # Rule 4: every row carries the inputs needed to replay it
+            # standalone — the rate, the waiver threshold, the exempt set and
+            # (via `settle_*`) the score each pair fee is computed from.
+            self.assertIn("redeem_fee_perbill", params)
+            self.assertIn("min_split", params)
+            self.assertIn("protocol_accounts", params)
+            rate = params["redeem_fee_perbill"]
+            min_split = params["min_split"]
+            accrued = 0
+            scores = {}
+            for op in scenario["ops"]:
+                if op["op"] == "settle_scalar":
+                    scores["scalar"] = Decimal(
+                        op["args"]["s"]
+                    ) / Decimal(PERBILL_ONE)
+                if op["op"] == "settle_baseline":
+                    scores["baseline"] = Decimal(
+                        op["args"]["s"]
+                    ) / Decimal(PERBILL_ONE)
+                if "gross" in op:
+                    self.assertEqual(op["net"] + op["fee"], op["gross"])
+                    self.assertGreaterEqual(op["fee"], 0)
+                    self.assertLessEqual(op["fee"], op["gross"])
+                    if op["fee"]:
+                        charged_calls.add(op["op"])
+                    else:
+                        exempt_calls.add(op["op"])
+                    # Recompute every fee from the row's own inputs — a pair
+                    # from its legs per §5.3a(2a), everything else from its
+                    # gross. Exempt calls carry no fee to recompute.
+                    if op["op"] in (
+                        "redeem_scalar_pair",
+                        "redeem_baseline_pair",
+                    ):
+                        family = (
+                            "scalar"
+                            if op["op"] == "redeem_scalar_pair"
+                            else "baseline"
+                        )
+                        self.assertEqual(
+                            op["fee"],
+                            redemption_fee_pair(
+                                op["args"]["amount"],
+                                scores[family],
+                                rate,
+                                min_split,
+                            ),
+                            scenario["name"],
+                        )
+                    elif op["op"] in (
+                        "redeem_scalar",
+                        "redeem_gate",
+                        "redeem_baseline",
+                    ) and not params["protocol_accounts"]:
+                        self.assertEqual(
+                            op["fee"],
+                            redemption_fee(op["gross"], rate, min_split),
+                            scenario["name"],
+                        )
+                    accrued += op["fee"]
+                if op["op"] == "sweep_redemption_fees":
+                    self.assertEqual(op["outcome"]["ok"]["swept"], accrued)
+                    accrued = 0
+                self.assertEqual(op["fees_accrued_after"], accrued)
+            self.assertEqual(scenario["fees_accrued"], accrued)
+            self.assertEqual(
+                scenario["fees_charged_total"],
+                scenario["fees_accrued"] + scenario["fees_swept_total"],
+            )
+        self.assertEqual(
+            charged_calls,
+            {
+                "redeem_scalar",
+                "redeem_scalar_pair",
+                "redeem_gate",
+                "redeem_baseline",
+                "redeem_baseline_pair",
+            },
+        )
+        self.assertTrue(
+            {"redeem", "redeem_void", "merge", "merge_baseline"}.issubset(
+                exempt_calls
+            )
+        )
+
+    # -- the two rules that exist because the model found their absence -----
+
+    def test_pair_is_never_worse_than_leg_by_leg(self):
+        # REGRESSION for the finding that produced 03 §5.3a(2a). The pair path
+        # is guaranteed to "pay at least what leg-by-leg redemption of the same
+        # holdings pays" (PT-7, I-5). Charging `fee(a)` on the combined gross
+        # broke that, because the waiver applies per *call*: a leg below the
+        # threshold pays nothing while the pair was charged on the whole base.
+        # §5.3a(2a) removes the interaction by charging the pair its own legs.
+        # The original counterexample is kept verbatim as the witness.
+        pair_vault = _settled_scalar_vault(self.RATE, escrow=20_000)
+        pair_net = pair_vault.redeem_scalar_pair(Branch.ACCEPT, 20_000)
+
+        leg_vault = _settled_scalar_vault(self.RATE, escrow=20_000)
+        legs_net = leg_vault.redeem_scalar(
+            Branch.ACCEPT, ScalarSide.LONG, 20_000
+        ) + leg_vault.redeem_scalar(
+            Branch.ACCEPT, ScalarSide.SHORT, 20_000
+        )
+
+        self.assertEqual(pair_net, 19_957)
+        self.assertEqual(legs_net, 19_957)
+        self.assertGreaterEqual(pair_net, legs_net)
+        # The superseded rule would have netted the pair 19_940 — 17 less
+        # than fragmenting, which made fragmentation the rational strategy.
+        self.assertEqual(20_000 - redemption_fee(20_000, self.RATE), 19_940)
+        pair_vault.check_conservation()
+        leg_vault.check_conservation()
+
+    def test_pair_is_never_worse_than_legs_over_a_grid(self):
+        # The §5.3a(2a) claim is `net_pair ≥ net_legs` for EVERY a, s and
+        # rate, so verify it rather than trusting it. The mechanism: both
+        # sides apply the identical fee function to the identical bases, and
+        # `floor(a·s) + floor(a·(1−s)) ≤ a` leaves the pair a gross advantage.
+        scores = (
+            "0",
+            "0.00000001",
+            "0.29995",
+            "0.5",
+            "0.70005",
+            "0.999999999",
+            "1",
+            "0.333333333",
+        )
+        amounts = (
+            1,
+            3,
+            9_999,
+            10_000,
+            10_031,
+            14_287,
+            20_000,
+            33_333,
+            1_000_000,
+            1_000_003,
+        )
+        rates = (0, 1, self.RATE, 10_000_000, 500_000_000, PERBILL_ONE)
+        equalities = 0
+        strict = 0
+        for raw_score in scores:
+            score = Decimal(raw_score)
+            for amount in amounts:
+                for rate in rates:
+                    pair = _settled_scalar_vault(
+                        rate, escrow=amount, score=raw_score
+                    )
+                    pair_net = pair.redeem_scalar_pair(
+                        Branch.ACCEPT, amount
+                    )
+                    legs = _settled_scalar_vault(
+                        rate, escrow=amount, score=raw_score
+                    )
+                    legs_net = legs.redeem_scalar(
+                        Branch.ACCEPT, ScalarSide.LONG, amount
+                    ) + legs.redeem_scalar(
+                        Branch.ACCEPT, ScalarSide.SHORT, amount
+                    )
+                    self.assertGreaterEqual(
+                        pair_net, legs_net, (amount, raw_score, rate)
+                    )
+                    # The gross is always exactly `a`, at every rate.
+                    self.assertEqual(
+                        pair_net
+                        + redemption_fee_pair(amount, score, rate),
+                        amount,
+                    )
+                    pair.check_conservation()
+                    legs.check_conservation()
+                    if pair_net == legs_net:
+                        equalities += 1
+                    else:
+                        strict += 1
+        # Both sides of the inequality are actually reached, so the assertion
+        # above is not vacuously satisfied by one branch.
+        self.assertGreater(equalities, 0)
+        self.assertGreater(strict, 0)
+
+        # The Baseline pair carries the identical rule.
+        for raw_score in ("0.29995", "0.70005", "0.5"):
+            for amount in (10_031, 1_000_000, 1_000_003):
+                pair = _settled_baseline_vault(
+                    self.RATE, escrow=amount, score=raw_score
+                )
+                legs = _settled_baseline_vault(
+                    self.RATE, escrow=amount, score=raw_score
+                )
+                self.assertGreaterEqual(
+                    pair.redeem_baseline_pair(amount),
+                    legs.redeem_baseline(ScalarSide.LONG, amount)
+                    + legs.redeem_baseline(ScalarSide.SHORT, amount),
+                    (amount, raw_score),
+                )
+
+    def test_a_gross_of_exactly_min_balance_is_waived_and_nets_in_full(self):
+        # REGRESSION for the finding that produced the net-based waiver of
+        # 03 §5.3a(2). §7 R-2 and R-4 put `ledger.min_split` and the USDC
+        # `min_balance` at the same 10^4. Under the superseded gross-based
+        # test `g < min_split`, a gross of exactly `min_balance` cleared the
+        # waiver, was charged 30, and netted 9_970 — below `min_balance`, on
+        # precisely the R-4 `BelowMinimum` path the waiver exists to remove.
+        min_balance = MIN_SPLIT
+        self.assertEqual(redemption_fee(min_balance, self.RATE), 0)
+        vault = _settled_scalar_vault(
+            self.RATE, escrow=min_balance, score="1"
+        )
+        self.assertEqual(
+            vault.redeem_scalar(
+                Branch.ACCEPT, ScalarSide.LONG, min_balance
+            ),
+            min_balance,
+        )
+        self.assertEqual(vault.fees_charged_total, 0)
+        # The whole band the rationale names is now covered: no charged gross
+        # can net below `min_balance`, at any rate.
+        for rate in (1, self.RATE, 10_000_000, 500_000_000, PERBILL_ONE):
+            for gross in range(0, 4 * min_balance):
+                fee = redemption_fee(gross, rate)
+                if fee:
+                    self.assertGreaterEqual(gross - fee, min_balance)
+                else:
+                    self.assertEqual(gross - fee, gross)
+        # The superseded gross-based rule is what fails that sweep.
+        self.assertLess(
+            min_balance - ((min_balance * self.RATE) // PERBILL_ONE),
+            min_balance,
         )
 
 

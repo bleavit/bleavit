@@ -332,7 +332,7 @@ Changes vs. the superseded §12.3: XCM health `X` moves from S into `C_onchain` 
 | | Collator-set adequacy `K` (0.05) | `min(1, distinct_active_authors / collator.n_min)` *(collator.n_min: §13, default 4)* | on-chain | — | — |
 | **C_attested** (§4.4) | Incident score `I` (multiplier) | `max(0, 1 − Σ severity)`; S1 = 1.0, S2 = 0.4, S3 = 0.1; bonded filings + challenge in `pallet-registry` ([doc 07](./07-oracle-and-disputes.md)) | attested | no filings ⇒ 1 | suppression — permissionless bonded filing, slash for wrong rejection |
 | | External-price components (admissible class; **none registered in v1**) | per registered MetricSpec via doc 07's registries | attested | per spec | value-scaled bonds (doc 07) |
-| **P** (weighted geo) | Fees burned/paid (0.45) | `N(log1p(fees_USDC))`, protocol fee sink | on-chain | carry + flag | costs exactly the fees |
+| **P** (weighted geo) | Fees paid (0.45) *(label amended 2026-07-29, milestone E1 — was "Fees burned/paid")* | `N(log1p(fees_USDC))`, fees actually paid by users — **a demand measure, not a sink measure**; the USDC leg is no longer burned (E1: [08](./08-treasury-and-economics.md) §9 routes it to the treasury `MAIN` account, and the VIT leg that still burns is not denominated in this series) | on-chain | carry + flag | costs exactly the fees |
 | | Economically qualified users (0.35) | accounts paying ≥ dust-indexed fee on ≥ 3 distinct days, HLL-estimated, cost-weighted | on-chain sketch | carry + flag | Sybils must pay repeatedly; weight-capped |
 | | Settled value (0.20) | fee-weighted transfer value, self-transfer down-weighted | on-chain | carry + flag | wash routing — fee weighting prices it |
 | **A** (weighted geo) | Shipped audited upgrades (0.40) | `min(1, milestone points ÷ target)`, attested MilestoneRegistry ([doc 07](./07-oracle-and-disputes.md) §7 — `target` is a frozen per-MetricSpec field, never a [13](./13-parameters.md) key) | attested | 0 if none | scope inflation — enumerated scope classes, challengeable |
@@ -340,6 +340,12 @@ Changes vs. the superseded §12.3: XCM health `X` moves from S into `C_onchain` 
 | | Ecosystem integrations (0.30) | qualified independent integrations passing a 30-day on-chain fee-paying usage bar | attested registry | 0 | shells — usage bar on-chain-verifiable |
 
 **Canonical v1 `MetricId` assignments (added 2026-07-17, SQ-113).** The registered `MetricSpec` set assigns component ids; the v1 assignments are frozen here so runtime bindings, the oracle's per-component games and the FE agree without discovery (new components append, ids are never reused): `C_onchain` — `X` = 1, `R` = 2, `E` = 3, `H` = 4, `Π` = 5, `K` = 6; `S` — `U` = 10, `F` = 11, `D_eff` = 12; `P` — fees = 20, qualified users = 21, settled value = 22; `A` — shipped upgrades = 30, runtime performance = 31, ecosystem integrations = 32. Code mirror: `futarchy_primitives::metric_ids`.
+
+**MetricId 20 after E1: the label moved, the measurement did not (normative; added 2026-07-29, milestone E1).** [08](./08-treasury-and-economics.md) §9 rules that USDC transaction fees route to the treasury `MAIN` account instead of being destroyed, and [08](./08-treasury-and-economics.md) §1.1 routes realized market-fee value there too. The superseded label "Fees burned/paid" and the gloss "protocol fee sink" therefore became false as *descriptions of the destination*, and only as that — so both are amended above and nothing else is. Three consequences bind:
+
+1. **No `MetricSpec` version moves and no formula changes.** The measured quantity is and always was `N(log1p(fees_USDC))` over fees **actually paid by users**, which is a demand observation taken at the point of payment. Where the collected value goes afterwards never entered the series, so a destination change cannot change a single observation, past or future. Registering a new `MetricSpec` version for a corrected English label would re-key the oracle's per-component game and shift settlement under `epoch.horizon_k` (§3.3, I-16) for no change in any number — the opposite of what versioning is for. Implementations MUST NOT bump the version on this amendment.
+2. **`MetricId` 20 is unchanged and stays 20.** Ids are frozen and append-only per the paragraph above; a relabelled component is the same component. Nothing in the P pillar is renumbered.
+3. **The gloss was load-bearing in one direction only, and that direction is now wrong.** Reading MetricId 20 as a *sink* invited the inference that a rising `P` fee series destroys value; after E1 the same rising series **adds** liquid USDC to `MAIN` and therefore to `NavView.total` ([08](./08-treasury-and-economics.md) §1.2). That is a strictly better fact for the pillar, and no weight, floor or ε-floor is re-derived from it: `P`'s intra-pillar weights (0.45 / 0.35 / 0.20) and §4.4's aggregation are untouched.
 
 #### 4.3.1 `E` — coverage ratios, no VIT price anywhere (B-10, D-18)
 
@@ -668,8 +674,8 @@ TWAPs are the slew-capped accumulator means of [doc 04](./04-markets-and-pricing
 | Gate book healthy near 0 (GB-NB pass) | ✔ | ✔ | ✔ | ✔ | … | … | … | … | … | … | … | proceeds normally |
 | Unresolved dispute | ✔ | ✘ | – | – | – | – | – | – | – | – | – | Reject(ProcessHold) |
 | Gate-risk violation | ✔ | ✔ | ✔ | ✘ | – | – | – | – | – | – | – | Reject(GateVeto{S,C}) |
-| Full/trailing disagreement (first) | ✔ | ✔ | ✔ | ✔ | ✔ | full ≠ tail | – | – | – | – | Extend |
-| Disagreement/fail after extension | ✔ | ✔ | ✔ | ✔ | ✔ | full ≠ tail again | – | – | – | – | Reject(SecondExtensionFailed) |
+| Full/trailing disagreement (first) | ✔ | ✔ | ✔ | ✔ | ✔ | full ≠ tail | – | – | – | – | – | Extend |
+| Disagreement/fail after extension | ✔ | ✔ | ✔ | ✔ | ✔ | full ≠ tail again | – | – | – | – | – | Reject(SecondExtensionFailed) |
 | Non-convergence | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | – | – | – | Reject(ConvergenceFailed) |
 | **Prize outsizes measured depth** | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | – | – | **Reject(SecuritySizing)** |
 | **Attestation absent / below quorum (CODE/META)** | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✘att | – | **Reject(AttestationMissing)** |

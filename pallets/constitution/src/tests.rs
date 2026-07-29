@@ -1266,12 +1266,12 @@ fn extrinsic_value_types_do_not_admit_wrong_kinds_via_scale() {
 fn genesis_registry_matches_13_1_row_encodings() {
     new_test_ext().execute_with(|| {
         // Every 13 §1 row with a scalar concrete default and no open
-        // [VERIFY] tag is seeded (106 total, incl. per-class suffix keys and
+        // [VERIFY] tag is seeded (107 total, incl. per-class suffix keys and
         // rule-6 short keys; +2 for keeper.rebate/dis.merit_min, +2 for the
         // reserve-probe pricing rows, +3 for the SQ-173 sec.prize.* class
-        // envelopes and +1 for SQ-486's adopted sec.flow_cap); spot-pin the
-        // unit encodings per kind.
-        assert_eq!(Params::<Test>::count(), 106);
+        // envelopes, +1 for SQ-486's adopted sec.flow_cap and +1 for E1's
+        // ledger.rdm_fee); spot-pin the unit encodings per kind.
+        assert_eq!(Params::<Test>::count(), 107);
 
         // Per-class suffix keys (13 rule 6) — δ floors, kernel-capped.
         // Phase-0-calibrated (V-12): dec.delta.meta 0.090 on the 1e9 grid.
@@ -1334,6 +1334,18 @@ fn genesis_registry_matches_13_1_row_encodings() {
         assert_eq!(fee.value, ParamValue::Perbill(3_000_000)); // 30 bps
         assert_eq!(fee.max, ParamValue::Perbill(10_000_000)); // 100 bps
         assert_eq!(fee.class, ParamClass::Param);
+
+        // E1's `ledger.redeem_fee` (rule-6 key `ledger.rdm_fee`) carries the
+        // same raw-Perbill scaling as `mkt.fee` — 13 rule 8 stores the inner
+        // scalar, i.e. parts per billion, not the bps of the display column.
+        // Its default sits **at** `mkt.fee`, the largest exit-neutral rate
+        // (08 §10.6), and its floor is 0 — the safe direction.
+        let redeem_fee = Params::<Test>::get(key16(b"ledger.rdm_fee")).unwrap();
+        assert_eq!(redeem_fee.value, fee.value); // 30 bps, the coupling ceiling
+        assert_eq!(redeem_fee.min, ParamValue::Perbill(0)); // off
+        assert_eq!(redeem_fee.max, fee.max); // 100 bps, mirrors mkt.fee
+        assert_eq!(redeem_fee.class, ParamClass::Param);
+        assert!(!redeem_fee.kernel_bounded); // absent from the rule-7 set
 
         let window = Params::<Test>::get(key16(b"dec.window")).unwrap();
         assert_eq!(window.value, ParamValue::U32(43_200));
@@ -2261,6 +2273,88 @@ fn sq_36_ledger_position_deposit_is_frozen_at_its_kernel_floor() {
             ),
             Error::<Test>::AboveMax
         );
+        assert_ok!(Constitution::do_try_state());
+    });
+}
+
+/// E1 — 13 §1 row `ledger.redeem_fee` (rule-6 key `ledger.rdm_fee`), relation
+/// derived in 08 §10.6: the live coupling `ledger.redeem_fee <= mkt.fee` is
+/// screened **jointly over the pair at the amendment boundary**, in both
+/// directions, and is the second such coupling after `gate.v_min` <->
+/// `dec.v_min` (13 rule 7). Above `mkt.fee`, holding to settlement is dearer
+/// than round-tripping through the book in every state of the world, so the
+/// schedule pays traders to close before d18 — draining exactly the contest
+/// capital `dec.v_min` requires. The unsafe direction is upward, so the row's
+/// own static `[0, 100]` bps bounds are not what binds: the live coupling is
+/// strictly tighter whenever `mkt.fee < 100`.
+///
+/// **Ignored: the screen itself is a separate E1 work item and is not wired
+/// yet.** What is in place is the seeded registry row and its static bounds
+/// (covered by the generated per-key `set_param`/`amend_registry` suite). When
+/// E1 lands the joint screen, drop the `#[ignore]` and tighten the two refusal
+/// legs from `is_err()` to `assert_noop!` on whichever variant it chooses —
+/// the `gate.v_min` path answers `Error::TryStateViolation`.
+#[test]
+#[ignore = "E1: the joint ledger.redeem_fee <= mkt.fee amendment screen is not implemented yet"]
+fn e1_no_amendment_may_carry_the_redemption_fee_above_the_market_fee() {
+    new_test_ext().execute_with(|| {
+        let redeem = key16(b"ledger.rdm_fee");
+        let market = key16(b"mkt.fee");
+        let value_of = |key| Params::<Test>::get(key).map(|record| record.value);
+        let rate_of = |key| match value_of(key) {
+            Some(ParamValue::Perbill(rate)) => rate,
+            other => panic!("13 §1: {key:?} must be a seeded Perbill row, got {other:?}"),
+        };
+        // Both rows genesis at 30 bps (08 §10.6: the default sits *at* the
+        // coupling ceiling), so the pair starts exactly on the boundary and the
+        // smallest possible step in either direction breaks it.
+        let seeded = rate_of(redeem);
+        assert_eq!(seeded, rate_of(market));
+
+        set_epoch(1);
+        // (1) Raising the redemption fee past the live market fee is refused —
+        // in bounds for its own record (30 bps + 1 part is far below the 100 bps
+        // max and inside the 10 bps max-Δ), so only the coupling can refuse it.
+        let above = ParamValue::Perbill(seeded.saturating_add(1));
+        assert!(
+            Constitution::set_param(RuntimeOrigin::signed(PARAM_ACC), redeem, above).is_err(),
+            "13 §1 / 08 §10.6: ledger.redeem_fee must not be amendable above the live mkt.fee"
+        );
+        assert_eq!(value_of(redeem), Some(ParamValue::Perbill(seeded)));
+
+        // (2) The screen is joint, so it binds from the other side too: lowering
+        // the market fee under the live redemption fee is the same violation and
+        // must be refused rather than left for the ledger to reconcile.
+        let below = ParamValue::Perbill(seeded.saturating_sub(1));
+        assert!(
+            Constitution::set_param(RuntimeOrigin::signed(PARAM_ACC), market, below).is_err(),
+            "13 rule 7: the coupling is screened over the pair, not over one key"
+        );
+        assert_eq!(value_of(market), Some(ParamValue::Perbill(seeded)));
+
+        // (3) Raising the ceiling first makes the very same raise lawful: the
+        // screen tests the resulting pair, so both keys stay amendable in step.
+        let raised = ParamValue::Perbill(seeded.saturating_add(1_000_000)); // +10 bps, the max-Δ
+        assert_ok!(Constitution::set_param(
+            RuntimeOrigin::signed(PARAM_ACC),
+            market,
+            raised
+        ));
+        set_epoch(2);
+        assert_ok!(Constitution::set_param(
+            RuntimeOrigin::signed(PARAM_ACC),
+            redeem,
+            raised
+        ));
+
+        // (4) Lowering the redemption fee is always legal — 0 is the safe
+        // direction, and the screen is directional, not a freeze on the keys.
+        set_epoch(3);
+        assert_ok!(Constitution::set_param(
+            RuntimeOrigin::signed(PARAM_ACC),
+            redeem,
+            ParamValue::Perbill(seeded)
+        ));
         assert_ok!(Constitution::do_try_state());
     });
 }
