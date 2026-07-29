@@ -305,6 +305,12 @@ mod benches {
         let amount = 100_000 * USDC;
         let custody_seeded = T::BenchmarkHelper::prime_insurance_custody(amount);
         assert!(custody_seeded.is_ok());
+        // SQ-524: the crank rebates when it actually moves surplus, so the
+        // worst case is the *paying* rebate, not the structural no-op an
+        // unfunded meter produces. Without this the fixture charges the
+        // rebate's parameter reads and none of its payout writes — the same
+        // under-measured-fixture shape SQ-520 fixed for `buy`.
+        T::BenchmarkHelper::prime_keeper_rebate();
 
         #[extrinsic_call]
         _(RawOrigin::Signed(caller));
