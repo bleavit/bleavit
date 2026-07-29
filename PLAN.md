@@ -306,7 +306,7 @@ superseded `BACKEND_PLAN.md` §26; their scope is covered by Tracks M/A/B.)
 
 ### Track E — Protocol revenue and treasury sustainability
 
-Opened 2026-07-29 on the "self-funding permanent institution" work order. Spec layer (03, 04, 08, 13, 14, 15, 02 → contract **v17**) landed in one pass; the code layer is staged E1 → E4 in value order. Normative arithmetic: **08 §10 (Sustainability)** — PLAN carries only the status and the headline figures (R-4).
+Opened 2026-07-29 on the "self-funding permanent institution" work order. Spec layer (03, 04, 08, 13, 14, 15, 02 → contract **v17**) landed in one pass as **PR #195** (`feat/e1-treasury-sustainability`), together with the reference-model implementation of 03 §5.3a; the code layer is staged E1 → E4 in value order and follows in its own PRs. Normative arithmetic: **08 §10 (Sustainability)** — PLAN carries only the status and the headline figures (R-4).
 
 *Two verification obligations in the work order name artifacts that do not exist in this repository and are therefore not dischargeable here: there is no `explainer/` directory (so no third certified `src/protocol/` port to re-certify, and no `npm run verify`), and `frontend/` is still the `.gitkeep` placeholder of Track F (so the 04 §5 TypeScript LMSR port has no code to update). The 04 §5 obligations bind whenever those land; recorded so a later session does not read their absence as a skipped step.*
 
