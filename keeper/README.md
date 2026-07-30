@@ -156,6 +156,20 @@ the general keeper tranche — 08 §6.3's decision-critical list is closed and d
 A runtime predating the Sweep stage exposes neither the call nor the marker map; its reaps keep
 their earlier preconditions and no sweep is planned.
 
+The same "do not submit what the chain will refuse" rule is extended to **three** calls under the
+[`06`](../docs/architecture/06-governance-and-guardians.md) §6.3 freeze latches — deliberately not to
+the whole refusal surface. `ExecutionGuard::execute` (09 §1.2(10)) and, for seeded books, the
+transitively-refused `ledger.sweep_dust*` are **not** suppressed; extending to them is a separate
+question, tracked as such. What is covered: `sweep_revenue` and
+`crank_observe` error `Frozen` while `Market::FrozenUntil` is live, and `sweep_redemption_fees` while
+`ConditionalLedger::FrozenUntil` is — two independent latches, read per pallet and never conflated.
+The keeper suppresses exactly those calls for exactly that window: the test is `now < until`, the
+precise negation of the pallets' own guard, so a call the chain would accept on the block a freeze
+lapses is still planned on that block. An **unreadable** latch is treated as absent and the call is
+submitted, which is deliberate — it reproduces the behaviour that predates these reads, whereas
+treating an unreadable latch as frozen would let one persistently failing storage read stall the
+revenue cranks indefinitely, a liveness loss the freeze itself never asked for.
+
 Some roles are deliberately conservative. `record_snapshot` is submitted only when the active
 welfare specification and a missing completed-epoch snapshot are directly visible. For every live
 cohort, the extractor also follows its frozen `CohortSchedules` metric specification and catches up

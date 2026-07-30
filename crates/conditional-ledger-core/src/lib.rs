@@ -1650,10 +1650,13 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
     fn settled_winner(&self, pid: ProposalId) -> Result<Branch, Error> {
         Ok(self.settled(pid)?.0)
     }
-    /// 03 §5.3a(1): `ProtocolAccounts` are exempt on every charged call — the
-    /// book, fee, POL, POL_BASELINE, INSURANCE and treasury sub-accounts redeem
-    /// protocol inventory, and charging them would be the treasury taxing
-    /// itself and would corrupt the 08 §8 POL return with a circular transfer.
+    /// 03 §5.3a(1): `ProtocolAccounts` are exempt on every charged call. The
+    /// membership is 03 §3's normative list and is deliberately not re-enumerated
+    /// here — this comment used to name six sub-accounts, which was short by ten
+    /// and is exactly how the doc-side list drifted from the runtime's. Every
+    /// member redeems protocol inventory, so charging one would be the treasury
+    /// taxing itself and would corrupt the 08 §8 POL return with a circular
+    /// transfer.
     fn claimant_treatment(&self, who: &AccountId) -> FeeTreatment {
         if self.protocol_accounts.contains(who) {
             FeeTreatment::ExemptProtocol

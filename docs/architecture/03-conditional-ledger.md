@@ -132,11 +132,47 @@ pub trait Config: frame_system::Config {
     type SettleAuthority: EnsureOrigin<Self::RuntimeOrigin>;
     type MaxPositionsPerAccount: Get<u32>;   // 64 (normative value: §13)
     type PositionDeposit: Get<Balance>;      // 0.1 USDC per Positions entry (normative value: §13)
-    /// The book, fee, POL, POL_BASELINE, INSURANCE and treasury sub-accounts: exempt from the
-    /// position cap (D-disposition) and from the storage deposit (specified here; these accounts
-    /// are protocol-owned and bounded). Since §5.3a they are additionally exempt from the
-    /// redemption fee. This enumeration is normative and is the same closed set §5.3a(1) names;
-    /// the two MUST agree. The per-market **fee** account is a member: the
+    /// **The protocol-owned accounts.** Members are exempt from the position cap
+    /// (D-disposition), from the storage deposit (specified here), and — since §5.3a — from
+    /// the redemption fee.
+    ///
+    /// **The list below is normative and is the definition** (restated 2026-07-30): the
+    /// ledger sovereign and its `INSURANCE`, `POL`, `POL_BASELINE`, `FEES`, `BOOK` and
+    /// `TREASURY` sub-accounts; the treasury `MAIN` sub-account; **every** per-market book
+    /// **and** fee address across the whole reserved canonical namespace (§5.4 *Protocol
+    /// inventory at market reap* — reserved permanently, before creation and after reap,
+    /// not merely while a book is live); and the pallet sovereigns of market, epoch,
+    /// execution guard, oracle, welfare settlement, and the incident and milestone
+    /// registries. The *rationale* is unchanged and is rationale, not a test: these hold
+    /// protocol inventory whose position count is structural, and charging them the §5.3a
+    /// fee would be the treasury taxing itself. §5.3a(1) names the same set and the two
+    /// MUST agree.
+    ///
+    /// **Membership is by enumeration, and two failed attempts to derive it are recorded
+    /// so they are not repeated.** This paragraph first named six items and called them a
+    /// closed set; the implementation had correctly outgrown that by **ten**, so the
+    /// closure claim was false in the dangerous direction — a reader MUST NOT infer from
+    /// an account's absence that charging it is correct. The 2026-07-30 restatement then
+    /// over-corrected by asserting a deciding *criterion*, which fails twice over: any
+    /// property phrased over the positions an account *holds* is vacuously true of an
+    /// account holding none, and any property phrased over *who may transfer in* is
+    /// circular, because §5.4's `ProtocolDestination` refusal is a **consequence** of
+    /// membership and not a test for it. Adding a protocol sovereign is therefore a
+    /// deliberate spec change, and the runtime's `ProtocolAccounts` MUST be amended in the
+    /// same pass.
+    ///
+    /// **Deliberately not members, and the asymmetry is load-bearing.** The treasury
+    /// `KEEPER`, `ORACLE`, `REWARDS` and `COLLATOR` sub-accounts and the guardian sovereign
+    /// are **outside** this set, though §7 R-4 lists the first three among the
+    /// genesis-endowed permanent protocol accounts. The consequence is real: §5.4's
+    /// `transfer` refusal does not cover them, so a Signed `transfer` may strand
+    /// conditional positions in an account no origin can redeem from. The exposure is
+    /// bounded — escrow still backs those positions, conservation is untouched, and the
+    /// vault reaps at the archive delay — but the asymmetry is **unresolved** and is
+    /// tracked as a spec question rather than settled here, because widening the set is an
+    /// audit-scope-A behaviour change that does not belong in a revenue-instrument change.
+    ///
+    /// The per-market **fee** account is a member: the
     /// [`04-markets-and-pricing.md`](./04-markets-and-pricing.md) §2 `sweep_revenue` crank
     /// redeems that account's claims to USDC, and charging it would be the treasury taxing itself.
     type ProtocolAccounts: Contains<Self::AccountId>;
@@ -234,7 +270,7 @@ A single rate `ledger.redeem_fee` (Perbill; *normative row: [`13-parameters.md`]
 - **`redeem_scalar_pair` and `redeem_baseline_pair` are charged**, not exempt, even though they are the exact-par path for complete sets. Exempting them would tax the *fragmented* holder and spare the *assembled* one, which is anti-claimant and inverts R-1's whole direction. The pair path keeps its **relative** guarantee: it still pays at least what leg-by-leg redemption of the same holdings pays (PT-7).
 
   **What the charge does *not* reach, stated plainly (corrected 2026-07-29, milestone E1).** This bullet previously carried a second justification — that charging the pair calls is what stops the assembled LONG+SHORT holding, the shape that inflates the [`04`](./04-markets-and-pricing.md) §7a contest-capital measure at no market risk, from escaping instrument B. **That claim is false as written and is withdrawn.** §5.1 admits `merge_scalar` and `merge_gate` in `Resolved`, and every `merge*` is exempt, so a holder of a complete `LONG_w + SHORT_w` set converts it to winning branch-USDC at **no charge** throughout the entire `Resolved` window — from `resolve` at d18 to `settle_scalar` at cohort settlement e+3, roughly three epochs — and then exits through the **also-exempt** `redeem`. A cross-branch `Accept+Reject` pair escapes more directly still, via the exempt `merge` at par. Instrument B therefore reaches the *fragmented* holder and not the *assembled* one: the exact inversion the withdrawn sentence claimed to prevent. `redeem_scalar_pair`'s charge is reachable only for a holder who assembles a complete set **after** the vault reaches `ScalarSettled`, where `merge_scalar` is no longer available. The charge on the pair calls **stands** — it is the right treatment of the calls it does reach, and exempting them would stack a second inversion on top of the first — but it MUST NOT be read as closing the escape. Sizing consequence: [`08`](./08-treasury-and-economics.md) §10.2's β is an upper estimate. Closing the escape is **SQ-509** and is deliberately not done in E1.
-- **`ProtocolAccounts` are exempt** (§3). The book, fee, POL, POL_BASELINE, INSURANCE and treasury sub-accounts redeem protocol inventory; charging them would be the treasury taxing itself and would corrupt the §8-flow POL return of [`08`](./08-treasury-and-economics.md) §8 with a circular transfer.
+- **`ProtocolAccounts` are exempt** (§3, whose criterion and membership govern — the set is wider than the six sub-accounts this bullet used to enumerate, and §3 states why that list was not the closed set it claimed to be). Every member redeems protocol inventory; charging them would be the treasury taxing itself and would corrupt the §8-flow POL return of [`08`](./08-treasury-and-economics.md) §8 with a circular transfer.
 
 **(2) Arithmetic.** For a charged call with gross payout `g` and a non-protocol caller:
 

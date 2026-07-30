@@ -176,7 +176,10 @@ fn plan_observations(
     config: &PlannerConfig,
     cranks: &mut Vec<PlannedCrank>,
 ) {
-    if !enabled(config, Role::Observe) || !snapshot.has_call("Market", "crank_observe") {
+    if !enabled(config, Role::Observe)
+        || !snapshot.has_call("Market", "crank_observe")
+        || frozen(snapshot.market_frozen_until, snapshot.current_block)
+    {
         return;
     }
     for book in &snapshot.books {
@@ -671,7 +674,12 @@ fn plan_cleanup(snapshot: &ChainSnapshot, config: &PlannerConfig, cranks: &mut V
     // ValueQuery counter proves there is custody to move. It shares the
     // market-revenue priority because both calls recognize liquid USDC in
     // treasury MAIN and must run before lower-priority archival cleanup.
+    // 06 §6.3/SQ-517: both revenue cranks now error `Frozen` under an active
+    // `PB-LEDGER-FREEZE`, so planning them during one only burns the keeper's
+    // own fees. The latch is read per pallet because the two freezes are
+    // independent latches, not one shared flag.
     if snapshot.has_call("ConditionalLedger", "sweep_redemption_fees")
+        && !frozen(snapshot.ledger_frozen_until, snapshot.current_block)
         && snapshot
             .redemption_fees_accrued
             .is_some_and(|amount| amount > 0)
@@ -705,7 +713,10 @@ fn plan_cleanup(snapshot: &ChainSnapshot, config: &PlannerConfig, cranks: &mut V
     // admissible from the terminal block with no delay; reap only after
     // `ledger.archive_delay` **and** the marker the sweep writes.
     for candidate in &snapshot.market_reaps {
-        if snapshot.has_call("Market", "sweep_revenue") && sweep_due(snapshot, candidate.id) {
+        if snapshot.has_call("Market", "sweep_revenue")
+            && !frozen(snapshot.market_frozen_until, snapshot.current_block)
+            && sweep_due(snapshot, candidate.id)
+        {
             cranks.push(crank(
                 Role::Cleanup,
                 "Market",
@@ -808,6 +819,16 @@ fn insurance_reconciliation_due(insurance: Option<&InsuranceSnapshot>) -> bool {
             .checked_add(insurance.min_balance)
             .is_some_and(|target| insurance.balance > target)
     })
+}
+
+/// A 06 §6.3 freeze latch is active at `now`.
+///
+/// The condition is the exact negation of the pallets' own guard
+/// (`FrozenUntil::get().is_none_or(|until| now >= until)`), so the keeper never
+/// suppresses a call the chain would have accepted — including on the boundary
+/// block `now == until`, where the freeze has expired and the call succeeds.
+fn frozen(frozen_until: Option<u64>, now: u64) -> bool {
+    frozen_until.is_some_and(|until| now < until)
 }
 
 /// The book still owes its 04 §2 Sweep: the marker map is readable and carries
@@ -1033,6 +1054,8 @@ mod tests {
                 funded_periods: BTreeSet::new(),
             }),
             redemption_fees_accrued: Some(0),
+            ledger_frozen_until: None,
+            market_frozen_until: None,
             insurance: Some(InsuranceSnapshot {
                 balance: 110,
                 swept_residue_unreclaimed: 100,
@@ -1859,6 +1882,98 @@ mod tests {
             .any(|crank| crank.call == "sweep_redemption_fees"));
         snapshot.redemption_fees_accrued = None;
         assert!(!plan(&snapshot, &config_for(Role::Cleanup))
+            .iter()
+            .any(|crank| crank.call == "sweep_redemption_fees"));
+    }
+
+    #[test]
+    fn an_active_freeze_suppresses_the_three_gated_cranks_and_only_those() {
+        // 06 §6.3 / SQ-517. `sweep_redemption_fees` (ledger latch) and
+        // `sweep_revenue` + `crank_observe` (market latch) all error `Frozen`
+        // while their pallet's freeze is live, so planning them during one
+        // only burns the keeper's fees. The two latches are independent, which
+        // is what the cross-checks below pin: a ledger freeze must not
+        // suppress market cranks, and vice versa.
+        //
+        // Scope is exactly these three, not the whole 06 §6.3 refusal surface:
+        // `ExecutionGuard::execute` and the transitively-refused seeded-book
+        // `sweep_dust*` are deliberately still planned. The test name says
+        // "the three gated cranks" rather than "exactly what the chain
+        // refuses" because the earlier name over-claimed that scope.
+        let due = || {
+            let mut snapshot = snapshot();
+            snapshot.redemption_fees_accrued = Some(43);
+            // The default fixture marks market 88 already swept, which is what
+            // makes its `reap` due; clear the marker so the Sweep stage is the
+            // one outstanding and `sweep_revenue` is actually planned.
+            snapshot.swept_markets = Some(BTreeSet::new());
+            snapshot
+        };
+        let calls = |snapshot: &ChainSnapshot| -> Vec<&'static str> {
+            let config = PlannerConfig {
+                enabled_roles: [Role::Cleanup, Role::Observe].into(),
+                ..PlannerConfig::default()
+            };
+            plan(snapshot, &config)
+                .iter()
+                .map(|crank| crank.call)
+                .collect()
+        };
+
+        let baseline = calls(&due());
+        for call in ["sweep_redemption_fees", "sweep_revenue", "crank_observe"] {
+            assert!(
+                baseline.contains(&call),
+                "unfrozen baseline must plan {call}: {baseline:?}",
+            );
+        }
+
+        let mut ledger_frozen = due();
+        ledger_frozen.ledger_frozen_until = Some(ledger_frozen.current_block + 1);
+        let planned = calls(&ledger_frozen);
+        assert!(!planned.contains(&"sweep_redemption_fees"));
+        assert!(
+            planned.contains(&"sweep_revenue"),
+            "the market latch is independent of the ledger's: {planned:?}",
+        );
+
+        let mut market_frozen = due();
+        market_frozen.market_frozen_until = Some(market_frozen.current_block + 1);
+        let planned = calls(&market_frozen);
+        assert!(!planned.contains(&"sweep_revenue"));
+        assert!(!planned.contains(&"crank_observe"));
+        assert!(
+            planned.contains(&"sweep_redemption_fees"),
+            "the ledger latch is independent of the market's: {planned:?}",
+        );
+    }
+
+    #[test]
+    fn an_expired_freeze_is_not_a_freeze_on_its_boundary_block() {
+        // The pallets admit the call at `now == until`
+        // (`is_none_or(|until| now >= until)`), so a keeper that suppressed on
+        // `<=` would idle a whole block after every freeze lapsed. Pin the
+        // boundary in both directions rather than the safe side only.
+        let mut snapshot = snapshot();
+        snapshot.redemption_fees_accrued = Some(43);
+
+        snapshot.ledger_frozen_until = Some(snapshot.current_block);
+        assert!(
+            plan(&snapshot, &config_for(Role::Cleanup))
+                .iter()
+                .any(|crank| crank.call == "sweep_redemption_fees"),
+            "now == until is expired, and the chain would accept the call",
+        );
+
+        snapshot.ledger_frozen_until = Some(snapshot.current_block + 1);
+        assert!(!plan(&snapshot, &config_for(Role::Cleanup))
+            .iter()
+            .any(|crank| crank.call == "sweep_redemption_fees"));
+
+        // An unreadable latch decodes to `None` and must behave exactly as it
+        // did before these fields existed — submit, and let the chain refuse.
+        snapshot.ledger_frozen_until = None;
+        assert!(plan(&snapshot, &config_for(Role::Cleanup))
             .iter()
             .any(|crank| crank.call == "sweep_redemption_fees"));
     }

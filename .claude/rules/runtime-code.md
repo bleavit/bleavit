@@ -39,5 +39,10 @@ These rules bind all FRAME/runtime code. Spec citations are to `docs/architectur
 9. **`no_std` discipline.** `futarchy-primitives` and `futarchy-fixed` must never gain
    `frame` dependencies (01 §5.2) — the reference model, frontend port, and auditors
    consume them standalone.
-10. **Weights.** Every call and hook is benchmarked (`frame-benchmarking`); weight
-    regressions > 10 % fail CI (15 §4.5).
+10. **Weights.** Every call, hook **and transaction extension** is benchmarked
+    (`frame-benchmarking`); weight regressions > 10 % fail CI (15 §4.5). An extension
+    whose generic slots this runtime substitutes (a `HandleCredit`, an
+    `OnChargeTransaction`, a currency/asset adapter) MUST be benchmarked *here* and its
+    `WeightInfo` bound to the generated artifact — `()` charges the upstream
+    reference runtime's measurement, and the post-dispatch refund cannot correct it
+    (it subtracts the same `WeightInfo` it charged).

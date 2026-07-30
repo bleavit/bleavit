@@ -393,22 +393,95 @@ impl pallet_asset_tx_payment::Config for Runtime {
     type Fungibles = ForeignAssets;
     type OnChargeAssetTransaction =
         pallet_asset_tx_payment::FungiblesAdapter<LiveFeeConversion, UsdcFeesToMain>;
-    type WeightInfo = ();
+    // SQ-523: `()` charged the SDK's reference-runtime measurement, which cannot
+    // know that this runtime's `HandleCredit` resolves the credit into `MAIN`
+    // and mutates a treasury counter. Measured here against `()`: writes 2 -> 4
+    // and estimated proof 3,675 -> 7,404 B, a 2.01x PoV understatement on every
+    // USDC-paid extrinsic. (Reads are 5 either way — the same count over
+    // different keys, which is coincidence and not reassurance.)
+    //
+    // The extension's post-dispatch refund does not rescue this. It computes
+    // `declared - WeightInfo::charge_asset_tx_payment_asset()` where `declared`
+    // *is* that same function (`weight()` -> `Pre::Charge.weight`), so on the
+    // charged path the refund is identically zero. It corrects a mis-predicted
+    // branch, never a mis-measured one — an understated function is charged and
+    // refunded at the same understated value.
+    type WeightInfo = crate::weights::pallet_asset_tx_payment::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = AssetTxBenchmarkHelper;
 }
 
+/// SQ-523: the fixture that makes `pallet_asset_tx_payment`'s extension
+/// benchmarks measure **this** runtime's fee path rather than a rejection.
+///
+/// Three narrowings this runtime applies to the stock fixture's inputs, and
+/// **all three fail the same way**: `LiveFeeConversion` returns `Err`,
+/// `withdraw_fee` maps that to `InvalidTransaction::Payment`, `test_run`
+/// returns `Err`, and the SDK fixture's `.unwrap()` **panics**. None of them
+/// mis-measures — each aborts the benchmark outright, which is the safer
+/// failure but presents as a tooling error rather than as a missing weight.
+/// (An earlier version of this comment claimed the first one measured a cheap
+/// `Err` arm and contrasted it with the others; that distinction does not
+/// exist, and the abort is the whole reason SQ-523 sat unresolved for a
+/// session.)
+///
+/// 1. `create_asset_id_parameter` returns [`usdc_location`] and ignores the
+///    caller's index, because `LiveFeeConversion` above rejects every asset
+///    that is not USDC.
+/// 2. `setup_balances_and_pool` seeds the governed `fee.vit_usdc` rate, which
+///    is not a genesis key, so without it the conversion fails closed.
+/// 3. It also funds the caller, since an unfunded payer cannot settle.
+///
+/// The USDC asset itself is genesis-created and `is_sufficient`, so minting to
+/// an otherwise-unknown synthetic caller needs no provider reference; the
+/// native endowment is belt-and-braces for the tip and the ED.
 #[cfg(feature = "runtime-benchmarks")]
 pub struct AssetTxBenchmarkHelper;
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_asset_tx_payment::BenchmarkHelperTrait<AccountId, AssetId, AssetId>
     for AssetTxBenchmarkHelper
 {
-    fn create_asset_id_parameter(id: u32) -> (AssetId, AssetId) {
-        let asset_id = bleavit_xcm::identity::asset_hub_asset_location(id as u128);
+    fn create_asset_id_parameter(_id: u32) -> (AssetId, AssetId) {
+        let asset_id = usdc_location();
         (asset_id.clone(), asset_id)
     }
-    fn setup_balances_and_pool(_: AssetId, _: AccountId) {}
+
+    fn setup_balances_and_pool(asset_id: AssetId, account: AccountId) {
+        use frame_support::traits::fungible::Mutate as _;
+        use frame_support::traits::fungibles::Mutate as _;
+
+        // 13 §1 `fee.vit_usdc`, absent from genesis: without it the USDC fee
+        // path is inert and the extension cannot reach the handler at all.
+        //
+        // The rate below is a benchmark rate, not a copied parameter — 13's own
+        // value is `1.0 x fee.vit_usdc_rate_ref` with the ref `[VERIFY at TGE]`,
+        // which is precisely why no genesis seed exists to reuse. The weight is
+        // insensitive to it: any lawful non-zero rate takes the same branch and
+        // touches the same keys. It matches the runtime test helper's rate so
+        // the two fixtures stay comparable.
+        pallet_constitution::Params::<Runtime>::insert(
+            crate::FEE_VIT_USDC_RATE_KEY,
+            pallet_constitution::ParamRecord {
+                key: crate::FEE_VIT_USDC_RATE_KEY,
+                value: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(
+                    2_000_000_000,
+                )),
+                min: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(1)),
+                max: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(
+                    u64::MAX,
+                )),
+                max_delta: None,
+                cooldown_epochs: 0,
+                last_changed_epoch: 0,
+                last_change_block: 0,
+                class: pallet_constitution::ParamClass::Treasury,
+                kernel_bounded: false,
+            },
+        );
+
+        let _ = Balances::mint_into(&account, 1_000 * currency::VIT);
+        let _ = ForeignAssets::mint_into(asset_id, &account, 1_000_000 * currency::USDC);
+    }
 }
 
 parameter_types! {

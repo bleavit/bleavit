@@ -2310,6 +2310,123 @@ fn vit_transaction_fees_still_burn_and_the_native_adapter_is_untouched() {
     });
 }
 
+/// Drive `ChargeAssetTxPayment` end-to-end exactly as its benchmark does, so
+/// the fixture's preconditions are pinned by a test rather than rediscovered.
+///
+/// Returns the extension's own outcome; `None` means it refused the
+/// transaction outright (`TransactionValidityError`).
+fn run_usdc_fee_extension(caller: &AccountId) -> Option<()> {
+    use sp_runtime::traits::DispatchTransaction;
+
+    let ext: pallet_asset_tx_payment::ChargeAssetTxPayment<Runtime> =
+        pallet_asset_tx_payment::ChargeAssetTxPayment::from(10u32.into(), Some(usdc_location()));
+    let call = RuntimeCall::System(frame_system::Call::remark { remark: vec![] });
+    let info = frame_support::dispatch::DispatchInfo {
+        call_weight: Weight::from_parts(10, 0),
+        extension_weight: Weight::zero(),
+        class: DispatchClass::Operational,
+        pays_fee: frame_support::dispatch::Pays::Yes,
+    };
+    let post_info = frame_support::dispatch::PostDispatchInfo {
+        actual_weight: Some(Weight::from_parts(10, 0)),
+        pays_fee: frame_support::dispatch::Pays::Yes,
+    };
+    ext.test_run(
+        frame_system::RawOrigin::Signed(caller.clone()).into(),
+        &call,
+        &info,
+        0,
+        0,
+        |_| Ok(post_info),
+    )
+    .ok()
+    .map(|_| ())
+}
+
+#[test]
+fn the_usdc_fee_extension_benchmark_fixture_measures_the_paying_path() {
+    // SQ-523. `pallet_asset_tx_payment` has no dispatchables — what carries
+    // E3's storage work is its **transaction extension**, and the SDK's three
+    // fixtures reach it only through `test_run`. This test pins the two
+    // preconditions `AssetTxBenchmarkHelper::setup_balances_and_pool` exists to
+    // establish, in the same genesis the bencher builds (`development`).
+    //
+    // Why a test and not just the fixture: a benchmark that fails its
+    // preconditions **aborts**, and an aborting benchmark reads as a tooling
+    // problem rather than as a missing weight. Asserting the preconditions
+    // separately means a future change that breaks one fails here, with a name
+    // that says what broke, instead of surfacing as a weights-pipeline error.
+    // The third departure, pinned here because it is the one the doc calls
+    // load-bearing and the two `development_ext` arms below cannot see it:
+    // they pass `usdc_location()` directly, so a regression of
+    // `create_asset_id_parameter` back to `asset_hub_asset_location(1)` would
+    // leave them green while the benchmark measured a refusal.
+    #[cfg(feature = "runtime-benchmarks")]
+    {
+        use pallet_asset_tx_payment::BenchmarkHelperTrait;
+        let (fungibles_id, asset_id) =
+            <crate::configs::AssetTxBenchmarkHelper as BenchmarkHelperTrait<
+                AccountId,
+                crate::AssetId,
+                crate::AssetId,
+            >>::create_asset_id_parameter(1);
+        assert_eq!(
+            asset_id,
+            usdc_location(),
+            "the fixture must charge in USDC — LiveFeeConversion refuses every other asset",
+        );
+        assert_eq!(fungibles_id, usdc_location());
+    }
+
+    development_ext().execute_with(|| {
+        let caller = account(43);
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &caller,
+            1_000_000 * currency::USDC,
+        ));
+        // `fee.vit_usdc` is not a genesis key: without it `LiveFeeConversion`
+        // fails closed, and the extension refuses with `Invalid(Payment)`
+        // before ever reaching `UsdcFeesToMain`. This is the arm that made the
+        // stock fixture abort.
+        assert!(
+            run_usdc_fee_extension(&caller).is_none(),
+            "without the governed rate the USDC fee path is inert (SQ-523)",
+        );
+    });
+
+    development_ext().execute_with(|| {
+        let caller = account(43);
+        set_fee_vit_usdc_rate(2_000_000_000);
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &caller,
+            1_000_000 * currency::USDC,
+        ));
+        let main = crate::genesis::treasury_account();
+        let main_before =
+            <ForeignAssets as FungiblesInspect<AccountId>>::balance(usdc_location(), &main);
+        let nav_before = FutarchyTreasury::nav().nav;
+
+        assert!(
+            run_usdc_fee_extension(&caller).is_some(),
+            "seeded rate plus a funded payer must reach the handler",
+        );
+
+        // The point of the fixture: the measured path must be the one that
+        // moves custody *and* recognition, not the conversion's `Err` arm.
+        assert!(
+            <ForeignAssets as FungiblesInspect<AccountId>>::balance(usdc_location(), &main)
+                > main_before,
+            "the benchmarked path must actually credit MAIN (08 §9)",
+        );
+        assert!(
+            FutarchyTreasury::nav().nav > nav_before,
+            "and must actually move the recognition counter (08 §1.2)",
+        );
+    });
+}
+
 #[test]
 fn governed_xcm_rates_are_read_from_genesis_params_and_live_updates() {
     development_ext().execute_with(|| {
@@ -13476,6 +13593,79 @@ fn assert_insurance_at_target() {
         FutarchyTreasury::insurance_target(),
         "08 §1.2: INSURANCE retains exactly T_ins after an inflow that executes treasury code",
     );
+}
+
+#[test]
+fn the_oracle_reporter_bond_slash_also_runs_the_insurance_overflow() {
+    // SQ-518 wired the 08 §1.2 automatic overflow into **both** USDC inflows
+    // that execute treasury code. Every existing test covers only the first —
+    // the proposal-bond `slash_to_insurance` — so the oracle's reporter-bond
+    // leg (`RuntimeOracleCustody::slash_insurance`) shipped its half of that
+    // fix unverified. A one-sided regression here is invisible in the sum
+    // `confiscated_usdc()` reports, which is exactly why that helper's own
+    // doc comment insists on pairing it with a target assertion.
+    use crate::configs::RuntimeOracleCustody;
+    use pallet_oracle::OracleCustody;
+
+    development_ext().execute_with(|| {
+        let reporter = account(44);
+        let oracle_sovereign: AccountId =
+            crate::configs::OraclePalletId::get().into_account_truncating();
+        let bond = 250_000 * currency::USDC;
+
+        // Fund the reporter and take the bond into oracle custody through the
+        // production adapter, so the slash below has real custody to move.
+        // `hold` preserves the payer's 03 §7 floor, so funding exactly `bond`
+        // would fail `NotExpendable` — fund the floor on top of it.
+        let min_balance =
+            <ForeignAssets as FungiblesInspect<AccountId>>::minimum_balance(usdc_location());
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &reporter,
+            bond.saturating_add(min_balance),
+        ));
+        assert_ok!(RuntimeOracleCustody::hold(&reporter, bond));
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &oracle_sovereign),
+            bond,
+            "the bond must be in oracle custody before the slash",
+        );
+
+        let confiscated_before = confiscated_usdc();
+        let nav_before = FutarchyTreasury::nav().nav;
+
+        assert_ok!(RuntimeOracleCustody::slash_insurance(bond));
+
+        // Custody: the whole bond is confiscated, none of it lost.
+        assert_eq!(
+            confiscated_usdc(),
+            confiscated_before.saturating_add(bond),
+            "the slashed reporter bond is confiscated in full (07 §13)",
+        );
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &oracle_sovereign),
+            0,
+            "and leaves oracle custody entirely",
+        );
+        // The SQ-518 half: the overflow ran, so INSURANCE sits at T_ins and the
+        // excess is in MAIN rather than accumulating out of reach.
+        assert_insurance_at_target();
+        // And recognition moved with custody — `nav()` reads the internal
+        // counter, so USDC reaching MAIN without `credit_main` is invisible to
+        // it, which is the precise leak shape this track closes.
+        assert!(
+            FutarchyTreasury::nav().nav > nav_before,
+            "08 §1.2: the overflowed excess must be recognized in NAV",
+        );
+    });
+
+    // Zero is the documented no-op: it must move nothing and must not run the
+    // overflow's storage work either.
+    development_ext().execute_with(|| {
+        let before = confiscated_usdc();
+        assert_ok!(RuntimeOracleCustody::slash_insurance(0));
+        assert_eq!(confiscated_usdc(), before, "a zero slash is a no-op");
+    });
 }
 
 #[test]

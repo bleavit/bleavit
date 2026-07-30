@@ -67,6 +67,21 @@ pub struct ChainSnapshot {
     /// useful work. `None` is an unavailable/undecodable signal and suppresses
     /// the call; the ValueQuery default is decoded as `Some(0)`.
     pub redemption_fees_accrued: Option<u128>,
+    /// `ConditionalLedger::FrozenUntil` / `Market::FrozenUntil` (06 §6.3).
+    /// `Some(until)` means the pallet's value-moving surface errors `Frozen`
+    /// while `current_block < until`.
+    ///
+    /// Absence and an unreadable key are deliberately **not** distinguished,
+    /// and the choice is safe in one direction only: both decode to `None`, so
+    /// a transport failure leaves the keeper submitting exactly what it
+    /// submitted before these fields existed — a doomed extrinsic that the
+    /// chain refuses. Treating an unreadable latch as *frozen* would be the
+    /// unsafe reading: a persistently failing read would stall the revenue
+    /// cranks indefinitely, which is a liveness loss the freeze itself does not
+    /// justify. Under an actual freeze the value is present and decodes, which
+    /// is the case these fields exist to catch.
+    pub ledger_frozen_until: Option<u64>,
+    pub market_frozen_until: Option<u64>,
     /// The three live terms of 08 §1.2's derived INSURANCE target. All are
     /// required before the keeper may conclude that above-target custody is
     /// due for reconciliation.
@@ -475,6 +490,10 @@ impl SnapshotExtractor {
                 .collect(),
             coretime: self.extract_coretime(&at_block).await,
             redemption_fees_accrued: self.extract_redemption_fees(&at_block).await,
+            ledger_frozen_until: self
+                .extract_frozen_until(&at_block, "ConditionalLedger")
+                .await,
+            market_frozen_until: self.extract_frozen_until(&at_block, "Market").await,
             insurance: self.extract_insurance(&at_block).await,
             market_reaps: self
                 .extract_reaps(&at_block, "Market", "SettlementObservedAt", market_archive)
@@ -780,6 +799,19 @@ impl SnapshotExtractor {
         )
         .await?
         .as_u128()
+    }
+
+    /// Read a pallet's 06 §6.3 freeze latch (`FrozenUntil`, an `OptionQuery`
+    /// block number). `None` covers both "no freeze" and "unreadable" — see
+    /// the field docs for why collapsing them is the safe direction here.
+    async fn extract_frozen_until(
+        &self,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
+        pallet: &str,
+    ) -> Option<u64> {
+        self.fetch_value_with_keys(at_block, pallet, "FrozenUntil", Vec::new())
+            .await
+            .and_then(|value| as_u64(&value))
     }
 
     /// Read every term of 08 §1.2's `T_ins =
