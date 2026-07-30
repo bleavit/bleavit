@@ -416,6 +416,34 @@ class OperatingPointTests(unittest.TestCase):
         self.assertGreater(runway_years(c, NAV_FLOOR_CODE), D(25))
         self.assertGreater(runway_years(c, NAV_FLOOR_PARAM), D(80))
 
+    def test_the_shipped_point_is_self_funding_at_the_measured_turnover(self):
+        """Where the shipped operating point actually becomes indefinite.
+
+        08 §10.2 brackets the turnover ratio with three readings from the
+        15 §4.9 Phase-0 population: 5.8 median all-book, and ~3.0 once the
+        47.9 % round-trip churn the 04 §7a contest measure nets out is excluded.
+        §10.2 uses 3 as the central case *because* it is the conservative one.
+
+        At minimum viable activity the shipped point breaks even at tau = 3.558,
+        so it is short at the churn-excluded 3.0 and covered at the measured
+        median 5.8. Both are asserted, because reporting only the favourable
+        one would be exactly the selective reading 08 §10.2's own provenance
+        note warns about -- those figures come from an ad-hoc instrumented run,
+        not the committed Merkle-bound artifact (SQ-506).
+        """
+        c = cost_base(CostParams()).annual
+        minimum_activity = annual_held_capital("param", D(5), saturated=False)
+
+        # Conservative, churn-excluded: short, and by how much.
+        self.assertLess(revenue(minimum_activity, D(3)), c)
+        self.assertLess(c - revenue(minimum_activity, D(3)), D(35_000))
+
+        # Measured median all-book: covered, and the runway is unbounded.
+        self.assertGreater(revenue(minimum_activity, D("5.8")), c)
+        self.assertTrue(
+            runway_years(c, NAV_FLOOR_CODE, revenue(minimum_activity, D("5.8"))).is_infinite()
+        )
+
     def test_the_collator_lever_is_available_but_not_taken(self):
         """Pins the one decision E5 declined, and why it is the only one.
 
