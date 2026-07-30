@@ -3256,3 +3256,56 @@ fn try_state_sees_an_outstanding_stream_as_a_claim_on_the_pot() {
         assert!(crate::Pallet::<Test>::do_try_state().is_err());
     });
 }
+
+#[test]
+fn a_rebate_payout_does_not_double_count_deferred_main_credit() {
+    // SQ-530. `load()` folds `PendingMainCredit` into `main_usdc`, and
+    // `persist()` is the ONLY place that kills the counter afterwards. Four
+    // fail-soft paths write `State::<T>::put(state)` directly instead —
+    // `pay_collator_compensation`, the zero-pay rebate branch,
+    // `do_keeper_rebate` and `do_proposer_reward`. Each therefore persists the
+    // folded value while leaving the counter live, so the NEXT `load()` adds it
+    // a second time.
+    //
+    // The direction is the unsafe one: NAV is over-stated, and every
+    // NAV-derived control — `trs.cap_proposal`·NAV (hence the §5.2 security
+    // sizing gate), `pol.budget_epoch`·NAV, and the 08 §4.1 arming floors — is
+    // then computed on capital the treasury does not hold. It compounds,
+    // because `credit_main` runs in the fee handler of every USDC-paying
+    // extrinsic and `do_keeper_rebate` runs inside most cranks.
+    //
+    // `do_try_state` cannot catch it: no invariant ties `main_usdc` to real
+    // MAIN custody. The existing `credit_main` coverage pairs it only with
+    // `fund_budget_line`, which goes through `persist()` and is therefore
+    // correct — which is exactly why this went unseen.
+    funded_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Keeper,
+            100 * USDC
+        ));
+        KeeperRebate::set(USDC);
+
+        let main_before = Treasury::treasury().main_usdc;
+        Treasury::credit_main(1_000 * USDC);
+        assert_eq!(
+            Treasury::treasury().main_usdc,
+            main_before + 1_000 * USDC,
+            "the fold is correct on the first read",
+        );
+
+        crate::Pallet::<Test>::do_keeper_rebate(&acc(7), CrankClass::DecisionCritical);
+
+        assert_eq!(
+            crate::PendingMainCredit::<Test>::get(),
+            0,
+            "a path that persisted the folded credit must discharge the counter",
+        );
+        assert_eq!(
+            Treasury::treasury().main_usdc,
+            main_before + 1_000 * USDC,
+            "the deferred credit must be recognised exactly once (SQ-530)",
+        );
+        assert_ok!(Treasury::do_try_state());
+    });
+}

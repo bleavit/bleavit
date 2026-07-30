@@ -20695,3 +20695,87 @@ fn install_attested_spec(version: u16, delta_s_max_bps: u32) {
         pallet_welfare::BoundedSpecSet::try_from(vec![spec]).expect("one spec is bounded"),
     );
 }
+
+/// SQ-528. `FeeMultiplierUpdate = ()` collapses the fee multiplier to ZERO at
+/// the first `on_finalize`, after which transaction weight is not priced at all.
+///
+/// `pallet_transaction_payment::Config::FeeMultiplierUpdate` requires
+/// `Convert<Multiplier, Multiplier>`. The pallet supplies that impl only for
+/// `TargetedFeeAdjustment` and `ConstFeeMultiplier`; `()` falls through to
+/// sp-runtime's blanket `impl<A, B: Default> Convert<A, B> for ()`, which
+/// returns `Default::default()` — and `Multiplier = FixedU128` defaults to 0,
+/// not 1. The pallet's `on_finalize` then runs unconditionally, so genesis's
+/// `MULTIPLIER_DEFAULT_VALUE = 1` survives exactly one block.
+///
+/// `compute_fee_raw` multiplies ONLY the weight term:
+/// `base_fee + len_fee + multiplier * weight_to_fee(weight)`. At multiplier 0 a
+/// 220 Gps `settle_cohort` therefore costs exactly what an empty call costs.
+/// On a PoV-bound parachain that is a standing denial-of-service subsidy, and
+/// it silently invalidates every fee-derived figure in 08 §6 and §10.
+///
+/// The existing single-block smoke test cannot see this: it dispatches while
+/// the multiplier is still 1 and is zeroed only by its own `on_finalize`. This
+/// test therefore asserts across a block boundary, which is the whole point.
+#[test]
+fn the_transaction_fee_multiplier_survives_a_block_boundary() {
+    use pallet_transaction_payment::Multiplier;
+
+    development_ext().execute_with(|| {
+        assert_eq!(
+            pallet_transaction_payment::NextFeeMultiplier::<Runtime>::get(),
+            Multiplier::from_u32(1),
+            "genesis seeds the multiplier at 1",
+        );
+
+        // One block boundary is all it takes. Only the pallet under test is
+        // finalized: `AllPalletsWithSystem` would trip pallet-timestamp's
+        // "must be updated once in the block" assertion, which is unrelated.
+        <TransactionPayment as frame_support::traits::OnFinalize<crate::BlockNumber>>::on_finalize(
+            System::block_number(),
+        );
+
+        assert!(
+            pallet_transaction_payment::NextFeeMultiplier::<Runtime>::get()
+                > Multiplier::from_u32(0),
+            "the fee multiplier collapsed to zero after one block: transaction \
+             weight is no longer priced, so block space is free (SQ-528)",
+        );
+    });
+}
+
+/// SQ-528, the consequence. With the multiplier alive, a heavy call must cost
+/// materially more than a light one. This is the property the multiplier
+/// defect destroys, asserted directly on fees rather than on the multiplier.
+#[test]
+fn a_heavy_call_costs_more_than_a_light_one_after_a_block_boundary() {
+    use frame_support::dispatch::{DispatchClass, DispatchInfo, Pays};
+    use frame_support::weights::Weight;
+
+    development_ext().execute_with(|| {
+        <TransactionPayment as frame_support::traits::OnFinalize<crate::BlockNumber>>::on_finalize(
+            System::block_number(),
+        );
+
+        let info = |ref_time: u64| DispatchInfo {
+            call_weight: Weight::from_parts(ref_time, 0),
+            extension_weight: Weight::zero(),
+            class: DispatchClass::Normal,
+            pays_fee: Pays::Yes,
+        };
+        let light = pallet_transaction_payment::Pallet::<Runtime>::compute_fee(
+            120,
+            &info(1_240_920_000),
+            0,
+        );
+        let heavy = pallet_transaction_payment::Pallet::<Runtime>::compute_fee(
+            120,
+            &info(184_614_730_612),
+            0,
+        );
+        assert!(
+            heavy > light,
+            "a 149x heavier call must not cost the same: light={light} heavy={heavy} \
+             (SQ-528 — weight is unpriced once the multiplier collapses)",
+        );
+    });
+}

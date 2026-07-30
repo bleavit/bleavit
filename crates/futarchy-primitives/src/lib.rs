@@ -1586,17 +1586,42 @@ pub mod kernel {
     }
 
     pub const KEEPER_BUDGET_EPOCH_FLOOR_USDC: u128 = 6_000_000_000;
-    /// SQ-117 (ruled 2026-07-21): the benchmark **fee basis** the launch
-    /// `keeper.rebate` seed is calibrated against — the sanctioned-crank fee
-    /// cost from which 13 §1 expresses the row (default `3×`, hard min `1×`,
-    /// hard max `10×`). This is the **[VERIFY]** placeholder of [08](../../docs/architecture/08-treasury-and-economics.md)
-    /// §6.2 (`≈ 0.03 USDC`, 30,000 µUSDC): a conservative pre-launch default,
-    /// **not** a calibrated number. It is replaced at benchmark time once the
-    /// launch `fee.vit_usdc_rate` fixes the real per-crank fee; the seed is
-    /// then rounded **down** to µUSDC against the claimant (R-7). Until then the
-    /// row is genesis-seeded (so B9's rebate pipeline stops paying zero) but its
-    /// value carries the 13 §1 `[VERIFY fee basis at benchmark time]` tag.
-    pub const KEEPER_REBATE_FEE_BASIS_USDC: u128 = 30_000;
+    /// SQ-117 (ruled 2026-07-21) / **SQ-531 (measured 2026-07-30, milestone E5)**:
+    /// the benchmark **fee basis** the launch `keeper.rebate` seed is calibrated
+    /// against — the sanctioned-crank fee cost from which 13 §1 expresses the
+    /// row (default `3×`, hard min `1×`, hard max `10×`).
+    ///
+    /// **This was 30,000 µUSDC (`≈ 0.03 USDC`) and that placeholder was wrong by
+    /// 353×.** It was never a measurement — 08 §6.2 called it "assumed" and
+    /// 13 §1 carried `[VERIFY fee basis at benchmark time]` — and the whole
+    /// keeper cost base was derived from it: 908,408 USDC/yr, **79.3 % of the
+    /// entire annual cost base**, resting on a number nobody had ever computed.
+    ///
+    /// Now derived from the committed generated weights, at the multiplier that
+    /// SQ-528 restored (before that fix the multiplier was pinned to zero and
+    /// weight was not priced at all, so no fee basis was measurable):
+    ///
+    /// ```text
+    /// crank_observe call weight        1,240,920,000 ps   (committed weights)
+    /// + TxExtension weight               352,392,000 ps
+    /// = fee-charged weight             1,593,312,000 ps
+    /// WeightToFee = IdentityFee        1 ps -> 1 planck
+    /// + ExtrinsicBaseWeight              108,157,000 planck
+    /// + length fee (~120 B)                      120 planck
+    /// = 1,701,469,120 planck = 0.00170146912 VIT   (VIT has 12 decimals)
+    /// x 0.05 USDC/VIT                  = 0.000085073 USDC = 85.07 uUSDC
+    /// floor to uUSDC against the claimant (R-7) = 85
+    /// ```
+    ///
+    /// The 0.05 USDC/VIT factor is 13 §1 / 08 §9's documented placeholder
+    /// reference, so **the `[VERIFY at TGE]` tag stays**: the absolute USDC
+    /// figure still moves with the launch price. What is fixed is the thing that
+    /// was actually broken — the *ratio* to the real fee. At 30,000 the seeded
+    /// rebate was ~1,058x the fee it claimed to be 3x; at 85 it is 3x, at any
+    /// price, because both numerator and denominator scale with the same rate.
+    ///
+    /// For 30,000 to have been right, VIT would have to trade at ~17.6 USDC.
+    pub const KEEPER_REBATE_FEE_BASIS_USDC: u128 = 85;
 }
 
 /// Epoch phase-start offsets as fractions of `epoch.length` (13 §3.1). The pairs
