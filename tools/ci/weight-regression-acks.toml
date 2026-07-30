@@ -158,3 +158,28 @@ runtime/bleavit-runtime/src/weights/pallet_market.rs sweep_revenue @ ref_time=85
 # the error without a layer would retain the credit and overstate NAV against
 # custody that never moved.
 runtime/bleavit-runtime/src/weights/pallet_oracle.rs adjudicate @ writes=10: SQ-518. The 08 §1.2 automatic INSURANCE overflow now runs in the reporter-bond slash's own transaction. +2 writes reconcile exactly: `ForeignAssets::Account` +1w for the INSURANCE -> MAIN transfer and `PendingMainCredit` +1w for `credit_main`, the accounting half without which USDC reaching MAIN never reaches `nav()`. Reads move 478 -> 481 (+0.6 %, under the limit) for the same two keys plus `SweptResidueUnreclaimed`, the liability term of `T_ins`. All O(1) named single-value keys, no scan, on a path already performing 478 reads; the overflow is a no-op at or below target. Best-effort inside its own storage layer so a cleanup failure cannot void a confiscation (G-1) and cannot leave `main_usdc` credited against custody that never moved.
+
+# --- Re-measurement variance surfaced by the E4 regeneration sweep ---
+#
+# `qualify_recovery_image` is component-bearing in `b` (payload bytes, high
+# 4,194,304). Its **storage dimensions did not move at all** — reads 17,
+# writes 3, estimated PoV `103128 + b * 1`, identical before and after. What
+# moved is ref_time: base 254,510,000 -> 257,380,000 (+1.1 %) and the per-byte
+# slope 2,268 -> 2,592 (+14.3 %), which the gate compounds into a worst-case
+# 9,767,191,472 -> 11,129,015,968 (+13.9 %) at the component high.
+#
+# This is measurement variance on **unchanged code**, not a regression. Both
+# `pallets/execution-guard/` and `crates/execution-guard-core/` are byte-
+# identical to the merge base on this branch (`git diff --stat <base>` is
+# empty) and no commit touches `qualify_recovery_image`. The function was
+# re-measured only because it shares `pallet_execution_guard.rs` with
+# `expire_failed_execution` and `reject_stale`, whose bond-slash paths genuinely
+# gained the 08 §1.2 INSURANCE overflow (SQ-518) — regeneration is per file, so
+# an untouched neighbour is re-measured with them.
+#
+# ref_time is the dimension `regenerate-weights.py` calls advisory "always"
+# precisely because of this spread (127 % measured on unchanged code); a
+# per-byte slope fitted over a 4 MiB range is the noisiest quantity in the whole
+# weight set. The block-bounding dimensions — the ones that are exact — did not
+# change, which is the evidence that nothing structural happened here.
+runtime/bleavit-runtime/src/weights/pallet_execution_guard.rs qualify_recovery_image @ ref_time=11129015968: E4 regeneration sweep. Re-measurement variance on code this branch does not touch: `pallets/execution-guard/` and `crates/execution-guard-core/` are byte-identical to the merge base and no commit touches this function. Storage dimensions are unchanged (reads 17, writes 3, PoV `103128 + b * 1`); only ref_time moved, base +1.1 % and the per-byte slope 2,268 -> 2,592, compounding to +13.9 % at the 4,194,304-byte component high. It was re-measured only as a file-neighbour of `expire_failed_execution`/`reject_stale`, which genuinely gained the SQ-518 overflow. ref_time is advisory in the drift gate for exactly this reason (127 % measured spread on unchanged code), and a slope fitted across a 4 MiB range is the noisiest quantity in the set.
