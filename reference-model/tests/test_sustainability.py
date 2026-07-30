@@ -398,18 +398,47 @@ class OperatingPointTests(unittest.TestCase):
             D(300),
         )
 
-    def test_the_e5_operating_point_is_admissible_and_clears_25_years(self):
-        """The goal, asserted against the HARDEST floor rather than the easiest.
+    def test_the_shipped_e5_operating_point_clears_25_years(self):
+        """The goal, asserted against what actually SHIPS.
 
-        25 years is measured to the 21,256,533 shared CODE/META arming floor --
-        the binding one, above CODE's own 13,862,944 seeding floor -- and with
-        ZERO revenue assumed.
+        `CostParams()` is the shipped genesis operating point: the SQ-531
+        fee-basis correction and nothing else. `collator.comp_epoch` stays at
+        2,000 -- see `test_the_collator_lever_is_available_but_not_taken`.
+
+        Measured to the 13,862,944 CODE **seeding** floor, which is the
+        operating constraint: below it no CODE proposal fits an epoch's POL
+        budget. Zero revenue is assumed.
         """
-        p = with_levers(collator_comp_epoch=500)
+        p = CostParams()
         self.assertTrue(is_admissible(p), [f.detail for f in check_admissible(p) if not f.ok])
         c = cost_base(p).annual
-        self.assertGreater(runway_years(c, NAV_FLOOR_META), D(25))
-        self.assertGreater(runway_years(c, NAV_FLOOR_CODE), D(100))
+        self.assertLess(c, D(240_000))
+        self.assertGreater(runway_years(c, NAV_FLOOR_CODE), D(25))
+        self.assertGreater(runway_years(c, NAV_FLOOR_PARAM), D(80))
+
+    def test_the_collator_lever_is_available_but_not_taken(self):
+        """Pins the one decision E5 declined, and why it is the only one.
+
+        `collator.comp_epoch` -> 500 (its 13 §1 registry minimum) is lawful and
+        worth ~130,447/yr -- 72.6 % of the remaining base -- and it is what
+        would carry the runway past 25 years against the 21,256,533 shared
+        CODE/META **arming** floor as well as the seeding floor.
+
+        It is declined because it is the only lever here whose error direction
+        is unsafe (underpaid collators stop producing blocks) and which no
+        evidence in this repository anchors: 12 §6.1 mandates growth to 8-12
+        bonded permissionless collators from Phase 4 and gives counts, never
+        costs. R-2 reserves exactly that shape for a values judgement. This test
+        keeps the arithmetic exact so launch governance can take it as a
+        one-line decision with real operator quotes.
+        """
+        shipped = cost_base(CostParams()).annual
+        lowered = cost_base(with_levers(collator_comp_epoch=500)).annual
+        self.assertLess(abs((shipped - lowered) - D(130_447)), D(2))
+        # Declining it is what leaves the arming floor short of 25 years...
+        self.assertLess(runway_years(shipped, NAV_FLOOR_META), D(25))
+        # ...and taking it would clear that too.
+        self.assertGreater(runway_years(lowered, NAV_FLOOR_META), D(25))
 
     def test_the_e5_operating_point_is_self_funding_at_minimum_activity(self):
         """R >= C at the least activity for which the chain decides anything.
@@ -418,6 +447,9 @@ class OperatingPointTests(unittest.TestCase):
         `dec.v_min` floor -- the depth below which a proposal is not
         decision-grade at all -- so this is not an optimistic scenario.
         """
+        # Stated for the LOWERED point, which is where R >= C holds. At the
+        # shipped point revenue covers cost only from tau ~ 3.6 upward; the
+        # difference is exactly the collator line this milestone declined to cut.
         c = cost_base(with_levers(collator_comp_epoch=500)).annual
         minimum_activity = annual_held_capital("param", D(5), saturated=False)
         for tau in (D(2), D(3), D("5.8")):

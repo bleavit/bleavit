@@ -20779,3 +20779,70 @@ fn a_heavy_call_costs_more_than_a_light_one_after_a_block_boundary() {
         );
     });
 }
+
+/// SQ-531. The seeded `keeper.rebate` must stay tied to the fee it claims to be
+/// a multiple of.
+///
+/// The parameter shipped at 0.09 USDC as "3x the crank fee" against an *assumed*
+/// 0.03 USDC basis that nobody had measured. The real fee is ~0.000085 USDC, so
+/// the seed was ~1,058x the fee it claimed to be 3x of — and both keeper cost
+/// lines, 79.3 % of the annual cost base (08 §10.1), were scaled by that error.
+///
+/// Correcting the number does not stop it recurring: the fee moves whenever
+/// weights are regenerated, and nothing tied the two together. This test is that
+/// tie. It recomputes the fee from the LIVE dispatch info of a real sanctioned
+/// crank and asserts the seeded rebate is within a stated band of the 3x target,
+/// so a weight change large enough to invalidate the basis fails here instead of
+/// silently re-inflating the cost base.
+///
+/// The band is deliberately wide (0.3x-30x the target, i.e. an order of magnitude
+/// either side). It is a drift alarm, not a precision check: the rebate is a
+/// governed PARAM row with a [1x, 10x] envelope of its own, and the USDC leg
+/// still moves with the `[VERIFY at TGE]` launch price. What it catches is the
+/// failure that actually happened — a basis wrong by two to four orders of
+/// magnitude — which no plausible band would let through.
+#[test]
+fn the_seeded_keeper_rebate_tracks_the_measured_crank_fee() {
+    use frame_support::dispatch::GetDispatchInfo;
+
+    development_ext().execute_with(|| {
+        <TransactionPayment as frame_support::traits::OnFinalize<crate::BlockNumber>>::on_finalize(
+            System::block_number(),
+        );
+
+        // A real sanctioned crank, weighed exactly as the dispatcher weighs it.
+        let call: RuntimeCall =
+            RuntimeCall::Market(pallet_market::Call::crank_observe { market: 0 });
+        let info = call.get_dispatch_info();
+        let fee_vit = pallet_transaction_payment::Pallet::<Runtime>::compute_fee(
+            120, // representative encoded length
+            &info, 0,
+        );
+
+        // VIT (12 decimals) -> USDC (6 decimals) at 08 §9's documented
+        // placeholder reference of 0.05 USDC/VIT. The absolute figure moves with
+        // the launch price; the RATIO this test guards does not, because rebate
+        // and fee scale together.
+        let fee_uusdc = fee_vit
+            .saturating_mul(50_000) // 0.05 USDC/VIT, expressed in uUSDC per VIT
+            / 1_000_000_000_000u128; // VIT planck per VIT
+
+        let basis = futarchy_primitives::kernel::KEEPER_REBATE_FEE_BASIS_USDC;
+        let seeded_rebate = basis.saturating_mul(3);
+        let target = fee_uusdc.saturating_mul(3);
+
+        assert!(
+            fee_uusdc > 0,
+            "the crank fee must be measurable at all — a zero fee means weight \
+             is unpriced, which is SQ-528 regressing",
+        );
+        assert!(
+            seeded_rebate <= target.saturating_mul(30)
+                && seeded_rebate.saturating_mul(10) >= target.saturating_mul(3),
+            "keeper.rebate has drifted from the fee it is a multiple of: seeded \
+             {seeded_rebate} uUSDC against a 3x target of {target} uUSDC \
+             (measured fee {fee_uusdc} uUSDC, basis constant {basis}). \
+             Re-derive KEEPER_REBATE_FEE_BASIS_USDC per 08 §6.2 (SQ-531).",
+        );
+    });
+}

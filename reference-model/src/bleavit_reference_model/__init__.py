@@ -6,3 +6,4 @@ from .market import *
 from .welfare import *
 from .decision import *
 from .treasury import *
+from .sustainability import *
