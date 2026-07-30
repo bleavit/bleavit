@@ -13,7 +13,7 @@
 // benchmark
 // pallet
 // --runtime
-// /tmp/bleavit-bench-target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
+// /tmp/claude-1000/-home-chralt-development-bleavit/3297e50f-8943-4d4d-b537-90553161cda7/scratchpad/wtarget/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
 // --pallet
 // pallet_market
 // --extrinsic
@@ -43,7 +43,7 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `Market::Markets` (`max_values`: None, `max_size`: Some(229), added: 2704, mode: `MaxEncodedLen`)
 	/// Storage: `Market::DecisionWindows` (r:1 w:1)
 	/// Proof: `Market::DecisionWindows` (`max_values`: None, `max_size`: Some(409), added: 2884, mode: `MaxEncodedLen`)
-	/// Storage: `Constitution::Params` (r:4 w:0)
+	/// Storage: `Constitution::Params` (r:6 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::SplitPausedUntil` (r:1 w:0)
 	/// Proof: `ConditionalLedger::SplitPausedUntil` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
@@ -51,6 +51,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `ConditionalLedger::Vaults` (`max_values`: None, `max_size`: Some(184), added: 2659, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::DepositsHeld` (r:1 w:1)
 	/// Proof: `ConditionalLedger::DepositsHeld` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
+	/// Storage: `ConditionalLedger::RedemptionFeesAccrued` (r:1 w:0)
+	/// Proof: `ConditionalLedger::RedemptionFeesAccrued` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::PositionTotals` (r:14 w:14)
 	/// Proof: `ConditionalLedger::PositionTotals` (`max_values`: None, `max_size`: Some(44), added: 2519, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::Positions` (r:42 w:42)
@@ -67,12 +69,12 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn buy() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `3954`
+		//  Measured:  `4240`
 		//  Estimated: `108804`
-		// Minimum execution time: 1_016_251_000 picoseconds.
-		Weight::from_parts(1_109_742_000, 0)
+		// Minimum execution time: 1_048_440_000 picoseconds.
+		Weight::from_parts(1_137_949_000, 0)
 			.saturating_add(Weight::from_parts(0, 108804))
-			.saturating_add(T::DbWeight::get().reads(74))
+			.saturating_add(T::DbWeight::get().reads(77))
 			.saturating_add(T::DbWeight::get().writes(67))
 	}
 	/// Storage: `Market::FrozenUntil` (r:1 w:0)
@@ -81,12 +83,14 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `Market::Markets` (`max_values`: None, `max_size`: Some(229), added: 2704, mode: `MaxEncodedLen`)
 	/// Storage: `Market::DecisionWindows` (r:1 w:1)
 	/// Proof: `Market::DecisionWindows` (`max_values`: None, `max_size`: Some(409), added: 2884, mode: `MaxEncodedLen`)
-	/// Storage: `Constitution::Params` (r:4 w:0)
+	/// Storage: `Constitution::Params` (r:6 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::Vaults` (r:1 w:1)
 	/// Proof: `ConditionalLedger::Vaults` (`max_values`: None, `max_size`: Some(184), added: 2659, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::DepositsHeld` (r:1 w:1)
 	/// Proof: `ConditionalLedger::DepositsHeld` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
+	/// Storage: `ConditionalLedger::RedemptionFeesAccrued` (r:1 w:0)
+	/// Proof: `ConditionalLedger::RedemptionFeesAccrued` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::PositionTotals` (r:14 w:14)
 	/// Proof: `ConditionalLedger::PositionTotals` (`max_values`: None, `max_size`: Some(44), added: 2519, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::Positions` (r:42 w:42)
@@ -103,12 +107,12 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `ConditionalLedger::TotalEscrowed` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
 	fn sell() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `4440`
+		//  Measured:  `4726`
 		//  Estimated: `108804`
-		// Minimum execution time: 940_641_000 picoseconds.
-		Weight::from_parts(958_842_000, 0)
+		// Minimum execution time: 898_149_000 picoseconds.
+		Weight::from_parts(973_470_000, 0)
 			.saturating_add(Weight::from_parts(0, 108804))
-			.saturating_add(T::DbWeight::get().reads(73))
+			.saturating_add(T::DbWeight::get().reads(76))
 			.saturating_add(T::DbWeight::get().writes(67))
 	}
 	/// Storage: `Market::FrozenUntil` (r:1 w:0)
@@ -123,6 +127,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
 	/// Storage: `FutarchyTreasury::State` (r:1 w:1)
 	/// Proof: `FutarchyTreasury::State` (`max_values`: Some(1), `max_size`: Some(25361), added: 25856, mode: `MaxEncodedLen`)
+	/// Storage: `FutarchyTreasury::PendingMainCredit` (r:1 w:0)
+	/// Proof: `FutarchyTreasury::PendingMainCredit` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
@@ -133,51 +139,57 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `13846`
 		//  Estimated: `27060`
-		// Minimum execution time: 135_030_000 picoseconds.
-		Weight::from_parts(139_840_000, 0)
+		// Minimum execution time: 127_310_000 picoseconds.
+		Weight::from_parts(140_920_000, 0)
 			.saturating_add(Weight::from_parts(0, 27060))
-			.saturating_add(T::DbWeight::get().reads(19))
+			.saturating_add(T::DbWeight::get().reads(20))
 			.saturating_add(T::DbWeight::get().writes(6))
 	}
 	/// Storage: `Market::Markets` (r:1 w:0)
 	/// Proof: `Market::Markets` (`max_values`: None, `max_size`: Some(229), added: 2704, mode: `MaxEncodedLen`)
 	/// Storage: `Market::SweptMarkets` (r:1 w:1)
 	/// Proof: `Market::SweptMarkets` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
+	/// Storage: `Market::FrozenUntil` (r:1 w:0)
+	/// Proof: `Market::FrozenUntil` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Market::SettlementObservedAt` (r:1 w:0)
 	/// Proof: `Market::SettlementObservedAt` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
-	/// Storage: `Market::SeededMarkets` (r:1 w:0)
-	/// Proof: `Market::SeededMarkets` (`max_values`: None, `max_size`: Some(56), added: 2531, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::Vaults` (r:1 w:1)
 	/// Proof: `ConditionalLedger::Vaults` (`max_values`: None, `max_size`: Some(184), added: 2659, mode: `MaxEncodedLen`)
-	/// Storage: `ConditionalLedger::Positions` (r:14 w:14)
+	/// Storage: `ConditionalLedger::Positions` (r:28 w:28)
 	/// Proof: `ConditionalLedger::Positions` (`max_values`: None, `max_size`: Some(92), added: 2567, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::DepositsHeld` (r:1 w:0)
 	/// Proof: `ConditionalLedger::DepositsHeld` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
+	/// Storage: `Constitution::Params` (r:10 w:0)
+	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
+	/// Storage: `ConditionalLedger::RedemptionFeesAccrued` (r:1 w:0)
+	/// Proof: `ConditionalLedger::RedemptionFeesAccrued` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::PositionTotals` (r:14 w:14)
 	/// Proof: `ConditionalLedger::PositionTotals` (`max_values`: None, `max_size`: Some(44), added: 2519, mode: `MaxEncodedLen`)
-	/// Storage: `ConditionalLedger::PositionCount` (r:1 w:1)
+	/// Storage: `ConditionalLedger::PositionCount` (r:2 w:2)
 	/// Proof: `ConditionalLedger::PositionCount` (`max_values`: None, `max_size`: Some(52), added: 2527, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::TotalEscrowed` (r:1 w:1)
 	/// Proof: `ConditionalLedger::TotalEscrowed` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
 	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
-	/// Storage: `ForeignAssets::Account` (r:4 w:4)
+	/// Storage: `ForeignAssets::Account` (r:5 w:5)
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
-	/// Storage: `Constitution::Params` (r:8 w:0)
-	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
+	/// Storage: `FutarchyTreasury::PendingMainCredit` (r:1 w:1)
+	/// Proof: `FutarchyTreasury::PendingMainCredit` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
+	/// Storage: `Market::SeededMarkets` (r:1 w:0)
+	/// Proof: `Market::SeededMarkets` (`max_values`: None, `max_size`: Some(56), added: 2531, mode: `MaxEncodedLen`)
 	/// Storage: `FutarchyTreasury::State` (r:1 w:1)
 	/// Proof: `FutarchyTreasury::State` (`max_values`: Some(1), `max_size`: Some(25361), added: 25856, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
 	fn sweep_revenue() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `14624`
-		//  Estimated: `36928`
-		// Minimum execution time: 588_411_000 picoseconds.
-		Weight::from_parts(599_630_000, 0)
-			.saturating_add(Weight::from_parts(0, 36928))
-			.saturating_add(T::DbWeight::get().reads(51))
-			.saturating_add(T::DbWeight::get().writes(38))
+		//  Measured:  `15053`
+		//  Estimated: `72866`
+		// Minimum execution time: 813_300_000 picoseconds.
+		Weight::from_parts(857_390_000, 0)
+			.saturating_add(Weight::from_parts(0, 72866))
+			.saturating_add(T::DbWeight::get().reads(72))
+			.saturating_add(T::DbWeight::get().writes(55))
 	}
 	/// Storage: `Market::Markets` (r:1 w:1)
 	/// Proof: `Market::Markets` (`max_values`: None, `max_size`: Some(229), added: 2704, mode: `MaxEncodedLen`)
@@ -205,6 +217,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `Market::ProposalMarketIds` (`max_values`: None, `max_size`: Some(73), added: 2548, mode: `MaxEncodedLen`)
 	/// Storage: `FutarchyTreasury::State` (r:1 w:1)
 	/// Proof: `FutarchyTreasury::State` (`max_values`: Some(1), `max_size`: Some(25361), added: 25856, mode: `MaxEncodedLen`)
+	/// Storage: `FutarchyTreasury::PendingMainCredit` (r:1 w:1)
+	/// Proof: `FutarchyTreasury::PendingMainCredit` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
@@ -225,11 +239,11 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `16766`
 		//  Estimated: `72866`
-		// Minimum execution time: 434_801_000 picoseconds.
-		Weight::from_parts(447_550_000, 0)
+		// Minimum execution time: 409_319_000 picoseconds.
+		Weight::from_parts(435_890_000, 0)
 			.saturating_add(Weight::from_parts(0, 72866))
-			.saturating_add(T::DbWeight::get().reads(65))
-			.saturating_add(T::DbWeight::get().writes(61))
+			.saturating_add(T::DbWeight::get().reads(66))
+			.saturating_add(T::DbWeight::get().writes(62))
 	}
 	/// Storage: `Market::CreationFrozenUntil` (r:0 w:1)
 	/// Proof: `Market::CreationFrozenUntil` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
@@ -237,8 +251,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `0`
 		//  Estimated: `0`
-		// Minimum execution time: 4_120_000 picoseconds.
-		Weight::from_parts(4_530_000, 0)
+		// Minimum execution time: 3_970_000 picoseconds.
+		Weight::from_parts(4_460_000, 0)
 			.saturating_add(Weight::from_parts(0, 0))
 			.saturating_add(T::DbWeight::get().writes(1))
 	}
@@ -250,8 +264,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `109`
 		//  Estimated: `1489`
-		// Minimum execution time: 6_260_000 picoseconds.
-		Weight::from_parts(6_690_000, 0)
+		// Minimum execution time: 5_730_000 picoseconds.
+		Weight::from_parts(6_390_000, 0)
 			.saturating_add(Weight::from_parts(0, 1489))
 			.saturating_add(T::DbWeight::get().reads(1))
 			.saturating_add(T::DbWeight::get().writes(2))
@@ -276,8 +290,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `151`
 		//  Estimated: `6040`
-		// Minimum execution time: 26_660_000 picoseconds.
-		Weight::from_parts(28_030_000, 0)
+		// Minimum execution time: 25_250_000 picoseconds.
+		Weight::from_parts(27_510_000, 0)
 			.saturating_add(Weight::from_parts(0, 6040))
 			.saturating_add(T::DbWeight::get().reads(9))
 			.saturating_add(T::DbWeight::get().writes(8))
@@ -296,6 +310,10 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `ConditionalLedger::Vaults` (`max_values`: None, `max_size`: Some(184), added: 2659, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::DepositsHeld` (r:1 w:0)
 	/// Proof: `ConditionalLedger::DepositsHeld` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
+	/// Storage: `Constitution::Params` (r:8 w:0)
+	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
+	/// Storage: `ConditionalLedger::RedemptionFeesAccrued` (r:1 w:0)
+	/// Proof: `ConditionalLedger::RedemptionFeesAccrued` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::PositionTotals` (r:14 w:14)
 	/// Proof: `ConditionalLedger::PositionTotals` (`max_values`: None, `max_size`: Some(44), added: 2519, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::Positions` (r:28 w:28)
@@ -308,21 +326,21 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Account` (r:2 w:2)
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
-	/// Storage: `Constitution::Params` (r:6 w:0)
-	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	/// Storage: `Market::LivePolCommitments` (r:1 w:1)
 	/// Proof: `Market::LivePolCommitments` (`max_values`: Some(1), `max_size`: Some(4706), added: 5201, mode: `MaxEncodedLen`)
 	/// Storage: `FutarchyTreasury::State` (r:1 w:1)
 	/// Proof: `FutarchyTreasury::State` (`max_values`: Some(1), `max_size`: Some(25361), added: 25856, mode: `MaxEncodedLen`)
+	/// Storage: `FutarchyTreasury::PendingMainCredit` (r:1 w:1)
+	/// Proof: `FutarchyTreasury::PendingMainCredit` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
 	fn seed() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `13151`
+		//  Measured:  `13437`
 		//  Estimated: `72866`
-		// Minimum execution time: 502_681_000 picoseconds.
-		Weight::from_parts(515_191_000, 0)
+		// Minimum execution time: 489_360_000 picoseconds.
+		Weight::from_parts(518_880_000, 0)
 			.saturating_add(Weight::from_parts(0, 72866))
-			.saturating_add(T::DbWeight::get().reads(64))
-			.saturating_add(T::DbWeight::get().writes(52))
+			.saturating_add(T::DbWeight::get().reads(68))
+			.saturating_add(T::DbWeight::get().writes(53))
 	}
 	/// Storage: `Market::Markets` (r:1 w:1)
 	/// Proof: `Market::Markets` (`max_values`: None, `max_size`: Some(229), added: 2704, mode: `MaxEncodedLen`)
@@ -334,8 +352,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `548`
 		//  Estimated: `3874`
-		// Minimum execution time: 19_890_000 picoseconds.
-		Weight::from_parts(20_900_000, 0)
+		// Minimum execution time: 18_920_000 picoseconds.
+		Weight::from_parts(20_470_000, 0)
 			.saturating_add(Weight::from_parts(0, 3874))
 			.saturating_add(T::DbWeight::get().reads(2))
 			.saturating_add(T::DbWeight::get().writes(3))
@@ -344,12 +362,12 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `Market::Markets` (`max_values`: None, `max_size`: Some(229), added: 2704, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::Vaults` (r:2240 w:0)
 	/// Proof: `ConditionalLedger::Vaults` (`max_values`: None, `max_size`: Some(184), added: 2659, mode: `MaxEncodedLen`)
-	/// Storage: `Market::SettlementObservedAt` (r:2241 w:0)
-	/// Proof: `Market::SettlementObservedAt` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
 	/// Storage: `Market::CounterForMarkets` (r:1 w:0)
 	/// Proof: `Market::CounterForMarkets` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Market::CounterForMarketProtocolAccounts` (r:1 w:0)
 	/// Proof: `Market::CounterForMarketProtocolAccounts` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `Market::SettlementObservedAt` (r:2241 w:0)
+	/// Proof: `Market::SettlementObservedAt` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
 	/// Storage: `Market::ActiveMarketCount` (r:1 w:0)
 	/// Proof: `Market::ActiveMarketCount` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Market::MarketProtocolAccounts` (r:4481 w:0)
@@ -370,7 +388,7 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `Market::DecisionWindowOwners` (`max_values`: None, `max_size`: Some(5146), added: 7621, mode: `MaxEncodedLen`)
 	/// Storage: `Market::SeededMarkets` (r:2241 w:0)
 	/// Proof: `Market::SeededMarkets` (`max_values`: None, `max_size`: Some(56), added: 2531, mode: `MaxEncodedLen`)
-	/// Storage: `Market::SweptMarkets` (r:2044 w:0)
+	/// Storage: `Market::SweptMarkets` (r:2241 w:0)
 	/// Proof: `Market::SweptMarkets` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::Positions` (r:6129 w:0)
 	/// Proof: `ConditionalLedger::Positions` (`max_values`: None, `max_size`: Some(92), added: 2567, mode: `MaxEncodedLen`)
@@ -382,15 +400,17 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `Market::ClosedAt` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
 	/// Storage: `FutarchyTreasury::State` (r:1 w:0)
 	/// Proof: `FutarchyTreasury::State` (`max_values`: Some(1), `max_size`: Some(25361), added: 25856, mode: `MaxEncodedLen`)
+	/// Storage: `FutarchyTreasury::PendingMainCredit` (r:1 w:0)
+	/// Proof: `FutarchyTreasury::PendingMainCredit` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
 	/// Storage: `Constitution::Params` (r:5 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	fn try_state() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `2873959`
+		//  Measured:  `2874018`
 		//  Estimated: `17079651`
-		// Minimum execution time: 304_714_986_000 picoseconds.
-		Weight::from_parts(306_907_699_000, 0)
+		// Minimum execution time: 301_685_355_000 picoseconds.
+		Weight::from_parts(310_853_761_000, 0)
 			.saturating_add(Weight::from_parts(0, 17079651))
-			.saturating_add(T::DbWeight::get().reads(37118))
+			.saturating_add(T::DbWeight::get().reads(37316))
 	}
 }

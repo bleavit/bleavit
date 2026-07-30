@@ -23,10 +23,19 @@ use futarchy_primitives::{
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
+/// The pre-E1 corpus shape (02 §13 contract v16): redemption events carry the
+/// payout and nothing else.
+const CONTRACT_V16: u64 = 16;
+/// The E1 corpus shape (contract v17): the four fee-bearing redemption events
+/// carry the **gross** plus a trailing `fee`, the digest carries
+/// `redemption_fees_accrued`, and `sweep_redemption_fees` is in the alphabet.
+const CONTRACT_V17: u64 = 17;
+
 #[derive(Deserialize)]
 struct Fixture {
     ledger_scenarios: Vec<Value>,
     ledger_sequence_scenarios: Vec<Scenario>,
+    ledger_fee_scenarios: Vec<FeeScenario>,
     ledger_score_scenarios: Vec<ScoreScenario>,
     ledger_error_scenarios: Vec<ErrorScenario>,
 }
@@ -37,6 +46,41 @@ struct Scenario {
     initial_state: InitialState,
     ops: Vec<Step>,
     final_state: Value,
+}
+
+/// One 03 §5.3a row of the fee corpus. Each is a standalone program: it carries
+/// the rate, the `min_split` waiver threshold and the exempt-account set beside
+/// its ops, so the replay never consults 13 (04 §5 standalone-replay rule).
+#[derive(Deserialize)]
+struct FeeScenario {
+    name: String,
+    params: FeeParams,
+    initial_state: InitialState,
+    ops: Vec<FeeStep>,
+    fees_accrued: u128,
+    fees_charged_total: u128,
+    fees_swept_total: u128,
+    final_state: Value,
+}
+
+#[derive(Deserialize)]
+struct FeeParams {
+    contract_version: u64,
+    redeem_fee_perbill: u64,
+    min_split: u64,
+    protocol_accounts: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct FeeStep {
+    #[serde(flatten)]
+    step: Step,
+    /// Present only on the payout ops: the escrow outflow, the withheld fee and
+    /// what the claimant received, measured independently of the event.
+    gross: Option<u128>,
+    fee: Option<u128>,
+    net: Option<u128>,
+    fees_accrued_after: u128,
 }
 
 #[derive(Deserialize)]
@@ -203,11 +247,27 @@ fn last_event(state: &LedgerState<u8>) -> &Event {
         .expect("successful operation emits event")
 }
 
+/// The four 02 §6 (contract v17) fee-bearing redemption outcomes report the
+/// gross with a trailing `fee`; the two exempt ones never do (rule 3).
+fn redemption_outcome(burned: u128, payout: u128, fee: u128, version: u64) -> Value {
+    if version >= CONTRACT_V17 {
+        object(&[
+            ("burned", number(burned)),
+            ("fee", number(fee)),
+            ("payout", number(payout)),
+        ])
+    } else {
+        assert_eq!(fee, 0, "a v16 replay must never charge a fee");
+        object(&[("burned", number(burned)), ("payout", number(payout))])
+    }
+}
+
 fn apply_step(
     state: &mut LedgerState<u8>,
     pid: u64,
     epoch: u32,
     step: &Step,
+    version: u64,
 ) -> Result<Value, Error> {
     let args = &step.args;
     let who = || holder(string(args, "account"));
@@ -323,35 +383,26 @@ fn apply_step(
         "redeem_scalar" => {
             let a = a();
             state.redeem_scalar(pid, scalar_side(string(args, "side")), &who(), a)?;
-            let Event::ScalarRedeemed(_, _, payout) = last_event(state) else {
+            let Event::ScalarRedeemed(_, _, payout, fee) = last_event(state) else {
                 panic!("scalar redemption emitted wrong event")
             };
-            Ok(object(&[
-                ("burned", number(a)),
-                ("payout", number(*payout)),
-            ]))
+            Ok(redemption_outcome(a, *payout, *fee, version))
         }
         "redeem_scalar_pair" => {
             let a = a();
             state.redeem_scalar_pair(pid, &who(), a)?;
-            let Event::ScalarPairRedeemed(_, payout) = last_event(state) else {
+            let Event::ScalarPairRedeemed(_, payout, fee) = last_event(state) else {
                 panic!("scalar pair redemption emitted wrong event")
             };
-            Ok(object(&[
-                ("burned", number(a)),
-                ("payout", number(*payout)),
-            ]))
+            Ok(redemption_outcome(a, *payout, *fee, version))
         }
         "redeem_gate" => {
             let a = a();
             state.redeem_gate(pid, gate(string(args, "gate")), &who(), a)?;
-            let Event::GateRedeemed(_, _, payout) = last_event(state) else {
+            let Event::GateRedeemed(_, _, payout, fee) = last_event(state) else {
                 panic!("gate redemption emitted wrong event")
             };
-            Ok(object(&[
-                ("burned", number(a)),
-                ("payout", number(*payout)),
-            ]))
+            Ok(redemption_outcome(a, *payout, *fee, version))
         }
         "redeem_void" => {
             let a = a();
@@ -391,24 +442,27 @@ fn apply_step(
         "redeem_baseline" => {
             let a = a();
             state.redeem_baseline(epoch, scalar_side(string(args, "side")), &who(), a)?;
-            let Event::BaselineRedeemed(_, _, payout) = last_event(state) else {
+            let Event::BaselineRedeemed(_, _, payout, fee) = last_event(state) else {
                 panic!("baseline redemption emitted wrong event")
             };
-            Ok(object(&[
-                ("burned", number(a)),
-                ("payout", number(*payout)),
-            ]))
+            Ok(redemption_outcome(a, *payout, *fee, version))
         }
         "redeem_baseline_pair" => {
             let a = a();
             state.redeem_baseline_pair(epoch, &who(), a)?;
-            let Event::BaselineRedeemed(_, _, payout) = last_event(state) else {
+            let Event::BaselineRedeemed(_, _, payout, fee) = last_event(state) else {
                 panic!("baseline pair redemption emitted wrong event")
             };
-            Ok(object(&[
-                ("burned", number(a)),
-                ("payout", number(*payout)),
-            ]))
+            Ok(redemption_outcome(a, *payout, *fee, version))
+        }
+        "sweep_redemption_fees" => {
+            assert!(
+                version >= CONTRACT_V17,
+                "03 §5.4's fee sweep is a contract-v17 call and must not appear \
+                 in a v16 program"
+            );
+            let swept = state.sweep_redemption_fees()?;
+            Ok(object(&[("swept", number(swept))]))
         }
         other => panic!("unhandled vector operation: {other}"),
     }
@@ -539,7 +593,24 @@ fn event_position_kind_name(kind: PositionKind) -> String {
     }
 }
 
-fn event_value(event: &Event) -> Value {
+/// Project one core event into the corpus's `{kind, fields}` shape.
+///
+/// 02 §6 rule 1 splits the gross and the fee across two fields of the same
+/// event, and rule 3 keeps `Redeemed`/`VoidRedeemed` free of a fee field
+/// entirely. The trailing `fee` exists only from contract v17, so the pre-E1
+/// rows project without it and the E1 rows with it — a v16 row that somehow
+/// carried a non-zero fee is refused here rather than silently truncated.
+fn event_value(event: &Event, version: u64) -> Value {
+    let fee_tail = |leading: Vec<Value>, fee: u128| -> Vec<Value> {
+        if version >= CONTRACT_V17 {
+            let mut fields = leading;
+            fields.push(number(fee));
+            fields
+        } else {
+            assert_eq!(fee, 0, "a v16 event cannot carry a fee");
+            leading
+        }
+    };
     let (kind, fields) = match *event {
         Event::Split(pid, amount) => ("Split", vec![Value::from(pid), number(amount)]),
         Event::Merged(pid, amount) => ("Merged", vec![Value::from(pid), number(amount)]),
@@ -614,24 +685,31 @@ fn event_value(event: &Event) -> Value {
             vec![Value::from(epoch), Value::from(score.0)],
         ),
         Event::Redeemed(pid, payout) => ("Redeemed", vec![Value::from(pid), number(payout)]),
-        Event::ScalarRedeemed(pid, side, payout) => (
+        Event::ScalarRedeemed(pid, side, payout, fee) => (
             "ScalarRedeemed",
-            vec![
-                Value::from(pid),
-                Value::from(scalar_side_name(side)),
-                number(payout),
-            ],
+            fee_tail(
+                vec![
+                    Value::from(pid),
+                    Value::from(scalar_side_name(side)),
+                    number(payout),
+                ],
+                fee,
+            ),
         ),
-        Event::ScalarPairRedeemed(pid, payout) => {
-            ("ScalarPairRedeemed", vec![Value::from(pid), number(payout)])
-        }
-        Event::GateRedeemed(pid, gate, payout) => (
+        Event::ScalarPairRedeemed(pid, payout, fee) => (
+            "ScalarPairRedeemed",
+            fee_tail(vec![Value::from(pid), number(payout)], fee),
+        ),
+        Event::GateRedeemed(pid, gate, payout, fee) => (
             "GateRedeemed",
-            vec![
-                Value::from(pid),
-                Value::from(gate_name(gate)),
-                number(payout),
-            ],
+            fee_tail(
+                vec![
+                    Value::from(pid),
+                    Value::from(gate_name(gate)),
+                    number(payout),
+                ],
+                fee,
+            ),
         ),
         Event::VoidRedeemed(pid, position_kind, amount, payout) => (
             "VoidRedeemed",
@@ -642,14 +720,24 @@ fn event_value(event: &Event) -> Value {
                 number(payout),
             ],
         ),
-        Event::BaselineRedeemed(epoch, side, payout) => (
+        Event::BaselineRedeemed(epoch, side, payout, fee) => (
             "BaselineRedeemed",
-            vec![
-                Value::from(epoch),
-                Value::from(scalar_side_name(side)),
-                number(payout),
-            ],
+            fee_tail(
+                vec![
+                    Value::from(epoch),
+                    Value::from(scalar_side_name(side)),
+                    number(payout),
+                ],
+                fee,
+            ),
         ),
+        Event::RedemptionFeesSwept(amount) => {
+            assert!(
+                version >= CONTRACT_V17,
+                "03 §5.4's sweep event is contract v17"
+            );
+            ("RedemptionFeesSwept", vec![number(amount)])
+        }
         Event::VaultReaped(pid, residue) => {
             ("VaultReaped", vec![Value::from(pid), number(residue)])
         }
@@ -664,7 +752,7 @@ fn event_value(event: &Event) -> Value {
     ])
 }
 
-fn state_digest(state: &LedgerState<u8>, pid: u64, epoch: u32) -> Value {
+fn state_digest(state: &LedgerState<u8>, pid: u64, epoch: u32, version: u64) -> Value {
     let proposal = &state
         .vaults
         .iter()
@@ -717,7 +805,7 @@ fn state_digest(state: &LedgerState<u8>, pid: u64, epoch: u32) -> Value {
         })
         .collect::<Vec<_>>();
     totals.sort_by(|left, right| left.0.cmp(&right.0));
-    object(&[
+    let mut digest = object(&[
         (
             "proposal",
             object(&[
@@ -786,7 +874,13 @@ fn state_digest(state: &LedgerState<u8>, pid: u64, epoch: u32) -> Value {
         ("deposits_held", number(state.deposits_held)),
         (
             "events",
-            Value::Array(state.events.iter().map(event_value).collect()),
+            Value::Array(
+                state
+                    .events
+                    .iter()
+                    .map(|event| event_value(event, version))
+                    .collect(),
+            ),
         ),
         (
             "protocol_accounts",
@@ -798,7 +892,19 @@ fn state_digest(state: &LedgerState<u8>, pid: u64, epoch: u32) -> Value {
                     .collect(),
             ),
         ),
-    ])
+    ]);
+    if version >= CONTRACT_V17 {
+        // 03 §5.3a(4): `RedemptionFeesAccrued` is real pallet storage, so a
+        // differential that compares only the final state must be able to see
+        // it. It exists only from E1, hence the version gate.
+        if let Some(map) = digest.as_object_mut() {
+            map.insert(
+                "redemption_fees_accrued".to_owned(),
+                number(state.redemption_fees_accrued),
+            );
+        }
+    }
+    digest
 }
 
 #[test]
@@ -815,7 +921,7 @@ fn ledger_sequence_vectors_match_python_reference_model() {
             .create_baseline_vault(epoch)
             .expect("create baseline vault");
         assert_eq!(
-            state_digest(&state, pid, epoch),
+            state_digest(&state, pid, epoch, CONTRACT_V16),
             scenario.initial_state.digest,
             "{} initial-state mismatch",
             scenario.name
@@ -823,7 +929,7 @@ fn ledger_sequence_vectors_match_python_reference_model() {
 
         for (index, step) in scenario.ops.iter().enumerate() {
             let before = state.clone();
-            let actual = apply_step(&mut state, pid, epoch, step);
+            let actual = apply_step(&mut state, pid, epoch, step, CONTRACT_V16);
             if let Some(expected) = step.outcome.get("ok") {
                 let actual = actual.unwrap_or_else(|error| {
                     panic!(
@@ -864,13 +970,305 @@ fn ledger_sequence_vectors_match_python_reference_model() {
             }
         }
 
-        let actual = state_digest(&state, pid, epoch);
+        let actual = state_digest(&state, pid, epoch, CONTRACT_V16);
         assert_eq!(
             actual, scenario.final_state,
             "{} final-state mismatch: Rust={actual}, Python={}",
             scenario.name, scenario.final_state
         );
     }
+}
+
+/// 03 §5.3a / §11 (the E1 half of the differential obligation).
+///
+/// Every existing family runs at the zero default and would agree with an
+/// implementation that ignored the rate completely, so this replay — and only
+/// this replay — exercises the fee path at all. It covers every charged call,
+/// every exemption, both waiver boundaries, the protocol-account exemption, the
+/// degenerate 100 % rate, an out-of-domain (malformed) record and the sweep.
+///
+/// The comparison is byte-exact on the per-op outcome, the running accrual, the
+/// event log and the final digest — with **one** documented correction applied
+/// to the corpus, below.
+#[test]
+fn ledger_fee_vectors_match_python_reference_model() {
+    let fixture = fixture();
+    assert_eq!(
+        fixture.ledger_fee_scenarios.len(),
+        11,
+        "03 §5.3a fee-corpus cardinality drifted"
+    );
+    let mut seen_protocol_row = false;
+
+    for scenario in fixture.ledger_fee_scenarios {
+        let version = scenario.params.contract_version;
+        assert_eq!(
+            version, CONTRACT_V17,
+            "{}: the fee corpus is the contract-v17 shape",
+            scenario.name
+        );
+        let pid = scenario.initial_state.proposal_id;
+        let epoch = scenario.initial_state.baseline_epoch;
+
+        let mut state = LedgerState::<u8>::new();
+        state.create_vault(pid, 0).expect("create proposal vault");
+        state
+            .create_baseline_vault(epoch)
+            .expect("create baseline vault");
+        // 13 · Reading rules: the row carries the rate and the waiver threshold,
+        // so the replay configures the core from the program rather than from a
+        // literal. `redeem_fee` is deliberately taken **unclamped** — row
+        // fee-10 carries a rate outside the `Perbill` domain and the ledger must
+        // read it as zero itself (§5.3a(5)).
+        state.redeem_fee =
+            u32::try_from(scenario.params.redeem_fee_perbill).expect("the corpus rate fits u32");
+        state.min_split = u128::from(scenario.params.min_split);
+        for account in &scenario.params.protocol_accounts {
+            seen_protocol_row = true;
+            state.add_protocol_account(holder(account));
+        }
+
+        assert_eq!(
+            state_digest(&state, pid, epoch, version),
+            corrected(&scenario.initial_state.digest, &scenario.params),
+            "{} initial-state mismatch",
+            scenario.name
+        );
+
+        let mut charged_total: u128 = 0;
+        let mut swept_total: u128 = 0;
+        for (index, row) in scenario.ops.iter().enumerate() {
+            let step = &row.step;
+            let before = state.clone();
+            let accrued_before = state.redemption_fees_accrued;
+            let escrow_before = total_escrow(&state);
+            let actual = apply_step(&mut state, pid, epoch, step, version);
+            let Some(expected) = step.outcome.get("ok") else {
+                let class = step
+                    .outcome
+                    .get("err")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("{} op {index} has no outcome", scenario.name));
+                assert_eq!(
+                    actual,
+                    Err(expected_error(class)),
+                    "{} op {index} ({}) error mismatch",
+                    scenario.name,
+                    step.op
+                );
+                assert_eq!(
+                    state, before,
+                    "{} op {index} ({}) mutated state on expected {class}",
+                    scenario.name, step.op
+                );
+                continue;
+            };
+            let actual = actual.unwrap_or_else(|error| {
+                panic!(
+                    "{} op {index} ({}) expected ok {expected}, got err {error:?}",
+                    scenario.name, step.op
+                )
+            });
+            assert_eq!(
+                actual, *expected,
+                "{} op {index} ({}) result mismatch: Rust={actual}, Python={expected}",
+                scenario.name, step.op
+            );
+
+            // 03 §5.3a(4)/§6.5: measure the gross as the **escrow outflow** and
+            // the fee as the **accrual delta**, independently of what the event
+            // reported, so `net + fee == gross` is a real check and not a
+            // restatement of the same number three times.
+            let escrow_after = total_escrow(&state);
+            let accrued_after = state.redemption_fees_accrued;
+            let gross = escrow_before.saturating_sub(escrow_after);
+            if step.op == "sweep_redemption_fees" {
+                let swept = accrued_before.saturating_sub(accrued_after);
+                assert_eq!(
+                    accrued_after, 0,
+                    "{} op {index}: sweep must zero",
+                    scenario.name
+                );
+                assert_eq!(
+                    gross, 0,
+                    "{} op {index}: the sweep moves surplus, never escrow",
+                    scenario.name
+                );
+                swept_total += swept;
+            } else {
+                let fee = accrued_after
+                    .checked_sub(accrued_before)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} op {index}: the accrual is monotone between sweeps",
+                            scenario.name
+                        )
+                    });
+                charged_total += fee;
+                assert_eq!(
+                    fee,
+                    row.fee.unwrap_or(0),
+                    "{} op {index} ({}) fee mismatch",
+                    scenario.name,
+                    step.op
+                );
+                if let (Some(row_gross), Some(row_net)) = (row.gross, row.net) {
+                    assert_eq!(
+                        gross, row_gross,
+                        "{} op {index} ({}) gross mismatch",
+                        scenario.name, step.op
+                    );
+                    assert_eq!(
+                        row_net + fee,
+                        gross,
+                        "{} op {index} ({}): net + fee != gross",
+                        scenario.name,
+                        step.op
+                    );
+                    // §5.3a(4): the fee is never a second draw on escrow — the
+                    // gross is the whole outflow and the fee is carved out of
+                    // it, so it can never exceed it.
+                    assert!(
+                        fee <= gross,
+                        "{} op {index} ({}): fee exceeds gross",
+                        scenario.name,
+                        step.op
+                    );
+                } else {
+                    assert_eq!(
+                        fee, 0,
+                        "{} op {index} ({}) is not a payout and must charge nothing",
+                        scenario.name, step.op
+                    );
+                }
+            }
+            assert_eq!(
+                state.redemption_fees_accrued, row.fees_accrued_after,
+                "{} op {index} ({}) accrual mismatch",
+                scenario.name, step.op
+            );
+            state.try_state().unwrap_or_else(|error| {
+                panic!(
+                    "{} op {index} ({}) violated Rust try-state: {error:?}",
+                    scenario.name, step.op
+                )
+            });
+        }
+
+        assert_eq!(
+            charged_total, scenario.fees_charged_total,
+            "{} cumulative charged-fee mismatch",
+            scenario.name
+        );
+        assert_eq!(
+            swept_total, scenario.fees_swept_total,
+            "{} cumulative swept-fee mismatch",
+            scenario.name
+        );
+        // L-7's core-visible half: the counter is exactly what was charged and
+        // not yet swept.
+        assert_eq!(
+            state.redemption_fees_accrued,
+            charged_total - swept_total,
+            "{} counter is not sweep-exact",
+            scenario.name
+        );
+        assert_eq!(
+            state.redemption_fees_accrued, scenario.fees_accrued,
+            "{} final accrual mismatch",
+            scenario.name
+        );
+
+        let actual = state_digest(&state, pid, epoch, version);
+        let expected = corrected(&scenario.final_state, &scenario.params);
+        assert_eq!(
+            actual, expected,
+            "{} final-state mismatch: Rust={actual}, Python={expected}",
+            scenario.name
+        );
+    }
+    assert!(
+        seen_protocol_row,
+        "the fee corpus must exercise the 03 §5.3a(1) ProtocolAccounts exemption"
+    );
+}
+
+/// Apply 03 §3/§4's protocol-account deposit exemption to a corpus digest.
+///
+/// **This is a recorded disagreement with the corpus generator, not a
+/// tolerance.** `tools/reference-model/generate-vectors.py`'s sequence driver
+/// stamps `_POSITION_DEPOSIT` onto every `Positions` row, counts every owner in
+/// `position_counts`, and derives `deposits_held` from the raw row count — it
+/// never consults its own `protocol_accounts` set. That was invisible while the
+/// set was empty (all 64 pre-E1 rows and 10 of the 11 fee rows) and becomes
+/// wrong on `fee-08-protocol-account-is-exempt`, the one row that populates it:
+/// 03 §3 makes `ProtocolAccounts` "exempt from the position cap … and from the
+/// storage deposit", and 03 §4 takes the deposit from **non**-protocol accounts
+/// only, so a protocol owner has `deposit = 0`, no `PositionCount` row and
+/// contributes nothing to `DepositsHeld` (L-6; PT-8's "cap enforced for
+/// non-protocol accounts, never for protocol accounts").
+///
+/// The spec decides it, so the correction is applied to the corpus rather than
+/// to the ledger, and it is applied **from the row's own `protocol_accounts`
+/// list** — deterministically, to exactly the three fields the exemption
+/// governs, and provably a no-op wherever that list is empty (asserted below).
+/// Everything else in the digest, including every balance, supply, event and
+/// the accrual itself, is still compared byte-exactly.
+fn corrected(digest: &Value, params: &FeeParams) -> Value {
+    let mut digest = digest.clone();
+    if params.protocol_accounts.is_empty() {
+        return digest;
+    }
+    let exempt: BTreeSet<&str> = params
+        .protocol_accounts
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let map = digest.as_object_mut().expect("digest is an object");
+    let mut freed: u128 = 0;
+    let mut exempt_rows = 0usize;
+    if let Some(Value::Array(rows)) = map.get_mut("positions") {
+        for row in rows.iter_mut() {
+            let owner = row["owner"].as_str().expect("row owner").to_owned();
+            if !exempt.contains(owner.as_str()) {
+                continue;
+            }
+            exempt_rows += 1;
+            let entry = row.as_object_mut().expect("position row is an object");
+            freed += entry["deposit"].as_u64().expect("row deposit") as u128;
+            entry.insert("deposit".to_owned(), number(0));
+        }
+    }
+    if let Some(Value::Array(rows)) = map.get_mut("position_counts") {
+        rows.retain(|row| !exempt.contains(row["owner"].as_str().expect("count owner")));
+    }
+    let held = map["deposits_held"].as_u64().expect("deposits_held") as u128;
+    map.insert("deposits_held".to_owned(), number(held - freed));
+    // The correction is self-proving: it must actually change something, or the
+    // disagreement it exists to record has been fixed upstream and this whole
+    // function — not the assertion — is what should be deleted. Silently
+    // becoming a no-op is the one failure mode a documented carve-out must not
+    // have.
+    assert!(
+        exempt_rows == 0 || freed > 0,
+        "the generator no longer charges a deposit to a ProtocolAccounts owner; \
+         delete `corrected()` and compare the digest directly"
+    );
+    digest
+}
+
+fn total_escrow(state: &LedgerState<u8>) -> u128 {
+    state
+        .vaults
+        .iter()
+        .map(|vault| vault.info.escrowed)
+        .chain(
+            state
+                .baseline_vaults
+                .iter()
+                .map(|vault| vault.info.escrowed),
+        )
+        .sum()
 }
 
 fn settled_scalar(score: u64, amount: u128) -> LedgerState<u8> {
@@ -908,7 +1306,7 @@ fn ledger_score_vectors_cover_endpoints_and_rounding_boundaries() {
         let mut long = settled_scalar(row.score, amount);
         long.redeem_scalar(1, ScalarSide::Long, &1, amount)
             .unwrap_or_else(|error| panic!("{} LONG failed: {error:?}", row.name));
-        let Event::ScalarRedeemed(_, _, long_payout) = long.events.last().unwrap() else {
+        let Event::ScalarRedeemed(_, _, long_payout, _) = long.events.last().unwrap() else {
             panic!("{} LONG emitted wrong event", row.name)
         };
         assert_eq!(
@@ -923,7 +1321,7 @@ fn ledger_score_vectors_cover_endpoints_and_rounding_boundaries() {
         short
             .redeem_scalar(1, ScalarSide::Short, &1, amount)
             .unwrap_or_else(|error| panic!("{} SHORT failed: {error:?}", row.name));
-        let Event::ScalarRedeemed(_, _, short_payout) = short.events.last().unwrap() else {
+        let Event::ScalarRedeemed(_, _, short_payout, _) = short.events.last().unwrap() else {
             panic!("{} SHORT emitted wrong event", row.name)
         };
         assert_eq!(
@@ -939,7 +1337,7 @@ fn ledger_score_vectors_cover_endpoints_and_rounding_boundaries() {
         let mut pair = settled_scalar(row.score, amount);
         pair.redeem_scalar_pair(1, &1, amount)
             .unwrap_or_else(|error| panic!("{} pair failed: {error:?}", row.name));
-        let Event::ScalarPairRedeemed(_, pair_payout) = pair.events.last().unwrap() else {
+        let Event::ScalarPairRedeemed(_, pair_payout, _) = pair.events.last().unwrap() else {
             panic!("{} pair emitted wrong event", row.name)
         };
         assert_eq!(
@@ -985,12 +1383,14 @@ fn ledger_legacy_scenarios_match_python_reference_model() {
 
     fn payout_of(state: &LedgerState<u8>) -> u128 {
         match state.events.last().expect("redemption emits an event") {
+            // The legacy family runs at the zero default, so every one of these
+            // is the gross and the net alike.
             Event::Redeemed(_, payout)
-            | Event::ScalarPairRedeemed(_, payout)
-            | Event::ScalarRedeemed(_, _, payout)
-            | Event::GateRedeemed(_, _, payout)
+            | Event::ScalarPairRedeemed(_, payout, _)
+            | Event::ScalarRedeemed(_, _, payout, _)
+            | Event::GateRedeemed(_, _, payout, _)
             | Event::VoidRedeemed(_, _, _, payout)
-            | Event::BaselineRedeemed(_, _, payout) => *payout,
+            | Event::BaselineRedeemed(_, _, payout, _) => *payout,
             other => panic!("last event is not a redemption: {other:?}"),
         }
     }

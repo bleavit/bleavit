@@ -1,4 +1,79 @@
 {
+  "baseline_market_scenarios": [
+    {
+      "after_buy": {
+        "book_long": 6443966602,
+        "book_short": 7443966602,
+        "buyer_long": 1000000000,
+        "buyer_short": 0,
+        "fees_long": 1537485,
+        "fees_short": 1537485,
+        "main_usdc": 0
+      },
+      "after_sweep": {
+        "book_long": 6443966602,
+        "book_short": 7443966602,
+        "buyer_long": 1000000000,
+        "buyer_short": 0,
+        "fees_long": 0,
+        "fees_short": 0,
+        "main_usdc": 1537485
+      },
+      "execution": {
+        "amount": 1000000000,
+        "cost": 512494796,
+        "fee": 1537485,
+        "side": "Long",
+        "total_debit": 514032281
+      },
+      "inputs": {
+        "amount": 1000000000,
+        "b": 10000000000,
+        "epoch": 7,
+        "fee_bps": 30,
+        "seed_inventory": 6931471806,
+        "side": "Long"
+      },
+      "name": "baseline-buy-fee-complete-set-to-main",
+      "swept_to_main": 1537485
+    },
+    {
+      "after": {
+        "book_long": 487505203,
+        "book_short": 487505203,
+        "buyer_long": 0,
+        "buyer_short": 0,
+        "fees_long": 0,
+        "fees_short": 0,
+        "main_usdc": 0
+      },
+      "before": {
+        "book_long": 487505203,
+        "book_short": 487505203,
+        "buyer_long": 0,
+        "buyer_short": 0,
+        "fees_long": 0,
+        "fees_short": 0,
+        "main_usdc": 0
+      },
+      "expected_error": "InsufficientBookInventory",
+      "inputs": {
+        "amount": 1000000000,
+        "b": 10000000000,
+        "book_inventory": 487505203,
+        "epoch": 7,
+        "fee_bps": 30,
+        "side": "Long"
+      },
+      "name": "baseline-buy-fee-segregation-refuses-thin-book",
+      "pooled_inventory": 1001537484,
+      "quote": {
+        "cost": 512494796,
+        "fee": 1537485
+      },
+      "segregated_inventory": 999999999
+    }
+  ],
   "contest_scenarios": [
     {
       "contest_capital_0_20": "0.000000",

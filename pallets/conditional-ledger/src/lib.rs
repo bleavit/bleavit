@@ -83,9 +83,49 @@ impl<AccountId> InflowCapGate<AccountId> for () {
     }
 }
 
+/// Runtime-owned ordering guard between the ledger's terminal-vault dust sweep
+/// and the market's 04 §2 revenue sweep.
+///
+/// The ledger stays independent of `pallet-market`: production binds this seam
+/// to that pallet, while standalone ledger tests provide an explicit fixture.
+/// Implementations must inspect only the bounded book index for the named
+/// vault. A seeded, unswept book returns `false`; an unseeded book is exempt
+/// because it has no subsidy inventory and may never acquire a lawful POL
+/// return destination.
+pub trait MarketSweepStatus {
+    fn proposal_books_swept(pid: futarchy_primitives::ProposalId) -> bool;
+    fn baseline_book_swept(epoch: futarchy_primitives::EpochId) -> bool;
+}
+
+/// Runtime-owned reporter for 03 §5.4 residue transferred into INSURANCE.
+///
+/// The transfer and this report are one accounting operation: production
+/// delegates to `pallet-futarchy-treasury::note_swept_residue`, which raises
+/// the derived 08 §1.2 target by exactly the event's `residue`. There is
+/// deliberately no implementation for `()`; a runtime must select an explicit
+/// reporter and cannot silently compile with the liability unreported.
+pub trait ResidueReporter {
+    fn note_swept_residue(
+        amount: futarchy_primitives::Balance,
+    ) -> frame_support::dispatch::DispatchResult;
+}
+
+/// Shared recognition seam for USDC that has reached treasury `MAIN` custody.
+///
+/// Both the 04 §2 market revenue sweep and the 03 §5.4 redemption-fee sweep
+/// use this exact trait. Custody alone does not move NAV because treasury
+/// accounting reads its internal `main_usdc` plus pending-credit counter.
+/// Returning an error leaves the enclosing sweep wholly unchanged (G-1).
+pub trait MainRevenueSink {
+    fn credit_main(amount: futarchy_primitives::Balance)
+        -> frame_support::dispatch::DispatchResult;
+}
+
 #[frame_support::pallet]
 pub mod pallet {
-    use crate::{weights::WeightInfo, InflowCapGate};
+    use crate::{
+        weights::WeightInfo, InflowCapGate, MainRevenueSink, MarketSweepStatus, ResidueReporter,
+    };
     use alloc::{collections::BTreeMap, vec::Vec};
     use conditional_ledger_core::{
         baseline as baseline_id, position as proposal_position, BaselineVaultInfo,
@@ -109,7 +149,7 @@ pub mod pallet {
     };
     use sp_runtime::{
         traits::{AccountIdConversion, CheckedAdd},
-        Saturating,
+        Perbill, Saturating,
     };
 
     /// The concrete asset identifier the configured collateral fungible uses. The
@@ -210,12 +250,45 @@ pub mod pallet {
         type ReapBatch: Get<u32>;
 
         /// POL / book / treasury-sub / INSURANCE accounts — exempt from the
-        /// position cap and the storage deposit (03 §3/§4).
+        /// position cap and the storage deposit (03 §3/§4). Since 03 §5.3a they
+        /// are additionally exempt from the redemption fee; the enumeration is
+        /// normative and is the same closed set §5.3a(1) names.
         type ProtocolAccounts: Contains<Self::AccountId>;
+
+        /// `ledger.redeem_fee` — the 03 §5.3a redemption-fee rate, read live
+        /// from `pallet-constitution::Params` (normative row: 13 §1). A missing
+        /// or malformed record reads as **zero**: the fail-open direction here
+        /// is the claimant-favouring one and cannot create an unbacked claim
+        /// (G-1). Deliberately **not** a `#[pallet::constant]` — 02 §9 freezes
+        /// the metadata constant `ConditionalLedger::RedemptionFee` as the
+        /// `u128` basis-points projection, exposed below in `extra_constants`
+        /// exactly as `Market::Fee` is.
+        type RedemptionFee: Get<Perbill>;
 
         /// Destination for swept residue (rounding dust + unredeemed-after-archive):
         /// the INSURANCE sub-account (03 §7 R-5).
         type InsuranceAccount: Get<Self::AccountId>;
+
+        /// Bounded 04 §2 ordering predicate. A terminal vault may not be
+        /// archived while any associated **seeded** book still owes its revenue
+        /// sweep; unseeded books are explicitly non-blocking.
+        type MarketSweepStatus: crate::MarketSweepStatus;
+
+        /// Reports the exact residue transferred to INSURANCE into the
+        /// treasury's O(1) unreclaimed-residue liability counter. No unit
+        /// implementation exists, so production cannot select a silent no-op.
+        type ResidueReporter: crate::ResidueReporter;
+
+        /// Destination for the swept redemption fee: the treasury `MAIN`
+        /// account (03 §5.4; 08 §1.1) — the same sink 04 §2's `sweep_revenue`
+        /// remits to. Kept separate from redemption itself so no payout can
+        /// fail because a treasury credit failed (03 §5.3a(4), G-1).
+        type TreasuryMainAccount: Get<Self::AccountId>;
+
+        /// NAV recognition for the custody transferred to
+        /// [`Config::TreasuryMainAccount`]. This is the same seam the market's
+        /// fee leg uses, so the two revenue instruments cannot drift apart.
+        type MainRevenueSink: crate::MainRevenueSink;
 
         /// The ledger's own `PalletId`; its derived sovereign account custodies all
         /// escrow and held deposits (03 §1).
@@ -292,6 +365,18 @@ pub mod pallet {
     /// storage transaction as the real USDC move (03 §5.4, I-4).
     #[pallet::storage]
     pub type TotalEscrowed<T: Config> = StorageValue<_, Balance, ValueQuery>;
+
+    /// 03 §5.3a(4)/L-7: redemption fee withheld from completed payouts and
+    /// retained as sovereign surplus, awaiting `sweep_redemption_fees`.
+    ///
+    /// An **additive internal** item (02 §13 v17) — not a §7 contract-surface
+    /// key. It is monotone non-decreasing between sweeps: a charged redemption
+    /// increments it by exactly `gross − net`, an exempt one by zero, and the
+    /// sweep is the only operation that decrements it, atomically with the
+    /// transfer. It is never escrow, so it is excluded from every L-2 liability
+    /// term and is exactly the lawful surplus L-7 bounds.
+    #[pallet::storage]
+    pub type RedemptionFeesAccrued<T: Config> = StorageValue<_, Balance, ValueQuery>;
 
     /// Persistent exact I-4 undercollateralization latch. `true` means the last
     /// reconciliation observed `liability > custody`; surplus is healthy.
@@ -392,35 +477,52 @@ pub mod pallet {
         },
         /// `settle_baseline(epoch, s)`.
         BaselineSettled { epoch: EpochId, s: FixedU64 },
-        /// `redeem(pid, a)`.
+        /// `redeem(pid, a)` — the par leg, **fee-exempt** (03 §5.3a(1), G-3), so
+        /// it deliberately carries no `fee` field (02 §6 rule 3).
         Redeemed { pid: ProposalId, amount: Balance },
-        /// `redeem_scalar(pid, kind, a)` — `payout` is the post-rounding amount.
+        /// `redeem_scalar(pid, kind, a)` — `payout` is the post-rounding
+        /// **gross**, `fee` the 03 §5.3a deduction, so `net = payout − fee`
+        /// (02 §6 rule 1, contract v17).
         ScalarRedeemed {
             pid: ProposalId,
             side: ScalarSide,
             payout: Balance,
+            fee: Balance,
         },
-        /// `redeem_scalar_pair(pid, a)` (02 §6, B-5).
-        ScalarPairRedeemed { pid: ProposalId, amount: Balance },
-        /// `redeem_gate(pid, g, a)`.
+        /// `redeem_scalar_pair(pid, a)` (02 §6, B-5) — `amount` is exactly `a`
+        /// gross; `fee` is `fee_pair(a)` per 03 §5.3a(2a), **not** `fee(a)`.
+        ScalarPairRedeemed {
+            pid: ProposalId,
+            amount: Balance,
+            fee: Balance,
+        },
+        /// `redeem_gate(pid, g, a)` — `amount` gross, `fee` the deduction.
         GateRedeemed {
             pid: ProposalId,
             gate: GateType,
             amount: Balance,
+            fee: Balance,
         },
-        /// `redeem_void(pid, kind, a)` (02 §6, D-1) — `amount` burned, `payout` paid.
+        /// `redeem_void(pid, kind, a)` (02 §6, D-1) — `amount` burned, `payout`
+        /// paid. **Fee-exempt** (03 §5.3a(1)), so no `fee` field (rule 3).
         VoidRedeemed {
             pid: ProposalId,
             kind: PositionKind,
             amount: Balance,
             payout: Balance,
         },
-        /// `redeem_baseline*`.
+        /// `redeem_baseline*` — `payout` gross, `fee` the deduction.
         BaselineRedeemed {
             epoch: EpochId,
             side: ScalarSide,
             payout: Balance,
+            fee: Balance,
         },
+        /// `sweep_redemption_fees()` moved the accrued balance to the treasury
+        /// `MAIN` account and zeroed the counter (02 §6, contract v17; 03 §5.4).
+        /// A sweep on an empty counter is a successful no-op and still emits,
+        /// with `amount = 0`.
+        RedemptionFeesSwept { amount: Balance },
         /// `sweep_dust(pid)` completed — residual escrow swept to INSURANCE (02 §6).
         VaultReaped { pid: ProposalId, residue: Balance },
         /// `sweep_dust_baseline(epoch)` completed.
@@ -481,7 +583,8 @@ pub mod pallet {
         /// internal consistency guards; try-state maps drift to I-4).
         TryStateViolation,
         /// The vault is not yet reap-eligible: not terminal, or `ArchiveDelay` has
-        /// not elapsed (03 §5.4).
+        /// not elapsed, or an associated seeded market has not completed its
+        /// 04 §2 Sweep (03 §5.4 / 04 §2).
         ReapNotDue,
         /// The position-storage deposit could not be taken from the entry owner
         /// (03 §4 / §8).
@@ -527,6 +630,16 @@ pub mod pallet {
         #[pallet::constant_name(MinTransfer)]
         fn min_transfer() -> Balance {
             kernel::MIN_TRANSFER_USDC
+        }
+
+        /// 02 §9 (contract v17): the live `ledger.redeem_fee` projected to
+        /// **basis points** by flooring the raw `Perbill` divided by 100,000 —
+        /// the same projection `Market::Fee` publishes for `mkt.fee`, and the
+        /// value a frontend cross-checks against the raw scalar from `params()`
+        /// before displaying a net redemption payout.
+        #[pallet::constant_name(RedemptionFee)]
+        fn redemption_fee_bps() -> u128 {
+            u128::from(T::RedemptionFee::get().deconstruct() / 100_000)
         }
     }
 
@@ -1053,6 +1166,53 @@ pub mod pallet {
             }
             Ok(())
         }
+
+        /// 03 §5.4 / §5.3a(4). Permissionless O(1) keeper crank: move the whole
+        /// accrued redemption fee from the sovereign to the treasury `MAIN`
+        /// account and zero the counter, atomically.
+        ///
+        /// A sweep on an **empty** counter is a successful no-op, not an error
+        /// (I-31; §5.3a(6) introduces no error and the §8 list is frozen). It
+        /// moves surplus, never escrow: `TotalEscrowed`, every vault's
+        /// `escrowed` and every supply field are untouched, so it cannot
+        /// underflow — the counter only ever accumulates amounts already
+        /// withheld from completed payouts. `Preservation::Preserve` keeps the
+        /// sovereign above its R-4 permanent floor, which L-7 is what makes
+        /// safe: the accrual is bounded by the surplus **above** `min_balance`,
+        /// so the crank can always pay out in full.
+        ///
+        /// **Frozen under `PB-LEDGER-FREEZE`** (06 §6.3; SQ-517). L-7 is a
+        /// conditional, and its condition is the negation of the I-4 drift
+        /// flag: the bound reads `RedemptionFeesAccrued ≤ balance −
+        /// TotalEscrowed − held_deposits − min_balance`, while the flag says
+        /// exactly that `TotalEscrowed + held_deposits > balance` — so under
+        /// the one state that authorizes a freeze the bound is *negative* and
+        /// there is no surplus to sweep. "Moves surplus, never escrow" then
+        /// stops being true, and `Preservation::Preserve` does not rescue it:
+        /// it protects `min_balance` and is indifferent to escrow. Refusing
+        /// here is what keeps the paragraph above accurate on every path this
+        /// crank can actually take.
+        #[pallet::call_index(26)]
+        #[pallet::weight(T::WeightInfo::sweep_redemption_fees())]
+        pub fn sweep_redemption_fees(origin: OriginFor<T>) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
+            let amount = RedemptionFeesAccrued::<T>::get();
+            if amount > 0 {
+                T::Collateral::transfer(
+                    Self::usdc(),
+                    &Self::account_id(),
+                    &T::TreasuryMainAccount::get(),
+                    amount,
+                    Preservation::Preserve,
+                )?;
+                T::MainRevenueSink::credit_main(amount)?;
+                RedemptionFeesAccrued::<T>::kill();
+                T::KeeperRebate::rebate(&who, CrankClass::General);
+            }
+            Self::deposit_event(Event::RedemptionFeesSwept { amount });
+            Ok(())
+        }
     }
 
     // ------------------------------------------- internal MarketAuthority API (§5.5)
@@ -1535,6 +1695,7 @@ pub mod pallet {
                 info,
             });
             st.deposits_held = DepositsHeld::<T>::get();
+            Self::overlay_fee_config(&mut st);
             Self::hydrate_positions(&mut st, Self::proposal_ids(pid), accts);
             Some(st)
         }
@@ -1548,8 +1709,25 @@ pub mod pallet {
             st.baseline_vaults
                 .push(conditional_ledger_core::BaselineVaultRecord { epoch, info });
             st.deposits_held = DepositsHeld::<T>::get();
+            Self::overlay_fee_config(&mut st);
             Self::hydrate_positions(&mut st, Self::baseline_ids(epoch).into_iter(), accts);
             Some(st)
+        }
+
+        /// 03 §5.3a(5) / 13 · Reading rules: overlay the live rate and waiver
+        /// threshold onto the loaded core state, and hand it the current
+        /// accrual so the op's post-image carries the exact new total.
+        ///
+        /// Both are read fresh on every load and neither is stored by the core:
+        /// a numeric literal duplicating either would be a defect. The rate is
+        /// the raw `Perbill` scalar; the ledger performs no bound check on it
+        /// beyond that domain, because the `≤ mkt.fee` coupling is screened at
+        /// the amendment boundary (13 rule 7) and no admissible rate can create
+        /// an unbacked claim (I-31).
+        fn overlay_fee_config(st: &mut LedgerState<T::AccountId>) {
+            st.redeem_fee = T::RedemptionFee::get().deconstruct();
+            st.min_split = T::MinSplit::get();
+            st.redemption_fees_accrued = RedemptionFeesAccrued::<T>::get();
         }
 
         fn hydrate_positions(
@@ -1693,10 +1871,13 @@ pub mod pallet {
         }
 
         /// [`Self::run_proposal`] additionally reporting the USDC the op paid
-        /// out of escrow to `escrow_party` — the exact amount `settle_collateral`
-        /// transferred. Redemptions never grow a vault's escrow, so a payout of
-        /// zero means the op moved no collateral, never that it moved some the
-        /// caller cannot see.
+        /// out of escrow to `escrow_party` — the exact amount
+        /// `settle_collateral` transferred, i.e. the **net** after any 03 §5.3a
+        /// redemption fee. Redemptions never grow a vault's escrow, so a payout
+        /// of zero means the op moved no collateral, never that it moved some
+        /// the caller cannot see. Every `MarketAuthority` caller of this helper
+        /// pays a `ProtocolAccounts` holder, which §5.3a(1) exempts, so gross
+        /// and net coincide on all of them.
         fn run_proposal_paid(
             pid: ProposalId,
             accts: &[T::AccountId],
@@ -1707,6 +1888,7 @@ pub mod pallet {
         ) -> Result<Balance, DispatchError> {
             let mut st = Self::load_proposal(pid, accts).ok_or(Error::<T>::UnknownVault)?;
             let escrow_before = Self::vault_escrow(&st, pid);
+            let accrued_before = st.redemption_fees_accrued;
             let counts_before: Vec<u32> =
                 accts.iter().map(|w| Self::account_count(&st, w)).collect();
             op(&mut st).map_err(Error::<T>::from)?;
@@ -1714,10 +1896,13 @@ pub mod pallet {
             let counts_after: Vec<u32> =
                 accts.iter().map(|w| Self::account_count(&st, w)).collect();
             Self::persist_proposal(pid, accts, &st);
-            Self::settle_collateral(escrow_party, escrow_before, escrow_after)?;
+            let withheld = Self::persist_redemption_fee(accrued_before, &st)?;
+            Self::settle_collateral(escrow_party, escrow_before, escrow_after, withheld)?;
             Self::settle_deposits(accts, &counts_before, &counts_after)?;
             Self::emit_core_events(&st);
-            Ok(escrow_before.saturating_sub(escrow_after))
+            Ok(escrow_before
+                .saturating_sub(escrow_after)
+                .saturating_sub(withheld))
         }
 
         fn run_baseline(
@@ -1743,6 +1928,7 @@ pub mod pallet {
             let mut st =
                 Self::load_baseline(epoch, accts).ok_or(Error::<T>::UnknownBaselineVault)?;
             let escrow_before = Self::baseline_escrow(&st, epoch);
+            let accrued_before = st.redemption_fees_accrued;
             let counts_before: Vec<u32> =
                 accts.iter().map(|w| Self::account_count(&st, w)).collect();
             op(&mut st).map_err(Error::<T>::from)?;
@@ -1750,10 +1936,13 @@ pub mod pallet {
             let counts_after: Vec<u32> =
                 accts.iter().map(|w| Self::account_count(&st, w)).collect();
             Self::persist_baseline(epoch, accts, &st);
-            Self::settle_collateral(escrow_party, escrow_before, escrow_after)?;
+            let withheld = Self::persist_redemption_fee(accrued_before, &st)?;
+            Self::settle_collateral(escrow_party, escrow_before, escrow_after, withheld)?;
             Self::settle_deposits(accts, &counts_before, &counts_after)?;
             Self::emit_core_events(&st);
-            Ok(escrow_before.saturating_sub(escrow_after))
+            Ok(escrow_before
+                .saturating_sub(escrow_after)
+                .saturating_sub(withheld))
         }
 
         /// Authority-only ops touch just the vault (no positions, no collateral).
@@ -1783,16 +1972,51 @@ pub mod pallet {
             Ok(())
         }
 
+        /// 03 §5.3a(4): write the core's post-image accrual back to storage and
+        /// return the fee this op withheld.
+        ///
+        /// The counter is maintained here rather than by `persist_*` because it
+        /// is pallet-wide, not per-vault: `persist_proposal`/`persist_baseline`
+        /// write only the cells their bounded load covers.
+        fn persist_redemption_fee(
+            before: Balance,
+            st: &LedgerState<T::AccountId>,
+        ) -> Result<Balance, DispatchError> {
+            let after = st.redemption_fees_accrued;
+            // L-7: the counter is monotone non-decreasing between sweeps, and
+            // `sweep_redemption_fees` — which never runs inside a vault op — is
+            // the only operation that removes from it. A decrease here is a
+            // core defect and rejects the whole op (G-1).
+            let withheld = after
+                .checked_sub(before)
+                .ok_or(Error::<T>::TryStateViolation)?;
+            if withheld > 0 {
+                RedemptionFeesAccrued::<T>::put(after);
+            }
+            Ok(withheld)
+        }
+
         /// Move the escrow delta between `party` and the sovereign account. Positive
         /// delta (escrow grew) → `party` pays in; negative → `party` is paid out.
+        ///
+        /// `withheld` is the 03 §5.3a fee the op retained: `escrowed` falls by
+        /// the **gross** (which is what `adjust_total_escrowed` mirrors), the
+        /// claimant receives `gross − withheld`, and the difference simply never
+        /// leaves the sovereign account. It is therefore **not** a second draw
+        /// on escrow, and the sovereign's surplus grows by exactly the accrual —
+        /// which is what makes L-2 hold with slack and L-7 exact.
         fn settle_collateral(
             party: &T::AccountId,
             before: Balance,
             after: Balance,
+            withheld: Balance,
         ) -> DispatchResult {
             let sovereign = Self::account_id();
             Self::adjust_total_escrowed(before, after)?;
             if after > before {
+                // An escrow-growing op is never a payout, so it can withhold
+                // nothing; a non-zero `withheld` here would be a core defect.
+                ensure!(withheld == 0, Error::<T>::TryStateViolation);
                 T::Collateral::transfer(
                     Self::usdc(),
                     party,
@@ -1801,13 +2025,21 @@ pub mod pallet {
                     Preservation::Preserve,
                 )?;
             } else if before > after {
-                T::Collateral::transfer(
-                    Self::usdc(),
-                    &sovereign,
-                    party,
-                    before.saturating_sub(after),
-                    Preservation::Preserve,
-                )?;
+                let net = before
+                    .saturating_sub(after)
+                    .checked_sub(withheld)
+                    .ok_or(Error::<T>::ArithmeticOverflow)?;
+                if net > 0 {
+                    T::Collateral::transfer(
+                        Self::usdc(),
+                        &sovereign,
+                        party,
+                        net,
+                        Preservation::Preserve,
+                    )?;
+                }
+            } else {
+                ensure!(withheld == 0, Error::<T>::TryStateViolation);
             }
             Ok(())
         }
@@ -1934,26 +2166,37 @@ pub mod pallet {
                 },
                 CoreEvent::BaselineSettled(epoch, s) => Event::BaselineSettled { epoch, s },
                 CoreEvent::Redeemed(pid, amount) => Event::Redeemed { pid, amount },
-                CoreEvent::ScalarRedeemed(pid, side, payout) => {
-                    Event::ScalarRedeemed { pid, side, payout }
+                CoreEvent::ScalarRedeemed(pid, side, payout, fee) => Event::ScalarRedeemed {
+                    pid,
+                    side,
+                    payout,
+                    fee,
+                },
+                CoreEvent::ScalarPairRedeemed(pid, amount, fee) => {
+                    Event::ScalarPairRedeemed { pid, amount, fee }
                 }
-                CoreEvent::ScalarPairRedeemed(pid, amount) => {
-                    Event::ScalarPairRedeemed { pid, amount }
-                }
-                CoreEvent::GateRedeemed(pid, gate, amount) => {
-                    Event::GateRedeemed { pid, gate, amount }
-                }
+                CoreEvent::GateRedeemed(pid, gate, amount, fee) => Event::GateRedeemed {
+                    pid,
+                    gate,
+                    amount,
+                    fee,
+                },
                 CoreEvent::VoidRedeemed(pid, kind, amount, payout) => Event::VoidRedeemed {
                     pid,
                     kind,
                     amount,
                     payout,
                 },
-                CoreEvent::BaselineRedeemed(epoch, side, payout) => Event::BaselineRedeemed {
+                CoreEvent::BaselineRedeemed(epoch, side, payout, fee) => Event::BaselineRedeemed {
                     epoch,
                     side,
                     payout,
+                    fee,
                 },
+                // The core's sweep is the counter half only; the pallet owns the
+                // custody move and emits `RedemptionFeesSwept` from the
+                // dispatchable itself, so no vault op can ever produce this.
+                CoreEvent::RedemptionFeesSwept(amount) => Event::RedemptionFeesSwept { amount },
                 CoreEvent::VaultReaped(pid, residue) => Event::VaultReaped { pid, residue },
                 CoreEvent::BaselineVaultReaped(epoch, residue) => {
                     Event::BaselineVaultReaped { epoch, residue }
@@ -1971,6 +2214,10 @@ pub mod pallet {
             let terminal_at = VaultTerminalAt::<T>::get(pid).ok_or(Error::<T>::ReapNotDue)?;
             ensure!(
                 frame_system::Pallet::<T>::block_number() >= Self::reap_eligible_at(terminal_at),
+                Error::<T>::ReapNotDue
+            );
+            ensure!(
+                T::MarketSweepStatus::proposal_books_swept(pid),
                 Error::<T>::ReapNotDue
             );
             let budget = T::ReapBatch::get();
@@ -2002,6 +2249,7 @@ pub mod pallet {
                         residue,
                         Preservation::Preserve,
                     )?;
+                    T::ResidueReporter::note_swept_residue(residue)?;
                 }
                 Vaults::<T>::remove(pid);
                 VaultTerminalAt::<T>::remove(pid);
@@ -2014,6 +2262,10 @@ pub mod pallet {
             let terminal_at = BaselineTerminalAt::<T>::get(epoch).ok_or(Error::<T>::ReapNotDue)?;
             ensure!(
                 frame_system::Pallet::<T>::block_number() >= Self::reap_eligible_at(terminal_at),
+                Error::<T>::ReapNotDue
+            );
+            ensure!(
+                T::MarketSweepStatus::baseline_book_swept(epoch),
                 Error::<T>::ReapNotDue
             );
             let budget = T::ReapBatch::get();
@@ -2045,6 +2297,7 @@ pub mod pallet {
                         residue,
                         Preservation::Preserve,
                     )?;
+                    T::ResidueReporter::note_swept_residue(residue)?;
                 }
                 BaselineVaults::<T>::remove(epoch);
                 BaselineTerminalAt::<T>::remove(epoch);
@@ -2186,6 +2439,7 @@ pub mod pallet {
                 st.add_protocol_account(o);
             }
             st.deposits_held = DepositsHeld::<T>::get();
+            Self::overlay_fee_config(&mut st);
             st.try_state()
                 .map_err(|e| sp_runtime::DispatchError::from(Error::<T>::from(e)))?;
 
@@ -2224,8 +2478,33 @@ pub mod pallet {
 
             // L-2: sovereign USDC covers all escrow plus held deposits. The
             // helper is the single checked definition shared with telemetry.
+            // Equality is not required — the R-4 genesis endowment, swept and
+            // direct-transfer dust and the §5.3a `RedemptionFeesAccrued`
+            // balance are all lawful surplus.
             let (custody, liability) = Self::collateral_totals()?;
             ensure!(liability <= custody, Error::<T>::TryStateViolation);
+
+            // L-7 (03 §9): the accrued redemption fee is a subset of the lawful
+            // surplus **above** the R-4 permanent-account floor, so it never
+            // encroaches on escrow and `sweep_redemption_fees` can always pay
+            // out in full. The `min_balance` term is load-bearing: §5.4 moves
+            // the accrual under `Preservation::Preserve`, so at most
+            // `balance − min_balance` is ever transferable, and the weaker
+            // bound would admit an accrual the sweep is not permitted to move —
+            // the crank would then fail on its last unit, which is exactly what
+            // this row claims cannot happen. `saturating_sub` is correct on the
+            // floor term: a headroom below `min_balance` is lawful whenever the
+            // accrual is zero, and fires here the moment it is not.
+            let min_balance =
+                <T::Collateral as fungibles::Inspect<T::AccountId>>::minimum_balance(Self::usdc());
+            let movable_surplus = custody
+                .checked_sub(liability)
+                .ok_or(Error::<T>::TryStateViolation)?
+                .saturating_sub(min_balance);
+            ensure!(
+                RedemptionFeesAccrued::<T>::get() <= movable_surplus,
+                Error::<T>::TryStateViolation
+            );
 
             // During the v0 multi-block backfill the full legacy-map audit above
             // remains authoritative, but the v1 mirror is deliberately not

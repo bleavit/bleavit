@@ -20,6 +20,11 @@ sp-io = { workspace = true }
 sp-runtime = { workspace = true }
 
 [dev-dependencies]
+# 13 rule 4 / `.claude/rules/runtime-code.md` rule 4: the suites read the live
+# `ledger.redeem_fee` genesis seed from the registry itself rather than
+# restating 30 bps as a literal. Test-only; the pallet never depends on the
+# constitution core at runtime.
+constitution-core = { path = "../../crates/constitution-core" }
 sp-core = { workspace = true, default-features = true }
 pallet-assets = { workspace = true, default-features = true }
 pallet-balances = { workspace = true, default-features = true }

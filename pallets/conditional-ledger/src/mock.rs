@@ -17,7 +17,7 @@ use futarchy_primitives::{
     keeper::{CrankClass, KeeperRebateSink},
     kernel, Balance,
 };
-use sp_runtime::{traits::AccountIdConversion, BuildStorage};
+use sp_runtime::{traits::AccountIdConversion, BuildStorage, Perbill};
 
 pub type AccountId = u64;
 pub type AssetId = u32;
@@ -30,10 +30,13 @@ pub const SETTLER: AccountId = 102;
 pub const ALICE: AccountId = 1;
 pub const BOB: AccountId = 2;
 pub const CHARLIE: AccountId = 3;
-/// Protocol accounts (POL/book/fee/INSURANCE) — cap- and deposit-exempt.
+/// Protocol accounts (POL/book/fee/INSURANCE) — cap-, deposit- and (03 §5.3a)
+/// redemption-fee-exempt.
 pub const BOOK: AccountId = 900;
 pub const POL: AccountId = 901;
 pub const INSURANCE: AccountId = 902;
+/// The treasury `MAIN` sub-account — the 03 §5.4 redemption-fee sink (08 §1.1).
+pub const TREASURY_MAIN: AccountId = 903;
 
 /// The USDC asset id inside the mock `Assets` instance.
 pub const USDC: AssetId = 1337;
@@ -115,6 +118,11 @@ parameter_types! {
     pub static ReapBatch: u32 = kernel::REAP_BATCH;
     pub UsdcAssetId: AssetId = USDC;
     pub InsuranceAccount: AccountId = INSURANCE;
+    pub TreasuryMainAccount: AccountId = TREASURY_MAIN;
+    // `static` so a test can drive the live 13 §1 `ledger.redeem_fee` rate.
+    // Defaults to **0** — the pre-E1 regression 03 §11 makes normative — so
+    // every existing suite keeps its exact behaviour unless it opts in.
+    pub static RedemptionFee: Perbill = Perbill::zero();
     /// Disabled by default, so the mock behaves like the `()` sink unless a
     /// keeper-rebate regression explicitly enables recording.
     pub static RecordKeeperRebates: bool = false;
@@ -126,6 +134,18 @@ parameter_types! {
     pub static MockTvlCap: Balance = u128::MAX;
     pub static MockCumulativeDeposits: Vec<(AccountId, Balance)> = Vec::new();
     pub static MockDepCap: Balance = u128::MAX;
+    /// Explicit market-ordering fixture. Standalone ledger tests have no
+    /// market pallet, so both vault classes are sweepable unless a regression
+    /// opts into the blocking state.
+    pub static ProposalMarketsSwept: bool = true;
+    pub static BaselineMarketSwept: bool = true;
+    /// Treasury seam fixtures. They are explicit types rather than `()` so the
+    /// production-required residue and revenue paths cannot disappear behind
+    /// an accounting-free default.
+    pub static ReportedResidue: Vec<Balance> = Vec::new();
+    pub static ResidueReporterRefuses: bool = false;
+    pub static MainCreditedTotal: Balance = 0;
+    pub static MainRevenueRefuses: bool = false;
 }
 
 pub struct TestKeeperRebate;
@@ -155,6 +175,51 @@ impl pallet_conditional_ledger::InflowCapGate<AccountId> for TestInflowCapGate {
     }
 }
 
+pub struct TestMarketSweepStatus;
+
+impl pallet_conditional_ledger::MarketSweepStatus for TestMarketSweepStatus {
+    fn proposal_books_swept(_: futarchy_primitives::ProposalId) -> bool {
+        ProposalMarketsSwept::get()
+    }
+
+    fn baseline_book_swept(_: futarchy_primitives::EpochId) -> bool {
+        BaselineMarketSwept::get()
+    }
+}
+
+pub struct TestResidueReporter;
+
+impl pallet_conditional_ledger::ResidueReporter for TestResidueReporter {
+    fn note_swept_residue(amount: Balance) -> frame_support::dispatch::DispatchResult {
+        if ResidueReporterRefuses::get() {
+            return Err(sp_runtime::DispatchError::Other(
+                "residue recognition refused",
+            ));
+        }
+        let mut reported = ReportedResidue::get();
+        reported.push(amount);
+        ReportedResidue::set(reported);
+        Ok(())
+    }
+}
+
+pub struct TestMainRevenueSink;
+
+impl pallet_conditional_ledger::MainRevenueSink for TestMainRevenueSink {
+    fn credit_main(amount: Balance) -> frame_support::dispatch::DispatchResult {
+        if MainRevenueRefuses::get() {
+            return Err(sp_runtime::DispatchError::Other(
+                "MAIN revenue recognition refused",
+            ));
+        }
+        let credited = MainCreditedTotal::get()
+            .checked_add(amount)
+            .ok_or(sp_runtime::DispatchError::Other("MAIN credit overflow"))?;
+        MainCreditedTotal::set(credited);
+        Ok(())
+    }
+}
+
 impl pallet_conditional_ledger::Config for Test {
     type Collateral = Assets;
     type UsdcAssetId = UsdcAssetId;
@@ -168,7 +233,12 @@ impl pallet_conditional_ledger::Config for Test {
     type ArchiveDelay = ArchiveDelay;
     type ReapBatch = ReapBatch;
     type ProtocolAccounts = Protocol;
+    type RedemptionFee = RedemptionFee;
     type InsuranceAccount = InsuranceAccount;
+    type MarketSweepStatus = TestMarketSweepStatus;
+    type ResidueReporter = TestResidueReporter;
+    type TreasuryMainAccount = TreasuryMainAccount;
+    type MainRevenueSink = TestMainRevenueSink;
     type PalletId = LedgerPalletId;
     type KeeperRebate = TestKeeperRebate;
     type InflowCapGate = TestInflowCapGate;
@@ -200,6 +270,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
             (BOOK, 1_000_000_000),
             (POL, 1_000_000_000),
             (INSURANCE, 1_000_000_000),
+            (TREASURY_MAIN, 1_000_000_000),
             (ledger_account(), 1_000_000_000),
         ],
         ..Default::default()
@@ -219,6 +290,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
             (USDC, BOOK, 100_000 * UNIT),
             (USDC, POL, 100_000 * UNIT),
             (USDC, INSURANCE, 100_000 * UNIT),
+            (USDC, TREASURY_MAIN, 100_000 * UNIT),
             (USDC, ledger_account(), 10_000), // one-ED genesis endowment (03 §1)
         ],
         next_asset_id: None,
@@ -232,12 +304,19 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         System::set_block_number(1);
         StorageVersion::new(1).put::<pallet_conditional_ledger::Pallet<Test>>();
         ReapBatch::set(kernel::REAP_BATCH);
+        RedemptionFee::set(Perbill::zero());
         RecordKeeperRebates::set(false);
         KeeperRebates::set(Vec::new());
         MockLocalUsdcIssuance::set(0);
         MockTvlCap::set(u128::MAX);
         MockCumulativeDeposits::set(Vec::new());
         MockDepCap::set(u128::MAX);
+        ProposalMarketsSwept::set(true);
+        BaselineMarketSwept::set(true);
+        ReportedResidue::set(Vec::new());
+        ResidueReporterRefuses::set(false);
+        MainCreditedTotal::set(0);
+        MainRevenueRefuses::set(false);
     });
     ext
 }

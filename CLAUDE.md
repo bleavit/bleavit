@@ -21,6 +21,19 @@ Everything above (imported from AGENTS.md) is binding. Below is the Claude-Code-
 | `test-engineer` | Authors the doc-15 test obligations (PT suites, limit-coverage, negative origin tests, try-state, differential vectors). |
 | `doc-curator` | End-of-session living-document sync when the delta is large. |
 
+**Delegating to Codex.** R-13 (AGENTS.md) governs: explicit `--sandbox` on every
+`codex exec`, `read-only` unless the job must author, no bypass flags. Note that the
+`codex:codex-rescue` agent is a **forwarder, not an orchestrator** — it fires one async
+companion `task` call and returns a job handle (`task-…`) rather than the findings, and
+it refuses follow-up instructions like "poll and report". For a review round whose
+constraints must actually reach Codex, prefer direct `codex exec` (with `</dev/null`),
+or drive the companion runtime from the main loop:
+`node ~/.claude/plugins/cache/openai-codex/codex/<ver>/scripts/codex-companion.mjs
+status --all | result <job> | cancel <job>`. Model for this repo: `gpt-5.6-sol` at
+`xhigh`. If Codex hits a capacity/quota wall, fall back to Claude subagents at matched
+model/effort and disclose the substitution in PLAN.md — losing the provider must not
+lose the independent-second-opinion pattern.
+
 ## Hooks (installed via `.claude/settings.json` — expect these behaviors)
 
 - **SessionStart** injects git state + PLAN.md focus/milestones/last log rows. Trust it

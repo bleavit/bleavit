@@ -7792,6 +7792,7 @@ name = "pallet-conditional-ledger"
 version = "0.1.0"
 dependencies = [
  "conditional-ledger-core",
+ "constitution-core",
  "frame-benchmarking",
  "frame-support",
  "frame-system",

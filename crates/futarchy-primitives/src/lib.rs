@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 16;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 17;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -1686,12 +1686,20 @@ impl TradeSide {
 mod tests {
     use super::*;
 
+    /// The single site that pins the contract version to a literal. Every other
+    /// assertion in the workspace compares against the constant, so exactly one
+    /// place has to move when 02 §13 versions the surface.
+    ///
+    /// Renamed 2026-07-29: it was called `contract_version_is_v13` while
+    /// asserting 16, having been left behind by three bumps. A test whose name
+    /// disagrees with its assertion is worse than no name — a reader grepping
+    /// for the version's home finds a number that was already stale twice over.
     #[test]
-    fn contract_version_is_v13() {
-        // SQ-186 adds `Epoch::TreasuryBondAskBps` — the kernel slope of 08 §7's
-        // TREASURY intake bond — to 02 §9's frozen metadata-constant list. Purely
-        // additive, so `transaction_version` is untouched (02 §13 rule 7).
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 16);
+    fn contract_version_is_pinned() {
+        // v17 (E1–E4): protocol revenue routing and the 03 §5.3a redemption fee.
+        // Two permissionless keeper cranks plus four trailing `fee` event fields;
+        // all appends, so `transaction_version` is untouched (02 §13 rule 7).
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 17);
     }
 
     #[test]

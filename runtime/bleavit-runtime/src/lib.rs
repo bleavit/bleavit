@@ -16,8 +16,27 @@ extern crate alloc;
 /// `pallet_aura` /
 /// `pallet_authorship` / `cumulus_pallet_aura_ext` / `staging_parachain_info`
 /// (no dispatchables and no benchmark harness upstream), and
-/// `pallet_transaction_payment` / `pallet_asset_tx_payment` (no benchmarkable
-/// calls; their tx-extension costs are carried by the extrinsic base weight).
+/// `pallet_transaction_payment` (no benchmarkable calls; its extension charges
+/// the SDK's own measurement, and this runtime adds no work to it).
+///
+/// `pallet_asset_tx_payment` **is** registered (SQ-523), and the note it
+/// replaces was not stale — it was **never true**. That note said the
+/// extension's costs were "carried by the extrinsic base weight". They never
+/// were: `ChargeAssetTxPayment::weight()` has always returned
+/// `WeightInfo::charge_asset_tx_payment_*()`, so `type WeightInfo = ()` bound
+/// the charge to the SDK's *reference-runtime* measurement from B1a onward.
+/// This runtime's substitutions have not matched that reference since — the
+/// `ForeignAssets`-over-`Assets` swap and `LiveFeeConversion`'s governed-rate
+/// read both predate E3, and E3 added `UsdcFeesToMain` on top of an already
+/// wrong number. The understatement therefore shipped **before** E3; E3 only
+/// widened it.
+///
+/// This pallet has no dispatchables — what is benchmarked is the **transaction
+/// extension**, whose three fixtures drive `ChargeAssetTxPayment` end-to-end
+/// through `test_run`. The post-dispatch refund cannot correct an error here:
+/// it subtracts the same `WeightInfo` function it charged, so on the charged
+/// path it is identically zero, which makes an understatement permanent.
+/// 15 §4.5 forbids that direction.
 #[cfg(feature = "runtime-benchmarks")]
 mod benches {
     macro_rules! define_runtime_benchmarks {
@@ -28,6 +47,7 @@ mod benches {
                 [pallet_balances, Balances]
                 [pallet_timestamp, Timestamp]
                 [pallet_assets, ForeignAssets]
+                [pallet_asset_tx_payment, AssetTxPayment]
                 [pallet_utility, Utility]
                 [pallet_proxy, Proxy]
                 [pallet_multisig, Multisig]

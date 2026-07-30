@@ -137,6 +137,39 @@ Baseline vault that is still `Open` **and** whose epoch satisfies all three §7(
 per-block no-op. It is prioritized above `cleanup` because it writes the terminal-block latch that
 the Baseline dust sweep and the book reap both require.
 
+The `cleanup` role drives the two-stage end of the
+[`04-markets-and-pricing.md` §2](../docs/architecture/04-markets-and-pricing.md) market lifecycle.
+`sweep_revenue(market)` realizes a settled book's revenue and returns its subsidy custody to the
+treasury's `POL`/`POL_BASELINE` lines
+([08](../docs/architecture/08-treasury-and-economics.md) §8 step 5); `reap(market)` then discards
+the provably worthless residue that leaves behind. Sweep is admissible from the terminal block with
+no delay, reap only after `ledger.archive_delay` **and** the swept marker — so the keeper plans a
+sweep for every latched, unswept book and withholds that book's reap until the marker is visible,
+rather than submitting a `NotReapable` it can predict. Sweep is prioritized above the rest of
+cleanup for a second reason: the ledger's `sweep_dust*` is independent of the market and routes
+residual escrow to `INSURANCE` ([03](../docs/architecture/03-conditional-ledger.md) §5.4), so a book
+that reaches its ledger archive delay unswept loses its return to exactly that account. The two
+stages are bounded a whole `ledger.archive_delay` apart and the priority ordering gives the sweep
+the lower nonce in any batch carrying both, but neither of those is a lock, so the keeper does not
+leave the order to chance. Both calls are permissionless and idempotent, and both are rebated from
+the general keeper tranche — 08 §6.3's decision-critical list is closed and does not include them.
+A runtime predating the Sweep stage exposes neither the call nor the marker map; its reaps keep
+their earlier preconditions and no sweep is planned.
+
+The same "do not submit what the chain will refuse" rule is extended to **three** calls under the
+[`06`](../docs/architecture/06-governance-and-guardians.md) §6.3 freeze latches — deliberately not to
+the whole refusal surface. `ExecutionGuard::execute` (09 §1.2(10)) and, for seeded books, the
+transitively-refused `ledger.sweep_dust*` are **not** suppressed; extending to them is a separate
+question, tracked as such. What is covered: `sweep_revenue` and
+`crank_observe` error `Frozen` while `Market::FrozenUntil` is live, and `sweep_redemption_fees` while
+`ConditionalLedger::FrozenUntil` is — two independent latches, read per pallet and never conflated.
+The keeper suppresses exactly those calls for exactly that window: the test is `now < until`, the
+precise negation of the pallets' own guard, so a call the chain would accept on the block a freeze
+lapses is still planned on that block. An **unreadable** latch is treated as absent and the call is
+submitted, which is deliberate — it reproduces the behaviour that predates these reads, whereas
+treating an unreadable latch as frozen would let one persistently failing storage read stall the
+revenue cranks indefinitely, a liveness loss the freeze itself never asked for.
+
 Some roles are deliberately conservative. `record_snapshot` is submitted only when the active
 welfare specification and a missing completed-epoch snapshot are directly visible. For every live
 cohort, the extractor also follows its frozen `CohortSchedules` metric specification and catches up

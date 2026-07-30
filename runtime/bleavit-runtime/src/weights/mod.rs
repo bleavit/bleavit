@@ -9,16 +9,35 @@
 //!
 //! `pallet_xcm` is calibrated here; its two protocol-disabled calls retain a
 //! fail-closed `Weight::MAX` because no valid benchmark fixture may bypass the
-//! production filters. Not present here (deliberate):
-//! `pallet_transaction_payment` /
-//! `pallet_asset_tx_payment` (no benchmarkable calls in this SDK train), and
-//! the hook-only consensus pallets (`pallet_aura`, `pallet_authorship`,
+//! production filters.
+//!
+//! `pallet_asset_tx_payment` **is** calibrated here (SQ-523). It is not the only
+//! entry whose functions are not dispatchables — `cumulus_pallet_parachain_system`
+//! already carries three `block_weight_tx_extension_*` fixtures and
+//! `pallet_collator_selection` two hook weights — but it is the only one whose
+//! pallet has *no* dispatchables at all, so everything weighted here is its
+//! **transaction extension**.
+//!
+//! Why it was needed, attributed honestly: the understatement did **not** arrive
+//! with E3. `ForeignAssets`-over-`Assets` (`max_size` 808/732 against the
+//! reference's 210/134) and `LiveFeeConversion`'s governed-rate read both predate
+//! it; E3 added `UsdcFeesToMain`'s `PendingMainCredit` write and a second
+//! `ForeignAssets::Account` write — roughly 511 B and 2 writes of the measured
+//! 3,729 B / +2-write gap — on top of a reference number that was already wrong.
+//! The post-dispatch refund cannot absorb any of it: it subtracts the same
+//! `WeightInfo` function it charged, so on the charged path it is identically
+//! zero (it corrects a mis-predicted branch, not a mis-measured one).
+//!
+//! Not present here (deliberate): `pallet_transaction_payment` (its extension
+//! is the stock one; this runtime adds no work to it) and the hook-only
+//! consensus pallets (`pallet_aura`, `pallet_authorship`,
 //! `cumulus_pallet_aura_ext`, `staging_parachain_info`) which expose no
 //! benchmark harness upstream.
 
 pub mod cumulus_pallet_parachain_system;
 pub mod cumulus_pallet_xcmp_queue;
 pub mod frame_system;
+pub mod pallet_asset_tx_payment;
 pub mod pallet_assets;
 pub mod pallet_attestor;
 pub mod pallet_balances;

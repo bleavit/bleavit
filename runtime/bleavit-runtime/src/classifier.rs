@@ -627,6 +627,11 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_conditional_ledger::Call::redeem_baseline_pair { .. }
             | pallet_conditional_ledger::Call::sweep_dust { .. }
             | pallet_conditional_ledger::Call::sweep_dust_baseline { .. }
+            // 03 §5.3a(4): a permissionless keeper crank in the same family as the
+            // dust sweeps — it moves already-accrued redemption fees from the
+            // ledger's custody to the 08 §1.1 `MAIN` sink and nowhere else, and
+            // chooses neither payer nor recipient (E4).
+            | pallet_conditional_ledger::Call::sweep_redemption_fees { .. }
             | pallet_conditional_ledger::Call::reconcile { .. } => leaf(CallDomain::Public),
             pallet_conditional_ledger::Call::set_split_paused { .. }
             | pallet_conditional_ledger::Call::set_frozen { .. } => {
@@ -722,6 +727,12 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             pallet_futarchy_treasury::Call::claim_stream { .. }
             | pallet_futarchy_treasury::Call::execute_coretime_renewal { .. }
             | pallet_futarchy_treasury::Call::note_coretime_quote { .. }
+            // 08 §1.2 (E2): the INSURANCE reconciliation crank is a
+            // permissionless keeper call, not a privileged act. It names no
+            // beneficiary, chooses no amount, and can move value to exactly one
+            // place — `MAIN` — so a caller has nothing to steer; the only thing
+            // a Signed origin buys is that somebody pays for the block space.
+            | pallet_futarchy_treasury::Call::reconcile_insurance { .. }
             | pallet_futarchy_treasury::Call::prune_coretime_quote { .. } => {
                 leaf(CallDomain::Public)
             }

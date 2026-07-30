@@ -691,10 +691,9 @@ reason = "13 §1; 15 §4.6: dispatch-path limit coverage."
 
 [[entry]]
 key = "ledger.rdm_fee"
-class = "unwired"
+class = "param-bounds"
 genesis = true
-owner = "E4"
-reason = "13 §1 / rule 7 specifies a live `ledger.redeem_fee <= mkt.fee` coupling screened jointly at the amendment boundary in BOTH directions, and asserted in try-state. NEITHER IS IMPLEMENTED: `set_param` screens only `gate_v_min_pair`, so governance can raise this key above `mkt.fee` or lower `mkt.fee` beneath it and violate the invariant while every gate stays green. Classifying it `param-bounds` was wrong and actively harmful -- the record bounds ARE covered by the generated per-key suite, so the gate reported the key as covered and the coupling gap was invisible (found by PR #195 review, 2026-07-29). It is `unwired` until milestone E4 lands the joint screen and the try-state assertion, at which point this exemption expires mechanically and the key returns to `param-bounds`. The regression `e1_no_amendment_may_carry_the_redemption_fee_above_the_market_fee` is deliberately `#[ignore]`d and fails on its first assertion until then."
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite. The rule-7 live coupling `ledger.redeem_fee <= mkt.fee` -- which the record bounds do NOT express and which was the reason this key was `unwired` under E4 -- is now screened jointly over the pair at the amendment boundary in BOTH directions (`constitution_core::screen_redeem_fee_coupling`, called from `ConstitutionState::checked_set_param` and from `pallet-constitution::set_param`, refusing with `RedemptionFeeAboveMarketFee`), and asserted in `ConstitutionState::try_state`. Both directions matter because both rows are PARAM: a PARAM decision can raise this key above `mkt.fee` or lower `mkt.fee` beneath it, and both are refused. Named regression (E4, no marker -- the checker rejects a `// limit-coverage:` marker on any non-`dispatch-limit` key, SQ-495 precedent): `pallets/constitution/src/tests.rs::e1_no_amendment_may_carry_the_redemption_fee_above_the_market_fee`, plus the core's `redeem_fee_coupling_is_screened_over_the_pair_in_both_directions`."
 
 [[entry]]
 key = "ledger.archive"

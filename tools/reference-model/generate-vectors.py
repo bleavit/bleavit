@@ -43,6 +43,7 @@ from bleavit_reference_model.lmsr import (
     vectors_v1_v6,
     worked_maker_example,
 )
+from bleavit_reference_model.market import baseline_market_scenarios
 from bleavit_reference_model.treasury import (
     attack_cost_hat,
     baseline_commitment,
@@ -740,13 +741,17 @@ class _LedgerSequenceModel:
         contract_version: int = _CONTRACT_V16,
     ):
         # 02 §13/§14: the redemption-fee field append is contract **v17**, and
-        # that entry is explicit that the bump is atomic with the surface —
-        # `INTEGRATION_CONTRACT_VERSION` stays 16 until E1 ships. So the model
-        # emits the shape of the version it is configured for: the pre-E1
-        # sequence corpus stays v16 (the in-force surface), and the E1 fee
-        # corpus is v17 (the target it exists to pin). A v16 model that
-        # somehow charged a fee would be emitting an event that cannot carry
-        # it, so that combination is refused outright below.
+        # that entry is explicit that the bump is atomic with the surface.
+        # `INTEGRATION_CONTRACT_VERSION` is now 17 (E2-E4 shipped it), but the
+        # per-row version is deliberately NOT slaved to the live constant: the
+        # model emits the shape of the version each row is configured for, so
+        # the pre-E1 sequence corpus stays v16 and pins the shape that surface
+        # actually had, while the fee corpus is v17. `differential_vectors.rs`
+        # dispatches on each row's own `params.contract_version`, so both
+        # replay under one binary — and a corpus that silently followed the
+        # constant would stop proving the older shape was ever honoured. A v16
+        # model that somehow charged a fee would be emitting an event that
+        # cannot carry it, so that combination is refused outright below.
         self.contract_version = contract_version
         # 03 §5.3a: the rate defaults to 0, so the 64 pre-E1 sequence rows are
         # generated at exactly their historical behaviour and the fee corpus
@@ -3040,6 +3045,7 @@ def build():
         "ledger_score_scenarios": _ledger_score_scenarios(),
         "ledger_sweep_scenarios": _ledger_sweep_scenarios(),
         "ledger_error_scenarios": _ledger_error_scenarios(),
+        "baseline_market_scenarios": baseline_market_scenarios(),
         "decision_scenarios": [
             _decision_row(scenario) for scenario in DECISION_SCENARIOS
         ],

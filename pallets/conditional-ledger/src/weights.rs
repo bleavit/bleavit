@@ -33,6 +33,20 @@ pub trait WeightInfo {
     fn redeem_baseline_pair() -> Weight;
     fn sweep_dust() -> Weight;
     fn sweep_dust_baseline() -> Weight;
+    /// 03 §5.4 / §5.3a(4): the O(1) redemption-fee sweep.
+    ///
+    /// Carries a default body so a runtime whose generated weight file predates
+    /// this crank still compiles against the trait; the default is a
+    /// deliberately conservative over-estimate (a counter read, a counter
+    /// write, one asset transfer's two account reads and two writes, plus a
+    /// full reference compute allowance) and is replaced the next time
+    /// `tools/ci/regenerate-weights.py --write` runs (15 §4.5).
+    fn sweep_redemption_fees() -> Weight {
+        reference()
+            .saturating_add(Weight::from_parts(0, 8 * 1024))
+            .saturating_add(Weight::from_parts(25_000 * 3, 0))
+            .saturating_add(Weight::from_parts(100_000 * 3, 0))
+    }
     fn set_split_paused() -> Weight;
     fn set_frozen() -> Weight;
     fn reconcile() -> Weight;
@@ -97,6 +111,7 @@ ref_impl!(
     redeem_baseline_pair,
     sweep_dust,
     sweep_dust_baseline,
+    sweep_redemption_fees,
     set_split_paused,
     set_frozen,
     reconcile,

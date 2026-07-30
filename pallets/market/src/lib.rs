@@ -14,6 +14,7 @@ use futarchy_primitives::{BlockNumber, MarketId};
 
 pub use market_core as core_market;
 pub use pallet::*;
+pub use pallet_conditional_ledger::MainRevenueSink;
 pub use weights::WeightInfo;
 
 pub mod weights;
@@ -129,6 +130,24 @@ impl PolLine {
     }
 }
 
+impl<T: pallet::Config> pallet_conditional_ledger::MarketSweepStatus for pallet::Pallet<T> {
+    fn proposal_books_swept(pid: futarchy_primitives::ProposalId) -> bool {
+        pallet::ProposalMarketIds::<T>::get(pid)
+            .iter()
+            .all(|market| {
+                !pallet::SeededMarkets::<T>::contains_key(market)
+                    || pallet::SweptMarkets::<T>::contains_key(market)
+            })
+    }
+
+    fn baseline_book_swept(epoch: futarchy_primitives::EpochId) -> bool {
+        pallet::BaselineMarketOf::<T>::get(epoch).is_none_or(|market| {
+            !pallet::SeededMarkets::<T>::contains_key(market)
+                || pallet::SweptMarkets::<T>::contains_key(market)
+        })
+    }
+}
+
 /// Production decision-grade predicate for a sealed Baseline boundary.
 /// Baseline books are shared across proposal classes, so the runtime owns the
 /// governed coverage, convergence, POL and contest-floor inputs rather than
@@ -172,12 +191,21 @@ pub mod pallet {
     use crate::weights::WeightInfo;
     use crate::BaselineGrade;
     use crate::DecisionGradeFacts;
+    use crate::MainRevenueSink;
     use crate::MarketAccountProvider;
     use crate::PolCommitmentSync;
     use crate::PolLine;
     use alloc::{collections::BTreeMap, vec::Vec};
     use core::marker::PhantomData;
-    use frame_support::{pallet_prelude::*, traits::Contains, PalletId};
+    use frame_support::{
+        pallet_prelude::*,
+        traits::{
+            fungibles::{Inspect, Mutate},
+            tokens::{Fortitude, Preservation},
+            Contains,
+        },
+        PalletId,
+    };
     use frame_system::pallet_prelude::*;
     use futarchy_primitives::{
         bounds,
@@ -242,6 +270,17 @@ pub mod pallet {
         /// Transactional treasury obligation mirror. A lifecycle transition is
         /// rolled back if its exact NAV obligation cannot be mirrored.
         type PolCommitmentSync: crate::PolCommitmentSync;
+
+        /// The 08 §1.1 treasury `MAIN` custody account — the single lawful
+        /// recipient of realized market-fee value (04 §2 Sweep, 04 §6.1). It is
+        /// a `Get`, never a call argument, so a permissionless crank cannot be
+        /// pointed at a payee of the caller's choosing. The enclosing runtime's
+        /// `ProtocolAccounts` classifier MUST recognize it, because the ledger's
+        /// return surface only ever pays protocol custody (03 §5.5).
+        type MainAccount: Get<Self::AccountId>;
+
+        /// NAV recognition for value the Sweep just moved into `MAIN` custody.
+        type MainRevenueSink: pallet_conditional_ledger::MainRevenueSink;
 
         /// Runtime-owned decision-grade predicate for sealed Baseline carry.
         /// The predicate is read-only and must fail closed when governed grade
@@ -318,6 +357,25 @@ pub mod pallet {
     /// names the account the 04 §2 Sweep returns that custody to, so the
     /// permissionless crank cannot be pointed at a payee of the caller's
     /// choosing (08 §8 step 5(b)). Removed at reap.
+    ///
+    /// **No migration accompanies the E1 value widening `()` → `AccountId`, and
+    /// that is deliberate.** Raised as a P1 by review, on the correct general
+    /// reasoning that an old zero-byte `()` value cannot decode as an
+    /// `AccountId`, so `contains_key` would report a market seeded while `get`
+    /// returned `None`. That failure needs a chain carrying pre-widening values,
+    /// and none exists: Bleavit is **pre-genesis** — no runtime is deployed, the
+    /// Track G rollout gates are unmet, and every environment that has ever held
+    /// this key is an ephemeral zombienet/chopsticks fixture rebuilt from
+    /// genesis. This is the same clause 02 §13 applies to v15, v16 and v17
+    /// ("Pre-genesis revision — no runtime is deployed, so §13's point-3
+    /// migration clause does not apply").
+    ///
+    /// The note is here rather than only in a review reply because the argument
+    /// is not visible from this file, so the next reader would reasonably raise
+    /// it again. **It expires at genesis:** once a runtime is deployed, any
+    /// further change to this value shape needs a real migration, and the repo's
+    /// standing constraint that additional MBMs require their own exhaustive
+    /// cutpoint repair (B15/B16) applies in full.
     #[pallet::storage]
     pub type SeededMarkets<T: Config> =
         StorageMap<_, Blake2_128Concat, MarketId, T::AccountId, OptionQuery>;
@@ -1043,10 +1101,25 @@ pub mod pallet {
         /// solvency defect, since the value is still fully collateralized in the
         /// ledger sovereign.
         ///
-        /// The **fee leg is E2** (04 §6.1: the fee account's realizable claims
-        /// remit 100 % to the treasury `MAIN` account). Until it lands the event
-        /// reports `fee_to_main: 0`; the marker's meaning does not change, since
-        /// 04 §2 makes one marker cover both remittances of one sweep.
+        /// The **fee leg** (E2) runs in the same atomic layer and is what makes
+        /// the market fee a revenue instrument rather than a sink (04 §6.1;
+        /// 08 §1.1). It has two shapes because collection has two: a decision or
+        /// gate book accrues branch-USDC into its fee account, which redeems to
+        /// USDC paid straight to `MAIN`; a Baseline book retains its sell-side
+        /// fee as **plain USDC** in the book account, which is transferred above
+        /// the 03 §7 R-4 `min_balance` floor and leaves that floor exactly where
+        /// R-4 puts it. Reaching `MAIN` custody is only half of it — `nav()` is
+        /// computed from the treasury's internal `main_usdc` counter, so the
+        /// arrival is recognized through [`MainRevenueSink`] in the same layer.
+        ///
+        /// **Frozen under `PB-LEDGER-FREEZE`** (06 §6.3; SQ-517), because the
+        /// fee leg redeems through the ledger's *internal* path, which carries
+        /// no `Frozen` check — so an unguarded sweep would collect the
+        /// protocol's own claim out of a possibly-short sovereign at the moment
+        /// every claimant's `redeem` is refused. Freezing it strands nothing:
+        /// the crank effects no terminal transition, the value stays fully
+        /// collateralized in place, and the cost is an NAV-recognition delay
+        /// bounded by the freeze's own ≤ 28-day ceiling.
         #[pallet::call_index(6)]
         #[pallet::weight(<T as Config>::WeightInfo::sweep_revenue())]
         pub fn sweep_revenue(origin: OriginFor<T>, market: MarketId) -> DispatchResult {
@@ -1058,15 +1131,37 @@ pub mod pallet {
             if SweptMarkets::<T>::contains_key(market) {
                 return Ok(());
             }
+            // 06 §6.3 (SQ-517): the revenue cranks freeze with the rest of the
+            // value-moving surface. The fee leg below redeems through the
+            // ledger's *internal* path, which carries no `Frozen` check — so
+            // without this the protocol would collect its own claim out of a
+            // possibly-short sovereign at the moment every claimant's `redeem`
+            // is refused. Placed after the idempotence return, so a freeze
+            // never changes what an already-swept book answers, and before
+            // every sweepability check, so `Frozen` is the reported reason
+            // wherever it applies — the same precedence 06 §6.3 gives the
+            // freeze test over the decide-time static guards.
+            Self::ensure_not_frozen()?;
             ensure!(
                 matches!(book.phase, MarketPhase::Closed)
                     && SettlementObservedAt::<T>::contains_key(market),
                 Error::<T>::NotSweepable
             );
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
+                let main = T::MainAccount::get();
+                // 04 §2 / 04 §6.1 revenue leg. It runs for every book, seeded or
+                // not: a book that traded accrued fee value regardless of who
+                // funded its subsidy, and reap would discard it (08 §10.5).
+                let mut ledger = PalletLedger::<T>::new();
+                let fee_to_main = market_core::withdraw_fees(&book, &mut ledger, &main)
+                    .map_err(Error::<T>::from)?
+                    .checked_add(Self::withdraw_baseline_fee_usdc(&book, &main)?)
+                    .ok_or(Error::<T>::ArithmeticOverflow)?;
+                if fee_to_main > 0 {
+                    <T as Config>::MainRevenueSink::credit_main(fee_to_main)?;
+                }
                 let pol_returned = match SeededMarkets::<T>::get(market) {
                     Some(treasury) => {
-                        let mut ledger = PalletLedger::<T>::new();
                         let returned = market_core::withdraw_book(&book, &mut ledger, &treasury)
                             .map_err(Error::<T>::from)?;
                         if returned > 0 {
@@ -1094,8 +1189,7 @@ pub mod pallet {
                 SweptMarkets::<T>::insert(market, ());
                 Self::deposit_event(Event::RevenueSwept {
                     market,
-                    // E2 wires the 04 §6.1 fee remittance into this same leg.
-                    fee_to_main: 0,
+                    fee_to_main,
                     pol_returned,
                 });
                 Ok(())
@@ -2209,6 +2303,53 @@ pub mod pallet {
             })
         }
 
+        /// The Baseline half of the 04 §2 Sweep's revenue leg (04 §6.1).
+        ///
+        /// A Baseline book is the one per-market account that custodies plain
+        /// USDC: its degenerate sell wrapper has no mirror leg to merge against,
+        /// so the **book** funds the payout, merges `net + fee` and re-splits
+        /// `net`, retaining the fee as real USDC. That balance needs no
+        /// redemption — it is already USDC — and is remitted to `MAIN` here.
+        ///
+        /// Only the balance **above `min_balance`** moves, and that is
+        /// normative, not defensive: 03 §7 R-4 endows this account at Seed and
+        /// every protocol path out of it preserves, so `Preservation::Preserve`
+        /// caps the transfer at `balance − min_balance` by construction. R-4 is
+        /// explicit that the sweep closes the *fee* component of the residue and
+        /// not the floor component, which stays exactly where R-4 puts it.
+        ///
+        /// Decision and gate books custody positions only — a scalar or gate
+        /// merge leaves the vault's `escrowed` unchanged, so no plain custody
+        /// moves (03 §7 R-4) — hence they return 0 without touching custody.
+        fn withdraw_baseline_fee_usdc(
+            book: &MarketBook<T::AccountId>,
+            main: &T::AccountId,
+        ) -> Result<Balance, DispatchError> {
+            if !matches!(book.kind, BookKind::Baseline { .. }) {
+                return Ok(0);
+            }
+            let asset = <T as pallet_conditional_ledger::Config>::UsdcAssetId::get();
+            let reducible = <<T as pallet_conditional_ledger::Config>::Collateral as Inspect<
+                T::AccountId,
+            >>::reducible_balance(
+                asset.clone(),
+                &book.account,
+                Preservation::Preserve,
+                Fortitude::Polite,
+            );
+            if reducible == 0 {
+                return Ok(0);
+            }
+            <<T as pallet_conditional_ledger::Config>::Collateral as Mutate<T::AccountId>>::transfer(
+                asset,
+                &book.account,
+                main,
+                reducible,
+                Preservation::Preserve,
+            )?;
+            Ok(reducible)
+        }
+
         /// I-33's book half: whether a swept book retains any claim that still
         /// pays at the recorded settlement. What may remain is exactly the
         /// worthless residue reap discards — losing-branch and unrealized-branch
@@ -2975,10 +3116,25 @@ pub mod pallet {
                 }
             }
             for id in SeededMarkets::<T>::iter_keys() {
-                ensure!(
-                    Markets::<T>::contains_key(id),
-                    Error::<T>::TryStateViolation
-                );
+                let book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
+                // 03 §5.4 / 04 §2 ordering guard: while a seeded book has not
+                // recorded its Sweep, the owning vault must still exist. A
+                // missing vault here means a dust crank archived realizable
+                // protocol inventory before revenue/POL custody was returned.
+                // Once `SweptMarkets` is present the vault may be independently
+                // archived, which preserves the specified market-first and
+                // ledger-first cleanup interleavings.
+                if !SweptMarkets::<T>::contains_key(id) {
+                    let vault_present = match book.kind {
+                        BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. } => {
+                            pallet_conditional_ledger::Vaults::<T>::contains_key(proposal)
+                        }
+                        BookKind::Baseline { epoch } => {
+                            pallet_conditional_ledger::BaselineVaults::<T>::contains_key(epoch)
+                        }
+                    };
+                    ensure!(vault_present, Error::<T>::TryStateViolation);
+                }
             }
             // I-33, book half (15 §1): no latched, swept book retains seed
             // inventory it has not returned, and no returned book is

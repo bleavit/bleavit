@@ -11,7 +11,7 @@ use frame_support::{
     dispatch::{DispatchClass, DispatchResult},
     parameter_types,
     traits::{
-        fungibles::{Inspect, Mutate},
+        fungibles::{self, Inspect, Mutate},
         tokens::{Fortitude, Preservation},
         Bounded, ConstBool, ConstU128, ConstU32, ConstU64, ConstU8, Contains, EqualPrivilegeOnly,
         Get, InstanceFilter, Nothing, OriginTrait, PostInherents, PostTransactions, QueryPreimage,
@@ -343,27 +343,145 @@ impl frame_support::traits::tokens::ConversionToAssetBalance<Balance, AssetId, B
     }
 }
 
+/// 08 §9 **Fee destination** (E3): USDC transaction fees resolve into `MAIN`.
+///
+/// The SDK's default `HandleCredit` implementation for `()` **drops** the
+/// collected credit, which burns it from `ForeignAssets` issuance. 08 §9 marks
+/// that non-conforming, and not as a policy preference: USDC on this chain is a
+/// claim against a reserve held on Asset Hub, so destroying the local claim does
+/// not destroy the remote reserve — it orphans it, which is exactly the outcome
+/// §7.1's anti-burn rationale exists to avoid.
+///
+/// **VIT fees keep burning**, deliberately, and `pallet_transaction_payment`'s
+/// `FungibleAdapter<Balances, ()>` above is left exactly as it is: VIT is
+/// natively issued here, so burning strands no reserve, and routing it would
+/// credit the treasury an asset 08 §2.2 marks at **0 in NAV**. The asymmetry is
+/// the bridged/native distinction and it is the whole of the reason.
+///
+/// Both halves move together, as everywhere else in E2/E3: `resolve` deposits
+/// the real USDC into `MAIN` custody, and the treasury's recognition counter is
+/// credited so `nav()` moves with it. The counter is a small dedicated
+/// `StorageValue` precisely because this handler runs on every USDC-paying
+/// extrinsic — the multi-kilobyte `TreasuryState` aggregate must not enter every
+/// block's proof.
+///
+/// `handle_credit` cannot fail, so the `Err` arm is the fail-closed one: `MAIN`
+/// is a 03 §7 R-4 genesis-endowed permanent USDC account, so a refused deposit
+/// is unreachable, and if it ever happened the credit is dropped exactly as the
+/// pre-E3 handler did — never recognized as NAV that did not arrive.
+pub struct UsdcFeesToMain;
+
+impl pallet_asset_tx_payment::HandleCredit<AccountId, ForeignAssets> for UsdcFeesToMain {
+    fn handle_credit(credit: fungibles::Credit<AccountId, ForeignAssets>) {
+        let amount = credit.peek();
+        if amount == 0 {
+            return;
+        }
+        if <ForeignAssets as fungibles::Balanced<AccountId>>::resolve(
+            &crate::genesis::treasury_account(),
+            credit,
+        )
+        .is_ok()
+        {
+            crate::FutarchyTreasury::credit_main(amount);
+        }
+    }
+}
+
 impl pallet_asset_tx_payment::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type Fungibles = ForeignAssets;
     type OnChargeAssetTransaction =
-        pallet_asset_tx_payment::FungiblesAdapter<LiveFeeConversion, ()>;
-    type WeightInfo = ();
+        pallet_asset_tx_payment::FungiblesAdapter<LiveFeeConversion, UsdcFeesToMain>;
+    // SQ-523: `()` charged the SDK's reference-runtime measurement, which cannot
+    // know that this runtime's `HandleCredit` resolves the credit into `MAIN`
+    // and mutates a treasury counter. Measured here against `()`: writes 2 -> 4
+    // and estimated proof 3,675 -> 7,404 B, a 2.01x PoV understatement on every
+    // USDC-paid extrinsic. (Reads are 5 either way — the same count over
+    // different keys, which is coincidence and not reassurance.)
+    //
+    // The extension's post-dispatch refund does not rescue this. It computes
+    // `declared - WeightInfo::charge_asset_tx_payment_asset()` where `declared`
+    // *is* that same function (`weight()` -> `Pre::Charge.weight`), so on the
+    // charged path the refund is identically zero. It corrects a mis-predicted
+    // branch, never a mis-measured one — an understated function is charged and
+    // refunded at the same understated value.
+    type WeightInfo = crate::weights::pallet_asset_tx_payment::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = AssetTxBenchmarkHelper;
 }
 
+/// SQ-523: the fixture that makes `pallet_asset_tx_payment`'s extension
+/// benchmarks measure **this** runtime's fee path rather than a rejection.
+///
+/// Three narrowings this runtime applies to the stock fixture's inputs, and
+/// **all three fail the same way**: `LiveFeeConversion` returns `Err`,
+/// `withdraw_fee` maps that to `InvalidTransaction::Payment`, `test_run`
+/// returns `Err`, and the SDK fixture's `.unwrap()` **panics**. None of them
+/// mis-measures — each aborts the benchmark outright, which is the safer
+/// failure but presents as a tooling error rather than as a missing weight.
+/// (An earlier version of this comment claimed the first one measured a cheap
+/// `Err` arm and contrasted it with the others; that distinction does not
+/// exist, and the abort is the whole reason SQ-523 sat unresolved for a
+/// session.)
+///
+/// 1. `create_asset_id_parameter` returns [`usdc_location`] and ignores the
+///    caller's index, because `LiveFeeConversion` above rejects every asset
+///    that is not USDC.
+/// 2. `setup_balances_and_pool` seeds the governed `fee.vit_usdc` rate, which
+///    is not a genesis key, so without it the conversion fails closed.
+/// 3. It also funds the caller, since an unfunded payer cannot settle.
+///
+/// The USDC asset itself is genesis-created and `is_sufficient`, so minting to
+/// an otherwise-unknown synthetic caller needs no provider reference; the
+/// native endowment is belt-and-braces for the tip and the ED.
 #[cfg(feature = "runtime-benchmarks")]
 pub struct AssetTxBenchmarkHelper;
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_asset_tx_payment::BenchmarkHelperTrait<AccountId, AssetId, AssetId>
     for AssetTxBenchmarkHelper
 {
-    fn create_asset_id_parameter(id: u32) -> (AssetId, AssetId) {
-        let asset_id = bleavit_xcm::identity::asset_hub_asset_location(id as u128);
+    fn create_asset_id_parameter(_id: u32) -> (AssetId, AssetId) {
+        let asset_id = usdc_location();
         (asset_id.clone(), asset_id)
     }
-    fn setup_balances_and_pool(_: AssetId, _: AccountId) {}
+
+    fn setup_balances_and_pool(asset_id: AssetId, account: AccountId) {
+        use frame_support::traits::fungible::Mutate as _;
+        use frame_support::traits::fungibles::Mutate as _;
+
+        // 13 §1 `fee.vit_usdc`, absent from genesis: without it the USDC fee
+        // path is inert and the extension cannot reach the handler at all.
+        //
+        // The rate below is a benchmark rate, not a copied parameter — 13's own
+        // value is `1.0 x fee.vit_usdc_rate_ref` with the ref `[VERIFY at TGE]`,
+        // which is precisely why no genesis seed exists to reuse. The weight is
+        // insensitive to it: any lawful non-zero rate takes the same branch and
+        // touches the same keys. It matches the runtime test helper's rate so
+        // the two fixtures stay comparable.
+        pallet_constitution::Params::<Runtime>::insert(
+            crate::FEE_VIT_USDC_RATE_KEY,
+            pallet_constitution::ParamRecord {
+                key: crate::FEE_VIT_USDC_RATE_KEY,
+                value: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(
+                    2_000_000_000,
+                )),
+                min: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(1)),
+                max: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(
+                    u64::MAX,
+                )),
+                max_delta: None,
+                cooldown_epochs: 0,
+                last_changed_epoch: 0,
+                last_change_block: 0,
+                class: pallet_constitution::ParamClass::Treasury,
+                kernel_bounded: false,
+            },
+        );
+
+        let _ = Balances::mint_into(&account, 1_000 * currency::VIT);
+        let _ = ForeignAssets::mint_into(asset_id, &account, 1_000_000 * currency::USDC);
+    }
 }
 
 parameter_types! {
@@ -2869,6 +2987,38 @@ impl pallet_epoch::EpochParamsProvider for RuntimeEpochParams {
         }
     }
 }
+/// 03 §3 / §5.3a(5): the live `ledger.redeem_fee`, read from
+/// `pallet-constitution::Params` on every use — 13 §1 makes it a PARAM row, so it
+/// must not become a compile-time constant. A missing record already reads as 0
+/// through `perbill_param`; an out-of-domain stored scalar is screened to 0 here
+/// rather than clamped to 100 % by `Perbill::from_parts`, because §5.3a(5) says a
+/// **malformed** record reads as zero and zero is the claimant-favouring direction.
+pub struct LedgerRedemptionFee;
+impl frame_support::traits::Get<Perbill> for LedgerRedemptionFee {
+    fn get() -> Perbill {
+        // Deliberately NOT `perbill_param`. That helper falls back to
+        // `default_param` — the genesis seed, 30 bps — before it falls back to
+        // zero, so a missing or wrong-kind record would charge a claimant from
+        // state the runtime could not read. 15 §1 I-32(d) forbids exactly that:
+        // "A missing, malformed or out-of-bounds rate record reads as **zero**,
+        // not as a charge — the one place the ledger's fail-**open** direction
+        // is the correct one, because it is the claimant-favouring one."
+        //
+        // The generic helper is right for `mkt.fee`, whose unreadable-record
+        // direction is the opposite (a market that silently stopped charging a
+        // maker fee is the unsafe one). This key is the exception, so it reads
+        // `live_param` directly and every non-conforming shape resolves to zero.
+        match live_param(pallet_constitution::key16(b"ledger.rdm_fee")) {
+            Some(pallet_constitution::ParamValue::Perbill(parts))
+                if parts <= Perbill::one().deconstruct() =>
+            {
+                Perbill::from_parts(parts)
+            }
+            _ => Perbill::zero(),
+        }
+    }
+}
+
 pub struct MarketFee;
 impl frame_support::traits::Get<u128> for MarketFee {
     fn get() -> u128 {
@@ -3075,6 +3225,22 @@ pub struct ProtocolAccounts;
 impl Contains<AccountId> for ProtocolAccounts {
     fn contains(who: &AccountId) -> bool {
         is_canonical_protocol_account(who)
+            // The treasury `MAIN` account (E2). 03 §7 R-4 already lists it among
+            // the twelve genesis-endowed permanent protocol accounts, and 04 §2
+            // / 04 §6.1 make it the recipient of the Sweep's fee remittance —
+            // which the ledger's return surface only pays to protocol custody
+            // (03 §5.5 `ensure_protocol_return`). Classifying it here therefore
+            // states what 03 §7 R-4 already says. Two further consequences are
+            // both wanted: a Signed ledger transfer *into* `MAIN` is refused
+            // (it must never custody conditional positions), and its fee
+            // redemptions are exempt from the 03 §5.3a redemption fee, so
+            // protocol revenue does not pay itself a fee.
+            //
+            // It is deliberately **not** added to `is_canonical_protocol_account`:
+            // that predicate also drives `InflowCapProtocolAccounts`, whose
+            // members are exempt from the 09 §5.2 per-account Phase-3 deposit
+            // meter. E2 has no reason to widen an inflow cap, so it does not.
+            || *who == crate::genesis::treasury_account()
             // The refcounted index records ownership of live/retained market
             // accounts. Classification does not depend on this index: every
             // canonical future/present/past address is reserved above.
@@ -3082,9 +3248,27 @@ impl Contains<AccountId> for ProtocolAccounts {
     }
 }
 parameter_types! { pub InsuranceAccount: AccountId = insurance_account(); }
+
+/// Bind the ledger's treasury-free 03 §5.4 residue seam to the exact
+/// `SweptResidueUnreclaimed` writer that derives 08 §1.2's INSURANCE target.
+/// No unit implementation exists on the trait, so production cannot silently
+/// replace this with a no-op.
+pub struct RuntimeResidueReporter;
+
+impl pallet_conditional_ledger::ResidueReporter for RuntimeResidueReporter {
+    fn note_swept_residue(amount: Balance) -> DispatchResult {
+        FutarchyTreasury::note_swept_residue(amount)
+    }
+}
+
 impl pallet_conditional_ledger::Config for Runtime {
     type Collateral = ForeignAssets;
     type UsdcAssetId = UsdcAssetId;
+    // 03 §5.3a. The rate is live (13 §1 PARAM row), and the sink is the 08 §1.1
+    // `MAIN` account 03 §5.4 names — the same `treasury_account()` E2/E3 binds as
+    // `pallet_market`'s `MainAccount`, so both revenue legs land in one place.
+    type RedemptionFee = LedgerRedemptionFee;
+    type TreasuryMainAccount = TreasuryMainAccount;
     type MarketAuthority = EnsureMarketAccount;
     type ResolveAuthority = EnsureEpochAccount;
     type SettleAuthority = EnsureWelfareAccount;
@@ -3096,6 +3280,9 @@ impl pallet_conditional_ledger::Config for Runtime {
     type ReapBatch = ConstU32<{ kernel::REAP_BATCH }>;
     type ProtocolAccounts = ProtocolAccounts;
     type InsuranceAccount = InsuranceAccount;
+    type MarketSweepStatus = Market;
+    type ResidueReporter = RuntimeResidueReporter;
+    type MainRevenueSink = RuntimeMainRevenueSink;
     type PalletId = LedgerPalletId;
     type KeeperRebate = FutarchyTreasury;
     type InflowCapGate = RuntimeLedgerInflowCapGate;
@@ -4370,6 +4557,26 @@ impl pallet_market::PolCommitmentSync for RuntimePolCommitmentSync {
     }
 }
 
+/// Recognize the 04 §2 Sweep's fee remittance as treasury credit (08 §1.1).
+///
+/// The custody half is already done by the time this runs — the ledger paid
+/// `MAIN` directly, or the Baseline book's plain USDC was transferred there —
+/// but `nav()` reads the treasury's internal `main_usdc` counter, so custody
+/// alone would leave NAV exactly where it was. A failure aborts the sweep.
+pub struct RuntimeMainRevenueSink;
+
+impl pallet_conditional_ledger::MainRevenueSink for RuntimeMainRevenueSink {
+    fn credit_main(amount: Balance) -> DispatchResult {
+        crate::FutarchyTreasury::credit_main(amount);
+        Ok(())
+    }
+}
+
+parameter_types! {
+    /// 08 §1.1 `MAIN`, the single lawful sink of realized fee value (04 §6.1).
+    pub TreasuryMainAccount: AccountId = crate::genesis::treasury_account();
+}
+
 /// Bind the market's treasury-free subsidy-line discriminant to the treasury's
 /// own `BudgetLine` (08 §8 step 5(b): `POL` for decision and gate books,
 /// `POL_BASELINE` for the Baseline book).
@@ -4395,6 +4602,8 @@ impl pallet_market::Config for Runtime {
     type KeeperRebate = FutarchyTreasury;
     type InDecisionWindow = RuntimeInDecisionWindow;
     type PolCommitmentSync = RuntimePolCommitmentSync;
+    type MainAccount = TreasuryMainAccount;
+    type MainRevenueSink = RuntimeMainRevenueSink;
     type BaselineGrade = RuntimeBaselineGrade;
 }
 
@@ -5544,8 +5753,25 @@ impl pallet_epoch::ProposalBondCurrency<AccountId> for RuntimeProposalBond {
             &insurance_account(),
             amount,
             Preservation::Expendable,
-        )
-        .map(|_| ())
+        )?;
+        // 08 §1.2 (SQ-518): slash proceeds are one of the three inflow classes
+        // that execute treasury code, so the above-target surplus overflows to
+        // `MAIN` in this same transaction — "no crank for those". The
+        // permissionless `reconcile_insurance` is the backstop for *direct*
+        // transfers, which cannot be intercepted, not the intended path here.
+        //
+        // Best-effort by design: the confiscation is the security-critical act
+        // and a cleanup failure must not void it (G-1); whatever is left above
+        // target is exactly what the crank clears. The inner storage layer is
+        // load-bearing rather than defensive — `overflow_insurance` credits
+        // `main_usdc` before moving custody and relies on the *dispatch* to
+        // undo the credit if custody refuses. Swallowing the error without a
+        // layer would keep that credit, overstating NAV against custody that
+        // never moved.
+        let _ = frame_support::storage::with_storage_layer(|| {
+            FutarchyTreasury::note_insurance_inflow()
+        });
+        Ok(())
     }
 
     fn escrow_balance() -> Balance {
@@ -6702,8 +6928,15 @@ impl pallet_oracle::OracleCustody<AccountId> for RuntimeOracleCustody {
             &insurance_account(),
             amount,
             Preservation::Expendable,
-        )
-        .map(|_| ())
+        )?;
+        // 08 §1.2 (SQ-518): the reporter-bond slash is the second USDC inflow
+        // that executes treasury code. Same reading, same best-effort contract
+        // and same inner storage layer as `slash_to_insurance` above — see the
+        // comment there for why the layer is load-bearing.
+        let _ = frame_support::storage::with_storage_layer(|| {
+            FutarchyTreasury::note_insurance_inflow()
+        });
+        Ok(())
     }
 
     fn balance() -> Balance {
@@ -7311,6 +7544,19 @@ impl pallet_futarchy_treasury::InsuranceSweep for TreasuryInsuranceSweep {
             Preservation::Preserve,
         )
         .map(|_| ())
+    }
+
+    /// 08 §1.2's `T_ins` bounds `balance(INSURANCE, Usdc)` and nothing else:
+    /// both terms of the target are USDC, so reading any other asset here would
+    /// be a units error. VIT slash proceeds (06 §7) share this account and are
+    /// deliberately invisible to the target — 08 §2.2 marks VIT at 0 in NAV, so
+    /// overflowing them would move nothing into spendable NAV.
+    fn usdc_balance() -> Balance {
+        <ForeignAssets as Inspect<AccountId>>::balance(usdc_location(), &insurance_account())
+    }
+
+    fn usdc_min_balance() -> Balance {
+        <ForeignAssets as Inspect<AccountId>>::minimum_balance(usdc_location())
     }
 }
 

@@ -1271,8 +1271,10 @@ pub fn buy_book<A: Clone + Eq, L: LedgerOps<A>>(
             side,
             who,
             &m.account,
+            &m.fees_account,
             amount,
-            cost.checked_add(fee).ok_or(Error::ArithmeticOverflow)?,
+            cost,
+            fee,
         )?,
     }
     match side {
@@ -1642,6 +1644,109 @@ pub fn withdraw_branch_pair<A: Clone + Eq, L: LedgerOps<A>>(
     add(returned, withdraw_book(reject, ledger, treasury)?)
 }
 
+/// Realize one book's **fee** custody and remit it to the treasury `MAIN`
+/// account — the revenue half of the 04 §2 Sweep stage (04 §6.1; 08 §1.1, whose
+/// amended Fee routing paragraph routes realized fee value 100 % to `MAIN`).
+///
+/// The fee account of a decision or gate book holds **branch-USDC of both
+/// branches** and nothing else: a `buy` withholds the fee as a complete
+/// Accept+Reject pair, a `sell` withholds it single-sided in the target branch
+/// (04 §6.1). So realization is exactly the branch-USDC schedule of 03 §5.3:
+///
+/// * `ScalarSettled` — the winning branch's balance redeems **at par**, which
+///   is why 04 §6.1 can call the buy-side pair "worth exactly `fee` USDC at any
+///   settlement"; the losing branch pays 0 and is the worthless residue reap
+///   discards. A single-sided `sell` fee follows its branch, which is the
+///   income haircut behind the `ρ = 0.75` realization factor of 08 §10.2.
+/// * `Voided` — each branch's balance pays the D-1 neutral `floor(a/2)`
+///   (03 §6.4), paid straight to `MAIN`.
+///
+///   **Why not merge the pair first.** A cross-branch pair merges to par, so
+///   merging would realize one extra base unit when *both* branch totals are
+///   odd. It is rejected anyway: `merge` pays its **holder**, and a per-market
+///   fee account is not genesis-endowed and custodies no plain USDC (03 §7
+///   R-4), so a merge below the USDC `min_balance` fails `BelowMinimum` — and
+///   because the sweep is a precondition of reap (04 §2), that failure would
+///   strand the book unswept, unreapable and its POL unreturned **forever**.
+///   One base unit of dust, swept per 03 §7 R-5, against a permanent liveness
+///   trap is not a close call (G-1, R-7).
+/// * `Archived` — the ledger's independent crank already reaped the vault;
+///   there is nothing left to value (04 §2 "Reap interleavings").
+///
+/// A **Baseline** book has two fee-custody shapes (04 §6.1). Its buy-side fee
+/// is a complete LONG+SHORT set in `fees_account`, segregated before the buyer
+/// receives the purchased leg; once the Baseline vault is `Settled`, the pair
+/// redeems at par to `MAIN`. Its sell-side fee is already plain USDC in the
+/// *book* account, so that separate custody move needs no ledger redemption and
+/// is performed by the caller above the 03 §7 R-4 `min_balance` floor.
+///
+/// Returns the real USDC the redemptions released to `MAIN`, which is the
+/// `fee_to_main` leg of `RevenueSwept` (02 §5). Errors are status-quo (G-1):
+/// the caller's storage layer rolls the whole sweep back and the crank retries.
+pub fn withdraw_fees<A: Clone + Eq, L: LedgerOps<A>>(
+    m: &MarketBook<A>,
+    ledger: &mut L,
+    main: &A,
+) -> Result<Balance, Error> {
+    let fees = &m.fees_account;
+    let proposal = match m.kind {
+        BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. } => proposal,
+        BookKind::Baseline { epoch } => {
+            return match ledger.baseline_terminal(epoch).ok_or(Error::NotTerminal)? {
+                BaselineTerminal::Settled => {
+                    let long = ledger.position_balance(baseline(epoch, ScalarSide::Long), fees);
+                    let short = ledger.position_balance(baseline(epoch, ScalarSide::Short), fees);
+                    let pairs = long.min(short);
+                    if pairs == 0 {
+                        return Ok(0);
+                    }
+                    ledger
+                        .do_redeem_baseline_pair(epoch, fees, main, pairs)
+                        .map_err(|_| Error::Ledger)
+                }
+                BaselineTerminal::Archived => Ok(0),
+            }
+        }
+    };
+    match ledger.vault_terminal(proposal).ok_or(Error::NotTerminal)? {
+        VaultTerminal::Settled { winner } => {
+            let held =
+                ledger.position_balance(position(proposal, winner, PositionKind::BranchUsdc), fees);
+            if held == 0 {
+                return Ok(0);
+            }
+            ledger
+                .do_redeem(proposal, fees, main, held)
+                .map_err(|_| Error::Ledger)
+        }
+        VaultTerminal::Voided => {
+            let mut returned = 0;
+            for branch in [Branch::Accept, Branch::Reject] {
+                let held = ledger
+                    .position_balance(position(proposal, branch, PositionKind::BranchUsdc), fees);
+                if held == 0 {
+                    continue;
+                }
+                returned = add(
+                    returned,
+                    ledger
+                        .do_redeem_void(
+                            proposal,
+                            branch,
+                            PositionKind::BranchUsdc,
+                            fees,
+                            main,
+                            held,
+                        )
+                        .map_err(|_| Error::Ledger)?,
+                )?;
+            }
+            Ok(returned)
+        }
+        VaultTerminal::Archived => Ok(0),
+    }
+}
+
 /// `ScalarSettled` decision book on the realized branch: complete sets pay par,
 /// the unmatched remainder pays the 03 §5.3 floored single-leg rate, and any
 /// branch-USDC the §6.3 recycle left behind redeems 1:1.
@@ -1942,20 +2047,31 @@ fn buy_baseline<A: Clone + Eq, L: LedgerOps<A>>(
     side: ScalarSide,
     who: &A,
     book: &A,
+    fees: &A,
     amount: Balance,
-    total: Balance,
+    cost: Balance,
+    fee: Balance,
 ) -> Result<(), Error> {
-    // 04 §6.1 Baseline degenerate wrapper: cost + fee pays in directly and
-    // there is no mirror credit - the buyer must not retain a fee-sized
-    // set pair, so both full legs move to the book.
+    // 04 §6.1 Baseline degenerate wrapper. The ordering is normative:
+    // segregate the complete fee set before paying the buyer's leg, so an
+    // underfunded book fails rather than financing the payout from revenue.
+    let total = add(cost, fee)?;
     ledger
         .do_split_baseline(epoch, who, total)
         .map_err(|_| Error::Ledger)?;
+    if fee > 0 {
+        ledger
+            .do_transfer(baseline(epoch, ScalarSide::Long), who, fees, fee)
+            .map_err(|_| Error::Ledger)?;
+        ledger
+            .do_transfer(baseline(epoch, ScalarSide::Short), who, fees, fee)
+            .map_err(|_| Error::Ledger)?;
+    }
     ledger
-        .do_transfer(baseline(epoch, ScalarSide::Long), who, book, total)
+        .do_transfer(baseline(epoch, ScalarSide::Long), who, book, cost)
         .map_err(|_| Error::Ledger)?;
     ledger
-        .do_transfer(baseline(epoch, ScalarSide::Short), who, book, total)
+        .do_transfer(baseline(epoch, ScalarSide::Short), who, book, cost)
         .map_err(|_| Error::Ledger)?;
     ledger
         .do_transfer(baseline(epoch, side), book, who, amount)
@@ -2653,6 +2769,55 @@ mod tests {
     }
 
     #[test]
+    fn withdraw_baseline_fees_requires_terminal_and_redeems_only_the_complete_set() {
+        // 04 §6.1 / 03 §5.3a: take the minimum rather than assuming the two
+        // fee legs are equal, require the Baseline terminal latch, and redeem
+        // the protocol account's pair at par despite a live redemption fee.
+        let mut ledger = LedgerState::new();
+        ledger.create_baseline_vault(1).unwrap();
+        ledger.redeem_fee = 3_000_000;
+        let mut markets = MarketState::new();
+        markets
+            .create_market(11, BookKind::Baseline { epoch: 1 }, a(9), a(8), B)
+            .unwrap();
+        markets.seed(&mut ledger, 11, &a(1)).unwrap();
+
+        let fee_inventory = 1_000_000;
+        ledger.do_split_baseline(1, &a(8), fee_inventory).unwrap();
+        let unmatched = kernel::MIN_SPLIT_USDC;
+        ledger
+            .do_transfer(baseline(1, ScalarSide::Long), &a(8), &a(7), unmatched)
+            .unwrap();
+        assert_eq!(
+            withdraw_fees(&markets.markets[0], &mut ledger, &a(3)),
+            Err(Error::NotTerminal),
+        );
+
+        ledger
+            .settle_baseline(LedgerOrigin::SettleAuthority, 1, FixedU64(500_000_000))
+            .unwrap();
+        let complete_set = fee_inventory - unmatched;
+        assert_eq!(
+            withdraw_fees(&markets.markets[0], &mut ledger, &a(3)).unwrap(),
+            complete_set,
+            "protocol fee realization is uncharged",
+        );
+        assert_eq!(
+            ledger.position_balance(baseline(1, ScalarSide::Long), &a(8)),
+            0,
+        );
+        assert_eq!(
+            ledger.position_balance(baseline(1, ScalarSide::Short), &a(8)),
+            unmatched,
+        );
+        assert_eq!(
+            withdraw_fees(&markets.markets[0], &mut ledger, &a(3)).unwrap(),
+            0,
+        );
+        ledger.try_state().unwrap();
+    }
+
+    #[test]
     fn withdraw_book_returns_the_winning_gate_side_and_refuses_an_unsettled_gate() {
         let mut ledger = LedgerState::new();
         ledger.create_vault(1, 0).unwrap();
@@ -3019,47 +3184,55 @@ mod tests {
 
     #[test]
     fn baseline_fees_are_withheld_on_both_sides() {
-        // Codex review, PR #17 (P2): the buyer must not retain a fee-sized
-        // complete pair, and sells must pay out net of the 30 bps fee.
+        // 04 §6.1 / SQ-519: the buyer must not retain a fee-sized complete
+        // pair, the book must not absorb it into subsidy inventory, and sells
+        // must pay out net of the 30 bps fee.
         let mut ledger = LedgerState::new();
         ledger.create_baseline_vault(3).unwrap();
         let mut m = MarketState::new();
         m.create_market(11, BookKind::Baseline { epoch: 3 }, a(9), a(8), B)
             .unwrap();
-        m.seed(&mut ledger, 11, &a(1)).unwrap();
+        let headroom = m.seed(&mut ledger, 11, &a(1)).unwrap();
         let trader = a(2);
+        let amount = 1_000_000_000;
+        let quoted = quote(&m.markets[0], TradeSide::BuyLong, amount, FEE_BPS).unwrap();
         m.buy(
             &mut ledger,
             11,
             &trader,
             ScalarSide::Long,
-            1_000_000_000,
+            amount,
             600_000_000,
             10,
         )
         .unwrap();
-        // Exactly the bought LONG leg - no residual SHORT (fee pair) with the
+        // Exactly the bought LONG leg — no residual SHORT (fee pair) with the
         // buyer.
         assert_eq!(
             balance_of(&ledger, baseline(3, ScalarSide::Long), &trader),
-            1_000_000_000
+            amount
         );
         assert_eq!(
             balance_of(&ledger, baseline(3, ScalarSide::Short), &trader),
             0
         );
         let buy_fee = m.markets[0].fees_accrued;
+        assert_eq!(buy_fee, quoted.fee);
         assert!(buy_fee > 0);
-        m.sell(
-            &mut ledger,
-            11,
-            &trader,
-            ScalarSide::Long,
-            1_000_000_000,
-            1,
-            20,
-        )
-        .unwrap();
+        // The fee account, not the book, holds the complete unconditional set.
+        for side in [ScalarSide::Long, ScalarSide::Short] {
+            assert_eq!(balance_of(&ledger, baseline(3, side), &a(8)), buy_fee,);
+        }
+        assert_eq!(
+            balance_of(&ledger, baseline(3, ScalarSide::Long), &a(9)),
+            headroom + quoted.cost - amount,
+        );
+        assert_eq!(
+            balance_of(&ledger, baseline(3, ScalarSide::Short), &a(9)),
+            headroom + quoted.cost,
+        );
+        m.sell(&mut ledger, 11, &trader, ScalarSide::Long, amount, 1, 20)
+            .unwrap();
         // The seller's payout pair equals proceeds net of fee: total fees
         // accrued grew by the sell fee and the payout reflects it.
         assert!(m.markets[0].fees_accrued > buy_fee);
@@ -3071,6 +3244,50 @@ mod tests {
         assert!(payout_pair > 0);
         ledger.try_state().unwrap();
         m.try_state().unwrap();
+    }
+
+    #[test]
+    fn baseline_buy_cannot_fund_the_buyer_from_segregated_fee_revenue() {
+        // 04 §6.1 ordering / SQ-519: construct a valid but deliberately thin
+        // book with one unit less inventory than `amount - cost`. Pooling the
+        // fee with cost would make the final delivery succeed; segregating it
+        // first leaves the book one unit short, so the whole trade must fail
+        // atomically (G-1).
+        let mut ledger = LedgerState::new();
+        ledger.create_baseline_vault(3).unwrap();
+        let mut markets = MarketState::new();
+        let book = a(9);
+        let fees = a(8);
+        let trader = a(2);
+        let amount = 1_000_000_000;
+        markets
+            .create_market(11, BookKind::Baseline { epoch: 3 }, book, fees, B)
+            .unwrap();
+        let quoted = quote(&markets.markets[0], TradeSide::BuyLong, amount, FEE_BPS).unwrap();
+        let inventory = amount - quoted.cost - 1;
+        assert!(quoted.fee > 1);
+        assert_eq!(inventory + quoted.cost, amount - 1);
+        assert!(inventory + quoted.cost + quoted.fee >= amount);
+        ledger
+            .split_baseline(LedgerOrigin::Signed, 3, &book, inventory)
+            .unwrap();
+
+        let markets_before = markets.clone();
+        let ledger_before = ledger.clone();
+        assert_eq!(
+            markets.buy(
+                &mut ledger,
+                11,
+                &trader,
+                ScalarSide::Long,
+                amount,
+                Balance::MAX,
+                10,
+            ),
+            Err(Error::Ledger),
+        );
+        assert_eq!(markets, markets_before);
+        assert_eq!(ledger, ledger_before);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use subxt::ext::scale_value::{Composite, Value};
 use crate::{
     config::{Role, RoleSet},
     snapshot::{
-        ChainSnapshot, RegistryEpochSnapshot, DEFAULT_DECISION_WINDOW_BLOCKS,
+        ChainSnapshot, InsuranceSnapshot, RegistryEpochSnapshot, DEFAULT_DECISION_WINDOW_BLOCKS,
         DEFAULT_OBSERVATION_INTERVAL_BLOCKS, DEFAULT_RESERVE_PROBE_INTERVAL_BLOCKS,
         DEFAULT_RESERVE_PROBE_TIMEOUT_BLOCKS, DEFAULT_TICK_BATCH,
     },
@@ -31,8 +31,18 @@ pub const PRIORITY_OBSERVE: u16 = 500;
 /// terminal-block latch that the Baseline dust sweep and the book reap both
 /// require (05 §7(6)), so it has to land before the cleanup work it unblocks.
 pub const PRIORITY_BASELINE_FINALIZE: u16 = 150;
+/// Above `PRIORITY_CLEANUP` for two independent reasons (04 §2, milestone E1).
+/// The 04 §2 Sweep stage is the precondition of the book reap, so it has to hold
+/// the lower nonce in any batch that carries both. And the custody it returns is
+/// exactly what the ledger's independent `sweep_dust*` would otherwise route to
+/// `INSURANCE` (03 §5.4) — the two are bounded a whole `ledger.archive_delay`
+/// apart, but nothing locks them, so the keeper does not leave the order to
+/// chance (SQ-512). Below `PRIORITY_BASELINE_FINALIZE`, which writes the very
+/// terminal latch the sweep needs.
+pub const PRIORITY_MARKET_SWEEP: u16 = 125;
 pub const PRIORITY_CLEANUP: u16 = 100;
-const _: () = assert!(PRIORITY_BASELINE_FINALIZE > PRIORITY_CLEANUP);
+const _: () = assert!(PRIORITY_BASELINE_FINALIZE > PRIORITY_MARKET_SWEEP);
+const _: () = assert!(PRIORITY_MARKET_SWEEP > PRIORITY_CLEANUP);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlannedCrank {
@@ -166,7 +176,10 @@ fn plan_observations(
     config: &PlannerConfig,
     cranks: &mut Vec<PlannedCrank>,
 ) {
-    if !enabled(config, Role::Observe) || !snapshot.has_call("Market", "crank_observe") {
+    if !enabled(config, Role::Observe)
+        || !snapshot.has_call("Market", "crank_observe")
+        || frozen(snapshot.market_frozen_until, snapshot.current_block)
+    {
         return;
     }
     for book in &snapshot.books {
@@ -657,8 +670,63 @@ fn plan_cleanup(snapshot: &ChainSnapshot, config: &PlannerConfig, cranks: &mut V
             PRIORITY_CLEANUP,
         ));
     }
+    // 03 §5.4: only pay to submit the permissionless revenue sweep when its
+    // ValueQuery counter proves there is custody to move. It shares the
+    // market-revenue priority because both calls recognize liquid USDC in
+    // treasury MAIN and must run before lower-priority archival cleanup.
+    // 06 §6.3/SQ-517: both revenue cranks now error `Frozen` under an active
+    // `PB-LEDGER-FREEZE`, so planning them during one only burns the keeper's
+    // own fees. The latch is read per pallet because the two freezes are
+    // independent latches, not one shared flag.
+    if snapshot.has_call("ConditionalLedger", "sweep_redemption_fees")
+        && !frozen(snapshot.ledger_frozen_until, snapshot.current_block)
+        && snapshot
+            .redemption_fees_accrued
+            .is_some_and(|amount| amount > 0)
+    {
+        cranks.push(crank(
+            Role::Cleanup,
+            "ConditionalLedger",
+            "sweep_redemption_fees",
+            core::iter::empty::<(&str, Value<()>)>(),
+            PRIORITY_MARKET_SWEEP,
+        ));
+    }
+    // 08 §1.2: a permissionless reconciliation is useful only above the
+    // derived reserve target. Checked arithmetic is deliberate: an overflowing
+    // target is undefined, so G-1 suppresses the call instead of treating the
+    // wrapped/saturated result as spendable surplus.
+    if snapshot.has_call("FutarchyTreasury", "reconcile_insurance")
+        && insurance_reconciliation_due(snapshot.insurance.as_ref())
+    {
+        cranks.push(crank(
+            Role::Cleanup,
+            "FutarchyTreasury",
+            "reconcile_insurance",
+            core::iter::empty::<(&str, Value<()>)>(),
+            PRIORITY_MARKET_SWEEP,
+        ));
+    }
+    // 04 §2's Sweep and Reap stages. Both are gated by the same
+    // `SettlementObservedAt` latch — which is what `market_reaps` is — so they
+    // are planned together and their ordering is visible in one place. Sweep is
+    // admissible from the terminal block with no delay; reap only after
+    // `ledger.archive_delay` **and** the marker the sweep writes.
     for candidate in &snapshot.market_reaps {
+        if snapshot.has_call("Market", "sweep_revenue")
+            && !frozen(snapshot.market_frozen_until, snapshot.current_block)
+            && sweep_due(snapshot, candidate.id)
+        {
+            cranks.push(crank(
+                Role::Cleanup,
+                "Market",
+                "sweep_revenue",
+                [("market", number(candidate.id))],
+                PRIORITY_MARKET_SWEEP,
+            ));
+        }
         if snapshot.has_call("Market", "reap")
+            && reap_swept(snapshot, candidate.id)
             && reap_due(
                 snapshot.current_block,
                 candidate.terminal_at,
@@ -742,6 +810,48 @@ fn reap_due(current: u64, terminal_at: Option<u64>, archive_delay: Option<u64>) 
     terminal_at
         .zip(archive_delay)
         .is_some_and(|(at, delay)| current >= at.saturating_add(delay))
+}
+
+fn insurance_reconciliation_due(insurance: Option<&InsuranceSnapshot>) -> bool {
+    insurance.is_some_and(|insurance| {
+        insurance
+            .swept_residue_unreclaimed
+            .checked_add(insurance.min_balance)
+            .is_some_and(|target| insurance.balance > target)
+    })
+}
+
+/// A 06 §6.3 freeze latch is active at `now`.
+///
+/// The condition is the exact negation of the pallets' own guard
+/// (`FrozenUntil::get().is_none_or(|until| now >= until)`), so the keeper never
+/// suppresses a call the chain would have accepted — including on the boundary
+/// block `now == until`, where the freeze has expired and the call succeeds.
+fn frozen(frozen_until: Option<u64>, now: u64) -> bool {
+    frozen_until.is_some_and(|until| now < until)
+}
+
+/// The book still owes its 04 §2 Sweep: the marker map is readable and carries
+/// no entry for it. `sweep_revenue` is idempotent, so a stale `true` costs one
+/// no-op submission, but suppressing the repeat is what keeps a settled slate
+/// from re-planning the whole set on every finalized block.
+fn sweep_due(snapshot: &ChainSnapshot, market: u64) -> bool {
+    snapshot
+        .swept_markets
+        .as_ref()
+        .is_some_and(|swept| !swept.contains(&market))
+}
+
+/// `reap` requires that marker in addition to the terminal latch and the
+/// archive delay, and answers `NotReapable` without it (04 §2, milestone E1).
+/// A runtime predating the Sweep stage exposes no marker map — `None` — and
+/// keeps its pre-E1 preconditions, so its reaps are not gated on a surface that
+/// chain does not have.
+fn reap_swept(snapshot: &ChainSnapshot, market: u64) -> bool {
+    snapshot
+        .swept_markets
+        .as_ref()
+        .is_none_or(|swept| swept.contains(&market))
 }
 
 fn enabled(config: &PlannerConfig, role: Role) -> bool {
@@ -828,6 +938,7 @@ mod tests {
                 "Epoch.finalize_epoch_baseline",
                 "Market.crank_observe",
                 "Market.reap",
+                "Market.sweep_revenue",
                 "Oracle.crank_round_close",
                 "Oracle.crank_reserve_probe",
                 "IncidentRegistry.crank_close",
@@ -835,12 +946,14 @@ mod tests {
                 "IncidentRegistry.reap_epoch",
                 "ConditionalLedger.sweep_dust",
                 "ConditionalLedger.sweep_dust_baseline",
+                "ConditionalLedger.sweep_redemption_fees",
                 "ConditionalLedger.reconcile",
                 "ExecutionGuard.execute",
                 "ExecutionGuard.expire_failed_execution",
                 "ExecutionGuard.qualify_recovery_image",
                 "FutarchyTreasury.execute_coretime_renewal",
                 "FutarchyTreasury.prune_coretime_quote",
+                "FutarchyTreasury.reconcile_insurance",
                 "Welfare.record_snapshot",
                 "Welfare.record_daily_gate",
             ]
@@ -940,11 +1053,23 @@ mod tests {
                 }],
                 funded_periods: BTreeSet::new(),
             }),
+            redemption_fees_accrued: Some(0),
+            ledger_frozen_until: None,
+            market_frozen_until: None,
+            insurance: Some(InsuranceSnapshot {
+                balance: 110,
+                swept_residue_unreclaimed: 100,
+                min_balance: 10,
+            }),
             market_reaps: vec![ReapSnapshot {
                 id: 88,
                 terminal_at: Some(900),
                 archive_delay: Some(50),
             }],
+            // Swept, so the fixture's book is reapable: 04 §2 makes the marker
+            // a reap precondition, and the two stages are mutually exclusive on
+            // any one book.
+            swept_markets: Some(BTreeSet::from([88])),
             proposal_dust: vec![ReapSnapshot {
                 id: 3,
                 terminal_at: Some(900),
@@ -1736,5 +1861,248 @@ mod tests {
         assert_eq!(reaps.len(), 1, "got {planned:?}");
         assert_eq!(argument(reaps[0], "epoch"), Some(3));
         assert_eq!(argument(reaps[0], "spec_version"), Some(3));
+    }
+
+    #[test]
+    fn redemption_fee_sweep_is_planned_only_for_a_nonzero_due_signal() {
+        let mut snapshot = snapshot();
+        snapshot.redemption_fees_accrued = Some(43);
+        let planned = plan(&snapshot, &config_for(Role::Cleanup));
+        let sweep = planned
+            .iter()
+            .find(|crank| crank.call == "sweep_redemption_fees")
+            .expect("nonzero accrued redemption fees are due");
+        assert_eq!(sweep.role, Role::Cleanup);
+        assert_eq!(sweep.pallet, "ConditionalLedger");
+        assert_eq!(sweep.priority, PRIORITY_MARKET_SWEEP);
+
+        snapshot.redemption_fees_accrued = Some(0);
+        assert!(!plan(&snapshot, &config_for(Role::Cleanup))
+            .iter()
+            .any(|crank| crank.call == "sweep_redemption_fees"));
+        snapshot.redemption_fees_accrued = None;
+        assert!(!plan(&snapshot, &config_for(Role::Cleanup))
+            .iter()
+            .any(|crank| crank.call == "sweep_redemption_fees"));
+    }
+
+    #[test]
+    fn an_active_freeze_suppresses_the_three_gated_cranks_and_only_those() {
+        // 06 §6.3 / SQ-517. `sweep_redemption_fees` (ledger latch) and
+        // `sweep_revenue` + `crank_observe` (market latch) all error `Frozen`
+        // while their pallet's freeze is live, so planning them during one
+        // only burns the keeper's fees. The two latches are independent, which
+        // is what the cross-checks below pin: a ledger freeze must not
+        // suppress market cranks, and vice versa.
+        //
+        // Scope is exactly these three, not the whole 06 §6.3 refusal surface:
+        // `ExecutionGuard::execute` and the transitively-refused seeded-book
+        // `sweep_dust*` are deliberately still planned. The test name says
+        // "the three gated cranks" rather than "exactly what the chain
+        // refuses" because the earlier name over-claimed that scope.
+        let due = || {
+            let mut snapshot = snapshot();
+            snapshot.redemption_fees_accrued = Some(43);
+            // The default fixture marks market 88 already swept, which is what
+            // makes its `reap` due; clear the marker so the Sweep stage is the
+            // one outstanding and `sweep_revenue` is actually planned.
+            snapshot.swept_markets = Some(BTreeSet::new());
+            snapshot
+        };
+        let calls = |snapshot: &ChainSnapshot| -> Vec<&'static str> {
+            let config = PlannerConfig {
+                enabled_roles: [Role::Cleanup, Role::Observe].into(),
+                ..PlannerConfig::default()
+            };
+            plan(snapshot, &config)
+                .iter()
+                .map(|crank| crank.call)
+                .collect()
+        };
+
+        let baseline = calls(&due());
+        for call in ["sweep_redemption_fees", "sweep_revenue", "crank_observe"] {
+            assert!(
+                baseline.contains(&call),
+                "unfrozen baseline must plan {call}: {baseline:?}",
+            );
+        }
+
+        let mut ledger_frozen = due();
+        ledger_frozen.ledger_frozen_until = Some(ledger_frozen.current_block + 1);
+        let planned = calls(&ledger_frozen);
+        assert!(!planned.contains(&"sweep_redemption_fees"));
+        assert!(
+            planned.contains(&"sweep_revenue"),
+            "the market latch is independent of the ledger's: {planned:?}",
+        );
+
+        let mut market_frozen = due();
+        market_frozen.market_frozen_until = Some(market_frozen.current_block + 1);
+        let planned = calls(&market_frozen);
+        assert!(!planned.contains(&"sweep_revenue"));
+        assert!(!planned.contains(&"crank_observe"));
+        assert!(
+            planned.contains(&"sweep_redemption_fees"),
+            "the ledger latch is independent of the market's: {planned:?}",
+        );
+    }
+
+    #[test]
+    fn an_expired_freeze_is_not_a_freeze_on_its_boundary_block() {
+        // The pallets admit the call at `now == until`
+        // (`is_none_or(|until| now >= until)`), so a keeper that suppressed on
+        // `<=` would idle a whole block after every freeze lapsed. Pin the
+        // boundary in both directions rather than the safe side only.
+        let mut snapshot = snapshot();
+        snapshot.redemption_fees_accrued = Some(43);
+
+        snapshot.ledger_frozen_until = Some(snapshot.current_block);
+        assert!(
+            plan(&snapshot, &config_for(Role::Cleanup))
+                .iter()
+                .any(|crank| crank.call == "sweep_redemption_fees"),
+            "now == until is expired, and the chain would accept the call",
+        );
+
+        snapshot.ledger_frozen_until = Some(snapshot.current_block + 1);
+        assert!(!plan(&snapshot, &config_for(Role::Cleanup))
+            .iter()
+            .any(|crank| crank.call == "sweep_redemption_fees"));
+
+        // An unreadable latch decodes to `None` and must behave exactly as it
+        // did before these fields existed — submit, and let the chain refuse.
+        snapshot.ledger_frozen_until = None;
+        assert!(plan(&snapshot, &config_for(Role::Cleanup))
+            .iter()
+            .any(|crank| crank.call == "sweep_redemption_fees"));
+    }
+
+    #[test]
+    fn insurance_reconciliation_is_planned_only_strictly_above_the_derived_target() {
+        let mut snapshot = snapshot();
+        snapshot.insurance = Some(InsuranceSnapshot {
+            balance: 111,
+            swept_residue_unreclaimed: 100,
+            min_balance: 10,
+        });
+        let planned = plan(&snapshot, &config_for(Role::Cleanup));
+        let reconcile = planned
+            .iter()
+            .find(|crank| crank.call == "reconcile_insurance")
+            .expect("custody above T_ins is due");
+        assert_eq!(reconcile.role, Role::Cleanup);
+        assert_eq!(reconcile.pallet, "FutarchyTreasury");
+        assert_eq!(reconcile.priority, PRIORITY_MARKET_SWEEP);
+
+        for signal in [
+            Some(InsuranceSnapshot {
+                balance: 110,
+                swept_residue_unreclaimed: 100,
+                min_balance: 10,
+            }),
+            Some(InsuranceSnapshot {
+                balance: 109,
+                swept_residue_unreclaimed: 100,
+                min_balance: 10,
+            }),
+            Some(InsuranceSnapshot {
+                balance: u128::MAX,
+                swept_residue_unreclaimed: u128::MAX,
+                min_balance: 1,
+            }),
+            None,
+        ] {
+            snapshot.insurance = signal;
+            assert!(
+                !plan(&snapshot, &config_for(Role::Cleanup))
+                    .iter()
+                    .any(|crank| crank.call == "reconcile_insurance"),
+                "at/below/undefined targets must preserve the status quo"
+            );
+        }
+    }
+
+    /// SQ-511: 04 §2's Sweep stage is admissible from the terminal block with no
+    /// delay, and `reap` answers `NotReapable` until it has run — so an unswept
+    /// latched book is swept and is *not* offered to reap, however long its
+    /// archive delay has been elapsed.
+    #[test]
+    fn an_unswept_book_is_swept_and_is_not_reaped_before_it() {
+        let mut snapshot = snapshot();
+        snapshot.swept_markets = Some(BTreeSet::new());
+        let planned = plan(&snapshot, &config_for(Role::Cleanup));
+        let sweep = planned
+            .iter()
+            .find(|crank| crank.call == "sweep_revenue")
+            .expect("a latched, unswept book is sweepable");
+        assert_eq!(sweep.pallet, "Market");
+        assert_eq!(argument(sweep, "market"), Some(88));
+        assert_eq!(sweep.priority, PRIORITY_MARKET_SWEEP);
+        assert!(
+            !planned.iter().any(|crank| crank.call == "reap"),
+            "reap must not be planned before the sweep it requires: {planned:?}"
+        );
+    }
+
+    /// The marker makes the two stages mutually exclusive on one book, so the
+    /// ordering is proved across two: the sweep of a still-owing book outranks
+    /// both the reap of a swept one and the ledger dust sweeps. `sweep_dust*` is
+    /// independent of the market and routes residue to `INSURANCE` (03 §5.4), so
+    /// losing that race is what SQ-512 costs.
+    #[test]
+    fn sweep_outranks_the_reap_and_the_dust_sweeps_it_must_precede() {
+        let mut snapshot = snapshot();
+        snapshot.market_reaps.push(ReapSnapshot {
+            id: 89,
+            terminal_at: Some(900),
+            archive_delay: Some(50),
+        });
+        let planned = plan(&snapshot, &config_for(Role::Cleanup));
+        let position = |call: &str| {
+            planned
+                .iter()
+                .position(|crank| crank.call == call)
+                .unwrap_or_else(|| panic!("fixture has due {call} work; got {planned:?}"))
+        };
+        let sweep = position("sweep_revenue");
+        assert_eq!(argument(&planned[sweep], "market"), Some(89));
+        assert!(sweep < position("reap"));
+        assert!(sweep < position("sweep_dust"));
+        assert!(planned[sweep].priority > PRIORITY_CLEANUP);
+    }
+
+    /// The marker is durable until reap, so a settled slate must not re-plan its
+    /// whole sweep set on every finalized block.
+    #[test]
+    fn an_already_swept_book_is_not_swept_again() {
+        let planned = plan(&snapshot(), &config_for(Role::Cleanup));
+        assert!(
+            !planned.iter().any(|crank| crank.call == "sweep_revenue"),
+            "the fixture's book is already swept: {planned:?}"
+        );
+        assert!(planned.iter().any(|crank| crank.call == "reap"));
+    }
+
+    /// A runtime predating the Sweep stage carries neither the call nor the
+    /// marker map, and its `reap` never needed one. Gating that chain's reaps on
+    /// an absent surface would stall its cleanup outright.
+    #[test]
+    fn reap_is_not_gated_on_a_marker_surface_the_runtime_lacks() {
+        let mut snapshot = snapshot();
+        snapshot.swept_markets = None;
+        snapshot.available_calls.remove("Market.sweep_revenue");
+        let planned = plan(&snapshot, &config_for(Role::Cleanup));
+        assert!(planned.iter().any(|crank| crank.call == "reap"));
+        assert!(!planned.iter().any(|crank| crank.call == "sweep_revenue"));
+
+        // And the sweep is equally suppressed when only the call is missing:
+        // planning it against a chain that cannot dispatch it is a doomed
+        // submission, not a degradation.
+        let mut half_present = snapshot.clone();
+        half_present.swept_markets = Some(BTreeSet::new());
+        assert!(!plan(&half_present, &config_for(Role::Cleanup))
+            .iter()
+            .any(|crank| crank.call == "sweep_revenue"));
     }
 }

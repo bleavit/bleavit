@@ -2089,7 +2089,7 @@ fn identity_and_version_pins_match_the_integration_contract() {
     // makes a future re-coupling fail here.
     assert_eq!(VERSION.transaction_version, TRANSACTION_VERSION);
     assert_eq!(VERSION.transaction_version, 1);
-    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 16);
+    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 17);
     assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
@@ -2160,6 +2160,269 @@ fn usdc_fee_conversion_scales_decimals_and_rounds_against_the_payer() {
         assert_eq!(
             crate::configs::LiveFeeConversion::to_asset_balance(0, usdc_location()),
             Ok(0)
+        );
+    });
+}
+
+/// Install the 13 §1 `fee.vit_usdc` rate so the USDC fee path is live.
+fn set_fee_vit_usdc_rate(rate_1e9: u64) {
+    pallet_constitution::Params::<Runtime>::insert(
+        FEE_VIT_USDC_RATE_KEY,
+        pallet_constitution::ParamRecord {
+            key: FEE_VIT_USDC_RATE_KEY,
+            value: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(rate_1e9)),
+            min: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(1)),
+            max: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(u64::MAX)),
+            max_delta: None,
+            cooldown_epochs: 0,
+            last_changed_epoch: 0,
+            last_change_block: 0,
+            class: pallet_constitution::ParamClass::Treasury,
+            kernel_bounded: false,
+        },
+    );
+}
+
+#[test]
+fn usdc_transaction_fees_land_in_main_instead_of_reducing_issuance() {
+    // 08 §9 Fee destination (E3). The SDK's default `HandleCredit` for `()`
+    // drops the collected credit, which **burns** it from `ForeignAssets`
+    // issuance — and USDC here is a claim against a reserve held on Asset Hub,
+    // so destroying the local claim orphans the remote reserve rather than
+    // destroying it (§7.1). 08 §9 marks any runtime that does so non-conforming.
+    //
+    // Two things are asserted, and the second is the one custody alone does not
+    // give: the fee reaches `MAIN`, **and** `nav()` moves by it, because NAV is
+    // computed from the treasury's internal `main_usdc` counter.
+    type AssetFeeCharger = <Runtime as pallet_asset_tx_payment::Config>::OnChargeAssetTransaction;
+
+    development_ext().execute_with(|| {
+        set_fee_vit_usdc_rate(2_000_000_000);
+        let payer = account(41);
+        let main = crate::genesis::treasury_account();
+        let fee_call = remark();
+        let dispatch_info = fee_call.get_dispatch_info();
+        let native_fee = currency::VIT;
+        let expected_usdc = crate::configs::LiveFeeConversion::to_asset_balance(
+            native_fee,
+            usdc_location(),
+        )
+        .expect("the governed rate is installed");
+        assert!(expected_usdc > 0);
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &payer,
+            expected_usdc * 10,
+        ));
+
+        let issuance_before =
+            <ForeignAssets as FungiblesInspect<AccountId>>::total_issuance(usdc_location());
+        let main_before =
+            <ForeignAssets as FungiblesInspect<AccountId>>::balance(usdc_location(), &main);
+        let nav_before = FutarchyTreasury::nav().nav;
+
+        let liquidity = <AssetFeeCharger as pallet_asset_tx_payment::OnChargeAssetTransaction<
+            Runtime,
+        >>::withdraw_fee(
+            &payer,
+            &fee_call,
+            &dispatch_info,
+            usdc_location(),
+            native_fee,
+            0,
+        )
+        .expect("a funded USDC payer can pay the fee");
+        assert_ok!(
+            <AssetFeeCharger as pallet_asset_tx_payment::OnChargeAssetTransaction<Runtime>>::correct_and_deposit_fee(
+                &payer,
+                &dispatch_info,
+                &frame_support::dispatch::PostDispatchInfo::default(),
+                native_fee,
+                0,
+                liquidity,
+            )
+        );
+
+        assert_eq!(
+            <ForeignAssets as FungiblesInspect<AccountId>>::total_issuance(usdc_location()),
+            issuance_before,
+            "08 §9: the USDC fee must not be burned out of issuance",
+        );
+        assert_eq!(
+            <ForeignAssets as FungiblesInspect<AccountId>>::balance(usdc_location(), &main)
+                - main_before,
+            expected_usdc,
+            "custody: the fee arrives in MAIN",
+        );
+        assert_eq!(
+            FutarchyTreasury::nav().nav - nav_before,
+            expected_usdc,
+            "recognition: NAV moves with it (08 §1.2)",
+        );
+    });
+}
+
+#[test]
+fn vit_transaction_fees_still_burn_and_the_native_adapter_is_untouched() {
+    // 08 §9: VIT is natively issued here, so burning strands no reserve and
+    // orphans no claim, and routing it would credit the treasury an asset
+    // 08 §2.2 marks at **0 in NAV**. The asymmetry is deliberate and E3 must
+    // not "fix" it — pin the native adapter's destination as `()`.
+    development_ext().execute_with(|| {
+        let payer = account(42);
+        let endowment = 1_000 * currency::VIT;
+        assert_ok!(Balances::force_set_balance(
+            RuntimeOrigin::root(),
+            MultiAddress::Id(payer.clone()),
+            endowment,
+        ));
+        let fee_call = remark();
+        let dispatch_info = fee_call.get_dispatch_info();
+        let issuance_before = Balances::total_issuance();
+        let main_before = Balances::free_balance(crate::genesis::treasury_account());
+
+        type NativeFeeCharger = <Runtime as pallet_transaction_payment::Config>::OnChargeTransaction;
+        let liquidity = <NativeFeeCharger as pallet_transaction_payment::OnChargeTransaction<
+            Runtime,
+        >>::withdraw_fee(&payer, &fee_call, &dispatch_info, currency::VIT, 0)
+        .expect("a funded VIT payer can pay the fee");
+        assert_ok!(
+            <NativeFeeCharger as pallet_transaction_payment::OnChargeTransaction<Runtime>>::correct_and_deposit_fee(
+                &payer,
+                &dispatch_info,
+                &frame_support::dispatch::PostDispatchInfo::default(),
+                currency::VIT,
+                0,
+                liquidity,
+            )
+        );
+
+        assert_eq!(
+            Balances::total_issuance(),
+            issuance_before - currency::VIT,
+            "VIT fees keep burning (08 §9)",
+        );
+        assert_eq!(
+            Balances::free_balance(crate::genesis::treasury_account()),
+            main_before,
+            "and are never routed to MAIN",
+        );
+    });
+}
+
+/// Drive `ChargeAssetTxPayment` end-to-end exactly as its benchmark does, so
+/// the fixture's preconditions are pinned by a test rather than rediscovered.
+///
+/// Returns the extension's own outcome; `None` means it refused the
+/// transaction outright (`TransactionValidityError`).
+fn run_usdc_fee_extension(caller: &AccountId) -> Option<()> {
+    use sp_runtime::traits::DispatchTransaction;
+
+    let ext: pallet_asset_tx_payment::ChargeAssetTxPayment<Runtime> =
+        pallet_asset_tx_payment::ChargeAssetTxPayment::from(10u32.into(), Some(usdc_location()));
+    let call = RuntimeCall::System(frame_system::Call::remark { remark: vec![] });
+    let info = frame_support::dispatch::DispatchInfo {
+        call_weight: Weight::from_parts(10, 0),
+        extension_weight: Weight::zero(),
+        class: DispatchClass::Operational,
+        pays_fee: frame_support::dispatch::Pays::Yes,
+    };
+    let post_info = frame_support::dispatch::PostDispatchInfo {
+        actual_weight: Some(Weight::from_parts(10, 0)),
+        pays_fee: frame_support::dispatch::Pays::Yes,
+    };
+    ext.test_run(
+        frame_system::RawOrigin::Signed(caller.clone()).into(),
+        &call,
+        &info,
+        0,
+        0,
+        |_| Ok(post_info),
+    )
+    .ok()
+    .map(|_| ())
+}
+
+#[test]
+fn the_usdc_fee_extension_benchmark_fixture_measures_the_paying_path() {
+    // SQ-523. `pallet_asset_tx_payment` has no dispatchables — what carries
+    // E3's storage work is its **transaction extension**, and the SDK's three
+    // fixtures reach it only through `test_run`. This test pins the two
+    // preconditions `AssetTxBenchmarkHelper::setup_balances_and_pool` exists to
+    // establish, in the same genesis the bencher builds (`development`).
+    //
+    // Why a test and not just the fixture: a benchmark that fails its
+    // preconditions **aborts**, and an aborting benchmark reads as a tooling
+    // problem rather than as a missing weight. Asserting the preconditions
+    // separately means a future change that breaks one fails here, with a name
+    // that says what broke, instead of surfacing as a weights-pipeline error.
+    // The third departure, pinned here because it is the one the doc calls
+    // load-bearing and the two `development_ext` arms below cannot see it:
+    // they pass `usdc_location()` directly, so a regression of
+    // `create_asset_id_parameter` back to `asset_hub_asset_location(1)` would
+    // leave them green while the benchmark measured a refusal.
+    #[cfg(feature = "runtime-benchmarks")]
+    {
+        use pallet_asset_tx_payment::BenchmarkHelperTrait;
+        let (fungibles_id, asset_id) =
+            <crate::configs::AssetTxBenchmarkHelper as BenchmarkHelperTrait<
+                AccountId,
+                crate::AssetId,
+                crate::AssetId,
+            >>::create_asset_id_parameter(1);
+        assert_eq!(
+            asset_id,
+            usdc_location(),
+            "the fixture must charge in USDC — LiveFeeConversion refuses every other asset",
+        );
+        assert_eq!(fungibles_id, usdc_location());
+    }
+
+    development_ext().execute_with(|| {
+        let caller = account(43);
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &caller,
+            1_000_000 * currency::USDC,
+        ));
+        // `fee.vit_usdc` is not a genesis key: without it `LiveFeeConversion`
+        // fails closed, and the extension refuses with `Invalid(Payment)`
+        // before ever reaching `UsdcFeesToMain`. This is the arm that made the
+        // stock fixture abort.
+        assert!(
+            run_usdc_fee_extension(&caller).is_none(),
+            "without the governed rate the USDC fee path is inert (SQ-523)",
+        );
+    });
+
+    development_ext().execute_with(|| {
+        let caller = account(43);
+        set_fee_vit_usdc_rate(2_000_000_000);
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &caller,
+            1_000_000 * currency::USDC,
+        ));
+        let main = crate::genesis::treasury_account();
+        let main_before =
+            <ForeignAssets as FungiblesInspect<AccountId>>::balance(usdc_location(), &main);
+        let nav_before = FutarchyTreasury::nav().nav;
+
+        assert!(
+            run_usdc_fee_extension(&caller).is_some(),
+            "seeded rate plus a funded payer must reach the handler",
+        );
+
+        // The point of the fixture: the measured path must be the one that
+        // moves custody *and* recognition, not the conversion's `Err` arm.
+        assert!(
+            <ForeignAssets as FungiblesInspect<AccountId>>::balance(usdc_location(), &main)
+                > main_before,
+            "the benchmarked path must actually credit MAIN (08 §9)",
+        );
+        assert!(
+            FutarchyTreasury::nav().nav > nav_before,
+            "and must actually move the recognition counter (08 §1.2)",
         );
     });
 }
@@ -10562,6 +10825,29 @@ fn void_cohort_releases_a_retained_rerun_pin_and_guard_records() {
 /// This is the end-to-end regression over the real
 /// epoch → welfare (SettleAuthority) → ledger wiring; the pallet suites cover
 /// the seams individually.
+///
+/// 03 §5.3a: `redeem_baseline` is in the charged family, so a holder receives the
+/// payout **net** of `ceil(g · ledger.redeem_fee)`. The position deposit is not a
+/// payout — it is a storage-deposit refund — so it is returned whole and is added
+/// after the fee, which is why these tests take the fee on `long_payout` alone.
+///
+/// Derived from the live PARAM row (13 §1) rather than written as a literal, so
+/// the expectation follows a lawful amendment instead of pinning today's 30 bps.
+/// The §5.3a small-payout waiver cannot bind here: these fixtures redeem millions
+/// of base units against a `ledger.min_split` of 10^4, so `g − fee` is never below
+/// it. `debug_assert` states that rather than leaving it as an unstated premise.
+fn redeem_payout_net_of_fee(gross: Balance) -> Balance {
+    let rate = <crate::configs::LedgerRedemptionFee as frame_support::traits::Get<
+        sp_runtime::Perbill,
+    >>::get();
+    let net = gross.saturating_sub(rate.mul_ceil(gross));
+    debug_assert!(
+        net >= crate::configs::balance_param(b"ledger.min_split"),
+        "fixture must not straddle the §5.3a small-payout waiver: net {net} < min_split"
+    );
+    net
+}
+
 #[test]
 fn sq92_epoch_void_settles_the_baseline_and_unstrands_a_single_sided_holder() {
     use futarchy_primitives::{PositionId, ScalarSide};
@@ -10693,7 +10979,7 @@ fn sq92_epoch_void_settles_the_baseline_and_unstrands_a_single_sided_holder() {
         ));
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &holder).saturating_sub(holder_before),
-            long_payout.saturating_add(deposit),
+            redeem_payout_net_of_fee(long_payout).saturating_add(deposit),
         );
 
         let counterparty_before = ForeignAssets::balance(usdc_location(), &counterparty);
@@ -10706,7 +10992,7 @@ fn sq92_epoch_void_settles_the_baseline_and_unstrands_a_single_sided_holder() {
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &counterparty)
                 .saturating_sub(counterparty_before),
-            short_payout.saturating_add(deposit),
+            redeem_payout_net_of_fee(short_payout).saturating_add(deposit),
         );
 
         // R-1/L-2: the two floors never over-draw the vault's escrow.
@@ -11704,6 +11990,100 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
 }
 
 #[test]
+fn permissionless_dust_reports_exact_residue_before_insurance_reconciliation() {
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 80_161;
+        let holder = account(154);
+        let attacker = account(155);
+        let amount = currency::USDC.saturating_mul(5);
+        let holder_funding = amount
+            .saturating_add(crate::configs::LedgerPositionDeposit::get().saturating_mul(2))
+            .saturating_add(ForeignAssets::minimum_balance(usdc_location()));
+
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &holder,
+            holder_funding,
+        ));
+        assert_ok!(ConditionalLedger::create_vault(
+            RuntimeOrigin::signed(crate::configs::market_account()),
+            PID,
+            0,
+        ));
+        assert_ok!(ConditionalLedger::split(
+            RuntimeOrigin::signed(holder.clone()),
+            PID,
+            amount,
+        ));
+        assert_ok!(ConditionalLedger::resolve(
+            RuntimeOrigin::signed(crate::configs::epoch_account()),
+            PID,
+            futarchy_primitives::Branch::Accept,
+        ));
+        assert_ok!(ConditionalLedger::settle_scalar(
+            RuntimeOrigin::signed(crate::configs::welfare_settlement_account()),
+            PID,
+            futarchy_primitives::FixedU64(500_000_000),
+        ));
+
+        let insurance_before =
+            ForeignAssets::balance(usdc_location(), crate::configs::insurance_account());
+        let residue_before = pallet_futarchy_treasury::SweptResidueUnreclaimed::<Runtime>::get();
+        let main_credit_before = pallet_futarchy_treasury::PendingMainCredit::<Runtime>::get();
+        let terminal = pallet_conditional_ledger::VaultTerminalAt::<Runtime>::get(PID)
+            .expect("settled vault records its terminal block");
+        System::set_block_number(
+            terminal.saturating_add(crate::configs::LedgerArchiveDelay::get()),
+        );
+
+        assert_ok!(ConditionalLedger::sweep_dust(
+            RuntimeOrigin::signed(attacker.clone()),
+            PID,
+        ));
+        let residue = System::events()
+            .iter()
+            .rev()
+            .find_map(|record| match &record.event {
+                crate::RuntimeEvent::ConditionalLedger(
+                    pallet_conditional_ledger::Event::VaultReaped { pid, residue },
+                ) if *pid == PID => Some(*residue),
+                _ => None,
+            })
+            .expect("permissionless dust sweep emits its exact residue");
+        assert!(residue > 0);
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), crate::configs::insurance_account()),
+            insurance_before.saturating_add(residue),
+        );
+        assert_eq!(
+            pallet_futarchy_treasury::SweptResidueUnreclaimed::<Runtime>::get(),
+            residue_before.saturating_add(residue),
+        );
+        assert_eq!(
+            FutarchyTreasury::insurance_target(),
+            residue_before.saturating_add(residue).saturating_add(
+                <ForeignAssets as FungiblesInspect<AccountId>>::minimum_balance(usdc_location(),)
+            ),
+        );
+
+        // Any signed account may crank reconciliation. With the residue
+        // reported atomically, the just-swept buffer is target, not surplus.
+        assert_ok!(FutarchyTreasury::reconcile_insurance(
+            RuntimeOrigin::signed(attacker),
+        ));
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), crate::configs::insurance_account()),
+            insurance_before.saturating_add(residue),
+        );
+        assert_eq!(
+            pallet_futarchy_treasury::PendingMainCredit::<Runtime>::get(),
+            main_credit_before,
+        );
+        assert!(FutarchyTreasury::do_try_state().is_ok());
+    });
+}
+
+#[test]
 fn market_try_state_rejects_treasury_pol_mirror_drift() {
     development_ext().execute_with(|| {
         let markets = open_seeded_param_market_set(8_016)
@@ -11850,8 +12230,14 @@ fn seeded_force_reject_void_closes_and_reaps_all_proposal_books() {
         System::set_block_number(
             void_block.saturating_add(crate::configs::LedgerArchiveDelay::get()),
         );
-        assert_ok!(ConditionalLedger::sweep_dust(
-            RuntimeOrigin::signed(account(153)),
+        // Both paths are permissionless. The assembled runtime must bind the
+        // ledger ordering seam to the market pallet, so an attacker cannot
+        // archive seeded protocol inventory before the 04 §2 Sweep.
+        assert_noop!(
+            ConditionalLedger::sweep_dust(RuntimeOrigin::signed(account(155)), PID),
+            pallet_conditional_ledger::Error::<Runtime>::ReapNotDue,
+        );
+        assert!(pallet_conditional_ledger::Vaults::<Runtime>::contains_key(
             PID,
         ));
         for id in &proposal_books {
@@ -11859,6 +12245,12 @@ fn seeded_force_reject_void_closes_and_reaps_all_proposal_books() {
                 RuntimeOrigin::signed(account(153)),
                 *id
             ));
+        }
+        assert_ok!(ConditionalLedger::sweep_dust(
+            RuntimeOrigin::signed(account(155)),
+            PID,
+        ));
+        for id in &proposal_books {
             assert_ok!(Market::reap(RuntimeOrigin::signed(account(153)), *id));
         }
         assert!(!pallet_market::ProposalMarketIds::<Runtime>::contains_key(
@@ -12080,7 +12472,7 @@ fn sq320_orphaned_epoch_baseline_is_settled_by_the_permissionless_crank() {
         ));
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &holder).saturating_sub(holder_before),
-            long_payout.saturating_add(deposit),
+            redeem_payout_net_of_fee(long_payout).saturating_add(deposit),
         );
 
         // §7(6): a second crank is a harmless no-op, never an error (G-1).
@@ -13173,6 +13565,109 @@ fn proposal_bond_custody_rejects_unfunded_and_second_intake_then_refunds_withdra
     });
 }
 
+/// Total confiscated USDC still held by the protocol, across the two accounts
+/// 08 §1.2 splits it between (SQ-518).
+///
+/// A USDC slash executes treasury code, so the above-target surplus overflows
+/// to `MAIN` **in the slash's own transaction** — INSURANCE is left holding
+/// exactly its derived target `T_ins`, not the inflow. Asserting on INSURANCE
+/// alone would therefore measure the *target*, which is a constant, rather than
+/// the confiscation, which is what these tests are about; the sum is invariant
+/// under where §1.2 chooses to park the money and is the honest subject.
+///
+/// Pair every use with an `insurance_target()` assertion: the sum alone would
+/// also hold if the overflow silently stopped running, and that regression is
+/// exactly what SQ-518 fixed.
+fn confiscated_usdc() -> Balance {
+    ForeignAssets::balance(usdc_location(), crate::configs::insurance_account()).saturating_add(
+        ForeignAssets::balance(usdc_location(), crate::genesis::treasury_account()),
+    )
+}
+
+/// INSURANCE retains exactly `T_ins` once an inflow that executes treasury code
+/// has settled (08 §1.2). This is the half of the SQ-518 obligation that proves
+/// the automatic overflow actually ran.
+fn assert_insurance_at_target() {
+    assert_eq!(
+        ForeignAssets::balance(usdc_location(), crate::configs::insurance_account()),
+        FutarchyTreasury::insurance_target(),
+        "08 §1.2: INSURANCE retains exactly T_ins after an inflow that executes treasury code",
+    );
+}
+
+#[test]
+fn the_oracle_reporter_bond_slash_also_runs_the_insurance_overflow() {
+    // SQ-518 wired the 08 §1.2 automatic overflow into **both** USDC inflows
+    // that execute treasury code. Every existing test covers only the first —
+    // the proposal-bond `slash_to_insurance` — so the oracle's reporter-bond
+    // leg (`RuntimeOracleCustody::slash_insurance`) shipped its half of that
+    // fix unverified. A one-sided regression here is invisible in the sum
+    // `confiscated_usdc()` reports, which is exactly why that helper's own
+    // doc comment insists on pairing it with a target assertion.
+    use crate::configs::RuntimeOracleCustody;
+    use pallet_oracle::OracleCustody;
+
+    development_ext().execute_with(|| {
+        let reporter = account(44);
+        let oracle_sovereign: AccountId =
+            crate::configs::OraclePalletId::get().into_account_truncating();
+        let bond = 250_000 * currency::USDC;
+
+        // Fund the reporter and take the bond into oracle custody through the
+        // production adapter, so the slash below has real custody to move.
+        // `hold` preserves the payer's 03 §7 floor, so funding exactly `bond`
+        // would fail `NotExpendable` — fund the floor on top of it.
+        let min_balance =
+            <ForeignAssets as FungiblesInspect<AccountId>>::minimum_balance(usdc_location());
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &reporter,
+            bond.saturating_add(min_balance),
+        ));
+        assert_ok!(RuntimeOracleCustody::hold(&reporter, bond));
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &oracle_sovereign),
+            bond,
+            "the bond must be in oracle custody before the slash",
+        );
+
+        let confiscated_before = confiscated_usdc();
+        let nav_before = FutarchyTreasury::nav().nav;
+
+        assert_ok!(RuntimeOracleCustody::slash_insurance(bond));
+
+        // Custody: the whole bond is confiscated, none of it lost.
+        assert_eq!(
+            confiscated_usdc(),
+            confiscated_before.saturating_add(bond),
+            "the slashed reporter bond is confiscated in full (07 §13)",
+        );
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &oracle_sovereign),
+            0,
+            "and leaves oracle custody entirely",
+        );
+        // The SQ-518 half: the overflow ran, so INSURANCE sits at T_ins and the
+        // excess is in MAIN rather than accumulating out of reach.
+        assert_insurance_at_target();
+        // And recognition moved with custody — `nav()` reads the internal
+        // counter, so USDC reaching MAIN without `credit_main` is invisible to
+        // it, which is the precise leak shape this track closes.
+        assert!(
+            FutarchyTreasury::nav().nav > nav_before,
+            "08 §1.2: the overflowed excess must be recognized in NAV",
+        );
+    });
+
+    // Zero is the documented no-op: it must move nothing and must not run the
+    // overflow's storage work either.
+    development_ext().execute_with(|| {
+        let before = confiscated_usdc();
+        assert_ok!(RuntimeOracleCustody::slash_insurance(0));
+        assert_eq!(confiscated_usdc(), before, "a zero slash is a no-op");
+    });
+}
+
 #[test]
 fn proposal_bond_custody_blocks_late_withdrawal_refunds_terminal_reject_and_slashes_t18_once() {
     use frame_support::traits::tokens::{Fortitude, Preservation};
@@ -13246,8 +13741,7 @@ fn proposal_bond_custody_blocks_late_withdrawal_refunds_terminal_reject_and_slas
             assert!(false, "qualification fixture must be constructible");
             return;
         };
-        let insurance = crate::configs::insurance_account();
-        let insurance_before = ForeignAssets::balance(usdc_location(), &insurance);
+        let confiscated_before = confiscated_usdc();
         pallet_epoch::Proposals::<Runtime>::mutate(pid, |proposal| {
             if let Some(proposal) = proposal {
                 proposal.state = ProposalState::Queued;
@@ -13278,10 +13772,11 @@ fn proposal_bond_custody_blocks_late_withdrawal_refunds_terminal_reject_and_slas
             Some(retained),
         );
         assert_eq!(
-            ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(slash),
+            confiscated_usdc(),
+            confiscated_before.saturating_add(slash),
             "T18 slashes exactly one claimant-adverse half into insurance",
         );
+        assert_insurance_at_target();
 
         assert!(Epoch::mark_failed_executed(
             RuntimeOrigin::signed(crate::configs::execution_guard_account()),
@@ -13289,8 +13784,8 @@ fn proposal_bond_custody_blocks_late_withdrawal_refunds_terminal_reject_and_slas
         )
         .is_err());
         assert_eq!(
-            ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(slash),
+            confiscated_usdc(),
+            confiscated_before.saturating_add(slash),
             "a repeated T18 callback cannot slash twice",
         );
 
@@ -13335,8 +13830,7 @@ fn missing_preimage_terminal_path_slashes_the_live_param_fraction_to_insurance()
             }
         };
         let slash = bond.saturating_mul(Balance::from(slash_pct)) / 100;
-        let insurance = crate::configs::insurance_account();
-        let insurance_before = ForeignAssets::balance(usdc_location(), &insurance);
+        let confiscated_before = confiscated_usdc();
         assert_ok!(ForeignAssets::mint_into(usdc_location(), &proposer, bond));
         let missing_hash = H256::repeat_byte(151);
         let pid = pallet_epoch::NextProposalId::<Runtime>::get();
@@ -13390,10 +13884,8 @@ fn missing_preimage_terminal_path_slashes_the_live_param_fraction_to_insurance()
             ),
             bond.saturating_sub(slash),
         );
-        assert_eq!(
-            ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(slash),
-        );
+        assert_eq!(confiscated_usdc(), confiscated_before.saturating_add(slash),);
+        assert_insurance_at_target();
         assert!(System::events().iter().any(|record| matches!(
             record.event,
             crate::RuntimeEvent::Epoch(pallet_epoch::Event::IntakeSlashed {
@@ -13414,8 +13906,7 @@ fn real_proposal_bond_custody_covers_full_static_slash_and_not_decision_grade_pa
         assert!(install_single_active_metric_spec(19).is_some());
         let proposer = account(151);
         let bond = crate::configs::balance_param(b"prop.bond.param");
-        let insurance = crate::configs::insurance_account();
-        let insurance_before = ForeignAssets::balance(usdc_location(), &insurance);
+        let confiscated_before = confiscated_usdc();
         let batch =
             match pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(Vec::new()) {
                 Ok(batch) => batch,
@@ -13500,18 +13991,15 @@ fn real_proposal_bond_custody_covers_full_static_slash_and_not_decision_grade_pa
             0,
             "a false resource declaration loses the complete real bond",
         );
-        assert_eq!(
-            ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(bond),
-        );
+        assert_eq!(confiscated_usdc(), confiscated_before.saturating_add(bond),);
+        assert_insurance_at_target();
     });
 
     development_ext().execute_with(|| {
         assert!(install_single_active_metric_spec(20).is_some());
         let proposer = account(153);
         let bond = crate::configs::balance_param(b"prop.bond.param");
-        let insurance = crate::configs::insurance_account();
-        let insurance_before = ForeignAssets::balance(usdc_location(), &insurance);
+        let confiscated_before = confiscated_usdc();
         let batch =
             match pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(Vec::new()) {
                 Ok(batch) => batch,
@@ -13684,10 +14172,7 @@ fn real_proposal_bond_custody_covers_full_static_slash_and_not_decision_grade_pa
             ),
             bond.saturating_sub(slash),
         );
-        assert_eq!(
-            ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(slash),
-        );
+        assert_eq!(confiscated_usdc(), confiscated_before.saturating_add(slash),);
     });
 }
 
@@ -13856,8 +14341,7 @@ fn false_resource_declarations_under_over_and_wrong_fully_slash() {
         let wrong = expected_resource_key(0x01, Some(&pallet_constitution::key16(b"mkt.fee")));
         let declarations = [Vec::new(), vec![correct, wrong], vec![wrong]];
         let bond = crate::configs::balance_param(b"prop.bond.param");
-        let insurance = crate::configs::insurance_account();
-        let insurance_before = ForeignAssets::balance(usdc_location(), &insurance);
+        let confiscated_before = confiscated_usdc();
         let mut submitted = Vec::new();
 
         for (index, resources) in declarations.into_iter().enumerate() {
@@ -13912,9 +14396,10 @@ fn false_resource_declarations_under_over_and_wrong_fully_slash() {
             );
         }
         assert_eq!(
-            ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(bond.saturating_mul(3)),
+            confiscated_usdc(),
+            confiscated_before.saturating_add(bond.saturating_mul(3)),
         );
+        assert_insurance_at_target();
         assert!(pallet_epoch::ResourceLocks::<Runtime>::get().is_empty());
     });
 }
@@ -13972,8 +14457,7 @@ fn mixed_valid_and_values_scope_leaves_use_unclassifiable_refund_slash_taxonomy(
             }
         };
         let bond = crate::configs::balance_param(b"prop.bond.param");
-        let insurance = crate::configs::insurance_account();
-        let insurance_before = ForeignAssets::balance(usdc_location(), &insurance);
+        let confiscated_before = confiscated_usdc();
         assert!(tick_qualification(vec![refund_pid, slash_pid]).is_some());
         for (pid, reason) in [
             (refund_pid, RejectReason::ProcessHold),
@@ -14005,10 +14489,8 @@ fn mixed_valid_and_values_scope_leaves_use_unclassifiable_refund_slash_taxonomy(
             ),
             0,
         );
-        assert_eq!(
-            ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(bond),
-        );
+        assert_eq!(confiscated_usdc(), confiscated_before.saturating_add(bond),);
+        assert_insurance_at_target();
     });
 }
 
@@ -14304,8 +14786,7 @@ fn overbound_footprint_slashes_empty_declaration_but_unknown_wrapper_refunds() {
             return;
         };
         let bond = crate::configs::balance_param(b"prop.bond.param");
-        let insurance = crate::configs::insurance_account();
-        let insurance_before = ForeignAssets::balance(usdc_location(), &insurance);
+        let confiscated_before = confiscated_usdc();
         assert!(tick_qualification(vec![
             empty_overbound_pid,
             nonempty_overbound_pid,
@@ -14358,9 +14839,10 @@ fn overbound_footprint_slashes_empty_declaration_but_unknown_wrapper_refunds() {
             bond,
         );
         assert_eq!(
-            ForeignAssets::balance(usdc_location(), &insurance),
-            insurance_before.saturating_add(bond.saturating_mul(2)),
+            confiscated_usdc(),
+            confiscated_before.saturating_add(bond.saturating_mul(2)),
         );
+        assert_insurance_at_target();
     });
 }
 
@@ -19825,9 +20307,15 @@ fn sq186_metadata_exposes_the_treasury_bond_ask_slope() {
                     .iter()
                     .find(|constant| constant.name == "INTEGRATION_CONTRACT_VERSION")
                     .expect("Epoch advertises the contract version");
+                // Asserted against the constant, not a literal: exactly one site
+                // pins the number (the `= 17` assertion above), and this one
+                // proves the metadata a client reads agrees with it. Two literals
+                // would let metadata and constant drift apart while both tests
+                // stayed green — the failure that makes the version useless as a
+                // schema selector (02 §13).
                 assert_eq!(
                     u32::decode(&mut &contract.value[..]).expect("version decodes"),
-                    16,
+                    futarchy_primitives::INTEGRATION_CONTRACT_VERSION,
                 );
             }};
         }

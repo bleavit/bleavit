@@ -294,6 +294,28 @@ mod benches {
         );
     }
 
+    /// 08 §1.2: the permissionless INSURANCE reconciliation crank. Worst case is
+    /// an above-target balance, which moves custody and writes the deferred
+    /// `MAIN` credit on top of the two reads every call performs; the at-target
+    /// no-op is strictly cheaper.
+    #[benchmark]
+    fn reconcile_insurance() {
+        Pallet::<T>::seed(&funded());
+        let caller: T::AccountId = T::BenchmarkHelper::account(5);
+        let amount = 100_000 * USDC;
+        let custody_seeded = T::BenchmarkHelper::prime_insurance_custody(amount);
+        assert!(custody_seeded.is_ok());
+        // SQ-524: the crank rebates when it actually moves surplus, so the
+        // worst case is the *paying* rebate, not the structural no-op an
+        // unfunded meter produces. Without this the fixture charges the
+        // rebate's parameter reads and none of its payout writes — the same
+        // under-measured-fixture shape SQ-520 fixed for `buy`.
+        T::BenchmarkHelper::prime_keeper_rebate();
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller));
+    }
+
     #[benchmark]
     fn create_community_schedule() {
         let beneficiary: T::AccountId = T::BenchmarkHelper::account(9);

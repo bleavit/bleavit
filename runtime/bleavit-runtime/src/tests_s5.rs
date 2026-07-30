@@ -218,7 +218,7 @@ inventory! {
         leaf values => ["set_release_channel"];
     }
     "ConditionalLedger" {
-        leaf public => ["split", "merge", "split_scalar", "merge_scalar", "split_gate", "merge_gate", "transfer", "split_baseline", "merge_baseline", "resolve", "void", "settle_scalar", "settle_gate", "settle_baseline", "redeem", "redeem_scalar", "redeem_scalar_pair", "redeem_gate", "redeem_void", "redeem_baseline", "redeem_baseline_pair", "sweep_dust", "sweep_dust_baseline", "reconcile"];
+        leaf public => ["split", "merge", "split_scalar", "merge_scalar", "split_gate", "merge_gate", "transfer", "split_baseline", "merge_baseline", "resolve", "void", "settle_scalar", "settle_gate", "settle_baseline", "redeem", "redeem_scalar", "redeem_scalar_pair", "redeem_gate", "redeem_void", "redeem_baseline", "redeem_baseline_pair", "sweep_dust", "sweep_dust_baseline", "sweep_redemption_fees", "reconcile"];
         leaf emergency_playbook => ["set_split_paused", "set_frozen"];
     }
     "Market" {
@@ -243,7 +243,7 @@ inventory! {
     }
     "FutarchyTreasury" {
         leaf treasury => ["fund_budget_line", "spend", "open_stream", "cancel_stream", "issue_vit", "recover_foreign", "set_coretime_authority", "sweep_insurance"];
-        leaf public => ["claim_stream", "execute_coretime_renewal", "note_coretime_quote", "prune_coretime_quote"];
+        leaf public => ["claim_stream", "execute_coretime_renewal", "note_coretime_quote", "prune_coretime_quote", "reconcile_insurance"];
         leaf param => ["create_community_schedule"];
     }
     "Guardian" {

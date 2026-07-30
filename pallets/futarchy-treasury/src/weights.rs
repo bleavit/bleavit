@@ -38,6 +38,11 @@ pub trait WeightInfo {
     fn set_coretime_authority() -> Weight;
     /// Weight of `sweep_insurance` (`State` r:1 w:1 + one USDC custody move).
     fn sweep_insurance() -> Weight;
+    /// Weight of `reconcile_insurance` (08 §1.2): the residue counter and the
+    /// INSURANCE USDC balance are read on every call; the worst case is an
+    /// above-target balance, which additionally moves custody and writes the
+    /// deferred `MAIN` credit.
+    fn reconcile_insurance() -> Weight;
     /// Weight of `create_community_schedule` (bounded allocation state plus
     /// the SDK vesting/currency adapter).
     fn create_community_schedule() -> Weight;
@@ -120,6 +125,11 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(3))
             .saturating_add(T::DbWeight::get().writes(3))
     }
+    fn reconcile_insurance() -> Weight {
+        Weight::from_parts(45_000_000, STATE_POV)
+            .saturating_add(T::DbWeight::get().reads(4))
+            .saturating_add(T::DbWeight::get().writes(3))
+    }
     fn create_community_schedule() -> Weight {
         Weight::from_parts(45_000_000, STATE_POV)
             .saturating_add(T::DbWeight::get().reads(4))
@@ -190,6 +200,11 @@ impl WeightInfo for () {
     fn sweep_insurance() -> Weight {
         Weight::from_parts(45_000_000, STATE_POV)
             .saturating_add(RocksDbWeight::get().reads(3))
+            .saturating_add(RocksDbWeight::get().writes(3))
+    }
+    fn reconcile_insurance() -> Weight {
+        Weight::from_parts(45_000_000, STATE_POV)
+            .saturating_add(RocksDbWeight::get().reads(4))
             .saturating_add(RocksDbWeight::get().writes(3))
     }
     fn create_community_schedule() -> Weight {

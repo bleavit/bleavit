@@ -144,6 +144,20 @@ Read this file first. Then read `PLAN.md`. Then work.
   changed-scope feedback loop, while the no-argument script remains exhaustive.
   When CI polling is useful, poll no more than once every five minutes. Standing
   user instruction (2026-07-23).
+- **R-13 — Delegated tools always run sandboxed.** Every `codex exec` invocation
+  passes an **explicit** `--sandbox` mode, and it is `read-only` unless the task
+  genuinely must write files. Never `--dangerously-bypass-approvals-and-sandbox`
+  (no sandbox at all), never `--dangerously-bypass-hook-trust`, and never the
+  Claude Code Bash tool's own `dangerouslyDisableSandbox`. **Do not let the mode be
+  implicit:** `~/.codex/config.toml` marks this repository `trust_level =
+  "trusted"`, and trust suppresses *approval prompts*, not confinement — an
+  invocation that omits `--sandbox` silently inherits whatever the CLI default is.
+  Two operational corollaries, both learned the expensive way: pass `</dev/null`
+  or `codex exec` hangs on `Reading additional input from stdin...`, and never
+  point a `workspace-write` job at a tree another agent is editing, because its
+  turn-level snapshot/restore reverts concurrent edits — including in files it was
+  told not to touch. Verify the mode from the job log after launching rather than
+  assuming it. Standing user instruction (2026-07-29).
 
 ## Session protocol
 
@@ -168,11 +182,35 @@ encode this loop verbatim.
 Run what exists; gates grow with the repo (PLAN.md's *Verify* column is authoritative
 per milestone):
 
+> **Local prerequisites for the exhaustive Rust gate (verified 2026-07-29).** The
+> no-argument `rust-workspace-gates.sh` does not run on this workstation as-is;
+> three environment gaps stop it, none of them code defects, and CI hits none of
+> them (ext4 + `libclang-dev`). Export all three:
+>
+> ```bash
+> export CARGO_TARGET_DIR=/tmp/<scratch>/wtarget          # $HOME is ecryptfs: ~143-char
+>                                                          # filename cap kills the
+>                                                          # release+benchmarks build
+> export LIBCLANG_PATH=/tmp/<scratch>/libclang             # dir containing a symlink named
+>                                                          # exactly `libclang.so`; clang-sys
+>                                                          # matches only `libclang.so` /
+>                                                          # `libclang-*.so`, and this box has
+>                                                          # only `libclang.so.1` and
+>                                                          # `libclang-14.so.13`
+> export WASM_BUILD_WORKSPACE_HINT=$PWD                    # the wasm builder cannot find
+>                                                          # Cargo.lock from an out-of-tree
+>                                                          # target dir
+> ```
+>
+> `tools/ci/regenerate-weights.py` needs the same first variable **plus**
+> `--runtime <CARGO_TARGET_DIR>/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm`,
+> because it defaults to the in-repo `target/`.
+
 | Area | Gate (current) |
 |---|---|
 | Rust | `tools/ci/rust-workspace-gates.sh` (runs `cargo fmt --all -- --check` · `cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace` · runtime release/`runtime-benchmarks`/`try-runtime` builds + the try-runtime-enabled runtime suite (B6; the 15 §4.7 snapshot `try-runtime-cli` leg lands with B7/B8) · `tools/ci/runtime-profile-gates.sh` for the bootstrap/Phase-4 primary+recovery matrix, exact-one bounded primary ledger MBM, exhaustive paired repair, and recovery zero-SDK-MBM proof (B15/B16) · `no_std` build · generated-weight storage-bound check (`python3 tools/ci/check-weight-storage-bounds.py`) · the 15 §4.5 generated-weight purity gate (`python3 tools/ci/check-generated-weights.py` — every function in a `runtime/bleavit-runtime/src/weights/*.rs` file must carry the generator's `Minimum execution time:` line **and** contain nothing outside the generator's own grammar, since a term spliced into an already-generated function keeps that line and a marker-only check would pass it; a deliberate hand-written override needs a justified, **mechanically expiring** entry in `tools/ci/generated-weight-overrides.toml`, because a hand-spliced term is deleted by the next regeneration and that reads as a weight *decrease* the growth-only regression gate cannot see — SQ-490) · the S3 limit-coverage leg: `python3 -m unittest discover -s tools/limit-coverage/tests` + `python3 tools/limit-coverage/check-limit-coverage.py` — the 15 §4.6 / I-22 gate: every 13-registry key must be classified in `tools/limit-coverage/registry.toml` and every dispatch-limit key bound to a `// limit-coverage:` marked test) |
 | Runtime crates | `try-state` green in test envs; benchmarks compile; no new `unwrap`/`expect`/`panic!`/`unsafe` in runtime code |
-| Weight drift (15 §4.5) | `python3 tools/ci/regenerate-weights.py --check --steps 2 --repeat 1` — CI job `benchmark-smoke` (the id is kept for branch protection; the job is a drift gate, not a smoke test). Re-measures every pallet and diffs the committed weights **per function**, closing the hole `check-weight-regression.py` cannot reach: that checker diffs HEAD against the merge base, so it sees a regeneration and never the *absence* of one (SQ-490 — `pallet_attestor::remove_for_cause` shipped declaring 8 reads while performing 261). Compares **worst-case totals** (base + slope × component high), never the intercept and slope separately — that split is not fidelity-stable even where the total is (`set_candidacy_bond` shifts its proof slope 901→1,306 at 2×1 with worst-case writes fixed at 201). Hard gate: component range highs always, plus the storage totals of **constant-weight** functions at any fidelity (measured invariant: `pallet_attestor` 6/6, `pallet_collator_selection` 2/2 — and the 8-vs-261-reads defect was such a function, so a cheap per-commit run does catch the real thing). Advisory: ref_time always (127 % measured spread), and **component-bearing** functions unless the run's fidelity matches the committed header — a 2-point fit can lose a linear term outright (`new_session`: worst-case writes 100 at 50×20 vs 3 at 2×1), and losing it understates. Those are gated by the release-blocking `release.yml` job **`Component weights at committed fidelity`** (`--check --components-only --steps 50 --repeat 20`, the 16 of 31 pallets carrying a fitted component, derived not listed), which `publish` depends on — so nothing ships on a slope that was never verified at the fidelity it claims. `--write` regenerates; `--changed` selects pallets whose local source moved. A pallet whose `--extrinsic '*'` run aborts on one unsatisfiable fixture no longer discards its other functions: the tool takes its work list from the runtime (`--list`, so a benchmark added since the last generation cannot be skipped), probes, regenerates the rest, and carries the unmeasurable one forward only if `tools/ci/weight-preservation.toml` declares it — a marker alone buys no exemption, and the two are cross-checked in both directions |
+| Weight drift (15 §4.5) | `python3 tools/ci/regenerate-weights.py --check --steps 2 --repeat 1` — CI job `benchmark-smoke` (the id is kept for branch protection; the job is a drift gate, not a smoke test). Re-measures every pallet and diffs the committed weights **per function**, closing the hole `check-weight-regression.py` cannot reach: that checker diffs HEAD against the merge base, so it sees a regeneration and never the *absence* of one (SQ-490 — `pallet_attestor::remove_for_cause` shipped declaring 8 reads while performing 261). Compares **worst-case totals** (base + slope × component high), never the intercept and slope separately — that split is not fidelity-stable even where the total is (`set_candidacy_bond` shifts its proof slope 901→1,306 at 2×1 with worst-case writes fixed at 201). Hard gate: component range highs always, plus the storage totals of **constant-weight** functions at any fidelity (measured invariant: `pallet_attestor` 6/6, `pallet_collator_selection` 2/2 — and the 8-vs-261-reads defect was such a function, so a cheap per-commit run does catch the real thing). Advisory: ref_time always (127 % measured spread), and **component-bearing** functions unless the run's fidelity matches the committed header — a 2-point fit can lose a linear term outright (`new_session`: worst-case writes 100 at 50×20 vs 3 at 2×1), and losing it understates. Those are gated by the release-blocking `release.yml` job **`Component weights at committed fidelity`** (`--check --components-only --steps 50 --repeat 20`, the 16 of 32 pallets carrying a fitted component, derived not listed), which `publish` depends on — so nothing ships on a slope that was never verified at the fidelity it claims. `--write` regenerates; `--changed` selects pallets whose local source moved. A pallet whose `--extrinsic '*'` run aborts on one unsatisfiable fixture no longer discards its other functions: the tool takes its work list from the runtime (`--list`, so a benchmark added since the last generation cannot be skipped), probes, regenerates the rest, and carries the unmeasurable one forward only if `tools/ci/weight-preservation.toml` declares it — a marker alone buys no exemption, and the two are cross-checked in both directions |
 | Fuzzing (15 §4.5) | `tools/ci/fuzz-gates.sh` (CI job `fuzz`, nightly-pinned separate `fuzz/` workspace): fmt/clippy/oracle-unit-tests · `cargo fuzz build` each target · corpus regression (`-runs=0`) · a short random smoke (`FUZZ_SMOKE_SECONDS`, default 30). Long campaigns/distillation/sanitizer matrices are B8 |
 | Reference model | `PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests`; vector freshness via `python3 tools/reference-model/generate-vectors.py --check`; normative LMSR documentation-table agreement via `python3 tools/reference-model/check-doc-table.py` (04 §5; 15 §4.4) |
 | Economic simulation (S4) | `PYTHONPATH=reference-model/src:simulation/src python3 -m unittest discover -s simulation/tests` (CI, in the reference-model job). The calibration runner `python3 tools/simulation/run-calibration.py` is evidence tooling, not a CI gate: `--check` re-verifies the committed `simulation/results/phase0-calibration.json` (structure, byte-exact pinned subsample, Merkle root) and deliberately exits 1 while the artifact records economic violations — red-by-design pending SQ-231; `--full` regenerates the ≥ 10⁴-proposal Phase-0 evidence (15 §4.9; G0 consumes it) |

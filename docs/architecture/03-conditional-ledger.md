@@ -132,11 +132,47 @@ pub trait Config: frame_system::Config {
     type SettleAuthority: EnsureOrigin<Self::RuntimeOrigin>;
     type MaxPositionsPerAccount: Get<u32>;   // 64 (normative value: §13)
     type PositionDeposit: Get<Balance>;      // 0.1 USDC per Positions entry (normative value: §13)
-    /// The book, fee, POL, POL_BASELINE, INSURANCE and treasury sub-accounts: exempt from the
-    /// position cap (D-disposition) and from the storage deposit (specified here; these accounts
-    /// are protocol-owned and bounded). Since §5.3a they are additionally exempt from the
-    /// redemption fee. This enumeration is normative and is the same closed set §5.3a(1) names;
-    /// the two MUST agree. The per-market **fee** account is a member: the
+    /// **The protocol-owned accounts.** Members are exempt from the position cap
+    /// (D-disposition), from the storage deposit (specified here), and — since §5.3a — from
+    /// the redemption fee.
+    ///
+    /// **The list below is normative and is the definition** (restated 2026-07-30): the
+    /// ledger sovereign and its `INSURANCE`, `POL`, `POL_BASELINE`, `FEES`, `BOOK` and
+    /// `TREASURY` sub-accounts; the treasury `MAIN` sub-account; **every** per-market book
+    /// **and** fee address across the whole reserved canonical namespace (§5.4 *Protocol
+    /// inventory at market reap* — reserved permanently, before creation and after reap,
+    /// not merely while a book is live); and the pallet sovereigns of market, epoch,
+    /// execution guard, oracle, welfare settlement, and the incident and milestone
+    /// registries. The *rationale* is unchanged and is rationale, not a test: these hold
+    /// protocol inventory whose position count is structural, and charging them the §5.3a
+    /// fee would be the treasury taxing itself. §5.3a(1) names the same set and the two
+    /// MUST agree.
+    ///
+    /// **Membership is by enumeration, and two failed attempts to derive it are recorded
+    /// so they are not repeated.** This paragraph first named six items and called them a
+    /// closed set; the implementation had correctly outgrown that by **ten**, so the
+    /// closure claim was false in the dangerous direction — a reader MUST NOT infer from
+    /// an account's absence that charging it is correct. The 2026-07-30 restatement then
+    /// over-corrected by asserting a deciding *criterion*, which fails twice over: any
+    /// property phrased over the positions an account *holds* is vacuously true of an
+    /// account holding none, and any property phrased over *who may transfer in* is
+    /// circular, because §5.4's `ProtocolDestination` refusal is a **consequence** of
+    /// membership and not a test for it. Adding a protocol sovereign is therefore a
+    /// deliberate spec change, and the runtime's `ProtocolAccounts` MUST be amended in the
+    /// same pass.
+    ///
+    /// **Deliberately not members, and the asymmetry is load-bearing.** The treasury
+    /// `KEEPER`, `ORACLE`, `REWARDS` and `COLLATOR` sub-accounts and the guardian sovereign
+    /// are **outside** this set, though §7 R-4 lists the first three among the
+    /// genesis-endowed permanent protocol accounts. The consequence is real: §5.4's
+    /// `transfer` refusal does not cover them, so a Signed `transfer` may strand
+    /// conditional positions in an account no origin can redeem from. The exposure is
+    /// bounded — escrow still backs those positions, conservation is untouched, and the
+    /// vault reaps at the archive delay — but the asymmetry is **unresolved** and is
+    /// tracked as a spec question rather than settled here, because widening the set is an
+    /// audit-scope-A behaviour change that does not belong in a revenue-instrument change.
+    ///
+    /// The per-market **fee** account is a member: the
     /// [`04-markets-and-pricing.md`](./04-markets-and-pricing.md) §2 `sweep_revenue` crank
     /// redeems that account's claims to USDC, and charging it would be the treasury taxing itself.
     type ProtocolAccounts: Contains<Self::AccountId>;
@@ -234,7 +270,7 @@ A single rate `ledger.redeem_fee` (Perbill; *normative row: [`13-parameters.md`]
 - **`redeem_scalar_pair` and `redeem_baseline_pair` are charged**, not exempt, even though they are the exact-par path for complete sets. Exempting them would tax the *fragmented* holder and spare the *assembled* one, which is anti-claimant and inverts R-1's whole direction. The pair path keeps its **relative** guarantee: it still pays at least what leg-by-leg redemption of the same holdings pays (PT-7).
 
   **What the charge does *not* reach, stated plainly (corrected 2026-07-29, milestone E1).** This bullet previously carried a second justification — that charging the pair calls is what stops the assembled LONG+SHORT holding, the shape that inflates the [`04`](./04-markets-and-pricing.md) §7a contest-capital measure at no market risk, from escaping instrument B. **That claim is false as written and is withdrawn.** §5.1 admits `merge_scalar` and `merge_gate` in `Resolved`, and every `merge*` is exempt, so a holder of a complete `LONG_w + SHORT_w` set converts it to winning branch-USDC at **no charge** throughout the entire `Resolved` window — from `resolve` at d18 to `settle_scalar` at cohort settlement e+3, roughly three epochs — and then exits through the **also-exempt** `redeem`. A cross-branch `Accept+Reject` pair escapes more directly still, via the exempt `merge` at par. Instrument B therefore reaches the *fragmented* holder and not the *assembled* one: the exact inversion the withdrawn sentence claimed to prevent. `redeem_scalar_pair`'s charge is reachable only for a holder who assembles a complete set **after** the vault reaches `ScalarSettled`, where `merge_scalar` is no longer available. The charge on the pair calls **stands** — it is the right treatment of the calls it does reach, and exempting them would stack a second inversion on top of the first — but it MUST NOT be read as closing the escape. Sizing consequence: [`08`](./08-treasury-and-economics.md) §10.2's β is an upper estimate. Closing the escape is **SQ-509** and is deliberately not done in E1.
-- **`ProtocolAccounts` are exempt** (§3). The book, fee, POL, POL_BASELINE, INSURANCE and treasury sub-accounts redeem protocol inventory; charging them would be the treasury taxing itself and would corrupt the §8-flow POL return of [`08`](./08-treasury-and-economics.md) §8 with a circular transfer.
+- **`ProtocolAccounts` are exempt** (§3, whose criterion and membership govern — the set is wider than the six sub-accounts this bullet used to enumerate, and §3 states why that list was not the closed set it claimed to be). Every member redeems protocol inventory; charging them would be the treasury taxing itself and would corrupt the §8-flow POL return of [`08`](./08-treasury-and-economics.md) §8 with a circular transfer.
 
 **(2) Arithmetic.** For a charged call with gross payout `g` and a non-protocol caller:
 
@@ -275,9 +311,9 @@ net_pair    = a − fee_pair(a)
 
 | Call | Origin | Preconditions | Effect | Event |
 |---|---|---|---|---|
-| `sweep_dust(pid)` / `sweep_dust_baseline(epoch)` | Signed (keeper) | vault terminal + `RedemptionArchiveDelay` elapsed (hard maximum one year) | drain ≤ `ReapBatch(=100)` claimant `Positions` entries per call across the vault's 14 (resp. 2) `PositionId` prefixes; refund deposits to entry owners; residual escrow → INSURANCE; storage and terminal marker reaped when drained. This cleanup is independent of the owning market-book reap | `VaultReaped { pid, residue }` (proposal crank) / `BaselineVaultReaped { epoch, residue }` (Baseline crank) — each identifies its vault; only the name `VaultReaped` is frozen in [`02-integration-contract.md`](./02-integration-contract.md) §6 (fields open) |
+| `sweep_dust(pid)` / `sweep_dust_baseline(epoch)` | Signed (keeper) | vault terminal + `RedemptionArchiveDelay` elapsed (hard maximum one year) **+ every associated *seeded* market book has recorded its [04](04-markets-and-pricing.md) §2 Sweep** (amended 2026-07-29, milestone E4 — see §5.4a) | drain ≤ `ReapBatch(=100)` claimant `Positions` entries per call across the vault's 14 (resp. 2) `PositionId` prefixes; refund deposits to entry owners; residual escrow → INSURANCE; storage and terminal marker reaped when drained. This cleanup remains independent of the owning market-book **reap**, but is now *ordered after* that book's **Sweep** (§5.4a) | `VaultReaped { pid, residue }` (proposal crank) / `BaselineVaultReaped { epoch, residue }` (Baseline crank) — each identifies its vault; only the name `VaultReaped` is frozen in [`02-integration-contract.md`](./02-integration-contract.md) §6 (fields open) |
 | `reconcile()` | Signed (keeper) | checked `TotalEscrowed + DepositsHeld` succeeds | compare the O(1) maintained liability with the sovereign's actual USDC custody; set the persistent I-4 drift latch iff `liability > custody`; record the exact sample. Emit only on a latch edge | `LedgerDriftDetected { liability, custody }` / `LedgerDriftCleared { liability, custody }` |
-| `sweep_redemption_fees()` | Signed (keeper) | none; a sweep on an empty counter is a successful **no-op** (§6.5(3); [`15`](./15-invariants-and-testing.md) I-31; [`02`](./02-integration-contract.md) §6) | transfer the whole accrued balance from the sovereign to the treasury `MAIN` account — the same sink [`04`](./04-markets-and-pricing.md) §2's `sweep_revenue` remits to ([`08`](./08-treasury-and-economics.md) §1.1) — and zero the counter, atomically; `Preservation::Preserve` on the sovereign; O(1) | `RedemptionFeesSwept { amount }` |
+| `sweep_redemption_fees()` | Signed (keeper) | **no active `PB-LEDGER-FREEZE`** ([`06`](./06-governance-and-guardians.md) §6.3; errors `Frozen` — amended 2026-07-29, milestone E4, SQ-517: the freeze's I-4 admission condition is exactly the state in which L-7's surplus bound goes negative, so under a freeze there is no surplus to sweep and the transfer would come out of escrow backing); otherwise none — a sweep on an empty counter is a successful **no-op** (§6.5(3); [`15`](./15-invariants-and-testing.md) I-31; [`02`](./02-integration-contract.md) §6) | transfer the whole accrued balance from the sovereign to the treasury `MAIN` account — the same sink [`04`](./04-markets-and-pricing.md) §2's `sweep_revenue` remits to ([`08`](./08-treasury-and-economics.md) §1.1) — and zero the counter, atomically; `Preservation::Preserve` on the sovereign; O(1) | `RedemptionFeesSwept { amount }` |
 
 **Reconciliation accounting is exact and bounded (normative).** `TotalEscrowed` is a
 checked maintained total over every proposal and Baseline vault's `escrowed` field. Every
@@ -317,6 +353,43 @@ framework's `Stuck` form.
 **Protocol inventory at market reap (normative).** Every per-market book and fee address belongs to a canonical, domain-separated `AccountId32` namespace reserved permanently — before creation, throughout the book lifetime, and after reap. `MarketProtocolAccounts` is only the bounded ownership/refcount index; inserting or removing it MUST NOT change deposit classification. Market creation MUST reject a non-canonical pair before creating a vault or index entry. Signed `transfer` MUST reject every `ProtocolAccount` destination (`ProtocolDestination`), including a predictable future book/fee address; the origin-gated `MarketAuthority` wrapper is the sole position ingress, so pre-creation squatting cannot poison an address, reclassify a deposit-backed claimant row, or wedge market creation. Immediately before one archived market row unregisters its two accounts, `MarketAuthority` MUST atomically discard positions owned by exactly those accounts across exactly that book's owning vault universe: 14 fixed proposal instruments (≤ 28 storage cells) or two fixed Baseline instruments (≤ 4 cells). It MUST decrement `PositionTotals` by the discarded balances, move no collateral or held deposit, and touch no claimant-owned row. If any later step of market reap fails, this discard rolls back with it (G-1). The vault and its claimant rows remain independently redeemable/sweepable, so ledger-first and market-first interleavings are both safe.
 
 The BE §5.2.1 note on SGF §9.3 settlement perpetuity carries forward unchanged: after reaping, unredeemed claims remain redeemable through a Merkle-archived claims procedure executed by a TREASURY-class proposal (deliberate v1 compromise, recorded in BE §31).
+
+#### 5.4a Dust-sweep ordering against the market Sweep (normative; added 2026-07-29, milestone E4)
+
+A terminal vault's dust sweep MUST NOT drain a vault while any **seeded** market
+book owned by that vault has not recorded its [04](04-markets-and-pricing.md) §2
+Sweep. The refusal is a status-quo no-op (G-1), not a failure of the claim.
+
+**Why this ordering is mandatory rather than advisory.** Both cranks are
+permissionless Signed calls. Without the ordering, any account could call
+`sweep_dust` first: it drains the book's *protocol-owned* positions along with the
+claimant rows, transfers the residual escrow to `INSURANCE`, and removes the
+vault. `market.sweep_revenue` then finds an archived vault, realizes **nothing**,
+and still writes its swept marker — reporting success for a return that did not
+happen and permitting reap. The POL and fee value is not stolen (it reaches the
+treasury through `INSURANCE` and the §1.2 overflow), but the `POL`/`POL_BASELINE`
+budget line is never credited, so NAV attribution is wrong and [08](08-treasury-and-economics.md)
+§8 step 5's "committed POL withdraws at settlement" silently does not hold. An
+off-chain keeper ordering the two cranks is an A-1 liveness assumption and cannot
+substitute for this, because the attack path is permissionless.
+
+**The predicate is `seeded ∧ ¬swept`, and the `seeded` half is load-bearing.** A
+book that was never seeded holds no protocol custody to return, so nothing is lost
+by archiving its vault; and a book that can never *become* sweepable — one whose
+`sweep_revenue` refuses permanently, e.g. a book with no recorded funder — would
+otherwise pin its vault forever. Blocking on `¬swept` alone would therefore
+convert a value leak into a permanent liveness stall, which is the worse trade.
+
+**Interaction with §4's `Vaults` bound.** §4 sizes `Vaults` on terminal vaults
+being permissionlessly drainable after `RedemptionArchiveDelay` (hard maximum one
+year). That guarantee is now **conditional on the vault's seeded books becoming
+sweepable**, and the conditionality is bounded by construction: `sweep_revenue` is
+itself permissionless, requires only the terminal latch, and is idempotent, so any
+account can discharge the precondition without permission or coordination. A vault
+whose seeded book is nevertheless permanently unsweepable is a defect in that
+book's own accounting, not a lawful resting state; it MUST surface as a
+`try-state` violation (the market pallet asserts that a seeded, unswept book still
+has its owning vault) rather than as silent unbounded retention.
 
 ### 5.5 Internal API for the D-3 trade wrapper (no extrinsic surface)
 
@@ -515,7 +588,7 @@ supply field.
 | L-4 | Paired-supply equality in `Open`: `supply(L_b) == supply(S_b) == Q_b`, `supply(Yes_{b,g}) == supply(No_{b,g}) == G_{b,g}`. |
 | L-5 | State legality: no vault in a state outside §2.3's transition table; terminal states admit no mint ops (D-8); `resolve`/`void`/`settle_*` each at most once per target. |
 | L-6 | `PositionCount(who) ==` number of live `Positions` entries for `who`; `≤ MaxPositionsPerAccount` unless `ProtocolAccounts`; held deposits `== PositionDeposit ×` Σ non-exempt entries. |
-| L-7 | **Redemption-fee accrual (§5.3a).** `RedemptionFeesAccrued ≤ balance(sovereign) − TotalEscrowed − held_deposits − min_balance` — the accrued fee is a subset of the lawful surplus **above** the R-4 permanent-account floor and never encroaches on escrow, so `sweep_redemption_fees` can always pay out in full. The `min_balance` term is load-bearing and was missing in the row's first form (corrected 2026-07-29, milestone E1): §5.4 requires `Preservation::Preserve` on the sovereign, so at most `balance − min_balance` is ever movable, and the weaker bound would have admitted an accrual the sweep is not permitted to transfer — the crank would then fail on its last unit rather than pay out in full, which is exactly what this row claims cannot happen. The counter is monotone non-decreasing between sweeps and is zeroed atomically with the transfer; it is never decremented by any other operation. A charged redemption increments it by exactly `gross − net`, and an exempt one by zero. |
+| L-7 | **Redemption-fee accrual (§5.3a).** `RedemptionFeesAccrued ≤ balance(sovereign) − TotalEscrowed − held_deposits − min_balance` — the accrued fee is a subset of the lawful surplus **above** the R-4 permanent-account floor and never encroaches on escrow, so `sweep_redemption_fees` can always pay out in full. The `min_balance` term is load-bearing and was missing in the row's first form (corrected 2026-07-29, milestone E1): §5.4 requires `Preservation::Preserve` on the sovereign, so at most `balance − min_balance` is ever movable, and the weaker bound would have admitted an accrual the sweep is not permitted to transfer — the crank would then fail on its last unit rather than pay out in full, which is exactly what this row claims cannot happen. The counter is monotone non-decreasing between sweeps and is zeroed atomically with the transfer; it is never decremented by any other operation. A charged redemption increments it by exactly `gross − net`, and an exempt one by zero. **This row is a conditional, and its condition is I-4 (added 2026-07-29, milestone E4, SQ-517):** the bound's right-hand side is non-negative precisely while `balance(sovereign) ≥ TotalEscrowed + held_deposits + min_balance`, so under the drift flag — `liability > custody`, the sole admission condition for `PB-LEDGER-FREEZE` ([`06`](./06-governance-and-guardians.md) §6.3) — it is **negative** and the row does not hold. "Moves surplus, never escrow" is therefore a theorem about the healthy state, not an unconditional property of the crank, and `Preservation::Preserve` does not supply the missing guarantee: it protects `min_balance` alone and is indifferent to escrow. §5.4 accordingly refuses the crank while a freeze is active, which is what keeps this row's claim true whenever the crank can actually run. |
 
 ---
 

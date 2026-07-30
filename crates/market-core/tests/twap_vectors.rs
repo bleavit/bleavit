@@ -10,9 +10,11 @@
 
 use std::{fs, path::PathBuf};
 
-use futarchy_primitives::{Branch, FixedU64};
+use conditional_ledger_core::{baseline, LedgerOrigin, LedgerState};
+use futarchy_primitives::{Balance, Branch, FixedU64, ScalarSide, TradeSide};
 use market_core::{
-    contest_capital, observe_book, twap_between, BookKind, MarketBook, MarketParams, TwapCumulative,
+    contest_capital, observe_book, quote, twap_between, withdraw_fees, BookKind, Error, MarketBook,
+    MarketParams, MarketState, TwapCumulative, FEE_BPS,
 };
 use serde_json::Value;
 
@@ -21,6 +23,22 @@ fn fixture() -> Value {
         .join("../../reference-model/fixtures/vectors.json");
     serde_json::from_str(&fs::read_to_string(path).expect("read shared reference-model vectors"))
         .expect("parse shared reference-model vectors")
+}
+
+fn balance(ledger: &LedgerState<u8>, side: ScalarSide, who: u8) -> Balance {
+    ledger
+        .positions
+        .iter()
+        .find(|record| record.id == baseline(7, side) && record.owner == who)
+        .map_or(0, |record| record.balance)
+}
+
+fn base_units(value: &Value, context: &str) -> Balance {
+    Balance::from(
+        value
+            .as_u64()
+            .unwrap_or_else(|| panic!("{context} must be an unsigned integer")),
+    )
 }
 
 /// Parse a corpus decimal string onto the 1e9 grid, returning the floored
@@ -188,6 +206,159 @@ fn twap_vectors_match_python_reference_model() {
                 );
             }
             other => panic!("unknown twap scenario: {other}"),
+        }
+    }
+}
+
+/// 04 §6.1 / 15 §4.4 / SQ-519: replay the independently derived Baseline
+/// wrapper vectors. This binds the custody distinction the LMSR-only vectors
+/// cannot see: fee sets belong to the fee account, not the book.
+#[test]
+fn baseline_market_vectors_match_python_reference_model() {
+    let fixture = fixture();
+    let scenarios = fixture["baseline_market_scenarios"]
+        .as_array()
+        .expect("baseline_market_scenarios family present");
+    assert_eq!(
+        scenarios.len(),
+        2,
+        "Baseline market family cardinality drifted"
+    );
+
+    for row in scenarios {
+        let name = row["name"].as_str().expect("scenario name");
+        let inputs = &row["inputs"];
+        let b = base_units(&inputs["b"], "b");
+        let amount = base_units(&inputs["amount"], "amount");
+        assert_eq!(
+            base_units(&inputs["fee_bps"], "fee_bps"),
+            FEE_BPS,
+            "{name}: fee parameter"
+        );
+
+        match name {
+            "baseline-buy-fee-complete-set-to-main" => {
+                let mut ledger = LedgerState::new();
+                ledger.create_baseline_vault(7).expect("create Baseline");
+                let mut markets = MarketState::new();
+                markets
+                    .create_market(11, BookKind::Baseline { epoch: 7 }, 9, 8, b)
+                    .expect("create market");
+                let headroom = markets.seed(&mut ledger, 11, &1).expect("seed");
+                assert_eq!(
+                    headroom,
+                    base_units(&inputs["seed_inventory"], "seed_inventory"),
+                    "{name}: seed inventory"
+                );
+                let quoted = quote(&markets.markets[0], TradeSide::BuyLong, amount, FEE_BPS)
+                    .expect("buy quote");
+                assert_eq!(
+                    quoted.cost,
+                    base_units(&row["execution"]["cost"], "cost"),
+                    "{name}: cost"
+                );
+                assert_eq!(
+                    quoted.fee,
+                    base_units(&row["execution"]["fee"], "fee"),
+                    "{name}: fee"
+                );
+
+                markets
+                    .buy(
+                        &mut ledger,
+                        11,
+                        &2,
+                        ScalarSide::Long,
+                        amount,
+                        Balance::MAX,
+                        10,
+                    )
+                    .expect("funded Baseline buy");
+                let expected = &row["after_buy"];
+                for (side, key) in [
+                    (ScalarSide::Long, "book_long"),
+                    (ScalarSide::Short, "book_short"),
+                ] {
+                    assert_eq!(
+                        balance(&ledger, side, 9),
+                        base_units(&expected[key], key),
+                        "{name}: {key}"
+                    );
+                }
+                for (side, key) in [
+                    (ScalarSide::Long, "fees_long"),
+                    (ScalarSide::Short, "fees_short"),
+                ] {
+                    assert_eq!(
+                        balance(&ledger, side, 8),
+                        base_units(&expected[key], key),
+                        "{name}: {key}"
+                    );
+                }
+                for (side, key) in [
+                    (ScalarSide::Long, "buyer_long"),
+                    (ScalarSide::Short, "buyer_short"),
+                ] {
+                    assert_eq!(
+                        balance(&ledger, side, 2),
+                        base_units(&expected[key], key),
+                        "{name}: {key}"
+                    );
+                }
+
+                ledger
+                    .settle_baseline(LedgerOrigin::SettleAuthority, 7, FixedU64(500_000_000))
+                    .expect("settle Baseline");
+                let swept = withdraw_fees(&markets.markets[0], &mut ledger, &3)
+                    .expect("sweep Baseline buy fee");
+                assert_eq!(
+                    swept,
+                    base_units(&row["swept_to_main"], "swept_to_main"),
+                    "{name}: swept fee"
+                );
+                assert_eq!(balance(&ledger, ScalarSide::Long, 8), 0);
+                assert_eq!(balance(&ledger, ScalarSide::Short, 8), 0);
+            }
+            "baseline-buy-fee-segregation-refuses-thin-book" => {
+                let inventory = base_units(&inputs["book_inventory"], "book_inventory");
+                let mut ledger = LedgerState::new();
+                ledger.create_baseline_vault(7).expect("create Baseline");
+                ledger
+                    .split_baseline(LedgerOrigin::Signed, 7, &9, inventory)
+                    .expect("fund thin book");
+                let mut markets = MarketState::new();
+                markets
+                    .create_market(11, BookKind::Baseline { epoch: 7 }, 9, 8, b)
+                    .expect("create market");
+                let quoted = quote(&markets.markets[0], TradeSide::BuyLong, amount, FEE_BPS)
+                    .expect("buy quote");
+                assert_eq!(
+                    inventory + quoted.cost,
+                    base_units(&row["segregated_inventory"], "segregated_inventory")
+                );
+                assert_eq!(
+                    inventory + quoted.cost + quoted.fee,
+                    base_units(&row["pooled_inventory"], "pooled_inventory")
+                );
+                let markets_before = markets.clone();
+                let ledger_before = ledger.clone();
+                assert_eq!(
+                    markets.buy(
+                        &mut ledger,
+                        11,
+                        &2,
+                        ScalarSide::Long,
+                        amount,
+                        Balance::MAX,
+                        10,
+                    ),
+                    Err(Error::Ledger),
+                    "{name}: thin book must refuse"
+                );
+                assert_eq!(markets, markets_before, "{name}: market rollback");
+                assert_eq!(ledger, ledger_before, "{name}: ledger rollback");
+            }
+            other => panic!("unknown Baseline market scenario: {other}"),
         }
     }
 }

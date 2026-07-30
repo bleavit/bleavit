@@ -53,6 +53,7 @@ DOC13_SECTION1_HEADER = (
 )
 CORPUS_METADATA_KEYS = frozenset(("schema", "precision"))
 CORPUS_FAMILY_BINDINGS: Mapping[str, tuple[str, ...] | None] = {
+    "baseline_market_scenarios": ("market-core-twap-vectors",),
     "contest_scenarios": ("market-core-twap-vectors",),
     "decision_scenarios": ("decision-engine-reference-vectors",),
     "high_precision_corpus": ("fixed-reference-vectors",),
@@ -557,10 +558,11 @@ def reference_legs(sweep_dir: Path) -> tuple[list[CommandLeg], CommandLeg, Comma
                 "twap_vectors",
             ),
             test_output="cargo",
-            # twap + contest + window-staleness (AUD-NUM-002). The floor tracks
-            # the binary's actual test count, so a family whose replay is dropped
-            # fails here instead of passing on the two that remain.
-            minimum_tests=3,
+            # Baseline wrapper + twap + contest + window-staleness
+            # (AUD-NUM-002). The floor tracks the binary's actual test count,
+            # so a family whose replay is dropped fails here instead of passing
+            # on the others.
+            minimum_tests=4,
         ),
         CommandLeg(
             "ledger-pallet-core-differential",
