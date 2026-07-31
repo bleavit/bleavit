@@ -22,7 +22,7 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 
 > ### ⇨ ACTIVE (2026-07-31) — E6, the proposal author/funder split
 >
-> **Branch `feat/e6-proposal-funder-split`, based on `1554e74` (S6, #200).** New milestone,
+> **Branch `feat/e6-proposal-funder-split`, rebased onto `48e59f3` (E5 pass 2, #199).** New milestone,
 > user-requested: `epoch.submit` requires `proposal.proposer == who`, so a proposal's author
 > and the party locking its 1k–50k USDC class bond must be the same address. E6 separates
 > them — signer becomes the **funder**, `proposal.proposer` stays the **author**.
