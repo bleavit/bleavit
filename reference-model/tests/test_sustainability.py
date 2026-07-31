@@ -17,6 +17,8 @@ import unittest
 
 from bleavit_reference_model.sustainability import (
     CORETIME_PERIOD_DAYS,
+    POL_RERUN_MAX_MULTIPLE,
+    pol_divergence_with_reruns,
     xcm_annual_revenue,
     xcm_break_even_messages_per_day,
     xcm_fee_micro_usdc,
@@ -768,6 +770,73 @@ class CoretimeEscalationTests(unittest.TestCase):
         ten = coretime_cost_after_years(start, D(10))
         self.assertGreater(ten, cost_base().annual)  # exceeds the WHOLE base
         self.assertLess(abs(ten - D(189_073)), D(50))
+
+
+class PolRerunExposureTests(unittest.TestCase):
+    """SQ-540(d). 08 §10.1's divergence row is the no-rerun case and says so nowhere.
+
+    The sweep's framing -- "rerun top-ups double a book's `b` with no
+    `pol.budget_epoch` charge" -- describes something 08 §4.4 already states
+    normatively and defends: reruns are deliberately not budget-charged,
+    because `delayed_once`/`rerun` are one-way flags, so the exposure is
+    structurally bounded at 2x rather than budget-bounded. That half is not a
+    defect.
+
+    The half that survives is about the COST MODEL rather than the protocol.
+    §10.1 publishes a realized-divergence figure computed at zero reruns, while
+    05 §2.1 T13 permits up to a doubling -- so the published cost base is an
+    understatement by up to its own divergence row, and an understated `C`
+    makes every runway figure in §10.5 look better than it is.
+    """
+
+    def test_the_published_row_is_exactly_the_no_rerun_case(self):
+        """Default reproduces §10.1 byte-for-byte, so this adds a term, not a change."""
+        self.assertEqual(CostParams().pol_rerun_fraction, D(0))
+        self.assertEqual(pol_divergence_with_reruns(D(0)), D(18_830))
+        self.assertEqual(cost_base().pol_divergence, D(18_830))
+
+    def test_the_exposure_is_linear_in_the_rerun_share_and_capped_at_two(self):
+        """Divergence is `b*[ln2 - H(p)]`, linear in `b`; T13 doubles `b`."""
+        self.assertEqual(POL_RERUN_MAX_MULTIPLE, D(2))
+        self.assertEqual(pol_divergence_with_reruns(D(1)), D(18_830) * D(2))
+        self.assertEqual(pol_divergence_with_reruns(D("0.5")), D(18_830) * D("1.5"))
+        # The structural cap really binds: 05 §2.1's rerun finality allows ONE
+        # rerun per proposal, so no share can push past 2x.
+        self.assertEqual(pol_divergence_with_reruns(D(3)), D(18_830) * D(2))
+        self.assertEqual(pol_divergence_with_reruns(D("-1")), D(18_830))
+
+    def test_a_fully_rerun_slate_costs_17_percent_of_the_whole_base(self):
+        """Why it is worth stating rather than filing."""
+        base = cost_base().annual
+        full = cost_base(with_levers(pol_rerun_fraction=D(1))).annual
+        self.assertLess(abs(full - base - D(18_830)), D(1))
+        self.assertGreater((full / base) - D(1), D("0.17"))
+        self.assertLess(abs(runway_years(full, NAV_FLOOR_META) - D("29.22")), D("0.05"))
+
+    def test_the_joint_worst_case_still_does_not_change_the_standing_conclusion(self):
+        """Stacked with the other two known exposures, honestly.
+
+        12 collators (the 12 §6.1 mandated ceiling) AND a fully rerun slate is
+        the pessimistic corner of everything E5/E7 have quantified. It does not
+        reverse anything: the coretime policy is still worth more than the
+        rerun term costs, and the zero-revenue reading still fails at the
+        mandated count for the reason §10.5 already gives -- mature operation
+        depends on revenue, not on the endowment.
+        """
+        worst = cost_base(
+            with_levers(collator_count=12, pol_rerun_fraction=D(1))
+        ).annual
+        self.assertLess(abs(worst - D(188_986)), D(2))
+        late = runway_years_with_coretime_policy(
+            worst, NAV_FLOOR_META, D(4_000), through=CORETIME_RENEW_LEADIN_END
+        )
+        early = runway_years_with_coretime_policy(
+            worst, NAV_FLOOR_META, D(4_000), through=CORETIME_RENEW_INTERLUDE
+        )
+        self.assertLess(abs(late - D("19.40")), D("0.05"))
+        self.assertLess(abs(early - D("12.72")), D("0.05"))
+        # Even in the worst corner the renewal-timing policy is the larger term.
+        self.assertGreater(late - early, D(6))
 
 
 class XcmDiscardedRevenueTests(unittest.TestCase):

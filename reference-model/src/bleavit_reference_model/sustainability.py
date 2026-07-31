@@ -358,6 +358,12 @@ class CostParams:
     proposer_reward: Decimal = Decimal(500)
     # 08 §10.1: realized POL divergence loss, the 04 §12 worked walk. Annual.
     pol_divergence_annual: Decimal = Decimal(18_830)
+    # SQ-540(d). Share of the qualified slate that takes a T13 rerun. 08 §10.1's
+    # divergence row is computed at 0 -- a no-rerun epoch -- and nothing in §10
+    # says so, which makes the published cost base an understatement of exactly
+    # the amount 05 §2.1 T13 permits. Default 0 to reproduce the published row;
+    # pass a fraction to see the exposure the spec already allows.
+    pol_rerun_fraction: Decimal = Decimal(0)
     # 07 §8 reserve-probe envelope. Annual.
     reserve_probe_annual: Decimal = Decimal(913)
     # The eight 13 §1 [VERIFY]-tagged ops lines. 08 §10.1 refuses to size them
@@ -466,10 +472,41 @@ def cost_base(params: CostParams | None = None) -> CostBase:
             keeper_metered=+(metered_epoch * epy),
             keeper_beyond_meter=+((beyond_meter_epoch - fee_return_epoch) * epy),
             proposer_rewards=+(p.proposer_reward * p.epoch_slots * epy),
-            pol_divergence=p.pol_divergence_annual,
+            pol_divergence=pol_divergence_with_reruns(p.pol_rerun_fraction, p),
             reserve_probe=p.reserve_probe_annual,
             ops_overlay=p.ops_overlay_annual,
         )
+
+
+# 05 §2.1 T13: a rerun REOPENS the same books at 2x POL with positions intact.
+# `delayed_once` and `rerun` are one-way flags, so a proposal admits at most ONE
+# rerun -- which is why 08 §4.4 can call the exposure "structurally bounded
+# rather than budget-bounded" and cap an epoch at 2x its qualified commitment.
+POL_RERUN_MAX_MULTIPLE = Decimal(2)
+
+
+def pol_divergence_with_reruns(
+    rerun_fraction: Decimal,
+    params: CostParams | None = None,
+) -> Decimal:
+    """Realized POL divergence when `rerun_fraction` of the slate reruns.
+
+    Divergence loss is `b*[ln2 - H(p)]` per book (04 §12), i.e. LINEAR in `b`,
+    and T13 doubles `b` on the reopened book. A rerun book therefore contributes
+    at most twice a non-rerun one, and the epoch total scales as
+    `1 + rerun_fraction` up to the structural cap of 2x.
+
+    This is a CEILING on the rerun term, not a forecast: it takes each rerun
+    book to the full doubled bound. The point is that 08 §10.1's published row
+    is the `rerun_fraction = 0` case and says so nowhere, so the cost base it
+    states is an understatement by up to its own size.
+    """
+    p = params or CostParams()
+    fraction = max(Decimal(0), min(Decimal(1), rerun_fraction))
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        multiple = Decimal(1) + fraction * (POL_RERUN_MAX_MULTIPLE - Decimal(1))
+        return +(p.pol_divergence_annual * multiple)
 
 
 def quiet_epoch_cost(params: CostParams | None = None) -> Decimal:
