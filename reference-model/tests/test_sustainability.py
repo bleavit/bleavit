@@ -61,7 +61,7 @@ D = Decimal
 
 
 def pass1_params():
-    """E5 pass 1: the SQ-531 fee-basis correction, before the SQ-535 reseed.
+    """E5 pass 1: the SQ-531 fee-basis correction, before the SQ-536 reseed.
 
     Several published comparisons are against this intermediate point rather
     than against the pre-E5 world, because it isolates what re-anchoring
@@ -427,7 +427,7 @@ class OperatingPointTests(unittest.TestCase):
         """The goal, asserted against what actually SHIPS.
 
         `CostParams()` is the shipped genesis operating point: the SQ-531
-        fee-basis correction AND the SQ-535 `collator.comp_epoch` reseed.
+        fee-basis correction AND the SQ-536 `collator.comp_epoch` reseed.
 
         Measured to the 13,862,944 CODE **seeding** floor, which is the
         operating constraint: below it no CODE proposal fits an epoch's POL
@@ -552,7 +552,7 @@ class OperatingPointTests(unittest.TestCase):
         revenue_ratio = D(1) / p.epoch_slots
         self.assertGreater(cost_ratio, revenue_ratio)
 
-        # The SQ-535 reseed cut the standing share materially but did not
+        # The SQ-536 reseed cut the standing share materially but did not
         # remove it: one-slot cost was 79.0 % of full-slate cost at pass 1 and
         # is 53.8 % at the shipped point. Pinned in both directions so neither
         # "collator compensation is standing" nor "occupancy scaling now
@@ -631,7 +631,7 @@ class OperatingPointTests(unittest.TestCase):
                 self.assertIn(actual, expected)
                 # The whole POL row is at most 17.3 % of the cost base, which
                 # is why the extremes cannot move the answer far. The share
-                # ROSE with the SQ-535 reseed -- not because POL grew, but
+                # ROSE with the SQ-536 reseed -- not because POL grew, but
                 # because the base it is measured against shrank -- so this
                 # bound is restated rather than inherited.
                 self.assertLess(
@@ -650,7 +650,7 @@ class OperatingPointTests(unittest.TestCase):
         At pass 1 that line was 72.6 % of the base and the standing weight
         dominated so heavily that break-even needed SEVEN occupied slots at
         tau = 3 -- above `epoch.slots` = 5, so not reachable without also
-        amending that key. At the shipped point (SQ-535) it is 39.8 %, and ONE
+        amending that key. At the shipped point (SQ-536) it is 39.8 %, and ONE
         occupied slot covers the base at the same turnover.
 
         This is why the question was worth answering rather than deferring: the
@@ -679,7 +679,7 @@ class OperatingPointTests(unittest.TestCase):
         )
 
     def test_the_collator_reseed_is_worth_130k_a_year(self):
-        """The magnitude of the SQ-535 reseed, and what it decides.
+        """The magnitude of the SQ-536 reseed, and what it decides.
 
         `collator.comp_epoch` 2,000 -> 500 (its 13 §1 registry minimum) is
         worth ~130,447/yr -- 72.6 % of the pass-1 base -- and it is what
@@ -703,7 +703,7 @@ class OperatingPointTests(unittest.TestCase):
 
 
 class CollatorAnchorTests(unittest.TestCase):
-    """SQ-535. The external evidence that made `collator.comp_epoch` decidable.
+    """SQ-536. The external evidence that made `collator.comp_epoch` decidable.
 
     R-2 permits a values-layer number only when it is DERIVED -- tied to a
     kernel constant, an existing key, or published calibration evidence -- and
@@ -814,7 +814,7 @@ class CollatorAnchorTests(unittest.TestCase):
     def test_the_25_year_goal_does_not_survive_the_mandated_collator_growth(self):
         """The qualification the headline figure needs, stated as a test.
 
-        SQ-535's headline is 34.3 years to the binding 21.26M CODE/META
+        SQ-536's headline is 34.3 years to the binding 21.26M CODE/META
         arming floor at ZERO revenue. That is the LAUNCH count of 5. 12 §6.1
         mandates growth to 8-12 bonded permissionless collators from Phase 4+,
         and `collator.comp_epoch` is already at its registry floor, so the only
@@ -878,7 +878,7 @@ class CollatorAnchorTests(unittest.TestCase):
         `dec.v_min` floor -- the depth below which a proposal is not
         decision-grade at all -- so this is not an optimistic scenario.
         """
-        # Stated for the SHIPPED point. Until the SQ-535 reseed this held only
+        # Stated for the SHIPPED point. Until the SQ-536 reseed this held only
         # for the lowered collator line -- at the pass-1 seed revenue covered
         # cost only from tau ~ 3.6 upward, and that gap was exactly the
         # collator line. Asserted for `CostParams()` now that they coincide.

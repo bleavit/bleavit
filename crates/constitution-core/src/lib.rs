@@ -2619,7 +2619,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         ),
         row(
             b"collator.comp",
-            // SQ-535 (milestone E5 pass 2): seeded at the registry MINIMUM,
+            // SQ-536 (milestone E5 pass 2): seeded at the registry MINIMUM,
             // 500 USDC/collator/epoch, re-anchored from the superseded 2,000.
             //
             // 2,000 was a D-15 initial value with no cost evidence behind it.
@@ -3237,7 +3237,7 @@ mod tests {
         assert_eq!(record.admissible_next_interval(), Ok((50_400, 201_600)));
     }
 
-    /// SQ-535. The seeded `collator.comp` value, pinned to its external anchor.
+    /// SQ-536. The seeded `collator.comp` value, pinned to its external anchor.
     ///
     /// Nothing else in this workspace pins the *value* of a genesis PARAM row —
     /// `genesis-keys.json` asserts the key SET, and every consumer reads the

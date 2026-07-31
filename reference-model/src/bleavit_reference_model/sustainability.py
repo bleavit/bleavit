@@ -55,7 +55,7 @@ KEEPER_BUDGET_MIN, KEEPER_BUDGET_MAX = Decimal(6_000), Decimal(60_000)
 COLLATOR_COMP_MIN, COLLATOR_COMP_MAX = Decimal(500), Decimal(10_000)
 
 # ---------------------------------------------------------------------------
-# The external anchor for `collator.comp_epoch` (SQ-535, milestone E5 pass 2).
+# The external anchor for `collator.comp_epoch` (SQ-536, milestone E5 pass 2).
 #
 # This is the ONE figure in 08 §10 that no amount of internal derivation can
 # reach: a collator's cost is a market price, and R-2 forbids inventing one.
@@ -225,7 +225,7 @@ class CostParams:
     # seed moved 0.09 -> 0.000255. See PRE_E5 below for the superseded value.
     keeper_rebate: Decimal = Decimal("0.000255")
     keeper_budget_epoch: Decimal = Decimal(12_000)
-    # 13 §1 `collator.comp_epoch`. SQ-535 (milestone E5 pass 2) re-seeded this
+    # 13 §1 `collator.comp_epoch`. SQ-536 (milestone E5 pass 2) re-seeded this
     # 2,000 -> 500, the registry MINIMUM, against the referendum #1870 anchor
     # above: 500 is 2.36x the fully-loaded rate real operators accepted for the
     # same treasury-funded, zero-fee-revenue role, where 2,000 was 9.44x. The
@@ -780,7 +780,7 @@ def with_levers(**overrides) -> CostParams:
 # claimed to be 3x, and both keeper lines -- 79.3 % of the whole cost base --
 # were scaled by that error (SQ-531). Pass 2 additionally re-seeded
 # `collator.comp_epoch` 2,000 -> 500 against the referendum #1870 anchor
-# (SQ-535), so that value is pinned here too rather than inherited.
+# (SQ-536), so that value is pinned here too rather than inherited.
 def pre_e5_params(**overrides) -> CostParams:
     base = replace(
         CostParams(),
