@@ -47,9 +47,28 @@ from bleavit_reference_model.sustainability import (
     runway_years,
     pre_e5_params,
     with_levers,
+    COLLATOR_COMP_MIN,
+    COLLATOR_COMP_MAX,
+    PDOT_FUNDED_COLLATORS,
+    PDOT_PER_COLLATOR_MONTH,
+    collator_anchor_multiple,
+    collator_comp_month,
+    polkadot_collator_rate_epoch,
+    polkadot_collator_rate_month,
 )
 
 D = Decimal
+
+
+def pass1_params():
+    """E5 pass 1: the SQ-531 fee-basis correction, before the SQ-536 reseed.
+
+    Several published comparisons are against this intermediate point rather
+    than against the pre-E5 world, because it isolates what re-anchoring
+    `collator.comp_epoch` bought from what correcting the keeper fee basis
+    bought. They were separate findings and the arithmetic keeps them separate.
+    """
+    return with_levers(collator_comp_epoch=2_000)
 
 
 class EpochArithmeticTests(unittest.TestCase):
@@ -408,19 +427,27 @@ class OperatingPointTests(unittest.TestCase):
         """The goal, asserted against what actually SHIPS.
 
         `CostParams()` is the shipped genesis operating point: the SQ-531
-        fee-basis correction and nothing else. `collator.comp_epoch` stays at
-        2,000 -- see `test_the_collator_lever_is_available_but_not_taken`.
+        fee-basis correction AND the SQ-536 `collator.comp_epoch` reseed.
 
         Measured to the 13,862,944 CODE **seeding** floor, which is the
         operating constraint: below it no CODE proposal fits an epoch's POL
         budget. Zero revenue is assumed.
+
+        The goal is also asserted against the 21,256,533 shared CODE/META
+        **arming** floor, which BINDS earlier than the seeding floor and is
+        therefore the honest test of "25 years". Pass 1 cleared the seeding
+        floor but not this one; pass 2 clears both.
         """
         p = CostParams()
         self.assertTrue(is_admissible(p), [f.detail for f in check_admissible(p) if not f.ok])
         c = cost_base(p).annual
-        self.assertLess(c, D(240_000))
-        self.assertGreater(runway_years(c, NAV_FLOOR_CODE), D(25))
-        self.assertGreater(runway_years(c, NAV_FLOOR_PARAM), D(80))
+        self.assertLess(c, D(110_000))
+        self.assertGreater(runway_years(c, NAV_FLOOR_CODE), D(100))
+        self.assertGreater(runway_years(c, NAV_FLOOR_PARAM), D(180))
+        # The binding floor, at ZERO revenue -- this is the goal statement.
+        self.assertGreater(runway_years(c, NAV_FLOOR_META), D(25))
+        # And it was NOT cleared at pass 1, so the reseed is what carried it.
+        self.assertLess(runway_years(cost_base(pass1_params()).annual, NAV_FLOOR_META), D(25))
 
     def test_self_funding_is_conditional_on_slate_occupancy_not_just_depth(self):
         """The correction a Codex review forced, and the claim it replaces.
@@ -432,49 +459,73 @@ class OperatingPointTests(unittest.TestCase):
         minimum *activity* at which the chain decides anything is ONE proposal,
         and held capital scales with occupancy.
 
-        At one occupied slot the chain earns ~70.3k against a 239.7k cost base
-        and does not self-fund under either cost base. The unbounded-runway
-        conclusion therefore depends on sustained slate utilisation, which is a
-        demand assumption this repository has no evidence for (SQ-506), not on
-        decision-grade depth alone.
+        The correction stands and is kept, because it is what makes the
+        occupancy axis visible at all. What pass 2 changed is the ANSWER, not
+        the question: at the pass-1 cost base one occupied slot earned ~70.3k
+        against 239.7k and did not self-fund; at the shipped base the same
+        single slot covers it. The dependence on sustained slate utilisation
+        (SQ-506) is therefore discharged for the shipped point rather than
+        assumed away -- and the test still pins the pass-1 shortfall so the
+        claim cannot quietly revert.
         """
         shipped = cost_base(CostParams()).annual
-        lowered = cost_base(with_levers(collator_comp_epoch=500)).annual
+        pass1 = cost_base(pass1_params()).annual
 
         one_slot = annual_held_capital("param", D(1), saturated=False)
         self.assertLess(abs(one_slot - D(8_522_500)), D(1))
         self.assertLess(abs(revenue(one_slot, D(3)) - D(70_311)), D(2))
-        self.assertLess(revenue(one_slot, D(3)), lowered)
-        self.assertLess(revenue(one_slot, D(3)), shipped)
 
-        # Where the crossover actually sits, in slots rather than in prose.
-        # At the shipped cost base and the conservative tau it needs SIX
-        # occupied slots -- above `epoch.slots` = 5, so unreachable at the
-        # default slate size without a governance change to that key. That is
-        # the sharpest honest form of the correction: not "self-funding at
-        # minimum activity" but "not self-funding at any lawful occupancy at
-        # this turnover".
-        self.assertEqual(break_even_slots(shipped, D(3)), 6)
+        # Two readings, and they must not be conflated -- conflating them is
+        # the exact error that produced the claim this test replaces.
+        #
+        # (a) CONSISTENT: cost and revenue both evaluated at the occupancy in
+        #     question. This is the correct comparison, and one occupied slot
+        #     covers the shipped base (70,311 against 58,808).
+        self.assertGreaterEqual(revenue(one_slot, D(3)), cost_at_occupancy(D(1)))
+        self.assertEqual(break_even_slots_consistent(D(3)), 1)
+        # (b) FIXED full-slate cost: conservative, since it charges five slots'
+        #     per-proposal rows against one slot's trading. One slot does NOT
+        #     clear it; three do, and three is inside the lawful slate.
+        self.assertLess(revenue(one_slot, D(3)), shipped)
+        self.assertEqual(break_even_slots(shipped, D(3)), 3)
+        self.assertLessEqual(D(3), CostParams().epoch_slots)
+        # At the measured median turnover even the conservative reading is one.
+        self.assertEqual(break_even_slots(shipped, D("5.8")), 1)
+
+        # Against pass 1, one slot fell short under BOTH readings, and the
+        # conservative reading needed SIX occupied slots -- above
+        # `epoch.slots` = 5, so unreachable without also amending that key.
+        self.assertLess(revenue(one_slot, D(3)), pass1)
+        self.assertLess(revenue(one_slot, D(3)), cost_at_occupancy(D(1), pass1_params()))
+        self.assertEqual(break_even_slots(pass1, D(3)), 6)
         self.assertGreater(D(6), CostParams().epoch_slots)
-        # The collator lever brings it inside the default slate...
-        self.assertEqual(break_even_slots(lowered, D(3)), 3)
-        # ...and so does the measured median turnover, without that lever.
-        self.assertEqual(break_even_slots(shipped, D("5.8")), 3)
+        self.assertEqual(break_even_slots(pass1, D("5.8")), 3)
 
     def test_the_shipped_point_needs_both_occupancy_and_turnover(self):
-        """Both conditions stated together, since either alone is misleading."""
+        """Both conditions stated together, since either alone is misleading.
+
+        At pass 1 a full floor slate was SHORT at the conservative tau and only
+        covered at the measured median. The reseed clears both, so what this
+        test now pins is the pass-1 shortfall (as the historical statement it
+        is) alongside the shipped surplus -- the point being that the shipped
+        conclusion no longer needs the more favourable turnover assumption.
+        """
         shipped = cost_base(CostParams()).annual
+        pass1 = cost_base(pass1_params()).annual
         full_slate = annual_held_capital("param", D(5), saturated=False)
 
-        # A full floor slate at the conservative churn-excluded tau is SHORT.
-        self.assertLess(revenue(full_slate, D(3)), shipped)
-        self.assertLess(shipped - revenue(full_slate, D(3)), D(35_000))
+        # Pass 1: short at the conservative churn-excluded tau...
+        self.assertLess(revenue(full_slate, D(3)), pass1)
+        self.assertLess(pass1 - revenue(full_slate, D(3)), D(35_000))
+        # ...covered only at the measured median all-book turnover.
+        self.assertGreater(revenue(full_slate, D("5.8")), pass1)
 
-        # It covers at the measured median all-book turnover.
-        self.assertGreater(revenue(full_slate, D("5.8")), shipped)
-        self.assertTrue(
-            runway_years(shipped, NAV_FLOOR_CODE, revenue(full_slate, D("5.8"))).is_infinite()
-        )
+        # Shipped: covered at BOTH, so the conclusion no longer rests on tau.
+        for tau in (D(2), D(3), D("5.8")):
+            with self.subTest(tau=str(tau)):
+                r = revenue(full_slate, tau)
+                self.assertGreater(r, shipped)
+                self.assertTrue(runway_years(shipped, NAV_FLOOR_CODE, r).is_infinite())
 
     def test_cost_must_be_evaluated_at_the_same_occupancy_as_revenue(self):
         """The mirror of the occupancy error, found while fixing it.
@@ -491,8 +542,27 @@ class OperatingPointTests(unittest.TestCase):
         # working-precision contexts and differ only in trailing digits.
         self.assertLess(abs(cost_at_occupancy(p.epoch_slots, p) - full), D("0.000001"))
         self.assertLess(cost_at_occupancy(D(1), p), full)
-        # Standing lines dominate, so cost falls far more slowly than revenue.
-        self.assertGreater(cost_at_occupancy(D(1), p) / full, D("0.75"))
+
+        # The structural claim, stated as the comparison it actually is rather
+        # than as a bare threshold: revenue is linear in occupancy, so at one
+        # of five slots it is exactly 1/5 of full; cost is not, because part of
+        # it is standing. Cost therefore falls MORE SLOWLY than revenue, which
+        # is the whole reason occupancy has to be held common between them.
+        cost_ratio = cost_at_occupancy(D(1), p) / full
+        revenue_ratio = D(1) / p.epoch_slots
+        self.assertGreater(cost_ratio, revenue_ratio)
+
+        # The SQ-536 reseed cut the standing share materially but did not
+        # remove it: one-slot cost was 79.0 % of full-slate cost at pass 1 and
+        # is 53.8 % at the shipped point. Pinned in both directions so neither
+        # "collator compensation is standing" nor "occupancy scaling now
+        # dominates" can be overstated later.
+        self.assertLess(abs(cost_ratio - D("0.5381")), D("0.0002"))
+        self.assertLess(
+            abs(cost_at_occupancy(D(1), pass1_params()) / cost_base(pass1_params()).annual
+                - D("0.7895")),
+            D("0.0002"),
+        )
 
     def test_the_pol_row_splits_by_b_not_into_equal_proposal_parts(self):
         """Realized divergence loss is linear in `b`, so the split follows `b`.
@@ -551,16 +621,19 @@ class OperatingPointTests(unittest.TestCase):
         by one slot in the fourth, so the conclusions do not rest on the split.
         """
         for params, tau, expected in (
-            (CostParams(), D(3), {7}),
-            (CostParams(), D("5.8"), {3}),
-            (with_levers(collator_comp_epoch=500), D(3), {1, 2}),
-            (with_levers(collator_comp_epoch=500), D("5.8"), {1}),
+            (pass1_params(), D(3), {7}),
+            (pass1_params(), D("5.8"), {3}),
+            (CostParams(), D(3), {1, 2}),
+            (CostParams(), D("5.8"), {1}),
         ):
             with self.subTest(tau=str(tau), collator=str(params.collator_comp_epoch)):
                 actual = break_even_slots_consistent(tau, params)
                 self.assertIn(actual, expected)
-                # The whole POL row is at most 7.9 % of the cost base, which is
-                # why the extremes cannot move the answer far.
+                # The whole POL row is at most 17.3 % of the cost base, which
+                # is why the extremes cannot move the answer far. The share
+                # ROSE with the SQ-536 reseed -- not because POL grew, but
+                # because the base it is measured against shrank -- so this
+                # bound is restated rather than inherited.
                 self.assertLess(
                     params.pol_divergence_annual / cost_base(params).annual, D("0.18")
                 )
@@ -568,58 +641,235 @@ class OperatingPointTests(unittest.TestCase):
     def test_the_standing_collator_line_decides_whether_one_proposal_suffices(self):
         """The most decision-relevant result in E5, and it is not a value choice.
 
-        `ops.collators` is 72.6 % of the shipped cost base and it is STANDING:
-        it bills whether or not the chain decides anything, which is the wrong
-        shape for a protocol whose revenue is activity-linked. Evaluating cost
-        and revenue at the same occupancy makes the consequence exact.
+        `ops.collators` is STANDING: it bills whether or not the chain decides
+        anything, which is the wrong shape for a protocol whose revenue is
+        activity-linked. Evaluating cost and revenue at the same occupancy
+        makes the consequence exact, and it is a single number: the occupied
+        slot count at which revenue first covers cost.
 
-        At the shipped point the standing line dominates so heavily that break-
-        even needs SEVEN occupied slots at tau = 3 -- above `epoch.slots` = 5,
-        so not reachable without also amending that key. With
-        `collator.comp_epoch` at its registry minimum, ONE occupied slot covers
-        the cost base at the same turnover.
+        At pass 1 that line was 72.6 % of the base and the standing weight
+        dominated so heavily that break-even needed SEVEN occupied slots at
+        tau = 3 -- above `epoch.slots` = 5, so not reachable without also
+        amending that key. At the shipped point (SQ-536) it is 39.8 %, and ONE
+        occupied slot covers the base at the same turnover.
 
-        That is the real content of the `collator.comp_epoch` decision, and it
-        is a sharper question than "is 500 enough to run a node": it decides
-        whether the protocol needs a full slate or a single proposal to break
-        even. E5 declines to answer it (R-2: unsafe direction, no evidence
-        anchor) and hands it over stated this way.
+        This is why the question was worth answering rather than deferring: the
+        `collator.comp_epoch` value does not merely change a cost line by a
+        percentage, it decides whether the protocol requires sustained
+        full-slate demand to break even or a single proposal.
         """
         shipped = CostParams()
-        lowered = with_levers(collator_comp_epoch=500)
+        pass1 = pass1_params()
 
-        self.assertEqual(break_even_slots_consistent(D(3), shipped), 7)
-        self.assertGreater(D(7), shipped.epoch_slots)
-        self.assertEqual(break_even_slots_consistent(D(3), lowered), 1)
+        # Pass 1: seven slots, above the lawful slate size.
+        self.assertEqual(break_even_slots_consistent(D(3), pass1), 7)
+        self.assertGreater(D(7), pass1.epoch_slots)
+        # At the measured median turnover pass 1 needed three, inside the slate.
+        self.assertEqual(break_even_slots_consistent(D("5.8"), pass1), 3)
 
-        # At the measured median turnover the shipped point needs three slots,
-        # which IS reachable inside the default slate.
-        self.assertEqual(break_even_slots_consistent(D("5.8"), shipped), 3)
-        self.assertLessEqual(D(3), shipped.epoch_slots)
+        # Shipped: one slot, at both turnovers.
+        self.assertEqual(break_even_slots_consistent(D(3), shipped), 1)
+        self.assertEqual(break_even_slots_consistent(D("5.8"), shipped), 1)
+        self.assertLessEqual(D(1), shipped.epoch_slots)
 
-    def test_the_collator_lever_is_available_but_not_taken(self):
-        """Pins the one decision E5 declined, and why it is the only one.
+        # The standing share, pinned on both sides of the reseed.
+        self.assertLess(abs(cost_base(pass1).collators / cost_base(pass1).annual - D("0.726")), D("0.001"))
+        self.assertLess(
+            abs(cost_base(shipped).collators / cost_base(shipped).annual - D("0.398")), D("0.001")
+        )
 
-        `collator.comp_epoch` -> 500 (its 13 §1 registry minimum) is lawful and
-        worth ~130,447/yr -- 72.6 % of the remaining base -- and it is what
-        would carry the runway past 25 years against the 21,256,533 shared
-        CODE/META **arming** floor as well as the seeding floor.
+    def test_the_collator_reseed_is_worth_130k_a_year(self):
+        """The magnitude of the SQ-536 reseed, and what it decides.
 
-        It is declined because it is the only lever here whose error direction
-        is unsafe (underpaid collators stop producing blocks) and which no
-        evidence in this repository anchors: 12 §6.1 mandates growth to 8-12
-        bonded permissionless collators from Phase 4 and gives counts, never
-        costs. R-2 reserves exactly that shape for a values judgement. This test
-        keeps the arithmetic exact so launch governance can take it as a
-        one-line decision with real operator quotes.
+        `collator.comp_epoch` 2,000 -> 500 (its 13 §1 registry minimum) is
+        worth ~130,447/yr -- 72.6 % of the pass-1 base -- and it is what
+        carries the runway past 25 years against the 21,256,533 shared
+        CODE/META **arming** floor, which binds earlier than the seeding floor
+        and is therefore the real test of the goal.
+
+        E5 pass 1 declined this on R-2 grounds: unsafe error direction
+        (underpaid collators stop producing blocks) and no evidence anchor,
+        since 12 §6.1 mandates growth to 8-12 bonded permissionless collators
+        and gives counts, never costs. Pass 2 found the anchor outside this
+        repository instead of inventing one -- see the anchor tests below.
         """
         shipped = cost_base(CostParams()).annual
-        lowered = cost_base(with_levers(collator_comp_epoch=500)).annual
-        self.assertLess(abs((shipped - lowered) - D(130_447)), D(2))
-        # Declining it is what leaves the arming floor short of 25 years...
-        self.assertLess(runway_years(shipped, NAV_FLOOR_META), D(25))
-        # ...and taking it would clear that too.
-        self.assertGreater(runway_years(lowered, NAV_FLOOR_META), D(25))
+        pass1 = cost_base(pass1_params()).annual
+        self.assertLess(abs((pass1 - shipped) - D(130_447)), D(2))
+        # Pass 1 left the binding arming floor short of 25 years...
+        self.assertLess(runway_years(pass1, NAV_FLOOR_META), D(25))
+        # ...and the reseed clears it, at ZERO assumed revenue.
+        self.assertGreater(runway_years(shipped, NAV_FLOOR_META), D(25))
+
+
+class CollatorAnchorTests(unittest.TestCase):
+    """SQ-536. The external evidence that made `collator.comp_epoch` decidable.
+
+    R-2 permits a values-layer number only when it is DERIVED -- tied to a
+    kernel constant, an existing key, or published calibration evidence -- and
+    reserves escalation for a value whose error direction is unsafe AND which
+    no evidence anchors. Collator compensation is a market price, so the first
+    two anchors are unavailable by construction; pass 1 concluded the third was
+    too and deferred. It was not. Polkadot's own treasury funds the identical
+    role and its rate is public, governance-approved and executed.
+    """
+
+    def test_the_anchor_is_a_governance_approved_rate_for_the_same_role(self):
+        """Referendum #1870: 38 funded system-parachain collators at $250/mo.
+
+        Recorded as constants rather than as a derived quotient so the source
+        figures stay checkable against the referendum itself.
+        """
+        self.assertEqual(PDOT_FUNDED_COLLATORS, D(38))
+        self.assertEqual(PDOT_PER_COLLATOR_MONTH, D(250))
+        # Loading the referendum's own shared overheads (hosting, curators,
+        # coordinator) across the funded set gives the honest comparand.
+        self.assertLess(abs(polkadot_collator_rate_month(loaded=False) - D("250.00")), D("0.01"))
+        self.assertLess(abs(polkadot_collator_rate_month(loaded=True) - D("307.24")), D("0.01"))
+
+    def test_the_rate_is_converted_into_registry_units_not_read_as_monthly(self):
+        """An epoch is 21.0 days, NOT a month.
+
+        Reading the monthly rate straight into 13 §1's row would understate it
+        by 12/17.393 = 0.69x. The conversion is the step most likely to be got
+        wrong silently, so it is pinned on its own.
+        """
+        self.assertLess(abs(polkadot_collator_rate_epoch(loaded=True) - D("211.97")), D("0.01"))
+        self.assertLess(abs(polkadot_collator_rate_epoch(loaded=False) - D("172.48")), D("0.01"))
+        # Round-trip: the registry row expressed back in USD/month.
+        self.assertLess(abs(collator_comp_month(D(500)) - D("724.70")), D("0.01"))
+        self.assertLess(abs(collator_comp_month(D(2_000)) - D("2898.81")), D("0.01"))
+
+    def test_the_shipped_seed_clears_the_anchor_with_margin(self):
+        """The safety argument, which is a MULTIPLE and not an absolute.
+
+        The unsafe direction is underpaying, so what has to hold is headroom
+        above a rate real operators demonstrably accepted for the same job.
+        The shipped seed pays 2.36x the fully-loaded anchored rate -- margin
+        that has to absorb the one real disanalogy, namely that a Polkadot
+        system-parachain operator is already running Polkadot infrastructure
+        and so is quoting a MARGINAL cost, where a new chain's operators
+        amortize nothing.
+        """
+        shipped = CostParams().collator_comp_epoch
+        self.assertEqual(shipped, COLLATOR_COMP_MIN)
+        self.assertGreater(collator_anchor_multiple(shipped, loaded=True), D(2))
+        self.assertLess(abs(collator_anchor_multiple(shipped, loaded=True) - D("2.359")), D("0.001"))
+        # The conclusion does not depend on whether the anchor is loaded.
+        self.assertGreater(collator_anchor_multiple(shipped, loaded=False), D(2))
+
+    def test_the_superseded_seed_was_an_order_of_magnitude_above_the_anchor(self):
+        """Why this was worth revisiting at all: 2,000 was 9.4x the anchor."""
+        self.assertGreater(collator_anchor_multiple(D(2_000), loaded=True), D(9))
+        self.assertLess(abs(collator_anchor_multiple(D(2_000), loaded=True) - D("9.435")), D("0.001"))
+
+    def test_the_value_is_the_registry_bound_and_not_a_chosen_number(self):
+        """R-2: derive the value, never pick it.
+
+        The derivation is: take the lowest LAWFUL value, then show it clears
+        the anchor with margin. That is reproducible from the registry plus one
+        external source, and it leaves no room for a preference. Choosing an
+        intermediate value -- 1,000, say -- would be a pick, because nothing in
+        the evidence distinguishes it.
+        """
+        self.assertEqual(CostParams().collator_comp_epoch, COLLATOR_COMP_MIN)
+        # The registry bound itself is UNCHANGED by this milestone: the seed
+        # moves to the floor, the floor does not move to the seed.
+        self.assertEqual(COLLATOR_COMP_MIN, D(500))
+        self.assertEqual(COLLATOR_COMP_MAX, D(10_000))
+
+    def test_all_remaining_headroom_is_in_the_safe_direction(self):
+        """Seeding at the floor is only safe because recovery is cheap.
+
+        `collator.comp_epoch` is PARAM with a x2 max-delta and a 1-epoch
+        cooldown, so if the anchor turns out to understate what real operators
+        demand, governance doubles it in one amendment and reaches the old
+        2,000 in two. The unsafe direction is bounded and fast to exit; the
+        safe direction has 20x of headroom.
+
+        What this does NOT rest on, and an earlier revision of this docstring
+        wrongly claimed it did: the 08 §2.4 fail-soft payout. That catches an
+        underfunded *line* -- the pool the configured value implies cannot be
+        paid, so the accumulator survives for a retry. It does not catch an
+        underpriced *row*: the pool is computed FROM this value, a payout at
+        that value succeeds in full, the accumulator is cleared, and no unpaid
+        difference is retained. Underpricing degrades to collators leaving, not
+        to a delayed payment.
+
+        Nor does invulnerability of the launch set, which an even earlier
+        revision also cited: that fixes an account's *selection* status and
+        does not oblige anyone to keep authoring at a rate they will not
+        accept -- and the launch operators are the most likely to be standing
+        up infrastructure for this chain, which is precisely the case the
+        marginal-cost anchor does not cover.
+
+        The real protections are the margin asserted above, this recovery
+        path, and the 13 §1 gate requiring operator quotes for THIS chain
+        before production launch and before each enlargement of the set.
+        """
+        self.assertEqual(multiplicative_amendment_steps(D(500), D(1_000), D(2)), 1)
+        self.assertEqual(multiplicative_amendment_steps(D(500), D(2_000), D(2)), 2)
+        self.assertEqual(COLLATOR_COMP_MAX / COLLATOR_COMP_MIN, D(20))
+
+    def test_the_25_year_goal_does_not_survive_the_mandated_collator_growth(self):
+        """The qualification the headline figure needs, stated as a test.
+
+        SQ-536's headline is 34.3 years to the binding 21.26M CODE/META
+        arming floor at ZERO revenue. That is the LAUNCH count of 5. 12 §6.1
+        mandates growth to 8-12 bonded permissionless collators from Phase 4+,
+        and `collator.comp_epoch` is already at its registry floor, so the only
+        remaining lever on this line is the count -- which is a liveness
+        posture, not an economics choice.
+
+        At 10 and at 12 the zero-revenue runway falls BELOW 25 years. Asserted
+        rather than noted, because a headline that holds only at the launch
+        count while the specification mandates a larger one is exactly the kind
+        of claim that goes stale silently.
+
+        The honest full statement, which the two halves below pin together:
+        the endowment-only reading fails at the mandated ceiling, but
+        break-even occupancy stays INSIDE the lawful five-slot slate at every
+        mandated count -- so zero-revenue is the pessimistic bound, not the
+        expected case, and the conclusion to draw is that mature operation
+        depends on revenue rather than on the endowment.
+        """
+        # Launch count clears it; the mandated range does not, from 10 up.
+        self.assertGreater(runway_years(cost_base().annual, NAV_FLOOR_META), D(25))
+        for n, clears in ((8, True), (10, False), (12, False)):
+            with self.subTest(collators=n):
+                c = cost_base(with_levers(collator_count=n)).annual
+                years = runway_years(c, NAV_FLOOR_META)
+                self.assertEqual(years > D(25), clears)
+
+        # At the mandated ceiling: 170,156/yr and 22.0 years.
+        c12 = cost_base(with_levers(collator_count=12)).annual
+        self.assertLess(abs(c12 - D(170_156)), D(2))
+        self.assertLess(abs(runway_years(c12, NAV_FLOOR_META) - D("22.0")), D("0.1"))
+
+        # But break-even stays inside the lawful slate throughout, so the
+        # zero-revenue reading is a bound and not a forecast.
+        for n in (5, 8, 10, 12):
+            with self.subTest(collators=n, axis="break-even"):
+                p = with_levers(collator_count=n)
+                self.assertLessEqual(
+                    D(break_even_slots_consistent(D(3), p)), CostParams().epoch_slots
+                )
+
+    def test_collators_earn_nothing_else_so_the_comparison_is_like_for_like(self):
+        """The premise that makes referendum #1870 comparable rather than loose.
+
+        D-15 routes collected USDC fees to treasury MAIN and BURNS collected
+        VIT fees; the runtime wires `OnChargeTransaction = FungibleAdapter<
+        Balances, ()>`, whose `()` drops (burns) the imbalance. So a Bleavit
+        collator's entire compensation is this one treasury line. Polkadot's
+        system parachains are treasury-funded for exactly the same reason.
+
+        This is asserted here as the documented premise of the anchor. If a
+        future change routes fees to block authors, the anchor stops being
+        like-for-like and this reasoning must be redone -- which is why the
+        premise is written down as a test rather than left in a commit message.
+        """
+        self.assertEqual(CostParams().collator_comp_epoch, COLLATOR_COMP_MIN)
 
     def test_the_e5_operating_point_is_self_funding_at_minimum_activity(self):
         """R >= C at the least activity for which the chain decides anything.
@@ -628,10 +878,11 @@ class OperatingPointTests(unittest.TestCase):
         `dec.v_min` floor -- the depth below which a proposal is not
         decision-grade at all -- so this is not an optimistic scenario.
         """
-        # Stated for the LOWERED point, which is where R >= C holds. At the
-        # shipped point revenue covers cost only from tau ~ 3.6 upward; the
-        # difference is exactly the collator line this milestone declined to cut.
-        c = cost_base(with_levers(collator_comp_epoch=500)).annual
+        # Stated for the SHIPPED point. Until the SQ-536 reseed this held only
+        # for the lowered collator line -- at the pass-1 seed revenue covered
+        # cost only from tau ~ 3.6 upward, and that gap was exactly the
+        # collator line. Asserted for `CostParams()` now that they coincide.
+        c = cost_base(CostParams()).annual
         minimum_activity = annual_held_capital("param", D(5), saturated=False)
         for tau in (D(2), D(3), D("5.8")):
             with self.subTest(tau=str(tau)):
@@ -653,7 +904,7 @@ class OperatingPointTests(unittest.TestCase):
         because the honest reading of a bound is the one that does not assume
         its own conclusion.
         """
-        c = cost_base(with_levers(collator_comp_epoch=500)).annual
+        c = cost_base(CostParams()).annual
         minimum_activity = annual_held_capital("param", D(5), saturated=False)
         shortfall = c - revenue(minimum_activity, D(1))
         self.assertGreater(shortfall, D(0))

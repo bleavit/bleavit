@@ -54,6 +54,44 @@ KEEPER_REBATE_MIN_MULTIPLE, KEEPER_REBATE_MAX_MULTIPLE = Decimal(1), Decimal(10)
 KEEPER_BUDGET_MIN, KEEPER_BUDGET_MAX = Decimal(6_000), Decimal(60_000)
 COLLATOR_COMP_MIN, COLLATOR_COMP_MAX = Decimal(500), Decimal(10_000)
 
+# ---------------------------------------------------------------------------
+# The external anchor for `collator.comp_epoch` (SQ-536, milestone E5 pass 2).
+#
+# This is the ONE figure in 08 §10 that no amount of internal derivation can
+# reach: a collator's cost is a market price, and R-2 forbids inventing one.
+# It is anchored here to a published, governance-APPROVED rate for the same
+# role rather than to a vendor estimate.
+#
+# Source: Polkadot OpenGov referendum #1870 (status: Executed / Passed),
+# which funds the collators of the Polkadot system parachains. Verified
+# 2026-07-31; recorded in PLAN.md's Verification log.
+#
+# The comparison is apt rather than approximate, because the two roles are in
+# the same economic position on the one axis that matters: Bleavit collators
+# earn NOTHING from transaction fees or tips. The runtime wires
+# `OnChargeTransaction = FungibleAdapter<Balances, ()>`, whose `()` drops the
+# imbalance (i.e. burns it), which is D-15's "collected VIT transaction fees
+# continue to burn". Polkadot's system parachains are likewise treasury-funded
+# precisely because their fee revenue does not cover a collator. So in both
+# cases the treasury line IS the collator's entire compensation, and the rates
+# are directly comparable.
+#
+# Where the comparison is NOT exact, and why the margin below covers it: a
+# Polkadot system-parachain collator is run by an operator who is already
+# running Polkadot infrastructure, so the funded rate is a MARGINAL cost. A new
+# parachain's operators amortize nothing. That is the gap the shipped seed's
+# multiple over this anchor has to absorb, and it is why the derivation below
+# takes the registry MINIMUM rather than the anchor itself.
+# ---------------------------------------------------------------------------
+
+PDOT_FUNDED_COLLATORS = Decimal(38)  # AssetHub 8, BridgeHub 8, People 8,
+#                                      Coretime 4, Collectives 2, Bulletin 8.
+PDOT_PER_COLLATOR_MONTH = Decimal(250)  # USD/collator/month, March onward.
+PDOT_HOSTING_MONTH = Decimal(425)  # Fixed hosting line, shared by the set.
+PDOT_CURATORS_MONTH = Decimal(750)  # 3 curators x 250.
+PDOT_COORDINATOR_MONTH = Decimal(1_000)  # Bounty coordinator.
+MONTHS_PER_YEAR = Decimal(12)
+
 # 04 §7 / futarchy_primitives::MKT_STALE_GAP_BLOCKS. A KERNEL constant, movable
 # only by CODE. An observation gap strictly greater than this increments
 # `stale_events` inside the decision window: first forces a 3-day extension,
@@ -110,6 +148,63 @@ def epochs_per_year() -> Decimal:
 
 
 # ---------------------------------------------------------------------------
+# The collator-rate anchor
+# ---------------------------------------------------------------------------
+
+
+def polkadot_collator_rate_month(loaded: bool = True) -> Decimal:
+    """Referendum #1870's per-collator monthly rate, in USD.
+
+    `loaded=False` is the headline $250/collator/month. `loaded=True` adds the
+    referendum's own shared overheads — the fixed hosting line, the curators
+    and the coordinator — spread across the funded set, because those are costs
+    the bounty pays to keep the collators running and a Bleavit `ops.collators`
+    line has no separate home for. Loaded is the honest comparand and is the
+    default; the unloaded figure is exposed only so the test suite can show the
+    conclusion does not depend on which one is used.
+    """
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        total = PDOT_PER_COLLATOR_MONTH * PDOT_FUNDED_COLLATORS
+        if loaded:
+            total += PDOT_HOSTING_MONTH + PDOT_CURATORS_MONTH + PDOT_COORDINATOR_MONTH
+        return +(total / PDOT_FUNDED_COLLATORS)
+
+
+def polkadot_collator_rate_epoch(loaded: bool = True) -> Decimal:
+    """The same rate expressed in `collator.comp_epoch` units (USDC/epoch).
+
+    This is the quantity 13 §1's row is denominated in, so it is what the seed
+    must be compared against. Epochs are 21.0 days, i.e. NOT months — reading
+    the monthly rate straight into the registry row would understate by 1.45x.
+    """
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        annual = polkadot_collator_rate_month(loaded) * MONTHS_PER_YEAR
+        return +(annual / epochs_per_year())
+
+
+def collator_comp_month(comp_epoch: Decimal) -> Decimal:
+    """A `collator.comp_epoch` value expressed back in USD/collator/month."""
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        return +(comp_epoch * epochs_per_year() / MONTHS_PER_YEAR)
+
+
+def collator_anchor_multiple(comp_epoch: Decimal, loaded: bool = True) -> Decimal:
+    """How many times the anchored rate a given `collator.comp_epoch` pays.
+
+    The safety argument for the shipped seed is this multiple, not the absolute
+    number: the unsafe direction is UNDER-paying (collators stop authoring and
+    the chain stalls), so what has to be shown is headroom above a rate that
+    real operators demonstrably accepted for the same job.
+    """
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        return +(comp_epoch / polkadot_collator_rate_epoch(loaded))
+
+
+# ---------------------------------------------------------------------------
 # Cost base
 # ---------------------------------------------------------------------------
 
@@ -130,7 +225,15 @@ class CostParams:
     # seed moved 0.09 -> 0.000255. See PRE_E5 below for the superseded value.
     keeper_rebate: Decimal = Decimal("0.000255")
     keeper_budget_epoch: Decimal = Decimal(12_000)
-    collator_comp_epoch: Decimal = Decimal(2_000)
+    # 13 §1 `collator.comp_epoch`. SQ-536 (milestone E5 pass 2) re-seeded this
+    # 2,000 -> 500, the registry MINIMUM, against the referendum #1870 anchor
+    # above: 500 is 2.36x the fully-loaded rate real operators accepted for the
+    # same treasury-funded, zero-fee-revenue role, where 2,000 was 9.44x. The
+    # value is the registry bound, not a chosen number -- see
+    # `collator_anchor_multiple`. All remaining headroom is in the SAFE
+    # direction (20x, up to the 10,000 maximum) and reachable by PARAM
+    # amendment at x2 per step with a 1-epoch cooldown.
+    collator_comp_epoch: Decimal = Decimal(500)
     collator_count: Decimal = Decimal(5)
     # 08 §1.1: PARAM proposer reward 500, paid only on `Executed`. The 08 §10.1
     # row is a CEILING (an all-pass five-slot PARAM slate), not a floor.
@@ -675,9 +778,14 @@ def with_levers(**overrides) -> CostParams:
 # `keeper.rebate` = 0.09 was 3x an ASSUMED 0.03 USDC crank fee that nobody had
 # measured; the real fee is 0.000085 USDC, so the seed was ~1,058x the fee it
 # claimed to be 3x, and both keeper lines -- 79.3 % of the whole cost base --
-# were scaled by that error (SQ-531).
+# were scaled by that error (SQ-531). Pass 2 additionally re-seeded
+# `collator.comp_epoch` 2,000 -> 500 against the referendum #1870 anchor
+# (SQ-536), so that value is pinned here too rather than inherited.
 def pre_e5_params(**overrides) -> CostParams:
     base = replace(
-        CostParams(), keeper_rebate=Decimal("0.09"), crank_fee_basis=Decimal("0.03")
+        CostParams(),
+        keeper_rebate=Decimal("0.09"),
+        crank_fee_basis=Decimal("0.03"),
+        collator_comp_epoch=Decimal(2_000),
     )
     return replace(base, **{k: Decimal(str(v)) for k, v in overrides.items()})
