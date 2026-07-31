@@ -917,6 +917,53 @@ class CoretimeRenewalPriceTests(unittest.TestCase):
         self.assertLess(abs(unbounded - early), D("0.5"))  # plausible, hence missed
         self.assertGreater(late - unbounded, D(18))  # and wrong where it counted
 
+    def test_the_coretime_win_does_not_by_itself_save_the_25_year_goal(self):
+        """The two claims are each true alone and over-optimistic together.
+
+        This test exists because I was about to let them stand apart. SQ-541
+        says late renewal takes the runway 14.7 -> 33.1 years and "meets the
+        25-year goal"; SQ-536's own qualification says the goal already fails
+        at 10 and 12 collators, which 12 §6.1 mandates from Phase 4+. Both are
+        true at the count each was computed at -- 5 and 5 -- and read together
+        they claim something neither establishes.
+
+        Joined here: at the mandated 10-12 range the goal fails EVEN under the
+        cheap renewal policy. The policy is still worth ~10 years there, which
+        is why it remains the largest single lever found; it is simply not
+        sufficient on its own, and the conclusion 08 §10.5 already draws stands
+        unchanged -- mature operation depends on revenue, not on the endowment.
+
+        Also pins the shape: the policy is worth LESS as the base grows (18.3
+        years at 5 collators, 8.4 at 12), because a larger constant base ends
+        the runway before the ratchet has time to saturate.
+        """
+        rows = ((5, D("33.05"), D("14.71")), (8, D("26.86"), D("13.99")),
+                (10, D("23.88"), D("13.55")), (12, D("21.49"), D("13.14")))
+        prev_gap = None
+        for n, late_exp, early_exp in rows:
+            with self.subTest(collators=n):
+                c = cost_base(with_levers(collator_count=n)).annual
+                late = runway_years_with_coretime_policy(
+                    c, NAV_FLOOR_META, D(4_000), through=CORETIME_RENEW_LEADIN_END
+                )
+                early = runway_years_with_coretime_policy(
+                    c, NAV_FLOOR_META, D(4_000), through=CORETIME_RENEW_INTERLUDE
+                )
+                self.assertLess(abs(late - late_exp), D("0.05"))
+                self.assertLess(abs(early - early_exp), D("0.05"))
+                # The goal holds at the launch count and at 8, and fails from
+                # 10 up -- under the CHEAP policy. That is the joint claim.
+                self.assertEqual(late > D(25), n <= 8)
+                # The expensive policy fails at every mandated count, so the
+                # policy is never the thing that causes the miss.
+                self.assertLess(early, D(25))
+                # Monotone erosion of what the policy buys.
+                gap = late - early
+                if prev_gap is not None:
+                    self.assertLess(gap, prev_gap)
+                prev_gap = gap
+        self.assertLess(abs(prev_gap - D("8.35")), D("0.1"))  # 12 collators
+
     def test_a_zero_bump_reproduces_the_constant_base_under_either_policy(self):
         """The check that this models a mechanism rather than an assumption."""
         self.assertEqual(coretime_annual_escalation(D(0)), D(0))
