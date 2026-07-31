@@ -802,6 +802,50 @@ class CollatorAnchorTests(unittest.TestCase):
         self.assertEqual(multiplicative_amendment_steps(D(500), D(2_000), D(2)), 2)
         self.assertEqual(COLLATOR_COMP_MAX / COLLATOR_COMP_MIN, D(20))
 
+    def test_the_25_year_goal_does_not_survive_the_mandated_collator_growth(self):
+        """The qualification the headline figure needs, stated as a test.
+
+        SQ-535's headline is 34.3 years to the binding 21.26M CODE/META
+        arming floor at ZERO revenue. That is the LAUNCH count of 5. 12 §6.1
+        mandates growth to 8-12 bonded permissionless collators from Phase 4+,
+        and `collator.comp_epoch` is already at its registry floor, so the only
+        remaining lever on this line is the count -- which is a liveness
+        posture, not an economics choice.
+
+        At 10 and at 12 the zero-revenue runway falls BELOW 25 years. Asserted
+        rather than noted, because a headline that holds only at the launch
+        count while the specification mandates a larger one is exactly the kind
+        of claim that goes stale silently.
+
+        The honest full statement, which the two halves below pin together:
+        the endowment-only reading fails at the mandated ceiling, but
+        break-even occupancy stays INSIDE the lawful five-slot slate at every
+        mandated count -- so zero-revenue is the pessimistic bound, not the
+        expected case, and the conclusion to draw is that mature operation
+        depends on revenue rather than on the endowment.
+        """
+        # Launch count clears it; the mandated range does not, from 10 up.
+        self.assertGreater(runway_years(cost_base().annual, NAV_FLOOR_META), D(25))
+        for n, clears in ((8, True), (10, False), (12, False)):
+            with self.subTest(collators=n):
+                c = cost_base(with_levers(collator_count=n)).annual
+                years = runway_years(c, NAV_FLOOR_META)
+                self.assertEqual(years > D(25), clears)
+
+        # At the mandated ceiling: 170,156/yr and 22.0 years.
+        c12 = cost_base(with_levers(collator_count=12)).annual
+        self.assertLess(abs(c12 - D(170_156)), D(2))
+        self.assertLess(abs(runway_years(c12, NAV_FLOOR_META) - D("22.0")), D("0.1"))
+
+        # But break-even stays inside the lawful slate throughout, so the
+        # zero-revenue reading is a bound and not a forecast.
+        for n in (5, 8, 10, 12):
+            with self.subTest(collators=n, axis="break-even"):
+                p = with_levers(collator_count=n)
+                self.assertLessEqual(
+                    D(break_even_slots_consistent(D(3), p)), CostParams().epoch_slots
+                )
+
     def test_collators_earn_nothing_else_so_the_comparison_is_like_for_like(self):
         """The premise that makes referendum #1870 comparable rather than loose.
 
