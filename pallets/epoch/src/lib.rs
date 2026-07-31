@@ -3610,12 +3610,24 @@ pub mod pallet {
                     .ok_or(TryRuntimeError::Other(
                         "epoch proposal-bond liability overflow",
                     ))?;
-                if bond.held == 0
-                    || (!IntakeProposals::<T>::contains_key(pid)
-                        && !Proposals::<T>::contains_key(pid))
-                {
+                let owner = IntakeProposals::<T>::get(pid)
+                    .or_else(|| Proposals::<T>::get(pid))
+                    .map(|proposal| proposal.funder);
+                if bond.held == 0 || owner.is_none() {
                     return Err(TryRuntimeError::Other(
                         "epoch proposal-bond liability is orphaned",
+                    ));
+                }
+                // 05 §1.5 (E6): custody follows the funder, so the identity the
+                // hold was placed on must be the identity the record names.
+                // Before the author/funder split this binding was implicit —
+                // one identity, nothing to diverge — and it is exactly what a
+                // mis-keyed bond would break: the refund and the 06 §4 slash
+                // both follow `bond.funder`, so a bond keyed to the author pays
+                // and penalizes the wrong party with nothing else objecting.
+                if owner.as_ref() != Some(&bond.funder) {
+                    return Err(TryRuntimeError::Other(
+                        "epoch proposal-bond custody identity is not the proposal funder",
                     ));
                 }
             }

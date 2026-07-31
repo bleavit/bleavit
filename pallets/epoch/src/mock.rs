@@ -345,6 +345,12 @@ parameter_types! {
     pub static RecordKeeperRebates: bool = false;
     pub static KeeperRebates: Vec<(AccountId32, CrankClass)> = Vec::new();
     pub static BondReleases: Vec<(AccountId32, Balance)> = Vec::new();
+    /// Confiscated bond amounts, in order. `slash_to_insurance` names no
+    /// account by design — the hold already sits in the pallet escrow — so the
+    /// incidence of a slash is only observable as the *shortfall* in what the
+    /// funder is released. A test that asserts the pair therefore needs both
+    /// this and `BondReleases` (05 §1.5, milestone E6).
+    pub static BondSlashes: Vec<Balance> = Vec::new();
 }
 
 pub struct TestKeeperRebate;
@@ -711,7 +717,8 @@ impl ProposalBondCurrency<AccountId32> for TestProposalBond {
         BondReleases::mutate(|releases| releases.push((who.clone(), amount)));
         Ok(())
     }
-    fn slash_to_insurance(_amount: Balance) -> frame_support::dispatch::DispatchResult {
+    fn slash_to_insurance(amount: Balance) -> frame_support::dispatch::DispatchResult {
+        BondSlashes::mutate(|slashes| slashes.push(amount));
         Ok(())
     }
     fn escrow_balance() -> Balance {

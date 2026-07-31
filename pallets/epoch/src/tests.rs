@@ -313,7 +313,12 @@ fn decision_state(
 ) -> EpochState<sp_core::crypto::AccountId32> {
     let mut state = EpochState::new();
     let mut proposal = live_proposal(pid, ProposalState::Trading, 0);
+    // Collapsed identities: this fixture models a proposal whose author
+    // funded it themselves, which is the only shape `submit` produced
+    // before E6. Setting `proposer` alone would leave `funder` at the
+    // `live_proposal` default and build a record production cannot reach.
     proposal.proposer = keeper();
+    proposal.funder = keeper();
     proposal.class = class;
     proposal.markets = Some(markets(pid, 0, epoch_core::requires_gate_markets(class)));
     proposal.decide_at = 1;
@@ -351,6 +356,7 @@ fn callback_state(
     let mut state = EpochState::new();
     let mut proposal = live_proposal(pid, proposal_state, 0);
     proposal.proposer = keeper();
+    proposal.funder = keeper();
     if matches!(
         proposal_state,
         ProposalState::Queued | ProposalState::Suspended
@@ -1381,6 +1387,7 @@ fn stale_decide_noop_on_already_decided_proposal_never_rebates() {
         let mut state = decision_state(2, ProposalClass::Param);
         let mut already_decided = live_proposal(1, ProposalState::Measuring, 0);
         already_decided.proposer = keeper();
+        already_decided.funder = keeper();
         already_decided.decision = Some(DecisionOutcome::Adopt);
         state.proposals.insert(0, already_decided);
         state.epoch.phase = EpochPhase::Trade;
@@ -5012,6 +5019,108 @@ fn e6_bond_refund_is_released_to_the_funder_not_the_author() {
         assert!(
             releases.iter().any(|(who, _)| *who == funder),
             "the funder must receive the refund: {releases:?}"
+        );
+    });
+}
+
+/// Incidence of the 06 §4 non-decision-grade slash: the **funder** bears it
+/// (05 §1.5). The hold was taken from the funder at submit, so confiscating it
+/// out of the pallet escrow reduces the funder and nobody else; the author
+/// posted nothing and is therefore reduced by nothing.
+///
+/// `slash_to_insurance` names no account, so the incidence is not directly
+/// observable at the seam — it shows up as a *shortfall*: the funder is released
+/// `held − slash` instead of `held`, and the author appears in no release at
+/// all. Asserting that pair is what makes this a test of who pays, rather than
+/// one more test that a slash happened.
+#[test]
+fn e6_non_decision_grade_slash_is_borne_by_the_funder_not_the_author() {
+    new_test_ext().execute_with(|| {
+        let author = account(7);
+        // Deliberately not `keeper()`: the crank caller below is the keeper, and
+        // a funder that is also the cranker would confound the two roles.
+        let funder = account(8);
+        let mut state = decision_state(1, ProposalClass::Param);
+        state.proposals[0].proposer = author.clone();
+        state.proposals[0].funder = funder.clone();
+        let books = state.proposals[0]
+            .markets
+            .expect("a PARAM decision state carries books");
+        let held = state.proposals[0].bond;
+
+        // A first-pass Invalid welfare book decides Reject(NotDecisionGrade),
+        // which is the 06 §4 slashing outcome.
+        WelfareInvalidMarkets::set(vec![books.accept]);
+        assert_ok!(Epoch::seed(state));
+        ProposalBonds::<Test>::insert(
+            1,
+            ProposalBond {
+                funder: funder.clone(),
+                held,
+            },
+        );
+        BondReleases::set(Vec::new());
+        BondSlashes::set(Vec::new());
+
+        assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
+        assert_eq!(
+            Proposals::<Test>::get(1).and_then(|proposal| proposal.decision),
+            Some(DecisionOutcome::Reject(RejectReason::NotDecisionGrade)),
+        );
+
+        let slashes = BondSlashes::get();
+        assert_eq!(
+            slashes.len(),
+            1,
+            "the outcome must confiscate exactly once: {slashes:?}"
+        );
+        let slash = slashes[0];
+        assert!(
+            slash > 0 && slash < held,
+            "06 §4 slashes a fraction, not the whole bond: {slash} of {held}"
+        );
+        assert_eq!(
+            BondReleases::get(),
+            vec![(funder, held.saturating_sub(slash))],
+            "the funder is released the bond less the slash — so the funder bears \
+             it — and the author receives no release at all"
+        );
+        assert_ok!(Epoch::do_try_state());
+    });
+}
+
+/// try-state binds bond custody to the proposal's funder. Splitting the
+/// identities made a mis-keyed bond *representable* for the first time: before
+/// E6 there was one identity and nothing could diverge, so nothing had to check.
+/// A bond keyed to the author would refund the wrong party on T2/T17 and make
+/// the wrong party bear the 06 §4 slash, and every other try-state assertion
+/// here — liability bound, collateralization, orphan check — would still pass.
+#[test]
+fn e6_try_state_rejects_a_bond_keyed_to_the_author_instead_of_the_funder() {
+    new_test_ext().execute_with(|| {
+        let author = account(7);
+        let funder = account(8);
+        assert_ok!(Epoch::submit(
+            RuntimeOrigin::signed(funder.clone()),
+            proposal_split(1, author.clone(), funder, ProposalState::Submitted, 0, 1),
+        ));
+        // The honest state submit produced passes.
+        assert_ok!(Epoch::do_try_state());
+
+        // Re-key the custody identity to the author, changing nothing else.
+        let held = ProposalBonds::<Test>::get(1)
+            .expect("submit records the liability")
+            .held;
+        ProposalBonds::<Test>::insert(
+            1,
+            ProposalBond {
+                funder: author,
+                held,
+            },
+        );
+        assert!(
+            Epoch::do_try_state().is_err(),
+            "a bond whose custody identity is not the proposal's funder must fail try-state"
         );
     });
 }
