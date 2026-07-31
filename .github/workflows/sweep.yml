@@ -20,6 +20,14 @@ on:
 permissions:
   contents: read
 
+# Same reasoning as `ci.yml`, and it bites harder here: the sweep is a 90-minute
+# job, so a branch pushed three times can hold three runners for an afternoon to
+# answer a question about two trees nobody will merge. Never cancels on `main`,
+# where each run is the record for its own commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   full-sweep:
     name: Full 10M-point exp/ln/cost sweep

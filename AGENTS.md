@@ -139,7 +139,13 @@ Read this file first. Then read `PLAN.md`. Then work.
   identical exhaustive CI rerun before moving on. This is a handoff rule, not a
   gate waiver: meaningful code, build, workflow, dependency, generated-artifact,
   or test changes still require their appropriate fresh evidence, and any observed
-  failure must be investigated. Do not launch concurrent duplicate Cargo gates;
+  failure must be investigated. **CI supersedes its own in-flight runs since
+  2026-07-31**: `ci.yml` and `sweep.yml` carry a `concurrency` group keyed on
+  `github.ref` with `cancel-in-progress` on every ref except `main`, so pushing
+  again to a branch *cancels* the previous run rather than queueing beside it.
+  A run that shows `cancelled` after you pushed is that, not a failure — check
+  the newest run for the branch. `main` never cancels, because there each run is
+  the record for its own commit. Do not launch concurrent duplicate Cargo gates;
   `tools/ci/rust-workspace-gates.sh --changed [PACKAGE...]` provides a locked,
   changed-scope feedback loop, while the no-argument script remains exhaustive.
   When CI polling is useful, poll no more than once every five minutes. Standing
@@ -202,7 +208,17 @@ per milestone):
 >                                                          # target dir
 > ```
 >
-> `tools/ci/regenerate-weights.py` needs the same first variable **plus**
+> **Put the `libclang` directory somewhere session-scoped, and re-check it before a
+long run (learned 2026-07-31).** `/tmp` is swept on this box: a `libclang` dir
+created early in a session can be gone by the time the exhaustive gate runs, and
+the failure surfaces as a `clang-sys` build-script panic (*"couldn't find any
+valid shared libraries … (invalid: [])"*) that reads like a toolchain problem
+rather than a missing symlink. Two further traps in the same line: point the
+symlink at a **real** `libclang-14.so.1`, not at `libclang.so.1` if that name does
+not exist here, and verify with `ls -lL` (which follows the link) rather than
+`ls -l` (which happily shows a dangling one).
+
+`tools/ci/regenerate-weights.py` needs the same first variable **plus**
 > `--runtime <CARGO_TARGET_DIR>/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm`,
 > because it defaults to the in-repo `target/`.
 
