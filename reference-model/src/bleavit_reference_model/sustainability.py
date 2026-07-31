@@ -173,6 +173,51 @@ GENESIS_ENDOWMENT = Decimal(25_000_000)
 # bracket, never as Polkadot's value.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# XCM fee revenue (SQ-540(e), milestone E7).
+#
+# 08 §10.2 names TWO revenue instruments, both paid by traders. There is a
+# third: the chain charges every inbound XCM message for execution at governed
+# 13 §1 rates, through `GovernedWeightTrader`. It is not in §10.2 because it is
+# currently DISCARDED -- the runtime binds `Trader = GovernedWeightTrader<
+# ConstitutionTraderRates, ()>` and `TakeRevenue for ()` drops the collected
+# assets on the trader's `Drop`. So the fee is computed, charged, and thrown
+# away.
+#
+# Everything below is anchored in this repository, so the size of what is being
+# discarded is derivable rather than guessed:
+#
+#   * `UnitWeightCost = Weight::from_parts(1_000_000_000, 64 * 1024)` per
+#     instruction (`runtime/bleavit-runtime/src/configs.rs`, the
+#     `FixedWeightBounds` weigher), i.e. 1 ms of ref-time and 64 KiB of proof.
+#   * `xcm.trade_usdc_per_sec` = 50,000,000 µUSDC/s and
+#     `xcm.trade_usdc_per_mb` = 5,000,000 µUSDC/MiB (13 §1 defaults).
+#   * `WEIGHT_REF_TIME_PER_SECOND` = 10^12, `WEIGHT_PROOF_SIZE_PER_MB` = 2^20
+#     (`sp-weights`), the two denominators `price_up` divides by.
+#
+# The ONE quantity that is not derivable is inbound message volume, and it is
+# deliberately not assumed here. Every consumer takes it as a parameter and the
+# headline is expressed as a BREAK-EVEN rate -- how many messages a day would
+# have to arrive for the discarded fee to cover the cost base -- which is a
+# derivation, not a forecast.
+# ---------------------------------------------------------------------------
+
+# `runtime/bleavit-runtime/src/configs.rs` xcm_config::UnitWeightCost.
+XCM_UNIT_REF_TIME = Decimal(1_000_000_000)
+XCM_UNIT_PROOF_SIZE = Decimal(64 * 1024)
+# `sp_weights::constants`, the denominators `GovernedWeightTrader::price_up` uses.
+WEIGHT_REF_TIME_PER_SECOND = Decimal(10**12)
+WEIGHT_PROOF_SIZE_PER_MB = Decimal(1024 * 1024)
+# 13 §1 `xcm.trade_usdc_per_sec` / `xcm.trade_usdc_per_mb`, in µUSDC.
+XCM_USDC_PER_SEC = Decimal(50_000_000)
+XCM_USDC_PER_MB = Decimal(5_000_000)
+MICRO_USDC = Decimal(1_000_000)
+# A minimal inbound reserve transfer: ReserveAssetDeposited, ClearOrigin,
+# BuyExecution, DepositAsset. Stated as the parameter's default, not as a
+# universal truth -- messages carrying more instructions pay proportionally
+# more, which is why every consumer takes the count.
+XCM_RESERVE_TRANSFER_INSTRUCTIONS = 4
+
 CORETIME_PERIOD_DAYS = Decimal(28)
 # Kusama's configured per-renewal bump. [VERIFY the Polkadot value].
 CORETIME_RENEWAL_CAP_KSM = Decimal("0.03")
@@ -591,6 +636,67 @@ def coretime_annual_escalation(per_period_cap: Decimal = CORETIME_RENEWAL_CAP_KS
     this rate up to the ceiling, and that is the part §10.5 omits.
     """
     return _pow(Decimal(1) + per_period_cap, coretime_renewals_per_year()) - Decimal(1)
+
+
+def _ceil_div(numerator: Decimal, denominator: Decimal) -> Decimal:
+    """Integer ceiling division, matching `component_price_up`'s remainder term."""
+    whole = (numerator / denominator).to_integral_value(rounding="ROUND_FLOOR")
+    return whole + (Decimal(1) if numerator != whole * denominator else Decimal(0))
+
+
+def xcm_fee_micro_usdc(
+    instructions: int = XCM_RESERVE_TRANSFER_INSTRUCTIONS,
+) -> Decimal:
+    """`GovernedWeightTrader::price_up` for a message of `instructions` steps.
+
+    Transcribed from `runtime/bleavit-xcm/src/trader.rs`: each weight dimension
+    is priced separately and rounded UP (payer-adverse, PT-3), then summed. The
+    weigher is `FixedWeightBounds`, so message weight is exactly
+    `instructions × UnitWeightCost` in both dimensions.
+    """
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        n = Decimal(instructions)
+        ref = _ceil_div(n * XCM_UNIT_REF_TIME * XCM_USDC_PER_SEC, WEIGHT_REF_TIME_PER_SECOND)
+        proof = _ceil_div(n * XCM_UNIT_PROOF_SIZE * XCM_USDC_PER_MB, WEIGHT_PROOF_SIZE_PER_MB)
+        return +(ref + proof)
+
+
+def xcm_fee_per_message(
+    instructions: int = XCM_RESERVE_TRANSFER_INSTRUCTIONS,
+) -> Decimal:
+    """The same fee in whole USDC, the unit 08 §10 states costs in."""
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        return +(xcm_fee_micro_usdc(instructions) / MICRO_USDC)
+
+
+def xcm_annual_revenue(
+    messages_per_day: Decimal,
+    instructions: int = XCM_RESERVE_TRANSFER_INSTRUCTIONS,
+) -> Decimal:
+    """Annual USDC currently discarded at a given inbound message rate."""
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        return +(xcm_fee_per_message(instructions) * messages_per_day * DAYS_PER_YEAR)
+
+
+def xcm_break_even_messages_per_day(
+    annual_cost: Decimal,
+    instructions: int = XCM_RESERVE_TRANSFER_INSTRUCTIONS,
+) -> Decimal:
+    """Inbound messages/day at which the DISCARDED fee alone covers `annual_cost`.
+
+    The honest form of the finding. Volume is the one input that cannot be
+    derived from this repository, so the result is stated as the volume the
+    protocol would need rather than as a revenue figure it would earn.
+    """
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        per_day = xcm_fee_per_message(instructions) * DAYS_PER_YEAR
+        if per_day <= 0:
+            return INFINITE
+        return +(annual_cost / per_day)
 
 
 def coretime_leadin_factor(through: Decimal) -> Decimal:

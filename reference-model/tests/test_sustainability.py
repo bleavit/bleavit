@@ -17,6 +17,10 @@ import unittest
 
 from bleavit_reference_model.sustainability import (
     CORETIME_PERIOD_DAYS,
+    xcm_annual_revenue,
+    xcm_break_even_messages_per_day,
+    xcm_fee_micro_usdc,
+    xcm_fee_per_message,
     CORETIME_RENEWAL_CAP_KSM,
     CORETIME_RENEW_INTERLUDE,
     CORETIME_RENEW_LEADIN_END,
@@ -764,6 +768,88 @@ class CoretimeEscalationTests(unittest.TestCase):
         ten = coretime_cost_after_years(start, D(10))
         self.assertGreater(ten, cost_base().annual)  # exceeds the WHOLE base
         self.assertLess(abs(ten - D(189_073)), D(50))
+
+
+class XcmDiscardedRevenueTests(unittest.TestCase):
+    """SQ-540(e). 08 §10.2 names two revenue instruments; there is a third.
+
+    The chain charges every inbound XCM message for execution at governed 13 §1
+    rates through `GovernedWeightTrader`, and then **discards the payment**:
+    the runtime binds `Trader = GovernedWeightTrader<ConstitutionTraderRates,
+    ()>`, and `TakeRevenue for ()` drops the collected assets when the trader
+    is dropped. The fee is computed, charged, and thrown away.
+
+    Every input below is anchored in this repository, so the size of what is
+    discarded is derivable. The one input that is NOT -- inbound message volume
+    -- is deliberately never assumed: the headline is a break-even rate.
+    """
+
+    def test_the_fee_transcribes_the_traders_own_arithmetic(self):
+        """Both dimensions priced separately and rounded up, then summed.
+
+        Per instruction, from `UnitWeightCost = (1e9 ref-time, 64 KiB proof)`
+        and the 13 §1 USDC rates: 0.001 s x 50 USDC/s = 0.05, plus
+        0.0625 MiB x 5 USDC/MiB = 0.3125. Total 0.3625 USDC.
+        """
+        self.assertEqual(xcm_fee_micro_usdc(1), D(362_500))
+        self.assertEqual(xcm_fee_per_message(1), D("0.3625"))
+        # `FixedWeightBounds` is linear in the instruction count, so the message
+        # fee is exactly proportional -- and both components divide evenly here,
+        # so the payer-adverse ceiling costs the payer nothing extra at n = 4.
+        self.assertEqual(xcm_fee_per_message(4), D("1.45"))
+        self.assertEqual(xcm_fee_micro_usdc(4), D(1_450_000))
+        for n in (1, 2, 4, 8, 16):
+            with self.subTest(instructions=n):
+                self.assertEqual(xcm_fee_micro_usdc(n), D(362_500) * n)
+
+    def test_the_proof_dimension_is_86_percent_of_the_fee(self):
+        """Where the number comes from, because it bounds how solid it is.
+
+        `FixedWeightBounds` charges a flat 64 KiB of proof per instruction
+        regardless of what the instruction does -- a deliberately conservative
+        over-estimate, not a measurement. So the fee level is a property of the
+        weigher, and replacing it with benchmarked bounds would cut the revenue
+        substantially. Asserted so that a later weigher change cannot silently
+        invalidate the finding.
+        """
+        with_proof = xcm_fee_micro_usdc(1)
+        ref_only = D(50_000)  # 0.001 s x 50,000,000 uUSDC/s
+        self.assertEqual(with_proof - ref_only, D(312_500))
+        self.assertGreater((with_proof - ref_only) / with_proof, D("0.86"))
+
+    def test_a_few_hundred_messages_a_day_would_cover_the_whole_cost_base(self):
+        """The finding. It is stated as required volume, never as earned revenue.
+
+        Volume is the one input this repository cannot supply, so asserting a
+        revenue figure would be a forecast. Asserting the break-even is a
+        derivation: this many inbound messages a day and the fee the chain
+        ALREADY charges, and then throws away, pays for everything.
+        """
+        c5 = cost_base().annual
+        c12 = cost_base(with_levers(collator_count=12)).annual
+        self.assertLess(abs(xcm_break_even_messages_per_day(c5) - D(206)), D(1))
+        self.assertLess(abs(xcm_break_even_messages_per_day(c12) - D(321)), D(1))
+        # Round-trip: revenue at the break-even volume really is the cost base.
+        be = xcm_break_even_messages_per_day(c5)
+        self.assertLess(abs(xcm_annual_revenue(be) - c5), D("0.01"))
+        # And the shape at sub-break-even volumes, so "material" is checkable
+        # rather than rhetorical: 100/day is already ~half the launch base.
+        self.assertGreater(xcm_annual_revenue(D(100)) / c5, D("0.48"))
+        self.assertLess(xcm_annual_revenue(D(10)) / c5, D("0.05"))
+
+    def test_break_even_volume_scales_the_right_way(self):
+        """Monotone in both directions, which a wrong sign would break."""
+        c5 = cost_base().annual
+        # A larger cost base needs more messages.
+        self.assertGreater(
+            xcm_break_even_messages_per_day(cost_base(with_levers(collator_count=12)).annual),
+            xcm_break_even_messages_per_day(c5),
+        )
+        # Fatter messages pay more, so fewer are needed.
+        self.assertLess(
+            xcm_break_even_messages_per_day(c5, instructions=8),
+            xcm_break_even_messages_per_day(c5, instructions=4),
+        )
 
 
 class CoretimeRenewalPriceTests(unittest.TestCase):
