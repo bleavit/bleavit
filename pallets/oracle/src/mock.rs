@@ -63,6 +63,14 @@ parameter_types! {
     /// real adapter's accounting calls while keeping balances unbounded.
     pub static CustodyReleased: Balance = 0;
     pub static CustodySlashed: Balance = 0;
+    /// Per-account `hold`/`pay` ledgers. Without these, `hold` and `pay` were
+    /// silent no-ops and `balance()` returned `Balance::MAX`, so **no** test
+    /// could assert a bounty, an attacker's P&L, or the I-29 custody identity —
+    /// the 07 §5.5 money rules were structurally untestable at this layer.
+    pub static CustodyHeld: alloc::collections::BTreeMap<AccountId32, Balance> =
+        alloc::collections::BTreeMap::new();
+    pub static CustodyPaid: alloc::collections::BTreeMap<AccountId32, Balance> =
+        alloc::collections::BTreeMap::new();
     /// Keeper-batch cap for `crank_round_close`.
     pub const MaxRoundCloseBatch: u32 = 20;
 }
@@ -120,7 +128,11 @@ impl pallet_oracle::ReserveHealthSink for TestReserveHealthSink {
 pub struct TestCustody;
 
 impl pallet_oracle::OracleCustody<AccountId32> for TestCustody {
-    fn hold(_: &AccountId32, _: Balance) -> frame_support::pallet_prelude::DispatchResult {
+    fn hold(who: &AccountId32, amount: Balance) -> frame_support::pallet_prelude::DispatchResult {
+        CustodyHeld::mutate(|held| {
+            let entry = held.entry(who.clone()).or_default();
+            *entry = entry.saturating_add(amount);
+        });
         Ok(())
     }
 
@@ -129,7 +141,11 @@ impl pallet_oracle::OracleCustody<AccountId32> for TestCustody {
         Ok(())
     }
 
-    fn pay(_: &AccountId32, _: Balance) -> frame_support::pallet_prelude::DispatchResult {
+    fn pay(who: &AccountId32, amount: Balance) -> frame_support::pallet_prelude::DispatchResult {
+        CustodyPaid::mutate(|paid| {
+            let entry = paid.entry(who.clone()).or_default();
+            *entry = entry.saturating_add(amount);
+        });
         Ok(())
     }
 
@@ -138,8 +154,13 @@ impl pallet_oracle::OracleCustody<AccountId32> for TestCustody {
         Ok(())
     }
 
+    /// The pot's real residual: everything held, less everything that has left
+    /// it. Makes the I-29 try-state leg meaningful instead of vacuous.
     fn balance() -> Balance {
-        Balance::MAX
+        let held: Balance = CustodyHeld::get().values().copied().sum();
+        held.saturating_sub(CustodyReleased::get())
+            .saturating_sub(CustodySlashed::get())
+            .saturating_sub(CustodyPaid::get().values().copied().sum())
     }
 }
 
@@ -239,6 +260,8 @@ pub fn new_test_ext_with(oracle: pallet_oracle::GenesisConfig<Test>) -> sp_io::T
     ReserveHealthSinkFails::set(false);
     CustodyReleased::set(0);
     CustodySlashed::set(0);
+    CustodyHeld::set(alloc::collections::BTreeMap::new());
+    CustodyPaid::set(alloc::collections::BTreeMap::new());
     let storage = RuntimeGenesisConfig {
         system: Default::default(),
         oracle,

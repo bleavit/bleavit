@@ -403,16 +403,29 @@ class SurfaceManifestTests(unittest.TestCase):
                     registry_fields,
                 )
 
+        settle_path = (
+            "oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|"
+            "Adjudicated=2|ChallengerDefault=3|Neutral=4]"
+        )
         self.assertEqual(
             by_event[("Oracle", "ComponentSettled")]["layout"]["fields"][-1],
-            {
-                "name": "path",
-                "type": (
-                    "oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|"
-                    "Adjudicated=2|ChallengerDefault=3|Neutral=4]"
-                ),
-            },
+            {"name": "path", "type": settle_path},
         )
+        # The *storage* row must declare the same enum as the event row. It did
+        # not: `storage.oracle.component_values` carried a stale four-variant
+        # `SettlePath` (`Neutral=3`) while the event row carried five, so the two
+        # disagreed on `Neutral`'s discriminant and only the event row was
+        # pinned. A release-time metadata binding would have failed on it.
+        # Contract v18 retains `ChallengerDefault` precisely so this discriminant
+        # cannot move.
+        component_values = next(
+            entry
+            for entry in self.entries
+            if entry.get("kind") == "storage"
+            and entry.get("pallet") == "Oracle"
+            and entry.get("item") == "ComponentValues"
+        )
+        self.assertIn(settle_path, component_values["layout"]["value"])
 
     def test_newly_wired_v4_constant_layouts_are_frozen(self) -> None:
         expected = {

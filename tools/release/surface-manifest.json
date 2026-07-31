@@ -267,7 +267,7 @@
           "Blake2_128Concat"
         ],
         "key": "(u16,u32,u16)",
-        "value": "oracle_core::SettledComponent{value:futarchy_primitives::FixedU64(u64),path:oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|Adjudicated=2|Neutral=3],flagged:bool}"
+        "value": "oracle_core::SettledComponent{value:futarchy_primitives::FixedU64(u64),path:oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|Adjudicated=2|ChallengerDefault=3|Neutral=4],flagged:bool}"
       }
     },
     {

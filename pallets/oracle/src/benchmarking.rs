@@ -77,6 +77,31 @@ fn fill_reporters<T: Config>(first_seed: u8, count: u8) {
     }
 }
 
+/// Fill the retained 07 §3 record store to its bound so `load()` hydrates it at
+/// worst case in every benchmark (contract v18). Seeds are disjoint from
+/// `fill_reporters`' range: a retained record and a live seat are mutually
+/// exclusive homes for the same account, and both `try_state` and the core
+/// invariant forbid the overlap.
+fn fill_reporter_records<T: Config>() {
+    let mut records = crate::pallet::ReporterRecords::<T>::get();
+    for i in 0..crate::MAX_REPORTER_RECORDS_BOUND {
+        // Offset well past `fill_reporters`' seeded range so a retained record
+        // never shadows a live seat.
+        let account = [(128u32.saturating_add(i)) as u8; 32];
+        if records
+            .try_push(oracle_core::ReporterRecord {
+                account,
+                offenses: 1,
+                ejected: false,
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
+    crate::pallet::ReporterRecords::<T>::put(records);
+}
+
 fn fill_watchtowers<T: Config>(first_seed: u8, count: u8) {
     for seed in first_seed..first_seed.saturating_add(count) {
         let who = account::<T>(seed);
@@ -233,6 +258,7 @@ fn fill_hydration<T: Config>(
     fill_ack_capacity::<T>(target_acks, watchtowers);
     fill_component_values::<T>(MAX_COMPONENT_VALUES_BOUND.saturating_sub(settlement_slots));
     fill_recomputable::<T>(include_target_recomputable);
+    fill_reporter_records::<T>();
 }
 
 /// Drive the game to a terminal (round `R_max`, challenged) state so
@@ -498,6 +524,37 @@ mod benches {
         fill_component_values::<T>(MAX_COMPONENT_VALUES_BOUND.saturating_sub(n));
         fill_money_settled::<T>();
         fill_recomputable::<T>(false);
+        fill_reporter_records::<T>();
+        // Seed every round onto the 07 §5.3 **default** branch, which since
+        // contract v18 is strictly the heavier arm: it scans the settled history
+        // for the carried value, emits an extra `NeutralSettlement`, and settles
+        // a bond stack with an INSURANCE transfer. With saturated acks alone
+        // every round closed `Unchallenged` and the default branch was never
+        // measured — 15 §4.5 forbids weighing a batched crank on an undersized
+        // fixture, and the growth-only regression gate cannot see work that was
+        // never measured at all.
+        //
+        // `account::<T>(2)` is a registered reporter (via `fill_reporters`) but
+        // is never the *round's* reporter, so the new distinctness guard passes.
+        // That is exactly why the guard is `who != r.reporter` rather than
+        // "challengers must not be reporters" — the latter has no 07 §5.2 basis
+        // and would abort this fixture and two others.
+        let challenger = account::<T>(2);
+        T::BenchmarkHelper::prime_custody(
+            2,
+            futarchy_primitives::currency::USDC.saturating_mul(1_000_000),
+        );
+        for component in 1..=n as u16 {
+            Pallet::<T>::challenge(
+                RawOrigin::Signed(challenger.clone()).into(),
+                component,
+                EPOCH,
+                SPEC,
+                FixedU64(440_000_000),
+                [10u8; 32],
+            )
+            .expect("challenge opens the default branch");
+        }
         frame_system::Pallet::<T>::set_block_number((ORC_WINDOW_BLOCKS + 2).into());
         let keeper = account::<T>(5);
         T::BenchmarkHelper::prime_keeper_rebate();
@@ -509,6 +566,14 @@ mod benches {
             futarchy_primitives::keeper::CrankClass::OracleLine,
         );
         assert_eq!(Rounds::<T>::iter().count() as u32, MAX_ROUNDS_BOUND - n);
+        // Prove the measured arm really was the default branch, so a future
+        // fixture change cannot silently fall back to the cheaper one.
+        for component in 1..=n as u16 {
+            let settled = ComponentValues::<T>::get((component, EPOCH, SPEC))
+                .expect("default branch settled the component");
+            assert_eq!(settled.path, oracle_core::SettlePath::Neutral);
+            assert!(settled.flagged);
+        }
     }
 
     #[benchmark]
