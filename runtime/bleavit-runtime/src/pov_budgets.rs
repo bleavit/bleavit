@@ -740,6 +740,14 @@ fn recovery_qualifier_and_mandatory_hooks_fit_absolute_class_budgets() {
 /// budget at execution. A sparse benchmark trie under-represents production path
 /// depth, so `Measured` here would be optimistic about the wrong thing.
 ///
+/// `settle_cohort(5)` moved 725,862 -> 727,942 B with E6. That is a
+/// **measurement**, not a regression, and it reconciles exactly: the call reads
+/// `Epoch::Proposals` at r:33 w:32, and the E6 author/funder split widened
+/// `Proposal` by one `AccountId32`, so the estimator's per-key envelope grows
+/// 32 B on each of those 65 accesses -- 65 x 32 = 2,080. `decide` is unmoved
+/// because its pin is dominated by the collator-compensation term below rather
+/// than by its own proposal reads.
+///
 /// The capacity cost that buys is real and quantified: `decide` is now 19.0 % of
 /// the 3,932,160 B normal-class budget and `settle_cohort(12)` 23.9 %, so a
 /// crank charges ~389 KB of proof for a payout that fires once an epoch. The fix
@@ -768,7 +776,7 @@ fn decide_and_settle_cohort_pov_pinned_below_map_scaling() {
             .call_weight;
     assert_eq!(
         settle_five.proof_size(),
-        725_862,
+        727_942,
         "settle_cohort(5) proof_size drifted from the 13 §5 dispatched-weight estimate"
     );
     let settle = crate::RuntimeCall::Epoch(pallet_epoch::Call::settle_cohort {
