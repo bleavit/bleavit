@@ -217,10 +217,18 @@ STATES: tuple[str, ...] = (
     "Settled",
 )
 
-#: §2.1 *Terminal states*. `Rejected` and `Expired` are terminal only when no
-#: vault exists or the vault is `Voided`; with a healthy vault they are
-#: transient and T21 fires in the same block.
-TERMINAL_STATES: frozenset[str] = frozenset({"Settled", "Cancelled"})
+#: §2.1 *Terminal states*. `Settled` and `Cancelled` are absorbing outright.
+#: `Rejected` is **also** terminal "where no vault exists (pre-Seed rejections via
+#: T20) or the vault is `Voided`", because T21 "fires iff markets were deployed and
+#: the vault is open". Whether a configuration is terminal is therefore a question
+#: about the vault as well as the state — use :func:`is_terminal`, not this set.
+ABSORBING_STATES: frozenset[str] = frozenset({"Settled", "Cancelled"})
+
+#: The vault's states as the proposal machine observes them (03 §2.3). A proposal
+#: has no vault until T7 deploys markets and opens one; T20 voids an open one
+#: (D-1) and a `Voided` vault takes no measurement.
+VAULT_NONE, VAULT_OPEN, VAULT_VOIDED = "none", "open", "voided"
+VAULT_STATES: tuple[str, ...] = (VAULT_NONE, VAULT_OPEN, VAULT_VOIDED)
 
 #: §2.1 T20 scope: "any non-terminal pre-Executed" state. SQ-319 confirms
 #: `Queued`, `Suspended`, `Rerun` and `FailedExecuted` are simultaneously
@@ -254,6 +262,14 @@ class Transition:
     requires_set: tuple[str, ...] = ()
     #: Flags the transition sets.
     sets: tuple[str, ...] = ()
+    #: Vault states in which the transition is enabled; empty means any.
+    requires_vault: tuple[str, ...] = ()
+    #: T7 alone deploys markets and opens the vault.
+    opens_vault: bool = False
+    #: T20 alone voids an open vault — "if a vault exists it transitions to
+    #: `Voided` (03, D-1) — **no measurement**". A pre-Seed T20 has no vault to
+    #: void and simply leaves the proposal terminally `Rejected`.
+    voids_vault: bool = False
 
 
 #: The §2.1 table. The flag names are the document's own: `extended`,
@@ -270,7 +286,9 @@ TRANSITIONS: tuple[Transition, ...] = (
         "T6", ("Screening",), "Submitted", "tick (defer)",
         requires_unset=("deferred_once",), sets=("deferred_once",),
     ),
-    Transition("T7", ("Qualified",), "Trading", "tick (markets + POL)"),
+    Transition(
+        "T7", ("Qualified",), "Trading", "tick (markets + POL)", opens_vault=True
+    ),
     Transition(
         "T8", ("Trading",), "Extended", "decide (insufficiency / stale TWAP)",
         requires_unset=("extended",), sets=("extended",),
@@ -296,8 +314,12 @@ TRANSITIONS: tuple[Transition, ...] = (
     Transition(
         "T20", tuple(sorted(PRE_EXECUTED_STATES)), "Rejected",
         "tick / decide under VOID, stale epoch, PB-LEDGER-FREEZE",
+        voids_vault=True,
     ),
-    Transition("T21", ("Rejected", "Expired"), "Measuring", "automatic; resolve(Reject)"),
+    Transition(
+        "T21", ("Rejected", "Expired"), "Measuring", "automatic; resolve(Reject)",
+        requires_vault=(VAULT_OPEN,),
+    ),
     Transition("T22", ("FailedExecuted",), "Measuring", "tick (retry exhausted)"),
     Transition("T23", ("FailedExecuted",), "Executed", "execution_guard.execute (retry)"),
     Transition("T24", ("Suspended",), "Rejected", "guardian.uphold_veto"),
@@ -343,10 +365,22 @@ FLAGS: tuple[str, ...] = ("deferred_once", "extended", "delayed_once", "rerun", 
 
 @dataclass(frozen=True)
 class Config:
-    """A proposal's process state plus its one-shot budgets."""
+    """A proposal's process state, its one-shot budgets, and its vault.
+
+    The vault is part of the configuration because §2.1 makes terminality depend
+    on it: T21 fires only on an open one, so the same `Rejected` state is
+    transient with a healthy vault and terminal without.
+    """
 
     state: str
     flags: frozenset[str] = field(default_factory=frozenset)
+    vault: str = VAULT_NONE
+
+    def __post_init__(self) -> None:
+        if self.state not in STATES:
+            raise ScheduleError(f"unknown proposal state {self.state!r}")
+        if self.vault not in VAULT_STATES:
+            raise ScheduleError(f"unknown vault state {self.vault!r}")
 
 
 def enabled(config: Config) -> list[Transition]:
@@ -357,11 +391,29 @@ def enabled(config: Config) -> list[Transition]:
         if config.state in t.sources
         and not (set(t.requires_unset) & config.flags)
         and set(t.requires_set) <= config.flags
+        and (not t.requires_vault or config.vault in t.requires_vault)
     ]
 
 
 def fire(config: Config, transition: Transition) -> Config:
-    return Config(transition.target, config.flags | set(transition.sets))
+    vault = config.vault
+    if transition.opens_vault:
+        vault = VAULT_OPEN
+    elif transition.voids_vault and vault == VAULT_OPEN:
+        vault = VAULT_VOIDED
+    return Config(transition.target, config.flags | set(transition.sets), vault)
+
+
+def is_terminal(config: Config) -> bool:
+    """§2.1 *Terminal states*, evaluated on the configuration rather than the state.
+
+    Terminal means no §2.1 transition is enabled. That reproduces the document's
+    list exactly: `Settled` and `Cancelled` always; `Rejected` when no vault
+    exists (a pre-Seed T20) or the vault is `Voided`; and never `Expired`, since
+    `Expired` implies `Queued` implies markets — §2.1 lists `Expired`-without-vault
+    as impossible, and :func:`reachable_configs` confirms it is unreachable.
+    """
+    return not enabled(config)
 
 
 def reachable_configs(start: Config | None = None) -> set[Config]:
@@ -414,7 +466,7 @@ def find_cycle() -> list[str] | None:
 
 def terminal_configs() -> set[Config]:
     """Reachable configurations from which no §2.1 transition is enabled."""
-    return {c for c in reachable_configs() if not enabled(c)}
+    return {c for c in reachable_configs() if is_terminal(c)}
 
 
 # ---------------------------------------------------------------------------
@@ -493,28 +545,68 @@ def max_horizon_k(cap: int = MAX_NON_TERMINAL_COHORTS) -> int:
     return cap - 2
 
 
+@dataclass(frozen=True)
+class CohortRun:
+    """The §3.3 cohort machine's outcome, per epoch.
+
+    Recording admission **per epoch** rather than only the first failure is what
+    distinguishes the two claims a saturated live count is compatible with: a
+    total halt, and a recurring shortfall. At `k = 3` it is the second — see
+    :attr:`admission_rate` and the 2026-07-31 correction to 05 §3.3.
+    """
+
+    live_counts: tuple[int, ...]
+    admitted: tuple[bool, ...]
+
+    @property
+    def failure_epochs(self) -> tuple[int, ...]:
+        return tuple(e for e, ok in enumerate(self.admitted) if not ok)
+
+    @property
+    def first_failure(self) -> int | None:
+        failures = self.failure_epochs
+        return failures[0] if failures else None
+
+    @property
+    def admission_rate(self) -> Fraction:
+        """Fraction of epochs that formed a cohort."""
+        if not self.admitted:
+            raise ScheduleError("empty run has no admission rate")
+        return Fraction(sum(self.admitted), len(self.admitted))
+
+    def failure_period(self) -> int | None:
+        """The gap between consecutive admission failures, if it is constant."""
+        failures = self.failure_epochs
+        if len(failures) < 2:
+            return None
+        gaps = {b - a for a, b in zip(failures, failures[1:])}
+        return gaps.pop() if len(gaps) == 1 else None
+
+
 def simulate_cohorts(
     horizon_k: int, epochs: int, cap: int = MAX_NON_TERMINAL_COHORTS
-) -> tuple[list[int], int | None]:
-    """Run the §3.3 cohort machine; report live counts and the first wedge epoch.
+) -> CohortRun:
+    """Run the §3.3 cohort machine and record every epoch's admission outcome.
 
-    A `qualify` that would create a fifth concurrent cohort fails
-    `TooManyCohorts` — and because one cohort forms per epoch and each occupies
-    `k + 2` of them, at `k = 3` the failure is permanent rather than transient.
-    Returns `(live_count_per_epoch, first_epoch_at_which_admission_failed)`.
+    A `qualify` that would create a `cap + 1`-th concurrent cohort fails
+    `TooManyCohorts`. One cohort forms per epoch and each occupies `k + 2` of
+    them, so the steady-state demand is `k + 2` against the cap: at `k ≤ 2` the
+    demand fits and no epoch ever fails, and at `k = 3` it does not, so exactly
+    one epoch in every `k + 2` fails — forever, and unrecoverably, because a
+    cohort is per-epoch and a skipped epoch's proposals cannot join a later one.
     """
     lifetime = cohort_lifetime_epochs(horizon_k)
     live: list[int] = []  # creation epochs of non-terminal cohorts
     counts: list[int] = []
-    wedged: int | None = None
+    admitted: list[bool] = []
     for epoch in range(epochs):
         live = [e for e in live if epoch - e < lifetime]
-        if len(live) < cap:
+        ok = len(live) < cap
+        if ok:
             live.append(epoch)
-        elif wedged is None:
-            wedged = epoch
+        admitted.append(ok)
         counts.append(len(live))
-    return counts, wedged
+    return CohortRun(tuple(counts), tuple(admitted))
 
 
 # ---------------------------------------------------------------------------

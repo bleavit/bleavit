@@ -31,10 +31,13 @@ from bleavit_reference_model.lifecycle import (
     PRE_EXECUTED_STATES,
     PRUNE_CUTOFF_OFFSET,
     RETAINED_EPOCHS,
+    ABSORBING_STATES,
     STATES,
     T16_CAUSES,
-    TERMINAL_STATES,
     TRANSITIONS,
+    VAULT_NONE,
+    VAULT_OPEN,
+    VAULT_VOIDED,
     Config,
     ScheduleError,
     SnapshotWindow,
@@ -47,7 +50,9 @@ from bleavit_reference_model.lifecycle import (
     diagram_edges,
     enabled,
     find_cycle,
+    fire,
     grace_end_disposition,
+    is_terminal,
     lawful_epoch_lengths,
     max_horizon_k,
     max_snapshots,
@@ -217,24 +222,31 @@ class TestOneShotBudgets(unittest.TestCase):
         self.assertIn("T26", [t.tag for t in enabled(deferred)])
 
     def test_t8_extends_at_most_once(self):
-        self.assertIn("T8", [t.tag for t in enabled(Config("Trading"))])
-        already = Config("Trading", frozenset({"extended"}))
+        trading = Config("Trading", vault=VAULT_OPEN)
+        self.assertIn("T8", [t.tag for t in enabled(trading)])
+        already = Config("Trading", frozenset({"extended"}), VAULT_OPEN)
         self.assertNotIn("T8", [t.tag for t in enabled(already)])
 
     def test_one_guardian_rerun_of_either_kind_ever(self):
         # §2.1 *Rerun finality*: "a proposal that took the T11→T12→T13
         # delay-then-rerun path cannot then take T25, and vice versa".
-        after_t11 = Config("Queued", frozenset({"delayed_once", "guardian_rerun"}))
+        after_t11 = Config(
+            "Queued", frozenset({"delayed_once", "guardian_rerun"}), VAULT_OPEN
+        )
         self.assertNotIn("T25", [t.tag for t in enabled(after_t11)])
         self.assertNotIn("T11", [t.tag for t in enabled(after_t11)])
-        after_t25 = Config("Extended", frozenset({"extended", "rerun", "guardian_rerun"}))
+        after_t25 = Config(
+            "Extended", frozenset({"extended", "rerun", "guardian_rerun"}), VAULT_OPEN
+        )
         self.assertNotIn("T25", [t.tag for t in enabled(after_t25)])
 
     def test_rerun_finality_is_structural(self):
         # "`delayed_once` is already true so T11 cannot fire again, and
         # `extended` is already true so no further extension is reachable …
         # A rerun that fails grade or hurdle rejects; it never re-extends."
-        reopened = Config("Extended", frozenset({"extended", "rerun", "guardian_rerun"}))
+        reopened = Config(
+            "Extended", frozenset({"extended", "rerun", "guardian_rerun"}), VAULT_OPEN
+        )
         tags = {t.tag for t in enabled(reopened)}
         self.assertEqual(tags, {"T9", "T10", "T20"})
 
@@ -250,48 +262,98 @@ class TestClosureProperties(unittest.TestCase):
 
     def test_reachable_configuration_space_is_small_and_bounded(self):
         configs = reachable_configs()
-        self.assertEqual(len(configs), 93)
+        self.assertEqual(len(configs), 107)
         self.assertLessEqual(len({c.state for c in configs}), len(STATES))
 
-    def test_only_settled_and_cancelled_are_absorbing(self):
-        # §2.1 *Terminal states*: `Rejected` and `Expired` with a healthy vault
-        # are **transient** — T21 fires in the same block — which is what closes
-        # the superseded table's B-12 gap.
-        self.assertEqual({c.state for c in terminal_configs()}, set(TERMINAL_STATES))
-        self.assertEqual(TERMINAL_STATES, frozenset({"Settled", "Cancelled"}))
+    def test_the_terminal_set_is_exactly_the_documents_list(self):
+        # §2.1 *Terminal states*: "`Settled`, `Cancelled`, `Expired`-without-vault
+        # (impossible …), and `Rejected` where no vault exists (pre-Seed
+        # rejections via T20) or the vault is `Voided`. `Rejected` and `Expired`
+        # with a healthy vault are **transient**" — T21 fires in the same block,
+        # which is what closes the superseded table's B-12 gap.
+        # Deduplicated over the one-shot flags, which do not affect terminality.
+        self.assertEqual(
+            sorted({(c.state, c.vault) for c in terminal_configs()}),
+            [
+                ("Cancelled", VAULT_NONE),
+                ("Rejected", VAULT_NONE),
+                ("Rejected", VAULT_VOIDED),
+                ("Settled", VAULT_OPEN),
+            ],
+        )
+        self.assertEqual(ABSORBING_STATES, frozenset({"Settled", "Cancelled"}))
+
+    def test_a_pre_seed_force_rejection_is_terminal(self):
+        # The case the unconditional-T21 model got wrong (Codex review, PR #200):
+        # T20 on a proposal that never reached T7 leaves `Rejected` with no
+        # vault, and §2.1 makes that terminal — T21 "fires iff markets were
+        # deployed and the vault is open".
+        for state in ("Submitted", "Screening", "Qualified"):
+            with self.subTest(state=state):
+                rejected = fire(Config(state), BY_TAG["T20"])
+                self.assertEqual((rejected.state, rejected.vault), ("Rejected", VAULT_NONE))
+                self.assertTrue(is_terminal(rejected))
+                self.assertFalse(reaches(rejected, "Measuring"))
+                self.assertFalse(reaches(rejected, "Settled"))
+
+    def test_a_post_seed_force_rejection_voids_its_vault_and_is_terminal(self):
+        # T20: "if a vault exists it transitions to `Voided` (03, D-1) — **no
+        # measurement**". So T20 is terminal on both sides of Seed, by two
+        # different routes.
+        for state in ("Trading", "Extended", "Queued", "Suspended", "FailedExecuted"):
+            with self.subTest(state=state):
+                rejected = fire(Config(state, vault=VAULT_OPEN), BY_TAG["T20"])
+                self.assertEqual(
+                    (rejected.state, rejected.vault), ("Rejected", VAULT_VOIDED)
+                )
+                self.assertTrue(is_terminal(rejected))
+                self.assertFalse(reaches(rejected, "Measuring"))
+
+    def test_expired_without_a_vault_is_unreachable(self):
+        # §2.1 lists it as "impossible — Expired implies Queued implies markets;
+        # listed for completeness". Computed here rather than taken on trust.
+        self.assertFalse(
+            any(
+                c.state == "Expired" and c.vault != VAULT_OPEN
+                for c in reachable_configs()
+            )
+        )
 
     def test_i15_no_rejection_timeout_veto_or_expiry_path_enqueues_execution(self):
         # §2.1: "**no rejection, timeout, veto, or expiry path enqueues
-        # execution** (I-15, checked by state-machine model checking)".
+        # execution** (I-15, checked by state-machine model checking)". Checked
+        # from every vault state, since T21's gate changes what is reachable.
         for state in ("Rejected", "Expired", "Cancelled"):
-            with self.subTest(state=state):
-                self.assertFalse(reaches(Config(state), "Executed"))
-                self.assertFalse(reaches(Config(state), "Queued"))
+            for vault in (VAULT_NONE, VAULT_OPEN, VAULT_VOIDED):
+                with self.subTest(state=state, vault=vault):
+                    start = Config(state, vault=vault)
+                    self.assertFalse(reaches(start, "Executed"))
+                    self.assertFalse(reaches(start, "Queued"))
 
     def test_every_rejected_or_expired_proposal_with_a_vault_reaches_measurement(self):
         # T21 "fires iff markets were deployed and the vault is open" — the
         # REJECT branch trades through measurement and settles, "the most common
-        # lifecycle path".
+        # lifecycle path". The gate is real: without an open vault it does not.
         for state in ("Rejected", "Expired"):
             with self.subTest(state=state):
-                self.assertTrue(reaches(Config(state), "Measuring"))
-                self.assertTrue(reaches(Config(state), "Settled"))
+                healthy = Config(state, vault=VAULT_OPEN)
+                self.assertTrue(reaches(healthy, "Measuring"))
+                self.assertTrue(reaches(healthy, "Settled"))
+                for dead in (VAULT_NONE, VAULT_VOIDED):
+                    self.assertFalse(reaches(Config(state, vault=dead), "Measuring"))
 
     def test_every_reachable_configuration_can_still_terminate(self):
         for config in reachable_configs():
             with self.subTest(config=config):
                 self.assertTrue(
-                    any(
-                        reachable.state in TERMINAL_STATES
-                        for reachable in reachable_configs(config)
-                    )
+                    any(is_terminal(r) for r in reachable_configs(config))
                 )
 
     def test_failed_execution_retries_or_measures_but_never_expires(self):
         # T23 retries within the 72 h window, T22 measures when it is exhausted.
-        tags = {t.tag for t in enabled(Config("FailedExecuted"))}
-        self.assertEqual(tags, {"T20", "T22", "T23"})
-        self.assertFalse(reaches(Config("FailedExecuted"), "Expired"))
+        failed = Config("FailedExecuted", vault=VAULT_OPEN)
+        self.assertEqual({t.tag for t in enabled(failed)}, {"T20", "T22", "T23"})
+        self.assertFalse(reaches(failed, "Expired"))
 
 
 class TestGraceEndPrecedence(unittest.TestCase):
@@ -349,33 +411,55 @@ class TestCohortHorizon(unittest.TestCase):
         self.assertEqual(max_horizon_k(), 2)
         self.assertEqual(max_horizon_k(), MAX_NON_TERMINAL_COHORTS - 2)
 
-    def test_k_at_or_below_the_ceiling_never_wedges(self):
+    def test_k_at_or_below_the_ceiling_never_fails_admission(self):
         for k in (1, 2):
-            counts, wedged = simulate_cohorts(k, epochs=200)
+            run = simulate_cohorts(k, epochs=200)
             with self.subTest(k=k):
-                self.assertIsNone(wedged)
-                self.assertEqual(counts[-1], k + 2)
-                self.assertLessEqual(max(counts), MAX_NON_TERMINAL_COHORTS)
+                self.assertIsNone(run.first_failure)
+                self.assertEqual(run.admission_rate, 1)
+                self.assertEqual(run.live_counts[-1], k + 2)
+                self.assertLessEqual(max(run.live_counts), MAX_NON_TERMINAL_COHORTS)
 
     def test_k_equals_2_saturates_the_cap_exactly(self):
-        counts, _ = simulate_cohorts(2, epochs=50)
-        self.assertEqual(counts[-1], MAX_NON_TERMINAL_COHORTS)
+        run = simulate_cohorts(2, epochs=50)
+        self.assertEqual(run.live_counts[-1], MAX_NON_TERMINAL_COHORTS)
+        self.assertEqual(run.admission_rate, 1)
 
-    def test_k_equals_3_wedges_permanently_within_a_few_epochs(self):
-        # "at `k = 3` the fifth concurrent cohort cannot be admitted, so within
-        # a few epochs **every** `qualify` fails `TooManyCohorts` permanently,
-        # with no proposal able to enter measurement again."
-        counts, wedged = simulate_cohorts(3, epochs=200)
-        self.assertIsNotNone(wedged)
-        self.assertEqual(wedged, 4)
-        # Permanent, not transient: the count pins at the cap forever after.
-        self.assertTrue(all(count == MAX_NON_TERMINAL_COHORTS for count in counts[4:]))
+    def test_k_equals_3_loses_one_epoch_in_five_forever(self):
+        """The corrected form of §3.3's claim (2026-07-31; Codex review, PR #200).
 
-    def test_the_wedge_is_reachable_through_a_lawful_amendment(self):
+        §3.3 read "within a few epochs **every** `qualify` fails
+        `TooManyCohorts` permanently, with no proposal able to enter measurement
+        again". Executed, that is false and the earlier version of this test
+        asserted the wrong thing: it took a permanently saturated *live count*
+        as proof of permanent *admission failure*, which the count cannot show.
+        One cohort retires each epoch once the window fills, so `k = 3` admits in
+        four epochs out of five.
+
+        What is true — and is what the kernel ceiling rests on — is that the
+        steady-state demand `k + 2 = 5` exceeds the cap of 4, so exactly one
+        epoch in every `k + 2` fails, forever. The loss is unrecoverable because
+        a cohort is per-epoch: a skipped epoch's proposals cannot join a later
+        cohort, they take T6 once and then T26. §3.3 now states this.
+        """
+        run = simulate_cohorts(3, epochs=200)
+        self.assertEqual(run.first_failure, 4)
+        self.assertEqual(run.failure_period(), 5)  # = k + 2
+        self.assertEqual(run.admission_rate, Fraction(4, 5))
+        # Recurring forever, not a transient at the fill boundary…
+        self.assertGreater(len(run.failure_epochs), 30)
+        # …and the live count alone cannot distinguish the two, which is exactly
+        # why admission is now recorded per epoch.
+        self.assertTrue(
+            all(count == MAX_NON_TERMINAL_COHORTS for count in run.live_counts[4:])
+        )
+
+    def test_the_shortfall_is_reachable_through_a_lawful_amendment(self):
         # "That the wedge was reachable through a lawful amendment inside the
         # key's own published bounds is what makes the ceiling normative here."
         # 13 §1 caps `epoch.horizon_k` at 2 precisely to close this.
         self.assertGreater(cohort_lifetime_epochs(3), MAX_NON_TERMINAL_COHORTS)
+        self.assertLessEqual(cohort_lifetime_epochs(2), MAX_NON_TERMINAL_COHORTS)
 
 
 class TestSnapshotRetention(unittest.TestCase):

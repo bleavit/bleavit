@@ -347,9 +347,43 @@ class InFlight:
     #: The longest `epoch.length` still in force (pinned per epoch/proposal/cohort).
     longest_length_in_force: int = 302_400
 
+    def refusal_reason(self) -> str | None:
+        """Why this in-flight maximum cannot be established, if it cannot.
+
+        13 §5 names **two** refusal causes, not one: "An in-flight maximum that
+        cannot be established — state unreadable, **or a bound already exceeded**
+        — is a **refusal**, never a fallback to the registry value, which is the
+        defect itself (G-1)." The second cause is the load-bearing one: a live
+        value outside its own 13 §1 bound is precisely the state in which
+        composing it against a proposed value produces a derivation that looks
+        admissible, so the screen must refuse before it composes rather than
+        after it derives.
+        """
+        if self.largest_cohort_slots < 0 or self.longest_length_in_force <= 0:
+            return "in-flight state unreadable"
+        slots, length = BOUNDS["epoch.slots"], BOUNDS["epoch.length"]
+        if not slots.in_bounds(self.largest_cohort_slots):
+            return (
+                f"live epoch.slots {self.largest_cohort_slots} already outside "
+                f"[{slots.minimum}, {slots.maximum}]"
+            )
+        if not length.in_bounds(self.longest_length_in_force):
+            return (
+                f"live epoch.length {self.longest_length_in_force} already outside "
+                f"[{length.minimum}, {length.maximum}]"
+            )
+        if self.longest_length_in_force % PHASE_DENOMINATOR:
+            # 05 §3.1: a length that is not a multiple of 21 has no exact phase
+            # boundaries, so no envelope derived from its Trade phase is sound.
+            return (
+                f"live epoch.length {self.longest_length_in_force} is not a "
+                f"multiple of {PHASE_DENOMINATOR}"
+            )
+        return None
+
     def readable(self) -> bool:
         """13 §5: an in-flight maximum that cannot be established is a refusal."""
-        return self.largest_cohort_slots >= 0 and self.longest_length_in_force > 0
+        return self.refusal_reason() is None
 
 
 GENESIS_IN_FLIGHT = InFlight()
@@ -363,10 +397,10 @@ def compose(registry: Registry, in_flight: InFlight) -> tuple[Registry, int]:
     classification — pinned keys take the larger of proposed and live, live
     keys take the proposed value unchanged.
     """
-    if not in_flight.readable():
+    reason = in_flight.refusal_reason()
+    if reason is not None:
         raise DerivationRefused(
-            "in-flight maximum unestablishable — refuse, never fall back to the "
-            "registry value (13 §5, G-1)"
+            f"{reason} — refuse, never fall back to the registry value (13 §5, G-1)"
         )
     effective_slots = max(registry.epoch_slots, in_flight.largest_cohort_slots)
     effective_length = max(registry.epoch_length, in_flight.longest_length_in_force)
@@ -445,8 +479,9 @@ def real_load(registry: Registry, in_flight: InFlight) -> Envelopes:
     consumer re-reads them on every crank. The screen is sound exactly when it
     dominates this for every reachable state.
     """
-    if not in_flight.readable():
-        raise DerivationRefused("unreadable in-flight state")
+    reason = in_flight.refusal_reason()
+    if reason is not None:
+        raise DerivationRefused(reason)
     actual = replace(
         registry,
         epoch_slots=in_flight.largest_cohort_slots,

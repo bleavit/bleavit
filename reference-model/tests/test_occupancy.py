@@ -271,6 +271,57 @@ class TestInFlightComposition(unittest.TestCase):
         with self.assertRaises(DerivationRefused):
             screen(GENESIS, "dec.window", 34_560, InFlight(longest_length_in_force=0))
 
+    def test_an_in_flight_value_already_outside_its_bound_refuses(self):
+        """13 §5's second refusal cause, which is the load-bearing one.
+
+        The sentence names two: "state unreadable, **or a bound already
+        exceeded**". Only the first was checked (Codex review, PR #200), and the
+        gap was not theoretical: with a live `epoch.length` of 604,821 — 21
+        blocks above the 13 §1 maximum, and still a multiple of 21, so nothing
+        downstream refuses it — a `dec.window` *reduction* composed to an
+        envelope under its frozen figure and the screen returned **admitted**.
+        Compensation inside the derivation hid a live value that was already out
+        of bounds, which is precisely the fallback G-1 forbids.
+        """
+        over_length = InFlight(longest_length_in_force=604_821)
+        self.assertEqual(over_length.longest_length_in_force % 21, 0)
+        self.assertGreater(
+            over_length.longest_length_in_force, BOUNDS["epoch.length"].maximum
+        )
+        self.assertFalse(over_length.readable())
+        with self.assertRaises(DerivationRefused):
+            screen(
+                GENESIS.with_key("mkt.obs_interval", 50),
+                "dec.window",
+                34_560,
+                over_length,
+            )
+
+        for bad in (
+            InFlight(largest_cohort_slots=BOUNDS["epoch.slots"].maximum + 1),
+            InFlight(largest_cohort_slots=BOUNDS["epoch.slots"].minimum - 1),
+            InFlight(longest_length_in_force=BOUNDS["epoch.length"].minimum - 21),
+            # 05 §3.1: a length with inexact phase boundaries makes every
+            # Trade-phase-derived envelope unsound, so it refuses too.
+            InFlight(longest_length_in_force=302_401),
+        ):
+            with self.subTest(in_flight=bad):
+                self.assertIsNotNone(bad.refusal_reason())
+                with self.assertRaises(DerivationRefused):
+                    compose(GENESIS, bad)
+
+    def test_a_lawful_in_flight_state_still_composes(self):
+        # The refusal must not be so broad that it rejects ordinary states.
+        for good in (
+            GENESIS_IN_FLIGHT,
+            InFlight(largest_cohort_slots=1, longest_length_in_force=201_600),
+            InFlight(largest_cohort_slots=5, longest_length_in_force=604_800),
+        ):
+            with self.subTest(in_flight=good):
+                self.assertIsNone(good.refusal_reason())
+                self.assertTrue(good.readable())
+                compose(GENESIS, good)
+
     def test_screen_dominates_real_load_for_every_admitted_state(self):
         # Soundness, stated directly: the composed screen's derivation is never
         # below what the chain actually incurs.
