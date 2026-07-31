@@ -419,6 +419,104 @@ fn trader_group_partial_refund_returns_surplus_and_drop_takes_only_remainder_as_
     );
 }
 
+// SQ-540(e). The fee the chain charges and then discards.
+std::thread_local! {
+    static DEPOSITED: RefCell<Vec<(Location, u128)>> = const { RefCell::new(Vec::new()) };
+    static CREDITED: RefCell<Vec<u128>> = const { RefCell::new(Vec::new()) };
+    static DEPOSIT_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct RecordingTransactor;
+impl staging_xcm_executor::traits::TransactAsset for RecordingTransactor {
+    fn deposit_asset(
+        what: AssetsInHolding,
+        who: &Location,
+        _context: Option<&XcmContext>,
+    ) -> Result<(), (AssetsInHolding, staging_xcm::latest::Error)> {
+        if DEPOSIT_FAILS.with(|f| f.get()) {
+            return Err((
+                what,
+                staging_xcm::latest::Error::FailedToTransactAsset("no"),
+            ));
+        }
+        DEPOSITED.with(|d| {
+            d.borrow_mut()
+                .extend(what.fungible_assets_iter().filter_map(|a| match a {
+                    Asset {
+                        id: AssetId(location),
+                        fun: Fungible(amount),
+                    } => Some((location, amount)),
+                    _ => None,
+                }))
+        });
+        let _ = who;
+        Ok(())
+    }
+}
+
+struct RecordingCredit;
+impl crate::trader::TreasuryFeeCredit for RecordingCredit {
+    fn credit_usdc(amount: u128) {
+        CREDITED.with(|c| c.borrow_mut().push(amount));
+    }
+}
+
+frame_support::parameter_types! {
+    pub TreasuryBeneficiary: Location = Location::new(0, [Junction::PalletInstance(61)]);
+}
+
+type FeeSink =
+    crate::trader::FeesToTreasury<RecordingTransactor, TreasuryBeneficiary, RecordingCredit>;
+
+fn reset_fee_sink() {
+    DEPOSITED.with(|d| d.borrow_mut().clear());
+    CREDITED.with(|c| c.borrow_mut().clear());
+    DEPOSIT_FAILS.with(|f| f.set(false));
+}
+
+#[test]
+fn fee_revenue_is_deposited_to_treasury_custody_and_usdc_alone_is_recognized_as_nav() {
+    // SQ-540(e). Depositing is only half the job: NAV reads the treasury's
+    // INTERNAL ledger, so a deposit without recognition would leave the pot
+    // holding value `nav()` cannot see -- worth nothing to runway, and drifting
+    // the 08 §6.3 pot-vs-line alarm. Both halves are asserted together.
+    reset_fee_sink();
+    FeeSink::take_revenue(mock_asset_to_holding(asset(usdc_location(), 1_450_000)));
+    assert_eq!(
+        DEPOSITED.with(|d| d.borrow().clone()),
+        vec![(usdc_location(), 1_450_000)]
+    );
+    assert_eq!(CREDITED.with(|c| c.borrow().clone()), vec![1_450_000]);
+}
+
+#[test]
+fn dot_fee_revenue_is_taken_into_custody_but_never_recognized_as_nav() {
+    // 08 §1.2 marks DOT holdings at 0 in NAV, so crediting DOT to `MAIN` would
+    // inflate NAV by exactly the term the treasury refuses to count. Custody is
+    // still real, so the deposit happens; only the recognition does not.
+    reset_fee_sink();
+    FeeSink::take_revenue(mock_asset_to_holding(asset(dot_location(), 9_000)));
+    assert_eq!(
+        DEPOSITED.with(|d| d.borrow().clone()),
+        vec![(dot_location(), 9_000)]
+    );
+    assert!(CREDITED.with(|c| c.borrow().is_empty()));
+}
+
+#[test]
+fn a_failed_custody_deposit_recognizes_nothing_and_matches_the_discarding_status_quo() {
+    // G-1 / I-33: recognition follows custody and never precedes it, so this
+    // path cannot make the internal ledger claim more than the pot holds. The
+    // failure branch drops the holding, which is precisely what the shipped
+    // `TakeRevenue for ()` does today -- a no-op against the status quo rather
+    // than a new loss.
+    reset_fee_sink();
+    DEPOSIT_FAILS.with(|f| f.set(true));
+    FeeSink::take_revenue(mock_asset_to_holding(asset(usdc_location(), 1_450_000)));
+    assert!(DEPOSITED.with(|d| d.borrow().is_empty()));
+    assert!(CREDITED.with(|c| c.borrow().is_empty()));
+}
+
 #[test]
 fn trader_group_repeat_buys_accumulate_and_other_asset_cannot_change_the_refund_ledger() {
     use frame_support::weights::constants::WEIGHT_REF_TIME_PER_SECOND;

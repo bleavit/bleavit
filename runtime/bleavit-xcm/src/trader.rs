@@ -214,6 +214,85 @@ impl<Rates: TraderRates, Revenue: TakeRevenue> WeightTrader
     }
 }
 
+/// Runtime seam for recognizing deposited USDC execution fees as treasury NAV
+/// (SQ-540(e); 08 §1.2, §10.2).
+///
+/// Depositing the fee into treasury custody is only half the job: NAV is read
+/// from the treasury's *internal* ledger, not from the custody balance, so a
+/// deposit alone would leave the pot holding value the ledger does not claim —
+/// invisible to `nav()` and therefore worth nothing to runway, while also
+/// drifting the 08 §6.3 pot-vs-line alarm. This trait is the recognition half.
+pub trait TreasuryFeeCredit {
+    /// Recognize `amount` µUSDC now held in treasury custody as internal `MAIN`
+    /// credit. Called **only** after the custody deposit has succeeded.
+    fn credit_usdc(amount: u128);
+}
+
+impl TreasuryFeeCredit for () {
+    fn credit_usdc(_amount: u128) {}
+}
+
+/// Route the trader's unrefunded execution fee to the treasury instead of
+/// discarding it (SQ-540(e)).
+///
+/// The default `TakeRevenue for ()` drops the collected assets, so the chain
+/// prices every inbound message at the governed 09 §6.1 rates, charges it, and
+/// throws the payment away. This adapter is the `XcmFeesToAccount` pattern with
+/// the two protocol-specific facts this system's accounting requires:
+///
+/// * **USDC is deposited *and* recognized; DOT is deposited only.** 08 §1.2
+///   marks DOT holdings at 0 in NAV, so crediting DOT to `MAIN` would inflate
+///   NAV by a term the treasury explicitly does not count.
+/// * **Recognition follows custody, never precedes it.** The internal credit is
+///   applied only on a successful deposit, so this path can never make the
+///   ledger claim more than the pot holds (G-1, I-33) — the direction 08 §6.3's
+///   drift alarm exists to catch.
+///
+/// The holding is deposited **whole and undecomposed**, which is a correctness
+/// requirement rather than a style choice: `AssetsInHolding` carries real
+/// `ImbalanceAccounting` objects, and `into_assets_iter` yields plain `Asset`
+/// descriptors while dropping the imbalances underneath them. Splitting the
+/// holding to filter it per asset would therefore destroy exactly the value
+/// this adapter exists to keep. The USDC portion is measured with the
+/// *borrowing* iterator first, and only then is the whole holding handed over.
+pub struct FeesToTreasury<Transactor, Beneficiary, Credit>(
+    PhantomData<(Transactor, Beneficiary, Credit)>,
+);
+
+impl<Transactor, Beneficiary, Credit> TakeRevenue
+    for FeesToTreasury<Transactor, Beneficiary, Credit>
+where
+    Transactor: staging_xcm_executor::traits::TransactAsset,
+    Beneficiary: frame_support::traits::Get<staging_xcm::latest::Location>,
+    Credit: TreasuryFeeCredit,
+{
+    fn take_revenue(revenue: AssetsInHolding) {
+        // Measure the USDC portion without consuming the holding. DOT is
+        // deliberately excluded: 08 §1.2 marks DOT at 0 in NAV, so recognizing
+        // it as `MAIN` credit would inflate NAV by a term the treasury does not
+        // count. It is still deposited — custody is real either way.
+        let usdc = revenue
+            .fungible_assets_iter()
+            .filter_map(|asset| match asset {
+                Asset {
+                    id: AssetId(location),
+                    fun: Fungibility::Fungible(amount),
+                } if location == usdc_location() => Some(amount),
+                _ => None,
+            })
+            .fold(0u128, |total, amount| total.saturating_add(amount));
+
+        // A failed deposit hands the holding back, and dropping it is precisely
+        // what `TakeRevenue for ()` does today — so the failure path is the
+        // status quo rather than a new loss (G-1), and no credit is recognized
+        // for value custody never received (I-33).
+        if Transactor::deposit_asset(revenue, &Beneficiary::get(), None).is_ok() && !usdc.is_zero()
+        {
+            Credit::credit_usdc(usdc);
+        }
+    }
+}
+
 impl<Rates, Revenue: TakeRevenue> Drop for GovernedWeightTrader<Rates, Revenue> {
     fn drop(&mut self) {
         if !self.paid_assets.is_empty() {
