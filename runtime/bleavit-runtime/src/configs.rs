@@ -1460,9 +1460,22 @@ pub(crate) mod xcm_config {
         type UniversalLocation = UniversalLocation;
         type Barrier = BarrierType;
         type Weigher = Weigher;
-        // Unrefunded fees use payer-adverse disposal until treasury revenue
-        // routing is wired; this cannot create an unbacked claim.
-        type Trader = bleavit_xcm::trader::GovernedWeightTrader<ConstitutionTraderRates, ()>;
+        // SQ-540(e): unrefunded fees are treasury revenue, not litter. Before
+        // this they were dropped — the chain priced every inbound message at the
+        // governed 09 §6.1 rates, charged it, and threw the payment away. The
+        // sink deposits through *this config's own* transactor, so the capped
+        // production path and the recovery path each route through the one they
+        // already use, and recognizes only the USDC portion as NAV (08 §1.2
+        // marks DOT at 0). A failed deposit degrades to the previous discarding
+        // behaviour rather than to an unbacked claim.
+        type Trader = bleavit_xcm::trader::GovernedWeightTrader<
+            ConstitutionTraderRates,
+            bleavit_xcm::trader::FeesToTreasury<
+                Assets,
+                super::TreasuryMainLocation,
+                super::TreasuryXcmFeeCredit,
+            >,
+        >;
         type ResponseHandler = ResponseHandler;
         type AssetTrap = PolkadotXcm;
         type SubscriptionService = PolkadotXcm;
@@ -4609,6 +4622,33 @@ impl pallet_conditional_ledger::MainRevenueSink for RuntimeMainRevenueSink {
 parameter_types! {
     /// 08 §1.1 `MAIN`, the single lawful sink of realized fee value (04 §6.1).
     pub TreasuryMainAccount: AccountId = crate::genesis::treasury_account();
+    /// The same account addressed as an XCM beneficiary, for the SQ-540(e) fee
+    /// sink. `StandardLocationToAccountId`'s `AccountId32Aliases` leg resolves a
+    /// network-agnostic local `AccountId32` junction back to exactly this
+    /// account, so the deposit lands in `MAIN` custody and nowhere else.
+    pub TreasuryMainLocation: staging_xcm::latest::Location =
+        staging_xcm::latest::Location::new(
+            0,
+            [staging_xcm::latest::Junction::AccountId32 {
+                network: None,
+                id: crate::genesis::treasury_account().into(),
+            }],
+        );
+}
+
+/// SQ-540(e). Recognize a deposited USDC execution fee as internal `MAIN`
+/// credit so it reaches NAV.
+///
+/// `credit_main` is the existing `PendingMainCredit` seam — a small dedicated
+/// counter rather than a write to the treasury aggregate, because this runs on
+/// message-processing paths where folding the multi-kilobyte aggregate into the
+/// proof would be the wrong trade. `Pallet::load` folds it into `main_usdc`, so
+/// `nav()`, `treasury()` and try-state observe the credit exactly once.
+pub struct TreasuryXcmFeeCredit;
+impl bleavit_xcm::trader::TreasuryFeeCredit for TreasuryXcmFeeCredit {
+    fn credit_usdc(amount: Balance) {
+        pallet_futarchy_treasury::Pallet::<Runtime>::credit_main(amount);
+    }
 }
 
 /// Bind the market's treasury-free subsidy-line discriminant to the treasury's

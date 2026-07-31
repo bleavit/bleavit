@@ -3424,6 +3424,13 @@ fn production_xcm_remote_keyed_trap_is_recoverable_only_by_asset_hub_claim() {
         let recovery_beneficiary = account(57);
         let amount = 20 * currency::USDC;
         let issuance_before = ForeignAssets::total_issuance(usdc_location());
+        // SQ-540(e): BOTH messages in this test pay an execution fee — the one
+        // that strands the holding and the one that reclaims it — and neither
+        // is burned any more, so the baseline has to be taken here rather than
+        // just before the recovery.
+        let treasury_usdc_before =
+            ForeignAssets::balance(usdc_location(), crate::genesis::treasury_account());
+        let pending_credit_before = pallet_futarchy_treasury::PendingMainCredit::<Runtime>::get();
         set_balance_param_value(b"phase3.tvl_cap", issuance_before.saturating_add(amount));
         set_balance_param_value(b"phase3.dep_cap", amount);
 
@@ -3542,12 +3549,37 @@ fn production_xcm_remote_keyed_trap_is_recoverable_only_by_asset_hub_claim() {
             pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&recovery_beneficiary),
             recovered
         );
+        // The paid execution fee is protocol revenue now, not litter. Before
+        // SQ-540(e) it was dropped, which did not destroy value so much as
+        // convert it into unrepresented surplus backing in the sovereign
+        // account on Asset Hub — real, but invisible to `nav()` and therefore
+        // unable to fund anything. Routing it to `MAIN` leaves local issuance
+        // and the reserve in exactly the same relation while making the value
+        // spendable.
+        let fee_to_treasury =
+            ForeignAssets::balance(usdc_location(), crate::genesis::treasury_account())
+                .saturating_sub(treasury_usdc_before);
+        assert!(
+            fee_to_treasury > 0,
+            "the paid execution fees must reach the treasury"
+        );
         let issuance_after_recovery = ForeignAssets::total_issuance(usdc_location());
         assert!(issuance_after_recovery <= issuance_after_trap);
         assert_eq!(
             issuance_after_recovery,
-            issuance_before.saturating_add(recovered),
-            "claim reconstruction adds no issuance; only paid recovery fees are removed"
+            issuance_before
+                .saturating_add(recovered)
+                .saturating_add(fee_to_treasury),
+            "claim reconstruction adds no issuance; the paid recovery fee is retained \
+             by the protocol rather than burned, so the reclaimed total is preserved"
+        );
+        // Custody alone would leave the fee outside NAV and drift the 08 §6.3
+        // pot-vs-line alarm, so the recognition half is asserted with it.
+        assert_eq!(
+            pallet_futarchy_treasury::PendingMainCredit::<Runtime>::get()
+                .saturating_sub(pending_credit_before),
+            fee_to_treasury,
+            "the deposited fee is recognized as internal MAIN credit, so it reaches NAV"
         );
     });
 }
