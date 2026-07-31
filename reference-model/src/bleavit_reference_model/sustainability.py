@@ -380,6 +380,43 @@ def runway_years(
         return +(headroom / net_burn)
 
 
+def cost_at_occupancy(occupied: Decimal, params: CostParams | None = None) -> Decimal:
+    """Annual cost when only `occupied` of `epoch.slots` carry a proposal.
+
+    Two of §10.1's rows are per-proposal, not standing, and holding them at
+    full-slate values while varying revenue occupancy double-counts against the
+    protocol:
+
+    * `REWARDS` is paid only on `Executed` (08 §1.1), so a five-slot figure is
+      an all-pass FULL slate -- the ceiling §10.1 already labels as such.
+    * The realized POL divergence needs a seeded book, so it scales with the
+      proposals actually seeded. The epoch's one Baseline book is standing and
+      does not scale, and is held out here.
+
+    Everything else -- collators, keepers, the reserve probe -- is standing.
+    """
+    p = params or CostParams()
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        full = cost_base(p)
+        share = occupied / p.epoch_slots
+        # 08 §10.1 sizes the POL row for a full PARAM slate PLUS the Baseline.
+        # 08 §10.5 gives the Baseline's own cash as pol.b_baseline*ln2, which is
+        # exactly PARAM's per-proposal figure, so the row is 6 equal parts: five
+        # scaling proposals and one standing Baseline.
+        pol_baseline = full.pol_divergence / Decimal(6)
+        pol_proposals = (full.pol_divergence - pol_baseline) * share
+        return +(
+            full.collators
+            + full.keeper_total
+            + full.reserve_probe
+            + full.ops_overlay
+            + full.proposer_rewards * share
+            + pol_baseline
+            + pol_proposals
+        )
+
+
 def break_even_slots(
     annual_cost: Decimal,
     tau: Decimal,
@@ -403,6 +440,29 @@ def break_even_slots(
     for slots in range(1, max_slots + 1):
         held = annual_held_capital(proposal_class, Decimal(slots), saturated)
         if revenue(held, tau) >= annual_cost:
+            return slots
+    return None
+
+
+def break_even_slots_consistent(
+    tau: Decimal,
+    params: CostParams | None = None,
+    proposal_class: str = "param",
+    saturated: bool = False,
+    max_slots: int = 12,
+) -> int | None:
+    """`break_even_slots`, with cost evaluated at the SAME occupancy as revenue.
+
+    `break_even_slots` holds the full-slate cost fixed while varying revenue
+    occupancy, which charges five slots' proposer rewards against one slot's
+    trading. That is the mirror of the error this pair of functions exists to
+    correct, and it runs against the protocol rather than for it -- so the
+    honest break-even is lower than the fixed-cost one, not higher.
+    """
+    p = params or CostParams()
+    for slots in range(1, max_slots + 1):
+        held = annual_held_capital(proposal_class, Decimal(slots), saturated)
+        if revenue(held, tau) >= cost_at_occupancy(Decimal(slots), p):
             return slots
     return None
 

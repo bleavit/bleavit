@@ -38,6 +38,8 @@ from bleavit_reference_model.sustainability import (
     quiet_epoch_cost,
     revenue,
     break_even_slots,
+    break_even_slots_consistent,
+    cost_at_occupancy,
     revenue_rate,
     runway_years,
     pre_e5_params,
@@ -470,6 +472,56 @@ class OperatingPointTests(unittest.TestCase):
         self.assertTrue(
             runway_years(shipped, NAV_FLOOR_CODE, revenue(full_slate, D("5.8"))).is_infinite()
         )
+
+    def test_cost_must_be_evaluated_at_the_same_occupancy_as_revenue(self):
+        """The mirror of the occupancy error, found while fixing it.
+
+        `break_even_slots` holds the FULL-slate cost fixed while varying revenue
+        occupancy, which charges five slots' proposer rewards against one slot's
+        trading. Two §10.1 rows are per-proposal rather than standing --
+        `REWARDS` (paid only on `Executed`) and the realized POL divergence
+        (needs a seeded book) -- so the consistent comparison scales them.
+        """
+        p = CostParams()
+        full = cost_base(p).annual
+        # Tolerance, not equality: the two are computed in different
+        # working-precision contexts and differ only in trailing digits.
+        self.assertLess(abs(cost_at_occupancy(p.epoch_slots, p) - full), D("0.000001"))
+        self.assertLess(cost_at_occupancy(D(1), p), full)
+        # Standing lines dominate, so cost falls far more slowly than revenue.
+        self.assertGreater(cost_at_occupancy(D(1), p) / full, D("0.75"))
+
+    def test_the_standing_collator_line_decides_whether_one_proposal_suffices(self):
+        """The most decision-relevant result in E5, and it is not a value choice.
+
+        `ops.collators` is 72.6 % of the shipped cost base and it is STANDING:
+        it bills whether or not the chain decides anything, which is the wrong
+        shape for a protocol whose revenue is activity-linked. Evaluating cost
+        and revenue at the same occupancy makes the consequence exact.
+
+        At the shipped point the standing line dominates so heavily that break-
+        even needs SEVEN occupied slots at tau = 3 -- above `epoch.slots` = 5,
+        so not reachable without also amending that key. With
+        `collator.comp_epoch` at its registry minimum, ONE occupied slot covers
+        the cost base at the same turnover.
+
+        That is the real content of the `collator.comp_epoch` decision, and it
+        is a sharper question than "is 500 enough to run a node": it decides
+        whether the protocol needs a full slate or a single proposal to break
+        even. E5 declines to answer it (R-2: unsafe direction, no evidence
+        anchor) and hands it over stated this way.
+        """
+        shipped = CostParams()
+        lowered = with_levers(collator_comp_epoch=500)
+
+        self.assertEqual(break_even_slots_consistent(D(3), shipped), 7)
+        self.assertGreater(D(7), shipped.epoch_slots)
+        self.assertEqual(break_even_slots_consistent(D(3), lowered), 1)
+
+        # At the measured median turnover the shipped point needs three slots,
+        # which IS reachable inside the default slate.
+        self.assertEqual(break_even_slots_consistent(D("5.8"), shipped), 3)
+        self.assertLessEqual(D(3), shipped.epoch_slots)
 
     def test_the_collator_lever_is_available_but_not_taken(self):
         """Pins the one decision E5 declined, and why it is the only one.
