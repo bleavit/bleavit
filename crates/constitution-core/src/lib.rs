@@ -2619,7 +2619,31 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         ),
         row(
             b"collator.comp",
-            ParamValue::Balance(2_000_000_000),
+            // SQ-535 (milestone E5 pass 2): seeded at the registry MINIMUM,
+            // 500 USDC/collator/epoch, re-anchored from the superseded 2,000.
+            //
+            // 2,000 was a D-15 initial value with no cost evidence behind it.
+            // The anchor is Polkadot OpenGov referendum #1870 (passed and
+            // executed), which funds 38 system-parachain collators at $250 per
+            // collator per month, $307.24 fully loaded with the bounty's own
+            // hosting/curator/coordinator lines. An epoch is 21.0 days, so that
+            // is 211.97 USDC/epoch — making the superseded seed 9.44x the rate
+            // real operators accepted for the same job, and this one 2.36x.
+            //
+            // The comparison is like-for-like on the axis that matters: a
+            // Bleavit collator earns nothing from fees or tips (D-15 burns VIT
+            // fees; `OnChargeTransaction`'s `()` drops the imbalance), exactly
+            // as a Polkadot system parachain's collator does, so in both cases
+            // the treasury line IS the whole compensation.
+            //
+            // The unsafe direction is UNDER-paying, and it is bounded: the
+            // payout is fail-soft (an underfunded line leaves the epoch's
+            // accumulator pending rather than dropping the claim), the launch
+            // set is invulnerable, and recovery is a x2 PARAM amendment with a
+            // 1-epoch cooldown — one step to 1,000, two to the old 2,000.
+            // Derivation and margin are machine-checked in the reference model
+            // (`sustainability.collator_anchor_multiple`).
+            ParamValue::Balance(500_000_000),
             ParamValue::Balance(500_000_000),
             ParamValue::Balance(10_000_000_000),
             Some(MaxDelta::Factor(2)),
@@ -3196,6 +3220,51 @@ mod tests {
         assert_eq!(value, 100_800);
         assert_eq!(record.max.as_u128(), 432_000);
         assert_eq!(record.admissible_next_interval(), Ok((50_400, 201_600)));
+    }
+
+    /// SQ-535. The seeded `collator.comp` value, pinned to its external anchor.
+    ///
+    /// Nothing else in this workspace pins the *value* of a genesis PARAM row —
+    /// `genesis-keys.json` asserts the key SET, and every consumer reads the
+    /// live registry — so before this test the seed could move in either
+    /// direction without a single Rust failure. It moved once already on no
+    /// evidence at all (the superseded 2,000 was a D-15 initial with no costing
+    /// behind it), and `ops.collators` is the largest standing line in 08 §10.1,
+    /// so an unnoticed drift here is a direct hit to the runway.
+    ///
+    /// The anchor is Polkadot OpenGov referendum #1870 (passed, executed): 38
+    /// funded system-parachain collators at $250/collator/month, $307.24 fully
+    /// loaded with the bounty's hosting, curator and coordinator lines. At 21.0
+    /// days per epoch that is 211.97 USDC/epoch, so the seed carries a 2.36x
+    /// margin over a rate real operators accepted for the same job — and the
+    /// job really is the same, because a Bleavit collator earns nothing from
+    /// fees or tips (D-15 burns VIT fees) exactly as a system-parachain
+    /// collator does.
+    ///
+    /// This asserts the *shape* of that argument, not just the number: the seed
+    /// sits ON the registry minimum, so every remaining amendment is in the
+    /// safe (upward) direction. Re-deriving the margin is the reference model's
+    /// job (`sustainability.collator_anchor_multiple`); what belongs here is
+    /// that the shipped constitution agrees with it.
+    #[test]
+    fn genesis_collator_compensation_is_seeded_at_its_anchored_registry_floor() {
+        let record = genesis_params()
+            .into_iter()
+            .find(|record| record.key == key16(b"collator.comp"))
+            .expect("collator.comp is a seeded genesis key");
+
+        // 500 USDC/collator/epoch at USDC's 6 decimals.
+        assert_eq!(record.value.as_u128(), 500_000_000);
+        // Seeded AT the floor: all headroom is in the safe direction.
+        assert_eq!(record.value.as_u128(), record.min.as_u128());
+        assert_eq!(record.max.as_u128(), 10_000_000_000);
+        // The bound itself is untouched by the reseed — the seed moved to the
+        // floor, the floor did not move to the seed.
+        assert_eq!(record.max.as_u128() / record.min.as_u128(), 20);
+        // Recovery is bounded and fast: x2 per amendment, so one step reaches
+        // 1,000 and two reach the superseded 2,000.
+        assert_eq!(record.max_delta, Some(MaxDelta::Factor(2)));
+        assert_eq!(record.class, ParamClass::Param);
     }
 
     #[test]
