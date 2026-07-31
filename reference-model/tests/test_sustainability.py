@@ -17,6 +17,7 @@ import unittest
 
 from bleavit_reference_model.sustainability import (
     CORETIME_PERIOD_DAYS,
+    INFINITE,
     POL_RERUN_MAX_MULTIPLE,
     pol_divergence_with_reruns,
     xcm_annual_revenue,
@@ -905,6 +906,44 @@ class XcmDiscardedRevenueTests(unittest.TestCase):
         # rather than rhetorical: 100/day is already ~half the launch base.
         self.assertGreater(xcm_annual_revenue(D(100)) / c5, D("0.48"))
         self.assertLess(xcm_annual_revenue(D(10)) / c5, D("0.05"))
+
+    def test_the_captured_fee_closes_the_gap_at_the_mandated_collator_count(self):
+        """What the E7 wiring is actually for, stated end to end.
+
+        The zero-revenue reading fails at the 12 collators 12 §6.1 mandates:
+        21.5 years under the cheap coretime policy. The fee the chain was
+        already charging and discarding closes that gap at a *small* traffic
+        level, and makes the endowment self-sustaining at the break-even rate
+        this class already derives.
+
+        Stated as required traffic, not as a promise: message volume is market
+        behaviour the protocol does not control, and it belongs beside `tau`
+        rather than beside the endowment. What the model can say is exactly how
+        much is needed, and it is less than most readers would guess.
+        """
+        c12 = cost_base(with_levers(collator_count=12)).annual
+        zero = runway_years_with_coretime_policy(
+            c12, NAV_FLOOR_META, D(4_000), through=CORETIME_RENEW_LEADIN_END
+        )
+        self.assertLess(zero, D(25))  # the gap this closes
+
+        def runway_at(messages_per_day):
+            return runway_years_with_coretime_policy(
+                c12,
+                NAV_FLOOR_META,
+                D(4_000),
+                through=CORETIME_RENEW_LEADIN_END,
+                annual_revenue=xcm_annual_revenue(D(messages_per_day)),
+            )
+
+        # 50/day already clears the 25-year goal at the mandated ceiling.
+        self.assertGreater(runway_at(50), D(25))
+        self.assertLess(abs(runway_at(50) - D("25.35")), D("0.05"))
+        # And at the break-even rate this class derives, the endowment is never
+        # drawn down at all.
+        self.assertEqual(runway_at(321), INFINITE)
+        # Monotone in traffic, which a sign error would break.
+        self.assertGreater(runway_at(100), runway_at(50))
 
     def test_break_even_volume_scales_the_right_way(self):
         """Monotone in both directions, which a wrong sign would break."""
