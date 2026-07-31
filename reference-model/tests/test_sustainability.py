@@ -786,14 +786,21 @@ class CollatorAnchorTests(unittest.TestCase):
         demand, governance doubles it in one amendment and reaches the old
         2,000 in two. The unsafe direction is bounded and fast to exit; the
         safe direction has 20x of headroom.
+
+        What this does NOT rest on, and an earlier revision of this docstring
+        wrongly claimed it did: the 08 §2.4 fail-soft payout. That catches an
+        underfunded *line* -- the pool the configured value implies cannot be
+        paid, so the accumulator survives for a retry. It does not catch an
+        underpriced *row*: the pool is computed FROM this value, a payout at
+        that value succeeds in full, the accumulator is cleared, and no unpaid
+        difference is retained. Underpricing degrades to collators leaving, not
+        to a delayed payment. The real protections are the margin asserted
+        above, the invulnerable launch set, this recovery path, and the 13 §1
+        gate on the Phase-4+ permissionless transition.
         """
         self.assertEqual(multiplicative_amendment_steps(D(500), D(1_000), D(2)), 1)
         self.assertEqual(multiplicative_amendment_steps(D(500), D(2_000), D(2)), 2)
         self.assertEqual(COLLATOR_COMP_MAX / COLLATOR_COMP_MIN, D(20))
-        # And the payout path is fail-soft (08 §2.4): an underfunded line
-        # leaves the epoch's accumulator pending for a later retry rather than
-        # dropping the collators' claim, so the failure mode of getting this
-        # wrong is a delayed payment, not a lost one.
 
     def test_collators_earn_nothing_else_so_the_comparison_is_like_for_like(self):
         """The premise that makes referendum #1870 comparable rather than loose.

@@ -2636,11 +2636,19 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             // as a Polkadot system parachain's collator does, so in both cases
             // the treasury line IS the whole compensation.
             //
-            // The unsafe direction is UNDER-paying, and it is bounded: the
-            // payout is fail-soft (an underfunded line leaves the epoch's
-            // accumulator pending rather than dropping the claim), the launch
-            // set is invulnerable, and recovery is a x2 PARAM amendment with a
-            // 1-epoch cooldown — one step to 1,000, two to the old 2,000.
+            // The unsafe direction is UNDER-paying. What bounds it is the
+            // 2.36x margin, the invulnerable launch set (the market rate does
+            // not bind while it is the whole set), recovery at x2 per PARAM
+            // amendment on a 1-epoch cooldown, and the 13 §1 gate requiring
+            // re-verification against operator quotes before the Phase-4+
+            // permissionless set is armed.
+            //
+            // NOT the fail-soft payout, and an earlier revision of this comment
+            // wrongly cited it. `collator_compensation` computes the pool from
+            // THIS value; a successful payout clears the accumulator. Fail-soft
+            // catches an underfunded *line* (the claim survives for a retry) —
+            // an underpriced *row* pays out in full and retains no unpaid
+            // difference, so underpricing degrades to collators leaving.
             // Derivation and margin are machine-checked in the reference model
             // (`sustainability.collator_anchor_multiple`).
             ParamValue::Balance(500_000_000),
