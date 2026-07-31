@@ -243,6 +243,14 @@ Strict mode is expected to fail today:
   `PLAN.md`; SQ-172/176/178 themselves were resolved by the B1b completion)
   remain release-blocking — enforced by
   the manifest's `release_blockers` row `b1b.compliance`;
+- `collator.comp_epoch` ships at its 500 registry minimum against an anchor
+  (Polkadot OpenGov referendum #1870) that prices operators already running
+  Polkadot infrastructure — a *marginal* cost this chain's operators may not
+  share. 13 §1 requires quotes obtained for this chain before production launch
+  and before each enlargement of the collator set, the invulnerable launch set
+  included; enforced by the manifest's `release_blockers` row
+  `collator.rate_unverified` and cleared by recording the quotes in `PLAN.md`'s
+  Verification log (SQ-536);
 - The reserve-health sink, production dispatcher and authenticated response
   route are wired (SQ-205/SQ-380). SQ-195's day-resolved welfare input remains
   open under the A12-owned `welfare.reserve_daily_unbound` blocker. Separately,
