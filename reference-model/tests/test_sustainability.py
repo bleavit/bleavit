@@ -16,6 +16,12 @@ from decimal import Decimal
 import unittest
 
 from bleavit_reference_model.sustainability import (
+    CORETIME_PERIOD_DAYS,
+    CORETIME_RENEWAL_CAP_KSM,
+    coretime_annual_escalation,
+    coretime_cost_after_years,
+    coretime_renewals_per_year,
+    runway_years_with_escalating_line,
     BASELINE_V_MIN,
     GENESIS_ENDOWMENT,
     NAV_FLOOR_CODE,
@@ -700,6 +706,82 @@ class OperatingPointTests(unittest.TestCase):
         self.assertLess(runway_years(pass1, NAV_FLOOR_META), D(25))
         # ...and the reseed clears it, at ZERO assumed revenue.
         self.assertGreater(runway_years(shipped, NAV_FLOOR_META), D(25))
+
+
+class CoretimeEscalationTests(unittest.TestCase):
+    """SQ-538. The cost line 08 §10.1 excludes, and why excluding it flatters.
+
+    §10.1 leaves `ops.coretime` out of the table because the `broker.renew`
+    price is an off-chain quote and "the renewal *period* is not stated
+    anywhere in this document set". The second half is resolvable -- the period
+    is a property of Polkadot, not a Bleavit choice -- and resolving it exposes
+    that the level was never the interesting quantity. The growth rate is.
+    """
+
+    def test_the_renewal_period_is_a_platform_constant_not_a_missing_value(self):
+        """28 days, so 13.0446 renewals a year. Not 12: a period is not a month."""
+        self.assertEqual(CORETIME_PERIOD_DAYS, D(28))
+        self.assertLess(abs(coretime_renewals_per_year() - D("13.0446")), D("0.0001"))
+        # The off-by-8.7% a reader gets from assuming monthly renewals.
+        self.assertGreater(coretime_renewals_per_year(), D(12))
+
+    def test_the_rent_control_compounds_into_a_47_percent_annual_ceiling(self):
+        """The finding. A 3 %/period cap is not a 3 % problem.
+
+        Bulk renewals are price-capped, which reads as protection and per
+        period is. Applied 13.04 times a year it is +47 %, and 08 §10.5's
+        runway table holds `C` constant, so nothing there accounts for it.
+        """
+        self.assertLess(
+            abs(coretime_annual_escalation(CORETIME_RENEWAL_CAP_KSM) - D("0.470")), D("0.001")
+        )
+        # Bracketed rather than pinned to one cap, because Polkadot's own value
+        # is [VERIFY] -- the 3 % is Kusama's configuration.
+        for cap, expected in ((D("0.01"), D("0.139")), (D("0.02"), D("0.295"))):
+            with self.subTest(cap=str(cap)):
+                self.assertLess(abs(coretime_annual_escalation(cap) - expected), D("0.001"))
+        # Monotone in the cap, and strictly worse than the naive reading of it.
+        self.assertGreater(coretime_annual_escalation(D("0.03")), D("0.03") * D(13))
+
+    def test_a_small_coretime_line_becomes_the_largest_line_within_a_decade(self):
+        """Why the level being small today is not reassurance."""
+        start = D(4_000)
+        ten = coretime_cost_after_years(start, D(10))
+        self.assertGreater(ten, cost_base().annual)  # exceeds the WHOLE base
+        self.assertLess(abs(ten - D(189_073)), D(50))
+
+    def test_the_25_year_goal_does_not_survive_an_escalating_coretime_line(self):
+        """The correction this milestone owes its own headline.
+
+        SQ-536 reported 34.3 years to the binding arming floor at zero revenue,
+        computed against a constant `C`. Adding the one unavoidable external
+        cost, with the escalation its own price cap permits, more than halves
+        it -- and it does so at a starting level small enough that §10.1 felt
+        able to omit the line entirely.
+        """
+        c = cost_base().annual
+        constant = runway_years(c, NAV_FLOOR_META)
+        self.assertGreater(constant, D(25))
+
+        for initial, expected in ((D(4_000), D("14.3")), (D(25_000), D("10.1"))):
+            with self.subTest(initial=str(initial)):
+                escalating = runway_years_with_escalating_line(c, NAV_FLOOR_META, initial)
+                self.assertLess(abs(escalating - expected), D("0.15"))
+                self.assertLess(escalating, D(25))
+                self.assertLess(escalating, constant / D(2))
+
+    def test_the_escalation_is_a_ceiling_and_the_model_says_so(self):
+        """Stated as a bound, because claiming it as a forecast would be wrong.
+
+        Renewals escalate only while the market price rises; the cap limits how
+        fast a renewal may track it, it does not push the price up. A zero cap
+        must therefore reproduce the constant-`C` answer exactly, which is the
+        check that this model adds a bound rather than an assumption.
+        """
+        self.assertEqual(coretime_annual_escalation(D(0)), D(0))
+        c = cost_base().annual
+        flat = runway_years_with_escalating_line(c, NAV_FLOOR_META, D(0), per_period_cap=D(0))
+        self.assertLess(abs(flat - runway_years(c, NAV_FLOOR_META)), D("1.0"))
 
 
 class CollatorAnchorTests(unittest.TestCase):

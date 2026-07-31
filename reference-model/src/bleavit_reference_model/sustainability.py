@@ -115,6 +115,32 @@ NAV_FLOOR_META = Decimal(21_256_533)
 # 08 §2.5 funding target.
 GENESIS_ENDOWMENT = Decimal(25_000_000)
 
+# ---------------------------------------------------------------------------
+# Coretime (SQ-538, milestone E6).
+#
+# 08 §10.1 excludes `ops.coretime` from its table on the grounds that the
+# `broker.renew` price is an off-chain quote AND that "the renewal *period* is
+# not stated anywhere in this document set". The second half is resolvable: the
+# period is not a Bleavit choice at all, it is a property of the platform.
+# Polkadot bulk coretime is sold in 28-day periods (Polkadot Wiki, verified
+# 2026-07-31), so a year carries 365.25/28 = 13.0446 renewals.
+#
+# The load-bearing fact is NOT the level, though — it is the growth rate. Bulk
+# renewals are price-capped ("rent-controlled"): a renewal pays at most a fixed
+# percentage more than the previous one. That reads as protection, and per
+# period it is. Compounded over 13.04 renewals a year it is not: Kusama's
+# configured 3 %/period is +47 %/yr, which no runway figure in 08 §10.5
+# accounts for, because every one of them holds `C` constant.
+#
+# The cap value for Polkadot is [VERIFY] -- the wiki records 3 % for Kusama and
+# says Polkadot's was still under discussion -- so the consumer takes it as a
+# parameter and the tests bracket it rather than picking one.
+# ---------------------------------------------------------------------------
+
+CORETIME_PERIOD_DAYS = Decimal(28)
+# Kusama's configured per-renewal cap. [VERIFY the Polkadot value].
+CORETIME_RENEWAL_CAP_KSM = Decimal("0.03")
+
 # 13 §1 dec.v_min class floors and pol.b class floors.
 DEC_V_MIN = {
     "param": Decimal(100_000),
@@ -481,6 +507,88 @@ def runway_years(
         if headroom <= 0:
             return Decimal(0)
         return +(headroom / net_burn)
+
+
+# ---------------------------------------------------------------------------
+# Coretime escalation (SQ-538)
+# ---------------------------------------------------------------------------
+
+
+def coretime_renewals_per_year() -> Decimal:
+    """13.0446. The period is a platform constant, not a Bleavit choice."""
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        return +(DAYS_PER_YEAR / CORETIME_PERIOD_DAYS)
+
+
+def _pow(base: Decimal, exponent: Decimal) -> Decimal:
+    """Decimal power for non-integer exponents (`**` rejects Decimal exponents)."""
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        return +((base.ln() * exponent).exp())
+
+
+def coretime_annual_escalation(per_period_cap: Decimal = CORETIME_RENEWAL_CAP_KSM) -> Decimal:
+    """The per-period renewal cap compounded over a year of renewals.
+
+    This is the number the "rent-controlled renewal" framing hides. A cap that
+    is plainly modest per period -- 3 % -- is +47 %/yr once it applies 13.04
+    times, and nothing in 08 §10.5 accounts for a cost line that can do that.
+
+    It is a CEILING, not a forecast: renewals only escalate while the market
+    price is rising, and the cap limits how fast a renewal may track it. The
+    point is that the ceiling is unbounded over multiple years, so a runway
+    computed against a constant `C` is not conservative with respect to it.
+    """
+    return _pow(Decimal(1) + per_period_cap, coretime_renewals_per_year()) - Decimal(1)
+
+
+def coretime_cost_after_years(
+    initial_annual: Decimal,
+    years: Decimal,
+    per_period_cap: Decimal = CORETIME_RENEWAL_CAP_KSM,
+) -> Decimal:
+    """`initial_annual` escalated at the compounded cap for `years`."""
+    growth = Decimal(1) + coretime_annual_escalation(per_period_cap)
+    return _pow(growth, years) * initial_annual
+
+
+def runway_years_with_escalating_line(
+    annual_cost: Decimal,
+    floor: Decimal,
+    escalating_initial: Decimal,
+    per_period_cap: Decimal = CORETIME_RENEWAL_CAP_KSM,
+    annual_revenue: Decimal = Decimal(0),
+    endowment: Decimal = GENESIS_ENDOWMENT,
+    max_years: int = 400,
+) -> Decimal:
+    """Runway when one cost line escalates rather than holding constant.
+
+    `annual_cost` is the constant remainder of the base; `escalating_initial`
+    is the year-0 size of the escalating line, which is added on top and grown
+    each year. Integrates year by year rather than solving in closed form,
+    because the point is to show the shape and the shape is not linear.
+
+    Returns INFINITE if revenue covers the total in every year up to
+    `max_years` -- which cannot happen for a positive cap, since the escalating
+    line eventually exceeds any fixed revenue.
+    """
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        growth = Decimal(1) + coretime_annual_escalation(per_period_cap)
+        balance = endowment
+        line = escalating_initial
+        for year in range(max_years):
+            burn = annual_cost + line - annual_revenue
+            if burn <= 0:
+                line *= growth
+                continue
+            if balance - burn <= floor:
+                headroom = balance - floor
+                return +(Decimal(year) + (headroom / burn if burn > 0 else Decimal(0)))
+            balance -= burn
+            line *= growth
+        return INFINITE
 
 
 def cost_at_occupancy(occupied: Decimal, params: CostParams | None = None) -> Decimal:
