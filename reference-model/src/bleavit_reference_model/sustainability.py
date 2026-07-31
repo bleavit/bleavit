@@ -401,10 +401,22 @@ def cost_at_occupancy(occupied: Decimal, params: CostParams | None = None) -> De
         full = cost_base(p)
         share = occupied / p.epoch_slots
         # 08 §10.1 sizes the POL row for a full PARAM slate PLUS the Baseline.
-        # 08 §10.5 gives the Baseline's own cash as pol.b_baseline*ln2, which is
-        # exactly PARAM's per-proposal figure, so the row is 6 equal parts: five
-        # scaling proposals and one standing Baseline.
-        pol_baseline = full.pol_divergence / Decimal(6)
+        # Realized divergence loss is `b*[ln2 - H(p)]` per book, hence linear in
+        # `b`, so the row splits by total `b` and NOT into equal per-proposal
+        # parts. A PARAM proposal carries `2*pol.b + 4*pol.b_gate` = 50,000
+        # against the Baseline's `pol.b_baseline` = 25,000, so at five slots the
+        # Baseline is 25,000/275,000 = 1/11 of the row.
+        #
+        # An earlier revision used 1/6, from 08 §10.5's observation that the
+        # Baseline's cash equals PARAM's per-proposal cash. That is a different
+        # quantity -- §10.5 measures custody AT RISK, where a branched proposal
+        # contributes only half its commitment because one `split` funds a
+        # branch pair, and the coincidence there does not carry over to a loss
+        # that is linear in `b`.
+        b_per_proposal = POL_B["param"] * Decimal(2) + POL_B_GATE * Decimal(4)
+        b_full_slate = b_per_proposal * p.epoch_slots
+        baseline_share = POL_B_BASELINE / (b_full_slate + POL_B_BASELINE)
+        pol_baseline = full.pol_divergence * baseline_share
         pol_proposals = (full.pol_divergence - pol_baseline) * share
         return +(
             full.collators

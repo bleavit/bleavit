@@ -22,6 +22,9 @@ from bleavit_reference_model.sustainability import (
     NAV_FLOOR_META,
     NAV_FLOOR_PARAM,
     OBS_INTERVAL_MAX,
+    POL_B,
+    POL_B_BASELINE,
+    POL_B_GATE,
     STALE_GAP_BLOCKS,
     CostParams,
     amendment_steps,
@@ -490,6 +493,30 @@ class OperatingPointTests(unittest.TestCase):
         self.assertLess(cost_at_occupancy(D(1), p), full)
         # Standing lines dominate, so cost falls far more slowly than revenue.
         self.assertGreater(cost_at_occupancy(D(1), p) / full, D("0.75"))
+
+    def test_the_pol_row_splits_by_b_not_into_equal_proposal_parts(self):
+        """Realized divergence loss is linear in `b`, so the split follows `b`.
+
+        A PARAM proposal carries `2*pol.b + 4*pol.b_gate` = 50,000 against the
+        Baseline's `pol.b_baseline` = 25,000, making the Baseline 1/11 of a
+        five-slot row -- not 1/6.
+
+        The 1/6 reading comes from 08 §10.5, where the Baseline's cash happens
+        to equal PARAM's per-proposal cash. That is a different quantity: §10.5
+        measures custody AT RISK, in which a branched proposal contributes only
+        half its commitment because one `split` funds a branch pair. The
+        coincidence there does not carry to a loss linear in `b`.
+        """
+        p = CostParams()
+        b_per_proposal = POL_B["param"] * D(2) + POL_B_GATE * D(4)
+        self.assertEqual(b_per_proposal, D(50_000))
+        self.assertEqual(POL_B_BASELINE, D(25_000))
+        baseline_share = POL_B_BASELINE / (b_per_proposal * p.epoch_slots + POL_B_BASELINE)
+        self.assertEqual(baseline_share, D(1) / D(11))
+
+        # The standing (Baseline-only) POL residue at zero occupancy.
+        standing = cost_at_occupancy(D(0), p) - cost_at_occupancy(D(0), with_levers(pol_divergence_annual=0))
+        self.assertLess(abs(standing - p.pol_divergence_annual / D(11)), D("0.01"))
 
     def test_the_standing_collator_line_decides_whether_one_proposal_suffices(self):
         """The most decision-relevant result in E5, and it is not a value choice.
