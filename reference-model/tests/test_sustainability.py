@@ -794,9 +794,18 @@ class CollatorAnchorTests(unittest.TestCase):
         underpriced *row*: the pool is computed FROM this value, a payout at
         that value succeeds in full, the accumulator is cleared, and no unpaid
         difference is retained. Underpricing degrades to collators leaving, not
-        to a delayed payment. The real protections are the margin asserted
-        above, the invulnerable launch set, this recovery path, and the 13 §1
-        gate on the Phase-4+ permissionless transition.
+        to a delayed payment.
+
+        Nor does invulnerability of the launch set, which an even earlier
+        revision also cited: that fixes an account's *selection* status and
+        does not oblige anyone to keep authoring at a rate they will not
+        accept -- and the launch operators are the most likely to be standing
+        up infrastructure for this chain, which is precisely the case the
+        marginal-cost anchor does not cover.
+
+        The real protections are the margin asserted above, this recovery
+        path, and the 13 §1 gate requiring operator quotes for THIS chain
+        before production launch and before each enlargement of the set.
         """
         self.assertEqual(multiplicative_amendment_steps(D(500), D(1_000), D(2)), 1)
         self.assertEqual(multiplicative_amendment_steps(D(500), D(2_000), D(2)), 2)
