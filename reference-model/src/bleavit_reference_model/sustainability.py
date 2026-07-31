@@ -380,6 +380,33 @@ def runway_years(
         return +(headroom / net_burn)
 
 
+def break_even_slots(
+    annual_cost: Decimal,
+    tau: Decimal,
+    proposal_class: str = "param",
+    saturated: bool = False,
+    max_slots: int = 12,
+) -> int | None:
+    """Fewest OCCUPIED proposal slots per epoch at which `R >= C`.
+
+    Slate occupancy is a separate axis from book depth and conflating them
+    overstates self-funding badly. "A five-slot PARAM slate at the `dec.v_min`
+    floor" is the minimum *depth* at which five proposals are decision-grade --
+    it is not the minimum *activity* at which the chain decides anything, which
+    is ONE proposal. Held capital scales with occupancy, so a chain deciding one
+    proposal per epoch earns roughly a fifth of the five-slot figure.
+
+    Returns `None` when no occupancy up to `max_slots` covers the cost base.
+    `epoch.slots` defaults to 5 and its registry maximum is 12 (13 §1), so a
+    `None` at 12 means no lawful occupancy covers it at this `tau`.
+    """
+    for slots in range(1, max_slots + 1):
+        held = annual_held_capital(proposal_class, Decimal(slots), saturated)
+        if revenue(held, tau) >= annual_cost:
+            return slots
+    return None
+
+
 @dataclass(frozen=True)
 class OperatingPoint:
     """A candidate parameter set together with everything it implies."""

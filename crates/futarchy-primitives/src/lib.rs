@@ -1613,14 +1613,40 @@ pub mod kernel {
     /// floor to uUSDC against the claimant (R-7) = 85
     /// ```
     ///
-    /// The 0.05 USDC/VIT factor is 13 §1 / 08 §9's documented placeholder
-    /// reference, so **the `[VERIFY at TGE]` tag stays**: the absolute USDC
-    /// figure still moves with the launch price. What is fixed is the thing that
-    /// was actually broken — the *ratio* to the real fee. At 30,000 the seeded
-    /// rebate was ~1,058x the fee it claimed to be 3x; at 85 it is 3x, at any
-    /// price, because both numerator and denominator scale with the same rate.
+    /// **The ratio is NOT preserved across VIT prices, and an earlier revision
+    /// of this comment wrongly said it was** (corrected 2026-07-31; the same
+    /// error was raised independently by review). The crank fee is fixed in
+    /// **VIT** by weight — 0.0017 VIT, invariant to price — while this basis and
+    /// the `keeper.rebate` row `genesis_params()` derives from it are **stored
+    /// USDC** values. Only one side moves when VIT reprices:
     ///
-    /// For 30,000 to have been right, VIT would have to trade at ~17.6 USDC.
+    /// ```text
+    /// fee.vit_usdc_rate     crank fee (USDC)    keeper.rebate / fee
+    ///   0.0125 (1/4x)          0.0000213              12.0x
+    ///   0.05   (derivation)    0.0000851               3.0x
+    ///   0.20   (4x)            0.000340                0.75x
+    ///   1.00   (20x)           0.00170                 0.15x
+    /// ```
+    ///
+    /// **The unsafe direction is VIT appreciation:** above ~4x the derivation
+    /// price the rebate falls below the fee itself and cranking becomes
+    /// loss-making, which is the silent A-1 failure 08 §6.2 describes. Nothing
+    /// in code updates or screens the rebate when `fee.vit_usdc` changes, and
+    /// 13 §1 permits a 10x move of that rate.
+    ///
+    /// The `[VERIFY at TGE]` tag is therefore **load-bearing, not narrowed**:
+    /// this basis MUST be re-derived at the launch `fee.vit_usdc_rate` before
+    /// mainnet, and material later rate moves need a PARAM amendment of
+    /// `keeper.rebate` to track them. The 13 §1 [1x, 10x] envelope bounds the
+    /// exposure to roughly a 10x price move; beyond that this constant itself
+    /// must change, which is a CODE change. Enforcing the coupling at the
+    /// amendment boundary (the shape 13 rule 7 uses for
+    /// `ledger.redeem_fee` <= `mkt.fee`) is SQ-534.
+    ///
+    /// What the correction *did* fix is orthogonal and holds: the derivation is
+    /// anchored to a **measured** weight instead of an invented fee, so
+    /// re-deriving at any price now gives the right answer. Before, no price
+    /// did — for 30,000 to have been right VIT would trade at ~17.6 USDC.
     pub const KEEPER_REBATE_FEE_BASIS_USDC: u128 = 85;
 }
 

@@ -37,6 +37,7 @@ from bleavit_reference_model.sustainability import (
     multiplicative_amendment_steps,
     quiet_epoch_cost,
     revenue,
+    break_even_slots,
     revenue_rate,
     runway_years,
     pre_e5_params,
@@ -416,32 +417,58 @@ class OperatingPointTests(unittest.TestCase):
         self.assertGreater(runway_years(c, NAV_FLOOR_CODE), D(25))
         self.assertGreater(runway_years(c, NAV_FLOOR_PARAM), D(80))
 
-    def test_the_shipped_point_is_self_funding_at_the_measured_turnover(self):
-        """Where the shipped operating point actually becomes indefinite.
+    def test_self_funding_is_conditional_on_slate_occupancy_not_just_depth(self):
+        """The correction a Codex review forced, and the claim it replaces.
 
-        08 §10.2 brackets the turnover ratio with three readings from the
-        15 §4.9 Phase-0 population: 5.8 median all-book, and ~3.0 once the
-        47.9 % round-trip churn the 04 §7a contest measure nets out is excluded.
-        §10.2 uses 3 as the central case *because* it is the conservative one.
+        E5 originally reported the shipped point as "self-funding at minimum
+        viable activity", taking a FIVE-slot PARAM slate at the `dec.v_min`
+        floor as that minimum. That conflates two axes. Five slots at the floor
+        is the minimum *depth* at which five proposals are decision-grade; the
+        minimum *activity* at which the chain decides anything is ONE proposal,
+        and held capital scales with occupancy.
 
-        At minimum viable activity the shipped point breaks even at tau = 3.558,
-        so it is short at the churn-excluded 3.0 and covered at the measured
-        median 5.8. Both are asserted, because reporting only the favourable
-        one would be exactly the selective reading 08 §10.2's own provenance
-        note warns about -- those figures come from an ad-hoc instrumented run,
-        not the committed Merkle-bound artifact (SQ-506).
+        At one occupied slot the chain earns ~70.3k against a 239.7k cost base
+        and does not self-fund under either cost base. The unbounded-runway
+        conclusion therefore depends on sustained slate utilisation, which is a
+        demand assumption this repository has no evidence for (SQ-506), not on
+        decision-grade depth alone.
         """
-        c = cost_base(CostParams()).annual
-        minimum_activity = annual_held_capital("param", D(5), saturated=False)
+        shipped = cost_base(CostParams()).annual
+        lowered = cost_base(with_levers(collator_comp_epoch=500)).annual
 
-        # Conservative, churn-excluded: short, and by how much.
-        self.assertLess(revenue(minimum_activity, D(3)), c)
-        self.assertLess(c - revenue(minimum_activity, D(3)), D(35_000))
+        one_slot = annual_held_capital("param", D(1), saturated=False)
+        self.assertLess(abs(one_slot - D(8_522_500)), D(1))
+        self.assertLess(abs(revenue(one_slot, D(3)) - D(70_311)), D(2))
+        self.assertLess(revenue(one_slot, D(3)), lowered)
+        self.assertLess(revenue(one_slot, D(3)), shipped)
 
-        # Measured median all-book: covered, and the runway is unbounded.
-        self.assertGreater(revenue(minimum_activity, D("5.8")), c)
+        # Where the crossover actually sits, in slots rather than in prose.
+        # At the shipped cost base and the conservative tau it needs SIX
+        # occupied slots -- above `epoch.slots` = 5, so unreachable at the
+        # default slate size without a governance change to that key. That is
+        # the sharpest honest form of the correction: not "self-funding at
+        # minimum activity" but "not self-funding at any lawful occupancy at
+        # this turnover".
+        self.assertEqual(break_even_slots(shipped, D(3)), 6)
+        self.assertGreater(D(6), CostParams().epoch_slots)
+        # The collator lever brings it inside the default slate...
+        self.assertEqual(break_even_slots(lowered, D(3)), 3)
+        # ...and so does the measured median turnover, without that lever.
+        self.assertEqual(break_even_slots(shipped, D("5.8")), 3)
+
+    def test_the_shipped_point_needs_both_occupancy_and_turnover(self):
+        """Both conditions stated together, since either alone is misleading."""
+        shipped = cost_base(CostParams()).annual
+        full_slate = annual_held_capital("param", D(5), saturated=False)
+
+        # A full floor slate at the conservative churn-excluded tau is SHORT.
+        self.assertLess(revenue(full_slate, D(3)), shipped)
+        self.assertLess(shipped - revenue(full_slate, D(3)), D(35_000))
+
+        # It covers at the measured median all-book turnover.
+        self.assertGreater(revenue(full_slate, D("5.8")), shipped)
         self.assertTrue(
-            runway_years(c, NAV_FLOOR_CODE, revenue(minimum_activity, D("5.8"))).is_infinite()
+            runway_years(shipped, NAV_FLOOR_CODE, revenue(full_slate, D("5.8"))).is_infinite()
         )
 
     def test_the_collator_lever_is_available_but_not_taken(self):

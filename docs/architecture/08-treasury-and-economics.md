@@ -358,7 +358,22 @@ So `keeper.rebate` at 3× is **0.000255 USDC**, not 0.09 — the seeded value wa
 
 **Two consequences, and neither is a policy change.** The decision-critical load falls to `133,920 × 0.000255` ≈ **34 USDC/epoch** and the full trading window to ≈ **148 USDC/epoch**; §10.1's two keeper lines fall from 908,408 USDC/yr — 79.3% of the entire annual cost base — to ≈ 2,574. And `keeper.budget_epoch` = 12,000 now over-provisions the decision-critical load by ≈ 350×, which is recorded rather than corrected here: the budget is a **ceiling, not a spend** (§1.1), so an over-large one books no cost, but it also means the meter cannot bind and provides no real protection. Right-sizing it is blocked on the kernel floor `keeper.budget_epoch` ≥ 6,000 (13 §1), itself now ≈ 175× the full-window demand; moving a kernel floor is a CODE change and is raised as **SQ-532** rather than taken here.
 
-**The `[VERIFY]` tag stays, and what it now covers is narrower.** The 0.05 USDC/VIT factor is §9's placeholder pending TGE pricing, so the absolute USDC figure still moves with the launch price. What is no longer uncertain is the **ratio**: rebate and fee scale with the same rate, so 3× stays 3× at any price. The tag now covers the price, not the multiple.
+**The `[VERIFY]` tag stays, and it is load-bearing — the rebate does NOT auto-track the price (normative; corrected 2026-07-31, before launch).** An earlier revision of this paragraph claimed the tag had narrowed to "the price, not the multiple", on the reasoning that rebate and fee scale together. **They do not.** The fee is fixed in **VIT** by weight (0.0017 VIT per sanctioned crank, invariant to price); `keeper.rebate` is a **stored USDC parameter**. Only one side moves when VIT reprices:
+
+| `fee.vit_usdc_rate` | crank fee (USDC) | `keeper.rebate` ÷ fee |
+|---|---|---|
+| 0.0125 (¼ × placeholder) | 0.0000213 | 12.0× |
+| **0.05 (the derivation price)** | **0.0000851** | **3.0×** |
+| 0.20 (4 × placeholder) | 0.000340 | **0.75×** |
+| 1.00 (20 × placeholder) | 0.00170 | 0.15× |
+
+**The unsafe direction is VIT appreciation.** Above ≈ 4× the derivation price the rebate falls below the fee itself, cranking becomes loss-making, and A-1 fails silently — the exact failure §6.2 says the 3,000 USDC budget used to cause. Three consequences are normative:
+
+1. `keeper.rebate` **MUST be re-derived at the launch `fee.vit_usdc_rate`**, not merely inherited. That is what the `[VERIFY]` tag now demands, and it is a launch blocker rather than a nicety.
+2. The 13 §1 envelope bounds the exposure: the row admits [1×, 10×] of the basis, so the registry can absorb price moves up to ≈ 10× before no admissible value restores a 1× rebate. Beyond that the **basis constant itself** must move, which is a CODE change.
+3. The row is PARAM with a 1-epoch cooldown, so governance can track material price moves — but nothing does this automatically, and the monitoring obligation belongs with the keeper-inactivity alarm of [12](12-release-and-operations.md) §6.3.
+
+What the SQ-531 correction did fix is orthogonal and still holds: the derivation is now anchored to a **measured** weight instead of an invented fee, so re-deriving at any price gives the right answer. Before, no price gave the right answer.
 
 **Separately, the budget never covered the load it claimed to (SQ-527).** At the superseded rebate the derivation gave 12,052.80 USDC/epoch and the budget was set to 12,000 — 52.80 short, 0.44%. §6.3 makes exhaustion a **latch**: once `KeeperBudgetExhausted` fires, no further metered rebate is paid for the remainder of that epoch. So on a worst-case (zero-organic-trade) epoch the meter exhausted before the decision-critical load completed, every epoch, and the sentence claiming otherwise was false. The corrected basis makes the shortfall moot — 34 USDC against a 12,000 budget — but the claim is corrected rather than quietly overtaken.
 
@@ -448,7 +463,17 @@ This section states what it costs to run Bleavit for a year, what the protocol e
 
 **The four numbers this section is accountable for**, and the one honest headline: **Bleavit is not self-funding at launch, and cannot be.** Launch volume is zero by construction — Phase-4 arms PARAM only, and a proposal earns the protocol nothing until traders show up. Self-funding is a maturity property, and the endowment is the bridge to it. Any statement that the protocol funds itself from block one is false and MUST NOT be made.
 
-**What changed on 2026-07-30 (milestone E5) is how far away maturity is, not whether launch is self-funding.** With the SQ-531 fee-basis correction the crossover falls from held capital of 138.9M to **29.1M** at the central τ = 3 — i.e. from *above* a saturated five-slot TREASURY slate to **1.15× a five-slot PARAM slate held at the bare `dec.v_min` floor**, which is the least activity at which the chain decides anything at all. With `collator.comp_epoch` additionally at its 500 registry minimum the crossover is **13.2M**, comfortably *below* that floor slate, so revenue covers the cost base at minimum viable activity and the runway is unbounded rather than merely long. None of that makes launch self-funding, because launch activity is zero, not minimal.
+**What changed on 2026-07-30 (milestone E5) is how far away maturity is, not whether launch is self-funding.** With the SQ-531 fee-basis correction the crossover falls from held capital of 138.9M to **29.1M** at the central τ = 3, and to **13.2M** with `collator.comp_epoch` additionally at its 500 registry minimum.
+
+**Self-funding is conditional on slate OCCUPANCY, not on depth alone, and an earlier revision of this paragraph conflated the two (normative correction; 2026-07-31, raised by review).** That revision called a five-slot PARAM slate at the `dec.v_min` floor "the least activity at which the chain decides anything at all" and concluded the runway was unbounded. Five slots at the floor is the minimum **depth** at which five proposals are decision-grade; the minimum **activity** is *one* proposal, and held capital scales with occupancy. At the central τ = 3:
+
+| Occupied PARAM slots (at the `dec.v_min` floor) | `H`/yr | `R` at τ = 3 | vs `C` = 239,728 | vs `C` = 109,281 |
+|---|---|---|---|---|
+| 1 | 8,522,500 | 70,311 | short 169,417 | short 38,970 |
+| 3 | 16,871,071 | 139,186 | short 100,541 | **covers** |
+| 5 (`epoch.slots` default, full slate) | 25,219,643 | 208,062 | short 31,665 | **covers** |
+
+So at the shipped cost base and τ = 3 the break-even is **six** occupied slots — above `epoch.slots` = 5, hence not reachable at the default slate size at all. It is reached either by the `collator.comp_epoch` lever (3 slots) or at the measured median all-book τ = 5.8 (3 slots). **The unbounded-runway conclusion therefore rests on sustained slate utilisation**, which is a demand assumption nothing in this repository evidences (§10.2's provenance note; SQ-506) — not on decision-grade depth, which the protocol does enforce. None of it makes launch self-funding either, because launch activity is zero rather than minimal.
 
 **The whole reduction is arithmetic, not austerity.** No service level, mechanism or commitment was reduced to reach it: 79 % of the former cost base was a single unmeasured placeholder (§6.2), and the remainder moves on one PARAM key whose registry minimum was always available. This section is therefore materially more optimistic than it was, and the reason it may be believed is that every figure in it is now re-derived by the reference model on every CI run (15 §4.4) rather than hand-computed — which is precisely how the two figures corrected earlier the same day came to be wrong.
 
