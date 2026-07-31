@@ -295,12 +295,46 @@ impl frame_support::traits::EnsureOriginWithArg<RuntimeOrigin, AssetId>
     }
 }
 
+parameter_types! {
+    /// The identity fee multiplier (SQ-528). `FixedU128::DIV` is the inner
+    /// representation of 1.0, so the weight term is priced at par.
+    pub FeeMultiplierOne: pallet_transaction_payment::Multiplier =
+        pallet_transaction_payment::Multiplier::from_u32(1);
+}
+
 impl pallet_transaction_payment::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type OnChargeTransaction = pallet_transaction_payment::FungibleAdapter<Balances, ()>;
     type WeightToFee = IdentityFee<Balance>;
     type LengthToFee = IdentityFee<Balance>;
-    type FeeMultiplierUpdate = ();
+    // SQ-528. This was `()`, which does NOT mean "leave the multiplier alone".
+    // `FeeMultiplierUpdate` requires `Convert<Multiplier, Multiplier>`; the
+    // pallet implements that only for `TargetedFeeAdjustment` and
+    // `ConstFeeMultiplier`, so `()` fell through to sp-runtime's blanket
+    // `impl<A, B: Default> Convert<A, B> for ()` and returned
+    // `Multiplier::default()` — which for `FixedU128` is **0**, not 1. The
+    // pallet's `on_finalize` runs unconditionally, so genesis's multiplier of 1
+    // survived exactly one block and then pinned to zero forever.
+    //
+    // `compute_fee_raw` multiplies only the weight term
+    // (`base_fee + len_fee + multiplier * weight_to_fee(weight)`), so at zero a
+    // 185 Gps `settle_cohort` cost precisely what an empty call cost: on a
+    // PoV-bound parachain, block space was free. It also silently falsified
+    // every fee-derived figure in 08 §6 and §10, including the `keeper.rebate`
+    // basis.
+    //
+    // Fixed at 1.0 rather than adopting a congestion-responsive multiplier
+    // (`SlowAdjustingFeeUpdate`): 1.0 is exactly the model 08 §9 documents —
+    // fee proportional to weight, with `fee.vit_usdc_rate`'s bounded
+    // [0.1x, 10x] envelope as the only governed variation. Congestion pricing
+    // would add a second, unbudgeted source of fee movement that no spec
+    // section owns and that the keeper-rebate derivation would have to track;
+    // it is a policy addition, not a defect fix, and is raised separately as
+    // SQ-529. Regression: `the_transaction_fee_multiplier_survives_a_block_boundary`
+    // and `a_heavy_call_costs_more_than_a_light_one_after_a_block_boundary`,
+    // both of which assert ACROSS a block boundary — the pre-existing
+    // single-block smoke test structurally could not see this.
+    type FeeMultiplierUpdate = pallet_transaction_payment::ConstFeeMultiplier<FeeMultiplierOne>;
     type OperationalFeeMultiplier = ConstU8<5>;
     type WeightInfo = ();
 }

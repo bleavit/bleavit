@@ -20695,3 +20695,162 @@ fn install_attested_spec(version: u16, delta_s_max_bps: u32) {
         pallet_welfare::BoundedSpecSet::try_from(vec![spec]).expect("one spec is bounded"),
     );
 }
+
+/// SQ-528. `FeeMultiplierUpdate = ()` collapses the fee multiplier to ZERO at
+/// the first `on_finalize`, after which transaction weight is not priced at all.
+///
+/// `pallet_transaction_payment::Config::FeeMultiplierUpdate` requires
+/// `Convert<Multiplier, Multiplier>`. The pallet supplies that impl only for
+/// `TargetedFeeAdjustment` and `ConstFeeMultiplier`; `()` falls through to
+/// sp-runtime's blanket `impl<A, B: Default> Convert<A, B> for ()`, which
+/// returns `Default::default()` — and `Multiplier = FixedU128` defaults to 0,
+/// not 1. The pallet's `on_finalize` then runs unconditionally, so genesis's
+/// `MULTIPLIER_DEFAULT_VALUE = 1` survives exactly one block.
+///
+/// `compute_fee_raw` multiplies ONLY the weight term:
+/// `base_fee + len_fee + multiplier * weight_to_fee(weight)`. At multiplier 0 a
+/// 220 Gps `settle_cohort` therefore costs exactly what an empty call costs.
+/// On a PoV-bound parachain that is a standing denial-of-service subsidy, and
+/// it silently invalidates every fee-derived figure in 08 §6 and §10.
+///
+/// The existing single-block smoke test cannot see this: it dispatches while
+/// the multiplier is still 1 and is zeroed only by its own `on_finalize`. This
+/// test therefore asserts across a block boundary, which is the whole point.
+#[test]
+fn the_transaction_fee_multiplier_survives_a_block_boundary() {
+    use pallet_transaction_payment::Multiplier;
+
+    development_ext().execute_with(|| {
+        assert_eq!(
+            pallet_transaction_payment::NextFeeMultiplier::<Runtime>::get(),
+            Multiplier::from_u32(1),
+            "genesis seeds the multiplier at 1",
+        );
+
+        // One block boundary is all it takes. Only the pallet under test is
+        // finalized: `AllPalletsWithSystem` would trip pallet-timestamp's
+        // "must be updated once in the block" assertion, which is unrelated.
+        <TransactionPayment as frame_support::traits::OnFinalize<crate::BlockNumber>>::on_finalize(
+            System::block_number(),
+        );
+
+        assert!(
+            pallet_transaction_payment::NextFeeMultiplier::<Runtime>::get()
+                > Multiplier::from_u32(0),
+            "the fee multiplier collapsed to zero after one block: transaction \
+             weight is no longer priced, so block space is free (SQ-528)",
+        );
+    });
+}
+
+/// SQ-528, the consequence. With the multiplier alive, a heavy call must cost
+/// materially more than a light one. This is the property the multiplier
+/// defect destroys, asserted directly on fees rather than on the multiplier.
+#[test]
+fn a_heavy_call_costs_more_than_a_light_one_after_a_block_boundary() {
+    use frame_support::dispatch::{DispatchClass, DispatchInfo, Pays};
+    use frame_support::weights::Weight;
+
+    development_ext().execute_with(|| {
+        <TransactionPayment as frame_support::traits::OnFinalize<crate::BlockNumber>>::on_finalize(
+            System::block_number(),
+        );
+
+        let info = |ref_time: u64| DispatchInfo {
+            call_weight: Weight::from_parts(ref_time, 0),
+            extension_weight: Weight::zero(),
+            class: DispatchClass::Normal,
+            pays_fee: Pays::Yes,
+        };
+        let light = pallet_transaction_payment::Pallet::<Runtime>::compute_fee(
+            120,
+            &info(1_240_920_000),
+            0,
+        );
+        let heavy = pallet_transaction_payment::Pallet::<Runtime>::compute_fee(
+            120,
+            &info(184_614_730_612),
+            0,
+        );
+        assert!(
+            heavy > light,
+            "a 149x heavier call must not cost the same: light={light} heavy={heavy} \
+             (SQ-528 — weight is unpriced once the multiplier collapses)",
+        );
+    });
+}
+
+/// SQ-531. The seeded `keeper.rebate` must stay tied to the WEIGHT of the crank
+/// whose fee it is a multiple of.
+///
+/// The parameter shipped at 0.09 USDC as "3x the crank fee" against an *assumed*
+/// 0.03 USDC basis that nobody had measured. The real fee is ~0.000085 USDC, so
+/// the seed was ~1,058x the fee it claimed to be 3x of — and both keeper cost
+/// lines, 79.3 % of the annual cost base (08 §10.1), were scaled by that error.
+///
+/// Correcting the number does not stop it recurring: the fee moves whenever
+/// weights are regenerated, and nothing tied the two together. This test is that
+/// tie. It recomputes the fee from the LIVE dispatch info of a real sanctioned
+/// crank and asserts the seeded rebate is within a stated band of the 3x target,
+/// so a weight change large enough to invalidate the basis fails here instead of
+/// silently re-inflating the cost base.
+///
+/// **This is a WEIGHT-drift alarm and nothing more** (scope corrected 2026-07-31
+/// after review). It hardcodes 08 §9's 0.05 USDC/VIT placeholder, so it says
+/// nothing whatever about price: `keeper.rebate` is a stored USDC amount while
+/// the fee is weight-fixed in VIT, so a lawful appreciation of
+/// `fee.vit_usdc_rate` can drive the real ratio below 1.0 while this test keeps
+/// passing against 0.05. Guarding *that* is SQ-534's amendment-boundary screen,
+/// which does not exist yet; do not read this test as covering it.
+///
+/// What it does cover: a weight regeneration that moves the crank's cost far
+/// enough to invalidate the basis. The band is deliberately wide (0.3x-30x the
+/// target) because the rebate is a governed PARAM row with a [1x, 10x] envelope
+/// of its own. What it catches is the failure that actually happened — a basis
+/// wrong by two to four orders of magnitude — which no plausible band lets
+/// through.
+#[test]
+fn the_seeded_keeper_rebate_tracks_the_measured_crank_fee() {
+    use frame_support::dispatch::GetDispatchInfo;
+
+    development_ext().execute_with(|| {
+        <TransactionPayment as frame_support::traits::OnFinalize<crate::BlockNumber>>::on_finalize(
+            System::block_number(),
+        );
+
+        // A real sanctioned crank, weighed exactly as the dispatcher weighs it.
+        let call: RuntimeCall =
+            RuntimeCall::Market(pallet_market::Call::crank_observe { market: 0 });
+        let info = call.get_dispatch_info();
+        let fee_vit = pallet_transaction_payment::Pallet::<Runtime>::compute_fee(
+            120, // representative encoded length
+            &info, 0,
+        );
+
+        // VIT (12 decimals) -> USDC (6 decimals) at 08 §9's documented
+        // placeholder reference of 0.05 USDC/VIT. The absolute figure moves with
+        // the launch price; the RATIO this test guards does not, because rebate
+        // and fee scale together.
+        let fee_uusdc = fee_vit
+            .saturating_mul(50_000) // 0.05 USDC/VIT, expressed in uUSDC per VIT
+            / 1_000_000_000_000u128; // VIT planck per VIT
+
+        let basis = futarchy_primitives::kernel::KEEPER_REBATE_FEE_BASIS_USDC;
+        let seeded_rebate = basis.saturating_mul(3);
+        let target = fee_uusdc.saturating_mul(3);
+
+        assert!(
+            fee_uusdc > 0,
+            "the crank fee must be measurable at all — a zero fee means weight \
+             is unpriced, which is SQ-528 regressing",
+        );
+        assert!(
+            seeded_rebate <= target.saturating_mul(30)
+                && seeded_rebate.saturating_mul(10) >= target.saturating_mul(3),
+            "keeper.rebate has drifted from the fee it is a multiple of: seeded \
+             {seeded_rebate} uUSDC against a 3x target of {target} uUSDC \
+             (measured fee {fee_uusdc} uUSDC, basis constant {basis}). \
+             Re-derive KEEPER_REBATE_FEE_BASIS_USDC per 08 §6.2 (SQ-531).",
+        );
+    });
+}

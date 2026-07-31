@@ -339,7 +339,43 @@ Concurrently trading books = 5 slots × 6 + 1 Baseline = **31** (forecast tradin
 
 ### 6.2 Budget sizing
 
-`keeper.budget_epoch` = **12,000 USDC** (raised from 3,000; *normative value: [13](13-parameters.md)*). Derivation: assumed crank fee ≈ 0.03 USDC **[VERIFY against benchmarked weights + `fee.vit_usdc_rate` at launch]**, `keeper.rebate` ≈ 3× fee ⇒ 133,920 × 0.09 ≈ **12,053 USDC** — the budget covers the full decision-critical load at the 3× profitability multiple (keeper gross margin ≈ 8,000 USDC/epoch over fees paid). The old 3,000 budget covered <25% of decision-critical volume — rational keepers would have stopped mid-window and every decision would have rejected `NotDecisionGrade`.
+`keeper.budget_epoch` = **12,000 USDC** (raised from 3,000; *normative value: [13](13-parameters.md)*). The old 3,000 budget covered <25% of decision-critical volume — rational keepers would have stopped mid-window and every decision would have rejected `NotDecisionGrade`.
+
+**The fee basis is now measured, and the assumed one was wrong by 353× (normative; corrected 2026-07-30, milestone E5, SQ-531).** This section previously derived the budget as `133,920 × 0.09 ≈ 12,053 USDC` from an **assumed** crank fee of ≈ 0.03 USDC, carrying `[VERIFY against benchmarked weights + fee.vit_usdc_rate at launch]`. Every pallet is now benchmarked, so the assumption is testable — and it fails. Priced from the committed generated weights at the multiplier [09](09-execution-upgrades-and-rollout.md)-adjacent SQ-528 restored:
+
+```
+crank_observe call weight       1,240,920,000 ps      (committed weights)
++ TxExtension weight              352,392,000 ps
+WeightToFee = IdentityFee         1 ps -> 1 planck
++ ExtrinsicBaseWeight             108,157,000 planck
++ length fee (~120 B)                     120 planck
+= 1,701,469,120 planck = 0.00170146912 VIT            (VIT: 12 decimals)
+x 0.05 USDC/VIT (§9's documented placeholder reference)
+= 0.000085 USDC per sanctioned crank
+```
+
+So `keeper.rebate` at 3× is **0.000255 USDC**, not 0.09 — the seeded value was ≈ **1,058×** the fee it claimed to be 3× of. For 0.03 to have been right, VIT would have to trade at ≈ 17.6 USDC. The kernel basis constant moves 30,000 → **85 µUSDC** accordingly.
+
+**Two consequences, and neither is a policy change.** The decision-critical load falls to `133,920 × 0.000255` ≈ **34 USDC/epoch** and the full trading window to ≈ **148 USDC/epoch**; §10.1's two keeper lines fall from 908,408 USDC/yr — 79.3% of the entire annual cost base — to ≈ 2,574. And `keeper.budget_epoch` = 12,000 now over-provisions the decision-critical load by ≈ 350×, which is recorded rather than corrected here: the budget is a **ceiling, not a spend** (§1.1), so an over-large one books no cost, but it also means the meter cannot bind and provides no real protection. Right-sizing it is blocked on the kernel floor `keeper.budget_epoch` ≥ 6,000 (13 §1), itself now ≈ 175× the full-window demand; moving a kernel floor is a CODE change and is raised as **SQ-532** rather than taken here.
+
+**The `[VERIFY]` tag stays, and it is load-bearing — the rebate does NOT auto-track the price (normative; corrected 2026-07-31, before launch).** An earlier revision of this paragraph claimed the tag had narrowed to "the price, not the multiple", on the reasoning that rebate and fee scale together. **They do not.** The fee is fixed in **VIT** by weight (0.0017 VIT per sanctioned crank, invariant to price); `keeper.rebate` is a **stored USDC parameter**. Only one side moves when VIT reprices:
+
+| `fee.vit_usdc_rate` | crank fee (USDC) | `keeper.rebate` ÷ fee |
+|---|---|---|
+| 0.0125 (¼ × placeholder) | 0.0000213 | 12.0× |
+| **0.05 (the derivation price)** | **0.0000851** | **3.0×** |
+| 0.20 (4 × placeholder) | 0.000340 | **0.75×** |
+| 1.00 (20 × placeholder) | 0.00170 | 0.15× |
+
+**The unsafe direction is VIT appreciation.** Above ≈ 4× the derivation price the rebate falls below the fee itself, cranking becomes loss-making, and A-1 fails silently — the exact failure §6.2 says the 3,000 USDC budget used to cause. Three consequences are normative:
+
+1. `keeper.rebate` **MUST be re-derived at the launch `fee.vit_usdc_rate`**, not merely inherited. That is what the `[VERIFY]` tag now demands, and it is a launch blocker rather than a nicety.
+2. The 13 §1 envelope bounds the exposure: the row admits [1×, 10×] of the basis, so the registry can absorb price moves up to ≈ 10× before no admissible value restores a 1× rebate. Beyond that the **basis constant itself** must move, which is a CODE change.
+3. The row is PARAM with a 1-epoch cooldown, so governance can track material price moves — but nothing does this automatically, and the monitoring obligation belongs with the keeper-inactivity alarm of [12](12-release-and-operations.md) §6.3.
+
+What the SQ-531 correction did fix is orthogonal and still holds: the derivation is now anchored to a **measured** weight instead of an invented fee, so re-deriving at any price gives the right answer. Before, no price gave the right answer.
+
+**Separately, the budget never covered the load it claimed to (SQ-527).** At the superseded rebate the derivation gave 12,052.80 USDC/epoch and the budget was set to 12,000 — 52.80 short, 0.44%. §6.3 makes exhaustion a **latch**: once `KeeperBudgetExhausted` fires, no further metered rebate is paid for the remainder of that epoch. So on a worst-case (zero-organic-trade) epoch the meter exhausted before the decision-critical load completed, every epoch, and the sentence claiming otherwise was false. The corrected basis makes the shortfall moot — 34 USDC against a 12,000 budget — but the claim is corrected rather than quietly overtaken.
 
 ### 6.3 Meter structure and exhaustion behavior
 
@@ -425,7 +461,32 @@ The return is **fail-soft and idempotent**: it MUST NOT be able to fail a settle
 
 This section states what it costs to run Bleavit for a year, what the protocol earns, at what volume the two meet, and how long the genesis endowment lasts on the way there. It exists because §§1–9 specify every individual flow and no section put them in one place; §§4.1–4.2's NAV floors and §2.5's funding target were being read as a funding *plan* when they are only a set of gates.
 
-**The four numbers this section is accountable for**, and the one honest headline: **Bleavit is not self-funding at launch, and cannot be.** Launch volume is zero by construction — Phase-4 arms PARAM only, and a proposal earns the protocol nothing until traders show up. Self-funding is a maturity property, reached (on the arithmetic below) somewhere around the depth the chain's own security calibration already assumes, and the endowment is the bridge to it. Any statement that the protocol funds itself from block one is false and MUST NOT be made.
+**The four numbers this section is accountable for**, and the one honest headline: **Bleavit is not self-funding at launch, and cannot be.** Launch volume is zero by construction — Phase-4 arms PARAM only, and a proposal earns the protocol nothing until traders show up. Self-funding is a maturity property, and the endowment is the bridge to it. Any statement that the protocol funds itself from block one is false and MUST NOT be made.
+
+**What changed on 2026-07-30 (milestone E5) is how far away maturity is, not whether launch is self-funding.** With the SQ-531 fee-basis correction the crossover falls from held capital of 138.9M to **29.1M** at the central τ = 3, and to **13.2M** with `collator.comp_epoch` additionally at its 500 registry minimum.
+
+**Self-funding is conditional on slate OCCUPANCY, not on depth alone, and an earlier revision of this paragraph conflated the two (normative correction; 2026-07-31, raised by review).** That revision called a five-slot PARAM slate at the `dec.v_min` floor "the least activity at which the chain decides anything at all" and concluded the runway was unbounded. Five slots at the floor is the minimum **depth** at which five proposals are decision-grade; the minimum **activity** is *one* proposal, and held capital scales with occupancy. At the central τ = 3:
+
+| Occupied PARAM slots (at the `dec.v_min` floor) | `H`/yr | `R` at τ = 3 | vs `C` = 239,728 | vs `C` = 109,281 |
+|---|---|---|---|---|
+| 1 | 8,522,500 | 70,311 | short 169,417 | short 38,970 |
+| 3 | 16,871,071 | 139,186 | short 100,541 | **covers** |
+| 5 (`epoch.slots` default, full slate) | 25,219,643 | 208,062 | short 31,665 | **covers** |
+
+So at the shipped cost base and τ = 3 the break-even is **six** occupied slots — above `epoch.slots` = 5, hence not reachable at the default slate size at all. It is reached either by the `collator.comp_epoch` lever (3 slots) or at the measured median all-book τ = 5.8 (3 slots). **The unbounded-runway conclusion therefore rests on sustained slate utilisation**, which is a demand assumption nothing in this repository evidences (§10.2's provenance note; SQ-506) — not on decision-grade depth, which the protocol does enforce. None of it makes launch self-funding either, because launch activity is zero rather than minimal.
+
+**Cost must be read at the same occupancy as revenue, and doing so sharpens the `ops.collators` question into the one that actually matters (normative; added 2026-07-31).** The table above varies revenue with occupancy while holding cost at its full-slate value, which charges five slots' proposer rewards against one slot's trading. Two rows of §10.1 are **per-proposal** rather than standing — `REWARDS`, paid only on `Executed`, and the realized POL divergence, which needs a seeded book — so a consistent comparison scales them and holds the rest. Read that way:
+
+| | shipped `C` | with `collator.comp_epoch` = 500 |
+|---|---|---|
+| Break-even occupied slots at τ = 3 | **7** (above `epoch.slots` = 5) | **1** |
+| Break-even occupied slots at τ = 5.8 | 3 | 1 |
+
+**`ops.collators` is 72.6 % of the shipped cost base and it is *standing*** — it bills whether or not the chain decides anything, which is the wrong shape for a protocol whose revenue is activity-linked. That single line is what decides whether break-even needs a **full slate and then some**, or a **single proposal**. The `collator.comp_epoch` decision is therefore not principally "is 500 USDC/epoch enough to run a node"; it is "does the protocol carry a standing obligation large enough to require sustained full-slate demand". This document does not answer it — the value's error direction is unsafe (underpaid collators stop producing blocks) and no unit cost exists anywhere in this specification or its deployment tooling — but it states the question in the form launch governance should decide it in, alongside the operator quotes that [12](12-release-and-operations.md) §6.1's counts imply and this section cannot supply.
+
+**The whole reduction is arithmetic, not austerity.** No service level, mechanism or commitment was reduced to reach it: 79 % of the former cost base was a single unmeasured placeholder (§6.2), and the remainder moves on one PARAM key whose registry minimum was always available. This section is therefore materially more optimistic than it was, and the reason it may be believed is that every figure in it is now re-derived by the reference model on every CI run (15 §4.4) rather than hand-computed — which is precisely how the two figures corrected earlier the same day came to be wrong.
+
+**Normative reproduction requirement (added 2026-07-30).** Every table in this section MUST be reproducible by `bleavit_reference_model.sustainability`, and its test suite pins them. A figure in §10 that the model does not derive is a defect in one of the two, to be investigated rather than reconciled by editing whichever is more convenient.
 
 ### 10.1 The annual cost base `C`
 
@@ -434,15 +495,32 @@ Epoch = `epoch.length` = 302,400 blocks at 6 s = **21.0 days**, so **17.393 epoc
 | Line | Per epoch (USDC) | Per year (USDC) | Basis |
 |---|---|---|---|
 | `ops.collators` | 10,000 | 173,929 | §2.4; 5 × `collator.comp_epoch` = 2,000 |
-| `KEEPER` metered budget | 12,000 | 208,714 | §6.2 |
-| `ops.keepers` (continuity **beyond** the metered budget) | 40,229 | 699,694 | §6.3; `580,320 × 0.09 − keeper.budget_epoch` |
+| `KEEPER` metered budget — **actual metered spend, not the budget** | ≈ 148 | ≈ 2,574 | §6.2 as corrected; `580,320 × 0.000255`, i.e. the **whole** trading window |
+| `ops.keepers` (continuity **beyond** the metered budget) | **0** | **0** | §6.3; the full-window demand now fits inside `keeper.budget_epoch` with ≈ 81× headroom, so there is nothing beyond the meter to fund |
 | `REWARDS` proposer rewards, **PARAM-only ceiling** | 2,500 | 43,482 | §1.1; 5 × 500 |
 | POL realized divergence loss | ≈ 1,083 | ≈ 18,830 | §3; the §12-equivalent walk of [04](04-markets-and-pricing.md) §12, `b·[ln 2 − H(0.56)]` |
 | `ops.reserve_probe` | ≈ 52 | ≈ 913 | [07](07-oracle-and-disputes.md) §8; 21 probes × `ops.probe_fee_dot`·`ops.probe_dot_rate` |
-| **Subtotal (derivable from this doc set)** | **≈ 65,864** | **≈ 1,145,562** | — |
-| Same, with a **META-only** proposer-reward slate (upper bound) | 188,364 | 3,276,187 | §1.1; 5 × 25,000 |
+| **Subtotal (derivable from this doc set)** | **≈ 13,783** | **≈ 239,728** | — |
+| Same, with a **META-only** proposer-reward slate (upper bound) | 136,283 | 2,370,375 | §1.1; 5 × 25,000 |
+| Memo — the same subtotal **before** the SQ-531 fee-basis correction | 65,864 | 1,145,562 | superseded 2026-07-30; keeper rows were 12,000 + 40,229/epoch |
+
+**The keeper rows fell by 353× and that is a correction, not a saving (normative record; 2026-07-30, milestone E5).** Both were derived from `keeper.rebate` = 0.09 USDC, which §6.2 assumed to be 3× a 0.03 USDC crank fee that nobody had measured. The measured fee is 0.000085 USDC, so the rebate was ≈ 1,058× the fee — and the two keeper lines, **79.3 % of this table**, were scaled by that error. Resolving the `[VERIFY]` is what R-2 requires rather than permits; no policy, mechanism or service level changed. The superseded subtotal is retained above so the size of the correction stays visible rather than being quietly absorbed.
+
+**One tabled row is sized at launch scale and grows by mandate (added 2026-07-30, milestone E5).** `ops.collators` above assumes **5** collators, which is the launch set; [12](12-release-and-operations.md) §6.1 mandates growth to **8–12 bonded permissionless collators from Phase 4**. At 12 the row is 24,000/epoch ⇒ 417,429/yr, i.e. **+243,500/yr** over the tabled figure, which would make it the largest line in the table by a wide margin once the keeper correction lands. The growth *schedule* is itself `[VERIFY]` (13 §1 `collator.n_target`), so the mature figure is a range and not a point — but the direction is mandated, not optional, and a table that silently fixed the count at 5 was understating the mature state. `collator.comp_epoch` is PARAM-adjustable within [500, 10,000], so the mature cost is a governed choice rather than a given.
 
 **One row in that table is a ceiling, not a floor, and is labelled so (corrected 2026-07-29, milestone E1).** §1.1 pays proposer rewards **only on `Executed`**, so an all-pass five-slot PARAM slate is the *most* that line can cost at PARAM rates — a slate that rejects or defers pays less, and an epoch with no execution pays nothing. The row was previously labelled a "floor", which is the opposite of what the payout condition makes it. The subtotal's floor character does not rest on this row: it rests on the eight lines below, which are strictly positive and omitted entirely, and on the fact that a non-PARAM slate raises the reward line rather than lowering it (the META-only bound is the last row).
+
+**Most of the unsized lines are not owed at Phase 4, and funding them at launch would be a choice rather than an obligation (normative guidance; added 2026-07-30, milestone E5).** The eight `[VERIFY]` lines below are frequently read as a standing launch cost. They are not: each is owed from the phase whose mechanism it serves ([09](09-execution-upgrades-and-rollout.md) §7.1), and Phase 4 arms **PARAM only**.
+
+| Line | Owed from | Why |
+|---|---|---|
+| `ORACLE`, `ops.oracle_evidence` | Phase 3 | No reporter is registered and no attested component is admitted before Phase-3 arming ([07](07-oracle-and-disputes.md) §3) |
+| `ops.watchtowers` | Phase 3 | Watchtowers acknowledge oracle rounds and registry filings; neither exists earlier ([07](07-oracle-and-disputes.md) §4) |
+| `ops.arweave` | Phase 2/3, and largely **capex** | The ArNS permabuy is a one-time purchase, not a recurring line; per-release Turbo credits recur with releases, not with epochs ([12](12-release-and-operations.md) §4.1) |
+| `ops.bootnodes`, `ops.rpc_archive`, `ops.monitoring` | Phase 2 | Required from the first public network, at the ≥ counts of [12](12-release-and-operations.md) §6.1 — these are the genuinely standing ones |
+| `ops.coretime` | from the first leased core | The one unavoidable external cost, and see the note below |
+
+**The one line that cannot be reduced is the one this table cannot size.** `ops.coretime`'s `broker.renew` price is an operator-supplied quote read off-chain ([09](09-execution-upgrades-and-rollout.md) §4), and the renewal *period* is not stated anywhere in this document set — so the annual cost of the single unavoidable infrastructure line is not derivable from the specification even given a price. A parachain cannot run without buying coretime; every other line above is a service level the treasury chooses.
 
 **Eight lines are not sizeable from any evidence in this repository, and are therefore not sized here.** `ops.bootnodes`, `ops.rpc_archive`, `ops.oracle_evidence`, `ops.watchtowers`, `ops.monitoring`, `ops.arweave`, the `broker.renew` price component of `ops.coretime`, and the `ORACLE` line all carry `[VERIFY — sized in Phase-2/3 ops planning; ops-gated]` in [13](13-parameters.md) §1 and stay that way: what each MUST fund is specified as a **count** ([12](12-release-and-operations.md) §6.1 — ≥ 8 WSS endpoints across ≥ 4 operators on each of two networks, ≥ 4 RPC + ≥ 2 archive nodes serving 30 days of state, ≥ 2 bonded watchtowers, ≥ 2 independent keeper operators, ≥ 2 monitor operators, 3-of-5 ArNS custody), but **no unit cost, hardware profile or headcount figure exists anywhere in the specification or the deployment tooling**. Inventing one would be exactly the fabrication R-2 forbids. The subtotal above is therefore a **floor on `C`, not an operating point**; §10.4 states the crossover at that floor and at two stated ops overlays (+0.5M, +1.5M/yr) so the sensitivity is visible rather than hidden inside a single fabricated total.
 
@@ -518,11 +596,15 @@ Break-even held capital `V*` (and the equivalent turnover `τ·V*`):
 
 | `C` | τ=2 | **τ=3 (central)** | τ=5.8 |
 |---|---|---|---|
-| **1,145,562** (derivable lines only — a floor, §10.1) | `H` = 190,926,921 (`V` = 381,853,842) | **138,855,943** (416,567,828) | 78,732,751 (456,649,955) |
+| **239,728** (post-SQ-531 derivable lines — the current base) | `H` = 39,954,590 | **29,057,883** | 16,476,119 |
+| **109,281** (same, `collator.comp_epoch` at its 500 registry minimum) | 18,213,518 | **13,246,195** | 7,510,729 |
+| ~~1,145,562~~ (**superseded 2026-07-30** — the pre-SQ-531 fee basis; retained so the size of the correction stays visible) | `H` = 190,926,921 (`V` = 381,853,842) | **138,855,943** (416,567,828) | 78,732,751 (456,649,955) |
 | **1,645,562** (+0.5M ops overlay) | 274,260,254 (548,520,509) | 199,462,003 (598,386,009) | 113,097,012 (655,962,670) |
 | **2,645,562** (+1.5M ops overlay) | 440,926,921 (881,853,842) | 320,674,124 (962,022,373) | 181,825,534 (1,054,588,100) |
 
-**Read against §10.3's capacity table, the crossover sits at the protocol's own design point rather than far beyond it.** At `C` = 1.146M and the central τ = 3, `V*` = 138.9M — **1.17×** the 5 × TREASURY saturated slate and **0.64×** the 5 × CODE one. A mature chain running treasury- and code-class decisions at the depth its own security parameters assume is at or just short of break-even at today's fee rates, with no rate change. A chain running PARAM-only slates at the bare `dec.v_min` floor earns 151k–367k against ≥ 1.146M — a **3.1–7.6× shortfall** — and no rate inside the [13](13-parameters.md) registry closes it.
+**Read against §10.3's capacity table, the crossover now sits well inside the protocol's own design point (rewritten 2026-07-31 for the post-SQ-531 base; the superseded reading follows).** At `C` = 239,728 and the central τ = 3, `V*` = **29.1M** — **0.25×** the 5 × TREASURY saturated slate, **0.14×** the 5 × CODE one, and **1.15×** a five-slot PARAM slate held at the bare `dec.v_min` floor. With `collator.comp_epoch` at its registry minimum `V*` is **13.2M**, i.e. **0.53×** that floor slate. **Neither figure means the chain funds itself at minimum activity**, because held capital scales with slate *occupancy* and these compare against a full five-slot slate — see the occupancy table in the section preamble, where break-even is 7 occupied slots at the shipped base and τ = 3, and 3 at the measured τ = 5.8.
+
+**Superseded reading, retained deliberately.** At the pre-SQ-531 `C` = 1.146M the same arithmetic gave `V*` = 138.9M — 1.17× the 5 × TREASURY saturated slate and 0.64× the 5 × CODE one — and concluded that only a mature treasury/code-class chain reached break-even, with a PARAM-only floor slate short by 3.1–7.6×. That conclusion was correct for its cost base and is wrong for this one; it is kept because the gap between the two is the whole measure of what a single unverified parameter was doing to this section.
 
 Equivalently, the rate that would clear `C` at saturated capacity (with `ledger.redeem_fee` = `mkt.fee` per §10.6):
 
@@ -550,7 +632,9 @@ Only one cell in that table exceeds `mkt.fee`'s 100 bps registry maximum, and it
 
 | Annual net burn | To the 21.26M shared CODE/META arming floor | To 13.86M | To 4.62M |
 |---|---|---|---|
-| `C` = 1.146M (derivable lines, POL returning) | 3.3 yr | 9.7 yr | 17.8 yr |
+| **`C` = 239,728 (post-SQ-531 derivable lines)** | **15.6 yr** | **46.5 yr** | **85.0 yr** |
+| **`C` = 109,281 (same, with `collator.comp_epoch` at its 500 registry minimum)** | **34.3 yr** | **101.9 yr** | **186.5 yr** |
+| `C` = 1.146M (superseded — the pre-SQ-531 fee basis) | 3.3 yr | 9.7 yr | 17.8 yr |
 | `C` = 2.646M (+1.5M ops overlay) | 1.4 yr | 4.2 yr | 7.7 yr |
 | `C` = 2.954M (**the pre-E1 implementation** — the derivable base plus the **gross** 1,808,371 diversion below; the net-of-realized-cost 1,789,542 gives 2.935M, which rounds to the same cells at 1 dp) | 1.3 yr | 3.8 yr | 6.9 yr |
 
@@ -574,9 +658,9 @@ Three consequences are normative, not incidental:
 
 **Effect on the security certificate (§5.2–§5.3): none, by construction.** The `InCapPrize ≤ AttackCost̂/3` gate is a threshold test on *measured* contest capital, and neither instrument changes the measurement: the `v_min = 2P` identity of §5.3 holds unchanged, so every decision-grade, sizing-passing adoption still satisfies `AttackCost̂ ≥ 3·InCapPrize` with the same `3·b·ln 2` margin. Higher round-trip cost *raises* attacker cost — §7's "refund path" row already prices the attacker's `2 × 30 bps` entry/exit on 3M of held capital, and a redemption fee adds `ledger.redeem_fee` to the exit leg of that same held position. What both instruments do reduce is the *supply* of honest depth, which shows up as more `NotDecisionGrade` rejections — fewer decisions, less revenue, unchanged safety (status-quo default). §10.4's σ-band rule is the binding guard on that, and it is why the rate is not raised to chase the crossover.
 
-**Quiet epochs.** Revenue is zero when no proposal qualifies, while collators, keepers and the `ops.*` lines still bill ≈ **62,281** USDC/epoch — `ops.collators` 10,000 + the `KEEPER` metered budget 12,000 + `ops.keepers` 40,229 + `ops.reserve_probe` 52, i.e. §10.1's subtotal less the two rows a quiet epoch does not incur (`REWARDS` 2,500, which §1.1 pays only on `Executed`, and the ≈ 1,083 POL divergence, which needs a seeded book). **This figure read 77,864 until 2026-07-30 and that was an arithmetic error, corrected here (spec-audit minor, closed in the SQ-523 session).** 77,864 is exactly §10.1's 65,864 plus a second copy of `keeper.budget_epoch`: it counted the keeper cost **gross** (`580,320 × 0.09` = 52,229) while also keeping the separate 12,000 row that the gross figure already contains. The error **overstated** cost, so it never supported a self-funding claim the arithmetic did not carry — but it propagated into §10.5's runway (see there) and into a 1,354,279 annualization that appears nowhere in §10.1's table, which is precisely the "does not derive from its own table" symptom. A minimally-qualified epoch — 5 PARAM at exactly `dec.v_min`, τ ≈ 1 — earns ≈ 4,500 USDC against that. **That figure counts the five proposal slates' held capital only and excludes the epoch's Baseline book**, unlike §10.3's and §10.4's `H` figures, which include the Baseline's 250,000 at the `dec.v_min` floors. The exclusion is stated rather than smoothed over; it is conservative — including the Baseline raises the figure — and understating a quiet epoch's revenue is the safe direction for a paragraph whose whole point is that neither instrument saves it. **Neither instrument saves a quiet epoch, and the design does not pretend otherwise**: the reserve that carries quiet epochs is the endowment under §10.5's runway, not `INSURANCE`. `INSURANCE` is not that reserve and MUST NOT be re-purposed as one — §1.2 fixes its size to the liability it actually backs (§1.2, as amended by E1), and a reserve sized to a *liability* cannot also be a buffer sized to an *expense*.
+**Quiet epochs.** Revenue is zero when no proposal qualifies, while collators, keepers and the `ops.*` lines still bill ≈ **10,200** USDC/epoch (updated 2026-07-31 for the post-SQ-531 basis) — `ops.collators` 10,000 + the whole metered keeper spend ≈ 148 + `ops.reserve_probe` 52, i.e. §10.1's subtotal less the two rows a quiet epoch does not incur. **With `collator.comp_epoch` at its registry minimum this is ≈ 2,700/epoch**, and the composition is the point: a quiet epoch is now ≈ 98 % collator compensation, because that is the only materially standing line left. ~~62,281~~ was the pre-SQ-531 figure (`ops.collators` 10,000 + `KEEPER` 12,000 + `ops.keepers` 40,229 + probe 52) (`REWARDS` 2,500, which §1.1 pays only on `Executed`, and the ≈ 1,083 POL divergence, which needs a seeded book). **This figure read 77,864 until 2026-07-30 and that was an arithmetic error, corrected here (spec-audit minor, closed in the SQ-523 session).** 77,864 is exactly §10.1's 65,864 plus a second copy of `keeper.budget_epoch`: it counted the keeper cost **gross** (`580,320 × 0.09` = 52,229) while also keeping the separate 12,000 row that the gross figure already contains. The error **overstated** cost, so it never supported a self-funding claim the arithmetic did not carry — but it propagated into §10.5's runway (see there) and into a 1,354,279 annualization that appears nowhere in §10.1's table, which is precisely the "does not derive from its own table" symptom. A minimally-qualified epoch — 5 PARAM at exactly `dec.v_min`, τ ≈ 1 — earns ≈ 4,500 USDC against that. **That figure counts the five proposal slates' held capital only and excludes the epoch's Baseline book**, unlike §10.3's and §10.4's `H` figures, which include the Baseline's 250,000 at the `dec.v_min` floors. The exclusion is stated rather than smoothed over; it is conservative — including the Baseline raises the figure — and understating a quiet epoch's revenue is the safe direction for a paragraph whose whole point is that neither instrument saves it. **Neither instrument saves a quiet epoch, and the design does not pretend otherwise**: the reserve that carries quiet epochs is the endowment under §10.5's runway, not `INSURANCE`. `INSURANCE` is not that reserve and MUST NOT be re-purposed as one — §1.2 fixes its size to the liability it actually backs (§1.2, as amended by E1), and a reserve sized to a *liability* cannot also be a buffer sized to an *expense*.
 
-**Should the endowment still be 25M?** Yes, and §2.5's target is unchanged. With the POL leak closed the endowment is a genuine bridge: **9.7 years** to the CODE seeding floor at the derivable cost base — `(25,000,000 − 13,862,944) / 1,145,562`, the middle cell of the table's `C` = 1.146M row — against a crossover that §10.4 puts at roughly the security-calibrated design depth. **This read 8.2 years until 2026-07-30 and did not derive from that table** (spec-audit minor, closed in the SQ-523 session): 8.2 is the same quotient taken against 1,354,279/yr, the annualization of the erroneous 77,864/epoch §10.6 carried, and 1,354,279 appears in no table in this section. The error was in the conservative direction — a shorter runway than the cost base supports — but a headline figure that cannot be reproduced from its own table is exactly what this section may not ship. The §4.1 class floors are frozen literals movable only by CODE, under the [13](13-parameters.md) §5 item-6 value screen on `pol.budget_epoch` / `pol.b*` — nothing in this section moves them, and nothing here should be read as licence to.
+**Should the endowment still be 25M?** Yes, and §2.5's target is unchanged. With the POL leak closed **and the SQ-531 fee basis corrected**, the endowment is a wide bridge rather than a narrow one: **46.5 years** to the CODE seeding floor at the derivable cost base — `(25,000,000 − 13,862,944) / 239,728` — and **101.9 years** with `collator.comp_epoch` at its registry minimum, against a crossover §10.4 now puts at 29.1M / 13.2M. To the *binding* shared CODE/META arming floor the same two bases give **15.6** and **34.3** years. **This read 9.7 years until 2026-07-31**, from the superseded 1,145,562 denominator; the correction is the SQ-531 fee basis and not a change of policy, and §2.5's 25M target is unchanged and now carries considerably more margin than it was sized for. **This read 8.2 years until 2026-07-30 and did not derive from that table** (spec-audit minor, closed in the SQ-523 session): 8.2 is the same quotient taken against 1,354,279/yr, the annualization of the erroneous 77,864/epoch §10.6 carried, and 1,354,279 appears in no table in this section. The error was in the conservative direction — a shorter runway than the cost base supports — but a headline figure that cannot be reproduced from its own table is exactly what this section may not ship. The §4.1 class floors are frozen literals movable only by CODE, under the [13](13-parameters.md) §5 item-6 value screen on `pol.budget_epoch` / `pol.b*` — nothing in this section moves them, and nothing here should be read as licence to.
 
 ---
 

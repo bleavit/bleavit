@@ -1727,7 +1727,7 @@ pub mod pallet {
                         PayoutLine::OpsCollators,
                     )?;
                 }
-                State::<T>::put(state);
+                Self::put_folded_state(state);
                 for event in events {
                     Self::deposit_core_event(event);
                 }
@@ -1802,7 +1802,7 @@ pub mod pallet {
                     return;
                 }
                 if let Ok(state) = Self::checked_state(&t) {
-                    State::<T>::put(state);
+                    Self::put_folded_state(state);
                     for event in events {
                         Self::deposit_core_event(event);
                     }
@@ -1823,7 +1823,7 @@ pub mod pallet {
             if T::RebatePayout::pay(who, payable, line).is_err() {
                 return;
             }
-            State::<T>::put(state);
+            Self::put_folded_state(state);
             for event in events {
                 Self::deposit_core_event(event);
             }
@@ -1851,7 +1851,7 @@ pub mod pallet {
             if T::RebatePayout::pay(who, amount, PayoutLine::Rewards).is_err() {
                 return false;
             }
-            State::<T>::put(state);
+            Self::put_folded_state(state);
             for event in events {
                 Self::deposit_core_event(event);
             }
@@ -2187,14 +2187,30 @@ pub mod pallet {
         /// events. The bounded conversion is the last fallible step before the
         /// single write, so an (unreachable, core enforces the same bounds)
         /// over-bound state rejects the whole dispatch with nothing persisted.
+        /// Write a state derived from a [`Self::load`]-folded [`Treasury`].
+        ///
+        /// SQ-530. `load` folds [`PendingMainCredit`] into `main_usdc`, so
+        /// **every** write of that value must discharge the counter in the same
+        /// storage transaction. Otherwise the next `load` folds it a second
+        /// time and NAV over-states custody — cumulatively, and in the
+        /// over-permissive direction for `trs.cap_proposal`·NAV,
+        /// `pol.budget_epoch`·NAV and the 08 §4.1 arming floors.
+        ///
+        /// This exists as one seam rather than as a rule to remember because
+        /// four fail-soft paths (`pay_collator_compensation`, the zero-pay
+        /// rebate branch, `do_keeper_rebate`, `do_proposer_reward`) deliberately
+        /// bypass [`Self::persist`] — they must not propagate a `checked_state`
+        /// error — and every one of them had dropped the discharge.
+        fn put_folded_state(state: TreasuryState) {
+            State::<T>::put(state);
+            // A rejected conversion returns before either write and leaves the
+            // credit pending, which is the G-1 direction.
+            PendingMainCredit::<T>::kill();
+        }
+
         fn persist(t: Treasury) -> DispatchResult {
             let state = Self::checked_state(&t)?;
-            State::<T>::put(state);
-            // `load` folded the deferred credits into the value just written, so
-            // the counter is discharged. Clearing it after the bounded
-            // conversion keeps the pair exact: a rejected conversion returns
-            // before either write and leaves the credit pending (G-1).
-            PendingMainCredit::<T>::kill();
+            Self::put_folded_state(state);
             for ev in t.events {
                 Self::deposit_core_event(ev);
             }

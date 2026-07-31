@@ -1586,17 +1586,68 @@ pub mod kernel {
     }
 
     pub const KEEPER_BUDGET_EPOCH_FLOOR_USDC: u128 = 6_000_000_000;
-    /// SQ-117 (ruled 2026-07-21): the benchmark **fee basis** the launch
-    /// `keeper.rebate` seed is calibrated against — the sanctioned-crank fee
-    /// cost from which 13 §1 expresses the row (default `3×`, hard min `1×`,
-    /// hard max `10×`). This is the **[VERIFY]** placeholder of [08](../../docs/architecture/08-treasury-and-economics.md)
-    /// §6.2 (`≈ 0.03 USDC`, 30,000 µUSDC): a conservative pre-launch default,
-    /// **not** a calibrated number. It is replaced at benchmark time once the
-    /// launch `fee.vit_usdc_rate` fixes the real per-crank fee; the seed is
-    /// then rounded **down** to µUSDC against the claimant (R-7). Until then the
-    /// row is genesis-seeded (so B9's rebate pipeline stops paying zero) but its
-    /// value carries the 13 §1 `[VERIFY fee basis at benchmark time]` tag.
-    pub const KEEPER_REBATE_FEE_BASIS_USDC: u128 = 30_000;
+    /// SQ-117 (ruled 2026-07-21) / **SQ-531 (measured 2026-07-30, milestone E5)**:
+    /// the benchmark **fee basis** the launch `keeper.rebate` seed is calibrated
+    /// against — the sanctioned-crank fee cost from which 13 §1 expresses the
+    /// row (default `3×`, hard min `1×`, hard max `10×`).
+    ///
+    /// **This was 30,000 µUSDC (`≈ 0.03 USDC`) and that placeholder was wrong by
+    /// 353×.** It was never a measurement — 08 §6.2 called it "assumed" and
+    /// 13 §1 carried `[VERIFY fee basis at benchmark time]` — and the whole
+    /// keeper cost base was derived from it: 908,408 USDC/yr, **79.3 % of the
+    /// entire annual cost base**, resting on a number nobody had ever computed.
+    ///
+    /// Now derived from the committed generated weights, at the multiplier that
+    /// SQ-528 restored (before that fix the multiplier was pinned to zero and
+    /// weight was not priced at all, so no fee basis was measurable):
+    ///
+    /// ```text
+    /// crank_observe call weight        1,240,920,000 ps   (committed weights)
+    /// + TxExtension weight               352,392,000 ps
+    /// = fee-charged weight             1,593,312,000 ps
+    /// WeightToFee = IdentityFee        1 ps -> 1 planck
+    /// + ExtrinsicBaseWeight              108,157,000 planck
+    /// + length fee (~120 B)                      120 planck
+    /// = 1,701,469,120 planck = 0.00170146912 VIT   (VIT has 12 decimals)
+    /// x 0.05 USDC/VIT                  = 0.000085073 USDC = 85.07 uUSDC
+    /// floor to uUSDC against the claimant (R-7) = 85
+    /// ```
+    ///
+    /// **The ratio is NOT preserved across VIT prices, and an earlier revision
+    /// of this comment wrongly said it was** (corrected 2026-07-31; the same
+    /// error was raised independently by review). The crank fee is fixed in
+    /// **VIT** by weight — 0.0017 VIT, invariant to price — while this basis and
+    /// the `keeper.rebate` row `genesis_params()` derives from it are **stored
+    /// USDC** values. Only one side moves when VIT reprices:
+    ///
+    /// ```text
+    /// fee.vit_usdc_rate     crank fee (USDC)    keeper.rebate / fee
+    ///   0.0125 (1/4x)          0.0000213              12.0x
+    ///   0.05   (derivation)    0.0000851               3.0x
+    ///   0.20   (4x)            0.000340                0.75x
+    ///   1.00   (20x)           0.00170                 0.15x
+    /// ```
+    ///
+    /// **The unsafe direction is VIT appreciation:** above ~4x the derivation
+    /// price the rebate falls below the fee itself and cranking becomes
+    /// loss-making, which is the silent A-1 failure 08 §6.2 describes. Nothing
+    /// in code updates or screens the rebate when `fee.vit_usdc` changes, and
+    /// 13 §1 permits a 10x move of that rate.
+    ///
+    /// The `[VERIFY at TGE]` tag is therefore **load-bearing, not narrowed**:
+    /// this basis MUST be re-derived at the launch `fee.vit_usdc_rate` before
+    /// mainnet, and material later rate moves need a PARAM amendment of
+    /// `keeper.rebate` to track them. The 13 §1 [1x, 10x] envelope bounds the
+    /// exposure to roughly a 10x price move; beyond that this constant itself
+    /// must change, which is a CODE change. Enforcing the coupling at the
+    /// amendment boundary (the shape 13 rule 7 uses for
+    /// `ledger.redeem_fee` <= `mkt.fee`) is SQ-534.
+    ///
+    /// What the correction *did* fix is orthogonal and holds: the derivation is
+    /// anchored to a **measured** weight instead of an invented fee, so
+    /// re-deriving at any price now gives the right answer. Before, no price
+    /// did — for 30,000 to have been right VIT would trade at ~17.6 USDC.
+    pub const KEEPER_REBATE_FEE_BASIS_USDC: u128 = 85;
 }
 
 /// Epoch phase-start offsets as fractions of `epoch.length` (13 §3.1). The pairs
