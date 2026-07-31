@@ -1158,6 +1158,88 @@ class CoretimeRenewalPriceTests(unittest.TestCase):
                 prev_gap = gap
         self.assertLess(abs(prev_gap - D("8.35")), D("0.1"))  # 12 collators
 
+    def test_both_clamps_bound_the_price_over_a_swept_grid(self):
+        """The two structural bounds `do_renew` guarantees, over a grid.
+
+        * `price <= sale_price(t)` -- the `min` is a CEILING at the open market,
+          which is why the ratchet saturates at all.
+        * `price >= end_price` -- the `max` is a FLOOR, and it is the pallet's
+          own stated intent ("Renewals should never be priced lower than the
+          current `end_price`").
+
+        These are necessary and NOT sufficient, which is worth saying because
+        the first version of this test claimed they were. Swapping `min` and
+        `max` degenerates the function to "always charge `sale_price`", and that
+        degenerate form satisfies both bounds everywhere -- so this test passes
+        against it. What actually kills that mutant is the next test, plus the
+        interlude/leadin-end point values above. Verified by mutation rather
+        than assumed: an assertion nothing can violate is decoration.
+        """
+        ends = (D(1), D(10), D("0.5"), D(1_000))
+        prevs = (D(0), D("0.25"), D(1), D(5), D(100), D(10_000))
+        throughs = (D(0), D("0.25"), D("0.5"), D("0.75"), D(1))
+        bumps = (D(0), D("0.03"), D("0.5"), D(3))
+        checked = 0
+        for end in ends:
+            for prev in prevs:
+                for t in throughs:
+                    for bump in bumps:
+                        price = coretime_renewal_price(prev, end, t, bump)
+                        self.assertLessEqual(price, coretime_sale_price(end, t))
+                        self.assertGreaterEqual(price, end)
+                        checked += 1
+        self.assertEqual(checked, 480)
+
+    def test_both_clamps_are_LIVE_and_neither_one_alone_decides_the_price(self):
+        """Anti-vacuity: each clamp must actually bind somewhere.
+
+        The bounds above are satisfied by two different degenerate functions --
+        "always `sale_price`" (what swapping `min`/`max` produces) and "always
+        `end_price`". Ruling both out needs strictness, so this asserts that
+        each clamp is the binding one in its own regime:
+
+        * the ratchet binds early in the leadin, where the price is strictly
+          BELOW the sale price and strictly increasing in the prior price;
+        * the market clamp binds at the ceiling, where raising the prior price
+          further changes nothing.
+        """
+        end, t = D(1), CORETIME_RENEW_INTERLUDE
+
+        # The `min` is not the only thing acting: at t = 0 the sale price is
+        # 100x, and a renewal off a floor-priced prior pays 1.03, not 100.
+        self.assertLess(coretime_renewal_price(end, end, t), coretime_sale_price(end, t))
+        # The ratchet is STRICTLY increasing in the prior price below saturation
+        # -- this is what "always `sale_price`" (constant in `prev`) cannot do.
+        below = [coretime_renewal_price(D(p), end, t) for p in (1, 2, 5, 20)]
+        self.assertEqual(below, sorted(below))
+        self.assertLess(below[0], below[-1])
+        for lo, hi in zip(below, below[1:]):
+            self.assertLess(lo, hi)
+        # And the floor is not the only thing acting either: those prices are
+        # strictly above `end_price`, ruling out "always `end_price`".
+        self.assertGreater(below[0], end)
+
+        # Above saturation the market clamp takes over and `prev` stops mattering.
+        ceiling = coretime_ratchet_ceiling(end, t)
+        self.assertEqual(coretime_renewal_price(ceiling, end, t), ceiling)
+        self.assertEqual(coretime_renewal_price(ceiling * D(10), end, t), ceiling)
+
+    def test_the_saturated_price_is_a_fixed_point_the_path_converges_to(self):
+        """Once pinned to the market the recurrence stops moving, at any bump.
+
+        This is the property that makes `coretime_periods_to_saturation`
+        terminate, so asserting it also guards that loop against spinning if the
+        clamp is ever weakened.
+        """
+        end = D(7)
+        for t in (D(0), D("0.5"), D(1)):
+            ceiling = coretime_ratchet_ceiling(end, t)
+            for bump in (D("0.03"), D(1), D(10)):
+                self.assertEqual(coretime_renewal_price(ceiling, end, t, bump), ceiling)
+            path = coretime_price_path(400, end, through=t)
+            self.assertEqual(path[-1], ceiling)
+            self.assertEqual(path, sorted(path))
+
     def test_a_zero_bump_reproduces_the_constant_base_under_either_policy(self):
         """The check that this models a mechanism rather than an assumption."""
         self.assertEqual(coretime_annual_escalation(D(0)), D(0))
