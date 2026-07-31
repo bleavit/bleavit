@@ -63,6 +63,9 @@ pub fn proposal_summaries() -> BoundedVec<ProposalSummaryView, { bounds::MAX_PRO
                 decide_at: proposal.decide_at,
                 maturity: proposal.maturity,
                 ratification,
+                // Contract v18 (E6): bond custody, distinct from `proposer` when the
+                // submission split authorship from funding (05 §1.5).
+                funder: proposal.funder.into(),
             })
             .is_err()
         {

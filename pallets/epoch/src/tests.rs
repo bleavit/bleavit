@@ -1636,7 +1636,7 @@ fn sq40_undefined_prize_proxy_takes_t10_and_refunds_the_full_bond() {
         ProposalBonds::<Test>::insert(
             1,
             ProposalBond {
-                proposer: proposer.clone(),
+                funder: proposer.clone(),
                 held: bond,
             },
         );

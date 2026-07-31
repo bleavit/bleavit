@@ -1203,6 +1203,7 @@ mod tests {
         e.proposals.push(Proposal {
             id: 1,
             proposer: acct(1),
+            funder: acct(1),
             class: ProposalClass::Param,
             state: ProposalState::Queued,
             epoch: 0,

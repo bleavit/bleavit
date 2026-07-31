@@ -101,6 +101,7 @@ pub(crate) fn seed_live_proposal(pid: futarchy_primitives::ProposalId) {
         Proposal {
             id: pid,
             proposer: account(70),
+            funder: account(70),
             class: ProposalClass::Code,
             state: ProposalState::Queued,
             epoch,
@@ -341,6 +342,7 @@ fn seed_queued_epoch_proposal(
     let proposal = Proposal {
         id: pid,
         proposer: account(70),
+        funder: account(70),
         class,
         state: ProposalState::Queued,
         epoch,
@@ -935,6 +937,7 @@ pub(crate) fn empty_param_proposal(
 ) -> Proposal<AccountId> {
     Proposal {
         id,
+        funder: proposer.clone(),
         proposer,
         class: ProposalClass::Param,
         state: ProposalState::Submitted,
@@ -2089,7 +2092,16 @@ fn identity_and_version_pins_match_the_integration_contract() {
     // makes a future re-coupling fail here.
     assert_eq!(VERSION.transaction_version, TRANSACTION_VERSION);
     assert_eq!(VERSION.transaction_version, 1);
-    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 17);
+    // The contract-version literal that stood here has been **removed**, not bumped
+    // (E6, contract v18). 02 §13's v17 entry records the remedy this follows: exactly
+    // one literal may exist — the constant in `futarchy-primitives` and the unit test
+    // beside it — because the duplicates went stale through three consecutive bumps,
+    // one of them inside a test still named `contract_version_is_v13` while asserting
+    // 16. The same entry deletes such drive-by pins outright rather than relaxing
+    // them, since incidental coverage is precisely what goes stale. Nothing is lost
+    // here: this test owns *runtime identity*, and the independence property the
+    // paragraph above states is carried by pinning `transaction_version` at 1 while
+    // the contract version moves independently of it.
     assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
@@ -8344,6 +8356,7 @@ fn epoch_call_samples() -> Vec<RuntimeCall> {
     let proposal = Proposal {
         id: 0,
         proposer: account(30),
+        funder: account(30),
         class: ProposalClass::Param,
         state: ProposalState::Submitted,
         epoch: 0,
@@ -8649,6 +8662,7 @@ fn assert_runtime_gate_veto(class: ProposalClass, expected: RejectReason) {
         let proposal = Proposal {
             id: PID,
             proposer: account(70),
+            funder: account(70),
             class,
             state: ProposalState::Trading,
             epoch,
@@ -8885,6 +8899,7 @@ fn seeded_trading_decision_revalidates_real_payload_before_guard_enqueue() {
         let proposal = Proposal {
             id: PID,
             proposer: account(70),
+            funder: account(70),
             class: ProposalClass::Treasury,
             state: ProposalState::Trading,
             epoch,
@@ -9164,6 +9179,7 @@ fn delayed_decide_uses_own_baseline_window_before_classless_queue_refusal() {
         let proposal = |id, decide_at, markets| Proposal {
             id,
             proposer: account(149),
+            funder: account(149),
             class: ProposalClass::Treasury,
             state: ProposalState::Trading,
             epoch,
@@ -16251,6 +16267,7 @@ fn seed_in_flight_cohort(count: u64) {
             Proposal {
                 id: pid,
                 proposer: account(70),
+                funder: account(70),
                 class: ProposalClass::Param,
                 state: ProposalState::Trading,
                 epoch,
@@ -17455,7 +17472,7 @@ fn sq40_undefined_prize_takes_t10_and_refunds_the_full_runtime_bond() {
         pallet_epoch::ProposalBonds::<Runtime>::insert(
             PID,
             pallet_epoch::ProposalBond {
-                proposer: proposer.clone(),
+                funder: proposer.clone(),
                 held: bond,
             },
         );
@@ -17485,6 +17502,7 @@ fn sq40_undefined_prize_takes_t10_and_refunds_the_full_runtime_bond() {
         let proposal = Proposal {
             id: PID,
             proposer: proposer.clone(),
+            funder: proposer.clone(),
             class: ProposalClass::Param,
             state: ProposalState::Trading,
             epoch,
@@ -18290,6 +18308,7 @@ fn view_decision_stats_pins_effective_floor_pair_minima_gates_and_convergence() 
         let proposal = Proposal {
             id: PID,
             proposer: account(70),
+            funder: account(70),
             class: ProposalClass::Treasury,
             state: ProposalState::Trading,
             epoch,

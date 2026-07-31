@@ -49,6 +49,10 @@ pub struct Proposal<AccountId> {
     pub grace_end: Option<BlockNumber>,     // execution grace deadline (09 §1.2(1))
     pub version_constraint: Option<RuntimeVersionConstraint>, // layout: 09 §1.2(3)
     pub decision: Option<DecisionOutcome>,  // set at decide()/terminal transition
+    pub funder: AccountId,       // bond custody (§1.5, contract v18). The `epoch.submit`
+                                 // signer; refund and the 06 §4 slashes reach this account
+                                 // and rule 4's per-account cap counts it. Trailing by
+                                 // construction — fields 1–21 keep their v17 offsets
 }
 ```
 

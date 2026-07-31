@@ -76,6 +76,10 @@ pub fn markets(pid: ProposalId, epoch: EpochId, gates: bool) -> MarketSet {
     }
 }
 
+/// Collapsed-identity proposal: author == funder, the only state reachable before
+/// contract v18. Use [`proposal_split`] to exercise the 05 §1.5 split — a test that
+/// only ever builds this shape proves nothing about which identity a right binds to
+/// (15 §4.2's two-identity obligation).
 pub fn proposal(
     id: ProposalId,
     proposer: AccountId32,
@@ -83,9 +87,22 @@ pub fn proposal(
     epoch: EpochId,
     now: BlockNumber,
 ) -> Proposal<AccountId32> {
+    proposal_split(id, proposer.clone(), proposer, state, epoch, now)
+}
+
+/// Split-identity proposal: `proposer` authors, `funder` posts the bond (05 §1.5).
+pub fn proposal_split(
+    id: ProposalId,
+    proposer: AccountId32,
+    funder: AccountId32,
+    state: ProposalState,
+    epoch: EpochId,
+    now: BlockNumber,
+) -> Proposal<AccountId32> {
     Proposal {
         id,
         proposer,
+        funder,
         class: ProposalClass::Param,
         state,
         epoch,
