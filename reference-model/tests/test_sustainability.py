@@ -17,6 +17,11 @@ import unittest
 
 from bleavit_reference_model.sustainability import (
     CORETIME_PERIOD_DAYS,
+    PROPOSER_REWARD,
+    PROP_BOND,
+    INTAKE_SLASH_FRACTION,
+    proposer_expected_value,
+    proposer_break_even_adopt_rate,
     INFINITE,
     POL_RERUN_MAX_MULTIPLE,
     pol_divergence_with_reruns,
@@ -771,6 +776,79 @@ class CoretimeEscalationTests(unittest.TestCase):
         ten = coretime_cost_after_years(start, D(10))
         self.assertGreater(ten, cost_base().annual)  # exceeds the WHOLE base
         self.assertLess(abs(ten - D(189_073)), D(50))
+
+
+class ProposerRewardEconomicsTests(unittest.TestCase):
+    """SQ-542. The cost line tied for largest, and the one with no derivation.
+
+    `trs.proposer_reward` is **39.8 %** of the launch cost base at the 08 §10.1
+    PARAM ceiling -- level with `ops.collators`, and larger than every other row
+    combined. It appears in exactly three places in the whole doc set: the 13 §1
+    row, a restatement in 08 §1.1, and the §10.1 cost row. **No derivation, no
+    anchor, no rationale.** That is the same shape as `collator.comp_epoch`
+    before SQ-536, which turned out to be 4x too high.
+
+    This class exists to record why it is NOT the same answer, because the size
+    of the line makes it a standing temptation. The arithmetic says the error
+    direction here is more likely DOWNWARD, so cutting it is the unsafe move.
+    """
+
+    def test_rejection_is_free_and_getting_that_wrong_flatters_the_reward(self):
+        """The 08 §7.1 rule a hand calculation gets backwards.
+
+        Bonds "refund in full only on a decision-grade outcome (adopt or reject
+        -- rejection is information)", so `intake.slash_pct` fires on
+        NON-decision-grade outcomes. Treating rejection as a slash makes the
+        reward look far more generous than it is.
+        """
+        self.assertEqual(INTAKE_SLASH_FRACTION, D("0.10"))
+        # Perfect formation: rejection costs nothing, so EV is never negative.
+        self.assertEqual(proposer_expected_value("param", D(0), D(1)), D(0))
+        self.assertEqual(proposer_expected_value("param", D(1), D(1)), D(500))
+        # The loss comes only from markets that fail to form a decision.
+        self.assertEqual(proposer_expected_value("param", D(0), D(0)), D(-100))
+
+    def test_at_the_phase0_rates_param_proposing_loses_money(self):
+        """The evidence, and its limits, both stated.
+
+        Artifact rates (10,000 proposals): PARAM adopts 2.32 % and forms a
+        decision-grade market 40.56 % of the time, giving EV = -47.8 USDC per
+        submission against a break-even adopt rate of 11.89 %.
+
+        The population is **adversarial by construction** -- informed, noise,
+        arbitrage and five doc-14 manipulator strategies -- so this is a
+        population average and NOT an honest proposer's expectation. It cannot
+        establish that the reward is too low. What it does establish is that
+        nothing here supports the reward being too HIGH, which is the only
+        reading that would make this line a cost lever.
+        """
+        adopt, dg = D("0.0232"), D("0.4056")
+        ev = proposer_expected_value("param", adopt, dg)
+        self.assertLess(ev, D(0))
+        self.assertLess(abs(ev - D("-47.8")), D("0.5"))
+        be = proposer_break_even_adopt_rate("param", dg)
+        self.assertLess(abs(be - D("0.1189")), D("0.0005"))
+        self.assertGreater(be, adopt)  # the gap is ~5x, not a rounding matter
+
+    def test_the_line_is_large_enough_to_be_a_standing_temptation(self):
+        """Why this is written down rather than left to be rediscovered."""
+        cb = cost_base()
+        self.assertLess(abs(cb.proposer_rewards - D(43_482)), D(2))
+        self.assertGreater(cb.shares()["proposer_rewards"], D("0.39"))
+        # Level with collators at the launch count -- the two largest lines.
+        self.assertEqual(cb.proposer_rewards, cb.collators)
+        # And a x0.1 cut (the 13 §1 hard-min) would take 39,134/yr off `C`...
+        cut = cost_base(with_levers(proposer_reward=D(50)))
+        self.assertGreater(cb.annual - cut.annual, D(39_000))
+        # ...and it would make proposing UNPROFITABLE AT ANY ADOPT RATE: at
+        # reward 50 the break-even is 118.9 %, i.e. even a proposal adopted
+        # every single time would not cover the non-formation slash. That is
+        # the decisive argument, and it is evidence rather than caution.
+        hard_min = proposer_break_even_adopt_rate("param", D("0.4056"), reward=D(50))
+        self.assertGreater(hard_min, D(1))
+        self.assertLess(abs(hard_min - D("1.1888")), D("0.0005"))
+        # The shipped value is the only one of the two that is even reachable.
+        self.assertLess(proposer_break_even_adopt_rate("param", D("0.4056")), D(1))
 
 
 class PolRerunExposureTests(unittest.TestCase):

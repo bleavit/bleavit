@@ -509,6 +509,67 @@ def pol_divergence_with_reruns(
         return +(p.pol_divergence_annual * multiple)
 
 
+# 13 §1 `prop.bond` per class and `trs.proposer_reward` per class, with the
+# 08 §7.1 slash rule: bonds "refund in full only on a decision-grade outcome
+# (adopt or reject -- rejection is information)", so the 10 % `intake.slash_pct`
+# fires on NON-decision-grade outcomes, not on rejection.
+PROP_BOND = {
+    "param": Decimal(1_000),
+    "treasury": Decimal(5_000),
+    "code": Decimal(25_000),
+    "meta": Decimal(50_000),
+}
+PROPOSER_REWARD = {
+    "param": Decimal(500),
+    "treasury": Decimal(25_000),
+    "code": Decimal(25_000),
+    "meta": Decimal(25_000),
+}
+INTAKE_SLASH_FRACTION = Decimal("0.10")
+
+
+def proposer_expected_value(
+    proposal_class: str,
+    adopt_rate: Decimal,
+    decision_grade_rate: Decimal,
+) -> Decimal:
+    """Expected USDC to a proposer per submission, per 08 §7.1 and §1.1.
+
+    `reward * P(adopt) - slash * P(non-decision-grade)`. Rejection contributes
+    ZERO, not a loss: 08 §7.1 refunds the bond in full on any decision-grade
+    outcome because "rejection is information". Getting that wrong turns an
+    honest rejected proposal into a penalised one and makes the reward look
+    far more generous than it is -- which is exactly the error this function
+    exists to stop a reader making by hand.
+    """
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        reward = PROPOSER_REWARD[proposal_class]
+        slash = PROP_BOND[proposal_class] * INTAKE_SLASH_FRACTION
+        return +(reward * adopt_rate - slash * (Decimal(1) - decision_grade_rate))
+
+
+def proposer_break_even_adopt_rate(
+    proposal_class: str,
+    decision_grade_rate: Decimal,
+    reward: Decimal | None = None,
+) -> Decimal:
+    """Adopt rate at which proposing stops losing money, at a given formation rate.
+
+    `reward` overrides the 13 §1 default so a proposed amendment can be tested
+    before it is made. A result above 1 means NO adopt rate makes proposing
+    profitable -- the reward cannot cover the non-formation slash even if every
+    submission is adopted.
+    """
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        reward = PROPOSER_REWARD[proposal_class] if reward is None else reward
+        slash = PROP_BOND[proposal_class] * INTAKE_SLASH_FRACTION
+        if reward <= 0:
+            return INFINITE
+        return +(slash * (Decimal(1) - decision_grade_rate) / reward)
+
+
 def quiet_epoch_cost(params: CostParams | None = None) -> Decimal:
     """08 §10.6: what a zero-revenue epoch still bills.
 
