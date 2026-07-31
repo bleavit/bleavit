@@ -96,6 +96,36 @@ or fail while existing valid claims remain payable under their own rules.
    page for a reviewed repair rather than reporting a freeze. A ledger drift instead uses the
    stricter RB-LEDGER path.
 
+### Coretime renewal timing (recurring procedure, not an incident response)
+
+Owned here because it is an `ops.coretime` spending decision, and it is the largest single lever on
+the treasury's runway ([08 §10.1](../../docs/architecture/08-treasury-and-economics.md): 62× on
+cumulative 25-year spend, +18.3 years of runway). `broker.renew` charges
+`min(leadin_factor(t) · end_price, max(prev · (1 + renewal_bump), end_price))`, and `t` — how far
+into the sale's leadin the renewal is submitted — is the quote authority's choice.
+
+1. Each bulk period, read the Coretime-chain sale state: `end_price`, `sale_start`,
+   `leadin_length`, `cores_offered`, `cores_sold`, and the chain's own `PotentialRenewals` price.
+2. **Target the end of the leadin**, not the interlude. At the end of the leadin the price is
+   `end_price` exactly, whatever the previous price was; in the interlude it is
+   `prev · (1 + renewal_bump)` and ratchets toward 100× the market floor
+   ([09 §4](../../docs/architecture/09-execution-upgrades-and-rollout.md)).
+3. **Pull the submission earlier whenever the remaining-core margin is thin.** Track
+   `cores_offered − cores_sold` across the leadin and submit as soon as the observed fill rate
+   projects a sellout before the target block. The interlude's guaranteed core is the correct
+   answer whenever the margin is thin: **a missed renewal is a lost core and is strictly worse than
+   a ratcheted price.** No cost argument overrides that ordering.
+4. `note_coretime_quote(period_index, price)` then `execute_coretime_renewal(period_index)` as
+   usual. The on-chain calls are timing-agnostic and enforce none of the above; the price
+   discipline is entirely this procedure's.
+5. **A ratcheted price is recoverable, so do not treat it as permanent.** Because each renewal
+   rewrites the stored `record.price`, one successful end-of-leadin renewal drops an already-
+   saturated price back to the market floor. If several periods have been renewed in the interlude,
+   the next late renewal alone repairs the whole escalation.
+6. Escalate to a TREASURY refill only after step 5 has been attempted. A rising `ops.coretime`
+   refill cadence with no corresponding rise in `end_price` is the signature of interlude renewal,
+   not of a rising market, and should be diagnosed as a procedure defect first.
+
 ## Escalation
 
 The Monitoring coordinator owns the initial incident. Page the Keeper coordinator for keeper-meter
@@ -112,5 +142,7 @@ meter, affected obligations, NAV/floor impact, and whether any valid claim was d
 - [08 §1 — NAV, streams, meters, calls, and reserve haircut](../../docs/architecture/08-treasury-and-economics.md)
 - [08 §4 — minimum-viable NAV](../../docs/architecture/08-treasury-and-economics.md)
 - [08 §6.3 — keeper-meter complement](../../docs/architecture/08-treasury-and-economics.md)
+- [08 §10.1 — coretime renewal pricing and what the timing is worth](../../docs/architecture/08-treasury-and-economics.md)
+- [09 §4 — coretime continuity, quote authority, normative renewal timing](../../docs/architecture/09-execution-upgrades-and-rollout.md)
 - [12 §6.3 — Treasury alert](../../docs/architecture/12-release-and-operations.md)
 - [15 I-7/I-17 — metering invariants](../../docs/architecture/15-invariants-and-testing.md)
