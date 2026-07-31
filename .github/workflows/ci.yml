@@ -10,6 +10,16 @@ on:
 permissions:
   contents: read
 
+# Supersede in-flight runs of the same ref. Without this a branch that is pushed
+# three times queues three full workspace builds that compete for the same
+# runners, and only the last one's result can matter — the earlier two are
+# answering a question about a tree nobody will merge. Never cancels on `main`:
+# there each push is a distinct commit whose result is the record for that
+# commit, not a draft superseded by the next one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   rust:
     name: Rust workspace
