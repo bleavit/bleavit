@@ -223,7 +223,8 @@ live. For mock data these are the correct realistic values.
 
 | Parameter | Value | UI surface |
 |---|---|---|
-| `mkt.fee` | 30 bps | fee line in trade ticket |
+| `mkt.fee` | 30 bps | fee line in trade ticket; read from the `Market::Fee` metadata constant and cross-checked against raw `params(mkt.fee)` — never hardcoded |
+| `ledger.redeem_fee` (key `ledger.rdm_fee`) | 30 bps (E1; live coupling `ledger.redeem_fee ≤ mkt.fee`, a **separate key** from `mkt.fee` — never substitute or derive one from the other) | net-payout line on every **charged** redemption (`redeem_scalar`, `redeem_scalar_pair`, `redeem_gate`, `redeem_baseline`, `redeem_baseline_pair`): show `net` as the headline and `gross` as itemization. **Exempt, so no fee line at all**: `redeem`, `redeem_void`, every `merge*` — those are the par legs and must still read as par. Read from `ConditionalLedger::RedemptionFee` and cross-checked against raw `params(ledger.rdm_fee)`; if unreadable, omit the net figure with an explanation rather than defaulting |
 | `MinTrade` / `MaxTrade` | 1 USDC / b/4 per trade | amount validation, `max_trade` |
 | `mkt.obs_interval` | 10 blocks (= 1 min) | chart granularity |
 | `mkt.kappa` κ | 0.005 per interval (TWAP slew cap) | "TWAP capped" chart annotation |
