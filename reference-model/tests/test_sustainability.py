@@ -518,6 +518,53 @@ class OperatingPointTests(unittest.TestCase):
         standing = cost_at_occupancy(D(0), p) - cost_at_occupancy(D(0), with_levers(pol_divergence_annual=0))
         self.assertLess(abs(standing - p.pol_divergence_annual / D(11)), D("0.01"))
 
+    def test_keeper_cost_scales_with_occupancy_like_the_crank_load_does(self):
+        """Raised by review. 13 §5 item 4 derives observation load from
+        `epoch.slots * 6 + 1` books, so keeper cost scales with OCCUPIED slots
+        and only the epoch's single Baseline book is observed at zero
+        occupancy. Treating it as standing charged five slots' observations at
+        one-slot occupancy and, worse, capped it at five when the break-even
+        search evaluated six through twelve.
+        """
+        p = CostParams()
+        full = cost_base(p).keeper_total
+        # At zero occupancy only the Baseline book is observed: 1 of 31.
+        self.assertLess(
+            abs(cost_at_occupancy(D(0), p) - cost_at_occupancy(D(0), with_levers(keeper_rebate=0))
+                - full / D(31)),
+            D("0.01"),
+        )
+        # And it keeps scaling above the default slate rather than saturating.
+        self.assertGreater(cost_at_occupancy(D(7), p), cost_at_occupancy(D(5), p))
+
+    def test_the_break_even_conclusion_survives_the_pol_split_uncertainty(self):
+        """Bounds the P1 rather than guessing per-book settlement prices.
+
+        Realized POL loss is `b*[ln2 - H(p)]` and 04 §12 gives different prices
+        for Baseline, decision and gate books, so the standing-versus-scaling
+        split of that row is genuinely uncertain -- the `b`-weighted 1/11 is a
+        first-order model, not a derivation from prices.
+
+        Rather than invent prices the spec does not pin, drive the whole row to
+        BOTH extremes: entirely scaling with proposals, and entirely standing.
+        The published break-even is unchanged in three of four cells and moves
+        by one slot in the fourth, so the conclusions do not rest on the split.
+        """
+        for params, tau, expected in (
+            (CostParams(), D(3), {7}),
+            (CostParams(), D("5.8"), {3}),
+            (with_levers(collator_comp_epoch=500), D(3), {1, 2}),
+            (with_levers(collator_comp_epoch=500), D("5.8"), {1}),
+        ):
+            with self.subTest(tau=str(tau), collator=str(params.collator_comp_epoch)):
+                actual = break_even_slots_consistent(tau, params)
+                self.assertIn(actual, expected)
+                # The whole POL row is at most 7.9 % of the cost base, which is
+                # why the extremes cannot move the answer far.
+                self.assertLess(
+                    params.pol_divergence_annual / cost_base(params).annual, D("0.18")
+                )
+
     def test_the_standing_collator_line_decides_whether_one_proposal_suffices(self):
         """The most decision-relevant result in E5, and it is not a value choice.
 

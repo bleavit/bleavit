@@ -418,9 +418,19 @@ def cost_at_occupancy(occupied: Decimal, params: CostParams | None = None) -> De
         baseline_share = POL_B_BASELINE / (b_full_slate + POL_B_BASELINE)
         pol_baseline = full.pol_divergence * baseline_share
         pol_proposals = (full.pol_divergence - pol_baseline) * share
+
+        # Keeper cost is NOT standing either (raised by review). 13 §5 item 4
+        # derives observation load from `epoch.slots * 6 + 1` books, so it
+        # scales with OCCUPIED slots and only the epoch's single Baseline book
+        # is observed at zero occupancy. Treating it as standing charged five
+        # slots' observations at one-slot occupancy, and — worse — capped it at
+        # five when `break_even_slots_consistent` evaluated six through twelve.
+        books_at_occupancy = occupied * BOOKS_PER_PROPOSAL + Decimal(1)
+        keeper = full.keeper_total * books_at_occupancy / p.trading_books()
+
         return +(
             full.collators
-            + full.keeper_total
+            + keeper
             + full.reserve_probe
             + full.ops_overlay
             + full.proposer_rewards * share

@@ -20780,8 +20780,8 @@ fn a_heavy_call_costs_more_than_a_light_one_after_a_block_boundary() {
     });
 }
 
-/// SQ-531. The seeded `keeper.rebate` must stay tied to the fee it claims to be
-/// a multiple of.
+/// SQ-531. The seeded `keeper.rebate` must stay tied to the WEIGHT of the crank
+/// whose fee it is a multiple of.
 ///
 /// The parameter shipped at 0.09 USDC as "3x the crank fee" against an *assumed*
 /// 0.03 USDC basis that nobody had measured. The real fee is ~0.000085 USDC, so
@@ -20795,12 +20795,20 @@ fn a_heavy_call_costs_more_than_a_light_one_after_a_block_boundary() {
 /// so a weight change large enough to invalidate the basis fails here instead of
 /// silently re-inflating the cost base.
 ///
-/// The band is deliberately wide (0.3x-30x the target, i.e. an order of magnitude
-/// either side). It is a drift alarm, not a precision check: the rebate is a
-/// governed PARAM row with a [1x, 10x] envelope of its own, and the USDC leg
-/// still moves with the `[VERIFY at TGE]` launch price. What it catches is the
-/// failure that actually happened — a basis wrong by two to four orders of
-/// magnitude — which no plausible band would let through.
+/// **This is a WEIGHT-drift alarm and nothing more** (scope corrected 2026-07-31
+/// after review). It hardcodes 08 §9's 0.05 USDC/VIT placeholder, so it says
+/// nothing whatever about price: `keeper.rebate` is a stored USDC amount while
+/// the fee is weight-fixed in VIT, so a lawful appreciation of
+/// `fee.vit_usdc_rate` can drive the real ratio below 1.0 while this test keeps
+/// passing against 0.05. Guarding *that* is SQ-534's amendment-boundary screen,
+/// which does not exist yet; do not read this test as covering it.
+///
+/// What it does cover: a weight regeneration that moves the crank's cost far
+/// enough to invalidate the basis. The band is deliberately wide (0.3x-30x the
+/// target) because the rebate is a governed PARAM row with a [1x, 10x] envelope
+/// of its own. What it catches is the failure that actually happened — a basis
+/// wrong by two to four orders of magnitude — which no plausible band lets
+/// through.
 #[test]
 fn the_seeded_keeper_rebate_tracks_the_measured_crank_fee() {
     use frame_support::dispatch::GetDispatchInfo;
