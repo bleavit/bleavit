@@ -108,6 +108,29 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 >    *shape of the fit*, not the headline: the per-round slope moves **51,312,035 → 123,620,566
 >    (2.4×)** while the intercept moves only +7.0 %, and the Standard Error *tightens* 1,366,514 →
 >    469,648. Unmeasured per-round work moves a slope; noise moves an intercept.
+>
+>    **A cross-pallet consumer was missed, and CI caught it.** Regenerating only
+>    `pallet_oracle` was not enough: `pallet-epoch::drive_oracle_boundaries` — the 07 §11/SQ-182
+>    crank that drives the oracle's settle deadline — calls into the oracle and therefore also pays
+>    the new `load()` read. `benchmark-smoke` failed with the single line
+>    `STALE drive_oracle_boundaries: worst_case.reads 715 -> 716`, the **only** stale entry across
+>    all 32 pallets, and a local 50×20 regeneration reproduced it exactly: the function's storage
+>    list now carries `Oracle::ReporterRecords (r:1 w:0)`, `max_size: Some(2178)` = 64 × 34 + 2.
+>    +0.14 % needs no acknowledgement. Two lessons worth keeping. **(i)** A new read in a shared
+>    hydration path is a *cross-pallet* weight change; `--pallet <one>` is the wrong scope, and
+>    `--changed` would not have found it either, since `pallets/epoch/` never moved. **(ii)** CI's
+>    `2×1` run reported `settle_cohort: worst_case.proof_size 552,103 -> 568,303 (+2.9 %)` as
+>    advisory; the quiet 50×20 regeneration did **not** reproduce it, confirming it as a
+>    low-fidelity artifact of a component-bearing function and not this change — which is exactly
+>    the distinction the constant-weight/component-bearing split in the drift gate exists to draw.
+>
+>    **Operational gotcha (cost one failed regeneration):** `rust-workspace-gates.sh` and
+>    `regenerate-weights.py` share `CARGO_TARGET_DIR`, and the gate's plain-release runtime build
+>    **overwrites** the `runtime-benchmarks` wasm at
+>    `release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm`. A regeneration run
+>    after the gate aborts with "Did not find the benchmarking runtime api". Regenerate weights
+>    *before* the exhaustive gate, or rebuild with `--features runtime-benchmarks` after it. It
+>    fails loudly rather than mis-measuring, which is the right failure mode.
 > 2. **The security claim is now executable, not asserted.** The rebase brought in S6's
 >    `reference-model/src/bleavit_reference_model/disputes.py` — the executable form of 07 §5–§6 —
 >    which models §5.5's 40/60 split and §6.3's coverage rule but knew nothing about a *default*.
