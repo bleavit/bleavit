@@ -60,13 +60,79 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 > tooling 86 green; plan-tables, spec-question-batches, limit-coverage (**unwired = 0, no registry
 > churn — no new 13 key**) and doc-links green.
 >
-> **Owed before ready-for-merge, and neither is optional:**
-> 1. **Regenerated `pallet_oracle` weights.** `load()` now reads `ReporterRecords` on *every*
->    dispatch, so all 12 functions move; and `crank_round_close`'s fixture was reseeded onto the
->    §5.3 default branch, which was **never measured** before (saturated acks sent every round down
->    the `Unchallenged` arm) and is now strictly the heavier one. The growth-only regression gate
->    cannot see work that was never measured — this is the SQ-490 class.
-> 2. **One exhaustive `tools/ci/rust-workspace-gates.sh`** on the coherent state.
+> **Both pre-merge obligations are now discharged (PR #203, head `e1c6e25`, rebased onto `48e59f3`):**
+> 1. **Regenerated `pallet_oracle` weights — landed, at 50×20.** `load()` now reads `ReporterRecords`
+>    on *every* dispatch, so all 12 functions moved; and `crank_round_close`'s fixture was reseeded
+>    onto the §5.3 default branch, which was **never measured** before (saturated acks sent every
+>    round down the `Unchallenged` arm) and is now strictly the heavier one — **+4 reads / +2 writes**
+>    and ref_time `2,341,966,339 → 2,988,538,778` (**+27.61 %** against the rebased base). The
+>    growth-only regression gate cannot see work that was never measured, so this is the SQ-490 class
+>    and the movement is a **fixture correction, not a slowdown**; it is value-pinned in
+>    `tools/ci/weight-regression-acks.toml` with that reasoning, and `check-weight-regression.py`
+>    reports `PASS WITH ACKNOWLEDGEMENTS`.
+> 2. **The one exhaustive `tools/ci/rust-workspace-gates.sh` — green on the coherent post-rebase
+>    state (`GATES_EXIT=0`).** Includes the runtime release/`runtime-benchmarks`/`try-runtime`
+>    builds, the runtime-profile matrix, `no_std`, both weight checkers, and the limit-coverage leg
+>    (194 keys, unwired = 0). Per R-12 this state does not owe a second exhaustive rerun.
+>
+> **A completeness sweep over the change set then found three more things (2026-07-31, post-gate):**
+>
+> 1. **A benchmark-fixture gap this PR itself introduced — real, but smaller than it first looked.**
+>    Making `load()` read `ReporterRecords` on every dispatch means every benchmark whose dispatch
+>    hydrates the aggregate must fill that store to its bound — but `fill_reporter_records()` was
+>    reached by only 8 of the 12, via `fill_hydration` plus `crank_round_close`'s explicit call.
+>    `register_watchtower` and `ack_observed` build their own fixtures, go through `mutate_core` →
+>    `load()` anyway, and so measured an **empty** record store. The helper's own doc comment claimed
+>    "every benchmark", which is how it read as covered. Both now call it, and each gains exactly
+>    **+2,201 B** of measured state (64 × 34 B + encoding overhead) — the deterministic signal.
+>
+>    **Three corrections to the first reading, all recorded because the obvious framing was wrong
+>    each time.** (a) **The charged PoV was never understated.** `ReporterRecords` is declared
+>    `MaxEncodedLen`, so the `Estimated:` figure — the proof size actually charged — already carried
+>    the full 64-record bound while the fixture was empty. Only `Measured:` (informational) and
+>    `ref_time` moved; reads and writes did not. (b) **It was two functions, not four.**
+>    `crank_reserve_probe` and `reserve_probe_result` go through the narrow `mutate_reserve_health`
+>    path, never `mutate_core`, and their generated weights carry no `Oracle::ReporterRecords` read
+>    at all. They were briefly given the fixture too; it was removed, because seeding a store the
+>    dispatch provably never touches is the same misleading-fixture pattern this PR exists to fix.
+>    Both now carry a comment saying why they are the exception. (c) **Do not trust a contended
+>    ref_time.** An intermediate regeneration ran while another session benchmarked in a sibling
+>    worktree and read `recompute_proof` +59.8 % and `register_watchtower` +11.4 %; on a quiet re-run
+>    both collapsed to +2.1 % and +6.9 %. So this fixture fix is a **fidelity correction with no
+>    charged-weight consequence** for those two functions — worth making because the artifact should
+>    describe the state the dispatch really sees, not because it crossed a regression line. The
+>    acknowledgement in `weight-regression-acks.toml` now carries that caution explicitly.
+>
+>    The one genuine regression remains `crank_round_close`, re-pinned at
+>    `ref_time=3193098962` (+36.34 % worst case at the component high `n = 10`). Its evidence is the
+>    *shape of the fit*, not the headline: the per-round slope moves **51,312,035 → 123,620,566
+>    (2.4×)** while the intercept moves only +7.0 %, and the Standard Error *tightens* 1,366,514 →
+>    469,648. Unmeasured per-round work moves a slope; noise moves an intercept.
+> 2. **The security claim is now executable, not asserted.** The rebase brought in S6's
+>    `reference-model/src/bleavit_reference_model/disputes.py` — the executable form of 07 §5–§6 —
+>    which models §5.5's 40/60 split and §6.3's coverage rule but knew nothing about a *default*.
+>    Added `default_slash_split()` (the v18 round-1 exception) and `self_challenge_outcome()`, which
+>    re-derives every number this PR and 02 §13 publish: pre-v18 **+102,000** net at **8.6 %** of the
+>    required ladder against the honest attacker's −90,000, and post-v18 **−30,000** with zero gross
+>    gain. Suite **253 → 263**. One new test deliberately pins the *residual* rather than hiding it:
+>    neutralization removes the gain, not the move, so an attacker may still burn `B_1` to force a
+>    neutral flagged settlement — which is exactly what §11(4) prices and §10's two-consecutive-flag
+>    renormalization absorbs. Another sweeps every lawful `(bond_floor, bond_bps, rounds)` triple, so
+>    unprofitability does not rest on the defaults (`orc.rounds` carries no max-Δ).
+> 3. **Supporting evidence the old behavior was a defect, not a design choice.** 07 §13's
+>    already-existing try-state list admits exactly four `ComponentValues` categories —
+>    quorum-acknowledged, challenge-resolved, adjudicated, neutral-flagged. `ChallengerDefault` is
+>    none of them, so the pre-v18 path violated the spec's own invariant text. The new try-state
+>    assertion is therefore a *strengthening consistent with* 07 §13, and needs no doc-15 edit
+>    (15 §1's coverage rule delegates per-pallet invariants to the owning doc).
+>
+> Checked and found **not** owed: 07 §13 needs no `ReporterRecords` row (it lists 6 of the pallet's
+> 14 storage items and 7 of its 27 errors — `RoundSchedules`, `AckRecords`, `MoneySettled`,
+> `RoundActivity` and two more internal items are already absent, so the list is the contract-frozen
+> surface, not an enumeration); 13 §4 needs no bound row (`Reporters` itself has none — the ≤ 64 is
+> anchored at 07 §13 — and the new store reuses that same bound); and `ReporterRecordsFull` needs no
+> `surface-manifest.json` entry, because the manifest is checked **manifest → metadata**, so an
+> off-contract event is out of its scope by construction.
 >
 > **Pre-existing red, reported not absorbed:** `cargo test -p pallet-oracle --features
 > runtime-benchmarks` fails `bench_report` identically on unmodified `HEAD` (137 passed / 1 failed

@@ -78,7 +78,10 @@ fn fill_reporters<T: Config>(first_seed: u8, count: u8) {
 }
 
 /// Fill the retained 07 §3 record store to its bound so `load()` hydrates it at
-/// worst case in every benchmark (contract v18). Seeds are disjoint from
+/// worst case (contract v18). Called by every benchmark whose dispatch goes
+/// through `mutate_core` — which is all of them except the two reserve-probe
+/// entry points, whose narrow `mutate_reserve_health` path never reads it.
+/// Seeds are disjoint from
 /// `fill_reporters`' range: a retained record and a live seat are mutually
 /// exclusive homes for the same account, and both `try_state` and the core
 /// invariant forbid the overlap.
@@ -452,6 +455,7 @@ mod benches {
     fn register_watchtower() {
         fill_watchtowers::<T>(2, (MAX_WATCHTOWERS_BOUND - 1) as u8);
         fill_reporters::<T>(1, MAX_REPORTERS_BOUND as u8);
+        fill_reporter_records::<T>();
         fill_future_rounds::<T>(1);
         fill_ack_capacity::<T>(15, 15);
         fill_component_values::<T>(MAX_COMPONENT_VALUES_BOUND);
@@ -476,6 +480,7 @@ mod benches {
     fn ack_observed() {
         let reporter = seed_reporter::<T>(1);
         fill_reporters::<T>(2, (MAX_REPORTERS_BOUND - 1) as u8);
+        fill_reporter_records::<T>();
         let value = FixedU64(500_000_000);
         let evidence = [9u8; 32];
         seed_report::<T>(&reporter, value, evidence);
@@ -581,6 +586,12 @@ mod benches {
         // Conservative synthetic upper envelope: combine the recurring path's
         // timeout/missed-slot/sink work with the first-arm readiness check. No
         // single reachable branch performs more work than this union.
+        //
+        // No `fill_reporter_records` here, deliberately: this crank goes
+        // through the narrow `mutate_reserve_health` path, not `mutate_core`,
+        // so it never hydrates the aggregate and the generated weights carry
+        // no `Oracle::ReporterRecords` read. Seeding a store the dispatch
+        // provably does not touch would misstate the fixture.
         ReserveHealth::<T>::put(ReserveHealthValue {
             consecutive_fails: oracle_core::RES_FAIL_THRESHOLD.saturating_sub(1),
             consecutive_passes: 0,
@@ -619,6 +630,8 @@ mod benches {
     #[benchmark]
     fn reserve_probe_result() {
         let now = RES_PROBE_INTERVAL;
+        // As in `crank_reserve_probe`: the authenticated-response path uses
+        // `mutate_reserve_health`, so no `ReporterRecords` hydration applies.
         ReserveHealth::<T>::put(ReserveHealthValue {
             consecutive_fails: oracle_core::RES_FAIL_THRESHOLD.saturating_sub(1),
             consecutive_passes: 0,

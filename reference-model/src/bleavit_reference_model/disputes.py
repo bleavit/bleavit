@@ -197,6 +197,34 @@ def slash_split(stack: int) -> tuple[int, int]:
     return honest, stack - honest
 
 
+def default_slash_split(stack: int, round_: int) -> tuple[int, int]:
+    """§5.5's contract-v18 exception to `slash_split` for a §5.3 **default**.
+
+    A default is not an adjudicated finding. At round 1 the game holds exactly
+    two unrebutted assertions and one was abandoned, and nothing on chain
+    distinguishes an honest catch from a griefing or self-dealt one — §5.2
+    freezes no reporter/challenger distinctness, and none stronger is
+    implementable while §4's "entity registry per 05" does not exist. So the
+    whole stack routes to INSURANCE and **no bounty is paid**: paying there is
+    what makes challenging an honest *offline* reporter profitable, and it is
+    the leg that turned the self-challenge below into a profit.
+
+    From round 2 the reporter consented to escalate, re-asserted under a
+    doubled bond and only then abandoned. That is a concession by conduct
+    against a contest the challenger actually funded, so §6.2's
+    honest-challenger revenue applies and §5.5's ordinary 40/60 split stands.
+
+    Returns `(to_counterparty, to_insurance)`, like `slash_split`.
+    """
+    if stack < 0:
+        raise BondError(f"negative stack {stack}")
+    if round_ < 1:
+        raise BondError(f"round {round_} below 1")
+    if round_ == 1:
+        return 0, stack
+    return slash_split(stack)
+
+
 def challenger_breakeven_probability() -> Fraction:
     """The confidence an honest challenger needs before challenging is +EV.
 
@@ -388,6 +416,96 @@ def coverage_makes_lying_unprofitable(
     rule exists to buy, so it is checked rather than assumed.
     """
     return attack_outcome(stake_at_risk, delta_s_max, params).net <= 0
+
+
+# ---------------------------------------------------------------------------
+# §5.3 — one account on both sides of the game (contract v18).
+#
+# §6.3 sizes the ladder against `Δs_max` on the assumption that a lie must be
+# ridden to `R_max` to land, so the liar forfeits `(2^R_max − 1)·B_1`. A
+# reporter who challenges *itself* and then defaults never pays that: the game
+# terminates at round 1 having risked one rung. This prices both regimes so the
+# coverage rule's promise is checked against the cheapest path to a settled
+# value, not only against the honest-attacker path `attack_outcome` models.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SelfChallengeOutcome:
+    """One economic party occupying both roles of a §5.3 default, priced."""
+
+    b1: int
+    #: The full ladder §6.3 sized the coverage rule against.
+    required_ladder: int
+    #: The one stack the attack actually puts at risk (round 1 only).
+    risked: int
+    #: Refunded to the attacker's own "honest counterparty" identity.
+    bounty: Fraction
+    #: `risked − bounty` — what terminating at round 1 really costs.
+    net_cost: Fraction
+    gross_gain: Fraction
+    net: Fraction
+
+    @property
+    def profitable(self) -> bool:
+        return self.net > 0
+
+    @property
+    def ladder_fraction(self) -> Fraction:
+        """Net cost as a share of the ladder §6.3 required.
+
+        This is the number that shows the coverage rule was bypassed rather
+        than merely beaten: the rule can be satisfied exactly and still be paid
+        in a small fraction of the stack it sized.
+        """
+        return Fraction(self.net_cost, 1) / self.required_ladder
+
+
+def self_challenge_outcome(
+    stake_at_risk: int,
+    delta_s_bps: int,
+    params: OracleParams = DEFAULTS,
+    position_share: Fraction = Fraction(1),
+    *,
+    neutralized: bool,
+) -> SelfChallengeOutcome:
+    """A reporter challenges itself, then defaults at round 1.
+
+    Both leaves are `CallDomain::Public`, so one `utility.batch_all([report,
+    challenge])` takes both roles atomically and the front-running window is
+    zero. `AlreadyChallenged` then locks every honest challenger out, and
+    `adjudicate` is unreachable below `round_cap`, so nothing but the default
+    can end the game.
+
+    `neutralized=False` prices the **pre-v18** rule, where a default settled
+    the challenger's counter-value *forward and unflagged*. The attacker puts
+    the false value on the challenger side, abandons the reporter side, and its
+    own counterparty bounty refunds 40 % of the single stack it risked — so the
+    false value reaches `C_attested` (and thus `W`) having paid a fraction of a
+    rung.
+
+    `neutralized=True` prices the **v18** repair: the default takes §10's
+    neutral carry-last/flagged path, so the false value never lands at all
+    (`gross_gain = 0`), and §5.5's round-1 exception pays no bounty. The repair
+    is on the *value* side because §5.3's own closing sentences forbid debiting
+    an unfunded stack — no rule can make a defaulting party forfeit rungs it
+    never posted, so the gain, not the cost, is what had to move.
+    """
+    if not Fraction(0) <= position_share <= Fraction(1):
+        raise BondError(f"position share {position_share} outside [0, 1]")
+    b1 = bond_1(stake_at_risk, params)
+    required_ladder = cumulative_forfeit(b1, params.rounds, params)
+    risked = b1
+    if neutralized:
+        bounty = Fraction(0)
+        gross = Fraction(0)
+    else:
+        bounty = HONEST_SHARE * b1
+        gross = Fraction(delta_s_bps * stake_at_risk, BPS_DENOMINATOR) * position_share
+    net_cost = risked - bounty
+    return SelfChallengeOutcome(
+        b1, required_ladder, risked, bounty, net_cost, gross, gross - net_cost
+    )
 
 
 # ---------------------------------------------------------------------------
