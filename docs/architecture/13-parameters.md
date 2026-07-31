@@ -167,13 +167,15 @@ Phase offsets are stored as rational fractions of `epoch.length` (B-med fix), so
 | Qualify | [3/21, 4/21) | 43,200 – 57,600 | d3–d4 |
 | Seed | [4/21, 5/21) | 57,600 – 72,000 | d4–d5 |
 | **Trade** | [5/21, 18/21) | 72,000 – 259,200 | **d5–d18 (13 days — corrected label; was “d4–d18”)** |
-| Decide window (accrual) | [15/21, 18/21) | 216,000 – 259,200 | d15–d18 (final 72 h; trailing = final 24 h) |
+| Decide window (accrual) | **not a fraction** — [18/21·L − `dec.window`, 18/21·L), anchored to Trade close ([05](05-welfare-and-decision-engine.md) §3.1) | 216,000 – 259,200 | d15–d18 (final 72 h; trailing = final 24 h) |
 | Decide | 18/21 | 259,200 | d18 |
 | Review (timelock) | d18 + `exec.timelock(class)` | — | per class |
 | Execute | per-proposal maturity, within `exec.grace` | — | — |
 | Housekeeping | [20/21, 1) | 288,000 – 302,400 | d20–d21 |
 
 Related frozen values: measurement horizon k = 2 epochs; measured cohort settlement at e+3; ≤ 4 non-terminal cohorts; **maturity worked example B+288,000** (corrected from B+287,000); capital duration example ~63–66 days.
+
+**The decision window is the one row that is not a kernel fraction (corrected 2026-07-31; SQ-535).** Every other row above scales with `epoch.length` by construction, which is the property this table exists to state. The decision window does not: [05](05-welfare-and-decision-engine.md) §3.1 anchors it *absolutely* to Trade close — "`dec.window` and `dec.trailing` remain absolute block-count parameters" — and the SQ-501 clarification below confirms the accrual boundaries are computed from the then-live `dec.window`/`dec.trailing` and stored per book. Its `15/21` is therefore a **rendering at the genesis registry**, not an offset: it equals the governing window at `(epoch.length, dec.window) = (302,400, 43,200)` and at no other admissible pair. At `epoch.length = 604,800` the fraction gives `[432,000, 518,400)` where the governing window is `[475,200, 518,400)`; at `dec.window = 86,400` and the default length it gives a 43,200-block window where the governing one is 86,400. The row previously stated the fraction without qualification, which contradicted the document that owns the schedule. `reference-model`'s `lifecycle` module carries both readings and pins the divergence (`decide_window_absolute` / `decide_window_by_fraction`). **The kernel constant `phase_offsets::DECIDE_WINDOW_NUM = 15` is published to clients in the [02](02-integration-contract.md) §9 `Epoch::PhaseOffsets` list and has the same property; whether it belongs there is SQ-535**, since removing it changes a frozen 02 surface.
 
 **Scope of "keep their creation-time schedule" (normative clarification; SQ-501, 2026-07-27).** The sentence above pins **phase boundaries**: the K fraction pairs, the epoch length a cohort was created under, its `decide_at` anchor, and the decision-window accrual boundaries, which are computed from the then-live `dec.window`/`dec.trailing` and **stored per book** when the window is registered at Seed. TWAP accrual, observation counts, staleness and coverage all read those stored boundaries, so for them the pin is real.
 
