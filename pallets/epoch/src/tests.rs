@@ -4851,3 +4851,202 @@ fn randomized_512_step_shell_core_differential_covers_refactored_seams() {
     run_settlement_seam_differential();
     run_t20_void_seam_differential();
 }
+
+// ---------------------------------------------------------------------------
+// E6 — the 05 §1.5 proposal author/funder split.
+//
+// 15 §4.2's two-identity obligation binds here: every incidence below is
+// asserted against *its own* identity, and none is inferred from the other. A
+// test that only ever built the collapsed shape (author == funder, the sole
+// state reachable before contract v18) would prove none of it, which is why
+// every fixture in this block uses `proposal_split` with distinct accounts.
+// ---------------------------------------------------------------------------
+
+/// The defect closure. 06 §4 rule 4 counts the **funder**; an author identity
+/// signs nothing, holds nothing and is slashed for nothing, so a cap keyed to it
+/// is satisfiable by minting free authors. One funder backing `cap + 1` distinct
+/// authors must still be refused on the `cap + 1`-th.
+///
+/// This is the test 15 §4.2 requires to be mutation-proven, and it **was**
+/// (2026-07-31): reverting the `epoch-core` predicate to the pre-E6
+/// `p.proposer == proposal.proposer` fails this test *and* its complement below,
+/// which is a two-sided proof rather than a one-sided one. Under the author
+/// keying the sybil evasion succeeds here (every submission is admitted, since
+/// all `cap + 1` authors are distinct), and one author backed by distinct funders
+/// is wrongly refused there. A regression whose pre-fix behavior was never
+/// observed does not evidence the defect it claims to close.
+#[test]
+fn e6_intake_cap_counts_the_funder_so_free_authors_cannot_evade_it() {
+    // limit-coverage: intake.max_acct
+    new_test_ext().execute_with(|| {
+        let cap = ParamsValue::get().intake_max_per_account as u64;
+        let funder = keeper();
+        // Each submission carries a *different* author and the same funder.
+        for id in 1..=cap {
+            assert_ok!(Epoch::submit(
+                RuntimeOrigin::signed(funder.clone()),
+                proposal_split(
+                    id,
+                    account(100u8.saturating_add(id as u8)),
+                    funder.clone(),
+                    ProposalState::Submitted,
+                    0,
+                    1,
+                ),
+            ));
+        }
+        // A fresh author does not buy a fresh allowance: the funder is at its cap.
+        assert_noop!(
+            Epoch::submit(
+                RuntimeOrigin::signed(funder.clone()),
+                proposal_split(99, account(200), funder, ProposalState::Submitted, 0, 1),
+            ),
+            Error::<Test>::IntakeFull
+        );
+    });
+}
+
+/// The complement, and the reason the test above is not vacuous: the cap really
+/// is keyed to the funder rather than to "any identity on the record". One
+/// author backed by distinct funders is *not* capped — each funder brings its
+/// own bond capital, which is precisely what rule 4 prices.
+#[test]
+fn e6_intake_cap_does_not_bind_across_distinct_funders() {
+    new_test_ext().execute_with(|| {
+        let cap = ParamsValue::get().intake_max_per_account as u64;
+        let author = account(42);
+        for id in 1..=cap.saturating_add(1) {
+            let funder = account(10u8.saturating_add(id as u8));
+            assert_ok!(Epoch::submit(
+                RuntimeOrigin::signed(funder.clone()),
+                proposal_split(id, author.clone(), funder, ProposalState::Submitted, 0, 1,),
+            ));
+        }
+    });
+}
+
+/// Consent: the bond hold lands on the signer, so the signer MUST be the funder.
+/// An author cannot submit a proposal that spends someone else's balance.
+#[test]
+fn e6_submit_refuses_a_signer_that_is_not_the_funder() {
+    new_test_ext().execute_with(|| {
+        let author = account(7);
+        let funder = account(8);
+        assert_noop!(
+            Epoch::submit(
+                RuntimeOrigin::signed(author.clone()),
+                proposal_split(1, author, funder, ProposalState::Submitted, 0, 1),
+            ),
+            Error::<Test>::BadProposalShape
+        );
+    });
+}
+
+/// T2 is admitted to **either** identity (05 §1.5) and to no one else.
+#[test]
+fn e6_withdraw_admits_author_and_funder_but_refuses_a_third_party() {
+    new_test_ext().execute_with(|| {
+        let author = account(7);
+        let funder = keeper();
+        let submit = |id: u64| {
+            Epoch::submit(
+                RuntimeOrigin::signed(funder.clone()),
+                proposal_split(
+                    id,
+                    author.clone(),
+                    funder.clone(),
+                    ProposalState::Submitted,
+                    0,
+                    1,
+                ),
+            )
+        };
+
+        // A third party may not withdraw.
+        assert_ok!(submit(1));
+        assert_noop!(
+            Epoch::withdraw(RuntimeOrigin::signed(account(99)), 1),
+            Error::<Test>::BadState
+        );
+        // The author may.
+        assert_ok!(Epoch::withdraw(RuntimeOrigin::signed(author.clone()), 1));
+
+        // So may the funder, on a fresh proposal.
+        assert_ok!(submit(2));
+        assert_ok!(Epoch::withdraw(RuntimeOrigin::signed(funder), 2));
+    });
+}
+
+/// Custody follows the funder: the refund is released to the account that posted
+/// the bond, never to the author. Paying an author for a bond they did not post
+/// would mint a transfer out of a bond the funder is still owed.
+#[test]
+fn e6_bond_refund_is_released_to_the_funder_not_the_author() {
+    new_test_ext().execute_with(|| {
+        let author = account(7);
+        let funder = keeper();
+        assert_ok!(Epoch::submit(
+            RuntimeOrigin::signed(funder.clone()),
+            proposal_split(
+                1,
+                author.clone(),
+                funder.clone(),
+                ProposalState::Submitted,
+                0,
+                1,
+            ),
+        ));
+        assert_eq!(
+            ProposalBonds::<Test>::get(1).map(|bond| bond.funder),
+            Some(funder.clone()),
+            "custody identity must be the funder"
+        );
+
+        BondReleases::set(Vec::new());
+        assert_ok!(Epoch::withdraw(RuntimeOrigin::signed(author.clone()), 1));
+        let releases = BondReleases::get();
+        assert!(
+            releases.iter().all(|(who, _)| *who != author),
+            "the author must never receive bond custody: {releases:?}"
+        );
+        assert!(
+            releases.iter().any(|(who, _)| *who == funder),
+            "the funder must receive the refund: {releases:?}"
+        );
+    });
+}
+
+/// Author-only rights stay author-only. `bind_ratification` freezes the
+/// referendum identity for a payload the author committed (09 §1.1(4)); funding
+/// it buys no authority over what it means.
+#[test]
+fn e6_bind_ratification_refuses_the_funder() {
+    new_test_ext().execute_with(|| {
+        let author = account(7);
+        let funder = keeper();
+        let mut state = EpochState::new();
+        let mut p = proposal_split(
+            1,
+            author.clone(),
+            funder.clone(),
+            ProposalState::Trading,
+            0,
+            1,
+        );
+        p.class = ProposalClass::Code;
+        state.proposals.push(p);
+        assert_ok!(Epoch::seed(state));
+
+        assert_noop!(
+            Epoch::bind_ratification(RuntimeOrigin::signed(funder), 1, 5),
+            DispatchError::BadOrigin
+        );
+        // ...and the author is the identity that can, so the refusal above is
+        // about *which* identity rather than about the call being unreachable.
+        assert_ok!(Epoch::bind_ratification(
+            RuntimeOrigin::signed(author),
+            1,
+            5
+        ));
+    });
+}
