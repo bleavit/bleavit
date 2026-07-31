@@ -15177,6 +15177,186 @@ fn qualified_real_payload_passes_guard_domain_rederivation_and_executes() {
     });
 }
 
+/// 08 §1.1 / 05 §1.5 (E6): the execution-time proposer reward is an **author**
+/// right. `RuntimeEpochHandoff::mark_executed` pays `&proposal.proposer`, so
+/// keeping `proposer` authorial satisfies the rule by construction — which is
+/// exactly why it needs a test rather than an argument: nothing else in the
+/// suite would notice a future change routing the payout through custody.
+///
+/// Two fixture choices are load-bearing.
+///
+/// **The identities must be distinct.** Every other end-to-end fixture submits
+/// with `author == funder`, where both recipients are the same account and the
+/// assertion cannot discriminate.
+///
+/// **The class must be PARAM.** Its reward is the flat `trs.reward.param`,
+/// independent of `ask`. TREASURY/CODE pay `min(0.05 %·Ask, 25k)`, which is 0 at
+/// the `ask = 0` every existing execution fixture carries — and a payout of zero
+/// pins no recipient.
+#[test]
+fn e6_execution_reward_pays_the_author_and_never_the_funder() {
+    use pallet_epoch::ExecutionGuardAccess;
+
+    development_ext().execute_with(|| {
+        arm_all_classes_for_tests();
+        assert!(install_single_active_metric_spec(28).is_some());
+
+        let reward = crate::configs::balance_param(b"trs.reward.param");
+        assert!(
+            reward > 0,
+            "the 13 §1 PARAM reward must be non-zero or this fixture proves nothing",
+        );
+
+        // `do_proposer_reward` is deliberately fail-soft: an unfunded REWARDS
+        // line makes it a silent no-op. That would satisfy a "the funder was not
+        // paid" assertion vacuously, so fund the line through the real governed
+        // call and assert the author's credit positively below.
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.main_usdc = state.main_usdc.saturating_add(reward);
+        });
+        back_main_usdc(reward);
+        assert_ok!(FutarchyTreasury::fund_budget_line(
+            pallet_origins::Origin::FutarchyTreasury.into(),
+            pallet_futarchy_treasury::BudgetLine::Rewards,
+            reward,
+        ));
+
+        let author = account(243);
+        let funder = account(244);
+        assert_ne!(author, funder);
+
+        let record = match pallet_constitution::Params::<Runtime>::get(pallet_constitution::key16(
+            b"mkt.obs_interval",
+        )) {
+            Some(record) => record,
+            None => {
+                assert!(false, "registered PARAM record must exist");
+                return;
+            }
+        };
+        let resource = expected_resource_key(0x01, Some(&record.key));
+        let (payload_hash, payload_len) =
+            match note_runtime_batch(vec![registered_param_call(record)]) {
+                Some(payload) => payload,
+                None => {
+                    assert!(false, "real PARAM execution fixture must encode");
+                    return;
+                }
+            };
+
+        let pid = pallet_epoch::NextProposalId::<Runtime>::get();
+        let mut submitted = empty_param_proposal(pid, author.clone(), payload_hash, payload_len);
+        submitted.funder = funder.clone();
+        submitted.resources = match futarchy_primitives::BoundedVec::try_from(vec![resource]) {
+            Ok(resources) => resources,
+            Err(_) => {
+                assert!(false, "one PARAM resource must fit");
+                return;
+            }
+        };
+
+        // The bond is the funder's — 05 §1.5 binds custody to the submit signer,
+        // and the author is never required to hold USDC (D-12).
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &funder,
+            submitted.bond,
+        ));
+        assert_ok!(Epoch::submit(
+            RuntimeOrigin::signed(funder.clone()),
+            submitted
+        ));
+        assert!(tick_qualification(vec![pid]).is_some());
+        assert_eq!(stored_proposal_state(pid), Some(ProposalState::Qualified));
+
+        let proposal = match pallet_epoch::Proposals::<Runtime>::get(pid) {
+            Some(proposal) => proposal,
+            None => {
+                assert!(false, "qualified proposal must be live");
+                return;
+            }
+        };
+        assert_eq!(proposal.proposer, author);
+        assert_eq!(proposal.funder, funder);
+
+        let maturity = System::block_number().saturating_add(
+            <crate::configs::ExecutionParams as pallet_execution_guard::Params>::exec_timelock(
+                ProposalClass::Param,
+            ),
+        );
+        let grace = <crate::configs::ExecutionParams as pallet_execution_guard::Params>::exec_grace(
+            ProposalClass::Param,
+        );
+        assert_ok!(
+            <crate::configs::RuntimeEpochExecutionGuard as ExecutionGuardAccess>::enqueue(
+                pid,
+                proposal.payload_hash,
+                proposal.version_constraint.clone(),
+                maturity,
+                grace,
+                false,
+            )
+        );
+        pallet_epoch::Proposals::<Runtime>::mutate(pid, |stored| {
+            if let Some(stored) = stored {
+                stored.state = ProposalState::Queued;
+                stored.maturity = Some(maturity);
+                stored.grace_end = Some(maturity.saturating_add(grace));
+                stored.decision = Some(DecisionOutcome::Adopt);
+                stored.markets = Some(MarketSet {
+                    accept: pid.saturating_mul(10).saturating_add(1),
+                    reject: pid.saturating_mul(10).saturating_add(2),
+                    gates: None,
+                    baseline: pid.saturating_mul(10).saturating_add(3),
+                });
+            }
+        });
+        pallet_conditional_ledger::Vaults::<Runtime>::insert(
+            pid,
+            pallet_conditional_ledger::core_ledger::VaultInfo::open(1),
+        );
+
+        let author_before = ForeignAssets::balance(usdc_location(), &author);
+        let funder_before = ForeignAssets::balance(usdc_location(), &funder);
+        assert_eq!(
+            author_before, 0,
+            "the author locked nothing, so any post-execution credit is the reward",
+        );
+
+        System::set_block_number(maturity);
+        assert_ok!(ExecutionGuard::execute(
+            RuntimeOrigin::signed(account(245)),
+            pid,
+        ));
+        assert_eq!(stored_proposal_state(pid), Some(ProposalState::Measuring));
+
+        // Execution settles both incidences in the same transaction, so this
+        // one fixture pins the whole 05 §1.5 split: the author is credited the
+        // reward and nothing else, the funder is credited the bond release and
+        // nothing else. Swapping either recipient breaks an exact equality.
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &author),
+            author_before.saturating_add(reward),
+            "08 §1.1 pays the proposal's author — and pays them the reward only, \
+             never the bond that was never theirs",
+        );
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &funder),
+            funder_before.saturating_add(proposal.bond),
+            "the funder is made whole on the bond they locked — and receives the \
+             bond only, never the reward",
+        );
+        assert!(System::events().iter().any(|record| matches!(
+            &record.event,
+            crate::RuntimeEvent::FutarchyTreasury(pallet_futarchy_treasury::Event::Spent {
+                line: pallet_futarchy_treasury::BudgetLine::Rewards,
+                dest,
+                amount,
+            }) if *dest == author && *amount == reward
+        )));
+    });
+}
+
 #[test]
 fn classless_screening_outcome_is_independent_of_keeper_permutation() {
     let forward = match qualification_states_for_order(false) {
