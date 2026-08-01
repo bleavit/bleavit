@@ -4132,7 +4132,7 @@ fn reserve_probe_crank_rejects_unsigned_and_root_origins() {
 }
 
 // ---------------------------------------------------------------------------
-// Contract v18 — the two confirmed oracle vulnerabilities, at the extrinsic
+// Contract v19 — the two confirmed oracle vulnerabilities, at the extrinsic
 // layer. See `oracle-core`'s own suite for the state-machine-level proofs.
 // ---------------------------------------------------------------------------
 
@@ -4236,7 +4236,7 @@ fn round_one_default_pays_the_challenger_no_bounty() {
         let slashed_before = CustodySlashed::get();
         set_block(ORC_WINDOW_BLOCKS + 2);
         assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(8)), 20));
-        // 07 §5.5 (contract v18): the whole forfeited stack routes to INSURANCE.
+        // 07 §5.5 (contract v19): the whole forfeited stack routes to INSURANCE.
         // Baseline paid the challenger 40 % of it — which, when one purse held
         // both roles, was a rebate to the attacker.
         assert_eq!(CustodySlashed::get() - slashed_before, bond(1));

@@ -416,7 +416,7 @@ class SurfaceManifestTests(unittest.TestCase):
         # `SettlePath` (`Neutral=3`) while the event row carried five, so the two
         # disagreed on `Neutral`'s discriminant and only the event row was
         # pinned. A release-time metadata binding would have failed on it.
-        # Contract v18 retains `ChallengerDefault` precisely so this discriminant
+        # Contract v19 retains `ChallengerDefault` precisely so this discriminant
         # cannot move.
         component_values = next(
             entry

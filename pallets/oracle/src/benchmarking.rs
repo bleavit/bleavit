@@ -78,7 +78,7 @@ fn fill_reporters<T: Config>(first_seed: u8, count: u8) {
 }
 
 /// Fill the retained 07 §3 record store to its bound so `load()` hydrates it at
-/// worst case (contract v18). Called by every benchmark whose dispatch goes
+/// worst case (contract v19). Called by every benchmark whose dispatch goes
 /// through `mutate_core` — which is all of them except the two reserve-probe
 /// entry points, whose narrow `mutate_reserve_health` path never reads it.
 /// Seeds are disjoint from
@@ -531,7 +531,7 @@ mod benches {
         fill_recomputable::<T>(false);
         fill_reporter_records::<T>();
         // Seed every round onto the 07 §5.3 **default** branch, which since
-        // contract v18 is strictly the heavier arm: it scans the settled history
+        // contract v19 is strictly the heavier arm: it scans the settled history
         // for the carried value, emits an extra `NeutralSettlement`, and settles
         // a bond stack with an INSURANCE transfer. With saturated acks alone
         // every round closed `Unchallenged` and the default branch was never

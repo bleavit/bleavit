@@ -78,7 +78,7 @@ pub const ORC_ROUNDS: u8 = 3;
 /// finding. Single-homes the literal that `record_reporter_offense` used to
 /// carry inline.
 pub const OFFENSE_SLASH_THRESHOLD: u8 = 2;
-/// 07 §3: ejection on the *third*. Ejection is permanent since contract v18 —
+/// 07 §3: ejection on the *third*. Ejection is permanent since contract v19 —
 /// see [`Oracle::register_reporter_with_params`].
 pub const OFFENSE_EJECTION_THRESHOLD: u8 = 3;
 pub const ORC_ROUND_CAP_MIN: u8 = futarchy_primitives::kernel::ORC_ROUNDS_MIN;
@@ -203,7 +203,7 @@ pub enum SettlePath {
     Unchallenged,
     Recomputed,
     Adjudicated,
-    /// Retained for SCALE stability; **no longer produced since contract v18**.
+    /// Retained for SCALE stability; **no longer produced since contract v19**.
     ///
     /// A 07 §5.3 reporter default now settles [`SettlePath::Neutral`] with
     /// `flagged: true` (07 §5.3/§10): a default establishes that the reporter
@@ -284,7 +284,7 @@ pub enum BondDisposition {
     /// *capital lock-up* it is, not as a slash, and the values track's failure
     /// to rule is not a finding against either party (SQ-492).
     RefundBoth,
-    /// The reporter abandoned a funded **round 1** (07 §5.3/§5.5, contract v18).
+    /// The reporter abandoned a funded **round 1** (07 §5.3/§5.5, contract v19).
     ///
     /// Their stack is forfeit — that is conduct — but it routes **100 % to
     /// INSURANCE and pays no bounty**. At round 1 the game holds exactly two
@@ -439,7 +439,7 @@ pub enum Event {
         challenger_bond: Balance,
     },
     /// The retained 07 §3 record store was full of ejections and a departing or
-    /// ejected account's record could not be kept (contract v18). An operational
+    /// ejected account's record could not be kept (contract v19). An operational
     /// diagnostic only — off the frozen 02 §6 ingest set by that section's
     /// (a)–(c) rule. Appended last; inserting mid-enum would shift discriminants.
     ///
@@ -477,13 +477,13 @@ pub enum Error {
     BadProof,
     /// A reported/adjudicated value is off the 05 §4.4 `[0, 1]` 1e9 grid.
     ValueOutOfBounds,
-    /// 07 §5.2 (contract v18): the round's own reporter may not challenge it.
+    /// 07 §5.2 (contract v19): the round's own reporter may not challenge it.
     /// §5.5 disposes of a round in favour of "the honest counterparty" and §5.3
     /// calls escalation "opt-in on both sides"; both are undefined when one
     /// account holds both roles. Appended last — SCALE discriminants are
     /// positional.
     SelfChallenge,
-    /// 07 §3 (contract v18): an account ejected on the third offense may never
+    /// 07 §3 (contract v19): an account ejected on the third offense may never
     /// re-register.
     ReporterEjected,
 }
@@ -506,7 +506,7 @@ pub struct ReportInput {
 pub struct Oracle {
     pub reporters: Vec<(AccountId, ReporterInfo)>,
     /// 07 §3 offense records retained across `deregister_reporter` and ejection
-    /// (contract v18). Bounded by [`MAX_REPORTER_RECORDS`]; carries no balance.
+    /// (contract v19). Bounded by [`MAX_REPORTER_RECORDS`]; carries no balance.
     /// `Oracle` is never itself stored, so adding this moves no on-chain SCALE —
     /// the shell persists it as its own internal storage item.
     pub reporter_records: Vec<ReporterRecord>,
@@ -567,7 +567,7 @@ impl Oracle {
         params: &OracleParams,
     ) -> Result<(), Error> {
         ensure!(!self.is_reporter(&who), Error::AlreadyRegistered);
-        // 07 §3 (contract v18): the ladder is a property of the **account**, not
+        // 07 §3 (contract v19): the ladder is a property of the **account**, not
         // of the seat. Nothing in §3 resets strikes, and resetting them made
         // `deregister_reporter` + `register_reporter` — which returns the stake
         // in full and costs two extrinsics — erase both the second-offense 50 %
@@ -828,7 +828,7 @@ impl Oracle {
         // must not race the close crank that treats that block as mature
         // (Codex F24).
         ensure!(now < r.challenge_deadline, Error::WindowClosed);
-        // 07 §5.2 (contract v18): the round's own reporter may not challenge it.
+        // 07 §5.2 (contract v19): the round's own reporter may not challenge it.
         // §5.5 disposes of a round in favour of "the honest counterparty" and
         // §5.3 calls escalation "opt-in on both sides"; both terms are undefined
         // when one account holds both roles — there is no counterparty, and
@@ -1512,7 +1512,7 @@ impl Oracle {
         for who in &self.watchtower_active {
             ensure!(self.is_watchtower(who), Error::NotRegistered);
         }
-        // 07 §3 (contract v18): a retained record and a live seat are mutually
+        // 07 §3 (contract v19): a retained record and a live seat are mutually
         // exclusive homes for the same account's offense count, records are
         // unique, and `ejected` implies the account actually reached the
         // threshold.
@@ -1539,7 +1539,7 @@ impl Oracle {
             );
         }
         for r in &self.rounds {
-            // 07 §5.2 (contract v18): no game may have one account on both
+            // 07 §5.2 (contract v19): no game may have one account on both
             // sides. Anchors the `challenge` guard against a future edit.
             ensure!(r.challenger != Some(r.reporter), Error::SelfChallenge);
             let schedule = self.round_schedule(RoundKey {
@@ -1824,7 +1824,7 @@ impl Oracle {
     }
 
     /// The 07 §5.3 reporter default, settled on the §10 neutral path
-    /// (contract v18).
+    /// (contract v19).
     ///
     /// A default establishes that the reporter **abandoned their assertion**. It
     /// establishes nothing about the challenger's, which no watchtower quorum
@@ -1964,7 +1964,7 @@ impl Oracle {
         // so a valid recompute/adjudication on their *other* still-live rounds
         // can still settle instead of failing `NotRegistered` (Codex F17).
         //
-        // This no-op is safe against the retained ladder (contract v18) because
+        // This no-op is safe against the retained ladder (contract v19) because
         // a verdict can only land while the account is still **seated**:
         // `deregister_reporter` refuses while the account is any live round's
         // reporter *or* challenger, a money-settled round stays in `rounds`
@@ -1990,7 +1990,7 @@ impl Oracle {
             });
         }
         if offense >= OFFENSE_EJECTION_THRESHOLD {
-            // Ejection is **permanent** (contract v18). `retain` alone returned
+            // Ejection is **permanent** (contract v19). `retain` alone returned
             // the account to a clean permissionless registration, so the
             // third-offense step was exactly as escapable as the second.
             if !self.upsert_reporter_record(who, offense, true) {
@@ -2566,7 +2566,7 @@ mod tests {
         o.challenge(acct(4), 2, key(8, 42, 3), FixedU64(44), h(10))
             .unwrap();
         o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1).unwrap();
-        // Contract v18: a challenge still supersedes the ack requirement — the
+        // Contract v19: a challenge still supersedes the ack requirement — the
         // round closes without a quorum — but the reporter's default no longer
         // settles the challenger's counter-value *forward*. It takes the 07 §10
         // neutral path, carrying the last valid value with the epoch flagged,
@@ -3935,7 +3935,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Contract v18 — the two confirmed oracle vulnerabilities.
+    // Contract v19 — the two confirmed oracle vulnerabilities.
     //
     // VULN 1: `challenge` never checked distinctness and the 07 §5.3 default
     // settled the challenger's counter-value forward unflagged, so one purse

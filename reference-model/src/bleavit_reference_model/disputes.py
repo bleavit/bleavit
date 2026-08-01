@@ -419,7 +419,7 @@ def coverage_makes_lying_unprofitable(
 
 
 # ---------------------------------------------------------------------------
-# §5.3 — one account on both sides of the game (contract v18).
+# §5.3 — one account on both sides of the game (contract v19).
 #
 # §6.3 sizes the ladder against `Δs_max` on the assumption that a lie must be
 # ridden to `R_max` to land, so the liar forfeits `(2^R_max − 1)·B_1`. A

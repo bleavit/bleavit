@@ -499,7 +499,7 @@ pub mod pallet {
     >;
 
     /// 07 §3's offense ladder, retained independently of the active roster
-    /// (contract v18).
+    /// (contract v19).
     ///
     /// **Internal — deliberately not 02 §7 contract surface.** Without it the
     /// ladder is unreachable: `deregister_reporter` returns the stake in full
@@ -659,7 +659,7 @@ pub mod pallet {
         },
         /// The retained 07 §3 record store was full of ejections and a
         /// departing or ejected account's record could not be kept
-        /// (contract v18). Fails **open** by design (G-1): a full table must
+        /// (contract v19). Fails **open** by design (G-1): a full table must
         /// never abort a values-track verdict.
         ///
         /// An operational diagnostic — off the frozen 02 §6 ingest set by that
@@ -719,12 +719,12 @@ pub mod pallet {
         BadProof,
         /// A reported/adjudicated value is off the 05 §4.4 `[0, 1]` grid.
         ValueOutOfBounds,
-        /// 07 §5.2 (contract v18): the round's own reporter may not challenge
+        /// 07 §5.2 (contract v19): the round's own reporter may not challenge
         /// it. §5.5 disposes of a round in favour of "the honest counterparty"
         /// and §5.3 calls escalation "opt-in on both sides"; both are undefined
         /// when one account holds both roles.
         SelfChallenge,
-        /// 07 §3 (contract v18): an account ejected on the third adjudicated
+        /// 07 §3 (contract v19): an account ejected on the third adjudicated
         /// -false finding may never re-register. Ejection is permanent.
         ReporterEjected,
         /// Core state validator rejected the aggregate (try-state only).
@@ -1582,7 +1582,7 @@ pub mod pallet {
         fn settle_bond_custody(settlement: &BondSettlement) -> DispatchResult {
             let reporter = T::AccountId::from(settlement.reporter);
             if settlement.disposition == BondDisposition::ReporterDefaulted {
-                // 07 §5.5 (contract v18): a **round-1** default forfeits the
+                // 07 §5.5 (contract v19): a **round-1** default forfeits the
                 // reporter's stack but pays no bounty. Same rule, and the same
                 // reasoning, as the no-challenger recompute arm below: at round
                 // 1 the game holds two unrebutted assertions and one was
@@ -1979,7 +1979,7 @@ pub mod pallet {
                 ));
             }
             let oracle = Self::load();
-            // Contract v18: `ReporterRecords` stays inside its bound, and the
+            // Contract v19: `ReporterRecords` stays inside its bound, and the
             // 07 §5.3 default path never writes the retired forward-settling
             // variant. `ChallengerDefault` is retained only for SCALE stability
             // (removing it would shift `Neutral`'s discriminant and break the
@@ -1992,7 +1992,7 @@ pub mod pallet {
             for (_, settled) in ComponentValues::<T>::iter() {
                 if settled.path == oracle_core::SettlePath::ChallengerDefault {
                     return Err(TryRuntimeError::Other(
-                        "ComponentValues: ChallengerDefault is unreachable since contract v18",
+                        "ComponentValues: ChallengerDefault is unreachable since contract v19",
                     ));
                 }
             }

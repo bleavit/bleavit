@@ -277,7 +277,7 @@ class TestSection63MetaWorkedExample(unittest.TestCase):
 
 
 class TestSelfChallengeDefault(unittest.TestCase):
-    """07 §5.3/§5.5 contract v18 — one account on both sides of the game.
+    """07 §5.3/§5.5 contract v19 — one account on both sides of the game.
 
     The same META cohort §6.3 recomputes its worked example on, priced along
     the path the coverage rule never modelled: terminating at round 1 by
