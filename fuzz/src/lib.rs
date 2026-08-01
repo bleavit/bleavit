@@ -1679,6 +1679,7 @@ fn service_report(question_id: u64) -> Option<Report<SERVICE_MAX_ATTESTORS>> {
             b_reject: 10_000 * USDC,
             declared_stake: 100 * USDC,
             epsilon_1e9: FixedU64(50_000_000),
+            tolerance_1e9: FixedU64(10_000_000),
             settlement_trust: trust,
         },
         0,
