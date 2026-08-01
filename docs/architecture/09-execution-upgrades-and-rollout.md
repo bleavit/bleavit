@@ -316,11 +316,16 @@ The hosted question service ([16](./16-hosted-question-service.md)) is the only 
 path on this chain, and it is admitted by matching **one exact whole program**, position by position.
 This is not an allowlist relaxation and MUST NOT be implemented as one.
 
-**Why positional.** `Transact` nested inside `DepositReserveAsset { xcm }`,
-`InitiateReserveWithdraw { xcm }` or `InitiateTeleport { xcm }` does not execute here at all — it
-executes on a **remote** chain carrying **this chain's** sovereign origin. No predicate over
-instruction identity distinguishes that from a local `Transact`; a positional match does, because
-nesting simply is not one of the admitted positions.
+**Why positional.** XCM v5 has **nine** instructions carrying an inner program:
+`TransferReserveAsset`, `DepositReserveAsset`, `InitiateReserveWithdraw`, `InitiateTeleport`,
+`InitiateTransfer` and `ExportMessage` run theirs on a **remote** chain under **this chain's**
+sovereign origin; `SetErrorHandler` and `SetAppendix` run theirs **locally** and carry `Call`, so
+they can carry a `Transact`; and `ExecuteWithOrigin { descendant_origin, xcm }` runs its own
+**locally under a descended origin** — reaching the sub-identity that keeping `DescendOrigin`
+unadmitted is meant to refuse. No predicate over instruction *identity* distinguishes these from a
+plain local `Transact` without enumerating all nine and staying complete as the SDK evolves. The
+positional match enumerates none of them: not one is at an admitted position, so all nine fail by
+construction.
 
 | idx | instruction | pinned constraint |
 |---:|---|---|

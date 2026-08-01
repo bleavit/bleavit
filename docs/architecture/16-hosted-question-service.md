@@ -79,10 +79,21 @@ the same; only the transport differs.
 states why it has that shape.
 
 Admitting "top-level `Transact` from an allowlist" is **not narrow enough**, and the reason is not
-obvious: `Transact` nested inside `DepositReserveAsset { xcm }`, `InitiateReserveWithdraw { xcm }` or
-`InitiateTeleport { xcm }` does not execute here at all — it executes on a **remote** chain carrying
-**Bleavit's** sovereign origin. An allowlist keyed on instruction identity cannot distinguish the
-two; a positional template can, because the nesting simply is not one of the admitted positions.
+obvious. XCM v5 has **nine** instructions carrying an inner program, and a `Transact` inside one of
+them does something other than what a reader of the outer program expects:
+
+| Instruction | Where the inner program runs |
+|---|---|
+| `TransferReserveAsset { xcm }` · `DepositReserveAsset { xcm }` · `InitiateReserveWithdraw { xcm }` · `InitiateTeleport { xcm }` · `InitiateTransfer { remote_xcm }` · `ExportMessage { xcm }` | on a **remote** chain, carrying **Bleavit's** sovereign origin |
+| `SetErrorHandler(Xcm<Call>)` · `SetAppendix(Xcm<Call>)` | **locally**, on error or on completion — and these carry `Call`, so they can carry a `Transact` |
+| `ExecuteWithOrigin { descendant_origin, xcm }` | **locally**, under a *descended* origin — the sub-identity vector §2 refuses, reachable without `DescendOrigin` appearing anywhere |
+
+An allowlist keyed on instruction identity has to enumerate all nine and stay complete as the SDK
+evolves. **The positional template does not enumerate them at all**: none of the nine is at an
+admitted position, so all nine fail the match by construction, and an SDK that adds a tenth fails
+compilation rather than slipping through (property 4 below). That is the whole argument for matching
+shape rather than membership — an earlier draft of this section named only three of the nine, which
+is exactly the kind of incompleteness a deny-list invites and a positional match makes irrelevant.
 
 So `Transact` is admitted only inside **one exact, positionally-matched, whole program**:
 
