@@ -134,9 +134,12 @@ fact.
 - `CallDomain::ExternalClient` (the twelfth variant) is reachable by **no** governance origin, and
   `SafeCallFilter` is *derived from* the classifier so the admissible set cannot drift from the domain.
 
-**[06](./06-governance-and-guardians.md) §1's eight-origin closure clause stays literally true** —
-different pallet, different `OriginCaller` variant — and needs only an appended scoping paragraph
-saying so.
+**[01](./01-system-overview.md) §6's eight-origin closure clause stays literally true** — different
+pallet, different `OriginCaller` variant — and carries an appended scoping paragraph saying so.
+That clause matters here more than its brevity suggests: it states that none of the eight is
+obtainable from *"a signed extrinsic, XCM origin conversion, or wrapper call"*, and this design
+introduces exactly an XCM origin conversion. It produces a **ninth** origin in a different pallet,
+so the sentence is unweakened rather than merely still-passing.
 
 **One genuine widening, stated rather than hidden.** `allowed_for(None) == true` for the new domain
 makes the pallet's own `EnsureOrigin` load-bearing in a way the eight governance origins' is not.
