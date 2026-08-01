@@ -220,7 +220,7 @@ impl pallet_conditional_ledger::MainRevenueSink for TestMainRevenueSink {
     }
 }
 
-impl pallet_conditional_ledger::Config for Test {
+impl pallet_conditional_ledger::Config<()> for Test {
     type Collateral = Assets;
     type UsdcAssetId = UsdcAssetId;
     type MarketAuthority = EnsureMarket;

@@ -155,7 +155,7 @@ pub mod pallet {
     /// The concrete asset identifier the configured collateral fungible uses. The
     /// ledger never names it (rule 7 — no XCM types here); the runtime pins it to
     /// the USDC `Location` via [`Config::UsdcAssetId`].
-    pub type AssetIdOf<T> = <<T as Config>::Collateral as fungibles::Inspect<
+    pub type AssetIdOf<T, I> = <<T as Config<I>>::Collateral as fungibles::Inspect<
         <T as frame_system::Config>::AccountId,
     >>::AssetId;
 
@@ -195,19 +195,21 @@ pub mod pallet {
     /// cross-pallet seam: two Params reads, total ForeignAssets issuance, and
     /// one cumulative-meter read. The proof bound conservatively covers four
     /// distinct map values until the next full runtime weight regeneration.
-    fn inflow_cap_gate_weight<T: Config>() -> Weight {
+    fn inflow_cap_gate_weight<T: Config<I>, I: 'static>() -> Weight {
         Weight::from_parts(1_000_000, 12 * 1024).saturating_add(T::DbWeight::get().reads(4))
     }
 
     #[pallet::config]
-    pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
+    pub trait Config<I: 'static = ()>:
+        frame_system::Config<RuntimeEvent: From<Event<Self, I>>>
+    {
         /// USDC collateral (the `ForeignAssets` instance in production, 03 §1/§3).
         /// Balances are the shared `u128` kernel `Balance`.
         type Collateral: fungibles::Mutate<Self::AccountId>
             + fungibles::Inspect<Self::AccountId, Balance = Balance>;
 
         /// The asset id of USDC inside [`Config::Collateral`] (the USDC `Location`).
-        type UsdcAssetId: Get<AssetIdOf<Self>>;
+        type UsdcAssetId: Get<AssetIdOf<Self, I>>;
 
         /// Internal — `pallet-market` only: the D-3 wrapper's ledger operations and
         /// vault creation (03 §5.5).
@@ -313,7 +315,7 @@ pub mod pallet {
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
-    pub struct Pallet<T>(_);
+    pub struct Pallet<T, I = ()>(_);
 
     // ------------------------------------------------------------------ storage
 
@@ -322,19 +324,19 @@ pub mod pallet {
     /// that create vaults (there is no structural map bound; each value is
     /// `MaxEncodedLen`).
     #[pallet::storage]
-    pub type Vaults<T: Config> =
+    pub type Vaults<T: Config<I>, I: 'static = ()> =
         StorageMap<_, Blake2_128Concat, ProposalId, VaultInfo, OptionQuery>;
 
     /// Baseline vaults — `map EpochId → BaselineVaultInfo` (03 §4; ≤ 64 B).
     #[pallet::storage]
-    pub type BaselineVaults<T: Config> =
+    pub type BaselineVaults<T: Config<I>, I: 'static = ()> =
         StorageMap<_, Blake2_128Concat, EpochId, BaselineVaultInfo, OptionQuery>;
 
     /// Positions — `double_map (PositionId, AccountId) → Balance` (02 §7.4 / 03 §4).
     /// Key order is `(PositionId, AccountId)` so per-vault reaping drains a prefix.
     /// Global growth is priced by [`Config::PositionDeposit`] (the economic bound).
     #[pallet::storage]
-    pub type Positions<T: Config> = StorageDoubleMap<
+    pub type Positions<T: Config<I>, I: 'static = ()> = StorageDoubleMap<
         _,
         Blake2_128Concat,
         PositionId,
@@ -347,24 +349,24 @@ pub mod pallet {
     /// Live `Positions` entries per account — `map AccountId → u32`, ≤
     /// `MaxPositionsPerAccount` for non-protocol accounts (03 §4, L-6).
     #[pallet::storage]
-    pub type PositionCount<T: Config> =
+    pub type PositionCount<T: Config<I>, I: 'static = ()> =
         StorageMap<_, Blake2_128Concat, T::AccountId, u32, ValueQuery>;
 
     /// Outstanding supply per instrument — `map PositionId → Balance` (03 §4).
     #[pallet::storage]
-    pub type PositionTotals<T: Config> =
+    pub type PositionTotals<T: Config<I>, I: 'static = ()> =
         StorageMap<_, Blake2_128Concat, PositionId, Balance, ValueQuery>;
 
     /// Total position storage deposits currently held by the sovereign account,
     /// accounted strictly outside `escrowed` (03 §4, L-2/L-6).
     #[pallet::storage]
-    pub type DepositsHeld<T: Config> = StorageValue<_, Balance, ValueQuery>;
+    pub type DepositsHeld<T: Config<I>, I: 'static = ()> = StorageValue<_, Balance, ValueQuery>;
 
     /// Checked O(1) mirror of every proposal and Baseline vault's `escrowed`
     /// field. Every escrow delta and terminal reap updates this in the same
     /// storage transaction as the real USDC move (03 §5.4, I-4).
     #[pallet::storage]
-    pub type TotalEscrowed<T: Config> = StorageValue<_, Balance, ValueQuery>;
+    pub type TotalEscrowed<T: Config<I>, I: 'static = ()> = StorageValue<_, Balance, ValueQuery>;
 
     /// 03 §5.3a(4)/L-7: redemption fee withheld from completed payouts and
     /// retained as sovereign surplus, awaiting `sweep_redemption_fees`.
@@ -376,49 +378,52 @@ pub mod pallet {
     /// transfer. It is never escrow, so it is excluded from every L-2 liability
     /// term and is exactly the lawful surplus L-7 bounds.
     #[pallet::storage]
-    pub type RedemptionFeesAccrued<T: Config> = StorageValue<_, Balance, ValueQuery>;
+    pub type RedemptionFeesAccrued<T: Config<I>, I: 'static = ()> =
+        StorageValue<_, Balance, ValueQuery>;
 
     /// Persistent exact I-4 undercollateralization latch. `true` means the last
     /// reconciliation observed `liability > custody`; surplus is healthy.
     #[pallet::storage]
-    pub type LedgerDrifted<T: Config> = StorageValue<_, bool, ValueQuery>;
+    pub type LedgerDrifted<T: Config<I>, I: 'static = ()> = StorageValue<_, bool, ValueQuery>;
 
     /// Last exact comparison, retained so `try_state` can prove the latch was
     /// derived from the specified inequality rather than an arbitrary writer.
     #[pallet::storage]
-    pub type LastReconciliation<T: Config> =
+    pub type LastReconciliation<T: Config<I>, I: 'static = ()> =
         StorageValue<_, ReconciliationSample<BlockNumberFor<T>>, OptionQuery>;
 
     /// Block at which a proposal vault entered a terminal state, for the
     /// `sweep_dust` archive-delay gate (03 §4/§5.4). Ledger-internal; not a FE
     /// surface.
     #[pallet::storage]
-    pub type VaultTerminalAt<T: Config> =
+    pub type VaultTerminalAt<T: Config<I>, I: 'static = ()> =
         StorageMap<_, Blake2_128Concat, ProposalId, BlockNumberFor<T>, OptionQuery>;
 
     /// Block at which a Baseline vault settled, for `sweep_dust_baseline`.
     #[pallet::storage]
-    pub type BaselineTerminalAt<T: Config> =
+    pub type BaselineTerminalAt<T: Config<I>, I: 'static = ()> =
         StorageMap<_, Blake2_128Concat, EpochId, BlockNumberFor<T>, OptionQuery>;
 
     /// PB-RESERVE backstop. Only public split inflows consult this timestamp;
     /// merge/redeem/transfer and authority recovery paths remain live.
     #[pallet::storage]
-    pub type SplitPausedUntil<T: Config> = StorageValue<_, BlockNumberFor<T>, OptionQuery>;
+    pub type SplitPausedUntil<T: Config<I>, I: 'static = ()> =
+        StorageValue<_, BlockNumberFor<T>, OptionQuery>;
 
     /// PB-LEDGER-FREEZE backstop for every public funds-moving ledger call.
     #[pallet::storage]
-    pub type FrozenUntil<T: Config> = StorageValue<_, BlockNumberFor<T>, OptionQuery>;
+    pub type FrozenUntil<T: Config<I>, I: 'static = ()> =
+        StorageValue<_, BlockNumberFor<T>, OptionQuery>;
 
     /// Independent one-renewal latch (06 §6.3).
     #[pallet::storage]
-    pub type FreezeRenewed<T: Config> = StorageValue<_, bool, ValueQuery>;
+    pub type FreezeRenewed<T: Config<I>, I: 'static = ()> = StorageValue<_, bool, ValueQuery>;
 
     // -------------------------------------------------------------------- events
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
-    pub enum Event<T: Config> {
+    pub enum Event<T: Config<I>, I: 'static = ()> {
         /// `split(pid, a)`: minted `a` of both branch-USDC to the caller.
         Split { pid: ProposalId, amount: Balance },
         /// `merge(pid, a)`: burned both branch-USDC, paid `a` USDC out.
@@ -554,7 +559,7 @@ pub mod pallet {
     // -------------------------------------------------------------------- errors
 
     #[pallet::error]
-    pub enum Error<T> {
+    pub enum Error<T, I = ()> {
         /// Origin was not the internal authority the call requires (defensive; the
         /// pallet checks origins before the core, so the happy path never sees it).
         BadOrigin,
@@ -605,7 +610,7 @@ pub mod pallet {
         ProtocolDestination,
     }
 
-    impl<T: Config> From<conditional_ledger_core::Error> for Error<T> {
+    impl<T: Config<I>, I: 'static> From<conditional_ledger_core::Error> for Error<T, I> {
         fn from(e: conditional_ledger_core::Error) -> Self {
             use conditional_ledger_core::Error as C;
             match e {
@@ -626,7 +631,7 @@ pub mod pallet {
     }
 
     #[pallet::extra_constants]
-    impl<T: Config> Pallet<T> {
+    impl<T: Config<I>, I: 'static> Pallet<T, I> {
         #[pallet::constant_name(MinTransfer)]
         fn min_transfer() -> Balance {
             kernel::MIN_TRANSFER_USDC
@@ -646,7 +651,7 @@ pub mod pallet {
     // --------------------------------------------------------------------- hooks
 
     #[pallet::hooks]
-    impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+    impl<T: Config<I>, I: 'static> Hooks<BlockNumberFor<T>> for Pallet<T, I> {
         /// `MaxPositionsPerAccount` is the fixed 13 §4 bound (64) that the frame-free
         /// core enforces mid-op; the Config `Get` (03 §3 surface) must equal it or a
         /// runtime could advertise a cap the core silently ignores. The position
@@ -672,18 +677,18 @@ pub mod pallet {
     // ---------------------------------------------------------------------- calls
 
     #[pallet::call]
-    impl<T: Config> Pallet<T> {
+    impl<T: Config<I>, I: 'static> Pallet<T, I> {
         /// 03 §5.1. Split `a` USDC into `a` Accept-USDC + `a` Reject-USDC.
         #[pallet::call_index(0)]
-        #[pallet::weight(T::WeightInfo::split().saturating_add(inflow_cap_gate_weight::<T>()))]
+        #[pallet::weight(T::WeightInfo::split().saturating_add(inflow_cap_gate_weight::<T, I>()))]
         pub fn split(origin: OriginFor<T>, pid: ProposalId, amount: Balance) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::ensure_not_frozen()?;
             Self::ensure_splits_open()?;
-            ensure!(amount >= T::MinSplit::get(), Error::<T>::BelowMinimum);
+            ensure!(amount >= T::MinSplit::get(), Error::<T, I>::BelowMinimum);
             ensure!(
                 T::InflowCapGate::escrow_admissible(&who),
-                Error::<T>::InflowCapExceeded
+                Error::<T, I>::InflowCapExceeded
             );
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.split(LedgerOrigin::Signed, pid, &who, amount)
@@ -703,7 +708,7 @@ pub mod pallet {
 
         /// 03 §5.1. Split branch-USDC into a LONG/SHORT scalar set.
         #[pallet::call_index(2)]
-        #[pallet::weight(T::WeightInfo::split_scalar().saturating_add(inflow_cap_gate_weight::<T>()))]
+        #[pallet::weight(T::WeightInfo::split_scalar().saturating_add(inflow_cap_gate_weight::<T, I>()))]
         pub fn split_scalar(
             origin: OriginFor<T>,
             pid: ProposalId,
@@ -718,10 +723,10 @@ pub mod pallet {
             // the floor even though the §5.1 row omits it. The core guards only the
             // stale compile-time K floor; `do_split_scalar` (`MarketAuthority`,
             // exact by construction) stays exempt.
-            ensure!(amount >= T::MinSplit::get(), Error::<T>::BelowMinimum);
+            ensure!(amount >= T::MinSplit::get(), Error::<T, I>::BelowMinimum);
             ensure!(
                 T::InflowCapGate::escrow_admissible(&who),
-                Error::<T>::InflowCapExceeded
+                Error::<T, I>::InflowCapExceeded
             );
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.split_scalar(LedgerOrigin::Signed, pid, branch, &who, amount)
@@ -746,7 +751,7 @@ pub mod pallet {
 
         /// 03 §5.1. Split branch-USDC into a gate YES/NO set.
         #[pallet::call_index(4)]
-        #[pallet::weight(T::WeightInfo::split_gate().saturating_add(inflow_cap_gate_weight::<T>()))]
+        #[pallet::weight(T::WeightInfo::split_gate().saturating_add(inflow_cap_gate_weight::<T, I>()))]
         pub fn split_gate(
             origin: OriginFor<T>,
             pid: ProposalId,
@@ -759,10 +764,10 @@ pub mod pallet {
             Self::ensure_splits_open()?;
             // 03 §7 R-2 creation floor at the LIVE `ledger.min_split` (as
             // `split_scalar`): the minted gate legs are new non-protocol entries.
-            ensure!(amount >= T::MinSplit::get(), Error::<T>::BelowMinimum);
+            ensure!(amount >= T::MinSplit::get(), Error::<T, I>::BelowMinimum);
             ensure!(
                 T::InflowCapGate::escrow_admissible(&who),
-                Error::<T>::InflowCapExceeded
+                Error::<T, I>::InflowCapExceeded
             );
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.split_gate(LedgerOrigin::Signed, pid, branch, gate, &who, amount)
@@ -806,7 +811,7 @@ pub mod pallet {
             // or create inventory outside the fixed market-reap universe.
             ensure!(
                 !T::ProtocolAccounts::contains(&to),
-                Error::<T>::ProtocolDestination
+                Error::<T, I>::ProtocolDestination
             );
             let (pid, epoch, is_proposal) = Self::id_home(position);
             // 03 §7 R-2, both sub-rules enforced at the LIVE `ledger.min_split` (the
@@ -819,15 +824,17 @@ pub mod pallet {
             // sweep (at the K floor) is then a no-op. Protocol senders are exact by
             // construction and exempt (as in the core).
             if !T::ProtocolAccounts::contains(&from) {
-                let bal = Positions::<T>::get(position, &from);
+                let bal = Positions::<T, I>::get(position, &from);
                 let remainder = bal.saturating_sub(amount);
                 if remainder > 0 && remainder < T::MinSplit::get() {
                     amount = bal;
                 }
             }
             // (a) creation floor — a new non-protocol entry cannot be created below it.
-            if !Positions::<T>::contains_key(position, &to) && !T::ProtocolAccounts::contains(&to) {
-                ensure!(amount >= T::MinSplit::get(), Error::<T>::BelowMinimum);
+            if !Positions::<T, I>::contains_key(position, &to)
+                && !T::ProtocolAccounts::contains(&to)
+            {
+                ensure!(amount >= T::MinSplit::get(), Error::<T, I>::BelowMinimum);
             }
             // Escrow never moves on transfer; `from` is a valid (unused) escrow party.
             // The account set MUST be deduplicated: a self-transfer (`from == to`)
@@ -846,7 +853,7 @@ pub mod pallet {
 
         /// 03 §5.1. Baseline split.
         #[pallet::call_index(7)]
-        #[pallet::weight(T::WeightInfo::split_baseline().saturating_add(inflow_cap_gate_weight::<T>()))]
+        #[pallet::weight(T::WeightInfo::split_baseline().saturating_add(inflow_cap_gate_weight::<T, I>()))]
         pub fn split_baseline(
             origin: OriginFor<T>,
             epoch: EpochId,
@@ -855,10 +862,10 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             Self::ensure_not_frozen()?;
             Self::ensure_splits_open()?;
-            ensure!(amount >= T::MinSplit::get(), Error::<T>::BelowMinimum);
+            ensure!(amount >= T::MinSplit::get(), Error::<T, I>::BelowMinimum);
             ensure!(
                 T::InflowCapGate::escrow_admissible(&who),
-                Error::<T>::InflowCapExceeded
+                Error::<T, I>::InflowCapExceeded
             );
             Self::run_baseline(epoch, core::slice::from_ref(&who), &who, |st| {
                 st.split_baseline(LedgerOrigin::Signed, epoch, &who, amount)
@@ -899,7 +906,7 @@ pub mod pallet {
         pub fn void(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
             T::ResolveAuthority::ensure_origin(origin)?;
             Self::run_proposal_authority(pid, |st| st.void(LedgerOrigin::ResolveAuthority, pid))?;
-            VaultTerminalAt::<T>::insert(pid, frame_system::Pallet::<T>::block_number());
+            VaultTerminalAt::<T, I>::insert(pid, frame_system::Pallet::<T>::block_number());
             Ok(())
         }
 
@@ -911,7 +918,7 @@ pub mod pallet {
             Self::run_proposal_authority(pid, |st| {
                 st.settle_scalar(LedgerOrigin::SettleAuthority, pid, s)
             })?;
-            VaultTerminalAt::<T>::insert(pid, frame_system::Pallet::<T>::block_number());
+            VaultTerminalAt::<T, I>::insert(pid, frame_system::Pallet::<T>::block_number());
             Ok(())
         }
 
@@ -942,7 +949,7 @@ pub mod pallet {
             Self::run_baseline_authority(epoch, |st| {
                 st.settle_baseline(LedgerOrigin::SettleAuthority, epoch, s)
             })?;
-            BaselineTerminalAt::<T>::insert(epoch, frame_system::Pallet::<T>::block_number());
+            BaselineTerminalAt::<T, I>::insert(epoch, frame_system::Pallet::<T>::block_number());
             Ok(())
         }
 
@@ -1100,12 +1107,12 @@ pub mod pallet {
                 let max: BlockNumberFor<T> = kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS.into();
                 ensure!(
                     expiry >= now && expiry.saturating_sub(now) <= max,
-                    Error::<T>::FreezeOutOfBounds
+                    Error::<T, I>::FreezeOutOfBounds
                 );
-                SplitPausedUntil::<T>::put(expiry);
+                SplitPausedUntil::<T, I>::put(expiry);
                 Self::deposit_event(Event::SplitPauseSet { until: expiry });
             } else {
-                SplitPausedUntil::<T>::kill();
+                SplitPausedUntil::<T, I>::kill();
                 Self::deposit_event(Event::SplitPauseCleared);
             }
             Ok(())
@@ -1120,18 +1127,18 @@ pub mod pallet {
             if frozen {
                 let now = frame_system::Pallet::<T>::block_number();
                 ensure!(
-                    FrozenUntil::<T>::get().is_none_or(|until| now >= until),
-                    Error::<T>::Frozen
+                    FrozenUntil::<T, I>::get().is_none_or(|until| now >= until),
+                    Error::<T, I>::Frozen
                 );
                 let until = now
                     .checked_add(&kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS.into())
-                    .ok_or(Error::<T>::ArithmeticOverflow)?;
-                FrozenUntil::<T>::put(until);
-                FreezeRenewed::<T>::put(false);
+                    .ok_or(Error::<T, I>::ArithmeticOverflow)?;
+                FrozenUntil::<T, I>::put(until);
+                FreezeRenewed::<T, I>::put(false);
                 Self::deposit_event(Event::FreezeSet { until });
             } else {
-                FrozenUntil::<T>::kill();
-                FreezeRenewed::<T>::put(false);
+                FrozenUntil::<T, I>::kill();
+                FreezeRenewed::<T, I>::put(false);
                 Self::deposit_event(Event::FreezeCleared);
             }
             Ok(())
@@ -1148,15 +1155,15 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             let (custody, liability) = Self::maintained_collateral_totals()?;
             let drifted = liability > custody;
-            let was_drifted = LedgerDrifted::<T>::get();
+            let was_drifted = LedgerDrifted::<T, I>::get();
 
-            LastReconciliation::<T>::put(ReconciliationSample {
+            LastReconciliation::<T, I>::put(ReconciliationSample {
                 liability,
                 custody,
                 at: frame_system::Pallet::<T>::block_number(),
             });
             if drifted != was_drifted {
-                LedgerDrifted::<T>::put(drifted);
+                LedgerDrifted::<T, I>::put(drifted);
                 if drifted {
                     Self::deposit_event(Event::LedgerDriftDetected { liability, custody });
                 } else {
@@ -1197,7 +1204,7 @@ pub mod pallet {
         pub fn sweep_redemption_fees(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::ensure_not_frozen()?;
-            let amount = RedemptionFeesAccrued::<T>::get();
+            let amount = RedemptionFeesAccrued::<T, I>::get();
             if amount > 0 {
                 T::Collateral::transfer(
                     Self::usdc(),
@@ -1207,7 +1214,7 @@ pub mod pallet {
                     Preservation::Preserve,
                 )?;
                 T::MainRevenueSink::credit_main(amount)?;
-                RedemptionFeesAccrued::<T>::kill();
+                RedemptionFeesAccrued::<T, I>::kill();
                 T::KeeperRebate::rebate(&who, CrankClass::General);
             }
             Self::deposit_event(Event::RedemptionFeesSwept { amount });
@@ -1217,36 +1224,36 @@ pub mod pallet {
 
     // ------------------------------------------- internal MarketAuthority API (§5.5)
 
-    impl<T: Config> Pallet<T> {
+    impl<T: Config<I>, I: 'static> Pallet<T, I> {
         /// Runtime renewal hook for PB-LEDGER-FREEZE. Installs one fresh kernel
         /// window from ratification time and fails before any write on misuse.
         pub fn extend_freeze_once() -> DispatchResult {
             let now = frame_system::Pallet::<T>::block_number();
-            let current = FrozenUntil::<T>::get().ok_or(Error::<T>::Frozen)?;
-            ensure!(now < current, Error::<T>::Frozen);
+            let current = FrozenUntil::<T, I>::get().ok_or(Error::<T, I>::Frozen)?;
+            ensure!(now < current, Error::<T, I>::Frozen);
             ensure!(
-                !FreezeRenewed::<T>::get(),
-                Error::<T>::FreezeRenewalExhausted
+                !FreezeRenewed::<T, I>::get(),
+                Error::<T, I>::FreezeRenewalExhausted
             );
             let until = now
                 .checked_add(&kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS.into())
-                .ok_or(Error::<T>::ArithmeticOverflow)?;
-            FrozenUntil::<T>::put(until);
-            FreezeRenewed::<T>::put(true);
+                .ok_or(Error::<T, I>::ArithmeticOverflow)?;
+            FrozenUntil::<T, I>::put(until);
+            FreezeRenewed::<T, I>::put(true);
             Self::deposit_event(Event::FreezeExtended { until });
             Ok(())
         }
 
         /// Current persisted I-4 trigger consumed by guardian wiring.
         pub fn ledger_drifted() -> bool {
-            LedgerDrifted::<T>::get()
+            LedgerDrifted::<T, I>::get()
         }
 
         fn ensure_splits_open() -> DispatchResult {
             let now = frame_system::Pallet::<T>::block_number();
             ensure!(
-                SplitPausedUntil::<T>::get().is_none_or(|until| now >= until),
-                Error::<T>::SplitPaused
+                SplitPausedUntil::<T, I>::get().is_none_or(|until| now >= until),
+                Error::<T, I>::SplitPaused
             );
             Ok(())
         }
@@ -1254,8 +1261,8 @@ pub mod pallet {
         fn ensure_not_frozen() -> DispatchResult {
             let now = frame_system::Pallet::<T>::block_number();
             ensure!(
-                FrozenUntil::<T>::get().is_none_or(|until| now >= until),
-                Error::<T>::Frozen
+                FrozenUntil::<T, I>::get().is_none_or(|until| now >= until),
+                Error::<T, I>::Frozen
             );
             Ok(())
         }
@@ -1268,8 +1275,11 @@ pub mod pallet {
             spec: MetricSpecVersion,
         ) -> DispatchResult {
             T::MarketAuthority::ensure_origin(origin)?;
-            ensure!(!Vaults::<T>::contains_key(pid), Error::<T>::WrongVaultState);
-            Vaults::<T>::insert(pid, VaultInfo::open(spec));
+            ensure!(
+                !Vaults::<T, I>::contains_key(pid),
+                Error::<T, I>::WrongVaultState
+            );
+            Vaults::<T, I>::insert(pid, VaultInfo::open(spec));
             Ok(())
         }
 
@@ -1277,10 +1287,10 @@ pub mod pallet {
         pub fn create_baseline_vault(origin: OriginFor<T>, epoch: EpochId) -> DispatchResult {
             T::MarketAuthority::ensure_origin(origin)?;
             ensure!(
-                !BaselineVaults::<T>::contains_key(epoch),
-                Error::<T>::WrongVaultState
+                !BaselineVaults::<T, I>::contains_key(epoch),
+                Error::<T, I>::WrongVaultState
             );
-            BaselineVaults::<T>::insert(epoch, BaselineVaultInfo::open());
+            BaselineVaults::<T, I>::insert(epoch, BaselineVaultInfo::open());
             Ok(())
         }
 
@@ -1561,7 +1571,7 @@ pub mod pallet {
         ) -> DispatchResult {
             ensure!(
                 Self::is_protocol(holder) && Self::is_protocol(recipient),
-                Error::<T>::TryStateViolation
+                Error::<T, I>::TryStateViolation
             );
             Ok(())
         }
@@ -1569,13 +1579,13 @@ pub mod pallet {
 
     // -------------------------------------------------------- scoped-state adapter
 
-    impl<T: Config> Pallet<T> {
+    impl<T: Config<I>, I: 'static> Pallet<T, I> {
         /// The ledger's sovereign account — custodies escrow and held deposits.
         pub fn account_id() -> T::AccountId {
             T::PalletId::get().into_account_truncating()
         }
 
-        fn usdc() -> AssetIdOf<T> {
+        fn usdc() -> AssetIdOf<T, I> {
             T::UsdcAssetId::get()
         }
 
@@ -1650,12 +1660,12 @@ pub mod pallet {
         ) -> DispatchResult {
             ensure!(
                 Self::is_protocol(account) && Self::is_protocol(fees_account),
-                Error::<T>::TryStateViolation
+                Error::<T, I>::TryStateViolation
             );
             let sovereign = Self::account_id();
             for id in ids {
                 for who in [account, fees_account] {
-                    let balance = Positions::<T>::get(id, who);
+                    let balance = Positions::<T, I>::get(id, who);
                     if balance > 0 {
                         Self::reap_one(id, who, balance, &sovereign)?;
                     }
@@ -1688,13 +1698,13 @@ pub mod pallet {
             pid: ProposalId,
             accts: &[T::AccountId],
         ) -> Option<LedgerState<T::AccountId>> {
-            let info = Vaults::<T>::get(pid)?;
+            let info = Vaults::<T, I>::get(pid)?;
             let mut st = LedgerState::new();
             st.vaults.push(conditional_ledger_core::VaultRecord {
                 proposal: pid,
                 info,
             });
-            st.deposits_held = DepositsHeld::<T>::get();
+            st.deposits_held = DepositsHeld::<T, I>::get();
             Self::overlay_fee_config(&mut st);
             Self::hydrate_positions(&mut st, Self::proposal_ids(pid), accts);
             Some(st)
@@ -1704,11 +1714,11 @@ pub mod pallet {
             epoch: EpochId,
             accts: &[T::AccountId],
         ) -> Option<LedgerState<T::AccountId>> {
-            let info = BaselineVaults::<T>::get(epoch)?;
+            let info = BaselineVaults::<T, I>::get(epoch)?;
             let mut st = LedgerState::new();
             st.baseline_vaults
                 .push(conditional_ledger_core::BaselineVaultRecord { epoch, info });
-            st.deposits_held = DepositsHeld::<T>::get();
+            st.deposits_held = DepositsHeld::<T, I>::get();
             Self::overlay_fee_config(&mut st);
             Self::hydrate_positions(&mut st, Self::baseline_ids(epoch).into_iter(), accts);
             Some(st)
@@ -1727,7 +1737,7 @@ pub mod pallet {
         fn overlay_fee_config(st: &mut LedgerState<T::AccountId>) {
             st.redeem_fee = T::RedemptionFee::get().deconstruct();
             st.min_split = T::MinSplit::get();
-            st.redemption_fees_accrued = RedemptionFeesAccrued::<T>::get();
+            st.redemption_fees_accrued = RedemptionFeesAccrued::<T, I>::get();
         }
 
         fn hydrate_positions(
@@ -1736,13 +1746,13 @@ pub mod pallet {
             accts: &[T::AccountId],
         ) {
             for id in ids {
-                let total = PositionTotals::<T>::get(id);
+                let total = PositionTotals::<T, I>::get(id);
                 if total > 0 {
                     st.position_totals
                         .push(conditional_ledger_core::PositionTotal { id, total });
                 }
                 for who in accts {
-                    let bal = Positions::<T>::get(id, who);
+                    let bal = Positions::<T, I>::get(id, who);
                     if bal > 0 {
                         st.positions.push(conditional_ledger_core::PositionRecord {
                             id,
@@ -1757,7 +1767,7 @@ pub mod pallet {
                 st.position_counts
                     .push(conditional_ledger_core::PositionCount {
                         owner: who.clone(),
-                        count: PositionCount::<T>::get(who),
+                        count: PositionCount::<T, I>::get(who),
                     });
                 if Self::is_protocol(who) {
                     st.add_protocol_account(who.clone());
@@ -1772,7 +1782,7 @@ pub mod pallet {
             st: &LedgerState<T::AccountId>,
         ) {
             if let Some(rec) = st.vaults.iter().find(|v| v.proposal == pid) {
-                Vaults::<T>::insert(pid, rec.info);
+                Vaults::<T, I>::insert(pid, rec.info);
             }
             Self::persist_positions(Self::proposal_ids(pid), accts, st);
         }
@@ -1783,7 +1793,7 @@ pub mod pallet {
             st: &LedgerState<T::AccountId>,
         ) {
             if let Some(rec) = st.baseline_vaults.iter().find(|v| v.epoch == epoch) {
-                BaselineVaults::<T>::insert(epoch, rec.info);
+                BaselineVaults::<T, I>::insert(epoch, rec.info);
             }
             Self::persist_positions(Self::baseline_ids(epoch).into_iter(), accts, st);
         }
@@ -1803,9 +1813,9 @@ pub mod pallet {
                     .find(|t| t.id == id)
                     .map_or(0, |t| t.total);
                 if total == 0 {
-                    PositionTotals::<T>::remove(id);
+                    PositionTotals::<T, I>::remove(id);
                 } else {
-                    PositionTotals::<T>::insert(id, total);
+                    PositionTotals::<T, I>::insert(id, total);
                 }
                 for who in accts {
                     let bal = st
@@ -1814,9 +1824,9 @@ pub mod pallet {
                         .find(|p| p.id == id && &p.owner == who)
                         .map_or(0, |p| p.balance);
                     if bal == 0 {
-                        Positions::<T>::remove(id, who);
+                        Positions::<T, I>::remove(id, who);
                     } else {
-                        Positions::<T>::insert(id, who, bal);
+                        Positions::<T, I>::insert(id, who, bal);
                     }
                 }
             }
@@ -1827,9 +1837,9 @@ pub mod pallet {
                     .find(|c| &c.owner == who)
                     .map_or(0, |c| c.count);
                 if c == 0 {
-                    PositionCount::<T>::remove(who);
+                    PositionCount::<T, I>::remove(who);
                 } else {
-                    PositionCount::<T>::insert(who, c);
+                    PositionCount::<T, I>::insert(who, c);
                 }
             }
         }
@@ -1886,12 +1896,12 @@ pub mod pallet {
                 &mut LedgerState<T::AccountId>,
             ) -> Result<(), conditional_ledger_core::Error>,
         ) -> Result<Balance, DispatchError> {
-            let mut st = Self::load_proposal(pid, accts).ok_or(Error::<T>::UnknownVault)?;
+            let mut st = Self::load_proposal(pid, accts).ok_or(Error::<T, I>::UnknownVault)?;
             let escrow_before = Self::vault_escrow(&st, pid);
             let accrued_before = st.redemption_fees_accrued;
             let counts_before: Vec<u32> =
                 accts.iter().map(|w| Self::account_count(&st, w)).collect();
-            op(&mut st).map_err(Error::<T>::from)?;
+            op(&mut st).map_err(Error::<T, I>::from)?;
             let escrow_after = Self::vault_escrow(&st, pid);
             let counts_after: Vec<u32> =
                 accts.iter().map(|w| Self::account_count(&st, w)).collect();
@@ -1926,12 +1936,12 @@ pub mod pallet {
             ) -> Result<(), conditional_ledger_core::Error>,
         ) -> Result<Balance, DispatchError> {
             let mut st =
-                Self::load_baseline(epoch, accts).ok_or(Error::<T>::UnknownBaselineVault)?;
+                Self::load_baseline(epoch, accts).ok_or(Error::<T, I>::UnknownBaselineVault)?;
             let escrow_before = Self::baseline_escrow(&st, epoch);
             let accrued_before = st.redemption_fees_accrued;
             let counts_before: Vec<u32> =
                 accts.iter().map(|w| Self::account_count(&st, w)).collect();
-            op(&mut st).map_err(Error::<T>::from)?;
+            op(&mut st).map_err(Error::<T, I>::from)?;
             let escrow_after = Self::baseline_escrow(&st, epoch);
             let counts_after: Vec<u32> =
                 accts.iter().map(|w| Self::account_count(&st, w)).collect();
@@ -1952,8 +1962,8 @@ pub mod pallet {
                 &mut LedgerState<T::AccountId>,
             ) -> Result<(), conditional_ledger_core::Error>,
         ) -> DispatchResult {
-            let mut st = Self::load_proposal(pid, &[]).ok_or(Error::<T>::UnknownVault)?;
-            op(&mut st).map_err(Error::<T>::from)?;
+            let mut st = Self::load_proposal(pid, &[]).ok_or(Error::<T, I>::UnknownVault)?;
+            op(&mut st).map_err(Error::<T, I>::from)?;
             Self::persist_proposal(pid, &[], &st);
             Self::emit_core_events(&st);
             Ok(())
@@ -1965,8 +1975,9 @@ pub mod pallet {
                 &mut LedgerState<T::AccountId>,
             ) -> Result<(), conditional_ledger_core::Error>,
         ) -> DispatchResult {
-            let mut st = Self::load_baseline(epoch, &[]).ok_or(Error::<T>::UnknownBaselineVault)?;
-            op(&mut st).map_err(Error::<T>::from)?;
+            let mut st =
+                Self::load_baseline(epoch, &[]).ok_or(Error::<T, I>::UnknownBaselineVault)?;
+            op(&mut st).map_err(Error::<T, I>::from)?;
             Self::persist_baseline(epoch, &[], &st);
             Self::emit_core_events(&st);
             Ok(())
@@ -1989,9 +2000,9 @@ pub mod pallet {
             // core defect and rejects the whole op (G-1).
             let withheld = after
                 .checked_sub(before)
-                .ok_or(Error::<T>::TryStateViolation)?;
+                .ok_or(Error::<T, I>::TryStateViolation)?;
             if withheld > 0 {
-                RedemptionFeesAccrued::<T>::put(after);
+                RedemptionFeesAccrued::<T, I>::put(after);
             }
             Ok(withheld)
         }
@@ -2016,7 +2027,7 @@ pub mod pallet {
             if after > before {
                 // An escrow-growing op is never a payout, so it can withhold
                 // nothing; a non-zero `withheld` here would be a core defect.
-                ensure!(withheld == 0, Error::<T>::TryStateViolation);
+                ensure!(withheld == 0, Error::<T, I>::TryStateViolation);
                 T::Collateral::transfer(
                     Self::usdc(),
                     party,
@@ -2028,7 +2039,7 @@ pub mod pallet {
                 let net = before
                     .saturating_sub(after)
                     .checked_sub(withheld)
-                    .ok_or(Error::<T>::ArithmeticOverflow)?;
+                    .ok_or(Error::<T, I>::ArithmeticOverflow)?;
                 if net > 0 {
                     T::Collateral::transfer(
                         Self::usdc(),
@@ -2039,7 +2050,7 @@ pub mod pallet {
                     )?;
                 }
             } else {
-                ensure!(withheld == 0, Error::<T>::TryStateViolation);
+                ensure!(withheld == 0, Error::<T, I>::TryStateViolation);
             }
             Ok(())
         }
@@ -2048,15 +2059,15 @@ pub mod pallet {
             if after == before {
                 return Ok(());
             }
-            TotalEscrowed::<T>::try_mutate(|total| -> DispatchResult {
+            TotalEscrowed::<T, I>::try_mutate(|total| -> DispatchResult {
                 *total = if after > before {
                     total
                         .checked_add(after.saturating_sub(before))
-                        .ok_or(Error::<T>::ArithmeticOverflow)?
+                        .ok_or(Error::<T, I>::ArithmeticOverflow)?
                 } else {
                     total
                         .checked_sub(before.saturating_sub(after))
-                        .ok_or(Error::<T>::ArithmeticOverflow)?
+                        .ok_or(Error::<T, I>::ArithmeticOverflow)?
                 };
                 Ok(())
             })
@@ -2090,7 +2101,7 @@ pub mod pallet {
                         amt,
                         Preservation::Preserve,
                     )
-                    .map_err(|_| Error::<T>::DepositFailed)?;
+                    .map_err(|_| Error::<T, I>::DepositFailed)?;
                     added = added.saturating_add(amt);
                 } else if b > a {
                     let amt = unit.saturating_mul(Balance::from(b.saturating_sub(a)));
@@ -2105,12 +2116,12 @@ pub mod pallet {
                 }
             }
             if added != removed {
-                let held = DepositsHeld::<T>::get()
+                let held = DepositsHeld::<T, I>::get()
                     .checked_add(added)
-                    .ok_or(Error::<T>::ArithmeticOverflow)?
+                    .ok_or(Error::<T, I>::ArithmeticOverflow)?
                     .checked_sub(removed)
-                    .ok_or(Error::<T>::ArithmeticOverflow)?;
-                DepositsHeld::<T>::put(held);
+                    .ok_or(Error::<T, I>::ArithmeticOverflow)?;
+                DepositsHeld::<T, I>::put(held);
             }
             Ok(())
         }
@@ -2122,7 +2133,7 @@ pub mod pallet {
             }
         }
 
-        fn map_event(ev: &CoreEvent) -> Event<T> {
+        fn map_event(ev: &CoreEvent) -> Event<T, I> {
             match *ev {
                 CoreEvent::Split(pid, amount) => Event::Split { pid, amount },
                 CoreEvent::Merged(pid, amount) => Event::Merged { pid, amount },
@@ -2211,14 +2222,14 @@ pub mod pallet {
         }
 
         fn do_sweep_proposal(pid: ProposalId) -> Result<bool, DispatchError> {
-            let terminal_at = VaultTerminalAt::<T>::get(pid).ok_or(Error::<T>::ReapNotDue)?;
+            let terminal_at = VaultTerminalAt::<T, I>::get(pid).ok_or(Error::<T, I>::ReapNotDue)?;
             ensure!(
                 frame_system::Pallet::<T>::block_number() >= Self::reap_eligible_at(terminal_at),
-                Error::<T>::ReapNotDue
+                Error::<T, I>::ReapNotDue
             );
             ensure!(
                 T::MarketSweepStatus::proposal_books_swept(pid),
-                Error::<T>::ReapNotDue
+                Error::<T, I>::ReapNotDue
             );
             let budget = T::ReapBatch::get();
             let mut drained = 0u32;
@@ -2227,7 +2238,7 @@ pub mod pallet {
                 if drained >= budget {
                     break;
                 }
-                let holders: Vec<(T::AccountId, Balance)> = Positions::<T>::iter_prefix(id)
+                let holders: Vec<(T::AccountId, Balance)> = Positions::<T, I>::iter_prefix(id)
                     .take(budget.saturating_sub(drained) as usize)
                     .collect();
                 for (who, bal) in holders {
@@ -2236,10 +2247,10 @@ pub mod pallet {
                 }
             }
             // Fully drained iff no `Positions` entry remains across the 14 prefixes.
-            let fully_drained =
-                Self::proposal_ids(pid).all(|id| Positions::<T>::iter_prefix(id).next().is_none());
+            let fully_drained = Self::proposal_ids(pid)
+                .all(|id| Positions::<T, I>::iter_prefix(id).next().is_none());
             if fully_drained {
-                let residue = Vaults::<T>::get(pid).map_or(0, |v| v.escrowed);
+                let residue = Vaults::<T, I>::get(pid).map_or(0, |v| v.escrowed);
                 Self::adjust_total_escrowed(residue, 0)?;
                 if residue > 0 {
                     T::Collateral::transfer(
@@ -2251,22 +2262,23 @@ pub mod pallet {
                     )?;
                     T::ResidueReporter::note_swept_residue(residue)?;
                 }
-                Vaults::<T>::remove(pid);
-                VaultTerminalAt::<T>::remove(pid);
+                Vaults::<T, I>::remove(pid);
+                VaultTerminalAt::<T, I>::remove(pid);
                 Self::deposit_event(Event::VaultReaped { pid, residue });
             }
             Ok(drained > 0 || fully_drained)
         }
 
         fn do_sweep_baseline(epoch: EpochId) -> Result<bool, DispatchError> {
-            let terminal_at = BaselineTerminalAt::<T>::get(epoch).ok_or(Error::<T>::ReapNotDue)?;
+            let terminal_at =
+                BaselineTerminalAt::<T, I>::get(epoch).ok_or(Error::<T, I>::ReapNotDue)?;
             ensure!(
                 frame_system::Pallet::<T>::block_number() >= Self::reap_eligible_at(terminal_at),
-                Error::<T>::ReapNotDue
+                Error::<T, I>::ReapNotDue
             );
             ensure!(
                 T::MarketSweepStatus::baseline_book_swept(epoch),
-                Error::<T>::ReapNotDue
+                Error::<T, I>::ReapNotDue
             );
             let budget = T::ReapBatch::get();
             let mut drained = 0u32;
@@ -2275,7 +2287,7 @@ pub mod pallet {
                 if drained >= budget {
                     break;
                 }
-                let holders: Vec<(T::AccountId, Balance)> = Positions::<T>::iter_prefix(id)
+                let holders: Vec<(T::AccountId, Balance)> = Positions::<T, I>::iter_prefix(id)
                     .take(budget.saturating_sub(drained) as usize)
                     .collect();
                 for (who, bal) in holders {
@@ -2285,9 +2297,9 @@ pub mod pallet {
             }
             let fully_drained = Self::baseline_ids(epoch)
                 .into_iter()
-                .all(|id| Positions::<T>::iter_prefix(id).next().is_none());
+                .all(|id| Positions::<T, I>::iter_prefix(id).next().is_none());
             if fully_drained {
-                let residue = BaselineVaults::<T>::get(epoch).map_or(0, |v| v.escrowed);
+                let residue = BaselineVaults::<T, I>::get(epoch).map_or(0, |v| v.escrowed);
                 Self::adjust_total_escrowed(residue, 0)?;
                 if residue > 0 {
                     T::Collateral::transfer(
@@ -2299,8 +2311,8 @@ pub mod pallet {
                     )?;
                     T::ResidueReporter::note_swept_residue(residue)?;
                 }
-                BaselineVaults::<T>::remove(epoch);
-                BaselineTerminalAt::<T>::remove(epoch);
+                BaselineVaults::<T, I>::remove(epoch);
+                BaselineTerminalAt::<T, I>::remove(epoch);
                 Self::deposit_event(Event::BaselineVaultReaped { epoch, residue });
             }
             Ok(drained > 0 || fully_drained)
@@ -2317,30 +2329,30 @@ pub mod pallet {
             bal: Balance,
             sovereign: &T::AccountId,
         ) -> DispatchResult {
-            Positions::<T>::remove(id, who);
-            let remaining = PositionTotals::<T>::get(id)
+            Positions::<T, I>::remove(id, who);
+            let remaining = PositionTotals::<T, I>::get(id)
                 .checked_sub(bal)
-                .ok_or(Error::<T>::ArithmeticOverflow)?;
+                .ok_or(Error::<T, I>::ArithmeticOverflow)?;
             if remaining == 0 {
-                PositionTotals::<T>::remove(id);
+                PositionTotals::<T, I>::remove(id);
             } else {
-                PositionTotals::<T>::insert(id, remaining);
+                PositionTotals::<T, I>::insert(id, remaining);
             }
             if Self::is_protocol(who) {
                 // protocol accounts hold no deposit and are not counted
                 return Ok(());
             }
-            let cnt = PositionCount::<T>::get(who);
+            let cnt = PositionCount::<T, I>::get(who);
             if cnt <= 1 {
-                PositionCount::<T>::remove(who);
+                PositionCount::<T, I>::remove(who);
             } else {
-                PositionCount::<T>::insert(who, cnt.saturating_sub(1));
+                PositionCount::<T, I>::insert(who, cnt.saturating_sub(1));
             }
             let unit = T::PositionDeposit::get();
-            let held = DepositsHeld::<T>::get()
+            let held = DepositsHeld::<T, I>::get()
                 .checked_sub(unit)
-                .ok_or(Error::<T>::ArithmeticOverflow)?;
-            DepositsHeld::<T>::put(held);
+                .ok_or(Error::<T, I>::ArithmeticOverflow)?;
+            DepositsHeld::<T, I>::put(held);
             let dest = if frame_system::Pallet::<T>::account_exists(who) {
                 who.clone()
             } else {
@@ -2360,19 +2372,19 @@ pub mod pallet {
         /// ledger accounting in the runtime or exporter (12 §6.3, B13).
         pub fn collateral_totals() -> Result<(Balance, Balance), sp_runtime::DispatchError> {
             let mut escrow: Balance = 0;
-            for vault in Vaults::<T>::iter_values() {
+            for vault in Vaults::<T, I>::iter_values() {
                 escrow = escrow
                     .checked_add(vault.escrowed)
-                    .ok_or(Error::<T>::ArithmeticOverflow)?;
+                    .ok_or(Error::<T, I>::ArithmeticOverflow)?;
             }
-            for vault in BaselineVaults::<T>::iter_values() {
+            for vault in BaselineVaults::<T, I>::iter_values() {
                 escrow = escrow
                     .checked_add(vault.escrowed)
-                    .ok_or(Error::<T>::ArithmeticOverflow)?;
+                    .ok_or(Error::<T, I>::ArithmeticOverflow)?;
             }
             let liability = escrow
-                .checked_add(DepositsHeld::<T>::get())
-                .ok_or(Error::<T>::ArithmeticOverflow)?;
+                .checked_add(DepositsHeld::<T, I>::get())
+                .ok_or(Error::<T, I>::ArithmeticOverflow)?;
             let custody = <T::Collateral as fungibles::Inspect<T::AccountId>>::balance(
                 Self::usdc(),
                 &Self::account_id(),
@@ -2385,9 +2397,9 @@ pub mod pallet {
         /// equals a complete map re-sum.
         pub fn maintained_collateral_totals(
         ) -> Result<(Balance, Balance), sp_runtime::DispatchError> {
-            let liability = TotalEscrowed::<T>::get()
-                .checked_add(DepositsHeld::<T>::get())
-                .ok_or(Error::<T>::ArithmeticOverflow)?;
+            let liability = TotalEscrowed::<T, I>::get()
+                .checked_add(DepositsHeld::<T, I>::get())
+                .ok_or(Error::<T, I>::ArithmeticOverflow)?;
             let custody = <T::Collateral as fungibles::Inspect<T::AccountId>>::balance(
                 Self::usdc(),
                 &Self::account_id(),
@@ -2399,17 +2411,17 @@ pub mod pallet {
         /// then the sovereign-solvency check L-2 the core cannot see.
         pub fn do_try_state() -> Result<(), sp_runtime::DispatchError> {
             let mut st = LedgerState::<T::AccountId>::new();
-            for (pid, info) in Vaults::<T>::iter() {
+            for (pid, info) in Vaults::<T, I>::iter() {
                 st.vaults.push(conditional_ledger_core::VaultRecord {
                     proposal: pid,
                     info,
                 });
             }
-            for (epoch, info) in BaselineVaults::<T>::iter() {
+            for (epoch, info) in BaselineVaults::<T, I>::iter() {
                 st.baseline_vaults
                     .push(conditional_ledger_core::BaselineVaultRecord { epoch, info });
             }
-            for (id, who, balance) in Positions::<T>::iter() {
+            for (id, who, balance) in Positions::<T, I>::iter() {
                 if balance > 0 {
                     st.positions.push(conditional_ledger_core::PositionRecord {
                         id,
@@ -2419,11 +2431,11 @@ pub mod pallet {
                     });
                 }
             }
-            for (who, count) in PositionCount::<T>::iter() {
+            for (who, count) in PositionCount::<T, I>::iter() {
                 st.position_counts
                     .push(conditional_ledger_core::PositionCount { owner: who, count });
             }
-            for (id, total) in PositionTotals::<T>::iter() {
+            for (id, total) in PositionTotals::<T, I>::iter() {
                 st.position_totals
                     .push(conditional_ledger_core::PositionTotal { id, total });
             }
@@ -2438,10 +2450,10 @@ pub mod pallet {
             for o in protocol_owners {
                 st.add_protocol_account(o);
             }
-            st.deposits_held = DepositsHeld::<T>::get();
+            st.deposits_held = DepositsHeld::<T, I>::get();
             Self::overlay_fee_config(&mut st);
             st.try_state()
-                .map_err(|e| sp_runtime::DispatchError::from(Error::<T>::from(e)))?;
+                .map_err(|e| sp_runtime::DispatchError::from(Error::<T, I>::from(e)))?;
 
             // L-6 (explicit, storage-level): every owner holding a live position has a
             // matching `PositionCount`, and `DepositsHeld` equals the deposit unit
@@ -2450,7 +2462,7 @@ pub mod pallet {
             // nor reconcile the aggregate `DepositsHeld` against real entries.
             let unit = T::PositionDeposit::get();
             let mut derived: BTreeMap<T::AccountId, u32> = BTreeMap::new();
-            for (_id, who, balance) in Positions::<T>::iter() {
+            for (_id, who, balance) in Positions::<T, I>::iter() {
                 if balance > 0 {
                     *derived.entry(who).or_default() += 1;
                 }
@@ -2461,19 +2473,19 @@ pub mod pallet {
                     continue;
                 }
                 ensure!(
-                    PositionCount::<T>::get(who) == *count,
-                    Error::<T>::TryStateViolation
+                    PositionCount::<T, I>::get(who) == *count,
+                    Error::<T, I>::TryStateViolation
                 );
                 let entry_deposits = unit
                     .checked_mul(Balance::from(*count))
-                    .ok_or(Error::<T>::ArithmeticOverflow)?;
+                    .ok_or(Error::<T, I>::ArithmeticOverflow)?;
                 expected_deposits = expected_deposits
                     .checked_add(entry_deposits)
-                    .ok_or(Error::<T>::ArithmeticOverflow)?;
+                    .ok_or(Error::<T, I>::ArithmeticOverflow)?;
             }
             ensure!(
-                DepositsHeld::<T>::get() == expected_deposits,
-                Error::<T>::TryStateViolation
+                DepositsHeld::<T, I>::get() == expected_deposits,
+                Error::<T, I>::TryStateViolation
             );
 
             // L-2: sovereign USDC covers all escrow plus held deposits. The
@@ -2482,7 +2494,7 @@ pub mod pallet {
             // direct-transfer dust and the §5.3a `RedemptionFeesAccrued`
             // balance are all lawful surplus.
             let (custody, liability) = Self::collateral_totals()?;
-            ensure!(liability <= custody, Error::<T>::TryStateViolation);
+            ensure!(liability <= custody, Error::<T, I>::TryStateViolation);
 
             // L-7 (03 §9): the accrued redemption fee is a subset of the lawful
             // surplus **above** the R-4 permanent-account floor, so it never
@@ -2499,30 +2511,33 @@ pub mod pallet {
                 <T::Collateral as fungibles::Inspect<T::AccountId>>::minimum_balance(Self::usdc());
             let movable_surplus = custody
                 .checked_sub(liability)
-                .ok_or(Error::<T>::TryStateViolation)?
+                .ok_or(Error::<T, I>::TryStateViolation)?
                 .saturating_sub(min_balance);
             ensure!(
-                RedemptionFeesAccrued::<T>::get() <= movable_surplus,
-                Error::<T>::TryStateViolation
+                RedemptionFeesAccrued::<T, I>::get() <= movable_surplus,
+                Error::<T, I>::TryStateViolation
             );
 
             // During the v0 multi-block backfill the full legacy-map audit above
             // remains authoritative, but the v1 mirror is deliberately not
             // published until the terminal cursor step. Per-block try-state must
             // therefore accept that bounded intermediate state.
-            if Pallet::<T>::on_chain_storage_version() >= STORAGE_VERSION {
-                let tracked = TotalEscrowed::<T>::get();
+            if Pallet::<T, I>::on_chain_storage_version() >= STORAGE_VERSION {
+                let tracked = TotalEscrowed::<T, I>::get();
                 let audited_escrow = liability
-                    .checked_sub(DepositsHeld::<T>::get())
-                    .ok_or(Error::<T>::ArithmeticOverflow)?;
-                ensure!(tracked == audited_escrow, Error::<T>::TryStateViolation);
+                    .checked_sub(DepositsHeld::<T, I>::get())
+                    .ok_or(Error::<T, I>::ArithmeticOverflow)?;
+                ensure!(tracked == audited_escrow, Error::<T, I>::TryStateViolation);
 
-                match LastReconciliation::<T>::get() {
+                match LastReconciliation::<T, I>::get() {
                     Some(sample) => ensure!(
-                        LedgerDrifted::<T>::get() == (sample.liability > sample.custody),
-                        Error::<T>::TryStateViolation
+                        LedgerDrifted::<T, I>::get() == (sample.liability > sample.custody),
+                        Error::<T, I>::TryStateViolation
                     ),
-                    None => ensure!(!LedgerDrifted::<T>::get(), Error::<T>::TryStateViolation),
+                    None => ensure!(
+                        !LedgerDrifted::<T, I>::get(),
+                        Error::<T, I>::TryStateViolation
+                    ),
                 }
             }
             Ok(())
@@ -2578,9 +2593,9 @@ pub mod migration {
         },
     }
 
-    pub struct BackfillTotalEscrowedV1<T>(core::marker::PhantomData<T>);
+    pub struct BackfillTotalEscrowedV1<T, I = ()>(core::marker::PhantomData<(T, I)>);
 
-    impl<T: Config> BackfillTotalEscrowedV1<T> {
+    impl<T: Config<I>, I: 'static> BackfillTotalEscrowedV1<T, I> {
         // Every invocation reserves the greater of the generated one-row scan
         // and terminal mirror/version paths before its first storage access.
         fn step_weight() -> Weight {
@@ -2588,11 +2603,11 @@ pub mod migration {
         }
 
         fn proposal_prefix() -> [u8; 32] {
-            <Vaults<T> as StoragePrefixedMap<VaultInfo>>::final_prefix()
+            <Vaults<T, I> as StoragePrefixedMap<VaultInfo>>::final_prefix()
         }
 
         fn baseline_prefix() -> [u8; 32] {
-            <BaselineVaults<T> as StoragePrefixedMap<BaselineVaultInfo>>::final_prefix()
+            <BaselineVaults<T, I> as StoragePrefixedMap<BaselineVaultInfo>>::final_prefix()
         }
 
         fn next_raw_row<V: DecodeAll>(
@@ -2675,7 +2690,7 @@ pub mod migration {
         }
     }
 
-    impl<T: Config> SteppedMigration for BackfillTotalEscrowedV1<T> {
+    impl<T: Config<I>, I: 'static> SteppedMigration for BackfillTotalEscrowedV1<T, I> {
         type Cursor = BackfillCursor;
         type Identifier = [u8; 16];
 
@@ -2696,7 +2711,7 @@ pub mod migration {
                 .try_consume(required)
                 .map_err(|_| SteppedMigrationError::InsufficientWeight { required })?;
 
-            if Pallet::<T>::on_chain_storage_version() != StorageVersion::new(0) {
+            if Pallet::<T, I>::on_chain_storage_version() != StorageVersion::new(0) {
                 return Ok(None);
             }
 
@@ -2735,8 +2750,8 @@ pub mod migration {
                             total,
                         }))
                     } else {
-                        TotalEscrowed::<T>::put(total);
-                        StorageVersion::new(1).put::<Pallet<T>>();
+                        TotalEscrowed::<T, I>::put(total);
+                        StorageVersion::new(1).put::<Pallet<T, I>>();
                         Ok(None)
                     }
                 }
@@ -2747,12 +2762,12 @@ pub mod migration {
         fn pre_upgrade() -> Result<alloc::vec::Vec<u8>, sp_runtime::TryRuntimeError> {
             use parity_scale_codec::Encode;
 
-            let version = Pallet::<T>::on_chain_storage_version();
+            let version = Pallet::<T, I>::on_chain_storage_version();
             let migrating = version == StorageVersion::new(0);
             let expected = if migrating {
                 Self::strict_legacy_sum()?
             } else {
-                TotalEscrowed::<T>::get()
+                TotalEscrowed::<T, I>::get()
             };
             Ok((version, expected).encode())
         }
@@ -2770,11 +2785,11 @@ pub mod migration {
                 version_before
             };
             frame_support::ensure!(
-                Pallet::<T>::on_chain_storage_version() == expected_version,
+                Pallet::<T, I>::on_chain_storage_version() == expected_version,
                 "conditional-ledger v1 migration: storage version transition is invalid"
             );
             frame_support::ensure!(
-                TotalEscrowed::<T>::get() == expected,
+                TotalEscrowed::<T, I>::get() == expected,
                 "conditional-ledger v1 migration: maintained total differs from legacy vault sum"
             );
             Ok(())

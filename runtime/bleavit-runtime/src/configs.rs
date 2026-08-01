@@ -3308,7 +3308,7 @@ impl pallet_conditional_ledger::ResidueReporter for RuntimeResidueReporter {
     }
 }
 
-impl pallet_conditional_ledger::Config for Runtime {
+impl pallet_conditional_ledger::Config<()> for Runtime {
     type Collateral = ForeignAssets;
     type UsdcAssetId = UsdcAssetId;
     // 03 §5.3a. The rate is live (13 §1 PARAM row), and the sink is the 08 §1.1
