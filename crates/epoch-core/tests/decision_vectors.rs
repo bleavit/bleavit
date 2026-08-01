@@ -347,6 +347,7 @@ fn replay(row: &Value) -> (DecisionOutcome, u128) {
     state.proposals.push(Proposal {
         id: 1,
         proposer: [1; 32],
+        funder: [1; 32],
         class,
         state: if extended {
             ProposalState::Extended

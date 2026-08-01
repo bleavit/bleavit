@@ -653,7 +653,13 @@ pub mod pallet {
         Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo,
     )]
     pub struct ProposalBond<AccountId> {
-        pub proposer: AccountId,
+        /// Bond custody: the `epoch.submit` signer, i.e. the proposal's **funder**
+        /// (05 §1.5, contract v18). Named `proposer` until E6, when the two
+        /// identities stopped coinciding — this record has always tracked whoever
+        /// the hold was placed on, and the refund and slashes follow it. The
+        /// proposal's *author* lives in `Proposal.proposer` and is paid the 08 §1.1
+        /// reward; routing anything custodial through that field is a defect.
+        pub funder: AccountId,
         pub held: Balance,
     }
 
@@ -1079,8 +1085,15 @@ pub mod pallet {
             ensure!(!Self::intake_paused(now), Error::<T>::IntakePaused);
             let epoch = EpochOf::<T>::get().index;
             proposal.id = NextProposalId::<T>::get();
+            // 05 §1.5 (E6): the signer is the **funder**, and the bond hold below lands
+            // on that same signer — which is the whole of the consent mechanism. The
+            // author (`proposal.proposer`) is unconstrained and MAY differ, so a
+            // technically capable author and a capitalised funder can be distinct
+            // accounts. This MUST NOT be relaxed into a caller-supplied funder with a
+            // separate authorization step: an authorization the signer does not carry at
+            // dispatch time is one the runtime would have to trust rather than verify.
             ensure!(
-                proposal.proposer == who
+                proposal.funder == who
                     && proposal.epoch == epoch
                     && proposal.submitted_at == now
                     && proposal.state == ProposalState::Submitted
@@ -1108,7 +1121,7 @@ pub mod pallet {
                 ProposalBonds::<T>::insert(
                     proposal.id,
                     ProposalBond {
-                        proposer: who,
+                        funder: who,
                         held: proposal.bond,
                     },
                 );
@@ -3113,7 +3126,7 @@ pub mod pallet {
                     .checked_sub(slash)
                     .ok_or(Error::<T>::ArithmeticOverflow)?;
                 if refund > 0 {
-                    T::ProposalBond::release(&bond.proposer, refund)?;
+                    T::ProposalBond::release(&bond.funder, refund)?;
                 }
                 ProposalBonds::<T>::remove(pid);
             }
@@ -3597,12 +3610,24 @@ pub mod pallet {
                     .ok_or(TryRuntimeError::Other(
                         "epoch proposal-bond liability overflow",
                     ))?;
-                if bond.held == 0
-                    || (!IntakeProposals::<T>::contains_key(pid)
-                        && !Proposals::<T>::contains_key(pid))
-                {
+                let owner = IntakeProposals::<T>::get(pid)
+                    .or_else(|| Proposals::<T>::get(pid))
+                    .map(|proposal| proposal.funder);
+                if bond.held == 0 || owner.is_none() {
                     return Err(TryRuntimeError::Other(
                         "epoch proposal-bond liability is orphaned",
+                    ));
+                }
+                // 05 §1.5 (E6): custody follows the funder, so the identity the
+                // hold was placed on must be the identity the record names.
+                // Before the author/funder split this binding was implicit —
+                // one identity, nothing to diverge — and it is exactly what a
+                // mis-keyed bond would break: the refund and the 06 §4 slash
+                // both follow `bond.funder`, so a bond keyed to the author pays
+                // and penalizes the wrong party with nothing else objecting.
+                if owner.as_ref() != Some(&bond.funder) {
+                    return Err(TryRuntimeError::Other(
+                        "epoch proposal-bond custody identity is not the proposal funder",
                     ));
                 }
             }

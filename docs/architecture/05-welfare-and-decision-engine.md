@@ -49,6 +49,10 @@ pub struct Proposal<AccountId> {
     pub grace_end: Option<BlockNumber>,     // execution grace deadline (09 §1.2(1))
     pub version_constraint: Option<RuntimeVersionConstraint>, // layout: 09 §1.2(3)
     pub decision: Option<DecisionOutcome>,  // set at decide()/terminal transition
+    pub funder: AccountId,       // bond custody (§1.5, contract v18). The `epoch.submit`
+                                 // signer; refund and the 06 §4 slashes reach this account
+                                 // and rule 4's per-account cap counts it. Trailing by
+                                 // construction — fields 1–21 keep their v17 offsets
 }
 ```
 
@@ -142,7 +146,7 @@ Changes vs. the superseded table (B-12): **T21/T22/T23 added**, **T13 restructur
 | # | From → To | Trigger (call) | Origin | Timing / guard | Deposit / slash | Events |
 |---|---|---|---|---|---|---|
 | T1 | ∅ → Submitted | `epoch.submit` | Signed | Intake phase only; queue < 64; ≤ 4 entries/epoch/account ([doc 06](./06-governance-and-guardians.md)); bond held | class bond held | `ProposalSubmitted` |
-| T2 | Submitted → Cancelled | `epoch.withdraw` | proposer | before Qualify | full refund | `ProposalWithdrawn` |
+| T2 | Submitted → Cancelled | `epoch.withdraw` | proposer **or funder** (§1.5) | before Qualify | full refund **to the funder** | `ProposalWithdrawn` |
 | T3 | Submitted → Screening | `tick` | keeper | Qualify phase start | — | `ScreeningStarted` |
 | T4 | Screening → Cancelled | `tick` (static checks fail: preimage missing/unpinned/oversized, domain mismatch, kernel violation, unclassifiable batch, bond insufficient after class bump) | keeper | — | **100% slash** on constitution violation or false resource declaration; **10% slash to INSURANCE** on preimage-missing (B-13, [doc 06](./06-governance-and-guardians.md)) | `ProposalCancelled(reason)` |
 | T5 | Screening → Qualified | `tick` (checks pass; slot won by bond priority among ≤ N_active; resource locks acquired; `decide_at` computed and stored per §3.3) | keeper | Qualify phase | — | `ProposalQualified` |
@@ -181,6 +185,22 @@ Rules carried forward unchanged: idempotency (every keeper call re-invoked in th
 Rejection at screening is information, not misconduct: the refund arm is the default and the two slash arms are the enumerated exceptions.
 
 **T5/T6 ordering and rollover exhaustion (normative; SQ-91 resolution, 2026-07-20).** Qualification ranks candidates **bond-descending, then `pid`-ascending** — the tie-break is the deterministic submission order, so equal bonds never depend on iteration order. A candidate that wins no slot, or whose resource locks conflict, takes T6 and rolls over **exactly once**: the first deferral returns it to `Submitted` re-anchored to the next epoch (T6, `ProposalDeferred`); a second deferral of the same proposal cancels it with a full refund (**T26**, `ProposalCancelled { reason: RolloverExhausted }`). The exhausting deferral is **terminal and MUST report itself as such** — emitting `ProposalDeferred` for it would enter a dead proposal into event-derived history as still live (SQ-166). The single rollover allowance is **per proposal, not per cause** — a proposal deferred once by slot contention and then demoted by the [doc 08](./08-treasury-and-economics.md) §4.4 POL-budget shrink-to-fit has already consumed its allowance and cancels.
+
+**§1.5 — A proposal carries two identities, and every right is bound to exactly one of them (normative; added 2026-07-31, milestone E6).** A `Proposal` record names an **author** (`proposer`) and a **funder** (`funder`). The author writes the payload; the funder posts the [doc 06](./06-governance-and-guardians.md) §4 class bond. They MAY be the same account and are so by default; nothing below is conditional on their being distinct.
+
+The funder is the **submit origin**, not a field the caller may name freely: `epoch.submit` places the bond hold on the signer, so an extrinsic can never enlist a third party's balance. That is the whole of the consent mechanism and it MUST NOT be relaxed into a caller-supplied funder with a separate authorization step — an authorization the signer does not carry at dispatch time is one the runtime would have to trust rather than verify.
+
+Rights bind as follows, and the division is by **who bears the loss** rather than by convenience:
+
+| Right | Bound to | Why |
+|---|---|---|
+| `epoch.bind_ratification` (T-table; [09](./09-execution-upgrades-and-rollout.md) §1.1(4)) | **Author** | It freezes the referendum identity for a payload the author committed; funding it buys no authority over what it means |
+| [08](./08-treasury-and-economics.md) §1.1 `trs.proposer_reward` on `Executed` | **Author** | It pays for authorial work |
+| Bond refund, and the [06](./06-governance-and-guardians.md) §4 10 % non-decision-grade slash | **Funder** | The funder holds the bond; loss follows custody and cannot follow anything else |
+| `epoch.withdraw` before qualification (T2) | **Either** | Neither party may trap the other — the author cannot strand the funder's capital for the epoch, and the funder cannot hold a live proposal hostage against its author |
+| [06](./06-governance-and-guardians.md) §4 rule-4 per-account intake cap | **Funder** | Capital at risk is what prices spam; see the rule's own normative note |
+
+**Withdrawal is deliberately admitted to both, and the failure mode of the alternatives is the argument.** Restricting T2 to the author lets an author abandon a proposal while the funder's bond stays held to the end of the intake phase with no exit. Restricting it to the funder lets a funder refuse to release a proposal its author has disowned. Both are states in which one party's capital or reputation is committed at the other's discretion, and neither buys any safety: T2 is a **full refund to the funder** and a status-quo terminal state (G-1), so an adversarial withdrawal costs its counterparty a slot attempt and nothing else. The refund destination is custody-following and is not a choice — paying an author for a bond they did not post would mint a transfer out of a bond the funder is still owed.
 
 **T20 stale-epoch anchor (normative; SQ-86 resolution, 2026-07-20).** `StaleEpochBound` measures **epoch staleness, not per-proposal lifetime**: it is the overdue margin on the persisted **next phase boundary**, so a chain whose clock has stopped advancing trips it regardless of how new any individual proposal is. When the bound is exceeded the engine **latches a high-water proposal-id snapshot**; force-rejection then applies to exactly those proposals with `id ≤ cutoff`, and proposals submitted after the latch are immune (they never observed the stale epoch). The latch is **suppressed while the dead-man switch is armed or paused and during a recovery epoch** — a stalled clock that the dead-man already owns must not also be attributed to epoch staleness (§4.8) — and it **self-clears** once no proposal at or below the cutoff remains force-rejectable, so the mechanism is a bounded drain rather than a permanent mode.
 

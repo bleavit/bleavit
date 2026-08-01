@@ -773,7 +773,15 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         ensure!(
             self.proposals
                 .iter()
-                .filter(|p| p.epoch == self.epoch.index && p.proposer == proposal.proposer)
+                // 06 §4 rule 4 counts the **funder**, not the author (05 §1.5, E6).
+                // An author identity signs nothing, holds nothing and is slashed for
+                // nothing, so a cap keyed to it is satisfiable by minting free authors:
+                // one funder could back ceil(64/4) = 16 throwaway authors and occupy the
+                // whole D-10 intake family, restoring the pre-review TH-16 economics.
+                // Keying the cap to the identity that bears the cost is what makes it a
+                // limit at all. Identical to the pre-split behaviour whenever the two
+                // coincide, which is every state reachable before contract v18.
+                .filter(|p| p.epoch == self.epoch.index && p.funder == proposal.funder)
                 .count()
                 < usize::from(params.intake_max_per_account),
             Error::IntakeFull,
@@ -806,8 +814,14 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             Error::BadState
         );
         let p = self.proposal_mut(pid)?;
+        // T2 is admitted to **either** identity (05 §1.5, E6): restricting it to the
+        // author lets an author abandon a proposal while the funder's bond stays held
+        // with no exit; restricting it to the funder lets a funder hold a disowned
+        // proposal hostage. Neither restriction buys safety — T2 is a full refund to
+        // the funder and a status-quo terminal state (G-1), so an adversarial
+        // withdrawal costs its counterparty a slot attempt and nothing more.
         ensure!(
-            p.state == ProposalState::Submitted && &p.proposer == who,
+            p.state == ProposalState::Submitted && (&p.proposer == who || &p.funder == who),
             Error::BadState
         );
         p.state = ProposalState::Cancelled;
@@ -2527,6 +2541,7 @@ mod tests {
         Proposal {
             id,
             proposer: acct(1),
+            funder: acct(1),
             class: ProposalClass::Param,
             state,
             epoch: 0,

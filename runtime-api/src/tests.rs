@@ -102,6 +102,9 @@ fn proposal_summary() -> ProposalSummaryView {
         decide_at: 303,
         maturity: Some(404),
         ratification: RatificationStatus::NoPassedRecord,
+        // Deliberately distinct from `proposer`: a fixture that collapses the two
+        // identities cannot detect a projection that swaps or aliases them.
+        funder: [9; 32],
     }
 }
 

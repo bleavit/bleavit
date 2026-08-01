@@ -10872,6 +10872,11 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
         let (payload_hash, payload_len) = benchmark_ensure_payload_preimage(id);
         futarchy_primitives::Proposal {
             id,
+            // `submit` requires `funder == origin` (05 §1.5): the hold lands on
+            // the signer, so no benchmark fixture may name a third party here.
+            // The record is the same width either way — `funder` is a
+            // fixed-size `AccountId32` — so this costs the measurement nothing.
+            funder: who.clone(),
             proposer: who,
             class: futarchy_primitives::ProposalClass::Param,
             state: futarchy_primitives::ProposalState::Submitted,
@@ -11289,9 +11294,14 @@ fn benchmark_epoch_proposal(
     payload_len: u32,
     state: futarchy_primitives::ProposalState,
 ) -> futarchy_primitives::Proposal<AccountId> {
+    let who = AccountId32::new([u8::try_from(pid).map_or(0, |value| value); 32]);
     futarchy_primitives::Proposal {
         id: pid,
-        proposer: AccountId32::new([u8::try_from(pid).map_or(0, |value| value); 32]),
+        // Seeded states pair with `ProposalBonds` entries whose custody
+        // identity is the submitting account, so the two identities coincide
+        // here exactly as they did before the E6 split.
+        funder: who.clone(),
+        proposer: who,
         class: futarchy_primitives::ProposalClass::Param,
         state,
         epoch: pallet_epoch::CurrentEpoch::<Runtime>::get(),
