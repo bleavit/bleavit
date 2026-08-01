@@ -49,11 +49,56 @@ pub enum CallDomain {
     GuardianHold,
     EmergencyPlaybook,
     InternalRoot,
+    /// The hosted question service's client domain (D-20; [16] §3.1). Appended
+    /// last — SCALE discriminants are positional.
+    ///
+    /// Two properties define it, and they pull in opposite directions on
+    /// purpose:
+    ///
+    /// * **No governance origin reaches it.** [`Self::allowed_for`] is `false`
+    ///   for every `Some(Origin::_)`, so the eight governance origins and this
+    ///   domain are disjoint by construction rather than by review. That is
+    ///   what makes 06 §1's eight-origin closure clause stay literally true
+    ///   while a twelfth domain exists.
+    /// * **`allowed_for(None)` is `true`**, and this is a genuine widening
+    ///   stated rather than hidden. Off-chain services cannot send XCM and use
+    ///   the identical calls from a local signed account ([16] §2), so the
+    ///   domain must admit a plain signed origin. The consequence is that the
+    ///   owning pallet's own `EnsureOrigin` is **load-bearing** in a way the
+    ///   eight governance origins' is not. The alternative — routing these
+    ///   calls through `dispatch_bypass_filter` — is worse under R-7, because
+    ///   it removes the filter from the path entirely rather than making it
+    ///   decisive.
+    ///
+    /// It **is** in [`Self::is_privileged`]'s exempt set, and an earlier draft
+    /// of this variant had that backwards. "Privileged" here means
+    /// *governance*-privileged — 06 §3.3 denies "every bare
+    /// **governance-privileged** leaf", and G-5 defines a privileged effect as
+    /// one flowing "through an enumerated custom origin produced by an
+    /// enumerated pallet". This domain requires no governance origin at all,
+    /// so calling it privileged conflates two different properties, and the
+    /// `nested_wrapper_filter` differential oracle caught the conflation
+    /// immediately: it asserts that anything `validate(None, _)` admits
+    /// contains no unscoped privileged leaf, which a privileged-but-`None`-
+    /// admitted domain falsifies by construction.
+    ///
+    /// Denying proxy-ish wrappers here would also have bought nothing. The
+    /// XCM threat is closed one layer up by `SafeCallFilter ≡ {c : domain(c)
+    /// == ExternalClient}` (I-35): a `Utility.batch(..)` or `Proxy(..)` does
+    /// not itself classify as `ExternalClient`, so no wrapper is admissible
+    /// through the [09] §6.5 ingress template regardless of what this
+    /// predicate says. The wrapper rule would only have cost off-chain
+    /// services their batching.
+    ExternalClient,
 }
 
 impl CallDomain {
     pub const fn is_privileged(self) -> bool {
-        !matches!(self, Self::Public | Self::Nobody)
+        // "Privileged" is *governance*-privileged (06 §3.3, G-5): the leaf
+        // needs an enumerated custom origin. `ExternalClient` needs none —
+        // it is reachable from a plain signed origin — so it belongs here
+        // beside `Public`, not with the governance domains. See the variant.
+        !matches!(self, Self::Public | Self::Nobody | Self::ExternalClient)
     }
 
     pub const fn allowed_for(self, origin: Option<Origin>) -> bool {
@@ -68,6 +113,10 @@ impl CallDomain {
             Self::OracleResolution => matches!(origin, Some(Origin::OracleResolution)),
             Self::GuardianHold => matches!(origin, Some(Origin::GuardianHold)),
             Self::EmergencyPlaybook => matches!(origin, Some(Origin::EmergencyPlaybook)),
+            // Reachable by no governance origin, and by a plain signed origin
+            // only. See the variant's own documentation for why both halves
+            // are deliberate.
+            Self::ExternalClient => origin.is_none(),
         }
     }
 }
@@ -280,6 +329,83 @@ mod tests {
 
     fn boxed(call: RuntimeCall) -> BoxedCall {
         BoxedCall::new(call)
+    }
+
+    #[test]
+    fn external_client_domain_is_reachable_by_no_governance_origin() {
+        // I-35 / 16 §3.1. The whole point of a twelfth domain is that the
+        // governance surface and the client surface are disjoint *by
+        // construction*. If this ever passes for a `Some(_)`, the XCM ingress
+        // has become a governance path.
+        let governance = [
+            Origin::FutarchyParam,
+            Origin::FutarchyTreasury,
+            Origin::FutarchyCode,
+            Origin::FutarchyMeta,
+            Origin::ConstitutionalValues,
+            Origin::OracleResolution,
+            Origin::GuardianHold,
+            Origin::EmergencyPlaybook,
+        ];
+        for origin in governance {
+            assert!(
+                !CallDomain::ExternalClient.allowed_for(Some(origin)),
+                "{origin:?} must not reach the client domain"
+            );
+        }
+        // And the converse: no governance domain is reachable *without* an
+        // origin, so the widening below cannot leak the other way.
+        for domain in [
+            CallDomain::Param,
+            CallDomain::Treasury,
+            CallDomain::Code,
+            CallDomain::Meta,
+            CallDomain::ConstitutionalValues,
+            CallDomain::OracleResolution,
+            CallDomain::GuardianHold,
+            CallDomain::EmergencyPlaybook,
+            CallDomain::InternalRoot,
+            CallDomain::Nobody,
+        ] {
+            assert!(!domain.allowed_for(None), "{domain:?} must need an origin");
+        }
+    }
+
+    #[test]
+    fn external_client_is_signed_reachable_and_not_governance_privileged() {
+        // The deliberate widening (16 §3.1): off-chain services cannot send
+        // XCM and use the same calls from a local signed account, so the
+        // domain must admit `None`.
+        assert!(CallDomain::ExternalClient.allowed_for(None));
+        assert_eq!(
+            SafetyFilter::validate(None, &RuntimeCall::leaf(CallDomain::ExternalClient)),
+            Ok(())
+        );
+
+        // And it is NOT governance-privileged. 06 §3.3 denies "every bare
+        // **governance-privileged** leaf" and G-5 defines a privileged effect
+        // as one flowing through an enumerated custom origin; this domain
+        // needs no origin at all. An earlier draft had this backwards, and the
+        // `nested_wrapper_filter` differential oracle falsified it at once —
+        // it asserts that whatever `validate(None, _)` admits carries no
+        // unscoped privileged leaf, which a privileged-yet-`None`-admitted
+        // domain contradicts by construction.
+        assert!(!CallDomain::ExternalClient.is_privileged());
+
+        // Wrappers are therefore ordinary here, and that costs nothing: the
+        // XCM threat is closed one layer up by `SafeCallFilter == {c :
+        // domain(c) == ExternalClient}` (I-35). A wrapper does not itself
+        // classify as `ExternalClient`, so it is inadmissible through the
+        // 09 §6.5 template whatever this predicate says.
+        assert_eq!(
+            SafetyFilter::validate(
+                None,
+                &RuntimeCall::Proxy(BoxedCall::new(RuntimeCall::leaf(
+                    CallDomain::ExternalClient
+                )))
+            ),
+            Ok(())
+        );
     }
 
     #[test]

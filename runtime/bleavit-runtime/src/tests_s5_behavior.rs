@@ -733,7 +733,17 @@ fn matching_origin(domain: CallDomain) -> Option<ClassOrigin> {
         CallDomain::OracleResolution => Some(ClassOrigin::OracleResolution),
         CallDomain::GuardianHold => Some(ClassOrigin::GuardianHold),
         CallDomain::EmergencyPlaybook => Some(ClassOrigin::EmergencyPlaybook),
-        CallDomain::Public | CallDomain::Nobody | CallDomain::InternalRoot => None,
+        // `ExternalClient` joins the no-governance-origin arm deliberately and
+        // is spelled out rather than folded into it: the other three are
+        // origin-less because they are unprivileged or unreachable, whereas
+        // this one is origin-less because **no governance origin may reach
+        // it** (I-35, 16 §3.1). Naming it here means a future contributor who
+        // gives the client domain a governance origin has to delete this
+        // comment to do it.
+        CallDomain::Public
+        | CallDomain::Nobody
+        | CallDomain::InternalRoot
+        | CallDomain::ExternalClient => None,
     }
 }
 
