@@ -49,6 +49,33 @@ pub enum CallDomain {
     GuardianHold,
     EmergencyPlaybook,
     InternalRoot,
+    /// The hosted question service's client domain (D-20; [16] §3.1). Appended
+    /// last — SCALE discriminants are positional.
+    ///
+    /// Two properties define it, and they pull in opposite directions on
+    /// purpose:
+    ///
+    /// * **No governance origin reaches it.** [`Self::allowed_for`] is `false`
+    ///   for every `Some(Origin::_)`, so the eight governance origins and this
+    ///   domain are disjoint by construction rather than by review. That is
+    ///   what makes 06 §1's eight-origin closure clause stay literally true
+    ///   while a twelfth domain exists.
+    /// * **`allowed_for(None)` is `true`**, and this is a genuine widening
+    ///   stated rather than hidden. Off-chain services cannot send XCM and use
+    ///   the identical calls from a local signed account ([16] §2), so the
+    ///   domain must admit a plain signed origin. The consequence is that the
+    ///   owning pallet's own `EnsureOrigin` is **load-bearing** in a way the
+    ///   eight governance origins' is not. The alternative — routing these
+    ///   calls through `dispatch_bypass_filter` — is worse under R-7, because
+    ///   it removes the filter from the path entirely rather than making it
+    ///   decisive.
+    ///
+    /// It is deliberately **not** added to [`Self::is_privileged`]'s exempt
+    /// set, so a client-domain call inside a proxy-ish wrapper is refused
+    /// `PrivilegedWrapper` (I-10/I-11). The cost is that an off-chain service
+    /// cannot batch or proxy these calls; the benefit is that no wrapper path
+    /// can carry one under another account's origin. R-7 picks the refusal.
+    ExternalClient,
 }
 
 impl CallDomain {
@@ -68,6 +95,10 @@ impl CallDomain {
             Self::OracleResolution => matches!(origin, Some(Origin::OracleResolution)),
             Self::GuardianHold => matches!(origin, Some(Origin::GuardianHold)),
             Self::EmergencyPlaybook => matches!(origin, Some(Origin::EmergencyPlaybook)),
+            // Reachable by no governance origin, and by a plain signed origin
+            // only. See the variant's own documentation for why both halves
+            // are deliberate.
+            Self::ExternalClient => origin.is_none(),
         }
     }
 }
@@ -280,6 +311,74 @@ mod tests {
 
     fn boxed(call: RuntimeCall) -> BoxedCall {
         BoxedCall::new(call)
+    }
+
+    #[test]
+    fn external_client_domain_is_reachable_by_no_governance_origin() {
+        // I-35 / 16 §3.1. The whole point of a twelfth domain is that the
+        // governance surface and the client surface are disjoint *by
+        // construction*. If this ever passes for a `Some(_)`, the XCM ingress
+        // has become a governance path.
+        let governance = [
+            Origin::FutarchyParam,
+            Origin::FutarchyTreasury,
+            Origin::FutarchyCode,
+            Origin::FutarchyMeta,
+            Origin::ConstitutionalValues,
+            Origin::OracleResolution,
+            Origin::GuardianHold,
+            Origin::EmergencyPlaybook,
+        ];
+        for origin in governance {
+            assert!(
+                !CallDomain::ExternalClient.allowed_for(Some(origin)),
+                "{origin:?} must not reach the client domain"
+            );
+        }
+        // And the converse: no governance domain is reachable *without* an
+        // origin, so the widening below cannot leak the other way.
+        for domain in [
+            CallDomain::Param,
+            CallDomain::Treasury,
+            CallDomain::Code,
+            CallDomain::Meta,
+            CallDomain::ConstitutionalValues,
+            CallDomain::OracleResolution,
+            CallDomain::GuardianHold,
+            CallDomain::EmergencyPlaybook,
+            CallDomain::InternalRoot,
+            CallDomain::Nobody,
+        ] {
+            assert!(!domain.allowed_for(None), "{domain:?} must need an origin");
+        }
+    }
+
+    #[test]
+    fn external_client_admits_a_plain_signed_origin_but_never_a_wrapper() {
+        // The deliberate widening (16 §3.1): off-chain services cannot send
+        // XCM and use the same calls from a local signed account, so the
+        // domain must admit `None`.
+        assert!(CallDomain::ExternalClient.allowed_for(None));
+
+        // But it stays **privileged**, so no proxy-ish wrapper can carry a
+        // client-domain call under another account's origin (I-10/I-11). This
+        // is the R-7 trade recorded on the variant: an off-chain service loses
+        // batching, and nothing gains a smuggling path.
+        assert!(CallDomain::ExternalClient.is_privileged());
+        assert_eq!(
+            SafetyFilter::validate(
+                None,
+                &RuntimeCall::Proxy(BoxedCall::new(RuntimeCall::leaf(
+                    CallDomain::ExternalClient
+                )))
+            ),
+            Err(Error::PrivilegedWrapper)
+        );
+        // Unwrapped, the same call and origin are fine.
+        assert_eq!(
+            SafetyFilter::validate(None, &RuntimeCall::leaf(CallDomain::ExternalClient)),
+            Ok(())
+        );
     }
 
     #[test]
