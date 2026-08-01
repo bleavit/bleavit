@@ -367,6 +367,12 @@ pub struct ReportView {
     pub manip_floor: Balance,             // 05 §5.6 cash form, rounded DOWN
     pub declared_stake: Balance,          // S, republished verbatim
     pub epsilon_1e9: FixedU64,            // ε, republished verbatim
+    pub tolerance_1e9: FixedU64,          // the §6.3 deviation tolerance, FROZEN at
+                                          //   registration. It is contract surface
+                                          //   because settlement takes it as an
+                                          //   argument: without it here a widened
+                                          //   value could excuse otherwise-slashable
+                                          //   submissions undetectably
     pub certified: bool,                  // C_disp(ε) ≥ 3·S — NOT ManipFloor̂ (16 §5.2)
     pub settlement_trust: SettlementTrust,
     pub provenance_hash: H256,            // blake2_256 over the domain-separated SCALE preimage

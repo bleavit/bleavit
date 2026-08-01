@@ -240,6 +240,8 @@ Report {
     manip_floor,                          // 05 §5.6, cash form, rounded DOWN
     declared_stake,                        // S, republished verbatim
     epsilon_1e9,                           // ε, republished verbatim
+    tolerance_1e9,                         // §6.3 deviation tolerance, frozen at
+                                           //   registration and provenance-bound
     certified: bool,                       // C_disp(ε) ≥ SECURITY_FACTOR·S — client-funded depth
                                            //   ONLY, never the measured-inclusive ManipFloor̂ (§5.2)
     settlement_trust: SettlementTrust { attestors, quorum, bond_total },
@@ -384,6 +386,33 @@ The same shapes as [07](./07-oracle-and-disputes.md), with **zero new values-lay
   `max(reg.bond_milestone, ceil((2^orc.rounds − 1) · orc.bond_bps · escrowed / 10_000))`.
 - The window is `orc.window` (72 h, D-18-frozen).
 - Deviation beyond tolerance is slashed on 07 §5.5's 40/60 split.
+
+**Four details the first draft left open, ruled here rather than deferred (2026-08-01, raised by
+the N5 implementation pass).** Each was reachable by an implementer making a reasonable choice, and
+each reasonable choice was different from the others' — which is exactly the state that produces a
+Rust/Python divergence nobody notices.
+
+1. **The median of an even quorum settles on the arithmetic mean of the two central values,
+   **floored** to [05](./05-welfare-and-decision-engine.md) §4.4's `1e9` grid.** Two reasons, and
+   the first is dispositive: every settled value MUST lie on that grid, so an unfloored mean is not
+   a representable settlement value at all. The second is direction — flooring is R-7's rounding
+   against the party who gains from a higher settlement.
+2. **The median is taken over *every* in-window submission from a named attestor, never over "the
+   first `⌈n/2⌉`.**" A first-`q` rule is order-dependent, and transaction ordering is not a property
+   the client or Bleavit controls — a collator could select which attestors count. `⌈n/2⌉` is the
+   **threshold to settle at all**, not a selection rule. Duplicate submissions from one attestor
+   collapse to that attestor's latest.
+3. **The deviation tolerance is a per-question field frozen at registration**, bounded by a kernel
+   constant — **not** a `Params` key. It is part of what the client buys, and a values majority that
+   could widen it after trading opened could retroactively excuse an attestor the client had
+   priced. Same argument that keeps `SECURITY_FACTOR` kernel (§8, TH-73). **It is therefore in §5's
+   `Report` and bound into `provenance_hash`**: settlement takes tolerance as an *argument*, so a
+   report that omitted it would let a widened value pass unnoticed by any client verifying the
+   pushed or pulled report. Freezing a promise the buyer cannot check is not freezing it.
+4. **`provenance_hash` is `blake2_256` over a domain-separated SCALE preimage**, separator
+   `b"bleavit/hosted-report/v1"`, covering every field of §5's `Report` including `sub_id`. It is
+   read cross-chain, so it is [02](./02-integration-contract.md) contract surface and frozen with
+   contract v20; a client verifying a report by storage proof recomputes exactly this.
 
 **Why a median rather than a self-report with a challenge window.** A lie detector needs an
 adjudicator, and this game has none by construction — sending a client's disputed foreign fact to

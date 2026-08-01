@@ -17,6 +17,7 @@ members = [
   "crates/market-core",
   "crates/oracle-core",
   "crates/origins-core",
+  "crates/question-service-core",
   "crates/registry-core",
   "crates/welfare-core",
   "pallets/constitution",

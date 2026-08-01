@@ -1081,6 +1081,11 @@ pub mod kernel {
     pub const RERUN_HURDLE_BUMP_1E9: u64 = 10_000_000;
     /// Capture-resistance multiplier `AttackCost >= 3 * InCapPrize` (D-4).
     pub const SECURITY_FACTOR: u128 = 3;
+    /// Minimum client-named attestor-set size for the hosted question service
+    /// (13 §2 / 16 §6.3). This is distinct from [`ATT_MIN_MEMBERS`]: that
+    /// constant governs Bleavit's values-elected upgrade-attestor registry,
+    /// while this one is part of the settlement-trust claim sold to a client.
+    pub const SVC_ATTESTORS_MIN: u32 = 3;
     /// Kernel hard minimum for `sec.flow_cap` — the `C_hold` wash ceiling on
     /// the measured non-POL contest-capital depth term, as a multiple of
     /// `(b_acc + b_rej)` on the contract's 1e9 grid (13 §1; 08 §5.3: below ×7
