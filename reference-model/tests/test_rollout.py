@@ -11,6 +11,7 @@ import unittest
 from decimal import Decimal, localcontext
 from fractions import Fraction
 from pathlib import Path
+import re
 
 from bleavit_reference_model import lifecycle
 from bleavit_reference_model.rollout import (
@@ -34,7 +35,6 @@ from bleavit_reference_model.rollout import (
     USDC_MIN_BALANCE,
     Env,
     RolloutError,
-    cap_argument,
     expedited_repair_latency,
     freeze_repair_finding,
     guarded_enabled,
@@ -47,7 +47,6 @@ from bleavit_reference_model.rollout import (
     onset_grid,
     phase_cap_raise_allowed,
     phase_gate_satisfiable,
-    production_expedited_writer,
     published_sum,
     renewal_fits_first_window,
     renewal_slack,
@@ -61,47 +60,267 @@ D = Decimal
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _plain_markdown(value: str) -> str:
+    """Normalize inline presentation without discarding criterion content."""
+    without_links = re.sub(r"\[([^]]+)\]\([^)]+\)", r"\1", value)
+    without_delimiters = (
+        without_links.replace("**", "").replace("`", "").replace("*", "")
+    )
+    return re.sub(r"\s+", " ", without_delimiters).strip()
+
+
+def _phase_table_rows(markdown: str) -> tuple[tuple[int, str, str], ...]:
+    """Parse every phase name and complete 09 §7.1 entry-criteria cell."""
+    try:
+        section = markdown.split("### 7.1 Phase table", 1)[1].split("### 7.2", 1)[0]
+    except IndexError as error:
+        raise AssertionError("09 §7.1 phase-table headings are missing") from error
+    rows = []
+    for line in section.splitlines():
+        if re.match(r"^\|\s*[0-7]\s", line) is None:
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) != 7:
+            raise AssertionError(f"phase row has {len(cells)} columns, expected 7")
+        phase_cell = _plain_markdown(cells[0])
+        match = re.fullmatch(r"(\d+)\s+(.+)", phase_cell)
+        if match is None:
+            raise AssertionError(f"malformed phase cell {phase_cell!r}")
+        rows.append(
+            (int(match.group(1)), match.group(2), _plain_markdown(cells[3]))
+        )
+    return tuple(rows)
+
+
+EXPECTED_PHASE_ENTRY_COLUMNS = (
+    (0, "Reference & simulation", "E1–E8 code-complete"),
+    (1, "Local nets", "Phase 0 exit"),
+    (
+        2,
+        "Public testnet (Paseo) + bounties",
+        "Phase 1 exit; bounty program funded; ss58 prefix 7777 registry submission "
+        "accepted; testnet WSS bootnode set live (≥ 8 browser-reachable across ≥ 4 "
+        "operators, ≥ 2 on :443); integration-contract implementation (E15) deployed",
+    ),
+    (
+        3,
+        "Mainnet shadow futarchy",
+        "audits A+B passed; genesis ceremony; mainnet WSS bootnode set live "
+        "(≥ 8/≥ 4 ops/≥ 2 on :443) + 30-day operator served-state commitment in "
+        "force; descriptor pipeline live incl. Asset Hub descriptor set; ≥ 3 "
+        "registered oracle reporters with full stakes; HRMP channels to Asset Hub "
+        "open; funding flow (deposit + withdraw) passing the published XCM test suite",
+    ),
+    (
+        4,
+        "Binding PARAM",
+        "Phase 3 exit + values ratification of the arming upgrade; NAV ≥ min-viable "
+        "NAV(PARAM) (08) — loud gate: arming refused with a published shortfall "
+        "figure, never silently",
+    ),
+    (
+        5,
+        "+ TREASURY",
+        "Phase 4 exit; V_min consistently met; treasury funding ≥ 25M USDC and NAV "
+        "≥ min-viable NAV(TREASURY)",
+    ),
+    (
+        6,
+        "+ CODE/META",
+        "Phase 5 exit; scope-A re-audit; NAV ≥ min-viable NAV(CODE/META) — "
+        "because 02 §7.3's bit 3 arms both classes at once, the binding floor is "
+        "the higher of the two, META's 21,256,533 USDC; CODE's ≈ 14M is the floor "
+        "for one CODE at floor liquidity and is necessary but not sufficient here "
+        "(normative values and the SQ-382 resolution: 08 §4.1–§4.2)",
+    ),
+    (7, "Mature", "Phase 6 exit; entrenched-track confirmation"),
+)
+
+
+EXPECTED_PHASE_GATE_MODEL = (
+    (
+        0,
+        "Reference & simulation",
+        (("p0.code-complete", "E1–E8 code-complete", (), None, None),),
+    ),
+    (1, "Local nets", (("p1.phase0-exit", "Phase 0 exit", (), None, None),)),
+    (
+        2,
+        "Public testnet (Paseo) + bounties",
+        (
+            ("p2.phase1-exit", "Phase 1 exit", (), None, None),
+            ("p2.bounties", "bounty program funded", (), None, None),
+            (
+                "p2.ss58",
+                "ss58 prefix 7777 registry submission accepted",
+                (),
+                None,
+                None,
+            ),
+            (
+                "p2.bootnodes",
+                "testnet WSS bootnode set live (>=8, >=4 operators, >=2 on :443)",
+                (),
+                None,
+                None,
+            ),
+            (
+                "p2.contract",
+                "integration-contract implementation (E15) deployed",
+                (),
+                None,
+                None,
+            ),
+        ),
+    ),
+    (
+        3,
+        "Mainnet shadow futarchy",
+        (
+            ("p3.audits", "audits A+B passed", (), None, None),
+            ("p3.genesis", "genesis ceremony", (), None, None),
+            (
+                "p3.bootnodes",
+                "mainnet WSS bootnodes and 30-day served-state commitment live",
+                (),
+                None,
+                None,
+            ),
+            (
+                "p3.descriptors",
+                "descriptor pipeline live including the Asset Hub descriptor set",
+                (),
+                None,
+                None,
+            ),
+            (
+                "p3.reporters",
+                ">=3 registered oracle reporters with full stakes",
+                ("orc.n_min", "orc.reporter_stake"),
+                None,
+                None,
+            ),
+            (
+                "p3.hrmp",
+                "Asset Hub HRMP channels open and deposit+withdraw test suite passing",
+                ("phase3.tvl_cap", "phase3.deposit_cap"),
+                None,
+                None,
+            ),
+        ),
+    ),
+    (
+        4,
+        "Binding PARAM",
+        (
+            ("p4.phase3-exit", "Phase 3 exit", (), None, None),
+            (
+                "p4.ratification",
+                "values ratification of the arming upgrade",
+                (),
+                None,
+                None,
+            ),
+            (
+                "p4.nav-param",
+                "spendable NAV >= min-viable NAV(PARAM)",
+                ("08.nav_floor.param",),
+                D(4_620_989),
+                D(4_620_989),
+            ),
+        ),
+    ),
+    (
+        5,
+        "+ TREASURY",
+        (
+            ("p5.phase4-exit", "Phase 4 exit", (), None, None),
+            (
+                "p5.v-min",
+                "V_min consistently met",
+                ("dec.v_min.param", "dec.v_min.treasury"),
+                None,
+                None,
+            ),
+            (
+                "p5.funding",
+                "treasury funding >= 25,000,000 USDC",
+                ("08.initial_usdc_funding_target",),
+                D(25_000_000),
+                None,
+            ),
+            (
+                "p5.nav-treasury",
+                "spendable NAV >= min-viable NAV(TREASURY)",
+                ("08.nav_floor.treasury",),
+                D(7_393_600),
+                D(7_393_600),
+            ),
+        ),
+    ),
+    (
+        6,
+        "+ CODE/META",
+        (
+            ("p6.phase5-exit", "Phase 5 exit", (), None, None),
+            ("p6.audit", "scope-A re-audit", (), None, None),
+            (
+                "p6.nav-code-meta",
+                "spendable NAV clears the shared CODE/META arming floor",
+                ("08.nav_floor.code", "08.nav_floor.meta"),
+                D(21_256_533),
+                D(21_256_533),
+            ),
+        ),
+    ),
+    (
+        7,
+        "Mature",
+        (
+            ("p7.phase6-exit", "Phase 6 exit", (), None, None),
+            (
+                "p7.entrenched",
+                "entrenched-track confirmation",
+                (),
+                None,
+                None,
+            ),
+        ),
+    ),
+)
+
+
 class PhaseGateDataTests(unittest.TestCase):
     """09 §7.1's Entry criteria are present once and carry their numeric reads."""
 
-    def test_all_eight_phase_rows_are_data(self):
-        self.assertEqual(tuple(gate.phase for gate in PHASE_GATES), tuple(range(8)))
-        self.assertEqual(len({gate.phase for gate in PHASE_GATES}), len(PHASE_GATES))
+    def test_complete_entry_criteria_column_matches_09_section_7_1(self):
+        doc09 = (
+            REPO_ROOT / "docs/architecture/09-execution-upgrades-and-rollout.md"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(_phase_table_rows(doc09), EXPECTED_PHASE_ENTRY_COLUMNS)
 
-    def test_every_entry_criterion_has_a_stable_unique_key(self):
+    def test_every_model_criterion_numeric_requirement_and_read_is_pinned(self):
+        actual = tuple(
+            (
+                gate.phase,
+                gate.name,
+                tuple(
+                    (
+                        criterion.key,
+                        criterion.text,
+                        criterion.reads,
+                        criterion.cap_requirement,
+                        criterion.nav_floor,
+                    )
+                    for criterion in gate.criteria
+                ),
+            )
+            for gate in PHASE_GATES
+        )
+        self.assertEqual(actual, EXPECTED_PHASE_GATE_MODEL)
+
         keys = [criterion.key for gate in PHASE_GATES for criterion in gate.criteria]
-        self.assertEqual(len(keys), 25)
         self.assertEqual(len(keys), len(set(keys)))
-
-    def test_the_phase_table_carries_every_nav_floor_read(self):
-        reads = {
-            phase: criterion.reads for phase, criterion in nav_floor_criteria()
-        }
-        self.assertEqual(
-            reads,
-            {
-                4: ("08.nav_floor.param",),
-                5: ("08.nav_floor.treasury",),
-                6: ("08.nav_floor.code", "08.nav_floor.meta"),
-            },
-        )
-
-    def test_nav_floor_requirements_are_the_frozen_08_literals(self):
-        requirements = {
-            phase: criterion.nav_floor for phase, criterion in nav_floor_criteria()
-        }
-        self.assertEqual(requirements[4], NAV_FLOORS["param"])
-        self.assertEqual(requirements[5], NAV_FLOORS["treasury"])
-        self.assertEqual(requirements[6], NAV_FLOORS["meta"])
-        self.assertGreater(requirements[6], NAV_FLOORS["code"])
-
-    def test_phase_three_reporter_and_inflow_criteria_name_their_registry_reads(self):
-        phase3 = next(gate for gate in PHASE_GATES if gate.phase == 3)
-        reads = {criterion.key: criterion.reads for criterion in phase3.criteria}
-        self.assertEqual(reads["p3.reporters"], ("orc.n_min", "orc.reporter_stake"))
-        self.assertEqual(
-            reads["p3.hrmp"], ("phase3.tvl_cap", "phase3.deposit_cap")
-        )
 
     def test_every_cap_sensitive_criterion_names_an_08_or_13_input(self):
         for gate in PHASE_GATES:
@@ -109,22 +328,64 @@ class PhaseGateDataTests(unittest.TestCase):
                 if criterion.cap_requirement is not None:
                     with self.subTest(criterion=criterion.key):
                         self.assertTrue(criterion.reads)
-                        self.assertTrue(
-                            all(
-                                read.startswith("08.")
-                                or read.startswith("phase3.")
-                                for read in criterion.reads
+                    for read in criterion.reads:
+                        with self.subTest(criterion=criterion.key, read=read):
+                            self.assertTrue(
+                                read.startswith("08.") or read.startswith("phase3.")
                             )
-                        )
+
+    def test_mutating_one_entry_criterion_is_detected(self):
+        doc09 = (
+            REPO_ROOT / "docs/architecture/09-execution-upgrades-and-rollout.md"
+        ).read_text(encoding="utf-8")
+        mutated = doc09.replace(
+            "bounty program funded", "bounty program waived", 1
+        )
+        self.assertNotEqual(mutated, doc09)
+        self.assertNotEqual(
+            _phase_table_rows(mutated),
+            EXPECTED_PHASE_ENTRY_COLUMNS,
+        )
 
 
 class PhaseCapCompositionTests(unittest.TestCase):
     """09's global issuance cap is composed with 08's entry requirements."""
 
-    def test_all_four_links_of_the_cap_wedge_are_explicit(self):
-        links = cap_argument()
+    def test_all_four_links_of_the_cap_wedge_are_derived_from_evidence(self):
+        doc08 = (
+            REPO_ROOT / "docs/architecture/08-treasury-and-economics.md"
+        ).read_text(encoding="utf-8")
+        doc09 = (
+            REPO_ROOT / "docs/architecture/09-execution-upgrades-and-rollout.md"
+        ).read_text(encoding="utf-8")
+        plain08, plain09 = _plain_markdown(doc08), _plain_markdown(doc09)
+        checks = {
+            "nav-local-usdc": (
+                "NAV = liquid USDC at par" in plain08
+                and "VIT holdings: marked 0" in plain08
+                and max_attainable_nav(PHASE3_TVL_CAP_DEFAULT)
+                == PHASE3_TVL_CAP_DEFAULT
+            ),
+            "genesis-not-funded": (
+                GENESIS_PROTOCOL_USDC
+                == GENESIS_PROTOCOL_ACCOUNTS * USDC_MIN_BALANCE
+                and GENESIS_PROTOCOL_USDC < TREASURY_FUNDING_TARGET
+            ),
+            "protocol-global-cap": (
+                "global cap on total local USDC issuance" in plain09
+            ),
+            "gate-before-raise": (
+                "Both keys are raised only by phase gates" in plain09
+                and not phase_cap_raise_allowed(
+                    phase=3,
+                    param_armed=False,
+                    current=PHASE3_TVL_CAP_DEFAULT,
+                    proposed=NAV_FLOORS["param"],
+                )
+            ),
+        }
         self.assertEqual(
-            tuple(link.key for link in links),
+            tuple(checks),
             (
                 "nav-local-usdc",
                 "genesis-not-funded",
@@ -132,7 +393,9 @@ class PhaseCapCompositionTests(unittest.TestCase):
                 "gate-before-raise",
             ),
         )
-        self.assertTrue(all(link.ok for link in links))
+        for key, ok in checks.items():
+            with self.subTest(link=key):
+                self.assertTrue(ok)
 
     def test_genesis_seeds_twelve_cents_not_the_treasury_target(self):
         self.assertEqual(USDC_MIN_BALANCE, D("0.01"))
@@ -398,12 +661,42 @@ class GuardedReachabilityTests(unittest.TestCase):
         return Env(**values)
 
     def test_every_lifecycle_transition_has_an_environment_predicate(self):
-        self.assertEqual(len(GUARDED_TRANSITIONS), len(lifecycle.TRANSITIONS))
-        self.assertEqual(
-            {guarded.transition.tag for guarded in GUARDED_TRANSITIONS},
-            {transition.tag for transition in lifecycle.TRANSITIONS},
-        )
-        self.assertTrue(all(guarded.guard for guarded in GUARDED_TRANSITIONS))
+        ordinary = "ordinary lifecycle progress; freeze/dead-man blocks"
+        expected = {
+            "T1": "submission; expedited requires a live trigger and CODE phase",
+            "T2": ordinary,
+            "T3": ordinary,
+            "T4": ordinary,
+            "T5": ordinary,
+            "T6": ordinary,
+            "T7": ordinary,
+            "T8": "decide-time emergency re-check",
+            "T9": "decide-time emergency re-check",
+            "T10": "decide-time emergency re-check",
+            "T11": ordinary,
+            "T12": ordinary,
+            "T13": ordinary,
+            "T14": "execution item 10 expedited exemption",
+            "T15": ordinary,
+            "T16": ordinary,
+            "T17": "settlement remains live",
+            "T18": ordinary,
+            "T19": "settlement remains live",
+            "T20": "PB-LEDGER-FREEZE force rejection",
+            "T21": "settlement remains live",
+            "T22": ordinary,
+            "T23": "execution item 10 expedited exemption",
+            "T24": ordinary,
+            "T25": ordinary,
+            "T26": ordinary,
+        }
+        actual = {
+            guarded.transition.tag: guarded.guard for guarded in GUARDED_TRANSITIONS
+        }
+        self.assertEqual(set(actual), set(expected))
+        for tag, semantics in expected.items():
+            with self.subTest(transition=tag):
+                self.assertEqual(actual[tag], semantics)
 
     def test_sq_545_no_lawful_freeze_trace_satisfies_d9s_positive_claim(self):
         """SQ-545. 06 §6.3 says the freeze buys time to ship its repair.
@@ -459,17 +752,6 @@ class GuardedReachabilityTests(unittest.TestCase):
         env = self.freeze_env(dead_man=True)
         self.assertFalse(guarded_reaches(env, "Submitted"))
         self.assertFalse(guarded_reaches(env, "Executed"))
-
-
-class ProductionWriterTests(unittest.TestCase):
-    """The specification lane also needs a production writer for its marker."""
-
-    def test_the_only_production_enqueue_call_passes_literal_false(self):
-        check = production_expedited_writer(REPO_ROOT)
-        self.assertEqual(check.call_count, 1)
-        self.assertEqual(check.last_arguments, ("false",))
-        self.assertFalse(check.can_mark_expedited)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,36 +1,26 @@
 """14 §3.2, §3.3, §4 — the threat model's attack-cost column, executed.
 
-Doc 14 makes every number in a threat row normative. Three of those rows rely
-on arithmetic rather than a rule: TH-64 says transaction fees price redemption
-waiver fragmentation at about 1,000 times the fee avoided, TH-11 says position
-deposits make third-party dusting uneconomic, and TH-16 prices sustained intake
-and slot monopolization at about 10,900 USDC per epoch.
+The specification fixes the economic inputs to TH-64 and TH-11 except for the
+fee of the call that performs each attack.  That omission is load-bearing: 08
+§6.2 documents a measured ``crank_observe`` fee, not a normative fee for either
+``redeem_scalar`` or ``transfer``.  The independent model therefore states the
+results parametrically:
 
-Executing the owning documents falsifies all three claims (SQ-556):
+* TH-64's avoidance ratio is ``calls * per_call_fee / fee_avoided``.  At a
+  one-USDC gross payout it crosses one at exactly 0.00003 USDC per call.  The
+  three documents' fixed factor has no normative redemption-call fee beneath
+  it (SQ-556).
+* TH-11's 64 recipient-side deposits lock 6.4 USDC while the attacker transfers
+  0.64 USDC of dust plus an explicit fee per call.  Direct attacker outlay only
+  catches the victim's forced lock at 0.09 USDC per call.  The deposit itself
+  prices the recipient, not the attacker (SQ-556).
+* 08 §7 independently derives the intake/slot strategy costs.  Its combined
+  recurring cost disagrees with TH-16's stale copy (SQ-556).
 
-* 03 §5.3a(3), TH-64 and 14 §4 residual 14 agree with each other at about
-  1,000x. The committed `redeem_scalar` weight instead charges 266 micro-USDC
-  at the 0.05 USDC/VIT placeholder, so 100 calls avoid a 0.003-USDC fee for
-  0.0266 USDC: exactly 133/15 = 8.8666...x. At the lawful 0.1x rate floor the
-  ratio is 9/10, so the mitigation crosses into profit inside its own envelope.
-  The continuous break-even rate is 0.005641145... USDC/VIT, only
-  0.1128229...x the placeholder reference. Publishing a larger ratio is the
-  unsafe direction because it overstates the cost of avoiding protocol revenue.
-* A 64-slot position dusting costs the attacker 0.64 USDC of transferred dust
-  plus 0.022656 USDC in `transfer` fees at the reference rate. The attacker's
-  serial 0.1-USDC source deposit is refunded; the recipient, without consent,
-  is forced to lock 6.4 USDC. A fast recovery costs another 0.022656 USDC and
-  relocates the deposit lock to the next recipient. Releasing it through a
-  sweep requires `ScalarSettled`/`Voided` (or Baseline `Settled`), the archive
-  delay (one year at the default), and every seeded book's Sweep. The attack
-  reaches only non-protocol accounts with enough reducible USDC to fund the
-  recipient deposits.
-* 08 §7 reproduces 64,000/6,400 USDC for intake denial,
-  125,000/12,500 for slot capture, 189,000/18,900 combined, at least 16 funded
-  accounts, and the 18,000-USDC refund-path fee floor. TH-16 instead applies
-  the 10 percent slash to its superseded 109,000-USDC total and publishes
-  10,900. That error understates the attacker's cost, so it is conservative
-  rather than safety-weakening, but the two normative documents disagree.
+Current generated weights remain available through ``observed_*`` accessors.
+Those accessors deliberately read Rust artifacts and are implementation
+conformance evidence only; they never supply a default to a specification
+derivation or decide whether a threat-model claim is true.
 
 Units are whole USDC and VIT represented as exact :class:`fractions.Fraction`.
 VIT has 12 decimal places and USDC has 6. Transaction fees round **up** to a
@@ -58,7 +48,7 @@ def ceil_fraction(value: Fraction) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Currency and fee mechanics (08 §6.2/§9).
+# Implementation fee evidence (08 §6.2/§9), never a specification oracle.
 # ---------------------------------------------------------------------------
 
 VIT_BASE_UNITS = 10**12
@@ -66,18 +56,25 @@ USDC_BASE_UNITS = 10**6
 
 # 08 §9 / 13 §1 `fee.vit_usdc_rate`: placeholder reference 0.05 USDC/VIT,
 # with a kernel envelope [0.1x, 10x] of that genesis reference.
+#
+# Deliberately re-derived here rather than imported from `spec_values`: the
+# cross-module consistency check in `test_spec_values` compares INDEPENDENT
+# statements of the same normative value, and a shared import would make that
+# comparison compare an object with itself. Duplication that is checked is the
+# point; duplication that is silent is the defect.
 FEE_VIT_USDC_RATE_REF = Fraction(5, 100)
 FEE_VIT_USDC_RATE_MIN = FEE_VIT_USDC_RATE_REF * Fraction(1, 10)
 FEE_VIT_USDC_RATE_MAX = FEE_VIT_USDC_RATE_REF * 10
 
-# 08 §6.2's measured transaction-fee composition. WeightToFee and
-# LengthToFee are IdentityFee: one picosecond/byte maps to one VIT planck.
+# 08 §6.2's measured transaction-fee composition. WeightToFee and LengthToFee
+# are IdentityFee: one picosecond/byte maps to one VIT planck. These values are
+# used only by the observed evidence accessors below.
 TX_EXTENSION_REF_TIME = 352_392_000
 EXTRINSIC_BASE_REF_TIME = 108_157_000
 DEFAULT_EXTRINSIC_LENGTH = 120
 
-# runtime configs bind RocksDbWeight; these are the generated-weight read/write
-# ref-time charges used by 08 §6.2's committed-weight derivation.
+# The current runtime binds RocksDbWeight. These implementation constants turn
+# the generated read/write counts into observed fee evidence.
 ROCKSDB_READ_REF_TIME = 25_000_000
 ROCKSDB_WRITE_REF_TIME = 100_000_000
 
@@ -88,12 +85,14 @@ GENERATED_LEDGER_WEIGHT_FILE = Path(
 
 @dataclass(frozen=True)
 class CallWeight:
-    """One committed generated call weight's fee-bearing ref-time parts."""
+    """One parsed generated call weight; implementation evidence, not spec."""
 
     function: str
     call_ref_time: int
+    proof_size: int
     reads: int
     writes: int
+    minimum_ref_time: int
     source: Path = GENERATED_LEDGER_WEIGHT_FILE
 
     def dispatch_ref_time(self) -> int:
@@ -119,37 +118,82 @@ class CallWeight:
         return Fraction(self.fee_plancks(length_bytes), VIT_BASE_UNITS)
 
 
-# Live implementation inputs, deliberately kept separate from the specification
-# parameters below. Source: runtime/bleavit-runtime/src/weights/
-# pallet_conditional_ledger.rs, `WeightInfo::redeem_scalar`.
-REDEEM_SCALAR_WEIGHT = CallWeight("redeem_scalar", 232_520_000, 41, 36)
-# Same file, `WeightInfo::transfer`; TH-11's attacker calls this, not a crank.
-TRANSFER_WEIGHT = CallWeight("transfer", 293_020_000, 57, 49)
+def _rust_int(value: str) -> int:
+    return int(value.replace("_", ""))
 
 
-def generated_call_weight(repo_root: Path, function: str) -> CallWeight:
-    """Read one generated ledger weight so committed weights cannot drift silently."""
-    path = repo_root / GENERATED_LEDGER_WEIGHT_FILE
+def parse_generated_call_weight(path: Path, function: str) -> CallWeight:
+    """Parse one constant generated FRAME weight as conformance evidence.
+
+    Every generated term is counted. Component-bearing functions, duplicate
+    ref-time/proof terms, duplicate database terms, and unfamiliar dimension
+    layouts refuse instead of being partially parsed into a reassuring value.
+    """
     text = path.read_text(encoding="utf-8")
     match = re.search(
-        rf"\bfn\s+{re.escape(function)}\(\)\s*->\s*Weight\s*\{{(.*?)\n\s*\}}",
+        rf"\tfn {re.escape(function)}\(\) -> Weight \{{(?P<body>.*?)\n\t\}}",
         text,
         re.DOTALL,
     )
     if match is None:
         raise ThreatCostError(f"generated function {function!r} not found in {path}")
-    body = match.group(1)
-    call = re.search(r"Weight::from_parts\(([\d_]+),\s*0\)", body)
-    reads = re.search(r"DbWeight::get\(\)\.reads\(([\d_]+)\)", body)
-    writes = re.search(r"DbWeight::get\(\)\.writes\(([\d_]+)\)", body)
-    if call is None or reads is None or writes is None:
+    body = match.group("body")
+    if "saturating_mul" in body:
+        raise ThreatCostError(f"component-bearing weight {function!r} is unsupported")
+    expression = re.sub(
+        r"\s+",
+        "",
+        "".join(
+            line.strip()
+            for line in body.splitlines()
+            if line.strip() and not line.lstrip().startswith("//")
+        ),
+    )
+    generated_grammar = re.compile(
+        r"Weight::from_parts\([0-9_]+,0\)"
+        r"\.saturating_add\(Weight::from_parts\(0,[0-9_]+\)\)"
+        r"\.saturating_add\(T::DbWeight::get\(\)\.reads\([0-9_]+\)\)"
+        r"\.saturating_add\(T::DbWeight::get\(\)\.writes\([0-9_]+\)\)"
+    )
+    if generated_grammar.fullmatch(expression) is None:
         raise ThreatCostError(f"generated weight grammar unreadable for {function!r}")
-    integer = lambda token: int(token.replace("_", ""))
+
+    def one(pattern: str, label: str) -> int:
+        matches = re.findall(pattern, body)
+        if len(matches) != 1:
+            raise ThreatCostError(
+                f"expected exactly one {label} in {function!r}, found {len(matches)}"
+            )
+        return _rust_int(matches[0])
+
+    parts = re.findall(r"Weight::from_parts\(([0-9_]+),\s*([0-9_]+)\)", body)
+    if len(parts) != 2:
+        raise ThreatCostError(f"expected base and proof terms in {function!r}")
+    ref_time, base_proof = map(_rust_int, parts[0])
+    proof_ref, proof_size = map(_rust_int, parts[1])
+    if base_proof != 0 or proof_ref != 0:
+        raise ThreatCostError(f"weight dimensions are not separated in {function!r}")
     return CallWeight(
-        function,
-        integer(call.group(1)),
-        integer(reads.group(1)),
-        integer(writes.group(1)),
+        function=function,
+        call_ref_time=ref_time,
+        proof_size=proof_size,
+        reads=one(r"\.reads\(([0-9_]+)\)", "database read term"),
+        writes=one(r"\.writes\(([0-9_]+)\)", "database write term"),
+        minimum_ref_time=one(
+            r"Minimum execution time:\s*([0-9_]+) picoseconds", "minimum time"
+        ),
+        source=path,
+    )
+
+
+def observed_call_weight(repo_root: Path, function: str) -> CallWeight:
+    """Read a generated Rust artifact as implementation conformance evidence.
+
+    This accessor is intentionally outside every document-derived calculation.
+    A benchmark regeneration changes the returned evidence, not the spec model.
+    """
+    return parse_generated_call_weight(
+        repo_root / GENERATED_LEDGER_WEIGHT_FILE, function
     )
 
 
@@ -180,6 +224,37 @@ def transaction_fee_usdc(
     return Fraction(base_units, USDC_BASE_UNITS)
 
 
+@dataclass(frozen=True)
+class ObservedCallFee:
+    """Current implementation fee evidence for one generated call."""
+
+    function: str
+    weight: CallWeight
+    vit_usdc_rate: Fraction
+    length_bytes: int
+    raw_usdc: Fraction
+    charged_usdc: Fraction
+
+
+def observed_call_fee(
+    repo_root: Path,
+    function: str,
+    *,
+    vit_usdc_rate: Fraction = FEE_VIT_USDC_RATE_REF,
+    length_bytes: int = DEFAULT_EXTRINSIC_LENGTH,
+) -> ObservedCallFee:
+    """Measure a generated Rust call fee; conformance evidence, not derivation."""
+    weight = observed_call_weight(repo_root, function)
+    return ObservedCallFee(
+        function=function,
+        weight=weight,
+        vit_usdc_rate=vit_usdc_rate,
+        length_bytes=length_bytes,
+        raw_usdc=raw_transaction_fee_usdc(vit_usdc_rate, weight, length_bytes),
+        charged_usdc=transaction_fee_usdc(vit_usdc_rate, weight, length_bytes),
+    )
+
+
 # ---------------------------------------------------------------------------
 # TH-64 / 03 §5.3a — redemption-fee waiver fragmentation.
 # ---------------------------------------------------------------------------
@@ -206,45 +281,40 @@ def redemption_fee_amount(gross: Fraction, redeem_fee: Fraction) -> Fraction:
 def redemption_fee_avoidance_ratio(
     gross: Fraction,
     *,
+    per_call_fee_usdc: Fraction,
     min_split: Fraction = LEDGER_MIN_SPLIT,
     redeem_fee: Fraction = LEDGER_REDEEM_FEE,
-    vit_usdc_rate: Fraction = FEE_VIT_USDC_RATE_REF,
-    weight: CallWeight = REDEEM_SCALAR_WEIGHT,
-    length_bytes: int = DEFAULT_EXTRINSIC_LENGTH,
 ) -> Fraction:
     """Transaction-fee cost of fragmentation divided by redemption fee avoided.
 
-    03 §5.3a(3) and TH-64 price `ceil(gross/min_split)` calls. The charged
-    call is `redeem_scalar`, so a crank weight is not a valid substitute. A
-    ratio at or below one means the grief pays for itself; TH-64's arithmetic
-    is its only mitigation, so the load-bearing requirement is strictly > 1.
+    03 §5.3a(3) and TH-64 price ``ceil(gross/min_split)`` calls but do not
+    normatively fix the fee for one such call. The caller must therefore state
+    that fee. A ratio at or below one means the grief pays for itself; TH-64's
+    arithmetic is its only mitigation, so the load-bearing requirement is
+    strictly greater than one.
     """
-    if gross <= 0 or min_split <= 0:
-        raise ThreatCostError("gross and ledger.min_split must be positive")
+    if gross <= 0 or min_split <= 0 or per_call_fee_usdc < 0:
+        raise ThreatCostError(
+            "gross and ledger.min_split must be positive; per-call fee non-negative"
+        )
     calls = ceil_fraction(gross / min_split)
     avoided = redemption_fee_amount(gross, redeem_fee)
     if avoided == 0:
         raise ThreatCostError("a zero redemption fee has no avoidance ratio")
-    cost = calls * transaction_fee_usdc(vit_usdc_rate, weight, length_bytes)
-    return cost / avoided
+    return calls * per_call_fee_usdc / avoided
 
 
-def avoidance_breakeven_vit_usdc_rate(
+def avoidance_breakeven_call_fee(
+    gross: Fraction,
     *,
     min_split: Fraction = LEDGER_MIN_SPLIT,
     redeem_fee: Fraction = LEDGER_REDEEM_FEE,
-    weight: CallWeight = REDEEM_SCALAR_WEIGHT,
-    length_bytes: int = DEFAULT_EXTRINSIC_LENGTH,
 ) -> Fraction:
-    """Continuous VIT/USDC rate above which one leg costs more than its fee.
-
-    The gross cancels from TH-64's own `g/min_split` approximation. The exact
-    micro-USDC charge is stepped: rounding up creates an equality band, but it
-    cannot move the lawful 0.1x floor above one (that ratio is exactly 9/10).
-    """
-    if min_split <= 0 or redeem_fee <= 0:
-        raise ThreatCostError("min_split and redeem_fee must be positive")
-    return min_split * redeem_fee / weight.fee_vit(length_bytes)
+    """Per-call USDC fee at which TH-64's exact avoidance ratio equals one."""
+    if gross <= 0 or min_split <= 0 or redeem_fee <= 0:
+        raise ThreatCostError("gross, min_split and redeem_fee must be positive")
+    calls = ceil_fraction(gross / min_split)
+    return redemption_fee_amount(gross, redeem_fee) / calls
 
 
 @dataclass(frozen=True)
@@ -311,6 +381,51 @@ def published_redemption_factors(repo_root: Path) -> PublishedRedemptionFactors:
     return PublishedRedemptionFactors(ledger, threat, residual)
 
 
+@dataclass(frozen=True)
+class PublishedTransactionFeeBasis:
+    """The call and rounded USDC fee that 08 §6.2 actually documents."""
+
+    function: str
+    fee_usdc: Fraction
+
+
+def published_transaction_fee_basis(repo_root: Path) -> PublishedTransactionFeeBasis:
+    """Parse 08 §6.2's documented measured call basis from architecture text."""
+    doc_08 = (repo_root / "docs/architecture/08-treasury-and-economics.md").read_text(
+        encoding="utf-8"
+    )
+    start = doc_08.find("### 6.2 Budget sizing")
+    end = doc_08.find("### 6.3", start)
+    if start < 0 or end < 0:
+        raise ThreatCostError("08 §6.2 boundaries not found")
+    section = doc_08[start:end]
+    function = re.search(r"^([a-z][a-z0-9_]*) call weight", section, re.MULTILINE)
+    fee = re.search(
+        r"= ([0-9.]+) USDC per sanctioned crank", section, re.MULTILINE
+    )
+    if function is None or fee is None:
+        raise ThreatCostError("08 §6.2 transaction-fee basis not found")
+    return PublishedTransactionFeeBasis(function.group(1), _number(fee.group(1)))
+
+
+def th11_deposit_claim(repo_root: Path) -> tuple[str, str]:
+    """Return TH-11's residual claim and 03 §4.3's documented deposit payer."""
+    doc_03 = (repo_root / "docs/architecture/03-conditional-ledger.md").read_text(
+        encoding="utf-8"
+    )
+    doc_14 = (repo_root / "docs/architecture/14-threat-model.md").read_text(
+        encoding="utf-8"
+    )
+    row = next((line for line in doc_14.splitlines() if line.startswith("| TH-11 |")), None)
+    if row is None:
+        raise ThreatCostError("TH-11 not found")
+    payer_match = re.search(r"entry owner \(the \*([^*]+)\* on `transfer`\)", doc_03)
+    if payer_match is None:
+        raise ThreatCostError("03 §4.3 position-deposit payer not found")
+    residual = row.split("|")[-3].strip()
+    return residual, payer_match.group(1)
+
+
 # ---------------------------------------------------------------------------
 # TH-11 / 03 §4.3, §5.2 — third-party position dusting.
 # ---------------------------------------------------------------------------
@@ -333,11 +448,9 @@ BASELINE_TERMINAL_STATES = frozenset({"Settled"})
 def dusting_cost(
     victim_slots: int,
     *,
+    per_call_fee_usdc: Fraction,
     position_deposit: Fraction = LEDGER_POSITION_DEPOSIT,
     min_transfer: Fraction = LEDGER_MIN_SPLIT,
-    vit_usdc_rate: Fraction = FEE_VIT_USDC_RATE_REF,
-    weight: CallWeight = TRANSFER_WEIGHT,
-    length_bytes: int = DEFAULT_EXTRINSIC_LENGTH,
 ) -> tuple[Fraction, Fraction, Fraction]:
     """Return `(attacker_outlay, victim_outlay, victim_recovery_cost)`.
 
@@ -356,13 +469,30 @@ def dusting_cost(
         raise ThreatCostError(
             f"victim slots {victim_slots} outside 0..{MAX_POSITIONS_PER_ACCOUNT}"
         )
+    if position_deposit <= 0 or min_transfer <= 0 or per_call_fee_usdc < 0:
+        raise ThreatCostError(
+            "position deposit and MinTransfer must be positive; per-call fee non-negative"
+        )
+    attacker_outlay = victim_slots * (min_transfer + per_call_fee_usdc)
+    victim_outlay = victim_slots * position_deposit
+    victim_recovery_cost = victim_slots * per_call_fee_usdc
+    return attacker_outlay, victim_outlay, victim_recovery_cost
+
+
+def dusting_breakeven_call_fee(
+    *,
+    position_deposit: Fraction = LEDGER_POSITION_DEPOSIT,
+    min_transfer: Fraction = LEDGER_MIN_SPLIT,
+) -> Fraction:
+    """Per-transfer fee where direct attacker outlay equals the forced lock.
+
+    The result is independent of the slot count because both sides are linear
+    per newly created recipient position. A negative threshold would mean the
+    transferred dust alone already exceeds the recipient deposit.
+    """
     if position_deposit <= 0 or min_transfer <= 0:
         raise ThreatCostError("position deposit and MinTransfer must be positive")
-    tx_fee = transaction_fee_usdc(vit_usdc_rate, weight, length_bytes)
-    attacker_outlay = victim_slots * (min_transfer + tx_fee)
-    victim_outlay = victim_slots * position_deposit
-    victim_recovery_cost = victim_slots * tx_fee
-    return attacker_outlay, victim_outlay, victim_recovery_cost
+    return max(Fraction(0), position_deposit - min_transfer)
 
 
 def attacker_peak_position_deposit(
@@ -600,53 +730,71 @@ class ThreatCostFinding:
     """One claim evaluated as data rather than left only in a test comment."""
 
     key: str
+    sq_id: str
     ok: bool
-    actual: Fraction
-    claimed_or_required: Fraction
+    derived: Fraction | str
+    source_claim: Fraction | str
     error_direction: str
+    supporting_evidence: ObservedCallFee | tuple[ObservedCallFee, Fraction] | None = None
 
 
 def check_threat_cost_claims(repo_root: Path) -> tuple[ThreatCostFinding, ...]:
-    """Evaluate the three red threat rows and TH-64's envelope requirement."""
+    """Evaluate SQ-556's document defects with measurements kept subordinate.
+
+    The TH-64 and TH-11 findings are decided by document-derived thresholds and
+    fee incidence. Current generated-call fees are attached only as supporting
+    implementation evidence; changing those artifacts cannot make either
+    document claim normative.
+    """
     gross = Fraction(1)
     factors = published_redemption_factors(repo_root)
     if len(set(factors.values())) != 1:
         raise ThreatCostError("TH-64's three normative copies already disagree")
     published_factor = factors.values()[0]
-    reference_ratio = redemption_fee_avoidance_ratio(gross)
-    floor_ratio = redemption_fee_avoidance_ratio(
-        gross, vit_usdc_rate=FEE_VIT_USDC_RATE_MIN
+    published_basis = published_transaction_fee_basis(repo_root)
+    implied_call_fee = avoidance_breakeven_call_fee(gross) * published_factor
+    redeem_evidence = observed_call_fee(repo_root, "redeem_scalar")
+    observed_ratio = redemption_fee_avoidance_ratio(
+        gross, per_call_fee_usdc=redeem_evidence.charged_usdc
     )
-    attacker, victim, _ = dusting_cost(MAX_POSITIONS_PER_ACCOUNT)
+    transfer_evidence = observed_call_fee(repo_root, "transfer")
+    observed_attacker, _, _ = dusting_cost(
+        MAX_POSITIONS_PER_ACCOUNT,
+        per_call_fee_usdc=transfer_evidence.charged_usdc,
+    )
+    th11_residual, deposit_payer = th11_deposit_claim(repo_root)
+    th11_claim_present = "deposits make third-party dusting uneconomic" in th11_residual
     intake = published_intake_forfeits(repo_root)
     derived_intake = intake_monopolization_cost("combined").cost_per_epoch
     return (
         ThreatCostFinding(
-            "TH-64 published default avoidance factor",
-            reference_ratio == published_factor,
-            reference_ratio,
-            published_factor,
+            "TH-64 fixed avoidance factor has a normative redeem-call fee basis",
+            "SQ-556",
+            published_basis.function == "redeem_scalar"
+            and published_basis.fee_usdc == implied_call_fee,
+            avoidance_breakeven_call_fee(gross),
+            (
+                f"factor={published_factor}; 08 §6.2 basis="
+                f"{published_basis.function}@{published_basis.fee_usdc} USDC"
+            ),
             "overstating attacker cost is unsafe",
+            (redeem_evidence, observed_ratio),
         ),
         ThreatCostFinding(
-            "TH-64 ratio exceeds one across fee.vit_usdc_rate envelope",
-            floor_ratio > 1,
-            floor_ratio,
-            Fraction(1),
-            "a lower ratio makes fee avoidance profitable",
-        ),
-        ThreatCostFinding(
-            "TH-11 attacker outlay covers victim deposit outlay",
-            attacker >= victim,
-            attacker,
-            victim,
+            "TH-11 attacker is charged the position deposit it cites",
+            "SQ-556",
+            (not th11_claim_present) or deposit_payer == "attacker",
+            dusting_breakeven_call_fee(),
+            th11_residual,
             "attacker below victim inverts deposit incidence",
+            (transfer_evidence, observed_attacker),
         ),
         ThreatCostFinding(
             "TH-16 agrees with 08 §7 combined recurring cost",
+            "SQ-556",
             intake.threat_row_16 == derived_intake == intake.treasury_section_7,
-            intake.threat_row_16,
             derived_intake,
+            intake.threat_row_16,
             "understating attacker cost is conservative, but non-normative",
         ),
     )

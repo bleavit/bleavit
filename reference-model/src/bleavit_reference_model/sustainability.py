@@ -50,6 +50,17 @@ from dataclasses import dataclass, replace
 from decimal import ROUND_FLOOR, Decimal, localcontext
 from pathlib import Path
 
+from .spec_values import (
+    EPOCH_LENGTH_DEFAULT,
+    FEE_VIT_USDC_RATE_MAX,
+    FEE_VIT_USDC_RATE_MIN,
+    FEE_VIT_USDC_RATE_REF,
+    NAV_FLOOR_CODE,
+    NAV_FLOOR_META,
+    NAV_FLOOR_PARAM,
+    NAV_FLOOR_TREASURY,
+)
+
 WORK_PREC = 60
 
 # ---------------------------------------------------------------------------
@@ -61,8 +72,8 @@ WORK_PREC = 60
 BLOCK_SECONDS = Decimal(6)
 DAYS_PER_YEAR = Decimal("365.25")
 
-# 13 §1 epoch.length (kernel-bounded). 302,400 blocks x 6 s = 21.0 days.
-EPOCH_LENGTH_BLOCKS = Decimal(302_400)
+# 13 §1 epoch.length, kept as Decimal for this module's cost arithmetic.
+EPOCH_LENGTH_BLOCKS = Decimal(EPOCH_LENGTH_DEFAULT)
 # 04 §3.1: the Trade phase is d5-d18, i.e. 13/21 of the epoch. Kept as a pair of
 # integers rather than a quotient: 13/21 is non-terminating in base 10, and
 # evaluating it before the multiplication loses the exact 580,320.
@@ -85,10 +96,6 @@ KEEPER_REBATE_MIN_MULTIPLE, KEEPER_REBATE_MAX_MULTIPLE = Decimal(1), Decimal(10)
 KEEPER_BUDGET_MIN, KEEPER_BUDGET_MAX = Decimal(6_000), Decimal(60_000)
 COLLATOR_COMP_MIN, COLLATOR_COMP_MAX = Decimal(500), Decimal(10_000)
 
-# 13 §1 `fee.vit_usdc_rate`: placeholder reference and its lawful envelope.
-FEE_VIT_USDC_RATE_REF = Decimal("0.05")
-FEE_VIT_USDC_RATE_MIN = Decimal("0.1") * FEE_VIT_USDC_RATE_REF
-FEE_VIT_USDC_RATE_MAX = Decimal(10) * FEE_VIT_USDC_RATE_REF
 # 13 §1 `keeper.rebate`, in whole USDC, with the row's own hard bounds.
 KEEPER_REBATE = Decimal("0.000255")
 KEEPER_REBATE_FEE_BASIS_USDC = Decimal("0.000085")
@@ -346,13 +353,6 @@ MKT_FEE = Decimal("0.003")  # 13 §1 mkt.fee, 30 bps.
 REDEEM_FEE = Decimal("0.003")  # 13 §1 ledger.redeem_fee, 30 bps, <= mkt.fee.
 RHO = Decimal("0.75")  # realized fraction of nominal trading fees.
 BETA = Decimal("0.50")  # fee-assessed share of terminal claim mass (upper est).
-
-# 08 §4.1 frozen per-class NAV floors. Compile-time literals; movable only by a
-# CODE proposal under the 13 §5 item-6 value screen. E5 MUST NOT move these.
-NAV_FLOOR_PARAM = Decimal(4_620_989)
-NAV_FLOOR_TREASURY = Decimal(7_393_600)
-NAV_FLOOR_CODE = Decimal(13_862_944)
-NAV_FLOOR_META = Decimal(21_256_533)
 
 # 08 §2.5 funding target.
 GENESIS_ENDOWMENT = Decimal(25_000_000)

@@ -24,13 +24,14 @@ The same transition machine gives an exact stationary unhealthy duty cycle of
 40 %.  Those figures assume unbounded funding and therefore measure only the
 health hysteresis, not line exhaustion.
 
-The funding arithmetic has no hidden margin.  The governed defaults debit
-2,500,000 micro-USDC = 2.5 USDC per attempt.  The exact cadence burns 52.5
-USDC per 21-day epoch and 913.125 USDC per 365.25-day year.  Doc 08 §10 prints
-those as approximate whole-USDC figures ``≈52`` and ``≈913``; treating the
-display values as allocations would make them short by 0.5 and 0.125 USDC,
-respectively.  The table's stated basis is exactly routine burn, hence zero
-buffer, while the actual ``ops.reserve_probe`` allocation remains ``[VERIFY]``.
+The cost arithmetic has an exact equality, not a funding conclusion. The
+governed defaults debit 2,500,000 micro-USDC = 2.5 USDC per attempt. The exact
+cadence costs 52.5 USDC per 21-day epoch and 913.125 USDC per 365.25-day year.
+Doc 08 §10 prints those as approximate whole-USDC figures ``≈52`` and ``≈913``.
+Its basis equals routine demand because it is a cost estimate; that proves
+neither that the line is funded nor that its allocation has zero buffer. 13
+leaves the actual ``ops.reserve_probe`` allocation ``[VERIFY]``, so it is an
+explicit scenario input below.
 
 The first-arm runway is not re-checked by any stated threshold-amendment rule.
 Because ``res.recover_threshold`` is an un-delta-limited ``u8``, one lawful
@@ -175,22 +176,30 @@ def runway_micro_usdc(
 
 @dataclass(frozen=True)
 class ProbeFunding:
-    """08 §10's probe row separated into derivation and displayed rounding."""
+    """08 §10's cost row plus an optional explicit allocation scenario."""
 
     envelope_micro_usdc: int
     probes_per_epoch: Fraction
     probes_per_year: Fraction
-    booked_epoch_micro_usdc: Fraction
-    booked_year_micro_usdc: Fraction
+    cost_basis_epoch_micro_usdc: Fraction
+    cost_basis_year_micro_usdc: Fraction
     routine_epoch_micro_usdc: Fraction
     routine_year_micro_usdc: Fraction
     display_epoch_micro_usdc: int
     display_year_micro_usdc: int
+    allocation_epoch_micro_usdc: int | None
 
     @property
-    def exact_basis_buffer_epoch_micro_usdc(self) -> Fraction:
-        """The row's basis is cadence × envelope, so its economic buffer is 0."""
-        return self.booked_epoch_micro_usdc - self.routine_epoch_micro_usdc
+    def cost_basis_difference_epoch_micro_usdc(self) -> Fraction:
+        """Cost basis minus routine demand; informational, not headroom."""
+        return self.cost_basis_epoch_micro_usdc - self.routine_epoch_micro_usdc
+
+    @property
+    def allocation_buffer_epoch_micro_usdc(self) -> Fraction | None:
+        """Scenario allocation minus demand, absent while 13 remains [VERIFY]."""
+        if self.allocation_epoch_micro_usdc is None:
+            return None
+        return Fraction(self.allocation_epoch_micro_usdc) - self.routine_epoch_micro_usdc
 
     @property
     def display_epoch_margin_micro_usdc(self) -> Fraction:
@@ -211,41 +220,61 @@ class ProbeFunding:
         return self.display_year_margin_micro_usdc / self.routine_year_micro_usdc
 
 
-def probe_funding() -> ProbeFunding:
-    """Re-derive 08 §10.1's ``ops.reserve_probe`` row exactly."""
+def probe_funding(*, allocation_epoch_micro_usdc: int | None) -> ProbeFunding:
+    """Re-derive 08 §10.1 and evaluate only a supplied allocation scenario."""
+    if allocation_epoch_micro_usdc is not None and (
+        isinstance(allocation_epoch_micro_usdc, bool)
+        or not isinstance(allocation_epoch_micro_usdc, int)
+        or allocation_epoch_micro_usdc < 0
+    ):
+        raise OracleModelError("probe allocation must be non-negative or absent")
     envelope = probe_envelope_micro_usdc()
     probes_epoch = Fraction(EPOCH_LENGTH_BLOCKS, RES_PROBE_INTERVAL_DEFAULT)
     probes_year = DAYS_PER_YEAR  # interval is exactly one day.
-    booked_epoch = Fraction(PROBE_COST_BASIS_PROBES_PER_EPOCH * envelope)
+    cost_basis_epoch = Fraction(PROBE_COST_BASIS_PROBES_PER_EPOCH * envelope)
     epochs_year = DAYS_PER_YEAR / Fraction(EPOCH_LENGTH_BLOCKS, BLOCKS_PER_DAY)
     return ProbeFunding(
         envelope_micro_usdc=envelope,
         probes_per_epoch=probes_epoch,
         probes_per_year=probes_year,
-        booked_epoch_micro_usdc=booked_epoch,
-        booked_year_micro_usdc=booked_epoch * epochs_year,
+        cost_basis_epoch_micro_usdc=cost_basis_epoch,
+        cost_basis_year_micro_usdc=cost_basis_epoch * epochs_year,
         routine_epoch_micro_usdc=probes_epoch * envelope,
         routine_year_micro_usdc=probes_year * envelope,
         display_epoch_micro_usdc=PROBE_COST_EPOCH_DISPLAY_USDC * MICRO_USDC_PER_USDC,
         display_year_micro_usdc=PROBE_COST_YEAR_DISPLAY_USDC * MICRO_USDC_PER_USDC,
+        allocation_epoch_micro_usdc=allocation_epoch_micro_usdc,
     )
 
 
-def funding_findings() -> tuple[Finding, ...]:
-    """SQ-554's structured funding result."""
-    funding = probe_funding()
+def funding_findings(
+    *, allocation_epoch_micro_usdc: int | None
+) -> tuple[Finding, ...]:
+    """SQ-554's informational cost result and conditional funding scenario."""
+    funding = probe_funding(
+        allocation_epoch_micro_usdc=allocation_epoch_micro_usdc
+    )
+    if funding.allocation_buffer_epoch_micro_usdc is None:
+        allocation_detail = (
+            "allocation absent: 13 §1 leaves ops.reserve_probe [VERIFY], so "
+            "funding and buffer are not evaluated"
+        )
+    else:
+        allocation_detail = (
+            "conditional allocation buffer="
+            f"{funding.allocation_buffer_epoch_micro_usdc} micro-USDC/epoch"
+        )
     return (
         Finding(
-            "ops.reserve_probe routine-burn buffer",
-            funding.exact_basis_buffer_epoch_micro_usdc > 0,
-            "08 §10's stated 21-probe basis equals routine burn exactly; "
-            "it adds no outage or fee-rate buffer",
+            "ops.reserve_probe cost basis equals routine demand",
+            funding.cost_basis_difference_epoch_micro_usdc == 0,
+            "informational: 08 §10's 21-probe cost basis equals routine demand; "
+            "the row is not an allocation",
         ),
         Finding(
-            "ops.reserve_probe allocation is calibrated",
-            OPS_RESERVE_PROBE_BUDGET_DEFAULT_MICRO_USDC is not None,
-            "13 §1 leaves the actual line allocation [VERIFY]; §10 is cost "
-            "accounting, not a funded-balance record",
+            "ops.reserve_probe funding scenario",
+            True,
+            allocation_detail,
         ),
     )
 

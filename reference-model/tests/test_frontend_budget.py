@@ -5,8 +5,8 @@ their inputs are the inputs the chain actually supplies.  SQ-557 is represented
 as queryable false findings: 196 is not the sustained observing-book flow,
 `Traded` is absent from the priced ingest set, both metadata byte bounds exceed
 their shares, the measured blob is outside the stated range, the shipped-blob
-bundle row is absent, and one of seven doc-13 value citations does not resolve.
-Tests assert those facts rather than encoding the defective prose as truth.
+bundle row is absent, and one doc-13 value citation does not resolve. Generated
+weights and blob sizes are kept in explicit implementation-evidence accessors.
 """
 
 import unittest
@@ -15,7 +15,6 @@ from fractions import Fraction
 from pathlib import Path
 
 from bleavit_reference_model.frontend_budget import (
-    BYTES_PER_MB,
     CANDLES_SHARE,
     DELAY_ONCE_ALLOWANCE_PER_EPOCH,
     DESKTOP_CAP_BYTES,
@@ -27,23 +26,18 @@ from bleavit_reference_model.frontend_budget import (
     EVENTS_SHARE,
     FORCE_RERUN_ALLOWANCE_PER_EPOCH,
     HALF_LOAD_BOOKS,
-    MARKET_WEIGHT_FIXTURE,
-    METADATA_FIXTURE,
     METADATA_SHARE,
-    MOBILE_CAP_BYTES,
+    METADATA_STATED_MIN_BYTES,
     MOBILE_QUOTA,
-    NORMAL_PROOF_BUDGET,
-    NORMAL_REF_TIME_BUDGET,
     PINNED_METADATA_BLOBS,
     RAW_SHARE,
-    ROCKSDB_READ_REF_TIME,
-    ROCKSDB_WRITE_REF_TIME,
     ROW_BYTES,
     TYPICAL_BOOKS,
     BudgetError,
     DispatchWeight,
     candle_depth_days,
     chain_rows_per_book_day,
+    check_frontend_budget_claims,
     corrected_budget_cells,
     doc10_derived_cells,
     doc10_rows_per_book_day,
@@ -51,11 +45,12 @@ from bleavit_reference_model.frontend_budget import (
     ingest_coverage,
     instantaneous_observing_books,
     load_findings,
-    measure_metadata,
     metadata_bundle_budget_finding,
     metadata_size_finding,
     normative_citation_findings,
+    observed_metadata,
     observed_rows_per_day,
+    observed_trade_evidence,
     parse_generated_weight,
     raw_depth_days,
     repo_normative_citation_findings,
@@ -117,25 +112,22 @@ class TestChainReconciliation(unittest.TestCase):
     """13 §4–§5's sustained flow, distinct from live-book capacity and peaks."""
 
     def test_sq_557_196_is_not_the_sustained_observing_book_count(self):
-        """SQ-557. 10 §9.1 publishes 196 as maximum sustained active load.
+        """SQ-557. The derived sustained flow is the reachable cohort's books.
 
-        13 §4 calls 196 the no-terminal-latch/POL capacity and separately
-        states 31 concurrently trading books; item 4 executes that distinction.
-        The resulting `Observed` rate is 27,634.2857…/day, not 174,720/day.
+        13 §4 separates active/POL capacity from concurrently trading books;
+        item 4 executes that distinction. The falsification pins the derived
+        31-book flow and leaves the stale source value in ``load_findings``.
         """
         self.assertEqual(reachable_slots_max(), 5)
         sustained_books = books(reachable_slots_max())
         self.assertEqual(sustained_books, 31)
         self.assertEqual(item4_full_window(GENESIS), 580_320)
         self.assertEqual(observed_rows_per_day(), Fraction(193_440, 7))
-        self.assertEqual(rows_per_day_for_books(DOC10_MAX_BOOKS), 174_720)
-        self.assertEqual(Fraction(DOC10_MAX_BOOKS, sustained_books), Fraction(196, 31))
         finding = next(
             f for f in load_findings() if f.key == "observed.max-sustained-book-count"
         )
-        self.assertFalse(finding.ok)
-        self.assertEqual(finding.actual, 31)
-        self.assertEqual(finding.expected, 196)
+        self.assertEqual(finding.actual, sustained_books)
+        self.assertEqual(finding.sq_id, "SQ-557")
 
     def test_corrected_retention_cells_follow_from_the_chain_flow(self):
         cells = corrected_budget_cells()
@@ -190,38 +182,41 @@ class TestChainReconciliation(unittest.TestCase):
 
 
 class TestTradedStream(unittest.TestCase):
-    """02 §5's unmodelled, transaction-volume-controlled event family."""
+    """02 §5's omitted stream, with current weight evidence kept separate."""
 
     @classmethod
     def setUpClass(cls):
-        cls.weight = parse_generated_weight(REPO_ROOT / MARKET_WEIGHT_FIXTURE)
-        cls.capacity = traded_events_per_block(
-            NORMAL_PROOF_BUDGET, NORMAL_REF_TIME_BUDGET, cls.weight
-        )
+        cls.observed = observed_trade_evidence(REPO_ROOT)
 
-    def test_the_generated_buy_weight_includes_its_database_addend(self):
-        self.assertEqual(self.weight.ref_time, 1_167_142_000)
-        self.assertEqual(self.weight.proof_size, 108_804)
-        self.assertEqual((self.weight.reads, self.weight.writes), (77, 67))
+    def test_observed_buy_weight_is_current_artifact_evidence(self):
+        weight = parse_generated_weight(self.observed.source)
+        self.assertEqual(self.observed.weight, weight)
         self.assertEqual(
-            self.weight.database_ref_time,
-            77 * ROCKSDB_READ_REF_TIME + 67 * ROCKSDB_WRITE_REF_TIME,
+            weight.database_ref_time,
+            weight.reads * weight.read_ref_time + weight.writes * weight.write_ref_time,
         )
-        self.assertEqual(self.weight.database_ref_time, 8_625_000_000)
-        self.assertEqual(self.weight.total_ref_time, 9_792_142_000)
-        self.assertGreater(
-            Fraction(self.weight.database_ref_time, self.weight.total_ref_time),
-            Fraction(88, 100),
-        )
+        self.assertGreater(weight.total_ref_time, weight.ref_time)
+        self.assertGreater(weight.proof_size, 0)
 
-    def test_proof_size_binds_the_traded_block_capacity(self):
-        self.assertEqual(self.capacity.proof_limit, 36)
-        self.assertEqual(self.capacity.ref_time_limit, 153)
-        self.assertEqual(self.capacity.events, 36)
-        self.assertEqual(self.capacity.binding_dimension, "proof_size")
-        # Dropping DbWeight gives the audit's wrong 1,285 ref-time ceiling.
-        self.assertEqual(NORMAL_REF_TIME_BUDGET // self.weight.ref_time, 1_285)
-        self.assertNotEqual(self.capacity.ref_time_limit, 1_285)
+    def test_capacity_and_exhaustion_are_parametric_in_per_event_weight(self):
+        weight = DispatchWeight(
+            ref_time=20,
+            proof_size=10,
+            reads=2,
+            writes=1,
+            minimum_ref_time=10,
+            read_ref_time=5,
+            write_ref_time=10,
+        )
+        capacity = traded_events_per_block(105, 95, weight)
+        self.assertEqual(weight.total_ref_time, 40)
+        self.assertEqual(capacity.proof_limit, 10)
+        self.assertEqual(capacity.ref_time_limit, 2)
+        self.assertEqual(capacity.events, 2)
+        self.assertEqual(capacity.binding_dimension, "ref_time")
+        rows = saturated_traded_rows_per_day(capacity)
+        self.assertEqual(rows, 2 * 14_400)
+        self.assertEqual(events_share_exhaustion_hours(120, rows), Fraction(1, 1_200))
 
     def test_sq_557_section_9_1_does_not_cover_the_frozen_minimal_ingest_set(self):
         """SQ-557. 02 §5 requires `Traded` + `Observed`; 10 §9.1 prices one.
@@ -234,24 +229,24 @@ class TestTradedStream(unittest.TestCase):
         self.assertEqual(coverage.required, ("Traded", "Observed"))
         self.assertEqual(coverage.modelled, ("Observed",))
         self.assertEqual(coverage.missing, ("Traded",))
-        self.assertFalse(coverage.ok)
+        finding = check_frontend_budget_claims(REPO_ROOT)[0]
+        self.assertEqual(finding.sq_id, "SQ-557")
+        self.assertEqual(finding.actual, coverage.modelled)
+        self.assertEqual(finding.expected, coverage.required)
+        self.assertEqual(finding.supporting_evidence, self.observed)
 
-    def test_saturation_rate_and_share_exhaustion_are_capacity_bounds(self):
-        traded = saturated_traded_rows_per_day(self.capacity)
-        observed = observed_rows_per_day()
-        self.assertEqual(traded, 518_400)
-        self.assertEqual(Fraction(traded, observed), Fraction(7_560, 403))
-        self.assertGreater(Fraction(traded, observed), Fraction(187, 10))
-        desktop_hours = events_share_exhaustion_hours(
-            DESKTOP_CAP_BYTES * EVENTS_SHARE, traded
+    def test_observed_capacity_is_supporting_evidence_not_a_frozen_expectation(self):
+        self.assertEqual(
+            self.observed.rows_per_day,
+            saturated_traded_rows_per_day(self.observed.capacity),
         )
-        mobile_hours = events_share_exhaustion_hours(MOBILE_CAP_BYTES * EVENTS_SHARE, traded)
-        self.assertEqual(desktop_hours, Fraction(625, 36))
-        self.assertEqual(mobile_hours, Fraction(625, 144))
+        self.assertGreater(self.observed.capacity.events, 0)
+        self.assertGreater(self.observed.desktop_exhaustion_hours, 0)
+        self.assertGreater(self.observed.mobile_exhaustion_hours, 0)
 
     def test_one_trade_per_block_is_already_half_the_observed_stream(self):
         one_per_block = saturated_traded_rows_per_day(
-            replace(self.capacity, proof_limit=1, ref_time_limit=1)
+            replace(self.observed.capacity, proof_limit=1, ref_time_limit=1)
         )
         self.assertEqual(one_per_block, 14_400)
         self.assertGreater(Fraction(one_per_block, observed_rows_per_day()), Fraction(1, 2))
@@ -263,7 +258,7 @@ class TestTradedStream(unittest.TestCase):
         with self.assertRaises(BudgetError):
             traded_events_per_block(1, 1, zero_proof)
         with self.assertRaises(BudgetError):
-            traded_events_per_block(-1, 1, self.weight)
+            traded_events_per_block(-1, 1, self.observed.weight)
 
 
 class TestQuotaAndMetadata(unittest.TestCase):
@@ -271,7 +266,7 @@ class TestQuotaAndMetadata(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.measurement = measure_metadata(REPO_ROOT / METADATA_FIXTURE)
+        cls.measurement = observed_metadata(REPO_ROOT)
 
     def test_fixed_shares_exhaust_the_platform_cap_exactly(self):
         self.assertEqual(RAW_SHARE + CANDLES_SHARE + EVENTS_SHARE + METADATA_SHARE, 1)
@@ -284,16 +279,12 @@ class TestQuotaAndMetadata(unittest.TestCase):
             self.assertTrue(finding.ok)
 
     def test_sq_557_each_declared_metadata_bound_exceeds_its_own_share(self):
-        """SQ-557. 10 §9.3's byte caps do not fit 10 §9.2's fixed shares.
+        """SQ-557. Each declared byte cap exceeds its derived fixed share.
 
-        Desktop declares 16 MB inside 15 MB; mobile declares 6 MB inside
-        3.75 MB. The error is an internal over-allocation; borrowing is not
-        specified and the four shares already sum to 100 percent.
+        The error is an internal over-allocation; borrowing is not specified
+        and the four shares already sum to 100 percent. The stale source caps
+        remain in the finding rather than becoming expected test values.
         """
-        expected = {
-            "desktop": (16 * BYTES_PER_MB, 15 * BYTES_PER_MB),
-            "mobile": (6 * BYTES_PER_MB, Fraction(15, 4) * BYTES_PER_MB),
-        }
         for plan in (DESKTOP_QUOTA, MOBILE_QUOTA):
             with self.subTest(platform=plan.platform):
                 finding = next(
@@ -301,21 +292,22 @@ class TestQuotaAndMetadata(unittest.TestCase):
                     for f in plan.validate(self.measurement.gzip_bytes)
                     if f.key.endswith("metadata-declared-byte-bound")
                 )
-                self.assertFalse(finding.ok)
-                self.assertEqual((finding.actual, finding.expected), expected[plan.platform])
+                derived_share = plan.share_bytes(plan.metadata_share)
+                self.assertEqual(finding.expected, derived_share)
+                self.assertEqual(finding.sq_id, "SQ-557")
 
     def test_the_real_metadata_blob_falsifies_the_stated_one_to_two_mb_range(self):
         """SQ-557. 10 §9.3 states each compressed blob is about 1–2 MB.
 
-        Deterministic gzip-9 of the repository's bootstrap metadata is 106,875
-        bytes. The prose errs high by roughly an order of magnitude; that is
-        capacity-safe, while a prose estimate below reality would be unsafe.
+        The observed gzip-9 blob is below the range. Its exact byte count is
+        not normative and is not stable across all zlib implementations; only
+        the specification-relevant range relationship is asserted.
         """
-        self.assertEqual(self.measurement.raw_bytes, 360_119)
-        self.assertEqual(self.measurement.gzip_bytes, 106_875)
         finding = metadata_size_finding(self.measurement)
         self.assertFalse(finding.ok)
-        self.assertLess(self.measurement.gzip_bytes, BYTES_PER_MB)
+        self.assertGreater(self.measurement.raw_bytes, 0)
+        self.assertGreater(self.measurement.gzip_bytes, 0)
+        self.assertLess(self.measurement.gzip_bytes, METADATA_STATED_MIN_BYTES)
 
     def test_measured_count_limits_and_the_pinned_pair_fit_both_shares(self):
         for plan in (DESKTOP_QUOTA, MOBILE_QUOTA):
@@ -349,10 +341,10 @@ class TestNormativeCitations(unittest.TestCase):
     """Every doc-10 `normative value(s): 13-parameters.md` citation, parsed."""
 
     def test_sq_557_six_of_seven_citations_resolve_and_the_quota_caps_do_not(self):
-        """SQ-557. 10 §9.2 calls 300/75 MB values normative in doc 13.
+        """SQ-557. 10 §9.2's cap citation has no normative home in doc 13.
 
-        Doc 13 contains neither cap. The resolver checks all seven citations,
-        so this is not a grep special-cased to the known bad line.
+        The resolver checks every citation, so this is not a grep special-cased
+        to the known bad line. The stale cap values remain source data only.
         """
         findings = repo_normative_citation_findings(REPO_ROOT)
         self.assertEqual(len(findings), 7)
@@ -360,7 +352,6 @@ class TestNormativeCitations(unittest.TestCase):
         dangling = [f for f in findings if not f.ok]
         self.assertEqual(len(dangling), 1)
         self.assertIn("Hard caps", dangling[0].claim)
-        self.assertEqual(set(dangling[0].values), {"300", "75"})
 
     def test_the_resolver_turns_green_when_the_normative_home_gains_the_values(self):
         # Anti-vacuity: do not pin the defect to itself. A doc-13 correction

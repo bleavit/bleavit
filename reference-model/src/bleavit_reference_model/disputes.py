@@ -64,6 +64,12 @@ from decimal import Decimal, ROUND_CEILING
 from fractions import Fraction
 
 from . import welfare
+from .spec_values import (
+    EPOCH_LENGTH_DEFAULT,
+    EPOCH_LENGTH_MAX,
+    EPOCH_LENGTH_MAX_DELTA,
+    EPOCH_LENGTH_MIN,
+)
 
 BPS_DENOMINATOR = 10_000
 #: `orc.bond_bps` is stored as a `Perbill` — parts per billion (13 §1, 07 §6.3).
@@ -104,9 +110,6 @@ BOND_BPS_DEFAULT, BOND_BPS_MIN, BOND_BPS_MAX = 250, 150, 1_000
 ROUNDS_DEFAULT, ROUNDS_MIN, ROUNDS_MAX = 3, 2, 4
 #: `orc.window` — 72 h kernel floor, never lowered; META may raise to 120 h.
 ORC_WINDOW_DEFAULT, ORC_WINDOW_MIN, ORC_WINDOW_MAX = 43_200, 43_200, 72_000
-#: `epoch.length` — 13 §1; 10 % max-Δ and a 2-epoch cooldown.
-EPOCH_LENGTH_DEFAULT, EPOCH_LENGTH_MIN, EPOCH_LENGTH_MAX = 302_400, 201_600, 604_800
-EPOCH_LENGTH_MAX_DELTA = Fraction(1, 10)
 #: 07 §7 registry filing-bond floors (`reg.bond_inc` / `reg.bond_mile`).
 REG_BOND_INCIDENT, REG_BOND_MILESTONE = 5_000, 2_500
 #: `reg.max_filings_epoch` — 13 §2 / 07 §7, shared across frozen versions.

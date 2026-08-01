@@ -24,6 +24,7 @@ whose reason differs from normative §5.4.
 import unittest
 from fractions import Fraction
 from pathlib import Path
+import tempfile
 
 from bleavit_reference_model.decision import Outcome, RejectReason
 from bleavit_reference_model.lifecycle import (
@@ -49,6 +50,7 @@ from bleavit_reference_model.lifecycle import (
     Config,
     ScheduleError,
     SnapshotWindow,
+    WelfareHurdleCase,
     analyze_reason_table,
     admissible_versions,
     backend_execute_checks,
@@ -71,6 +73,7 @@ from bleavit_reference_model.lifecycle import (
     lawful_epoch_lengths,
     max_horizon_k,
     max_snapshots,
+    ordered_welfare_decision,
     phase_offset_blocks,
     phase_schedule,
     prune_cutoff,
@@ -468,9 +471,9 @@ class TestCohortHorizon(unittest.TestCase):
         self.assertGreater(len(run.failure_epochs), 30)
         # …and the live count alone cannot distinguish the two, which is exactly
         # why admission is now recorded per epoch.
-        self.assertTrue(
-            all(count == MAX_NON_TERMINAL_COHORTS for count in run.live_counts[4:])
-        )
+        for epoch, count in enumerate(run.live_counts[4:], start=4):
+            with self.subTest(epoch=epoch):
+                self.assertEqual(count, MAX_NON_TERMINAL_COHORTS)
 
     def test_the_shortfall_is_reachable_through_a_lawful_amendment(self):
         # "That the wedge was reachable through a lawful amendment inside the
@@ -619,21 +622,19 @@ class TestExecuteChecklistContract(unittest.TestCase):
         self.assertEqual(mismatches["backend:10:split"].frontend_rows, (11, 12))
         self.assertIn("apply_authorized_upgrade", mismatches["frontend:14:unmatched"].why)
 
-    def test_every_named_reason_is_frozen_except_bad_preimage(self):
+    def test_the_check_accessor_exposes_the_unfrozen_terminal_reason(self):
+        """SQ-552. The accessor carries the source-side reason discrepancy."""
         findings = check_execute_reject_reasons(REPO_ROOT)
-        self.assertEqual(
-            [(finding.document, finding.row, finding.reason) for finding in findings],
-            [
-                ("09 §1.2", 3, "StaleQueue"),
-                ("09 §1.2", 4, "NotRatified"),
-                ("09 §1.2", 5, "AttestationMissing"),
-                ("09 §1.2", 11, "BadPreimage"),
-                ("11 §11.5", 5, "NotRatified"),
-            ],
-        )
         invalid = [finding for finding in findings if not finding.ok]
-        self.assertEqual([(finding.row, finding.reason) for finding in invalid], [(11, "BadPreimage")])
-        self.assertNotIn("BadPreimage", frozen_reject_reasons())
+        self.assertEqual(len(invalid), 1)
+        self.assertEqual((invalid[0].document, invalid[0].row), ("09 §1.2", 11))
+        self.assertNotIn(invalid[0].reason, frozen_reject_reasons())
+        for finding in findings:
+            with self.subTest(document=finding.document, row=finding.row):
+                self.assertEqual(
+                    finding.ok,
+                    finding.reason in frozen_reject_reasons(),
+                )
 
     def test_sq_552_bad_preimage_stays_queued_then_expires_by_t15(self):
         """SQ-552. 09 §1.2(11)'s `Rejected(BadPreimage)` is unconstructable.
@@ -643,7 +644,12 @@ class TestExecuteChecklistContract(unittest.TestCase):
         specific cause, 05 §2.1 therefore sends it through T15 `Expired` at
         grace end rather than recording the terminal state 09 publishes.
         """
-        disposition = unconstructable_reject_disposition("BadPreimage")
+        invalid = next(
+            finding
+            for finding in check_execute_reject_reasons(REPO_ROOT)
+            if not finding.ok
+        )
+        disposition = unconstructable_reject_disposition(invalid.reason)
         self.assertEqual(
             (
                 disposition.state_after_dispatch,
@@ -654,16 +660,42 @@ class TestExecuteChecklistContract(unittest.TestCase):
         )
 
     def test_t16_reason_sets_are_compared_in_both_directions(self):
+        """SQ-552. The derived T16 set excludes the unconstructable reason."""
         checklist = checklist_t16_causes(REPO_ROOT)
-        self.assertEqual(
-            checklist,
-            frozenset({"StaleQueue", "NotRatified", "AttestationMissing", "BadPreimage"}),
-        )
-        self.assertEqual(frozenset(T16_CAUSES), checklist - {"BadPreimage"})
         finding = t16_cause_diff(REPO_ROOT)
         self.assertFalse(finding.ok)
-        self.assertEqual(finding.checklist_only, frozenset({"BadPreimage"}))
+        self.assertEqual(len(finding.checklist_only), 1)
         self.assertEqual(finding.transition_only, frozenset())
+        self.assertEqual(checklist - finding.checklist_only, frozenset(T16_CAUSES))
+
+    def test_repaired_payload_disposition_makes_the_reason_parsers_agree(self):
+        """SQ-552. A queued-then-expired repair is the parser positive control."""
+        doc09_path = REPO_ROOT / "docs/architecture/09-execution-upgrades-and-rollout.md"
+        doc11_path = REPO_ROOT / "docs/architecture/11-frontend-workflows.md"
+        doc09 = doc09_path.read_text(encoding="utf-8")
+        stale = "resolves to `Rejected(BadPreimage)` (G-1 status quo)"
+        repaired = (
+            "errors `BadPreimage`, leaves the proposal `Queued`, and reaches "
+            "T15 `Expired` at grace end (G-1 status quo)"
+        )
+        repaired_doc09 = doc09.replace(stale, repaired, 1)
+        self.assertNotEqual(repaired_doc09, doc09)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            architecture = root / "docs/architecture"
+            architecture.mkdir(parents=True)
+            (architecture / doc09_path.name).write_text(
+                repaired_doc09, encoding="utf-8"
+            )
+            (architecture / doc11_path.name).write_text(
+                doc11_path.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            findings = check_execute_reject_reasons(root)
+            t16 = t16_cause_diff(root)
+        for finding in findings:
+            with self.subTest(document=finding.document, row=finding.row):
+                self.assertTrue(finding.ok)
+        self.assertTrue(t16.ok)
 
 
 class TestReasonCodeTruthTable(unittest.TestCase):
@@ -672,10 +704,14 @@ class TestReasonCodeTruthTable(unittest.TestCase):
     def test_the_published_table_parses_as_twenty_one_rows_by_eleven_steps(self):
         rows = reason_table_rows(REPO_ROOT)
         self.assertEqual(len(rows), 21)
-        self.assertTrue(all(len(row.steps) == 11 for row in rows))
-        valid_fail = next(row for row in rows if row.scenario == "Valid fail")
-        self.assertEqual(valid_fail.steps[5:8], ("✘", "–", "–"))
-        self.assertEqual(valid_fail.outcome, "Reject(HurdleNotMet)")
+        for row in rows:
+            with self.subTest(scenario=row.scenario):
+                self.assertEqual(len(row.steps), 11)
+        derived = ordered_welfare_decision(
+            WelfareHurdleCase(False, False, False, False)
+        )
+        self.assertEqual(derived.outcome, Outcome.REJECT)
+        self.assertEqual(derived.reason, RejectReason.CONVERGENCE_FAILED)
 
     def test_the_hurdle_partition_is_total_deterministic_and_non_overlapping(self):
         analysis = analyze_reason_table(REPO_ROOT)
@@ -711,10 +747,6 @@ class TestReasonCodeTruthTable(unittest.TestCase):
             {(False, False, False, False), (False, False, False, True)},
         )
         self.assertEqual(
-            {mismatch.table.reason for mismatch in mismatches},
-            {RejectReason.HURDLE_NOT_MET},
-        )
-        self.assertEqual(
             {mismatch.normative.reason for mismatch in mismatches},
             {RejectReason.CONVERGENCE_FAILED},
         )
@@ -722,6 +754,45 @@ class TestReasonCodeTruthTable(unittest.TestCase):
             {mismatch.table.outcome for mismatch in mismatches},
             {Outcome.REJECT},
         )
+
+    def test_repaired_reason_rows_make_the_truth_table_agree(self):
+        """SQ-552. Split converged/non-converged failures are a positive control."""
+        doc05_path = REPO_ROOT / "docs/architecture/05-welfare-and-decision-engine.md"
+        doc05 = doc05_path.read_text(encoding="utf-8")
+        stale_valid = (
+            "| Valid fail | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | – | – | – | – | – | "
+            "Reject(HurdleNotMet) |"
+        )
+        repaired_valid = (
+            "| Valid fail | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | – | ✔ | – | – | – | "
+            "Reject(HurdleNotMet) |"
+        )
+        existing_non_convergence = (
+            "| Non-convergence | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | – | – | – | "
+            "Reject(ConvergenceFailed) |"
+        )
+        failed_non_convergence = (
+            "| Non-convergence | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | ✘ | ✘ | – | – | – | "
+            "Reject(ConvergenceFailed) |"
+        )
+        repaired_doc05 = doc05.replace(stale_valid, repaired_valid, 1).replace(
+            existing_non_convergence,
+            f"{existing_non_convergence}\n{failed_non_convergence}",
+            1,
+        )
+        self.assertNotEqual(repaired_doc05, doc05)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            architecture = root / "docs/architecture"
+            architecture.mkdir(parents=True)
+            (architecture / doc05_path.name).write_text(
+                repaired_doc05, encoding="utf-8"
+            )
+            analysis = analyze_reason_table(root)
+        self.assertTrue(analysis.total)
+        self.assertTrue(analysis.deterministic)
+        self.assertTrue(analysis.non_overlapping)
+        self.assertEqual(analysis.mismatches, ())
 
 
 if __name__ == "__main__":

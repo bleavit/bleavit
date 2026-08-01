@@ -20,30 +20,28 @@ them into the sustained-average stock.
 
 The error in the other direction is unsafe.  02 §5 freezes the minimal price
 ingest set as `Traded` plus `Observed`, but 10 §9.1 prices only observations.
-The committed generated `buy()` weight is parsed rather than copied: 108,804 B
-proof and 1,167,142,000 ps base ref-time, plus 77 RocksDB reads and 67 writes.
-The database addend is 8,625,000,000 ps, so the dispatched total is
-9,792,142,000 ps.  Against the normal-class budgets, proof binds at 36 fills per
-block (ref-time permits 153).  At block-capacity saturation that is 518,400
-adversary-controllable `Traded` rows/day, enough by itself to consume the 45 MB
-desktop events share in 17.361111… hours and the 11.25 MB mobile share in
-4.340277… hours.  These are capacity bounds, not traffic forecasts.
+The specification fixes no per-event `Traded` weight, so the capacity and
+retention functions accept an explicit weight.  A separate ``observed_*``
+accessor parses the current generated ``buy()`` artifact and reports what that
+implementation would imply.  It is supporting conformance evidence only: a
+benchmark regeneration changes the observation, never the specification model
+or the finding that 10 §9.1 omits a frozen event family.
 
-Two smaller inconsistencies also execute here.  The metadata sub-bound is
-16 MB against a 15 MB desktop share and 6 MB against a 3.75 MB mobile share.
-The committed bootstrap metadata is only 106,875 B under deterministic gzip-9,
-not doc 10's stated ~1–2 MB, so the two pinned blobs and the full count limits
-fit in practice; the structural impossibility suggested by the prose does not.
+Two smaller inconsistencies also execute here.  The metadata sub-bounds exceed
+their fixed metadata shares.  The committed bootstrap blob is measured only as
+implementation evidence and is far below doc 10's stated ~1–2 MB range; tests
+assert that range relationship, not a compressor-backend-specific byte count.
 Finally, doc 10 has seven `normative value(s): 13-parameters.md` citations.  Six
-resolve to a statement in doc 13; the 300/75 MB IndexedDB caps do not.
+resolve to a statement in doc 13; the IndexedDB caps do not.
 
 Units: bytes are exact bytes and MB is decimal 1,000,000 B, matching doc 10's
 growth arithmetic; time is blocks, days, hours or picoseconds as named.  Rates,
 shares and depths use :class:`fractions.Fraction`; no binary float participates.
 Integer capacity division rounds **down**, so an over-capacity event claim is
 never published.  Retention depths remain exact; any UI promise derived from
-them must round down against the claimant (R-7).  Gzip is level 9 with mtime 0
-and no filename, making the measurement byte-stable.
+them must round down against the claimant (R-7).  Gzip evidence uses level 9,
+mtime 0 and no filename, but DEFLATE output size is deliberately not treated as
+byte-stable across zlib implementations.
 """
 
 from __future__ import annotations
@@ -122,6 +120,8 @@ class Finding:
     actual: int | Fraction | str | tuple[str, ...]
     expected: int | Fraction | str | tuple[str, ...]
     error_direction: str
+    sq_id: str | None = None
+    supporting_evidence: object | None = None
 
 
 @dataclass(frozen=True)
@@ -341,6 +341,7 @@ def load_findings(
             sustained_books,
             DOC10_MAX_BOOKS,
             "Doc 10 errs high (capacity-safe) here; the unsafe direction is low.",
+            sq_id="SQ-557",
         ),
     )
 
@@ -470,6 +471,45 @@ def events_share_exhaustion_hours(
     return raw_depth_days(share_bytes, rows_per_day, row_bytes) * HOURS_PER_DAY
 
 
+@dataclass(frozen=True)
+class ObservedTradeEvidence:
+    """Current generated-buy capacity; implementation evidence only."""
+
+    source: Path
+    weight: DispatchWeight
+    capacity: TradeCapacity
+    rows_per_day: int
+    desktop_exhaustion_hours: Fraction
+    mobile_exhaustion_hours: Fraction
+
+
+def observed_trade_evidence(repo_root: Path) -> ObservedTradeEvidence:
+    """Read generated Rust weight evidence without making it a spec oracle.
+
+    The block budgets and generated ``buy`` weight describe the current runtime
+    profile. They support the operational severity of an omitted ``Traded``
+    stream, but no value returned here decides whether 10 §9.1 covers 02 §5.
+    """
+    source = repo_root / MARKET_WEIGHT_FIXTURE
+    weight = parse_generated_weight(source)
+    capacity = traded_events_per_block(
+        NORMAL_PROOF_BUDGET, NORMAL_REF_TIME_BUDGET, weight
+    )
+    rows = saturated_traded_rows_per_day(capacity)
+    return ObservedTradeEvidence(
+        source=source,
+        weight=weight,
+        capacity=capacity,
+        rows_per_day=rows,
+        desktop_exhaustion_hours=events_share_exhaustion_hours(
+            DESKTOP_CAP_BYTES * EVENTS_SHARE, rows
+        ),
+        mobile_exhaustion_hours=events_share_exhaustion_hours(
+            MOBILE_CAP_BYTES * EVENTS_SHARE, rows
+        ),
+    )
+
+
 def _markdown_section(text: str, heading: str, next_heading: str) -> str:
     start = text.find(heading)
     if start < 0:
@@ -533,6 +573,22 @@ def ingest_coverage(repo_root: Path) -> IngestCoverage:
     return IngestCoverage(required, modelled_ingest_set(doc10, required))
 
 
+def check_frontend_budget_claims(repo_root: Path) -> tuple[Finding, ...]:
+    """Return SQ-557's ingest defect with measurements only as evidence."""
+    coverage = ingest_coverage(repo_root)
+    return (
+        Finding(
+            "ingest.frozen-streams-modelled",
+            coverage.ok,
+            coverage.modelled,
+            coverage.required,
+            "Omitting an adversary-controlled event stream undersizes storage.",
+            sq_id="SQ-557",
+            supporting_evidence=observed_trade_evidence(repo_root),
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # 10 §9.2–§9.4 quota and metadata checks.
 # ---------------------------------------------------------------------------
@@ -547,10 +603,20 @@ class MetadataMeasurement:
 
 
 def measure_metadata(path: Path) -> MetadataMeasurement:
-    """Measure raw and deterministic gzip-9 bytes (mtime 0, no filename)."""
+    """Measure one artifact as conformance evidence, never as a spec input.
+
+    ``mtime=0`` removes timestamp variance but does not pin the DEFLATE
+    implementation. Consumers must compare the result to a document bound and
+    must not assert an exact compressed byte count across environments.
+    """
     raw = path.read_bytes()
     compressed = gzip.compress(raw, compresslevel=9, mtime=0)
     return MetadataMeasurement(len(raw), len(compressed))
+
+
+def observed_metadata(repo_root: Path) -> MetadataMeasurement:
+    """Read the committed metadata blob as implementation evidence only."""
+    return measure_metadata(repo_root / METADATA_FIXTURE)
 
 
 @dataclass(frozen=True)
@@ -596,6 +662,7 @@ class QuotaPlan:
                 self.metadata_byte_limit,
                 metadata_bytes,
                 "A bound above its share is internally inconsistent; unsafe if allocated.",
+                sq_id="SQ-557",
             ),
             Finding(
                 f"{self.platform}.metadata-count-at-measured-size",
@@ -644,6 +711,8 @@ def metadata_size_finding(measurement: MetadataMeasurement) -> Finding:
         measurement.gzip_bytes,
         f"{METADATA_STATED_MIN_BYTES}…{METADATA_STATED_MAX_BYTES}",
         "The document errs high (capacity-safe); an error low would overflow quotas.",
+        sq_id="SQ-557",
+        supporting_evidence=measurement,
     )
 
 
@@ -664,6 +733,7 @@ def metadata_bundle_budget_finding(doc10_text: str) -> Finding:
         row_labels,
         "a metadata-blob bundle row",
         "Missing release-size accounting is unsafe when the bundle grows.",
+        sq_id="SQ-557",
     )
 
 

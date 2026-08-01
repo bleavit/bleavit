@@ -100,11 +100,11 @@ class ReserveFundingArithmeticTests(unittest.TestCase):
         self.assertEqual(runway_micro_usdc(), 12_500_000)
 
     def test_exact_cadence_reproduces_the_published_approximate_row(self):
-        funding = probe_funding()
+        funding = probe_funding(allocation_epoch_micro_usdc=None)
         self.assertEqual(funding.probes_per_epoch, 21)
         self.assertEqual(funding.probes_per_year, Fraction(1_461, 4))
-        self.assertEqual(funding.booked_epoch_micro_usdc, 52_500_000)
-        self.assertEqual(funding.booked_year_micro_usdc, 913_125_000)
+        self.assertEqual(funding.cost_basis_epoch_micro_usdc, 52_500_000)
+        self.assertEqual(funding.cost_basis_year_micro_usdc, 913_125_000)
         self.assertEqual(funding.routine_epoch_micro_usdc, 52_500_000)
         self.assertEqual(funding.routine_year_micro_usdc, 913_125_000)
         # The printed ≈52/≈913 are close presentations, not exact allocations.
@@ -113,31 +113,58 @@ class ReserveFundingArithmeticTests(unittest.TestCase):
         self.assertEqual(funding.display_epoch_margin_fraction, Fraction(-1, 105))
         self.assertEqual(funding.display_year_margin_fraction, Fraction(-1, 7_305))
 
-    def test_sq_554_the_probe_cost_basis_contains_no_routine_burn_buffer(self):
-        """SQ-554. 08 §10 books cadence burn, not an outage reserve.
+    def test_sq_554_cost_basis_equality_is_informational(self):
+        """SQ-554. The derived cost-basis difference is zero, not headroom.
 
         Its stated basis is exactly 21 attempts × the 2.5-USDC envelope, so the
-        derived buffer is zero.  The whole-USDC display values are slightly
-        below the exact products; they cannot establish a positive margin.
+        cost estimate equals routine demand. Because the row is not the actual
+        allocation, that equality proves neither funding nor lack of buffer.
         """
-        funding = probe_funding()
-        self.assertEqual(funding.exact_basis_buffer_epoch_micro_usdc, 0)
+        funding = probe_funding(allocation_epoch_micro_usdc=None)
+        self.assertEqual(funding.cost_basis_difference_epoch_micro_usdc, 0)
+        self.assertIsNone(funding.allocation_buffer_epoch_micro_usdc)
         finding = next(
             item
-            for item in funding_findings()
-            if item.key == "ops.reserve_probe routine-burn buffer"
+            for item in funding_findings(allocation_epoch_micro_usdc=None)
+            if item.key == "ops.reserve_probe cost basis equals routine demand"
         )
-        self.assertFalse(finding.ok)
+        self.assertTrue(finding.ok)
+        self.assertIn("informational", finding.detail)
 
     def test_the_actual_budget_line_value_is_still_unsettled(self):
         # 13 §1 says [VERIFY].  §10's cost row is not a balance allocation.
         self.assertIsNone(OPS_RESERVE_PROBE_BUDGET_DEFAULT_MICRO_USDC)
         finding = next(
             item
-            for item in funding_findings()
-            if item.key == "ops.reserve_probe allocation is calibrated"
+            for item in funding_findings(allocation_epoch_micro_usdc=None)
+            if item.key == "ops.reserve_probe funding scenario"
         )
-        self.assertFalse(finding.ok)
+        self.assertTrue(finding.ok)
+        self.assertIn("not evaluated", finding.detail)
+
+    def test_explicit_allocation_scenarios_report_conditional_headroom(self):
+        routine = 52_500_000
+        for allocation, expected in (
+            (52_000_000, Fraction(-500_000)),
+            (routine, Fraction(0)),
+            (60_000_000, Fraction(7_500_000)),
+        ):
+            with self.subTest(allocation=allocation):
+                funding = probe_funding(
+                    allocation_epoch_micro_usdc=allocation
+                )
+                self.assertEqual(
+                    funding.allocation_buffer_epoch_micro_usdc, expected
+                )
+                finding = next(
+                    item
+                    for item in funding_findings(
+                        allocation_epoch_micro_usdc=allocation
+                    )
+                    if item.key == "ops.reserve_probe funding scenario"
+                )
+                self.assertTrue(finding.ok)
+                self.assertIn(str(expected), finding.detail)
 
 
 class ReserveProbeStateMachineTests(unittest.TestCase):

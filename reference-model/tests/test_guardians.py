@@ -1,11 +1,9 @@
 """Pins 06 §5 and §6.3's guardian arithmetic to an executable derivation.
 
-The suite prices the VIT bond across 13 §1's lawful rate envelope, executes the
-fixed-slash liability ladder, composes the review deadline with every recall
+The suite prices the VIT bond across 13 §1's lawful rate envelope, executes
+both readings of "50% of bond", composes the review deadline with every recall
 track stage, and checks the freeze-renewal window against the same complete
-track. Published figures are regression pins only after their inputs have been
-derived; the zero-bond finding asserts the state that actually exists rather
-than encoding the missing check as though it were present.
+track. The slash basis is always an explicit scenario input.
 """
 
 from decimal import Decimal
@@ -99,11 +97,14 @@ class BondPricingTests(unittest.TestCase):
                 seat_bond_usdc(bad)
 
 
-class LiabilityDepletionTests(unittest.TestCase):
-    """06 §5.4(3)'s fixed slash, saturation, and membership-only gate."""
+class LiabilityBasisTests(unittest.TestCase):
+    """06 §5.4(3)'s two exact readings and membership-only gate."""
 
-    def test_constant_slash_exhausts_the_bond_after_two_failures(self):
-        ladder = [lifetime_liability(n) for n in range(4)]
+    def test_original_seat_basis_exhausts_after_two_failures(self):
+        ladder = [
+            lifetime_liability(n, slash_basis="original-seat-bond")
+            for n in range(4)
+        ]
         self.assertEqual(
             [row.remaining_bond_vit for row in ladder], [50_000, 25_000, 0, 0]
         )
@@ -116,11 +117,12 @@ class LiabilityDepletionTests(unittest.TestCase):
         )
         self.assertTrue(ladder[2].exhausted)
 
-    def test_lifetime_accountability_is_2500_per_seat_and_12500_per_coalition(self):
-        exhausted = lifetime_liability(2)
+    def test_original_basis_caps_at_2500_per_seat_and_12500_per_coalition(self):
+        exhausted = lifetime_liability(2, slash_basis="original-seat-bond")
         per_seat = (
             seat_bond_usdc()
-            * D(exhausted.cumulative_slashed_vit)
+            * D(exhausted.cumulative_slashed_vit.numerator)
+            / D(exhausted.cumulative_slashed_vit.denominator)
             / D(GUARDIAN_BOND_VIT)
         )
         coalition = per_seat * D(GUARDIAN_THRESHOLD)
@@ -131,35 +133,50 @@ class LiabilityDepletionTests(unittest.TestCase):
         self.assertEqual(one_failure, D("6250.0000000"))
         self.assertEqual(coalition, one_failure * 2)
 
-    def test_liability_is_monotone_but_its_marginal_cost_reaches_zero(self):
-        rows = [lifetime_liability(n) for n in range(8)]
+    def test_live_held_basis_halves_forever_and_never_reaches_zero(self):
+        rows = [
+            lifetime_liability(n, slash_basis="live-held-bond")
+            for n in range(8)
+        ]
         self.assertEqual(
             [row.cumulative_slashed_vit for row in rows],
             sorted(row.cumulative_slashed_vit for row in rows),
         )
-        self.assertEqual(rows[2].next_failure_slash_vit, 0)
-        self.assertEqual(rows[-1].cumulative_slashed_vit, GUARDIAN_BOND_VIT)
+        self.assertEqual(
+            [row.remaining_bond_vit for row in rows[:4]],
+            [50_000, 25_000, 12_500, 6_250],
+        )
+        self.assertTrue(all(row.remaining_bond_vit > 0 for row in rows))
+        self.assertTrue(all(row.next_failure_slash_vit > 0 for row in rows))
+        self.assertFalse(any(row.exhausted for row in rows))
 
-    def test_sq_558_zero_bond_member_keeps_action_weight_if_recall_does_not_enact(self):
-        """SQ-558. Two failed reviews exhaust the fixed seat bond.
+    def test_sq_558_reports_the_slash_basis_ambiguity(self):
+        """SQ-558. Two failures derive 12,500 VIT or zero, by basis.
 
-        Each failure auto-schedules recall, so reaching the third requires the
-        values layer to have declined or failed to enact both recalls. In that
-        surviving state §5.1 and the shipped calls test membership only: the
-        zero-bond member can still propose and approve, and failure three has
-        zero marginal slash.
+        "50% of bond" leaves 12,500 VIT when ``bond`` means the live hold and
+        zero when it means the original 50,000-VIT seat bond. 06 does not pick
+        one. §5.1 separately makes membership the only action precondition, so
+        an original-basis depleted member would not be refused by a bond test.
         """
-        exhausted = lifetime_liability(2)
-        self.assertEqual(exhausted.remaining_bond_vit, 0)
-        self.assertEqual(exhausted.next_failure_slash_vit, 0)
+        live = lifetime_liability(2, slash_basis="live-held-bond")
+        original = lifetime_liability(2, slash_basis="original-seat-bond")
+        self.assertEqual(live.remaining_bond_vit, 12_500)
+        self.assertEqual(original.remaining_bond_vit, 0)
         self.assertTrue(
             member_can_propose_or_approve(
-                is_member=True, remaining_bond_vit=exhausted.remaining_bond_vit
+                is_member=True, remaining_bond_vit=original.remaining_bond_vit
             )
         )
-        findings = {finding.key: finding for finding in accountability_findings(2)}
-        self.assertFalse(findings["remaining liability after repeated review failures"].ok)
-        self.assertFalse(findings["action eligibility requires remaining liability"].ok)
+        findings = {
+            finding.key: finding
+            for finding in accountability_findings(
+                2, slash_basis="live-held-bond"
+            )
+        }
+        self.assertFalse(findings["06.review-slash-basis-is-specified"].ok)
+        self.assertIn("12500 VIT", findings["06.review-slash-basis-is-specified"].detail)
+        self.assertIn("0 VIT", findings["06.review-slash-basis-is-specified"].detail)
+        self.assertTrue(findings["06.action-gate-is-membership-only"].ok)
 
     def test_non_member_still_cannot_act(self):
         self.assertFalse(
@@ -169,7 +186,11 @@ class LiabilityDepletionTests(unittest.TestCase):
     def test_invalid_liability_inputs_refuse(self):
         for bad in (-1, True, D(2)):
             with self.subTest(failures=bad), self.assertRaises(GuardianDerivationError):
-                lifetime_liability(bad)  # type: ignore[arg-type]
+                lifetime_liability(  # type: ignore[arg-type]
+                    bad, slash_basis="live-held-bond"
+                )
+        with self.assertRaises(GuardianDerivationError):
+            lifetime_liability(2, slash_basis="unknown")  # type: ignore[arg-type]
 
 
 class RecallLatencyTests(unittest.TestCase):
@@ -182,7 +203,7 @@ class RecallLatencyTests(unittest.TestCase):
         self.assertEqual(GUARDIAN_TRACK.enactment_days, 2)
         self.assertEqual(GUARDIAN_TRACK.latency_days, 11)
 
-    def test_shipped_default_worst_case_is_74_days_or_74_over_21_cycles(self):
+    def test_documented_fallback_worst_case_is_74_days_or_74_over_21_cycles(self):
         run = capture_run()
         self.assertEqual(run.review_wait_days, 63)
         self.assertEqual(run.recall_track_days, 11)

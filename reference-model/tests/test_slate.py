@@ -10,6 +10,7 @@ is used.
 
 from decimal import Decimal
 from pathlib import Path
+import tempfile
 import unittest
 
 from bleavit_reference_model.slate import (
@@ -374,24 +375,56 @@ class BlankingEconomicsTests(unittest.TestCase):
 class CrossDocumentFindingTests(unittest.TestCase):
     """Document extraction and the structured SQ-543 defect rows."""
 
-    def test_sq_543_the_two_documents_publish_different_prices(self):
-        """SQ-543. 08 §7 publishes 18,900 while 14 TH-16 publishes 10,900.
+    def test_sq_543_the_derived_monopolization_price_is_18_900(self):
+        """SQ-543. The bond schedule derives 18,900 USDC per epoch.
 
-        Both describe recurring monopolization cost on the same 10% bond
-        schedule. The threat row understates the table by 8,000 USDC (1.73x),
-        a conservative defence-pricing inconsistency rather than an unbacked-
-        claim direction.
+        The structured finding, rather than this assertion, carries the stale
+        cross-document publication and its source-side discrepancy.
         """
+        derived = intake_cost_table().combined_slashed
         prices = document_monopolization_prices(REPO_ROOT)
-        self.assertEqual(prices.doc08_combined, D(18_900))
-        self.assertEqual(prices.doc14_th16, D(10_900))
+        self.assertEqual(derived, D(18_900))
+        self.assertEqual(prices.doc08_combined, derived)
         self.assertFalse(prices.agree)
+        finding = next(
+            row
+            for row in check_claims(REPO_ROOT)
+            if row.key == "08 §7 and 14 TH-16 publish one monopolization price"
+        )
+        self.assertFalse(finding.ok)
+
+    def test_repaired_threat_price_makes_the_document_parser_agree(self):
+        """SQ-543. A repaired TH-16 is a positive control for the parser."""
+        doc08 = (
+            REPO_ROOT / "docs/architecture/08-treasury-and-economics.md"
+        ).read_text(encoding="utf-8")
+        doc14 = (REPO_ROOT / "docs/architecture/14-threat-model.md").read_text(
+            encoding="utf-8"
+        )
+        repaired_doc14 = doc14.replace(
+            "forfeits ~10.9k USDC", "forfeits ~18.9k USDC", 1
+        )
+        self.assertNotEqual(repaired_doc14, doc14)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            architecture = root / "docs/architecture"
+            architecture.mkdir(parents=True)
+            (architecture / "08-treasury-and-economics.md").write_text(
+                doc08, encoding="utf-8"
+            )
+            (architecture / "14-threat-model.md").write_text(
+                repaired_doc14, encoding="utf-8"
+            )
+            prices = document_monopolization_prices(root)
+        self.assertTrue(prices.agree)
+        self.assertEqual(prices.doc14_th16, intake_cost_table().combined_slashed)
 
     def test_parsed_section_seven_price_equals_its_derived_schedule(self):
         prices = document_monopolization_prices(REPO_ROOT)
         self.assertEqual(prices.doc08_combined, intake_cost_table().combined_slashed)
 
     def test_every_falsified_claim_is_queryable(self):
+        """SQ-543. Every derived failure remains available to callers."""
         findings = {row.key: row for row in check_claims(REPO_ROOT)}
         expected_false = {
             "scaled CODE commitment fits pol.budget_epoch",
@@ -402,7 +435,9 @@ class CrossDocumentFindingTests(unittest.TestCase):
             "b_floor*ln2/P_ref is class-invariant",
         }
         self.assertEqual(set(findings), expected_false)
-        self.assertTrue(all(not findings[key].ok for key in expected_false))
+        for key in sorted(expected_false):
+            with self.subTest(claim=key):
+                self.assertFalse(findings[key].ok)
 
 
 if __name__ == "__main__":

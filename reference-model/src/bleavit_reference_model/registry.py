@@ -10,19 +10,19 @@ Executing those claims finds four distinct failures rather than assuming the
 registry box is safe:
 
 * rule 7's ``dec.sigma <= delta/2`` and ``gate.eps <= p_max/2`` relations have
-  no consumer validation at all, and the welfare-weight identity reaches a
-  consumer error in one amendment; only the ``gate.v_min`` band and
-  ``ledger.redeem_fee <= mkt.fee`` are screened at the amendment boundary;
-* ``dec.trailing >= dec.window`` is reachable in three amendments and four
-  elapsed epochs, although a decision window must contain a strictly smaller
-  trailing window;
+  no consumer validation at all, contrary to the consuming-engine checks the
+  document requires.  The welfare-weight identity is consumer-validated as
+  required, while the ``gate.v_min`` band and
+  ``ledger.redeem_fee <= mkt.fee`` bind earlier at the amendment boundary;
+* ``dec.trailing > dec.window`` is reachable in three amendments and four
+  elapsed epochs.  Equality remains valid containment, but the two Rust
+  consumers disagree there: epoch-core accepts it and pallet-market does not;
 * the missing ``gate.p_max`` floor reaches zero in five amendments / twenty
   epochs and then the strict gate veto rejects every market-bearing class.
   At the minimum viable META NAV, ``sec.prize.meta`` reaches a value above the
   largest certificate admitted by the POL budget after one doubling / two
   epochs.  Both states disable the META class which
-  owns their repair.  Lowering ``dec.window`` alone reaches a third such state
-  in five amendments / ten epochs;
+  owns their repair;
 * the reserve-probe first-arm runway is not re-verified after amendments of
   either threshold, fee or conversion rate; the remote USDC inventory check is
   likewise not repeated after ``res.probe_amount`` changes.
@@ -47,10 +47,21 @@ from dataclasses import dataclass
 from decimal import Decimal, localcontext
 from enum import Enum
 from itertools import product
+import os
 from pathlib import Path
 import re
 from typing import Callable, Iterable, Mapping
 
+from .spec_values import (
+    EPOCH_LENGTH_DEFAULT,
+    EPOCH_LENGTH_MAX,
+    EPOCH_LENGTH_MAX_DELTA_PERCENT,
+    EPOCH_LENGTH_MIN,
+    NAV_FLOOR_CODE,
+    NAV_FLOOR_META,
+    NAV_FLOOR_PARAM,
+    NAV_FLOOR_TREASURY,
+)
 from .treasury import attack_cost_hat, l_hat, round_down
 
 
@@ -273,7 +284,17 @@ def _row(
 # ---------------------------------------------------------------------------
 
 # Epoch, markets and the decision engine (13 §1; 04 §7; 05 §3/§5).
-_row("epoch.length", ParamKind.U32, "blocks", 302_400, 201_600, 604_800, percent(10), 2, AmendmentClass.META)
+_row(
+    "epoch.length",
+    ParamKind.U32,
+    "blocks",
+    EPOCH_LENGTH_DEFAULT,
+    EPOCH_LENGTH_MIN,
+    EPOCH_LENGTH_MAX,
+    percent(EPOCH_LENGTH_MAX_DELTA_PERCENT),
+    2,
+    AmendmentClass.META,
+)
 _row("epoch.slots", ParamKind.U8, "count", 5, 1, 12, absolute(2), 1, AmendmentClass.META)
 _row("epoch.horizon_k", ParamKind.U8, "epochs", 2, 1, 2, absolute(1), 4, AmendmentClass.META_VALUES)
 _row("mkt.obs_interval", ParamKind.U32, "blocks", 10, 5, 50, absolute(5), 1, AmendmentClass.PARAM)
@@ -410,8 +431,17 @@ del _records
 
 class BindingSite(str, Enum):
     BOUNDARY_SCREENED = "boundary-screened"
-    CONSUMER_VALIDATED = "consumer-validated"
-    UNCHECKED = "unchecked"
+    CONSUMING_ENGINE = "consuming-engine"
+    UNSPECIFIED = "unspecified"
+
+
+class ObservedConsumerCheck(str, Enum):
+    """Implementation evidence kept separate from the normative binding site."""
+
+    NOT_APPLICABLE = "not-applicable"
+    CONFORMING = "conforming"
+    ABSENT = "absent"
+    INCONSISTENT = "inconsistent"
 
 
 Predicate = Callable[[Mapping[str, int]], bool]
@@ -422,7 +452,8 @@ class Coupling:
     name: str
     keys: tuple[str, ...]
     predicate: Predicate
-    binding_site: BindingSite
+    normative_binding_site: BindingSite
+    observed_consumer_check: ObservedConsumerCheck
     spec_cite: str
 
     def holds(self, values: Mapping[str, int]) -> bool:
@@ -447,7 +478,8 @@ COUPLINGS: tuple[Coupling, ...] = tuple(
             f"dec-sigma-{suffix}",
             (f"dec.sigma.{suffix}", f"dec.delta.{suffix}"),
             _sigma_delta(suffix),
-            BindingSite.UNCHECKED,
+            BindingSite.CONSUMING_ENGINE,
+            ObservedConsumerCheck.ABSENT,
             "13 rule 7; 05 §5.3",
         )
         for suffix in ("param", "trs", "code", "meta")
@@ -457,14 +489,16 @@ COUPLINGS: tuple[Coupling, ...] = tuple(
             "gate-epsilon",
             ("gate.eps", "gate.p_max"),
             lambda s: 2 * s["gate.eps"] <= s["gate.p_max"],
-            BindingSite.UNCHECKED,
+            BindingSite.CONSUMING_ENGINE,
+            ObservedConsumerCheck.ABSENT,
             "13 rule 7; 05 §5.1",
         ),
         Coupling(
             "welfare-weights",
             ("welfare.wP", "welfare.wA"),
             lambda s: s["welfare.wP"] + s["welfare.wA"] == FIXED_SCALE,
-            BindingSite.CONSUMER_VALIDATED,
+            BindingSite.CONSUMING_ENGINE,
+            ObservedConsumerCheck.CONFORMING,
             "13 rule 7; 05 §4.1/§4.4",
         ),
     ]
@@ -474,6 +508,7 @@ COUPLINGS: tuple[Coupling, ...] = tuple(
             (f"gate.v_min.{suffix}", f"dec.v_min.{suffix}"),
             _gate_v_min(suffix),
             BindingSite.BOUNDARY_SCREENED,
+            ObservedConsumerCheck.NOT_APPLICABLE,
             "13 rule 7; 05 §5.2",
         )
         for suffix in ("param", "trs", "code", "meta")
@@ -484,63 +519,48 @@ COUPLINGS: tuple[Coupling, ...] = tuple(
             ("ledger.rdm_fee", "mkt.fee"),
             lambda s: s["ledger.rdm_fee"] <= s["mkt.fee"],
             BindingSite.BOUNDARY_SCREENED,
+            ObservedConsumerCheck.NOT_APPLICABLE,
             "13 rule 7; 08 §10.6",
         ),
         Coupling(
             "decision-trailing-window",
             ("dec.window", "dec.trailing"),
-            lambda s: s["dec.trailing"] < s["dec.window"],
-            BindingSite.CONSUMER_VALIDATED,
-            "05 §3.1/§5; 04 §7",
+            lambda s: s["dec.trailing"] <= s["dec.window"],
+            BindingSite.CONSUMING_ENGINE,
+            ObservedConsumerCheck.INCONSISTENT,
+            "05 §3.1/§5; 04 §7 (final-window containment)",
         ),
         Coupling(
             "decision-window-trade-phase",
             ("dec.window", "epoch.length"),
             lambda s: 21 * s["dec.window"] <= 13 * s["epoch.length"],
-            BindingSite.CONSUMER_VALIDATED,
+            BindingSite.CONSUMING_ENGINE,
+            ObservedConsumerCheck.CONFORMING,
             "05 §3.1",
         ),
         Coupling(
             "survival-knees",
             ("welfare.thS_lo", "welfare.thS_hi"),
             lambda s: s["welfare.thS_lo"] < s["welfare.thS_hi"],
-            BindingSite.CONSUMER_VALIDATED,
+            BindingSite.CONSUMING_ENGINE,
+            ObservedConsumerCheck.CONFORMING,
             "05 §4.1",
         ),
         Coupling(
             "security-knees",
             ("welfare.thC_lo", "welfare.thC_hi"),
             lambda s: s["welfare.thC_lo"] < s["welfare.thC_hi"],
-            BindingSite.CONSUMER_VALIDATED,
+            BindingSite.CONSUMING_ENGINE,
+            ObservedConsumerCheck.CONFORMING,
             "05 §4.1",
-        ),
-        Coupling(
-            "treasury-proposal-30d",
-            ("trs.cap_proposal", "trs.cap_30d"),
-            lambda s: s["trs.cap_proposal"] <= s["trs.cap_30d"],
-            BindingSite.UNCHECKED,
-            "08 §1.3; 13 §1",
-        ),
-        Coupling(
-            "treasury-30d-180d",
-            ("trs.cap_30d", "trs.cap_180d"),
-            lambda s: s["trs.cap_30d"] <= s["trs.cap_180d"],
-            BindingSite.UNCHECKED,
-            "08 §1.3; 13 §1",
         ),
         Coupling(
             "collator-min-target",
             ("collator.n_min", "collator.n_tgt"),
             lambda s: s["collator.n_min"] <= s["collator.n_tgt"],
-            BindingSite.UNCHECKED,
+            BindingSite.UNSPECIFIED,
+            ObservedConsumerCheck.NOT_APPLICABLE,
             "05 §4.3.1; 13 §1",
-        ),
-        Coupling(
-            "reserve-timeout-interval",
-            ("res.probe_to", "res.probe_int"),
-            lambda s: s["res.probe_to"] < s["res.probe_int"],
-            BindingSite.UNCHECKED,
-            "07 §8; 13 §1",
         ),
     ]
 )
@@ -592,10 +612,10 @@ def min_breaking_sequence(coupling: Coupling, max_steps: int = 32) -> BreakingSe
     """BFS the joint I-6 amendment graph and return the shortest break.
 
     The graph applies record bounds/max-Δ and per-key cooldowns.  It does not
-    apply ``coupling.binding_site``: the point is to ask whether the ordinary
-    record permits a breaking proposal and then check whether the boundary
-    catches it.  Different keys may lawfully change in the same epoch; repeated
-    changes to one key wait for that key's cooldown.
+    apply ``coupling.normative_binding_site``: the point is to ask whether the
+    ordinary record permits a breaking proposal and then check whether the
+    designated site catches it.  Different keys may lawfully change in the same
+    epoch; repeated changes to one key wait for that key's cooldown.
     """
     keys = coupling.keys
     records = tuple(REGISTRY[key] for key in keys)
@@ -682,13 +702,30 @@ class CouplingFinding:
         return self.breakage is not None and self.breakage.steps == 1
 
     @property
+    def issue(self) -> str | None:
+        """The implementation-conformance result, never a specification gap."""
+        if self.coupling.normative_binding_site is not BindingSite.CONSUMING_ENGINE:
+            return None
+        observed = self.coupling.observed_consumer_check
+        if observed is ObservedConsumerCheck.ABSENT:
+            return "required consumer check absent"
+        if observed is ObservedConsumerCheck.INCONSISTENT:
+            return "consumer checks disagree with the normative predicate"
+        return None
+
+    @property
     def ok(self) -> bool:
-        return not self.breakable_in_one or self.coupling.binding_site is BindingSite.BOUNDARY_SCREENED
+        return self.issue is None
 
 
 def coupling_findings() -> tuple[CouplingFinding, ...]:
-    """SQ-547's queryable form: one-step breaks must bind at the boundary."""
+    """All modelled relations with their implementation-conformance result."""
     return tuple(CouplingFinding(c, min_breaking_sequence(c)) for c in COUPLINGS)
+
+
+def check_coupling_conformance() -> tuple[CouplingFinding, ...]:
+    """SQ-547/SQ-548: required consumer checks which are absent or disagree."""
+    return tuple(finding for finding in coupling_findings() if not finding.ok)
 
 
 def path_to_value(key: str, target: int) -> tuple[Amendment, ...] | None:
@@ -752,10 +789,10 @@ _CLASS_SUFFIX = {
 # 08 §4.1 frozen class-floor literals.  The owning section explicitly says
 # these do not share one re-derivation convention and must be carried exactly.
 CLASS_NAV_FLOORS_USDC = {
-    ProposalClass.PARAM: Decimal(4_620_989),
-    ProposalClass.TREASURY: Decimal(7_393_600),
-    ProposalClass.CODE: Decimal(13_862_944),
-    ProposalClass.META: Decimal(21_256_533),
+    ProposalClass.PARAM: NAV_FLOOR_PARAM,
+    ProposalClass.TREASURY: NAV_FLOOR_TREASURY,
+    ProposalClass.CODE: NAV_FLOOR_CODE,
+    ProposalClass.META: NAV_FLOOR_META,
 }
 
 
@@ -863,7 +900,7 @@ def disables_class(
         # 0.5 seed, a recorded observation therefore bottoms out at one raw
         # 1e-9 unit; 05 §5.1's strict `adopt > p_max` is always true at zero.
         return MARKET_BEARING
-    if key in ("dec.window", "dec.trailing") and values["dec.trailing"] >= values["dec.window"]:
+    if key in ("dec.window", "dec.trailing") and values["dec.trailing"] > values["dec.window"]:
         return MARKET_BEARING
     if key.startswith("sec.prize."):
         suffix = key.rsplit(".", 1)[1]
@@ -910,8 +947,8 @@ class SelfSealingCorner:
 
     @property
     def ok(self) -> bool:
-        """A returned corner is, by definition, a governance-liveness failure."""
-        return False
+        """Whether the class which owns repair remains available."""
+        return self.repair_class not in self.disabled_classes
 
 
 def self_sealing_corners(max_steps: int = 32) -> tuple[SelfSealingCorner, ...]:
@@ -1141,20 +1178,16 @@ class KernelHygieneFinding:
 
 
 def _production_rust_files(root: Path) -> Iterable[Path]:
-    for path in sorted(root.rglob("*.rs")):
-        parts = set(path.parts)
-        if "target" in parts or "tests" in parts or "benches" in parts:
-            continue
-        # A git worktree checked out *inside* the repository is a second copy of
-        # every source file, so its declaration of a symbol reads as a consumer of
-        # that symbol and an orphan silently stops looking like one. The scan must
-        # depend only on the canonical tree, never on which worktrees happen to
-        # exist locally (CI checks out neither, so the drift is invisible there).
-        if "worktrees" in parts or ".git" in parts:
-            continue
-        if path.name in {"tests.rs", "mock.rs", "benchmarking.rs"}:
-            continue
-        yield path
+    excluded_dirs = {"target", "tests", "benches", "worktrees", ".git"}
+    excluded_files = {"tests.rs", "mock.rs", "benchmarking.rs"}
+    # Prune before descent: filtering rglob's results is too late for target/
+    # and nested worktrees, whose transient build files may disappear mid-scan.
+    for current, dirs, files in os.walk(root, topdown=True):
+        dirs[:] = sorted(name for name in dirs if name not in excluded_dirs)
+        directory = Path(current)
+        for name in sorted(files):
+            if name.endswith(".rs") and name not in excluded_files:
+                yield directory / name
 
 
 def _rust_code(source: str) -> str:

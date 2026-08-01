@@ -64,6 +64,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from bleavit_reference_model import lifecycle
+from bleavit_reference_model.spec_values import NAV_FLOORS_USDC
 
 WORK_PREC = 60
 MICRO_USDC = Decimal(1_000_000)
@@ -89,12 +90,7 @@ GENESIS_PROTOCOL_ACCOUNTS = 12
 GENESIS_PROTOCOL_USDC = USDC_MIN_BALANCE * GENESIS_PROTOCOL_ACCOUNTS
 
 # 08 §4.1 frozen literals. They are not live re-derivations.
-NAV_FLOORS: dict[str, Decimal] = {
-    "param": Decimal(4_620_989),
-    "treasury": Decimal(7_393_600),
-    "code": Decimal(13_862_944),
-    "meta": Decimal(21_256_533),
-}
+NAV_FLOORS = NAV_FLOORS_USDC
 # 08 §2.5, before Phase-5 TREASURY arming.
 TREASURY_FUNDING_TARGET = Decimal(25_000_000)
 

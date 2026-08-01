@@ -59,11 +59,15 @@ class ClopperPearsonReferenceTests(unittest.TestCase):
 class ClopperPearsonPropertyTests(unittest.TestCase):
     def test_fixed_event_count_tightens_with_more_trials(self) -> None:
         bounds = [upper_bound(2, n, ONE_SIDED_ALPHA) for n in (20, 40, 80, 160)]
-        self.assertTrue(all(left > right for left, right in zip(bounds, bounds[1:])))
+        for index, (left, right) in enumerate(zip(bounds, bounds[1:])):
+            with self.subTest(pair=index):
+                self.assertGreater(left, right)
 
     def test_fixed_denominator_loosens_with_more_events(self) -> None:
         bounds = [upper_bound(k, 80, ONE_SIDED_ALPHA) for k in range(6)]
-        self.assertTrue(all(left < right for left, right in zip(bounds, bounds[1:])))
+        for index, (left, right) in enumerate(zip(bounds, bounds[1:])):
+            with self.subTest(pair=index):
+                self.assertLess(left, right)
 
     def test_invalid_counts_and_inexact_inputs_refuse(self) -> None:
         for args in ((-1, 10), (11, 10), (0, 0), (True, 10)):
@@ -173,7 +177,9 @@ class CommittedArtifactConfidenceTests(unittest.TestCase):
                 "meta": "0.005626",
             },
         )
-        self.assertTrue(all(row.point_rate < FALSE_PASS_GATE for row in findings))
+        for row in findings:
+            with self.subTest(proposal_class=row.proposal_class):
+                self.assertLess(row.point_rate, FALSE_PASS_GATE)
 
     def test_structured_findings_name_each_independent_class(self) -> None:
         findings = check_confidence()
@@ -211,14 +217,26 @@ class AttackStatusTests(unittest.TestCase):
             },
         )
         self.assertEqual(sum(row.causal_wrong_passes for row in findings), 62)
-        self.assertTrue(
-            all(
-                row.published_status == "no_causal_wrong_pass_observed"
-                and row.expected_status == "all_candidates_unprofitable"
-                and not row.ok
-                for row in findings
-            )
-        )
+        for row in findings:
+            with self.subTest(proposal_class=row.proposal_class):
+                self.assertEqual(row.expected_status, "all_candidates_unprofitable")
+                self.assertNotEqual(row.published_status, row.expected_status)
+                self.assertFalse(row.ok)
+
+    def test_repaired_attack_statuses_make_the_accessor_agree(self) -> None:
+        """SQ-550: all-candidates-unprofitable is the derived positive control."""
+        payload = json.loads(COMMITTED_ARTIFACT.read_text(encoding="utf-8"))
+        per_class = payload["attack_cost_validation"]["per_class"]
+        for proposal_class in sorted(per_class):
+            per_class[proposal_class]["status"] = "all_candidates_unprofitable"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "calibration.json"
+            path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+            findings = check_attack_status(path)
+        for row in findings:
+            with self.subTest(proposal_class=row.proposal_class):
+                self.assertEqual(row.expected_status, "all_candidates_unprofitable")
+                self.assertTrue(row.ok)
 
 
 if __name__ == "__main__":

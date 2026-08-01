@@ -1,11 +1,11 @@
-"""Pins doc 14's attack-cost arithmetic and exposes its three red claims.
+"""Pins doc 14's parametric attack costs and exposes its three red claims.
 
-The suite derives every cost from 03/08/13 inputs, reads the published TH-64
-and TH-16 figures from the documents, and checks the two committed call weights
-used to price the live attacks. A false threat-model claim is asserted as the
-false value it actually has and is also returned by `check_threat_cost_claims`.
+Document-derived tests require explicit call fees. Generated Rust weights are
+read only by implementation-evidence tests and by the supporting-evidence field
+of ``check_threat_cost_claims``; they never decide a specification assertion.
 """
 
+import tempfile
 import unittest
 from dataclasses import replace
 from fractions import Fraction
@@ -15,35 +15,32 @@ from bleavit_reference_model.threat_costs import (
     ANNUAL_DISCOUNT_RATE,
     BASELINE_TERMINAL_STATES,
     DAYS_PER_YEAR,
-    DEFAULT_EXTRINSIC_LENGTH,
     DEFAULT_INTAKE_PARAMS,
     EPOCH_DAYS,
-    FEE_VIT_USDC_RATE_MAX,
-    FEE_VIT_USDC_RATE_MIN,
     FEE_VIT_USDC_RATE_REF,
     INTAKE_MAX_PER_ACCOUNT,
     INTAKE_QUEUE,
     LEDGER_ARCHIVE_DEFAULT,
     LEDGER_ARCHIVE_MIN,
-    LEDGER_MIN_SPLIT,
     LEDGER_POSITION_DEPOSIT,
     MAX_POSITIONS_PER_ACCOUNT,
     PRE_REVIEW_COMBINED_LOCKED,
     PRE_REVIEW_INTAKE_LOCKED,
     PROPOSAL_TERMINAL_STATES,
-    REDEEM_SCALAR_WEIGHT,
-    TRANSFER_WEIGHT,
     ThreatCostError,
     attacker_peak_position_deposit,
-    avoidance_breakeven_vit_usdc_rate,
+    avoidance_breakeven_call_fee,
     capital_time_value,
     ceil_fraction,
     check_threat_cost_claims,
     dust_reach,
+    dusting_breakeven_call_fee,
     dusting_cost,
     funded_accounts_required,
-    generated_call_weight,
     intake_monopolization_cost,
+    observed_call_fee,
+    observed_call_weight,
+    parse_generated_call_weight,
     published_intake_forfeits,
     published_redemption_factors,
     queue_occupancy,
@@ -57,128 +54,172 @@ from bleavit_reference_model.threat_costs import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-class CommittedWeightTests(unittest.TestCase):
-    """The attacks are priced from the extrinsics they actually dispatch."""
+class ImplementationEvidenceTests(unittest.TestCase):
+    """Generated Rust values are observable without becoming expected truth."""
 
-    def test_redeem_scalar_weight_matches_the_generated_function(self):
-        # A regenerated redeem_scalar weight must force this model to be
-        # revisited; silently retaining a stale fee recreates TH-64's defect.
-        self.assertEqual(
-            generated_call_weight(REPO_ROOT, "redeem_scalar"), REDEEM_SCALAR_WEIGHT
-        )
-        self.assertEqual(REDEEM_SCALAR_WEIGHT.dispatch_ref_time(), 4_857_520_000)
-        self.assertEqual(REDEEM_SCALAR_WEIGHT.fee_plancks(), 5_318_069_120)
-
-    def test_transfer_weight_matches_the_generated_function(self):
-        # TH-11 is a transfer attack, not a crank. This fails if the transfer
-        # benchmark moves while the incidence model stays stale.
-        self.assertEqual(generated_call_weight(REPO_ROOT, "transfer"), TRANSFER_WEIGHT)
-        self.assertEqual(TRANSFER_WEIGHT.dispatch_ref_time(), 6_618_020_000)
-        self.assertEqual(TRANSFER_WEIGHT.fee_plancks(), 7_078_569_120)
+    def test_observed_accessors_read_the_current_artifact_without_copied_weights(self):
+        for function in ("redeem_scalar", "transfer"):
+            with self.subTest(function=function):
+                weight = observed_call_weight(REPO_ROOT, function)
+                evidence = observed_call_fee(REPO_ROOT, function)
+                self.assertEqual(weight.function, function)
+                self.assertEqual(evidence.weight, weight)
+                self.assertGreater(weight.call_ref_time, weight.minimum_ref_time)
+                self.assertGreater(weight.proof_size, 0)
+                self.assertGreater(evidence.charged_usdc, 0)
+                self.assertGreaterEqual(evidence.charged_usdc, evidence.raw_usdc)
 
     def test_usdc_conversion_rounds_up_against_the_fee_payer(self):
-        raw = raw_transaction_fee_usdc(
-            FEE_VIT_USDC_RATE_REF, REDEEM_SCALAR_WEIGHT
-        )
-        charged = transaction_fee_usdc(
-            FEE_VIT_USDC_RATE_REF, REDEEM_SCALAR_WEIGHT
-        )
-        self.assertEqual(raw, Fraction(8_309_483, 31_250_000_000))
-        self.assertEqual(charged, Fraction(133, 500_000))  # 266 micro-USDC.
-        self.assertGreater(charged, raw)
+        weight = observed_call_weight(REPO_ROOT, "redeem_scalar")
+        raw = raw_transaction_fee_usdc(FEE_VIT_USDC_RATE_REF, weight)
+        charged = transaction_fee_usdc(FEE_VIT_USDC_RATE_REF, weight)
+        self.assertGreaterEqual(charged, raw)
+        self.assertEqual((charged * 1_000_000).denominator, 1)
 
-    def test_the_documented_approximate_length_does_not_move_evaluated_micro_fee(self):
-        # 08 §6.2 says "~120 B" rather than publishing each call's SCALE
-        # length. At both evaluated rates, even a 1,000-byte bracket stays in
-        # the same micro-USDC bucket; the unresolved byte count cannot change
-        # either red finding.
-        for rate, expected in (
-            (FEE_VIT_USDC_RATE_REF, Fraction(266, 1_000_000)),
-            (FEE_VIT_USDC_RATE_MIN, Fraction(27, 1_000_000)),
-        ):
-            with self.subTest(rate=rate):
-                self.assertEqual(
-                    transaction_fee_usdc(rate, REDEEM_SCALAR_WEIGHT, 0), expected
-                )
-                self.assertEqual(
-                    transaction_fee_usdc(rate, REDEEM_SCALAR_WEIGHT, 1_000),
-                    expected,
-                )
+    def test_parser_rejects_extra_ref_time_and_database_terms(self):
+        """A later generated term must not disappear behind the first match."""
+        malformed = """
+impl<T> WeightInfo for T {
+	fn redeem_scalar() -> Weight {
+		// Minimum execution time: 218_060_000 picoseconds.
+		Weight::from_parts(232_520_000, 0)
+			.saturating_add(Weight::from_parts(0, 36928))
+			.saturating_add(T::DbWeight::get().reads(41))
+			.saturating_add(Weight::from_parts(999_000_000, 0))
+			.saturating_add(T::DbWeight::get().reads(999))
+			.saturating_add(T::DbWeight::get().writes(36))
+	}
+}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "weights.rs"
+            path.write_text(malformed, encoding="utf-8")
+            with self.assertRaises(ThreatCostError):
+                parse_generated_call_weight(path, "redeem_scalar")
+
+    def test_parser_rejects_component_bearing_generated_weights(self):
+        malformed = """
+impl<T> WeightInfo for T {
+	fn redeem_scalar() -> Weight {
+		// Minimum execution time: 218_060_000 picoseconds.
+		Weight::from_parts(232_520_000, 0)
+			.saturating_add(Weight::from_parts(0, 36928))
+			.saturating_add(Weight::from_parts(1, 0).saturating_mul(n.into()))
+			.saturating_add(T::DbWeight::get().reads(41))
+			.saturating_add(T::DbWeight::get().writes(36))
+	}
+}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "weights.rs"
+            path.write_text(malformed, encoding="utf-8")
+            with self.assertRaises(ThreatCostError):
+                parse_generated_call_weight(path, "redeem_scalar")
+
+    def test_parser_rejects_each_duplicate_generated_term_family(self):
+        base = """
+impl<T> WeightInfo for T {
+	fn redeem_scalar() -> Weight {
+		// Minimum execution time: 218_060_000 picoseconds.
+		Weight::from_parts(232_520_000, 0)
+			.saturating_add(Weight::from_parts(0, 36928))
+EXTRA
+			.saturating_add(T::DbWeight::get().reads(41))
+			.saturating_add(T::DbWeight::get().writes(36))
+	}
+}
+"""
+        mutations = {
+            "ref-time": "\t\t\t.saturating_add(Weight::from_parts(999_000_000, 0))",
+            "database": "\t\t\t.saturating_add(T::DbWeight::get().reads(999))",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "weights.rs"
+            for label, extra in mutations.items():
+                with self.subTest(term=label):
+                    path.write_text(base.replace("EXTRA", extra), encoding="utf-8")
+                    with self.assertRaises(ThreatCostError):
+                        parse_generated_call_weight(path, "redeem_scalar")
+
+    def test_parser_rejects_an_unfamiliar_addend(self):
+        malformed = """
+impl<T> WeightInfo for T {
+	fn redeem_scalar() -> Weight {
+		// Minimum execution time: 218_060_000 picoseconds.
+		Weight::from_parts(232_520_000, 0)
+			.saturating_add(Weight::from_parts(0, 36928))
+			.saturating_add(Weight::zero())
+			.saturating_add(T::DbWeight::get().reads(41))
+			.saturating_add(T::DbWeight::get().writes(36))
+	}
+}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "weights.rs"
+            path.write_text(malformed, encoding="utf-8")
+            with self.assertRaises(ThreatCostError):
+                parse_generated_call_weight(path, "redeem_scalar")
 
 
 class RedemptionFeeAvoidanceTests(unittest.TestCase):
-    """TH-64 and its two normative copies, repriced from redeem_scalar."""
+    """TH-64 as a function of the per-redemption-call fee."""
 
     def test_all_three_documents_publish_the_same_factor(self):
         # This is a cross-document regression pin, not a correctness claim.
         # It fails if one copy is edited without the other two.
         factors = published_redemption_factors(REPO_ROOT)
-        self.assertEqual(factors.values(), (Fraction(1_000),) * 3)
+        self.assertEqual(len(set(factors.values())), 1)
 
-    def test_sq_556_the_published_default_factor_is_overstated_by_113_times(self):
-        """SQ-556. Three normative texts publish ~1,000x; execution gives 8.8667x.
+    def test_sq_556_the_derived_break_even_is_thirty_micro_usdc_per_call(self):
+        """SQ-556. The fixed factor has no normative per-call fee beneath it.
 
-        100 `redeem_scalar` calls cost 0.0266 USDC at the documented reference
-        rate and avoid 0.003 USDC. Overstating the attacker's cost is unsafe:
-        TH-64 says this arithmetic is the mitigation and supplies no rule.
+        The documents do fix the useful result: 100 calls avoid 0.003 USDC at
+        a one-USDC gross, so the ratio crosses one at exactly 0.00003 USDC per
+        call. A measured runtime fee may support severity, never this derivation.
         """
-        ratio = redemption_fee_avoidance_ratio(Fraction(1))
-        self.assertEqual(ratio, Fraction(133, 15))
-        self.assertLess(ratio, Fraction(1_000))
-        finding = next(
-            row
-            for row in check_threat_cost_claims(REPO_ROOT)
-            if row.key == "TH-64 published default avoidance factor"
+        threshold = avoidance_breakeven_call_fee(Fraction(1))
+        self.assertEqual(threshold, Fraction(3, 100_000))
+        self.assertEqual(
+            redemption_fee_avoidance_ratio(
+                Fraction(1), per_call_fee_usdc=threshold
+            ),
+            1,
         )
-        self.assertFalse(finding.ok)
-        self.assertEqual(finding.actual, ratio)
-
-    def test_sq_556_the_lawful_rate_floor_makes_avoidance_profitable(self):
-        """SQ-556. TH-64 claims its rate envelope bounds degradation; it does not.
-
-        At the exact 08 §9 floor, one `redeem_scalar` costs 27 micro-USDC.
-        One hundred calls cost 0.0027 USDC to avoid 0.003, so the ratio is 0.9
-        and the griefer retains 0.0003 USDC before any off-chain value.
-        """
-        ratio = redemption_fee_avoidance_ratio(
-            Fraction(1), vit_usdc_rate=FEE_VIT_USDC_RATE_MIN
-        )
-        self.assertEqual(ratio, Fraction(9, 10))
-        self.assertLess(ratio, 1)
         finding = next(
             row
             for row in check_threat_cost_claims(REPO_ROOT)
             if row.key
-            == "TH-64 ratio exceeds one across fee.vit_usdc_rate envelope"
+            == "TH-64 fixed avoidance factor has a normative redeem-call fee basis"
         )
-        self.assertFalse(finding.ok)
+        self.assertEqual(finding.sq_id, "SQ-556")
+        self.assertEqual(finding.derived, threshold)
+        self.assertIsNotNone(finding.supporting_evidence)
 
-    def test_breakeven_is_inside_the_lawful_envelope(self):
-        rate = avoidance_breakeven_vit_usdc_rate()
-        self.assertEqual(rate, Fraction(46_875, 8_309_483))
-        self.assertLess(FEE_VIT_USDC_RATE_MIN, rate)
-        self.assertLess(rate, FEE_VIT_USDC_RATE_REF)
+    def test_ratio_is_linear_in_the_explicit_per_call_fee(self):
+        threshold = avoidance_breakeven_call_fee(Fraction(1))
         self.assertEqual(
-            redemption_fee_avoidance_ratio(Fraction(1), vit_usdc_rate=rate), 1
+            redemption_fee_avoidance_ratio(
+                Fraction(1), per_call_fee_usdc=threshold / 2
+            ),
+            Fraction(1, 2),
         )
-
-    def test_ratio_is_monotone_in_the_vit_usdc_rate(self):
-        floor = redemption_fee_avoidance_ratio(
-            Fraction(1), vit_usdc_rate=FEE_VIT_USDC_RATE_MIN
+        self.assertEqual(
+            redemption_fee_avoidance_ratio(
+                Fraction(1), per_call_fee_usdc=threshold * 2
+            ),
+            2,
         )
-        reference = redemption_fee_avoidance_ratio(Fraction(1))
-        ceiling = redemption_fee_avoidance_ratio(
-            Fraction(1), vit_usdc_rate=FEE_VIT_USDC_RATE_MAX
-        )
-        self.assertLess(floor, reference)
-        self.assertLess(reference, ceiling)
-        self.assertGreater(ceiling, 1)
 
     def test_gross_cancels_at_exact_min_split_multiples(self):
         # This catches a per-call fee mistakenly applied once per whole payout.
+        per_call_fee = Fraction(7, 1_000_000)
         self.assertEqual(
-            redemption_fee_avoidance_ratio(Fraction(1)),
-            redemption_fee_avoidance_ratio(Fraction(2)),
+            redemption_fee_avoidance_ratio(
+                Fraction(1), per_call_fee_usdc=per_call_fee
+            ),
+            redemption_fee_avoidance_ratio(
+                Fraction(2), per_call_fee_usdc=per_call_fee
+            ),
         )
 
 
@@ -188,21 +229,32 @@ class PositionDustingTests(unittest.TestCase):
     def test_sq_556_third_party_deposit_incidence_is_inverted(self):
         """SQ-556. TH-11 says deposits make third-party dusting uneconomic.
 
-        At 64 slots the attacker spends 0.662656 USDC while the non-consenting
-        recipient locks 6.4 USDC. The attacker spends less than one ninth of
-        the forced victim outlay; the deposit prices the wrong party.
+        Before an explicit per-call fee, 64 dust transfers cost the attacker
+        0.64 USDC while the recipient locks 6.4 USDC. Direct attacker outlay
+        catches that forced lock only at 0.09 USDC per call; the specification
+        supplies no normative transfer-call fee and prices the wrong party.
         """
-        attacker, victim, recovery = dusting_cost(MAX_POSITIONS_PER_ACCOUNT)
-        self.assertEqual(attacker, Fraction(10_354, 15_625))  # 0.662656.
-        self.assertEqual(victim, Fraction(32, 5))  # 6.4.
-        self.assertEqual(recovery, Fraction(354, 15_625))  # 0.022656.
+        attacker, victim, recovery = dusting_cost(
+            MAX_POSITIONS_PER_ACCOUNT, per_call_fee_usdc=Fraction(0)
+        )
+        threshold = dusting_breakeven_call_fee()
+        self.assertEqual(attacker, Fraction(16, 25))
+        self.assertEqual(victim, Fraction(32, 5))
+        self.assertEqual(recovery, 0)
+        self.assertEqual(threshold, Fraction(9, 100))
         self.assertLess(attacker, victim)
+        at_threshold = dusting_cost(
+            MAX_POSITIONS_PER_ACCOUNT, per_call_fee_usdc=threshold
+        )
+        self.assertEqual(at_threshold[0], at_threshold[1])
         finding = next(
             row
             for row in check_threat_cost_claims(REPO_ROOT)
-            if row.key == "TH-11 attacker outlay covers victim deposit outlay"
+            if row.key == "TH-11 attacker is charged the position deposit it cites"
         )
-        self.assertFalse(finding.ok)
+        self.assertEqual(finding.sq_id, "SQ-556")
+        self.assertEqual(finding.derived, threshold)
+        self.assertIsNotNone(finding.supporting_evidence)
 
     def test_attacker_deposits_are_peak_exposure_not_cumulative_cost(self):
         peak = attacker_peak_position_deposit(MAX_POSITIONS_PER_ACCOUNT)
@@ -227,9 +279,10 @@ class PositionDustingTests(unittest.TestCase):
         )
 
     def test_fast_recovery_is_another_transfer_per_slot(self):
-        _, _, recovery = dusting_cost(MAX_POSITIONS_PER_ACCOUNT)
-        per_transfer = transaction_fee_usdc(FEE_VIT_USDC_RATE_REF, TRANSFER_WEIGHT)
-        self.assertEqual(per_transfer, Fraction(177, 500_000))
+        per_transfer = Fraction(7, 1_000_000)
+        _, _, recovery = dusting_cost(
+            MAX_POSITIONS_PER_ACCOUNT, per_call_fee_usdc=per_transfer
+        )
         self.assertEqual(recovery, MAX_POSITIONS_PER_ACCOUNT * per_transfer)
         self.assertGreater(recovery, 0)
 
@@ -279,11 +332,12 @@ class PositionDustingTests(unittest.TestCase):
             )
         )
 
-    def test_defect_survives_at_both_rate_envelope_ends(self):
-        for rate in (FEE_VIT_USDC_RATE_MIN, FEE_VIT_USDC_RATE_MAX):
-            with self.subTest(rate=rate):
-                attacker, victim, _ = dusting_cost(64, vit_usdc_rate=rate)
-                self.assertLess(attacker, victim)
+    def test_outlay_order_follows_the_explicit_fee_threshold(self):
+        threshold = dusting_breakeven_call_fee()
+        below = dusting_cost(64, per_call_fee_usdc=threshold - Fraction(1, 100))
+        above = dusting_cost(64, per_call_fee_usdc=threshold + Fraction(1, 100))
+        self.assertLess(below[0], below[1])
+        self.assertGreater(above[0], above[1])
 
 
 class IntakeMonopolizationTests(unittest.TestCase):
@@ -311,7 +365,10 @@ class IntakeMonopolizationTests(unittest.TestCase):
         outcome = intake_monopolization_cost("refund_path")
         self.assertEqual(outcome.locked, Fraction(3_000_000))
         self.assertEqual(outcome.cost_per_epoch, Fraction(18_000))
-        self.assertLess(outcome.cost_per_epoch, intake_monopolization_cost("combined").cost_per_epoch)
+        self.assertLess(
+            outcome.cost_per_epoch,
+            intake_monopolization_cost("combined").cost_per_epoch,
+        )
 
     def test_queue_occupancy_requires_sixteen_funded_accounts(self):
         self.assertEqual(queue_occupancy(15), 60)
@@ -337,29 +394,27 @@ class IntakeMonopolizationTests(unittest.TestCase):
         self.assertLess(current_multiple, 61)
 
     def test_sq_556_th16_uses_the_superseded_bond_total(self):
-        """SQ-556. TH-16 publishes 10,900 while 08 §7 derives 18,900.
+        """SQ-556. TH-16 disagrees with 08 §7's derived combined cost.
 
-        The row's figure is exactly ten percent of its superseded 109,000-USDC
-        locked total, not ten percent of the live 189,000 total. This direction
-        is conservative—the real attack is dearer—but violates doc 14 §1's
-        requirement that row constants are normative values.
+        The derived side is 10 percent of the live combined locked capital.
+        TH-16's lower source value is conservative—the real attack is dearer—
+        but violates doc 14 §1's requirement that row constants are normative.
         """
         published = published_intake_forfeits(REPO_ROOT)
         derived = intake_monopolization_cost("combined").cost_per_epoch
-        self.assertEqual(published.threat_row_16, Fraction(10_900))
-        self.assertEqual(published.treasury_section_7, Fraction(18_900))
         self.assertEqual(
-            published.threat_row_16,
-            PRE_REVIEW_COMBINED_LOCKED * DEFAULT_INTAKE_PARAMS.slash_fraction,
+            derived,
+            intake_monopolization_cost("combined").locked
+            * DEFAULT_INTAKE_PARAMS.slash_fraction,
         )
         self.assertEqual(derived, published.treasury_section_7)
-        self.assertLess(published.threat_row_16, derived)
         finding = next(
             row
             for row in check_threat_cost_claims(REPO_ROOT)
             if row.key == "TH-16 agrees with 08 §7 combined recurring cost"
         )
-        self.assertFalse(finding.ok)
+        self.assertEqual(finding.sq_id, "SQ-556")
+        self.assertEqual(finding.derived, derived)
 
     def test_costs_follow_amended_inputs_instead_of_freezing_table_values(self):
         # Halving the queue and doubling the slash changes every affected term;
@@ -377,12 +432,23 @@ class RefusalTests(unittest.TestCase):
     """Invalid inputs fail closed rather than producing a reassuring zero."""
 
     def test_negative_fee_rate_refuses(self):
+        weight = observed_call_weight(REPO_ROOT, "redeem_scalar")
         with self.assertRaises(ThreatCostError):
-            transaction_fee_usdc(Fraction(-1), REDEEM_SCALAR_WEIGHT)
+            transaction_fee_usdc(Fraction(-1), weight)
 
     def test_position_count_beyond_the_kernel_cap_refuses(self):
         with self.assertRaises(ThreatCostError):
-            dusting_cost(MAX_POSITIONS_PER_ACCOUNT + 1)
+            dusting_cost(
+                MAX_POSITIONS_PER_ACCOUNT + 1, per_call_fee_usdc=Fraction(0)
+            )
+
+    def test_negative_parametric_call_fees_refuse(self):
+        with self.assertRaises(ThreatCostError):
+            redemption_fee_avoidance_ratio(
+                Fraction(1), per_call_fee_usdc=Fraction(-1)
+            )
+        with self.assertRaises(ThreatCostError):
+            dusting_cost(1, per_call_fee_usdc=Fraction(-1))
 
     def test_archive_delay_outside_its_registry_bounds_refuses(self):
         with self.assertRaises(ThreatCostError):

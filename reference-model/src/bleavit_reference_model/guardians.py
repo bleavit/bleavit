@@ -12,12 +12,12 @@ Executing the composition exposes four facts the document does not state:
   is 2,500 USDC, the five-seat approving coalition is 12,500 USDC, and all
   seven seats are 17,500 USDC; across the rate's lawful 0.1x–10x envelope a
   seat spans 250–25,000 USDC;
-* the fixed 25,000-VIT slash exhausts a seat after two failed reviews, capping
-  its lifetime slash at 2,500 USDC at that placeholder, while §5.1's
-  membership-only action gate still admits the zero-bond member. A third
-  failure is therefore free if the values layer has declined or failed to
-  enact both automatically scheduled recalls;
-* the shipped strict epoch-index fallback plus a successful guardian-track
+* "50% of bond" has two exact readings. Applied to the live held bond it
+  halves 50,000 → 25,000 → 12,500 → … and never reaches zero; applied to the
+  original seat bond it charges 25,000 each time and saturates after two. The
+  document does not choose a basis. Under either reading §5.1's action gate is
+  membership-only and does not inspect the remaining bond;
+* the documented strict epoch-index fallback plus a successful guardian-track
   recall takes at most 74 days at the defaults and 221 days at the lawful
   ``(grd.review_dl, epoch.length)`` maximum: 74/21 and 221/42 obstruction
   cycles. The block-duration deadline the document prefers would instead take
@@ -31,7 +31,8 @@ Executing the composition exposes four facts the document does not state:
 Units: VIT quantities are whole tokens and day quantities are exact
 ``Fraction`` values. USDC is ``Decimal`` at six-decimal base-unit precision.
 Conversion rounds down, against the guardian as collateral claimant: rounding
-up would overstate the accountable capital. Timing is not rounded.
+up would overstate the accountable capital. Bond ladders use exact
+``Fraction`` VIT and timing is not rounded.
 """
 
 from __future__ import annotations
@@ -127,58 +128,81 @@ def lawful_bond_stack_envelope() -> tuple[BondStack, BondStack]:
 # ---------------------------------------------------------------------------
 
 
+SlashBasis = Literal["live-held-bond", "original-seat-bond"]
+
+
 @dataclass(frozen=True)
 class Liability:
-    """One seat's constant-slash ladder after ``failures`` failed reviews."""
+    """One seat's exact ladder under an explicit reading of "bond"."""
 
     failures: int
-    initial_bond_vit: int
-    nominal_slash_per_failure_vit: int
-    cumulative_slashed_vit: int
-    remaining_bond_vit: int
-    next_failure_slash_vit: int
+    slash_basis: SlashBasis
+    initial_bond_vit: Fraction
+    first_failure_slash_vit: Fraction
+    last_failure_slash_vit: Fraction
+    cumulative_slashed_vit: Fraction
+    remaining_bond_vit: Fraction
+    next_failure_slash_vit: Fraction
 
     @property
     def exhausted(self) -> bool:
         return self.remaining_bond_vit == 0
 
 
-def lifetime_liability(n_failures: int) -> Liability:
-    """Apply §5.4(3)'s 50%-of-seat-bond slash with saturation at zero.
+def lifetime_liability(n_failures: int, *, slash_basis: SlashBasis) -> Liability:
+    """Apply §5.4(3) under one explicit slash-basis scenario.
 
-    The slash base is the 50,000-VIT seat bond, not the remaining balance.
-    Fifty percent is integral here; were it not, a slash would round up because
-    rounding a charge down is claimant-favouring. Actual cumulative slashing
-    cannot exceed the held bond.
+    ``live-held-bond`` applies 50% to the balance currently held. It remains a
+    positive exact fraction after every finite failure count. ``original-seat-
+    bond`` applies 50% of 50,000 VIT on every failure and saturates at the held
+    amount. The document's phrase "50% of bond" does not select between them.
     """
     if isinstance(n_failures, bool) or not isinstance(n_failures, int):
         raise GuardianDerivationError("failure count must be an integer")
     if n_failures < 0:
         raise GuardianDerivationError("failure count cannot be negative")
-    nominal = Fraction(GUARDIAN_BOND_VIT) * REVIEW_SLASH_FRACTION
-    if nominal.denominator != 1:
-        nominal_slash = -(-nominal.numerator // nominal.denominator)
+    initial = Fraction(GUARDIAN_BOND_VIT)
+    first_slash = initial * REVIEW_SLASH_FRACTION
+    if slash_basis == "live-held-bond":
+        remaining = initial * (1 - REVIEW_SLASH_FRACTION) ** n_failures
+        cumulative = initial - remaining
+        last_slash = (
+            Fraction(0)
+            if n_failures == 0
+            else initial
+            * (1 - REVIEW_SLASH_FRACTION) ** (n_failures - 1)
+            * REVIEW_SLASH_FRACTION
+        )
+        next_slash = remaining * REVIEW_SLASH_FRACTION
+    elif slash_basis == "original-seat-bond":
+        cumulative = min(initial, n_failures * first_slash)
+        remaining = initial - cumulative
+        previous_cumulative = min(initial, max(0, n_failures - 1) * first_slash)
+        last_slash = cumulative - previous_cumulative
+        next_slash = min(first_slash, remaining)
     else:
-        nominal_slash = nominal.numerator
-    cumulative = min(GUARDIAN_BOND_VIT, n_failures * nominal_slash)
-    remaining = GUARDIAN_BOND_VIT - cumulative
+        raise GuardianDerivationError(f"unknown slash basis {slash_basis!r}")
     return Liability(
         failures=n_failures,
-        initial_bond_vit=GUARDIAN_BOND_VIT,
-        nominal_slash_per_failure_vit=nominal_slash,
+        slash_basis=slash_basis,
+        initial_bond_vit=initial,
+        first_failure_slash_vit=first_slash,
+        last_failure_slash_vit=last_slash,
         cumulative_slashed_vit=cumulative,
         remaining_bond_vit=remaining,
-        next_failure_slash_vit=min(nominal_slash, remaining),
+        next_failure_slash_vit=next_slash,
     )
 
 
-def member_can_propose_or_approve(*, is_member: bool, remaining_bond_vit: int) -> bool:
+def member_can_propose_or_approve(
+    *, is_member: bool, remaining_bond_vit: Fraction | int
+) -> bool:
     """06 §5.1's action gate, which tests membership and not remaining bond.
 
-    This is also the shipped gate at commit ``0b160ab``: both action calls use
-    the pure membership check, while the bond balance is not read. The balance
-    is accepted here so the missing composition is executable rather than
-    hidden in prose; changing it does not change the verdict.
+    §5.1 says any member may call both action methods and names no live-bond
+    precondition. The balance is accepted here so the documented composition
+    is executable rather than hidden in prose; changing it does not change the
+    verdict.
     """
     if remaining_bond_vit < 0:
         raise GuardianDerivationError("remaining bond cannot be negative")
@@ -194,24 +218,36 @@ class Finding:
     detail: str
 
 
-def accountability_findings(n_failures: int = 2) -> tuple[Finding, ...]:
-    """Evaluate the liability and action-gate composition (SQ-558)."""
-    liability = lifetime_liability(n_failures)
+def accountability_findings(
+    n_failures: int, *, slash_basis: SlashBasis
+) -> tuple[Finding, ...]:
+    """Report SQ-558's ambiguity and one conditional ladder result."""
+    liability = lifetime_liability(n_failures, slash_basis=slash_basis)
+    other_basis: SlashBasis = (
+        "original-seat-bond"
+        if slash_basis == "live-held-bond"
+        else "live-held-bond"
+    )
+    other = lifetime_liability(n_failures, slash_basis=other_basis)
     can_act = member_can_propose_or_approve(
         is_member=True, remaining_bond_vit=liability.remaining_bond_vit
     )
     return (
         Finding(
-            key="remaining liability after repeated review failures",
-            ok=liability.remaining_bond_vit > 0,
-            detail=f"{liability.remaining_bond_vit} VIT remains",
+            key="06.review-slash-basis-is-specified",
+            ok=False,
+            detail=(
+                f"after {n_failures} failures: {slash_basis} leaves "
+                f"{liability.remaining_bond_vit} VIT; {other_basis} leaves "
+                f"{other.remaining_bond_vit} VIT"
+            ),
         ),
         Finding(
-            key="action eligibility requires remaining liability",
-            ok=liability.remaining_bond_vit > 0 or not can_act,
+            key="06.action-gate-is-membership-only",
+            ok=can_act,
             detail=(
-                f"member_can_act={can_act} at "
-                f"{liability.remaining_bond_vit} VIT remaining"
+                f"conditional {slash_basis} ladder: member_can_act={can_act} "
+                f"at {liability.remaining_bond_vit} VIT remaining"
             ),
         ),
     )
@@ -221,7 +257,7 @@ def accountability_findings(n_failures: int = 2) -> tuple[Finding, ...]:
 # 06 §5.4 — review failure and successful recall latency.
 # ---------------------------------------------------------------------------
 
-DeadlineMode = Literal["shipped-strict-epoch", "exact-duration"]
+DeadlineMode = Literal["strict-epoch-fallback", "exact-duration"]
 
 # 13 §1 registry rows, expressed in days for composition with 06 §2.1.
 EPOCH_LENGTH_DAYS_DEFAULT = Fraction(21)
@@ -282,11 +318,11 @@ def capture_run(
     review_deadline_epochs: int = REVIEW_DEADLINE_EPOCHS_DEFAULT,
     epoch_length_days: Fraction | int = EPOCH_LENGTH_DAYS_DEFAULT,
     *,
-    deadline_mode: DeadlineMode = "shipped-strict-epoch",
+    deadline_mode: DeadlineMode = "strict-epoch-fallback",
 ) -> CaptureRun:
     """Compose review failure with the full guardian-track recall schedule.
 
-    ``shipped-strict-epoch`` is 06 §5.4's permitted interim implementation:
+    ``strict-epoch-fallback`` is 06 §5.4's permitted interim implementation:
     failure occurs only when ``current_epoch > action_epoch + review_dl``, so
     the worst wait is ``(review_dl + 1) * epoch.length``. ``exact-duration`` is
     the document's preferred block deadline and waits exactly
@@ -302,7 +338,7 @@ def capture_run(
         raise GuardianDerivationError(
             "epoch.length outside its 13 §1 [14 d, 42 d] bounds"
         )
-    if deadline_mode == "shipped-strict-epoch":
+    if deadline_mode == "strict-epoch-fallback":
         review_wait = (review_deadline_epochs + 1) * epoch_days
     elif deadline_mode == "exact-duration":
         review_wait = review_deadline_epochs * epoch_days
@@ -346,7 +382,7 @@ def renewal_slack(
 def renewal_record_available(now_days: Fraction | int, expiry_days: Fraction | int) -> bool:
     """Whether the active record needed by ``renew_playbook`` still exists.
 
-    06 §6.3 says the activation auto-expires; the shipped expiry rule removes
+    06 §6.3 says the activation auto-expires; its expiry rule removes
     it at ``now >= expiry``. A late renewal therefore refuses rather than
     reviving the expired activation.
     """
@@ -378,7 +414,7 @@ def incident_freeze_budget(
 ) -> Fraction:
     """Aggregate upper budget of fresh post-expiry activation records.
 
-    The document and shipped state machine reject a duplicate while the first
+    The documented state machine rejects a duplicate while the first
     record is active, but after expiry a new 5-of-7 activation starts with
     ``renewals_used = 0``. Consequently 28 days is a per-activation statement,
     not a finite incident bound. This function totals the per-activation upper

@@ -1,23 +1,23 @@
-"""00 D-1; 03 §6.4; 04 §9, §12; 05 §5, §7 — VOID-contaminated prices.
+"""00 D-1 redemption arithmetic and a non-normative VOID-price sensitivity.
 
-D-1 values an unpaired branch-USDC at one half of USDC and an unpaired
-scalar or gate leg at one quarter.  Doc 04 denominates every proposal book in
-that branch-USDC, and doc 05 consumes the resulting TWAPs without removing the
-VOID state.  The executable consequence is a price floor: the VOID-only book
-price is `(1/4) / (1/2) = 1/2`, independent of the fact the leg predicts.
+D-1 values an unpaired branch-USDC at one half of USDC and an unpaired scalar
+or gate leg at one quarter. The normative derivation in this module ends at
+those payouts and their exact ratio: a VOID leg is worth one half of a
+VOID branch-USDC in redemption units.
 
-Two results fall out that the documents do not state:
+D-1 does **not** define a quote as expected leg payout divided by expected
+branch-USDC payout, define ``pi`` or branch-resolution weights ``w``, or claim
+that inventory-derived LMSR prices converge to that quotient. The rest of the
+module is therefore explicitly a risk-neutral sensitivity. Every readout
+carries :class:`RiskNeutralQuoteScenario`, including the otherwise-missing
+assumption that quotes converge to an expected-value ratio.
 
-* with equal branch-resolution weights, the common pull toward one half only
-  shrinks an ACCEPT-minus-REJECT uplift, so the error is status-quo-favouring;
-* with complementary but asymmetric weights, the pulls differ.  SQ-559: a
-  true REJECT can pass the pricing part of the ADOPT rule while both §5.1 gate
-  vetoes remain clear.  The corrected exact witness uses `pi = 1/50`,
-  `w_accept = 1/5`, true decision values `2/5` and `91/250`, and the two gate
-  pairs published by 04 §12.  Its true uplift is `9/250 = 0.036`, below the
-  TREASURY hurdle `3/80 = 0.0375`; its contaminated uplift is larger than the
-  hurdle.  Unlike an earlier audit witness, the branch weights sum to one and
-  the gate ordering does not mask the result.
+Under that non-normative assumption, equal branch weights shrink an
+ACCEPT-minus-REJECT uplift, while complementary asymmetric weights can produce
+a hypothetical false ADOPT in the supplied scenario. SQ-559 records that
+sensitivity without treating it as a mechanical specification contradiction.
+The actionable document observation is narrower: 05 §5 reads raw TWAPs and no
+document adopts a VOID-adjusted series.
 
 The same execution corrects the worked-example sensitivity: `7/82`
 (`8.5366… %`) is only the full-window hurdle equality.  The example first
@@ -29,7 +29,8 @@ The Baseline book is deliberately separate.  It has plain-USDC collateral and
 toward one half is therefore :func:`baseline_neutral_price`, not the D-1
 quarter-over-half ratio used by :func:`leg_price`.
 
-Units: all inputs and outputs are exact probabilities or branch-USDC prices,
+Units: all sensitivity inputs and outputs are exact probabilities or
+branch-USDC quote hypotheses,
 represented by :class:`fractions.Fraction`.  D-1 redemption of integer claim
 amounts rounds down, against the claimant and in favour of escrow (R-7).
 Pricing uses the schedule's exact claim values before holder-specific integer
@@ -49,7 +50,7 @@ VoidInstrument = Literal["branch_usdc", "leg"]
 
 
 class PricingRefused(ValueError):
-    """A price whose probability or numeraire is undefined refuses (G-1)."""
+    """A sensitivity whose probability or numeraire is undefined refuses."""
 
 
 def _exact(name: str, value: Exact) -> Fraction:
@@ -82,8 +83,8 @@ class VoidSchedule:
         object.__setattr__(self, "leg_value", leg)
 
     @property
-    def void_book_price(self) -> Fraction:
-        """A leg's VOID claim in its branch-USDC numeraire."""
+    def leg_value_in_branch_units(self) -> Fraction:
+        """A leg's D-1 redemption value in branch-USDC redemption units."""
         return self.leg_value / self.branch_value
 
     def payout(self, amount: int, instrument: VoidInstrument) -> int:
@@ -110,6 +111,25 @@ D1_SCHEDULE = VoidSchedule()
 # 05 §7(5)-(6): Baseline is settled, independently, at neutral `s = 0.5`.
 BASELINE_NEUTRAL_SCORE = Fraction(1, 2)
 
+
+@dataclass(frozen=True)
+class RiskNeutralQuoteScenario:
+    """Non-normative inputs for the expected-value quote sensitivity.
+
+    The boolean has no default because D-1 does not supply the convergence
+    premise. A false value records that the sensitivity is inapplicable; price
+    readouts refuse instead of silently promoting the premise to specification.
+    """
+
+    void_probability: Fraction
+    quotes_converge_to_expected_value_ratio: bool
+
+    def __post_init__(self) -> None:
+        probability = _probability("void_probability", self.void_probability)
+        if not isinstance(self.quotes_converge_to_expected_value_ratio, bool):
+            raise PricingRefused("quote-convergence premise must be boolean")
+        object.__setattr__(self, "void_probability", probability)
+
 # 13 §1 registry defaults consumed by 05 §5 and 04 §12.
 DEC_DELTA_TRS = Fraction(3, 80)  # `dec.delta.trs` = 0.0375.
 DEC_SIGMA_TRS = Fraction(1, 200)  # `dec.sigma.trs` = 0.005.
@@ -128,15 +148,34 @@ EXAMPLE_GATE_SURVIVAL = (Fraction(11, 1_000), Fraction(9, 1_000))
 EXAMPLE_GATE_SECURITY = (Fraction(17, 1_000), Fraction(15, 1_000))
 
 
-def branch_information_weight(pi: Exact, w: Exact) -> Fraction:
-    """Share of the branch-USDC numeraire backed by non-VOID realization.
+def _require_convergence(scenario: RiskNeutralQuoteScenario) -> Fraction:
+    if not scenario.quotes_converge_to_expected_value_ratio:
+        raise PricingRefused(
+            "risk-neutral quote sensitivity requires the explicit convergence premise"
+        )
+    return scenario.void_probability
+
+
+def _require_convergence_flag(
+    quotes_converge_to_expected_value_ratio: bool,
+) -> None:
+    if quotes_converge_to_expected_value_ratio is not True:
+        raise PricingRefused(
+            "quote-boundary sensitivity requires the explicit convergence premise"
+        )
+
+
+def branch_information_weight(
+    scenario: RiskNeutralQuoteScenario, w: Exact
+) -> Fraction:
+    """Non-normative realized-branch share of the expected numeraire.
 
     The branch-USDC's expected USDC value is
     `(1-pi)·w + pi·D1.branch_value`.  This function returns the first term's
-    share.  Under D-1, :func:`leg_price` is that share times `q`, plus the
-    remaining share times the VOID book price one half.
+    share under the scenario's convergence premise. This equation is a
+    sensitivity assumption, not a consequence stated by D-1.
     """
-    void_probability = _probability("pi", pi)
+    void_probability = _require_convergence(scenario)
     branch_weight = _probability("w", w)
     realized = (1 - void_probability) * branch_weight
     denominator = realized + void_probability * D1_SCHEDULE.branch_value
@@ -147,23 +186,26 @@ def branch_information_weight(pi: Exact, w: Exact) -> Fraction:
     return realized / denominator
 
 
-def leg_price(q: Exact, pi: Exact, w: Exact) -> Fraction:
-    """Risk-neutral leg price in branch-USDC, derived from D-1's schedule.
+def leg_price(
+    q: Exact, scenario: RiskNeutralQuoteScenario, w: Exact
+) -> Fraction:
+    """Non-normative risk-neutral leg quote in branch-USDC.
 
     `q` is the leg's payoff probability conditional on this branch realizing
-    and no VOID.  `pi` is the unconditional VOID probability.  `w` is this
-    branch's realization probability conditional on no VOID.
+    and no VOID. The scenario supplies `pi` and the otherwise-unstated quote
+    convergence premise. `w` is the scenario's branch realization probability
+    conditional on no VOID.
 
     The USDC-valued numerator and numeraire are derived independently:
 
     * leg: `(1-pi)·w·q + pi·(1/4)`;
     * branch-USDC: `(1-pi)·w + pi·(1/2)`.
 
-    Their quotient is the book price.  No formula from an implementation is
-    involved; the two VOID terms are exactly D-1 / 03 §6.4.
+    Their quotient is the hypothetical quote **only if** the named convergence
+    premise holds. D-1 supplies the two VOID payout terms but not this equation.
     """
     conditional_value = _probability("q", q)
-    void_probability = _probability("pi", pi)
+    void_probability = _require_convergence(scenario)
     branch_weight = _probability("w", w)
     non_void_branch = (1 - void_probability) * branch_weight
     leg_usdc = non_void_branch * conditional_value + void_probability * D1_SCHEDULE.leg_value
@@ -175,32 +217,39 @@ def leg_price(q: Exact, pi: Exact, w: Exact) -> Fraction:
     return leg_usdc / branch_usdc
 
 
-def baseline_neutral_price(q: Exact, pi: Exact) -> Fraction:
-    """Baseline price under 05 §7's neutral settlement, not under D-1.
+def baseline_neutral_price(
+    q: Exact, scenario: RiskNeutralQuoteScenario
+) -> Fraction:
+    """Non-normative Baseline quote sensitivity under neutral settlement.
 
     Baseline collateral is plain USDC, so there is no branch-USDC denominator:
     `(1-pi)·q + pi·0.5`.  Numerically this happens to equal an equal-weight
-    proposal-leg price under D-1, but the equality disappears for `w != 1/2`
-    and the mechanisms must not be conflated.
+    proposal-leg sensitivity under D-1, but the equality disappears for
+    `w != 1/2` and the mechanisms must not be conflated.
     """
     conditional_value = _probability("q", q)
-    void_probability = _probability("pi", pi)
+    void_probability = _require_convergence(scenario)
     return (1 - void_probability) * conditional_value + void_probability * BASELINE_NEUTRAL_SCORE
 
 
-def degenerate_branch_price(pi: Exact) -> Fraction:
-    """Price of every leg when its branch has zero non-VOID realization weight.
+def degenerate_branch_price(scenario: RiskNeutralQuoteScenario) -> Fraction:
+    """Sensitivity quote when a branch has zero non-VOID realization weight.
 
     Any positive VOID probability leaves only D-1's quarter-value leg and
     half-value branch-USDC, hence exactly one half independent of `q`.
     """
-    void_probability = _probability("pi", pi)
+    void_probability = _require_convergence(scenario)
     if void_probability == 0:
         raise PricingRefused("the w = 0 book has no numeraire when pi = 0")
-    return D1_SCHEDULE.void_book_price
+    return D1_SCHEDULE.leg_value_in_branch_units
 
 
-def veto_breach_ratio(q: Exact, p_max: Exact = GATE_P_MAX) -> Fraction | None:
+def veto_breach_ratio(
+    q: Exact,
+    p_max: Exact = GATE_P_MAX,
+    *,
+    quotes_converge_to_expected_value_ratio: bool,
+) -> Fraction | None:
     """VOID-to-realized-branch mass at the absolute-veto equality boundary.
 
     Let `r = pi / ((1-pi)·w)`.  Dividing :func:`leg_price` by the realized
@@ -211,11 +260,12 @@ def veto_breach_ratio(q: Exact, p_max: Exact = GATE_P_MAX) -> Fraction | None:
     Returns zero when the non-VOID value is already at or above the boundary,
     and ``None`` when the D-1 target cannot cross `p_max` from below.
     """
+    _require_convergence_flag(quotes_converge_to_expected_value_ratio)
     conditional_value = _probability("q", q)
     cap = _probability("p_max", p_max)
     if conditional_value >= cap:
         return Fraction(0)
-    if D1_SCHEDULE.void_book_price <= cap:
+    if D1_SCHEDULE.leg_value_in_branch_units <= cap:
         return None
     coefficient = D1_SCHEDULE.leg_value - cap * D1_SCHEDULE.branch_value
     if coefficient <= 0:
@@ -234,13 +284,20 @@ def void_probability_from_ratio(ratio: Exact, w: Exact) -> Fraction:
     return r * branch_weight / (1 + r * branch_weight)
 
 
-def symmetric_hurdle_boundary(q_accept: Exact, q_reject: Exact, delta: Exact) -> Fraction | None:
+def symmetric_hurdle_boundary(
+    q_accept: Exact,
+    q_reject: Exact,
+    delta: Exact,
+    *,
+    quotes_converge_to_expected_value_ratio: bool,
+) -> Fraction | None:
     """VOID probability at hurdle equality when both branch weights are 1/2.
 
     Both prices have the same denominator and VOID offset, so their difference
     is the true uplift times one common information weight.  Returns ``None``
     if the non-VOID pair does not initially pass the hurdle.
     """
+    _require_convergence_flag(quotes_converge_to_expected_value_ratio)
     accept = _probability("q_accept", q_accept)
     reject = _probability("q_reject", q_reject)
     hurdle = _exact("delta", delta)
@@ -275,16 +332,33 @@ class WorkedExampleBoundaries:
         )
 
 
-def worked_example_boundaries() -> WorkedExampleBoundaries:
+def worked_example_boundaries(
+    *, quotes_converge_to_expected_value_ratio: bool
+) -> WorkedExampleBoundaries:
     """Re-derive all published 04 §12 boundaries under equal branch weights."""
+    _require_convergence_flag(quotes_converge_to_expected_value_ratio)
     full = symmetric_hurdle_boundary(
-        EXAMPLE_FULL_ACCEPT, EXAMPLE_FULL_REJECT, DEC_DELTA_TRS
+        EXAMPLE_FULL_ACCEPT,
+        EXAMPLE_FULL_REJECT,
+        DEC_DELTA_TRS,
+        quotes_converge_to_expected_value_ratio=True,
     )
     trailing = symmetric_hurdle_boundary(
-        EXAMPLE_TRAILING_ACCEPT, EXAMPLE_TRAILING_REJECT, DEC_DELTA_TRS
+        EXAMPLE_TRAILING_ACCEPT,
+        EXAMPLE_TRAILING_REJECT,
+        DEC_DELTA_TRS,
+        quotes_converge_to_expected_value_ratio=True,
     )
-    survival_ratio = veto_breach_ratio(EXAMPLE_GATE_SURVIVAL[0], GATE_P_MAX)
-    security_ratio = veto_breach_ratio(EXAMPLE_GATE_SECURITY[0], GATE_P_MAX)
+    survival_ratio = veto_breach_ratio(
+        EXAMPLE_GATE_SURVIVAL[0],
+        GATE_P_MAX,
+        quotes_converge_to_expected_value_ratio=True,
+    )
+    security_ratio = veto_breach_ratio(
+        EXAMPLE_GATE_SECURITY[0],
+        GATE_P_MAX,
+        quotes_converge_to_expected_value_ratio=True,
+    )
     if full is None or trailing is None or survival_ratio is None or security_ratio is None:
         raise PricingRefused("04 §12's published passing example has no equality boundary")
     return WorkedExampleBoundaries(
@@ -306,7 +380,7 @@ class GateConditionalValues:
 
 @dataclass(frozen=True)
 class PricingInputs:
-    """Inputs to the price-reading part of 05 §5's ordered decision rule.
+    """Inputs to a non-normative sensitivity of 05 §5's raw-TWAP rule.
 
     Tail values are taken equal to full-window values for the asymmetric
     witness.  Book validity, convergence, security sizing and non-price holds
@@ -317,7 +391,7 @@ class PricingInputs:
     decision_accept: Fraction
     decision_reject: Fraction
     baseline: Fraction
-    pi: Fraction
+    scenario: RiskNeutralQuoteScenario
     gates: tuple[GateConditionalValues, ...]
     delta: Fraction = DEC_DELTA_TRS
     sigma: Fraction = DEC_SIGMA_TRS
@@ -334,7 +408,7 @@ class GateReadout:
 
 @dataclass(frozen=True)
 class PricingReadout:
-    """True and VOID-contaminated readings at one complementary weight pair."""
+    """Conditional and sensitivity readings at one complementary weight pair."""
 
     inputs: PricingInputs
     w_accept: Fraction
@@ -398,10 +472,10 @@ class PricingReadout:
 
 
 def price_readout(inputs: PricingInputs, w_accept: Exact) -> PricingReadout:
-    """Price 05 §5's proposal-book inputs with complementary branch weights."""
+    """Run the quote sensitivity with complementary branch weights."""
     accept_weight = _probability("w_accept", w_accept)
     reject_weight = 1 - accept_weight
-    pi = _probability("pi", inputs.pi)
+    _require_convergence(inputs.scenario)
     decision_accept = _probability("decision_accept", inputs.decision_accept)
     decision_reject = _probability("decision_reject", inputs.decision_reject)
     baseline = _probability("baseline", inputs.baseline)
@@ -419,8 +493,8 @@ def price_readout(inputs: PricingInputs, w_accept: Exact) -> PricingReadout:
         gate_readouts.append(
             GateReadout(
                 gate,
-                leg_price(gate_accept, pi, accept_weight),
-                leg_price(gate_reject, pi, reject_weight),
+                leg_price(gate_accept, inputs.scenario, accept_weight),
+                leg_price(gate_reject, inputs.scenario, reject_weight),
             )
         )
 
@@ -430,7 +504,7 @@ def price_readout(inputs: PricingInputs, w_accept: Exact) -> PricingReadout:
         decision_accept=decision_accept,
         decision_reject=decision_reject,
         baseline=baseline,
-        pi=pi,
+        scenario=inputs.scenario,
         gates=tuple(
             GateConditionalValues(
                 gate.name,
@@ -448,9 +522,9 @@ def price_readout(inputs: PricingInputs, w_accept: Exact) -> PricingReadout:
         inputs=normalized,
         w_accept=accept_weight,
         w_reject=reject_weight,
-        accept_price=leg_price(decision_accept, pi, accept_weight),
-        reject_price=leg_price(decision_reject, pi, reject_weight),
-        baseline_price=baseline_neutral_price(baseline, pi),
+        accept_price=leg_price(decision_accept, inputs.scenario, accept_weight),
+        reject_price=leg_price(decision_reject, inputs.scenario, reject_weight),
+        baseline_price=baseline_neutral_price(baseline, inputs.scenario),
         gates=tuple(gate_readouts),
     )
 
@@ -513,7 +587,7 @@ def search_false_adopt_interval(
     """
     if isinstance(iterations, bool) or not isinstance(iterations, int) or iterations < 1:
         raise PricingRefused(f"iterations must be a positive integer, got {iterations!r}")
-    pi = _probability("pi", inputs.pi)
+    pi = _require_convergence(inputs.scenario)
     if pi == 0:
         raise PricingRefused("continuous search at w_accept = 0 requires pi > 0")
     monotone_values = (
@@ -572,7 +646,7 @@ def search_false_adopt_interval(
 
 @dataclass(frozen=True)
 class PricingFinding:
-    """A queryable claim check, matching the S6 evidence-module convention."""
+    """A queryable document observation or conditional sensitivity."""
 
     key: str
     ok: bool
@@ -583,26 +657,48 @@ class PricingFinding:
 def check_weight_safety(
     inputs: PricingInputs, accept_weights: Iterable[Exact]
 ) -> tuple[PricingFinding, ...]:
-    """Check the symmetric claim and search the asymmetric one (SQ-559)."""
+    """Report SQ-559 without treating a pricing hypothesis as a defect.
+
+    Every returned finding is ``ok=True``. The first records the supported
+    document observation. The second either reports that the sensitivity was
+    not run because its convergence premise is absent, or reports the exact
+    hypothetical result conditional on that premise.
+    """
+    if not inputs.scenario.quotes_converge_to_expected_value_ratio:
+        return (
+            PricingFinding(
+                key="decision rule reads raw TWAP without a VOID-adjusted series",
+                ok=True,
+                detail="05 §5 consumes raw TWAPs; no document adopts a VOID-adjusted series",
+            ),
+            PricingFinding(
+                key="risk-neutral VOID sensitivity",
+                ok=True,
+                detail=(
+                    "not evaluated: scenario does not assume quotes converge "
+                    "to expected payout over expected branch-USDC value"
+                ),
+            ),
+        )
     symmetric = price_readout(inputs, Fraction(1, 2))
     witness = search_false_adopt(inputs, accept_weights)
     return (
         PricingFinding(
-            key="equal branch weights preserve a true REJECT",
-            ok=not symmetric.false_adopt,
+            key="decision rule reads raw TWAP without a VOID-adjusted series",
+            ok=True,
             detail=(
-                f"true uplift {symmetric.true_uplift}; equal-weight priced uplift "
-                f"{symmetric.priced_uplift}"
+                "05 §5 consumes raw TWAPs; no document adopts a VOID-adjusted series; "
+                f"equal-weight sensitivity false_adopt={symmetric.false_adopt}"
             ),
-            witness=symmetric if symmetric.false_adopt else None,
         ),
         PricingFinding(
-            key="lawful asymmetric weights preserve a true REJECT",
-            ok=witness is None,
+            key="risk-neutral VOID sensitivity",
+            ok=True,
             detail=(
-                "no false ADOPT in supplied exact weight space"
+                "no hypothetical false ADOPT in supplied exact weight space"
                 if witness is None
                 else (
+                    "conditional on risk-neutral quote convergence: "
                     f"w_accept={witness.w_accept}, w_reject={witness.w_reject}, "
                     f"true uplift={witness.true_uplift}, priced uplift={witness.priced_uplift}"
                 )
@@ -612,7 +708,12 @@ def check_weight_safety(
     )
 
 
-def degenerate_reject_probability_boundary(pi: Exact, delta: Exact) -> Fraction:
+def degenerate_reject_probability_boundary(
+    pi: Exact,
+    delta: Exact,
+    *,
+    quotes_converge_to_expected_value_ratio: bool,
+) -> Fraction:
     """Reject-leg `q` at hurdle equality as `w_accept -> 0`, `w_reject -> 1`.
 
     The ACCEPT price is D-1's one-half target, independent of its truth.  This
@@ -622,13 +723,14 @@ def degenerate_reject_probability_boundary(pi: Exact, delta: Exact) -> Fraction:
     boundary, not a claim that the gate vetoes also clear at `w_accept = 0` —
     they do not, which is why :func:`search_false_adopt` checks them explicitly.
     """
+    _require_convergence_flag(quotes_converge_to_expected_value_ratio)
     void_probability = _probability("pi", pi)
     hurdle = _exact("delta", delta)
     if not Fraction(0) < void_probability < Fraction(1):
         raise PricingRefused("degenerate boundary requires 0 < pi < 1")
     if hurdle <= 0:
         raise PricingRefused(f"delta {hurdle} must be positive")
-    target = D1_SCHEDULE.void_book_price
+    target = D1_SCHEDULE.leg_value_in_branch_units
     non_void = 1 - void_probability
     reject_numeraire = non_void + void_probability * D1_SCHEDULE.branch_value
     return (

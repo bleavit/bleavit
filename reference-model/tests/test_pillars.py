@@ -399,7 +399,9 @@ class CollatorScheduleTests(unittest.TestCase):
             [cell.d_eff for cell in cells],
             [D("0.900000000"), D("0.875000000"), D("0.857142857")],
         )
-        self.assertTrue(all(cell.collapsed for cell in cells))
+        for cell in cells:
+            with self.subTest(phase=cell.phase, collators=cell.collator_set_size):
+                self.assertTrue(cell.collapsed)
 
     def test_five_equal_authors_lose_the_launch_cap_as_phases_advance(self):
         cells = d_eff_grid(range(3, 7), (5,))
@@ -418,12 +420,11 @@ class CollatorScheduleTests(unittest.TestCase):
         )
 
     def test_the_unqualified_five_author_neutralization_claim_is_false(self):
-        """05 §4.5 says five equal authors score D_eff=1 without a phase qualifier.
+        """SQ-555. Five equal authors derive D_eff < 1 after Phase 3.
 
-        That is true only in phases 0-3. The same fixed set scores 0.96 in
-        Phase 4 and falls to 0.914285714 in Phase 6, because n_cap advances
-        independently of actual set size and collator.n_target is still
-        [VERIFY].
+        The same fixed set scores 0.96 in Phase 4 and falls to 0.914285714 in
+        Phase 6 because n_cap advances independently of actual set size. The
+        structured finding carries the unqualified publication discrepancy.
         """
         finding = next(
             row
@@ -433,6 +434,7 @@ class CollatorScheduleTests(unittest.TestCase):
         self.assertFalse(finding.ok)
 
     def test_the_target_minimum_has_no_phase_advance_safety_binding(self):
+        """SQ-555. Four equal authors derive a collapsed Phase-4 survival gate."""
         finding = next(
             row
             for row in check_collator_reachability()

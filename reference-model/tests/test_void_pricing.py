@@ -1,9 +1,9 @@
-"""Executes D-1's VOID schedule as a price input to 04 §12 and 05 §5.
+"""Executes D-1 payouts and a named, non-normative pricing sensitivity.
 
-The suite derives the quarter-over-half contamination from 00 D-1 / 03 §6.4,
-pins 04 §12's full, trailing and gate boundaries, and searches complementary
-branch weights for the asymmetric SQ-559 false-ADOPT condition.  Baseline is
-checked separately through 05 §7's neutral plain-USDC settlement.
+D-1's half/quarter redemption schedule is normative. Every ``pi``/``w``
+calculation below is conditional on an explicit risk-neutral quote-convergence
+scenario that the documents do not establish. SQ-559 remains useful as a
+sensitivity, while the findings accessor reports no mechanical contradiction.
 """
 
 import unittest
@@ -26,24 +26,88 @@ from bleavit_reference_model.void_pricing import (
     GateConditionalValues,
     PricingInputs,
     PricingRefused,
+    RiskNeutralQuoteScenario,
     VoidSchedule,
-    baseline_neutral_price,
-    branch_information_weight,
+    baseline_neutral_price as _baseline_neutral_price,
+    branch_information_weight as _branch_information_weight,
     check_weight_safety,
-    degenerate_branch_price,
-    degenerate_reject_probability_boundary,
-    leg_price,
+    degenerate_branch_price as _degenerate_branch_price,
+    degenerate_reject_probability_boundary as _degenerate_reject_probability_boundary,
+    leg_price as _leg_price,
     price_readout,
     search_false_adopt,
     search_false_adopt_interval,
-    symmetric_hurdle_boundary,
-    veto_breach_ratio,
+    symmetric_hurdle_boundary as _symmetric_hurdle_boundary,
+    veto_breach_ratio as _veto_breach_ratio,
     void_probability_from_ratio,
-    worked_example_boundaries,
+    worked_example_boundaries as _worked_example_boundaries,
 )
 
 
 F = Fraction
+
+
+def quote_scenario(
+    pi: Fraction, *, converges: bool = True
+) -> RiskNeutralQuoteScenario:
+    """Build the explicit non-normative premise used by sensitivity tests."""
+    return RiskNeutralQuoteScenario(
+        void_probability=pi,
+        quotes_converge_to_expected_value_ratio=converges,
+    )
+
+
+def leg_price(q: Fraction, pi: Fraction, w: Fraction) -> Fraction:
+    return _leg_price(q, quote_scenario(pi), w)
+
+
+def branch_information_weight(pi: Fraction, w: Fraction) -> Fraction:
+    return _branch_information_weight(quote_scenario(pi), w)
+
+
+def baseline_neutral_price(q: Fraction, pi: Fraction) -> Fraction:
+    return _baseline_neutral_price(q, quote_scenario(pi))
+
+
+def degenerate_branch_price(pi: Fraction) -> Fraction:
+    return _degenerate_branch_price(quote_scenario(pi))
+
+
+def veto_breach_ratio(
+    q: Fraction, p_max: Fraction = GATE_P_MAX
+) -> Fraction | None:
+    return _veto_breach_ratio(
+        q,
+        p_max,
+        quotes_converge_to_expected_value_ratio=True,
+    )
+
+
+def symmetric_hurdle_boundary(
+    q_accept: Fraction, q_reject: Fraction, delta: Fraction
+) -> Fraction | None:
+    return _symmetric_hurdle_boundary(
+        q_accept,
+        q_reject,
+        delta,
+        quotes_converge_to_expected_value_ratio=True,
+    )
+
+
+def worked_example_boundaries():
+    return _worked_example_boundaries(
+        quotes_converge_to_expected_value_ratio=True
+    )
+
+
+def degenerate_reject_probability_boundary(
+    pi: Fraction, delta: Fraction
+) -> Fraction:
+    return _degenerate_reject_probability_boundary(
+        pi,
+        delta,
+        quotes_converge_to_expected_value_ratio=True,
+    )
 
 
 def asymmetric_inputs() -> PricingInputs:
@@ -52,7 +116,7 @@ def asymmetric_inputs() -> PricingInputs:
         decision_accept=F(2, 5),
         decision_reject=F(91, 250),
         baseline=F(91, 250),
-        pi=F(1, 50),
+        scenario=quote_scenario(F(1, 50)),
         gates=(
             GateConditionalValues("S", *EXAMPLE_GATE_SURVIVAL),
             GateConditionalValues("C", *EXAMPLE_GATE_SECURITY),
@@ -63,15 +127,15 @@ def asymmetric_inputs() -> PricingInputs:
 class TestD1Schedule(unittest.TestCase):
     """00 D-1 / 03 §6.4, derived before any market arithmetic."""
 
-    def test_quarter_over_half_is_the_void_book_price(self):
-        # The floor is not an asserted 0.5: it is the quotient of the two
-        # independently specified D-1 claims.
+    def test_quarter_over_half_is_the_void_redemption_value_ratio(self):
+        # The ratio is not an asserted quote: it is the quotient of the two
+        # independently specified D-1 redemption claims.
         self.assertEqual(D1_SCHEDULE.branch_value, F(1, 2))
         self.assertEqual(D1_SCHEDULE.leg_value, F(1, 4))
         self.assertEqual(
             D1_SCHEDULE.leg_value / D1_SCHEDULE.branch_value, F(1, 2)
         )
-        self.assertEqual(D1_SCHEDULE.void_book_price, F(1, 2))
+        self.assertEqual(D1_SCHEDULE.leg_value_in_branch_units, F(1, 2))
 
     def test_integer_redemption_rounds_against_the_claimant(self):
         # `floor(3/2) = 1` and `floor(3/4) = 0`; rounding either up would make
@@ -90,12 +154,14 @@ class TestD1Schedule(unittest.TestCase):
                 with self.subTest(q=q, w=w):
                     self.assertEqual(leg_price(q, F(0), w), q)
 
-    def test_price_is_a_derived_blend_not_a_copied_formula(self):
-        # Independently compute the information share of the bUSDC numeraire;
-        # D-1 says the remainder is worth the quarter-over-half target.
+    def test_risk_neutral_sensitivity_is_an_exact_blend(self):
+        # This verifies the named scenario equation, not a D-1 quote rule.
         q, pi, w = F(7, 20), F(3, 100), F(2, 5)
         information = branch_information_weight(pi, w)
-        derived = information * q + (1 - information) * D1_SCHEDULE.void_book_price
+        derived = (
+            information * q
+            + (1 - information) * D1_SCHEDULE.leg_value_in_branch_units
+        )
         self.assertEqual(leg_price(q, pi, w), derived)
         self.assertGreater(leg_price(q, pi, w), q)  # q < 1/2: pull is upward.
 
@@ -162,9 +228,9 @@ class TestGateVetoBoundary(unittest.TestCase):
         self.assertTrue(above_boundary > GATE_P_MAX)
 
     def test_void_contamination_can_only_advance_this_absolute_veto(self):
-        # For q below both p_max and the 1/2 VOID target, increasing pi raises
-        # the price monotonically.  The unsafe error for this gate is upward,
-        # and its protocol consequence is the safe G-1 direction: REJECT.
+        # Under the sensitivity, q below both p_max and the 1/2 VOID target
+        # moves upward monotonically as pi rises; the hypothetical decision
+        # consequence of crossing this gate is the safe G-1 direction: REJECT.
         for q in (F(0), F(11, 1_000), F(17, 1_000), F(49, 1_000)):
             prices = [leg_price(q, pi, F(1, 2)) for pi in (F(0), F(1, 100), F(1, 10))]
             with self.subTest(q=q):
@@ -173,7 +239,7 @@ class TestGateVetoBoundary(unittest.TestCase):
 
 
 class TestWorkedExample(unittest.TestCase):
-    """04 §12's normative figures under equal-weight VOID sensitivity."""
+    """04 §12's normative observations under a non-normative sensitivity."""
 
     def test_full_window_boundary_is_seven_eighty_seconds(self):
         # `0.041·(1-pi) = 0.0375` at pi = 7/82.  This reproduces the audit's
@@ -189,7 +255,7 @@ class TestWorkedExample(unittest.TestCase):
         )
 
     def test_sq_559_the_stated_adopt_first_flips_at_the_trailing_hurdle(self):
-        """SQ-559. 04 §12 publishes **Adopt**; 7/82 is not its first boundary.
+        """SQ-559 sensitivity: 7/82 is not the first conditional boundary.
 
         The same section publishes trailing values 0.5620 / 0.5222 and 05
         §5.4 requires that hurdle too.  They reach 0.0375 at pi = 23/398;
@@ -309,16 +375,16 @@ class TestDegenerateBranch(unittest.TestCase):
 
 
 class TestAsymmetricWeightSearch(unittest.TestCase):
-    """SQ-559's load-bearing search over complementary branch weights."""
+    """SQ-559's risk-neutral sensitivity over complementary branch weights."""
 
     def test_corrected_witness_turns_a_true_reject_into_a_pricing_adopt(self):
-        """SQ-559. D-1 and 05 §5 are unsafe when branch weights are asymmetric.
+        """SQ-559 sensitivity under the explicit quote-convergence premise.
 
         05 §5 reads the raw gate, decision and Baseline TWAPs and then applies
-        a status-quo default.  At this lawful complementary weight pair the
-        uncontaminated inputs miss the hurdle, while the D-1-priced inputs
-        clear both gate vetoes and the hurdle; the unsafe error is an upward
-        ACCEPT read, so this path favours execution rather than status quo.
+        a status-quo default. Under the non-normative risk-neutral model, this
+        complementary weight pair makes the hypothetical readings clear both
+        gate vetoes and the hurdle. The documents do not claim convergence to
+        these readings.
         """
         readout = price_readout(asymmetric_inputs(), F(1, 5))
         self.assertEqual(readout.w_accept + readout.w_reject, F(1))
@@ -354,7 +420,7 @@ class TestAsymmetricWeightSearch(unittest.TestCase):
 
     def test_exact_millipercent_search_has_a_nonempty_false_adopt_interval(self):
         # Search every positive millipercent weight, not selected witnesses.
-        # The first lawful grid point clears the S relative veto at 0.197; the
+        # The first supplied grid point clears the S relative veto at 0.197; the
         # last still clears the welfare hurdle at 0.288.
         inputs = asymmetric_inputs()
         weights = tuple(F(n, 1_000) for n in range(1, 1_000))
@@ -363,7 +429,7 @@ class TestAsymmetricWeightSearch(unittest.TestCase):
         self.assertEqual(vulnerable[-1], F(288, 1_000))
         self.assertGreater(len(vulnerable), 1)
 
-    def test_search_is_stable_and_returns_the_first_lawful_witness(self):
+    def test_search_is_stable_and_returns_the_first_scenario_witness(self):
         inputs = asymmetric_inputs()
         descending = (F(n, 1_000) for n in range(999, 0, -1))
         witness = search_false_adopt(inputs, descending)
@@ -394,26 +460,48 @@ class TestAsymmetricWeightSearch(unittest.TestCase):
         self.assertTrue(inside_exit.false_adopt)
         self.assertFalse(after.priced_hurdle_pass)
 
-    def test_structured_finding_exposes_the_defect(self):
+    def test_structured_finding_reports_observation_and_conditional_sensitivity(self):
         inputs = asymmetric_inputs()
         findings = check_weight_safety(
             inputs, (F(n, 1_000) for n in range(1, 1_000))
         )
-        symmetric = next(
+        raw_twap = next(
             finding
             for finding in findings
-            if finding.key == "equal branch weights preserve a true REJECT"
+            if finding.key
+            == "decision rule reads raw TWAP without a VOID-adjusted series"
         )
-        asymmetric = next(
+        sensitivity = next(
             finding
             for finding in findings
-            if finding.key == "lawful asymmetric weights preserve a true REJECT"
+            if finding.key == "risk-neutral VOID sensitivity"
         )
-        self.assertTrue(symmetric.ok)
-        self.assertIsNone(symmetric.witness)
-        self.assertFalse(asymmetric.ok)
-        self.assertIsNotNone(asymmetric.witness)
-        self.assertTrue(asymmetric.witness.false_adopt)
+        self.assertTrue(raw_twap.ok)
+        self.assertIsNone(raw_twap.witness)
+        self.assertTrue(sensitivity.ok)
+        self.assertIsNotNone(sensitivity.witness)
+        self.assertTrue(sensitivity.witness.false_adopt)
+        self.assertIn("conditional on", sensitivity.detail)
+
+    def test_sensitivity_is_not_run_without_the_explicit_convergence_premise(self):
+        inputs = asymmetric_inputs()
+        inputs = PricingInputs(
+            decision_accept=inputs.decision_accept,
+            decision_reject=inputs.decision_reject,
+            baseline=inputs.baseline,
+            scenario=quote_scenario(F(1, 50), converges=False),
+            gates=inputs.gates,
+        )
+        findings = check_weight_safety(inputs, (F(1, 5),))
+        self.assertTrue(all(finding.ok for finding in findings))
+        self.assertTrue(all(finding.witness is None for finding in findings))
+        self.assertIn("not evaluated", findings[1].detail)
+        with self.assertRaisesRegex(PricingRefused, "convergence premise"):
+            price_readout(inputs, F(1, 5))
+        with self.assertRaisesRegex(PricingRefused, "convergence premise"):
+            _worked_example_boundaries(
+                quotes_converge_to_expected_value_ratio=False
+            )
 
     def test_extreme_welfare_flip_alone_is_not_a_valid_final_witness(self):
         # At the audit's near-degenerate shape the welfare uplift flips much

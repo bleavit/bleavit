@@ -63,6 +63,7 @@ from itertools import product
 from pathlib import Path
 
 from .decision import Decision, Outcome, RejectReason
+from .spec_values import EPOCH_LENGTH_DEFAULT, EPOCH_LENGTH_MAX, EPOCH_LENGTH_MIN
 
 # ---------------------------------------------------------------------------
 # 13 §3.1 / 13 §4 kernel constants.
@@ -92,9 +93,6 @@ ORDERED_PHASES: tuple[tuple[str, int], ...] = (
     ("Housekeeping", HOUSEKEEPING_NUM),
 )
 
-EPOCH_LENGTH_DEFAULT = 302_400
-EPOCH_LENGTH_MIN = 201_600  # 14 d floor, K
-EPOCH_LENGTH_MAX = 604_800
 DEC_WINDOW_DEFAULT = 43_200  # 72 h
 DEC_WINDOW_MIN = 14_400
 DEC_WINDOW_MAX = 86_400

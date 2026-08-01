@@ -51,11 +51,14 @@ from typing import Iterable, Literal, Sequence
 from .lifecycle import BY_TAG, Config, fire
 from .sustainability import (
     INTAKE_SLASH_FRACTION,
+    PROP_BOND,
+)
+from .spec_values import (
     NAV_FLOOR_CODE,
     NAV_FLOOR_META,
     NAV_FLOOR_PARAM,
     NAV_FLOOR_TREASURY,
-    PROP_BOND,
+    NAV_FLOORS_USDC,
 )
 from .treasury import (
     BASE_UNIT,
@@ -115,14 +118,8 @@ SEC_FLOW_CAP_MAX = Decimal(32)
 # 13 §1 `prop.bond`'s TREASURY kernel surcharge: 50 bps = 0.5 % of Ask.
 TREASURY_BOND_ASK_FRACTION = Decimal("0.005")
 
-# 08 §4.1 frozen literals. sustainability.py already carries these values for
-# §10 runway arithmetic, so this module imports rather than duplicates them.
-NAV_FLOORS: dict[ProposalClass, Decimal] = {
-    "param": NAV_FLOOR_PARAM,
-    "treasury": NAV_FLOOR_TREASURY,
-    "code": NAV_FLOOR_CODE,
-    "meta": NAV_FLOOR_META,
-}
+# 08 §4.1 frozen literals, shared by every consumer of those exact rows.
+NAV_FLOORS = NAV_FLOORS_USDC
 
 # 09's rollout schedule as consumed by 08 §4.2: PARAM Phase 4, TREASURY Phase 5,
 # and the shared CODE/META bit at Phase 6.
@@ -1001,8 +998,12 @@ def document_monopolization_prices(repo_root: Path) -> DocumentPrices:
     The figures are intentionally not module constants: this parser is the
     drift detector, following lifecycle.py's Mermaid-table precedent.
     """
-    doc08 = (repo_root / "docs/architecture/08-treasury-and-economics.md").read_text()
-    doc14 = (repo_root / "docs/architecture/14-threat-model.md").read_text()
+    doc08 = (repo_root / "docs/architecture/08-treasury-and-economics.md").read_text(
+        encoding="utf-8"
+    )
+    doc14 = (repo_root / "docs/architecture/14-threat-model.md").read_text(
+        encoding="utf-8"
+    )
     combined = re.search(
         r"\|\s*Combined monopolization\s*\|[^|]+\|\s*\*\*[^\d]*(\d[\d,]*(?:\.\d+)?)\*\*",
         doc08,
