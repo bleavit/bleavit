@@ -179,10 +179,14 @@ New FE epic **FE-14 (Governance surface)**: referenda list/detail, vote/delegate
 - **Rejected alternatives**, each for a stated reason:
   - *Asset/topic encoding instead of `Transact`* — cannot carry a registration, and abuses a
     transfer path as an RPC.
-  - *Generic `Transact` from an origin allowlist* — nested `Transact` inside `DepositReserveAsset` /
-    `InitiateReserveWithdraw` / `InitiateTeleport` executes **remotely** under Bleavit's own sovereign
-    origin, which no per-instruction predicate distinguishes. The positional whole-program template
-    closes it by shape.
+  - *Generic `Transact` from an origin allowlist* — XCM v5 has **nine** instructions carrying an
+    inner program. Six (`TransferReserveAsset`, `DepositReserveAsset`, `InitiateReserveWithdraw`,
+    `InitiateTeleport`, `InitiateTransfer`, `ExportMessage`) run theirs **remotely** under Bleavit's
+    own sovereign origin; `SetErrorHandler` and `SetAppendix` run theirs **locally** and carry
+    `Call`, so they can carry a `Transact`; and `ExecuteWithOrigin` runs its own locally under a
+    **descended** origin. No per-instruction predicate distinguishes these without enumerating all
+    nine and staying complete as the SDK moves. The positional whole-program template closes every
+    one by shape, enumerating none.
   - *A sovereign signed origin for clients* — leaves `SafeCallFilter` as the only thing between a
     client and every `CallDomain::Public` call. A distinct origin type is a type-level fact instead.
   - *`DescendOrigin` sub-identity* — makes Bleavit assert claims about who inside a client chain

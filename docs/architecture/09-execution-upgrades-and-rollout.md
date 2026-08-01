@@ -286,7 +286,7 @@ Both keys are **raised only by phase gates** (§7): they are not PARAM/META-adju
 | Fees/weight | `WeightTrader` selling execution for DOT or USDC at governed rates — the four [13](./13-parameters.md) §1 PARAM keys `xcm.dot_per_sec` / `xcm.dot_per_mb` / `xcm.usdc_per_sec` / `xcm.usdc_per_mb` (stable2606 `Weight` is two-dimensional, so each asset carries a ref-time and a proof-size rate; keys added 2026-07-17, SQ-112); USDC is a sufficient asset, so a USDC-only account can pay inbound execution fees ([08](./08-treasury-and-economics.md) owns `fee.vit_usdc_rate` for the tx-payment side) |
 | Failure handling | protocol-initiated transfers (coretime funding §4, treasury recovery) are keeper-monitored with bounded retry and idempotency keys; user transfers follow standard XCM error semantics; **no XCM outcome participates in any decision or settlement path** (I-24) — an XCM failure can therefore never default to adoption |
 | Trapped assets | recovery via `claim_assets`, which is **self-scoped by construction** (the claim origin must equal the location the trap was keyed under): Signed accounts may reclaim only traps keyed to their own origin (their own failed transfers — no new authority is created), and protocol-keyed traps are reclaimed via a TREASURY-class call. Traps keyed to a *remote* origin (e.g. a failed inbound message keyed under Asset Hub) are recoverable only by an inbound `ClaimAsset` program from that origin — mitigation is upstream: the §5.2 inflow caps are enforced at the *mint* leg — **both** of them, per the SQ-129 resolution of 2026-07-20 — so an over-cap inbound transfer of either kind fails before anything reaches the local trap, and no cap refusal can produce a **new** remote-keyed trap at all. **Recovery carve-out (normative; SQ-360 resolution, 2026-07-24).** The one case §5.2's mint-step exemption leaves reachable is an inbound `ClaimAsset` recovery whose beneficiary is over the per-account cap: §5.2 requires the beneficiary deposit leg of any recovery to stay metered, so that deposit refuses and the holding returns to the trap it was claimed from — **the same key, under the same origin**. No claim is created, no value is lost, and nothing is stranded that was not already trapped, which is why the barrier deliberately skips the prospective pre-mint gate for programs whose only USDC source is `ClaimAsset` (a refusal there would consume the trap entry while yielding no holding). The sentence above therefore bounds *new* stranding, not the idempotent re-trap of an existing one (amended 2026-07-16, B4 review — the prior "TREASURY-class only" wording was unimplementable: `AssetTrap` keys claims by origin, so a treasury origin could never match user- or remote-keyed traps and those funds would have been permanently stranded) |
-| Disabled instructions | `Transact` (except at §6.5's pinned position 2), `DescendOrigin`, `AliasOrigin`, every nesting instruction (`DepositReserveAsset`, `InitiateReserveWithdraw`, `InitiateTeleport`), HRMP channel-request handling beyond system defaults, any instruction not needed for reserve transfer + fee payment — default-deny posture. The **closed instruction allowlist itself is unchanged by §6.5**: the client program is admitted by matching a whole program shape, not by widening the per-instruction set |
+| Disabled instructions | `Transact` (except at §6.5's pinned position 2), `DescendOrigin`, `AliasOrigin`, all **nine** inner-program instructions (`TransferReserveAsset`, `DepositReserveAsset`, `InitiateReserveWithdraw`, `InitiateTeleport`, `InitiateTransfer`, `ExportMessage`, `SetErrorHandler`, `SetAppendix`, `ExecuteWithOrigin` — see §6.5), HRMP channel-request handling beyond system defaults, any instruction not needed for reserve transfer + fee payment — default-deny posture. The **closed instruction allowlist itself is unchanged by §6.5**: the client program is admitted by matching a whole program shape, not by widening the per-instruction set |
 | Governance restriction | `pallet_xcm::{send, force_*}` filtered for all origins; cross-chain governance execution deferred. The §6.5 ingress creates **no** new user-reachable send authority, and `CallDomain::ExternalClient` is reachable by **no** governance origin — so the client surface and the governance surface are disjoint by construction, not by review |
 
 External oracle-parachain feeds via XCM remain analyzed and excluded as settlement sources in v1.
@@ -343,18 +343,36 @@ Four properties hold **by shape** rather than by any maintained predicate:
    client spends a balance it already holds here and `phase3.tvl_cap` is untouched *by ingress*.
 3. **"This chain `Transact`s abroad as itself" is closed** — no nesting instruction is admitted at
    any position.
-4. **Unknown future instructions fail the match** — the template is an exhaustive per-position
-   `match` over the pinned SDK enum, so a new SDK variant fails *compilation* rather than being
-   silently re-interpreted. The pin (`staging-xcm = 24.0.0`) is therefore part of the invariant's
-   statement (I-35), not merely a dependency choice.
+4. **Unknown and future instructions fail the positional match**, because they are not at an admitted position. An earlier revision claimed a new SDK variant would fail *compilation*; that is not guaranteed and MUST NOT be relied on. What is guaranteed is the runtime refusal, and what backs it is the `=`-exact pin (`staging-xcm = 24.0.0`) plus a test that asserts the admitted set has exactly six positions — so a version bump that changes the instruction set fails a **test**, which is the check that actually exists. The pin is therefore part of I-35's statement, not merely a dependency choice.
 
-**One matcher, three consumers.** The barrier, the origin converter and `SafeCallFilter` MUST call the
-same matcher, so they cannot disagree with each other about what is admitted.
+**Three checks, three different inputs — and an earlier revision demanded something the SDK cannot
+provide.** It required the barrier, the origin converter and `SafeCallFilter` to call *one* whole-program
+matcher. They cannot: only the barrier ever sees the instruction slice. `ConvertOrigin::convert_origin`
+receives `(Location, OriginKind)` and nothing else, and `SafeCallFilter` is a `Contains<RuntimeCall>`
+that receives a decoded call and nothing else. The correct decomposition, which is what MUST be
+implemented:
+
+| Component | Input it actually gets | What it checks |
+|---|---|---|
+| Barrier | the whole `Xcm<Call>` slice | the six-position template, exhaustively |
+| `OriginConverter` | `(Location, OriginKind)` | exact equality against a registered client `Location`, and `OriginKind::Xcm` |
+| `SafeCallFilter` | `RuntimeCall` | `domain(call) == CallDomain::ExternalClient` |
+
+None of the three is sufficient alone, and no one of them can verify another's precondition. What
+makes the composition sound is that **admission requires all three to pass**, and the test obligation
+is therefore on their *intersection*, not on a shared implementation: the ingress drill asserts that
+a program failing any one of the three does not dispatch. Stating it as "one matcher" would have been
+implemented as a lie or not at all.
 
 **Origin.** A matched program's `Transact` executes under
 `pallet_client_registry::Origin::ExternalClient(ClientId)` — never a signed origin, never `Root`,
-never any `pallet_origins::Origin` variant. The converter has exactly one success constructor
-(I-34).
+never any `pallet_origins::Origin` variant. The converter constructs exactly one variant, and that
+is an **implementation-and-test** obligation rather than a type-level one: the executor requires
+`ConvertOrigin<RuntimeOrigin>`, and `RuntimeOrigin` admits every constructor in the runtime, so no
+signature forbids the others. I-34 is therefore discharged by the converter having a single
+`Ok(...)` expression plus the negative-origin matrix that proves it, not by the type. An earlier
+revision called it "a type-level fact, not a review promise"; the honest statement is that it is a
+review promise **with a mechanical check attached**.
 
 **Weight and fees.** `FixedWeightBounds` already decodes a `Transact`'s call and adds its
 `call_weight`, so the trader prices the real dispatch and an undecodable call dies at weighing rather

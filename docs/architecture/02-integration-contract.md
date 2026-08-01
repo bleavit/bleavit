@@ -336,8 +336,23 @@ two clients reading only the changelog would encode v20 differently. `INTEGRATIO
 stays **19** until the implementation lands; these definitions are frozen on arrival, not on merge.
 
 ```rust
-// §4 view type, returned by the twelfth `FutarchyApi` method
-//   fn hosted_report(question_id: QuestionId) -> Option<ReportView>;
+// §3 — the twelfth `FutarchyApi` method (additive; bumps the sp_api version too)
+fn hosted_report(question_id: QuestionId) -> Option<ReportView>;
+
+// §4 — exact aliases and enums this surface introduces
+pub type QuestionId = u64;
+pub type ClientId   = u32;
+
+pub enum VoidReason {          // #[codec(index)]-stable, append-only
+    NoQuorum,                  // 0
+    MedianOutOfRange,          // 1
+    DeadlineMissed,            // 2
+    ServicePaused,             // 3
+    EscrowInsufficient,        // 4
+    AttestorSetCollapsed,      // 5
+    ClientUnreachable,         // 6
+}                              // registry removal is NOT here — 16 §2/§6.4
+
 pub struct ReportView {
     pub question_id: QuestionId,          // u64
     pub client_id: ClientId,              // u32
@@ -382,8 +397,8 @@ Push-failure and ingress-metering events meet none of (a)–(c) and are pallet-l
 
 | Key | Value | Bound |
 |---|---|---|
-| `Clients: map ClientId → ClientRecord` | `{ location: Option<Location>, local_signer: Option<AccountId>, bond, admitted_at, questions_live, questions_total }` — exactly one of the two identity fields is `Some` (16 §2) | `svc.max_clients` (13 §4) |
-| `Questions: map QuestionId → QuestionRecord` | `{ client_id, phase: QuestionPhase, window_start, window_end, declared_stake, epsilon_1e9, tolerance_1e9, markets: [MarketId; 2] }` | `svc.max_live` live + retention |
+| `Clients: map ClientId → ClientRecord` | `{ location: Option<Location>, local_signer: Option<AccountId>, bond: Balance, admitted_at: BlockNumber, questions_live: u32, questions_total: u32 }` — exactly one of the two identity fields is `Some` (16 §2) | `svc.max_clients` (13 §1) |
+| `Questions: map QuestionId → QuestionRecord` | `{ client_id: ClientId, phase: QuestionPhase, window_start: BlockNumber, window_end: BlockNumber, declared_stake: Balance, epsilon_1e9: FixedU64, tolerance_1e9: FixedU64, markets: [MarketId; 2] }` | `svc.max_live` live + retention |
 | `Reports: map QuestionId → ReportView` | as above | one per sealed question, retained to archive |
 
 **§7.1 scoping (normative).** Every existing conditional-ledger row in §7 is scoped to instance
@@ -598,7 +613,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 
 | Pallet | Constant name | Type | Value source |
 |---|---|---|---|
-| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (**= 17 in force**, §13) |
+| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (the value §13 marks IN FORCE — read the constant, never a prose copy; §13) |
 | Constitution | `MaxParams` | `u32` | `constitution_core::MAX_PARAMS` (= 128) |
 | Constitution | `MaxCapabilities` | `u32` | `constitution_core::MAX_CAPABILITIES` (= 64) |
 | Constitution | `MaxMeters` | `u32` | `constitution_core::MAX_METERS` (= 16) |
@@ -624,7 +639,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Registry (each instance) | `ArchiveDelay` | `BlockNumber` (`u32`) | `max(live Params[ledger.archive], 21 × BLOCKS_PER_DAY)`; the 21-day floor is independent of the shared ledger tunable |
 | Registry (each instance) | `MaxFilingsPerEpoch` | `u32` | `kernel::REG_MAX_FILINGS_EPOCH` (= 64) |
 | Registry (each instance) | `MaxEvidenceLen` | `u32` | fixed `H256` evidence-hash width (= 32 bytes) |
-| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (**= 17 in force**, §13) |
+| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (the value §13 marks IN FORCE — read the constant, never a prose copy; §13) |
 | ExecutionGuard | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) |
 | ExecutionGuard | `MaxExecutionRecords` | `u32` | `bounds::MAX_EXECUTION_RECORDS` (= 256) |
 | ExecutionGuard | `MaxCalls` | `u32` | `kernel::MAX_CALLS` (= 16) |
@@ -633,7 +648,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | ExecutionGuard | `MaxRuntimeCodeBytes` | `u32` | runtime `Config::MaxRuntimeCodeBytes` (`pallet_preimage::MAX_SIZE`) |
 | ExecutionGuard | `ExecutionTimelockFloor` | `[u32; 4]` | [13 §1](13-parameters.md) `exec.lock.*` K hard minima, `[14,400; 4]` blocks |
 | ExecutionGuard | `ExecutionGraceFloor` | `u32` | [13 §1](13-parameters.md) `exec.grace` K hard minimum (= 100,800 blocks) |
-| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (**= 17 in force**, §13) |
+| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (the value §13 marks IN FORCE — read the constant, never a prose copy; §13) |
 | Epoch | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) |
 | Epoch | `MaxIntakeQueue` | `u32` | `bounds::INTAKE_QUEUE` (= 64) |
 | Epoch | `MaxNonTerminalCohorts` | `u32` | `bounds::MAX_NON_TERMINAL_COHORTS` (= 4) |
@@ -647,12 +662,12 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Epoch | `DecisionDeltaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.delta.*` K hard minima (= `[5,000,000; 4]`) |
 | Epoch | `TreasuryBondAskBps` | `u128` | `kernel::TREASURY_BOND_ASK_BPS` (= 50; the 08 §7 TREASURY Ask surcharge slope, added in v13 — SQ-186) |
 | Epoch | `DecisionSigmaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.sigma.*` K hard minima (= `[0; 4]`) |
-| Welfare | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (**= 17 in force**, §13) |
+| Welfare | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (the value §13 marks IN FORCE — read the constant, never a prose copy; §13) |
 | Welfare | `MaxMetricSpecs` | `u32` | `welfare_core::MAX_METRIC_SPECS` (= 16) |
 | Welfare | `MaxSnapshots` | `u32` | `welfare_core::MAX_SNAPSHOTS` (= 60 = 20 retained epochs × (`epoch.horizon_k` = 2 frozen versions + the epoch's own active version); contract v16) |
 | Welfare | `MaxGateFlags` | `u32` | `welfare_core::MAX_GATE_FLAGS` (= 20) |
 | Welfare | `MaxDailyGateSamples` | `u8` | `welfare_core::MAX_DAILY_GATE_SAMPLES` (= 64) |
-| FutarchyTreasury | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (**= 17 in force**, §13) |
+| FutarchyTreasury | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (the value §13 marks IN FORCE — read the constant, never a prose copy; §13) |
 | FutarchyTreasury | `MaxStreams` | `u32` | `futarchy_treasury_core::MAX_STREAMS` (= 128) |
 | FutarchyTreasury | `MaxBudgetLines` | `u32` | `futarchy_treasury_core::MAX_BUDGET_LINES` (= 32) |
 | FutarchyTreasury | `MaxPolCommitments` | `u32` | `futarchy_treasury_core::MAX_POL_COMMITMENTS` (= 196) |

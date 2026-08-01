@@ -163,7 +163,7 @@ Transitions (exhaustive; anything absent is impossible and MUST error):
 ## 3. Config
 
 ```rust
-pub trait Config: frame_system::Config {
+pub trait Config<I: 'static = ()>: frame_system::Config {   // instanced by D-20 (§1a)
     type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
     type Collateral: fungibles::Mutate<Self::AccountId, AssetId = AssetId, Balance = Balance>; // USDC
     type UsdcAssetId: Get<AssetId>;
@@ -219,7 +219,19 @@ pub trait Config: frame_system::Config {
     /// The per-market **fee** account is a member: the
     /// [`04-markets-and-pricing.md`](./04-markets-and-pricing.md) §2 `sweep_revenue` crank
     /// redeems that account's claims to USDC, and charging it would be the treasury taxing itself.
-    type ProtocolAccounts: Contains<Self::AccountId>;
+    /// §1a: ONE predicate cannot serve three jobs once a second instance exists.
+    /// Getting either direction wrong moves money — per-instance destinations
+    /// strand a position in the other domain's book address; union exemptions
+    /// hand a foreign account zero deposit and no position cap.
+    ///
+    /// Union across every instance and domain — §5.4's signed-transfer
+    /// destination refusal. A destination reserved in *either* domain is refused
+    /// in *both*.
+    type ReservedProtocolDestinations: Contains<Self::AccountId>;
+    /// This instance only — fee, storage-deposit and position-cap exemption,
+    /// and internal custody. A foreign domain's protocol account is NOT exempt
+    /// here.
+    type LocalProtocolAccounts: Contains<Self::AccountId>;
     /// §5.3a redemption fee rate, read live from `pallet-constitution::Params`
     /// (`ledger.redeem_fee`, normative row: §13 §1). A missing or malformed
     /// record reads as **zero** — the fail-open direction here is the

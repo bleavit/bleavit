@@ -155,6 +155,8 @@ XCM relationships in v1 are **three** (was two until 2026-08-01, D-20): Asset Hu
 
 ### 5.1 Pallet map
 
+**Added by D-20 (2026-08-01):** `pallet-client-registry` (index 65) and `pallet-question-service` (index 66) hold the external-client trust domain, and `ServiceLedger` (`pallet_conditional_ledger::<Instance1>`, index 67) holds its custody — a **second instance** of an existing pallet rather than a new one, which is why it is not a separate row. The topology diagram above shows the two v1 XCM relationships and is deliberately **not** redrawn for the third (client ingress/egress): [09](09-execution-upgrades-and-rollout.md) §6.5 and [16](16-hosted-question-service.md) own that surface, and a duplicated wire diagram is how two descriptions drift apart.
+
 Cohesion rule: pallets are bounded by *trust domain and settlement lifecycle*, not by noun. The conditional ledger and the market maker are separate because the ledger is the solvency-critical custody domain (small, frozen early, heavily verified) while markets are the evolving pricing domain.
 
 **Standard pallets (all `polkadot-stable2606`) — abbreviated; full config detail in the owning docs:**
@@ -233,7 +235,7 @@ Eight evidence-gated phases; advancement at every step = published evidence + ME
 
 ## 8. How to Read This Document Set
 
-Fifteen component documents replace the two monolithic plans. [00-decision-record.md](00-decision-record.md) is the normative resolution of the design review; each document below implements it for its subsystem and ends with a Resolves table. Constants have exactly two homes: the chain ↔ frontend contract ([02](02-integration-contract.md)) and the parameter table ([13](13-parameters.md)); every other document references them.
+**Sixteen** component documents replace the two monolithic plans (fifteen until D-20 added [16-hosted-question-service.md](16-hosted-question-service.md), the external-client trust domain). [00-decision-record.md](00-decision-record.md) is the normative resolution of the design review; each document below implements it for its subsystem and ends with a Resolves table. Constants have exactly two homes: the chain ↔ frontend contract ([02](02-integration-contract.md)) and the parameter table ([13](13-parameters.md)); every other document references them.
 
 | Doc | Component | Read it for |
 |---|---|---|

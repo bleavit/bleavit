@@ -34,7 +34,7 @@ I-24 intact, and it is the reason a hostile client can lose its own money and no
 
 | Never | Enforced by |
 |---|---|
-| Executes a client-supplied call, payload or predicate | The ingress template admits exactly one `Transact`, and its call must resolve to `CallDomain::ExternalClient` (§3). No client bytes are ever dispatched |
+| Dispatches **arbitrary** client code | The ingress template admits exactly one `Transact`, whose decoded call must classify to `CallDomain::ExternalClient` (§3). The client *does* supply a call — an earlier revision said "no client bytes are ever dispatched", which is false. The true guarantee is narrower and is the one that matters: the only reachable calls are this service's own dispatchables, and no client-supplied **payload, predicate or decision rule** is ever evaluated for its consequence |
 | Reads an external price, outcome or report into `W`, `s`, or any settlement input | I-34/I-37 + the metric-provenance refusal (§8.3) |
 | Lets an external failure halt, freeze or degrade the primary domain | The second ledger instance (§7) and VOID-as-universal-edge (§6.4) |
 | Sends XCM whose success or failure feeds `X` | The dedicated egress router, I-36 (§9) |
@@ -124,10 +124,7 @@ Four properties follow **by shape**, not by a predicate anyone must maintain:
    cap on issuance and is therefore untouched *by ingress* — see §8.5 for the cap that does bind.
 3. **"Bleavit `Transact`s abroad as Bleavit" is closed by construction**, because no nesting
    instruction appears at any admitted position.
-4. **Unknown future instructions fail the match.** The template is written as an exhaustive
-   per-position `match` over the pinned SDK enum, so an SDK that adds a variant fails *compilation*
-   rather than silently re-interpreting an admitted program. The pin (`staging-xcm = 24.0.0`)
-   therefore belongs in I-35's statement, not merely in `Cargo.toml`.
+4. **Unknown and future instructions fail the positional match**, because they are not at an admitted position. An earlier revision claimed a new SDK variant would fail *compilation*; that is not guaranteed and MUST NOT be relied on. What is guaranteed is the runtime refusal, and what backs it is the `=`-exact pin (`staging-xcm = 24.0.0`) plus a test that asserts the admitted set has exactly six positions — so a version bump that changes the instruction set fails a **test**, which is the check that actually exists. The pin therefore belongs in I-35's statement, not merely in `Cargo.toml`.
 
 **The existing closed instruction allowlist does not change by one token.** All three deny components
 call one shared matcher, so they cannot disagree with each other — the highest-value single test in
@@ -212,7 +209,8 @@ Report {
     manip_floor,                          // 05 §5.6, cash form, rounded DOWN
     declared_stake,                        // S, republished verbatim
     epsilon_1e9,                           // ε, republished verbatim
-    certified: bool,                       // ManipFloor̂(ε) ≥ SECURITY_FACTOR · S
+    certified: bool,                       // C_disp(ε) ≥ SECURITY_FACTOR·S — client-funded depth
+                                           //   ONLY, never the measured-inclusive ManipFloor̂ (§5.2)
     settlement_trust: SettlementTrust { attestors, quorum, bond_total },
     provenance_hash,                       // binds every field above + sub_id
 }
@@ -239,11 +237,15 @@ Three properties make it the right thing to sell, and one makes it dangerous to 
   added to a cash amount, reading **1.928× high**. Every figure in this document uses the corrected
   cash form. A service that resold the superseded number would have been selling a security claim
   roughly twice as strong as the truth.
-- **It is not currently computed on-chain.** SQ-545 records that §5.6's "mandatory diagnostic" has no
-  Rust implementation and that no `DecisionDiagnostics` surface exists. **This service may not ship
-  its `certified` flag before that producer exists**: a certificate derived from a quantity the chain
-  never computes is a claim with no referent. Until then `register` MUST refuse a request asking for
-  certification, with `CertificationUnavailable`.
+- **It is not currently computed on-chain, and what that blocks is narrower than an earlier revision
+  said.** SQ-545 records that §5.6's "mandatory diagnostic" has no Rust implementation and that no
+  `DecisionDiagnostics` surface exists. The earlier text blocked the whole `certified` flag on that
+  producer — but since §5.2 now defines certification over **`C_disp` alone**, the certificate no
+  longer derives from `ManipFloor̂` and that rationale no longer applies: `C_disp` is computed by
+  this service from the client's own posted `b`, so `certified` is self-contained. What SQ-545 still
+  blocks is the **`manip_floor` report field**, which is the §5.6 quantity itself. `seal` MUST
+  therefore either publish a real `manip_floor` or refuse with `CertificationUnavailable` — it MUST
+  NOT publish a placeholder, because the field is sold.
 
 **Deliberately NOT shipped: an `ε_max` "feasibility ceiling".** An earlier draft of this design
 published `ε_max = (1/n)·Σ[min(1, p̄(1+κ)^i) − p̄]` as a *proof* that a question is unmanipulable at
