@@ -1203,10 +1203,3 @@ class = "unwired"
 genesis = false
 owner = "N7"
 reason = "13 §1 / 16 §5.2: the floor on a client's declared resolution ε. Consumer is `register`'s `EpsilonOutOfRange` refusal (N7). Dispatch-limit once wired."
-
-[[entry]]
-key = "svc.max_clients"
-class = "unwired"
-genesis = false
-owner = "N4"
-reason = "13 §1 / 16 §2: bounds the `Clients` map ([02](02-integration-contract.md) §7). Consumer is `pallet-client-registry`'s admission path (N4), which refuses past the bound."

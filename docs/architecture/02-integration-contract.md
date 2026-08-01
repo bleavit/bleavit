@@ -397,7 +397,7 @@ Push-failure and ingress-metering events meet none of (a)–(c) and are pallet-l
 
 | Key | Value | Bound |
 |---|---|---|
-| `Clients: map ClientId → ClientRecord` | `{ location: Option<Location>, local_signer: Option<AccountId>, bond: Balance, admitted_at: BlockNumber, questions_live: u32, questions_total: u32 }` — exactly one of the two identity fields is `Some` (16 §2) | `svc.max_clients` (13 §1) |
+| `Clients: map ClientId → ClientRecord` | `{ location: Option<Location>, local_signer: Option<AccountId>, bond: Balance, admitted_at: BlockNumber, questions_live: u32, questions_total: u32 }` — exactly one of the two identity fields is `Some` (16 §2) | `MaxClients` = 64 (13 §4) |
 | `Questions: map QuestionId → QuestionRecord` | `{ client_id: ClientId, phase: QuestionPhase, window_start: BlockNumber, window_end: BlockNumber, declared_stake: Balance, epsilon_1e9: FixedU64, tolerance_1e9: FixedU64, markets: [MarketId; 2] }` | `svc.max_live` live + retention |
 | `Reports: map QuestionId → ReportView` | as above | one per sealed question, retained to archive |
 
