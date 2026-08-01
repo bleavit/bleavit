@@ -180,6 +180,20 @@ makes the pallet's own `EnsureOrigin` load-bearing in a way the eight governance
 The alternative — `dispatch_bypass_filter` — is worse under R-7, because it removes the filter from
 the path entirely rather than making it decisive.
 
+**`ExternalClient` is *not* governance-privileged, and wrapper protection does not come from
+pretending it is.** [06](./06-governance-and-guardians.md) §3.3 denies "every bare
+**governance-privileged** leaf" and G-5 defines a privileged effect as one flowing "through an
+enumerated custom origin produced by an enumerated pallet" — this domain requires no origin at all,
+so classifying it as privileged conflates two different properties. (An early draft did exactly
+that, and the `nested_wrapper_filter` differential oracle falsified it immediately: it asserts that
+whatever `validate(None, _)` admits carries no unscoped privileged leaf, which a
+privileged-yet-`None`-admitted domain contradicts by construction.) Wrappers are ordinary here, and
+that costs nothing, because **the XCM threat is closed one layer up**: `SafeCallFilter ≡ {c :
+domain(c) == ExternalClient}` (I-35), and a `Utility.batch(…)` or `Proxy(…)` does not itself
+classify as `ExternalClient`, so no wrapper is admissible through the §6.5 template whatever the
+privilege predicate says. Denying wrappers would have bought nothing and cost off-chain services
+their batching.
+
 ---
 
 ## 4. The question lifecycle
