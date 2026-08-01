@@ -3,7 +3,7 @@ from decimal import Decimal
 import unittest
 
 from bleavit_reference_model.decision import Outcome
-from bleavit_reference_model.treasury import LN2, in_cap_prize, l_hat
+from bleavit_reference_model.treasury import LN2, in_cap_prize, l_hat, manip_floor_hat
 from bleavit_simulation.config import (
     DEFAULT_SEED,
     GATE_EPS,
@@ -364,6 +364,53 @@ class ExecutedEngineTests(unittest.TestCase):
         self.assertIsNone(result.evidence()["prize"])
         self.assertEqual(result.outcome, "Reject")
         self.assertEqual(result.reason, "SecuritySizing")
+
+    def test_manip_floor_hat_agrees_with_the_signed_simulation_implementation(self):
+        """SQ-562 differential: the two ManipFloor-hat implementations must agree.
+
+        This suite is the only place the check can live, because it is the only
+        one with both packages on its path. The reference model reproduced 05
+        §5.6's share/USDC unit error while this module was already correct, so
+        the two disagreed by 1.928x and **nothing compared them** — that gap,
+        not the formula, was the actual defect.
+
+        Prices are deliberately **asymmetric**. At p_bar = 0.5 the accept and
+        reject legs are numerically equal, which hides exactly the thing most
+        likely to regress: this module converts the reject book by displacing
+        `1 - r` upward (the attacker buys SHORT there), and a symmetric fixture
+        would stay green if that conversion were dropped. The assertion below
+        pins the two legs apart to keep the conversion exercised.
+        """
+        b = Decimal("25000")
+        accept_price = Decimal("0.62")
+        reject_price = Decimal("0.41")
+        delta = Decimal("0.05")
+        flow_cap = Decimal(16)
+
+        # C_hold = 0 isolates C_disp; the second case exercises the shared
+        # min(V_win, flow_cap * total_b) * delta term as well.
+        for contest_capital in (Decimal(0), Decimal(400000)):
+            with self.subTest(contest_capital=contest_capital):
+                value, legs = _signed_manip_floor(
+                    b=b,
+                    accept_price=accept_price,
+                    reject_price=reject_price,
+                    delta=delta,
+                    contest_capital=contest_capital,
+                    flow_cap=flow_cap,
+                )
+                # The reference model takes p* per book: the pre-move price of
+                # the outcome the attacker BUYS (doc 16 §5.1). For the reject
+                # book that is 1 - r, which is the conversion under test.
+                reference = manip_floor_hat(
+                    [(b, accept_price), (b, Decimal(1) - reject_price)],
+                    delta,
+                    contest_capital,
+                    flow_cap,
+                )
+                self.assertEqual(value, reference)
+
+        self.assertNotEqual(legs[0], legs[1], "asymmetric fixture must split the legs")
 
     def test_signed_manip_floor_uses_opposite_book_directions(self):
         value, components = _signed_manip_floor(

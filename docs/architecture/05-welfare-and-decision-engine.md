@@ -751,9 +751,13 @@ InCapPrize = match class {                       // doc 08 §5.2's table governs
 ```
 ManipFloor̂ = C_disp + C_hold                     // emitted in DecisionDiagnostics, never gates in v1
 
-C_disp = Σ_{book ∈ {acc, rej}} b_book · ln( ((p̄ + δc)·(1 − p̄)) / ((1 − p̄ − δc)·p̄) )
-         // closed-form LMSR cost of displacing each decision book's window TWAP p̄ by
-         // δc = DELTA[class] (+1 pp if rerun), inputs clamped to the quoting domain (doc 04)
+C_disp = Σ_{book ∈ {acc, rej}} b_book · ln( (1 − p̄*_book) / (1 − p̄*_book − δc) )
+         // closed-form LMSR **cash** cost of displacing each decision book's window
+         // TWAP by δc = DELTA[class] (+1 pp if rerun). p̄*_book is the pre-move price
+         // of the outcome the attacker BUYS in that book — the accept book's LONG and
+         // the reject book's SHORT for an adopt-forcing attack — so one δc move costs
+         // the same expression on both sides. Inputs clamped to the quoting domain
+         // (doc 04 §3). This is `cost` in 04 §3's pair, never `displacement`.
 
 C_hold = min(V_win, sec.flow_cap · (b_acc + b_rej)) · δc
          // adverse-selection bleed of holding a δc mispricing against the window's
@@ -761,6 +765,8 @@ C_hold = min(V_win, sec.flow_cap · (b_acc + b_rej)) · δc
          // (doc 04 §7a), so churn and wash flow net out by construction rather than
          // being merely capped; sec.flow_cap remains as the secondary ceiling (doc 14)
 ```
+
+**`C_disp` was a share count added to a cash amount, and the error ran in the unsafe direction (normative record; SQ-562 resolution, 2026-08-01).** The superseded expression was `b·ln( ((p̄+δc)(1−p̄)) / ((1−p̄−δc)p̄) )`, which is algebraically `b·(logit(p̄+δc) − logit(p̄))` — and [04](./04-markets-and-pricing.md) §3 states in one line that this quantity is the **displacement** `Δ`, denominated in *shares*, while the **cost** of the same move is `b·ln((1−p)/(1−p′))`, denominated in *USDC*. The two are not equal and not proportional: 04 §3's own V3 vector prints both for one move, displacing 0.5 → 0.6 at `b` = 10,000 as **4,054.65108108 LONG shares** against **2,231.43551314 USDC**. `C_hold` is USDC (contest capital × δc), so `ManipFloor̂` was summing a share count and a cash amount. At Bleavit's own PARAM pair (`b` = 10,000 per book, δ = 0.0375, p̄ = 0.5) the superseded expression reads **3,005.64** where the true cash cost is **1,559.23** — **1.928× too high**. The direction is what makes this a defect rather than a typo: the quantity is a **lower bound on attacker cost**, so overstating it makes manipulation look more expensive than it is, and the escape clause in the next paragraph — which fires when published `ManipFloor̂` persistently reads below `3 · InCapPrize` — is **delayed** by exactly that factor. The one implementation that was already correct is the Phase-0 simulation (`simulation/src/bleavit_simulation/engine.py::_signed_manip_floor`, which calls `lmsr.displacement_cost`, i.e. the cash form); the reference model faithfully reproduced this document's error, so the two disagreed by 1.93× and nothing compared them. They are now cross-checked by a test, which is the durable half of this repair.
 
 `ManipFloor̂` is part of the Phase 3–4 measurement obligation alongside `F̂` (doc 08 §5.5): if published `ManipFloor̂` persistently reads below `3 · InCapPrize` for adopted proposals, the values layer MUST tighten δ and/or the `dec.v_min`/`pol.b` slopes before caps rise — the diagnostic exists precisely because the flow-model gate is an upper bound. The Phase-0 exit simulation ([15](15-invariants-and-testing.md) §4.9) validates this envelope at the irreducible economic line: it flags a causal wrong-PASS flip as a security failure only when the *realized* attacker cost falls **below the prize** (a profitable capture); an unprofitable flip whose realized cost is ≥ the prize but below `3 · InCapPrize` is deep-pocket griefing (TM-18) that the SF = 3 margin conservatively guards against — recorded as a diagnostic, not a Phase-0 gate failure. Economic derivation, calibration, the worked recomputation at defaults, and the secondary Ask-scaled liquidity mechanism (`pol.b`, `dec.v_min`, δ scaling with `ask`, floors = current defaults) live in [doc 08](./08-treasury-and-economics.md).
 
