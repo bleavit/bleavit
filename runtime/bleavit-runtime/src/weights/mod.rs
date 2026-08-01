@@ -41,6 +41,7 @@ pub mod pallet_asset_tx_payment;
 pub mod pallet_assets;
 pub mod pallet_attestor;
 pub mod pallet_balances;
+pub mod pallet_client_registry;
 pub mod pallet_collator_selection;
 pub mod pallet_conditional_ledger;
 pub mod pallet_constitution;

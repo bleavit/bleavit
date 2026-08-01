@@ -1,7 +1,8 @@
 # Bleavit design-context pack — START HERE
 
 > Generated 2026-07-12 from the frozen specification in `docs/architecture/` at commit
-> `9f250be`; refreshed through integration contract v12 on 2026-07-23 (A12 signed oracle escalation custody). This pack exists
+> `9f250be`; refreshed through Track N / N4 on 2026-08-01. Contract v19 is in force;
+> hosted-question-service contract v20 is authored but not yet in force. This pack exists
 > because design tools cap attachments (Claude Design: 10 files)
 > and the full spec is ~677 KB across 17 documents. It compresses the spec into 7 files
 > without losing anything a frontend designer needs. **The spec always wins over this pack.**
@@ -10,8 +11,9 @@
 
 Bleavit is a futarchy-governed blockchain — prediction markets make its decisions — with a
 fully decentralized canonical web app (in-browser light client, Arweave-distributed, no
-backend). The complete product behavior is already specified; these files are that
-specification, curated for design work.
+backend). It is also building a hosted question service that sells conditional price discovery
+to external chains and services without deciding or executing for them. The complete product
+behavior is already specified; these files are that specification, curated for design work.
 
 ## The files, in reading order
 
@@ -43,5 +45,6 @@ specification, curated for design work.
 ## Regeneration
 
 Files 03/04 are byte-copies of `docs/architecture/10-…` and `11-…` plus a header; re-copy to
-refresh. Files 01/02/05/06 are distillations; regenerate them against the spec if the
-architecture is ever amended (it is frozen — amendments are rare and logged in PLAN.md).
+refresh. Files 01/02/05/06 are distillations; regenerate them against the spec whenever the
+architecture is amended. Pending contract text is context, not permission to invent a screen or
+present a not-yet-in-force surface as live.

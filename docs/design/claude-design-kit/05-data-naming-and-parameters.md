@@ -1,7 +1,8 @@
 # Data surface, canonical naming & UI-visible parameter values
 
-> **DERIVED, NON-NORMATIVE.** Refreshed 2026-07-22 from the frozen spec —
-> doc 02 (integration contract, frozen, v8) and doc 13 (the single home of parameter values) —
+> **DERIVED, NON-NORMATIVE.** Refreshed 2026-08-01 through Track N / N4 from the frozen spec —
+> doc 02 (contract v19 in force; hosted-service v20 authored but not in force), doc 13 (the
+> single home of parameter values), and doc 16 (hosted question service) —
 > for upload to Claude Design. Where this file and the spec disagree, the spec wins. All names
 > below are CANONICAL: use these exact spellings in UI copy, labels and mock data. Values
 > marked [VERIFY] are unresolved in the spec — never invent them.
@@ -20,7 +21,7 @@ Block-time basis for human-time conversions: **6 s/block, 14,400 blocks/day** (1
 | **VIT** (native governance token) | **12 decimals**; total supply 10^9; existential deposit 0.01 VIT |
 | Prices / scores | fixed-point, **1e9 scale** at every API/event boundary; quote clamp [0.001, 0.999]; `p_S = 1 − p_L`; gate books map YES ↦ LONG |
 | Time | all deadlines are block numbers (`decide_at`, `maturity`, `grace_end`, `challenge_deadline`, `next_boundary`) — the UI computes countdowns from them |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 16`, a runtime constant, echoed in `release.json` |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 19`, a runtime constant, echoed in `release.json`; v20 is authored but not in force |
 
 ### A2. What the UI can read and display (02 §3–§4, §7)
 
@@ -196,6 +197,19 @@ expert detail + documented recovery per code; no free-text errors.
 9. Trading enablement + sudo banner bind to `PhaseFlags`; dead-man and ledger-freeze states
    come from `EpochStatusView`.
 
+### A6. Hosted-service names present at N4 (16 §2, §11)
+
+N4 provides the registry boundary, not the hosted-report contract. Canonical registry calls are
+`client_registry.admit_client` and `client_registry.remove_client`; both are guardian-track
+`ConstitutionalValues` calls. Canonical registry errors are `NotRegistered`, `ClientRemoved`,
+`ClientBondUnset`, `DuplicateLocation`, `ClientsFull`, `ClientIdExhausted`, `BondInsufficient`,
+`BondAccounting`, `QuestionCounterOverflow`, and `NoLiveQuestions`. The custom transport origin is
+exactly `ExternalClient(ClientId)`.
+
+Contract-v20 report names (`hosted_report`, `QuestionRegistered`, `QuestionSealed`,
+`QuestionSettled`, `QuestionVoided`, `Reports`) remain authored-but-not-in-force. Do not render them
+as live or assign them a screen until the runtime constant moves and doc 11 owns the workflow.
+
 ## SECTION B — UI-visible parameter values (doc 13)
 
 Defaults are simulation hypotheses unless marked frozen/K (kernel); the real UI reads them
@@ -322,6 +336,17 @@ live. For mock data these are the correct realistic values.
 | Rounding | charges round up, payouts round down (against the claimant) | payout fine print |
 | `RecentCohortSummaries` | ring of 32 (~22 months) | history page range |
 | `ExecutionRecords` | ring of 256 | execution history range |
+
+### B9. Hosted service (13 §1, §4; 16)
+
+| Parameter | Value | Consumer / design consequence |
+|---|---|---|
+| `MaxClients` | **64** | hard bounded roster; a 65th admission refuses before taking a bond |
+| `svc.client_bond` | **`[VERIFY]`, unset at genesis, native VIT** | admission returns `ClientBondUnset`; never invent a mock value or show the service as armed |
+| `svc.fee_bps` | **`[VERIFY]`, unset at genesis** | N7 service registration will return `ServiceRateUnset` while absent |
+| `svc.max_live` | provisional **16**, hard max 64, `[VERIFY]` | external resource partition; not a demand target |
+| `svc.max_window` | 302,400 blocks (= one epoch), `[VERIFY]` consumer pending N7 | hosted-question window ceiling |
+| `svc.epsilon_min` | 0.01, `[VERIFY]` consumer pending N7 | declared manipulation displacement floor |
 
 **Unset-by-spec ([VERIFY], sim-/ops-gated — never invent values):**
 `sec.flow_cap`, `collator.bond_req_vit`, `ops.*` budget lines, `pol.b_baseline` calibration,

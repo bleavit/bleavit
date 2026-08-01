@@ -947,6 +947,12 @@ error = "Epoch::TooManyLiveProposals"
 reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
 
 [[entry]]
+key = "MaxClients"
+class = "dispatch-limit"
+error = "ClientRegistry::ClientsFull"
+reason = "13 §4 / 16 §2: the 65th values-governed admission is refused before its native bond hold or either registry index changes."
+
+[[entry]]
 key = "Books per proposal"
 class = "value"
 reason = "13 §4: structural per-proposal book count derived from fixed MarketKind composition; no call accepts an over-bound collection."
@@ -1192,10 +1198,9 @@ reason = "13 §1 / 16 §4: the maximum question window. Consumer is `register`'s
 
 [[entry]]
 key = "svc.client_bond"
-class = "unwired"
+class = "value"
 genesis = false
-owner = "N4"
-reason = "13 §1 / 16 §2, §9: the held client-registry bond, and the source of prepaid egress delivery fees (I-36). Consumer is `pallet-client-registry`'s admission path, which is milestone N4."
+reason = "13 §1 / 16 §2, §9: the live optional value sets the exact native VIT hold at admission and the remaining source for prepaid egress. Absence is enforced by `ClientBondUnset`; this is a value consumer, not a caller-supplied dispatch bound."
 
 [[entry]]
 key = "svc.epsilon_min"

@@ -176,6 +176,10 @@ New FE epic **FE-14 (Governance surface)**: referenda list/detail, vote/delegate
   make an external failure freeze-eligible for Bleavit's own ledger); a separate origin type in a
   separate pallet; a twelfth `CallDomain` reachable by no governance origin; a dedicated egress router
   outside XCM health accounting.
+- **The roster remains values-governed.** `client_registry.admit_client` and `remove_client` are
+  `ConstitutionalValues` calls on the guardian track; only calls made *by an admitted client* use
+  `Origin::ExternalClient(ClientId)`. Giving the roster mutations the client domain would make the
+  authority that grants a capability unreachable by construction rather than protect the boundary.
 - **Rejected alternatives**, each for a stated reason:
   - *Asset/topic encoding instead of `Transact`* — cannot carry a registration, and abuses a
     transfer path as an RPC.

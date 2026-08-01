@@ -762,6 +762,13 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_attestor::Call::reap_attestation { .. } => leaf(CallDomain::Public),
             pallet_attestor::Call::__Ignore(_, _) => denied(),
         },
+        RuntimeCall::ClientRegistry(call) => match call {
+            pallet_client_registry::Call::admit_client { .. }
+            | pallet_client_registry::Call::remove_client { .. } => {
+                leaf(CallDomain::ConstitutionalValues)
+            }
+            pallet_client_registry::Call::__Ignore(_, _) => denied(),
+        },
         RuntimeCall::Epoch(call) => match call {
             pallet_epoch::Call::submit { .. }
             | pallet_epoch::Call::withdraw { .. }
@@ -1194,6 +1201,8 @@ pub fn is_values_enactment_leaf(call: &RuntimeCall) -> bool {
             | RuntimeCall::Attestor(pallet_attestor::Call::set_members { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::resolve_challenge { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::remove_for_cause { .. })
+            | RuntimeCall::ClientRegistry(pallet_client_registry::Call::admit_client { .. })
+            | RuntimeCall::ClientRegistry(pallet_client_registry::Call::remove_client { .. })
             | RuntimeCall::Oracle(pallet_oracle::Call::adjudicate { .. })
             // Both registry instances gate `resolve_challenge` on
             // `EnsureOracleResolution` (SQ-295). Now that the classifier states

@@ -50,14 +50,15 @@ use staging_xcm_executor::{
 use crate::{
     classifier::{RuntimeBaseCallFilter, RuntimeDispatcher},
     AccountId, AllPalletsWithSystem, AssetTxPayment, Attestor, Aura, AuraExt, Authorship, Balance,
-    Balances, BlockNumber, CollatorSelection, ConditionalLedger, Constitution, ConvictionVoting,
-    CumulusXcm, Epoch, ExecutionGuard, ForeignAssets, FutarchyTreasury, Guardian, IncidentRegistry,
-    InflowCaps, Market, MessageQueue, Migrations, MilestoneRegistry, Multisig, Oracle, Origins,
-    PalletInfo as RuntimePalletInfo, ParachainInfo, ParachainSystem, PolkadotXcm, Preimage, Proxy,
-    Referenda, Runtime, RuntimeCall, RuntimeGenesisConfig, RuntimeOrigin, Scheduler, Session,
-    System, Timestamp, TrackOrigins, TransactionPayment, TxExtension, UncheckedExtrinsic, Utility,
-    Vesting, Welfare, XcmpQueue, FEE_VIT_USDC_RATE_KEY, MILLISECS_PER_BLOCK, SS58_PREFIX,
-    TRANSACTION_VERSION, USDC_DECIMALS, USDC_LOCATION_ENCODED, VERSION, VIT_DECIMALS,
+    Balances, BlockNumber, ClientRegistry, CollatorSelection, ConditionalLedger, Constitution,
+    ConvictionVoting, CumulusXcm, Epoch, ExecutionGuard, ForeignAssets, FutarchyTreasury, Guardian,
+    IncidentRegistry, InflowCaps, Market, MessageQueue, Migrations, MilestoneRegistry, Multisig,
+    Oracle, Origins, PalletInfo as RuntimePalletInfo, ParachainInfo, ParachainSystem, PolkadotXcm,
+    Preimage, Proxy, Referenda, Runtime, RuntimeCall, RuntimeGenesisConfig, RuntimeOrigin,
+    Scheduler, Session, System, Timestamp, TrackOrigins, TransactionPayment, TxExtension,
+    UncheckedExtrinsic, Utility, Vesting, Welfare, XcmpQueue, FEE_VIT_USDC_RATE_KEY,
+    MILLISECS_PER_BLOCK, SS58_PREFIX, TRANSACTION_VERSION, USDC_DECIMALS, USDC_LOCATION_ENCODED,
+    VERSION, VIT_DECIMALS,
 };
 
 #[cfg(feature = "bootstrap")]
@@ -1861,16 +1862,107 @@ fn composition_contains_all_wired_pallets_at_their_frozen_indices() {
     assert_pallet!(ExecutionGuard, 62, "ExecutionGuard");
     assert_pallet!(InflowCaps, 63, "InflowCaps");
     assert_pallet!(TrackOrigins, 64, "TrackOrigins");
+    assert_pallet!(ClientRegistry, 65, "ClientRegistry");
     #[cfg(feature = "bootstrap")]
     assert_eq!(
         <AllPalletsWithSystem as PalletsInfoAccess>::infos().len(),
-        42
+        43
     );
     #[cfg(not(feature = "bootstrap"))]
     assert_eq!(
         <AllPalletsWithSystem as PalletsInfoAccess>::infos().len(),
-        41
+        42
     );
+}
+
+#[test]
+fn n4_client_bond_and_guardian_track_are_live_only_when_explicitly_seated() {
+    development_ext().execute_with(|| {
+        let location = staging_xcm::latest::Location::here();
+        let owner = account(90);
+
+        assert_noop!(
+            ClientRegistry::admit_client(
+                crate::track_origins::Origin::GuardianTrack.into(),
+                location.clone(),
+                owner.clone(),
+                pallet_client_registry::SubIdPolicy::Optional,
+            ),
+            pallet_client_registry::Error::<Runtime>::ClientBondUnset
+        );
+        assert_eq!(pallet_client_registry::ClientCount::<Runtime>::get(), 0);
+        assert!(!pallet_client_registry::ClientIdOf::<Runtime>::contains_key(&location));
+
+        let bond = 1_000 * currency::VIT;
+        let key = pallet_constitution::key16(b"svc.client_bond");
+        pallet_constitution::Params::<Runtime>::insert(
+            key,
+            pallet_constitution::ParamRecord {
+                key,
+                value: pallet_constitution::ParamValue::Balance(bond),
+                min: pallet_constitution::ParamValue::Balance(1_000 * currency::VIT),
+                max: pallet_constitution::ParamValue::Balance(1_000_000 * currency::VIT),
+                max_delta: None,
+                cooldown_epochs: 2,
+                last_changed_epoch: 0,
+                last_change_block: 0,
+                class: pallet_constitution::ParamClass::Param,
+                kernel_bounded: false,
+            },
+        );
+        assert_ok!(Balances::force_set_balance(
+            RuntimeOrigin::root(),
+            MultiAddress::Id(owner.clone()),
+            bond.saturating_add(Balances::minimum_balance()),
+        ));
+
+        macro_rules! assert_admission_origin_rejected {
+            ($origin:expr) => {
+                assert_noop!(
+                    ClientRegistry::admit_client(
+                        $origin,
+                        location.clone(),
+                        owner.clone(),
+                        pallet_client_registry::SubIdPolicy::Required,
+                    ),
+                    DispatchError::BadOrigin
+                )
+            };
+        }
+
+        assert_admission_origin_rejected!(pallet_origins::Origin::ConstitutionalValues.into());
+        assert_admission_origin_rejected!(RuntimeOrigin::signed(account(91)));
+        assert_admission_origin_rejected!(RuntimeOrigin::root());
+        assert_admission_origin_rejected!(RuntimeOrigin::none());
+        assert_admission_origin_rejected!(pallet_client_registry::Origin::ExternalClient(0).into());
+
+        for wrong_track in [
+            crate::track_origins::Origin::Metric,
+            crate::track_origins::Origin::Constitution,
+            crate::track_origins::Origin::Entrenched,
+            crate::track_origins::Origin::Ratify,
+        ] {
+            assert_admission_origin_rejected!(wrong_track.into());
+        }
+
+        assert_ok!(ClientRegistry::admit_client(
+            crate::track_origins::Origin::GuardianTrack.into(),
+            location.clone(),
+            owner.clone(),
+            pallet_client_registry::SubIdPolicy::Required,
+        ));
+        assert_eq!(
+            pallet_client_registry::Clients::<Runtime>::get(0).map(|record| record.bond),
+            Some(bond)
+        );
+        let reason = crate::RuntimeHoldReason::from(pallet_client_registry::HoldReason::ClientBond);
+        assert_eq!(Balances::balance_on_hold(&reason, &owner), bond);
+        assert_ok!(ClientRegistry::remove_client(
+            crate::track_origins::Origin::GuardianTrack.into(),
+            0,
+        ));
+        assert_eq!(Balances::balance_on_hold(&reason, &owner), 0);
+    });
 }
 
 #[test]

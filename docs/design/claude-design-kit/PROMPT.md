@@ -16,7 +16,8 @@ identity does not exist yet. You are creating it.
 ## Your sources — attached, in reading order
 
 1. `00-START-HERE.md` — how to read this pack and the ground rules.
-2. `01-product-brief.md` — what Bleavit is, the nine personas, product principles.
+2. `01-product-brief.md` — what Bleavit is, the canonical-app personas plus the external-client
+   integration persona, and product principles.
 3. `02-domain-model-and-lifecycles.md` — every entity, state machine and payout rule.
 4. `03-frontend-architecture-VERBATIM.md` — frozen spec: the provenance/trust model, boot
    state machine, degraded modes, history layers.
@@ -35,6 +36,12 @@ REJECT branches, LONG/SHORT, Baseline, `verified-finalized` / `verified-best` /
 `derived-local` / `provider` / `stale-cache`, `Voided`, the RejectReason names, screen IDs
 S1–S20. Never rename, never synonymize, never soften. Everything the spec does NOT govern —
 typography, palette, layout, motion, personality — is yours, and I want a real point of view.
+
+The hosted-question-service contract v20 is attached as product context but is **authored, not in
+force** while the chain advertises contract v19. Do not invent a hosted-service screen, screen ID,
+live report, or enabled action in this iteration. If an integration concept appears, label it
+future/not-in-force and preserve the central claim: Bleavit sells conditional prices with provenance,
+not decisions or endorsements.
 
 ## Deliverable — iteration 1: the core loop, high fidelity
 
