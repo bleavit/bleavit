@@ -14,6 +14,11 @@ ROOT = Path(__file__).resolve().parents[3]
 RULES = ROOT / "deploy" / "monitoring" / "prometheus" / "rules" / "bleavit-alerts.yml"
 DOC_12 = ROOT / "docs" / "architecture" / "12-release-and-operations.md"
 EXPECTED_EXPRESSIONS = {
+    # D-20 hosted question service (doc 16). Producers are N9 seams; the rules
+    # are pinned here so the expressions cannot drift before the exporters land.
+    "BleavitServiceClientPushFailing": "bleavit_service_client_push_failures_consecutive >= 3",
+    "BleavitServiceOccupancyOrCannibalization": "(bleavit_service_questions_live >= 0.9 * bleavit_service_max_live) or ((increase(bleavit_service_not_decision_grade_rejections[3d]) > 0) and (bleavit_service_contest_capital_external > 0))",
+    "BleavitServiceExternalWeightQuotaHigh": "bleavit_service_external_weight_used_ratio > 0.8",
     "BleavitEpochTickLag": "bleavit_chain_tick_lag_blocks > 600",
     "BleavitProposalQueueAtBound": '(bleavit_chain_storage_map_bound{pallet="Epoch",item="IntakeProposals"} > 0) and (bleavit_chain_storage_map_entries{pallet="Epoch",item="IntakeProposals"} >= bleavit_chain_storage_map_bound{pallet="Epoch",item="IntakeProposals"})',
     "BleavitMarketBookLoss": "bleavit_market_book_loss_usdc > (0.9 * bleavit_market_lmsr_loss_bound_usdc)",
@@ -43,12 +48,15 @@ class RuleAndStackTests(unittest.TestCase):
     def test_every_spec_domain_has_a_structured_rule(self) -> None:
         document = yaml.safe_load(RULES.read_text(encoding="utf-8"))
         rules = [rule for group in document["groups"] for rule in group["rules"]]
-        # 21 frozen 12 §6.3 domains, 22 rules: the Relay finality domain carries
+        # 24 frozen 12 §6.3 domains, 25 rules: the Relay finality domain carries
         # two — the stall detector and BleavitRelayMonitorDisconnected, the
         # monitor-health rule that keeps the stall alert from going silent when
-        # collection breaks (SQ-283 review, Finding 1).
-        self.assertEqual(len(rules), 22)
-        self.assertEqual(len({rule["alert"] for rule in rules}), 22)
+        # collection breaks (SQ-283 review, Finding 1). Three of the 24 domains
+        # are D-20's hosted-question-service rows (doc 16), whose producers are
+        # N9 seams; the rules are pinned now so the expressions cannot drift
+        # before the exporters exist.
+        self.assertEqual(len(rules), 25)
+        self.assertEqual(len({rule["alert"] for rule in rules}), 25)
         domains = [rule["labels"]["domain"] for rule in rules]
         spec_domains = {
             row.domain
@@ -56,7 +64,7 @@ class RuleAndStackTests(unittest.TestCase):
         }
         # Every rule maps to a spec domain and every spec domain is covered.
         self.assertEqual(set(domains), spec_domains)
-        self.assertEqual(len(spec_domains), 21)
+        self.assertEqual(len(spec_domains), 24)
         duplicated = {domain for domain in domains if domains.count(domain) > 1}
         self.assertEqual(duplicated, {"Relay finality"})
         for rule in rules:

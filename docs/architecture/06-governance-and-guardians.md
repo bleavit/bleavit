@@ -151,6 +151,7 @@ Note: `ProposalClass::Emergency` is deleted (D-7); the `EmergencyPlaybook` **ori
 | `Preimage` (`ensure_updated`) | Public | Signed |
 | `XcmpQueue` | Public | Root (bootstrap-era administration) |
 | `MessageQueue` (`reap_page`, `execute_overweight`) | Public | Signed — permissionless servicing cranks |
+| `pallet-client-registry`, `pallet-question-service` (client calls) | **ExternalClient** | `pallet_client_registry::Origin::ExternalClient(ClientId)` — **not** a governance origin, and reachable by none of the eight (D-20) |
 | `CollatorSelection` (candidate self-service) | Public | Signed, self-scoped |
 | `CollatorSelection` (administration: invulnerables, desired candidates, bonds) | Public | Root (bootstrap-era administration) |
 | `Session` (`set_keys`, `purge_keys`) | Public | Signed, self-scoped |

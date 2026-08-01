@@ -38,6 +38,9 @@ FROZEN_RUNBOOK_IDS = frozenset(
         "RB-STORAGE",
         "RB-BOOTNODE",
         "RB-RELEASE",
+        # RB-SERVICE joins the frozen set with D-20 (hosted question service,
+        # doc 16): doc 12 §6.3 gained three rows that no existing runbook owns.
+        "RB-SERVICE",
     }
 )
 REQUIRED_KEYS = (
@@ -850,7 +853,7 @@ def validate_frozen_runbook_ids(
         if unexpected:
             details.append(f"unexpected {', '.join(unexpected)}")
         errors.append(
-            f"{label}:1: §6.3 runbook IDs must equal the frozen 13-ID O4 set ({'; '.join(details)})"
+            f"{label}:1: §6.3 runbook IDs must equal the frozen 14-ID runbook set ({'; '.join(details)})"
         )
 
 

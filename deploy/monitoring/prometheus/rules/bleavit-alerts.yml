@@ -1,6 +1,33 @@
 groups:
   - name: bleavit.protocol
     rules:
+      - alert: BleavitServiceClientPushFailing
+        expr: bleavit_service_client_push_failures_consecutive >= 3
+        labels: {severity: warning, runbook: RB-SERVICE, domain: "Client report push"}
+        annotations:
+          summary: "Client report push: a client has three or more consecutive push failures"
+          key_series: "pushes attempted, pushes failed, consecutive failures per client"
+          threshold: "any client with ≥ 3 consecutive push failures"
+          note: "Customer-integration signal, never chain health. I-36 keeps this counter outside XCM health accounting on purpose: a client that never opens its return channel must not be able to move X. The pull surface remains the authoritative delivery."
+
+      - alert: BleavitServiceOccupancyOrCannibalization
+        expr: (bleavit_service_questions_live >= 0.9 * bleavit_service_max_live) or ((increase(bleavit_service_not_decision_grade_rejections[3d]) > 0) and (bleavit_service_contest_capital_external > 0))
+        labels: {severity: warning, runbook: RB-SERVICE, domain: "Hosted service occupancy"}
+        annotations:
+          summary: "Hosted service occupancy: slots near svc.max_live, or NotDecisionGrade rejections rising with external occupancy"
+          key_series: "live external questions, svc.max_live headroom, external vs Bleavit contest capital, NotDecisionGrade rejections/epoch"
+          threshold: "live ≥ 0.9 · svc.max_live, or NotDecisionGrade rejections rising with external occupancy"
+          note: "Two conditions, one cell, and they are not equally serious. Headroom is capacity planning. The second disjunct is doc 16 §8.4's cannibalization falsifier, and its response is a PARAM cut to svc.max_live -- the only alert in this set whose remediation is a parameter change. Never compensate by lowering dec.v_min (TH-65/TH-73)."
+
+      - alert: BleavitServiceExternalWeightQuotaHigh
+        expr: bleavit_service_external_weight_used_ratio > 0.8
+        labels: {severity: warning, runbook: RB-SERVICE, domain: "External block-weight quota"}
+        annotations:
+          summary: "External block-weight quota: external ref-time or proof-size above 80% of its reserved allocation"
+          key_series: "external ref-time and proof-size used vs the reserved external quota, per block"
+          threshold: "> 80 % of either quota"
+          note: "This fires on the reserved EXTERNAL allocation, never on total block utilization -- H is computed against reserved PRIMARY capacity (05 4.3). Saturation is the partition working; a breach is a partition defect and escalates."
+
       - alert: BleavitEpochTickLag
         expr: bleavit_chain_tick_lag_blocks > 600
         labels: {severity: warning, runbook: RB-KEEPER, domain: "Epoch progress"}

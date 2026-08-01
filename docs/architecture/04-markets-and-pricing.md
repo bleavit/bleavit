@@ -68,6 +68,35 @@ displacement:  Δ = b·(logit p′ − logit p);   cost = b · ln((1 − p)/(1 �
 worst-case maker loss = b · ln 2   (from symmetric start)
 ```
 
+**External books (normative; 2026-08-01, D-20).** `BookKind` gains `External`, used by the hosted
+question service ([16](./16-hosted-question-service.md)). Two consequences bind here rather than in 16:
+
+1. **Funding is a typed domain, not a total function over `BookKind`.** `market.seed` currently calls
+   `debit_pol_custody(PolLine::of(book.kind), headroom)` and `insert_pol_commitment`
+   **unconditionally**, and `PolLine::of` is total, so a new arm inherits both. The correct shape is
+   `FundingDomain ∈ { Protocol(PolLine), ExternalClient(ClientId) }`, with **only** `Protocol(_)`
+   touching `LivePolCommitments` or any treasury line. The naive-arm failure is worth stating
+   precisely because the obvious description of it is wrong: `debit_pol_custody` **moves no tokens**,
+   so a misclassified external book does not book client capital as NAV on the way in. The
+   full-cycle NAV error is `r − h`, the external maker's P/L — understated when the book loses,
+   **overstated when it wins**, and overstatement is the unsafe direction because every NAV-derived
+   control is then computed on capital the treasury does not hold. It is I-33's *neighbour*, not its
+   recurrence.
+2. **Returning a client's subsidy needs its own capability.** `withdraw_book`'s return path requires
+   `is_protocol(holder) && is_protocol(recipient)`, while [03](./03-conditional-ledger.md) §1a requires
+   a client account **not** to be a protocol account — so the unspent subsidy cannot be refunded at
+   all and the whole sweep rolls back. The resolution is a **narrow exact-funder return capability**:
+   the book stores its immutable funder at creation and may return inventory to *that account and no
+   other*. Never a protocol-classification exemption, which would re-open every hole §1a closes.
+
+**Fee ownership is explicit, because silence would appropriate it.** `sweep_revenue`'s fee leg runs
+"for every book" and routes to treasury `MAIN`; the ledger's redemption-fee sweep does the same.
+Normatively: `mkt.fee` and `ledger.redeem_fee` on external books accrue to `MAIN` as **service
+revenue** (this is instruments A and B, and it is how hosting pays — [16](./16-hosted-question-service.md)
+§8); the client's **subsidy** does not, and returns under rule 2 above. The reap-eligibility guard and
+the archive dust sweep MUST be keyed on instance and domain: a vacuous `true` for an external question
+would sweep residue to `INSURANCE` **before** the subsidy return.
+
 Subsidy sizing: `b = SubsidyBudget / ln 2` per book; per-class `b` defaults (`pol.b`, `pol.b_gate`, `pol.b_baseline`) are constitution keys in [13-parameters.md](./13-parameters.md); the security-scaled sizing of D-4 (Ask-scaled `pol.b`) is owned by doc 08. Gate books use the identical mechanism with YES ↦ LONG, NO ↦ SHORT.
 
 Every LMSR obligation is pre-collateralized in the conditional ledger: the book account holds complete sets covering its worst-case delivery and loss (§6.3). Invariant I-12 ties book state to held sets; a total failure of `pallet-market` can produce bad prices but can neither mint claims nor move escrow.

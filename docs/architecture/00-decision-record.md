@@ -159,6 +159,55 @@ New FE epic **FE-14 (Governance surface)**: referenda list/detail, vote/delegate
 - Maintenance tags of the new line (`polkadot-stable2606-N`) are adopted as ordinary pin bumps per 01 §9; no new decision entry is required until the line changes again.
 - XCM v5 remains the latest stable wire version on stable2606 (re-verified at adoption; `staging-xcm 24.0.0` ships v3/v4/v5); the [02 §8](02-integration-contract.md) v5-frozen surfaces are unaffected.
 
+### D-20. Futarchy as a service: Bleavit hosts conditional markets for external clients (2026-08-01, PLAN Track N)
+
+- **The decision.** Bleavit sells hosted conditional prediction markets to other parachains, contracts
+  and services over XCM: the client registers a question and funds it, Bleavit runs a two-book LMSR
+  market and publishes the conditional TWAPs with provenance plus a manipulation-cost bound, and the
+  **client's own rule, on the client's own chain, decides**. Owned by [16](16-hosted-question-service.md);
+  ingress template in [09 §6.5](09-execution-upgrades-and-rollout.md).
+- **What is sold is price discovery, not decisions.** This is the load-bearing half of the decision.
+  Selling a *decision* would require an external outcome to enter a Bleavit settlement path;
+  selling a *price* does not. [05](05-welfare-and-decision-engine.md)'s `W` stays Bleavit-scoped and
+  I-24 is untouched, so a hostile client can lose its own money and nothing else.
+- **The boundary is structural, not procedural.** A second `pallet-conditional-ledger` **instance**
+  with its own sovereign (I-4/L-2 is stated against *the* sovereign account, singular, so shared
+  custody would mask an external deficit until Bleavit's own traders were already unbacked, and would
+  make an external failure freeze-eligible for Bleavit's own ledger); a separate origin type in a
+  separate pallet; a twelfth `CallDomain` reachable by no governance origin; a dedicated egress router
+  outside XCM health accounting.
+- **Rejected alternatives**, each for a stated reason:
+  - *Asset/topic encoding instead of `Transact`* — cannot carry a registration, and abuses a
+    transfer path as an RPC.
+  - *Generic `Transact` from an origin allowlist* — nested `Transact` inside `DepositReserveAsset` /
+    `InitiateReserveWithdraw` / `InitiateTeleport` executes **remotely** under Bleavit's own sovereign
+    origin, which no per-instruction predicate distinguishes. The positional whole-program template
+    closes it by shape.
+  - *A sovereign signed origin for clients* — leaves `SafeCallFilter` as the only thing between a
+    client and every `CallDomain::Public` call. A distinct origin type is a type-level fact instead.
+  - *`DescendOrigin` sub-identity* — makes Bleavit assert claims about who inside a client chain
+    asked. Identity is chain-granular; `sub_id` is stored, echoed, and never interpreted.
+  - *`QueryResponse` egress* — XCM v5's `Response` carries no arbitrary data, so it is structurally
+    not a data channel.
+  - *Settlement inside `pallet-oracle`* — its discipline parameters are chain-wide with no
+    per-question override, so hosting external questions there is possible **only by degrading
+    Bleavit's own oracle economics** (bond 250 → 667 bps, one extra round on every Bleavit dispute),
+    and a reporter permanently ejected over a false *external* report becomes unavailable for
+    Bleavit's own welfare. Settlement runs in `pallet-question-service` on a client-named bonded
+    attestor median instead.
+  - *Health-tracked push* — a client that never opens its return channel would drive `X` down at zero
+    cost, which is exactly what I-24 forbids. The egress router is dedicated and never read back.
+  - *Certification against measured depth* — would let an external question satisfy its security
+    relation using Bleavit's own organic liquidity, turning tenants into competitors for the capital
+    `dec.v_min` measures. Certification counts only client-funded `C_disp`.
+- **Preserved properties, each with its enforcement:** no external state in any decision, welfare or
+  settlement input (I-34/I-37, PT-10); no external `Transact` reaching any non-`ExternalClient` call
+  (I-35); no externally-triggered send feeding XCM health (I-36); ingress issuance-neutral (I-38);
+  per-domain solvency as the existing invariant evaluated twice (PT-9).
+- **Cost accepted:** this is the largest relaxation of the chain's XCM posture to date, and G2–G4 gain
+  a materially larger surface to prove before sudo removal. Taken deliberately: [10](10-frontend-architecture.md)–[11](11-frontend-workflows.md)
+  are unbuilt, so the contract bump is cheap now and expensive after F2 binds.
+
 ---
 
 ## Part 2 — Finding disposition table

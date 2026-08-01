@@ -279,15 +279,15 @@ Both keys are **raised only by phase gates** (§7): they are not PARAM/META-adju
 | Aspect | v1 rule |
 |---|---|
 | XCM version | **XCM v5** — latest stable on `stable2606` (verified 2026-07-16 on stable2603, PLAN V-16; re-verified at the D-19 line move 2026-07-17 — `staging-xcm 24.0.0` ships v3/v4/v5); version negotiation enabled |
-| Accepted origins | Asset Hub, relay chain, Coretime chain; all others barred |
-| Barrier | paid-execution allowlist + known query responses; **`Transact` refused from all locations**; no superuser origin conversion; `UnpaidExecution` refused |
+| Accepted origins | Asset Hub, relay chain, Coretime chain; plus **registered hosted-question-service clients**, matched by exact `Location` equality against the [16](./16-hosted-question-service.md) §2 registry (never by prefix, and never after `DescendOrigin`/`AliasOrigin`, which stay unadmitted); all others barred |
+| Barrier | paid-execution allowlist + known query responses; **`Transact` refused from all locations except inside the §6.5 client-ingress template**, whose match is positional over the whole program rather than per-instruction; no superuser origin conversion; `UnpaidExecution` refused |
 | Asset mappings | USDC (Asset Hub location ↔ local `ForeignAssets` id, pinned per D-17: `{parents: 1, X3(Parachain(1000), PalletInstance(50), GeneralIndex(1337))}` — asset index 1337 verified as Circle-native sufficient USDC, 2026-07-16, PLAN V-17) and DOT (parent) only; unknown assets refused |
 | Reserve model | Asset Hub is reserve for USDC; relay/AH for DOT; **teleports disabled** — scope: this chain's executor trusts no inbound or outbound teleport (`IsTeleporter = ()`); programs this chain *authors* may instruct the **relay** to run its canonical DOT teleport to a system chain (the §4 Coretime funding leg, PLAN V-19), which executes on the relay under the relay's own trust rules and creates no teleport trust here (clarified 2026-07-16) |
 | Fees/weight | `WeightTrader` selling execution for DOT or USDC at governed rates — the four [13](./13-parameters.md) §1 PARAM keys `xcm.dot_per_sec` / `xcm.dot_per_mb` / `xcm.usdc_per_sec` / `xcm.usdc_per_mb` (stable2606 `Weight` is two-dimensional, so each asset carries a ref-time and a proof-size rate; keys added 2026-07-17, SQ-112); USDC is a sufficient asset, so a USDC-only account can pay inbound execution fees ([08](./08-treasury-and-economics.md) owns `fee.vit_usdc_rate` for the tx-payment side) |
 | Failure handling | protocol-initiated transfers (coretime funding §4, treasury recovery) are keeper-monitored with bounded retry and idempotency keys; user transfers follow standard XCM error semantics; **no XCM outcome participates in any decision or settlement path** (I-24) — an XCM failure can therefore never default to adoption |
 | Trapped assets | recovery via `claim_assets`, which is **self-scoped by construction** (the claim origin must equal the location the trap was keyed under): Signed accounts may reclaim only traps keyed to their own origin (their own failed transfers — no new authority is created), and protocol-keyed traps are reclaimed via a TREASURY-class call. Traps keyed to a *remote* origin (e.g. a failed inbound message keyed under Asset Hub) are recoverable only by an inbound `ClaimAsset` program from that origin — mitigation is upstream: the §5.2 inflow caps are enforced at the *mint* leg — **both** of them, per the SQ-129 resolution of 2026-07-20 — so an over-cap inbound transfer of either kind fails before anything reaches the local trap, and no cap refusal can produce a **new** remote-keyed trap at all. **Recovery carve-out (normative; SQ-360 resolution, 2026-07-24).** The one case §5.2's mint-step exemption leaves reachable is an inbound `ClaimAsset` recovery whose beneficiary is over the per-account cap: §5.2 requires the beneficiary deposit leg of any recovery to stay metered, so that deposit refuses and the holding returns to the trap it was claimed from — **the same key, under the same origin**. No claim is created, no value is lost, and nothing is stranded that was not already trapped, which is why the barrier deliberately skips the prospective pre-mint gate for programs whose only USDC source is `ClaimAsset` (a refusal there would consume the trap entry while yielding no holding). The sentence above therefore bounds *new* stranding, not the idempotent re-trap of an existing one (amended 2026-07-16, B4 review — the prior "TREASURY-class only" wording was unimplementable: `AssetTrap` keys claims by origin, so a treasury origin could never match user- or remote-keyed traps and those funds would have been permanently stranded) |
-| Disabled instructions | `Transact`, HRMP channel-request handling beyond system defaults, any instruction not needed for reserve transfer + fee payment — default-deny posture |
-| Governance restriction | `pallet_xcm::{send, force_*}` filtered for all origins; cross-chain governance execution deferred |
+| Disabled instructions | `Transact` (except at §6.5's pinned position 2), `DescendOrigin`, `AliasOrigin`, every nesting instruction (`DepositReserveAsset`, `InitiateReserveWithdraw`, `InitiateTeleport`), HRMP channel-request handling beyond system defaults, any instruction not needed for reserve transfer + fee payment — default-deny posture. The **closed instruction allowlist itself is unchanged by §6.5**: the client program is admitted by matching a whole program shape, not by widening the per-instruction set |
+| Governance restriction | `pallet_xcm::{send, force_*}` filtered for all origins; cross-chain governance execution deferred. The §6.5 ingress creates **no** new user-reachable send authority, and `CallDomain::ExternalClient` is reachable by **no** governance origin — so the client surface and the governance surface are disjoint by construction, not by review |
 
 External oracle-parachain feeds via XCM remain analyzed and excluded as settlement sources in v1.
 
@@ -309,6 +309,58 @@ The guided deposit flow ([11](./11-frontend-workflows.md)) runs a second light-c
 
 - **X sub-metric (XCM health)**: send/fail/timeout counters enter `C_onchain` ([05](./05-welfare-and-decision-engine.md)/[07](./07-oracle-and-disputes.md) own the pillar split). *(Resolved 2026-07-17, SQ-113 — formerly `[VERIFY XCM-health data availability on stable2603]`.)* On stable2606 (re-checked at the D-19 line move; XCM v5 unchanged) exactly three signals are runtime-readable, all **local**: (1) a message accepted and delivered to the local transport by the router, (2) a local validate/deliver failure, and (3) the [07](./07-oracle-and-disputes.md) §8 reserve-probe timeout fold (the only locally-observable "sent but never answered" signal). Remote delivery/execution outcomes are **not** runtime-readable without per-message response tracking, which v1 deliberately omits (I-24: no XCM outcome may enter a decision path with inferred success). v1 X is therefore computed from the three local counters — `X = accepted ÷ (accepted + local_failures + probe_timeouts)` over the day/epoch window, no traffic ⇒ 1 ([05](./05-welfare-and-decision-engine.md) §4.3 carries the formula row) — and X so defined is *partial by construction*, so the fallback below is load-bearing, not residual:
 - **R probe (reserve health)**: the deterministic asynchronous [07 §8](./07-oracle-and-disputes.md) Asset Hub transferability round trip. Once per epoch day, a keeper-cranked query withdraws and re-deposits the exact probe USDC from the Bleavit sovereign account and returns a paid response; only a timely authenticated success within the bounded observation window raises R. There is no same-block result and no sovereign-balance-reconciliation shortcut. R enters `C_onchain`; every error, timeout, missed cadence slot or ambiguous result sets the daily **C** breach flag **fail-static** (R and X both live in `C_onchain` — pillar placement owned by [05](./05-welfare-and-decision-engine.md) §4.3) — if XCM-health data proves unavailable or ambiguous, R alone drives the flag, so a frozen/censored reserve channel degrades to status-quo defaults, never to silent full-backing claims. PB-RESERVE (halt split inflows) and the FE NAV-haircut surfacing are owned by [07](./07-oracle-and-disputes.md)/[08](./08-treasury-and-economics.md)/[10](./10-frontend-architecture.md).
+
+### 6.5 Client ingress — the positional template (normative)
+
+The hosted question service ([16](./16-hosted-question-service.md)) is the only inbound `Transact`
+path on this chain, and it is admitted by matching **one exact whole program**, position by position.
+This is not an allowlist relaxation and MUST NOT be implemented as one.
+
+**Why positional.** `Transact` nested inside `DepositReserveAsset { xcm }`,
+`InitiateReserveWithdraw { xcm }` or `InitiateTeleport { xcm }` does not execute here at all — it
+executes on a **remote** chain carrying **this chain's** sovereign origin. No predicate over
+instruction identity distinguishes that from a local `Transact`; a positional match does, because
+nesting simply is not one of the admitted positions.
+
+| idx | instruction | pinned constraint |
+|---:|---|---|
+| 0 | `WithdrawAsset(assets)` | exactly one asset, `id == usdc_location()`, `Fungible` |
+| 1 | `PayFees { asset }` | `asset.id == usdc_location()` |
+| 2 | `Transact { origin_kind, call }` | `origin_kind == OriginKind::Xcm`; the decoded call MUST classify to `CallDomain::ExternalClient` |
+| 3 | `RefundSurplus` | — |
+| 4 | `DepositAsset { assets, beneficiary }` | `Wild(AllCounted(1))`, **`beneficiary == *origin`** |
+| 5 | `SetTopic(_)` | optional; last only |
+
+Four properties hold **by shape** rather than by any maintained predicate:
+
+1. **Value redirection is not expressible** — position 4 pins the beneficiary to the sending origin.
+2. **Ingress mints nothing** — position 0 is `WithdrawAsset`, never `ReserveAssetDeposited`, so the
+   client spends a balance it already holds here and `phase3.tvl_cap` is untouched *by ingress*.
+3. **"This chain `Transact`s abroad as itself" is closed** — no nesting instruction is admitted at
+   any position.
+4. **Unknown future instructions fail the match** — the template is an exhaustive per-position
+   `match` over the pinned SDK enum, so a new SDK variant fails *compilation* rather than being
+   silently re-interpreted. The pin (`staging-xcm = 24.0.0`) is therefore part of the invariant's
+   statement (I-35), not merely a dependency choice.
+
+**One matcher, three consumers.** The barrier, the origin converter and `SafeCallFilter` MUST call the
+same matcher, so they cannot disagree with each other about what is admitted.
+
+**Origin.** A matched program's `Transact` executes under
+`pallet_client_registry::Origin::ExternalClient(ClientId)` — never a signed origin, never `Root`,
+never any `pallet_origins::Origin` variant. The converter has exactly one success constructor
+(I-34).
+
+**Weight and fees.** `FixedWeightBounds` already decodes a `Transact`'s call and adds its
+`call_weight`, so the trader prices the real dispatch and an undecodable call dies at weighing rather
+than at execution. `DenyThenTry` passes the **raw** origin to the deny leg, so origin matching sees
+the true sender.
+
+**Egress is not symmetric with ingress.** The only program this chain authors toward a client is a
+best-effort report push on a **dedicated** router that does not wrap `HealthTrackingRouter`, with
+delivery fees prepaid from the client bond and the send outcome never read back into any local state
+(I-36; [16](./16-hosted-question-service.md) §9). XCM v5's `Response` carries no arbitrary data, so
+`QueryResponse` is structurally not a data channel and is not used as one.
 
 ---
 

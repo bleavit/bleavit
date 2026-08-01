@@ -58,7 +58,7 @@ A runtime upgrade can technically replace any runtime logic, including "immutabl
 
 ### 2.4 Non-goals and v1 cuts
 
-N-1. Combinatorial futarchy. N-2. Arbitrary cross-chain governance execution over XCM (only reserve transfers and enumerated queries). N-3. On-chain continuous limit-order book. N-4. Per-address position limits / address clustering as consensus security. N-5. Reputation-weighted market influence. N-6. Multi-asset collateral baskets. N-7. Sybil-proof usage metrics. **N-8 (new, D-8). Forecast trading** — post-resolution books are cut from v1; the reopened-book inventory problem is recorded with the deferral in [04](04-markets-and-pricing.md).
+N-1. Combinatorial futarchy. N-2. Arbitrary cross-chain governance execution over XCM. **Narrowed, not lifted (2026-08-01, D-20):** reserve transfers, enumerated queries, and the single positionally-matched client-ingress program of [09](09-execution-upgrades-and-rollout.md) §6.5 are admitted; everything else remains barred. The ingress program carries a `Transact` whose call MUST resolve to `CallDomain::ExternalClient`, a domain reachable by no governance origin — so what stays excluded is precisely what N-2 was written to exclude: *governance* execution, in either direction. See [16](16-hosted-question-service.md). N-3. On-chain continuous limit-order book. N-4. Per-address position limits / address clustering as consensus security. N-5. Reputation-weighted market influence. N-6. Multi-asset collateral baskets. N-7. Sybil-proof usage metrics. **N-8 (new, D-8). Forecast trading** — post-resolution books are cut from v1; the reopened-book inventory problem is recorded with the deferral in [04](04-markets-and-pricing.md).
 
 ---
 
@@ -147,7 +147,7 @@ flowchart TB
     AR --> OR
 ```
 
-XCM relationships in v1 are exactly two: Asset Hub ⇄ futarchy chain reserve transfers of USDC (and DOT for fees), and treasury-authorized transfers to the Coretime chain for renewals. No cross-chain `Transact` governance in either direction.
+XCM relationships in v1 are **three** (was two until 2026-08-01, D-20): Asset Hub ⇄ futarchy chain reserve transfers of USDC (and DOT for fees); treasury-authorized transfers to the Coretime chain for renewals; and the **hosted-question-service** relationship with admitted external clients ([16](16-hosted-question-service.md)), which is bounded in both directions and is the only one carrying a `Transact`. Inbound, that `Transact` is admissible **only** inside the exact positionally-matched program of [09](09-execution-upgrades-and-rollout.md) §6.5, and only for calls in `CallDomain::ExternalClient`. Outbound, the only program this chain authors toward a client is a best-effort report push on a dedicated router whose outcome is never read back (I-36). No cross-chain **governance** `Transact` in either direction — that remains excluded, and the new domain is reachable by no governance origin.
 
 ---
 

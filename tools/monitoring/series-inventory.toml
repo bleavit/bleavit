@@ -189,3 +189,39 @@ source = "relay-monitor"
 [[series]]
 name = "bleavit_relay_monitor_connected"
 source = "relay-monitor"
+
+[[series]]
+name = "bleavit_service_client_push_failures_consecutive"
+source = "seam"
+owner = "N9"
+rationale = "The client egress path is milestone N9; the counter is deliberately non-welfare (I-36), so it cannot be derived from any existing XCM-health series."
+
+[[series]]
+name = "bleavit_service_questions_live"
+source = "seam"
+owner = "N9"
+rationale = "Hosted-question occupancy is produced by pallet-question-service (N7), surfaced with the N9 egress/telemetry wiring."
+
+[[series]]
+name = "bleavit_service_contest_capital_external"
+source = "seam"
+owner = "N9"
+rationale = "The 16 §8.4 cannibalization falsifier compares external against Bleavit contest capital; the external half does not exist until the service books do."
+
+[[series]]
+name = "bleavit_service_not_decision_grade_rejections"
+source = "seam"
+owner = "N9"
+rationale = "Bleavit-side NotDecisionGrade counts are only actionable beside the external-occupancy series they are correlated against, so both land together."
+
+[[series]]
+name = "bleavit_service_external_weight_used_ratio"
+source = "seam"
+owner = "N9"
+rationale = "The 05 §4.3 external/primary weight partition is implemented with the service pallets; there is no reserved external allocation to measure before then."
+
+[[series]]
+name = "bleavit_service_max_live"
+source = "seam"
+owner = "N9"
+rationale = "The live svc.max_live bound is exported beside the occupancy series it is compared against; both arrive with the N9 telemetry wiring."

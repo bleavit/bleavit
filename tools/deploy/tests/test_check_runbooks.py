@@ -449,7 +449,7 @@ class CheckRunbooksTests(unittest.TestCase):
 
         self.assertTrue(
             any(
-                "must equal the frozen 13-ID O4 set" in error
+                "must equal the frozen 14-ID runbook set" in error
                 and "missing RB-XCM" in error
                 for error in errors
             ),

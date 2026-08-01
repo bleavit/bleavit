@@ -11,12 +11,12 @@ Read this file first. Then read `PLAN.md`. Then work.
 
 ## Ground truth
 
-- **`docs/architecture/` (00–15) is the single source of truth** for what to build
+- **`docs/architecture/` (00–16) is the single source of truth** for what to build
   (see rule R-1). Doc 00 is the decision record (D-1…D-19); 01 the system overview;
   02 the chain↔frontend integration contract (a versioned surface — see 02 §13);
   03–09 the protocol components;
   10–12 the frontend and operations; 13 the only home of parameter values;
-  14 the threat model; 15 the invariants and the normative testing regime.
+  14 the threat model; 15 the invariants and the normative testing regime; **16 the hosted question service** — the external-client trust domain (D-20).
   Reading order for newcomers: 01 → 02 → 03 → 04 → 05, then as needed
   (`docs/architecture/README.md`).
 - Constants and parameters have exactly two homes: `02` (chain identity, the
@@ -31,7 +31,7 @@ Read this file first. Then read `PLAN.md`. Then work.
 ## Rules
 
 - **R-1 — The specification is the source of truth for behavior.** Every observable
-  behavior traces to `docs/architecture/` (00–15); implementation follows the spec.
+  behavior traces to `docs/architecture/` (00–16); implementation follows the spec.
   The spec is editable — when it is genuinely wrong, ambiguous, or contradictory you
   may correct it directly rather than coding around it. Do it deliberately: keep the
   change internally consistent across the doc set (owning doc + every referencing doc
@@ -244,7 +244,7 @@ not exist here, and verify with `ls -lL` (which follows the link) rather than
 
 | Path | Status | What it is |
 |---|---|---|
-| `docs/architecture/` | spec | The specification (00–15 + README) |
+| `docs/architecture/` | spec | The specification (00–16 + README) |
 | `docs/design/` | derived | Non-normative design-context pack (`claude-design-kit/`: spec distillations + Claude Design prompt); spec wins on conflict; regenerate after any spec change |
 | `PLAN.md` | living | Implementation roadmap, status, session log |
 | `README.md` | living | Human orientation |
