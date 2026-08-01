@@ -18,6 +18,8 @@ from bleavit_reference_model.disputes import (
     BOND_BPS_MAX,
     BOND_BPS_MIN,
     BOND_FLOOR_DEFAULT,
+    BOND_FLOOR_MAX,
+    BOND_FLOOR_MIN,
     DEFAULTS,
     DELTA_S_MAX_MAX,
     HONEST_SHARE,
@@ -42,6 +44,7 @@ from bleavit_reference_model.disputes import (
     coverage_bps,
     coverage_makes_lying_unprofitable,
     cumulative_forfeit,
+    default_slash_split,
     expiry_disposition,
     filing_bond,
     flat_bond_attack_outcome,
@@ -52,6 +55,7 @@ from bleavit_reference_model.disputes import (
     naive_perbill_admits_component,
     per_round_extension_budget_days,
     retain_until_days,
+    self_challenge_outcome,
     settles_neutrally,
     slash_split,
     terminal_forfeit_fraction,
@@ -270,6 +274,122 @@ class TestSection63MetaWorkedExample(unittest.TestCase):
     def test_position_share_outside_the_unit_interval_refuses(self):
         with self.assertRaises(BondError):
             attack_outcome(self.STAKE, self.DELTA_S_BPS, position_share=Fraction(2))
+
+
+class TestSelfChallengeDefault(unittest.TestCase):
+    """07 §5.3/§5.5 contract v19 — one account on both sides of the game.
+
+    The same META cohort §6.3 recomputes its worked example on, priced along
+    the path the coverage rule never modelled: terminating at round 1 by
+    default instead of riding the ladder to `R_max`. §6.3 sizes `B_1` so that
+    forfeiting `(2^R_max − 1)·B_1` exceeds the gross gain; that argument holds
+    only if landing a false value *costs* the full ladder.
+    """
+
+    STAKE = 1_200_000
+    DELTA_S_BPS = 1_000  # shifting `s` by 0.10, as in §6.3
+
+    def test_pre_v18_forward_settlement_inverted_the_coverage_promise(self):
+        # The honest attacker nets −90,000 (`test_this_spec_row`); the same
+        # attacker occupying both roles netted **+102,000** on the same cohort.
+        old = self_challenge_outcome(self.STAKE, self.DELTA_S_BPS, neutralized=False)
+        self.assertEqual(old.b1, 30_000)
+        self.assertEqual(old.required_ladder, 210_000)
+        self.assertEqual(old.gross_gain, 120_000)
+        self.assertEqual(old.bounty, 12_000)  # its own 40 % counterparty share
+        self.assertEqual(old.net_cost, 18_000)
+        self.assertEqual(old.net, 102_000)
+        self.assertTrue(old.profitable)
+        self.assertLess(attack_outcome(self.STAKE, self.DELTA_S_BPS).net, 0)
+
+    def test_it_paid_8_6_percent_of_the_ladder_the_rule_required(self):
+        # The rule was bypassed, not beaten: it can be satisfied exactly and
+        # still be paid in a fraction of the stack it sized.
+        old = self_challenge_outcome(self.STAKE, self.DELTA_S_BPS, neutralized=False)
+        self.assertEqual(old.ladder_fraction, Fraction(18_000, 210_000))
+        self.assertAlmostEqual(float(old.ladder_fraction), 0.0857, places=4)
+
+    def test_v18_neutralization_removes_the_gain_entirely(self):
+        # The repair is on the value side: the false value never lands, so the
+        # gross gain is zero rather than merely outweighed.
+        new = self_challenge_outcome(self.STAKE, self.DELTA_S_BPS, neutralized=True)
+        self.assertEqual(new.gross_gain, 0)
+        self.assertEqual(new.bounty, 0)  # §5.5's round-1 exception
+        self.assertEqual(new.net, -30_000)
+        self.assertFalse(new.profitable)
+
+    def test_no_position_share_makes_the_neutralized_attack_pay(self):
+        # Outweighing a gain depends on how much of the winning side the
+        # attacker holds; removing it does not.
+        for share in (Fraction(1, 4), Fraction(1, 2), Fraction(1)):
+            with self.subTest(share=share):
+                out = self_challenge_outcome(
+                    self.STAKE,
+                    self.DELTA_S_BPS,
+                    position_share=share,
+                    neutralized=True,
+                )
+                self.assertEqual(out.gross_gain, 0)
+                self.assertEqual(out.net, -30_000)
+
+    def test_no_lawful_parameter_set_makes_the_neutralized_attack_pay(self):
+        # Unprofitability must not depend on the defaults: `orc.rounds` carries
+        # no max-Δ, so 3 → 2 is a single lawful META step.
+        for floor in (BOND_FLOOR_MIN, BOND_FLOOR_DEFAULT, BOND_FLOOR_MAX):
+            for bps in (BOND_BPS_MIN, BOND_BPS_MAX):
+                for rounds in range(ROUNDS_MIN, ROUNDS_MAX + 1):
+                    params = OracleParams(floor, bps, rounds)
+                    with self.subTest(params=params):
+                        out = self_challenge_outcome(
+                            self.STAKE, DELTA_S_MAX_MAX, params, neutralized=True
+                        )
+                        self.assertFalse(out.profitable)
+                        self.assertEqual(out.gross_gain, 0)
+
+    def test_the_residual_is_a_priced_griefing_vector_not_a_profit(self):
+        # Honest reporting of the residual: neutralization removes the *gain*,
+        # it does not remove the *move*. An attacker may still burn `B_1` to
+        # force a neutral flagged settlement — which is exactly what §11(4)
+        # prices as riding a dispute for a status-quo outcome, and what §10's
+        # two-consecutive-flag renormalization exists to absorb. The point is
+        # that the price is now paid for nothing.
+        new = self_challenge_outcome(self.STAKE, self.DELTA_S_BPS, neutralized=True)
+        self.assertEqual(new.net_cost, new.b1)
+        self.assertEqual(new.gross_gain, 0)
+
+    def test_round_one_default_pays_no_bounty(self):
+        # §5.5 v18: the whole stack routes to INSURANCE. Paying a bounty here
+        # is what makes challenging an honest *offline* reporter profitable.
+        self.assertEqual(default_slash_split(30_000, 1), (0, 30_000))
+
+    def test_from_round_two_the_ordinary_split_applies(self):
+        for round_ in (2, 3):
+            with self.subTest(round=round_):
+                self.assertEqual(
+                    default_slash_split(70_000, round_), slash_split(70_000)
+                )
+
+    def test_the_default_split_never_creates_an_unbacked_claim(self):
+        for round_ in (1, 2, 3):
+            for stack in (0, 1, 999, 30_000, 210_001):
+                with self.subTest(round=round_, stack=stack):
+                    counterparty, insurance = default_slash_split(stack, round_)
+                    self.assertGreaterEqual(counterparty, 0)
+                    self.assertGreaterEqual(insurance, 0)
+                    self.assertEqual(counterparty + insurance, stack)
+
+    def test_degenerate_inputs_refuse(self):
+        with self.assertRaises(BondError):
+            default_slash_split(-1, 1)
+        with self.assertRaises(BondError):
+            default_slash_split(10_000, 0)
+        with self.assertRaises(BondError):
+            self_challenge_outcome(
+                self.STAKE,
+                self.DELTA_S_BPS,
+                position_share=Fraction(2),
+                neutralized=False,
+            )
 
 
 class TestSection63AmendmentScreen(unittest.TestCase):

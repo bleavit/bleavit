@@ -1,6 +1,6 @@
 {
   "schema": "bleavit.critical-surface.v1",
-  "integration_contract_version": 18,
+  "integration_contract_version": 19,
   "description": "Critical chain/frontend surface frozen by architecture 02 sections 3, 6-9, and 12.",
   "release_blockers": [
     {
@@ -267,7 +267,7 @@
           "Blake2_128Concat"
         ],
         "key": "(u16,u32,u16)",
-        "value": "oracle_core::SettledComponent{value:futarchy_primitives::FixedU64(u64),path:oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|Adjudicated=2|Neutral=3],flagged:bool}"
+        "value": "oracle_core::SettledComponent{value:futarchy_primitives::FixedU64(u64),path:oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|Adjudicated=2|ChallengerDefault=3|Neutral=4],flagged:bool}"
       }
     },
     {
@@ -762,7 +762,7 @@
       "citation": "02 §8; 02 §13",
       "layout": {
         "type": "u32",
-        "value": "0x12000000"
+        "value": "0x13000000"
       }
     },
     {

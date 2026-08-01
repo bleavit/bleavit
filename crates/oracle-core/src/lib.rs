@@ -12,6 +12,10 @@ use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
 pub const MAX_REPORTERS: usize = 64;
+/// One retained 07 §3 offense record per account that can hold a seat. A clean
+/// exit leaves no row, so ordinary rotation can never fill this; only accounts
+/// carrying a non-zero record (or an ejection) occupy one.
+pub const MAX_REPORTER_RECORDS: usize = MAX_REPORTERS;
 pub const MAX_WATCHTOWERS: usize = futarchy_primitives::kernel::WT_MAX as usize;
 /// Live reporting rounds: ≤ 16 components × ≤ 4 concurrently-settling epochs ×
 /// ≤ 2 frozen versions overlapping a MetricSpec activation boundary (07 §2(4)).
@@ -70,6 +74,13 @@ pub const RES_PROBE_TIMEOUT: BlockNumber = 600;
 /// never create an id that aliases that flag when the dispatcher encodes it.
 pub const MAX_RESERVE_PROBE_QUERY_ID: u64 = (1_u64 << 63) - 1;
 pub const ORC_ROUNDS: u8 = 3;
+/// 07 §3: the 50 % stake slash lands on exactly the *second* wrong-value
+/// finding. Single-homes the literal that `record_reporter_offense` used to
+/// carry inline.
+pub const OFFENSE_SLASH_THRESHOLD: u8 = 2;
+/// 07 §3: ejection on the *third*. Ejection is permanent since contract v19 —
+/// see [`Oracle::register_reporter_with_params`].
+pub const OFFENSE_EJECTION_THRESHOLD: u8 = 3;
 pub const ORC_ROUND_CAP_MIN: u8 = futarchy_primitives::kernel::ORC_ROUNDS_MIN;
 pub const ORC_ROUND_CAP_MAX: u8 = futarchy_primitives::kernel::ORC_ROUNDS_MAX;
 pub const ORC_BOND_FLOOR: Balance = 10_000_000_000;
@@ -150,6 +161,25 @@ pub struct ReporterInfo {
     pub offenses: u8,
 }
 
+/// 07 §3's offense ladder, retained independently of the active seat.
+///
+/// Without this the ladder is unreachable by construction: `deregister_reporter`
+/// returns the stake in full and `register_reporter` re-seated `offenses: 0`, so
+/// a reporter answered the first adjudicated-false finding by exiting and
+/// re-entering for the price of two extrinsics — and neither the second-offense
+/// 50 % slash nor the third-offense ejection could ever be reached. Identical in
+/// shape to the `pallet-attestor` defect closed by SQ-262.
+///
+/// Deliberately carries **no balance**: 07 §3's "exit returns the stake" is
+/// untouched, so the I-29 custody sum in the shell's `do_try_state` is unchanged
+/// by construction.
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+pub struct ReporterRecord {
+    pub account: AccountId,
+    pub offenses: u8,
+    pub ejected: bool,
+}
+
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct WatchtowerInfo {
     pub stake: Balance,
@@ -173,8 +203,17 @@ pub enum SettlePath {
     Unchallenged,
     Recomputed,
     Adjudicated,
-    /// The reporter did not consent to the next round before its deadline;
-    /// the current challenger value therefore wins by the §5.3 default path.
+    /// Retained for SCALE stability; **no longer produced since contract v19**.
+    ///
+    /// A 07 §5.3 reporter default now settles [`SettlePath::Neutral`] with
+    /// `flagged: true` (07 §5.3/§10): a default establishes that the reporter
+    /// abandoned their assertion and establishes nothing about the challenger's,
+    /// which no quorum acknowledged, no recomputation confirmed and no
+    /// adjudication reviewed. Settling it forward was the whole of the
+    /// self-challenge attack. Removing the variant would shift `Neutral`'s
+    /// discriminant 4 → 3 and break the frozen 02 §6 `ComponentSettled` layout,
+    /// so it stays; `Pallet::do_try_state` asserts no `ComponentValues` entry
+    /// ever carries it.
     ChallengerDefault,
     Neutral,
 }
@@ -245,6 +284,22 @@ pub enum BondDisposition {
     /// *capital lock-up* it is, not as a slash, and the values track's failure
     /// to rule is not a finding against either party (SQ-492).
     RefundBoth,
+    /// The reporter abandoned a funded **round 1** (07 §5.3/§5.5, contract v19).
+    ///
+    /// Their stack is forfeit — that is conduct — but it routes **100 % to
+    /// INSURANCE and pays no bounty**. At round 1 the game holds exactly two
+    /// unrebutted assertions and one was abandoned; nothing on chain
+    /// distinguishes an honest catch from a griefing or self-dealt one, and
+    /// paying there makes challenging an honest *offline* reporter profitable.
+    /// From round 2 the reporter consented to escalate under a doubled bond and
+    /// then abandoned — a concession by conduct and a contest the challenger
+    /// funded — so §6.2's honest-challenger revenue applies unchanged and the
+    /// disposition is [`BondDisposition::ChallengerWins`].
+    ///
+    /// Precedent for paying nobody: `settle_bond_custody`'s no-challenger
+    /// recompute arm — taking custody with no finding behind it is the unbacked
+    /// claim the ledger discipline exists to prevent.
+    ReporterDefaulted,
 }
 
 /// Internal custody instruction emitted by a terminal transition. This is not
@@ -383,6 +438,16 @@ pub enum Event {
         reporter_bond: Balance,
         challenger_bond: Balance,
     },
+    /// The retained 07 §3 record store was full of ejections and a departing or
+    /// ejected account's record could not be kept (contract v19). An operational
+    /// diagnostic only — off the frozen 02 §6 ingest set by that section's
+    /// (a)–(c) rule. Appended last; inserting mid-enum would shift discriminants.
+    ///
+    /// Fails **open** deliberately (G-1): a full table must never abort a
+    /// values-track verdict.
+    ReporterRecordsFull {
+        who: AccountId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
@@ -412,6 +477,15 @@ pub enum Error {
     BadProof,
     /// A reported/adjudicated value is off the 05 §4.4 `[0, 1]` 1e9 grid.
     ValueOutOfBounds,
+    /// 07 §5.2 (contract v19): the round's own reporter may not challenge it.
+    /// §5.5 disposes of a round in favour of "the honest counterparty" and §5.3
+    /// calls escalation "opt-in on both sides"; both are undefined when one
+    /// account holds both roles. Appended last — SCALE discriminants are
+    /// positional.
+    SelfChallenge,
+    /// 07 §3 (contract v19): an account ejected on the third offense may never
+    /// re-register.
+    ReporterEjected,
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
@@ -431,6 +505,11 @@ pub struct ReportInput {
 #[derive(Clone, Debug, Default, Decode, Encode, Eq, PartialEq, TypeInfo)]
 pub struct Oracle {
     pub reporters: Vec<(AccountId, ReporterInfo)>,
+    /// 07 §3 offense records retained across `deregister_reporter` and ejection
+    /// (contract v19). Bounded by [`MAX_REPORTER_RECORDS`]; carries no balance.
+    /// `Oracle` is never itself stored, so adding this moves no on-chain SCALE —
+    /// the shell persists it as its own internal storage item.
+    pub reporter_records: Vec<ReporterRecord>,
     pub watchtowers: Vec<(AccountId, WatchtowerInfo)>,
     pub rounds: Vec<RoundState>,
     /// Parallel internal schedule state, one entry per live round. The FRAME
@@ -488,28 +567,64 @@ impl Oracle {
         params: &OracleParams,
     ) -> Result<(), Error> {
         ensure!(!self.is_reporter(&who), Error::AlreadyRegistered);
+        // 07 §3 (contract v19): the ladder is a property of the **account**, not
+        // of the seat. Nothing in §3 resets strikes, and resetting them made
+        // `deregister_reporter` + `register_reporter` — which returns the stake
+        // in full and costs two extrinsics — erase both the second-offense 50 %
+        // slash and the third-offense ejection, so the discipline was
+        // unreachable in practice. Identical in shape to the `pallet-attestor`
+        // defect closed by SQ-262.
+        let carried = self
+            .reporter_records
+            .iter()
+            .find(|r| r.account == who)
+            .copied();
+        ensure!(!carried.is_some_and(|r| r.ejected), Error::ReporterEjected);
         ensure!(
             self.reporters.len() < MAX_REPORTERS,
             Error::TooManyReporters
         );
+        let offenses = carried.map_or(0, |r| r.offenses);
+        // 07 §2(5): "a reporter slashed to half stake on a second
+        // adjudicated-false report remains registered until the third", and the
+        // `orc.n_min` count "MUST exclude any seat holding less than
+        // `orc.reporter_stake`". Re-seating at full stake would restore
+        // countability the ladder took away.
+        let stake = if offenses >= OFFENSE_SLASH_THRESHOLD {
+            params
+                .reporter_stake
+                .saturating_sub(ceil_div(params.reporter_stake, 2))
+        } else {
+            params.reporter_stake
+        };
+        // Exactly one home per account: while seated, the seat carries the
+        // count; the retained row exists only for departed/ejected accounts.
+        self.reporter_records.retain(|r| r.account != who);
         self.reporters.push((
             who,
             ReporterInfo {
-                stake: params.reporter_stake,
+                stake,
                 registered_at: now,
-                offenses: 0,
+                offenses,
             },
         ));
-        self.events.push(Event::ReporterRegistered {
-            who,
-            stake: params.reporter_stake,
-        });
+        self.events.push(Event::ReporterRegistered { who, stake });
         Ok(())
     }
 
     pub fn deregister_reporter(&mut self, who: AccountId) -> Result<(), Error> {
+        // 07 §3: exit returns the stake "after all rounds the reporter
+        // participated in are closed". A **challenger's** bond is held in the
+        // round just as a reporter's is, so challenging is participating — and
+        // because a money-settled round stays in `rounds` until
+        // `expire_retention_at`, this is also what keeps a late verdict from
+        // ever landing on a departed account, which is what lets
+        // `record_reporter_offense`'s unseated no-op stand unchanged.
         ensure!(
-            !self.rounds.iter().any(|r| r.reporter == who),
+            !self
+                .rounds
+                .iter()
+                .any(|r| r.reporter == who || r.challenger == Some(who)),
             Error::WindowOpen
         );
         let pos = self
@@ -517,8 +632,55 @@ impl Oracle {
             .iter()
             .position(|(a, _)| *a == who)
             .ok_or(Error::NotRegistered)?;
+        let offenses = self.reporters[pos].1.offenses;
+        // Conditional retention (the attestor's `has_unsettled_liability`
+        // discipline): a clean reporter leaves **no** row, so ordinary rotation
+        // can never fill the bound.
+        if offenses > 0 && !self.upsert_reporter_record(who, offenses, false) {
+            self.events.push(Event::ReporterRecordsFull { who });
+        }
         self.reporters.remove(pos);
         Ok(())
+    }
+
+    /// Upsert `who`'s retained 07 §3 record.
+    ///
+    /// Returns `false` only when the store is full of **ejections**, which are
+    /// never evicted: dropping a ban would re-admit a disqualified reporter,
+    /// while dropping a 1–2 strike row costs one ladder reset. Filling it needs
+    /// 64 accounts × 3 adjudicated-false findings, so the bound is priced rather
+    /// than proved. The caller emits [`Event::ReporterRecordsFull`]; nothing
+    /// here may fail a dispatch (G-1) — a full table must not abort a
+    /// values-track verdict.
+    fn upsert_reporter_record(&mut self, who: AccountId, offenses: u8, ejected: bool) -> bool {
+        if let Some(rec) = self.reporter_records.iter_mut().find(|r| r.account == who) {
+            rec.offenses = rec.offenses.max(offenses);
+            rec.ejected |= ejected;
+            return true;
+        }
+        if self.reporter_records.len() >= MAX_REPORTER_RECORDS {
+            // Least severe first, oldest to break ties — deterministic, and
+            // never an ejection.
+            let victim = self
+                .reporter_records
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| !r.ejected)
+                .min_by_key(|(idx, r)| (r.offenses, *idx))
+                .map(|(idx, _)| idx);
+            match victim {
+                Some(idx) => {
+                    self.reporter_records.remove(idx);
+                }
+                None => return false,
+            }
+        }
+        self.reporter_records.push(ReporterRecord {
+            account: who,
+            offenses,
+            ejected,
+        });
+        true
     }
 
     pub fn register_watchtower_with_params(
@@ -666,6 +828,18 @@ impl Oracle {
         // must not race the close crank that treats that block as mature
         // (Codex F24).
         ensure!(now < r.challenge_deadline, Error::WindowClosed);
+        // 07 §5.2 (contract v19): the round's own reporter may not challenge it.
+        // §5.5 disposes of a round in favour of "the honest counterparty" and
+        // §5.3 calls escalation "opt-in on both sides"; both terms are undefined
+        // when one account holds both roles — there is no counterparty, and
+        // `settle_bond_custody` would pay the loser 40 % of their own forfeited
+        // stack. Ordered *before* `AlreadyChallenged` so the reporter's own
+        // attempt names the real reason rather than a stale-slot error.
+        //
+        // Necessary but **not sufficient**: a second funded account defeats it,
+        // which is why the default path no longer settles forward at all — see
+        // `default_neutral_at`.
+        ensure!(who != r.reporter, Error::SelfChallenge);
         // `challenger` is durable for the whole game; only `counter_value`
         // indicates that the current round has an active challenge. A later
         // round must be challenged by the same party so the bonded owner cannot
@@ -904,9 +1078,27 @@ impl Oracle {
                 // never write a second ComponentValues entry.
                 if self.rounds[i].counter_value.is_some()
                     && self.rounds[i].round < self.round_schedule(current_key)?.round_cap
+                    // Defensive (R-7): a below-cap round whose window has not
+                    // closed is not in default, and must not forfeit a stack
+                    // while the party still has time to escalate. Unreachable in
+                    // production — the last legal report is d2 and every
+                    // below-cap deadline precedes the d20 neutralization — so a
+                    // round that falls through resolves at the retention arm
+                    // below with `RefundBoth`, which is the safer direction.
+                    && now >= self.rounds[i].challenge_deadline
                 {
-                    let value = self.rounds[i].counter_value.ok_or(Error::QuorumPending)?;
-                    self.settle_at(i, value, SettlePath::ChallengerDefault, true, false)?;
+                    // The money leg is already neutral (`already_settled`), so
+                    // the value/path/flagged arguments are inert here and only
+                    // the bond ledger closes. Passing `Neutral` keeps the
+                    // contract-v18 invariant — `ChallengerDefault` is never
+                    // written — true by construction rather than by accident.
+                    let value = self.rounds[i].value;
+                    let disposition = if self.rounds[i].round <= 1 {
+                        BondDisposition::ReporterDefaulted
+                    } else {
+                        BondDisposition::ChallengerWins
+                    };
+                    self.settle_at(i, value, SettlePath::Neutral, true, disposition)?;
                     processed += 1;
                     continue;
                 }
@@ -916,7 +1108,7 @@ impl Oracle {
                         self.rounds[i].value,
                         SettlePath::Unchallenged,
                         true,
-                        true,
+                        BondDisposition::ReporterWins,
                     )?;
                     processed += 1;
                     continue;
@@ -963,7 +1155,13 @@ impl Oracle {
             if self.rounds[i].counter_value.is_none() {
                 if self.rounds[i].acks >= params.watchtower_quorum {
                     let value = self.rounds[i].value;
-                    self.settle_at(i, value, SettlePath::Unchallenged, false, true)?;
+                    self.settle_at(
+                        i,
+                        value,
+                        SettlePath::Unchallenged,
+                        false,
+                        BondDisposition::ReporterWins,
+                    )?;
                 } else if !self.rounds[i].extended {
                     self.rounds[i].extended = true;
                     self.rounds[i].challenge_deadline = now.saturating_add(ORC_EXT_WINDOW_BLOCKS);
@@ -984,11 +1182,9 @@ impl Oracle {
                     self.neutral_at(i, carried, 1, retention_deadline_from(now))?;
                 }
             } else if self.rounds[i].round < schedule.round_cap {
-                // The reporter did not post a consenting `counter_report`.
-                // Resolve in the challenger's favour using the value already
-                // funded in this round; no keeper-created bond or round occurs.
-                let value = self.rounds[i].counter_value.ok_or(Error::QuorumPending)?;
-                self.settle_at(i, value, SettlePath::ChallengerDefault, false, false)?;
+                // The reporter did not post a consenting `counter_report`
+                // (07 §5.3). The default decides the *bonds*, never the value.
+                self.default_neutral_at(i)?;
             } else {
                 i += 1;
             }
@@ -1036,8 +1232,12 @@ impl Oracle {
             value,
             prover,
         });
-        let reporter_wins = value == self.rounds[idx].value;
-        self.settle_at(idx, value, SettlePath::Recomputed, false, reporter_wins)
+        let disposition = if value == self.rounds[idx].value {
+            BondDisposition::ReporterWins
+        } else {
+            BondDisposition::ChallengerWins
+        };
+        self.settle_at(idx, value, SettlePath::Recomputed, false, disposition)
     }
 
     pub fn request_adjudication(&mut self, key: RoundKey, referendum: u32) -> Result<(), Error> {
@@ -1095,7 +1295,12 @@ impl Oracle {
             epoch,
             value,
         });
-        self.settle_at(idx, value, SettlePath::Adjudicated, false, !reporter_wrong)
+        let disposition = if reporter_wrong {
+            BondDisposition::ChallengerWins
+        } else {
+            BondDisposition::ReporterWins
+        };
+        self.settle_at(idx, value, SettlePath::Adjudicated, false, disposition)
     }
 
     /// Force-neutralize a measurement `epoch` at its `OracleSettleDeadline`
@@ -1299,11 +1504,44 @@ impl Oracle {
             self.watchtower_active.len() <= MAX_WATCHTOWERS,
             Error::TooManyWatchtowers
         );
+        ensure!(
+            self.reporter_records.len() <= MAX_REPORTER_RECORDS,
+            Error::TooManyReporters
+        );
         // The liveness activity set only names registered watchtowers (07 §4).
         for who in &self.watchtower_active {
             ensure!(self.is_watchtower(who), Error::NotRegistered);
         }
+        // 07 §3 (contract v19): a retained record and a live seat are mutually
+        // exclusive homes for the same account's offense count, records are
+        // unique, and `ejected` implies the account actually reached the
+        // threshold.
+        for (i, rec) in self.reporter_records.iter().enumerate() {
+            ensure!(!self.is_reporter(&rec.account), Error::AlreadyRegistered);
+            ensure!(
+                !self.reporter_records[..i]
+                    .iter()
+                    .any(|o| o.account == rec.account),
+                Error::AlreadyRegistered
+            );
+            ensure!(
+                !rec.ejected || rec.offenses >= OFFENSE_EJECTION_THRESHOLD,
+                Error::ReporterEjected
+            );
+        }
+        // Ejection is terminal, so a seated reporter standing at the threshold
+        // is dispatch-unreachable and therefore a storage-corruption signal
+        // (the attestor's `EjectedMemberActive` idiom).
+        for (_, info) in self.reporters.iter() {
+            ensure!(
+                info.offenses < OFFENSE_EJECTION_THRESHOLD,
+                Error::ReporterEjected
+            );
+        }
         for r in &self.rounds {
+            // 07 §5.2 (contract v19): no game may have one account on both
+            // sides. Anchors the `challenge` guard against a future edit.
+            ensure!(r.challenger != Some(r.reporter), Error::SelfChallenge);
             let schedule = self.round_schedule(RoundKey {
                 component: r.component,
                 epoch: r.epoch,
@@ -1378,7 +1616,7 @@ impl Oracle {
         value: FixedU64,
         path: SettlePath,
         flagged: bool,
-        reporter_wins: bool,
+        disposition: BondDisposition,
     ) -> Result<(), Error> {
         let round = self.rounds.get(idx).ok_or(Error::RoundNotFound)?;
         let key = RoundKey {
@@ -1394,11 +1632,7 @@ impl Oracle {
             challenger: r.challenger,
             reporter_bond: r.cumulative_reporter_bond,
             challenger_bond: r.cumulative_challenger_bond,
-            disposition: if reporter_wins {
-                BondDisposition::ReporterWins
-            } else {
-                BondDisposition::ChallengerWins
-            },
+            disposition,
         });
         // The game for this `(component, epoch, version)` is terminal: its
         // acknowledgment records are dead weight, so reap them — scoped to this
@@ -1589,6 +1823,53 @@ impl Oracle {
             .unwrap_or(FixedU64(COMPONENT_VALUE_MAX / 2))
     }
 
+    /// The 07 §5.3 reporter default, settled on the §10 neutral path
+    /// (contract v19).
+    ///
+    /// A default establishes that the reporter **abandoned their assertion**. It
+    /// establishes nothing about the challenger's, which no watchtower quorum
+    /// acknowledged, no recomputation confirmed and no adjudication reviewed.
+    /// Settling that value forward was the whole of the self-challenge attack:
+    /// one purse funding both roles moved a component by up to `Δs_max` while
+    /// risking `B_r`, where 07 §6.3 prices `(2^R_max − 1)·B_1`. The repair is on
+    /// the **value** side because it cannot be on the money side — §5.3's own
+    /// closing sentences forbid debiting a stack a party has not funded, so no
+    /// rule can make a defaulting party forfeit the full ladder.
+    ///
+    /// Bond disposition is round-conditional per §5.5; see
+    /// [`BondDisposition::ReporterDefaulted`].
+    ///
+    /// **No §3 offense is recorded.** A default is producible by the challenger,
+    /// by a collator set censoring `counter_report` (14 TH-24), or by a dead
+    /// node, so it is not a finding that the reported value was *wrong* — and
+    /// recording one would hand a griefer a lever on a permanent ladder that
+    /// `orc.n_min` turns into a MetricSpec-admission veto.
+    fn default_neutral_at(&mut self, idx: usize) -> Result<(), Error> {
+        let (component, epoch, round) = (
+            self.rounds[idx].component,
+            self.rounds[idx].epoch,
+            self.rounds[idx].round,
+        );
+        let carried = self.last_valid_value(component, epoch);
+        let disposition = if round <= 1 {
+            BondDisposition::ReporterDefaulted
+        } else {
+            BondDisposition::ChallengerWins
+        };
+        // 02 §7.2 freezes `NeutralSettlement`, and both the frontend and the
+        // 12 §6.3 exporters read it as *the* neutral signal, so the §10 path
+        // must emit it even though `settle_at` also emits `ComponentSettled`.
+        // Deliberately not `neutral_at` + `settle_at`: `neutral_at` pushes a
+        // `money_settled` row that `settle_at` would immediately remove.
+        self.events.push(Event::NeutralSettlement {
+            component,
+            epoch,
+            carried_value: carried,
+            flagged_epochs: 1,
+        });
+        self.settle_at(idx, carried, SettlePath::Neutral, true, disposition)
+    }
+
     fn neutral_at(
         &mut self,
         idx: usize,
@@ -1681,9 +1962,15 @@ impl Oracle {
         // A reporter ejected on a prior game is already maximally punished;
         // recording a further offense against them is a **no-op**, not an error,
         // so a valid recompute/adjudication on their *other* still-live rounds
-        // can still settle instead of failing `NotRegistered` (Codex F17). The
-        // 3rd-offense ejection removes them from new participation; retained
-        // reputation beyond that is B-track custody.
+        // can still settle instead of failing `NotRegistered` (Codex F17).
+        //
+        // This no-op is safe against the retained ladder (contract v19) because
+        // a verdict can only land while the account is still **seated**:
+        // `deregister_reporter` refuses while the account is any live round's
+        // reporter *or* challenger, a money-settled round stays in `rounds`
+        // until `expire_retention_at`, and once that removes the round both
+        // `adjudicate` and `recompute_proof` fail `RoundNotFound`. So there is
+        // no path on which a departed account silently escapes an offense here.
         let Some((_, info)) = self.reporters.iter_mut().find(|(a, _)| *a == who) else {
             return Ok(());
         };
@@ -1694,7 +1981,7 @@ impl Oracle {
         // second adjudicated-false report; **ejection** on the third (not a
         // further slash) — Codex F19. The §5.5 round-bond-stack forfeiture and
         // its 40/60 routing are economic custody, wired at B-track (decision #3).
-        if offense == 2 {
+        if offense == OFFENSE_SLASH_THRESHOLD {
             info.stake = info.stake.saturating_sub(slash_amount);
             self.events.push(Event::ReporterSlashed {
                 who,
@@ -1702,7 +1989,13 @@ impl Oracle {
                 offense,
             });
         }
-        if offense >= 3 {
+        if offense >= OFFENSE_EJECTION_THRESHOLD {
+            // Ejection is **permanent** (contract v19). `retain` alone returned
+            // the account to a clean permissionless registration, so the
+            // third-offense step was exactly as escapable as the second.
+            if !self.upsert_reporter_record(who, offense, true) {
+                self.events.push(Event::ReporterRecordsFull { who });
+            }
             self.reporters.retain(|(a, _)| *a != who);
             self.events.push(Event::ReporterEjected { who });
         }
@@ -2273,7 +2566,21 @@ mod tests {
         o.challenge(acct(4), 2, key(8, 42, 3), FixedU64(44), h(10))
             .unwrap();
         o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1).unwrap();
-        assert_eq!(o.component_values[0].1.path, SettlePath::ChallengerDefault);
+        // Contract v19: a challenge still supersedes the ack requirement — the
+        // round closes without a quorum — but the reporter's default no longer
+        // settles the challenger's counter-value *forward*. It takes the 07 §10
+        // neutral path, carrying the last valid value with the epoch flagged,
+        // because a default establishes only that the reporter abandoned their
+        // assertion and establishes nothing about the challenger's.
+        assert_eq!(o.component_values[0].1.path, SettlePath::Neutral);
+        assert!(o.component_values[0].1.flagged);
+        assert_ne!(o.component_values[0].1.value, FixedU64(44));
+        // Round 1 default: the whole forfeited stack routes to INSURANCE and no
+        // bounty is paid (07 §5.5).
+        assert_eq!(
+            o.bond_settlements[0].disposition,
+            BondDisposition::ReporterDefaulted
+        );
         assert!(o.rounds.is_empty());
 
         // A consenting reporter opens the next round explicitly; the keeper
@@ -3625,5 +3932,504 @@ mod tests {
         o.recompute_proof(acct(5), key(30, 41, 3), &proof).unwrap();
         assert!(o.component_values.iter().any(|((c, _, _), _)| *c == 30));
         o.try_state().unwrap();
+    }
+
+    // ---------------------------------------------------------------------
+    // Contract v19 — the two confirmed oracle vulnerabilities.
+    //
+    // VULN 1: `challenge` never checked distinctness and the 07 §5.3 default
+    // settled the challenger's counter-value forward unflagged, so one purse
+    // holding both roles moved a component by up to `Δs_max` while risking
+    // `0.6·B₁` against the `(2^R_max − 1)·B₁` ladder 07 §6.3 prices.
+    // VULN 2: the §3 offense ladder reset on deregister + re-register.
+    // ---------------------------------------------------------------------
+
+    /// Seed a settled value for `(component, epoch - 1)` so `last_valid_value`
+    /// carries something real rather than the neutral 0.5 fallback.
+    fn seed_prior_value(o: &mut Oracle, component: MetricId, epoch: EpochId, value: FixedU64) {
+        o.component_values.push((
+            (component, epoch - 1, 3),
+            SettledComponent {
+                value,
+                path: SettlePath::Unchallenged,
+                flagged: false,
+            },
+        ));
+    }
+
+    #[test]
+    fn challenge_by_the_round_reporter_is_refused_at_every_round() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        let k = key(7, 41, 3);
+        report!(
+            o,
+            acct(1),
+            1,
+            7,
+            41,
+            3,
+            FixedU64(62),
+            h(9),
+            400_000_000_000,
+            100,
+            3
+        )
+        .unwrap();
+        // Round 1.
+        assert_eq!(
+            o.challenge(acct(1), 2, k, FixedU64(44), h(10)),
+            Err(Error::SelfChallenge)
+        );
+        assert!(o.rounds[0].challenger.is_none());
+        assert_eq!(o.rounds[0].cumulative_challenger_bond, 0);
+        // The guard is ordered before `AlreadyChallenged`, so the reporter's own
+        // attempt names the real reason even after a legitimate challenge.
+        let d = round_deadline(&o, k);
+        o.challenge(acct(4), d - 1, k, FixedU64(440_000_000), h(10))
+            .unwrap();
+        assert_eq!(
+            o.challenge(acct(1), d - 1, k, FixedU64(44), h(10)),
+            Err(Error::SelfChallenge)
+        );
+        // And after a consenting escalation to round 2.
+        o.counter_report(
+            acct(1),
+            d - 1,
+            k,
+            FixedU64(440_000_000),
+            h(10),
+            &OracleParams::DEFAULT,
+        )
+        .unwrap();
+        assert_eq!(o.rounds[0].round, 2);
+        let d2 = round_deadline(&o, k);
+        assert_eq!(
+            o.challenge(acct(1), d2 - 1, k, FixedU64(44), h(10)),
+            Err(Error::SelfChallenge)
+        );
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn round_one_default_carries_last_valid_value_flagged() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        let k = key(7, 41, 3);
+        seed_prior_value(&mut o, 7, 41, FixedU64(900_000_000));
+        report!(
+            o,
+            acct(1),
+            1,
+            7,
+            41,
+            3,
+            FixedU64(62),
+            h(9),
+            400_000_000_000,
+            100,
+            3
+        )
+        .unwrap();
+        // A *second funded account* — deliberately not the reporter — so this
+        // proves the fix does not depend on the identity guard.
+        o.challenge(acct(9), 2, k, FixedU64(440_000_000), h(10))
+            .unwrap();
+        let bond = o.rounds[0].cumulative_reporter_bond;
+        o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1).unwrap();
+        let settled = o
+            .component_values
+            .iter()
+            .find(|((c, e, _), _)| *c == 7 && *e == 41)
+            .expect("settled")
+            .1;
+        assert_eq!(settled.path, SettlePath::Neutral);
+        assert!(settled.flagged);
+        // The carried value, never the challenger's assertion.
+        assert_eq!(settled.value, FixedU64(900_000_000));
+        assert_ne!(settled.value, FixedU64(440_000_000));
+        let s = o.bond_settlements.last().expect("settlement");
+        assert_eq!(s.disposition, BondDisposition::ReporterDefaulted);
+        assert_eq!(s.reporter_bond, bond);
+        assert!(o
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::NeutralSettlement { .. })));
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn round_two_default_carries_the_value_but_pays_the_bounty() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        let k = key(7, 41, 3);
+        seed_prior_value(&mut o, 7, 41, FixedU64(900_000_000));
+        report!(
+            o,
+            acct(1),
+            1,
+            7,
+            41,
+            3,
+            FixedU64(62),
+            h(9),
+            400_000_000_000,
+            100,
+            3
+        )
+        .unwrap();
+        let d = round_deadline(&o, k);
+        o.challenge(acct(9), d - 1, k, FixedU64(440_000_000), h(10))
+            .unwrap();
+        // The reporter consents to escalate, then abandons — a concession by
+        // conduct on a contest the challenger funded, so §6.2's bounty applies.
+        o.counter_report(
+            acct(1),
+            d - 1,
+            k,
+            FixedU64(440_000_000),
+            h(10),
+            &OracleParams::DEFAULT,
+        )
+        .unwrap();
+        let d2 = round_deadline(&o, k);
+        o.challenge(acct(9), d2 - 1, k, FixedU64(450_000_000), h(11))
+            .unwrap();
+        o.crank_round_close(d2 + 1, 1).unwrap();
+        let settled = o
+            .component_values
+            .iter()
+            .find(|((c, e, _), _)| *c == 7 && *e == 41)
+            .expect("settled")
+            .1;
+        // The value side is neutral at *every* round — only the money differs.
+        assert_eq!(settled.path, SettlePath::Neutral);
+        assert!(settled.flagged);
+        assert_eq!(settled.value, FixedU64(900_000_000));
+        let s = o.bond_settlements.last().expect("settlement");
+        assert_eq!(s.disposition, BondDisposition::ChallengerWins);
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn default_records_no_reporter_offense() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        let k = key(7, 41, 3);
+        report!(
+            o,
+            acct(1),
+            1,
+            7,
+            41,
+            3,
+            FixedU64(62),
+            h(9),
+            400_000_000_000,
+            100,
+            3
+        )
+        .unwrap();
+        o.challenge(acct(9), 2, k, FixedU64(440_000_000), h(10))
+            .unwrap();
+        o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1).unwrap();
+        // A default is producible by the challenger, by a censoring collator set
+        // (14 TH-24) or by a dead node, so it is not a finding that the value
+        // was *wrong* (07 §5.5).
+        let (_, info) = o.reporters.iter().find(|(a, _)| *a == acct(1)).unwrap();
+        assert_eq!(info.offenses, 0);
+        assert!(o.reporter_records.is_empty());
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn no_terminal_path_ever_writes_challenger_default() {
+        // Drives the reachable terminal paths and asserts the retired variant is
+        // never produced. Its unreachability is otherwise enforced only by the
+        // shell's try-state scan.
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        o.register_watchtower(acct(2), 0).unwrap();
+        o.register_watchtower(acct(3), 0).unwrap();
+        // Unchallenged + quorum.
+        report!(
+            o,
+            acct(1),
+            1,
+            7,
+            41,
+            3,
+            FixedU64(62),
+            h(9),
+            400_000_000_000,
+            100,
+            3
+        )
+        .unwrap();
+        let rh = o.rounds[0].report_hash;
+        o.ack_observed(acct(2), 5, key(7, 41, 3), 1, rh).unwrap();
+        o.ack_observed(acct(3), 6, key(7, 41, 3), 1, rh).unwrap();
+        o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1).unwrap();
+        // Round-1 default.
+        report!(
+            o,
+            acct(1),
+            1,
+            8,
+            42,
+            3,
+            FixedU64(62),
+            h(9),
+            400_000_000_000,
+            100,
+            3
+        )
+        .unwrap();
+        o.challenge(acct(9), 2, key(8, 42, 3), FixedU64(440_000_000), h(10))
+            .unwrap();
+        o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1).unwrap();
+        // Quorum failure ⇒ §10 neutral.
+        report!(
+            o,
+            acct(1),
+            1,
+            9,
+            43,
+            3,
+            FixedU64(62),
+            h(9),
+            400_000_000_000,
+            100,
+            3
+        )
+        .unwrap();
+        o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1).unwrap();
+        o.crank_round_close(ORC_WINDOW_BLOCKS + ORC_EXT_WINDOW_BLOCKS + 4, 1)
+            .unwrap();
+        assert!(!o
+            .component_values
+            .iter()
+            .any(|(_, s)| s.path == SettlePath::ChallengerDefault));
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn offense_record_survives_deregistration_and_reregistration() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        let k = key(7, 41, 3);
+        to_terminal(&mut o, 1, 9, k, FixedU64(62));
+        o.adjudicate(Origin::OracleResolution, k, FixedU64(440_000_000), true)
+            .unwrap();
+        let (_, info) = o.reporters.iter().find(|(a, _)| *a == acct(1)).unwrap();
+        assert_eq!(info.offenses, 1);
+        // Exit returns the stake in full, but not a clean record.
+        o.deregister_reporter(acct(1)).unwrap();
+        assert_eq!(o.reporter_records.len(), 1);
+        assert_eq!(o.reporter_records[0].offenses, 1);
+        o.try_state().unwrap();
+        o.register_reporter(acct(1), 10).unwrap();
+        let (_, info) = o.reporters.iter().find(|(a, _)| *a == acct(1)).unwrap();
+        assert_eq!(info.offenses, 1, "the ladder must survive exit");
+        // Exactly one home per account.
+        assert!(o.reporter_records.is_empty());
+        assert_eq!(info.stake, OracleParams::DEFAULT.reporter_stake);
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn clean_exit_retains_no_record() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        o.deregister_reporter(acct(1)).unwrap();
+        // Ordinary rotation can never fill the bound.
+        assert!(o.reporter_records.is_empty());
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn reregistration_after_the_second_offense_seats_the_half_stake() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        for (n, component) in [(0u8, 7u16), (1, 8)] {
+            let k = key(component, 41 + n as u32, 3);
+            to_terminal(&mut o, 1, 9, k, FixedU64(62));
+            o.adjudicate(Origin::OracleResolution, k, FixedU64(440_000_000), true)
+                .unwrap();
+        }
+        let (_, info) = o.reporters.iter().find(|(a, _)| *a == acct(1)).unwrap();
+        assert_eq!(info.offenses, OFFENSE_SLASH_THRESHOLD);
+        o.deregister_reporter(acct(1)).unwrap();
+        o.register_reporter(acct(1), 10).unwrap();
+        let (_, info) = o.reporters.iter().find(|(a, _)| *a == acct(1)).unwrap();
+        // 07 §2(5): re-entry is into the degraded half-stake state, so the
+        // `orc.n_min` count still excludes the seat.
+        let full = OracleParams::DEFAULT.reporter_stake;
+        assert_eq!(info.stake, full - full.div_ceil(2));
+        assert!(info.stake < full);
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn ejected_reporter_can_never_reregister() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        for (n, component) in [(0u8, 7u16), (1, 8), (2, 9)] {
+            let k = key(component, 41 + n as u32, 3);
+            to_terminal(&mut o, 1, 9, k, FixedU64(62));
+            o.adjudicate(Origin::OracleResolution, k, FixedU64(440_000_000), true)
+                .unwrap();
+        }
+        assert!(!o.is_reporter(&acct(1)));
+        let rec = o
+            .reporter_records
+            .iter()
+            .find(|r| r.account == acct(1))
+            .expect("ejection retained");
+        assert!(rec.ejected);
+        assert_eq!(
+            o.register_reporter(acct(1), 99),
+            Err(Error::ReporterEjected)
+        );
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn deregister_blocked_while_the_account_is_a_live_rounds_challenger() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        o.register_reporter(acct(9), 0).unwrap();
+        let k = key(7, 41, 3);
+        report!(
+            o,
+            acct(1),
+            1,
+            7,
+            41,
+            3,
+            FixedU64(62),
+            h(9),
+            400_000_000_000,
+            100,
+            3
+        )
+        .unwrap();
+        o.challenge(acct(9), 2, k, FixedU64(440_000_000), h(10))
+            .unwrap();
+        // 07 §3: a challenger's bond is held in the round, so challenging is
+        // "participating" and exit must wait for it to close.
+        assert_eq!(o.deregister_reporter(acct(9)), Err(Error::WindowOpen));
+        o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1).unwrap();
+        o.deregister_reporter(acct(9)).unwrap();
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn record_store_evicts_the_least_severe_row_but_never_an_ejection() {
+        let mut o = Oracle::default();
+        // Fill entirely with ejections, then try to add one more.
+        for n in 0..MAX_REPORTER_RECORDS {
+            o.reporter_records.push(ReporterRecord {
+                account: acct(n as u8),
+                offenses: OFFENSE_EJECTION_THRESHOLD,
+                ejected: true,
+            });
+        }
+        assert!(
+            !o.upsert_reporter_record(acct(200), 1, false),
+            "a ban must never be evicted to make room"
+        );
+        assert_eq!(o.reporter_records.len(), MAX_REPORTER_RECORDS);
+        assert!(o.reporter_records.iter().all(|r| r.ejected));
+
+        // With one non-ejected row present, that row is the victim.
+        let mut o = Oracle::default();
+        o.reporter_records.push(ReporterRecord {
+            account: acct(1),
+            offenses: 1,
+            ejected: false,
+        });
+        for n in 2..MAX_REPORTER_RECORDS + 1 {
+            o.reporter_records.push(ReporterRecord {
+                account: acct(n as u8),
+                offenses: OFFENSE_EJECTION_THRESHOLD,
+                ejected: true,
+            });
+        }
+        o.reporter_records.truncate(MAX_REPORTER_RECORDS);
+        assert!(o.upsert_reporter_record(acct(200), 2, false));
+        assert!(!o.reporter_records.iter().any(|r| r.account == acct(1)));
+        assert!(o.reporter_records.iter().any(|r| r.account == acct(200)));
+    }
+
+    #[test]
+    fn try_state_rejects_a_round_whose_challenger_is_its_reporter() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        report!(
+            o,
+            acct(1),
+            1,
+            7,
+            41,
+            3,
+            FixedU64(62),
+            h(9),
+            400_000_000_000,
+            100,
+            3
+        )
+        .unwrap();
+        o.try_state().unwrap();
+        o.rounds[0].challenger = Some(acct(1));
+        assert_eq!(o.try_state(), Err(Error::SelfChallenge));
+    }
+
+    #[test]
+    fn try_state_rejects_a_record_that_shadows_a_live_seat() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        o.try_state().unwrap();
+        o.reporter_records.push(ReporterRecord {
+            account: acct(1),
+            offenses: 1,
+            ejected: false,
+        });
+        assert_eq!(o.try_state(), Err(Error::AlreadyRegistered));
+    }
+
+    #[test]
+    fn try_state_rejects_a_duplicate_or_understrength_ejection_record() {
+        let mut o = Oracle::default();
+        o.reporter_records.push(ReporterRecord {
+            account: acct(1),
+            offenses: 1,
+            ejected: false,
+        });
+        o.reporter_records.push(ReporterRecord {
+            account: acct(1),
+            offenses: 1,
+            ejected: false,
+        });
+        assert_eq!(o.try_state(), Err(Error::AlreadyRegistered));
+
+        let mut o = Oracle::default();
+        o.reporter_records.push(ReporterRecord {
+            account: acct(1),
+            offenses: 1,
+            ejected: true,
+        });
+        assert_eq!(o.try_state(), Err(Error::ReporterEjected));
+    }
+
+    #[test]
+    fn try_state_rejects_a_seated_reporter_at_the_ejection_threshold() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        o.try_state().unwrap();
+        if let Some((_, info)) = o.reporters.iter_mut().find(|(a, _)| *a == acct(1)) {
+            info.offenses = OFFENSE_EJECTION_THRESHOLD;
+        }
+        assert_eq!(o.try_state(), Err(Error::ReporterEjected));
     }
 }

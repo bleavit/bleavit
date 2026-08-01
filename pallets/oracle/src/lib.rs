@@ -108,6 +108,10 @@ pub const MAX_REPORTERS_BOUND: u32 = MAX_REPORTERS as u32;
 pub const MAX_WATCHTOWERS_BOUND: u32 = MAX_WATCHTOWERS as u32;
 /// Live rounds bound: ≤ 16 components × ≤ 4 settling epochs, per-version (02 §7.2).
 pub const MAX_ROUNDS_BOUND: u32 = MAX_ROUNDS as u32;
+/// Bound for [`ReporterRecords`]. A per-pallet storage bound, not a 13 §4 row —
+/// the SQ-215 ruling carves these to the owning pallet + 02 §7, and
+/// `pallet_attestor::MAX_LIABILITIES` is the precedent.
+pub const MAX_REPORTER_RECORDS_BOUND: u32 = oracle_core::MAX_REPORTER_RECORDS as u32;
 /// Settled values awaiting reaping at cohort settlement (02 §7.2).
 pub const MAX_COMPONENT_VALUES_BOUND: u32 = MAX_COMPONENT_VALUES as u32;
 /// Live acknowledgment records; pruned on settle/escalate in the core.
@@ -494,6 +498,23 @@ pub mod pallet {
         ValueQuery,
     >;
 
+    /// 07 §3's offense ladder, retained independently of the active roster
+    /// (contract v19).
+    ///
+    /// **Internal — deliberately not 02 §7 contract surface.** Without it the
+    /// ladder is unreachable: `deregister_reporter` returns the stake in full
+    /// and `register_reporter` re-seated a clean row, so the second-offense
+    /// slash and third-offense ejection cost two extrinsics to erase. A clean
+    /// exit leaves no row, so ordinary rotation cannot fill the bound; the rows
+    /// carry no balance, so the I-29 custody sum in [`Pallet::do_try_state`] is
+    /// unchanged by construction.
+    #[pallet::storage]
+    pub type ReporterRecords<T: Config> = StorageValue<
+        _,
+        BoundedVec<oracle_core::ReporterRecord, ConstU32<MAX_REPORTER_RECORDS_BOUND>>,
+        ValueQuery,
+    >;
+
     /// 07 §4 liveness latch: whether any round has existed since the last
     /// watchtower sweep. Not inferable from `Rounds`, which a clean closure
     /// empties before the boundary sweep runs (SQ-491).
@@ -636,6 +657,14 @@ pub mod pallet {
             reporter_bond: Balance,
             challenger_bond: Balance,
         },
+        /// The retained 07 §3 record store was full of ejections and a
+        /// departing or ejected account's record could not be kept
+        /// (contract v19). Fails **open** by design (G-1): a full table must
+        /// never abort a values-track verdict.
+        ///
+        /// An operational diagnostic — off the frozen 02 §6 ingest set by that
+        /// section's (a)–(c) rule. Appended last.
+        ReporterRecordsFull { who: T::AccountId },
     }
 
     /// 1:1 with [`CoreError`]; `CoreError::BadOrigin` maps to
@@ -690,6 +719,14 @@ pub mod pallet {
         BadProof,
         /// A reported/adjudicated value is off the 05 §4.4 `[0, 1]` grid.
         ValueOutOfBounds,
+        /// 07 §5.2 (contract v19): the round's own reporter may not challenge
+        /// it. §5.5 disposes of a round in favour of "the honest counterparty"
+        /// and §5.3 calls escalation "opt-in on both sides"; both are undefined
+        /// when one account holds both roles.
+        SelfChallenge,
+        /// 07 §3 (contract v19): an account ejected on the third adjudicated
+        /// -false finding may never re-register. Ejection is permanent.
+        ReporterEjected,
         /// Core state validator rejected the aggregate (try-state only).
         TryStateViolation,
     }
@@ -1353,6 +1390,7 @@ pub mod pallet {
                 recomputable_components: Recomputable::<T>::get().into_inner(),
                 watchtower_active: WatchtowerActive::<T>::get().into_inner(),
                 money_settled: MoneySettled::<T>::get().into_inner(),
+                reporter_records: ReporterRecords::<T>::get().into_inner(),
                 round_activity: RoundActivity::<T>::get(),
                 bond_settlements: Vec::new(),
             }
@@ -1543,6 +1581,23 @@ pub mod pallet {
 
         fn settle_bond_custody(settlement: &BondSettlement) -> DispatchResult {
             let reporter = T::AccountId::from(settlement.reporter);
+            if settlement.disposition == BondDisposition::ReporterDefaulted {
+                // 07 §5.5 (contract v19): a **round-1** default forfeits the
+                // reporter's stack but pays no bounty. Same rule, and the same
+                // reasoning, as the no-challenger recompute arm below: at round
+                // 1 the game holds two unrebutted assertions and one was
+                // abandoned, so nothing on chain distinguishes an honest catch
+                // from a griefing or self-dealt one — and paying there makes
+                // challenging an honest *offline* reporter profitable.
+                T::Custody::slash_insurance(settlement.reporter_bond)?;
+                if let Some(challenger) = settlement.challenger.map(T::AccountId::from) {
+                    // No finding against the challenger either; 07 §11(4)
+                    // prices forcing a status-quo outcome as capital lock-up,
+                    // not forfeiture.
+                    T::Custody::release(&challenger, settlement.challenger_bond)?;
+                }
+                return Ok(());
+            }
             if settlement.disposition == BondDisposition::RefundBoth {
                 // No adjudicated loser: 07 §11(1)'s retention window closed
                 // without a verdict, so both stacks go back to their posters.
@@ -1707,6 +1762,11 @@ pub mod pallet {
             }
             if before.money_settled != after.money_settled {
                 MoneySettled::<T>::put(BoundedVec::truncate_from(after.money_settled.clone()));
+            }
+            if before.reporter_records != after.reporter_records {
+                ReporterRecords::<T>::put(BoundedVec::truncate_from(
+                    after.reporter_records.clone(),
+                ));
             }
             if before.round_activity != after.round_activity {
                 RoundActivity::<T>::put(after.round_activity);
@@ -1902,6 +1962,9 @@ pub mod pallet {
                         reporter_bond,
                         challenger_bond,
                     },
+                    CoreEvent::ReporterRecordsFull { who } => Event::ReporterRecordsFull {
+                        who: T::AccountId::from(who),
+                    },
                 };
                 Self::deposit_event(mapped);
             }
@@ -1916,6 +1979,23 @@ pub mod pallet {
                 ));
             }
             let oracle = Self::load();
+            // Contract v19: `ReporterRecords` stays inside its bound, and the
+            // 07 §5.3 default path never writes the retired forward-settling
+            // variant. `ChallengerDefault` is retained only for SCALE stability
+            // (removing it would shift `Neutral`'s discriminant and break the
+            // frozen 02 §6 `ComponentSettled` layout), so its unreachability has
+            // to be asserted rather than typed — a future edit reintroducing it
+            // would otherwise silently regress the whole fix.
+            if ReporterRecords::<T>::get().len() > MAX_REPORTER_RECORDS_BOUND as usize {
+                return Err(TryRuntimeError::Other("ReporterRecords: exceeds its bound"));
+            }
+            for (_, settled) in ComponentValues::<T>::iter() {
+                if settled.path == oracle_core::SettlePath::ChallengerDefault {
+                    return Err(TryRuntimeError::Other(
+                        "ComponentValues: ChallengerDefault is unreachable since contract v19",
+                    ));
+                }
+            }
             // Counter/iteration agreement for the counted maps.
             if oracle.reporters.len() != Reporters::<T>::count() as usize {
                 return Err(TryRuntimeError::Other(
@@ -2016,6 +2096,8 @@ pub mod pallet {
                 CoreError::EvidenceMismatch => Error::<T>::EvidenceMismatch.into(),
                 CoreError::BadProof => Error::<T>::BadProof.into(),
                 CoreError::ValueOutOfBounds => Error::<T>::ValueOutOfBounds.into(),
+                CoreError::SelfChallenge => Error::<T>::SelfChallenge.into(),
+                CoreError::ReporterEjected => Error::<T>::ReporterEjected.into(),
             }
         }
     }

@@ -4130,3 +4130,160 @@ fn reserve_probe_crank_rejects_unsigned_and_root_origins() {
         assert_ok!(Oracle::do_try_state());
     });
 }
+
+// ---------------------------------------------------------------------------
+// Contract v19 — the two confirmed oracle vulnerabilities, at the extrinsic
+// layer. See `oracle-core`'s own suite for the state-machine-level proofs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn self_challenge_by_the_round_reporter_is_refused() {
+    new_test_ext().execute_with(|| {
+        register_reporter(1);
+        assert_ok!(do_report(1, E, reported_value(), h(9)));
+        // The whole of VULN 1's entry point: at baseline this was `assert_ok!`
+        // and the reporter owned both sides of their own game.
+        assert_noop!(
+            Oracle::challenge(
+                RuntimeOrigin::signed(acc(1)),
+                C,
+                E,
+                V,
+                reported_value(),
+                h(10)
+            ),
+            Error::<Test>::SelfChallenge
+        );
+        let round = Rounds::<Test>::get((C, E, V)).expect("live round");
+        assert!(round.challenger.is_none());
+        assert_eq!(round.cumulative_challenger_bond, 0);
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+#[test]
+fn the_reporter_gets_self_challenge_not_already_challenged() {
+    // Guard ordering: the reporter's own attempt must name the real reason even
+    // once a legitimate challenger holds the slot.
+    new_test_ext().execute_with(|| {
+        register_reporter(1);
+        assert_ok!(do_report(1, E, reported_value(), h(9)));
+        assert_ok!(Oracle::challenge(
+            RuntimeOrigin::signed(acc(4)),
+            C,
+            E,
+            V,
+            counter_value(),
+            h(10)
+        ));
+        assert_noop!(
+            Oracle::challenge(RuntimeOrigin::signed(acc(1)), C, E, V, FixedU64(1), h(11)),
+            Error::<Test>::SelfChallenge
+        );
+    });
+}
+
+#[test]
+fn round_one_default_settles_the_carried_value_not_the_counter_value() {
+    new_test_ext().execute_with(|| {
+        register_reporter(1);
+        // A real prior value, so the carry is distinguishable from the neutral
+        // 0.5 fallback and from the challenger's assertion.
+        ComponentValues::<Test>::insert(
+            (C, E - 1, V),
+            SettledComponent {
+                value: FixedU64(900_000_000),
+                path: SettlePath::Unchallenged,
+                flagged: false,
+            },
+        );
+        assert_ok!(do_report(1, E, reported_value(), h(9)));
+        // Challenged from a *second funded account*, not the reporter — this
+        // proves the fix does not rest on the identity guard.
+        assert_ok!(Oracle::challenge(
+            RuntimeOrigin::signed(acc(9)),
+            C,
+            E,
+            V,
+            counter_value(),
+            h(10)
+        ));
+        set_block(ORC_WINDOW_BLOCKS + 2);
+        assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(8)), 20));
+        let settled = ComponentValues::<Test>::get((C, E, V)).expect("settled");
+        // Baseline: `{ counter_value(), ChallengerDefault, flagged: false }`.
+        assert_eq!(settled.path, SettlePath::Neutral);
+        assert!(settled.flagged);
+        assert_eq!(settled.value, FixedU64(900_000_000));
+        assert_ne!(settled.value, counter_value());
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+#[test]
+fn round_one_default_pays_the_challenger_no_bounty() {
+    new_test_ext().execute_with(|| {
+        register_reporter(1);
+        assert_ok!(do_report(1, E, reported_value(), h(9)));
+        assert_ok!(Oracle::challenge(
+            RuntimeOrigin::signed(acc(9)),
+            C,
+            E,
+            V,
+            counter_value(),
+            h(10)
+        ));
+        let slashed_before = CustodySlashed::get();
+        set_block(ORC_WINDOW_BLOCKS + 2);
+        assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(8)), 20));
+        // 07 §5.5 (contract v19): the whole forfeited stack routes to INSURANCE.
+        // Baseline paid the challenger 40 % of it — which, when one purse held
+        // both roles, was a rebate to the attacker.
+        assert_eq!(CustodySlashed::get() - slashed_before, bond(1));
+        assert_eq!(CustodyPaid::get().get(&acc(9)).copied().unwrap_or(0), 0);
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+#[test]
+fn deregister_of_a_live_rounds_challenger_is_window_open() {
+    new_test_ext().execute_with(|| {
+        register_reporter(1);
+        register_reporter(9);
+        assert_ok!(do_report(1, E, reported_value(), h(9)));
+        assert_ok!(Oracle::challenge(
+            RuntimeOrigin::signed(acc(9)),
+            C,
+            E,
+            V,
+            counter_value(),
+            h(10)
+        ));
+        // 07 §3: a challenger's bond is held in the round, so challenging is
+        // "participating" and exit must wait for the round to close.
+        assert_noop!(
+            Oracle::deregister_reporter(RuntimeOrigin::signed(acc(9))),
+            Error::<Test>::WindowOpen
+        );
+        set_block(ORC_WINDOW_BLOCKS + 2);
+        assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(8)), 20));
+        assert_ok!(Oracle::deregister_reporter(RuntimeOrigin::signed(acc(9))));
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+#[test]
+fn reporter_records_round_trip_through_storage() {
+    // Goes through the extrinsics deliberately: `persist` writes nothing for a
+    // field it does not know about, so a core-only test would pass even if the
+    // `ReporterRecords` arm were missing.
+    new_test_ext().execute_with(|| {
+        register_reporter(1);
+        settle_recomputed(1, E);
+        // A clean exit retains nothing, so ordinary rotation cannot fill the
+        // bound.
+        assert_ok!(Oracle::deregister_reporter(RuntimeOrigin::signed(acc(1))));
+        assert!(crate::pallet::ReporterRecords::<Test>::get().is_empty());
+        assert_ok!(Oracle::do_try_state());
+    });
+}

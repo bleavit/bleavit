@@ -20,7 +20,167 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 
 ## Current focus
 
-> ### ⇨ ACTIVE (2026-07-31) — E6, the proposal author/funder split
+> ### ⇨ CURRENT (2026-08-01) — security fix in flight, rebased onto E6; the E6 and S6 blocks below are prior entries and the 2026-07-30 one is kept for its E5 context
+>
+> **`main` is `4bd81f0`** (E6 #201 merged on top of E5 #198, S6 #200 and the SQ-535 collator re-anchor #199). Branch `fix/oracle-self-challenge-and-offense-ladder`
+> carries a security fix for **two confirmed oracle vulnerabilities**, found by a whole-repository
+> review of `main` and each confirmed by an independent adversarial refutation pass. Contract
+> **v18 → v19** (renumbered on rebase: E6 took v18 first).
+>
+> **VULN 1 (HIGH) — self-challenge.** `challenge` never checked the challenger differs from the
+> round's reporter, and a §5.3 reporter default settled the *challenger's* counter-value forward
+> with `flagged: false`, bypassing the watchtower quorum. One account could
+> `utility.batch_all([report, challenge])` — both leaves are `CallDomain::Public`, so the wrapper is
+> admissible and the front-running window is **zero** — monopolize the game via `AlreadyChallenged`,
+> and land its own false value unflagged in `C_attested` and therefore `W`. `adjudicate` is
+> unreachable below `round_cap`, so nothing could rescue the round. Against 07 §6.3's own worked
+> example the attacker nets **+102,000 instead of the intended −90,000**: 8.6 % of the required
+> ladder, repeatable every epoch, with no post-settlement remedy (I-18).
+>
+> **The fix is on the value side, and that is the load-bearing judgement.** 07 §5.3's own closing
+> sentences forbid debiting a stack a party has not funded, so no rule can make a defaulting party
+> forfeit the full ladder — the money side is closed to repair. A default now takes the §10 neutral
+> path (carry-last, **flagged**) at *every* round, so the attacker's gain is exactly **0**; the
+> round-1 stack routes 100 % to INSURANCE (paying a bounty there would make griefing an honest
+> *offline* reporter profitable), and 40/60 applies from round 2 where consented
+> escalation-then-abandonment evidences a real contest. Neutralizing at **all** rounds rather than
+> only round 1 is deliberate: preserving forward settlement at round ≥ 2 would leave the attack
+> alive at 1.8·B₁. `challenge` also refuses the reporter — necessary but **not sufficient**, since a
+> second funded account defeats it, which is exactly why the value-side fix carries the weight.
+>
+> **VULN 2 (MEDIUM) — the §3 ladder reset.** `deregister_reporter` + `register_reporter` erased the
+> offense count for the price of two extrinsics, making the second-offense slash and the
+> third-offense ejection unreachable. A bounded internal `ReporterRecords` store now retains the
+> ladder across exit and ejection (the attestor's SQ-262 pattern), re-registration re-seats at the
+> 07 §2(5) half stake past the second offense, and ejection is permanent. Deregistration is also now
+> refused while the account is a live round's **challenger** — a third defect found on the way, and
+> the thing that keeps a late verdict from landing on a departed account.
+>
+> **State:** `oracle-core` 52 tests, `pallet-oracle` 126, both green; fmt/clippy clean; release
+> tooling 86 green; plan-tables, spec-question-batches, limit-coverage (**unwired = 0, no registry
+> churn — no new 13 key**) and doc-links green.
+>
+> **Both pre-merge obligations are now discharged (PR #203, head `e1c6e25`, rebased onto `48e59f3`):**
+> 1. **Regenerated `pallet_oracle` weights — landed, at 50×20.** `load()` now reads `ReporterRecords`
+>    on *every* dispatch, so all 12 functions moved; and `crank_round_close`'s fixture was reseeded
+>    onto the §5.3 default branch, which was **never measured** before (saturated acks sent every
+>    round down the `Unchallenged` arm) and is now strictly the heavier one — **+4 reads / +2 writes**
+>    and ref_time `2,341,966,339 → 2,988,538,778` (**+27.61 %** against the rebased base). The
+>    growth-only regression gate cannot see work that was never measured, so this is the SQ-490 class
+>    and the movement is a **fixture correction, not a slowdown**; it is value-pinned in
+>    `tools/ci/weight-regression-acks.toml` with that reasoning, and `check-weight-regression.py`
+>    reports `PASS WITH ACKNOWLEDGEMENTS`.
+> 2. **The one exhaustive `tools/ci/rust-workspace-gates.sh` — green on the coherent post-rebase
+>    state (`GATES_EXIT=0`).** Includes the runtime release/`runtime-benchmarks`/`try-runtime`
+>    builds, the runtime-profile matrix, `no_std`, both weight checkers, and the limit-coverage leg
+>    (194 keys, unwired = 0). Per R-12 this state does not owe a second exhaustive rerun.
+>
+> **A completeness sweep over the change set then found three more things (2026-07-31, post-gate):**
+>
+> 1. **A benchmark-fixture gap this PR itself introduced — real, but smaller than it first looked.**
+>    Making `load()` read `ReporterRecords` on every dispatch means every benchmark whose dispatch
+>    hydrates the aggregate must fill that store to its bound — but `fill_reporter_records()` was
+>    reached by only 8 of the 12, via `fill_hydration` plus `crank_round_close`'s explicit call.
+>    `register_watchtower` and `ack_observed` build their own fixtures, go through `mutate_core` →
+>    `load()` anyway, and so measured an **empty** record store. The helper's own doc comment claimed
+>    "every benchmark", which is how it read as covered. Both now call it, and each gains exactly
+>    **+2,201 B** of measured state (64 × 34 B + encoding overhead) — the deterministic signal.
+>
+>    **Three corrections to the first reading, all recorded because the obvious framing was wrong
+>    each time.** (a) **The charged PoV was never understated.** `ReporterRecords` is declared
+>    `MaxEncodedLen`, so the `Estimated:` figure — the proof size actually charged — already carried
+>    the full 64-record bound while the fixture was empty. Only `Measured:` (informational) and
+>    `ref_time` moved; reads and writes did not. (b) **It was two functions, not four.**
+>    `crank_reserve_probe` and `reserve_probe_result` go through the narrow `mutate_reserve_health`
+>    path, never `mutate_core`, and their generated weights carry no `Oracle::ReporterRecords` read
+>    at all. They were briefly given the fixture too; it was removed, because seeding a store the
+>    dispatch provably never touches is the same misleading-fixture pattern this PR exists to fix.
+>    Both now carry a comment saying why they are the exception. (c) **Do not trust a contended
+>    ref_time.** An intermediate regeneration ran while another session benchmarked in a sibling
+>    worktree and read `recompute_proof` +59.8 % and `register_watchtower` +11.4 %; on a quiet re-run
+>    both collapsed to +2.1 % and +6.9 %. So this fixture fix is a **fidelity correction with no
+>    charged-weight consequence** for those two functions — worth making because the artifact should
+>    describe the state the dispatch really sees, not because it crossed a regression line. The
+>    acknowledgement in `weight-regression-acks.toml` now carries that caution explicitly.
+>
+>    The one genuine regression remains `crank_round_close`, re-pinned at
+>    `ref_time=3193098962` (+36.34 % worst case at the component high `n = 10`). Its evidence is the
+>    *shape of the fit*, not the headline: the per-round slope moves **51,312,035 → 123,620,566
+>    (2.4×)** while the intercept moves only +7.0 %, and the Standard Error *tightens* 1,366,514 →
+>    469,648. Unmeasured per-round work moves a slope; noise moves an intercept.
+>
+>    **A cross-pallet consumer was missed, and CI caught it.** Regenerating only
+>    `pallet_oracle` was not enough: `pallet-epoch::drive_oracle_boundaries` — the 07 §11/SQ-182
+>    crank that drives the oracle's settle deadline — calls into the oracle and therefore also pays
+>    the new `load()` read. `benchmark-smoke` failed with the single line
+>    `STALE drive_oracle_boundaries: worst_case.reads 715 -> 716`, the **only** stale entry across
+>    all 32 pallets, and a local 50×20 regeneration reproduced it exactly: the function's storage
+>    list now carries `Oracle::ReporterRecords (r:1 w:0)`, `max_size: Some(2178)` = 64 × 34 + 2.
+>    +0.14 % needs no acknowledgement. Two lessons worth keeping. **(i)** A new read in a shared
+>    hydration path is a *cross-pallet* weight change; `--pallet <one>` is the wrong scope, and
+>    `--changed` would not have found it either, since `pallets/epoch/` never moved. **(ii)** CI's
+>    `2×1` run reported `settle_cohort: worst_case.proof_size 552,103 -> 568,303 (+2.9 %)` as
+>    advisory; the quiet 50×20 regeneration did **not** reproduce it, confirming it as a
+>    low-fidelity artifact of a component-bearing function and not this change — which is exactly
+>    the distinction the constant-weight/component-bearing split in the drift gate exists to draw.
+>
+>    **Operational gotcha (cost one failed regeneration):** `rust-workspace-gates.sh` and
+>    `regenerate-weights.py` share `CARGO_TARGET_DIR`, and the gate's plain-release runtime build
+>    **overwrites** the `runtime-benchmarks` wasm at
+>    `release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm`. A regeneration run
+>    after the gate aborts with "Did not find the benchmarking runtime api". Regenerate weights
+>    *before* the exhaustive gate, or rebuild with `--features runtime-benchmarks` after it. It
+>    fails loudly rather than mis-measuring, which is the right failure mode.
+> 2. **The security claim is now executable, not asserted.** The rebase brought in S6's
+>    `reference-model/src/bleavit_reference_model/disputes.py` — the executable form of 07 §5–§6 —
+>    which models §5.5's 40/60 split and §6.3's coverage rule but knew nothing about a *default*.
+>    Added `default_slash_split()` (the v18 round-1 exception) and `self_challenge_outcome()`, which
+>    re-derives every number this PR and 02 §13 publish: pre-v18 **+102,000** net at **8.6 %** of the
+>    required ladder against the honest attacker's −90,000, and post-v18 **−30,000** with zero gross
+>    gain. Suite **253 → 263**. One new test deliberately pins the *residual* rather than hiding it:
+>    neutralization removes the gain, not the move, so an attacker may still burn `B_1` to force a
+>    neutral flagged settlement — which is exactly what §11(4) prices and §10's two-consecutive-flag
+>    renormalization absorbs. Another sweeps every lawful `(bond_floor, bond_bps, rounds)` triple, so
+>    unprofitability does not rest on the defaults (`orc.rounds` carries no max-Δ).
+> 3. **Supporting evidence the old behavior was a defect, not a design choice.** 07 §13's
+>    already-existing try-state list admits exactly four `ComponentValues` categories —
+>    quorum-acknowledged, challenge-resolved, adjudicated, neutral-flagged. `ChallengerDefault` is
+>    none of them, so the pre-v18 path violated the spec's own invariant text. The new try-state
+>    assertion is therefore a *strengthening consistent with* 07 §13, and needs no doc-15 edit
+>    (15 §1's coverage rule delegates per-pallet invariants to the owning doc).
+>
+> Checked and found **not** owed: 07 §13 needs no `ReporterRecords` row (it lists 6 of the pallet's
+> 14 storage items and 7 of its 27 errors — `RoundSchedules`, `AckRecords`, `MoneySettled`,
+> `RoundActivity` and two more internal items are already absent, so the list is the contract-frozen
+> surface, not an enumeration); 13 §4 needs no bound row (`Reporters` itself has none — the ≤ 64 is
+> anchored at 07 §13 — and the new store reuses that same bound); and `ReporterRecordsFull` needs no
+> `surface-manifest.json` entry, because the manifest is checked **manifest → metadata**, so an
+> off-contract event is out of its scope by construction.
+>
+> **RUSTSEC-2026-0222 (wasmtime): fixed here, then superseded by `main` on rebase.** The
+> `Supply chain` job passed at 15:0x and failed at 16:40 on a commit touching only `PLAN.md` and a
+> weights file — because the advisory database refreshed and picked up an advisory **published the
+> same day (2026-07-31)**: `wasmtime 36.0.12`, *"Stores can mix up type indices between engines"*,
+> severity 3.8 (low), reached via `sc-executor-wasmtime 0.47.0`. This branch never touched a
+> lockfile, so the condition was repo-wide and hit `main` and every open branch equally. It was
+> **fixed rather than waived** (`cargo update -p wasmtime --precise 36.0.13`), because unlike every
+> entry in `.cargo/audit.toml` this fix is semver-reachable and nothing pins the vulnerable
+> version — a waiver would have documented a constraint that does not exist.
+>
+> **The E6 session reached the same conclusion independently and landed it first**, so after the
+> rebase onto `4bd81f0` this branch's lockfile is byte-identical to `main` and the commit carries
+> no dependency change at all. Recorded rather than deleted because the reasoning is the same one
+> the next same-day advisory will need, and because two sessions converging on *patch, not waive*
+> is the useful signal. The duplicate work is the cost of two branches meeting a live advisory
+> feed at the same hour; it is not avoidable by either branch acting alone.
+>
+> **Pre-existing red, reported not absorbed:** `cargo test -p pallet-oracle --features
+> runtime-benchmarks` fails `bench_report` identically on unmodified `HEAD` (137 passed / 1 failed
+> both ways). Not caused here, not fixed here.
+>
+>
+> ### ⇨ PRIOR ENTRY (2026-07-31) — S6 done (#200 merged); superseded on status by the security fix above, kept for its verification context
+> ### ⇨ PRIOR ENTRY (2026-07-31) — E6, the proposal author/funder split (merged as #201)
 >
 > **Branch `feat/e6-proposal-funder-split`, rebased onto `48e59f3` (E5 pass 2, #199).** New milestone,
 > user-requested: `epoch.submit` requires `proposal.proposer == who`, so a proposal's author
@@ -1399,6 +1559,7 @@ Spec changes and other project decisions (rule R-1, AGENTS.md).
 
 | Date | Amendment | Authorized by | Docs touched |
 |---|---|---|---|
+| 2026-07-31 | **Oracle: a §5.3 default no longer settles forward, and the §3 ladder survives exit (contract v19).** Two confirmed vulnerabilities, one PR. **(1)** `challenge` never checked distinctness and the close crank settled the challenger's counter-value with `flagged: false`, so one purse holding both roles moved a component by up to `Δs_max` while risking `0.6·B₁` — against 07 §6.3's own worked example, +102,000 instead of the intended −90,000, i.e. 8.6 % of the required ladder, repeatable every epoch with no post-settlement remedy (I-18). The repair is on the **value** side because it cannot be on the money side: 07 §5.3's own closing sentences forbid debiting a stack a party has not funded, so no rule can make a defaulting party forfeit the full ladder. A default now takes the §10 neutral path (carry-last, flagged) at **every** round, with the stack forfeit **100 % to INSURANCE at round 1** and 40/60 from round 2. `challenge` additionally refuses the round's own reporter — necessary but **not** sufficient (a second funded account defeats it), kept for state hygiene and as the anchor for a new try-state invariant. **(2)** `register_reporter` seated `offenses: 0` unconditionally and `deregister_reporter` deleted the row, so 07 §3's second-offense slash and third-offense ejection cost two extrinsics to erase. A new internal bounded `ReporterRecords` store retains the ladder across exit and ejection; re-registration carries the count and re-seats at the 07 §2(5) half stake past the second offense; ejection is permanent. `deregister_reporter` is now also blocked while the account is a live round's **challenger** (07 §3's "all rounds the reporter participated in" — a third, separately-found defect), which is what keeps a late verdict from landing on a departed account and lets the Codex-F17 unseated no-op stand unchanged. **Rulings (R-1):** a default advances **no** §3 offense — it is producible by the challenger, by a collator set censoring `counter_report` (14 TH-24) or by a dead node, so it is not a finding that the value was wrong, and recording one would hand a griefer a lever on a ladder that `orc.n_min` turns into a MetricSpec-admission veto; the round-1 bounty is denied because paying it makes griefing an honest *offline* reporter profitable, while §6.2's incentive survives from round 2 where consented escalation-then-abandonment evidences a real contest. **Rejected, recorded so they are not re-derived:** watchtower quorum on the default path (defeated at Δcost 0 by two self-registered seats — 07 §4's entity-independence rule has no implementation because 05 specifies no entity registry); flat bounty denial at all rounds (destroys the honest-challenger incentive); a second independent challenger (breaks the frozen single-valued `RoundState.challenger`); slashing `orc.reporter_stake` on default (a flat key against a value-scaled property — 5.7 % coverage at `StakeAtRisk` = 10M); a `stake == 0` tombstone seat (leaves the re-activation stake unheld — `apply_custody` has no increase arm). **Also corrected in passing:** `surface-manifest.json` pinned a stale four-variant `SettlePath` for the `ComponentValues` storage row while the event row pinned five (a release-time metadata binding would have failed on it; now pinned by a test in both places), and the second `INTEGRATION_CONTRACT_VERSION` literal in the runtime suite violated the v17 entry's own "exactly one literal" remedy and was removed. `transaction_version` untouched (02 §13 rule 7); pre-genesis, no migration; no new 13 key and zero limit-coverage churn. | User (owner for both sides of the 02 §13 sign-off under R-1; standing autonomous-resolution delegation) | 07 §3/§5.2/§5.3/§5.5/§6.2/§10; 02 §7.2 + §13 (v18); 00 (contract-version list); 14 TH-23/TH-24 |
 | 2026-07-31 | **Proposal authorship and proposal funding are separated (milestone E6).** `epoch.submit` required `proposal.proposer == who`, so the account that wrote the payload had to be the account that locked the 1k–50k USDC class bond — an intersection of two unrelated capabilities gating every one of the ~87 decisions/year the chain is designed to produce. The submit signer becomes the **funder** (the hold lands on the signer, so no account can be forced into a hold by someone else's extrinsic) and `proposal.proposer` becomes the **author**, free to differ. Four incidence rulings, all the user's. (1) `trs.proposer_reward` pays the **author** — it pays for authorial work, and `runtime/bleavit-runtime/src/configs.rs:8381` already pays `proposal.proposer`, so the ruling is preserved rather than built, and is pinned by a test precisely because a property that holds by accident is one that regresses silently. (2) Pre-qualification withdrawal is available to **either** party: neither is trapped, the author cannot strand the funder's capital indefinitely and the funder cannot hold a live proposal hostage. (3) The 06 §4 10 % non-decision-grade slash falls on the **funder**, necessarily, since the funder holds the bond — which is the reason the funder signs the exact payload rather than pre-authorizing an author in the abstract. (4) The ≤4-entries/epoch intake cap is re-keyed from the author to the **funder**. The fourth is not a preference but a defect closure: `crates/epoch-core/src/lib.rs:776` counts `p.proposer`, which is safe only while `submit` forces author == signer, and splitting the identities without re-keying would let one funder back 16 throwaway author addresses at 4 proposals each and take the whole 64-entry `IntakeQueue`, voiding 06 §4 rule 4 and the B-13 monopolization defense. Capital at risk is what prices spam, so the cap follows the capital. Author-only rights are unchanged: `bind_ratification` remains the proposer's, per 09 §1.1(4). Contract v17 → **v18** — `Proposal` and `ProposalSummaryView` each gain a trailing `funder: AccountId` under 02 §13 rule 3, no existing field moves, no call index moves so `transaction_version` is unchanged, and the chain is pre-genesis so no migration is required. No new 13 key: `intake.max_acct` keeps its value and bounds and only its subject changes. | User (2026-07-31; owner for both the backend and frontend sides of the 02 §13 sign-off under R-1) | 02, 05, 06, 08, 14, 15, PLAN |
 | 2026-07-31 | **Splitting an identity creates a try-state obligation, and 15 §4.1 now says so as a general rule (milestone E6).** Closing E6 exposed that the split had made a state representable which nothing checked: `ProposalBond.funder` names the account the hold was taken from, and before the split there was one identity, so the binding to `Proposal.funder` held by construction and no assertion had to state it. Post-split a bond keyed to the *author* is fully collateralized, sits inside its liability bound and is not orphaned — it passes every existing try-state assertion — while its refund and its 06 §4 slash both reach the wrong party. The obligation is written into 15 §4.1 in the general form ("wherever a custody record names one of two identities, try-state MUST bind that name to the identity the record carries") rather than as a `ProposalBond` special case, because the same hole opens on any future split and a rule stated once is cheaper than the same defect found twice. Implemented in `pallet-epoch`'s `do_try_state` with a test that passes on the honest state and fails once the bond is re-keyed. | Claude (implementation-level spec completion under R-1; no values-layer or contract-surface change, so no 02 §13 bump and no sign-off required) | 15, PLAN |
 | 2026-07-31 | **13 §3.1's decision-window row corrected: it is not a kernel fraction.** The table's whole contract is that phase offsets scale with `epoch.length`; the decision window does not, because 05 §3.1 — which owns the schedule — anchors it absolutely to Trade close, and 13 §5's own in-flight table classifies `dec.window` as live-consumed via `decide_at − dec.window`. The `[15/21, 18/21)` rendering is exact at the genesis registry and, executably, at **exactly one** of the 19,201 lawful `epoch.length` values. Row now states the absolute derivation, with a note giving the two divergence examples and pointing at SQ-535 for the 02 §9 half. Found by putting 05 §3.1 into `reference-model`'s `lifecycle` module and failing to reproduce 13's table with one formula (S6) | Claude (R-1; doc-truing against the owning document, no consumer affected) | `13-parameters.md` §3.1 |
@@ -2189,3 +2350,4 @@ Append-only; newest last. Format: `| Date | Milestone(s) | Done | Next |`
 | 2026-07-31 | E7 (derived-pack and contract-version drift, R-3) | **Checked the R-3 obligations my spec edits triggered and found three drifts, none of them mine — which is why they were still there.** AGENTS.md forbids leaving `docs/design/claude-design-kit/` stale after a spec change, and a prior Codex review had already caught it once. (1) Both **VERBATIM copies were a full milestone behind**: docs 10/11 moved on 2026-07-29 with E1 and the kit last moved 2026-07-28, so the pack was missing real frontend-*normative* content — the redemption-fee display rules, the `NavView`-unchanged ruling, `split_gate`/`merge_gate`/`redeem_gate` in the S4 call set, and the two new revenue cranks. Regenerated both and asserted the bodies are now byte-identical to their sources. (2) The kit's **parameter distillation had no `ledger.redeem_fee` row at all**, while the copy it ships now *mandates* the frontend read that key — added, with the part that is easy to get backwards spelled out: `net` is the headline on the five charged calls, and `redeem`/`redeem_void`/every `merge*` are exempt and must still read as par. (3) AGENTS.md claimed **contract v13** in two places against an actual `INTEGRATION_CONTRACT_VERSION = 17`. **Caught one of my own errors on the way**: my first regeneration stamped the headers "contract v32", because the regex `INTEGRATION_CONTRACT_VERSION[^0-9]*\K[0-9]+` matches the `32` in `u32` before it reaches the value — fixed to v17 and re-verified. | — |
 | 2026-07-31 | E7 (mutation-testing my own coretime tests) | **Wrote property tests for the coretime transcription, claimed in their docstring that they would catch a swapped `min`/`max`, then checked — and they did not.** Swapping the two clamps degenerates `coretime_renewal_price` to "always charge `sale_price`", and that degenerate form satisfies **every bound I had written**: `price ≤ sale_price` holds with equality, `price ≥ end_price` holds because the leadin factor is ≥ 1, and monotonicity-in-`prev` holds vacuously because a constant list is sorted. All three of my new tests passed against the mutant; what actually killed it was the *point-value* interlude test asserting `path[0] == 1.03`. So the properties were decoration and the docstring was an unchecked claim — the exact failure mode the repo's TLA witness configs exist to prevent, reproduced by me one file over. **Replaced with an anti-vacuity test** that requires each clamp to be the *binding* one somewhere: the ratchet must put the price **strictly below** the sale price and **strictly increasing** in `prev` early in the leadin (killing "always `sale_price`"), and strictly above `end_price` (killing "always `end_price`"), while the market clamp must make `prev` stop mattering at the ceiling. Re-verified by mutation: the bounds test still passes against the mutant — and now *says so* — while the anti-vacuity test fails it. Suite **277**. | — |
 | 2026-07-31 | E7 (SQ-542 — the next lever, refused on evidence) | **Decomposed `C` after E7's cuts to find the next lever, found one worth 40 % of the cost base, and the arithmetic says do not pull it.** At the 08 §10.1 PARAM ceiling `trs.proposer_reward` is **43,482 USDC/yr — 39.8 %**, exactly level with `ops.collators` and larger than every other row combined; and like `collator.comp_epoch` before SQ-536 it has **no derivation anywhere in the doc set** — three appearances, all of them restatements of the number. The obvious move is a cut. **The evidence points the other way.** 08 §7.1 refunds a rejected proposal *in full* ("rejection is information"), so the slash attaches only to non-decision-grade outcomes, and EV per submission is `reward·P(adopt) − 0.1·bond·P(non-DG)`. At the committed Phase-0 rates that is **−47.8 USDC** against a break-even adopt rate of **11.89 %** — and a cut to the 13 §1 hard-min would put break-even at **118.9 %**, unprofitable even if every proposal were adopted. So the unsafe direction here is **downward**, which is the opposite of the collator case. Filed as SQ-542 rather than acted on: R-2's escalation test is a conjunction and both halves hold. **Also caught myself writing a tautological assertion** (`x*10 == x*10`) in the test that was supposed to quantify the counterfactual — one hour after committing a fix for exactly that failure mode — replaced with the hard-min break-even, which is decisive rather than decorative. Suite **280**. | — |
+| 2026-07-31 | Security fix (oracle) | **Two confirmed vulnerabilities fixed in one PR; contract v19.** Found by a whole-repository security review of `main` (`055cf54`; rebased onto `48e59f3`) run as five scoped agents plus an adversarial refutation pass per candidate — 2 of 6 candidates survived at confidence ≥ 8, and the other four are recorded as refuted with reasons. **HIGH — self-challenge:** `challenge` never checked that the challenger differs from the round's reporter, and a reporter default settled the challenger's counter-value forward with `flagged: false`, bypassing the watchtower quorum. One account could `utility.batch_all([report, challenge])` (both leaves are `CallDomain::Public`, so the wrapper is admissible and the front-running window is zero), lock out every honest challenger with `AlreadyChallenged`, and — `adjudicate` being unreachable below `round_cap` — have its own false value land unflagged in `C_attested` and thus `W`. Net against 07 §6.3's worked example: **+102,000 instead of the intended −90,000, at 8.6 % of the required ladder.** Fixed on the **value** side (a default now takes the §10 neutral carry-last/flagged path at every round) because the money side is closed to repair by §5.3's own no-unfunded-debit rule; round-1 defaults additionally pay no bounty. **MEDIUM — offense-ladder reset:** `deregister_reporter` + `register_reporter` erased 07 §3's ladder for two extrinsics' cost, making the second-offense slash and third-offense ejection unreachable; a retained bounded `ReporterRecords` store now carries the count across exit and makes ejection permanent, mirroring the attestor's SQ-262 fix. Deregistration is also now blocked while the account is a live round's *challenger* — a third defect found on the way. **Verification:** `oracle-core` 37→52 tests, `pallet-oracle` 120→126, all green; fmt + clippy `-D warnings` clean on both crates; release-tooling suite 86 green; plan-tables, spec-question-batches, limit-coverage (unwired = 0, no registry churn) and doc-links all green. The pre-existing test `quorum_finalizes_and_challenge_supersedes_ack_requirement` **failed against the fix while asserting `ChallengerDefault`** — that is the captured baseline, and it was rewritten deliberately rather than silently. **Reported honestly, not absorbed:** `cargo test -p pallet-oracle --features runtime-benchmarks` has a pre-existing failure (`bench_report`, "fixture must exercise the value-scaled path above the floor knee") that reproduces identically on unmodified `HEAD`; this PR adds no new failures (137 passed / 1 failed both ways). **Also fixed in passing:** `surface-manifest.json` pinned a stale four-variant `SettlePath` on the `ComponentValues` storage row while the event row pinned five — a release-time metadata binding would have failed on it; both are now test-pinned. | Land the regenerated `pallet_oracle` weights (`load()` now reads `ReporterRecords` on every dispatch, so all 12 functions move; `crank_round_close`'s fixture was also reseeded onto the previously-unmeasured default branch, which is now the heavier arm) and run the one exhaustive `rust-workspace-gates.sh` on the coherent post-rebase state. Weights are now regenerated and the `crank_round_close` ref_time regression is acknowledged and value-pinned; PR #203 is open. |

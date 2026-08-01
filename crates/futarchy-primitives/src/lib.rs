@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 18;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 19;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -1760,7 +1760,16 @@ mod tests {
         // `ProposalSummaryView` each gain a trailing `funder`; `epoch.submit` keeps
         // its signature (the funder is the origin, not an argument), so no call index
         // moves and `transaction_version` is untouched (02 §13 rules 3 and 7).
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 18);
+        //
+        // v19 (oracle security): a 07 §5.3 reporter default settles `Neutral`/
+        // flagged instead of the challenger's counter-value, and the §3 offense
+        // ladder survives `deregister_reporter` and ejection. Two 02 §7.2
+        // *behaviour* changes, no shape change; `SettlePath::ChallengerDefault`
+        // is retained but no longer produced, so no discriminant moves and
+        // `transaction_version` is untouched (02 §13 rule 7). Renumbered from
+        // v18 on rebase: E6 (#201) landed on that number first, and 02 §13
+        // entries are allocated in merge order, not authoring order.
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 19);
     }
 
     #[test]
