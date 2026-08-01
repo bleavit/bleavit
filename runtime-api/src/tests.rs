@@ -339,11 +339,11 @@ fn all_methods_are_callable_through_api_ref() {
             .expect("open oracle rounds call succeeds"),
         singleton(oracle_round())
     );
-    if let Ok(report) = api.hosted_report(at, 9) {
-        assert_eq!(report, Some(hosted_report(9)));
-    } else {
-        assert!(false, "hosted report call must succeed");
-    }
+    assert_eq!(
+        api.hosted_report(at, 9)
+            .expect("hosted report call succeeds"),
+        Some(hosted_report(9))
+    );
 }
 
 #[test]
