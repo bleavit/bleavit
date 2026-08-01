@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
+from . import lmsr
 from decimal import (
     Decimal,
     ROUND_CEILING,
@@ -285,6 +286,16 @@ def manip_floor_hat(
     traded notional is not the measure). Churn and wash flow net out of it by
     construction, so sec.flow_cap is a secondary ceiling here, not the control
     that bounds wash-trade inflation.
+
+    `C_disp` is the LMSR **cash** cost of the displacement (04 §3's ``cost``),
+    not the displacement itself (04 §3's ``Delta``). This module reproduced the
+    spec's own confusion of the two until SQ-562: the superseded expression
+    ``b*ln(((p+d)(1-p))/((1-p-d)p))`` is ``b*(logit(p+d) - logit(p))``, a share
+    count, and it was being added to ``C_hold``, a USDC amount. It read 1.93x
+    high at the PARAM defaults, in the unsafe direction for a *lower* bound.
+    ``simulation.engine._signed_manip_floor`` was already correct; the two are
+    now pinned against each other by
+    ``test_manip_floor_hat_is_cash_cost_and_matches_the_simulation``.
     """
     delta = _d(delta)
     with localcontext() as ctx:
@@ -296,11 +307,7 @@ def manip_floor_hat(
             price = _d(price)
             if not Decimal(0) < price < Decimal(1) - delta:
                 raise ValueError("displacement leaves probability domain")
-            ratio = (
-                (price + delta) * (Decimal(1) - price)
-                / ((Decimal(1) - price - delta) * price)
-            )
-            c_disp += b * ratio.ln()
+            c_disp += lmsr.displacement_cost(b, price, price + delta)
             total_b += b
         held_flow = min(_d(contest_capital), _flow_cap(flow_cap) * total_b)
         c_hold = held_flow * delta

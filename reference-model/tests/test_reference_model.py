@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import unittest
 
-from bleavit_reference_model import lmsr
+from bleavit_reference_model import lmsr, treasury
 from bleavit_reference_model.decision import (
     Grade,
     Outcome,
@@ -1021,6 +1021,49 @@ class ContestCapitalTests(unittest.TestCase):
                 Decimal(400000),
                 Decimal(5),
             )
+
+    def test_manip_floor_hat_is_cash_cost_and_matches_the_simulation(self):
+        """05 §5.6 / SQ-562: `C_disp` is 04 §3's `cost`, never its `Delta`.
+
+        Two assertions, and the second is the one that lasts. First: at
+        Bleavit's own PARAM pair the diagnostic reads the cash figure, not the
+        share figure it used to read. Second: the reference model and the
+        Phase-0 simulation compute the same number — they disagreed by 1.928x
+        for as long as nothing compared them.
+        """
+        b = Decimal(10000)
+        p_bar = Decimal("0.5")
+        delta = Decimal("0.0375")  # 13 §1 dec.sigma / DELTA[PARAM].
+
+        # C_hold = 0 isolates C_disp: contest capital is zero at registration.
+        floor_ = manip_floor_hat(
+            [(b, p_bar), (b, p_bar)], delta, Decimal(0), Decimal(16)
+        )
+        # The cash cost of two delta-moves, from 04 §3's `cost = b*ln((1-p)/(1-p'))`.
+        expected = treasury.round_down(
+            Decimal(2) * lmsr.displacement_cost(b, p_bar, p_bar + delta)
+        )
+        self.assertEqual(floor_, expected)
+        self.assertEqual(floor_, Decimal("1559.230829"))
+
+        # The superseded expression — 04 §3's *displacement*, a share count —
+        # read 1.928x high, and high is the unsafe direction for a lower bound:
+        # 05 §5.6's escape clause fires when the floor reads *below*
+        # `3 * InCapPrize`, so overstating it delays the trigger.
+        superseded = Decimal(2) * b * (
+            ((p_bar + delta) * (1 - p_bar)) / ((1 - p_bar - delta) * p_bar)
+        ).ln()
+        self.assertGreater(superseded, floor_ * Decimal("1.9"))
+
+        # The simulation's own implementation, reproduced here rather than
+        # imported (`simulation/` is a separate package and not on this suite's
+        # path): accept book displaced up, reject book displaced down, both
+        # priced with the same cash formula.
+        accept_leg = lmsr.displacement_cost(b, p_bar, p_bar + delta)
+        reject_leg = lmsr.displacement_cost(
+            b, Decimal(1) - p_bar, Decimal(1) - (p_bar - delta)
+        )
+        self.assertEqual(treasury.round_down(accept_leg + reject_leg), floor_)
 
     def test_decide_decomposed_l_hat_matches_composed(self):
         kwargs = dict(
