@@ -1025,11 +1025,14 @@ class ContestCapitalTests(unittest.TestCase):
     def test_manip_floor_hat_is_cash_cost_and_matches_the_simulation(self):
         """05 §5.6 / SQ-562: `C_disp` is 04 §3's `cost`, never its `Delta`.
 
-        Two assertions, and the second is the one that lasts. First: at
-        Bleavit's own PARAM pair the diagnostic reads the cash figure, not the
-        share figure it used to read. Second: the reference model and the
-        Phase-0 simulation compute the same number — they disagreed by 1.928x
-        for as long as nothing compared them.
+        Pins the corrected value and the size of the error it replaced. The
+        **differential** against the simulation's own implementation cannot
+        live here — `simulation/` is a separate package that is not on this
+        suite's path — so it lives in
+        `simulation/tests/test_engine.py::test_manip_floor_hat_agrees_with_the_signed_simulation_implementation`,
+        with asymmetric prices so the reject-book direction conversion is
+        actually exercised. Reproducing the simulation's formula here would
+        have proved only that this module agrees with itself.
         """
         b = Decimal(10000)
         p_bar = Decimal("0.5")
@@ -1055,15 +1058,6 @@ class ContestCapitalTests(unittest.TestCase):
         ).ln()
         self.assertGreater(superseded, floor_ * Decimal("1.9"))
 
-        # The simulation's own implementation, reproduced here rather than
-        # imported (`simulation/` is a separate package and not on this suite's
-        # path): accept book displaced up, reject book displaced down, both
-        # priced with the same cash formula.
-        accept_leg = lmsr.displacement_cost(b, p_bar, p_bar + delta)
-        reject_leg = lmsr.displacement_cost(
-            b, Decimal(1) - p_bar, Decimal(1) - (p_bar - delta)
-        )
-        self.assertEqual(treasury.round_down(accept_leg + reject_leg), floor_)
 
     def test_decide_decomposed_l_hat_matches_composed(self):
         kwargs = dict(
