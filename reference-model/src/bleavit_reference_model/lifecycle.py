@@ -1,4 +1,4 @@
-"""05 §2–§3 — the proposal state machine, the phase schedule, cohorts and snapshots.
+"""05 §2–§3/§5.4–§5.5, 09 §1.2 and 11 §11.5 — lifecycle claims as data.
 
 Doc 05's §2.1 transition table is normative ("anything absent is impossible and
 MUST error"), §2.2 claims to be "re-verified against §2.1 — every edge below
@@ -29,6 +29,29 @@ rather than smoothed over — see :func:`decide_window_absolute` and
 absolutely (`[18/21·L − dec.window, 18/21·L)`); 13 §3.1's table renders the same
 row as the fixed fraction `[15/21, 18/21)`. They agree at the genesis registry
 and nowhere else.
+
+The execute checklist is likewise read from the documents rather than copied
+into a second snapshot. 09 §1.2 publishes 13 items and demands an item-for-item
+frontend mirror; 11 §11.5 publishes 14 rows. Executing the comparison finds nine
+one-to-one rows, two backend rows split across two frontend rows each, two
+backend execution steps with no frontend precondition, and one frontend-only
+`DescriptorLeadTime` row. That last row belongs to 09 §2.2's separate
+`apply_authorized_upgrade` call, not `execute`.
+
+The same diff exposes a terminal state the contract cannot represent. 09
+§1.2(11) says `Rejected(BadPreimage)`, but `BadPreimage` is absent from the
+frozen 02 §4 :class:`~bleavit_reference_model.decision.RejectReason` set and
+from 05 §2.1's T16 causes. The failure therefore leaves the proposal `Queued`;
+with no lawful T16 cause it reaches T15 `Expired` at grace end. Separately, the
+05 §5.5 table is total, deterministic and non-overlapping over its steps 6–8
+partition, but its `Valid fail` row maps the reachable
+`full = tail = false, converged = false` cell to `HurdleNotMet`; normative §5.4
+maps it to `ConvergenceFailed`.
+
+Units: lifecycle windows are block heights; checklist indices, row counts and
+Boolean cells are exact integers. No new calculation divides, so no rounding is
+performed. Every unrepresentable rejection keeps the status quo (`Queued`), the
+direction against execution and against the claimant (R-7).
 """
 
 from __future__ import annotations
@@ -36,7 +59,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from fractions import Fraction
+from itertools import product
 from pathlib import Path
+
+from .decision import Decision, Outcome, RejectReason
+from .spec_values import EPOCH_LENGTH_DEFAULT, EPOCH_LENGTH_MAX, EPOCH_LENGTH_MIN
 
 # ---------------------------------------------------------------------------
 # 13 §3.1 / 13 §4 kernel constants.
@@ -66,9 +93,6 @@ ORDERED_PHASES: tuple[tuple[str, int], ...] = (
     ("Housekeeping", HOUSEKEEPING_NUM),
 )
 
-EPOCH_LENGTH_DEFAULT = 302_400
-EPOCH_LENGTH_MIN = 201_600  # 14 d floor, K
-EPOCH_LENGTH_MAX = 604_800
 DEC_WINDOW_DEFAULT = 43_200  # 72 h
 DEC_WINDOW_MIN = 14_400
 DEC_WINDOW_MAX = 86_400
@@ -712,3 +736,545 @@ def simulate_snapshot_window(
             if not window.record(epoch, version):
                 return epoch, window
     return None, window
+
+
+# ---------------------------------------------------------------------------
+# 09 §1.2 ↔ 11 §11.5 — execute-checklist contract diff.
+# ---------------------------------------------------------------------------
+
+DOC_09 = "docs/architecture/09-execution-upgrades-and-rollout.md"
+DOC_11 = "docs/architecture/11-frontend-workflows.md"
+
+# One item in either document can carry several independently re-readable
+# obligations. These labels are semantic join keys, not parameter values. They
+# preserve the documents' own grouping so a split/merge cannot masquerade as an
+# item-for-item bijection.
+_BACKEND_CHECK_ATOMS: dict[int, tuple[str, ...]] = {
+    1: ("queue-state", "window"),
+    2: ("preimage",),
+    3: ("runtime-version",),
+    4: ("ratification",),
+    5: ("attestation",),
+    6: ("capability-rules",),
+    7: ("rate-meters",),
+    8: ("resource-locks",),
+    9: ("guardian-suspension",),
+    10: ("gate-flags", "dead-man-freezes"),
+    11: ("batch-bounds",),
+    12: ("dispatch",),
+    13: ("record",),
+}
+
+_FRONTEND_CHECK_ATOMS: dict[int, tuple[str, ...]] = {
+    1: ("queue-state",),
+    2: ("window",),
+    3: ("preimage",),
+    4: ("runtime-version",),
+    5: ("ratification",),
+    6: ("attestation",),
+    7: ("capability-rules",),
+    8: ("rate-meters",),
+    9: ("resource-locks",),
+    10: ("guardian-suspension",),
+    11: ("gate-flags",),
+    12: ("dead-man-freezes",),
+    13: ("batch-bounds",),
+    14: ("descriptor-lead-time",),
+}
+
+
+def _between(text: str, start: str, end: str) -> str:
+    """The text between two unique headings, refusing a malformed document."""
+    start_at = text.find(start)
+    if start_at < 0:
+        raise ScheduleError(f"heading not found: {start}")
+    end_at = text.find(end, start_at + len(start))
+    if end_at < 0:
+        raise ScheduleError(f"heading not found after {start}: {end}")
+    return text[start_at + len(start):end_at]
+
+
+def _plain_markdown(value: str) -> str:
+    """Remove the inline delimiters needed to compare names and reason codes."""
+    return value.replace("**", "").replace("`", "").strip()
+
+
+def _named_reject_reasons(text: str) -> tuple[str, ...]:
+    """Reject reasons explicitly named as terminal outcomes in checklist prose."""
+    found: list[str] = []
+    for pattern in (r"Rejected\((\w+)\)", r"RejectReason::(\w+)"):
+        for reason in re.findall(pattern, _plain_markdown(text)):
+            if reason not in found:
+                found.append(reason)
+    return tuple(found)
+
+
+@dataclass(frozen=True)
+class ExecuteCheck:
+    """One parsed 09 §1.2 item or 11 §11.5 frontend row."""
+
+    document: str
+    index: int
+    name: str
+    detail: str
+    atoms: tuple[str, ...]
+    reject_reasons: tuple[str, ...]
+
+    @property
+    def key(self) -> str:
+        return f"{self.document}:{self.index}"
+
+
+def backend_execute_checks(repo_root: Path) -> tuple[ExecuteCheck, ...]:
+    """Parse 09 §1.2's numbered, canonical dispatch-time list."""
+    text = (repo_root / DOC_09).read_text(encoding="utf-8")
+    section = _between(
+        text,
+        "### 1.2 `execute(pid)` — permissionless, atomic; the complete dispatch-time check list",
+        "### 1.3 Origin discipline",
+    )
+    checks = []
+    for match in re.finditer(r"(?m)^(\d+)\. \*\*(.+?)\*\*: (.+)$", section):
+        index = int(match.group(1))
+        name, detail = _plain_markdown(match.group(2)), match.group(3).strip()
+        checks.append(
+            ExecuteCheck(
+                document="09 §1.2",
+                index=index,
+                name=name,
+                detail=detail,
+                atoms=_BACKEND_CHECK_ATOMS.get(index, ()),
+                reject_reasons=_named_reject_reasons(detail),
+            )
+        )
+    if any(not check.atoms for check in checks):
+        raise ScheduleError("09 §1.2 gained an unclassified execute-check item")
+    return tuple(checks)
+
+
+def frontend_execute_checks(repo_root: Path) -> tuple[ExecuteCheck, ...]:
+    """Parse 11 §11.5's `execution_guard.execute` precondition table."""
+    text = (repo_root / DOC_11).read_text(encoding="utf-8")
+    section = _between(
+        text,
+        "### `execution_guard.execute` — the complete precondition row (X-11i resolved)",
+        "\n---",
+    )
+    checks = []
+    for line in section.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) != 2:
+            continue
+        match = re.fullmatch(r"(\d+)\.\s*(.+)", cells[0])
+        if match is None:
+            continue
+        index = int(match.group(1))
+        name, detail = _plain_markdown(match.group(2)), cells[1]
+        checks.append(
+            ExecuteCheck(
+                document="11 §11.5",
+                index=index,
+                name=name,
+                detail=detail,
+                atoms=_FRONTEND_CHECK_ATOMS.get(index, ()),
+                reject_reasons=_named_reject_reasons(detail),
+            )
+        )
+    if any(not check.atoms for check in checks):
+        raise ScheduleError("11 §11.5 gained an unclassified execute-check row")
+    return tuple(checks)
+
+
+@dataclass(frozen=True)
+class ChecklistMismatch:
+    """One reason the two parsed lists are not an item-for-item bijection."""
+
+    key: str
+    backend_rows: tuple[int, ...]
+    frontend_rows: tuple[int, ...]
+    why: str
+
+
+@dataclass(frozen=True)
+class ExecuteChecklistDiff:
+    """The row-level bijection result for 09 §1.2 and 11 §11.5."""
+
+    backend: tuple[ExecuteCheck, ...]
+    frontend: tuple[ExecuteCheck, ...]
+    one_to_one: tuple[tuple[int, int], ...]
+    mismatches: tuple[ChecklistMismatch, ...]
+
+    @property
+    def bijective(self) -> bool:
+        return not self.mismatches
+
+
+def execute_checklist_diff(repo_root: Path) -> ExecuteChecklistDiff:
+    """Diff the two live document lists by semantic obligation and row grouping.
+
+    This is deliberately a row-level check. Comparing only the union of
+    obligations would hide 09 items 1 and 10 being split by the frontend, even
+    though both documents demand an *item-for-item* mirror.
+    """
+    backend = backend_execute_checks(repo_root)
+    frontend = frontend_execute_checks(repo_root)
+    backend_atoms = {atom: row for row in backend for atom in row.atoms}
+    frontend_atoms = {atom: row for row in frontend for atom in row.atoms}
+
+    one_to_one = []
+    mismatches = []
+    for row in backend:
+        matches = tuple(
+            sorted(
+                {frontend_atoms[atom].index for atom in row.atoms if atom in frontend_atoms}
+            )
+        )
+        if len(matches) == 1:
+            frontend_row = next(item for item in frontend if item.index == matches[0])
+            if frontend_row.atoms == row.atoms:
+                one_to_one.append((row.index, frontend_row.index))
+                continue
+        if not matches:
+            why = (
+                f"09 item {row.index} is the {row.name.lower()} execution step; "
+                "11's table contains pre-sign re-reads, not this post-check step"
+            )
+            mismatches.append(
+                ChecklistMismatch(
+                    f"backend:{row.index}:unmatched", (row.index,), (), why
+                )
+            )
+        else:
+            names = ", ".join(str(index) for index in matches)
+            mismatches.append(
+                ChecklistMismatch(
+                    f"backend:{row.index}:split",
+                    (row.index,),
+                    matches,
+                    f"09 item {row.index} groups {', '.join(row.atoms)}; "
+                    f"11 separates them into rows {names}",
+                )
+            )
+
+    for row in frontend:
+        if not any(atom in backend_atoms for atom in row.atoms):
+            why = (
+                "09 §2.2 makes DescriptorLeadTime a precondition of "
+                "apply_authorized_upgrade, not execution_guard.execute"
+                if row.atoms == ("descriptor-lead-time",)
+                else "no 09 §1.2 execute-check item carries this obligation"
+            )
+            mismatches.append(
+                ChecklistMismatch(
+                    f"frontend:{row.index}:unmatched", (), (row.index,), why
+                )
+            )
+
+    return ExecuteChecklistDiff(
+        backend,
+        frontend,
+        tuple(one_to_one),
+        tuple(mismatches),
+    )
+
+
+@dataclass(frozen=True)
+class RejectReasonFinding:
+    """Membership of one checklist-named terminal reason in frozen 02 §4."""
+
+    key: str
+    document: str
+    row: int
+    reason: str
+    ok: bool
+
+
+def frozen_reject_reasons() -> frozenset[str]:
+    """The frozen 02 §4 set, imported from the independent decision model."""
+    return frozenset(reason.value for reason in RejectReason)
+
+
+def check_execute_reject_reasons(repo_root: Path) -> tuple[RejectReasonFinding, ...]:
+    """Check every terminal reason named by either parsed execute list."""
+    frozen = frozen_reject_reasons()
+    findings = []
+    for check in backend_execute_checks(repo_root) + frontend_execute_checks(repo_root):
+        for reason in check.reject_reasons:
+            findings.append(
+                RejectReasonFinding(
+                    key=f"{check.key}:{reason}",
+                    document=check.document,
+                    row=check.index,
+                    reason=reason,
+                    ok=reason in frozen,
+                )
+            )
+    return tuple(findings)
+
+
+def checklist_t16_causes(repo_root: Path) -> frozenset[str]:
+    """09 §1.2 reasons that claim `Queued → Rejected`, hence T16.
+
+    T16 is the only 05 §2.1 transition from `Queued` to `Rejected`. The check
+    derives the transition from those endpoints rather than assigning a tag by
+    reason name; this is what exposes `BadPreimage` as an extra checklist cause.
+    """
+    return frozenset(
+        reason
+        for check in backend_execute_checks(repo_root)
+        for reason in check.reject_reasons
+        if f"Rejected({reason})" in _plain_markdown(check.detail)
+    )
+
+
+@dataclass(frozen=True)
+class T16CauseDiff:
+    """Both directions of the 09 §1.2 ↔ 05 §2.1 T16 reason-set diff."""
+
+    checklist_only: frozenset[str]
+    transition_only: frozenset[str]
+
+    @property
+    def ok(self) -> bool:
+        return not self.checklist_only and not self.transition_only
+
+
+def t16_cause_diff(repo_root: Path) -> T16CauseDiff:
+    """Compare checklist-produced terminal reasons with `T16_CAUSES`."""
+    checklist = checklist_t16_causes(repo_root)
+    transitions = frozenset(T16_CAUSES)
+    return T16CauseDiff(checklist - transitions, transitions - checklist)
+
+
+@dataclass(frozen=True)
+class ExecuteFailureDisposition:
+    """Status-quo path when a purported rejection cannot be represented."""
+
+    state_after_dispatch: str
+    grace_transition: str
+    grace_disposition: str
+
+
+def unconstructable_reject_disposition(reason: str) -> ExecuteFailureDisposition:
+    """Derive the fate of a checklist reason absent from frozen 02 §4.
+
+    A failed dispatch performs no transition, so the state remains `Queued`.
+    Because an unrepresentable reason cannot be a T16 cause, 05 §2.1's
+    grace-end precedence selects generic T15 expiry.
+    """
+    if reason in frozen_reject_reasons():
+        raise ScheduleError(f"{reason} is constructable as RejectReason")
+    transition, disposition = grace_end_disposition()
+    return ExecuteFailureDisposition("Queued", transition, disposition)
+
+
+# ---------------------------------------------------------------------------
+# 05 §5.4 ↔ §5.5 — reason-table check for the welfare match arm.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReasonTableRow:
+    """One parsed row of 05 §5.5's 11-step truth table."""
+
+    scenario: str
+    steps: tuple[str, ...]
+    outcome: str
+
+
+def reason_table_rows(repo_root: Path) -> tuple[ReasonTableRow, ...]:
+    """Parse all rows from 05 §5.5, refusing a malformed column count."""
+    text = (repo_root / DOC_05).read_text(encoding="utf-8")
+    section = _between(
+        text,
+        "### 5.5 Reason-code truth table (steps 1–11)",
+        "### 5.6 Security sizing:",
+    )
+    rows = []
+    for line in section.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if not cells or cells[0] in {"Scenario", "---"} or set(cells[0]) == {"-"}:
+            continue
+        if len(cells) != 13:
+            raise ScheduleError(
+                f"05 §5.5 row {cells[0]!r} has {len(cells)} columns, expected 13"
+            )
+        rows.append(
+            ReasonTableRow(
+                scenario=_plain_markdown(cells[0]),
+                steps=tuple(_plain_markdown(cell) for cell in cells[1:12]),
+                outcome=_plain_markdown(cells[12]),
+            )
+        )
+    return tuple(rows)
+
+
+@dataclass(frozen=True)
+class WelfareHurdleCase:
+    """The four inputs consumed by 05 §5.4's steps 6–8 match arm."""
+
+    full_pass: bool
+    tail_pass: bool
+    converged: bool
+    extended: bool
+
+
+_WELFARE_SCENARIOS = frozenset(
+    {
+        "Valid pass",
+        "Valid fail",
+        "Full/trailing disagreement (first)",
+        "Disagreement/fail after extension",
+        "Non-convergence",
+    }
+)
+
+
+def _welfare_row_matches(case: WelfareHurdleCase, row: ReasonTableRow) -> bool:
+    """Interpret the scenario label and marks for steps 6–8 only."""
+    def mark_matches(mark: str, value: bool) -> bool:
+        if mark == "✔":
+            return value
+        if mark.startswith("✘"):
+            return not value
+        if mark in {"–", "...", "…"}:
+            return True
+        raise ScheduleError(f"unsupported boolean truth-table mark {mark!r}")
+
+    full_mark, tail_mark, convergence_mark = row.steps[5:8]
+    if row.scenario == "Valid pass":
+        return (
+            mark_matches(full_mark, case.full_pass)
+            and mark_matches(tail_mark, case.tail_pass)
+            and mark_matches(convergence_mark, case.converged)
+        )
+    if row.scenario == "Valid fail":
+        # "fail", not disagreement: both hurdle windows fail. The dash under
+        # convergence is the bad cell under test, so it remains a wildcard.
+        return (
+            case.full_pass == case.tail_pass
+            and mark_matches(full_mark, case.full_pass)
+            and mark_matches(tail_mark, case.tail_pass)
+            and mark_matches(convergence_mark, case.converged)
+        )
+    if row.scenario == "Full/trailing disagreement (first)":
+        return full_mark == "full ≠ tail" and case.full_pass != case.tail_pass and not case.extended
+    if row.scenario == "Disagreement/fail after extension":
+        return full_mark == "full ≠ tail again" and case.full_pass != case.tail_pass and case.extended
+    if row.scenario == "Non-convergence":
+        return (
+            mark_matches(full_mark, case.full_pass)
+            and mark_matches(tail_mark, case.tail_pass)
+            and mark_matches(convergence_mark, case.converged)
+        )
+    return False
+
+
+def _reason_table_decision(row: ReasonTableRow) -> Decision:
+    """Decode a §5.5 outcome using the frozen reason enum."""
+    if row.outcome.startswith("ADOPT"):
+        return Decision(Outcome.ADOPT)
+    if row.outcome.startswith("Extend"):
+        return Decision(Outcome.EXTEND)
+    match = re.search(r"Reject\((\w+)\)", row.outcome)
+    if match is None:
+        raise ScheduleError(f"unsupported reason-table outcome {row.outcome!r}")
+    try:
+        reason = RejectReason(match.group(1))
+    except ValueError as error:
+        raise ScheduleError(f"unknown reason-table reason {match.group(1)!r}") from error
+    return Decision(Outcome.REJECT, reason)
+
+
+def ordered_welfare_decision(case: WelfareHurdleCase) -> Decision:
+    """05 §5.4's normative `(all, disagreement, extended)` match arm."""
+    if case.full_pass and case.tail_pass and case.converged:
+        return Decision(Outcome.ADOPT)
+    if case.full_pass != case.tail_pass:
+        if case.extended:
+            return Decision(Outcome.REJECT, RejectReason.SECOND_EXTENSION_FAILED)
+        return Decision(Outcome.EXTEND)
+    reason = (
+        RejectReason.HURDLE_NOT_MET
+        if case.converged
+        else RejectReason.CONVERGENCE_FAILED
+    )
+    return Decision(Outcome.REJECT, reason)
+
+
+@dataclass(frozen=True)
+class TruthTableMismatch:
+    """One reachable input where §5.5 disagrees with normative §5.4."""
+
+    case: WelfareHurdleCase
+    row: str
+    table: Decision
+    normative: Decision
+
+
+@dataclass(frozen=True)
+class ReasonTableAnalysis:
+    """Coverage, uniqueness and §5.4 agreement over the 16 hurdle cases."""
+
+    case_count: int
+    uncovered: tuple[WelfareHurdleCase, ...]
+    overlaps: tuple[tuple[WelfareHurdleCase, tuple[str, ...]], ...]
+    nondeterministic: tuple[tuple[WelfareHurdleCase, tuple[Decision, ...]], ...]
+    mismatches: tuple[TruthTableMismatch, ...]
+
+    @property
+    def total(self) -> bool:
+        return not self.uncovered
+
+    @property
+    def non_overlapping(self) -> bool:
+        return not self.overlaps
+
+    @property
+    def deterministic(self) -> bool:
+        return not self.nondeterministic
+
+
+def analyze_reason_table(repo_root: Path) -> ReasonTableAnalysis:
+    """Execute §5.5's steps 6–8 partition and compare it with §5.4.
+
+    This is the complete 2⁴ product for the welfare match arm, not a lattice
+    enumeration of the full decision engine. Steps 1–5 have already passed;
+    steps 9–11 are evaluated only after this arm proceeds.
+    """
+    rows = tuple(
+        row for row in reason_table_rows(repo_root) if row.scenario in _WELFARE_SCENARIOS
+    )
+    cases = tuple(
+        WelfareHurdleCase(*values) for values in product((False, True), repeat=4)
+    )
+    uncovered = []
+    overlaps = []
+    nondeterministic = []
+    mismatches = []
+    for case in cases:
+        matches = tuple(row for row in rows if _welfare_row_matches(case, row))
+        if not matches:
+            uncovered.append(case)
+            continue
+        if len(matches) > 1:
+            overlaps.append((case, tuple(row.scenario for row in matches)))
+        decisions = tuple(dict.fromkeys(_reason_table_decision(row) for row in matches))
+        if len(decisions) > 1:
+            nondeterministic.append((case, decisions))
+        if len(matches) == 1:
+            table = decisions[0]
+            normative = ordered_welfare_decision(case)
+            if table != normative:
+                mismatches.append(
+                    TruthTableMismatch(case, matches[0].scenario, table, normative)
+                )
+    return ReasonTableAnalysis(
+        case_count=len(cases),
+        uncovered=tuple(uncovered),
+        overlaps=tuple(overlaps),
+        nondeterministic=tuple(nondeterministic),
+        mismatches=tuple(mismatches),
+    )

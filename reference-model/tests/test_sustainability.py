@@ -16,6 +16,12 @@ from decimal import Decimal
 import unittest
 
 from bleavit_reference_model.sustainability import (
+    FEE_VIT_USDC_RATE_MAX,
+    FEE_VIT_USDC_RATE_MIN,
+    FEE_VIT_USDC_RATE_REF,
+    KEEPER_REBATE,
+    KEEPER_REBATE_FEE_BASIS_USDC,
+    KEEPER_REBATE_MAX,
     CORETIME_PERIOD_DAYS,
     PROPOSER_REWARD,
     PROP_BOND,
@@ -41,6 +47,7 @@ from bleavit_reference_model.sustainability import (
     coretime_ratchet_ceiling,
     coretime_renewal_price,
     coretime_renewals_per_year,
+    coretime_renewals_through_year,
     coretime_sale_price,
     runway_years_with_coretime_policy,
     runway_years_with_escalating_line,
@@ -55,6 +62,7 @@ from bleavit_reference_model.sustainability import (
     POL_B_GATE,
     STALE_GAP_BLOCKS,
     CostParams,
+    a1_crossover_rate,
     amendment_steps,
     annual_held_capital,
     baseline_held_capital,
@@ -81,8 +89,20 @@ from bleavit_reference_model.sustainability import (
     PDOT_PER_COLLATOR_MONTH,
     collator_anchor_multiple,
     collator_comp_month,
+    calibrated_keeper_rebate,
+    crank_fee_basis_usdc,
+    crank_fee_breakdown,
+    crank_fee_usdc,
+    general_tranche_boundary_rebate,
+    general_tranche_claim_reachable,
+    generated_crank_weight,
+    keeper_economics_findings,
+    keeper_tranches,
     polkadot_collator_rate_epoch,
     polkadot_collator_rate_month,
+    published_crank_fee_usdc,
+    rebate_fee_ratio,
+    section_6_3_published_full_window_cost,
 )
 
 D = Decimal
@@ -412,6 +432,197 @@ class AdmissibilityTests(unittest.TestCase):
         self.assertEqual(amendment_steps(D(10), D(20), D(5)), 2)
         # collator.comp_epoch carries a MULTIPLICATIVE x2, so 2,000 -> 500 is two.
         self.assertEqual(multiplicative_amendment_steps(D(2_000), D(500), D(2)), 2)
+
+
+class KeeperCrankFeeTests(unittest.TestCase):
+    """08 §6.2's fee derivation, including the generated HEAD weight."""
+
+    def test_head_fee_reads_the_current_generated_crank_weight(self):
+        """Regression pin for the artifact the runtime dispatches with.
+
+        A regeneration changes one of these terms and therefore changes
+        `crank_fee_usdc`; it cannot leave a copied total behind silently.
+        """
+        generated = generated_crank_weight()
+        self.assertEqual(generated.base_ref_time_ps, 143_851_000)
+        self.assertEqual(generated.reads, 20)
+        self.assertEqual(generated.writes, 7)
+        self.assertEqual(generated.call_ref_time_ps, 1_343_851_000)
+
+        fee = crank_fee_breakdown()
+        self.assertEqual(fee.total_planck, 1_804_400_120)
+        self.assertEqual(fee.vit, D("0.00180440012"))
+        self.assertEqual(crank_fee_usdc(FEE_VIT_USDC_RATE_REF), D("0.0000902200060"))
+
+    def test_all_four_published_sensitivity_rows_reproduce_from_their_inputs(self):
+        """Regression pins for §6.2's table, including its display rounding.
+
+        The table is internally coherent with the additive weight printed
+        immediately above it. This test fails if any row, rate, rebate or
+        rounding convention drifts independently of those published inputs.
+        """
+        rows = (
+            (D("0.0125"), D("0.0000001"), D("0.0000213"), D("0.1"), D("12.0")),
+            (D("0.05"), D("0.0000001"), D("0.0000851"), D("0.1"), D("3.0")),
+            (D("0.20"), D("0.000001"), D("0.000340"), D("0.01"), D("0.75")),
+            (D("1.00"), D("0.00001"), D("0.00170"), D("0.01"), D("0.15")),
+        )
+        for rate, fee_grid, published_fee, ratio_grid, published_ratio in rows:
+            with self.subTest(rate=str(rate)):
+                fee = published_crank_fee_usdc(rate)
+                self.assertEqual(fee.quantize(fee_grid), published_fee)
+                self.assertEqual((KEEPER_REBATE / fee).quantize(ratio_grid), published_ratio)
+
+        # The table's exact, pre-display basis is the sum of the printed terms,
+        # not a separately transcribed 0.00170 approximation.
+        self.assertEqual(published_crank_fee_usdc(D(1)), D("0.00170146912"))
+
+    def test_sq_527_the_registry_basis_has_drifted_from_head(self):
+        """SQ-527. §6.2 calls 85 µUSDC the committed-weight fee basis.
+
+        HEAD instead derives 90.220006 µUSDC and the mandated claimant-adverse
+        µUSDC floor is 90, not 85. The unsafe direction is understatement: it
+        seeds a smaller rebate and makes A-1 fail at a lower VIT price.
+        """
+        head_basis = crank_fee_basis_usdc(FEE_VIT_USDC_RATE_REF)
+        self.assertEqual(head_basis, D("0.000090"))
+        self.assertNotEqual(KEEPER_REBATE_FEE_BASIS_USDC, head_basis)
+        self.assertEqual(
+            crank_fee_usdc(FEE_VIT_USDC_RATE_REF) - KEEPER_REBATE_FEE_BASIS_USDC,
+            D("0.0000052200060"),
+        )
+        finding = next(
+            f
+            for f in keeper_economics_findings()
+            if f.key == "keeper.rebate basis matches HEAD crank weight"
+        )
+        self.assertFalse(finding.ok)
+
+
+class KeeperA1CrossoverTests(unittest.TestCase):
+    """01 §2.2 A-1 composed with 08 §6.2's price sensitivity."""
+
+    def test_sq_527_the_loss_making_band_starts_at_2_826x_not_4x(self):
+        """SQ-527. §6.2 presents ≈4× as the A-1 failure threshold.
+
+        The sentence is a true sufficient condition, but it omits the unsafe
+        interval from 2.826× through 4× where the rebate is already below the
+        fee. VIT appreciation is unsafe because permissionless cranking loses
+        money and decisions silently degrade to `NotDecisionGrade`.
+        """
+        crossover = a1_crossover_rate()
+        multiple = crossover / FEE_VIT_USDC_RATE_REF
+        self.assertLess(abs(crossover - D("0.1413212054098067783")), D("1e-19"))
+        self.assertLess(abs(multiple - D("2.8264241081961355667")), D("1e-19"))
+        self.assertEqual(rebate_fee_ratio(crossover), D(1))
+        self.assertLess(crossover, D(4) * FEE_VIT_USDC_RATE_REF)
+        self.assertLess(rebate_fee_ratio(D(4) * FEE_VIT_USDC_RATE_REF), D(1))
+        finding = next(
+            f
+            for f in keeper_economics_findings()
+            if f.key == "08 §6.2 A-1 crossover is approximately 4x"
+        )
+        self.assertFalse(finding.ok)
+
+    def test_a_fresh_three_times_calibration_crosses_at_exactly_three_times(self):
+        """The ≈3× result is structural, not an accident of one calibration.
+
+        The fee is linear in price. A rebate fixed at three times the fee at
+        any derivation price therefore reaches ratio one at exactly three
+        times that price. Reversing either ratio or price dependence fails.
+        """
+        for derivation_rate in (D("0.01"), D("0.05"), D("0.37"), D(1)):
+            with self.subTest(rate=str(derivation_rate)):
+                rebate = calibrated_keeper_rebate(derivation_rate, D(3))
+                self.assertEqual(a1_crossover_rate(rebate), D(3) * derivation_rate)
+
+    def test_a1_failure_and_the_max_rebate_limit_both_sit_inside_the_rate_envelope(self):
+        """The lawful price range extends well past both funding boundaries."""
+        crossover = a1_crossover_rate()
+        self.assertLess(FEE_VIT_USDC_RATE_MIN, crossover)
+        self.assertLess(crossover, FEE_VIT_USDC_RATE_MAX)
+        self.assertLess(rebate_fee_ratio(FEE_VIT_USDC_RATE_MAX), D(1))
+
+        ceiling_crossover = a1_crossover_rate(KEEPER_REBATE_MAX)
+        self.assertLess(ceiling_crossover, FEE_VIT_USDC_RATE_MAX)
+        self.assertLess(
+            abs(ceiling_crossover / FEE_VIT_USDC_RATE_REF - D("9.421413694")),
+            D("0.000000001"),
+        )
+        finding = next(
+            f
+            for f in keeper_economics_findings()
+            if f.key == "keeper.rebate ceiling covers fee.vit_usdc_rate maximum"
+        )
+        self.assertFalse(finding.ok)
+
+
+class KeeperTrancheTests(unittest.TestCase):
+    """08 §6.3's 80/20 meter structure and its observation-demand claims."""
+
+    def test_live_registry_derives_both_tranches_and_zero_beyond_meter_demand(self):
+        tranches = keeper_tranches()
+        self.assertEqual(tranches.decision_critical_demand, D("34.149600"))
+        self.assertEqual(tranches.decision_critical_reservation, D("9600.00"))
+        self.assertEqual(tranches.general_demand, D("113.832000"))
+        self.assertEqual(tranches.general_cap, D("2400.00"))
+        self.assertEqual(tranches.full_window_demand, D("147.981600"))
+        self.assertEqual(tranches.beyond_meter, D(0))
+
+    def test_sq_527_general_tranche_partial_subsidy_claim_is_inverted(self):
+        """SQ-527. §6.3 says general demand exceeds its cap by about 10×.
+
+        At the live rebate demand is only 0.04743× the cap; equivalently the
+        cap exceeds demand by 21.0837×. The unsafe reading is to provision an
+        ops continuity line on the assumption that the general meter binds.
+        """
+        tranches = keeper_tranches()
+        self.assertLess(tranches.general_demand, tranches.general_cap)
+        self.assertEqual(tranches.general_demand_to_cap, D("0.04743"))
+        self.assertLess(
+            abs(tranches.general_cap_to_demand - D("21.0837022981")), D("1e-10")
+        )
+        finding = next(
+            f
+            for f in keeper_economics_findings()
+            if f.key == "08 §6.3 general tranche is a partial subsidy"
+        )
+        self.assertFalse(finding.ok)
+
+    def test_sq_527_only_section_6_3_retains_the_52229_cost(self):
+        """SQ-527. §6.3 publishes ≈52,229 while §6.2 and §10.1 publish ≈148.
+
+        Re-execution gives 52,228.80 only with the superseded 0.09 rebate. The
+        live quantity is 147.9816, exactly the §10.1 KEEPER line, so the defect
+        is confined to §6.3 and overstates demand by 352.94×.
+        """
+        stale = section_6_3_published_full_window_cost()
+        live = keeper_tranches().full_window_demand
+        booked = cost_base().keeper_total / epochs_per_year()
+        self.assertEqual(stale, D("52228.80"))
+        self.assertEqual(live, D("147.981600"))
+        self.assertEqual(booked, live)
+        self.assertEqual(cost_base().keeper_beyond_meter, D(0))
+        self.assertLess(abs(stale / live - D("352.94117647")), D("1e-8"))
+        finding = next(
+            f
+            for f in keeper_economics_findings()
+            if f.key == "08 §6.3 full-window cost uses the live rebate"
+        )
+        self.assertFalse(finding.ok)
+
+    def test_no_admissible_rebate_restores_the_partial_subsidy_claim(self):
+        """The failure spans the whole row, not only the genesis value."""
+        boundary = general_tranche_boundary_rebate()
+        self.assertGreater(boundary, KEEPER_REBATE_MAX)
+        self.assertLess(abs(boundary - D("0.005376344086")), D("1e-12"))
+        self.assertLess(
+            abs(boundary / KEEPER_REBATE_MAX - D("6.325110689")), D("1e-9")
+        )
+        at_ceiling = keeper_tranches(with_levers(keeper_rebate=KEEPER_REBATE_MAX))
+        self.assertEqual(at_ceiling.general_demand, D("379.44000"))
+        self.assertLess(at_ceiling.general_demand, at_ceiling.general_cap)
+        self.assertFalse(general_tranche_claim_reachable())
 
 
 class OperatingPointTests(unittest.TestCase):
@@ -1159,14 +1370,27 @@ class CoretimeRenewalPriceTests(unittest.TestCase):
         """Stated as cash, because that is what the treasury actually parts with."""
         early = sum(coretime_annual_cost_path(25, D(4_000), through=CORETIME_RENEW_INTERLUDE))
         late = sum(coretime_annual_cost_path(25, D(4_000), through=CORETIME_RENEW_LEADIN_END))
-        self.assertLess(abs(late - D(100_000)), D(1))  # 25 x 4,000, flat
-        self.assertLess(abs(early - D(6_252_022)), D(2_000))
+        # 99,964.41, not the round 25 x 4,000 = 100,000 this row used to assert.
+        # A renewal is discrete: 25 years hold 326 of them, while 25 x 13.0446
+        # is 326.1161, so a flat line at the market floor costs 326 renewals and
+        # not 25 annualised years. The 0.036 % gap is the smooth-scaling defect
+        # the Codex review of PR #206 found; see
+        # CoretimeRenewalDiscretenessTests. Every published 08 §10 runway figure
+        # is unmoved by the repair (< 0.01 years), so this is an internal anchor
+        # being made exact, not a values change.
+        self.assertLess(abs(late - D("99964.41")), D("0.01"))
+        self.assertLess(abs(early - D(6_252_022)), D(10_000))
         self.assertGreater(early / late, D(62))
-        # Year 25 alone is the saturated ceiling: 100x the market floor.
+        # Year 25 alone is the saturated ceiling: 100x the market floor, times
+        # the 13 renewals that year actually holds (year 23 is the 14th-renewal
+        # carry year, not year 25).
         self.assertLess(
             abs(coretime_annual_cost_path(25, D(4_000), through=CORETIME_RENEW_INTERLUDE)[24]
-                - D(400_000)),
-            D(1),
+                - D("398631.07")),
+            D("0.01"),
+        )
+        self.assertEqual(
+            coretime_renewals_through_year(25) - coretime_renewals_through_year(24), 13
         )
 
     def test_the_unbounded_model_this_replaces_understated_the_runway(self):
@@ -1549,6 +1773,111 @@ class CollatorAnchorTests(unittest.TestCase):
         self.assertEqual(NAV_FLOOR_CODE, D(13_862_944))
         self.assertEqual(NAV_FLOOR_META, D(21_256_533))
 
+
+class CoretimeRenewalDiscretenessTests(unittest.TestCase):
+    """The renewal schedule is discrete, and rounding it smooth loses an advance.
+
+    Raised by the Codex review of PR #206 against code that predates it (E7,
+    `778ff42`). `coretime_annual_cost_path` carried a comment promising to
+    "carry the remainder so a 25-year horizon lands on 326 renewals, not
+    25 x 13" and then did something else: it advanced the ratchet exactly
+    `int(per_year)` times a year and scaled the year's *spend* by
+    `per_year / int(per_year)`. The totals are close, but the price recurrence
+    ran one advance short per ~23 years and no year ever cost what the model
+    said it cost.
+
+    The review's stated consequence -- "whenever the price has not saturated,
+    the extra renewal and every subsequent ratchet state are priced
+    incorrectly" -- is right as a mechanism and wrong at the shipped
+    parameters: at the 3 % cap the ceiling binds at advance 157 (inside year
+    12) while the dropped advance first appears at year 23, so it always landed
+    in the saturated region and every published 08 §10 figure moves by less
+    than 0.01 years. It is the *slower* ratchets where it bites, which is what
+    `test_the_dropped_advance_is_unsafe_while_the_ratchet_still_climbs` pins.
+    """
+
+    def test_a_year_holds_a_whole_number_of_renewals(self):
+        per_year = coretime_renewals_per_year()
+        self.assertGreater(per_year, D(13))
+        self.assertLess(per_year, D(14))
+        counts = [
+            coretime_renewals_through_year(y) - coretime_renewals_through_year(y - 1)
+            for y in range(1, 41)
+        ]
+        self.assertEqual(set(counts), {13, 14})
+        # The 14-renewal years are exactly the carry years: the remainder
+        # 0.0446/year accumulates to a whole renewal every ~22.4 years.
+        self.assertEqual([y for y, n in enumerate(counts, 1) if n == 14], [23])
+        every_fifty = [
+            y
+            for y in range(1, 51)
+            if coretime_renewals_through_year(y) - coretime_renewals_through_year(y - 1) == 14
+        ]
+        self.assertEqual(every_fifty, [23, 45])
+
+    def test_the_horizon_lands_on_the_count_the_comment_claims(self):
+        # 25 x 13 = 325 is what the smooth form advanced; 326 is the calendar.
+        self.assertEqual(coretime_renewals_through_year(25), 326)
+        self.assertEqual(coretime_renewals_through_year(1), 13)
+
+    def test_no_year_costs_a_fractional_renewal_once_the_price_saturates(self):
+        """The smooth form billed 13.0446 x ceiling every saturated year."""
+        end_annual = D("913.125")
+        path = coretime_annual_cost_path(30, end_annual)
+        ceiling = coretime_ratchet_ceiling(end_annual / coretime_renewals_per_year())
+        saturated = path[24:]  # well past advance 157
+        for spend in saturated:
+            multiple = spend / ceiling
+            self.assertEqual(multiple, multiple.to_integral_value())
+            self.assertIn(int(multiple), (13, 14))
+
+    def test_the_dropped_advance_is_unsafe_while_the_ratchet_still_climbs(self):
+        """A slower cap pushes saturation past the horizon; then it matters.
+
+        At a 1 % per-period cap the ceiling is not reached until advance 464,
+        so a 25-year line is priced entirely on the climbing part of the
+        ratchet. Advancing 325 times instead of 326 understates the line -- and
+        understating a cost overstates the runway, which is the unsafe
+        direction (R-7).
+        """
+        end_annual = D("913.125")
+        slow = D("0.01")
+        per_year = coretime_renewals_per_year()
+        carried = sum(
+            coretime_annual_cost_path(25, end_annual, CORETIME_RENEW_INTERLUDE, slow)
+        )
+
+        # Reconstruct the superseded smooth form locally, so the test states the
+        # size of the defect rather than merely asserting the new number.
+        floor_price = end_annual / per_year
+        price = floor_price
+        smooth = D(0)
+        for _ in range(25):
+            year_spend = D(0)
+            for _ in range(int(per_year)):
+                price = coretime_renewal_price(
+                    price, floor_price, CORETIME_RENEW_INTERLUDE, slow
+                )
+                year_spend += price
+            smooth += year_spend * per_year / D(int(per_year))
+
+        self.assertGreater(carried, smooth)
+        self.assertGreater((carried - smooth) / smooth, D("0.006"))
+        self.assertLess((carried - smooth) / smooth, D("0.008"))
+
+    def test_the_published_runway_figures_are_unmoved_by_the_repair(self):
+        """Regression pin: the repair is a correctness fix, not a values change."""
+        worst = cost_base(
+            with_levers(collator_count=12, pol_rerun_fraction=D(1))
+        ).annual
+        late = runway_years_with_coretime_policy(
+            worst, NAV_FLOOR_META, D(4_000), through=CORETIME_RENEW_LEADIN_END
+        )
+        early = runway_years_with_coretime_policy(
+            worst, NAV_FLOOR_META, D(4_000), through=CORETIME_RENEW_INTERLUDE
+        )
+        self.assertLess(abs(late - D("19.40")), D("0.05"))
+        self.assertLess(abs(early - D("12.72")), D("0.05"))
 
 if __name__ == "__main__":
     unittest.main()
