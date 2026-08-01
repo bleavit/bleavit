@@ -13,7 +13,7 @@
 // benchmark
 // pallet
 // --runtime
-// /tmp/e5t/wtarget/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
+// /tmp/claude-1000/-home-chralt-development-bleavit--claude-worktrees-vit-token-usage/5fc47c2c-310f-4967-8560-8ca91e424c5a/scratchpad/wtarget/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
 // --pallet
 // pallet_epoch
 // --extrinsic
@@ -60,9 +60,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
-	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:32 w:31)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Cohorts` (r:5 w:4)
 	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
@@ -101,11 +101,11 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::CounterForCohorts` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	fn submit() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `45698`
-		//  Estimated: `183055`
-		// Minimum execution time: 1_851_450_000 picoseconds.
-		Weight::from_parts(1_878_330_000, 0)
-			.saturating_add(Weight::from_parts(0, 183055))
+		//  Measured:  `48706`
+		//  Estimated: `185135`
+		// Minimum execution time: 1_888_432_000 picoseconds.
+		Weight::from_parts(1_920_322_000, 0)
+			.saturating_add(Weight::from_parts(0, 185135))
 			.saturating_add(T::DbWeight::get().reads(232))
 			.saturating_add(T::DbWeight::get().writes(118))
 	}
@@ -114,9 +114,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
-	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:33 w:32)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Cohorts` (r:5 w:4)
 	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
@@ -183,11 +183,11 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `ExecutionGuard::Expedited` (`max_values`: None, `max_size`: Some(25), added: 2500, mode: `MaxEncodedLen`)
 	fn withdraw() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `45225`
-		//  Estimated: `183055`
-		// Minimum execution time: 1_773_113_000 picoseconds.
-		Weight::from_parts(1_794_803_000, 0)
-			.saturating_add(Weight::from_parts(0, 183055))
+		//  Measured:  `48297`
+		//  Estimated: `185135`
+		// Minimum execution time: 1_776_881_000 picoseconds.
+		Weight::from_parts(1_818_302_000, 0)
+			.saturating_add(Weight::from_parts(0, 185135))
 			.saturating_add(T::DbWeight::get().reads(235))
 			.saturating_add(T::DbWeight::get().writes(123))
 	}
@@ -198,9 +198,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
-	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:33 w:32)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Cohorts` (r:5 w:4)
 	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
@@ -282,13 +282,13 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// The range of component `n` is `[1, 10]`.
 	fn tick(n: u32, ) -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `77381 + n * (171 ±0)`
-		//  Estimated: `183055 + n * (2753 ±0)`
-		// Minimum execution time: 2_503_314_000 picoseconds.
-		Weight::from_parts(2_564_015_184, 0)
-			.saturating_add(Weight::from_parts(0, 183055))
-			// Standard Error: 115_805
-			.saturating_add(Weight::from_parts(20_896_891, 0).saturating_mul(n.into()))
+		//  Measured:  `80453 + n * (171 ±0)`
+		//  Estimated: `185135 + n * (2753 ±5)`
+		// Minimum execution time: 2_551_032_000 picoseconds.
+		Weight::from_parts(2_689_539_866, 0)
+			.saturating_add(Weight::from_parts(0, 185135))
+			// Standard Error: 824_208
+			.saturating_add(Weight::from_parts(14_018_738, 0).saturating_mul(n.into()))
 			.saturating_add(T::DbWeight::get().reads(758))
 			.saturating_add(T::DbWeight::get().reads((5_u64).saturating_mul(n.into())))
 			.saturating_add(T::DbWeight::get().writes(635))
@@ -302,9 +302,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
-	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:33 w:32)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Cohorts` (r:5 w:4)
 	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
@@ -425,10 +425,10 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `ExecutionGuard::QueuedRecoveryImages` (`max_values`: None, `max_size`: Some(68), added: 2543, mode: `MaxEncodedLen`)
 	fn decide() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `141988`
+		//  Measured:  `145060`
 		//  Estimated: `356514`
-		// Minimum execution time: 3_775_275_000 picoseconds.
-		Weight::from_parts(4_065_595_000, 0)
+		// Minimum execution time: 4_035_425_000 picoseconds.
+		Weight::from_parts(4_116_615_000, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
 			.saturating_add(T::DbWeight::get().reads(656))
 			.saturating_add(T::DbWeight::get().writes(136))
@@ -440,9 +440,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
-	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:33 w:32)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Cohorts` (r:5 w:4)
 	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
@@ -552,13 +552,13 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// The range of component `n` is `[1, 12]`.
 	fn settle_cohort(n: u32, ) -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `110987 + n * (1523 ±0)`
-		//  Estimated: `183055 + n * (30754 ±231)`
-		// Minimum execution time: 3_937_655_000 picoseconds.
-		Weight::from_parts(3_994_112_651, 0)
-			.saturating_add(Weight::from_parts(0, 183055))
-			// Standard Error: 1_305_082
-			.saturating_add(Weight::from_parts(365_197_726, 0).saturating_mul(n.into()))
+		//  Measured:  `114059 + n * (1523 ±0)`
+		//  Estimated: `185135 + n * (30754 ±57)`
+		// Minimum execution time: 4_102_295_000 picoseconds.
+		Weight::from_parts(4_024_461_939, 0)
+			.saturating_add(Weight::from_parts(0, 185135))
+			// Standard Error: 1_405_488
+			.saturating_add(Weight::from_parts(374_988_717, 0).saturating_mul(n.into()))
 			.saturating_add(T::DbWeight::get().reads(923))
 			.saturating_add(T::DbWeight::get().reads((34_u64).saturating_mul(n.into())))
 			.saturating_add(T::DbWeight::get().writes(805))
@@ -572,9 +572,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
-	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:33 w:32)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Cohorts` (r:5 w:4)
 	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
@@ -617,11 +617,11 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::CounterForCohorts` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	fn set_next_epoch_length() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `45042`
-		//  Estimated: `183055`
-		// Minimum execution time: 1_759_142_000 picoseconds.
-		Weight::from_parts(1_781_372_000, 0)
-			.saturating_add(Weight::from_parts(0, 183055))
+		//  Measured:  `48114`
+		//  Estimated: `185135`
+		// Minimum execution time: 1_689_672_000 picoseconds.
+		Weight::from_parts(1_814_152_000, 0)
+			.saturating_add(Weight::from_parts(0, 185135))
 			.saturating_add(T::DbWeight::get().reads(226))
 			.saturating_add(T::DbWeight::get().writes(113))
 	}
@@ -630,9 +630,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
-	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:33 w:32)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Cohorts` (r:5 w:4)
 	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
@@ -677,11 +677,11 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::CounterForCohorts` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	fn delay_once() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `45005`
-		//  Estimated: `183055`
-		// Minimum execution time: 1_713_972_000 picoseconds.
-		Weight::from_parts(1_737_253_000, 0)
-			.saturating_add(Weight::from_parts(0, 183055))
+		//  Measured:  `48077`
+		//  Estimated: `185135`
+		// Minimum execution time: 1_636_143_000 picoseconds.
+		Weight::from_parts(1_744_402_000, 0)
+			.saturating_add(Weight::from_parts(0, 185135))
 			.saturating_add(T::DbWeight::get().reads(226))
 			.saturating_add(T::DbWeight::get().writes(113))
 	}
@@ -690,9 +690,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
-	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:33 w:32)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Cohorts` (r:5 w:4)
 	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
@@ -745,11 +745,11 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::CounterForCohorts` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	fn mark_executed() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `45347`
-		//  Estimated: `183055`
-		// Minimum execution time: 1_780_442_000 picoseconds.
-		Weight::from_parts(1_804_472_000, 0)
-			.saturating_add(Weight::from_parts(0, 183055))
+		//  Measured:  `48419`
+		//  Estimated: `185135`
+		// Minimum execution time: 1_739_873_000 picoseconds.
+		Weight::from_parts(1_840_133_000, 0)
+			.saturating_add(Weight::from_parts(0, 185135))
 			.saturating_add(T::DbWeight::get().reads(245))
 			.saturating_add(T::DbWeight::get().writes(129))
 	}
@@ -758,9 +758,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
-	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:33 w:32)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Cohorts` (r:5 w:4)
 	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
@@ -805,11 +805,11 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::CounterForCohorts` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	fn mark_failed_executed() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `45005`
-		//  Estimated: `183055`
-		// Minimum execution time: 1_709_742_000 picoseconds.
-		Weight::from_parts(1_734_441_000, 0)
-			.saturating_add(Weight::from_parts(0, 183055))
+		//  Measured:  `48077`
+		//  Estimated: `185135`
+		// Minimum execution time: 1_668_852_000 picoseconds.
+		Weight::from_parts(1_741_013_000, 0)
+			.saturating_add(Weight::from_parts(0, 185135))
 			.saturating_add(T::DbWeight::get().reads(226))
 			.saturating_add(T::DbWeight::get().writes(113))
 	}
@@ -818,9 +818,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
-	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:33 w:32)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Cohorts` (r:5 w:4)
 	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
@@ -893,11 +893,11 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `ExecutionGuard::Expedited` (`max_values`: None, `max_size`: Some(25), added: 2500, mode: `MaxEncodedLen`)
 	fn retry_exhausted_to_measurement() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `45566`
-		//  Estimated: `183055`
-		// Minimum execution time: 1_940_971_000 picoseconds.
-		Weight::from_parts(1_967_922_000, 0)
-			.saturating_add(Weight::from_parts(0, 183055))
+		//  Measured:  `48638`
+		//  Estimated: `185135`
+		// Minimum execution time: 1_924_603_000 picoseconds.
+		Weight::from_parts(1_999_733_000, 0)
+			.saturating_add(Weight::from_parts(0, 185135))
 			.saturating_add(T::DbWeight::get().reads(254))
 			.saturating_add(T::DbWeight::get().writes(139))
 	}
@@ -906,9 +906,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
-	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:33 w:32)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Cohorts` (r:5 w:4)
 	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
@@ -979,11 +979,11 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `ExecutionGuard::Expedited` (`max_values`: None, `max_size`: Some(25), added: 2500, mode: `MaxEncodedLen`)
 	fn expire_or_stale_queue() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `45530`
-		//  Estimated: `183055`
-		// Minimum execution time: 1_823_762_000 picoseconds.
-		Weight::from_parts(1_851_691_000, 0)
-			.saturating_add(Weight::from_parts(0, 183055))
+		//  Measured:  `48602`
+		//  Estimated: `185135`
+		// Minimum execution time: 1_767_523_000 picoseconds.
+		Weight::from_parts(1_864_052_000, 0)
+			.saturating_add(Weight::from_parts(0, 185135))
 			.saturating_add(T::DbWeight::get().reads(252))
 			.saturating_add(T::DbWeight::get().writes(137))
 	}
@@ -992,9 +992,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
-	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:33 w:32)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Cohorts` (r:5 w:4)
 	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
@@ -1099,11 +1099,11 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `ConditionalLedger::VaultTerminalAt` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
 	fn force_reject_process_hold() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `56126`
-		//  Estimated: `183055`
-		// Minimum execution time: 1_943_672_000 picoseconds.
-		Weight::from_parts(1_974_532_000, 0)
-			.saturating_add(Weight::from_parts(0, 183055))
+		//  Measured:  `59198`
+		//  Estimated: `185135`
+		// Minimum execution time: 1_897_113_000 picoseconds.
+		Weight::from_parts(1_985_253_000, 0)
+			.saturating_add(Weight::from_parts(0, 185135))
 			.saturating_add(T::DbWeight::get().reads(273))
 			.saturating_add(T::DbWeight::get().writes(160))
 	}
@@ -1112,9 +1112,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
-	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:33 w:32)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Cohorts` (r:5 w:4)
 	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
@@ -1195,11 +1195,11 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `ConditionalLedger::BaselineTerminalAt` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
 	fn finalize_epoch_baseline() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `57141`
-		//  Estimated: `183055`
-		// Minimum execution time: 1_892_282_000 picoseconds.
-		Weight::from_parts(1_924_292_000, 0)
-			.saturating_add(Weight::from_parts(0, 183055))
+		//  Measured:  `60213`
+		//  Estimated: `185135`
+		// Minimum execution time: 1_835_723_000 picoseconds.
+		Weight::from_parts(1_962_123_000, 0)
+			.saturating_add(Weight::from_parts(0, 185135))
 			.saturating_add(T::DbWeight::get().reads(251))
 			.saturating_add(T::DbWeight::get().writes(130))
 	}
@@ -1210,9 +1210,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
-	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:33 w:32)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Cohorts` (r:5 w:4)
 	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
@@ -1289,10 +1289,10 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn drive_oracle_boundaries() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `107960`
+		//  Measured:  `111032`
 		//  Estimated: `356514`
-		// Minimum execution time: 7_247_318_000 picoseconds.
-		Weight::from_parts(7_347_758_000, 0)
+		// Minimum execution time: 6_770_281_000 picoseconds.
+		Weight::from_parts(7_102_181_000, 0)
 			.saturating_add(Weight::from_parts(0, 356514))
 			.saturating_add(T::DbWeight::get().reads(715))
 			.saturating_add(T::DbWeight::get().writes(152))
@@ -1302,9 +1302,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
-	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:32 w:31)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Cohorts` (r:5 w:4)
 	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
@@ -1359,11 +1359,11 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::CounterForCohorts` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	fn bind_ratification() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `44880`
-		//  Estimated: `183055`
-		// Minimum execution time: 1_744_642_000 picoseconds.
-		Weight::from_parts(1_764_042_000, 0)
-			.saturating_add(Weight::from_parts(0, 183055))
+		//  Measured:  `47920`
+		//  Estimated: `185135`
+		// Minimum execution time: 1_645_303_000 picoseconds.
+		Weight::from_parts(1_743_953_000, 0)
+			.saturating_add(Weight::from_parts(0, 185135))
 			.saturating_add(T::DbWeight::get().reads(228))
 			.saturating_add(T::DbWeight::get().writes(114))
 	}
@@ -1372,9 +1372,9 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Schedule` (r:1 w:1)
 	/// Proof: `Epoch::Schedule` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::IntakeProposals` (r:65 w:64)
-	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::IntakeProposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:33 w:32)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Cohorts` (r:5 w:4)
 	/// Proof: `Epoch::Cohorts` (`max_values`: None, `max_size`: Some(126), added: 2601, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadManDetector` (r:1 w:0)
@@ -1482,13 +1482,13 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 	/// The range of component `n` is `[1, 12]`.
 	fn void_cohort(n: u32, ) -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `55550 + n * (1668 ±0)`
-		//  Estimated: `183055 + n * (35266 ±0)`
-		// Minimum execution time: 2_058_482_000 picoseconds.
-		Weight::from_parts(1_812_437_047, 0)
-			.saturating_add(Weight::from_parts(0, 183055))
-			// Standard Error: 239_639
-			.saturating_add(Weight::from_parts(276_500_650, 0).saturating_mul(n.into()))
+		//  Measured:  `58622 + n * (1668 ±0)`
+		//  Estimated: `185135 + n * (35266 ±0)`
+		// Minimum execution time: 2_000_333_000 picoseconds.
+		Weight::from_parts(1_828_871_200, 0)
+			.saturating_add(Weight::from_parts(0, 185135))
+			// Standard Error: 523_013
+			.saturating_add(Weight::from_parts(279_697_705, 0).saturating_mul(n.into()))
 			.saturating_add(T::DbWeight::get().reads(242))
 			.saturating_add(T::DbWeight::get().reads((45_u64).saturating_mul(n.into())))
 			.saturating_add(T::DbWeight::get().writes(121))
@@ -1529,8 +1529,8 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `17874`
 		//  Estimated: `389037`
-		// Minimum execution time: 4_262_864_000 picoseconds.
-		Weight::from_parts(4_325_794_000, 0)
+		// Minimum execution time: 4_315_727_000 picoseconds.
+		Weight::from_parts(4_381_977_000, 0)
 			.saturating_add(Weight::from_parts(0, 389037))
 			.saturating_add(T::DbWeight::get().reads(258))
 			.saturating_add(T::DbWeight::get().writes(249))
@@ -1541,8 +1541,8 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `0`
 		//  Estimated: `0`
-		// Minimum execution time: 4_240_000 picoseconds.
-		Weight::from_parts(4_730_000, 0)
+		// Minimum execution time: 4_100_000 picoseconds.
+		Weight::from_parts(4_520_000, 0)
 			.saturating_add(Weight::from_parts(0, 0))
 			.saturating_add(T::DbWeight::get().writes(1))
 	}

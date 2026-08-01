@@ -964,6 +964,7 @@ mod benches {
         let mut state = EpochState::new();
         let mut proposal = benchmark_proposal::<T>(1, ProposalState::Qualified, 0);
         proposal.proposer = caller.clone();
+        proposal.funder = caller.clone();
         proposal.class = ProposalClass::Code;
         state.proposals.push(proposal);
         fill_epoch_state::<T>(

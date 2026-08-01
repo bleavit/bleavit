@@ -76,6 +76,10 @@ pub fn markets(pid: ProposalId, epoch: EpochId, gates: bool) -> MarketSet {
     }
 }
 
+/// Collapsed-identity proposal: author == funder, the only state reachable before
+/// contract v18. Use [`proposal_split`] to exercise the 05 §1.5 split — a test that
+/// only ever builds this shape proves nothing about which identity a right binds to
+/// (15 §4.2's two-identity obligation).
 pub fn proposal(
     id: ProposalId,
     proposer: AccountId32,
@@ -83,9 +87,22 @@ pub fn proposal(
     epoch: EpochId,
     now: BlockNumber,
 ) -> Proposal<AccountId32> {
+    proposal_split(id, proposer.clone(), proposer, state, epoch, now)
+}
+
+/// Split-identity proposal: `proposer` authors, `funder` posts the bond (05 §1.5).
+pub fn proposal_split(
+    id: ProposalId,
+    proposer: AccountId32,
+    funder: AccountId32,
+    state: ProposalState,
+    epoch: EpochId,
+    now: BlockNumber,
+) -> Proposal<AccountId32> {
     Proposal {
         id,
         proposer,
+        funder,
         class: ProposalClass::Param,
         state,
         epoch,
@@ -328,6 +345,12 @@ parameter_types! {
     pub static RecordKeeperRebates: bool = false;
     pub static KeeperRebates: Vec<(AccountId32, CrankClass)> = Vec::new();
     pub static BondReleases: Vec<(AccountId32, Balance)> = Vec::new();
+    /// Confiscated bond amounts, in order. `slash_to_insurance` names no
+    /// account by design — the hold already sits in the pallet escrow — so the
+    /// incidence of a slash is only observable as the *shortfall* in what the
+    /// funder is released. A test that asserts the pair therefore needs both
+    /// this and `BondReleases` (05 §1.5, milestone E6).
+    pub static BondSlashes: Vec<Balance> = Vec::new();
 }
 
 pub struct TestKeeperRebate;
@@ -694,7 +717,8 @@ impl ProposalBondCurrency<AccountId32> for TestProposalBond {
         BondReleases::mutate(|releases| releases.push((who.clone(), amount)));
         Ok(())
     }
-    fn slash_to_insurance(_amount: Balance) -> frame_support::dispatch::DispatchResult {
+    fn slash_to_insurance(amount: Balance) -> frame_support::dispatch::DispatchResult {
+        BondSlashes::mutate(|slashes| slashes.push(amount));
         Ok(())
     }
     fn escrow_balance() -> Balance {

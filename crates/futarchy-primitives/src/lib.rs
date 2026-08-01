@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 17;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 18;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -705,6 +705,12 @@ pub struct Proposal<AccountId> {
     pub grace_end: Option<BlockNumber>,
     pub version_constraint: Option<RuntimeVersionConstraint>,
     pub decision: Option<DecisionOutcome>,
+    /// Bond custody identity (contract v18, milestone E6; 05 §1.5). The account that
+    /// signed `epoch.submit` and therefore holds the class bond — the refund and the
+    /// 06 §4 slashes reach *this* account, and 06 §4 rule 4's per-account intake cap
+    /// counts it. `proposer` above stays the **author**; the two are equal unless a
+    /// submission deliberately splits them, which is the only state reachable pre-v18.
+    pub funder: AccountId,
 }
 
 /// Terminal execution-queue record (09). Layout single-homed here per 02 §2.
@@ -748,6 +754,9 @@ pub struct ProposalSummaryView {
     pub decide_at: BlockNumber,
     pub maturity: Option<BlockNumber>,
     pub ratification: RatificationStatus,
+    /// Contract v18 (E6): bond custody. Equals `proposer` unless the submission split
+    /// authorship from funding (05 §1.5). Trailing append — 02 §13 rule 3.
+    pub funder: AccountId,
 }
 
 #[derive(
@@ -1747,10 +1756,11 @@ mod tests {
     /// for the version's home finds a number that was already stale twice over.
     #[test]
     fn contract_version_is_pinned() {
-        // v17 (E1–E4): protocol revenue routing and the 03 §5.3a redemption fee.
-        // Two permissionless keeper cranks plus four trailing `fee` event fields;
-        // all appends, so `transaction_version` is untouched (02 §13 rule 7).
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 17);
+        // v18 (E6): the 05 §1.5 proposal author/funder split. `Proposal` and
+        // `ProposalSummaryView` each gain a trailing `funder`; `epoch.submit` keeps
+        // its signature (the funder is the origin, not an argument), so no call index
+        // moves and `transaction_version` is untouched (02 §13 rules 3 and 7).
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 18);
     }
 
     #[test]
@@ -2154,6 +2164,9 @@ mod tests {
                 spec_version: 42,
             }),
             decision: Some(DecisionOutcome::Adopt),
+            // Deliberately distinct from `proposer`: a fixture that collapses the two
+            // identities cannot detect a layout that swaps or aliases them.
+            funder: [3u8; 32],
         };
         let bytes = proposal.encode();
         // Declaration order is the SCALE layout: id (u64 LE) leads.
@@ -2187,6 +2200,10 @@ mod tests {
         ordered.extend(proposal.grace_end.encode());
         ordered.extend(proposal.version_constraint.encode());
         ordered.extend(proposal.decision.encode());
+        // Field 22 — trailing `funder` append (contract v18, E6). It sits last
+        // precisely so fields 1–21 keep their v17 offsets: a consumer decoding the
+        // v17 prefix reads exactly what it read before.
+        ordered.extend(proposal.funder.encode());
         assert_eq!(
             bytes, ordered,
             "SCALE layout must follow 05 §1.2 field order"
@@ -2237,7 +2254,10 @@ mod tests {
                 QueuedExecutionView::max_encoded_len(),
                 RatificationStatus::max_encoded_len(),
             ),
-            (19, 159, 58, 155, 93, 5)
+            // `ProposalSummaryView` 159 → 191 at contract v18: the trailing `funder`
+            // adds exactly one `AccountId32` (32 B) and nothing else moves, which is
+            // what makes it a 02 §13 rule-3 append rather than a layout change.
+            (19, 191, 58, 155, 93, 5)
         );
     }
 

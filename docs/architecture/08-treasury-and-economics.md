@@ -22,7 +22,7 @@ Derived sub-accounts: `MAIN`, `POL`, `INSURANCE`, `KEEPER`, `ORACLE`, `REWARDS`,
 | `POL_BASELINE` | Standing Baseline book subsidy (§4.3) | `pol.b_baseline`·ln 2 ≈ 17,329 USDC/epoch, outside `pol.budget_epoch` |
 | `KEEPER` | Metered crank rebates (§6) | `keeper.budget_epoch` = 12,000 USDC |
 | `ORACLE` | Reporter fees + escalation float | per-epoch line |
-| `REWARDS` | Proposer rewards: PARAM 500; TREASURY/CODE min(0.05%·Ask, 25k); META 25k USDC — paid on `Executed` | — |
+| `REWARDS` | Proposer rewards: PARAM 500; TREASURY/CODE min(0.05%·Ask, 25k); META 25k USDC — paid on `Executed`, to the proposal's **author** (`Proposal.proposer`), never to its funder ([05](05-welfare-and-decision-engine.md) §1.5, milestone E6) | — |
 | `ops.bootnodes` / `ops.rpc_archive` | ≥8 WSS bootnodes; ≥4 public RPC + ≥2 archive nodes **and the 30-day served-state operator commitment** (D-6, D-16) | funded lines, named operators ([12](12-release-and-operations.md)) |
 | `ops.keepers` | Keeper operations **beyond** the metered budget (D-16; §6.3) | funded line |
 | `ops.oracle_evidence` | Oracle evidence hosting ([07](07-oracle-and-disputes.md)) | funded line |

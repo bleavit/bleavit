@@ -13,7 +13,7 @@
 // benchmark
 // pallet
 // --runtime
-// /tmp/e5t/wtarget/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
+// /tmp/claude-1000/-home-chralt-development-bleavit--claude-worktrees-vit-token-usage/5fc47c2c-310f-4967-8560-8ca91e424c5a/scratchpad/wtarget/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
 // --pallet
 // pallet_market
 // --extrinsic
@@ -71,8 +71,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `4240`
 		//  Estimated: `108804`
-		// Minimum execution time: 1_016_190_000 picoseconds.
-		Weight::from_parts(1_061_410_000, 0)
+		// Minimum execution time: 1_093_242_000 picoseconds.
+		Weight::from_parts(1_167_142_000, 0)
 			.saturating_add(Weight::from_parts(0, 108804))
 			.saturating_add(T::DbWeight::get().reads(77))
 			.saturating_add(T::DbWeight::get().writes(67))
@@ -109,8 +109,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `4726`
 		//  Estimated: `108804`
-		// Minimum execution time: 873_070_000 picoseconds.
-		Weight::from_parts(901_061_000, 0)
+		// Minimum execution time: 931_691_000 picoseconds.
+		Weight::from_parts(976_452_000, 0)
 			.saturating_add(Weight::from_parts(0, 108804))
 			.saturating_add(T::DbWeight::get().reads(76))
 			.saturating_add(T::DbWeight::get().writes(67))
@@ -124,7 +124,7 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Storage: `Constitution::Params` (r:10 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::Proposals` (r:1 w:0)
-	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
+	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `FutarchyTreasury::State` (r:1 w:1)
 	/// Proof: `FutarchyTreasury::State` (`max_values`: Some(1), `max_size`: Some(25361), added: 25856, mode: `MaxEncodedLen`)
 	/// Storage: `FutarchyTreasury::PendingMainCredit` (r:1 w:1)
@@ -139,8 +139,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `13846`
 		//  Estimated: `27060`
-		// Minimum execution time: 124_280_000 picoseconds.
-		Weight::from_parts(130_440_000, 0)
+		// Minimum execution time: 136_560_000 picoseconds.
+		Weight::from_parts(143_851_000, 0)
 			.saturating_add(Weight::from_parts(0, 27060))
 			.saturating_add(T::DbWeight::get().reads(20))
 			.saturating_add(T::DbWeight::get().writes(7))
@@ -185,8 +185,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `15053`
 		//  Estimated: `72866`
-		// Minimum execution time: 790_680_000 picoseconds.
-		Weight::from_parts(819_321_000, 0)
+		// Minimum execution time: 858_862_000 picoseconds.
+		Weight::from_parts(904_441_000, 0)
 			.saturating_add(Weight::from_parts(0, 72866))
 			.saturating_add(T::DbWeight::get().reads(72))
 			.saturating_add(T::DbWeight::get().writes(55))
@@ -239,8 +239,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `16766`
 		//  Estimated: `72866`
-		// Minimum execution time: 402_940_000 picoseconds.
-		Weight::from_parts(421_430_000, 0)
+		// Minimum execution time: 419_151_000 picoseconds.
+		Weight::from_parts(445_191_000, 0)
 			.saturating_add(Weight::from_parts(0, 72866))
 			.saturating_add(T::DbWeight::get().reads(66))
 			.saturating_add(T::DbWeight::get().writes(62))
@@ -251,8 +251,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `0`
 		//  Estimated: `0`
-		// Minimum execution time: 3_720_000 picoseconds.
-		Weight::from_parts(4_130_000, 0)
+		// Minimum execution time: 4_010_000 picoseconds.
+		Weight::from_parts(4_460_000, 0)
 			.saturating_add(Weight::from_parts(0, 0))
 			.saturating_add(T::DbWeight::get().writes(1))
 	}
@@ -264,8 +264,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `109`
 		//  Estimated: `1489`
-		// Minimum execution time: 5_630_000 picoseconds.
-		Weight::from_parts(6_140_000, 0)
+		// Minimum execution time: 5_930_000 picoseconds.
+		Weight::from_parts(6_520_000, 0)
 			.saturating_add(Weight::from_parts(0, 1489))
 			.saturating_add(T::DbWeight::get().reads(1))
 			.saturating_add(T::DbWeight::get().writes(2))
@@ -290,8 +290,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `151`
 		//  Estimated: `6040`
-		// Minimum execution time: 24_570_000 picoseconds.
-		Weight::from_parts(26_520_000, 0)
+		// Minimum execution time: 26_470_000 picoseconds.
+		Weight::from_parts(28_710_000, 0)
 			.saturating_add(Weight::from_parts(0, 6040))
 			.saturating_add(T::DbWeight::get().reads(9))
 			.saturating_add(T::DbWeight::get().writes(8))
@@ -336,8 +336,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `13437`
 		//  Estimated: `72866`
-		// Minimum execution time: 477_800_000 picoseconds.
-		Weight::from_parts(492_030_000, 0)
+		// Minimum execution time: 499_911_000 picoseconds.
+		Weight::from_parts(534_651_000, 0)
 			.saturating_add(Weight::from_parts(0, 72866))
 			.saturating_add(T::DbWeight::get().reads(68))
 			.saturating_add(T::DbWeight::get().writes(53))
@@ -352,8 +352,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `548`
 		//  Estimated: `3874`
-		// Minimum execution time: 18_450_000 picoseconds.
-		Weight::from_parts(19_530_000, 0)
+		// Minimum execution time: 20_030_000 picoseconds.
+		Weight::from_parts(21_360_000, 0)
 			.saturating_add(Weight::from_parts(0, 3874))
 			.saturating_add(T::DbWeight::get().reads(2))
 			.saturating_add(T::DbWeight::get().writes(3))
@@ -408,8 +408,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `2874018`
 		//  Estimated: `17079651`
-		// Minimum execution time: 289_896_025_000 picoseconds.
-		Weight::from_parts(300_726_589_000, 0)
+		// Minimum execution time: 317_608_139_000 picoseconds.
+		Weight::from_parts(321_967_197_000, 0)
 			.saturating_add(Weight::from_parts(0, 17079651))
 			.saturating_add(T::DbWeight::get().reads(37316))
 	}

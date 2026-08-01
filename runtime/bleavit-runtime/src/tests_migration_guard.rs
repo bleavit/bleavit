@@ -512,6 +512,7 @@ fn exact_phase_four_meta_payload_queues_and_commits_both_cap_raises() {
         let mut proposal = futarchy_primitives::Proposal {
             id: PID,
             proposer: tests::account(0xd3),
+            funder: tests::account(0xd3),
             class: futarchy_primitives::ProposalClass::Meta,
             state: futarchy_primitives::ProposalState::Submitted,
             epoch,
