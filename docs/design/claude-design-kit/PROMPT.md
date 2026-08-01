@@ -37,8 +37,9 @@ REJECT branches, LONG/SHORT, Baseline, `verified-finalized` / `verified-best` /
 S1–S20. Never rename, never synonymize, never soften. Everything the spec does NOT govern —
 typography, palette, layout, motion, personality — is yours, and I want a real point of view.
 
-The hosted-question-service contract v20 is attached as product context but is **authored, not in
-force** while the chain advertises contract v19. Do not invent a hosted-service screen, screen ID,
+The external-market schema is live contract v20. The hosted question/report contract v21 is attached
+as product context but is **authored, not in force** while the chain advertises contract v20. Do not
+invent a hosted-service screen, screen ID,
 live report, or enabled action in this iteration. If an integration concept appears, label it
 future/not-in-force and preserve the central claim: Bleavit sells conditional prices with provenance,
 not decisions or endorsements.

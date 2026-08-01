@@ -1450,7 +1450,12 @@ pub fn occupancy_envelopes_survive(params: OccupancyParams) -> bool {
     if retained > futarchy_primitives::bounds::MAX_STORED_MARKETS {
         return false;
     }
-    let Some(retained_bytes) = retained.checked_mul(kernel::MARKET_BOOK_MAX_BYTES) else {
+    let Some(all_retained) =
+        retained.checked_add(futarchy_primitives::bounds::MAX_STORED_EXTERNAL_MARKETS)
+    else {
+        return false;
+    };
+    let Some(retained_bytes) = all_retained.checked_mul(kernel::MARKET_BOOK_MAX_BYTES) else {
         return false;
     };
     if retained_bytes > kernel::RETAINED_MARKETS_BUDGET_BYTES {

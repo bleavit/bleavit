@@ -9,6 +9,7 @@ repository.workspace = true
 futarchy-fixed = { path = "../../crates/futarchy-fixed", default-features = false }
 futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
 conditional-ledger-core = { path = "../conditional-ledger-core", default-features = false }
+question-service-core = { path = "../question-service-core", default-features = false }
 parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive"] }
 scale-info = { version = "2.11.6", default-features = false, features = ["derive"] }
 
@@ -18,6 +19,7 @@ std = [
   "futarchy-fixed/std",
   "futarchy-primitives/std",
   "conditional-ledger-core/std",
+  "question-service-core/std",
   "parity-scale-codec/std",
   "scale-info/std",
 ]

@@ -6830,6 +6830,7 @@ dependencies = [
  "futarchy-primitives",
  "parity-scale-codec",
  "proptest",
+ "question-service-core",
  "scale-info",
  "serde_json",
 ]
@@ -8012,6 +8013,7 @@ dependencies = [
 name = "pallet-market"
 version = "0.1.0"
 dependencies = [
+ "constitution-core",
  "frame-benchmarking",
  "frame-support",
  "frame-system",
@@ -8022,6 +8024,7 @@ dependencies = [
  "pallet-balances",
  "pallet-conditional-ledger",
  "parity-scale-codec",
+ "question-service-core",
  "scale-info",
  "sp-io",
  "sp-runtime",

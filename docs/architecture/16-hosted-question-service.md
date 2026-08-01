@@ -423,7 +423,7 @@ Rust/Python divergence nobody notices.
 4. **`provenance_hash` is `blake2_256` over a domain-separated SCALE preimage**, separator
    `b"bleavit/hosted-report/v1"`, covering every field of §5's `Report` including `sub_id`. It is
    read cross-chain, so it is [02](./02-integration-contract.md) contract surface and frozen with
-   contract v20; a client verifying a report by storage proof recomputes exactly this.
+   contract v21; a client verifying a report by storage proof recomputes exactly this.
 
 **Why a median rather than a self-report with a challenge window.** A lie detector needs an
 adjudicator, and this game has none by construction — sending a client's disputed foreign fact to
@@ -499,8 +499,10 @@ What instancing buys, none of which requires a new invariant:
 
 **Defense in depth: a disjoint id band.** `kernel::SERVICE_ID_BASE = 1 << 63`; `pallet-epoch`'s
 allocator asserts `id < SERVICE_ID_BASE` and the service allocator starts at it, so every mis-route
-errors `UnknownVault` by construction at zero runtime cost. The property is only as strong as those
-two `ensure!`s, so both carry a try-state assertion.
+errors `UnknownVault` by construction at zero runtime cost. The service allocator is one monotone,
+non-reusing namespace across question and book ids; pair creation and try-state reject a question,
+Accept id or Reject id that duplicates any role in a retained pair. The property is only as strong
+as those boundary checks, so both domains carry a try-state assertion.
 
 Routing is **one** small, exhaustive, fuzzable `LedgerRoute::for_book(kind)` in the market shell — a
 single auditable dispatch point for the entire firewall.
@@ -513,7 +515,7 @@ instances that is not merely untidy — it is wrong in **both** directions at on
 | Predicate | Membership | Job |
 |---|---|---|
 | `ReservedProtocolDestinations` | **union** across every instance and domain | §5.4's signed-transfer destination refusal |
-| `LocalProtocolAccounts<I>` | **per instance** | fee, storage-deposit and position-cap exemption; internal custody |
+| `ProtocolAccounts<I>` (the local predicate) | **per instance** | fee, storage-deposit and position-cap exemption; internal custody |
 | `InflowCapExemptAccounts` | separate, globally governed | Phase-3 inflow metering |
 
 Get it **per-instance for destinations** and a service position can be transferred into a primary
@@ -538,6 +540,14 @@ enum FundingDomain { Protocol(PolLine), ExternalClient(ClientId) }
 ```
 
 with **only** `Protocol(_)` touching `LivePolCommitments` or any treasury line.
+
+External funding is pair-atomic and consumes `2·b·ln 2` cash, not merely two independently marked
+single-book calls. Two top-level splits are made from the immutable funder; all four minted branch
+legs leave that signable account in the same storage transaction. Each matching book scalar-splits
+one `b·ln 2` branch headroom and retains the other as raw same-branch inventory until terminal Sweep.
+Leaving the two mirror legs with the client would let it immediately `merge(question, b·ln 2)`,
+reclaim half the certified subsidy while both books still reported Seeded; leaving them outside the
+book return path would instead donate them to archive dust. Either result is a certification defect.
 
 The naive-arm failure is worth stating precisely, because the obvious description of it is wrong.
 `debit_pol_custody` **moves no tokens** — it decrements an internal treasury line — so a misclassified
@@ -762,7 +772,12 @@ to avoid.
 
 `PB-LEDGER-FREEZE` on the **primary** instance MUST NOT freeze the service instance, and a service
 instance fault MUST NOT make the primary instance freeze-eligible. That is the entire point of §7.1,
-and it is I-37.
+and it is I-37. This does not waive payout safety inside the service domain: the service ledger's
+own I-4 freeze gates its `buy`, `sell`, `crank_observe` and `sweep_revenue` funds-moving paths, while
+settlement and the deadline-driven VOID edge remain live. It is independent of pause and is selected
+only through `LedgerRoute::for_book`; an absent runtime binding fails closed. Conversely, those same
+market paths on Protocol books consult only the primary freeze. `PB-DEPEG` creation freeze remains
+global across both domains because it guards new shared-USDC market creation, not ledger solvency.
 
 ---
 

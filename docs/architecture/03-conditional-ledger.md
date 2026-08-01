@@ -45,7 +45,7 @@ unchanged and the chain is pre-genesis, so **no migration**.
 | Predicate | Membership | Job |
 |---|---|---|
 | `ReservedProtocolDestinations` | **union** across every instance and domain | §5.4's signed-transfer destination refusal |
-| `LocalProtocolAccounts<I>` | **per instance** | fee, storage-deposit and position-cap exemption; internal custody |
+| `ProtocolAccounts<I>` (the local predicate) | **per instance** | fee, storage-deposit and position-cap exemption; internal custody |
 | `InflowCapExemptAccounts` | separate, globally governed | Phase-3 inflow metering |
 
 Per-instance *destinations* strands a service position in a primary book address no service origin can
@@ -231,7 +231,7 @@ pub trait Config<I: 'static = ()>: frame_system::Config {   // instanced by D-20
     /// This instance only — fee, storage-deposit and position-cap exemption,
     /// and internal custody. A foreign domain's protocol account is NOT exempt
     /// here.
-    type LocalProtocolAccounts: Contains<Self::AccountId>;
+    type ProtocolAccounts: Contains<Self::AccountId>;
     /// §5.3a redemption fee rate, read live from `pallet-constitution::Params`
     /// (`ledger.redeem_fee`, normative row: §13 §1). A missing or malformed
     /// record reads as **zero** — the fail-open direction here is the
@@ -406,7 +406,7 @@ framework's `Stuck` form.
 
 **Terminal markers are swept state (normative).** A vault's terminal markers exist to gate this housekeeping and are removed by it; they are therefore **not** a durable signal any other pallet may key on for long-lived POL accounting. Every transition that records a terminal block — `void`, `settle_scalar`, `settle_baseline` — MUST, in the same atomic storage layer, latch that block into the owning market for each of the vault's books, release the active-market/POL slot and delete that terminal book's auxiliary checkpoint/window state, so the durable market latch survives this sweep. Latching MUST be idempotent, and marker, latch, active-slot release and POL release MUST commit or roll back together — a latch failure rolls the terminal transition back (status-quo default, G-1) rather than leaving a marker this sweep would later delete. The inverse identity is also machine-checked while both sides remain: every retained owning book named by a ledger terminal marker MUST carry the same latch. The obligation binds the **runtime composition** that wires ledger to market, not this pallet's dispatchables in isolation, which write only the marker.
 
-**Protocol inventory at market reap (normative).** Every per-market book and fee address belongs to a canonical, domain-separated `AccountId32` namespace reserved permanently — before creation, throughout the book lifetime, and after reap. `MarketProtocolAccounts` is only the bounded ownership/refcount index; inserting or removing it MUST NOT change deposit classification. Market creation MUST reject a non-canonical pair before creating a vault or index entry. Signed `transfer` MUST reject every `ProtocolAccount` destination (`ProtocolDestination`), including a predictable future book/fee address; the origin-gated `MarketAuthority` wrapper is the sole position ingress, so pre-creation squatting cannot poison an address, reclassify a deposit-backed claimant row, or wedge market creation. Immediately before one archived market row unregisters its two accounts, `MarketAuthority` MUST atomically discard positions owned by exactly those accounts across exactly that book's owning vault universe: 14 fixed proposal instruments (≤ 28 storage cells) or two fixed Baseline instruments (≤ 4 cells). It MUST decrement `PositionTotals` by the discarded balances, move no collateral or held deposit, and touch no claimant-owned row. If any later step of market reap fails, this discard rolls back with it (G-1). The vault and its claimant rows remain independently redeemable/sweepable, so ledger-first and market-first interleavings are both safe.
+**Protocol inventory at market reap (normative).** Every per-market book and fee address belongs to a canonical, domain-separated `AccountId32` namespace reserved permanently — before creation, throughout the book lifetime, and after reap. `MarketProtocolAccounts` is only the bounded ownership/refcount index; inserting or removing it MUST NOT change deposit classification. Market creation MUST reject a non-canonical pair before creating a vault or index entry. Signed `transfer` MUST reject every `ReservedProtocolDestinations` destination (`ProtocolDestination`), including a predictable future book/fee address in either ledger instance; the origin-gated `MarketAuthority` wrapper is the sole position ingress, so pre-creation squatting cannot poison an address, reclassify a deposit-backed claimant row, or wedge market creation. Immediately before one archived market row unregisters its two accounts, `MarketAuthority` MUST atomically discard positions owned by exactly those accounts across exactly that book's owning vault universe: 14 fixed proposal instruments (≤ 28 storage cells), two fixed Baseline instruments (≤ 4 cells), or the service question's 14-position proposal universe (of which an external scalar book can own only its branch's scalar/branch-USDC subset). It MUST decrement `PositionTotals` by the discarded balances, move no collateral or held deposit, and touch no claimant-owned row. If any later step of market reap fails, this discard rolls back with it (G-1). The vault and its claimant rows remain independently redeemable/sweepable, so ledger-first and market-first interleavings are both safe.
 
 The BE §5.2.1 note on SGF §9.3 settlement perpetuity carries forward unchanged: after reaping, unredeemed claims remain redeemable through a Merkle-archived claims procedure executed by a TREASURY-class proposal (deliberate v1 compromise, recorded in BE §31).
 
@@ -465,7 +465,16 @@ fn do_split_scalar(pid, b, who, a);  // book revenue immediately scalar-split in
 fn do_split_gate(pid, b, g, who, a); // same recycling for gate-book revenue (YES+NO sets)
 fn do_split_baseline(epoch, who, a); // Baseline wrapper leg and Baseline revenue recycling
 fn do_merge(...); fn do_merge_scalar(...); fn do_merge_gate(...); fn do_merge_baseline(...); // sell path
+fn do_redeem*(..., holder, InventoryReturn, ...); // terminal market inventory return
 ```
+
+`InventoryReturn` has exactly two typed forms. `Protocol(recipient)` requires both holder and
+recipient to be local `ProtocolAccounts<I>`. `ExactFunder { holder, funder }` still requires the
+holder to be local protocol custody, binds the embedded holder byte-for-byte to the inventory being
+burned, and requires the funder to be outside the cross-instance
+`ReservedProtocolDestinations` union. The market may construct that second form only from the
+immutable external-pair record created before seeding; it is an exact return capability, never an
+account-classification exemption ([04](04-markets-and-pricing.md) §3; [16](16-hosted-question-service.md) §7.3).
 
 Consequences the ledger guarantees (and the property tests assert): a wrapper buyer always ends the trade holding the purchased target leg plus mirror-branch branch-USDC equal to their paid cost, so on normal losing-branch resolution the mirror redeems at par and under VOID the package receives its D-1 neutral valuation after exact pairs are merged first (§6.4; **not** par in general — SQ-171); book revenue never sits as bare branch-USDC across a block boundary — it is recycled into complete sets in the same extrinsic, so every LMSR obligation stays pre-collateralized in the ledger (I-12).
 

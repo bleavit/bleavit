@@ -34,7 +34,7 @@ use futarchy_primitives::Balance;
 /// `svc.max_live`: 64 distinct clients can own all 64 live service slots, while
 /// idle registrations add no service capacity and can be replaced by values
 /// governance. Architecture 13 §4 owns the bound.
-pub const MAX_CLIENTS: u32 = 64;
+pub const MAX_CLIENTS: u32 = futarchy_primitives::bounds::MAX_CLIENTS;
 
 /// Live optional value for `svc.client_bond`. `None` is the intentional
 /// `[VERIFY]` fail-closed state and admission returns `ClientBondUnset`.

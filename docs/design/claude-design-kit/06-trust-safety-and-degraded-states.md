@@ -47,8 +47,9 @@ of principal on any protocol path" MUST NOT be used (SQ-171).
 Track N backend invariants with honesty consequences: **I-34** permits exactly one external-origin
 constructor, `ExternalClient(ClientId)`, from exact registered-`Location` equality and forbids every
 signed/root/none/governance conversion; **I-35** confines ingress to the external-client call domain;
-**I-36** keeps client push failures out of XCM health; **I-37** makes service custody and failure
-independent of Bleavit's primary ledger; **I-38** makes ingress issuance-neutral. A UI or integration
+**I-36** keeps client push failures out of XCM health; **I-37** makes service custody, failure and
+funds-moving freeze state independent of Bleavit's primary ledger (each book follows its owning
+instance; an unavailable service binding fails closed); **I-38** makes ingress issuance-neutral. A UI or integration
 guide must never imply that admission is identity verification beyond the chain-level `Location`,
 that a report is an endorsement, or that push delivery is the trustworthy source (the pull surface is).
 
@@ -115,8 +116,11 @@ and depeg risk borne by holders.
   can take 30–90 s (desktop) / 90–240 s (mobile) — sync progress is a designed experience.
 - **Session flags** (combinable): `Degraded` (peer/finality health) × `MemoryOnly` × `RpcOnly`,
   on top of compat mode `full`/`restricted`/`read-only-incompatible`. Every combination renders.
-- **Protocol freezes**: PB-LEDGER-FREEZE (guardian playbook freezes all ledger+market calls,
-  ≤ 14 days) — whole-app frozen-trading state; PB-RESERVE (split inflows halted + NAV haircut).
+- **Protocol freezes**: primary PB-LEDGER-FREEZE (guardian playbook freezes primary-ledger calls
+  and Protocol-book funds movement, ≤ 14 days) — a primary-domain frozen-trading state, never an
+  External-book freeze. Service books read only their service instance's independent I-4 status.
+  PB-DEPEG's new-market creation gate remains global across both shared-USDC domains; PB-RESERVE
+  halts split inflows and applies the NAV haircut.
   Disputes hold *settlement, never decisions*. Thin markets refuse to decide
   (`NotDecisionGrade`) — "refuse to decide rather than decide badly" is a designed outcome, not an error.
 - **Chain halted**: block production stalls; dead-man switch freezes execution; recovery epoch

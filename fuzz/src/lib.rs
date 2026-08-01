@@ -16,9 +16,9 @@ use futarchy_primitives::{
     Balance, BoundedVec, Branch, GateType, PositionId, PositionKind, ProposalClass, ScalarSide,
 };
 use market_core::{
-    buy_book, fee_up, seed_book, sell_book, BaselineTerminal, BookKind, Error as MarketError,
-    Event as MarketEvent, LedgerOps, MarketBook, MarketParams, MarketState, VaultTerminal, FEE_BPS,
-    MIN_TRADE,
+    buy_book, fee_up, seed_book, seed_external_pair, sell_book, BaselineTerminal, BookKind,
+    Error as MarketError, Event as MarketEvent, LedgerOps, LedgerRoute, MarketBook, MarketParams,
+    MarketState, VaultTerminal, FEE_BPS, MIN_TRADE,
 };
 use origins_core::{
     BoxedCall, CallDomain, Error as FilterError, Origin, RuntimeCall, SafetyFilter,
@@ -831,10 +831,10 @@ pub struct TradeOp {
 pub struct TradeCase {
     pub b: Balance,
     /// Which LMSR book the sequence runs against — Decision (either branch),
-    /// Gate (either branch, either `GateType`), or the unbranched Baseline. The
-    /// solvency invariants (04 §6.3, I-12) hold identically across all three
-    /// wrapper shapes; `sell_baseline` in particular was historically
-    /// solvency-buggy, so exercising every kind is load-bearing coverage.
+    /// Gate (either branch, either `GateType`), the unbranched Baseline, or an
+    /// External scalar book. The solvency invariants (04 §6.3, I-12/I-37) hold
+    /// across all four wrapper shapes; `sell_baseline` in particular was
+    /// historically solvency-buggy, so exercising every kind is load-bearing.
     pub kind: BookKind,
     pub round_trip_selector: u16,
     pub trades: Vec<TradeOp>,
@@ -843,7 +843,8 @@ pub struct TradeCase {
 /// Derive the book kind from the high bits of the first trade record's flag
 /// bytes. Those bits are 0 in every committed decision-book seed (the generator
 /// writes only bit 0 of each flag), so this keeps the committed corpus on the
-/// Decision/Accept path while letting the fuzzer reach Gate and Baseline books.
+/// Decision/Accept path while letting the fuzzer reach Gate, Baseline and
+/// External books.
 fn kind_from_seed(data: &[u8]) -> BookKind {
     // bit 0 of `data[10]` is the first op's buy flag; bits 1+ are unused there.
     let sel = data.get(10).copied().unwrap_or(0) >> 1;
@@ -852,7 +853,7 @@ fn kind_from_seed(data: &[u8]) -> BookKind {
     } else {
         Branch::Reject
     };
-    match sel % 4 {
+    match sel % 8 {
         0 | 1 => BookKind::Decision {
             proposal: 1,
             branch,
@@ -869,7 +870,12 @@ fn kind_from_seed(data: &[u8]) -> BookKind {
                 gate,
             }
         }
-        _ => BookKind::Baseline { epoch: 1 },
+        3 => BookKind::Baseline { epoch: 1 },
+        _ => BookKind::External {
+            question: 1,
+            client: 1,
+            branch,
+        },
     }
 }
 
@@ -1003,6 +1009,11 @@ fn side_position(kind: BookKind, side: ScalarSide) -> PositionId {
             gate,
         } => proposal_position(proposal, branch, gate_side_kind(gate, side)),
         BookKind::Baseline { epoch } => baseline_position(epoch, side),
+        BookKind::External {
+            question,
+            branch,
+            ..
+        } => proposal_position(question, branch, scalar_kind(side)),
     }
 }
 
@@ -1014,6 +1025,11 @@ fn liquid_position(kind: BookKind) -> Option<PositionId> {
         BookKind::Decision { proposal, branch }
         | BookKind::Gate {
             proposal, branch, ..
+        }
+        | BookKind::External {
+            question: proposal,
+            branch,
+            ..
         } => Some(proposal_position(
             proposal,
             branch,
@@ -1249,7 +1265,38 @@ impl LedgerOps<u8> for MockLedger {
 fn seeded_book(kind: BookKind, b: Balance) -> (MarketBook<u8>, MockLedger, Balance) {
     let book = MarketBook::open(7, kind, 9, 8, b);
     let mut ledger = MockLedger::default();
-    let headroom = seed_book(&book, &mut ledger, &1).expect("sensible b must seed");
+    let seeded = match kind {
+        BookKind::External {
+            question,
+            client,
+            branch,
+        } => {
+            let counterpart = MarketBook::open(
+                6,
+                BookKind::External {
+                    question,
+                    client,
+                    branch: match branch {
+                        Branch::Accept => Branch::Reject,
+                        Branch::Reject => Branch::Accept,
+                    },
+                },
+                7,
+                6,
+                b,
+            );
+            let (accept, reject) = match branch {
+                Branch::Accept => (&book, &counterpart),
+                Branch::Reject => (&counterpart, &book),
+            };
+            seed_external_pair(accept, reject, &mut ledger, &1)
+        }
+        BookKind::Decision { .. } | BookKind::Gate { .. } | BookKind::Baseline { .. } => {
+            seed_book(&book, &mut ledger, &1)
+        }
+    };
+    let headroom = seeded.map_or(0, |amount| amount);
+    assert!(headroom > 0, "sensible book must seed");
     (book, ledger, headroom)
 }
 
@@ -1368,13 +1415,20 @@ fn assert_book_state(
     );
 
     let liquid = liquid_position(book.kind).map_or(0, |id| ledger.balance(id, &book.account));
+    let locked_raw = if matches!(book.kind, BookKind::External { .. }) {
+        headroom
+    } else {
+        0
+    };
     for (side, q) in [
         (ScalarSide::Long, book.q_long),
         (ScalarSide::Short, book.q_short),
     ] {
         let scalar = ledger.balance(side_position(book.kind, side), &book.account);
-        let expected_available = i128::try_from(headroom).expect("range") + inventory
-            - i128::try_from(q).expect("range");
+        let funded_headroom = i128::try_from(headroom.saturating_add(locked_raw))
+            .map_or(i128::MAX, |value| value);
+        let quoted_inventory = i128::try_from(q).map_or(i128::MAX, |value| value);
+        let expected_available = funded_headroom + inventory - quoted_inventory;
         assert!(expected_available >= 0, "seeded headroom was exhausted");
         assert_eq!(
             scalar + liquid,
@@ -1434,12 +1488,19 @@ fn assert_round_trip(kind: BookKind, b: Balance, selector: u16) {
 
 pub fn assert_lmsr_case(case: &TradeCase) {
     let kind = case.kind;
+    let expected_route = match kind {
+        BookKind::External { .. } => LedgerRoute::Service,
+        BookKind::Decision { .. } | BookKind::Gate { .. } | BookKind::Baseline { .. } => {
+            LedgerRoute::Primary
+        }
+    };
+    assert_eq!(LedgerRoute::for_book(kind), expected_route);
     assert_round_trip(kind, case.b, case.round_trip_selector);
     let (mut book, mut ledger, headroom) = seeded_book(kind, case.b);
     // `net_revenue` is the signed gross cash flow (≥ 0 property); `inventory` is
     // the kind-specific USDC-equivalent the book has recycled net of delivery
     // (exact bookkeeping identity + I-12 drain ceiling). They coincide for
-    // Decision/Gate and diverge for the fee-retaining Baseline wrapper.
+    // Decision/Gate/External and diverge for the fee-retaining Baseline wrapper.
     let mut net_revenue = 0i128;
     let mut inventory = 0i128;
 
@@ -1856,7 +1917,7 @@ mod tests {
     /// historically solvency-buggy, so a buy→sell→interleave sequence on every
     /// kind is the load-bearing coverage.
     #[test]
-    fn lmsr_harness_covers_gate_and_baseline_books() {
+    fn lmsr_harness_covers_gate_baseline_and_external_books() {
         let trades = vec![
             TradeOp {
                 buy: true,
@@ -1894,6 +1955,11 @@ mod tests {
             BookKind::Decision {
                 proposal: 1,
                 branch: Branch::Reject,
+            },
+            BookKind::External {
+                question: 1,
+                client: 1,
+                branch: Branch::Accept,
             },
         ];
         for kind in kinds {

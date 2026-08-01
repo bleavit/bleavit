@@ -15,6 +15,7 @@ use futarchy_primitives::{
     PositionKind, ProposalId, QuoteView, ScalarSide, TradeSide, VaultState,
 };
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
+use question_service_core::{ClientId, QuestionId};
 use scale_info::TypeInfo;
 
 pub const FEE_BPS: u128 = 30;
@@ -463,6 +464,34 @@ pub enum BookKind {
     Baseline {
         epoch: EpochId,
     },
+    /// One of the hosted question service's exact Accept/Reject pair. The
+    /// question id is also the service-ledger proposal-vault id; `client`
+    /// makes the non-protocol funding domain impossible to erase while routing.
+    External {
+        question: QuestionId,
+        client: ClientId,
+        branch: Branch,
+    },
+}
+
+/// Exhaustive book-domain routing key. Keeping this pure dispatch point in the
+/// frame-free core makes the instance firewall directly fuzzable; the FRAME
+/// shell is forbidden from selecting an instance by any other input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LedgerRoute {
+    Primary,
+    Service,
+}
+
+impl LedgerRoute {
+    pub const fn for_book(kind: BookKind) -> Self {
+        match kind {
+            BookKind::Decision { .. } | BookKind::Gate { .. } | BookKind::Baseline { .. } => {
+                Self::Primary
+            }
+            BookKind::External { .. } => Self::Service,
+        }
+    }
 }
 
 #[derive(
@@ -950,6 +979,10 @@ impl<AccountId: Clone + Eq> MarketState<AccountId> {
         b: Balance,
     ) -> Result<(), Error> {
         ensure!(
+            !matches!(kind, BookKind::External { .. }),
+            Error::TryStateViolation
+        );
+        ensure!(
             self.markets.iter().all(|m| m.id != id),
             Error::DuplicateMarket
         );
@@ -967,6 +1000,48 @@ impl<AccountId: Clone + Eq> MarketState<AccountId> {
         Ok(())
     }
 
+    /// Atomically create exactly the hosted question's Accept/Reject pair.
+    /// The singular constructor above refuses `External`, so a frame-free
+    /// caller cannot represent a one-book service question (04 §3; 16 §7.6).
+    pub fn create_external_pair(
+        &mut self,
+        question: QuestionId,
+        client: ClientId,
+        accept: MarketId,
+        accept_account: AccountId,
+        accept_fees: AccountId,
+        reject: MarketId,
+        reject_account: AccountId,
+        reject_fees: AccountId,
+        b: Balance,
+    ) -> Result<(), Error> {
+        ensure!(accept != reject, Error::DuplicateMarket);
+        ensure!(
+            self.markets
+                .iter()
+                .all(|market| market.id != accept && market.id != reject),
+            Error::DuplicateMarket
+        );
+        for (id, branch, account, fees_account) in [
+            (accept, Branch::Accept, accept_account, accept_fees),
+            (reject, Branch::Reject, reject_account, reject_fees),
+        ] {
+            self.markets.push(MarketBook::open(
+                id,
+                BookKind::External {
+                    question,
+                    client,
+                    branch,
+                },
+                account,
+                fees_account,
+                b,
+            ));
+            self.events.push(Event::MarketCreated(id));
+        }
+        Ok(())
+    }
+
     pub fn seed(
         &mut self,
         ledger: &mut LedgerState<AccountId>,
@@ -980,6 +1055,42 @@ impl<AccountId: Clone + Eq> MarketState<AccountId> {
             .ok_or(Error::UnknownMarket)?;
         let headroom = seed_book(&self.markets[idx], ledger, treasury)?;
         self.events.push(Event::Seeded(id, headroom));
+        Ok(headroom)
+    }
+
+    /// Atomically seed the hosted service's two external books. Unlike the
+    /// protocol pair shortcut, this posts one headroom split per book and
+    /// locks every resulting branch leg in book custody.
+    pub fn seed_external_pair(
+        &mut self,
+        ledger: &mut LedgerState<AccountId>,
+        accept: MarketId,
+        reject: MarketId,
+        funder: &AccountId,
+    ) -> Result<Balance, Error> {
+        let accept_book = self
+            .markets
+            .iter()
+            .find(|book| book.id == accept)
+            .cloned()
+            .ok_or(Error::UnknownMarket)?;
+        let reject_book = self
+            .markets
+            .iter()
+            .find(|book| book.id == reject)
+            .cloned()
+            .ok_or(Error::UnknownMarket)?;
+        let ledger_before = ledger.clone();
+        let headroom = match seed_external_pair(&accept_book, &reject_book, ledger, funder) {
+            Ok(headroom) => headroom,
+            Err(error) => {
+                *ledger = ledger_before;
+                return Err(error);
+            }
+        };
+        for id in [accept, reject] {
+            self.events.push(Event::Seeded(id, headroom));
+        }
         Ok(headroom)
     }
 
@@ -1236,7 +1347,12 @@ pub fn buy_book<A: Clone + Eq, L: LedgerOps<A>>(
         Error::SlippageExceeded
     );
     match m.kind {
-        BookKind::Decision { proposal, branch } => buy_branch(
+        BookKind::Decision { proposal, branch }
+        | BookKind::External {
+            question: proposal,
+            branch,
+            ..
+        } => buy_branch(
             ledger,
             proposal,
             branch,
@@ -1331,7 +1447,12 @@ pub fn sell_book<A: Clone + Eq, L: LedgerOps<A>>(
     let net = sub(proceeds, fee)?;
     ensure!(net >= min_proceeds, Error::SlippageExceeded);
     match m.kind {
-        BookKind::Decision { proposal, branch } => sell_branch(
+        BookKind::Decision { proposal, branch }
+        | BookKind::External {
+            question: proposal,
+            branch,
+            ..
+        } => sell_branch(
             ledger,
             proposal,
             branch,
@@ -1391,7 +1512,10 @@ pub fn sell_book<A: Clone + Eq, L: LedgerOps<A>>(
     Ok(events)
 }
 
-/// Seed one book with its LMSR worst-case-loss headroom (04 §10).
+/// Seed one protocol book with its LMSR worst-case-loss headroom (04 §10).
+/// External books are pair-funded through [`seed_external_pair`]; refusing
+/// them here prevents a single split from leaving its signable mirror leg with
+/// the client while the book is nevertheless certified as seeded.
 pub fn seed_book<A: Clone + Eq, L: LedgerOps<A>>(
     m: &MarketBook<A>,
     ledger: &mut L,
@@ -1464,6 +1588,76 @@ pub fn seed_book<A: Clone + Eq, L: LedgerOps<A>>(
                 )
                 .map_err(|_| Error::Ledger)?;
         }
+        BookKind::External { .. } => return Err(Error::TryStateViolation),
+    }
+    Ok(headroom)
+}
+
+/// Seed an external Accept/Reject pair with **two** headroom splits, one per
+/// book (04 §3; 16 §8.2). Every leg minted by those splits moves out of the
+/// signable funder account before either book is marked seeded:
+///
+/// * each book scalar-splits `headroom` of its own branch into LMSR inventory;
+/// * the second `headroom` of that branch remains as raw branch-USDC in the
+///   same book, locking the other split's mirror until terminal withdrawal.
+///
+/// Thus service escrow increases by `2 * headroom`, the funder retains no
+/// complete pair it could merge early, and [`withdraw_book`] returns both the
+/// realizable LMSR inventory and the winning raw branch only to the immutable
+/// funder. The FRAME caller wraps this multi-operation sequence in one storage
+/// layer so every error is status-quo (G-1).
+pub fn seed_external_pair<A: Clone + Eq, L: LedgerOps<A>>(
+    accept: &MarketBook<A>,
+    reject: &MarketBook<A>,
+    ledger: &mut L,
+    funder: &A,
+) -> Result<Balance, Error> {
+    ensure!(
+        accept.id != reject.id && accept.b == reject.b,
+        Error::TryStateViolation
+    );
+    let question = match (accept.kind, reject.kind) {
+        (
+            BookKind::External {
+                question: left,
+                client: left_client,
+                branch: Branch::Accept,
+            },
+            BookKind::External {
+                question: right,
+                client: right_client,
+                branch: Branch::Reject,
+            },
+        ) if left == right && left_client == right_client => left,
+        _ => return Err(Error::TryStateViolation),
+    };
+    let headroom = seed_headroom(accept.b)?;
+    let branch_inventory = add(headroom, headroom)?;
+    for book in [accept, reject] {
+        ledger.note_protocol_account(book.account.clone());
+        ledger.note_protocol_account(book.fees_account.clone());
+    }
+    // Two cash deposits are normative even though one proposal split would
+    // mint enough mutually-exclusive branch collateral for both scalar books.
+    // The extra complete set is locked in the two book accounts, never left as
+    // an immediately mergeable client position.
+    for _ in 0..2 {
+        ledger
+            .do_split(question, funder, headroom)
+            .map_err(|_| Error::Ledger)?;
+    }
+    for (book, branch) in [(accept, Branch::Accept), (reject, Branch::Reject)] {
+        ledger
+            .do_transfer(
+                position(question, branch, PositionKind::BranchUsdc),
+                funder,
+                &book.account,
+                branch_inventory,
+            )
+            .map_err(|_| Error::Ledger)?;
+        ledger
+            .do_split_scalar(question, branch, &book.account, headroom)
+            .map_err(|_| Error::Ledger)?;
     }
     Ok(headroom)
 }
@@ -1567,7 +1761,12 @@ pub fn withdraw_book<A: Clone + Eq, L: LedgerOps<A>>(
     treasury: &A,
 ) -> Result<Balance, Error> {
     let (proposal, branch, gate) = match m.kind {
-        BookKind::Decision { proposal, branch } => (proposal, branch, None),
+        BookKind::Decision { proposal, branch }
+        | BookKind::External {
+            question: proposal,
+            branch,
+            ..
+        } => (proposal, branch, None),
         BookKind::Gate {
             proposal,
             branch,
@@ -1691,6 +1890,7 @@ pub fn withdraw_fees<A: Clone + Eq, L: LedgerOps<A>>(
     let fees = &m.fees_account;
     let proposal = match m.kind {
         BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. } => proposal,
+        BookKind::External { question, .. } => question,
         BookKind::Baseline { epoch } => {
             return match ledger.baseline_terminal(epoch).ok_or(Error::NotTerminal)? {
                 BaselineTerminal::Settled => {
@@ -3662,5 +3862,73 @@ mod tests {
             contest_capital(book.q_long, book.q_short, book.last_quote_1e9),
             Some(0)
         );
+    }
+
+    #[test]
+    fn external_books_are_scalar_but_each_posts_its_own_headroom() {
+        let mut ledger = LedgerState::new();
+        assert_eq!(ledger.create_vault(9, 0), Ok(()));
+        let mut market: MarketState<[u8; 32]> = MarketState::new();
+        assert_eq!(
+            market.create_external_pair(9, 3, 10, a(7), a(6), 11, a(5), a(4), B),
+            Ok(()),
+        );
+        assert_eq!(
+            market.seed_external_pair(&mut ledger, 10, 11, &a(1)),
+            seed_headroom(B),
+        );
+        let expected = seed_headroom(B)
+            .ok()
+            .and_then(|headroom| headroom.checked_mul(2));
+        let escrow = ledger
+            .vaults
+            .iter()
+            .find(|entry| entry.proposal == 9)
+            .map(|entry| entry.info.escrowed);
+        assert_eq!(escrow, expected);
+        for branch in [Branch::Accept, Branch::Reject] {
+            assert_eq!(
+                balance_of(
+                    &ledger,
+                    position(9, branch, PositionKind::BranchUsdc),
+                    &a(1),
+                ),
+                0,
+            );
+        }
+        assert_eq!(
+            ledger.merge(
+                LedgerOrigin::Signed,
+                9,
+                &a(1),
+                seed_headroom(B).unwrap_or(0)
+            ),
+            Err(conditional_ledger_core::Error::InsufficientPosition),
+        );
+    }
+
+    #[test]
+    fn external_pair_seed_is_status_quo_if_the_second_split_overflows() {
+        let mut ledger = LedgerState::new();
+        assert_eq!(ledger.create_vault(9, 0), Ok(()));
+        let headroom = seed_headroom(B).map_or(0, |amount| amount);
+        assert!(headroom > 0);
+        ledger.vaults[0].info.escrowed = Balance::MAX - headroom;
+        let before = ledger.clone();
+        let mut market: MarketState<[u8; 32]> = MarketState::new();
+        assert_eq!(
+            market.create_external_pair(9, 3, 10, a(7), a(6), 11, a(5), a(4), B),
+            Ok(()),
+        );
+
+        assert_eq!(
+            market.seed_external_pair(&mut ledger, 10, 11, &a(1)),
+            Err(Error::Ledger),
+        );
+        assert_eq!(ledger, before);
+        assert!(market
+            .events
+            .iter()
+            .all(|event| !matches!(event, Event::Seeded(..))));
     }
 }

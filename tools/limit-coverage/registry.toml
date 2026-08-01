@@ -953,6 +953,12 @@ error = "ClientRegistry::ClientsFull"
 reason = "13 §4 / 16 §2: the 65th values-governed admission is refused before its native bond hold or either registry index changes."
 
 [[entry]]
+key = "MaxExternalBookPairs"
+class = "dispatch-limit"
+error = "Market::TooManyExternalMarkets"
+reason = "13 §4 / 04 §3: the 65th immutable external pair is refused before vault, book, counter, or account-index mutation."
+
+[[entry]]
 key = "Books per proposal"
 class = "value"
 reason = "13 §4: structural per-proposal book count derived from fixed MarketKind composition; no call accepts an over-bound collection."
@@ -973,6 +979,24 @@ key = "MaxStoredMarkets"
 class = "dispatch-limit"
 error = "Market::TooManyStoredMarkets"
 reason = "13 §4; 15 §4.6: dispatch-path coverage for the 2,240-row retained-book envelope."
+
+[[entry]]
+key = "MaxLiveExternalMarkets"
+class = "dispatch-limit"
+error = "Market::TooManyExternalMarkets"
+reason = "13 §4 / 04 §3: a pair that would exceed the independent 128-live-external-book envelope is refused before any state mutation."
+
+[[entry]]
+key = "MaxStoredExternalMarkets"
+class = "dispatch-limit"
+error = "Market::TooManyExternalMarkets"
+reason = "13 §4 / 04 §3: a pair that would exceed the independent 128-retained-external-row envelope is refused before any state mutation."
+
+[[entry]]
+key = "MaxAllStoredMarkets"
+class = "dispatch-limit"
+error = "Market::TooManyStoredMarkets"
+reason = "13 §4 / 04 §3: the physical shared-map ceiling is checked independently after the two logical partition checks; a direct-state fixture reaches that final guard and proves status quo on refusal."
 
 [[entry]]
 key = "Concurrently trading books"

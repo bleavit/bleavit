@@ -3255,6 +3255,23 @@ impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureEpochAccount {
         Ok(RuntimeOrigin::signed(epoch_account()))
     }
 }
+
+/// N6 lands the market-side service seam before N7 owns runtime slots 66/67.
+/// The release runtime therefore refuses every external lifecycle operation;
+/// unit tests bind the real `Instance1` ledger instead.
+pub struct NoExternalMarketAdmin;
+impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for NoExternalMarketAdmin {
+    type Success = u32;
+
+    fn try_origin(origin: RuntimeOrigin) -> Result<Self::Success, RuntimeOrigin> {
+        Err(origin)
+    }
+
+    #[cfg(feature = "runtime-benchmarks")]
+    fn try_successful_origin() -> Result<RuntimeOrigin, ()> {
+        Err(())
+    }
+}
 pub struct EnsureExecutionGuardAccount;
 impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureExecutionGuardAccount {
     type Success = AccountId;
@@ -3359,8 +3376,9 @@ impl pallet_conditional_ledger::Config<()> for Runtime {
     type ArchiveDelay = LedgerArchiveDelay;
     type ReapBatch = ConstU32<{ kernel::REAP_BATCH }>;
     type ProtocolAccounts = ProtocolAccounts;
+    type ReservedProtocolDestinations = ProtocolAccounts;
     type InsuranceAccount = InsuranceAccount;
-    type MarketSweepStatus = Market;
+    type MarketSweepStatus = pallet_market::PrimaryMarketSweepStatus<Runtime>;
     type ResidueReporter = RuntimeResidueReporter;
     type MainRevenueSink = RuntimeMainRevenueSink;
     type PalletId = LedgerPalletId;
@@ -3434,6 +3452,7 @@ fn market_window_end(id: futarchy_primitives::MarketId) -> Option<BlockNumber> {
                 .map(|proposal| proposal.decide_at)
                 .max()
         }
+        pallet_market::core_market::BookKind::External { .. } => None,
     }
 }
 
@@ -3633,6 +3652,7 @@ fn contest_floor_for_grade(
                 .map(|proposal| effective_decision_contest_floor(&proposal, params))
                 .max()
         }
+        pallet_market::core_market::BookKind::External { .. } => None,
     }
 }
 
@@ -4702,6 +4722,11 @@ impl pallet_market::Config for Runtime {
     type ObsInterval = MarketObsInterval;
     type Kappa1e9 = MarketKappa;
     type MarketAdmin = EnsureEpochAccount;
+    type ExternalMarketAdmin = NoExternalMarketAdmin;
+    type ServiceLedger = ();
+    type PrimaryProposalIds = RuntimePrimaryProposalIds;
+    type ReservedProtocolDestinations = ProtocolAccounts;
+    type MaxLiveExternalMarkets = ConstU32<0>;
     type EmergencyPlaybookOrigin = pallet_origins::EnsureEmergencyPlaybook;
     type ArchiveDelay = LedgerArchiveDelay;
     type PalletId = MarketPalletId;
@@ -4712,6 +4737,13 @@ impl pallet_market::Config for Runtime {
     type MainAccount = TreasuryMainAccount;
     type MainRevenueSink = RuntimeMainRevenueSink;
     type BaselineGrade = RuntimeBaselineGrade;
+}
+
+pub struct RuntimePrimaryProposalIds;
+impl pallet_market::PrimaryProposalIdProvider for RuntimePrimaryProposalIds {
+    fn next_proposal_id() -> futarchy_primitives::ProposalId {
+        pallet_epoch::NextProposalId::<Runtime>::get()
+    }
 }
 
 pub struct RuntimeEpochOracle;

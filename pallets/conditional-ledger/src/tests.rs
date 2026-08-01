@@ -8,9 +8,9 @@
 //! differential check.
 
 use crate::{
-    mock::*, BaselineVaults, DepositsHeld, Error, Event, LastReconciliation, LedgerDrifted,
-    PositionCount, PositionTotals, Positions, ReconciliationSample, TotalEscrowed, VaultTerminalAt,
-    Vaults,
+    mock::*, BaselineVaults, DepositsHeld, Error, Event, InventoryReturn, LastReconciliation,
+    LedgerDrifted, PositionCount, PositionTotals, Positions, ReconciliationSample, TotalEscrowed,
+    VaultTerminalAt, Vaults,
 };
 use conditional_ledger_core::{
     baseline as baseline_pos, position as pos, BaselineState, LedgerOrigin, LedgerState,
@@ -2072,7 +2072,13 @@ fn the_market_return_surface_is_market_authority_only() {
 
         for origin in [signed(ALICE), signed(RESOLVER), RawOrigin::Root.into()] {
             assert_noop!(
-                Ledger::do_redeem_scalar_pair(origin, 1, BOOK, POL, UNIT),
+                Ledger::do_redeem_scalar_pair(
+                    origin,
+                    1,
+                    BOOK,
+                    InventoryReturn::Protocol(POL),
+                    UNIT,
+                ),
                 DispatchError::BadOrigin,
             );
         }
@@ -2116,12 +2122,24 @@ fn the_market_return_surface_moves_protocol_inventory_to_protocol_custody_only()
 
         // A claimant holder is refused.
         assert_noop!(
-            Ledger::do_redeem_scalar_pair(signed(MARKET), 1, ALICE, POL, UNIT),
+            Ledger::do_redeem_scalar_pair(
+                signed(MARKET),
+                1,
+                ALICE,
+                InventoryReturn::Protocol(POL),
+                UNIT,
+            ),
             E::TryStateViolation,
         );
         // A claimant payee is refused.
         assert_noop!(
-            Ledger::do_redeem_scalar_pair(signed(MARKET), 1, BOOK, ALICE, UNIT),
+            Ledger::do_redeem_scalar_pair(
+                signed(MARKET),
+                1,
+                BOOK,
+                InventoryReturn::Protocol(ALICE),
+                UNIT,
+            ),
             E::TryStateViolation,
         );
         assert_eq!(usdc(ALICE), alice_before);
@@ -2129,6 +2147,73 @@ fn the_market_return_surface_moves_protocol_inventory_to_protocol_custody_only()
             Positions::<Test>::get(pos(1, Branch::Accept, PositionKind::Long), ALICE),
             4 * UNIT
         );
+        try_state();
+    });
+}
+
+#[test]
+fn exact_funder_return_binds_holder_and_keeps_the_funder_non_protocol() {
+    new_test_ext().execute_with(|| {
+        create(1);
+        assert_ok!(Ledger::do_split(signed(MARKET), 1, BOOK, 2 * UNIT));
+        assert_ok!(Ledger::do_split_scalar(
+            signed(MARKET),
+            1,
+            Branch::Accept,
+            BOOK,
+            2 * UNIT,
+        ));
+        assert_ok!(Ledger::resolve(signed(RESOLVER), 1, Branch::Accept));
+        assert_ok!(Ledger::settle_scalar(
+            signed(SETTLER),
+            1,
+            FixedU64(500_000_000),
+        ));
+
+        // A capability for another protocol holder cannot burn this book's row.
+        assert_noop!(
+            Ledger::do_redeem_scalar_pair(
+                signed(MARKET),
+                1,
+                BOOK,
+                InventoryReturn::ExactFunder {
+                    holder: POL,
+                    funder: ALICE,
+                },
+                UNIT,
+            ),
+            E::TryStateViolation,
+        );
+        // Exact-funder return is not a second protocol-destination arm.
+        assert_noop!(
+            Ledger::do_redeem_scalar_pair(
+                signed(MARKET),
+                1,
+                BOOK,
+                InventoryReturn::ExactFunder {
+                    holder: BOOK,
+                    funder: POL,
+                },
+                UNIT,
+            ),
+            E::TryStateViolation,
+        );
+
+        let before = usdc(ALICE);
+        assert_eq!(
+            Ledger::do_redeem_scalar_pair(
+                signed(MARKET),
+                1,
+                BOOK,
+                InventoryReturn::ExactFunder {
+                    holder: BOOK,
+                    funder: ALICE,
+                },
+                UNIT,
+            ),
+            Ok(UNIT),
+        );
+        assert_eq!(usdc(ALICE), before + UNIT);
         try_state();
     });
 }
@@ -2167,12 +2252,25 @@ fn the_market_return_surface_reports_the_exact_gross_payout() {
         let pol_before = usdc(POL);
         let escrow_before = escrow(1);
         assert_eq!(
-            Ledger::do_redeem_scalar_pair(signed(MARKET), 1, BOOK, POL, 4 * UNIT),
+            Ledger::do_redeem_scalar_pair(
+                signed(MARKET),
+                1,
+                BOOK,
+                InventoryReturn::Protocol(POL),
+                4 * UNIT,
+            ),
             Ok(4 * UNIT),
         );
         // `floor(a·(1−s))` on the residual SHORT: 1 USDC × 0.25.
         assert_eq!(
-            Ledger::do_redeem_scalar(signed(MARKET), 1, ScalarSide::Short, BOOK, POL, UNIT),
+            Ledger::do_redeem_scalar(
+                signed(MARKET),
+                1,
+                ScalarSide::Short,
+                BOOK,
+                InventoryReturn::Protocol(POL),
+                UNIT,
+            ),
             Ok(UNIT / 4),
         );
         let paid = 4 * UNIT + UNIT / 4;
@@ -2216,7 +2314,7 @@ fn the_market_return_surface_pays_the_void_schedule_and_the_baseline_pair() {
                 Branch::Accept,
                 PositionKind::Long,
                 BOOK,
-                POL,
+                InventoryReturn::Protocol(POL),
                 4 * UNIT,
             ),
             Ok(UNIT),
@@ -2228,14 +2326,20 @@ fn the_market_return_surface_pays_the_void_schedule_and_the_baseline_pair() {
                 Branch::Reject,
                 PositionKind::BranchUsdc,
                 BOOK,
-                POL,
+                InventoryReturn::Protocol(POL),
                 4 * UNIT,
             ),
             Ok(2 * UNIT),
         );
         // Baseline complete sets pay par.
         assert_eq!(
-            Ledger::do_redeem_baseline_pair(signed(MARKET), 9, BOOK, POL, 4 * UNIT),
+            Ledger::do_redeem_baseline_pair(
+                signed(MARKET),
+                9,
+                BOOK,
+                InventoryReturn::Protocol(POL),
+                4 * UNIT,
+            ),
             Ok(4 * UNIT),
         );
         assert_eq!(usdc(POL), pol_before + UNIT + 2 * UNIT + 4 * UNIT);
@@ -2456,7 +2560,13 @@ fn protocol_accounts_are_exempt_on_every_charged_call() {
         // The gross is returned in full, and the wrapper's reported figure is
         // the real custody move.
         assert_eq!(
-            Ledger::do_redeem_scalar_pair(signed(MARKET), 1, BOOK, POL, 20_000),
+            Ledger::do_redeem_scalar_pair(
+                signed(MARKET),
+                1,
+                BOOK,
+                InventoryReturn::Protocol(POL),
+                20_000,
+            ),
             Ok(20_000)
         );
         assert_eq!(usdc(POL) - pol_before, 20_000);

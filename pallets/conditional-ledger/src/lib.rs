@@ -97,6 +97,24 @@ pub trait MarketSweepStatus {
     fn baseline_book_swept(epoch: futarchy_primitives::EpochId) -> bool;
 }
 
+/// Destination capability for the market authority's terminal-inventory
+/// return surface (04 §3; 16 §7.3).
+///
+/// The ordinary arm preserves the existing protocol-custody firewall. The
+/// external arm is deliberately narrower: it binds both the exact protocol
+/// holder whose inventory may burn and the exact non-protocol funder who may
+/// receive the payout. `pallet-market` constructs that pair only from its
+/// immutable external-book record; this pallet independently checks both
+/// classifications and the holder equality before moving collateral.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InventoryReturn<AccountId> {
+    Protocol(AccountId),
+    ExactFunder {
+        holder: AccountId,
+        funder: AccountId,
+    },
+}
+
 /// Runtime-owned reporter for 03 §5.4 residue transferred into INSURANCE.
 ///
 /// The transfer and this report are one accounting operation: production
@@ -251,11 +269,16 @@ pub mod pallet {
         #[pallet::constant]
         type ReapBatch: Get<u32>;
 
-        /// POL / book / treasury-sub / INSURANCE accounts — exempt from the
-        /// position cap and the storage deposit (03 §3/§4). Since 03 §5.3a they
-        /// are additionally exempt from the redemption fee; the enumeration is
-        /// normative and is the same closed set §5.3a(1) names.
+        /// Accounts local to this ledger instance: fee/deposit/cap exempt and
+        /// eligible for internal custody operations (03 §1a). This MUST NOT be
+        /// the cross-instance union.
         type ProtocolAccounts: Contains<Self::AccountId>;
+
+        /// Union of reserved protocol destinations across every ledger/domain.
+        /// Signed transfers refuse this set so positions cannot be stranded in
+        /// another instance's custody address (03 §1a). This predicate grants
+        /// no fee/deposit/cap exemption.
+        type ReservedProtocolDestinations: Contains<Self::AccountId>;
 
         /// `ledger.redeem_fee` — the 03 §5.3a redemption-fee rate, read live
         /// from `pallet-constitution::Params` (normative row: 13 §1). A missing
@@ -810,7 +833,7 @@ pub mod pallet {
             // Signed ingress would otherwise poison a future predictable address
             // or create inventory outside the fixed market-reap universe.
             ensure!(
-                !T::ProtocolAccounts::contains(&to),
+                !T::ReservedProtocolDestinations::contains(&to),
                 Error::<T, I>::ProtocolDestination
             );
             let (pid, epoch, is_proposal) = Self::id_home(position);
@@ -1445,23 +1468,22 @@ pub mod pallet {
         // `RevenueSwept.pol_returned` and the treasury credits back to its
         // `POL`/`POL_BASELINE` budget line (I-33).
         //
-        // Both parties MUST be protocol accounts. That is the same containment
-        // `discard_protocol_inventory` uses and it is exactly the 03 §5.3a
-        // `ProtocolAccounts` exemption boundary: this surface can only ever move
-        // protocol inventory to a protocol custody account, so a miswired market
-        // authority cannot redeem a claimant's position or pay an arbitrary
-        // payee, and the payouts are fee-free by construction (I-32(c)).
+        // The holder MUST always be a local protocol account. The ordinary
+        // destination is protocol custody as before. The sole exception is the
+        // typed exact-funder capability: it binds this exact holder to one exact
+        // non-protocol recipient recorded immutably by the external book. It is
+        // not a protocol-account exemption and cannot redeem claimant inventory.
 
         /// Winning branch-USDC at par (03 §5.3 `redeem`). `MarketAuthority`.
         pub fn do_redeem(
             origin: OriginFor<T>,
             pid: ProposalId,
             holder: T::AccountId,
-            recipient: T::AccountId,
+            destination: crate::InventoryReturn<T::AccountId>,
             amount: Balance,
         ) -> Result<Balance, DispatchError> {
             T::MarketAuthority::ensure_origin(origin)?;
-            Self::ensure_protocol_return(&holder, &recipient)?;
+            let recipient = Self::ensure_inventory_return(&holder, destination)?;
             Self::run_proposal_paid(pid, core::slice::from_ref(&holder), &recipient, |st| {
                 st.redeem(pid, &holder, amount)
             })
@@ -1473,11 +1495,11 @@ pub mod pallet {
             pid: ProposalId,
             side: ScalarSide,
             holder: T::AccountId,
-            recipient: T::AccountId,
+            destination: crate::InventoryReturn<T::AccountId>,
             amount: Balance,
         ) -> Result<Balance, DispatchError> {
             T::MarketAuthority::ensure_origin(origin)?;
-            Self::ensure_protocol_return(&holder, &recipient)?;
+            let recipient = Self::ensure_inventory_return(&holder, destination)?;
             Self::run_proposal_paid(pid, core::slice::from_ref(&holder), &recipient, |st| {
                 st.redeem_scalar(pid, side, &holder, amount)
             })
@@ -1488,11 +1510,11 @@ pub mod pallet {
             origin: OriginFor<T>,
             pid: ProposalId,
             holder: T::AccountId,
-            recipient: T::AccountId,
+            destination: crate::InventoryReturn<T::AccountId>,
             amount: Balance,
         ) -> Result<Balance, DispatchError> {
             T::MarketAuthority::ensure_origin(origin)?;
-            Self::ensure_protocol_return(&holder, &recipient)?;
+            let recipient = Self::ensure_inventory_return(&holder, destination)?;
             Self::run_proposal_paid(pid, core::slice::from_ref(&holder), &recipient, |st| {
                 st.redeem_scalar_pair(pid, &holder, amount)
             })
@@ -1504,11 +1526,11 @@ pub mod pallet {
             pid: ProposalId,
             gate: GateType,
             holder: T::AccountId,
-            recipient: T::AccountId,
+            destination: crate::InventoryReturn<T::AccountId>,
             amount: Balance,
         ) -> Result<Balance, DispatchError> {
             T::MarketAuthority::ensure_origin(origin)?;
-            Self::ensure_protocol_return(&holder, &recipient)?;
+            let recipient = Self::ensure_inventory_return(&holder, destination)?;
             Self::run_proposal_paid(pid, core::slice::from_ref(&holder), &recipient, |st| {
                 st.redeem_gate(pid, gate, &holder, amount)
             })
@@ -1521,11 +1543,11 @@ pub mod pallet {
             branch: Branch,
             kind: PositionKind,
             holder: T::AccountId,
-            recipient: T::AccountId,
+            destination: crate::InventoryReturn<T::AccountId>,
             amount: Balance,
         ) -> Result<Balance, DispatchError> {
             T::MarketAuthority::ensure_origin(origin)?;
-            Self::ensure_protocol_return(&holder, &recipient)?;
+            let recipient = Self::ensure_inventory_return(&holder, destination)?;
             Self::run_proposal_paid(pid, core::slice::from_ref(&holder), &recipient, |st| {
                 st.redeem_void(pid, branch, kind, &holder, amount)
             })
@@ -1537,11 +1559,11 @@ pub mod pallet {
             epoch: EpochId,
             side: ScalarSide,
             holder: T::AccountId,
-            recipient: T::AccountId,
+            destination: crate::InventoryReturn<T::AccountId>,
             amount: Balance,
         ) -> Result<Balance, DispatchError> {
             T::MarketAuthority::ensure_origin(origin)?;
-            Self::ensure_protocol_return(&holder, &recipient)?;
+            let recipient = Self::ensure_inventory_return(&holder, destination)?;
             Self::run_baseline_paid(epoch, core::slice::from_ref(&holder), &recipient, |st| {
                 st.redeem_baseline(epoch, side, &holder, amount)
             })
@@ -1552,28 +1574,46 @@ pub mod pallet {
             origin: OriginFor<T>,
             epoch: EpochId,
             holder: T::AccountId,
-            recipient: T::AccountId,
+            destination: crate::InventoryReturn<T::AccountId>,
             amount: Balance,
         ) -> Result<Balance, DispatchError> {
             T::MarketAuthority::ensure_origin(origin)?;
-            Self::ensure_protocol_return(&holder, &recipient)?;
+            let recipient = Self::ensure_inventory_return(&holder, destination)?;
             Self::run_baseline_paid(epoch, core::slice::from_ref(&holder), &recipient, |st| {
                 st.redeem_baseline_pair(epoch, &holder, amount)
             })
         }
 
-        /// Containment for the return surface above: protocol inventory only,
-        /// protocol custody only. `TryStateViolation` mirrors the identical
-        /// classification refusal in `discard_protocol_inventory`.
-        fn ensure_protocol_return(
+        /// Containment for the return surface above. The exact-funder arm is a
+        /// return capability, not an account-classification exemption: its
+        /// funder MUST remain non-protocol and its embedded holder MUST be the
+        /// protocol inventory holder supplied to the redemption operation.
+        fn ensure_inventory_return(
             holder: &T::AccountId,
-            recipient: &T::AccountId,
-        ) -> DispatchResult {
-            ensure!(
-                Self::is_protocol(holder) && Self::is_protocol(recipient),
-                Error::<T, I>::TryStateViolation
-            );
-            Ok(())
+            destination: crate::InventoryReturn<T::AccountId>,
+        ) -> Result<T::AccountId, DispatchError> {
+            ensure!(Self::is_protocol(holder), Error::<T, I>::TryStateViolation);
+            match destination {
+                crate::InventoryReturn::Protocol(recipient) => {
+                    ensure!(
+                        Self::is_protocol(&recipient),
+                        Error::<T, I>::TryStateViolation
+                    );
+                    Ok(recipient)
+                }
+                crate::InventoryReturn::ExactFunder {
+                    holder: expected_holder,
+                    funder,
+                } => {
+                    ensure!(
+                        expected_holder == *holder
+                            && !T::ReservedProtocolDestinations::contains(&funder)
+                            && !T::ProtocolAccounts::contains(&funder),
+                        Error::<T, I>::TryStateViolation
+                    );
+                    Ok(funder)
+                }
+            }
         }
     }
 
