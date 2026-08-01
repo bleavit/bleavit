@@ -51,7 +51,8 @@ holds the roster.
 |---|---|
 | `location: Location` | The client's XCM origin, matched by **exact equality** — never by prefix, never after `DescendOrigin`/`AliasOrigin` |
 | `client_id: ClientId` (`u32`) | The dense handle everything else keys on. `Location`'s ~306-byte `MaxEncodedLen` must never enter `OriginCaller`, which `pallet-scheduler`'s bounded `Agenda` would not survive |
-| `bond: Balance` | Held for the life of the registration; the source of egress delivery fees (§9) and the first loss on abuse |
+| `bond: Balance` | Native **VIT**, held for the life of the registration on the B19 (`pallet-attestor`) custody discipline. The first loss on abuse |
+| `delivery_float: Balance` | **USDC**, client-topped-up, and the *only* source of egress delivery fees (§9). Separate from the bond deliberately — see below |
 | `admitted_at`, `questions_live`, `questions_total` | Meter state |
 
 **Admission is a values-track act** (`ConstitutionalValues`, per [06](./06-governance-and-guardians.md)
@@ -66,6 +67,22 @@ sub-identity cannot be asserted to Bleavit at all. A client that needs per-contr
 supplies an opaque `sub_id: [u8; 32]` which Bleavit **stores, echoes in the report, binds into the
 provenance hash, and never interprets**. Bleavit makes no claim about who inside a client chain
 asked a question — the client chain does, to its own users, using a field Bleavit merely carries.
+
+**Why two balances rather than one (normative; SQ-565 resolution, 2026-08-01).** An earlier
+revision made the bond the source of prepaid egress delivery fees, and the bond is native VIT while
+XCM delivery is paid in an asset the router accepts — DOT or USDC under
+[09](./09-execution-upgrades-and-rollout.md) §6.1's trader, **never VIT**. That named a conversion
+that does not exist, at a price nothing publishes. The precedent was genuinely mixed rather than
+obviously one way (`att.bond` is native VIT; `orc.reporter_stake` is 100,000 USDC), so this is a
+values judgement and it is taken here rather than deferred: **the bond stays VIT and a separate
+USDC `delivery_float` pays for delivery.** Two balances are more to reason about than one, and that
+cost is accepted for a specific reason — it is the only resolution that introduces **no price**.
+Charging VIT at a governed rate would put a VIT/USDC rate on a fee path, and
+[08](./08-treasury-and-economics.md) §9's placeholder rate is explicitly not fit for that; making
+the whole bond USDC would discard the B19 hold discipline for a security deposit that is
+governance-adjacent by nature. A float that runs dry stops **pushes only** — the pull surface is
+unaffected, because §9 already makes pull the authoritative delivery and push best-effort, so an
+empty float degrades exactly the leg that was already allowed to fail.
 
 **Off-chain services** cannot send XCM. They use the identical calls from a **local signed
 account** — but that account must be bound in the registry, and an earlier revision's
@@ -667,7 +684,7 @@ exactly what I-24 forbids.
 Push therefore ships with four structural preconditions, together forming **I-36**:
 
 1. a dedicated `ClientEgressRouter = TopicRouter` that **does not wrap** `HealthTrackingRouter`;
-2. delivery fees **prepaid from the client's bond**, never a treasury outflow;
+2. delivery fees **prepaid from the client's USDC `delivery_float`** (§2), never from the VIT bond and never a treasury outflow; an exhausted float stops pushes and nothing else;
 3. the send outcome **best-effort and never read back** into any Bleavit state;
 4. push failures surfaced on a **non-welfare** counter plus a [12](./12-release-and-operations.md)
    §6.3 alert row.
