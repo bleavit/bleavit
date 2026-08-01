@@ -22,6 +22,11 @@
       "id": "oracle.bond_custody_absent",
       "owner": "A9",
       "reason": "SQ-263: oracle and attestor registration bonds have no economic custody — registration and slashing carry no capital cost"
+    },
+    {
+      "id": "collator.rate_unverified",
+      "owner": "E5",
+      "reason": "SQ-536: `collator.comp_epoch` ships seeded at its 500 registry minimum, anchored to Polkadot OpenGov referendum #1870 ($307.24/collator/month fully loaded = 211.97 USDC/epoch, a 2.36x margin). That anchor prices operators who ALREADY run Polkadot infrastructure, i.e. a marginal cost, and this chain's operators may amortize nothing. 13 §1 requires the rate to be re-verified against operator quotes obtained for THIS chain -- and amended if they exceed it -- before production launch and before each enlargement of the collator set, the invulnerable launch set included, since invulnerability governs selection and not willingness to author. Cleared by recording those quotes in PLAN.md's Verification log"
     }
   ],
   "entries": [

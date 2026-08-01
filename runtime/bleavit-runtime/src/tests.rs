@@ -3436,6 +3436,13 @@ fn production_xcm_remote_keyed_trap_is_recoverable_only_by_asset_hub_claim() {
         let recovery_beneficiary = account(57);
         let amount = 20 * currency::USDC;
         let issuance_before = ForeignAssets::total_issuance(usdc_location());
+        // SQ-540(e): BOTH messages in this test pay an execution fee — the one
+        // that strands the holding and the one that reclaims it — and neither
+        // is burned any more, so the baseline has to be taken here rather than
+        // just before the recovery.
+        let treasury_usdc_before =
+            ForeignAssets::balance(usdc_location(), crate::genesis::treasury_account());
+        let pending_credit_before = pallet_futarchy_treasury::PendingMainCredit::<Runtime>::get();
         set_balance_param_value(b"phase3.tvl_cap", issuance_before.saturating_add(amount));
         set_balance_param_value(b"phase3.dep_cap", amount);
 
@@ -3554,12 +3561,37 @@ fn production_xcm_remote_keyed_trap_is_recoverable_only_by_asset_hub_claim() {
             pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&recovery_beneficiary),
             recovered
         );
+        // The paid execution fee is protocol revenue now, not litter. Before
+        // SQ-540(e) it was dropped, which did not destroy value so much as
+        // convert it into unrepresented surplus backing in the sovereign
+        // account on Asset Hub — real, but invisible to `nav()` and therefore
+        // unable to fund anything. Routing it to `MAIN` leaves local issuance
+        // and the reserve in exactly the same relation while making the value
+        // spendable.
+        let fee_to_treasury =
+            ForeignAssets::balance(usdc_location(), crate::genesis::treasury_account())
+                .saturating_sub(treasury_usdc_before);
+        assert!(
+            fee_to_treasury > 0,
+            "the paid execution fees must reach the treasury"
+        );
         let issuance_after_recovery = ForeignAssets::total_issuance(usdc_location());
         assert!(issuance_after_recovery <= issuance_after_trap);
         assert_eq!(
             issuance_after_recovery,
-            issuance_before.saturating_add(recovered),
-            "claim reconstruction adds no issuance; only paid recovery fees are removed"
+            issuance_before
+                .saturating_add(recovered)
+                .saturating_add(fee_to_treasury),
+            "claim reconstruction adds no issuance; the paid recovery fee is retained \
+             by the protocol rather than burned, so the reclaimed total is preserved"
+        );
+        // Custody alone would leave the fee outside NAV and drift the 08 §6.3
+        // pot-vs-line alarm, so the recognition half is asserted with it.
+        assert_eq!(
+            pallet_futarchy_treasury::PendingMainCredit::<Runtime>::get()
+                .saturating_sub(pending_credit_before),
+            fee_to_treasury,
+            "the deposited fee is recognized as internal MAIN credit, so it reaches NAV"
         );
     });
 }
@@ -21050,6 +21082,58 @@ fn the_seeded_keeper_rebate_tracks_the_measured_crank_fee() {
              {seeded_rebate} uUSDC against a 3x target of {target} uUSDC \
              (measured fee {fee_uusdc} uUSDC, basis constant {basis}). \
              Re-derive KEEPER_REBATE_FEE_BASIS_USDC per 08 §6.2 (SQ-531).",
+        );
+    });
+}
+
+/// SQ-539. The SDK's parallel collator-reward path, pinned dormant.
+///
+/// `pallet_authorship::Config::EventHandler` is the tuple
+/// `(CollatorSelection, RuntimeCollatorAuthorship)`, so the SDK's
+/// `CollatorSelection::note_author` runs on **every block**. It does two
+/// things: it maintains `LastAuthoredBlock` (which drives candidate kick-out,
+/// so it cannot simply be unhooked), and it pays the block author **half the
+/// `PotStake` pot**.
+///
+/// That payout is a second, entirely ungoverned collator-compensation path
+/// running alongside 08 §2.4's `ops.collators` — no per-epoch meter, no origin
+/// check, no budget line, no NAV accounting, and no `try-state` coverage. It is
+/// invisible to 08 §10.1's cost table, which is why nothing had noticed it.
+///
+/// It is inert **by construction rather than by design**: nothing funds
+/// `PotStake` (genesis endows it nothing and 08 §9 burns collected VIT fees),
+/// and `note_author`'s reward is a fraction of the pot, so an empty pot pays
+/// zero. But `PotStake` is an ordinary `PalletId`-derived account and anyone
+/// may transfer VIT into it, at which point it starts paying out per block.
+///
+/// This test pins the dormancy so the assumption is checked rather than
+/// assumed, and so that funding the pot — deliberately or by accident — turns
+/// into a failing test rather than a silent outflow. Whether the pot should be
+/// made unfundable, swept, or formally adopted as the collator path is a
+/// values/design question, filed as SQ-539.
+#[test]
+fn the_sdk_collator_reward_pot_is_unfunded_so_its_payout_path_is_dormant() {
+    use frame_support::traits::fungible::Inspect;
+    use sp_runtime::traits::AccountIdConversion;
+
+    development_ext().execute_with(|| {
+        let pot: AccountId =
+            <Runtime as pallet_collator_selection::Config>::PotId::get().into_account_truncating();
+
+        // The pot holds nothing, so `note_author`'s `pot / 2` reward is zero.
+        let balance = <Balances as Inspect<AccountId>>::balance(&pot);
+        assert_eq!(
+            balance, 0,
+            "PotStake is funded ({balance}) — the SDK's ungoverned per-block \
+             collator payout is live and competes with ops.collators (SQ-539)"
+        );
+
+        // And it is genuinely a distinct account from the protocol's own
+        // governed collator custody pot, so the two cannot be conflated.
+        assert_ne!(
+            pot,
+            crate::configs::treasury_collators_account(),
+            "the SDK pot must not alias the 08 §2.4 COLLATOR custody pot"
         );
     });
 }

@@ -139,7 +139,13 @@ Read this file first. Then read `PLAN.md`. Then work.
   identical exhaustive CI rerun before moving on. This is a handoff rule, not a
   gate waiver: meaningful code, build, workflow, dependency, generated-artifact,
   or test changes still require their appropriate fresh evidence, and any observed
-  failure must be investigated. Do not launch concurrent duplicate Cargo gates;
+  failure must be investigated. **CI supersedes its own in-flight runs since
+  2026-07-31**: `ci.yml` and `sweep.yml` carry a `concurrency` group keyed on
+  `github.ref` with `cancel-in-progress` on every ref except `main`, so pushing
+  again to a branch *cancels* the previous run rather than queueing beside it.
+  A run that shows `cancelled` after you pushed is that, not a failure — check
+  the newest run for the branch. `main` never cancels, because there each run is
+  the record for its own commit. Do not launch concurrent duplicate Cargo gates;
   `tools/ci/rust-workspace-gates.sh --changed [PACKAGE...]` provides a locked,
   changed-scope feedback loop, while the no-argument script remains exhaustive.
   When CI polling is useful, poll no more than once every five minutes. Standing
@@ -202,7 +208,17 @@ per milestone):
 >                                                          # target dir
 > ```
 >
-> `tools/ci/regenerate-weights.py` needs the same first variable **plus**
+> **Put the `libclang` directory somewhere session-scoped, and re-check it before a
+long run (learned 2026-07-31).** `/tmp` is swept on this box: a `libclang` dir
+created early in a session can be gone by the time the exhaustive gate runs, and
+the failure surfaces as a `clang-sys` build-script panic (*"couldn't find any
+valid shared libraries … (invalid: [])"*) that reads like a toolchain problem
+rather than a missing symlink. Two further traps in the same line: point the
+symlink at a **real** `libclang-14.so.1`, not at `libclang.so.1` if that name does
+not exist here, and verify with `ls -lL` (which follows the link) rather than
+`ls -l` (which happily shows a dangling one).
+
+`tools/ci/regenerate-weights.py` needs the same first variable **plus**
 > `--runtime <CARGO_TARGET_DIR>/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm`,
 > because it defaults to the in-repo `target/`.
 
@@ -239,9 +255,9 @@ per milestone):
 | `tools/release/` | B8 + B16 done; B15 closeout | Release-artifact publication tooling (02 §11; 15 §5): reproducible runtime-profile builds, booted-node metadata extraction with `:code`↔wasm binding, the 02 critical-surface manifest + deterministic chainHead fixture recorder, content-addressed assembly with readiness report, the `bleavit.env-evidence.v1` contract (produced by `tools/env/run-evidence.py`, B7), `environments.json` live-env inventory — see `tools/release/README.md`. B16 added the machine-readable bootstrap/Phase-4 primary+recovery profile matrix: a release selects only the primary profile and automatically builds, boots and binds its same-commit zero-SDK-MBM terminal-recovery pair at exactly the next spec version. B15 admits the first bounded primary MBM only with its paired exhaustive ledger cutpoint repair. A real tag release still fails closed on missing per-release B7 evidence and the manifest's unresolved adoption blockers. |
 | `crates/` | scaffold | `futarchy-primitives` (M1) and `futarchy-fixed` (M2) live here; Track A's per-pallet **frame-free functional cores** land here too as `crates/<name>-core/` (`no_std`, no `frame` deps — the differential oracle + WASM/auditor port) |
 | `pallets/` | Track A + B4 residual | Track-A custom pallets are production shells (`lib.rs` + mock/tests + benchmarks/weights) over frame-free `crates/<name>-core/`; `pallets/inflow-caps` is the deliberate state-only exception (09 §5.2 shared meter, no dispatchables/benchmark/weights, runs inside caller envelopes) |
-| `runtime/` | B1–B12 + B15–B19 done/residual | `runtime/bleavit-runtime` is the real Cumulus parachain runtime (`construct_runtime!`, `impl_runtime_apis!`, `BaseCallFilter = SafetyFilter`, genesis presets with the 08 §2.1 VIT allocation/vesting). `Epoch`, `ExecutionGuard`, and `InflowCaps` occupy frozen indices 61, 62, and 63. Existing wiring includes the real epoch/guard path, six-track governance, live Params consumers, treasury/XCM posture, generated weights and the 11-method contract-v13 `FutarchyApi`. B16 adds compile-time bootstrap/Phase-4 and paired recovery profiles; B19 adds cause-aware attestor removal, bounded revocation/liability storage and native bond custody. Additional MBMs remain prohibited without their own exhaustive cutpoint repair. |
+| `runtime/` | B1–B12 + B15–B19 done/residual | `runtime/bleavit-runtime` is the real Cumulus parachain runtime (`construct_runtime!`, `impl_runtime_apis!`, `BaseCallFilter = SafetyFilter`, genesis presets with the 08 §2.1 VIT allocation/vesting). `Epoch`, `ExecutionGuard`, and `InflowCaps` occupy frozen indices 61, 62, and 63. Existing wiring includes the real epoch/guard path, six-track governance, live Params consumers, treasury/XCM posture, generated weights and the 11-method contract-v17 `FutarchyApi`. B16 adds compile-time bootstrap/Phase-4 and paired recovery profiles; B19 adds cause-aware attestor removal, bounded revocation/liability storage and native bond custody. Additional MBMs remain prohibited without their own exhaustive cutpoint repair. |
 | `runtime/bleavit-xcm/` | B4 done + residual bindings | The XCM layer as a runtime-independent library the runtime wires: 09 §6.1 rule-table barrier/assets/trader components, the 07 §8 reserve-probe program + authenticated response router, the 09 §4 coretime-renewal funding leg (verified relay-teleport route), 09 §5.2 inflow-cap adapters, the `pallet_xcm` call classifier — B10 wired the full production posture: `CappedInflows` is the live `AssetTransactor` over Location-keyed ForeignAssets, `BleavitBarrier`/`BleavitReserves`/AssetTrap recovery and the 09 §6.2 exit filter are runtime-bound, and constitution-backed `TraderRates` remains live |
-| `runtime-api/` | B2 done | `futarchy-runtime-api`: the `sp_api::decl_runtime_apis!` declaration of the frozen 11-method `FutarchyApi` (02 §3) over the §4 view types in `futarchy-primitives`. B2 implemented all 11 in the runtime (`runtime/bleavit-runtime/src/views.rs` + `impl_runtime_apis!`) and landed the 02 amendment batch as **integration contract v4** (the contract has since moved to **v13**; `futarchy_primitives::INTEGRATION_CONTRACT_VERSION = 13` and 02 §13 are the authorities, so the next bump is v14); B13 added the separate monitoring-only `TelemetryApi` trait (`runtime-api/src/telemetry.rs` + `runtime/bleavit-runtime/src/telemetry.rs`) — explicitly outside the 02 contract, owned by 12 §6.3, consumed only by the ops exporters |
+| `runtime-api/` | B2 done | `futarchy-runtime-api`: the `sp_api::decl_runtime_apis!` declaration of the frozen 11-method `FutarchyApi` (02 §3) over the §4 view types in `futarchy-primitives`. B2 implemented all 11 in the runtime (`runtime/bleavit-runtime/src/views.rs` + `impl_runtime_apis!`) and landed the 02 amendment batch as **integration contract v4** (the contract has since moved to **v17**; `futarchy_primitives::INTEGRATION_CONTRACT_VERSION = 17` and 02 §13 are the authorities, so the next bump is v18); B13 added the separate monitoring-only `TelemetryApi` trait (`runtime-api/src/telemetry.rs` + `runtime/bleavit-runtime/src/telemetry.rs`) — explicitly outside the 02 contract, owned by 12 §6.3, consumed only by the ops exporters |
 | `node/` | B3 done | `node/bleavit-node` — collator binary as a thin branding of the pinned `polkadot-omni-node` stack (runtime ships in the chain spec, not the node) |
 | `deploy/`, `tools/deploy/` | B3 + O4 done (grows with B7/B8/Track O) | Chain-spec pipeline + validator (02 §8/§10), bootnode operator manifests, production genesis-allocation template, ss58-registry submission artifact; **`deploy/runbooks/` (O4)** — the 12 §6.3 runbooks-as-code set: 13 runbooks RB-KEEPER…RB-RELEASE with machine-readable frontmatter bound to doc 12's alert tables, gated by `tools/deploy/check-runbooks.py` (bidirectional §6.1/§6.3 binding; CI `docs` job + `tools/deploy/tests`) |
 | `keeper/` | B9 done | `keeper/bleavit-keeper` — the off-chain keeper reference implementation (01 §4.2 role): subxt-dynamic planner/submitter cranking every permissionless extrinsic, per-role Prometheus metrics (12 §6.3). A **separate cargo workspace** (root `exclude = ["keeper"]`): its subxt dependency tree must never perturb the runtime workspace's `=`-exact stable2606 pins; `tools/ci/rust-workspace-gates.sh` runs its fmt/clippy/test leg. On-chain counterpart: the 08 §6.3 keeper meter + `KeeperRebateSink` seams live in the treasury/crank pallets |

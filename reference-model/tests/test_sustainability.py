@@ -16,6 +16,34 @@ from decimal import Decimal
 import unittest
 
 from bleavit_reference_model.sustainability import (
+    CORETIME_PERIOD_DAYS,
+    PROPOSER_REWARD,
+    PROP_BOND,
+    INTAKE_SLASH_FRACTION,
+    proposer_expected_value,
+    proposer_break_even_adopt_rate,
+    INFINITE,
+    POL_RERUN_MAX_MULTIPLE,
+    pol_divergence_with_reruns,
+    xcm_annual_revenue,
+    xcm_break_even_messages_per_day,
+    xcm_fee_micro_usdc,
+    xcm_fee_per_message,
+    CORETIME_RENEWAL_CAP_KSM,
+    CORETIME_RENEW_INTERLUDE,
+    CORETIME_RENEW_LEADIN_END,
+    coretime_annual_cost_path,
+    coretime_annual_escalation,
+    coretime_cost_after_years,
+    coretime_leadin_factor,
+    coretime_periods_to_saturation,
+    coretime_price_path,
+    coretime_ratchet_ceiling,
+    coretime_renewal_price,
+    coretime_renewals_per_year,
+    coretime_sale_price,
+    runway_years_with_coretime_policy,
+    runway_years_with_escalating_line,
     BASELINE_V_MIN,
     GENESIS_ENDOWMENT,
     NAV_FLOOR_CODE,
@@ -700,6 +728,606 @@ class OperatingPointTests(unittest.TestCase):
         self.assertLess(runway_years(pass1, NAV_FLOOR_META), D(25))
         # ...and the reseed clears it, at ZERO assumed revenue.
         self.assertGreater(runway_years(shipped, NAV_FLOOR_META), D(25))
+
+
+class CoretimeEscalationTests(unittest.TestCase):
+    """SQ-538. The cost line 08 §10.1 excludes, and why excluding it flatters.
+
+    §10.1 leaves `ops.coretime` out of the table because the `broker.renew`
+    price is an off-chain quote and "the renewal *period* is not stated
+    anywhere in this document set". The second half is resolvable -- the period
+    is a property of Polkadot, not a Bleavit choice -- and resolving it exposes
+    that the level was never the interesting quantity. The growth rate is.
+    """
+
+    def test_the_renewal_period_is_a_platform_constant_not_a_missing_value(self):
+        """28 days, so 13.0446 renewals a year. Not 12: a period is not a month."""
+        self.assertEqual(CORETIME_PERIOD_DAYS, D(28))
+        self.assertLess(abs(coretime_renewals_per_year() - D("13.0446")), D("0.0001"))
+        # The off-by-8.7% a reader gets from assuming monthly renewals.
+        self.assertGreater(coretime_renewals_per_year(), D(12))
+
+    def test_the_rent_control_compounds_into_a_47_percent_annual_ceiling(self):
+        """The finding. A 3 %/period cap is not a 3 % problem.
+
+        Bulk renewals are price-capped, which reads as protection and per
+        period is. Applied 13.04 times a year it is +47 %, and 08 §10.5's
+        runway table holds `C` constant, so nothing there accounts for it.
+        """
+        self.assertLess(
+            abs(coretime_annual_escalation(CORETIME_RENEWAL_CAP_KSM) - D("0.470")), D("0.001")
+        )
+        # Bracketed rather than pinned to one cap, because Polkadot's own value
+        # is [VERIFY] -- the 3 % is Kusama's configuration.
+        for cap, expected in ((D("0.01"), D("0.139")), (D("0.02"), D("0.295"))):
+            with self.subTest(cap=str(cap)):
+                self.assertLess(abs(coretime_annual_escalation(cap) - expected), D("0.001"))
+        # Monotone in the cap, and strictly worse than the naive reading of it.
+        self.assertGreater(coretime_annual_escalation(D("0.03")), D("0.03") * D(13))
+
+    def test_a_small_coretime_line_becomes_the_largest_line_within_a_decade(self):
+        """Why the level being small today is not reassurance -- UNCLAMPED reading.
+
+        Retained deliberately as the naive arithmetic, and named as such: it is
+        what the first pass published, and `coretime_cost_after_years` is the
+        function that produces it. The clamped truth is the next test.
+        """
+        start = D(4_000)
+        ten = coretime_cost_after_years(start, D(10))
+        self.assertGreater(ten, cost_base().annual)  # exceeds the WHOLE base
+        self.assertLess(abs(ten - D(189_073)), D(50))
+
+
+class ProposerRewardEconomicsTests(unittest.TestCase):
+    """SQ-542. The cost line tied for largest, and the one with no derivation.
+
+    `trs.proposer_reward` is **39.8 %** of the launch cost base at the 08 §10.1
+    PARAM ceiling -- level with `ops.collators`, and larger than every other row
+    combined. It appears in exactly three places in the whole doc set: the 13 §1
+    row, a restatement in 08 §1.1, and the §10.1 cost row. **No derivation, no
+    anchor, no rationale.** That is the same shape as `collator.comp_epoch`
+    before SQ-536, which turned out to be 4x too high.
+
+    This class exists to record why it is NOT the same answer, because the size
+    of the line makes it a standing temptation. The arithmetic says the error
+    direction here is more likely DOWNWARD, so cutting it is the unsafe move.
+    """
+
+    def test_rejection_is_free_and_getting_that_wrong_flatters_the_reward(self):
+        """The 08 §7.1 rule a hand calculation gets backwards.
+
+        Bonds "refund in full only on a decision-grade outcome (adopt or reject
+        -- rejection is information)", so `intake.slash_pct` fires on
+        NON-decision-grade outcomes. Treating rejection as a slash makes the
+        reward look far more generous than it is.
+        """
+        self.assertEqual(INTAKE_SLASH_FRACTION, D("0.10"))
+        # Perfect formation: rejection costs nothing, so EV is never negative.
+        self.assertEqual(proposer_expected_value("param", D(0), D(1)), D(0))
+        self.assertEqual(proposer_expected_value("param", D(1), D(1)), D(500))
+        # The loss comes only from markets that fail to form a decision.
+        self.assertEqual(proposer_expected_value("param", D(0), D(0)), D(-100))
+
+    def test_at_the_phase0_rates_param_proposing_loses_money(self):
+        """The evidence, and its limits, both stated.
+
+        Artifact rates (10,000 proposals): PARAM adopts 2.32 % and forms a
+        decision-grade market 40.56 % of the time, giving EV = -47.8 USDC per
+        submission against a break-even adopt rate of 11.89 %.
+
+        The population is **adversarial by construction** -- informed, noise,
+        arbitrage and five doc-14 manipulator strategies -- so this is a
+        population average and NOT an honest proposer's expectation. It cannot
+        establish that the reward is too low. What it does establish is that
+        nothing here supports the reward being too HIGH, which is the only
+        reading that would make this line a cost lever.
+        """
+        adopt, dg = D("0.0232"), D("0.4056")
+        ev = proposer_expected_value("param", adopt, dg)
+        self.assertLess(ev, D(0))
+        self.assertLess(abs(ev - D("-47.8")), D("0.5"))
+        be = proposer_break_even_adopt_rate("param", dg)
+        self.assertLess(abs(be - D("0.1189")), D("0.0005"))
+        self.assertGreater(be, adopt)  # the gap is ~5x, not a rounding matter
+
+    def test_the_line_is_large_enough_to_be_a_standing_temptation(self):
+        """Why this is written down rather than left to be rediscovered."""
+        cb = cost_base()
+        self.assertLess(abs(cb.proposer_rewards - D(43_482)), D(2))
+        self.assertGreater(cb.shares()["proposer_rewards"], D("0.39"))
+        # Level with collators at the launch count -- the two largest lines.
+        self.assertEqual(cb.proposer_rewards, cb.collators)
+        # And a x0.1 cut (the 13 §1 hard-min) would take 39,134/yr off `C`...
+        cut = cost_base(with_levers(proposer_reward=D(50)))
+        self.assertGreater(cb.annual - cut.annual, D(39_000))
+        # ...and it would make proposing UNPROFITABLE AT ANY ADOPT RATE: at
+        # reward 50 the break-even is 118.9 %, i.e. even a proposal adopted
+        # every single time would not cover the non-formation slash. That is
+        # the decisive argument, and it is evidence rather than caution.
+        hard_min = proposer_break_even_adopt_rate("param", D("0.4056"), reward=D(50))
+        self.assertGreater(hard_min, D(1))
+        self.assertLess(abs(hard_min - D("1.1888")), D("0.0005"))
+        # The shipped value is the only one of the two that is even reachable.
+        self.assertLess(proposer_break_even_adopt_rate("param", D("0.4056")), D(1))
+
+
+class PolRerunExposureTests(unittest.TestCase):
+    """SQ-540(d). 08 §10.1's divergence row is the no-rerun case and says so nowhere.
+
+    The sweep's framing -- "rerun top-ups double a book's `b` with no
+    `pol.budget_epoch` charge" -- describes something 08 §4.4 already states
+    normatively and defends: reruns are deliberately not budget-charged,
+    because `delayed_once`/`rerun` are one-way flags, so the exposure is
+    structurally bounded at 2x rather than budget-bounded. That half is not a
+    defect.
+
+    The half that survives is about the COST MODEL rather than the protocol.
+    §10.1 publishes a realized-divergence figure computed at zero reruns, while
+    05 §2.1 T13 permits up to a doubling -- so the published cost base is an
+    understatement by up to its own divergence row, and an understated `C`
+    makes every runway figure in §10.5 look better than it is.
+    """
+
+    def test_the_published_row_is_exactly_the_no_rerun_case(self):
+        """Default reproduces §10.1 byte-for-byte, so this adds a term, not a change."""
+        self.assertEqual(CostParams().pol_rerun_fraction, D(0))
+        self.assertEqual(pol_divergence_with_reruns(D(0)), D(18_830))
+        self.assertEqual(cost_base().pol_divergence, D(18_830))
+
+    def test_the_exposure_is_linear_in_the_rerun_share_and_capped_at_two(self):
+        """Divergence is `b*[ln2 - H(p)]`, linear in `b`; T13 doubles `b`."""
+        self.assertEqual(POL_RERUN_MAX_MULTIPLE, D(2))
+        self.assertEqual(pol_divergence_with_reruns(D(1)), D(18_830) * D(2))
+        self.assertEqual(pol_divergence_with_reruns(D("0.5")), D(18_830) * D("1.5"))
+        # The structural cap really binds: 05 §2.1's rerun finality allows ONE
+        # rerun per proposal, so no share can push past 2x.
+        self.assertEqual(pol_divergence_with_reruns(D(3)), D(18_830) * D(2))
+        self.assertEqual(pol_divergence_with_reruns(D("-1")), D(18_830))
+
+    def test_a_fully_rerun_slate_costs_17_percent_of_the_whole_base(self):
+        """Why it is worth stating rather than filing."""
+        base = cost_base().annual
+        full = cost_base(with_levers(pol_rerun_fraction=D(1))).annual
+        self.assertLess(abs(full - base - D(18_830)), D(1))
+        self.assertGreater((full / base) - D(1), D("0.17"))
+        self.assertLess(abs(runway_years(full, NAV_FLOOR_META) - D("29.22")), D("0.05"))
+
+    def test_the_joint_worst_case_still_does_not_change_the_standing_conclusion(self):
+        """Stacked with the other two known exposures, honestly.
+
+        12 collators (the 12 §6.1 mandated ceiling) AND a fully rerun slate is
+        the pessimistic corner of everything E5/E7 have quantified. It does not
+        reverse anything: the coretime policy is still worth more than the
+        rerun term costs, and the zero-revenue reading still fails at the
+        mandated count for the reason §10.5 already gives -- mature operation
+        depends on revenue, not on the endowment.
+        """
+        worst = cost_base(
+            with_levers(collator_count=12, pol_rerun_fraction=D(1))
+        ).annual
+        self.assertLess(abs(worst - D(188_986)), D(2))
+        late = runway_years_with_coretime_policy(
+            worst, NAV_FLOOR_META, D(4_000), through=CORETIME_RENEW_LEADIN_END
+        )
+        early = runway_years_with_coretime_policy(
+            worst, NAV_FLOOR_META, D(4_000), through=CORETIME_RENEW_INTERLUDE
+        )
+        self.assertLess(abs(late - D("19.40")), D("0.05"))
+        self.assertLess(abs(early - D("12.72")), D("0.05"))
+        # Even in the worst corner the renewal-timing policy is the larger term.
+        self.assertGreater(late - early, D(6))
+
+
+class XcmDiscardedRevenueTests(unittest.TestCase):
+    """SQ-540(e). 08 §10.2 names two revenue instruments; there is a third.
+
+    The chain charges every inbound XCM message for execution at governed 13 §1
+    rates through `GovernedWeightTrader`, and then **discards the payment**:
+    the runtime binds `Trader = GovernedWeightTrader<ConstitutionTraderRates,
+    ()>`, and `TakeRevenue for ()` drops the collected assets when the trader
+    is dropped. The fee is computed, charged, and thrown away.
+
+    Every input below is anchored in this repository, so the size of what is
+    discarded is derivable. The one input that is NOT -- inbound message volume
+    -- is deliberately never assumed: the headline is a break-even rate.
+    """
+
+    def test_the_fee_transcribes_the_traders_own_arithmetic(self):
+        """Both dimensions priced separately and rounded up, then summed.
+
+        Per instruction, from `UnitWeightCost = (1e9 ref-time, 64 KiB proof)`
+        and the 13 §1 USDC rates: 0.001 s x 50 USDC/s = 0.05, plus
+        0.0625 MiB x 5 USDC/MiB = 0.3125. Total 0.3625 USDC.
+        """
+        self.assertEqual(xcm_fee_micro_usdc(1), D(362_500))
+        self.assertEqual(xcm_fee_per_message(1), D("0.3625"))
+        # `FixedWeightBounds` is linear in the instruction count, so the message
+        # fee is exactly proportional -- and both components divide evenly here,
+        # so the payer-adverse ceiling costs the payer nothing extra at n = 4.
+        self.assertEqual(xcm_fee_per_message(4), D("1.45"))
+        self.assertEqual(xcm_fee_micro_usdc(4), D(1_450_000))
+        for n in (1, 2, 4, 8, 16):
+            with self.subTest(instructions=n):
+                self.assertEqual(xcm_fee_micro_usdc(n), D(362_500) * n)
+
+    def test_the_proof_dimension_is_86_percent_of_the_fee(self):
+        """Where the number comes from, because it bounds how solid it is.
+
+        `FixedWeightBounds` charges a flat 64 KiB of proof per instruction
+        regardless of what the instruction does -- a deliberately conservative
+        over-estimate, not a measurement. So the fee level is a property of the
+        weigher, and replacing it with benchmarked bounds would cut the revenue
+        substantially. Asserted so that a later weigher change cannot silently
+        invalidate the finding.
+        """
+        with_proof = xcm_fee_micro_usdc(1)
+        ref_only = D(50_000)  # 0.001 s x 50,000,000 uUSDC/s
+        self.assertEqual(with_proof - ref_only, D(312_500))
+        self.assertGreater((with_proof - ref_only) / with_proof, D("0.86"))
+
+    def test_a_few_hundred_messages_a_day_would_cover_the_whole_cost_base(self):
+        """The finding. It is stated as required volume, never as earned revenue.
+
+        Volume is the one input this repository cannot supply, so asserting a
+        revenue figure would be a forecast. Asserting the break-even is a
+        derivation: this many inbound messages a day and the fee the chain
+        ALREADY charges, and then throws away, pays for everything.
+        """
+        c5 = cost_base().annual
+        c12 = cost_base(with_levers(collator_count=12)).annual
+        self.assertLess(abs(xcm_break_even_messages_per_day(c5) - D(206)), D(1))
+        self.assertLess(abs(xcm_break_even_messages_per_day(c12) - D(321)), D(1))
+        # Round-trip: revenue at the break-even volume really is the cost base.
+        be = xcm_break_even_messages_per_day(c5)
+        self.assertLess(abs(xcm_annual_revenue(be) - c5), D("0.01"))
+        # And the shape at sub-break-even volumes, so "material" is checkable
+        # rather than rhetorical: 100/day is already ~half the launch base.
+        self.assertGreater(xcm_annual_revenue(D(100)) / c5, D("0.48"))
+        self.assertLess(xcm_annual_revenue(D(10)) / c5, D("0.05"))
+
+    def test_the_captured_fee_closes_the_gap_at_the_mandated_collator_count(self):
+        """What the E7 wiring is actually for, stated end to end.
+
+        The zero-revenue reading fails at the 12 collators 12 §6.1 mandates:
+        21.5 years under the cheap coretime policy. The fee the chain was
+        already charging and discarding closes that gap at a *small* traffic
+        level, and makes the endowment self-sustaining at the break-even rate
+        this class already derives.
+
+        Stated as required traffic, not as a promise: message volume is market
+        behaviour the protocol does not control, and it belongs beside `tau`
+        rather than beside the endowment. What the model can say is exactly how
+        much is needed, and it is less than most readers would guess.
+        """
+        c12 = cost_base(with_levers(collator_count=12)).annual
+        zero = runway_years_with_coretime_policy(
+            c12, NAV_FLOOR_META, D(4_000), through=CORETIME_RENEW_LEADIN_END
+        )
+        self.assertLess(zero, D(25))  # the gap this closes
+
+        def runway_at(messages_per_day):
+            return runway_years_with_coretime_policy(
+                c12,
+                NAV_FLOOR_META,
+                D(4_000),
+                through=CORETIME_RENEW_LEADIN_END,
+                annual_revenue=xcm_annual_revenue(D(messages_per_day)),
+            )
+
+        # 50/day already clears the 25-year goal at the mandated ceiling.
+        self.assertGreater(runway_at(50), D(25))
+        self.assertLess(abs(runway_at(50) - D("25.35")), D("0.05"))
+        # And at the break-even rate this class derives, the endowment is never
+        # drawn down at all.
+        self.assertEqual(runway_at(321), INFINITE)
+        # Monotone in traffic, which a sign error would break.
+        self.assertGreater(runway_at(100), runway_at(50))
+
+    def test_break_even_volume_scales_the_right_way(self):
+        """Monotone in both directions, which a wrong sign would break."""
+        c5 = cost_base().annual
+        # A larger cost base needs more messages.
+        self.assertGreater(
+            xcm_break_even_messages_per_day(cost_base(with_levers(collator_count=12)).annual),
+            xcm_break_even_messages_per_day(c5),
+        )
+        # Fatter messages pay more, so fewer are needed.
+        self.assertLess(
+            xcm_break_even_messages_per_day(c5, instructions=8),
+            xcm_break_even_messages_per_day(c5, instructions=4),
+        )
+
+
+class CoretimeRenewalPriceTests(unittest.TestCase):
+    """SQ-541. `do_renew`'s actual price rule, and the correction it forces.
+
+    The first pass modelled the renewal price as compounding at the per-period
+    bump without bound and published a 14.3-year runway on that basis. Read
+    against the arithmetic this workspace already ships -- `pallet-broker`
+    0.28.0, the version in `Cargo.lock` -- that is wrong:
+
+        price = min( leadin_factor(t) * end_price,
+                     max( prev * (1 + bump), end_price ) )
+
+    The `min` is a ceiling at the open-market price, so the ratchet SATURATES;
+    and because `leadin_factor` decays from 100 to 1 across the leadin, where
+    the ceiling sits is decided by WHEN the renewal is submitted. That is a
+    Bleavit operational choice, not a platform constant, and it turns out to be
+    worth more runway than any parameter in 13 §1.
+    """
+
+    def test_the_leadin_factor_matches_the_pallets_own_unit_test(self):
+        """Byte-for-byte against `adapt_price.rs::leadin_price_bound_check`.
+
+        Transcribing an upstream curve is exactly where a reference model earns
+        its keep or silently stops meaning anything, so the five points the
+        pallet itself asserts are the five points asserted here.
+        """
+        for through, expected in (
+            (D(0), D(100)),
+            (D("0.25"), D(55)),
+            (D("0.5"), D(10)),
+            (D("0.75"), D("5.5")),
+            (D(1), D(1)),
+        ):
+            with self.subTest(through=str(through)):
+                self.assertEqual(coretime_leadin_factor(through), expected)
+        # `sale_price` clamps `through` into [0, 1] via `.min(leadin_length)`;
+        # the interlude sits at t <= 0 and must price at the 100x start.
+        self.assertEqual(coretime_leadin_factor(D("-1")), D(100))
+        self.assertEqual(coretime_leadin_factor(D(2)), D(1))
+
+    def test_renewing_at_the_end_of_the_leadin_is_flat_forever(self):
+        """The whole finding, in one assertion.
+
+        At `t = 1` the sale price IS `end_price`, and since the cap is at least
+        `end_price` the `min` always binds. So the price paid is `end_price`
+        exactly -- for any prior price, at any bump, in every period. The
+        ratchet cannot start, and an already-ratcheted price is rewritten DOWN
+        to the floor on the first late renewal.
+        """
+        path = coretime_price_path(50, D(1), through=CORETIME_RENEW_LEADIN_END)
+        self.assertEqual(set(path), {D(1)})
+        # Independent of the bump: a 3x bump changes nothing at t = 1.
+        self.assertEqual(
+            coretime_renewal_price(D(1), D(1), CORETIME_RENEW_LEADIN_END, D(3)), D(1)
+        )
+        # And it un-ratchets: a price already at the 100x ceiling drops to the
+        # floor in ONE late renewal, which is why the policy is recoverable.
+        self.assertEqual(
+            coretime_renewal_price(D(100), D(1), CORETIME_RENEW_LEADIN_END), D(1)
+        )
+
+    def test_renewing_in_the_interlude_ratchets_to_a_100x_ceiling(self):
+        """The other policy, and the ceiling the first pass denied existed."""
+        path = coretime_price_path(6, D(1), through=CORETIME_RENEW_INTERLUDE)
+        self.assertEqual(path[0], D("1.03"))
+        self.assertLess(abs(path[5] - D("1.194052")), D("0.000001"))
+        # Bounded, and the bound is the sale price at the chosen moment.
+        self.assertEqual(coretime_ratchet_ceiling(D(1), CORETIME_RENEW_INTERLUDE), D(100))
+        self.assertEqual(coretime_ratchet_ceiling(D(1), CORETIME_RENEW_LEADIN_END), D(1))
+        # 156 renewals ~ 12.0 years to saturate from the floor at 3 %/period.
+        periods = coretime_periods_to_saturation()
+        self.assertEqual(periods, 156)
+        self.assertLess(abs(D(periods) / coretime_renewals_per_year() - D("11.96")), D("0.01"))
+        # Once saturated it is pinned: further renewals do not exceed the market.
+        self.assertEqual(coretime_renewal_price(D(200), D(1), CORETIME_RENEW_INTERLUDE), D(100))
+
+    def test_the_min_clamp_tracks_the_market_down_not_only_up(self):
+        """A model that only grows is not conservative, it is wrong.
+
+        If `end_price` halves, the renewal price follows it down on the next
+        renewal, because the `min` binds against the new, lower sale price.
+        """
+        # Saturated at 100 against a floor of 1; floor then halves to 0.5.
+        self.assertEqual(coretime_renewal_price(D(100), D("0.5"), CORETIME_RENEW_INTERLUDE), D(50))
+        # And the `max` is a floor, not a ceiling: an under-market prior price
+        # is lifted to `end_price`, never below it (the pallet's own comment).
+        self.assertEqual(coretime_renewal_price(D("0.1"), D(10), CORETIME_RENEW_LEADIN_END), D(10))
+
+    def test_the_renewal_timing_policy_is_worth_more_than_18_years_of_runway(self):
+        """The result. A scheduling choice dominates every parameter in 13 §1.
+
+        Same cost base, same endowment, same floor, same market: the only
+        difference is the block at which the ops multisig submits the renewal.
+        Late renewal MEETS the 25-year goal and interlude renewal misses it by
+        more than a decade -- at a line size small enough that 08 §10.1 felt
+        able to omit it from the table entirely.
+        """
+        c = cost_base().annual
+        constant = runway_years(c, NAV_FLOOR_META)
+        self.assertGreater(constant, D(25))
+
+        for floor_annual, early_exp, late_exp in (
+            (D(4_000), D("14.71"), D("33.05")),
+            (D(25_000), D("9.67"), D("27.88")),
+        ):
+            with self.subTest(line=str(floor_annual)):
+                early = runway_years_with_coretime_policy(
+                    c, NAV_FLOOR_META, floor_annual, through=CORETIME_RENEW_INTERLUDE
+                )
+                late = runway_years_with_coretime_policy(
+                    c, NAV_FLOOR_META, floor_annual, through=CORETIME_RENEW_LEADIN_END
+                )
+                self.assertLess(abs(early - early_exp), D("0.05"))
+                self.assertLess(abs(late - late_exp), D("0.05"))
+                self.assertLess(early, D(25))  # misses the goal
+                self.assertGreater(late, D(25))  # meets it
+                self.assertGreater(late - early, D(18))
+
+    def test_the_policy_saves_62x_of_cumulative_coretime_spend_over_25_years(self):
+        """Stated as cash, because that is what the treasury actually parts with."""
+        early = sum(coretime_annual_cost_path(25, D(4_000), through=CORETIME_RENEW_INTERLUDE))
+        late = sum(coretime_annual_cost_path(25, D(4_000), through=CORETIME_RENEW_LEADIN_END))
+        self.assertLess(abs(late - D(100_000)), D(1))  # 25 x 4,000, flat
+        self.assertLess(abs(early - D(6_252_022)), D(2_000))
+        self.assertGreater(early / late, D(62))
+        # Year 25 alone is the saturated ceiling: 100x the market floor.
+        self.assertLess(
+            abs(coretime_annual_cost_path(25, D(4_000), through=CORETIME_RENEW_INTERLUDE)[24]
+                - D(400_000)),
+            D(1),
+        )
+
+    def test_the_unbounded_model_this_replaces_understated_the_runway(self):
+        """Honest accounting of my own error, pinned so it cannot recur.
+
+        The superseded `runway_years_with_escalating_line` grows the line
+        without a ceiling. Against the interlude policy it is close (the
+        ceiling only binds after ~12 years, past the point the runway ends),
+        which is exactly why the error survived review -- but against the
+        policy that actually matters it is wrong by 18 years.
+        """
+        c = cost_base().annual
+        unbounded = runway_years_with_escalating_line(c, NAV_FLOOR_META, D(4_000))
+        early = runway_years_with_coretime_policy(
+            c, NAV_FLOOR_META, D(4_000), through=CORETIME_RENEW_INTERLUDE
+        )
+        late = runway_years_with_coretime_policy(
+            c, NAV_FLOOR_META, D(4_000), through=CORETIME_RENEW_LEADIN_END
+        )
+        self.assertLess(abs(unbounded - early), D("0.5"))  # plausible, hence missed
+        self.assertGreater(late - unbounded, D(18))  # and wrong where it counted
+
+    def test_the_coretime_win_does_not_by_itself_save_the_25_year_goal(self):
+        """The two claims are each true alone and over-optimistic together.
+
+        This test exists because I was about to let them stand apart. SQ-541
+        says late renewal takes the runway 14.7 -> 33.1 years and "meets the
+        25-year goal"; SQ-536's own qualification says the goal already fails
+        at 10 and 12 collators, which 12 §6.1 mandates from Phase 4+. Both are
+        true at the count each was computed at -- 5 and 5 -- and read together
+        they claim something neither establishes.
+
+        Joined here: at the mandated 10-12 range the goal fails EVEN under the
+        cheap renewal policy. The policy is still worth ~10 years there, which
+        is why it remains the largest single lever found; it is simply not
+        sufficient on its own, and the conclusion 08 §10.5 already draws stands
+        unchanged -- mature operation depends on revenue, not on the endowment.
+
+        Also pins the shape: the policy is worth LESS as the base grows (18.3
+        years at 5 collators, 8.4 at 12), because a larger constant base ends
+        the runway before the ratchet has time to saturate.
+        """
+        rows = ((5, D("33.05"), D("14.71")), (8, D("26.86"), D("13.99")),
+                (10, D("23.88"), D("13.55")), (12, D("21.49"), D("13.14")))
+        prev_gap = None
+        for n, late_exp, early_exp in rows:
+            with self.subTest(collators=n):
+                c = cost_base(with_levers(collator_count=n)).annual
+                late = runway_years_with_coretime_policy(
+                    c, NAV_FLOOR_META, D(4_000), through=CORETIME_RENEW_LEADIN_END
+                )
+                early = runway_years_with_coretime_policy(
+                    c, NAV_FLOOR_META, D(4_000), through=CORETIME_RENEW_INTERLUDE
+                )
+                self.assertLess(abs(late - late_exp), D("0.05"))
+                self.assertLess(abs(early - early_exp), D("0.05"))
+                # The goal holds at the launch count and at 8, and fails from
+                # 10 up -- under the CHEAP policy. That is the joint claim.
+                self.assertEqual(late > D(25), n <= 8)
+                # The expensive policy fails at every mandated count, so the
+                # policy is never the thing that causes the miss.
+                self.assertLess(early, D(25))
+                # Monotone erosion of what the policy buys.
+                gap = late - early
+                if prev_gap is not None:
+                    self.assertLess(gap, prev_gap)
+                prev_gap = gap
+        self.assertLess(abs(prev_gap - D("8.35")), D("0.1"))  # 12 collators
+
+    def test_both_clamps_bound_the_price_over_a_swept_grid(self):
+        """The two structural bounds `do_renew` guarantees, over a grid.
+
+        * `price <= sale_price(t)` -- the `min` is a CEILING at the open market,
+          which is why the ratchet saturates at all.
+        * `price >= end_price` -- the `max` is a FLOOR, and it is the pallet's
+          own stated intent ("Renewals should never be priced lower than the
+          current `end_price`").
+
+        These are necessary and NOT sufficient, which is worth saying because
+        the first version of this test claimed they were. Swapping `min` and
+        `max` degenerates the function to "always charge `sale_price`", and that
+        degenerate form satisfies both bounds everywhere -- so this test passes
+        against it. What actually kills that mutant is the next test, plus the
+        interlude/leadin-end point values above. Verified by mutation rather
+        than assumed: an assertion nothing can violate is decoration.
+        """
+        ends = (D(1), D(10), D("0.5"), D(1_000))
+        prevs = (D(0), D("0.25"), D(1), D(5), D(100), D(10_000))
+        throughs = (D(0), D("0.25"), D("0.5"), D("0.75"), D(1))
+        bumps = (D(0), D("0.03"), D("0.5"), D(3))
+        checked = 0
+        for end in ends:
+            for prev in prevs:
+                for t in throughs:
+                    for bump in bumps:
+                        price = coretime_renewal_price(prev, end, t, bump)
+                        self.assertLessEqual(price, coretime_sale_price(end, t))
+                        self.assertGreaterEqual(price, end)
+                        checked += 1
+        self.assertEqual(checked, 480)
+
+    def test_both_clamps_are_LIVE_and_neither_one_alone_decides_the_price(self):
+        """Anti-vacuity: each clamp must actually bind somewhere.
+
+        The bounds above are satisfied by two different degenerate functions --
+        "always `sale_price`" (what swapping `min`/`max` produces) and "always
+        `end_price`". Ruling both out needs strictness, so this asserts that
+        each clamp is the binding one in its own regime:
+
+        * the ratchet binds early in the leadin, where the price is strictly
+          BELOW the sale price and strictly increasing in the prior price;
+        * the market clamp binds at the ceiling, where raising the prior price
+          further changes nothing.
+        """
+        end, t = D(1), CORETIME_RENEW_INTERLUDE
+
+        # The `min` is not the only thing acting: at t = 0 the sale price is
+        # 100x, and a renewal off a floor-priced prior pays 1.03, not 100.
+        self.assertLess(coretime_renewal_price(end, end, t), coretime_sale_price(end, t))
+        # The ratchet is STRICTLY increasing in the prior price below saturation
+        # -- this is what "always `sale_price`" (constant in `prev`) cannot do.
+        below = [coretime_renewal_price(D(p), end, t) for p in (1, 2, 5, 20)]
+        self.assertEqual(below, sorted(below))
+        self.assertLess(below[0], below[-1])
+        for lo, hi in zip(below, below[1:]):
+            self.assertLess(lo, hi)
+        # And the floor is not the only thing acting either: those prices are
+        # strictly above `end_price`, ruling out "always `end_price`".
+        self.assertGreater(below[0], end)
+
+        # Above saturation the market clamp takes over and `prev` stops mattering.
+        ceiling = coretime_ratchet_ceiling(end, t)
+        self.assertEqual(coretime_renewal_price(ceiling, end, t), ceiling)
+        self.assertEqual(coretime_renewal_price(ceiling * D(10), end, t), ceiling)
+
+    def test_the_saturated_price_is_a_fixed_point_the_path_converges_to(self):
+        """Once pinned to the market the recurrence stops moving, at any bump.
+
+        This is the property that makes `coretime_periods_to_saturation`
+        terminate, so asserting it also guards that loop against spinning if the
+        clamp is ever weakened.
+        """
+        end = D(7)
+        for t in (D(0), D("0.5"), D(1)):
+            ceiling = coretime_ratchet_ceiling(end, t)
+            for bump in (D("0.03"), D(1), D(10)):
+                self.assertEqual(coretime_renewal_price(ceiling, end, t, bump), ceiling)
+            path = coretime_price_path(400, end, through=t)
+            self.assertEqual(path[-1], ceiling)
+            self.assertEqual(path, sorted(path))
+
+    def test_a_zero_bump_reproduces_the_constant_base_under_either_policy(self):
+        """The check that this models a mechanism rather than an assumption."""
+        self.assertEqual(coretime_annual_escalation(D(0)), D(0))
+        c = cost_base().annual
+        for through in (CORETIME_RENEW_INTERLUDE, CORETIME_RENEW_LEADIN_END):
+            with self.subTest(through=str(through)):
+                flat = runway_years_with_coretime_policy(
+                    c, NAV_FLOOR_META, D(0), through=through, per_period_cap=D(0)
+                )
+                self.assertLess(abs(flat - runway_years(c, NAV_FLOOR_META)), D("0.01"))
 
 
 class CollatorAnchorTests(unittest.TestCase):

@@ -1910,6 +1910,61 @@ mod tests {
     }
 
     #[test]
+    fn the_reserve_haircut_still_pays_collators_and_proposers_and_08_1_2_says_why() {
+        // SQ-540(b). 08 §1.2 enumerated TWO maintenance carve-outs while this
+        // code had always run more; the sweep read that as a solvency defect.
+        // It is not, and the two extra paths are correct for DIFFERENT reasons,
+        // which is why they are asserted separately rather than as one case.
+        let mut t = funded();
+        t.set_reserve_impaired(7, true);
+        assert_eq!(t.nav().spendable_nav, 0);
+        // The flag really is set and really does block discretionary spend, so
+        // the two assertions below are not passing by accident.
+        assert_eq!(
+            t.spend(TREASURY, 0, BudgetLine::OpsCollators, acct(1), 1)
+                .unwrap_err(),
+            Error::ReserveImpaired
+        );
+
+        // (c), the third carve-out: D-9's wedge argument one layer down.
+        // Unpaid collators stop authoring; an unauthored chain runs no reserve
+        // probe; the flag could then never clear. Bounded to the COLLATOR pot.
+        let before_line = t.line_balance(BudgetLine::OpsCollators);
+        let paid = t
+            .collator_compensation(&[(acct(1), 1)], COLLATOR_COMP_EPOCH, 1)
+            .expect("collator compensation is dispatchable under the flag");
+        assert_eq!(paid, vec![(acct(1), COLLATOR_COMP_EPOCH)]);
+        assert_eq!(
+            t.line_balance(BudgetLine::OpsCollators),
+            before_line - COLLATOR_COMP_EPOCH
+        );
+
+        // NOT a carve-out: a crystallized obligation, in the same class as the
+        // existing stream claims §1.2 already exempts. The payout is one-shot
+        // (`mark_executed` discards its result so a valid payload is never
+        // retried forever), so gating it on the flag would DESTROY the reward
+        // rather than defer it -- the wrong direction under G-1 and R-7.
+        let before_rewards = t.line_balance(BudgetLine::Rewards);
+        t.proposer_reward(acct(2), 500 * USDC)
+            .expect("an owed proposer reward survives the flag");
+        assert_eq!(
+            t.line_balance(BudgetLine::Rewards),
+            before_rewards - 500 * USDC
+        );
+
+        // And the bound holds: neither path can reach MAIN, and both stop at
+        // their own pot rather than drawing on the impaired reserve at large.
+        assert_eq!(
+            t.collator_compensation(&[(acct(1), 1)], before_line, 1),
+            Err(Error::InsufficientFunds)
+        );
+        assert_eq!(
+            t.proposer_reward(acct(2), before_rewards),
+            Err(Error::InsufficientFunds)
+        );
+    }
+
+    #[test]
     fn collator_compensation_scales_by_registered_collators_including_zero_authors() {
         let mut t = Treasury::default();
         t.lines.push((BudgetLine::OpsCollators, 6_000 * USDC));
