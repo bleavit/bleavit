@@ -39,6 +39,15 @@ Permissionless entry with `orc.reporter_stake` *(normative value: [13](./13-para
 
 OCWs on reporter-operated nodes MAY compute values and submit the signed extrinsics automatically; consensus verifies only signatures, bonds and windows. No unsigned oracle transactions are accepted (`ValidateUnsigned` is not implemented for any call in this document).
 
+**External questions do not settle here, and the reason is resource sharing rather than mechanism (normative; 2026-08-01, D-20).** The hosted question service ([16](./16-hosted-question-service.md)) reuses this document's *shapes* — §7's value-scaled filing bond verbatim, `orc.window`, §5.5's 40/60 slash split — inside `pallet-question-service`, and reuses **none of its state**. Two reasons, both about what is shared:
+
+1. **This document's discipline parameters are chain-wide with no per-question override.** `orc.rounds`, `orc.bond_bps` and `orc.reporter_stake` are single META keys governing *every* game on the chain. An external question's honest `Δs_max` is 10,000 bps — a lying reporter moves `s` from 0 to 1, and no client-declared `at_risk` may be substituted, because the client **is** the adversary the parameter binds. §6.3's coverage rule `(2^R_max − 1)·orc.bond_bps ≥ Δs_max` *is* satisfiable there — at `R_max` = 4 it needs 667 bps against a hard max of 1,000 — but **only by raising Bleavit's own reporter bond from 250 to 667 bps and adding a round to every Bleavit dispute**. The cost of hosting would be paid by the wrong party.
+2. **Reporter-registry contamination.** `orc.reporter_stake` is staked against *Bleavit's* welfare components, and §3's offense ladder is a property of the **account** across the whole chain — with ejection permanent. A reporter ejected over a false *external* report is thereby made unavailable for Bleavit's own welfare measurement, spending the chain's scarcest security resource on a tenant's dispute.
+
+Terminal adjudication is likewise out of scope: `OracleResolution` is a VIT-conviction referendum, and routing a client's disputed foreign fact to Bleavit's electorate is the same contamination in its most expensive form. External settlement is a client-named bonded attestor **median** instead ([16](./16-hosted-question-service.md) §6.3), with VOID as the universal failure edge.
+
+*Three further arguments for this boundary appeared in the Track N design draft and are **false**; they are recorded in [16](./16-hosted-question-service.md) §6.2 rather than deleted, because a boundary defended by a wrong argument is one correction away from being reopened for the wrong reason.*
+
 ## 4. Watchtower registry (challenge-censorship repair, D-18)
 
 The prior rule "unchallenged ⇒ final" made silence load-bearing: colluding collators could censor challenges for one 48 h window and finalize a false report (the review's challenge-censorship medium; TM-4's "delay, never wrong" was a mischaracterization). Finalization-by-silence now additionally requires positive, bonded evidence that the report was *observable*:

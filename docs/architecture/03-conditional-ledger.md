@@ -16,6 +16,50 @@ The pallet is small, frozen early, and heavily verified (audit scope A per BE §
 
 ---
 
+## 1a. Instancing and the second domain (normative; 2026-08-01, D-20)
+
+This pallet is `Config<I: 'static = ()>`. The runtime carries **two** instances: the primary domain
+(`()`, index 52) and the hosted-question-service domain
+(`ServiceLedger = pallet_conditional_ledger::<Instance1>`, index 67 — see
+[16](./16-hosted-question-service.md)). `pallet-registry` is the existing precedent in this runtime.
+
+**Why an instance and not a domain tag inside one ledger.** §7's L-2 is
+`TotalEscrowed + held_deposits ≤ balance(sovereign)` — stated against *the* sovereign account,
+**singular**. Under shared custody an external-domain deficit is masked by the primary domain's
+surplus until the *combined* liability exceeds combined custody, i.e. until **the primary domain's own
+traders are already unbacked**; and because the I-4 latch and `PB-LEDGER-FREEZE` eligibility key on
+that same global comparison, an external failure would halt the primary ledger. Instancing makes
+per-domain solvency **the existing invariant evaluated twice** rather than a new assertion: `try_state`
+runs per instance, and L-1…L-7 hold per domain unchanged.
+
+**What is per instance and what is not.** Each instance has its own `PalletId`-derived sovereign, its
+own storage prefix, and its own vault-id band about `kernel::SERVICE_ID_BASE`, so a mis-routed id
+errors `UnknownVault` by construction. `crates/conditional-ledger-core/` needs **no semantic change** —
+`LedgerState<AccountId>` is already an owned aggregate with no globals — though the FRAME shell needs
+the full `Config`/`Pallet<T>` → `Config<I>`/`Pallet<T, I>` conversion. Instance `()`'s prefix is
+unchanged and the chain is pre-genesis, so **no migration**.
+
+**`ProtocolAccounts` is three predicates, not one, and getting either direction wrong moves money.**
+§3's enumerated set currently serves three jobs at once. With two instances they separate:
+
+| Predicate | Membership | Job |
+|---|---|---|
+| `ReservedProtocolDestinations` | **union** across every instance and domain | §5.4's signed-transfer destination refusal |
+| `LocalProtocolAccounts<I>` | **per instance** | fee, storage-deposit and position-cap exemption; internal custody |
+| `InflowCapExemptAccounts` | separate, globally governed | Phase-3 inflow metering |
+
+Per-instance *destinations* strands a service position in a primary book address no service origin can
+redeem from (escrow stays solvent; the position is stuck until archive). Union *exemptions* gives
+foreign-domain accounts zero deposit, no 64-position cap and redemption-fee exemption. The runtime
+already demonstrates the split is real: treasury `MAIN` is in this pallet's `ProtocolAccounts` and is
+**deliberately excluded** from `InflowCapProtocolAccounts`. A hosted question's `client` account MUST
+be asserted outside **all three** sets at registration.
+
+**Formal coverage is not inherited for free.** `models/tla/ledger` stays valid verbatim *per instance*,
+which is the strongest single argument for this shape — but it has no domain dimension and its
+`Transfer` is unrestricted between modelled holders, so a **two-instance composition model** is owed
+alongside it, proving separate custody and the union destination firewall.
+
 ## 2. Instrument model
 
 ### 2.1 Position identity
@@ -119,7 +163,7 @@ Transitions (exhaustive; anything absent is impossible and MUST error):
 ## 3. Config
 
 ```rust
-pub trait Config: frame_system::Config {
+pub trait Config<I: 'static = ()>: frame_system::Config {   // instanced by D-20 (§1a)
     type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
     type Collateral: fungibles::Mutate<Self::AccountId, AssetId = AssetId, Balance = Balance>; // USDC
     type UsdcAssetId: Get<AssetId>;
@@ -175,7 +219,19 @@ pub trait Config: frame_system::Config {
     /// The per-market **fee** account is a member: the
     /// [`04-markets-and-pricing.md`](./04-markets-and-pricing.md) §2 `sweep_revenue` crank
     /// redeems that account's claims to USDC, and charging it would be the treasury taxing itself.
-    type ProtocolAccounts: Contains<Self::AccountId>;
+    /// §1a: ONE predicate cannot serve three jobs once a second instance exists.
+    /// Getting either direction wrong moves money — per-instance destinations
+    /// strand a position in the other domain's book address; union exemptions
+    /// hand a foreign account zero deposit and no position cap.
+    ///
+    /// Union across every instance and domain — §5.4's signed-transfer
+    /// destination refusal. A destination reserved in *either* domain is refused
+    /// in *both*.
+    type ReservedProtocolDestinations: Contains<Self::AccountId>;
+    /// This instance only — fee, storage-deposit and position-cap exemption,
+    /// and internal custody. A foreign domain's protocol account is NOT exempt
+    /// here.
+    type LocalProtocolAccounts: Contains<Self::AccountId>;
     /// §5.3a redemption fee rate, read live from `pallet-constitution::Params`
     /// (`ledger.redeem_fee`, normative row: §13 §1). A missing or malformed
     /// record reads as **zero** — the fail-open direction here is the

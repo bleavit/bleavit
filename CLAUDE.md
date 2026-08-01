@@ -30,9 +30,18 @@ constraints must actually reach Codex, prefer direct `codex exec` (with `</dev/n
 or drive the companion runtime from the main loop:
 `node ~/.claude/plugins/cache/openai-codex/codex/<ver>/scripts/codex-companion.mjs
 status --all | result <job> | cancel <job>`. Model for this repo: `gpt-5.6-sol` at
-`xhigh`. If Codex hits a capacity/quota wall, fall back to Claude subagents at matched
+**`max`** reasoning effort (raised from `xhigh` by explicit user instruction, 2026-08-01;
+pass it as `-c model_reasoning_effort="max"` — verified accepted by codex-cli 0.146.0).
+If Codex hits a capacity/quota wall, fall back to Claude subagents at matched
 model/effort and disclose the substitution in PLAN.md — losing the provider must not
 lose the independent-second-opinion pattern.
+
+**Parallel Codex jobs and the worktree rule (R-13's operational corollary).** A
+`workspace-write` job's turn-level snapshot/restore reverts concurrent edits in the same
+tree — *including files it was told not to touch*. So `read-only` jobs (review, audit,
+adversarial refutation, derivation checking) may fan out freely in one tree, but two
+**authoring** jobs must never share a worktree: give each its own `git worktree` and
+merge back serially.
 
 ## Hooks (installed via `.claude/settings.json` — expect these behaviors)
 

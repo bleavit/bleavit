@@ -475,7 +475,11 @@ class RegistryGroundingTests(unittest.TestCase):
         model_bytes = {param_key_bytes(key) for key in REGISTRY}
         json_bytes = {param_key_bytes(key) for key in json_keys}
         classified_bytes = {param_key_bytes(key) for key in classified_genesis}
-        self.assertEqual(len(entries), 194)
+        # 194 at S7-S11; +5 with D-20's `svc.*` keys (Track N, doc 16). All five
+        # are `genesis = false`, so the three seeded-key assertions below are
+        # deliberately unchanged at 107 — this counter is the tripwire that a
+        # new registry key gets noticed, and it did its job on the merge.
+        self.assertEqual(len(entries), 199)
         self.assertEqual(len(json_keys), 107)
         self.assertEqual(len(classified_genesis), 107)
         self.assertEqual(len(model_bytes), 107)

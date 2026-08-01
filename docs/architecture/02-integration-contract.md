@@ -4,7 +4,7 @@
 
 **Boundary.** This document owns everything the chain and the canonical frontend must agree on byte-for-byte: shared SCALE types, the `FutarchyApi` runtime API and its view types, the frozen event schema, the storage items and names the frontend reads directly, chain identity constants, the constants-binding rules, the WSS bootnode chain-spec requirement, the backend-published test-artifact feed, and the `ReleaseChannel` raw storage key. It does **not** own the *semantics* behind these surfaces (ledger rules → [03](03-conditional-ledger.md), market mechanics → [04](04-markets-and-pricing.md), decision engine → [05](05-welfare-and-decision-engine.md), oracle game → [07](07-oracle-and-disputes.md), upgrade path → [09](09-execution-upgrades-and-rollout.md)) — but where a name or layout appears both here and there, **this document's spelling is canonical**. Normative language per RFC 2119.
 
-**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 18**. Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
+**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 19**; **v20 is authored below and NOT yet in force** (§13), because the runtime does not declare it until Track N's code lands. Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
 
 ---
 
@@ -124,7 +124,7 @@ The `MetricId` assignment registry is owned by [05](05-welfare-and-decision-engi
 
 Proposal positions MUST project a settled proposal vault as `ScalarSettled { winner, s }`; Baseline positions MUST project a settled epoch vault as `BaselineSettled { s }` and MUST NOT fabricate a proposal branch. `RatificationStatus::NoPassedRecord` means only that the execution guard has no passing ratification record. It is deliberately agnostic between no referendum, an in-flight referendum and a failed referendum; the frontend MUST derive that lifecycle from `pallet-referenda` ([06](06-governance-and-guardians.md) §2.2). `Pending` and `Failed` are removed because the guard cannot truthfully produce them in the deployed design. This `RatificationStatus` restructure is a pre-genesis contract-v6 repair; no deployed SCALE value requires migration.
 
-The crate re-exports `INTEGRATION_CONTRACT_VERSION`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9). **It reads whichever version §13's history marks IN FORCE — currently v18.** A bump is always atomic with the surface it describes and is never in force ahead of it, so a consumer reads the constant rather than any prose statement of its value: this sentence used to name the pending version and the condition under which it would change, which made it a second copy of the number that went stale the moment the surface landed (corrected 2026-07-29, milestone E4).
+The crate re-exports `INTEGRATION_CONTRACT_VERSION`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9). **It reads whichever version §13's history marks IN FORCE — currently v19.** A bump is always atomic with the surface it describes and is never in force ahead of it, so a consumer reads the constant rather than any prose statement of its value: this sentence used to name the pending version and the condition under which it would change, which made it a second copy of the number that went stale the moment the surface landed (corrected 2026-07-29, milestone E4).
 
 ---
 
@@ -328,6 +328,90 @@ pub struct OracleRoundView {
 
 `OracleRoundView.escalated` is `round > 1`: it is true iff at least one prior round advanced the game. It MUST be false for a round-1 report even while that round has a live challenger, and MUST NOT be interpreted as “currently challenged”; any future view of that distinct fact requires a separately named field.
 
+### 4a. Hosted question service — pending contract **v20** (D-20; NOT in force)
+
+Authored here rather than only in §13's history, because a history entry saying a section "gains"
+a surface is not a surface: N7/N9 cannot implement a byte-for-byte contract from a changelog, and
+two clients reading only the changelog would encode v20 differently. `INTEGRATION_CONTRACT_VERSION`
+stays **19** until the implementation lands; these definitions are frozen on arrival, not on merge.
+
+```rust
+// §3 — the twelfth `FutarchyApi` method (additive; bumps the sp_api version too)
+fn hosted_report(question_id: QuestionId) -> Option<ReportView>;
+
+// §4 — exact aliases and enums this surface introduces
+pub type QuestionId = u64;
+pub type ClientId   = u32;
+
+pub enum VoidReason {          // #[codec(index)]-stable, append-only
+    NoQuorum,                  // 0
+    MedianOutOfRange,          // 1
+    DeadlineMissed,            // 2
+    ServicePaused,             // 3
+    EscrowInsufficient,        // 4
+    AttestorSetCollapsed,      // 5
+    ClientUnreachable,         // 6
+}                              // registry removal is NOT here — 16 §2/§6.4
+
+pub struct ReportView {
+    pub question_id: QuestionId,          // u64
+    pub client_id: ClientId,              // u32
+    pub sub_id: [u8; 32],                 // opaque; stored, echoed, never interpreted
+    pub twap_accept_1e9: FixedU64,        // sealed segment TWAP, 1e9 grid (04 §7)
+    pub twap_reject_1e9: FixedU64,
+    pub observations: u32,
+    pub window_start: BlockNumber,
+    pub window_end: BlockNumber,
+    pub b_accept: Balance,                // the liquidity actually posted
+    pub b_reject: Balance,
+    pub manip_floor: Balance,             // 05 §5.6 cash form, rounded DOWN
+    pub declared_stake: Balance,          // S, republished verbatim
+    pub epsilon_1e9: FixedU64,            // ε, republished verbatim
+    pub certified: bool,                  // C_disp(ε) ≥ 3·S — NOT ManipFloor̂ (16 §5.2)
+    pub settlement_trust: SettlementTrust,
+    pub provenance_hash: H256,            // blake2_256 over the domain-separated SCALE preimage
+}                                         //   separator b"bleavit/hosted-report/v1" (16 §6.3)
+
+pub struct SettlementTrust {
+    pub attestors: u32,
+    pub quorum: u32,
+    pub bond_total: Balance,
+}
+
+pub enum QuestionPhase { Registered, Open, Sealed, Settled, Voided }
+```
+
+**§6 additions — client-facing events.** These meet criterion (b): [16](16-hosted-question-service.md)
+requires a client to observe its own question's terminal state without trusting a push.
+
+| Event | Shape |
+|---|---|
+| `QuestionRegistered` | `{ question_id: QuestionId, client_id: ClientId, window_end: BlockNumber }` |
+| `QuestionSealed` | `{ question_id: QuestionId, provenance_hash: H256 }` |
+| `QuestionSettled` | `{ question_id: QuestionId, value_1e9: FixedU64 }` |
+| `QuestionVoided` | `{ question_id: QuestionId, reason: VoidReason }` |
+
+Push-failure and ingress-metering events meet none of (a)–(c) and are pallet-local diagnostics.
+
+**§7 additions — storage the frontend may read directly.**
+
+| Key | Value | Bound |
+|---|---|---|
+| `Clients: map ClientId → ClientRecord` | `{ location: Option<Location>, local_signer: Option<AccountId>, bond: Balance, admitted_at: BlockNumber, questions_live: u32, questions_total: u32 }` — exactly one of the two identity fields is `Some` (16 §2) | `MaxClients` = 64 (13 §4) |
+| `Questions: map QuestionId → QuestionRecord` | `{ client_id: ClientId, phase: QuestionPhase, window_start: BlockNumber, window_end: BlockNumber, declared_stake: Balance, epsilon_1e9: FixedU64, tolerance_1e9: FixedU64, markets: [MarketId; 2] }` | `svc.max_live` live + retention |
+| `Reports: map QuestionId → ReportView` | as above | one per sealed question, retained to archive |
+
+**§7.1 scoping (normative).** Every existing conditional-ledger row in §7 is scoped to instance
+`()`. `ServiceLedger` (`pallet_conditional_ledger::<Instance1>`) has its own storage prefix and is
+**not** canonical-frontend ingest surface; a frontend reading the ledger's raw keys reads the
+primary domain only.
+
+**§9 additions — metadata constants.** `QuestionService::FeeFloor`, `QuestionService::MaxLive`,
+`QuestionService::MaxWindow`, `QuestionService::EpsilonMin`, `ClientRegistry::ClientBond`, and
+`QuestionService::AttestorsMin` (kernel `3`). The `svc.fee_bps` PARAM row binds through `params()`
+like every other tunable and is **absent from metadata while unset** — its unset state is the
+arming gate (16 §8.1).
+
 ---
 
 ## 5. pallet-market events (X-1b)
@@ -484,7 +568,7 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 | VIT decimals | 12 |
 | VIT existential deposit | **0.01 VIT** (= 10^10 plancks) |
 | Phase flag storage | `pallet-constitution::PhaseFlags` (§7.3) — the trading-enablement key |
-| Contract version | `INTEGRATION_CONTRACT_VERSION` (runtime constant) — **`17` in force** (§13's history is the authority; read the constant, never a prose copy of it) |
+| Contract version | `INTEGRATION_CONTRACT_VERSION` (runtime constant) — **`19` in force** (§13's history is the authority; read the constant, never a prose copy of it) |
 
 ---
 
@@ -529,7 +613,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 
 | Pallet | Constant name | Type | Value source |
 |---|---|---|---|
-| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (**= 17 in force**, §13) |
+| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (the value §13 marks IN FORCE — read the constant, never a prose copy; §13) |
 | Constitution | `MaxParams` | `u32` | `constitution_core::MAX_PARAMS` (= 128) |
 | Constitution | `MaxCapabilities` | `u32` | `constitution_core::MAX_CAPABILITIES` (= 64) |
 | Constitution | `MaxMeters` | `u32` | `constitution_core::MAX_METERS` (= 16) |
@@ -555,7 +639,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Registry (each instance) | `ArchiveDelay` | `BlockNumber` (`u32`) | `max(live Params[ledger.archive], 21 × BLOCKS_PER_DAY)`; the 21-day floor is independent of the shared ledger tunable |
 | Registry (each instance) | `MaxFilingsPerEpoch` | `u32` | `kernel::REG_MAX_FILINGS_EPOCH` (= 64) |
 | Registry (each instance) | `MaxEvidenceLen` | `u32` | fixed `H256` evidence-hash width (= 32 bytes) |
-| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (**= 17 in force**, §13) |
+| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (the value §13 marks IN FORCE — read the constant, never a prose copy; §13) |
 | ExecutionGuard | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) |
 | ExecutionGuard | `MaxExecutionRecords` | `u32` | `bounds::MAX_EXECUTION_RECORDS` (= 256) |
 | ExecutionGuard | `MaxCalls` | `u32` | `kernel::MAX_CALLS` (= 16) |
@@ -564,7 +648,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | ExecutionGuard | `MaxRuntimeCodeBytes` | `u32` | runtime `Config::MaxRuntimeCodeBytes` (`pallet_preimage::MAX_SIZE`) |
 | ExecutionGuard | `ExecutionTimelockFloor` | `[u32; 4]` | [13 §1](13-parameters.md) `exec.lock.*` K hard minima, `[14,400; 4]` blocks |
 | ExecutionGuard | `ExecutionGraceFloor` | `u32` | [13 §1](13-parameters.md) `exec.grace` K hard minimum (= 100,800 blocks) |
-| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (**= 17 in force**, §13) |
+| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (the value §13 marks IN FORCE — read the constant, never a prose copy; §13) |
 | Epoch | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) |
 | Epoch | `MaxIntakeQueue` | `u32` | `bounds::INTAKE_QUEUE` (= 64) |
 | Epoch | `MaxNonTerminalCohorts` | `u32` | `bounds::MAX_NON_TERMINAL_COHORTS` (= 4) |
@@ -578,12 +662,12 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Epoch | `DecisionDeltaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.delta.*` K hard minima (= `[5,000,000; 4]`) |
 | Epoch | `TreasuryBondAskBps` | `u128` | `kernel::TREASURY_BOND_ASK_BPS` (= 50; the 08 §7 TREASURY Ask surcharge slope, added in v13 — SQ-186) |
 | Epoch | `DecisionSigmaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.sigma.*` K hard minima (= `[0; 4]`) |
-| Welfare | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (**= 17 in force**, §13) |
+| Welfare | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (the value §13 marks IN FORCE — read the constant, never a prose copy; §13) |
 | Welfare | `MaxMetricSpecs` | `u32` | `welfare_core::MAX_METRIC_SPECS` (= 16) |
 | Welfare | `MaxSnapshots` | `u32` | `welfare_core::MAX_SNAPSHOTS` (= 60 = 20 retained epochs × (`epoch.horizon_k` = 2 frozen versions + the epoch's own active version); contract v16) |
 | Welfare | `MaxGateFlags` | `u32` | `welfare_core::MAX_GATE_FLAGS` (= 20) |
 | Welfare | `MaxDailyGateSamples` | `u8` | `welfare_core::MAX_DAILY_GATE_SAMPLES` (= 64) |
-| FutarchyTreasury | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (**= 17 in force**, §13) |
+| FutarchyTreasury | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (the value §13 marks IN FORCE — read the constant, never a prose copy; §13) |
 | FutarchyTreasury | `MaxStreams` | `u32` | `futarchy_treasury_core::MAX_STREAMS` (= 128) |
 | FutarchyTreasury | `MaxBudgetLines` | `u32` | `futarchy_treasury_core::MAX_BUDGET_LINES` (= 32) |
 | FutarchyTreasury | `MaxPolCommitments` | `u32` | `futarchy_treasury_core::MAX_POL_COMMITMENTS` (= 196) |
@@ -666,6 +750,7 @@ No other origin can write the record. The layout MUST NEVER change except by app
 
 **Version history.**
 
+- **v20 (2026-08-01) — the hosted question service (D-20, Track N). AUTHORED, NOT IN FORCE.** Marked not-in-force deliberately, on the v17/v18 precedent recorded below: freezing this document at a version the runtime does not declare makes the metadata constant useless as a schema selector. `INTEGRATION_CONTRACT_VERSION` stays **19** until Track N's code lands (N7/N9), and this entry flips in the same commit that moves the constant. **What it adds, all additive.** (i) §4 gains one `FutarchyApi` method, `hosted_report(question_id) -> Option<ReportView>`, and its `ReportView` type — the sealed conditional TWAPs, `observations`, the posted `b` per book, `manip_floor`, `declared_stake`, `epsilon_1e9`, `certified`, `settlement_trust: SettlementTrust { attestors, quorum, bond_total }`, `sub_id` and `provenance_hash` ([16](16-hosted-question-service.md) §5). An additive method bumps the `sp_api` version *and* the contract version per rule 2. (ii) §6 gains the client-facing events `QuestionRegistered`, `QuestionSealed { question_id, provenance_hash }`, `QuestionSettled` and `QuestionVoided { reason }` — these meet criterion (b), because [16](16-hosted-question-service.md) requires a client to be able to observe its own question's terminal state without trusting a push. Push-failure and ingress-metering events do **not** meet (a)–(c) and are pallet-local operational diagnostics. (iii) §7 gains the service pallets' contract-surface keys (`Clients`, `Questions`, `Reports`) and — the one clause a direct-storage reader must not miss — **scopes every existing §7.1 conditional-ledger row to instance `()`**. `ServiceLedger` (`pallet_conditional_ledger::<Instance1>`) has its own storage prefix, and a frontend reading the ledger's raw keys reads the primary domain only; the service instance is deliberately **not** canonical-frontend ingest surface. (iv) §9 gains the `svc.*` metadata constants. **What does not change:** no existing SCALE type, field, offset, storage key, event shape or call index moves — every addition is trailing, so §13 rule 3 is satisfied and, per rule 7, `transaction_version` is untouched. **Pre-genesis revision** — no runtime is deployed, so §13's point-3 migration clause does not apply. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-08-01, through the standing autonomous-resolution delegation.**
 - **v19 (2026-08-01) — a reporter default settles neutral, and the §3 ladder survives exit (oracle security PR). IN FORCE.** *Renumbered from v18 on rebase: E6 (#201) merged onto that number first, and §13 entries are allocated in **merge order, not authoring order** — the number a not-yet-merged branch reserves is provisional until it lands.* Two §7.2 **behaviour** changes, no shape change; listed as a contract change under the v15 precedent, because a frontend reading these maps directly observes something the old notes did not describe. (i) `ComponentValues` no longer produces `SettlePath::ChallengerDefault`. [07](07-oracle-and-disputes.md) §5.3's forward settlement let one economic party occupy both roles — this document freezes no distinctness and 07 §4's "entity registry per 05" does not exist — and terminate a game at round 1 risking `B_1` against a `Δs_max` that 07 §6.3 sized against the full `(2^R_max − 1)·B_1` ladder; against §6.3's own worked example the attacker's net moved from the intended −90,000 to +102,000, at 8.6 % of the required ladder. The repair is on the value side because §5.3's own closing sentences forbid debiting an unfunded stack. The variant is **retained**, so no discriminant moves and `SettlePath`'s SCALE encoding is byte-identical. (ii) `Reporters` gains a retention/continuity rule: the 07 §3 offense record survives `deregister_reporter` and ejection in a pallet-internal, non-§7 store, re-registration carries it forward and re-seats at the 07 §2(5) half stake past the second offense, and an ejected account is refused. Neither the `ReporterInfo` nor the `SettledComponent` value shape changes; the new store is an **additive internal storage item** and is not contract surface (§7's own rule, and the v17 precedent). No event name or field shape moves — the one new pallet event (`ReporterRecordsFull`) fails §6's criteria (a)–(c) and is an off-contract operational diagnostic. Two trailing pallet error variants only (the v8 precedent). No call index moves and no dispatchable is added, so per §13 rule 7 `transaction_version` is untouched. **Pre-genesis revision** — no runtime is deployed, so §13's point-3 migration clause does not apply. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-31, through the standing autonomous-resolution delegation.**
 
 - **v18 (2026-07-31) — the proposal author/funder split (E6). Superseded by v19.** Implemented and bumped 2026-07-31 together with the surface: `Proposal` and `ProposalSummaryView` carry the trailing `funder` and `INTEGRATION_CONTRACT_VERSION` reads **18**, so a client selecting a schema from chain metadata selects v18 and is correct to. The entry was authored not-in-force one commit earlier, on the v17 precedent recorded below — freezing this document at a version the runtime does not declare makes the metadata constant useless as a schema selector — and flipped here, in the commit that moves the constant. **What changes.** `epoch.submit` no longer requires the submit signer to be the proposal's proposer. The **signer is the funder** — the class bond is held on the signer, so the split cannot be used to force an account into a hold it did not authorize — while `Proposal.proposer` remains the **author**. §4's `ProposalSummaryView` gains a **trailing** `funder: AccountId`; the `Proposal` record it projects (single-homed in `futarchy-primitives`, named by §7's `Proposals` row) gains the same trailing field. No existing field's name, type or offset moves, so both are §13 rule-3 appends, and a consumer that ignores the new field reads exactly what it read at v17. **What does not change.** No storage key, no `FutarchyApi` method, no event shape, and no call index — `submit`'s signature is unchanged because the funder is the origin, not an argument — so per §13 rule 7 `transaction_version` is untouched. Where `funder` is absent from a consumer's model it equals `proposer`, which is the only state reachable before this version. **Pre-genesis revision** — no runtime is deployed, so §13's point-3 migration clause does not apply. **Incidence, which a client rendering either identity must get right:** the [08](08-treasury-and-economics.md) §1.1 proposer reward pays the **author**; the [06](06-governance-and-guardians.md) §4 bond refund and its 10 % non-decision-grade slash fall on the **funder**; pre-qualification `epoch.withdraw` is admitted for **either**; `epoch.bind_ratification` remains **author-only** ([09](09-execution-upgrades-and-rollout.md) §1.1(4)). The [06](06-governance-and-guardians.md) §4 rule-4 per-account intake cap counts the **funder**. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-31, through the standing autonomous-resolution delegation.**

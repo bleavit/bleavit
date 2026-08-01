@@ -144,8 +144,10 @@ def extract_rows(document: str) -> list[AlertRow]:
             cursor += 1
         if count == 0:
             raise CoverageError(f"12 §6.3 table {table_index + 1} has no data rows")
-    if len(rows) != 21:
-        raise CoverageError(f"12 §6.3 extracted {len(rows)} rows; frozen O5 inventory requires 21")
+    # 21 at O5; +3 with D-20's hosted-question-service rows (doc 16), whose
+    # producers are seam-declared against N9 until the service pallets ship.
+    if len(rows) != 24:
+        raise CoverageError(f"12 §6.3 extracted {len(rows)} rows; frozen inventory requires 24")
     domains = [row.domain for row in rows]
     if len(set(domains)) != len(domains):
         raise CoverageError("12 §6.3 domain names are not unique")

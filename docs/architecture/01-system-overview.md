@@ -58,7 +58,7 @@ A runtime upgrade can technically replace any runtime logic, including "immutabl
 
 ### 2.4 Non-goals and v1 cuts
 
-N-1. Combinatorial futarchy. N-2. Arbitrary cross-chain governance execution over XCM (only reserve transfers and enumerated queries). N-3. On-chain continuous limit-order book. N-4. Per-address position limits / address clustering as consensus security. N-5. Reputation-weighted market influence. N-6. Multi-asset collateral baskets. N-7. Sybil-proof usage metrics. **N-8 (new, D-8). Forecast trading** — post-resolution books are cut from v1; the reopened-book inventory problem is recorded with the deferral in [04](04-markets-and-pricing.md).
+N-1. Combinatorial futarchy. N-2. Arbitrary cross-chain governance execution over XCM. **Narrowed, not lifted (2026-08-01, D-20):** reserve transfers, enumerated queries, and the single positionally-matched client-ingress program of [09](09-execution-upgrades-and-rollout.md) §6.5 are admitted; everything else remains barred. The ingress program carries a `Transact` whose call MUST resolve to `CallDomain::ExternalClient`, a domain reachable by no governance origin — so what stays excluded is precisely what N-2 was written to exclude: *governance* execution, in either direction. See [16](16-hosted-question-service.md). N-3. On-chain continuous limit-order book. N-4. Per-address position limits / address clustering as consensus security. N-5. Reputation-weighted market influence. N-6. Multi-asset collateral baskets. N-7. Sybil-proof usage metrics. **N-8 (new, D-8). Forecast trading** — post-resolution books are cut from v1; the reopened-book inventory problem is recorded with the deferral in [04](04-markets-and-pricing.md).
 
 ---
 
@@ -147,13 +147,15 @@ flowchart TB
     AR --> OR
 ```
 
-XCM relationships in v1 are exactly two: Asset Hub ⇄ futarchy chain reserve transfers of USDC (and DOT for fees), and treasury-authorized transfers to the Coretime chain for renewals. No cross-chain `Transact` governance in either direction.
+XCM relationships in v1 are **three** (was two until 2026-08-01, D-20): Asset Hub ⇄ futarchy chain reserve transfers of USDC (and DOT for fees); treasury-authorized transfers to the Coretime chain for renewals; and the **hosted-question-service** relationship with admitted external clients ([16](16-hosted-question-service.md)), which is bounded in both directions and is the only one carrying a `Transact`. Inbound, that `Transact` is admissible **only** inside the exact positionally-matched program of [09](09-execution-upgrades-and-rollout.md) §6.5, and only for calls in `CallDomain::ExternalClient`. Outbound, the only program this chain authors toward a client is a best-effort report push on a dedicated router whose outcome is never read back (I-36). No cross-chain **governance** `Transact` in either direction — that remains excluded, and the new domain is reachable by no governance origin.
 
 ---
 
 ## 5. Runtime Composition
 
 ### 5.1 Pallet map
+
+**Added by D-20 (2026-08-01):** `pallet-client-registry` (index 65) and `pallet-question-service` (index 66) hold the external-client trust domain, and `ServiceLedger` (`pallet_conditional_ledger::<Instance1>`, index 67) holds its custody — a **second instance** of an existing pallet rather than a new one, which is why it is not a separate row. The topology diagram above shows the two v1 XCM relationships and is deliberately **not** redrawn for the third (client ingress/egress): [09](09-execution-upgrades-and-rollout.md) §6.5 and [16](16-hosted-question-service.md) own that surface, and a duplicated wire diagram is how two descriptions drift apart.
 
 Cohesion rule: pallets are bounded by *trust domain and settlement lifecycle*, not by noun. The conditional ledger and the market maker are separate because the ledger is the solvency-critical custody domain (small, frozen early, heavily verified) while markets are the evolving pricing domain.
 
@@ -208,6 +210,8 @@ Eight custom origins, each produced by exactly one pallet through exactly one co
 
 `FutarchyParam`, `FutarchyTreasury`, `FutarchyCode`, `FutarchyMeta` (execution guard, per passed class) · `ConstitutionalValues`, `OracleResolution` (values referenda tracks) · `GuardianHold`, `EmergencyPlaybook` (guardian pallet, 5-of-7, scoped per power).
 
+**Scoping after D-20 (2026-08-01), because this clause says "XCM origin conversion" and there is now one.** The hosted question service ([16](16-hosted-question-service.md)) converts a registered client `Location` into `pallet_client_registry::Origin::ExternalClient(ClientId)`. The sentence above remains **literally true and unweakened**: it is a statement about *these eight* origins, and none of them becomes obtainable that way. The new origin is a **ninth**, in a **different pallet**, with a **different `OriginCaller` variant** — and that separation is load-bearing rather than cosmetic. `EnsureFutarchyOrigin` succeeds for *any* `pallet_origins::Origin` variant, so putting a client origin in that enum would have made the eight-origin closure depend on a filter; putting it in its own pallet makes `try_origin` fail **structurally** instead. The converter has exactly one success constructor, so no `Location` reaches `Signed`, `Root`, `None` or any of the eight (I-34), and `CallDomain::ExternalClient` is reachable by none of them either (I-35). `track_origins.rs` is the existing precedent for a non-`pallet_origins` origin in this runtime.
+
 There is **no path to unrestricted Root** after bootstrap: `EnsureRoot` succeeds only for the internal dispatch the execution guard performs for the two allowlisted `frame_system` upgrade calls. `BaseCallFilter = RuntimeBaseCallFilter` denies the "nobody" call set unconditionally (from genesis, D-13) and recursively inspects the **closed** wrapper/carrier set — including `batch`/`batch_all`/`force_batch`, `proxy`, **`proxy_announced`**, `as_multi`, **`as_multi_threshold_1`**, the storing carrier `referenda.submit`, and the denied carriers `dispatch_as`, `dispatch_as_fallible`, `if_else`, `sudo_as`, `scheduler.*` and `pallet_xcm.execute`; the enumeration is owned by [06](06-governance-and-guardians.md) §3.3 and closed there, not here. Matching-origin enforcement is a genuinely separate second check, but it cannot live in the filter — a `Contains<RuntimeCall>` sees no origin — so it happens at the two governance dispatch boundaries: the execution guard's origin-aware re-check before `dispatch_bypass_filter` on the belief side, and the scheduler's ordinary *filtered* dispatch plus each pallet's `EnsureOrigin` on the values side (SQ-32; mechanics in [06](06-governance-and-guardians.md) §3.3/§3.4). The EmergencyPlaybook admissible call set is enumerated in the capability table. The full call-level authority matrix, track table, ratification plumbing and playbook catalog live in [06](06-governance-and-guardians.md).
 
 ---
@@ -231,7 +235,7 @@ Eight evidence-gated phases; advancement at every step = published evidence + ME
 
 ## 8. How to Read This Document Set
 
-Fifteen component documents replace the two monolithic plans. [00-decision-record.md](00-decision-record.md) is the normative resolution of the design review; each document below implements it for its subsystem and ends with a Resolves table. Constants have exactly two homes: the chain ↔ frontend contract ([02](02-integration-contract.md)) and the parameter table ([13](13-parameters.md)); every other document references them.
+**Sixteen** component documents replace the two monolithic plans (fifteen until D-20 added [16-hosted-question-service.md](16-hosted-question-service.md), the external-client trust domain). [00-decision-record.md](00-decision-record.md) is the normative resolution of the design review; each document below implements it for its subsystem and ends with a Resolves table. Constants have exactly two homes: the chain ↔ frontend contract ([02](02-integration-contract.md)) and the parameter table ([13](13-parameters.md)); every other document references them.
 
 | Doc | Component | Read it for |
 |---|---|---|

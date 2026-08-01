@@ -107,6 +107,18 @@ Scope of the existing gate parameters is **every market-bearing class: PARAM, TR
 | `xcm.trade_dot_per_mb` (key: `xcm.dot_per_mb`; XCM `WeightTrader` DOT rate, proof-size dimension) | Balance | planck / MiB of proof | 10,000,000,000 (1 DOT/MiB) *(sim-gated, as above)* | 100,000,000 (0.01 DOT/MiB) | 1,000,000,000,000 (100 DOT/MiB) | ×2 | 1 | PARAM | [09](09-execution-upgrades-and-rollout.md) §6.1 |
 | `xcm.trade_usdc_per_sec` (key: `xcm.usdc_per_sec`; XCM `WeightTrader` USDC rate, ref-time dimension) | Balance | µUSDC / s of ref-time | 50,000,000 (50 USDC/s) *(sim-gated, as above)* | 500,000 (0.5 USDC/s) | 5,000,000,000 (5,000 USDC/s) | ×2 | 1 | PARAM | [09](09-execution-upgrades-and-rollout.md) §6.1 |
 | `xcm.trade_usdc_per_mb` (key: `xcm.usdc_per_mb`; XCM `WeightTrader` USDC rate, proof-size dimension) | Balance | µUSDC / MiB of proof | 5,000,000 (5 USDC/MiB) *(sim-gated, as above)* | 50,000 (0.05 USDC/MiB) | 500,000,000 (500 USDC/MiB) | ×2 | 1 | PARAM | [09](09-execution-upgrades-and-rollout.md) §6.1 |
+| `svc.fee_bps` | Perbill | bps | **`[VERIFY]` — unset at genesis; consumer fails closed** | 0 | 1,000 | 2 | 2 | PARAM | [16](16-hosted-question-service.md) §8 |
+| `svc.max_live` | u32 | questions | **`[VERIFY]` — 16 provisional**, bound to the §8.5 resource partition, not to appetite | 1 | 64 | 2 | 2 | PARAM | [16](16-hosted-question-service.md) §8.5 |
+| `svc.max_window` | u32 | blocks | 302,400 (= `epoch.length`) | 43,200 | 302,400 | 2 | 1 | PARAM | [16](16-hosted-question-service.md) §4 |
+| `svc.client_bond` | Balance | VIT | **`[VERIFY]`** — must cover worst-case egress delivery fees for `svc.max_live` questions over a full window | 1,000 | 1,000,000 | 2 | 2 | PARAM | [16](16-hosted-question-service.md) §2, §9 |
+| `svc.epsilon_min` | Perbill | — | 0.01 | 0.005 | 0.25 | 2 | 1 | PARAM | [16](16-hosted-question-service.md) §5.2 |
+
+
+**`svc.fee_bps` ships unset, and that is a legitimate state rather than a stalled one (normative; 2026-08-01, D-20).** R-2 permits a new key only when it is derived, never picked, and this one **cannot be derived from anything in this repository**: it is a market price for a service nobody has sold. So it ships `[VERIFY]`-tagged with its consumer **fail-closed** — while unset, `question_service.register` refuses with `ServiceRateUnset` and the whole service is inert. That doubles as the arming gate, which is why **no new `PhaseFlags` bit is introduced** and the [02](02-integration-contract.md) §7.3-frozen bitset does not widen. The error direction is safe in the direction R-2 cares about: too low costs revenue, too high costs demand, and neither can produce a wrong decision or an unbacked claim.
+
+**`svc.fee_floor` is a kernel constant, not a key (§2), and it is anchored to fully-allocated cost.** Marginal cost is the keeper crank load: `2 · ceil(svc.max_window / mkt.obs_interval) · keeper.rebate` = `2 · 30,240 · 0.000255` = **15.42 USDC/question** at a full-epoch window. Fully-allocated recovery at [08](08-treasury-and-economics.md) §10.1's `C` = 109,281, 17.39 epochs/yr and 16 slots is **≈ 393 USDC/question**. The floor is anchored to the **second** figure. Pricing a scarce slot at marginal cost prices it at approximately zero, and the slot is scarce by construction — `svc.max_live` is bounded by the §8.5 resource partition, not by demand.
+
+**`svc.max_live` is the row whose unsafe direction has no measurement behind it.** It bounds worst-case external block-weight consumption, which reaches [05](05-welfare-and-decision-engine.md) §4.3's `H` through resource use rather than through data — the one channel no import lint can close. Its value must be set so worst-case external load stays inside the reserved external quota, and **there is no measurement in this repository to size that against**, so 16 ships conservative and `[VERIFY]`-tagged. TH-73 is the pressure on it; PT-10 is the proof that the partition holds; and 16 §8.4's `NotDecisionGrade` falsifier is the standing instruction to **cut** it if external occupancy correlates with Bleavit proposals failing their depth floor.
 
 **`collator.comp_epoch`: the one row whose value is a market price, and where it comes from (normative record; added 2026-07-31, milestone E5, SQ-536).** Every other default in this section is derived from a kernel constant, another key, or this document set's own arithmetic. Collator compensation cannot be: it is what an operator will accept to run a node, which no amount of internal derivation reaches. Rule R-2 forbids inventing such a number, and the row's error direction is **unsafe in the low direction** — underpaid collators stop authoring and the chain stalls — so the seed was carried at D-15's 2,000 with no costing behind it until this milestone.
 
@@ -144,6 +156,17 @@ Safety rationale (row-wise, carried forward): kernel floors/ceilings exist so no
 ---
 
 ## 2. Kernel constants (K — compile-time, constants-API-exposed)
+
+**Hosted-question-service kernel constants (2026-08-01, D-20; owned by [16](16-hosted-question-service.md)).**
+`SERVICE_ID_BASE = 1 << 63` — the disjoint vault-id band that makes every cross-domain mis-route error
+`UnknownVault` by construction (I-37); `SVC_FEE_FLOOR_USDC` — the fully-allocated per-question cost
+floor derived in §1 above; `SVC_ATTESTORS_MIN = 3` and the `⌈n/2⌉` quorum rule of
+[16](16-hosted-question-service.md) §6.3. All four are **kernel** rather than `Params` for the same
+reason `SECURITY_FACTOR` is: each one is a term in a claim the service *sells*, and a values majority
+that could amend it could weaken a published guarantee without the buyer's knowledge (TH-73).
+`SECURITY_FACTOR = 3` itself is reused unchanged as the certification margin — the service invents no
+new security constant.
+
 
 | Constant | Value | Doc |
 |---|---|---|

@@ -39,7 +39,7 @@ def fixture_root(directory: str) -> Path:
     return root
 
 
-def milestone_plan(*, b13: str = "⬜", o3: str = "⬜") -> str:
+def milestone_plan(*, b13: str = "⬜", o3: str = "⬜", n9: str = "⬜") -> str:
     return f"""# PLAN fixture
 
 ## Milestones
@@ -50,6 +50,7 @@ def milestone_plan(*, b13: str = "⬜", o3: str = "⬜") -> str:
 |---|---|---|---|---|---|
 | B13 | Runtime telemetry | 12 §6.3 | — | {b13} | |
 | O3 | Bootnode probes | 12 §6.2 | — | {o3} | |
+| N9 | Hosted-service egress and telemetry | 16 §9 | — | {n9} | |
 
 ## Next section
 """
@@ -59,8 +60,8 @@ class CoverageCheckerTests(unittest.TestCase):
     def test_current_tree_is_complete(self) -> None:
         failures, rows, inventory = checker.validate(ROOT)
         self.assertEqual(failures, [])
-        self.assertEqual(len(rows), 21)
-        self.assertEqual(len(inventory), 45)
+        self.assertEqual(len(rows), 24)
+        self.assertEqual(len(inventory), 51)
 
     def test_relay_finality_row_is_bound_to_the_relay_monitor(self) -> None:
         _failures, rows, inventory = checker.validate(ROOT, exported=EXPORTED)

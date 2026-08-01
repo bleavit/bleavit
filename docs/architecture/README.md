@@ -28,6 +28,7 @@ Newcomers: 01 → 02 → 03 → 04 → 05, then as needed. Implementers of a sin
 | [13-parameters.md](13-parameters.md) | Parameters | The single reconciled parameter/bounds/constants table |
 | [14-threat-model.md](14-threat-model.md) | Threat model | Combined adversary model for chain + frontend |
 | [15-invariants-and-testing.md](15-invariants-and-testing.md) | Invariants & testing | Protocol invariants, INV-FE-1…15 verbatim, test regime, published artifacts |
+| [16-hosted-question-service.md](16-hosted-question-service.md) | **Hosted question service (external clients)** | The third trust domain: client admission, question lifecycle, the sold report, external settlement, domain segregation, revenue instrument D |
 
 ## Provenance
 

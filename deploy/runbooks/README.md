@@ -23,6 +23,7 @@ conflict is resolved in favor of the specification.
 | RB-STORAGE | Storage bound pressure | Monitoring coordinator | false |
 | RB-BOOTNODE | Bootnode and served-state availability | Bootnode program coordinator | false |
 | RB-RELEASE | Release integrity and channel response | Release operations lead | true |
+| RB-SERVICE | Hosted question service — client delivery, occupancy and the external weight partition | Service operator | false |
 
 ## Frozen frontmatter
 
@@ -62,6 +63,7 @@ decoded. Each body then contains, in order, `Purpose`, `Alerts`, `Diagnosis`,
 | RB-UPGRADE | Release operations lead | ops.arweave / ops.monitoring |
 | RB-BOOTNODE | Bootnode program coordinator | ops.bootnodes |
 | RB-RELEASE | Release operations lead | ops.arweave / ops.monitoring |
+| RB-SERVICE | Service operator | ops.keepers |
 
 Alert ownership is normative in 12 §6.3 ("Ownership"): §6.1's Monitoring row
 owns the §6.3 stack, so protocol-domain alerts fall to the monitoring
