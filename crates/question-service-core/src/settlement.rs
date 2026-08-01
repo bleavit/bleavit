@@ -102,9 +102,11 @@ pub fn quorum(attestor_count: usize) -> Result<u32, AttestorError> {
 ///
 /// For an even number of reports, the median is the midpoint of the two centre
 /// values, rounded down on the 1e9 grid. The input slice may contain more than
-/// the minimum quorum but never more reports than named attestors; identity
-/// uniqueness and membership are checked here, so duplicate submissions can
-/// never satisfy quorum even if a shell presents a malformed slice.
+/// the minimum quorum, counted over **distinct** attestors after repeats
+/// collapse to each attestor's latest (16 §6.3 ruling 2). Identity uniqueness
+/// and membership are checked here, and the quorum count deliberately follows
+/// deduplication — counting the raw slice would let one attestor satisfy a
+/// quorum of two by submitting twice.
 pub fn attestor_median(
     named_attestors: &[AccountId],
     reports: &[AttestorReport],
@@ -120,32 +122,45 @@ pub fn attestor_median(
     if duplicate_named {
         return Err(AttestorError::DuplicateAttestor);
     }
-    if reports.len() > named_attestors.len() {
-        return Err(AttestorError::ReportCountExceedsSet);
-    }
-    if reports.len() < required as usize {
-        return Err(AttestorError::QuorumNotReached);
-    }
     if tolerance.0 > kernel::SCORE_SCALE {
         return Err(AttestorError::ToleranceOutOfRange);
     }
-    for (index, report) in reports.iter().enumerate() {
+    for report in reports.iter() {
         if !named_attestors
             .iter()
             .any(|attestor| attestor == &report.attestor)
         {
             return Err(AttestorError::UnknownAttestor);
         }
-        if reports
-            .iter()
-            .take(index)
-            .any(|earlier| earlier.attestor == report.attestor)
-        {
-            return Err(AttestorError::DuplicateReport);
+    }
+
+    // 16 §6.3 ruling (2): repeated submissions from one attestor **collapse to
+    // that attestor's latest**, they do not poison the set. Rejecting them let a
+    // single otherwise-valid participant force `Voided(AttestorSetCollapsed)`
+    // merely by correcting its own value — a griefing vector open to every
+    // named attestor, which is the opposite of what the quorum is for.
+    let mut latest: Vec<(AccountId, FixedU64)> = Vec::new();
+    for report in reports.iter() {
+        match latest.iter_mut().find(|(who, _)| who == &report.attestor) {
+            Some(slot) => slot.1 = report.value,
+            None => latest.push((report.attestor, report.value)),
         }
     }
 
-    let mut ordered: Vec<FixedU64> = reports.iter().map(|report| report.value).collect();
+    // Quorum is counted over **distinct attestors**, and it must be counted
+    // *here* rather than over the raw slice. Collapsing repeats (ruling 2) made
+    // the raw count meaningless as a quorum measure: two submissions from one
+    // attestor would otherwise satisfy a quorum of two, letting a single named
+    // party settle a question alone. That is the whole property the quorum
+    // exists to deny, so the check follows deduplication, never precedes it.
+    if latest.len() > named_attestors.len() {
+        return Err(AttestorError::ReportCountExceedsSet);
+    }
+    if latest.len() < required as usize {
+        return Err(AttestorError::QuorumNotReached);
+    }
+
+    let mut ordered: Vec<FixedU64> = latest.iter().map(|(_, value)| *value).collect();
     ordered.sort_unstable_by_key(|value| value.0);
     let middle = ordered.len() / 2;
     let upper = ordered
@@ -250,25 +265,63 @@ mod tests {
             ),
             Err(AttestorError::MedianOutOfRange)
         );
+        // Four raw submissions from three named attestors is no longer an
+        // over-count: it is attestor 1 correcting itself, which ruling (2)
+        // requires be collapsed rather than refused. `ReportCountExceedsSet`
+        // now means what its name says — more *distinct* attestors than the
+        // named set — which membership checking already makes unreachable, so
+        // it survives as a defensive assertion rather than a live path.
         assert_eq!(
             attestor_median(
                 &NAMED,
                 &[report(1, 1), report(2, 1), report(3, 1), report(1, 1),],
                 FixedU64(0),
             ),
-            Err(AttestorError::ReportCountExceedsSet)
+            Ok(AttestorMedian {
+                value: FixedU64(1),
+                quorum: 2,
+                tolerance: FixedU64(0),
+            })
         );
     }
 
     #[test]
-    fn duplicate_or_unnamed_submissions_cannot_form_quorum() {
+    fn a_repeat_submission_collapses_to_the_attestors_latest() {
+        // 16 §6.3 ruling (2). The earlier behaviour rejected the whole set,
+        // which `settle_from_attestors` turns into terminal
+        // `Voided(AttestorSetCollapsed)` — so any single named attestor could
+        // force a VOID by submitting twice. Correcting your own value is not
+        // an attack; it must collapse to the latest instead.
+        //
+        // One attestor, two values: the set has effectively one member, which
+        // is below quorum. What matters is that it is a *quorum* failure and
+        // not a poisoned-set failure.
         assert_eq!(
             attestor_median(
                 &NAMED,
                 &[report(1, 400_000_000), report(1, 600_000_000)],
                 FixedU64(0),
             ),
-            Err(AttestorError::DuplicateReport)
+            Err(AttestorError::QuorumNotReached)
+        );
+        // Three named attestors where one corrects itself: the correction wins
+        // and the median is over the three *latest* values, not four raw ones.
+        assert_eq!(
+            attestor_median(
+                &NAMED,
+                &[
+                    report(1, 100_000_000),
+                    report(2, 500_000_000),
+                    report(3, 900_000_000),
+                    report(1, 400_000_000),
+                ],
+                FixedU64(1_000_000_000),
+            ),
+            Ok(AttestorMedian {
+                value: FixedU64(500_000_000),
+                quorum: 2,
+                tolerance: FixedU64(1_000_000_000),
+            })
         );
         assert_eq!(
             attestor_median(

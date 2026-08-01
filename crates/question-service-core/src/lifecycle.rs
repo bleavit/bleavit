@@ -373,6 +373,7 @@ mod tests {
                 b_reject: 10_000 * currency::USDC,
                 declared_stake: 100 * currency::USDC,
                 epsilon_1e9: FixedU64(50_000_000),
+                tolerance_1e9: FixedU64(5_000_000),
                 settlement_trust: trust,
             },
             0,

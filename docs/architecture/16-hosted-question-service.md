@@ -240,6 +240,8 @@ Report {
     manip_floor,                          // 05 §5.6, cash form, rounded DOWN
     declared_stake,                        // S, republished verbatim
     epsilon_1e9,                           // ε, republished verbatim
+    tolerance_1e9,                         // §6.3 deviation tolerance, frozen at
+                                           //   registration and provenance-bound
     certified: bool,                       // C_disp(ε) ≥ SECURITY_FACTOR·S — client-funded depth
                                            //   ONLY, never the measured-inclusive ManipFloor̂ (§5.2)
     settlement_trust: SettlementTrust { attestors, quorum, bond_total },
@@ -403,7 +405,10 @@ Rust/Python divergence nobody notices.
 3. **The deviation tolerance is a per-question field frozen at registration**, bounded by a kernel
    constant — **not** a `Params` key. It is part of what the client buys, and a values majority that
    could widen it after trading opened could retroactively excuse an attestor the client had
-   priced. Same argument that keeps `SECURITY_FACTOR` kernel (§8, TH-73).
+   priced. Same argument that keeps `SECURITY_FACTOR` kernel (§8, TH-73). **It is therefore in §5's
+   `Report` and bound into `provenance_hash`**: settlement takes tolerance as an *argument*, so a
+   report that omitted it would let a widened value pass unnoticed by any client verifying the
+   pushed or pulled report. Freezing a promise the buyer cannot check is not freezing it.
 4. **`provenance_hash` is `blake2_256` over a domain-separated SCALE preimage**, separator
    `b"bleavit/hosted-report/v1"`, covering every field of §5's `Report` including `sub_id`. It is
    read cross-chain, so it is [02](./02-integration-contract.md) contract surface and frozen with

@@ -23,6 +23,8 @@ from typing import Callable, Sequence
 
 WORK_PREC = 100
 USDC_BASE_UNIT = Decimal("0.000001")
+# 05 §4.4: every settled component value lies on the 1e9 grid.
+SCORE_GRID = Decimal("0.000000001")
 ONE = Decimal(1)
 HALF = Decimal("0.5")
 BPS_DENOMINATOR = 10_000
@@ -257,25 +259,42 @@ def attestor_median(
     tolerance = _d(tolerance)
     if len(set(named)) != len(named):
         raise ServiceModelError("attestors must be distinct")
-    if len(reports) > len(named):
-        raise ServiceModelError("more reports than named attestors")
-    if len(reports) < required:
-        raise ServiceModelError("quorum not reached")
     if not Decimal(0) <= tolerance <= ONE:
         raise ServiceModelError("tolerance is outside [0, 1]")
     submitters = tuple(report.attestor for report in reports)
     if any(attestor not in named for attestor in submitters):
         raise ServiceModelError("report came from an unnamed attestor")
-    if len(set(submitters)) != len(submitters):
-        raise ServiceModelError("one attestor submitted more than once")
-    values = tuple(_d(report.value) for report in reports)
+
+    # 16 §6.3 ruling (2): repeats collapse to each attestor's LATEST rather
+    # than poisoning the set — otherwise one named attestor forces a VOID by
+    # correcting its own value. Quorum is then counted over DISTINCT attestors,
+    # and that ordering is load-bearing: counting the raw slice would let a
+    # single attestor satisfy a quorum of two by submitting twice, which is the
+    # exact property the quorum exists to deny.
+    latest: dict = {}
+    for report in reports:
+        latest[report.attestor] = _d(report.value)
+    if len(latest) > len(named):
+        raise ServiceModelError("more distinct attestors than named")
+    if len(latest) < required:
+        raise ServiceModelError("quorum not reached")
+    values = tuple(latest.values())
 
     ordered = sorted(values)
     middle = len(ordered) // 2
     if len(ordered) % 2:
         value = ordered[middle]
     else:
-        value = (ordered[middle - 1] + ordered[middle]) / Decimal(2)
+        # 16 §6.3 ruling (1): an even quorum settles on the arithmetic mean of
+        # the two central values, **floored to 05 §4.4's 1e9 grid**. The
+        # dispositive reason is not rounding direction — it is that an
+        # unfloored mean is not a representable settlement value at all, so an
+        # "independent" model that returned one would certify behaviour the
+        # chain cannot express, and could classify a submission inside or
+        # outside tolerance at the boundary differently from the runtime.
+        value = ((ordered[middle - 1] + ordered[middle]) / Decimal(2)).quantize(
+            SCORE_GRID, rounding=ROUND_FLOOR
+        )
     if not Decimal(0) <= value <= ONE:
         raise ServiceModelError("median is outside [0, 1]")
 

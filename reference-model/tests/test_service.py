@@ -190,13 +190,22 @@ class SettlementTests(unittest.TestCase):
         )
         self.assertEqual(result.slashable_indices, (1,))
 
-    def test_quorum_survives_one_absence_and_even_median_is_midpoint(self):
+    def test_quorum_survives_one_absence_and_even_median_floors_to_the_grid(self):
+        """16 §6.3 ruling (1): the even-quorum midpoint floors to the 1e9 grid.
+
+        This fixture is chosen so the raw midpoint lands *off* the grid —
+        (0.4 + 0.600000001) / 2 = 0.5000000005 — because that is the only case
+        where the ruling is observable. The unfloored value is not a
+        representable settlement value at all, so a model returning it would
+        certify behaviour the chain cannot express and could classify a
+        submission inside or outside tolerance differently from the runtime.
+        """
         result = attestor_median(
             NAMED_ATTESTORS,
             (attestor_report(1, "0.4"), attestor_report(2, "0.600000001")),
             D("0.2"),
         )
-        self.assertEqual(result.value, D("0.5000000005"))
+        self.assertEqual(result.value, D("0.500000000"))
         self.assertEqual(result.slashable_indices, ())
 
     def test_quorum_or_out_of_range_median_refuses(self):

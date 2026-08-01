@@ -84,8 +84,16 @@ pub struct ReportDraft<const MAX_ATTESTORS: u32> {
     pub b_reject: Balance,
     pub declared_stake: Balance,
     pub epsilon_1e9: FixedU64,
+    /// Frozen at registration; see [`Report::tolerance_1e9`].
+    pub tolerance_1e9: FixedU64,
     pub settlement_trust: SettlementTrust<MAX_ATTESTORS>,
 }
+
+/// Domain separator for [`Report::provenance_preimage`] (16 §6.3;
+/// [02](../../../docs/architecture/02-integration-contract.md) §4a). Frozen —
+/// a client verifying a report by storage proof recomputes exactly
+/// `blake2_256(PROVENANCE_DOMAIN || SCALE(fields))`.
+pub const PROVENANCE_DOMAIN: &[u8] = b"bleavit/hosted-report/v1";
 
 /// The report sold at `Sealed` (architecture 16 §5), in its normative field
 /// order. `provenance_hash` binds the SCALE encoding of every preceding field.
@@ -107,20 +115,36 @@ pub struct Report<const MAX_ATTESTORS: u32> {
     pub manip_floor: Balance,
     pub declared_stake: Balance,
     pub epsilon_1e9: FixedU64,
+    /// The 16 §6.3 deviation tolerance, **frozen at registration** and bound
+    /// into `provenance_hash`. It is in the report because it is a promise to
+    /// the client: settlement takes tolerance as an argument, so without it
+    /// here a widened value could excuse otherwise-slashable submissions and no
+    /// client verifying the pushed or pulled report could detect the change.
+    pub tolerance_1e9: FixedU64,
     pub certified: bool,
     pub settlement_trust: SettlementTrust<MAX_ATTESTORS>,
     pub provenance_hash: H256,
 }
 
 impl<const MAX_ATTESTORS: u32> Report<MAX_ATTESTORS> {
-    /// Deterministic SCALE preimage in architecture 16 §5's field order.
+    /// Deterministic, **domain-separated** SCALE preimage in 16 §5's field
+    /// order. The separator is part of the preimage rather than the caller's
+    /// business, so the encoding is canonical whatever hasher is supplied.
     ///
-    /// The specification fixes the binding set but not yet the encoding,
-    /// domain separator or hash algorithm. N9 must freeze those before this is
-    /// a cross-chain verification contract. The hash itself is absent here, so
-    /// the construction is non-recursive.
+    /// 16 §6.3 and [02](../../../docs/architecture/02-integration-contract.md)
+    /// §4a freeze the full construction as
+    /// `blake2_256(PROVENANCE_DOMAIN || SCALE(fields))`. This crate is
+    /// frame-free and dependency-light by rule (01 §5.2), so it cannot itself
+    /// depend on a hasher — **the `blake2_256` obligation is therefore enforced
+    /// at the pallet boundary (N7), not here**, and that is a stated seam
+    /// rather than an oversight. What this function guarantees is that no
+    /// caller can produce a preimage that collides with another domain's.
+    ///
+    /// The hash itself is absent from the preimage, so the construction is
+    /// non-recursive.
     pub fn provenance_preimage(&self) -> Vec<u8> {
         let mut out = Vec::new();
+        out.extend_from_slice(PROVENANCE_DOMAIN);
         self.question_id.encode_to(&mut out);
         self.client_id.encode_to(&mut out);
         self.sub_id.encode_to(&mut out);
@@ -134,6 +158,7 @@ impl<const MAX_ATTESTORS: u32> Report<MAX_ATTESTORS> {
         self.manip_floor.encode_to(&mut out);
         self.declared_stake.encode_to(&mut out);
         self.epsilon_1e9.encode_to(&mut out);
+        self.tolerance_1e9.encode_to(&mut out);
         self.certified.encode_to(&mut out);
         self.settlement_trust.encode_to(&mut out);
         out
@@ -185,6 +210,7 @@ pub fn assemble_report<const MAX_ATTESTORS: u32>(
         manip_floor: manipulation_floor,
         declared_stake: draft.declared_stake,
         epsilon_1e9: draft.epsilon_1e9,
+        tolerance_1e9: draft.tolerance_1e9,
         certified: is_certified,
         settlement_trust: draft.settlement_trust,
         provenance_hash: [0; 32],
@@ -235,6 +261,7 @@ mod tests {
             b_reject: 10_000 * currency::USDC,
             declared_stake: 500 * currency::USDC,
             epsilon_1e9: FixedU64(37_500_000),
+            tolerance_1e9: FixedU64(5_000_000),
             settlement_trust: trust()?,
         })
     }
