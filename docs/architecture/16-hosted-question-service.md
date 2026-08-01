@@ -233,16 +233,16 @@ Three properties make it the right thing to sell, and one makes it dangerous to 
 - It **rounds DOWN**. R-7's "round against the claimant" here means against the party *relying* on
   the number, which is the client. A floor that rounds up is a floor that lies.
 - It is denominated in **USDC**, which is worth stating explicitly because this document's own
-  ancestor got it wrong: until SQ-544 the §5.6 expression was 04 §3's *displacement* (a share count)
+  ancestor got it wrong: until SQ-562 the §5.6 expression was 04 §3's *displacement* (a share count)
   added to a cash amount, reading **1.928× high**. Every figure in this document uses the corrected
   cash form. A service that resold the superseded number would have been selling a security claim
   roughly twice as strong as the truth.
 - **It is not currently computed on-chain, and what that blocks is narrower than an earlier revision
-  said.** SQ-545 records that §5.6's "mandatory diagnostic" has no Rust implementation and that no
+  said.** SQ-563 records that §5.6's "mandatory diagnostic" has no Rust implementation and that no
   `DecisionDiagnostics` surface exists. The earlier text blocked the whole `certified` flag on that
   producer — but since §5.2 now defines certification over **`C_disp` alone**, the certificate no
   longer derives from `ManipFloor̂` and that rationale no longer applies: `C_disp` is computed by
-  this service from the client's own posted `b`, so `certified` is self-contained. What SQ-545 still
+  this service from the client's own posted `b`, so `certified` is self-contained. What SQ-563 still
   blocks is the **`manip_floor` report field**, which is the §5.6 quantity itself. `seal` MUST
   therefore either publish a real `manip_floor` or refuse with `CertificationUnavailable` — it MUST
   NOT publish a placeholder, because the field is sold.
@@ -556,7 +556,7 @@ client subsidy at ε = 0.05  =  2 · b_min · ln 2  =  2 × 14.2368 × 0.693147 
 ```
 
 *(An earlier revision wrote `2·b_min = 28.5·S`, conflating the LMSR liquidity parameter with the
-cash that funds it — the same class of error as SQ-544 one layer up. Corrected 2026-08-01; every
+cash that funds it — the same class of error as SQ-562 one layer up. Corrected 2026-08-01; every
 figure below is the corrected one.)*
 
 At `ledger.redeem_fee` = 30 bps and β = 0.50, instrument **B** on that escrow is `≈ 0.0296·S`,
