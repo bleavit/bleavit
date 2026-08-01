@@ -260,9 +260,11 @@ The "Advanced" area. Every workflow below is light-client readable and follows �
 
 ### 11.8.1 Reporter console
 
+**Two of this console's preconditions are not currently client-readable, and that is a stated gap rather than an oversight (2026-08-01, SQ-564).** The retained [07](07-oracle-and-disputes.md) §3 offense record lives in a pallet-internal store that [02](02-integration-contract.md) §7 deliberately does not freeze, so a frontend cannot re-read either *"carries a retained ejection"* or *"entry is closed by saturation"* at `B′`. The consequence is bounded but real: in those states a client submits a transaction that **cannot** succeed, and learns it from the typed error (`ReporterEjected`, `ReporterRecordsSaturated`) rather than from a disabled button. Both states are rare — the first requires three adjudicated-false findings against the account, the second requires 64 distinct ejections chain-wide — and neither can cost more than one transaction fee. Until a contract-readable indicator exists, this console MUST render both errors explicitly rather than as a generic failure, and MUST NOT present registration as unconditionally available. Exposing the indicator is a [02](02-integration-contract.md) §7 addition and therefore a contract bump with joint sign-off; it is tracked as SQ-564 rather than folded into a security fix.
+
 | Tx | Preconditions re-read at B′ |
 |---|---|
-| `oracle.register_reporter()` | free USDC ≥ `ReporterStake` (100,000 USDC *(normative value: [13](13-parameters.md))*); not already registered; stake-hold consequence displayed |
+| `oracle.register_reporter()` | free USDC ≥ `ReporterStake` (100,000 USDC *(normative value: [13](13-parameters.md))*); not already registered; **not carrying a retained [07](07-oracle-and-disputes.md) §3 ejection**, and **permissionless entry not closed by the §3 saturation clause**; stake-hold consequence displayed |
 | `oracle.report` / `oracle.challenge` | rows P-13/P-14 (§11.5) |
 | `oracle.recompute_proof(component, epoch, spec_version, proof)` | round open and the consumed MetricSpec component permits deterministic recomputation ([07](07-oracle-and-disputes.md)); the FE recomputes the proof result locally from the committed raw data before submission and blocks on mismatch — never submit a proof the client's own recomputation contradicts |
 

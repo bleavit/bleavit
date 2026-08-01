@@ -729,6 +729,12 @@ pub mod pallet {
         ReporterEjected,
         /// Core state validator rejected the aggregate (try-state only).
         TryStateViolation,
+        /// 07 §3 saturation clause: the retained-record store is full of
+        /// ejections, so no fresh registration can be proved not to be a
+        /// dropped ban re-entering. Permissionless entry closes until a CODE
+        /// change enlarges the store. Appended last — SCALE discriminants are
+        /// positional.
+        ReporterRecordsSaturated,
     }
 
     #[pallet::hooks]
@@ -2098,6 +2104,7 @@ pub mod pallet {
                 CoreError::ValueOutOfBounds => Error::<T>::ValueOutOfBounds.into(),
                 CoreError::SelfChallenge => Error::<T>::SelfChallenge.into(),
                 CoreError::ReporterEjected => Error::<T>::ReporterEjected.into(),
+                CoreError::ReporterRecordsSaturated => Error::<T>::ReporterRecordsSaturated.into(),
             }
         }
     }
