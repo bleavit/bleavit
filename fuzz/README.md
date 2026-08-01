@@ -57,6 +57,14 @@ root workspace prevents those dependencies from perturbing the runtime's
   still run on every realized state. It also probes the fixed kernel at and across
   the `48*b` domain edge (04 §4-§6, especially §6.3; I-12). Every literal USDC
   base-unit scale comes from `futarchy_primitives::currency::USDC` (rule 4).
+- `xcm_client_ingress` generates both exact and adversarial XCM v5 programs
+  around the 09 §6.5 boundary and differentially compares the production
+  positional matcher with an independent spec-written oracle. Its instruction
+  alphabet includes all nine inner-program carriers, origin mutation, wrong
+  assets/beneficiaries/kinds, extra positions, and the issuance-increasing
+  `ReserveAssetDeposited` negative. Any admitted program is additionally
+  asserted to have exactly five mandatory positions plus at most one trailing
+  topic and to contain no reserve-deposit mint (I-34/I-35/I-38; 16 §12).
 
 The independent wrapper oracle has ordinary unit tests and runs with:
 

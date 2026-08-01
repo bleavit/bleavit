@@ -14,6 +14,7 @@ use staging_xcm_builder::{
 use staging_xcm_executor::traits::{ConvertLocation, DenyExecution, OnResponse, Properties};
 
 use crate::caps::InflowCaps;
+use crate::client::AllowClientIngress;
 use crate::identity::{asset_hub_location, coretime_location, relay_location, usdc_location};
 
 /// Exactly the three remote origins admitted by the v1 rule table (09 §6.1).
@@ -404,12 +405,16 @@ where
     }
 }
 
-/// The reusable Bleavit barrier (09 §6.1).
+/// The exact pre-N8 barrier (09 §6.1).
 ///
 /// Pre-paid local execution may consume weight credit; remote execution must otherwise be a
 /// known query response, paid from an accepted origin, or a version subscription from one.
 /// There is deliberately no unpaid-execution allow path and no superuser conversion.
-pub type BleavitBarrier<
+///
+/// Keep this composition explicit: N8's frozen differential uses it as the
+/// before-side oracle and proves that client ingress is a pure extension for
+/// every program without `Transact`.
+pub type LegacyBleavitBarrier<
     ResponseHandler,
     UniversalLocation,
     MaxPrefixes,
@@ -435,6 +440,30 @@ pub type BleavitBarrier<
         >,
     )>,
 >;
+
+/// The reusable Bleavit barrier after N8 (09 §6.1/§6.5).
+///
+/// `AllowClientIngress` is tried first because the three legacy deny
+/// components intentionally remain byte-for-byte closed to `Transact`. Its
+/// failed match is pure, so the legacy branch receives unchanged inputs.
+pub type BleavitBarrier<
+    ResponseHandler,
+    UniversalLocation,
+    MaxPrefixes,
+    Caps,
+    LocationToAccountId,
+    AccountId,
+> = (
+    AllowClientIngress,
+    LegacyBleavitBarrier<
+        ResponseHandler,
+        UniversalLocation,
+        MaxPrefixes,
+        Caps,
+        LocationToAccountId,
+        AccountId,
+    >,
+);
 
 // Keep the generic obligations close to the alias so B1a gets a short diagnostic on drift.
 #[allow(dead_code)]

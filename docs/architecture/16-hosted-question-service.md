@@ -131,9 +131,10 @@ them does something other than what a reader of the outer program expects:
 An allowlist keyed on instruction identity has to enumerate all nine and stay complete as the SDK
 evolves. **The positional template does not enumerate them at all**: none of the nine is at an
 admitted position, so all nine fail the match by construction, and an SDK that adds a tenth fails
-compilation rather than slipping through (property 4 below). That is the whole argument for matching
-shape rather than membership — an earlier draft of this section named only three of the nine, which
-is exactly the kind of incompleteness a deny-list invites and a positional match makes irrelevant.
+the positional match rather than slipping through (property 4 below). That is the whole argument for
+matching shape rather than membership — an earlier draft of this section named only three of the
+nine, which is exactly the kind of incompleteness a deny-list invites and a positional match makes
+irrelevant.
 
 So `Transact` is admitted only inside **one exact, positionally-matched, whole program**:
 
@@ -157,9 +158,20 @@ Four properties follow **by shape**, not by a predicate anyone must maintain:
    instruction appears at any admitted position.
 4. **Unknown and future instructions fail the positional match**, because they are not at an admitted position. An earlier revision claimed a new SDK variant would fail *compilation*; that is not guaranteed and MUST NOT be relied on. What is guaranteed is the runtime refusal, and what backs it is the `=`-exact pin (`staging-xcm = 24.0.0`) plus a test that asserts the admitted set has exactly six positions — so a version bump that changes the instruction set fails a **test**, which is the check that actually exists. The pin therefore belongs in I-35's statement, not merely in `Cargo.toml`.
 
-**The existing closed instruction allowlist does not change by one token.** All three deny components
-call one shared matcher, so they cannot disagree with each other — the highest-value single test in
-this batch asserts exactly that (§12).
+**The existing closed instruction allowlist does not change by one token.** Only the barrier sees the
+whole instruction slice, so only it can match the positional template. The SDK gives the other two
+checks narrower inputs: `ConvertOrigin::convert_origin` receives `(Location, OriginKind)`, while
+`SafeCallFilter` receives one decoded `RuntimeCall`. The required composition is therefore:
+
+| Component | Input it actually gets | What it checks |
+|---|---|---|
+| Barrier | the whole `Xcm<Call>` slice | the six-position template, exhaustively |
+| `OriginConverter` | `(Location, OriginKind)` | exact equality against a registered client `Location`, and `OriginKind::Xcm` |
+| `SafeCallFilter` | `RuntimeCall` | `domain(call) == CallDomain::ExternalClient` |
+
+Admission requires all three. The §12 obligation tests their **intersection**: a program that fails
+any one does not dispatch. An earlier revision demanded one shared matcher, but neither the origin
+converter nor the call filter receives a whole program, so that demand was unimplementable.
 
 **The strictness is what makes integration easy, not hard.** A hand-authored program of this shape is
 easy to get wrong and is *always* refused with a deterministic code; clients never hand-author it.
@@ -171,11 +183,14 @@ strictness is invisible.
 The client's `Location` converts to `pallet_client_registry::Origin::ExternalClient(ClientId)` —
 **not** a sovereign *signed* origin. A signed origin would leave `SafeCallFilter` as the only thing
 standing between a client and every `CallDomain::Public` call (`epoch.submit`, `market.buy`,
-`ledger.split`). That is one predicate away from catastrophe; a distinct origin type is a type-level
-fact.
+`ledger.split`). That is one predicate away from catastrophe; the distinct constructor and its
+closure are implementation-and-test obligations.
 
 - The converter has **exactly one success constructor**. No `Location` can become `RawOrigin::Signed`,
-  `RawOrigin::Root`, or any `pallet_origins::Origin` variant.
+  `RawOrigin::Root`, or any `pallet_origins::Origin` variant. This is **not** a type-level guarantee:
+  the executor requires `ConvertOrigin<RuntimeOrigin>`, and `RuntimeOrigin` admits every constructor
+  in the runtime. I-34 is discharged by one `Ok(...)` expression in the converter plus the complete
+  negative-origin matrix, which mechanically checks the review promise.
 - It lives in `pallet-client-registry`, **not** `pallet-origins`, because `EnsureFutarchyOrigin`
   succeeds for *any* `pallet_origins::Origin` variant — a foreign `OriginCaller` variant makes
   `try_origin` fail structurally instead. `track_origins.rs` is the existing precedent.

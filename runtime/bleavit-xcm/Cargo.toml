@@ -11,6 +11,8 @@ futarchy-treasury-core = { path = "../../crates/futarchy-treasury-core", default
 origins-core = { path = "../../crates/origins-core", default-features = false }
 pallet-futarchy-treasury = { path = "../../pallets/futarchy-treasury", default-features = false }
 pallet-oracle = { path = "../../pallets/oracle", default-features = false }
+pallet-client-registry = { path = "../../pallets/client-registry", default-features = false }
+pallet-origins = { path = "../../pallets/origins", default-features = false }
 parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive", "max-encoded-len"] }
 scale-info = { version = "2.11.6", default-features = false, features = ["derive"] }
 # FRAME + XCM on the `polkadot-stable2606` pins (workspace-managed versions, 01 §9).
@@ -27,6 +29,7 @@ cumulus-primitives-core = { workspace = true }
 pallet-assets = { workspace = true, features = ["std"] }
 pallet-balances = { workspace = true, features = ["std"] }
 oracle-core = { path = "../../crates/oracle-core", features = ["std"] }
+proptest = "1.11.0"
 sp-core = { workspace = true, features = ["std"] }
 sp-io = { workspace = true, features = ["std"] }
 
@@ -39,8 +42,10 @@ std = [
   "futarchy-primitives/std",
   "futarchy-treasury-core/std",
   "origins-core/std",
+  "pallet-client-registry/std",
   "pallet-futarchy-treasury/std",
   "pallet-oracle/std",
+  "pallet-origins/std",
   "pallet-xcm/std",
   "parity-scale-codec/std",
   "scale-info/std",
@@ -55,6 +60,8 @@ runtime-benchmarks = [
   "futarchy-treasury-core/runtime-benchmarks",
   "pallet-futarchy-treasury/runtime-benchmarks",
   "pallet-oracle/runtime-benchmarks",
+  "pallet-client-registry/runtime-benchmarks",
+  "pallet-origins/runtime-benchmarks",
   "pallet-xcm/runtime-benchmarks",
   "sp-runtime/runtime-benchmarks",
   "staging-xcm-builder/runtime-benchmarks",
@@ -66,6 +73,8 @@ try-runtime = [
   "frame-system/try-runtime",
   "pallet-futarchy-treasury/try-runtime",
   "pallet-oracle/try-runtime",
+  "pallet-client-registry/try-runtime",
+  "pallet-origins/try-runtime",
   "pallet-xcm/try-runtime",
   "sp-runtime/try-runtime",
 ]

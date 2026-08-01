@@ -20,7 +20,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 
-targets=(payload_scale_decode nested_wrapper_filter lmsr_trade_paths service_settlement_paths)
+targets=(payload_scale_decode nested_wrapper_filter lmsr_trade_paths service_settlement_paths xcm_client_ingress)
 
 # Corpus regression: replay every committed seed once (`-runs=0` does not mutate
 # or extend the corpus, so the curated `corpus/<target>` stays deterministic).
@@ -44,6 +44,7 @@ for target in "${targets[@]}"; do
     nested_wrapper_filter) max_len=16384 ;;
     lmsr_trade_paths) max_len=8192 ;;
     service_settlement_paths) max_len=4096 ;;
+    xcm_client_ingress) max_len=4096 ;;
     *)
       echo "missing max_len for fuzz target ${target}" >&2
       exit 1

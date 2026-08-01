@@ -192,7 +192,9 @@ New FE epic **FE-14 (Governance surface)**: referenda list/detail, vote/delegate
     nine and staying complete as the SDK moves. The positional whole-program template closes every
     one by shape, enumerating none.
   - *A sovereign signed origin for clients* — leaves `SafeCallFilter` as the only thing between a
-    client and every `CallDomain::Public` call. A distinct origin type is a type-level fact instead.
+    client and every `CallDomain::Public` call. A distinct origin keeps the dispatch authority
+    structurally separate; the converter's one-success closure is an implementation-and-test
+    obligation, not a type-level property ([09 §6.5](09-execution-upgrades-and-rollout.md), I-34).
   - *`DescendOrigin` sub-identity* — makes Bleavit assert claims about who inside a client chain
     asked. Identity is chain-granular; `sub_id` is stored, echoed, and never interpreted.
   - *`QueryResponse` egress* — XCM v5's `Response` carries no arbitrary data, so it is structurally
