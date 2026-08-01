@@ -328,6 +328,75 @@ pub struct OracleRoundView {
 
 `OracleRoundView.escalated` is `round > 1`: it is true iff at least one prior round advanced the game. It MUST be false for a round-1 report even while that round has a live challenger, and MUST NOT be interpreted as “currently challenged”; any future view of that distinct fact requires a separately named field.
 
+### 4a. Hosted question service — pending contract **v20** (D-20; NOT in force)
+
+Authored here rather than only in §13's history, because a history entry saying a section "gains"
+a surface is not a surface: N7/N9 cannot implement a byte-for-byte contract from a changelog, and
+two clients reading only the changelog would encode v20 differently. `INTEGRATION_CONTRACT_VERSION`
+stays **19** until the implementation lands; these definitions are frozen on arrival, not on merge.
+
+```rust
+// §4 view type, returned by the twelfth `FutarchyApi` method
+//   fn hosted_report(question_id: QuestionId) -> Option<ReportView>;
+pub struct ReportView {
+    pub question_id: QuestionId,          // u64
+    pub client_id: ClientId,              // u32
+    pub sub_id: [u8; 32],                 // opaque; stored, echoed, never interpreted
+    pub twap_accept_1e9: FixedU64,        // sealed segment TWAP, 1e9 grid (04 §7)
+    pub twap_reject_1e9: FixedU64,
+    pub observations: u32,
+    pub window_start: BlockNumber,
+    pub window_end: BlockNumber,
+    pub b_accept: Balance,                // the liquidity actually posted
+    pub b_reject: Balance,
+    pub manip_floor: Balance,             // 05 §5.6 cash form, rounded DOWN
+    pub declared_stake: Balance,          // S, republished verbatim
+    pub epsilon_1e9: FixedU64,            // ε, republished verbatim
+    pub certified: bool,                  // C_disp(ε) ≥ 3·S — NOT ManipFloor̂ (16 §5.2)
+    pub settlement_trust: SettlementTrust,
+    pub provenance_hash: H256,            // blake2_256 over the domain-separated SCALE preimage
+}                                         //   separator b"bleavit/hosted-report/v1" (16 §6.3)
+
+pub struct SettlementTrust {
+    pub attestors: u32,
+    pub quorum: u32,
+    pub bond_total: Balance,
+}
+
+pub enum QuestionPhase { Registered, Open, Sealed, Settled, Voided }
+```
+
+**§6 additions — client-facing events.** These meet criterion (b): [16](16-hosted-question-service.md)
+requires a client to observe its own question's terminal state without trusting a push.
+
+| Event | Shape |
+|---|---|
+| `QuestionRegistered` | `{ question_id: QuestionId, client_id: ClientId, window_end: BlockNumber }` |
+| `QuestionSealed` | `{ question_id: QuestionId, provenance_hash: H256 }` |
+| `QuestionSettled` | `{ question_id: QuestionId, value_1e9: FixedU64 }` |
+| `QuestionVoided` | `{ question_id: QuestionId, reason: VoidReason }` |
+
+Push-failure and ingress-metering events meet none of (a)–(c) and are pallet-local diagnostics.
+
+**§7 additions — storage the frontend may read directly.**
+
+| Key | Value | Bound |
+|---|---|---|
+| `Clients: map ClientId → ClientRecord` | `{ location: Option<Location>, local_signer: Option<AccountId>, bond, admitted_at, questions_live, questions_total }` — exactly one of the two identity fields is `Some` (16 §2) | `svc.max_clients` (13 §4) |
+| `Questions: map QuestionId → QuestionRecord` | `{ client_id, phase: QuestionPhase, window_start, window_end, declared_stake, epsilon_1e9, tolerance_1e9, markets: [MarketId; 2] }` | `svc.max_live` live + retention |
+| `Reports: map QuestionId → ReportView` | as above | one per sealed question, retained to archive |
+
+**§7.1 scoping (normative).** Every existing conditional-ledger row in §7 is scoped to instance
+`()`. `ServiceLedger` (`pallet_conditional_ledger::<Instance1>`) has its own storage prefix and is
+**not** canonical-frontend ingest surface; a frontend reading the ledger's raw keys reads the
+primary domain only.
+
+**§9 additions — metadata constants.** `QuestionService::FeeFloor`, `QuestionService::MaxLive`,
+`QuestionService::MaxWindow`, `QuestionService::EpsilonMin`, `ClientRegistry::ClientBond`, and
+`QuestionService::AttestorsMin` (kernel `3`). The `svc.fee_bps` PARAM row binds through `params()`
+like every other tunable and is **absent from metadata while unset** — its unset state is the
+arming gate (16 §8.1).
+
 ---
 
 ## 5. pallet-market events (X-1b)

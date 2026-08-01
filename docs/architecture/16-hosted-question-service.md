@@ -67,9 +67,18 @@ supplies an opaque `sub_id: [u8; 32]` which Bleavit **stores, echoes in the repo
 provenance hash, and never interprets**. Bleavit makes no claim about who inside a client chain
 asked a question — the client chain does, to its own users, using a field Bleavit merely carries.
 
-**Off-chain services** cannot send XCM. They use the identical calls from a local signed account,
-admitted to the same registry with `location = Location::here()`-derived identity. The product is
-the same; only the transport differs.
+**Off-chain services** cannot send XCM. They use the identical calls from a **local signed
+account** — but that account must be bound in the registry, and an earlier revision's
+`location = Location::here()` does not do it: `here()` is identical for *every* local signer, so it
+would either authenticate nobody or authenticate anybody. The registry record therefore carries an
+optional `local_signer: Option<AccountId>`, and a `ClientRecord` is admitted with **exactly one** of
+`location` (XCM transport) or `local_signer` (local transport) — never both, never neither. The
+signed-origin path converts `Signed(who)` to `ExternalClient(id)` **only** on an exact
+`local_signer == who` match, which is the same exact-equality discipline the `Location` path uses
+and the same single-success-constructor shape I-34 requires. §12's negative-origin matrix is scoped
+accordingly: a `Signed` origin that matches no `local_signer` is rejected, which is what that matrix
+is asserting. The product is identical across both transports; only the authentication field
+differs.
 
 ---
 
@@ -250,8 +259,17 @@ with the word "bound" absent, and only once something re-derives it.
 Certification is a relation, not a badge:
 
 ```
-Certified(ε, S)  iff  ManipFloor̂(ε) ≥ SECURITY_FACTOR · S           (SECURITY_FACTOR = 3, kernel K)
+Certified(ε, S)  iff  C_disp(ε) ≥ SECURITY_FACTOR · S               (SECURITY_FACTOR = 3, kernel K)
 ```
+
+**The predicate is over `C_disp` alone, never over `ManipFloor̂`.** `ManipFloor̂ = C_disp + C_hold`,
+and `C_hold` is a **measured** contest-capital term — so certifying against the total would let an
+underfunded client acquire the published certificate out of *organic trader activity*, which is
+precisely the liquidity-cannibalization design §8.4 refuses. The published `ManipFloor̂` and the
+certification predicate are therefore **different quantities with different jobs**: the first is the
+diagnostic the client is sold, the second is the admission gate, and only the second is restricted
+to client-funded depth. An earlier revision defined `Certified` over the total and contradicted
+§8.4; corrected 2026-08-01.
 
 At registration `V_win = 0`, `p̄ = 0.5` and both books carry the same `b`, so `C_hold = 0` and the
 requirement solves for the client's minimum subsidy:
@@ -344,8 +362,16 @@ bonded parties is the only construction that **prices one deviant and survives o
 ### 6.4 VOID is the universal failure edge
 
 Not a settlement mode — the failure edge for *every* path: no quorum, median out of range, deadline
-missed, service paused, escrow insufficient, client deregistered, attestor set collapsed, client
-vanished. All take the existing D-1 path already proven by I-26/I-27, PT-6 and the TLA⁺ witness
+missed, service paused, escrow insufficient, attestor set collapsed, client unreachable at
+settlement.
+
+**Registry removal is deliberately NOT on that list**, and an earlier revision listed it as "client
+deregistered", contradicting §2 one section over. The two rules must agree, and §2's is the one that
+survives: removal refuses *new* registrations and lets live questions reach their own terminal
+state, because VOIDing them would change trader payouts and could destroy an **unsealed** report the
+client has already paid for — on a values-track vote the traders had no part in. The immediate lever
+is the guardian pause of §10, which VOIDs by design and is bounded; a values-track removal is not an
+emergency and MUST NOT act like one. All take the existing D-1 path already proven by I-26/I-27, PT-6 and the TLA⁺ witness
 configs. Redemption is at par.
 
 ### 6.5 The residual trust, stated and priced
@@ -494,9 +520,15 @@ Three of four revenue paths need **no new code**: external books generate instru
 and client messages generate **C** (the weight-trader fee). Only **D** is new:
 
 ```
-fee(q) = max( svc.fee_floor ,  svc.fee_bps × declared_stake )      // charged per market created,
+fee(q) = max( svc.fee_floor ,  svc.fee_bps × declared_stake )      // charged once per QUESTION,
                                                                     // earned at `Sealed`
 ```
+
+**Once per question, not once per market**, and the distinction is not pedantic: a question carries
+**two** books (§7.6), so a literal per-market reading doubles both legs against the very arithmetic
+that sizes them — §8.2 values the rate leg as one `svc.fee_bps · S`, and the floor is derived from a
+per-**question** crank load and a per-**question** slot cost. An earlier revision said "per market
+created" and would have charged 2× what §8.2 justifies.
 
 A two-part tariff, which is what makes it simultaneously a per-market charge and incentive-compatible
 with honest `declared_stake`.
@@ -513,16 +545,22 @@ An earlier draft claimed a certified question carries `H_q ≈ 3S/ε` (60·S at 
 `AttackCost = ε·H`, a relation this repository never states, and it silently assumes organic trading
 depth that certification explicitly refuses to count (§5.2).
 
-What *is* derivable is the client's **own posted escrow**, which certification forces:
+What *is* derivable is the client's **own posted escrow**, which certification forces. The cash is
+**not** `b` — [04](./04-markets-and-pricing.md) §2 mints "per-book headroom `b·ln 2`" and §3 sizes
+`b = SubsidyBudget / ln 2`, so the posted subsidy per book is `b·ln 2`:
 
 ```
-client subsidy at ε = 0.05  =  2 · b_min  =  2 × 14.24·S  =  28.5·S
+client subsidy at ε = 0.05  =  2 · b_min · ln 2  =  2 × 14.2368 × 0.693147 · S  =  19.736·S
 ```
 
-At `ledger.redeem_fee` = 30 bps and β = 0.50, instrument **B** on that escrow is `≈ 0.043·S`, against
-instrument **D** at 100 bps of `0.010·S`. **Instrument D is therefore on the order of 20 % of the
-evidenced per-question revenue — not 2 %.** The user's instruction to charge per market is
-consequently far more load-bearing than the first draft made it look.
+*(An earlier revision wrote `2·b_min = 28.5·S`, conflating the LMSR liquidity parameter with the
+cash that funds it — the same class of error as SQ-544 one layer up. Corrected 2026-08-01; every
+figure below is the corrected one.)*
+
+At `ledger.redeem_fee` = 30 bps and β = 0.50, instrument **B** on that escrow is `≈ 0.0296·S`,
+against instrument **D** at 100 bps of `0.010·S`. **Instrument D is therefore ≈ 25 % of the
+evidenced per-question revenue — not 2 %.** The correction *raised* D's share, so charging per
+question is more load-bearing than either draft made it look.
 
 > **The honest division, and it must be stated this way round.** The *evidenced* revenue is D plus B,
 > both computable from capital the client is contractually required to post. Instrument A — trading
@@ -537,10 +575,14 @@ consequently far more load-bearing than the first draft made it look.
 2. [08](./08-treasury-and-economics.md) §10's rule binds verbatim: *"Bleavit is not self-funding at
    launch, and cannot be … Any statement that the protocol funds itself from block one is false and
    MUST NOT be made."* Hosting does not change this.
-3. `phase3.tvl_cap` = 2,000,000 is a **shared** meter. A single certified `S` = 100 k question needs
-   ≈ 2.85 M of client escrow — **above the entire cap** — so no consequential external question is
-   reachable during Phase 3 at all, and `register` MUST refuse while the cap is not the unbounded
-   sentinel.
+3. `phase3.tvl_cap` = 2,000,000 is a **shared** meter, and the corrected escrow **reverses** what
+   an earlier revision concluded here. A certified `S` = 100 k question at ε = 0.05 needs
+   **1,973,644** — it fits, with 1.3 % of the cap to spare, where the superseded 2.85 M figure said
+   it could not. That is a thinner result than it sounds: the cap is **shared with every other
+   inflow**, so one such question consumes essentially all of it and a second is unreachable.
+   `register` MUST therefore meter the client's escrow against the **live** remaining cap rather
+   than against the constant, and MUST refuse while the cap is not the unbounded sentinel unless
+   that live check passes.
 4. The combined crank load is **2.667×** the existing full-window figure at saturation, not the 1.67×
    an earlier draft claimed. §8.5's quota is sized against the corrected number.
 

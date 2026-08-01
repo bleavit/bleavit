@@ -112,6 +112,7 @@ Scope of the existing gate parameters is **every market-bearing class: PARAM, TR
 | `svc.max_window` | u32 | blocks | 302,400 (= `epoch.length`) | 43,200 | 302,400 | 2 | 1 | PARAM | [16](16-hosted-question-service.md) §4 |
 | `svc.client_bond` | Balance | USDC | **`[VERIFY]`** — must cover worst-case egress delivery fees for `svc.max_live` questions over a full window | 1,000 | 1,000,000 | 2 | 2 | PARAM | [16](16-hosted-question-service.md) §2, §9 |
 | `svc.epsilon_min` | Perbill | — | 0.01 | 0.005 | 0.25 | 2 | 1 | PARAM | [16](16-hosted-question-service.md) §5.2 |
+| `svc.max_clients` | u32 | clients | 32 | 1 | 128 | 2 | 2 | PARAM | [16](16-hosted-question-service.md) §2; storage bound for `Clients` ([02](02-integration-contract.md) §7) |
 
 
 **`svc.fee_bps` ships unset, and that is a legitimate state rather than a stalled one (normative; 2026-08-01, D-20).** R-2 permits a new key only when it is derived, never picked, and this one **cannot be derived from anything in this repository**: it is a market price for a service nobody has sold. So it ships `[VERIFY]`-tagged with its consumer **fail-closed** — while unset, `question_service.register` refuses with `ServiceRateUnset` and the whole service is inert. That doubles as the arming gate, which is why **no new `PhaseFlags` bit is introduced** and the [02](02-integration-contract.md) §7.3-frozen bitset does not widen. The error direction is safe in the direction R-2 cares about: too low costs revenue, too high costs demand, and neither can produce a wrong decision or an unbacked claim.
