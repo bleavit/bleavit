@@ -1259,16 +1259,45 @@ def coretime_annual_cost_path(
         floor_price = +(end_price_annual / per_year)
         price = floor_price
         out: list[Decimal] = []
-        for _ in range(years):
+        # Renewals are DISCRETE: a real year holds 13 or 14 of them, never
+        # 13.0446. Carry the remainder as a running cumulative total so the
+        # recurrence advances the number of times the calendar actually allows
+        # -- `floor(y * per_year)` renewals have happened by the end of year y,
+        # so a 25-year horizon lands on 326 advances rather than 25 x 13 = 325.
+        #
+        # An earlier form advanced exactly `int(per_year)` times per year and
+        # scaled the year's SPEND by `per_year / int(per_year)` instead. That is
+        # a smooth approximation of a discrete process, and it costs one advance
+        # of the ratchet per ~23 years: harmless once the price has saturated at
+        # the `min(sale_price, ...)` ceiling (at the shipped 3 % cap saturation
+        # arrives at advance 157, i.e. inside year 12, so every published 08 §10
+        # figure moves by less than 0.01 years), but NOT harmless while the
+        # ratchet is still climbing -- at a 1 % cap saturation is at advance 464
+        # and the dropped advance understates a 25-year line by 0.70 %.
+        # Understating a cost overstates the runway, so the error direction is
+        # unsafe and the discrete form is the one to keep.
+        done = 0
+        for year in range(1, years + 1):
+            target = int(per_year * Decimal(year))
             spend = Decimal(0)
-            # Fractional renewals-per-year: carry the remainder so a 25-year
-            # horizon lands on 326 renewals, not 25 x 13.
-            whole = int(per_year)
-            for _ in range(whole):
+            for _ in range(target - done):
                 price = coretime_renewal_price(price, floor_price, through, per_period_cap)
                 spend += price
-            out.append(+(spend * per_year / Decimal(whole)))
+            done = target
+            out.append(+spend)
         return out
+
+
+def coretime_renewals_through_year(year: int) -> int:
+    """Renewals completed by the end of year `year` -- `floor(year * 13.0446)`.
+
+    Exposed so the discreteness is testable rather than implicit in a loop
+    bound: the count is what makes a year cost 13 or 14 renewals, and it is the
+    quantity the smooth-scaling form got wrong.
+    """
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        return int(coretime_renewals_per_year() * Decimal(year))
 
 
 def coretime_cost_after_years(

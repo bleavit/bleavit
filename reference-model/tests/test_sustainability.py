@@ -47,6 +47,7 @@ from bleavit_reference_model.sustainability import (
     coretime_ratchet_ceiling,
     coretime_renewal_price,
     coretime_renewals_per_year,
+    coretime_renewals_through_year,
     coretime_sale_price,
     runway_years_with_coretime_policy,
     runway_years_with_escalating_line,
@@ -1369,14 +1370,27 @@ class CoretimeRenewalPriceTests(unittest.TestCase):
         """Stated as cash, because that is what the treasury actually parts with."""
         early = sum(coretime_annual_cost_path(25, D(4_000), through=CORETIME_RENEW_INTERLUDE))
         late = sum(coretime_annual_cost_path(25, D(4_000), through=CORETIME_RENEW_LEADIN_END))
-        self.assertLess(abs(late - D(100_000)), D(1))  # 25 x 4,000, flat
-        self.assertLess(abs(early - D(6_252_022)), D(2_000))
+        # 99,964.41, not the round 25 x 4,000 = 100,000 this row used to assert.
+        # A renewal is discrete: 25 years hold 326 of them, while 25 x 13.0446
+        # is 326.1161, so a flat line at the market floor costs 326 renewals and
+        # not 25 annualised years. The 0.036 % gap is the smooth-scaling defect
+        # the Codex review of PR #206 found; see
+        # CoretimeRenewalDiscretenessTests. Every published 08 §10 runway figure
+        # is unmoved by the repair (< 0.01 years), so this is an internal anchor
+        # being made exact, not a values change.
+        self.assertLess(abs(late - D("99964.41")), D("0.01"))
+        self.assertLess(abs(early - D(6_252_022)), D(10_000))
         self.assertGreater(early / late, D(62))
-        # Year 25 alone is the saturated ceiling: 100x the market floor.
+        # Year 25 alone is the saturated ceiling: 100x the market floor, times
+        # the 13 renewals that year actually holds (year 23 is the 14th-renewal
+        # carry year, not year 25).
         self.assertLess(
             abs(coretime_annual_cost_path(25, D(4_000), through=CORETIME_RENEW_INTERLUDE)[24]
-                - D(400_000)),
-            D(1),
+                - D("398631.07")),
+            D("0.01"),
+        )
+        self.assertEqual(
+            coretime_renewals_through_year(25) - coretime_renewals_through_year(24), 13
         )
 
     def test_the_unbounded_model_this_replaces_understated_the_runway(self):
@@ -1759,6 +1773,111 @@ class CollatorAnchorTests(unittest.TestCase):
         self.assertEqual(NAV_FLOOR_CODE, D(13_862_944))
         self.assertEqual(NAV_FLOOR_META, D(21_256_533))
 
+
+class CoretimeRenewalDiscretenessTests(unittest.TestCase):
+    """The renewal schedule is discrete, and rounding it smooth loses an advance.
+
+    Raised by the Codex review of PR #206 against code that predates it (E7,
+    `778ff42`). `coretime_annual_cost_path` carried a comment promising to
+    "carry the remainder so a 25-year horizon lands on 326 renewals, not
+    25 x 13" and then did something else: it advanced the ratchet exactly
+    `int(per_year)` times a year and scaled the year's *spend* by
+    `per_year / int(per_year)`. The totals are close, but the price recurrence
+    ran one advance short per ~23 years and no year ever cost what the model
+    said it cost.
+
+    The review's stated consequence -- "whenever the price has not saturated,
+    the extra renewal and every subsequent ratchet state are priced
+    incorrectly" -- is right as a mechanism and wrong at the shipped
+    parameters: at the 3 % cap the ceiling binds at advance 157 (inside year
+    12) while the dropped advance first appears at year 23, so it always landed
+    in the saturated region and every published 08 §10 figure moves by less
+    than 0.01 years. It is the *slower* ratchets where it bites, which is what
+    `test_the_dropped_advance_is_unsafe_while_the_ratchet_still_climbs` pins.
+    """
+
+    def test_a_year_holds_a_whole_number_of_renewals(self):
+        per_year = coretime_renewals_per_year()
+        self.assertGreater(per_year, D(13))
+        self.assertLess(per_year, D(14))
+        counts = [
+            coretime_renewals_through_year(y) - coretime_renewals_through_year(y - 1)
+            for y in range(1, 41)
+        ]
+        self.assertEqual(set(counts), {13, 14})
+        # The 14-renewal years are exactly the carry years: the remainder
+        # 0.0446/year accumulates to a whole renewal every ~22.4 years.
+        self.assertEqual([y for y, n in enumerate(counts, 1) if n == 14], [23])
+        every_fifty = [
+            y
+            for y in range(1, 51)
+            if coretime_renewals_through_year(y) - coretime_renewals_through_year(y - 1) == 14
+        ]
+        self.assertEqual(every_fifty, [23, 45])
+
+    def test_the_horizon_lands_on_the_count_the_comment_claims(self):
+        # 25 x 13 = 325 is what the smooth form advanced; 326 is the calendar.
+        self.assertEqual(coretime_renewals_through_year(25), 326)
+        self.assertEqual(coretime_renewals_through_year(1), 13)
+
+    def test_no_year_costs_a_fractional_renewal_once_the_price_saturates(self):
+        """The smooth form billed 13.0446 x ceiling every saturated year."""
+        end_annual = D("913.125")
+        path = coretime_annual_cost_path(30, end_annual)
+        ceiling = coretime_ratchet_ceiling(end_annual / coretime_renewals_per_year())
+        saturated = path[24:]  # well past advance 157
+        for spend in saturated:
+            multiple = spend / ceiling
+            self.assertEqual(multiple, multiple.to_integral_value())
+            self.assertIn(int(multiple), (13, 14))
+
+    def test_the_dropped_advance_is_unsafe_while_the_ratchet_still_climbs(self):
+        """A slower cap pushes saturation past the horizon; then it matters.
+
+        At a 1 % per-period cap the ceiling is not reached until advance 464,
+        so a 25-year line is priced entirely on the climbing part of the
+        ratchet. Advancing 325 times instead of 326 understates the line -- and
+        understating a cost overstates the runway, which is the unsafe
+        direction (R-7).
+        """
+        end_annual = D("913.125")
+        slow = D("0.01")
+        per_year = coretime_renewals_per_year()
+        carried = sum(
+            coretime_annual_cost_path(25, end_annual, CORETIME_RENEW_INTERLUDE, slow)
+        )
+
+        # Reconstruct the superseded smooth form locally, so the test states the
+        # size of the defect rather than merely asserting the new number.
+        floor_price = end_annual / per_year
+        price = floor_price
+        smooth = D(0)
+        for _ in range(25):
+            year_spend = D(0)
+            for _ in range(int(per_year)):
+                price = coretime_renewal_price(
+                    price, floor_price, CORETIME_RENEW_INTERLUDE, slow
+                )
+                year_spend += price
+            smooth += year_spend * per_year / D(int(per_year))
+
+        self.assertGreater(carried, smooth)
+        self.assertGreater((carried - smooth) / smooth, D("0.006"))
+        self.assertLess((carried - smooth) / smooth, D("0.008"))
+
+    def test_the_published_runway_figures_are_unmoved_by_the_repair(self):
+        """Regression pin: the repair is a correctness fix, not a values change."""
+        worst = cost_base(
+            with_levers(collator_count=12, pol_rerun_fraction=D(1))
+        ).annual
+        late = runway_years_with_coretime_policy(
+            worst, NAV_FLOOR_META, D(4_000), through=CORETIME_RENEW_LEADIN_END
+        )
+        early = runway_years_with_coretime_policy(
+            worst, NAV_FLOOR_META, D(4_000), through=CORETIME_RENEW_INTERLUDE
+        )
+        self.assertLess(abs(late - D("19.40")), D("0.05"))
+        self.assertLess(abs(early - D("12.72")), D("0.05"))
 
 if __name__ == "__main__":
     unittest.main()
