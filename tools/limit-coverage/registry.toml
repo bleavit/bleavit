@@ -1164,3 +1164,42 @@ key = "xcm.usdc_per_mb"
 class = "param-bounds"
 genesis = true
 reason = "13 §1 / 09 §6.1: governed XCM trader rate (proof-size dimension); amendment bounds covered by the generated per-key suite. Not a dispatch limit — see xcm.dot_per_sec."
+
+# --- D-20 hosted question service (doc 16). N1 is spec-only, so none of these
+# has a consumer yet; each is `unwired` with an owner that expires the exemption
+# mechanically once the owning milestone flips ✅ (15 §4.6).
+
+[[entry]]
+key = "svc.fee_bps"
+class = "unwired"
+genesis = false
+owner = "N7"
+reason = "13 §1 / 16 §8.1: ships `[VERIFY]`-tagged and UNSET at genesis, with its consumer fail-closed — while unset, `question_service.register` refuses `ServiceRateUnset`. The refusal doubles as the arming gate (which is why no new PhaseFlags bit is introduced), so the key cannot be bound to a dispatch-limit test until `pallet-question-service` exists. Owner N7 creates that consumer."
+
+[[entry]]
+key = "svc.max_live"
+class = "unwired"
+genesis = false
+owner = "N7"
+reason = "13 §1 / 16 §8.5: the live-question bound. Its consumer is `question_service.register`'s slot check (`SlotsExhausted`), which does not exist until N7. It becomes a `dispatch-limit` key with a marked past-the-limit test at that point — it is a registration refusal, not a bounds screen."
+
+[[entry]]
+key = "svc.max_window"
+class = "unwired"
+genesis = false
+owner = "N7"
+reason = "13 §1 / 16 §4: the maximum question window. Consumer is `register`'s `WindowTooLong` refusal (N7). Dispatch-limit once wired."
+
+[[entry]]
+key = "svc.client_bond"
+class = "unwired"
+genesis = false
+owner = "N4"
+reason = "13 §1 / 16 §2, §9: the held client-registry bond, and the source of prepaid egress delivery fees (I-36). Consumer is `pallet-client-registry`'s admission path, which is milestone N4."
+
+[[entry]]
+key = "svc.epsilon_min"
+class = "unwired"
+genesis = false
+owner = "N7"
+reason = "13 §1 / 16 §5.2: the floor on a client's declared resolution ε. Consumer is `register`'s `EpsilonOutOfRange` refusal (N7). Dispatch-limit once wired."
