@@ -26,16 +26,44 @@ nowhere, and both are properties of its own numbers rather than new policy:
   and the terminal forfeit is a *larger* fraction of stake — 175 % at 40k,
   1,750 % at 4k. The direction is safe (small cohorts are over-collateralized);
   §6.2's table reads as a constant and is one. See :func:`floor_crossover_stake`.
+* **§11's construction claim fails at 19 of the 117 configurations in the
+  registry's max-Δ/day-aligned sweep (SQ-553).** At the lawful corner
+  `(epoch.length, orc.window, orc.rounds) = (201,600, 72,000, 4)`, the money
+  deadline is d13⅓ and only round 1 challenge-closes by it. This does not make
+  lying cheaper: the deadline force-neutralizes the value. It makes *griefing*
+  cheaper, because one `B_1` challenge holds the next round open through the
+  deadline where the configured ladder would otherwise require `15·B_1`; at
+  the default three rounds the reduction is `7·B_1 → B_1`. The stacks are
+  refunded at `retain_until`, so these are capital-lock ratios, not forfeitures.
+* **The incident aggregate's maximum settlement-score impact rounds up to
+  10,000 bps, against 1,750 bps of default §6.3 coverage (SQ-553).** An S1
+  filing takes `I: 1 → 0`; through the exact 05 §4.4 pipeline, a maximal pair
+  moves from `s = 1` to `s = 0.000031622`, a `9,999.683780000`-bps swing whose
+  claimant-adverse coverage requirement is 10,000 bps. Default coverage spans
+  a zeroed epoch only through honest score `0.175013229` on the 1e-9 grid.
+  §7's premise that the MetricSpec surface does not carry `Δs_max` is stale:
+  05 §4.4 makes `delta_s_max_bps` mandatory and bound-checks attested metrics.
+  The residual is narrower and structural: `I` is not a `MetricId`, so it has
+  no component row to screen. An upheld filing is refunded; this module does
+  not subtract its bond from its gain, because those outcomes are exclusive.
 
 Units: USDC in whole units; `orc.bond_bps` in basis points; `Δs_max` in basis
 points (05 §4.4 fixes both). Bond arithmetic is exact integer arithmetic —
 §6.1's division rounds **up**, "resolved in the direction of custody".
+
+Latency uses blocks and exact rational days; welfare uses the 1e-9 `FixedU64`
+grid. A computed welfare swing rounds **up** to whole basis points: understating
+it is the unsafe, under-covered direction.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from decimal import Decimal, ROUND_CEILING
 from fractions import Fraction
+
+from . import welfare
 
 BPS_DENOMINATOR = 10_000
 #: `orc.bond_bps` is stored as a `Perbill` — parts per billion (13 §1, 07 §6.3).
@@ -76,10 +104,22 @@ BOND_BPS_DEFAULT, BOND_BPS_MIN, BOND_BPS_MAX = 250, 150, 1_000
 ROUNDS_DEFAULT, ROUNDS_MIN, ROUNDS_MAX = 3, 2, 4
 #: `orc.window` — 72 h kernel floor, never lowered; META may raise to 120 h.
 ORC_WINDOW_DEFAULT, ORC_WINDOW_MIN, ORC_WINDOW_MAX = 43_200, 43_200, 72_000
+#: `epoch.length` — 13 §1; 10 % max-Δ and a 2-epoch cooldown.
+EPOCH_LENGTH_DEFAULT, EPOCH_LENGTH_MIN, EPOCH_LENGTH_MAX = 302_400, 201_600, 604_800
+EPOCH_LENGTH_MAX_DELTA = Fraction(1, 10)
 #: 07 §7 registry filing-bond floors (`reg.bond_inc` / `reg.bond_mile`).
 REG_BOND_INCIDENT, REG_BOND_MILESTONE = 5_000, 2_500
+#: `reg.max_filings_epoch` — 13 §2 / 07 §7, shared across frozen versions.
+REG_MAX_FILINGS_EPOCH = 64
 #: 05 §4.4 fixes `Δs_max`'s units and its `0 < Δs_max ≤ 10,000` bound.
 DELTA_S_MAX_MIN, DELTA_S_MAX_MAX = 1, 10_000
+
+#: 05 §4.3 / 07 §7: exact incident severities folded over upheld filings only.
+INCIDENT_SEVERITIES: dict[str, Fraction] = {
+    "S1": Fraction(1),
+    "S2": Fraction(2, 5),
+    "S3": Fraction(1, 10),
+}
 
 
 @dataclass(frozen=True)
@@ -531,6 +571,197 @@ def filing_bond(kind: str, exposure: int, params: OracleParams = DEFAULTS) -> in
 
 
 # ---------------------------------------------------------------------------
+# §7 — the incident aggregate's effective `Δs_max` (SQ-553).
+# ---------------------------------------------------------------------------
+
+
+def incident_aggregate(upheld_severities: Iterable[str]) -> Fraction:
+    """`I = max(0, 1 − Σ severity)` over §7's upheld incident filings.
+
+    The fold is rational: S1/S2/S3 are exactly 1, 2/5 and 1/10. Unknown
+    severities and a filing count above `reg.max_filings_epoch` refuse rather
+    than fabricating a favourable aggregate. Rejected and still-open filings
+    are deliberately absent from the input; §7 says only `Upheld` records fold.
+    """
+    severities = tuple(upheld_severities)
+    if len(severities) > REG_MAX_FILINGS_EPOCH:
+        raise BondError(
+            f"{len(severities)} incident filings exceeds "
+            f"reg.max_filings_epoch {REG_MAX_FILINGS_EPOCH}"
+        )
+    total = Fraction(0)
+    for severity in severities:
+        try:
+            total += INCIDENT_SEVERITIES[severity]
+        except KeyError as exc:
+            raise BondError(f"unknown incident severity {severity!r}") from exc
+    return max(Fraction(0), Fraction(1) - total)
+
+
+@dataclass(frozen=True)
+class IncidentImpact:
+    """The maximal one-epoch incident move through 05 §4.4's full pipeline."""
+
+    aggregate_before: Fraction
+    aggregate_after: Fraction
+    honest_w: Decimal
+    incident_w: Decimal
+    honest_score: Decimal
+    incident_score: Decimal
+    delta_score: Decimal
+    delta_bps_exact: Decimal
+    delta_s_max_bps: int
+
+
+def _maximal_epoch_pipeline(incident: Fraction) -> dict[str, Decimal]:
+    """A 05 §4.3 v1 epoch at the top of every normalized input range.
+
+    This is a witness of the global maximum, not a calibration scenario. All
+    inputs and every pipeline output live in [0, 1], so no incident can start
+    above the honest `W = 1` produced here. S1 makes `I = 0`; because §4.4
+    makes I a pure multiplier, no incident can land below the `W = 0` produced
+    here either. Holding the other horizon epoch at 1 maximizes both geometric
+    means' difference.
+    """
+    one = Decimal(1)
+    return welfare.full_pipeline(
+        u=one,
+        f=one,
+        hhi=Decimal(0),
+        phase=6,
+        c_onchain={1: one, 2: one, 3: one, 4: one, 5: one, 6: one},
+        c_weights={
+            1: Decimal("0.25"),
+            2: Decimal("0.25"),
+            3: Decimal("0.20"),
+            4: Decimal("0.15"),
+            5: Decimal("0.10"),
+            6: Decimal("0.05"),
+        },
+        incident=Decimal(incident.numerator) / Decimal(incident.denominator),
+        p_components={20: one, 21: one, 22: one},
+        p_weights={
+            20: Decimal("0.45"),
+            21: Decimal("0.35"),
+            22: Decimal("0.20"),
+        },
+        a_components={30: one, 31: one, 32: one},
+        a_weights={
+            30: Decimal("0.40"),
+            31: Decimal("0.30"),
+            32: Decimal("0.30"),
+        },
+    )
+
+
+def delta_s_max_of_incident_aggregate() -> IncidentImpact:
+    """Derive §7's incident aggregate maximum through `welfare.full_pipeline`.
+
+    One upheld S1 filing is sufficient: `I = max(0, 1 − 1) = 0`. The affected
+    epoch is the first member of a two-epoch settlement pair; the other stays
+    at the maximal honest `W = 1`. `settlement_score` applies §4.4's 1e-9 floor
+    before the square root, so the attacked score is positive rather than zero.
+
+    `delta_s_max_bps` rounds the exact grid swing **up**. Rounding down could
+    admit an incident surface whose real move exceeds its coverage; up is the
+    claimant-adverse, custody-safe direction (R-7).
+    """
+    before = incident_aggregate(())
+    after = incident_aggregate(("S1",))
+    honest = _maximal_epoch_pipeline(before)
+    attacked = _maximal_epoch_pipeline(after)
+    honest_score = welfare.settlement_score(honest["W"], honest["W"])
+    incident_score = welfare.settlement_score(attacked["W"], honest["W"])
+    delta_score = honest_score - incident_score
+    exact_bps = delta_score * Decimal(BPS_DENOMINATOR)
+    required_bps = int(exact_bps.to_integral_value(rounding=ROUND_CEILING))
+    return IncidentImpact(
+        before,
+        after,
+        honest["W"],
+        attacked["W"],
+        honest_score,
+        incident_score,
+        delta_score,
+        exact_bps,
+        required_bps,
+    )
+
+
+def incident_zeroed_epoch_delta_bps(honest_score: Decimal) -> Decimal:
+    """Impact of zeroing one epoch when both honest horizon epochs score alike.
+
+    With equal honest epoch welfare values, the honest settlement score is that
+    same grid value. S1 changes one `W` to zero; §4.4 then scores the attacked
+    pair as `sqrt(max(0, 1e-9) × honest_score)`, using the shared welfare
+    implementation rather than re-stating its rounding.
+    """
+    honest_w = welfare.floor_fixed(honest_score)
+    if not Decimal(0) <= honest_w <= Decimal(1):
+        raise BondError(f"honest score {honest_w} outside [0, 1]")
+    honest_pair_score = welfare.settlement_score(honest_w, honest_w)
+    attacked_score = welfare.settlement_score(Decimal(0), honest_w)
+    return (honest_pair_score - attacked_score) * Decimal(BPS_DENOMINATOR)
+
+
+def honest_score_coverage_crossover(params: OracleParams = DEFAULTS) -> Decimal:
+    """Largest 1e-9-grid honest score whose S1 swing §6.3 coverage spans.
+
+    The predicate is monotone, so a deterministic integer binary search finds
+    the exact grid boundary. At defaults it is 0.175013229: its incident swing
+    is exactly 1,750 bps, while the next grid point moves 1,750.00001 bps.
+    """
+    if not params.in_bounds():
+        raise BondError("oracle parameters outside 13 §1 bounds")
+    available = Decimal(coverage_bps(params))
+    low, high = 0, welfare.FIXED_SCALE
+    while low < high:
+        middle = (low + high + 1) // 2
+        score = Decimal(middle).scaleb(-9)
+        if incident_zeroed_epoch_delta_bps(score) <= available:
+            low = middle
+        else:
+            high = middle - 1
+    return Decimal(low).scaleb(-9)
+
+
+@dataclass(frozen=True)
+class IncidentCoverageFinding:
+    """Queryable form of §7's one-round coverage claim (SQ-553)."""
+
+    key: str
+    ok: bool
+    coverage_bps: int
+    required_bps: int
+    shortfall_factor: Fraction
+    honest_score_crossover: Decimal
+    impact: IncidentImpact
+
+
+def check_incident_coverage(
+    params: OracleParams = DEFAULTS,
+) -> IncidentCoverageFinding:
+    """Compare incident `Δs_max` with the §6.3 rate §7 actually reuses.
+
+    This is a rate comparison, not `gain − filing_bond`: an upheld filing is
+    refunded, while a rejected filing moves no incident aggregate. Combining
+    the gain from the first outcome with forfeiture from the second would price
+    an impossible game.
+    """
+    impact = delta_s_max_of_incident_aggregate()
+    available = coverage_bps(params)
+    return IncidentCoverageFinding(
+        key="incident aggregate Δs_max vs §6.3 coverage",
+        ok=available >= impact.delta_s_max_bps,
+        coverage_bps=available,
+        required_bps=impact.delta_s_max_bps,
+        shortfall_factor=Fraction(impact.delta_s_max_bps, available),
+        honest_score_crossover=honest_score_coverage_crossover(params),
+        impact=impact,
+    )
+
+
+# ---------------------------------------------------------------------------
 # §11 — the latency budget, "met by construction, not by hope".
 # ---------------------------------------------------------------------------
 
@@ -555,9 +786,249 @@ LATENCY_STAGES: tuple[LatencyStage, ...] = (
 #: 05 §3.1 puts Housekeeping at 20/21 of the epoch, so this is a schedule
 #: consequence rather than an independent constant.
 MONEY_DEADLINE_DAY = 20
+#: 05 §3.1's Housekeeping fraction; `epoch.length` is a multiple of 21.
+HOUSEKEEPING_NUMERATOR, PHASE_DENOMINATOR = 20, 21
+#: §5/§11 absolute windows; these do not scale with `epoch.length`.
+REPORT_WINDOW_BLOCKS = 2 * BLOCKS_PER_DAY
+ORC_EXT_WINDOW_BLOCKS = 2 * BLOCKS_PER_DAY
+ORACLE_DECISION_BLOCKS = 7 * BLOCKS_PER_DAY
+ORACLE_CONFIRM_BLOCKS = BLOCKS_PER_DAY
 #: 07 §11 rule 3: the single-extension rule keeps the sum at 21 d; per-round
 #: extensions would add 4 d. Rounds 2 and 3 would each gain one 2 d extension.
 PER_ROUND_EXTENSION_DAYS = 2
+
+# The `orc.window` row has no max-Δ. These are every whole-day point in its
+# 72 h…120 h interval; together with `epoch_length_max_delta_lattice()` and
+# all integer `orc.rounds`, they form the 117-point SQ-553 sweep.
+ORC_WINDOW_DAY_LATTICE = tuple(
+    range(ORC_WINDOW_MIN, ORC_WINDOW_MAX + 1, BLOCKS_PER_DAY)
+)
+
+
+@dataclass(frozen=True)
+class LatencyClose:
+    """One §11 stage's exact close time after measurement epoch close."""
+
+    name: str
+    days: Fraction
+    round_index: int | None = None
+
+
+def money_deadline_days(epoch_length_blocks: int) -> Fraction:
+    """`20/21 · epoch.length`, expressed as exact days after `t0`.
+
+    05 §3.1 requires `epoch.length` to be a multiple of 21, so the Housekeeping
+    boundary is an integer block. No rounding is permitted: rounding it up
+    would grant a contested value extra money-bearing time, the unsafe direction.
+    """
+    if epoch_length_blocks <= 0:
+        raise BondError(f"non-positive epoch.length {epoch_length_blocks}")
+    if epoch_length_blocks % PHASE_DENOMINATOR:
+        raise BondError(
+            f"epoch.length {epoch_length_blocks} is not a multiple of "
+            f"{PHASE_DENOMINATOR}"
+        )
+    deadline_blocks = (
+        HOUSEKEEPING_NUMERATOR * epoch_length_blocks // PHASE_DENOMINATOR
+    )
+    return Fraction(deadline_blocks, BLOCKS_PER_DAY)
+
+
+def stage_closes(
+    orc_window_blocks: int = ORC_WINDOW_DEFAULT,
+    orc_rounds: int = ROUNDS_DEFAULT,
+) -> tuple[LatencyClose, ...]:
+    """§11's cumulative closes for a live window/round parameter pair.
+
+    Report, challenge and extension windows are absolute block counts. The
+    single 48 h extension belongs to round 1 only; the terminal decision and
+    confirmation add eight days after the configured final round. All outputs
+    are exact `Fraction` days, including non-day-aligned lawful window values.
+    """
+    if not ORC_WINDOW_MIN <= orc_window_blocks <= ORC_WINDOW_MAX:
+        raise BondError(
+            f"orc.window {orc_window_blocks} outside "
+            f"[{ORC_WINDOW_MIN}, {ORC_WINDOW_MAX}]"
+        )
+    if not ROUNDS_MIN <= orc_rounds <= ROUNDS_MAX:
+        raise BondError(
+            f"orc.rounds {orc_rounds} outside [{ROUNDS_MIN}, {ROUNDS_MAX}]"
+        )
+    running = REPORT_WINDOW_BLOCKS
+    closes = [LatencyClose("report window", Fraction(running, BLOCKS_PER_DAY))]
+    for round_index in range(1, orc_rounds + 1):
+        running += orc_window_blocks
+        if round_index == 1:
+            running += ORC_EXT_WINDOW_BLOCKS
+        closes.append(
+            LatencyClose(
+                f"round {round_index}",
+                Fraction(running, BLOCKS_PER_DAY),
+                round_index,
+            )
+        )
+    running += ORACLE_DECISION_BLOCKS + ORACLE_CONFIRM_BLOCKS
+    closes.append(LatencyClose("terminal decision + confirm", Fraction(running, BLOCKS_PER_DAY)))
+    return tuple(closes)
+
+
+def last_live_round(
+    epoch_length_blocks: int,
+    orc_window_blocks: int = ORC_WINDOW_DEFAULT,
+    orc_rounds: int = ROUNDS_DEFAULT,
+) -> int:
+    """Highest configured round challenge-closed **by** the money deadline.
+
+    §11 says "not challenge-closed **by** the deadline" neutralizes, and the
+    pre-existing `settles_neutrally(20)` pin treats an exact d20 close as live.
+    The comparison is therefore inclusive. The brief's phrase "before" is not
+    the document's fencepost rule; treating equality as late would add one more
+    failed sweep point, `(302,400, 57,600, 4)`.
+    """
+    if not EPOCH_LENGTH_MIN <= epoch_length_blocks <= EPOCH_LENGTH_MAX:
+        raise BondError(
+            f"epoch.length {epoch_length_blocks} outside "
+            f"[{EPOCH_LENGTH_MIN}, {EPOCH_LENGTH_MAX}]"
+        )
+    deadline = money_deadline_days(epoch_length_blocks)
+    return max(
+        (
+            close.round_index
+            for close in stage_closes(orc_window_blocks, orc_rounds)
+            if close.round_index is not None and close.days <= deadline
+        ),
+        default=0,
+    )
+
+
+def epoch_length_max_delta_lattice() -> tuple[int, ...]:
+    """Extremal 10 %-max-Δ walks from genesis to both `epoch.length` bounds.
+
+    Each step moves as far as the row permits while preserving 05 §3.1's
+    multiple-of-21 requirement: downward moves round toward the live value
+    (ceil to 21), upward moves likewise (floor to 21). The final step clamps to
+    the bound. This yields 13 reachable points, not a hand-selected sample.
+    """
+    values = {EPOCH_LENGTH_DEFAULT}
+    live = EPOCH_LENGTH_DEFAULT
+    while live > EPOCH_LENGTH_MIN:
+        minimum_lawful = ceil_div(
+            live * (EPOCH_LENGTH_MAX_DELTA.denominator - EPOCH_LENGTH_MAX_DELTA.numerator),
+            EPOCH_LENGTH_MAX_DELTA.denominator,
+        )
+        proposed = ceil_div(minimum_lawful, PHASE_DENOMINATOR) * PHASE_DENOMINATOR
+        proposed = max(EPOCH_LENGTH_MIN, proposed)
+        if proposed >= live:
+            raise BondError("epoch.length downward lattice made no progress")
+        values.add(proposed)
+        live = proposed
+
+    live = EPOCH_LENGTH_DEFAULT
+    while live < EPOCH_LENGTH_MAX:
+        maximum_lawful = (
+            live
+            * (EPOCH_LENGTH_MAX_DELTA.denominator + EPOCH_LENGTH_MAX_DELTA.numerator)
+            // EPOCH_LENGTH_MAX_DELTA.denominator
+        )
+        proposed = maximum_lawful // PHASE_DENOMINATOR * PHASE_DENOMINATOR
+        proposed = min(EPOCH_LENGTH_MAX, proposed)
+        if proposed <= live:
+            raise BondError("epoch.length upward lattice made no progress")
+        values.add(proposed)
+        live = proposed
+    return tuple(sorted(values))
+
+
+@dataclass(frozen=True)
+class LatencySweepRow:
+    """One lawful §11 configuration and the griefing lock it actually needs."""
+
+    epoch_length_blocks: int
+    orc_window_blocks: int
+    orc_rounds: int
+    bond_bps: int
+    deadline_days: Fraction
+    last_live_round: int
+
+    @property
+    def key(self) -> str:
+        return (
+            f"epoch.length={self.epoch_length_blocks},"
+            f"orc.window={self.orc_window_blocks},orc.rounds={self.orc_rounds}"
+        )
+
+    @property
+    def ok(self) -> bool:
+        """Whether every configured ladder round can close by the deadline."""
+        return self.last_live_round == self.orc_rounds
+
+    @property
+    def full_ladder_bps(self) -> int:
+        """The §6.3 rate associated with the configured full ladder."""
+        return (2**self.orc_rounds - 1) * self.bond_bps
+
+    @property
+    def griefing_lock_bps(self) -> int:
+        """Stack a griefer must post before the deadline catches the next round."""
+        return (2**self.last_live_round - 1) * self.bond_bps
+
+    @property
+    def griefing_discount_ratio(self) -> Fraction:
+        """Full-ladder lock divided by the lock the deadline actually requires."""
+        if self.griefing_lock_bps == 0:
+            raise BondError("no challenge round closes before the money deadline")
+        return Fraction(self.full_ladder_bps, self.griefing_lock_bps)
+
+
+def latency_sweep(
+    epoch_lengths: Iterable[int] | None = None,
+    orc_windows: Iterable[int] | None = None,
+    orc_rounds: Iterable[int] | None = None,
+    *,
+    bond_bps: int = BOND_BPS_DEFAULT,
+) -> tuple[LatencySweepRow, ...]:
+    """The deterministic SQ-553 sweep, or the caller's supplied lawful box.
+
+    Defaults are the 13-point `epoch.length` max-Δ lattice, every whole-day
+    point in `orc.window`'s 72 h…120 h range, and all three integer round
+    counts: 13 × 3 × 3 = 117 rows. The one-day window grid does not pretend
+    intermediate block values are unlawful; monotonicity means the grid
+    contains both window bounds and every threshold-crossing direction.
+    """
+    lengths = (
+        epoch_length_max_delta_lattice()
+        if epoch_lengths is None
+        else tuple(sorted(set(epoch_lengths)))
+    )
+    windows = (
+        ORC_WINDOW_DAY_LATTICE
+        if orc_windows is None
+        else tuple(sorted(set(orc_windows)))
+    )
+    rounds = (
+        tuple(range(ROUNDS_MIN, ROUNDS_MAX + 1))
+        if orc_rounds is None
+        else tuple(sorted(set(orc_rounds)))
+    )
+    if not BOND_BPS_MIN <= bond_bps <= BOND_BPS_MAX:
+        raise BondError(
+            f"orc.bond_bps {bond_bps} outside [{BOND_BPS_MIN}, {BOND_BPS_MAX}]"
+        )
+    rows = []
+    for epoch_length in lengths:
+        for window in windows:
+            for round_count in rounds:
+                rows.append(
+                    LatencySweepRow(
+                        epoch_length,
+                        window,
+                        round_count,
+                        bond_bps,
+                        money_deadline_days(epoch_length),
+                        last_live_round(epoch_length, window, round_count),
+                    )
+                )
+    return tuple(rows)
 
 
 def worst_case_close_days(stages: tuple[LatencyStage, ...] = LATENCY_STAGES) -> list[int]:

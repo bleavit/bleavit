@@ -1,4 +1,4 @@
-"""08 §10 (Sustainability) — the executable form of the cost/revenue/runway arithmetic.
+"""08 §6, §10 — keeper economics and sustainability as executable arithmetic.
 
 Doc 08's preamble makes this mandatory rather than optional: "all worked arithmetic
 is shown and MUST be reproduced by the Phase-0 reference model". Until milestone E5
@@ -10,14 +10,45 @@ Everything here is a *derivation* from the 13 §1 registry and the 08 §10 formu
 No figure is chosen. The accompanying test suite pins every published figure in
 08 §10.1-§10.6, so a spec table and this module cannot drift apart silently.
 
+08 §6 says its crank-fee basis comes from the committed generated weight and
+uses that basis to underwrite 01 §2.2 A-1: at least one rational, funded keeper.
+Reading the current generated `pallet_market::crank_observe` artifact makes that
+claim move with a future regeneration. At HEAD the function is 143,851,000 ps
+plus 20 reads and 7 writes, hence 1,343,851,000 ps with the configured
+`RocksDbWeight`; the complete §6.2 fee is 0.00180440012 VIT, or 0.000090220006
+USDC at the 0.05 reference price. The registry basis is still 0.000085 USDC.
+It floors to 85 µUSDC where the HEAD fee floors to 90 µUSDC, so the seed is
+2.8264× the fee rather than 3×.
+
+That moves the A-1 crossover to 0.1413212054 USDC/VIT, 2.8264× the derivation
+price, inside the lawful `fee.vit_usdc_rate` envelope [0.005, 0.5]. A freshly
+calibrated 3× rebate always crosses at exactly 3× because the fee is linear in
+price; §6.2's "above ≈ 4×" sentence therefore omits an unsafe loss-making band.
+Even the maximum lawful rebate now covers only through 0.4710706847 USDC/VIT
+(9.4214×), short of the envelope's 10× upper edge.
+
+§6.3's tranche prose is independently stale. At the live rebate, decision-
+critical observation demand is 34.1496 USDC against the 9,600 reservation and
+general observation demand is 113.832 USDC against the 2,400 cap. The cap is
+21.0837× demand, the inverse of "partial subsidy by construction". Full-window
+demand is 147.9816 USDC, agreeing with §6.2 and §10.1; only §6.3's superseded
+580,320 × 0.09 = 52,228.80 sentence disagrees, by 352.9412×. No admissible
+`keeper.rebate` restores the tranche claim: equality needs 0.005376344086 USDC,
+6.3251× the registry ceiling.
+
 Units: USDC in whole units (Decimal, 6-decimal base unit). Epoch is 13 §1
-`epoch.length` = 302,400 blocks at 6 s = 21.0 days.
+`epoch.length` = 302,400 blocks at 6 s = 21.0 days. VIT has 12 decimals;
+ref-time is picoseconds and `IdentityFee` prices one ps at one planck. Fee
+conversion remains exact until a registry basis is required, where it floors
+to µUSDC against the keeper/claimant as R-7 requires.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
-from decimal import Decimal, localcontext
+from decimal import ROUND_FLOOR, Decimal, localcontext
+from pathlib import Path
 
 WORK_PREC = 60
 
@@ -53,6 +84,217 @@ OBS_INTERVAL_MIN, OBS_INTERVAL_MAX, OBS_INTERVAL_MAX_DELTA = (
 KEEPER_REBATE_MIN_MULTIPLE, KEEPER_REBATE_MAX_MULTIPLE = Decimal(1), Decimal(10)
 KEEPER_BUDGET_MIN, KEEPER_BUDGET_MAX = Decimal(6_000), Decimal(60_000)
 COLLATOR_COMP_MIN, COLLATOR_COMP_MAX = Decimal(500), Decimal(10_000)
+
+# 13 §1 `fee.vit_usdc_rate`: placeholder reference and its lawful envelope.
+FEE_VIT_USDC_RATE_REF = Decimal("0.05")
+FEE_VIT_USDC_RATE_MIN = Decimal("0.1") * FEE_VIT_USDC_RATE_REF
+FEE_VIT_USDC_RATE_MAX = Decimal(10) * FEE_VIT_USDC_RATE_REF
+# 13 §1 `keeper.rebate`, in whole USDC, with the row's own hard bounds.
+KEEPER_REBATE = Decimal("0.000255")
+KEEPER_REBATE_FEE_BASIS_USDC = Decimal("0.000085")
+KEEPER_REBATE_MIN = Decimal("0.000085")
+KEEPER_REBATE_MAX = Decimal("0.00085")
+
+# ---------------------------------------------------------------------------
+# 08 §6.2 crank fee. Semantics come from the document; only the generated
+# call-weight tuple is read from the committed runtime artifact. That is the
+# evidence §6.2 calls "committed weights", and reading it makes a regeneration
+# move this model instead of leaving another stale transcription behind.
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+CRANK_WEIGHT_FILE = REPO_ROOT / "runtime/bleavit-runtime/src/weights/pallet_market.rs"
+
+# The runtime binds frame_system::Config::DbWeight = RocksDbWeight. These are
+# its read/write ref-time constants; proof-size does not enter IdentityFee.
+ROCKS_DB_READ_REF_TIME_PS = 25_000_000
+ROCKS_DB_WRITE_REF_TIME_PS = 100_000_000
+# The remaining §6.2 inputs are independent of the market benchmark.
+TX_EXTENSION_REF_TIME_PS = 352_392_000
+EXTRINSIC_BASE_WEIGHT_PLANCK = 108_157_000
+CRANK_EXTRINSIC_LENGTH_BYTES = 120
+VIT_PLANCK_PER_VIT = Decimal(10**12)
+USDC_BASE_UNITS = Decimal(10**6)
+
+# §6.2's published table is internally derived from this now-stale committed
+# call weight. Keep its components, not its total, so the published rows remain
+# reproducible while `crank_fee_usdc` independently follows HEAD.
+PUBLISHED_CRANK_CALL_REF_TIME_PS = 1_240_920_000
+PUBLISHED_TX_EXTENSION_REF_TIME_PS = 352_392_000
+PUBLISHED_EXTRINSIC_BASE_WEIGHT_PLANCK = 108_157_000
+PUBLISHED_CRANK_EXTRINSIC_LENGTH_BYTES = 120
+# §6.3's surviving pre-E5 price input, used only to execute the stale sentence.
+PUBLISHED_PRE_E5_KEEPER_REBATE = Decimal("0.09")
+
+
+class KeeperEconomicsError(ValueError):
+    """A malformed weight artifact or non-positive economic input refuses."""
+
+
+@dataclass(frozen=True)
+class GeneratedCrankWeight:
+    """The generated `crank_observe` ref-time terms used by the live runtime."""
+
+    base_ref_time_ps: int
+    reads: int
+    writes: int
+
+    @property
+    def call_ref_time_ps(self) -> int:
+        return (
+            self.base_ref_time_ps
+            + self.reads * ROCKS_DB_READ_REF_TIME_PS
+            + self.writes * ROCKS_DB_WRITE_REF_TIME_PS
+        )
+
+
+def _one_generated_integer(body: str, pattern: str, label: str) -> int:
+    matches = re.findall(pattern, body)
+    if len(matches) != 1:
+        raise KeeperEconomicsError(
+            f"crank_observe must contain exactly one {label}; found {len(matches)}"
+        )
+    return int(matches[0].replace("_", ""))
+
+
+def generated_crank_weight(path: Path = CRANK_WEIGHT_FILE) -> GeneratedCrankWeight:
+    """Read HEAD's generated `pallet_market::crank_observe` weight.
+
+    The parser is deliberately narrow: a missing function, duplicate term or
+    generator-shape change refuses instead of silently retaining the old fee.
+    A future weight regeneration therefore either changes the result or makes
+    this evidence gate loud.
+    """
+    text = path.read_text(encoding="utf-8")
+    match = re.search(
+        r"^\s*fn crank_observe\(\) -> Weight \{(?P<body>.*?)^\s*\}",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        raise KeeperEconomicsError(f"crank_observe not found in {path}")
+    body = match.group("body")
+    return GeneratedCrankWeight(
+        _one_generated_integer(
+            body, r"Weight::from_parts\(([\d_]+),\s*0\)", "base ref-time term"
+        ),
+        _one_generated_integer(
+            body, r"T::DbWeight::get\(\)\.reads\(([\d_]+)\)", "read term"
+        ),
+        _one_generated_integer(
+            body, r"T::DbWeight::get\(\)\.writes\(([\d_]+)\)", "write term"
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class CrankFeeBreakdown:
+    """Every additive term in 08 §6.2's fee, in VIT planck/ref-time ps."""
+
+    generated: GeneratedCrankWeight
+    tx_extension_ref_time_ps: int = TX_EXTENSION_REF_TIME_PS
+    extrinsic_base_planck: int = EXTRINSIC_BASE_WEIGHT_PLANCK
+    length_fee_planck: int = CRANK_EXTRINSIC_LENGTH_BYTES
+
+    @property
+    def total_planck(self) -> int:
+        return (
+            self.generated.call_ref_time_ps
+            + self.tx_extension_ref_time_ps
+            + self.extrinsic_base_planck
+            + self.length_fee_planck
+        )
+
+    @property
+    def vit(self) -> Decimal:
+        with localcontext() as ctx:
+            ctx.prec = WORK_PREC
+            return +(Decimal(self.total_planck) / VIT_PLANCK_PER_VIT)
+
+
+def crank_fee_breakdown() -> CrankFeeBreakdown:
+    """The complete fee basis, following the generated HEAD call weight."""
+    return CrankFeeBreakdown(generated_crank_weight())
+
+
+def crank_fee_usdc(vit_usdc_rate: Decimal) -> Decimal:
+    """08 §6.2's sanctioned-crank fee at `fee.vit_usdc_rate`.
+
+    The conversion is exact and unrounded. Registry calibration applies the
+    claimant-adverse µUSDC floor separately in :func:`crank_fee_basis_usdc`.
+    """
+    if vit_usdc_rate < 0:
+        raise KeeperEconomicsError(f"negative VIT/USDC rate {vit_usdc_rate}")
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        return +(crank_fee_breakdown().vit * vit_usdc_rate)
+
+
+def crank_fee_basis_usdc(vit_usdc_rate: Decimal) -> Decimal:
+    """The fee floored to a whole µUSDC, against the keeper/claimant (R-7)."""
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        base_units = (crank_fee_usdc(vit_usdc_rate) * USDC_BASE_UNITS).to_integral_value(
+            rounding=ROUND_FLOOR
+        )
+        return +(base_units / USDC_BASE_UNITS)
+
+
+def published_crank_fee_usdc(vit_usdc_rate: Decimal) -> Decimal:
+    """Re-execute §6.2's four-row table from its printed additive inputs."""
+    if vit_usdc_rate < 0:
+        raise KeeperEconomicsError(f"negative VIT/USDC rate {vit_usdc_rate}")
+    planck = (
+        PUBLISHED_CRANK_CALL_REF_TIME_PS
+        + PUBLISHED_TX_EXTENSION_REF_TIME_PS
+        + PUBLISHED_EXTRINSIC_BASE_WEIGHT_PLANCK
+        + PUBLISHED_CRANK_EXTRINSIC_LENGTH_BYTES
+    )
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        return +(Decimal(planck) / VIT_PLANCK_PER_VIT * vit_usdc_rate)
+
+
+def rebate_fee_ratio(
+    vit_usdc_rate: Decimal, rebate: Decimal = KEEPER_REBATE
+) -> Decimal:
+    """Stored USDC rebate divided by the HEAD-derived VIT fee at `rate`."""
+    fee = crank_fee_usdc(vit_usdc_rate)
+    if fee <= 0:
+        raise KeeperEconomicsError("positive VIT/USDC rate required for a fee ratio")
+    if rebate < 0:
+        raise KeeperEconomicsError(f"negative keeper rebate {rebate}")
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        return +(rebate / fee)
+
+
+def a1_crossover_rate(rebate: Decimal = KEEPER_REBATE) -> Decimal:
+    """VIT/USDC rate where the stored rebate equals the HEAD-derived fee.
+
+    Appreciation is unsafe: strictly above this rate a permissionless keeper
+    loses money before its own operating costs, so 01 §2.2 A-1 is no longer
+    funded by the mechanism.
+    """
+    if rebate < 0:
+        raise KeeperEconomicsError(f"negative keeper rebate {rebate}")
+    fee_vit = crank_fee_breakdown().vit
+    if fee_vit <= 0:
+        raise KeeperEconomicsError("non-positive crank fee in VIT")
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        return +(rebate / fee_vit)
+
+
+def calibrated_keeper_rebate(
+    vit_usdc_rate: Decimal, multiple: Decimal = Decimal(3)
+) -> Decimal:
+    """A rebate freshly calibrated as `multiple × fee` at one price."""
+    if multiple < 0:
+        raise KeeperEconomicsError(f"negative rebate multiple {multiple}")
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        return +(multiple * crank_fee_usdc(vit_usdc_rate))
 
 # ---------------------------------------------------------------------------
 # The external anchor for `collator.comp_epoch` (SQ-536, milestone E5 pass 2).
@@ -395,6 +637,103 @@ class CostParams:
             ctx.prec = WORK_PREC
             trade_blocks = self.epoch_length * TRADE_PHASE_NUM / TRADE_PHASE_DEN
             return +(self.trading_books() * (trade_blocks / self.mkt_obs_interval))
+
+
+# 08 §6.3 fixes only the split, not new registry values: at most 20 % of the
+# epoch meter may serve general cranks, leaving at least 80 % decision-critical.
+DECISION_CRITICAL_RESERVATION_FRACTION = Decimal("0.80")
+GENERAL_TRANCHE_CAP_FRACTION = Decimal("0.20")
+
+
+@dataclass(frozen=True)
+class KeeperTranches:
+    """§6.3's two-tranche observation demand and the resulting meter spend."""
+
+    decision_critical_demand: Decimal
+    decision_critical_reservation: Decimal
+    general_demand: Decimal
+    general_cap: Decimal
+    beyond_meter: Decimal
+
+    @property
+    def full_window_demand(self) -> Decimal:
+        return self.decision_critical_demand + self.general_demand
+
+    @property
+    def general_demand_to_cap(self) -> Decimal:
+        if self.general_cap <= 0:
+            raise KeeperEconomicsError("non-positive general-tranche cap")
+        with localcontext() as ctx:
+            ctx.prec = WORK_PREC
+            return +(self.general_demand / self.general_cap)
+
+    @property
+    def general_cap_to_demand(self) -> Decimal:
+        if self.general_demand <= 0:
+            raise KeeperEconomicsError("non-positive general-tranche demand")
+        with localcontext() as ctx:
+            ctx.prec = WORK_PREC
+            return +(self.general_cap / self.general_demand)
+
+
+def keeper_tranches(params: CostParams | None = None) -> KeeperTranches:
+    """Derive §6.3's two tranches from §6.1 volume and the live parameters.
+
+    The demand terms cover observations only, because that is the quantity the
+    "partial subsidy" sentence compares. §6.1 says the other crank families
+    are merely order 10² and does not specify a count that could be invented.
+
+    General cranks can draw at most their cap; decision-critical cranks can use
+    all remaining meter headroom. `beyond_meter` is therefore the demand no
+    legal ordering of the two classes can rebate, not a subtraction from the
+    nominal reservation.
+    """
+    p = params or CostParams()
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        decision_cranks = p.decision_critical_cranks()
+        full_cranks = p.full_window_cranks()
+        if full_cranks < decision_cranks:
+            raise KeeperEconomicsError("full-window cranks below decision-critical cranks")
+        decision = +(decision_cranks * p.keeper_rebate)
+        general = +((full_cranks - decision_cranks) * p.keeper_rebate)
+        reservation = +(
+            p.keeper_budget_epoch * DECISION_CRITICAL_RESERVATION_FRACTION
+        )
+        general_cap = +(p.keeper_budget_epoch * GENERAL_TRANCHE_CAP_FRACTION)
+        maximum_metered = min(
+            p.keeper_budget_epoch,
+            decision + min(general, general_cap),
+        )
+        beyond = +(decision + general - maximum_metered)
+        return KeeperTranches(decision, reservation, general, general_cap, beyond)
+
+
+def general_tranche_boundary_rebate(params: CostParams | None = None) -> Decimal:
+    """Rebate at which §6.3's general observation demand equals its cap."""
+    p = params or CostParams()
+    general_cranks = p.full_window_cranks() - p.decision_critical_cranks()
+    if general_cranks <= 0:
+        raise KeeperEconomicsError("non-positive general observation count")
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        cap = p.keeper_budget_epoch * GENERAL_TRANCHE_CAP_FRACTION
+        return +(cap / general_cranks)
+
+
+def general_tranche_claim_reachable(params: CostParams | None = None) -> bool:
+    """Whether any 13 §1-admissible rebate makes general demand exceed its cap."""
+    p = params or CostParams()
+    at_ceiling = replace(p, keeper_rebate=KEEPER_REBATE_MAX)
+    return keeper_tranches(at_ceiling).general_demand > keeper_tranches(at_ceiling).general_cap
+
+
+def section_6_3_published_full_window_cost(params: CostParams | None = None) -> Decimal:
+    """Execute §6.3's surviving `580,320 × 0.09` sentence."""
+    p = params or CostParams()
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        return +(p.full_window_cranks() * PUBLISHED_PRE_E5_KEEPER_REBATE)
 
 
 @dataclass(frozen=True)
@@ -1181,6 +1520,64 @@ class AdmissibilityFinding:
     key: str
     ok: bool
     detail: str
+
+
+def keeper_economics_findings(
+    params: CostParams | None = None,
+) -> list[AdmissibilityFinding]:
+    """Queryable verdicts for 08 §6's A-1 and tranche claims.
+
+    These reuse the existing finding row rather than turning known document
+    defects into red tests. They are evidence findings, not additional
+    parameter-admission predicates, so :func:`is_admissible` deliberately does
+    not consume them.
+    """
+    p = params or CostParams()
+    tranches = keeper_tranches(p)
+    head_basis = crank_fee_basis_usdc(FEE_VIT_USDC_RATE_REF)
+    crossover = a1_crossover_rate(p.keeper_rebate)
+    ceiling_crossover = a1_crossover_rate(KEEPER_REBATE_MAX)
+    stale_full_window = section_6_3_published_full_window_cost(p)
+    return [
+        AdmissibilityFinding(
+            "keeper.rebate basis matches HEAD crank weight",
+            KEEPER_REBATE_FEE_BASIS_USDC == head_basis,
+            f"registry basis {KEEPER_REBATE_FEE_BASIS_USDC} USDC vs "
+            f"HEAD-derived claimant-adverse floor {head_basis} USDC (08 §6.2)",
+        ),
+        AdmissibilityFinding(
+            "keeper.rebate covers HEAD fee at reference rate",
+            rebate_fee_ratio(FEE_VIT_USDC_RATE_REF, p.keeper_rebate) >= Decimal(1),
+            f"rebate/fee = {rebate_fee_ratio(FEE_VIT_USDC_RATE_REF, p.keeper_rebate)} "
+            f"at {FEE_VIT_USDC_RATE_REF} USDC/VIT (01 §2.2 A-1; 08 §6.2)",
+        ),
+        AdmissibilityFinding(
+            "08 §6.2 A-1 crossover is approximately 4x",
+            crossover >= Decimal(4) * FEE_VIT_USDC_RATE_REF,
+            f"crossover {crossover} USDC/VIT = "
+            f"{crossover / FEE_VIT_USDC_RATE_REF}x the derivation price; "
+            "appreciation above it is unsafe",
+        ),
+        AdmissibilityFinding(
+            "08 §6.3 general tranche is a partial subsidy",
+            tranches.general_demand > tranches.general_cap,
+            f"general demand {tranches.general_demand} USDC vs cap "
+            f"{tranches.general_cap} USDC (demand/cap "
+            f"{tranches.general_demand_to_cap}x)",
+        ),
+        AdmissibilityFinding(
+            "08 §6.3 full-window cost uses the live rebate",
+            stale_full_window == tranches.full_window_demand,
+            f"published sentence {stale_full_window} USDC vs live demand "
+            f"{tranches.full_window_demand} USDC",
+        ),
+        AdmissibilityFinding(
+            "keeper.rebate ceiling covers fee.vit_usdc_rate maximum",
+            ceiling_crossover >= FEE_VIT_USDC_RATE_MAX,
+            f"maximum rebate covers through {ceiling_crossover} USDC/VIT vs "
+            f"the lawful rate ceiling {FEE_VIT_USDC_RATE_MAX}",
+        ),
+    ]
 
 
 def check_admissible(params: CostParams) -> list[AdmissibilityFinding]:

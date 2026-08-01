@@ -9,11 +9,18 @@ Two results here are consequences of doc 07's own numbers rather than restated
 prose, and both are marked at their assertion: the honest challenger's
 break-even confidence (5/7, not 1/2) and the `StakeAtRisk` below which §6.2's
 `17.5 %` stops being a constant (400,000 USDC).
+
+SQ-553 extends that discipline to the epoch-relative money deadline and §7's
+incident aggregate. The deadline sweep records the configurations that really
+carry the full ladder; the incident check asks the existing welfare pipeline
+for the score move, rather than subtracting a refunded filing bond from it.
 """
 
 import unittest
+from decimal import Decimal
 from fractions import Fraction
 
+from bleavit_reference_model import welfare
 from bleavit_reference_model.disputes import (
     BOND_BPS_MAX,
     BOND_BPS_MIN,
@@ -22,13 +29,20 @@ from bleavit_reference_model.disputes import (
     BOND_FLOOR_MIN,
     DEFAULTS,
     DELTA_S_MAX_MAX,
+    EPOCH_LENGTH_DEFAULT,
+    EPOCH_LENGTH_MAX,
+    EPOCH_LENGTH_MAX_DELTA,
+    EPOCH_LENGTH_MIN,
     HONEST_SHARE,
     INSURANCE_SHARE,
     LATENCY_STAGES,
     MONEY_DEADLINE_DAY,
+    ORC_WINDOW_MAX,
+    ORC_WINDOW_MIN,
     PERBILL_PER_BPS,
     REG_BOND_INCIDENT,
     REG_BOND_MILESTONE,
+    REG_MAX_FILINGS_EPOCH,
     ROUNDS_MAX,
     ROUNDS_MIN,
     BondError,
@@ -41,16 +55,25 @@ from bleavit_reference_model.disputes import (
     budget_days,
     challenger_breakeven_probability,
     challenger_expected_value,
+    check_incident_coverage,
     coverage_bps,
     coverage_makes_lying_unprofitable,
     cumulative_forfeit,
     default_slash_split,
+    delta_s_max_of_incident_aggregate,
+    epoch_length_max_delta_lattice,
     expiry_disposition,
     filing_bond,
     flat_bond_attack_outcome,
     floor_crossover_stake,
+    honest_score_coverage_crossover,
+    incident_aggregate,
+    incident_zeroed_epoch_delta_bps,
     ladder,
     ladder_representable,
+    last_live_round,
+    latency_sweep,
+    money_deadline_days,
     naive_amendment_admissible,
     naive_perbill_admits_component,
     per_round_extension_budget_days,
@@ -58,6 +81,7 @@ from bleavit_reference_model.disputes import (
     self_challenge_outcome,
     settles_neutrally,
     slash_split,
+    stage_closes,
     terminal_forfeit_fraction,
     terminal_stack,
     worst_case_close_days,
@@ -612,6 +636,213 @@ class TestSection11LatencyBudget(unittest.TestCase):
         )
         # Contrast: a verdict inside the window still forfeits per §5.5.
         self.assertEqual(slash_split(reporter), (28_000, 42_000))
+
+
+class TestEpochRelativeLatency(unittest.TestCase):
+    """07 §11 against the live 05 §3.1 / 13 §1 schedule."""
+
+    def test_epoch_relative_derivation_reproduces_the_published_default_table(self):
+        # Regression pin: the new parameterized derivation must reproduce the
+        # published d2/d7/d10/d13/d21 and the schedule-derived d20 deadline.
+        self.assertEqual(money_deadline_days(EPOCH_LENGTH_DEFAULT), Fraction(20))
+        self.assertEqual(
+            [close.days for close in stage_closes()],
+            [Fraction(day) for day in (2, 7, 10, 13, 21)],
+        )
+        self.assertEqual(last_live_round(EPOCH_LENGTH_DEFAULT), 3)
+
+    def test_epoch_length_lattice_is_derived_from_the_ten_percent_band(self):
+        lattice = epoch_length_max_delta_lattice()
+        self.assertEqual(
+            lattice,
+            (
+                201_600,
+                220_458,
+                244_944,
+                272_160,
+                302_400,
+                332_640,
+                365_904,
+                402_486,
+                442_722,
+                486_990,
+                535_689,
+                589_239,
+                604_800,
+            ),
+        )
+        self.assertEqual((lattice[0], lattice[-1]), (EPOCH_LENGTH_MIN, EPOCH_LENGTH_MAX))
+        self.assertTrue(all(length % 21 == 0 for length in lattice))
+        below = tuple(
+            reversed(
+                tuple(
+                    length for length in lattice if length <= EPOCH_LENGTH_DEFAULT
+                )
+            )
+        )
+        above = tuple(length for length in lattice if length >= EPOCH_LENGTH_DEFAULT)
+        for path in (below, above):
+            for live, proposed in zip(path, path[1:]):
+                with self.subTest(live=live, proposed=proposed):
+                    self.assertLessEqual(
+                        Fraction(abs(proposed - live), live),
+                        EPOCH_LENGTH_MAX_DELTA,
+                    )
+
+    def test_sq_553_the_latency_budget_is_not_met_over_its_lawful_sweep(self):
+        """SQ-553. §11 says the budget is met by construction; 19 rows refute it.
+
+        The deadline scales with `epoch.length`, while the report, extension and
+        dispute windows do not. At the shortest epoch and longest window only
+        round 1 closes by d13⅓. Force-neutralization makes lying harder, not
+        cheaper; the unsafe change is the griefing lock, from 15 or 7 rungs'
+        geometric sum to one refundable `B_1` challenge.
+        """
+        rows = latency_sweep()
+        failures = tuple(row for row in rows if not row.ok)
+        self.assertEqual(len(rows), 117)
+        self.assertEqual(len(failures), 19)
+
+        worst_r4 = next(
+            row
+            for row in failures
+            if (
+                row.epoch_length_blocks,
+                row.orc_window_blocks,
+                row.orc_rounds,
+            )
+            == (EPOCH_LENGTH_MIN, ORC_WINDOW_MAX, 4)
+        )
+        self.assertEqual(worst_r4.deadline_days, Fraction(40, 3))
+        self.assertEqual(worst_r4.last_live_round, 1)
+        self.assertEqual((worst_r4.griefing_lock_bps, worst_r4.full_ladder_bps), (250, 3_750))
+        self.assertEqual(worst_r4.griefing_discount_ratio, Fraction(15))
+
+        worst_default_rounds = next(
+            row
+            for row in failures
+            if (
+                row.epoch_length_blocks,
+                row.orc_window_blocks,
+                row.orc_rounds,
+            )
+            == (EPOCH_LENGTH_MIN, ORC_WINDOW_MAX, 3)
+        )
+        self.assertEqual(
+            (
+                worst_default_rounds.griefing_lock_bps,
+                worst_default_rounds.full_ladder_bps,
+                worst_default_rounds.griefing_discount_ratio,
+            ),
+            (250, 1_750, Fraction(7)),
+        )
+        round_2 = next(
+            close
+            for close in stage_closes(ORC_WINDOW_MAX, 3)
+            if close.round_index == 2
+        )
+        self.assertGreater(round_2.days, worst_default_rounds.deadline_days)
+
+    def test_a_close_exactly_at_d20_is_closed_by_the_deadline(self):
+        # §11 says "challenge-closed by the deadline", and the existing
+        # `settles_neutrally(20) == False` pin is inclusive. Four 96 h rounds
+        # land exactly at d20, so this is not a twentieth failing sweep row.
+        closes = stage_closes(4 * 14_400, 4)
+        round_4 = next(close for close in closes if close.round_index == 4)
+        self.assertEqual(round_4.days, money_deadline_days(EPOCH_LENGTH_DEFAULT))
+        self.assertEqual(last_live_round(EPOCH_LENGTH_DEFAULT, 4 * 14_400, 4), 4)
+
+    def test_latency_inputs_outside_the_registry_refuse(self):
+        with self.assertRaises(BondError):
+            money_deadline_days(EPOCH_LENGTH_DEFAULT + 1)
+        with self.assertRaises(BondError):
+            stage_closes(ORC_WINDOW_MIN - 1, ROUNDS_MIN)
+        with self.assertRaises(BondError):
+            last_live_round(EPOCH_LENGTH_MIN - 21, ORC_WINDOW_MIN, ROUNDS_MIN)
+
+
+class TestIncidentAggregateImpact(unittest.TestCase):
+    """07 §7's incident aggregate through 05 §4.4 settlement arithmetic."""
+
+    def test_incident_aggregate_reproduces_the_normative_severity_fold(self):
+        self.assertEqual(incident_aggregate(()), Fraction(1))
+        self.assertEqual(incident_aggregate(("S1",)), Fraction(0))
+        self.assertEqual(incident_aggregate(("S2",)), Fraction(3, 5))
+        self.assertEqual(incident_aggregate(("S3",)), Fraction(9, 10))
+        self.assertEqual(incident_aggregate(("S2", "S2")), Fraction(1, 5))
+        self.assertEqual(incident_aggregate(("S2", "S2", "S2")), Fraction(0))
+        with self.assertRaises(BondError):
+            incident_aggregate(("S4",))
+        with self.assertRaises(BondError):
+            incident_aggregate(("S3",) * (REG_MAX_FILINGS_EPOCH + 1))
+
+    def test_s1_derives_the_global_score_swing_on_the_fixed_grid(self):
+        impact = delta_s_max_of_incident_aggregate()
+        self.assertEqual(
+            (impact.aggregate_before, impact.aggregate_after),
+            (Fraction(1), Fraction(0)),
+        )
+        self.assertEqual(
+            (impact.honest_w, impact.incident_w),
+            (Decimal("1.000000000"), Decimal("0E-9")),
+        )
+        self.assertEqual(impact.honest_score, Decimal("1.000000000"))
+        self.assertEqual(impact.incident_score, Decimal("0.000031622"))
+        self.assertEqual(impact.delta_bps_exact, Decimal("9999.683780000"))
+        # Coverage rounds up: 9,999 would understate the actual move.
+        self.assertEqual(impact.delta_s_max_bps, 10_000)
+
+    def test_sq_553_the_default_filing_rate_does_not_cover_incident_delta_s_max(self):
+        """SQ-553. §7 says its stand-in cannot under-collateralize; it does.
+
+        The incident multiplier can require 10,000 bps while the default
+        terminal-stack rate supplies 1,750. The shortfall direction is unsafe
+        for the section's coverage claim, but this is not `gain − bond`: upheld
+        refunds the bond and rejected moves no score, so those terms cannot be
+        combined into one attacker net.
+        """
+        finding = check_incident_coverage()
+        self.assertEqual(finding.key, "incident aggregate Δs_max vs §6.3 coverage")
+        self.assertFalse(finding.ok)
+        self.assertEqual((finding.coverage_bps, finding.required_bps), (1_750, 10_000))
+        self.assertEqual(finding.shortfall_factor, Fraction(40, 7))
+        self.assertEqual(finding.honest_score_crossover, Decimal("0.175013229"))
+
+    def test_default_coverage_crossover_is_exact_to_the_next_grid_point(self):
+        crossover = honest_score_coverage_crossover()
+        available = Decimal(coverage_bps(DEFAULTS))
+        self.assertEqual(incident_zeroed_epoch_delta_bps(crossover), available)
+        self.assertGreater(
+            incident_zeroed_epoch_delta_bps(crossover + Decimal("0.000000001")),
+            available,
+        )
+
+    def test_the_audit_healthy_epoch_is_one_grid_unit_above_its_probe(self):
+        # The audit hypothesized W=0.669921873 for U=F=C=0.97 and P=A=0.7.
+        # The current normative pipeline gives .874; its rounded 6,698.96-bps
+        # headline survives, but the exact grid value does not.
+        common = {
+            "u": Decimal("0.97"),
+            "f": Decimal("0.97"),
+            "hhi": Decimal("0.15"),
+            "phase": 6,
+            "c_onchain": {1: Decimal("0.97")},
+            "c_weights": {1: Decimal(1)},
+            "p_components": {20: Decimal("0.7")},
+            "p_weights": {20: Decimal(1)},
+            "a_components": {30: Decimal("0.7")},
+            "a_weights": {30: Decimal(1)},
+        }
+        honest = welfare.full_pipeline(incident=Decimal(1), **common)
+        s1 = welfare.full_pipeline(incident=Decimal(0), **common)
+        honest_score = welfare.settlement_score(honest["W"], honest["W"])
+        incident_score = welfare.settlement_score(s1["W"], honest["W"])
+        self.assertEqual(honest["W"], Decimal("0.669921874"))
+        self.assertEqual(incident_score, Decimal("0.000025882"))
+        self.assertEqual(
+            (honest_score - incident_score) * Decimal(10_000),
+            Decimal("6698.959920000"),
+        )
 
 
 if __name__ == "__main__":
