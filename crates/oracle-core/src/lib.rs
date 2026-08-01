@@ -486,6 +486,12 @@ pub enum Error {
     /// 07 §3 (contract v19): an account ejected on the third offense may never
     /// re-register.
     ReporterEjected,
+    /// The retained-record store is full of ejections, so a fresh registration
+    /// cannot be proved *not* to be a dropped ban re-entering (07 §3
+    /// saturation clause). Permissionless entry closes until a CODE change
+    /// enlarges [`MAX_REPORTER_RECORDS`]. Appended last — SCALE discriminants
+    /// are positional.
+    ReporterRecordsSaturated,
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
@@ -580,6 +586,23 @@ impl Oracle {
             .find(|r| r.account == who)
             .copied();
         ensure!(!carried.is_some_and(|r| r.ejected), Error::ReporterEjected);
+        // 07 §3 saturation clause. `record_reporter_offense` releases the seat
+        // whether or not the ban could be retained — it must, because G-1
+        // forbids a full table from aborting a values-track verdict. That left
+        // exactly one hole: with the store full of ejections the 65th ejection
+        // kept no row, `carried` read `None`, and the account re-entered at
+        // full stake with a clean ladder — the unconditional "MAY NEVER
+        // re-register" defeated by arithmetic. The fix is at *entry*, not at
+        // ejection: once no ban can be recorded, an account with no retained
+        // row is indistinguishable from a dropped ban, so permissionless entry
+        // closes rather than admitting one. Fail-closed (G-1), loud
+        // (`ReporterRecordsFull` already fires at the drop), and reversible
+        // only by a CODE change that enlarges the store. Seated reporters are
+        // untouched, so the live set keeps serving.
+        ensure!(
+            carried.is_some() || !self.ejection_records_saturated(),
+            Error::ReporterRecordsSaturated
+        );
         ensure!(
             self.reporters.len() < MAX_REPORTERS,
             Error::TooManyReporters
@@ -661,13 +684,7 @@ impl Oracle {
         if self.reporter_records.len() >= MAX_REPORTER_RECORDS {
             // Least severe first, oldest to break ties — deterministic, and
             // never an ejection.
-            let victim = self
-                .reporter_records
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| !r.ejected)
-                .min_by_key(|(idx, r)| (r.offenses, *idx))
-                .map(|(idx, _)| idx);
+            let victim = self.evictable_record();
             match victim {
                 Some(idx) => {
                     self.reporter_records.remove(idx);
@@ -681,6 +698,26 @@ impl Oracle {
             ejected,
         });
         true
+    }
+
+    /// Index of the row [`upsert_reporter_record`] would evict to make room:
+    /// least severe first, oldest to break ties, **never an ejection**.
+    fn evictable_record(&self) -> Option<usize> {
+        self.reporter_records
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| !r.ejected)
+            .min_by_key(|(idx, r)| (r.offenses, *idx))
+            .map(|(idx, _)| idx)
+    }
+
+    /// The store is full and holds nothing evictable — i.e. the next ban would
+    /// be **dropped**. Defined as the exact complement of the room
+    /// [`upsert_reporter_record`] looks for, so the entry gate in
+    /// [`Self::register_reporter_with_params`] and the drop it guards against
+    /// cannot drift apart.
+    fn ejection_records_saturated(&self) -> bool {
+        self.reporter_records.len() >= MAX_REPORTER_RECORDS && self.evictable_record().is_none()
     }
 
     pub fn register_watchtower_with_params(
@@ -4321,6 +4358,66 @@ mod tests {
         assert_eq!(o.deregister_reporter(acct(9)), Err(Error::WindowOpen));
         o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1).unwrap();
         o.deregister_reporter(acct(9)).unwrap();
+        o.try_state().unwrap();
+    }
+
+    /// 07 §3 saturation clause. The exact bypass this closes: with the record
+    /// store full of ejections, the next ejection retains **no row**, so the
+    /// `carried` lookup reads `None` and the unconditional "MAY NEVER
+    /// re-register" is defeated by arithmetic. Written against the real
+    /// ejection path, not by poking `reporter_records`, so it fails if either
+    /// half of the fix is reverted.
+    #[test]
+    fn a_saturated_ban_store_closes_entry_instead_of_re_admitting_the_ejected() {
+        let mut o = Oracle::default();
+        // Order matters, and it is the order the chain actually takes: the
+        // gate is *preventive*, so once the store saturates nobody new is
+        // seated. The only account that can hit the 65th ejection is one that
+        // was already seated when saturation arrived.
+        let victim = acct(200);
+        o.register_reporter(victim, 0).unwrap();
+        for n in 0..MAX_REPORTER_RECORDS {
+            o.reporter_records.push(ReporterRecord {
+                account: acct(n as u8),
+                offenses: OFFENSE_EJECTION_THRESHOLD,
+                ejected: true,
+            });
+        }
+        assert!(o.ejection_records_saturated());
+
+        // That seat takes its third adjudicated-false finding.
+        for _ in 0..OFFENSE_EJECTION_THRESHOLD {
+            o.record_reporter_offense(victim).unwrap();
+        }
+        assert!(!o.is_reporter(&victim), "the seat is still released (G-1)");
+        assert!(
+            o.events
+                .iter()
+                .any(|e| matches!(e, Event::ReporterRecordsFull { who } if *who == victim)),
+            "the dropped ban is loud, not silent"
+        );
+        assert!(
+            !o.reporter_records.iter().any(|r| r.account == victim),
+            "precondition: the ban really was dropped, so `carried` reads None"
+        );
+
+        // Before the fix this returned `Ok(())` and re-seated `victim` at full
+        // stake with `offenses == 0`.
+        assert_eq!(
+            o.register_reporter(victim, 99),
+            Err(Error::ReporterRecordsSaturated)
+        );
+        // Entry is closed for everyone while no ban can be recorded — an
+        // untainted newcomer is refused too, because it is indistinguishable
+        // from `victim` returning under a fresh key.
+        assert_eq!(
+            o.register_reporter(acct(201), 99),
+            Err(Error::ReporterRecordsSaturated)
+        );
+        // Enlarging the store is the only escape, and it reopens entry.
+        o.reporter_records.remove(0);
+        assert!(!o.ejection_records_saturated());
+        o.register_reporter(acct(201), 99).unwrap();
         o.try_state().unwrap();
     }
 
