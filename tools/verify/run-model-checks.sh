@@ -26,7 +26,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MODELS_DIR="${REPO_ROOT}/models/tla"
 JAR="${REPO_ROOT}/tools/verify/bin/tla2tools.jar"
-REQUIRED_MODELS=(ledger proposal)
+REQUIRED_MODELS=(ledger ledger-composition proposal service)
 
 "${REPO_ROOT}/tools/verify/fetch-tla2tools.sh"
 

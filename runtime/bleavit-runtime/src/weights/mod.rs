@@ -58,6 +58,7 @@ pub mod pallet_oracle;
 pub mod pallet_origins;
 pub mod pallet_preimage;
 pub mod pallet_proxy;
+pub mod pallet_question_service;
 pub mod pallet_referenda;
 pub mod pallet_registry;
 pub mod pallet_scheduler;

@@ -13,7 +13,7 @@
 // benchmark
 // pallet
 // --runtime
-// /tmp/n6-gates.nxb5T7/wtarget/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
+// /tmp/n7-question-service.Xgmc9d/wtarget/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
 // --pallet
 // pallet_market
 // --extrinsic
@@ -37,10 +37,10 @@ use core::marker::PhantomData;
 /// Weight functions for `pallet_market`.
 pub struct WeightInfo<T>(PhantomData<T>);
 impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
-	/// Storage: `Market::FrozenUntil` (r:1 w:0)
-	/// Proof: `Market::FrozenUntil` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Market::Markets` (r:1 w:1)
 	/// Proof: `Market::Markets` (`max_values`: None, `max_size`: Some(232), added: 2707, mode: `MaxEncodedLen`)
+	/// Storage: `Market::FrozenUntil` (r:1 w:0)
+	/// Proof: `Market::FrozenUntil` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Market::DecisionWindows` (r:1 w:1)
 	/// Proof: `Market::DecisionWindows` (`max_values`: None, `max_size`: Some(409), added: 2884, mode: `MaxEncodedLen`)
 	/// Storage: `Constitution::Params` (r:6 w:0)
@@ -59,8 +59,6 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `ConditionalLedger::Positions` (`max_values`: None, `max_size`: Some(92), added: 2567, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::PositionCount` (r:3 w:3)
 	/// Proof: `ConditionalLedger::PositionCount` (`max_values`: None, `max_size`: Some(52), added: 2527, mode: `MaxEncodedLen`)
-	/// Storage: `Market::MarketProtocolAccounts` (r:1 w:0)
-	/// Proof: `Market::MarketProtocolAccounts` (`max_values`: None, `max_size`: Some(50), added: 2525, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::TotalEscrowed` (r:1 w:1)
 	/// Proof: `ConditionalLedger::TotalEscrowed` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
@@ -69,18 +67,18 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn buy() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `4240`
+		//  Measured:  `4285`
 		//  Estimated: `108804`
-		// Minimum execution time: 1_107_941_000 picoseconds.
-		Weight::from_parts(1_128_321_000, 0)
+		// Minimum execution time: 1_091_800_000 picoseconds.
+		Weight::from_parts(1_119_260_000, 0)
 			.saturating_add(Weight::from_parts(0, 108804))
-			.saturating_add(T::DbWeight::get().reads(77))
+			.saturating_add(T::DbWeight::get().reads(76))
 			.saturating_add(T::DbWeight::get().writes(67))
 	}
-	/// Storage: `Market::FrozenUntil` (r:1 w:0)
-	/// Proof: `Market::FrozenUntil` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Market::Markets` (r:1 w:1)
 	/// Proof: `Market::Markets` (`max_values`: None, `max_size`: Some(232), added: 2707, mode: `MaxEncodedLen`)
+	/// Storage: `Market::FrozenUntil` (r:1 w:0)
+	/// Proof: `Market::FrozenUntil` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Market::DecisionWindows` (r:1 w:1)
 	/// Proof: `Market::DecisionWindows` (`max_values`: None, `max_size`: Some(409), added: 2884, mode: `MaxEncodedLen`)
 	/// Storage: `Constitution::Params` (r:6 w:0)
@@ -95,8 +93,6 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `ConditionalLedger::PositionTotals` (`max_values`: None, `max_size`: Some(44), added: 2519, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::Positions` (r:42 w:42)
 	/// Proof: `ConditionalLedger::Positions` (`max_values`: None, `max_size`: Some(92), added: 2567, mode: `MaxEncodedLen`)
-	/// Storage: `Market::MarketProtocolAccounts` (r:1 w:0)
-	/// Proof: `Market::MarketProtocolAccounts` (`max_values`: None, `max_size`: Some(50), added: 2525, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::PositionCount` (r:3 w:3)
 	/// Proof: `ConditionalLedger::PositionCount` (`max_values`: None, `max_size`: Some(52), added: 2527, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
@@ -107,18 +103,18 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `ConditionalLedger::TotalEscrowed` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
 	fn sell() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `4726`
+		//  Measured:  `4771`
 		//  Estimated: `108804`
-		// Minimum execution time: 958_291_000 picoseconds.
-		Weight::from_parts(970_890_000, 0)
+		// Minimum execution time: 950_630_000 picoseconds.
+		Weight::from_parts(965_660_000, 0)
 			.saturating_add(Weight::from_parts(0, 108804))
-			.saturating_add(T::DbWeight::get().reads(76))
+			.saturating_add(T::DbWeight::get().reads(75))
 			.saturating_add(T::DbWeight::get().writes(67))
 	}
-	/// Storage: `Market::FrozenUntil` (r:1 w:0)
-	/// Proof: `Market::FrozenUntil` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Market::Markets` (r:1 w:1)
 	/// Proof: `Market::Markets` (`max_values`: None, `max_size`: Some(232), added: 2707, mode: `MaxEncodedLen`)
+	/// Storage: `Market::FrozenUntil` (r:1 w:0)
+	/// Proof: `Market::FrozenUntil` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Market::DecisionWindows` (r:1 w:1)
 	/// Proof: `Market::DecisionWindows` (`max_values`: None, `max_size`: Some(409), added: 2884, mode: `MaxEncodedLen`)
 	/// Storage: `Constitution::Params` (r:10 w:0)
@@ -137,10 +133,10 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn crank_observe() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `13846`
+		//  Measured:  `13912`
 		//  Estimated: `27060`
-		// Minimum execution time: 136_440_000 picoseconds.
-		Weight::from_parts(141_290_000, 0)
+		// Minimum execution time: 136_870_000 picoseconds.
+		Weight::from_parts(141_590_000, 0)
 			.saturating_add(Weight::from_parts(0, 27060))
 			.saturating_add(T::DbWeight::get().reads(20))
 			.saturating_add(T::DbWeight::get().writes(7))
@@ -183,10 +179,10 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
 	fn sweep_revenue() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `15053`
+		//  Measured:  `15120`
 		//  Estimated: `72866`
-		// Minimum execution time: 868_881_000 picoseconds.
-		Weight::from_parts(884_641_000, 0)
+		// Minimum execution time: 880_390_000 picoseconds.
+		Weight::from_parts(896_620_000, 0)
 			.saturating_add(Weight::from_parts(0, 72866))
 			.saturating_add(T::DbWeight::get().reads(72))
 			.saturating_add(T::DbWeight::get().writes(55))
@@ -237,10 +233,10 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `Market::DecisionWindows` (`max_values`: None, `max_size`: Some(409), added: 2884, mode: `MaxEncodedLen`)
 	fn reap() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `16766`
+		//  Measured:  `16833`
 		//  Estimated: `72866`
-		// Minimum execution time: 437_771_000 picoseconds.
-		Weight::from_parts(446_950_000, 0)
+		// Minimum execution time: 442_200_000 picoseconds.
+		Weight::from_parts(453_240_000, 0)
 			.saturating_add(Weight::from_parts(0, 72866))
 			.saturating_add(T::DbWeight::get().reads(66))
 			.saturating_add(T::DbWeight::get().writes(62))
@@ -251,8 +247,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `0`
 		//  Estimated: `0`
-		// Minimum execution time: 4_210_000 picoseconds.
-		Weight::from_parts(4_640_000, 0)
+		// Minimum execution time: 4_150_000 picoseconds.
+		Weight::from_parts(4_570_000, 0)
 			.saturating_add(Weight::from_parts(0, 0))
 			.saturating_add(T::DbWeight::get().writes(1))
 	}
@@ -264,7 +260,7 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `109`
 		//  Estimated: `1489`
-		// Minimum execution time: 6_260_000 picoseconds.
+		// Minimum execution time: 6_280_000 picoseconds.
 		Weight::from_parts(6_730_000, 0)
 			.saturating_add(Weight::from_parts(0, 1489))
 			.saturating_add(T::DbWeight::get().reads(1))
@@ -290,10 +286,10 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `Market::ProposalMarketIds` (`max_values`: None, `max_size`: Some(73), added: 2548, mode: `MaxEncodedLen`)
 	fn create_market() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `151`
+		//  Measured:  `185`
 		//  Estimated: `6040`
-		// Minimum execution time: 27_630_000 picoseconds.
-		Weight::from_parts(29_170_000, 0)
+		// Minimum execution time: 27_830_000 picoseconds.
+		Weight::from_parts(29_300_000, 0)
 			.saturating_add(Weight::from_parts(0, 6040))
 			.saturating_add(T::DbWeight::get().reads(10))
 			.saturating_add(T::DbWeight::get().writes(8))
@@ -336,10 +332,10 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `FutarchyTreasury::PendingMainCredit` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
 	fn seed() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `13437`
+		//  Measured:  `13504`
 		//  Estimated: `72866`
-		// Minimum execution time: 521_851_000 picoseconds.
-		Weight::from_parts(534_650_000, 0)
+		// Minimum execution time: 525_700_000 picoseconds.
+		Weight::from_parts(537_380_000, 0)
 			.saturating_add(Weight::from_parts(0, 72866))
 			.saturating_add(T::DbWeight::get().reads(68))
 			.saturating_add(T::DbWeight::get().writes(53))
@@ -354,8 +350,8 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 		// Proof Size summary in bytes:
 		//  Measured:  `548`
 		//  Estimated: `3874`
-		// Minimum execution time: 21_580_000 picoseconds.
-		Weight::from_parts(22_560_000, 0)
+		// Minimum execution time: 19_730_000 picoseconds.
+		Weight::from_parts(21_420_000, 0)
 			.saturating_add(Weight::from_parts(0, 3874))
 			.saturating_add(T::DbWeight::get().reads(2))
 			.saturating_add(T::DbWeight::get().writes(3))
@@ -366,25 +362,31 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `Epoch::NextProposalId` (`max_values`: Some(1), `max_size`: Some(8), added: 503, mode: `MaxEncodedLen`)
 	/// Storage: `Market::CounterForExternalBookPairs` (r:1 w:0)
 	/// Proof: `Market::CounterForExternalBookPairs` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
-	/// Storage: `Market::ExternalBookPairs` (r:1 w:0)
+	/// Storage: `Constitution::Params` (r:6 w:0)
+	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
+	/// Storage: `Market::ExternalBookPairs` (r:65 w:0)
 	/// Proof: `Market::ExternalBookPairs` (`max_values`: None, `max_size`: Some(76), added: 2551, mode: `MaxEncodedLen`)
-	/// Storage: `Market::Markets` (r:2241 w:0)
+	/// Storage: `Market::Markets` (r:2369 w:0)
 	/// Proof: `Market::Markets` (`max_values`: None, `max_size`: Some(232), added: 2707, mode: `MaxEncodedLen`)
+	/// Storage: `Market::SeededMarkets` (r:2369 w:0)
+	/// Proof: `Market::SeededMarkets` (`max_values`: None, `max_size`: Some(56), added: 2531, mode: `MaxEncodedLen`)
+	/// Storage: `Market::SettlementObservedAt` (r:2369 w:0)
+	/// Proof: `Market::SettlementObservedAt` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::Vaults` (r:2240 w:0)
 	/// Proof: `ConditionalLedger::Vaults` (`max_values`: None, `max_size`: Some(184), added: 2659, mode: `MaxEncodedLen`)
+	/// Storage: `ServiceLedger::Vaults` (r:64 w:0)
+	/// Proof: `ServiceLedger::Vaults` (`max_values`: None, `max_size`: Some(184), added: 2659, mode: `MaxEncodedLen`)
 	/// Storage: `Market::CounterForMarkets` (r:1 w:0)
 	/// Proof: `Market::CounterForMarkets` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Market::CounterForMarketProtocolAccounts` (r:1 w:0)
 	/// Proof: `Market::CounterForMarketProtocolAccounts` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
-	/// Storage: `Market::SettlementObservedAt` (r:2241 w:0)
-	/// Proof: `Market::SettlementObservedAt` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
 	/// Storage: `Market::ActiveMarketCount` (r:1 w:0)
 	/// Proof: `Market::ActiveMarketCount` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Market::ActiveExternalMarketCount` (r:1 w:0)
 	/// Proof: `Market::ActiveExternalMarketCount` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	/// Storage: `Market::StoredExternalMarketCount` (r:1 w:0)
 	/// Proof: `Market::StoredExternalMarketCount` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
-	/// Storage: `Market::MarketProtocolAccounts` (r:4481 w:0)
+	/// Storage: `Market::MarketProtocolAccounts` (r:4737 w:0)
 	/// Proof: `Market::MarketProtocolAccounts` (`max_values`: None, `max_size`: Some(50), added: 2525, mode: `MaxEncodedLen`)
 	/// Storage: `Market::ProposalMarketIds` (r:2241 w:0)
 	/// Proof: `Market::ProposalMarketIds` (`max_values`: None, `max_size`: Some(73), added: 2548, mode: `MaxEncodedLen`)
@@ -396,19 +398,17 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `Market::SealedBaselineTwap` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
 	/// Storage: `Market::TwapCheckpoints` (r:2241 w:0)
 	/// Proof: `Market::TwapCheckpoints` (`max_values`: None, `max_size`: Some(313), added: 2788, mode: `MaxEncodedLen`)
-	/// Storage: `Market::DecisionWindows` (r:2241 w:0)
+	/// Storage: `Market::DecisionWindows` (r:2369 w:0)
 	/// Proof: `Market::DecisionWindows` (`max_values`: None, `max_size`: Some(409), added: 2884, mode: `MaxEncodedLen`)
-	/// Storage: `Market::DecisionWindowOwners` (r:2241 w:0)
+	/// Storage: `Market::DecisionWindowOwners` (r:2369 w:0)
 	/// Proof: `Market::DecisionWindowOwners` (`max_values`: None, `max_size`: Some(5146), added: 7621, mode: `MaxEncodedLen`)
-	/// Storage: `Market::SeededMarkets` (r:2241 w:0)
-	/// Proof: `Market::SeededMarkets` (`max_values`: None, `max_size`: Some(56), added: 2531, mode: `MaxEncodedLen`)
-	/// Storage: `Market::SweptMarkets` (r:2241 w:0)
+	/// Storage: `Market::SweptMarkets` (r:2369 w:0)
 	/// Proof: `Market::SweptMarkets` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::Positions` (r:6129 w:0)
 	/// Proof: `ConditionalLedger::Positions` (`max_values`: None, `max_size`: Some(92), added: 2567, mode: `MaxEncodedLen`)
 	/// Storage: `Market::LivePolCommitments` (r:1 w:0)
 	/// Proof: `Market::LivePolCommitments` (`max_values`: Some(1), `max_size`: Some(4706), added: 5201, mode: `MaxEncodedLen`)
-	/// Storage: `Market::RerunSeededMarkets` (r:2241 w:0)
+	/// Storage: `Market::RerunSeededMarkets` (r:2369 w:0)
 	/// Proof: `Market::RerunSeededMarkets` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
 	/// Storage: `Market::ClosedAt` (r:2044 w:0)
 	/// Proof: `Market::ClosedAt` (`max_values`: None, `max_size`: Some(28), added: 2503, mode: `MaxEncodedLen`)
@@ -416,15 +416,13 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 	/// Proof: `FutarchyTreasury::State` (`max_values`: Some(1), `max_size`: Some(25361), added: 25856, mode: `MaxEncodedLen`)
 	/// Storage: `FutarchyTreasury::PendingMainCredit` (r:1 w:0)
 	/// Proof: `FutarchyTreasury::PendingMainCredit` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
-	/// Storage: `Constitution::Params` (r:5 w:0)
-	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	fn try_state() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `2874113`
-		//  Estimated: `17079651`
-		// Minimum execution time: 332_191_954_000 picoseconds.
-		Weight::from_parts(334_873_104_000, 0)
-			.saturating_add(Weight::from_parts(0, 17079651))
-			.saturating_add(T::DbWeight::get().reads(37322))
+		//  Measured:  `2951977`
+		//  Estimated: `18055139`
+		// Minimum execution time: 316_354_650_000 picoseconds.
+		Weight::from_parts(323_110_912_000, 0)
+			.saturating_add(Weight::from_parts(0, 18055139))
+			.saturating_add(T::DbWeight::get().reads(38603))
 	}
 }

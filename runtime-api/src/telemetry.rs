@@ -93,7 +93,7 @@ pub struct StorageUtilizationTelemetry {
 
 sp_api::decl_runtime_apis! {
     /// Monitoring-only telemetry API owned by 12 §6.3, outside contract 02.
-    #[api_version(2)]
+    #[api_version(3)]
     pub trait TelemetryApi {
         /// Per-live-book realized loss and its identically labeled LMSR bound.
         fn market_books() -> Option<BoundedVec<MarketTelemetry, { bounds::MAX_LIVE_MARKETS }>>;
@@ -103,6 +103,8 @@ sp_api::decl_runtime_apis! {
         fn pol() -> Option<BoundedVec<PolTelemetry, MAX_POL_TELEMETRY_ROWS>>;
         /// Ledger L-2 custody and liability, plus the anomalous positive residue component.
         fn collateral() -> Option<CollateralTelemetry>;
+        /// Service-ledger L-2 custody and liability, independently audited for I-37.
+        fn service_collateral() -> Option<CollateralTelemetry>;
         /// Live USDC balance of the local `ops.reserve_probe` budget line.
         fn reserve_probe_line_balance() -> Balance;
         /// Canonical PB-MIGRATION cursor-stall detector state.

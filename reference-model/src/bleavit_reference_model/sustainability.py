@@ -13,19 +13,19 @@ No figure is chosen. The accompanying test suite pins every published figure in
 08 §6 says its crank-fee basis comes from the committed generated weight and
 uses that basis to underwrite 01 §2.2 A-1: at least one rational, funded keeper.
 Reading the current generated `pallet_market::crank_observe` artifact makes that
-claim move with a future regeneration. At HEAD the function is 141,290,000 ps
-plus 20 reads and 7 writes, hence 1,341,290,000 ps with the configured
-`RocksDbWeight`; the complete §6.2 fee is 0.00180183912 VIT, or 0.000090091956
+claim move with a future regeneration. At HEAD the function is 141,590,000 ps
+plus 20 reads and 7 writes, hence 1,341,590,000 ps with the configured
+`RocksDbWeight`; the complete §6.2 fee is 0.00180213912 VIT, or 0.000090106956
 USDC at the 0.05 reference price. The registry basis is still 0.000085 USDC.
 It floors to 85 µUSDC where the HEAD fee floors to 90 µUSDC, so the seed is
-2.8304× the fee rather than 3×.
+2.8300× the fee rather than 3×.
 
-That moves the A-1 crossover to 0.1415220689 USDC/VIT, 2.8304× the derivation
+That moves the A-1 crossover to 0.1414985098 USDC/VIT, 2.8300× the derivation
 price, inside the lawful `fee.vit_usdc_rate` envelope [0.005, 0.5]. A freshly
 calibrated 3× rebate always crosses at exactly 3× because the fee is linear in
 price; §6.2's "above ≈ 4×" sentence therefore omits an unsafe loss-making band.
-Even the maximum lawful rebate now covers only through 0.4717402295 USDC/VIT
-(9.4348×), short of the envelope's 10× upper edge.
+Even the maximum lawful rebate now covers only through 0.4716616995 USDC/VIT
+(9.4332×), short of the envelope's 10× upper edge.
 
 §6.3's tranche prose is independently stale. At the live rebate, decision-
 critical observation demand is 34.1496 USDC against the 9,600 reservation and

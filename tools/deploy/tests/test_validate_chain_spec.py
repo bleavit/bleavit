@@ -248,7 +248,15 @@ class ValidateGenesisTests(unittest.TestCase):
             "treasury_main": None,
             "treasury_keeper": b"KEEPER__",
             "treasury_oracle": b"ORACLE__",
+            "treasury_rewards": b"REWARDS_",
+            "treasury_collators": b"COLLATOR",
         }
+        self.assertEqual(
+            validator.ss58_account_id(
+                validator.USDC_ENDOWED_ACCOUNTS["service_ledger_sovereign"]
+            ),
+            validator.pallet_sub_account(b"bl/svclg", None),
+        )
         for label, sub in ledger_sub_accounts.items():
             with self.subTest(label=label):
                 self.assertEqual(

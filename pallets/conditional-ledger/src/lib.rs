@@ -741,12 +741,6 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             Self::ensure_not_frozen()?;
             Self::ensure_splits_open()?;
-            // 03 §7 R-2 creation floor at the LIVE `ledger.min_split`: the minted
-            // LONG/SHORT legs are new non-protocol entries, which R-2 forbids below
-            // the floor even though the §5.1 row omits it. The core guards only the
-            // stale compile-time K floor; `do_split_scalar` (`MarketAuthority`,
-            // exact by construction) stays exempt.
-            ensure!(amount >= T::MinSplit::get(), Error::<T, I>::BelowMinimum);
             ensure!(
                 T::InflowCapGate::escrow_admissible(&who),
                 Error::<T, I>::InflowCapExceeded
@@ -785,9 +779,6 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             Self::ensure_not_frozen()?;
             Self::ensure_splits_open()?;
-            // 03 §7 R-2 creation floor at the LIVE `ledger.min_split` (as
-            // `split_scalar`): the minted gate legs are new non-protocol entries.
-            ensure!(amount >= T::MinSplit::get(), Error::<T, I>::BelowMinimum);
             ensure!(
                 T::InflowCapGate::escrow_admissible(&who),
                 Error::<T, I>::InflowCapExceeded

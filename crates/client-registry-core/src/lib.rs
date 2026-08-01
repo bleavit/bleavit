@@ -36,36 +36,53 @@ pub enum SubIdPolicy {
     Required,
 }
 
-/// Canonical client row. `Location` stays generic so the core has no XCM or
-/// FRAME dependency; the production shell binds it to `staging_xcm::Location`.
+/// Canonical client row. `Location` and `AccountId` stay generic so the core
+/// has no XCM or FRAME dependency. Exactly one identity field is populated.
 #[derive(
     Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo,
 )]
-pub struct ClientRecord<Location> {
-    pub location: Location,
+pub struct ClientRecord<Location, AccountId> {
+    pub location: Option<Location>,
+    pub local_signer: Option<AccountId>,
     /// Remaining native VIT held for this registration.
     pub bond: Balance,
     pub admitted_at: BlockNumber,
     pub questions_live: u32,
-    pub questions_total: u64,
-    pub sub_id_policy: SubIdPolicy,
+    pub questions_total: u32,
 }
 
-impl<Location> ClientRecord<Location> {
-    pub const fn new(
-        location: Location,
-        bond: Balance,
-        admitted_at: BlockNumber,
-        sub_id_policy: SubIdPolicy,
-    ) -> Self {
+impl<Location, AccountId> ClientRecord<Location, AccountId> {
+    pub const fn new_location(location: Location, bond: Balance, admitted_at: BlockNumber) -> Self {
         Self {
-            location,
+            location: Some(location),
+            local_signer: None,
             bond,
             admitted_at,
             questions_live: 0,
             questions_total: 0,
-            sub_id_policy,
         }
+    }
+
+    pub const fn new_local(
+        local_signer: AccountId,
+        bond: Balance,
+        admitted_at: BlockNumber,
+    ) -> Self {
+        Self {
+            location: None,
+            local_signer: Some(local_signer),
+            bond,
+            admitted_at,
+            questions_live: 0,
+            questions_total: 0,
+        }
+    }
+
+    pub const fn identity_is_valid(&self) -> bool {
+        matches!(
+            (&self.location, &self.local_signer),
+            (Some(_), None) | (None, Some(_))
+        )
     }
 
     /// Admit one new question. A removal tombstone closes admission before any
@@ -129,10 +146,11 @@ impl IngressMeter {
 
 /// Pure result of an admission preflight.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Admission<Location> {
+pub struct Admission<Location, AccountId> {
     pub client_id: ClientId,
     pub next_client_id: ClientId,
-    pub record: ClientRecord<Location>,
+    pub record: ClientRecord<Location, AccountId>,
+    pub sub_id_policy: SubIdPolicy,
 }
 
 /// Read-only registry state needed to preflight one admission.
@@ -147,12 +165,10 @@ pub struct AdmissionContext {
 
 /// Validate every fallible admission condition before the shell places a hold
 /// or writes storage (G-1).
-pub fn admit<Location>(
-    location: Location,
-    sub_id_policy: SubIdPolicy,
+fn admission_ids(
     bond: Option<Balance>,
     context: AdmissionContext,
-) -> Result<Admission<Location>, Error> {
+) -> Result<(ClientId, ClientId, Balance), Error> {
     let bond = bond
         .filter(|value| *value > 0)
         .ok_or(Error::ClientBondUnset)?;
@@ -166,10 +182,36 @@ pub fn admit<Location>(
         .next_client_id
         .checked_add(1)
         .ok_or(Error::ClientIdExhausted)?;
+    Ok((context.next_client_id, next, bond))
+}
+
+pub fn admit_location<Location, AccountId>(
+    location: Location,
+    sub_id_policy: SubIdPolicy,
+    bond: Option<Balance>,
+    context: AdmissionContext,
+) -> Result<Admission<Location, AccountId>, Error> {
+    let (client_id, next_client_id, bond) = admission_ids(bond, context)?;
     Ok(Admission {
-        client_id: context.next_client_id,
-        next_client_id: next,
-        record: ClientRecord::new(location, bond, context.admitted_at, sub_id_policy),
+        client_id,
+        next_client_id,
+        record: ClientRecord::new_location(location, bond, context.admitted_at),
+        sub_id_policy,
+    })
+}
+
+pub fn admit_local<Location, AccountId>(
+    local_signer: AccountId,
+    sub_id_policy: SubIdPolicy,
+    bond: Option<Balance>,
+    context: AdmissionContext,
+) -> Result<Admission<Location, AccountId>, Error> {
+    let (client_id, next_client_id, bond) = admission_ids(bond, context)?;
+    Ok(Admission {
+        client_id,
+        next_client_id,
+        record: ClientRecord::new_local(local_signer, bond, context.admitted_at),
+        sub_id_policy,
     })
 }
 
@@ -189,8 +231,8 @@ pub enum Error {
 mod tests {
     use super::*;
 
-    fn record() -> ClientRecord<u8> {
-        ClientRecord::new(7, 1_000, 10, SubIdPolicy::Optional)
+    fn record() -> ClientRecord<u8, u16> {
+        ClientRecord::new_location(7, 1_000, 10)
     }
 
     fn context(
@@ -211,11 +253,11 @@ mod tests {
     #[test]
     fn admission_is_fail_closed_and_checked_before_state_exists() {
         assert_eq!(
-            admit(7u8, SubIdPolicy::Required, None, context(0, 64, 0, false)),
+            admit_location::<_, u16>(7u8, SubIdPolicy::Required, None, context(0, 64, 0, false)),
             Err(Error::ClientBondUnset)
         );
         assert_eq!(
-            admit(
+            admit_location::<_, u16>(
                 7u8,
                 SubIdPolicy::Required,
                 Some(1_000),
@@ -224,7 +266,7 @@ mod tests {
             Err(Error::DuplicateLocation)
         );
         assert_eq!(
-            admit(
+            admit_location::<_, u16>(
                 7u8,
                 SubIdPolicy::Required,
                 Some(1_000),
@@ -233,7 +275,7 @@ mod tests {
             Err(Error::ClientsFull)
         );
         assert_eq!(
-            admit(
+            admit_location::<_, u16>(
                 7u8,
                 SubIdPolicy::Required,
                 Some(1_000),
@@ -245,7 +287,7 @@ mod tests {
 
     #[test]
     fn admission_builds_the_exact_initial_record() {
-        let admission = admit(
+        let admission = admit_location::<_, u16>(
             7u8,
             SubIdPolicy::Required,
             Some(1_000),
@@ -257,14 +299,26 @@ mod tests {
                 client_id: 9,
                 next_client_id: 10,
                 record: ClientRecord {
-                    location: 7,
+                    location: Some(7),
+                    local_signer: None,
                     bond: 1_000,
                     admitted_at: 10,
                     questions_live: 0,
                     questions_total: 0,
-                    sub_id_policy: SubIdPolicy::Required,
                 },
+                sub_id_policy: SubIdPolicy::Required,
             })
+        );
+        let local = admit_local::<u8, _>(
+            22u16,
+            SubIdPolicy::Optional,
+            Some(1_000),
+            context(3, 64, 10, false),
+        );
+        assert!(
+            local.is_ok_and(|admission| admission.record.identity_is_valid()
+                && admission.record.location.is_none()
+                && admission.record.local_signer == Some(22))
         );
     }
 
@@ -292,13 +346,13 @@ mod tests {
         assert_eq!(live_overflow.questions_total, 0);
 
         let mut total_overflow = record();
-        total_overflow.questions_total = u64::MAX;
+        total_overflow.questions_total = u32::MAX;
         assert_eq!(
             total_overflow.register_question(false),
             Err(Error::QuestionCounterOverflow)
         );
         assert_eq!(total_overflow.questions_live, 0);
-        assert_eq!(total_overflow.questions_total, u64::MAX);
+        assert_eq!(total_overflow.questions_total, u32::MAX);
     }
 
     #[test]

@@ -16,10 +16,11 @@ not make it an upper bound.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 from enum import Enum
-from typing import Callable, Sequence
+from typing import Sequence
 
 WORK_PREC = 100
 USDC_BASE_UNIT = Decimal("0.000001")
@@ -28,6 +29,8 @@ SCORE_GRID = Decimal("0.000000001")
 ONE = Decimal(1)
 HALF = Decimal("0.5")
 BPS_DENOMINATOR = 10_000
+USDC_SCALE = 1_000_000
+PROVENANCE_DOMAIN = b"bleavit/hosted-report/v1"
 
 # 13 §2 / 16 §5–§6.3 kernel and reused values.  There is no service-
 # specific security multiplier.
@@ -53,14 +56,13 @@ class QuestionState(str, Enum):
 
 
 class VoidReason(str, Enum):
-    QUORUM_NOT_REACHED = "QuorumNotReached"
+    NO_QUORUM = "NoQuorum"
     MEDIAN_OUT_OF_RANGE = "MedianOutOfRange"
     DEADLINE_MISSED = "DeadlineMissed"
     SERVICE_PAUSED = "ServicePaused"
     ESCROW_INSUFFICIENT = "EscrowInsufficient"
-    CLIENT_DEREGISTERED = "ClientDeregistered"
     ATTESTOR_SET_COLLAPSED = "AttestorSetCollapsed"
-    CLIENT_VANISHED = "ClientVanished"
+    CLIENT_UNREACHABLE = "ClientUnreachable"
 
 
 class ServiceError(str, Enum):
@@ -90,6 +92,15 @@ class ServiceError(str, Enum):
     MEDIAN_OUT_OF_RANGE = "MedianOutOfRange"
     DEADLINE_NOT_REACHED = "DeadlineNotReached"
     UNKNOWN_QUESTION = "UnknownQuestion"
+    DEADLINE_PASSED = "DeadlinePassed"
+    CREATION_FROZEN = "CreationFrozen"
+    DUPLICATE_ATTESTOR = "DuplicateAttestor"
+    UNKNOWN_ATTESTOR = "UnknownAttestor"
+    ALREADY_BONDED = "AlreadyBonded"
+    INVALID_SUB_ID = "InvalidSubId"
+    ARITHMETIC_OVERFLOW = "ArithmeticOverflow"
+    ARCHIVE_NOT_READY = "ArchiveNotReady"
+    TRY_STATE_VIOLATION = "TryStateViolation"
 
 
 # 16 §4's complete graph.  Carrying it as data makes "only two terminals"
@@ -149,13 +160,13 @@ def _cash_displacement_cost(book: ManipulationBook, epsilon: Decimal) -> Decimal
     return b * ((ONE - price) / (ONE - price - epsilon)).ln()
 
 
-def manip_floor(
+def _manipulation_components(
     books: Sequence[ManipulationBook],
     epsilon: Decimal | int | str,
     contest_capital: Decimal | int | str,
     flow_cap: Decimal | int | str,
-) -> Decimal:
-    """16 §5.1's ``C_disp + C_hold``, rounded down to µUSDC.
+) -> tuple[Decimal, Decimal]:
+    """Return unrounded ``(C_disp, C_hold)`` after validating the sold inputs.
 
     A hosted question has exactly two books.  The ACCEPT input is its LONG
     TWAP; the REJECT input is its SHORT price, ``1 - twap_reject``.
@@ -178,7 +189,28 @@ def manip_floor(
         )
         total_b = sum((_d(book.b) for book in books), start=Decimal(0))
         c_hold = min(contest_capital, flow_cap * total_b) * epsilon
-        return _round_usdc_down(c_disp + c_hold)
+        return c_disp, c_hold
+
+
+def displacement_floor(
+    books: Sequence[ManipulationBook], epsilon: Decimal | int | str
+) -> Decimal:
+    """16 §5.2's certificate input ``C_disp``, rounded down to µUSDC."""
+    c_disp, _ = _manipulation_components(books, epsilon, 0, 0)
+    return _round_usdc_down(c_disp)
+
+
+def manip_floor(
+    books: Sequence[ManipulationBook],
+    epsilon: Decimal | int | str,
+    contest_capital: Decimal | int | str,
+    flow_cap: Decimal | int | str,
+) -> Decimal:
+    """16 §5.1's published ``C_disp + C_hold``, rounded down to µUSDC."""
+    c_disp, c_hold = _manipulation_components(
+        books, epsilon, contest_capital, flow_cap
+    )
+    return _round_usdc_down(c_disp + c_hold)
 
 
 def b_min_multiple(epsilon: Decimal | int | str) -> Decimal:
@@ -203,9 +235,9 @@ def b_min(stake: Decimal | int | str, epsilon: Decimal | int | str) -> Decimal:
         return _round_usdc_up(stake * b_min_multiple(epsilon))
 
 
-def certified(manipulation_floor: Decimal, declared_stake: Decimal) -> bool:
+def certified(displacement: Decimal, declared_stake: Decimal) -> bool:
     """The sold relation, not an unqualified badge (16 §5.2)."""
-    floor = _d(manipulation_floor)
+    floor = _d(displacement)
     stake = _d(declared_stake)
     if floor < 0 or stake < 0:
         raise ServiceModelError("certificate inputs must be non-negative")
@@ -369,6 +401,7 @@ class ReportDraft:
     b_reject: Decimal
     declared_stake: Decimal
     epsilon_1e9: int
+    tolerance_1e9: int
     settlement_trust: SettlementTrust
 
 
@@ -389,12 +422,13 @@ class Report:
     manip_floor: Decimal
     declared_stake: Decimal
     epsilon_1e9: int
+    tolerance_1e9: int
     certified: bool
     settlement_trust: SettlementTrust
     provenance_hash: bytes
 
     def provenance_fields(self) -> tuple[object, ...]:
-        """Every field before ``provenance_hash``, including ``sub_id``."""
+        """The exact public `ReportView` projection before ``provenance_hash``."""
         return (
             self.question_id,
             self.client_id,
@@ -409,30 +443,96 @@ class Report:
             self.manip_floor,
             self.declared_stake,
             self.epsilon_1e9,
+            self.tolerance_1e9,
             self.certified,
-            self.settlement_trust,
+            (
+                len(self.settlement_trust.attestors),
+                self.settlement_trust.quorum,
+                self.settlement_trust.bond_total,
+            ),
         )
 
-    def verifies(self, hasher: Callable[[tuple[object, ...]], bytes]) -> bool:
-        return hasher(self.provenance_fields()) == self.provenance_hash
+    def provenance_preimage(self) -> bytes:
+        """Domain-separated SCALE preimage frozen by 16 §5.2."""
+        return report_provenance_preimage(self)
+
+    def verifies(self) -> bool:
+        return provenance_hash(self) == self.provenance_hash
+
+
+def _scale_uint(value: int, width: int, field: str) -> bytes:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ServiceModelError(f"{field} must be an integer")
+    if value < 0 or value >= 1 << (width * 8):
+        raise ServiceModelError(f"{field} exceeds SCALE u{width * 8}")
+    return value.to_bytes(width, "little")
+
+
+def _scale_balance(value: Decimal | int | str, field: str) -> bytes:
+    with localcontext() as ctx:
+        ctx.prec = WORK_PREC
+        scaled = _d(value) * USDC_SCALE
+        integral = scaled.to_integral_value()
+    if scaled != integral:
+        raise ServiceModelError(f"{field} is not representable in USDC base units")
+    return _scale_uint(int(integral), 16, field)
+
+
+def report_provenance_preimage(report: Report) -> bytes:
+    """Independently encode ``PROVENANCE_DOMAIN || SCALE(fields)``.
+
+    Every field is fixed-width in the frozen ``ReportView``. The settlement
+    trust projection commits the public attestor count, not their identities.
+    """
+    if not isinstance(report.sub_id, bytes) or len(report.sub_id) != 32:
+        raise ServiceModelError("sub_id must be exactly 32 bytes")
+    trust = report.settlement_trust
+    return b"".join(
+        (
+            PROVENANCE_DOMAIN,
+            _scale_uint(report.question_id, 8, "question_id"),
+            _scale_uint(report.client_id, 4, "client_id"),
+            report.sub_id,
+            _scale_uint(report.twap_accept_1e9, 8, "twap_accept_1e9"),
+            _scale_uint(report.twap_reject_1e9, 8, "twap_reject_1e9"),
+            _scale_uint(report.observations, 4, "observations"),
+            _scale_uint(report.window_start, 4, "window_start"),
+            _scale_uint(report.window_end, 4, "window_end"),
+            _scale_balance(report.b_accept, "b_accept"),
+            _scale_balance(report.b_reject, "b_reject"),
+            _scale_balance(report.manip_floor, "manip_floor"),
+            _scale_balance(report.declared_stake, "declared_stake"),
+            _scale_uint(report.epsilon_1e9, 8, "epsilon_1e9"),
+            _scale_uint(report.tolerance_1e9, 8, "tolerance_1e9"),
+            b"\x01" if report.certified else b"\x00",
+            _scale_uint(len(trust.attestors), 4, "attestors"),
+            _scale_uint(trust.quorum, 4, "quorum"),
+            _scale_balance(trust.bond_total, "bond_total"),
+        )
+    )
+
+
+def provenance_hash(report: Report) -> bytes:
+    """Substrate's ``blake2_256`` over the normative provenance preimage."""
+    return hashlib.blake2b(report_provenance_preimage(report), digest_size=32).digest()
 
 
 def assemble_report(
     draft: ReportDraft,
     contest_capital: Decimal | int | str,
     flow_cap: Decimal | int | str,
-    hasher: Callable[[tuple[object, ...]], bytes],
 ) -> Report:
     """Fill 16 §5's derived report fields from the sealed observations."""
     scale = Decimal(1_000_000_000)
     accept_long = Decimal(draft.twap_accept_1e9) / scale
     reject_short = ONE - Decimal(draft.twap_reject_1e9) / scale
     epsilon = Decimal(draft.epsilon_1e9) / scale
+    books = (
+        ManipulationBook(_d(draft.b_accept), accept_long),
+        ManipulationBook(_d(draft.b_reject), reject_short),
+    )
     floor = manip_floor(
-        (
-            ManipulationBook(_d(draft.b_accept), accept_long),
-            ManipulationBook(_d(draft.b_reject), reject_short),
-        ),
+        books,
         epsilon,
         contest_capital,
         flow_cap,
@@ -451,11 +551,12 @@ def assemble_report(
         floor,
         _d(draft.declared_stake),
         draft.epsilon_1e9,
-        certified(floor, _d(draft.declared_stake)),
+        draft.tolerance_1e9,
+        certified(displacement_floor(books, epsilon), _d(draft.declared_stake)),
         draft.settlement_trust,
         b"",
     )
-    return replace(report, provenance_hash=hasher(report.provenance_fields()))
+    return replace(report, provenance_hash=provenance_hash(report))
 
 
 @dataclass(frozen=True)

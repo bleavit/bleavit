@@ -137,6 +137,12 @@ impl_runtime_apis! {
         > {
             crate::views::open_oracle_rounds()
         }
+
+        fn hosted_report(
+            question_id: futarchy_primitives::QuestionId,
+        ) -> Option<futarchy_primitives::ReportView> {
+            crate::views::hosted_report(question_id)
+        }
     }
 
     impl futarchy_runtime_api::TelemetryApi<Block> for Runtime {
@@ -163,6 +169,10 @@ impl_runtime_apis! {
 
         fn collateral() -> Option<futarchy_runtime_api::CollateralTelemetry> {
             crate::telemetry::collateral()
+        }
+
+        fn service_collateral() -> Option<futarchy_runtime_api::CollateralTelemetry> {
+            crate::telemetry::service_collateral()
         }
 
         fn reserve_probe_line_balance() -> futarchy_primitives::Balance {

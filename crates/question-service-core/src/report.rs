@@ -3,12 +3,16 @@
 use alloc::vec::Vec;
 
 use futarchy_fixed::FixedError;
-use futarchy_primitives::{kernel, AccountId, Balance, BlockNumber, BoundedVec, FixedU64, H256};
+use futarchy_primitives::{
+    kernel, AccountId, Balance, BlockNumber, BoundedVec, FixedU64, ReportView,
+    SettlementTrust as SettlementTrustView, H256,
+};
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
 use crate::{
-    certified, manip_floor, quorum, AttestorError, ClientId, ManipulationBook, QuestionId,
+    certified, displacement_floor, manip_floor, quorum, AttestorError, ClientId, ManipulationBook,
+    QuestionId,
 };
 
 /// The client-selected settlement trust published as part of every report.
@@ -131,42 +135,68 @@ impl<const MAX_ATTESTORS: u32> Report<MAX_ATTESTORS> {
     /// order. The separator is part of the preimage rather than the caller's
     /// business, so the encoding is canonical whatever hasher is supplied.
     ///
-    /// 16 §6.3 and [02](../../../docs/architecture/02-integration-contract.md)
-    /// §4a freeze the full construction as
-    /// `blake2_256(PROVENANCE_DOMAIN || SCALE(fields))`. This crate is
-    /// frame-free and dependency-light by rule (01 §5.2), so it cannot itself
-    /// depend on a hasher — **the `blake2_256` obligation is therefore enforced
-    /// at the pallet boundary (N7), not here**, and that is a stated seam
-    /// rather than an oversight. What this function guarantees is that no
-    /// caller can produce a preimage that collides with another domain's.
-    ///
-    /// The hash itself is absent from the preimage, so the construction is
-    /// non-recursive.
+    /// The hash itself is absent, so the construction is non-recursive.
     pub fn provenance_preimage(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(PROVENANCE_DOMAIN);
-        self.question_id.encode_to(&mut out);
-        self.client_id.encode_to(&mut out);
-        self.sub_id.encode_to(&mut out);
-        self.twap_accept_1e9.encode_to(&mut out);
-        self.twap_reject_1e9.encode_to(&mut out);
-        self.observations.encode_to(&mut out);
-        self.window_start.encode_to(&mut out);
-        self.window_end.encode_to(&mut out);
-        self.b_accept.encode_to(&mut out);
-        self.b_reject.encode_to(&mut out);
-        self.manip_floor.encode_to(&mut out);
-        self.declared_stake.encode_to(&mut out);
-        self.epsilon_1e9.encode_to(&mut out);
-        self.tolerance_1e9.encode_to(&mut out);
-        self.certified.encode_to(&mut out);
-        self.settlement_trust.encode_to(&mut out);
-        out
+        report_view_provenance_preimage(&ReportView {
+            question_id: self.question_id,
+            client_id: self.client_id,
+            sub_id: self.sub_id,
+            twap_accept_1e9: self.twap_accept_1e9,
+            twap_reject_1e9: self.twap_reject_1e9,
+            observations: self.observations,
+            window_start: self.window_start,
+            window_end: self.window_end,
+            b_accept: self.b_accept,
+            b_reject: self.b_reject,
+            manip_floor: self.manip_floor,
+            declared_stake: self.declared_stake,
+            epsilon_1e9: self.epsilon_1e9,
+            tolerance_1e9: self.tolerance_1e9,
+            certified: self.certified,
+            settlement_trust: SettlementTrustView {
+                attestors: self.settlement_trust.attestor_count() as u32,
+                quorum: self.settlement_trust.quorum(),
+                bond_total: self.settlement_trust.bond_total(),
+            },
+            provenance_hash: [0; 32],
+        })
     }
 
     pub fn verify_provenance(&self, hash: impl FnOnce(&[u8]) -> H256) -> bool {
         hash(&self.provenance_preimage()) == self.provenance_hash
     }
+}
+
+/// Domain-separated SCALE preimage of the exact contract-v21 `ReportView`
+/// fields preceding `provenance_hash`. In particular, this commits the public
+/// count-only `SettlementTrust` projection, so a proof-only client can
+/// recompute the hash without access to pallet-internal attestor identities.
+pub fn report_view_provenance_preimage(report: &ReportView) -> Vec<u8> {
+    let mut out = PROVENANCE_DOMAIN.to_vec();
+    report.question_id.encode_to(&mut out);
+    report.client_id.encode_to(&mut out);
+    report.sub_id.encode_to(&mut out);
+    report.twap_accept_1e9.encode_to(&mut out);
+    report.twap_reject_1e9.encode_to(&mut out);
+    report.observations.encode_to(&mut out);
+    report.window_start.encode_to(&mut out);
+    report.window_end.encode_to(&mut out);
+    report.b_accept.encode_to(&mut out);
+    report.b_reject.encode_to(&mut out);
+    report.manip_floor.encode_to(&mut out);
+    report.declared_stake.encode_to(&mut out);
+    report.epsilon_1e9.encode_to(&mut out);
+    report.tolerance_1e9.encode_to(&mut out);
+    report.certified.encode_to(&mut out);
+    report.settlement_trust.encode_to(&mut out);
+    out
+}
+
+pub fn verify_report_view_provenance(
+    report: &ReportView,
+    hash: impl FnOnce(&[u8]) -> H256,
+) -> bool {
+    hash(&report_view_provenance_preimage(report)) == report.provenance_hash
 }
 
 /// Assemble the sealed report and compute the certificate from chain inputs.
@@ -194,8 +224,9 @@ pub fn assemble_report<const MAX_ATTESTORS: u32>(
             bought_outcome_twap_1e9: reject_short,
         },
     ];
+    let displacement = displacement_floor(&books, draft.epsilon_1e9)?;
     let manipulation_floor = manip_floor(&books, draft.epsilon_1e9, contest_capital, flow_cap)?;
-    let is_certified = certified(manipulation_floor, draft.declared_stake)?;
+    let is_certified = certified(displacement, draft.declared_stake)?;
     let mut report = Report {
         question_id: draft.question_id,
         client_id: draft.client_id,
@@ -266,6 +297,32 @@ mod tests {
         })
     }
 
+    fn public_view(report: &Report<MAX>) -> ReportView {
+        ReportView {
+            question_id: report.question_id,
+            client_id: report.client_id,
+            sub_id: report.sub_id,
+            twap_accept_1e9: report.twap_accept_1e9,
+            twap_reject_1e9: report.twap_reject_1e9,
+            observations: report.observations,
+            window_start: report.window_start,
+            window_end: report.window_end,
+            b_accept: report.b_accept,
+            b_reject: report.b_reject,
+            manip_floor: report.manip_floor,
+            declared_stake: report.declared_stake,
+            epsilon_1e9: report.epsilon_1e9,
+            tolerance_1e9: report.tolerance_1e9,
+            certified: report.certified,
+            settlement_trust: SettlementTrustView {
+                attestors: report.settlement_trust.attestor_count() as u32,
+                quorum: report.settlement_trust.quorum(),
+                bond_total: report.settlement_trust.bond_total(),
+            },
+            provenance_hash: report.provenance_hash,
+        }
+    }
+
     #[test]
     fn assembly_fills_cash_floor_certificate_and_provenance() -> Result<(), FixedError> {
         let draft = draft().map_err(|_| FixedError::Domain)?;
@@ -274,6 +331,12 @@ mod tests {
         assert!(report.certified);
         assert_eq!(report.settlement_trust.quorum(), 2);
         assert!(report.verify_provenance(test_hash));
+        let view = public_view(&report);
+        assert_eq!(
+            report.provenance_preimage(),
+            report_view_provenance_preimage(&view)
+        );
+        assert!(verify_report_view_provenance(&view, test_hash));
         Ok(())
     }
 

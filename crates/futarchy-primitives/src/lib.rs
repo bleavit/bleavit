@@ -9,13 +9,15 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 20;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 21;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
 pub type EpochId = u32;
 pub type CohortId = EpochId;
 pub type MarketId = u64;
+pub type QuestionId = u64;
+pub type ClientId = u32;
 pub type MetricId = u16;
 pub type MetricSpecVersion = u16;
 pub type ResourceId = [u8; 8];
@@ -903,10 +905,104 @@ pub struct OracleRoundView {
     pub escalated: bool,
 }
 
+/// Hosted-question terminal failure reason (02 §4a, contract v21).
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
+pub enum VoidReason {
+    #[codec(index = 0)]
+    NoQuorum,
+    #[codec(index = 1)]
+    MedianOutOfRange,
+    #[codec(index = 2)]
+    DeadlineMissed,
+    #[codec(index = 3)]
+    ServicePaused,
+    #[codec(index = 4)]
+    EscrowInsufficient,
+    #[codec(index = 5)]
+    AttestorSetCollapsed,
+    #[codec(index = 6)]
+    ClientUnreachable,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
+pub enum QuestionPhase {
+    #[codec(index = 0)]
+    Registered,
+    #[codec(index = 1)]
+    Open,
+    #[codec(index = 2)]
+    Sealed,
+    #[codec(index = 3)]
+    Settled,
+    #[codec(index = 4)]
+    Voided,
+}
+
+#[derive(
+    Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo,
+)]
+pub struct SettlementTrust {
+    pub attestors: u32,
+    pub quorum: u32,
+    pub bond_total: Balance,
+}
+
+#[derive(
+    Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo,
+)]
+pub struct ReportView {
+    pub question_id: QuestionId,
+    pub client_id: ClientId,
+    pub sub_id: [u8; 32],
+    pub twap_accept_1e9: FixedU64,
+    pub twap_reject_1e9: FixedU64,
+    pub observations: u32,
+    pub window_start: BlockNumber,
+    pub window_end: BlockNumber,
+    pub b_accept: Balance,
+    pub b_reject: Balance,
+    pub manip_floor: Balance,
+    pub declared_stake: Balance,
+    pub epsilon_1e9: FixedU64,
+    /// The 16 §6.3 deviation tolerance, **frozen at registration**. It is
+    /// contract surface (02 §4a) and part of the provenance preimage because
+    /// settlement takes it as an argument: without it here, a widened value
+    /// could excuse otherwise-slashable submissions undetectably.
+    pub tolerance_1e9: FixedU64,
+    pub certified: bool,
+    pub settlement_trust: SettlementTrust,
+    pub provenance_hash: H256,
+}
+
 pub mod bounds {
     /// Maximum simultaneous hosted-service clients (13 §4). This is also
     /// the hard maximum of `svc.max_live` questions.
     pub const MAX_CLIENTS: u32 = 64;
+    /// Per-question named attestor capacity. Reuses the established 16-seat
+    /// attestor-roster envelope rather than introducing an uncalibrated key.
+    pub const MAX_SERVICE_ATTESTORS: u32 = 16;
     /// Retained immutable external question/book/funder records. It reuses the
     /// roster ceiling by derivation, but remains a separately named consumer
     /// bound so the two cannot drift silently.
@@ -1105,6 +1201,12 @@ pub mod kernel {
     /// constant governs Bleavit's values-elected upgrade-attestor registry,
     /// while this one is part of the settlement-trust claim sold to a client.
     pub const SVC_ATTESTORS_MIN: u32 = 3;
+    /// Fully allocated per-question service cost from 16 §8.1, in µUSDC.
+    pub const SVC_FEE_FLOOR_USDC: u128 = 393 * super::currency::USDC;
+    /// Maximum registration-frozen settlement tolerance. Reuses the existing
+    /// 25% service-resolution envelope; widening beyond it would make a named
+    /// attestor's deviation effectively unpriceable (16 §6.3; TH-73).
+    pub const SVC_TOLERANCE_MAX_1E9: u64 = 250_000_000;
     /// Kernel hard minimum for `sec.flow_cap` — the `C_hold` wash ceiling on
     /// the measured non-POL contest-capital depth term, as a multiple of
     /// `(b_acc + b_rej)` on the contract's 1e9 grid (13 §1; 08 §5.3: below ×7
@@ -1797,8 +1899,33 @@ mod tests {
         // v20 (N6): `MarketBook.kind` gains the trailing external-book variant,
         // the market event gains trailing `ExternalRevenueSwept`, and the
         // external/live/combined market bounds become metadata-readable. The
-        // remaining hosted question/report surface is pending v21.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 20);
+        // remaining hosted question/report surface lands in v21 (N7), including
+        // the twelfth API method and the exact §4a types/events/storage/constants.
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 21);
+    }
+
+    #[test]
+    fn contract_v21_question_enum_discriminants_are_frozen() {
+        for (phase, index) in [
+            (QuestionPhase::Registered, 0),
+            (QuestionPhase::Open, 1),
+            (QuestionPhase::Sealed, 2),
+            (QuestionPhase::Settled, 3),
+            (QuestionPhase::Voided, 4),
+        ] {
+            assert_eq!(phase.encode(), vec![index]);
+        }
+        for (reason, index) in [
+            (VoidReason::NoQuorum, 0),
+            (VoidReason::MedianOutOfRange, 1),
+            (VoidReason::DeadlineMissed, 2),
+            (VoidReason::ServicePaused, 3),
+            (VoidReason::EscrowInsufficient, 4),
+            (VoidReason::AttestorSetCollapsed, 5),
+            (VoidReason::ClientUnreachable, 6),
+        ] {
+            assert_eq!(reason.encode(), vec![index]);
+        }
     }
 
     #[test]

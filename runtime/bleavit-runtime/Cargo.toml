@@ -22,6 +22,7 @@ pallet-futarchy-treasury = { path = "../../pallets/futarchy-treasury", default-f
 pallet-guardian = { path = "../../pallets/guardian", default-features = false }
 pallet-attestor = { path = "../../pallets/attestor", default-features = false }
 pallet-client-registry = { path = "../../pallets/client-registry", default-features = false }
+pallet-question-service = { path = "../../pallets/question-service", default-features = false }
 pallet-inflow-caps = { path = "../../pallets/inflow-caps", default-features = false }
 pallet-execution-guard = { path = "../../pallets/execution-guard", default-features = false }
 pallet-epoch = { path = "../../pallets/epoch", default-features = false }
@@ -141,6 +142,7 @@ std = [
   "pallet-assets/std",
   "pallet-attestor/std",
   "pallet-client-registry/std",
+  "pallet-question-service/std",
   "pallet-inflow-caps/std",
   "pallet-aura/std",
   "pallet-authorship/std",
@@ -212,6 +214,7 @@ runtime-benchmarks = [
   "pallet-assets/runtime-benchmarks",
   "pallet-attestor/runtime-benchmarks",
   "pallet-client-registry/runtime-benchmarks",
+  "pallet-question-service/runtime-benchmarks",
   "pallet-balances/runtime-benchmarks",
   "pallet-vesting/runtime-benchmarks",
   "pallet-collator-selection/runtime-benchmarks",
@@ -259,6 +262,7 @@ try-runtime = [
   "pallet-assets/try-runtime",
   "pallet-attestor/try-runtime",
   "pallet-client-registry/try-runtime",
+  "pallet-question-service/try-runtime",
   "pallet-inflow-caps/try-runtime",
   "pallet-aura/try-runtime",
   "pallet-authorship/try-runtime",

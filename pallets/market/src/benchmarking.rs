@@ -4,7 +4,7 @@ use crate::*;
 use alloc::vec::Vec;
 use frame_benchmarking::v2::*;
 use frame_support::{
-    traits::{fungibles::Mutate, ConstU32, EnsureOrigin, Get},
+    traits::{fungibles::Mutate, ConstU32, Contains, EnsureOrigin, Get},
     BoundedVec,
 };
 use frame_system::RawOrigin;
@@ -448,7 +448,7 @@ mod benchmarks {
     }
 
     #[benchmark]
-    fn try_state() {
+    fn try_state() -> Result<(), BenchmarkError> {
         seeded_decision::<T>(1);
         frame_system::Pallet::<T>::set_block_number(10_000_u32.into());
         let now = frame_system::Pallet::<T>::block_number();
@@ -579,14 +579,75 @@ mod benchmarks {
         ActiveMarketCount::<T>::put(bounds::MAX_LIVE_MARKETS);
         T::PolCommitmentSync::sync_pol_commitments()
             .expect("benchmark POL mirror accepts the saturated commitment set");
-        assert_eq!(Markets::<T>::count(), bounds::MAX_STORED_MARKETS);
+
+        // N7 adds a second independently bounded partition to every scan above.
+        // Populate it through the real pair constructor/seed/window APIs so the
+        // measured fixture includes all 64 pair rows, 128 live external books,
+        // their service-ledger vaults and their ownership/window indexes.
+        <T as Config>::BenchmarkHelper::prime_external_capacity();
+        let external_origin = T::ExternalMarketAdmin::try_successful_origin()
+            .map_err(|_| BenchmarkError::Stop("benchmark external-client origin unavailable"))?;
+        let external_client = T::ExternalMarketAdmin::ensure_origin(external_origin.clone())
+            .map_err(|_| BenchmarkError::Stop("benchmark external-client origin unresolved"))?;
+        let external_funder = <T as Config>::BenchmarkHelper::external_funder();
+        assert!(!<T as Config>::ReservedProtocolDestinations::contains(
+            &external_funder
+        ));
+        assert!(!T::ProtocolAccounts::contains(&external_funder));
+        assert!(!T::ServiceLedger::is_local_protocol_account(
+            &external_funder
+        ));
+        fund::<T>(&external_funder, 1_000_000 * UNIT);
+        for offset in 0..bounds::MAX_EXTERNAL_BOOK_PAIRS {
+            let question =
+                kernel::SERVICE_ID_BASE.saturating_add(u64::from(offset).saturating_mul(3));
+            let accept = question.saturating_add(1);
+            let reject = question.saturating_add(2);
+            Pallet::<T>::create_external_pair(
+                external_origin.clone(),
+                ExternalPairInput {
+                    question,
+                    client: external_client,
+                    funder: external_funder.clone(),
+                    accept,
+                    accept_account: T::MarketAccounts::book(accept),
+                    accept_fees: T::MarketAccounts::fees(accept),
+                    reject,
+                    reject_account: T::MarketAccounts::book(reject),
+                    reject_fees: T::MarketAccounts::fees(reject),
+                    b: B,
+                },
+            )
+            .map_err(|_| BenchmarkError::Stop("benchmark external pair creation failed"))?;
+            Pallet::<T>::seed_external_pair(
+                external_origin.clone(),
+                question,
+                external_funder.clone(),
+            )
+            .map_err(|_| BenchmarkError::Stop("benchmark external pair seed failed"))?;
+            for market in [accept, reject] {
+                Pallet::<T>::register_decision_window(
+                    external_origin.clone(),
+                    market,
+                    question,
+                    10_000,
+                    10_001,
+                    10_002,
+                )
+                .map_err(|_| {
+                    BenchmarkError::Stop("benchmark external window registration failed")
+                })?;
+            }
+        }
+
+        assert_eq!(Markets::<T>::count(), bounds::MAX_ALL_STORED_MARKETS);
         assert_eq!(
             MarketProtocolAccounts::<T>::count(),
-            bounds::MAX_STORED_MARKETS.saturating_mul(2),
+            bounds::MAX_ALL_STORED_MARKETS.saturating_mul(2),
         );
         assert_eq!(
             SeededMarkets::<T>::iter_keys().count(),
-            bounds::MAX_STORED_MARKETS as usize
+            bounds::MAX_ALL_STORED_MARKETS as usize
         );
         assert_eq!(
             RerunSeededMarkets::<T>::iter_keys().count(),
@@ -602,10 +663,23 @@ mod benchmarks {
             LivePolCommitments::<T>::get().len(),
             bounds::MAX_LIVE_MARKETS as usize,
         );
+        assert_eq!(
+            ExternalBookPairs::<T>::count(),
+            bounds::MAX_EXTERNAL_BOOK_PAIRS
+        );
+        assert_eq!(
+            ActiveExternalMarketCount::<T>::get(),
+            bounds::MAX_LIVE_EXTERNAL_MARKETS
+        );
+        assert_eq!(
+            StoredExternalMarketCount::<T>::get(),
+            bounds::MAX_STORED_EXTERNAL_MARKETS
+        );
         #[block]
         {
             Pallet::<T>::do_try_state().expect("benchmark try-state succeeds");
         }
+        Ok(())
     }
 
     impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext(), crate::mock::Test);

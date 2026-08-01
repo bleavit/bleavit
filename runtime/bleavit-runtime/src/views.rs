@@ -1,4 +1,4 @@
-//! Read-only assembly for the contract-v6 `FutarchyApi` surface (02 §3-§4).
+//! Read-only assembly for the contract-v21 `FutarchyApi` surface (02 §3-§4a).
 
 use alloc::vec::Vec;
 
@@ -6,8 +6,8 @@ use frame_support::traits::{fungibles::Inspect, Get};
 use futarchy_primitives::{
     bounds, AccountId as ViewAccountId, Balance, BoundedVec, CohortSummaryView, DecisionStatsView,
     EpochStatusView, FixedU64, MarketId, NavView, OracleRoundView, ParamKey, ParamView,
-    PositionView, ProposalClass, ProposalId, ProposalSummaryView, QueuedExecutionView, QuoteView,
-    RatificationStatus, TradeSide, VaultState, WelfareView,
+    PositionView, ProposalClass, ProposalId, ProposalSummaryView, QuestionId, QueuedExecutionView,
+    QuoteView, RatificationStatus, ReportView, TradeSide, VaultState, WelfareView,
 };
 
 use crate::{usdc_location, AccountId, ForeignAssets, Runtime};
@@ -452,4 +452,9 @@ pub fn open_oracle_rounds() -> BoundedVec<OracleRoundView, { bounds::MAX_OPEN_OR
         }
     }
     out
+}
+
+/// Contract-v21 immutable hosted report projection (02 §4a).
+pub fn hosted_report(question_id: QuestionId) -> Option<ReportView> {
+    pallet_question_service::Pallet::<Runtime>::hosted_report(question_id)
 }

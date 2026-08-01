@@ -627,13 +627,22 @@ fn assert_state_independent_projection(
                 row_name(row)
             );
             if domain != CallDomain::Public {
-                assert!(!SafetyFilter::<BleavitSafetyClassifier>::contains(call));
-                assert_eq!(
-                    RuntimeBaseCallFilter::contains(call),
-                    is_values_enactment_leaf(call),
-                    "only a bare values-enactment leaf may widen the raw filter: {}",
-                    row_name(row)
-                );
+                if domain == CallDomain::ExternalClient {
+                    // Local signed clients cannot supply a governance origin.
+                    // N3 therefore admits this one domain through the
+                    // origin-blind filter while the origin-aware matrix still
+                    // maps no governance class to it (16 §3.1, I-35).
+                    assert!(SafetyFilter::<BleavitSafetyClassifier>::contains(call));
+                    assert!(RuntimeBaseCallFilter::contains(call));
+                } else {
+                    assert!(!SafetyFilter::<BleavitSafetyClassifier>::contains(call));
+                    assert_eq!(
+                        RuntimeBaseCallFilter::contains(call),
+                        is_values_enactment_leaf(call),
+                        "only a bare values-enactment leaf may widen the raw filter: {}",
+                        row_name(row)
+                    );
+                }
                 covered.insert((String::from(row.pallet), String::from(row.call)));
             }
         }

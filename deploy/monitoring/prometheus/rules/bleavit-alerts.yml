@@ -81,7 +81,7 @@ groups:
         labels: {severity: page, runbook: RB-LEDGER, domain: "Collateralization"}
         annotations:
           summary: "Collateralization: escrow and sovereign custody drift is non-zero"
-          key_series: "Σ escrow vs sovereign balance drift"
+          key_series: "per-instance Σ escrow vs sovereign balance drift"
           threshold: "any drift ≠ 0"
 
       - alert: BleavitTreasuryMeterHigh

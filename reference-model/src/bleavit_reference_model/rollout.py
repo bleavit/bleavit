@@ -10,7 +10,7 @@ lower bound; both cap defaults remain `[VERIFY]` (SQ-544).
 
 Every escape named during review closes in the specification itself. 08 §1.2
 makes every positive NAV term local USDC and subtracts obligations; 09 §5.2
-caps *all* local USDC issuance. Genesis contributes only twelve 0.01-USDC
+caps *all* local USDC issuance. Genesis contributes only thirteen 0.01-USDC
 protocol-account floors, not the 25,000,000-USDC funding target, and those
 floors consume issuance headroom rather than create an off-cap NAV term. The
 15 try-state rule exempts protocol accounts only from the per-account meter;
@@ -83,10 +83,10 @@ BALANCE_MAX_BASE_UNITS = 2**128 - 1
 _BALANCE_MAX_WHOLE, _BALANCE_MAX_MICRO = divmod(BALANCE_MAX_BASE_UNITS, 1_000_000)
 BALANCE_MAX_USDC = Decimal(f"{_BALANCE_MAX_WHOLE}.{_BALANCE_MAX_MICRO:06d}")
 
-# 03 §7 R-4 + 08 §2.1: twelve accounts, each at USDC min_balance = 10^4
+# 03 §7 R-4 + 08 §2.1: thirteen accounts, each at USDC min_balance = 10^4
 # base units = 0.01 USDC. This is the whole genesis-minted USDC allocation.
 USDC_MIN_BALANCE = Decimal("0.01")
-GENESIS_PROTOCOL_ACCOUNTS = 12
+GENESIS_PROTOCOL_ACCOUNTS = 13
 GENESIS_PROTOCOL_USDC = USDC_MIN_BALANCE * GENESIS_PROTOCOL_ACCOUNTS
 
 # 08 §4.1 frozen literals. They are not live re-derivations.
@@ -288,8 +288,8 @@ def cap_argument() -> tuple[CapLink, ...]:
         ),
         CapLink(
             "genesis-not-funded",
-            GENESIS_PROTOCOL_USDC == Decimal("0.12"),
-            "08 §2.1 seeds 12 x 0.01 USDC, while §2.5 transfers funding later",
+            GENESIS_PROTOCOL_USDC == Decimal("0.13"),
+            "08 §2.1 seeds 13 x 0.01 USDC, while §2.5 transfers funding later",
         ),
         CapLink(
             "protocol-global-cap",

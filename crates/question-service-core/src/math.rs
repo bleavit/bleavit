@@ -69,12 +69,12 @@ fn ceil_div(numerator: u128, denominator: u128) -> Result<u128, FixedError> {
 /// Every conversion and product rounds down, including the documented `ln`
 /// approximation allowance. `books` is an array because a hosted question has
 /// exactly two books (16 §7.6); a missing third-party bound cannot widen it.
-pub fn manip_floor(
+fn manipulation_components(
     books: &[ManipulationBook; 2],
     epsilon: FixedU64,
     contest_capital: Balance,
     flow_cap: FixedU64,
-) -> Result<Balance, FixedError> {
+) -> Result<(FixedU64x64, FixedU64x64), FixedError> {
     if epsilon.0 == 0 || epsilon.0 >= kernel::SCORE_SCALE {
         return Err(FixedError::Domain);
     }
@@ -108,8 +108,27 @@ pub fn manip_floor(
     let flow_limited = balance_as_fixed(total_b)?.checked_mul(scaled_1e9_down(flow_cap))?;
     let contest = balance_as_fixed(contest_capital)?;
     let held = cmp::min(contest, flow_limited).checked_mul(epsilon_fixed)?;
-    let total = displacement.checked_add(held)?;
-    Ok(round_payout_down(total))
+    Ok((displacement, held))
+}
+
+/// Client-funded displacement component used by the certification predicate.
+/// Organic contest capital is deliberately excluded (16 §5.2).
+pub fn displacement_floor(
+    books: &[ManipulationBook; 2],
+    epsilon: FixedU64,
+) -> Result<Balance, FixedError> {
+    manipulation_components(books, epsilon, 0, FixedU64(0))
+        .map(|(displacement, _)| round_payout_down(displacement))
+}
+
+pub fn manip_floor(
+    books: &[ManipulationBook; 2],
+    epsilon: FixedU64,
+    contest_capital: Balance,
+    flow_cap: FixedU64,
+) -> Result<Balance, FixedError> {
+    let (displacement, held) = manipulation_components(books, epsilon, contest_capital, flow_cap)?;
+    Ok(round_payout_down(displacement.checked_add(held)?))
 }
 
 /// Architecture 16 §5.2's minimum equal per-book liquidity, in USDC base

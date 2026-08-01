@@ -28,7 +28,7 @@ ledger is drifted ([03 §6/§9](../../docs/architecture/03-conditional-ledger.md
 
 | Domain | Key series | Trigger |
 |---|---|---|
-| Collateralization | Σ escrow vs sovereign balance drift | any drift ≠ 0 |
+| Collateralization | per-instance Σ escrow vs sovereign balance drift | any drift ≠ 0 |
 
 The trigger means the reconciliation gauge observed a non-zero unexplained
 difference. Expected genesis endowment, swept dust, and position deposits must be

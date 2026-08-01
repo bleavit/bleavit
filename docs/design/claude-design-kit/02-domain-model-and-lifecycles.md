@@ -273,7 +273,8 @@ decision or settlement inputs.
 
 - A bounded `ClientId: u32` roster maps exact XCM `Location` equality in both directions. The
   record carries remaining native-VIT bond, admission block, live/total question counters and an
-  `Optional`/`Required` opaque `sub_id` policy. `MaxClients = 64`.
+  internal `Optional`/`Required` opaque `sub_id` policy (`Optional` absence canonicalizes to the
+  all-zero value and is indistinguishable from an explicit zero). `MaxClients = 64`.
 - `admit_client` and `remove_client` are strict `ConstitutionalValues` acts on the guardian
   track. Removal tombstones immediately, refuses new questions, and keeps identity plus bond until
   every already-live question reaches `Settled` or `Voided`; this avoids stranding trader capital.
@@ -292,10 +293,9 @@ decision or settlement inputs.
   mirror pair with the client, locks the extra raw branch legs in the matching book accounts, and
   terminal cleanup returns surviving inventory only to the immutable exact funder.
 
-Contract v20 makes the external-market schema current; v21 describes the eventual report/API
-surface and is **authored, not in force** while the runtime constant remains v20. Treat the latter
-as domain context; do not mock it as a live canonical-app
-workflow or invent screen IDs.
+Contract v21 makes the hosted question/report API and its external-market schema current. It is a
+live integration surface, but doc 11 still assigns it no canonical-app workflow; do not invent
+screen IDs.
 
 ## 12. Merged glossary (canonical; supplement to kit file 05's naming tables)
 

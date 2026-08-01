@@ -149,12 +149,14 @@ impl EnsureOrigin<RuntimeOrigin> for EnsureMarketPallet {
 pub struct Protocol;
 impl Contains<AccountId> for Protocol {
     fn contains(who: &AccountId) -> bool {
-        let benchmark_account_end = BENCHMARK_MARKET_ACCOUNT_BASE
-            .saturating_add(u64::from(bounds::MAX_STORED_MARKETS).saturating_mul(2));
         matches!(*who, BOOK | FEES | POL | TREASURY | INSURANCE | MAIN)
             || *who == market_account()
             || *who == ledger_account()
-            || (BENCHMARK_MARKET_ACCOUNT_BASE..benchmark_account_end).contains(who)
+            // Model the production AccountId32 domain prefix rather than
+            // current occupancy. The try-state POL stand-in deliberately sits
+            // outside the retained-map fixture but remains a canonical primary
+            // account, just as it does before creation and after reap.
+            || (BENCHMARK_MARKET_ACCOUNT_BASE..SERVICE_MARKET_ACCOUNT_BASE).contains(who)
     }
 }
 
@@ -453,7 +455,7 @@ impl pallet_conditional_ledger::Config<Instance1> for Test {
 impl pallet_market::Config for Test {
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
-    type BenchmarkHelper = ();
+    type BenchmarkHelper = TestMarketBenchmarkHelper;
     type Fee = Fee;
     type ObsInterval = ObsInterval;
     type Kappa1e9 = Kappa1e9;
@@ -461,6 +463,7 @@ impl pallet_market::Config for Test {
     type ExternalMarketAdmin = EnsureExternalClient;
     type ServiceLedger = pallet_market::ConditionalLedgerInstance<Instance1>;
     type PrimaryProposalIds = TestPrimaryProposalIds;
+    type ExternalQuestionStatus = ();
     type ReservedProtocolDestinations = ReservedProtocolDestinations;
     type MaxLiveExternalMarkets = MaxLiveExternalMarkets;
     type EmergencyPlaybookOrigin = EnsureMarketAdmin;
@@ -473,6 +476,16 @@ impl pallet_market::Config for Test {
     type MainAccount = MainAccount;
     type MainRevenueSink = TestMainRevenueSink;
     type BaselineGrade = TestBaselineGrade;
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+pub struct TestMarketBenchmarkHelper;
+
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_market::BenchmarkHelper<AccountId> for TestMarketBenchmarkHelper {
+    fn external_funder() -> AccountId {
+        10
+    }
 }
 
 pub fn ledger_account() -> AccountId {

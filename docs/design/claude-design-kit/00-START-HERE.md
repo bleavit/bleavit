@@ -1,8 +1,8 @@
 # Bleavit design-context pack — START HERE
 
 > Generated 2026-07-12 from the frozen specification in `docs/architecture/` at commit
-> `9f250be`; refreshed through Track N / N4 on 2026-08-01. Contract v19 is in force;
-> external-market contract v20 is in force; hosted question/report contract v21 is authored but not yet in force. This pack exists
+> `9f250be`; refreshed through Track N / N7 on 2026-08-01. Contract v21 is in force,
+> including the hosted question/report surface. This pack exists
 > because design tools cap attachments (Claude Design: 10 files)
 > and the full spec is ~677 KB across 17 documents. It compresses the spec into 7 files
 > without losing anything a frontend designer needs. **The spec always wins over this pack.**
@@ -46,5 +46,5 @@ behavior is already specified; these files are that specification, curated for d
 
 Files 03/04 are byte-copies of `docs/architecture/10-…` and `11-…` plus a header; re-copy to
 refresh. Files 01/02/05/06 are distillations; regenerate them against the spec whenever the
-architecture is amended. Pending contract text is context, not permission to invent a screen or
-present a not-yet-in-force surface as live.
+architecture is amended. A live integration surface is not by itself permission to invent a
+canonical-app screen; doc 11 owns that workflow inventory.

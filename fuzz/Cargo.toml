@@ -21,6 +21,7 @@ libfuzzer-sys = "0.4.13"
 market-core = { path = "../crates/market-core" }
 origins-core = { path = "../crates/origins-core" }
 parity-scale-codec = { version = "3.7.5", features = ["derive", "max-encoded-len"] }
+question-service-core = { path = "../crates/question-service-core" }
 
 [[bin]]
 name = "payload_scale_decode"
@@ -39,6 +40,13 @@ bench = false
 [[bin]]
 name = "lmsr_trade_paths"
 path = "fuzz_targets/lmsr_trade_paths.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "service_settlement_paths"
+path = "fuzz_targets/service_settlement_paths.rs"
 test = false
 doc = false
 bench = false

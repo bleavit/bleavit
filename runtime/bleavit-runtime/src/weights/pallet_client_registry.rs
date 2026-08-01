@@ -13,7 +13,7 @@
 // benchmark
 // pallet
 // --runtime
-// /tmp/n4-client-registry-wtarget/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
+// /tmp/n7-question-service.Xgmc9d/wtarget/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
 // --pallet
 // pallet_client_registry
 // --extrinsic
@@ -49,22 +49,52 @@ impl<T: frame_system::Config> pallet_client_registry::WeightInfo for WeightInfo<
 	/// Proof: `System::Account` (`max_values`: None, `max_size`: Some(128), added: 2603, mode: `MaxEncodedLen`)
 	/// Storage: `Balances::Holds` (r:1 w:1)
 	/// Proof: `Balances::Holds` (`max_values`: None, `max_size`: Some(175), added: 2650, mode: `MaxEncodedLen`)
+	/// Storage: `ClientRegistry::ClientPolicies` (r:0 w:1)
+	/// Proof: `ClientRegistry::ClientPolicies` (`max_values`: None, `max_size`: Some(13), added: 2488, mode: `MaxEncodedLen`)
 	/// Storage: `ClientRegistry::BondOwners` (r:0 w:1)
 	/// Proof: `ClientRegistry::BondOwners` (`max_values`: None, `max_size`: Some(44), added: 2519, mode: `MaxEncodedLen`)
 	/// Storage: `ClientRegistry::Clients` (r:0 w:1)
-	/// Proof: `ClientRegistry::Clients` (`max_values`: None, `max_size`: Some(655), added: 3130, mode: `MaxEncodedLen`)
+	/// Proof: `ClientRegistry::Clients` (`max_values`: None, `max_size`: Some(684), added: 3159, mode: `MaxEncodedLen`)
 	fn admit_client() -> Weight {
 		// Proof Size summary in bytes:
 		//  Measured:  `1145`
 		//  Estimated: `4087`
-		// Minimum execution time: 58_250_000 picoseconds.
-		Weight::from_parts(61_260_000, 0)
+		// Minimum execution time: 59_610_000 picoseconds.
+		Weight::from_parts(63_280_000, 0)
 			.saturating_add(Weight::from_parts(0, 4087))
 			.saturating_add(T::DbWeight::get().reads(6))
-			.saturating_add(T::DbWeight::get().writes(7))
+			.saturating_add(T::DbWeight::get().writes(8))
+	}
+	/// Storage: `ClientRegistry::ClientIdOfSigner` (r:1 w:1)
+	/// Proof: `ClientRegistry::ClientIdOfSigner` (`max_values`: None, `max_size`: Some(52), added: 2527, mode: `MaxEncodedLen`)
+	/// Storage: `Constitution::Params` (r:1 w:0)
+	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
+	/// Storage: `ClientRegistry::ClientCount` (r:1 w:1)
+	/// Proof: `ClientRegistry::ClientCount` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `ClientRegistry::NextClientId` (r:1 w:1)
+	/// Proof: `ClientRegistry::NextClientId` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
+	/// Storage: `System::Account` (r:1 w:1)
+	/// Proof: `System::Account` (`max_values`: None, `max_size`: Some(128), added: 2603, mode: `MaxEncodedLen`)
+	/// Storage: `Balances::Holds` (r:1 w:1)
+	/// Proof: `Balances::Holds` (`max_values`: None, `max_size`: Some(175), added: 2650, mode: `MaxEncodedLen`)
+	/// Storage: `ClientRegistry::ClientPolicies` (r:0 w:1)
+	/// Proof: `ClientRegistry::ClientPolicies` (`max_values`: None, `max_size`: Some(13), added: 2488, mode: `MaxEncodedLen`)
+	/// Storage: `ClientRegistry::BondOwners` (r:0 w:1)
+	/// Proof: `ClientRegistry::BondOwners` (`max_values`: None, `max_size`: Some(44), added: 2519, mode: `MaxEncodedLen`)
+	/// Storage: `ClientRegistry::Clients` (r:0 w:1)
+	/// Proof: `ClientRegistry::Clients` (`max_values`: None, `max_size`: Some(684), added: 3159, mode: `MaxEncodedLen`)
+	fn admit_local_client() -> Weight {
+		// Proof Size summary in bytes:
+		//  Measured:  `1145`
+		//  Estimated: `3640`
+		// Minimum execution time: 56_320_000 picoseconds.
+		Weight::from_parts(59_590_000, 0)
+			.saturating_add(Weight::from_parts(0, 3640))
+			.saturating_add(T::DbWeight::get().reads(6))
+			.saturating_add(T::DbWeight::get().writes(8))
 	}
 	/// Storage: `ClientRegistry::Clients` (r:1 w:1)
-	/// Proof: `ClientRegistry::Clients` (`max_values`: None, `max_size`: Some(655), added: 3130, mode: `MaxEncodedLen`)
+	/// Proof: `ClientRegistry::Clients` (`max_values`: None, `max_size`: Some(684), added: 3159, mode: `MaxEncodedLen`)
 	/// Storage: `ClientRegistry::RemovedClients` (r:1 w:1)
 	/// Proof: `ClientRegistry::RemovedClients` (`max_values`: None, `max_size`: Some(12), added: 2487, mode: `MaxEncodedLen`)
 	/// Storage: `ClientRegistry::BondOwners` (r:1 w:1)
@@ -75,18 +105,20 @@ impl<T: frame_system::Config> pallet_client_registry::WeightInfo for WeightInfo<
 	/// Proof: `System::Account` (`max_values`: None, `max_size`: Some(128), added: 2603, mode: `MaxEncodedLen`)
 	/// Storage: `Balances::Holds` (r:1 w:1)
 	/// Proof: `Balances::Holds` (`max_values`: None, `max_size`: Some(175), added: 2650, mode: `MaxEncodedLen`)
+	/// Storage: `ClientRegistry::ClientPolicies` (r:0 w:1)
+	/// Proof: `ClientRegistry::ClientPolicies` (`max_values`: None, `max_size`: Some(13), added: 2488, mode: `MaxEncodedLen`)
 	/// Storage: `ClientRegistry::IngressMeters` (r:0 w:1)
 	/// Proof: `ClientRegistry::IngressMeters` (`max_values`: None, `max_size`: Some(24), added: 2499, mode: `MaxEncodedLen`)
 	/// Storage: `ClientRegistry::ClientIdOf` (r:0 w:1)
 	/// Proof: `ClientRegistry::ClientIdOf` (`max_values`: None, `max_size`: Some(622), added: 3097, mode: `MaxEncodedLen`)
 	fn remove_client() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `1132`
-		//  Estimated: `4120`
-		// Minimum execution time: 54_500_000 picoseconds.
-		Weight::from_parts(56_130_000, 0)
-			.saturating_add(Weight::from_parts(0, 4120))
+		//  Measured:  `1164`
+		//  Estimated: `4149`
+		// Minimum execution time: 57_020_000 picoseconds.
+		Weight::from_parts(60_170_000, 0)
+			.saturating_add(Weight::from_parts(0, 4149))
 			.saturating_add(T::DbWeight::get().reads(6))
-			.saturating_add(T::DbWeight::get().writes(8))
+			.saturating_add(T::DbWeight::get().writes(9))
 	}
 }

@@ -76,6 +76,13 @@ class TelemetryExporterTests(unittest.TestCase):
                     "anomalous_rounding_dust_usdc": 2,
                 }
             ),
+            "service_collateral": some(
+                {
+                    "custody_usdc": 31,
+                    "liability_usdc": 32,
+                    "anomalous_rounding_dust_usdc": 0,
+                }
+            ),
             "migration_cursor_stalled": True,
             "storage_utilization": some(
                 [
@@ -129,7 +136,13 @@ class TelemetryExporterTests(unittest.TestCase):
                 (("component", "baseline"),): 29,
             },
         )
-        self.assertEqual(samples(exporter, "bleavit_ledger_collateral_drift_usdc"), {(): 2})
+        self.assertEqual(
+            samples(exporter, "bleavit_ledger_collateral_drift_usdc"),
+            {
+                (("instance", "primary"),): 2,
+                (("instance", "service"),): -1,
+            },
+        )
         self.assertEqual(samples(exporter, "bleavit_runtime_migration_cursor_stalled"), {(): 1})
         self.assertEqual(
             samples(exporter, "bleavit_runtime_storage_max_utilization_ratio"),

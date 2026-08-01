@@ -54,11 +54,11 @@ use crate::{
     ConvictionVoting, CumulusXcm, Epoch, ExecutionGuard, ForeignAssets, FutarchyTreasury, Guardian,
     IncidentRegistry, InflowCaps, Market, MessageQueue, Migrations, MilestoneRegistry, Multisig,
     Oracle, Origins, PalletInfo as RuntimePalletInfo, ParachainInfo, ParachainSystem, PolkadotXcm,
-    Preimage, Proxy, Referenda, Runtime, RuntimeCall, RuntimeGenesisConfig, RuntimeOrigin,
-    Scheduler, Session, System, Timestamp, TrackOrigins, TransactionPayment, TxExtension,
-    UncheckedExtrinsic, Utility, Vesting, Welfare, XcmpQueue, FEE_VIT_USDC_RATE_KEY,
-    MILLISECS_PER_BLOCK, SS58_PREFIX, TRANSACTION_VERSION, USDC_DECIMALS, USDC_LOCATION_ENCODED,
-    VERSION, VIT_DECIMALS,
+    Preimage, Proxy, QuestionService, Referenda, Runtime, RuntimeCall, RuntimeGenesisConfig,
+    RuntimeOrigin, Scheduler, ServiceLedger, Session, System, Timestamp, TrackOrigins,
+    TransactionPayment, TxExtension, UncheckedExtrinsic, Utility, Vesting, Welfare, XcmpQueue,
+    FEE_VIT_USDC_RATE_KEY, MILLISECS_PER_BLOCK, SS58_PREFIX, TRANSACTION_VERSION, USDC_DECIMALS,
+    USDC_LOCATION_ENCODED, VERSION, VIT_DECIMALS,
 };
 
 #[cfg(feature = "bootstrap")]
@@ -1866,16 +1866,81 @@ fn composition_contains_all_wired_pallets_at_their_frozen_indices() {
     assert_pallet!(InflowCaps, 63, "InflowCaps");
     assert_pallet!(TrackOrigins, 64, "TrackOrigins");
     assert_pallet!(ClientRegistry, 65, "ClientRegistry");
+    assert_pallet!(QuestionService, 66, "QuestionService");
+    assert_pallet!(ServiceLedger, 67, "ServiceLedger");
     #[cfg(feature = "bootstrap")]
     assert_eq!(
         <AllPalletsWithSystem as PalletsInfoAccess>::infos().len(),
-        43
+        45
     );
     #[cfg(not(feature = "bootstrap"))]
     assert_eq!(
         <AllPalletsWithSystem as PalletsInfoAccess>::infos().len(),
-        42
+        44
     );
+}
+
+#[test]
+fn service_instance_predicates_and_i37_freeze_latches_are_directional() {
+    use frame_support::instances::Instance1;
+
+    development_ext().execute_with(|| {
+        let primary_sovereign = crate::configs::LedgerPalletId::get().into_account_truncating();
+        let service_sovereign =
+            crate::configs::ServiceLedgerPalletId::get().into_account_truncating();
+        let primary_book = crate::configs::market_book_account(7);
+        let service_book =
+            crate::configs::market_book_account(kernel::SERVICE_ID_BASE.saturating_add(7));
+        let main = crate::genesis::treasury_account();
+        let client = account(211);
+
+        for primary in [&primary_sovereign, &primary_book, &main] {
+            assert!(crate::configs::ProtocolAccounts::contains(primary));
+            assert!(!crate::configs::ServiceProtocolAccounts::contains(primary));
+            assert!(crate::configs::ReservedProtocolAccounts::contains(primary));
+        }
+        for service in [
+            &service_sovereign,
+            &service_book,
+            &QuestionService::account_id(),
+        ] {
+            assert!(!crate::configs::ProtocolAccounts::contains(service));
+            assert!(crate::configs::ServiceProtocolAccounts::contains(service));
+            assert!(crate::configs::ReservedProtocolAccounts::contains(service));
+        }
+
+        // The third predicate is independently governed: MAIN is a local
+        // primary exemption but deliberately remains inflow-metered.
+        assert!(!crate::configs::InflowCapProtocolAccounts::contains(&main));
+        assert!(!crate::configs::ProtocolAccounts::contains(&client));
+        assert!(!crate::configs::ServiceProtocolAccounts::contains(&client));
+        assert!(!crate::configs::ReservedProtocolAccounts::contains(&client));
+        assert!(!crate::configs::InflowCapProtocolAccounts::contains(
+            &client
+        ));
+
+        pallet_conditional_ledger::FrozenUntil::<Runtime>::kill();
+        pallet_conditional_ledger::FrozenUntil::<Runtime, Instance1>::kill();
+        pallet_conditional_ledger::FrozenUntil::<Runtime, Instance1>::put(99);
+        assert_eq!(
+            pallet_conditional_ledger::FrozenUntil::<Runtime>::get(),
+            None
+        );
+        assert_eq!(
+            pallet_conditional_ledger::FrozenUntil::<Runtime, Instance1>::get(),
+            Some(99)
+        );
+        pallet_conditional_ledger::FrozenUntil::<Runtime, Instance1>::kill();
+        pallet_conditional_ledger::FrozenUntil::<Runtime>::put(101);
+        assert_eq!(
+            pallet_conditional_ledger::FrozenUntil::<Runtime, Instance1>::get(),
+            None
+        );
+        assert_eq!(
+            pallet_conditional_ledger::FrozenUntil::<Runtime>::get(),
+            Some(101)
+        );
+    });
 }
 
 #[test]
@@ -1965,6 +2030,182 @@ fn n4_client_bond_and_guardian_track_are_live_only_when_explicitly_seated() {
             0,
         ));
         assert_eq!(Balances::balance_on_hold(&reason, &owner), 0);
+    });
+}
+
+#[test]
+fn n7_registry_and_service_origin_matrix_is_exhaustive() {
+    fn register(origin: RuntimeOrigin) -> frame_support::dispatch::DispatchResult {
+        QuestionService::register(
+            origin,
+            pallet_question_service::RegisterInput {
+                sub_id: None,
+                declared_stake: 1,
+                epsilon_1e9: futarchy_primitives::FixedU64(100_000_000),
+                tolerance_1e9: futarchy_primitives::FixedU64(10_000_000),
+                window_start: 10,
+                window_end: 20,
+                b: 1,
+                rule: pallet_question_service::ClientRule {
+                    min_accept_improvement_1e9: futarchy_primitives::FixedU64(0),
+                },
+                attestors: BoundedVec::default(),
+            },
+        )
+    }
+
+    #[derive(Clone, Copy)]
+    enum MatrixOrigin {
+        Signed,
+        Root,
+        None,
+        Governance(pallet_origins::Origin),
+        ExternalClient,
+    }
+
+    development_ext().execute_with(|| {
+        let signer = account(240);
+        // The Signed matrix row is an admitted local client, not merely an
+        // arbitrary account. This distinguishes the intended registry-backed
+        // path from the storage-free ExternalClient custom origin.
+        pallet_client_registry::ClientIdOfSigner::<Runtime>::insert(&signer, 0);
+
+        let mut origins = vec![
+            (
+                "Signed",
+                MatrixOrigin::Signed,
+                RuntimeOrigin::signed(signer.clone()),
+            ),
+            ("Root", MatrixOrigin::Root, RuntimeOrigin::root()),
+            ("None", MatrixOrigin::None, RuntimeOrigin::none()),
+            (
+                "ExternalClient",
+                MatrixOrigin::ExternalClient,
+                pallet_client_registry::Origin::ExternalClient(0).into(),
+            ),
+        ];
+        for governance in pallet_origins::Origin::ALL {
+            origins.push((
+                "governance",
+                MatrixOrigin::Governance(governance),
+                governance.into(),
+            ));
+        }
+
+        for (label, kind, origin) in origins {
+            // Every registry dispatchable is GuardianTrack-only. None of the
+            // twelve negative-matrix origin classes is that track origin.
+            assert_eq!(
+                ClientRegistry::admit_client(
+                    origin.clone(),
+                    staging_xcm::latest::Location::here(),
+                    signer.clone(),
+                    pallet_client_registry::SubIdPolicy::Optional,
+                ),
+                Err(DispatchError::BadOrigin),
+                "admit_client accepted {label}",
+            );
+            assert_eq!(
+                ClientRegistry::admit_local_client(
+                    origin.clone(),
+                    signer.clone(),
+                    signer.clone(),
+                    pallet_client_registry::SubIdPolicy::Optional,
+                ),
+                Err(DispatchError::BadOrigin),
+                "admit_local_client accepted {label}",
+            );
+            assert_eq!(
+                ClientRegistry::remove_client(origin.clone(), 0),
+                Err(DispatchError::BadOrigin),
+                "remove_client accepted {label}",
+            );
+
+            let client_admitted =
+                matches!(kind, MatrixOrigin::Signed | MatrixOrigin::ExternalClient);
+            assert_eq!(
+                register(origin.clone()),
+                Err(if client_admitted {
+                    pallet_question_service::Error::<Runtime>::ServiceRateUnset.into()
+                } else {
+                    pallet_question_service::Error::<Runtime>::NotRegistered.into()
+                }),
+                "register origin result changed for {label}",
+            );
+            for (name, result) in [
+                (
+                    "open",
+                    QuestionService::open(origin.clone(), kernel::SERVICE_ID_BASE),
+                ),
+                (
+                    "seal",
+                    QuestionService::seal(origin.clone(), kernel::SERVICE_ID_BASE),
+                ),
+            ] {
+                assert_eq!(
+                    result,
+                    Err(if client_admitted {
+                        pallet_question_service::Error::<Runtime>::UnknownQuestion.into()
+                    } else {
+                        pallet_question_service::Error::<Runtime>::NotRegistered.into()
+                    }),
+                    "{name} origin result changed for {label}",
+                );
+            }
+
+            let signed_result: Result<(), DispatchError> =
+                Err(pallet_question_service::Error::<Runtime>::UnknownQuestion.into());
+            let permissionless_expected = if matches!(kind, MatrixOrigin::Signed) {
+                signed_result
+            } else {
+                Err(DispatchError::BadOrigin)
+            };
+            for (name, result) in [
+                (
+                    "bond_attestor",
+                    QuestionService::bond_attestor(origin.clone(), kernel::SERVICE_ID_BASE),
+                ),
+                (
+                    "submit_attestation",
+                    QuestionService::submit_attestation(
+                        origin.clone(),
+                        kernel::SERVICE_ID_BASE,
+                        futarchy_primitives::FixedU64(0),
+                    ),
+                ),
+                (
+                    "settle",
+                    QuestionService::settle(origin.clone(), kernel::SERVICE_ID_BASE),
+                ),
+                (
+                    "void",
+                    QuestionService::void(origin.clone(), kernel::SERVICE_ID_BASE),
+                ),
+                (
+                    "archive",
+                    QuestionService::archive(origin.clone(), kernel::SERVICE_ID_BASE),
+                ),
+            ] {
+                assert_eq!(
+                    result, permissionless_expected,
+                    "{name} origin result changed for {label}",
+                );
+            }
+
+            let is_emergency = matches!(
+                kind,
+                MatrixOrigin::Governance(pallet_origins::Origin::EmergencyPlaybook)
+            );
+            assert_eq!(
+                QuestionService::set_paused(origin, None),
+                if is_emergency {
+                    Ok(())
+                } else {
+                    Err(DispatchError::BadOrigin)
+                },
+                "set_paused origin result changed for {label}",
+            );
+        }
     });
 }
 
@@ -3923,7 +4164,7 @@ fn genesis_endows_every_r4_protocol_account() {
 
     development_ext().execute_with(|| {
         let endowments = crate::genesis::usdc_genesis_endowments();
-        assert_eq!(endowments.len(), 12);
+        assert_eq!(endowments.len(), 13);
         let mut accounts = BTreeSet::new();
         for (asset, account, amount) in endowments {
             assert_eq!(asset, usdc_location());
@@ -3943,7 +4184,7 @@ fn genesis_usdc_issuance_is_exactly_the_r4_floor() {
     development_ext().execute_with(|| {
         assert_eq!(
             ForeignAssets::total_issuance(usdc_location()),
-            currency::USDC_CENT.saturating_mul(12),
+            currency::USDC_CENT.saturating_mul(13),
         );
     });
 }
@@ -3954,6 +4195,10 @@ fn r4_account_addresses_are_stable() {
         (
             "ledger sovereign",
             "6d6f646c626c2f6c656467720000000000000000000000000000000000000000",
+        ),
+        (
+            "service-ledger sovereign",
+            "6d6f646c626c2f7376636c670000000000000000000000000000000000000000",
         ),
         (
             "ledger INSURANCE",
@@ -4032,8 +4277,17 @@ fn market_custody_namespace_prevents_future_address_poisoning() {
             assert_ne!(book, fees);
             assert!(crate::configs::is_reserved_market_account(&book));
             assert!(crate::configs::is_reserved_market_account(&fees));
-            assert!(crate::configs::ProtocolAccounts::contains(&book));
-            assert!(crate::configs::ProtocolAccounts::contains(&fees));
+            let primary = id < futarchy_primitives::kernel::SERVICE_ID_BASE;
+            assert_eq!(crate::configs::ProtocolAccounts::contains(&book), primary);
+            assert_eq!(crate::configs::ProtocolAccounts::contains(&fees), primary);
+            assert_eq!(
+                crate::configs::ServiceProtocolAccounts::contains(&book),
+                !primary,
+            );
+            assert_eq!(
+                crate::configs::ServiceProtocolAccounts::contains(&fees),
+                !primary,
+            );
             assert!(!Market::is_market_protocol_account(&book));
             assert!(!Market::is_market_protocol_account(&fees));
 
@@ -19074,7 +19328,7 @@ fn view_decision_stats_returns_none_for_unknown_or_incomplete_backing() {
 }
 
 #[test]
-fn futarchy_api_trait_delegates_all_eleven_runtime_views() {
+fn futarchy_api_trait_delegates_all_twelve_runtime_views() {
     use futarchy_runtime_api::runtime_decl_for_futarchy_api::FutarchyApi as RuntimeFutarchyApi;
 
     development_ext().execute_with(|| {
@@ -19127,6 +19381,12 @@ fn futarchy_api_trait_delegates_all_eleven_runtime_views() {
             <ApiRuntime as RuntimeFutarchyApi<crate::Block>>::open_oracle_rounds(),
             crate::views::open_oracle_rounds()
         );
+        assert_eq!(
+            <ApiRuntime as RuntimeFutarchyApi<crate::Block>>::hosted_report(
+                kernel::SERVICE_ID_BASE,
+            ),
+            crate::views::hosted_report(kernel::SERVICE_ID_BASE)
+        );
     });
 }
 
@@ -19142,7 +19402,7 @@ fn guardian_playbook_routines_construct_exact_emergency_call_sets() {
             (
                 PlaybookId::HaltIntake,
                 None,
-                vec!["Epoch.set_intake_paused"],
+                vec!["Epoch.set_intake_paused", "QuestionService.set_paused"],
             ),
             (
                 PlaybookId::Reserve,
@@ -19173,6 +19433,9 @@ fn guardian_playbook_routines_construct_exact_emergency_call_sets() {
                     RuntimeCall::Epoch(pallet_epoch::Call::set_intake_paused { .. }) => {
                         Some("Epoch.set_intake_paused")
                     }
+                    RuntimeCall::QuestionService(pallet_question_service::Call::set_paused {
+                        ..
+                    }) => Some("QuestionService.set_paused"),
                     RuntimeCall::ConditionalLedger(
                         pallet_conditional_ledger::Call::set_split_paused { .. },
                     ) => Some("ConditionalLedger.set_split_paused"),

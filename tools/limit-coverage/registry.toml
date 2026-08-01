@@ -953,6 +953,12 @@ error = "ClientRegistry::ClientsFull"
 reason = "13 §4 / 16 §2: the 65th values-governed admission is refused before its native bond hold or either registry index changes."
 
 [[entry]]
+key = "MaxServiceAttestors"
+class = "dispatch-limit"
+behavior = "MAX_SERVICE_ATTESTORS"
+reason = "13 §4 / 16 §6.3: SCALE decoding of the bounded registration input refuses the 17th attestor name before dispatch, custody, or question state."
+
+[[entry]]
 key = "MaxExternalBookPairs"
 class = "dispatch-limit"
 error = "Market::TooManyExternalMarkets"
@@ -1195,30 +1201,28 @@ class = "param-bounds"
 genesis = true
 reason = "13 §1 / 09 §6.1: governed XCM trader rate (proof-size dimension); amendment bounds covered by the generated per-key suite. Not a dispatch limit — see xcm.dot_per_sec."
 
-# --- D-20 hosted question service (doc 16). N1 is spec-only, so none of these
-# has a consumer yet; each is `unwired` with an owner that expires the exemption
-# mechanically once the owning milestone flips ✅ (15 §4.6).
+# --- D-20 hosted question service (doc 16). N4 owns the client-bond value;
+# N7 owns the four registration/service consumers below (15 §4.6).
 
 [[entry]]
 key = "svc.fee_bps"
-class = "unwired"
+class = "value"
 genesis = false
-owner = "N7"
-reason = "13 §1 / 16 §8.1: ships `[VERIFY]`-tagged and UNSET at genesis, with its consumer fail-closed — while unset, `question_service.register` refuses `ServiceRateUnset`. The refusal doubles as the arming gate (which is why no new PhaseFlags bit is introduced), so the key cannot be bound to a dispatch-limit test until `pallet-question-service` exists. Owner N7 creates that consumer."
+reason = "13 §1 / 16 §8.1: optional live price input, deliberately absent at genesis. The N7 consumer fails closed with QuestionService::ServiceRateUnset before custody; it is not caller-supplied capacity."
 
 [[entry]]
 key = "svc.max_live"
-class = "unwired"
-genesis = false
-owner = "N7"
-reason = "13 §1 / 16 §8.5: the live-question bound. Its consumer is `question_service.register`'s slot check (`SlotsExhausted`), which does not exist until N7. It becomes a `dispatch-limit` key with a marked past-the-limit test at that point — it is a registration refusal, not a bounds screen."
+class = "dispatch-limit"
+genesis = true
+error = "QuestionService::SlotsExhausted"
+reason = "13 §1 / 16 §8.5: registration refuses the first question past the live slot bound."
 
 [[entry]]
 key = "svc.max_window"
-class = "unwired"
-genesis = false
-owner = "N7"
-reason = "13 §1 / 16 §4: the maximum question window. Consumer is `register`'s `WindowTooLong` refusal (N7). Dispatch-limit once wired."
+class = "dispatch-limit"
+genesis = true
+error = "QuestionService::WindowTooLong"
+reason = "13 §1 / 16 §4: registration refuses a window one block beyond the live bound."
 
 [[entry]]
 key = "svc.client_bond"
@@ -1228,7 +1232,7 @@ reason = "13 §1 / 16 §2, §9: the live optional value sets the exact native VI
 
 [[entry]]
 key = "svc.epsilon_min"
-class = "unwired"
-genesis = false
-owner = "N7"
-reason = "13 §1 / 16 §5.2: the floor on a client's declared resolution ε. Consumer is `register`'s `EpsilonOutOfRange` refusal (N7). Dispatch-limit once wired."
+class = "dispatch-limit"
+genesis = true
+error = "QuestionService::EpsilonOutOfRange"
+reason = "13 §1 / 16 §5.2: registration refuses epsilon one unit below the live floor."

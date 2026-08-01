@@ -4,8 +4,8 @@ use futarchy_primitives::{
     bounds, AccountId, BoundedVec, Branch, CohortSummaryView, DecisionOutcome, DecisionStatsView,
     EpochPhase, EpochStatusView, FixedU64, NavView, OracleRoundView, ParamKey, ParamView,
     PositionId, PositionKind, PositionView, ProposalClass, ProposalState, ProposalSummaryView,
-    QueuedExecutionView, QuoteView, RatificationStatus, RuntimeVersionConstraint, TradeSide,
-    VaultState, WelfareView,
+    QueuedExecutionView, QuoteView, RatificationStatus, ReportView, RuntimeVersionConstraint,
+    SettlementTrust, TradeSide, VaultState, WelfareView,
 };
 use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use sp_runtime::traits::Block as BlockT;
@@ -67,6 +67,36 @@ sp_api::mock_impl_runtime_apis! {
         fn open_oracle_rounds() -> BoundedVec<OracleRoundView, { bounds::MAX_OPEN_ORACLE_ROUNDS }> {
             singleton(oracle_round())
         }
+
+        fn hosted_report(question_id: u64) -> Option<ReportView> {
+            Some(hosted_report(question_id))
+        }
+    }
+}
+
+fn hosted_report(question_id: u64) -> ReportView {
+    ReportView {
+        question_id,
+        client_id: 7,
+        sub_id: [4; 32],
+        twap_accept_1e9: FixedU64(600_000_000),
+        twap_reject_1e9: FixedU64(400_000_000),
+        observations: 4_320,
+        window_start: 100,
+        window_end: 4_420,
+        b_accept: 10_000_000_000,
+        b_reject: 10_000_000_000,
+        manip_floor: 1_559_230_829,
+        declared_stake: 500_000_000,
+        epsilon_1e9: FixedU64(37_500_000),
+        tolerance_1e9: FixedU64(50_000_000),
+        certified: true,
+        settlement_trust: SettlementTrust {
+            attestors: 3,
+            quorum: 2,
+            bond_total: 30_000_000_000,
+        },
+        provenance_hash: [9; 32],
     }
 }
 
@@ -309,6 +339,11 @@ fn all_methods_are_callable_through_api_ref() {
             .expect("open oracle rounds call succeeds"),
         singleton(oracle_round())
     );
+    if let Ok(report) = api.hosted_report(at, 9) {
+        assert_eq!(report, Some(hosted_report(9)));
+    } else {
+        assert!(false, "hosted report call must succeed");
+    }
 }
 
 #[test]
@@ -317,8 +352,13 @@ fn runtime_api_id_and_version_are_frozen() {
         runtime_decl_for_futarchy_api::ID,
         [52, 172, 53, 103, 236, 227, 15, 254]
     );
-    assert_eq!(runtime_decl_for_futarchy_api::VERSION, 1);
-    assert_eq!(runtime_decl_for_telemetry_api::VERSION, 2);
+    assert_eq!(runtime_decl_for_futarchy_api::VERSION, 2);
+    // N7 raised this to 3 by adding `service_collateral()` for the I-37
+    // per-instance custody audit. `TelemetryApi` is deliberately outside the 02
+    // contract (12 §6.3 owns it, the ops exporters are its only consumer), so
+    // the bump needs no `INTEGRATION_CONTRACT_VERSION` change — but it is still
+    // frozen here, so a silent version drift fails rather than passes.
+    assert_eq!(runtime_decl_for_telemetry_api::VERSION, 3);
 }
 
 #[test]
@@ -424,4 +464,5 @@ fn every_populated_view_round_trips_across_api_boundary() {
     assert_scale_round_trip(nav());
     assert_scale_round_trip(cohort());
     assert_scale_round_trip(oracle_round());
+    assert_scale_round_trip(hosted_report(99));
 }

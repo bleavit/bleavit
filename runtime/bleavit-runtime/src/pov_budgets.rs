@@ -278,7 +278,20 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
     );
     all.extend(
         pallet_call_weights!(pallet_client_registry as pallet_client_registry::WeightInfo {
-            admit_client, remove_client,
+            admit_client, admit_local_client, remove_client,
+        }),
+    );
+    all.extend(
+        pallet_call_weights!(pallet_question_service as pallet_question_service::WeightInfo {
+            register(futarchy_primitives::bounds::MAX_SERVICE_ATTESTORS),
+            bond_attestor,
+            open,
+            seal,
+            submit_attestation,
+            settle(futarchy_primitives::bounds::MAX_SERVICE_ATTESTORS),
+            void(futarchy_primitives::bounds::MAX_SERVICE_ATTESTORS),
+            set_paused(futarchy_primitives::bounds::MAX_CLIENTS),
+            archive(futarchy_primitives::bounds::MAX_SERVICE_ATTESTORS),
         }),
     );
     // The three clock-syncing cranks charge the A13 collator payout on top of
@@ -360,6 +373,7 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
 const FUTARCHY_DISPATCHING_MODULES: &[(&str, &str)] = &[
     ("Constitution", "pallet_constitution"),
     ("ConditionalLedger", "pallet_conditional_ledger"),
+    ("ServiceLedger", "pallet_conditional_ledger"),
     ("Market", "pallet_market"),
     ("Welfare", "pallet_welfare"),
     ("Oracle", "pallet_oracle"),
@@ -369,6 +383,7 @@ const FUTARCHY_DISPATCHING_MODULES: &[(&str, &str)] = &[
     ("Guardian", "pallet_guardian"),
     ("Attestor", "pallet_attestor"),
     ("ClientRegistry", "pallet_client_registry"),
+    ("QuestionService", "pallet_question_service"),
     ("Epoch", "pallet_epoch"),
     ("ExecutionGuard", "pallet_execution_guard"),
 ];

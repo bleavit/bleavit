@@ -3,8 +3,9 @@
 
 use crate::mock::*;
 use crate::{
-    BondOwners, ClientCount, ClientIdOf, Clients, EnsureExternalClient, Error, HoldReason,
-    IngressMeters, NextClientId, Origin, RemovedClients, SubIdPolicy, MAX_CLIENTS,
+    BondOwners, ClientCount, ClientIdOf, ClientIdOfSigner, ClientPolicies, Clients,
+    EnsureExternalClient, Error, HoldReason, IngressMeters, NextClientId, Origin, RemovedClients,
+    SubIdPolicy, MAX_CLIENTS,
 };
 use frame_support::assert_noop;
 use frame_support::traits::{
@@ -174,19 +175,59 @@ fn admission_fails_closed_when_bond_is_unset_and_places_an_exact_native_hold_whe
         let record = Clients::<Test>::get(0);
         assert!(record.is_some());
         if let Some(record) = record {
-            assert_eq!(record.location, location(2_000));
+            assert_eq!(record.location, Some(location(2_000)));
+            assert_eq!(record.local_signer, None);
             assert_eq!(record.bond, 1_000);
             assert_eq!(record.admitted_at, 1);
             assert_eq!(record.questions_live, 0);
             assert_eq!(record.questions_total, 0);
-            assert_eq!(record.sub_id_policy, SubIdPolicy::Required);
         }
+        assert_eq!(ClientPolicies::<Test>::get(0), Some(SubIdPolicy::Required));
         assert_eq!(ClientIdOf::<Test>::get(location(2_000)), Some(0));
         assert_eq!(BondOwners::<Test>::get(0), Some(account(1)));
         assert_eq!(ClientCount::<Test>::get(), 1);
         assert_eq!(NextClientId::<Test>::get(), 1);
         assert_eq!(client_bond_hold(&account(1)), 1_000);
         assert_eq!(ClientRegistry::do_try_state(), Ok(()));
+    });
+}
+
+#[test]
+fn local_admission_uses_the_frozen_identity_shape_and_exact_signer_index() {
+    new_test_ext().execute_with(|| {
+        let signer = account(2);
+        assert!(ClientRegistry::admit_local_client(
+            values_origin(),
+            signer.clone(),
+            account(1),
+            SubIdPolicy::Required,
+        )
+        .is_ok());
+
+        let record = Clients::<Test>::get(0);
+        assert!(record.is_some());
+        if let Some(record) = record {
+            assert_eq!(record.location, None);
+            assert_eq!(record.local_signer, Some(signer.clone()));
+            assert_eq!(record.bond, 1_000);
+            assert_eq!(record.admitted_at, 1);
+            assert_eq!(record.questions_live, 0);
+            assert_eq!(record.questions_total, 0);
+        }
+        assert_eq!(ClientIdOfSigner::<Test>::get(&signer), Some(0));
+        assert_eq!(ClientPolicies::<Test>::get(0), Some(SubIdPolicy::Required));
+        assert_eq!(ClientRegistry::client_id_of_signer(&signer), Some(0));
+        assert_eq!(ClientRegistry::do_try_state(), Ok(()));
+
+        assert_noop!(
+            ClientRegistry::admit_local_client(
+                values_origin(),
+                signer,
+                account(1),
+                SubIdPolicy::Optional,
+            ),
+            Error::<Test>::DuplicateLocation
+        );
     });
 }
 
@@ -445,7 +486,7 @@ fn try_state_detects_representative_cross_map_and_custody_corruption() {
         assert_eq!(
             ClientRegistry::do_try_state(),
             Err(TryRuntimeError::Other(
-                "client-registry: reverse location index mismatch"
+                "client-registry: reverse identity index mismatch"
             ))
         );
     });

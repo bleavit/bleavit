@@ -444,15 +444,15 @@ class KeeperCrankFeeTests(unittest.TestCase):
         `crank_fee_usdc`; it cannot leave a copied total behind silently.
         """
         generated = generated_crank_weight()
-        self.assertEqual(generated.base_ref_time_ps, 141_290_000)
+        self.assertEqual(generated.base_ref_time_ps, 141_590_000)
         self.assertEqual(generated.reads, 20)
         self.assertEqual(generated.writes, 7)
-        self.assertEqual(generated.call_ref_time_ps, 1_341_290_000)
+        self.assertEqual(generated.call_ref_time_ps, 1_341_590_000)
 
         fee = crank_fee_breakdown()
-        self.assertEqual(fee.total_planck, 1_801_839_120)
-        self.assertEqual(fee.vit, D("0.00180183912"))
-        self.assertEqual(crank_fee_usdc(FEE_VIT_USDC_RATE_REF), D("0.0000900919560"))
+        self.assertEqual(fee.total_planck, 1_802_139_120)
+        self.assertEqual(fee.vit, D("0.00180213912"))
+        self.assertEqual(crank_fee_usdc(FEE_VIT_USDC_RATE_REF), D("0.0000901069560"))
 
     def test_all_four_published_sensitivity_rows_reproduce_from_their_inputs(self):
         """Regression pins for §6.2's table, including its display rounding.
@@ -489,7 +489,7 @@ class KeeperCrankFeeTests(unittest.TestCase):
         self.assertNotEqual(KEEPER_REBATE_FEE_BASIS_USDC, head_basis)
         self.assertEqual(
             crank_fee_usdc(FEE_VIT_USDC_RATE_REF) - KEEPER_REBATE_FEE_BASIS_USDC,
-            D("0.0000050919560"),
+            D("0.0000051069560"),
         )
         finding = next(
             f
@@ -502,18 +502,18 @@ class KeeperCrankFeeTests(unittest.TestCase):
 class KeeperA1CrossoverTests(unittest.TestCase):
     """01 §2.2 A-1 composed with 08 §6.2's price sensitivity."""
 
-    def test_sq_527_the_loss_making_band_starts_at_2_830x_not_4x(self):
+    def test_sq_527_the_loss_making_band_starts_at_2_829x_not_4x(self):
         """SQ-527. §6.2 presents ≈4× as the A-1 failure threshold.
 
         The sentence is a true sufficient condition, but it omits the unsafe
-        interval from 2.830× through 4× where the rebate is already below the
+        interval from 2.829× through 4× where the rebate is already below the
         fee. VIT appreciation is unsafe because permissionless cranking loses
         money and decisions silently degrade to `NotDecisionGrade`.
         """
         crossover = a1_crossover_rate()
         multiple = crossover / FEE_VIT_USDC_RATE_REF
-        self.assertLess(abs(crossover - D("0.1415220688515187749")), D("1e-19"))
-        self.assertLess(abs(multiple - D("2.8304413770303754977")), D("1e-19"))
+        self.assertLess(abs(crossover - D("0.1414985098375756917")), D("1e-19"))
+        self.assertLess(abs(multiple - D("2.8299701967515138343")), D("1e-19"))
         self.assertEqual(rebate_fee_ratio(crossover), D(1))
         self.assertLess(crossover, D(4) * FEE_VIT_USDC_RATE_REF)
         self.assertLess(rebate_fee_ratio(D(4) * FEE_VIT_USDC_RATE_REF), D(1))
@@ -546,7 +546,7 @@ class KeeperA1CrossoverTests(unittest.TestCase):
         ceiling_crossover = a1_crossover_rate(KEEPER_REBATE_MAX)
         self.assertLess(ceiling_crossover, FEE_VIT_USDC_RATE_MAX)
         self.assertLess(
-            abs(ceiling_crossover / FEE_VIT_USDC_RATE_REF - D("9.434804590")),
+            abs(ceiling_crossover / FEE_VIT_USDC_RATE_REF - D("9.433233989")),
             D("0.000000001"),
         )
         finding = next(

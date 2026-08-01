@@ -34,7 +34,7 @@ I-24 intact, and it is the reason a hostile client can lose its own money and no
 
 | Never | Enforced by |
 |---|---|
-| Dispatches **arbitrary** client code | The ingress template admits exactly one `Transact`, whose decoded call must classify to `CallDomain::ExternalClient` (§3). The client *does* supply a call — an earlier revision said "no client bytes are ever dispatched", which is false. The true guarantee is narrower and is the one that matters: the only reachable calls are this service's own dispatchables, and no client-supplied **payload, predicate or decision rule** is ever evaluated for its consequence |
+| Dispatches **arbitrary** client code | The ingress template admits exactly one `Transact`, whose decoded call must classify to `CallDomain::ExternalClient` (§3). The client *does* supply a call — an earlier revision said "no client bytes are ever dispatched", which is false. The true guarantee is narrower and is the one that matters: the only reachable calls are this service's own dispatchables; the one client-selected `ClientRule` is the fixed data-only comparison of §4 and is evaluated only to choose this question's settlement coordinate, never dispatched and never evaluated for an external consequence |
 | Reads an external price, outcome or report into `W`, `s`, or any settlement input | I-34/I-37 + the metric-provenance refusal (§8.3) |
 | Lets an external failure halt, freeze or degrade the primary domain | The second ledger instance (§7) and VOID-as-universal-edge (§6.4) |
 | Sends XCM whose success or failure feeds `X` | The dedicated egress router, I-36 (§9) |
@@ -54,7 +54,7 @@ holds the roster.
 | `bond: Balance` | Native **VIT**, held for the life of the registration on the B19 (`pallet-attestor`) custody discipline. The first loss on abuse |
 | `delivery_float: Balance` | **USDC**, client-topped-up, and the *only* source of egress delivery fees (§9). Separate from the bond deliberately — see below |
 | `admitted_at`, `questions_live`, `questions_total` | Meter state |
-| `sub_id_policy: SubIdPolicy` | Presence policy (`Optional` or `Required`) for the opaque `sub_id`; it never grants meaning to those bytes |
+| `ClientPolicies[client_id]: SubIdPolicy` | Registry-owned internal presence policy (`Optional` or `Required`) for the opaque `sub_id`; it is not a field of contract-v21 `ClientRecord` and never grants meaning to those bytes |
 
 The roster is bounded by [13](./13-parameters.md) §4's `MaxClients = 64`: the hard maximum of
 `svc.max_live`, so even the extreme allocation in which every live question belongs to a distinct
@@ -78,6 +78,9 @@ sub-identity cannot be asserted to Bleavit at all. A client that needs per-contr
 supplies an opaque `sub_id: [u8; 32]` which Bleavit **stores, echoes in the report, binds into the
 provenance hash, and never interprets**. Bleavit makes no claim about who inside a client chain
 asked a question — the client chain does, to its own users, using a field Bleavit merely carries.
+`Required` refuses an absent value. `Optional` accepts either form and canonicalizes absence to
+`[0u8; 32]`; because contract-v21 `ReportView` deliberately carries no presence bit, an absent
+optional value and an explicitly supplied all-zero value are indistinguishable on chain.
 
 **Why two balances rather than one (normative; SQ-565 resolution, 2026-08-01).** An earlier
 revision made the bond the source of prepaid egress delivery fees, and the bond is native VIT while
@@ -232,11 +235,38 @@ not *un-deliver* the report — the price discovery already happened and was alr
 is why the fee is earned at `Sealed` and not at `Settled`, and it is why a client cannot get a free
 report by sabotaging its own settlement.
 
+**The seal edge has a distinct frozen deadline (N7 ruling, 2026-08-01).** The client may seal in the
+half-open interval `[window_end, window_end + orc.window)`. A pre-seal `void(qid)` remains refused
+through that interval and becomes permissionless only at `window_end + orc.window`. Reusing the
+D-18-frozen `orc.window` adds no parameter and makes the success edge real: if `seal` and VOID first
+became eligible in the same block, an arbitrary signed caller or transaction ordering could destroy
+an unsealed report before its client had any eligible block in which to publish it. Registration
+snapshots `orc.window` into the internal question terms and stores the checked deadline; later
+parameter amendments move neither this seal boundary nor the settlement deadline derived from the
+same snapshot. `seal` after it refuses `DeadlinePassed`; the deadline VOID is the status-quo outcome.
+
 **Which branch settles needs no trust at all.** The client pre-commits its `ClientRule` at
 registration; `seal` derives the realized branch **deterministically from the sealed TWAPs**, in the
 same transaction that publishes the report. Nothing can be declared after seeing prices. This is not
 "running foreign code": it is a two-field comparison committed before trading opened, O(1) and
 non-dispatching — and it fixes only the *settlement coordinate*, never the client's decision.
+
+The comparison is byte-defined rather than caller-programmable:
+
+```rust
+pub struct ClientRule { pub min_accept_improvement_1e9: FixedU64 }
+
+realized = if twap_accept_1e9 >= twap_reject_1e9 + min_accept_improvement_1e9 {
+    Accept
+} else {
+    Reject
+}
+```
+
+The field is bounded to `[0, 1e9]` at registration. The addition is checked; overflow selects
+`Reject`, which is algebraically the same result because no in-range Accept TWAP can clear that
+threshold. A zero floor makes equality Accept. The rule is retained in pallet-internal bounded
+storage alongside the §4a-frozen `Questions` row; it does not widen that frontend record.
 
 ---
 
@@ -259,6 +289,10 @@ Report {
     provenance_hash,                       // binds every field above + sub_id
 }
 ```
+
+`observations` is the **minimum** of the two sealed books' in-segment observation counts. It is a
+coverage claim about the pair, so publishing the sum or the stronger book would overstate the
+weakest price input the report depends on.
 
 ### 5.1 The manipulation bound
 
@@ -425,6 +459,27 @@ Rust/Python divergence nobody notices.
    read cross-chain, so it is [02](./02-integration-contract.md) contract surface and frozen with
    contract v21; a client verifying a report by storage proof recomputes exactly this.
 
+**Bond custody and report authentication (normative N7 ruling).** Registration stores the named
+set and freezes the per-attestor bond computed from the formula above. The set is bounded to **16**,
+reusing the existing 16-seat attestor-roster envelope rather than introducing an uncalibrated
+values key. Each named local `AccountId` must call `bond_attestor(question_id)` and transfer that
+exact amount of USDC into question-service custody; `open` refuses `AttestorBondInsufficient` until
+all named accounts have done so. Thus trading never opens against a merely promised set, and the
+pallet never debits an attestor on a client's unauthenticated instruction. After `Sealed`, a named
+attestor submits signed values until the half-open deadline `[sealed_at, sealed_at + orc.window)`;
+only its latest in-window value is retained. Settlement is permissionless at or after the deadline.
+
+On a valid median, every reporter outside the frozen tolerance forfeits its full per-question bond.
+Forty percent of each forfeiture is divided equally, rounding down, among named reporters whose
+latest value is within tolerance; the division remainder and the other sixty percent go to
+INSURANCE. If there is no within-tolerance recipient, all proceeds go to INSURANCE. Every other
+bond is returned to its owner. A VOID with no valid median returns all bonds: §5.5 prices an
+identified wrong side, and absence alone identifies none.
+
+The registration-frozen tolerance is bounded to **0.25** on the `1e9` grid, the existing maximum
+service-resolution envelope. The unsafe direction is upward (it excuses larger deviations); the
+bound is kernel-fixed and therefore cannot be widened after a market opens.
+
 **Why a median rather than a self-report with a challenge window.** A lie detector needs an
 adjudicator, and this game has none by construction — sending a client's disputed foreign fact to
 Bleavit's VIT electorate is exactly the contamination §6.1 refuses. Without an adjudicator,
@@ -435,8 +490,15 @@ bonded parties is the only construction that **prices one deviant and survives o
 ### 6.4 VOID is the universal failure edge
 
 Not a settlement mode — the failure edge for *every* path: no quorum, median out of range, deadline
-missed, service paused, escrow insufficient, attestor set collapsed, client unreachable at
-settlement.
+missed, service paused, escrow insufficient, attestor set collapsed.
+
+**`ClientUnreachable` is reserved and has no on-chain producer (N7 ruling, 2026-08-01).** The frozen
+contract-v21 `VoidReason` variant remains append-only, but egress reachability cannot produce it:
+§9/I-36 requires push outcome to be best-effort and never read back into Bleavit state, registry
+removal deliberately does not VOID, and settlement needs no live client call. Emitting the variant
+from any of those facts would contradict those stronger rules. It MUST remain unproduced unless a
+future contract-versioned amendment defines an on-chain reachability predicate independent of send
+outcome.
 
 **Registry removal is deliberately NOT on that list**, and an earlier revision listed it as "client
 deregistered", contradicting §2 one section over. The two rules must agree, and §2's is the one that
@@ -528,6 +590,12 @@ The runtime already demonstrates that the split is real: treasury `MAIN` is in t
 
 **`Question.client` MUST be asserted outside all three sets** at registration, or a client account
 becomes fee-exempt, deposit-exempt and an invalid transfer destination simultaneously.
+
+Here `Question.client` means the authenticated funding account, not the compact `ClientId`: the
+exact `local_signer` for local transport, or the local sovereign account derived from the record's
+exact XCM `Location`. The caller never supplies this account. `register` derives it from `Clients`
+and passes that immutable account through pair creation and seeding; an arbitrary `funder` argument
+is not part of the question-service call surface.
 
 ### 7.3 Funding is a typed domain, and refunding a client needs its own capability
 
@@ -764,9 +832,10 @@ probe already does it, with **no new user-reachable send authority**.
 ## 10. Failure, pause and the guardian surface
 
 The service has one guardian control: **pause**. A paused service refuses `register` and `seal`, and
-every live question takes the VOID edge at its deadline. Pause is a
-[06](./06-governance-and-guardians.md) playbook with the same bounded duration discipline as the
-others, and it is deliberately *not* a freeze: freezing external questions would strand client and
+every live question takes the VOID edge at its deadline. Pause is the
+[06](./06-governance-and-guardians.md) **PB-HALT-INTAKE** effect: its bounded batch sets both the
+primary intake pause and the service pause to the same expiry, and its revert clears both. It is
+deliberately *not* a freeze: freezing external questions would strand client and
 trader capital in books with no terminal path, which is the failure mode the whole VOID design exists
 to avoid.
 
@@ -794,7 +863,8 @@ service is meant to be integrated without one.
 `WindowCollidesWithDecision` · `SlotsExhausted` · `TvlCapWouldBind` · `AttestorSetTooSmall` ·
 `AttestorBondInsufficient` · `ClientIsProtocolAccount` · `EscrowInsufficient` · `NotSealed` ·
 `AlreadySealed` · `AlreadyTerminal` · `QuorumNotReached` · `MedianOutOfRange` · `DeadlineNotReached` ·
-`UnknownQuestion`
+`UnknownQuestion` · `DeadlinePassed` · `CreationFrozen` · `DuplicateAttestor` · `UnknownAttestor` ·
+`AlreadyBonded` · `InvalidSubId` · `ArithmeticOverflow` · `ArchiveNotReady` · `TryStateViolation`
 
 ---
 

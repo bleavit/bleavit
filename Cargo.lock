@@ -1285,6 +1285,7 @@ dependencies = [
  "pallet-origins",
  "pallet-preimage",
  "pallet-proxy",
+ "pallet-question-service",
  "pallet-referenda",
  "pallet-registry",
  "pallet-scheduler",
@@ -7832,6 +7833,8 @@ dependencies = [
  "parity-scale-codec",
  "proptest",
  "scale-info",
+ "serde",
+ "serde_json",
  "sp-core",
  "sp-io",
  "sp-runtime",
@@ -8173,6 +8176,29 @@ dependencies = [
  "parity-scale-codec",
  "polkadot-sdk-frame",
  "scale-info",
+]
+
+[[package]]
+name = "pallet-question-service"
+version = "0.1.0"
+dependencies = [
+ "client-registry-core",
+ "constitution-core",
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
+ "futarchy-primitives",
+ "pallet-assets",
+ "pallet-balances",
+ "pallet-client-registry",
+ "pallet-conditional-ledger",
+ "pallet-market",
+ "parity-scale-codec",
+ "question-service-core",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
 ]
 
 [[package]]
