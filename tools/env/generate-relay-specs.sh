@@ -98,11 +98,27 @@ generate_json coretime-paseo-local "$out/coretime-paseo-local.json"
 # built only at session boundaries from the then-active `num_cores`, and the
 # scheduler's `expected_claim_queue_len = min(num_cores, validator_groups)`
 # never polls the zombienet-injected coretime assignments while either factor
-# is 0. Seeding `num_cores = 3` at genesis guarantees the first boundary
-# (block ~10 under fast-runtime above) builds groups with headroom for the
-# largest topology (bleavit-xcm: 4242 + Asset Hub + Coretime; zombienet adds
-# its own per-para bump on top). Relay-side host configuration for the local
-# drill relay only — no 13-owned Bleavit tunable is touched.
+# is 0. Any non-zero seed unwedges that; the seed's job is solely to be > 0.
+#
+# The seed is 1, NOT 3 (SQ-568, corrected 2026-08-02 from live relay state).
+# Zombienet adds **one core per parachain** on top of whatever is seeded, so a
+# seed of 3 gave 3 + n cores against a fixed four validators — and
+# `ValidatorGroups` are built by splitting the validator set across the cores,
+# so any excess core gets an EMPTY group. The claim queue still schedules paras
+# onto those cores, and a para on an empty-group core can never have a candidate
+# backed: it builds locally to `max_candidate_depth`, stalls, and rebuilds from
+# genesis forever. The diagnostic that caught it read
+# `validatorGroups = [[0],[1],[2],[3],[],[]]` with the claim queue putting Asset
+# Hub on core 4 and Coretime on core 5 — both empty.
+#
+# The old comment's reasoning ("headroom for the largest topology") had it
+# backwards: the per-topology headroom already comes from zombienet's bump, so
+# the seed adds to it rather than covering it. Seeding 1 keeps total cores at
+# 1 + n <= 4 for every committed topology (1, 2 and 3 paras), so no group is
+# ever empty. Raising the seed again REQUIRES raising the relay validator count
+# in lockstep — the binding constraint is `seed + parachains <= validators`.
+# Relay-side host configuration for the local drill relay only — no 13-owned
+# Bleavit tunable is touched.
 python3 - "$out/paseo-local.json" <<'PY'
 import json, sys
 path = sys.argv[1]
@@ -114,7 +130,7 @@ config = (
     .setdefault("config", {})
 )
 scheduler = config.setdefault("scheduler_params", {})
-scheduler["num_cores"] = 3
+scheduler["num_cores"] = 1
 with open(path, "w") as handle:
     json.dump(spec, handle, indent=2)
     handle.write("\n")
