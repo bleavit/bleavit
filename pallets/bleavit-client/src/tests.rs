@@ -1,9 +1,9 @@
-use crate::{mock::*, Error, Question, Reports};
+use crate::{mock::*, Error, Question, Reports, WeightInfo};
 use bleavit_client_abi::{ClientRule, RegisterInput};
-use frame_support::{assert_err, assert_ok};
+use frame_support::{assert_err, assert_ok, weights::Weight};
 use futarchy_primitives::{FixedU64, ReportView, SettlementTrust};
 use parity_scale_codec::Decode;
-use staging_xcm::latest::Instruction;
+use staging_xcm::latest::{Asset, AssetId, Fungibility, Instruction};
 
 fn question() -> Question {
     let mut attestors = futarchy_primitives::BoundedVec::new();
@@ -56,16 +56,20 @@ fn report(question_id: u64) -> ReportView {
 #[test]
 fn ask_builds_the_exact_positional_program_and_frozen_call() {
     new_test_ext().execute_with(|| {
-        assert_ok!(BleavitClient::ask(
-            RuntimeOrigin::signed(account(1)),
-            question()
-        ));
+        assert_ok!(BleavitClient::ask(RuntimeOrigin::root(), question()));
         let (destination, message) = SENT
             .with(|messages| messages.borrow_mut().pop_front())
             .expect("ask must produce one message");
         assert_eq!(destination, BleavitLocation::get());
         assert_eq!(message.0.len(), 6);
-        assert!(matches!(message.0[0], Instruction::WithdrawAsset(_)));
+        assert!(matches!(
+            &message.0[0],
+            Instruction::WithdrawAsset(assets)
+                if assets.inner().as_slice() == [Asset {
+                    id: AssetId(UsdcLocation::get()),
+                    fun: Fungibility::Fungible(XcmFee::get()),
+                }]
+        ));
         assert!(matches!(message.0[1], Instruction::PayFees { .. }));
         match &message.0[2] {
             Instruction::Transact { call, .. } => {
@@ -85,16 +89,40 @@ fn ask_builds_the_exact_positional_program_and_frozen_call() {
 }
 
 #[test]
+fn outbound_spending_calls_require_the_configured_origin() {
+    new_test_ext().execute_with(|| {
+        assert_err!(
+            BleavitClient::ask(RuntimeOrigin::signed(account(1)), question()),
+            Error::<Test>::BadSpendingOrigin
+        );
+        assert_err!(
+            BleavitClient::open(RuntimeOrigin::signed(account(1)), 7),
+            Error::<Test>::BadSpendingOrigin
+        );
+        assert_err!(
+            BleavitClient::seal(RuntimeOrigin::signed(account(1)), 7),
+            Error::<Test>::BadSpendingOrigin
+        );
+        SENT.with(|messages| assert!(messages.borrow().is_empty()));
+    });
+}
+
+#[test]
 fn receiver_requires_provenance_and_exact_client_id() {
     new_test_ext().execute_with(|| {
         assert_err!(
             BleavitClient::receive_report(RuntimeOrigin::signed(account(1)), report(7)),
             Error::<Test>::BadBleavitOrigin
         );
-        assert_ok!(BleavitClient::receive_report(
-            RuntimeOrigin::root(),
-            report(7)
-        ));
+        let post_info =
+            BleavitClient::receive_report(RuntimeOrigin::root(), report(7)).expect("valid report");
+        assert_eq!(
+            post_info.actual_weight,
+            Some(
+                <() as WeightInfo>::receive_report(Weight::zero())
+                    .saturating_add(Weight::from_parts(7_000, 0))
+            )
+        );
         assert_eq!(
             Reports::<Test>::get(7).map(|value| value.question_id),
             Some(7)

@@ -23,6 +23,7 @@ pallet-balances = { workspace = true }
 pallet-collator-selection = { workspace = true }
 pallet-message-queue = { workspace = true }
 pallet-session = { workspace = true }
+pallet-sudo = { workspace = true }
 pallet-timestamp = { workspace = true }
 pallet-xcm = { workspace = true }
 
@@ -77,6 +78,7 @@ std = [
   "pallet-bleavit-client/std",
   "pallet-message-queue/std",
   "pallet-session/std",
+  "pallet-sudo/std",
   "pallet-timestamp/std",
   "pallet-xcm/std",
   "parachains-common/std",

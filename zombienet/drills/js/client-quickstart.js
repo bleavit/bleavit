@@ -1,5 +1,5 @@
 // N10: the quickstart includes this file verbatim. The drill proves that a
-// client runtime calls one pallet method and that Bleavit's own ingress path
+// client governance origin calls one pallet method and that Bleavit's own ingress path
 // reaches its deterministic fail-closed service gate before calibration.
 const fs = require("fs");
 const path = require("path");
@@ -84,7 +84,10 @@ async function register(networkInfo) {
   const alice = keyring.addFromUri("//Alice");
   const start = (await bleavit.rpc.chain.getHeader()).number.toNumber();
   const ask = api.tx.bleavitClient?.ask;
-  if (!ask) throw new Error("pallet-bleavit-client ask call is absent from the client runtime");
+  const sudo = api.tx.sudo?.sudo;
+  if (!ask || !sudo) {
+    throw new Error("client runtime must expose bleavitClient.ask behind the governance sudo path");
+  }
 
   // This is the only application-level input. The pallet derives b, the
   // absolute window, the USDC envelope and every XCM instruction.
@@ -97,7 +100,10 @@ async function register(networkInfo) {
     attestors: [alice.publicKey, alice.publicKey, alice.publicKey],
     rule: { minAcceptImprovement1e9: 10_000_000 },
   };
-  const events = await submit(ask(question), alice);
+  // The reference runtime binds SpendingOrigin to EnsureRoot. Sudo is only
+  // the harness governance wrapper; an integrator should submit through its
+  // own root/governance origin instead of widening the pallet to signed users.
+  const events = await submit(sudo(ask(question)), alice);
   const sent = eventOf(events, "bleavitClient", "IngressSent");
   if (!sent) throw new Error("client ask did not emit bleavitClient.IngressSent");
   writeState({ start, messageId: sent.data[sent.data.length - 1].toHex() });

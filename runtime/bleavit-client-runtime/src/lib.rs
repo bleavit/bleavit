@@ -98,6 +98,10 @@ construct_runtime!(
         ParachainInfo: staging_parachain_info = 3,
 
         Balances: pallet_balances = 10,
+        // Harness-only governance wrapper: the client pallet's reference
+        // SpendingOrigin remains EnsureRoot, and the drill reaches it through
+        // this explicit root/governance path rather than a signed-user bypass.
+        Sudo: pallet_sudo = 28,
         XcmpQueue: cumulus_pallet_xcmp_queue = 30,
         MessageQueue: pallet_message_queue = 31,
         CumulusXcm: cumulus_pallet_xcm = 32,

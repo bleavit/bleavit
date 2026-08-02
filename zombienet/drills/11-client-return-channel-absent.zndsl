@@ -1,8 +1,7 @@
-Description: The client can build and send the typed ingress while the return HRMP channel is intentionally absent, so the egress failure remains isolated from welfare/XCM health (16 §12; 15 I-36).
+Description: The client drives register to open to seal and report publication with the return HRMP channel intentionally absent; the authoritative report still publishes, the client receives no push, and Welfare.XcmTraffic X is unchanged (16 §12; 15 I-36).
 Network: ./zombienet/networks/bleavit-client-no-return.toml
 Creds: config
 
 bleavit-collator-1: reports block height is at least 10 within 300 seconds
 client-collator-1: reports block height is at least 10 within 300 seconds
-client-collator-1: js-script ./js/client-quickstart.js with "register" within 300 seconds
-bleavit-collator-1: js-script ./js/client-quickstart.js with "remote-refusal" within 300 seconds
+client-collator-1: js-script ./js/client-return-channel-absent.js with "lifecycle" within 900 seconds

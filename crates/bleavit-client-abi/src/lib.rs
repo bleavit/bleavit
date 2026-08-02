@@ -154,31 +154,31 @@ pub fn encode_client_ingress_call(call: &ClientIngressCall) -> Vec<u8> {
 /// Build the exact five-position v5 client-ingress program plus its optional
 /// trailing topic position from typed inputs.
 ///
-/// The caller supplies only the chain-owned locations, the fee envelope, the
+/// The caller supplies only the chain-owned locations, the XCM fee envelope, the
 /// refund beneficiary, and a typed service call. The instruction order and
 /// every filter-bearing instruction are fixed here and cannot be hand-authored
 /// by an integration.
 pub fn build_ingress_program(
     usdc_location: Location,
-    withdrawal: Balance,
+    fee_envelope: Balance,
     fee: Balance,
     refund_beneficiary: Location,
     call: ClientIngressCall,
     topic: Option<[u8; 32]>,
 ) -> Result<Xcm<()>, IngressBuildError> {
-    if withdrawal == 0 {
+    if fee_envelope == 0 {
         return Err(IngressBuildError::EmptyWithdrawal);
     }
     if fee == 0 {
         return Err(IngressBuildError::EmptyFee);
     }
-    if fee > withdrawal {
+    if fee > fee_envelope {
         return Err(IngressBuildError::FeeExceedsWithdrawal);
     }
 
     let withdrawal_asset = Asset {
         id: AssetId(usdc_location.clone()),
-        fun: Fungibility::Fungible(withdrawal),
+        fun: Fungibility::Fungible(fee_envelope),
     };
     let fee_asset = Asset {
         id: AssetId(usdc_location),
@@ -319,8 +319,23 @@ mod tests {
         )
         .expect("valid ingress");
         assert_eq!(program.0.len(), 6);
-        assert!(matches!(program.0[0], Instruction::WithdrawAsset(_)));
-        assert!(matches!(program.0[1], Instruction::PayFees { .. }));
+        assert!(matches!(
+            &program.0[0],
+            Instruction::WithdrawAsset(assets)
+                if assets.inner().as_slice()
+                    == [Asset {
+                        id: AssetId(Location::here()),
+                        fun: Fungibility::Fungible(1_000),
+                    }]
+        ));
+        assert!(matches!(
+            &program.0[1],
+            Instruction::PayFees { asset }
+                if asset == &Asset {
+                    id: AssetId(Location::here()),
+                    fun: Fungibility::Fungible(100),
+                }
+        ));
         assert!(matches!(
             program.0[2],
             Instruction::Transact {

@@ -127,6 +127,46 @@ fn fee_unset_is_the_atomic_arming_gate() -> TestResult {
 }
 
 #[test]
+fn registration_accepts_exact_escrow_plus_fee_and_not_one_unit_less() -> TestResult {
+    new_test_ext().execute_with(|| -> TestResult {
+        let registration = input(10)?;
+        let headroom =
+            pallet_market::core_market::seed_headroom(registration.b).map_err(|_| "headroom")?;
+        let escrow = headroom.checked_mul(2).ok_or("escrow overflow")?;
+        let fee_rate = FeeRate::get().ok_or("fee rate")?;
+        let fee = fee_rate
+            .mul_ceil(registration.declared_stake)
+            .max(kernel::SVC_FEE_FLOOR_USDC);
+        let required = escrow.checked_add(fee).ok_or("required overflow")?;
+        let one_less = required.checked_sub(1).ok_or("required is zero")?;
+        let current = usdc(ALICE);
+        let burn = current
+            .checked_sub(one_less)
+            .ok_or("test account too small")?;
+
+        Assets::burn_from(
+            USDC,
+            &ALICE,
+            burn,
+            Preservation::Preserve,
+            Precision::Exact,
+            Fortitude::Polite,
+        )
+        .map_err(|_| "burn to one less than required")?;
+        assert_noop!(
+            QuestionService::register(client_origin(), registration.clone()),
+            Error::<Test>::EscrowInsufficient
+        );
+        assert_eq!(usdc(ALICE), one_less);
+
+        Assets::mint_into(USDC, &ALICE, 1).map_err(|_| "restore exact funding")?;
+        assert_ok!(QuestionService::register(client_origin(), registration));
+        assert_eq!(usdc(ALICE), 0);
+        Ok(())
+    })
+}
+
+#[test]
 fn attestor_funding_failure_has_its_own_refusal() -> TestResult {
     new_test_ext().execute_with(|| -> TestResult {
         assert_ok!(QuestionService::register(client_origin(), input(10)?));

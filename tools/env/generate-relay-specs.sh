@@ -130,8 +130,8 @@ PY
 # they resolve through the same `$bleavit_target` defined at the top.
 builder="$bleavit_target/tools/bin/chain-spec-builder"
 wasm="$bleavit_target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm"
-preset_patch="$repo_root/target/env/bleavit-local-preset.json"
-drill_patch="$repo_root/target/env/bleavit-drill-patch.json"
+preset_patch="$bleavit_target/env/bleavit-local-preset.json"
+drill_patch="$bleavit_target/env/bleavit-drill-patch.json"
 properties="tokenSymbol=VIT,tokenDecimals=12,ss58Format=7777"
 
 rm -f "$preset_patch"
@@ -239,7 +239,7 @@ fi
 # drill exercises. Every production preset leaves `migration_halt` false, so no
 # shipped chain boots halted; no Bleavit runtime byte and no 13-owned value
 # changes (drill-env staging, SQ-276).
-migration_patch="$repo_root/target/env/bleavit-drill-migration-patch.json"
+migration_patch="$bleavit_target/env/bleavit-drill-migration-patch.json"
 python3 - "$drill_patch" "$migration_patch" <<'PY'
 import json
 import sys
@@ -330,7 +330,7 @@ python3 "$repo_root/tools/deploy/validate-chain-spec.py" \
 # byte changes: both fields default `None` in every production preset
 # (fail-closed — a chain never boots with a renewal authority), so this is
 # drill-env staging against the byte-identical release runtime (SQ-276 extended).
-coretime_patch="$repo_root/target/env/bleavit-drill-coretime-patch.json"
+coretime_patch="$bleavit_target/env/bleavit-drill-coretime-patch.json"
 python3 - "$drill_patch" "$coretime_patch" <<'PY'
 import json
 import sys

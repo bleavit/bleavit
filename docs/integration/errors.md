@@ -8,7 +8,7 @@ channel to identify a missed precondition.
 
 | Code | Refusal |
 |---|---|
-| CLIENT-001 | `UnsignedCaller` — `ask`, `open`, or `seal` needs a signed client account |
+| CLIENT-001 | `BadSpendingOrigin` — `ask`, `open`, or `seal` requires the configured spending/governance origin; widening it grants authority to debit shared sovereign USDC and consume XCM fees |
 | CLIENT-002 | `BadBleavitOrigin` — inbound push was not the exact Bleavit sovereign |
 | CLIENT-003 | `QuestionStakeEmpty` |
 | CLIENT-004 | `QuestionBudgetUnavailable` — fixed-point subsidy arithmetic refused the terms |

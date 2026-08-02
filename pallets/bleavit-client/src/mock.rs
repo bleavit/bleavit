@@ -1,6 +1,11 @@
 use crate as pallet_bleavit_client;
 use crate::OnReport;
-use frame_support::{derive_impl, parameter_types};
+use frame_support::{
+    derive_impl,
+    dispatch::{DispatchErrorWithPostInfo, DispatchResultWithPostInfo, Pays, PostDispatchInfo},
+    parameter_types,
+    weights::Weight,
+};
 use frame_system::EnsureRoot;
 use parity_scale_codec::Encode;
 use sp_core::crypto::AccountId32;
@@ -65,15 +70,25 @@ impl staging_xcm::latest::SendXcm for RecordingSender {
 
 pub struct TestHandler;
 impl OnReport for TestHandler {
-    fn on_report(_: &crate::ReportView) -> frame_support::dispatch::DispatchResult {
+    fn weight() -> Weight {
+        Weight::from_parts(25_000, 0)
+    }
+
+    fn on_report(_: &crate::ReportView) -> DispatchResultWithPostInfo {
         HANDLER_CALLS.with(|calls| {
             let mut calls = calls.borrow_mut();
             *calls = calls.saturating_add(1);
         });
         if HANDLER_FAILS.with(|fails| *fails.borrow()) {
-            Err(DispatchError::Other("test handler refusal"))
+            Err(DispatchErrorWithPostInfo {
+                post_info: PostDispatchInfo::default(),
+                error: DispatchError::Other("test handler refusal"),
+            })
         } else {
-            Ok(())
+            Ok(PostDispatchInfo {
+                actual_weight: Some(Weight::from_parts(7_000, 0)),
+                pays_fee: Pays::Yes,
+            })
         }
     }
 }
@@ -88,6 +103,9 @@ impl pallet_bleavit_client::Config for Test {
     type WindowLead = WindowLead;
     type XcmSender = RecordingSender;
     type BleavitOrigin = EnsureRoot<AccountId>;
+    // The reference runtime is fail-closed: only governance/root may spend
+    // the shared sovereign account until an integrator explicitly widens it.
+    type SpendingOrigin = EnsureRoot<AccountId>;
     type OnReport = TestHandler;
     type MaxReports = MaxReports;
     type WeightInfo = ();

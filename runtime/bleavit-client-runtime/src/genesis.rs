@@ -9,7 +9,7 @@ use sp_runtime::AccountId32;
 
 use crate::{
     configs::session_keys, AccountId, BalancesConfig, ParachainInfoConfig, RuntimeGenesisConfig,
-    SessionConfig,
+    SessionConfig, SudoConfig,
 };
 
 pub const ALICE_PUBLIC: [u8; 32] = [
@@ -41,6 +41,11 @@ fn genesis() -> Value {
         },
         parachain_info: ParachainInfoConfig {
             parachain_id: ParaId::from(4343)
+        },
+        sudo: SudoConfig {
+            // The harness exercises the reference pallet through an explicit
+            // governance wrapper; the pallet itself remains EnsureRoot.
+            key: Some(alice.clone())
         },
         session: SessionConfig {
             keys: vec![

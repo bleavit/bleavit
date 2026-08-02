@@ -9,7 +9,10 @@ use core::marker::PhantomData;
 use frame_support::{traits::Get, weights::Weight};
 
 pub trait WeightInfo {
-    fn receive_report() -> Weight;
+    /// `handler_weight` is the client runtime's declared upper bound for its
+    /// `OnReport` callback. The pallet charges this component before invoking
+    /// arbitrary client-runtime logic.
+    fn receive_report(handler_weight: Weight) -> Weight;
     fn ask() -> Weight;
     fn open() -> Weight;
     fn seal() -> Weight;
@@ -29,8 +32,8 @@ fn reference<T: frame_system::Config>() -> Weight {
 pub struct SubstrateWeight<T>(PhantomData<T>);
 
 impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
-    fn receive_report() -> Weight {
-        reference::<T>()
+    fn receive_report(handler_weight: Weight) -> Weight {
+        reference::<T>().saturating_add(handler_weight)
     }
 
     fn ask() -> Weight {
@@ -51,8 +54,8 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 }
 
 impl WeightInfo for () {
-    fn receive_report() -> Weight {
-        Weight::from_parts(REF_COMPUTE, 0)
+    fn receive_report(handler_weight: Weight) -> Weight {
+        Weight::from_parts(REF_COMPUTE, 0).saturating_add(handler_weight)
     }
 
     fn ask() -> Weight {

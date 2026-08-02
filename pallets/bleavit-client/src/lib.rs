@@ -14,7 +14,11 @@ extern crate alloc;
 use bleavit_client_abi::{
     build_ingress_program, ClientIngressCall, ClientRule, IngressBuildError, RegisterInput,
 };
-use frame_support::traits::{EnsureOrigin, Get};
+use frame_support::{
+    dispatch::{DispatchErrorWithPostInfo, DispatchResultWithPostInfo, PostDispatchInfo},
+    traits::{EnsureOrigin, Get},
+    weights::Weight,
+};
 use futarchy_primitives::{
     bounds, AccountId, Balance, BlockNumber, BoundedVec, ClientId, FixedU64, H256,
 };
@@ -88,12 +92,24 @@ pub enum Action {
 /// A report consumer is deliberately a runtime trait rather than an opaque
 /// callback: the client runtime decides what a certified answer changes.
 pub trait OnReport {
-    fn on_report(report: &ReportView) -> frame_support::dispatch::DispatchResult;
+    /// Upper bound for the complete callback, including all client-runtime
+    /// storage and computation. Under-declaring this value is unsafe: the
+    /// pallet's dispatch weight includes it before the callback runs.
+    fn weight() -> Weight;
+
+    /// Apply the client-local decision and optionally return the callback's
+    /// actual weight for a post-dispatch refund. The returned weight is the
+    /// handler portion only; the pallet adds its own measured base.
+    fn on_report(report: &ReportView) -> DispatchResultWithPostInfo;
 }
 
 impl OnReport for () {
-    fn on_report(_: &ReportView) -> frame_support::dispatch::DispatchResult {
-        Ok(())
+    fn weight() -> Weight {
+        Weight::zero()
+    }
+
+    fn on_report(_: &ReportView) -> DispatchResultWithPostInfo {
+        Ok(PostDispatchInfo::default())
     }
 }
 
@@ -109,7 +125,7 @@ fn map_build_error(error: IngressBuildError) -> ErrorCode {
 /// the machine-readable error codes documented in `docs/integration/errors.md`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorCode {
-    UnsignedCaller,
+    BadSpendingOrigin,
     BadBleavitOrigin,
     QuestionStakeEmpty,
     QuestionBudgetUnavailable,
@@ -131,7 +147,7 @@ pub enum ErrorCode {
 pub mod pallet {
     use super::*;
     use frame_support::{pallet_prelude::*, storage::with_storage_layer};
-    use frame_system::{ensure_signed, pallet_prelude::*};
+    use frame_system::pallet_prelude::*;
     use sp_runtime::{traits::SaturatedConversion, TryRuntimeError};
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -184,6 +200,13 @@ pub mod pallet {
         /// signed, root, or unrelated XCM origin must not pass this check.
         type BleavitOrigin: EnsureOrigin<Self::RuntimeOrigin>;
 
+        /// Origin authorized to spend the client parachain's shared sovereign
+        /// USDC account and XCM fee envelope. One origin covers `ask`, `open`,
+        /// and `seal` because all three debit that same account; separating
+        /// them would create three privilege policies for one custody domain.
+        /// The reference integration binds this to root/governance.
+        type SpendingOrigin: EnsureOrigin<Self::RuntimeOrigin>;
+
         /// Local application action on a verified report.
         type OnReport: OnReport;
 
@@ -217,9 +240,9 @@ pub mod pallet {
 
     #[pallet::error]
     pub enum Error<T> {
-        /// CLIENT-001: the outbound dispatch must be signed by the local
-        /// application account.
-        UnsignedCaller,
+        /// CLIENT-001: the outbound dispatch did not come from the configured
+        /// spending/governance origin.
+        BadSpendingOrigin,
         /// CLIENT-002: the inbound origin was not the configured Bleavit
         /// sovereign origin.
         BadBleavitOrigin,
@@ -270,8 +293,11 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// Fixed call index 0: this is the v22 client receiver ABI.
         #[pallet::call_index(0)]
-        #[pallet::weight(T::WeightInfo::receive_report())]
-        pub fn receive_report(origin: OriginFor<T>, report: ReportView) -> DispatchResult {
+        #[pallet::weight(T::WeightInfo::receive_report(T::OnReport::weight()))]
+        pub fn receive_report(
+            origin: OriginFor<T>,
+            report: ReportView,
+        ) -> DispatchResultWithPostInfo {
             T::BleavitOrigin::ensure_origin(origin).map_err(|_| Error::<T>::BadBleavitOrigin)?;
             ensure!(
                 report.client_id == T::ClientId::get(),
@@ -294,13 +320,21 @@ pub mod pallet {
             );
 
             with_storage_layer(|| {
-                T::OnReport::on_report(&report).map_err(|_| Error::<T>::ReportHandlerRejected)?;
+                let handler_post_info = match T::OnReport::on_report(&report) {
+                    Ok(post_info) => post_info,
+                    Err(error) => {
+                        return Err(DispatchErrorWithPostInfo {
+                            post_info: Self::add_base_weight(error.post_info),
+                            error: Error::<T>::ReportHandlerRejected.into(),
+                        });
+                    }
+                };
                 Reports::<T>::insert(report.question_id, &report);
                 Self::deposit_event(Event::ReportReceived {
                     question_id: report.question_id,
                     provenance_hash: report.provenance_hash,
                 });
-                Ok(())
+                Ok(Self::add_base_weight(handler_post_info))
             })
         }
 
@@ -310,12 +344,12 @@ pub mod pallet {
         #[pallet::call_index(1)]
         #[pallet::weight(T::WeightInfo::ask())]
         pub fn ask(origin: OriginFor<T>, question: Question) -> DispatchResult {
-            ensure_signed(origin).map_err(|_| Error::<T>::UnsignedCaller)?;
-            let (input, withdrawal) = Self::registration_input(question)?;
+            T::SpendingOrigin::ensure_origin(origin).map_err(|_| Error::<T>::BadSpendingOrigin)?;
+            let (input, fee_envelope) = Self::registration_input(question)?;
             let topic = sp_io::hashing::blake2_256(&input.encode());
             let program = build_ingress_program(
                 T::UsdcLocation::get(),
-                withdrawal,
+                fee_envelope,
                 T::XcmFee::get(),
                 T::RefundLocation::get(),
                 ClientIngressCall::Register(input),
@@ -335,7 +369,7 @@ pub mod pallet {
         #[pallet::call_index(2)]
         #[pallet::weight(T::WeightInfo::open())]
         pub fn open(origin: OriginFor<T>, question_id: u64) -> DispatchResult {
-            ensure_signed(origin).map_err(|_| Error::<T>::UnsignedCaller)?;
+            T::SpendingOrigin::ensure_origin(origin).map_err(|_| Error::<T>::BadSpendingOrigin)?;
             let program = Self::program(ClientIngressCall::Open { question_id }, question_id)?;
             let message_id = Self::send(program)?;
             Self::deposit_event(Event::IngressSent {
@@ -349,7 +383,7 @@ pub mod pallet {
         #[pallet::call_index(3)]
         #[pallet::weight(T::WeightInfo::seal())]
         pub fn seal(origin: OriginFor<T>, question_id: u64) -> DispatchResult {
-            ensure_signed(origin).map_err(|_| Error::<T>::UnsignedCaller)?;
+            T::SpendingOrigin::ensure_origin(origin).map_err(|_| Error::<T>::BadSpendingOrigin)?;
             let program = Self::program(ClientIngressCall::Seal { question_id }, question_id)?;
             let message_id = Self::send(program)?;
             Self::deposit_event(Event::IngressSent {
@@ -363,7 +397,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         fn map_error(code: ErrorCode) -> Error<T> {
             match code {
-                ErrorCode::UnsignedCaller => Error::<T>::UnsignedCaller,
+                ErrorCode::BadSpendingOrigin => Error::<T>::BadSpendingOrigin,
                 ErrorCode::BadBleavitOrigin => Error::<T>::BadBleavitOrigin,
                 ErrorCode::QuestionStakeEmpty => Error::<T>::QuestionStakeEmpty,
                 ErrorCode::QuestionBudgetUnavailable => Error::<T>::QuestionBudgetUnavailable,
@@ -399,7 +433,12 @@ pub mod pallet {
             let end = start
                 .checked_add(question.window)
                 .ok_or(Error::<T>::WindowOverflow)?;
-            let withdrawal = escrow
+            // This is the documented client funding requirement, not the
+            // amount held by the XCM program. `QuestionService::register`
+            // seeds the escrow from the sovereign account, so withdrawing it
+            // here would make an exactly funded client fail. The positional
+            // template's WithdrawAsset is the execution-fee envelope only.
+            let _required_funding = escrow
                 .checked_add(T::RegistrationFeeBuffer::get())
                 .and_then(|value| value.checked_add(T::XcmFee::get()))
                 .ok_or(Error::<T>::RegistrationBudgetOverflow)?;
@@ -414,7 +453,17 @@ pub mod pallet {
                 rule: question.rule,
                 attestors: question.attestors,
             };
-            Ok((input, withdrawal))
+            Ok((input, T::XcmFee::get()))
+        }
+
+        fn add_base_weight(post_info: PostDispatchInfo) -> PostDispatchInfo {
+            let base = T::WeightInfo::receive_report(Weight::zero());
+            PostDispatchInfo {
+                actual_weight: post_info
+                    .actual_weight
+                    .map(|actual| base.saturating_add(actual)),
+                pays_fee: post_info.pays_fee,
+            }
         }
 
         fn program(

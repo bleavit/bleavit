@@ -22,7 +22,13 @@ The client runtime supplies route constants and one report handler. It never wri
 computes a service fee, or encodes a Bleavit call.
 
 ```rust
-use frame_support::parameter_types;
+use frame_support::{
+    dispatch::{DispatchResultWithPostInfo, PostDispatchInfo},
+    parameter_types,
+    traits::Get,
+    weights::Weight,
+};
+use frame_system::EnsureRoot;
 use futarchy_primitives::{AccountId, Balance, BlockNumber, ClientId, FixedU64};
 use pallet_bleavit_client::{ClientRule, Question, ReportView};
 use staging_xcm::latest::{Junction, Location};
@@ -43,12 +49,20 @@ parameter_types! {
 
 pub struct MyDecisionRule;
 impl pallet_bleavit_client::OnReport for MyDecisionRule {
-    fn on_report(report: &ReportView) -> frame_support::dispatch::DispatchResult {
+    fn weight() -> Weight {
+        // This is the measured upper bound for the whole callback, including
+        // enact_local_policy's storage and computation.
+        MyDecisionRuleWeight::get()
+    }
+
+    fn on_report(report: &ReportView) -> DispatchResultWithPostInfo {
         let spread = report.twap_accept_1e9.0.saturating_sub(report.twap_reject_1e9.0);
         if report.certified && spread >= 100_000_000 {
             enact_local_policy(report.question_id)?;
         }
-        Ok(())
+        // Return the actual callback weight when the handler can measure it;
+        // default() means no refund, not permission to under-declare weight().
+        Ok(PostDispatchInfo::default())
     }
 }
 
@@ -62,6 +76,9 @@ impl pallet_bleavit_client::Config for Runtime {
     type WindowLead = WindowLead;
     type XcmSender = ClientXcmpRouter;
     type BleavitOrigin = EnsureBleavitSovereign;
+    // Reference default: only root/governance may spend the shared sovereign
+    // account. Widening this grants every matching caller spending authority.
+    type SpendingOrigin = EnsureRoot<AccountId>;
     type OnReport = MyDecisionRule;
     type MaxReports = MaxReports;
     type WeightInfo = pallet_bleavit_client::weights::SubstrateWeight<Runtime>;
@@ -71,6 +88,14 @@ impl pallet_bleavit_client::Config for Runtime {
 `RegistrationFeeBuffer` is a conservative envelope for the live service fee and floor; it is not a
 second protocol tariff. `WindowLead` absorbs delivery latency before the pallet derives the remote
 absolute window. Both are client-runtime deployment policy, not values-layer protocol parameters.
+The escrow and service-fee envelope stays in the sovereign account for remote registration; the
+positional program withdraws only `XcmFee` at `WithdrawAsset` position 0 and pays it at position 1.
+
+`SpendingOrigin` intentionally defaults to root/governance. Widening it to a signed or operator
+origin lets every matching caller choose costly questions and consume the client chain's XCM fees.
+`OnReport::weight()` must be a measured upper bound for the complete callback. Under-declaring the
+handler is unsafe; return actual handler weight through `PostDispatchInfo` when it is available so
+the pallet can refund the difference.
 
 ## 3. Ask, open, and seal
 
@@ -126,7 +151,7 @@ fee-rate value is adopted.
 <!-- quickstart-drill-source:begin -->
 ```javascript
 // N10: the quickstart includes this file verbatim. The drill proves that a
-// client runtime calls one pallet method and that Bleavit's own ingress path
+// client governance origin calls one pallet method and that Bleavit's own ingress path
 // reaches its deterministic fail-closed service gate before calibration.
 const fs = require("fs");
 const path = require("path");
@@ -211,7 +236,10 @@ async function register(networkInfo) {
   const alice = keyring.addFromUri("//Alice");
   const start = (await bleavit.rpc.chain.getHeader()).number.toNumber();
   const ask = api.tx.bleavitClient?.ask;
-  if (!ask) throw new Error("pallet-bleavit-client ask call is absent from the client runtime");
+  const sudo = api.tx.sudo?.sudo;
+  if (!ask || !sudo) {
+    throw new Error("client runtime must expose bleavitClient.ask behind the governance sudo path");
+  }
 
   // This is the only application-level input. The pallet derives b, the
   // absolute window, the USDC envelope and every XCM instruction.
@@ -224,7 +252,10 @@ async function register(networkInfo) {
     attestors: [alice.publicKey, alice.publicKey, alice.publicKey],
     rule: { minAcceptImprovement1e9: 10_000_000 },
   };
-  const events = await submit(ask(question), alice);
+  // The reference runtime binds SpendingOrigin to EnsureRoot. Sudo is only
+  // the harness governance wrapper; an integrator should submit through its
+  // own root/governance origin instead of widening the pallet to signed users.
+  const events = await submit(sudo(ask(question)), alice);
   const sent = eventOf(events, "bleavitClient", "IngressSent");
   if (!sent) throw new Error("client ask did not emit bleavitClient.IngressSent");
   writeState({ start, messageId: sent.data[sent.data.length - 1].toHex() });

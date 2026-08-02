@@ -115,6 +115,12 @@ impl pallet_balances::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
 }
 
+impl pallet_sudo::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type RuntimeCall = RuntimeCall;
+    type WeightInfo = ();
+}
+
 impl cumulus_pallet_parachain_system::Config for Runtime {
     type WeightInfo = ();
     type RuntimeEvent = RuntimeEvent;
@@ -342,6 +348,9 @@ impl pallet_bleavit_client::Config for Runtime {
     type WindowLead = WindowLead;
     type XcmSender = XcmpQueue;
     type BleavitOrigin = EnsureBleavitOrigin;
+    // This standalone reference runtime has no application operator origin;
+    // keep the drop-in pallet fail-closed until a client adds governance.
+    type SpendingOrigin = EnsureRoot<AccountId>;
     type OnReport = ();
     type MaxReports = MaxReports;
     type WeightInfo = ();
