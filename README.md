@@ -38,6 +38,7 @@ rollout that removes `sudo` at Phase 4.
 | Path | What it is |
 |---|---|
 | [`docs/architecture/`](docs/architecture/README.md) | The specification (00–16). Start with its README; reading order 01 → 02 → 03 → 04 → 05 |
+| [`docs/integration/`](docs/integration/README.md) | **For clients** — plain-language guides to using Bleavit's hosted question service from a parachain, a contract, or an off-chain service |
 | [`docs/design/`](docs/design/claude-design-kit/00-START-HERE.md) | Derived, non-normative design assets: `claude-design-kit/` packs the spec into ≤10 files + a ready prompt for generating frontend design prototypes with Claude Design |
 | [`PLAN.md`](PLAN.md) | Implementation roadmap, milestone status, session log — the living source of "where are we" |
 | [`AGENTS.md`](AGENTS.md) | Operating manual + rules for all coding agents (and useful for humans) |

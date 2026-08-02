@@ -246,6 +246,7 @@ and `ls -lL` rather than `ls -l` (which happily shows a dangling one).
 | Path | Status | What it is |
 |---|---|---|
 | `docs/architecture/` | spec | The specification (00–16 + README) |
+| `docs/integration/` | living | **Human-facing client documentation** (N11): nine plain-language files for people integrating the hosted question service. Non-normative — `docs/architecture/` wins on conflict, and [16](docs/architecture/16-hosted-question-service.md) is the owning doc. The quickstart's code is the integration drill's code, so CI notices when it rots |
 | `docs/design/` | derived | Non-normative design-context pack (`claude-design-kit/`: spec distillations + Claude Design prompt); spec wins on conflict; regenerate after any spec change |
 | `PLAN.md` | living | Implementation roadmap, status, session log |
 | `README.md` | living | Human orientation |
