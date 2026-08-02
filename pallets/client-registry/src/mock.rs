@@ -1,7 +1,8 @@
 //! Mock runtime for `pallet-client-registry` (15 §4.1 / I-34).
 
 use crate as pallet_client_registry;
-use frame_support::{derive_impl, parameter_types};
+use frame_support::{derive_impl, parameter_types, traits::AsEnsureOriginWithArg, PalletId};
+use frame_system::{EnsureRoot, EnsureSigned};
 use sp_core::crypto::AccountId32;
 use sp_runtime::{traits::IdentityLookup, BuildStorage};
 
@@ -11,6 +12,7 @@ frame_support::construct_runtime!(
     pub enum Test {
         System: frame_system,
         Balances: pallet_balances,
+        Assets: pallet_assets,
         Origins: pallet_origins,
         ClientRegistry: pallet_client_registry,
     }
@@ -30,12 +32,24 @@ impl pallet_balances::Config for Test {
     type Balance = futarchy_primitives::Balance;
 }
 
+#[derive_impl(pallet_assets::config_preludes::TestDefaultConfig)]
+impl pallet_assets::Config for Test {
+    type Currency = Balances;
+    type Balance = futarchy_primitives::Balance;
+    type AssetId = u32;
+    type AssetIdParameter = u32;
+    type CreateOrigin = AsEnsureOriginWithArg<EnsureSigned<AccountId32>>;
+    type ForceOrigin = EnsureRoot<AccountId32>;
+}
+
 impl pallet_origins::Config for Test {
     type WeightInfo = ();
 }
 
 parameter_types! {
     pub static ClientBondValue: Option<futarchy_primitives::Balance> = Some(1_000);
+    pub DeliveryAssetId: u32 = 1_337;
+    pub const DeliveryFloatPalletId: PalletId = PalletId(*b"t/cliflt");
 }
 
 pub struct TestClientBond;
@@ -45,11 +59,26 @@ impl pallet_client_registry::ClientBondProvider for TestClientBond {
     }
 }
 
+pub struct TestClientFunding;
+impl pallet_client_registry::ClientFunding<AccountId32> for TestClientFunding {
+    fn funding_account(client: pallet_client_registry::ClientId) -> Option<AccountId32> {
+        let record = pallet_client_registry::Clients::<Test>::get(client)?;
+        record
+            .local_signer
+            .or_else(|| record.location.map(|_| account(2)))
+    }
+}
+
 impl pallet_client_registry::Config for Test {
     type ValuesOrigin = pallet_origins::EnsureConstitutionalValues;
+    type ClientOrigin = pallet_client_registry::EnsureExternalClient;
+    type ClientFunding = TestClientFunding;
     type ClientBond = TestClientBond;
     type Currency = Balances;
     type RuntimeHoldReason = RuntimeHoldReason;
+    type DeliveryAssets = Assets;
+    type DeliveryAssetId = DeliveryAssetId;
+    type DeliveryFloatPalletId = DeliveryFloatPalletId;
     type WeightInfo = ();
 
     #[cfg(feature = "runtime-benchmarks")]
@@ -65,6 +94,10 @@ impl pallet_client_registry::BenchmarkHelper<RuntimeOrigin, AccountId32> for Tes
         pallet_origins::Origin::ConstitutionalValues.into()
     }
 
+    fn client(client: pallet_client_registry::ClientId) -> RuntimeOrigin {
+        external_origin(client)
+    }
+
     fn bond_owner() -> AccountId32 {
         account(1)
     }
@@ -76,6 +109,11 @@ impl pallet_client_registry::BenchmarkHelper<RuntimeOrigin, AccountId32> for Tes
     fn prime_funds(who: &AccountId32, value: futarchy_primitives::Balance) {
         use frame_support::traits::fungible::Mutate;
         let _ = <Balances as Mutate<AccountId32>>::set_balance(who, value);
+    }
+
+    fn prime_delivery_funds(who: &AccountId32, value: futarchy_primitives::Balance) {
+        use frame_support::traits::fungibles::Mutate;
+        let _ = <Assets as Mutate<AccountId32>>::mint_into(DeliveryAssetId::get(), who, value);
     }
 }
 
@@ -114,6 +152,19 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         assimilation.is_ok(),
         "mock balances genesis must assimilate"
     );
+    let assets = pallet_assets::GenesisConfig::<Test> {
+        assets: vec![(DeliveryAssetId::get(), account(1), true, 100)],
+        metadata: vec![],
+        accounts: vec![
+            (DeliveryAssetId::get(), account(1), 1_000_000),
+            (DeliveryAssetId::get(), account(2), 1_000_000),
+            (DeliveryAssetId::get(), account(3), 1_000_000),
+        ],
+        next_asset_id: None,
+        reserves: vec![],
+    }
+    .assimilate_storage(&mut storage);
+    assert!(assets.is_ok(), "mock assets genesis must assimilate");
     let mut ext = sp_io::TestExternalities::new(storage);
     ext.execute_with(|| System::set_block_number(1));
     ext

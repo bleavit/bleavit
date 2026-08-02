@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bleavit-client-abi = { path = "../../crates/bleavit-client-abi", default-features = false }
 futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
 futarchy-treasury-core = { path = "../../crates/futarchy-treasury-core", default-features = false }
 origins-core = { path = "../../crates/origins-core", default-features = false }
@@ -36,6 +37,7 @@ sp-io = { workspace = true, features = ["std"] }
 [features]
 default = ["std"]
 std = [
+  "bleavit-client-abi/std",
   "cumulus-primitives-core/std",
   "frame-support/std",
   "frame-system/std",

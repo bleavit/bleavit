@@ -49,12 +49,13 @@ holds the roster.
 
 | Field | Meaning |
 |---|---|
-| `location: Location` | The client's XCM origin, matched by **exact equality** — never by prefix, never after `DescendOrigin`/`AliasOrigin` |
+| `location: Option<Location>` | The remote client's XCM origin, matched by **exact equality** — never by prefix, never after `DescendOrigin`/`AliasOrigin`; `None` for a local client |
+| `local_signer: Option<AccountId>` | The local client's exact signed identity; `None` for a remote XCM client. Exactly one identity field is populated |
 | `client_id: ClientId` (`u32`) | The dense handle everything else keys on. `Location`'s ~306-byte `MaxEncodedLen` must never enter `OriginCaller`, which `pallet-scheduler`'s bounded `Agenda` would not survive |
 | `bond: Balance` | Native **VIT**, held for the life of the registration on the B19 (`pallet-attestor`) custody discipline. The first loss on abuse |
 | `delivery_float: Balance` | **USDC**, client-topped-up, and the *only* source of egress delivery fees (§9). Separate from the bond deliberately — see below |
 | `admitted_at`, `questions_live`, `questions_total` | Meter state |
-| `ClientPolicies[client_id]: SubIdPolicy` | Registry-owned internal presence policy (`Optional` or `Required`) for the opaque `sub_id`; it is not a field of contract-v21 `ClientRecord` and never grants meaning to those bytes |
+| `ClientPolicies[client_id]: SubIdPolicy` | Registry-owned internal presence policy (`Optional` or `Required`) for the opaque `sub_id`; it is not a field of contract-v22 `ClientRecord` and never grants meaning to those bytes |
 
 The roster is bounded by [13](./13-parameters.md) §4's `MaxClients = 64`: the hard maximum of
 `svc.max_live`, so even the extreme allocation in which every live question belongs to a distinct
@@ -68,9 +69,12 @@ try-state.
 client refuses *new* registrations immediately and lets live questions run to their own terminal
 state, because the alternative strands trader capital in books nobody can settle. A client whose
 removal must be immediate is handled by the guardian pause of §10, which VOIDs rather than strands.
-Mechanically, removal writes a tombstone: exact-location authentication and the native hold remain
-until `questions_live` reaches zero; only then are both indexes deleted and the exact remaining hold
-released. A tombstoned client gets `ClientRemoved` on a new question registration.
+Mechanically, removal first returns the complete USDC `delivery_float` to the runtime-derived client
+funder and then writes a tombstone: exact-identity authentication and the native hold remain until
+`questions_live` reaches zero; only then are both indexes deleted and the exact remaining hold
+released. The refund and tombstone share one storage layer, so a failed exact refund leaves the
+client wholly live. A tombstoned client gets `ClientRemoved` on a new question registration and its
+remaining reports use authoritative pull only.
 
 **Identity is chain-granular, deliberately.** A contract on another chain authenticates as *that
 chain*, not as itself. `DescendOrigin` and `AliasOrigin` stay out of the ingress template (§3), so
@@ -79,7 +83,7 @@ supplies an opaque `sub_id: [u8; 32]` which Bleavit **stores, echoes in the repo
 provenance hash, and never interprets**. Bleavit makes no claim about who inside a client chain
 asked a question — the client chain does, to its own users, using a field Bleavit merely carries.
 `Required` refuses an absent value. `Optional` accepts either form and canonicalizes absence to
-`[0u8; 32]`; because contract-v21 `ReportView` deliberately carries no presence bit, an absent
+`[0u8; 32]`; because contract-v22 `ReportView` (unchanged from v21) deliberately carries no presence bit, an absent
 optional value and an explicitly supplied all-zero value are indistinguishable on chain.
 
 **Why two balances rather than one (normative; SQ-565 resolution, 2026-08-01).** An earlier
@@ -97,6 +101,33 @@ the whole bond USDC would discard the B19 hold discipline for a security deposit
 governance-adjacent by nature. A float that runs dry stops **pushes only** — the pull surface is
 unaffected, because §9 already makes pull the authoritative delivery and push best-effort, so an
 empty float degrades exactly the leg that was already allowed to fail.
+
+The float has its own client-authorized custody path. `top_up_delivery_float(amount)` and
+`withdraw_delivery_float(amount)` are accepted only through that record's exact `ExternalClient`
+origin; neither call accepts a funder, beneficiary, asset or destination argument. The runtime
+derives the sole USDC funder from the registered location's sovereign account or the exact local
+signer and moves the exact amount to or from a deterministic per-client escrow. The stored
+`delivery_float` is the client's claim; physical custody MUST be at least that liability. A third
+party may donate USDC to a publicly addressable escrow, but that surplus grants no client claim and
+MUST NOT make try-state externally haltable. Every nonzero claim MUST also be at least the asset's
+live on-chain minimum balance, so no successful debit can reap physical custody while leaving a
+stored liability. A voluntary withdrawal may reach zero; any other withdrawal remainder below the
+minimum is refused. Egress prepayment is stricter: it refuses a debit whose remainder would reach
+zero or fall below the minimum, preserving the N4 custody rule the float supersedes. Zero,
+insufficient, below-minimum, overflow and custody-accounting refusals are distinct (§11). Top-up
+also refuses a source-account remainder between zero and the asset minimum: `Expendable` is used
+only for an exact zero, so an ostensibly exact transfer can never burn uncredited source dust. Every
+failed transfer rolls both storage and assets back.
+
+**Custody identity is frozen.** `ClientDeliveryPalletId = PalletId(*b"bl/cdelv")`, and client
+`c`'s escrow is exactly
+`ClientDeliveryPalletId::get().into_sub_account_truncating(c: ClientId)`. These accounts are created
+on demand by top-up and are not members of [08](./08-treasury-and-economics.md) §2.1's exact
+genesis-endowed set; each nonzero claim itself keeps its account at or above the live USDC minimum.
+The runtime's `ForeignAssets` instance has no hold provider (`Holder = ()`), so the deterministic
+keyless escrow is the USDC custody analogue of N4's native hold: prepayment moves the exact debit
+from that escrow to the runtime-fixed beneficiary in the same rollback layer. The VIT hold remains
+byte-for-byte untouched; no user gains a transferable custody key.
 
 **Off-chain services** cannot send XCM. They use the identical calls from a **local signed
 account** — but that account must be bound in the registry, and an earlier revision's
@@ -471,8 +502,9 @@ Rust/Python divergence nobody notices.
    pushed or pulled report. Freezing a promise the buyer cannot check is not freezing it.
 4. **`provenance_hash` is `blake2_256` over a domain-separated SCALE preimage**, separator
    `b"bleavit/hosted-report/v1"`, covering every field of §5's `Report` including `sub_id`. It is
-   read cross-chain, so it is [02](./02-integration-contract.md) contract surface and frozen with
-   contract v21; a client verifying a report by storage proof recomputes exactly this.
+   read cross-chain, so it is [02](./02-integration-contract.md) contract surface, introduced at
+   v21 and byte-identical at current v22; a client verifying a report by storage proof recomputes
+   exactly this.
 
 **Bond custody and report authentication (normative N7 ruling).** Registration stores the named
 set and freezes the per-attestor bond computed from the formula above. The set is bounded to **16**,
@@ -508,8 +540,8 @@ Not a settlement mode — the failure edge for *every* path: no quorum, median o
 missed, service paused, escrow insufficient, attestor set collapsed.
 
 **`ClientUnreachable` is reserved and has no on-chain producer (N7 ruling, 2026-08-01).** The frozen
-contract-v21 `VoidReason` variant remains append-only, but egress reachability cannot produce it:
-§9/I-36 requires push outcome to be best-effort and never read back into Bleavit state, registry
+`VoidReason` variant introduced at contract v21 remains byte-identical and append-only at v22, but egress reachability cannot produce it:
+§9/I-36 requires push outcome to be best-effort and never read back into protocol or welfare state, registry
 removal deliberately does not VOID, and settlement needs no live client call. Emitting the variant
 from any of those facts would contradict those stronger rules. It MUST remain unproduced unless a
 future contract-versioned amendment defines an on-chain reachability predicate independent of send
@@ -832,7 +864,9 @@ Push therefore ships with four structural preconditions, together forming **I-36
 
 1. a dedicated `ClientEgressRouter = TopicRouter` that **does not wrap** `HealthTrackingRouter`;
 2. delivery fees **prepaid from the client's USDC `delivery_float`** (§2), never from the VIT bond and never a treasury outflow; an exhausted float stops pushes and nothing else;
-3. the send outcome **best-effort and never read back** into any Bleavit state;
+3. the send outcome is **best-effort and never read back into report, lifecycle, settlement,
+   treasury-outflow, XCM-health or welfare state**; the isolated diagnostic counter in item 4 is the
+   sole permitted observation of that outcome;
 4. push failures surfaced on a **non-welfare** counter plus a [12](./12-release-and-operations.md)
    §6.3 alert row.
 
@@ -841,6 +875,32 @@ by storage proof against a finalized header, which is the only delivery a client
 trust. Verified: XCM v5's `Response` carries no arbitrary data, so `QueryResponse` is structurally not
 a data channel — an outbound `Transact` is the only push shape, authored the way the existing reserve
 probe already does it, with **no new user-reachable send authority**.
+
+**The push is one fixed v5 program and one fixed receiver ABI (contract v22).** A remote client
+receives
+
+```text
+UnpaidExecution { Unlimited, check_origin: None }
+Transact { origin_kind: Xcm, fallback_max_weight: None,
+           call: [66, 0] ++ SCALE(ReportView) }
+SetTopic(ReportView.provenance_hash)
+```
+
+where `66` is the drop-in client receiver's `QuestionServiceReceiver` pallet slot and call `0` is
+`receive_report(report)`. The runtime constructs every byte from the already-stored report and the
+registry location; no extrinsic caller can choose a destination, selector or payload. A local client
+has no XCM destination, so it records neither an attempt nor a false failure and consumes the pull
+surface directly.
+
+The exact prepaid amount is the existing [09](./09-execution-upgrades-and-rollout.md) §6.1 USDC
+two-dimensional rate applied, rounding both dimensions up against the client, to the fixed
+three-instruction envelope `3 × UnitWeightCost`. This reuses `xcm.usdc_per_sec` and
+`xcm.usdc_per_mb`; no new tariff or conversion rate exists. The debit transfers USDC from the
+client's deterministic escrow to treasury `MAIN` and credits that same amount as a MAIN inflow. It
+shares one storage layer with router validation and delivery, so any local failure restores float,
+asset custody and treasury accounting. The stable2606 sibling router presently returns an empty
+delivery quote; a future non-empty quote fails closed until its asset incidence is specified rather
+than silently stacking or converting it.
 
 ---
 
@@ -873,6 +933,9 @@ service is meant to be integrated without one.
 
 `NotRegistered` · `ClientRemoved` · `ClientBondUnset` · `DuplicateLocation` · `ClientsFull` ·
 `ClientIdExhausted` · `BondInsufficient` · `BondAccounting` · `QuestionCounterOverflow` ·
+`DeliveryFloatAmountZero` · `DeliveryFloatInsufficient` · `DeliveryFloatWouldDrain` ·
+`DeliveryFloatBelowMinimum` · `DeliveryFundingWouldDust` · `DeliveryFloatOverflow` ·
+`DeliveryFloatAccounting` ·
 `NoLiveQuestions` · `ServicePaused` · `ServiceRateUnset` · `CertificationUnavailable` ·
 `StakeBelowFloor` · `SubsidyBelowMinimum` · `EpsilonOutOfRange` · `WindowTooLong` · `WindowTooShort` ·
 `WindowCollidesWithDecision` · `SlotsExhausted` · `TvlCapWouldBind` · `AttestorSetTooSmall` ·
@@ -880,6 +943,11 @@ service is meant to be integrated without one.
 `AlreadySealed` · `AlreadyTerminal` · `QuorumNotReached` · `MedianOutOfRange` · `DeadlineNotReached` ·
 `UnknownQuestion` · `DeadlinePassed` · `CreationFrozen` · `DuplicateAttestor` · `UnknownAttestor` ·
 `AlreadyBonded` · `InvalidSubId` · `ArithmeticOverflow` · `ArchiveNotReady` · `TryStateViolation`
+
+The optional push's non-dispatch outcomes remain distinct internally as `Validate`,
+`Fee(RouterQuoteUnsupported)`, `Fee(PricingUnavailable)`, `Fee(PrepaymentRefused)` and `Deliver`.
+They collapse only at the deliberately non-welfare alert counter: no push outcome is a client-call
+refusal and none can undo the already-published report.
 
 ---
 
@@ -906,9 +974,17 @@ owns the regime.
 - **Formal:** `models/tla/ledger` unchanged — the strongest single argument for instancing — plus a
   new **two-instance composition** model (§7.1) and `models/tla/service` proving every path from
   `Registered` reaches exactly one of `Settled`/`Voided`, with a witness config that MUST violate.
-- **Zombienet:** a client-para topology with HRMP both ways **and** a return-channel-absent variant to
-  witness I-36; an ingress drill sending the exact template plus eight malformed variants, none of
-  which may dispatch; a report-pull drill asserting `X` is unchanged throughout.
+- **Zombienet (N10 closure, explicit dependency split):** the drop-in receiver and runnable client
+  harness do not exist until N10, so N10 owns the client-para topology with HRMP both ways **and** a
+  return-channel-absent variant to witness N9's I-36; an ingress drill sending the exact template
+  plus eight malformed variants, none of which may dispatch; and a report-pull drill asserting `X`
+  is unchanged throughout. N9 closes only after the local proof below is green; N10 may not close
+  without these live-network variants. Assigning a receiver-dependent topology to N9 was a
+  dependency error, not evidence that the drill had run.
+- **I-36 local proof:** one review entry point MUST bind the exact `ClientEgressRouter = TopicRouter`
+  type, prove USDC float debit with byte-identical VIT bond custody, force every push to fail across
+  every measurable day of a full epoch, retain the authoritative report, advance only the isolated
+  per-client counter and assert every welfare counter plus `X` unchanged.
 - The full ledger differential corpus replayed against **instance 1**, to prove instance-independence.
 
 ---

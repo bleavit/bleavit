@@ -279,6 +279,7 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
     all.extend(
         pallet_call_weights!(pallet_client_registry as pallet_client_registry::WeightInfo {
             admit_client, admit_local_client, remove_client,
+            top_up_delivery_float, withdraw_delivery_float,
         }),
     );
     all.extend(

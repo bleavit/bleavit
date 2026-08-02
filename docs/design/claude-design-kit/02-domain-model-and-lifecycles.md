@@ -271,8 +271,11 @@ TWAPs, provenance and manipulation-cost floor; the client's own pre-committed ru
 system decide what to do. No external question, report or failure may enter Bleavit's welfare,
 decision or settlement inputs.
 
-- A bounded `ClientId: u32` roster maps exact XCM `Location` equality in both directions. The
-  record carries remaining native-VIT bond, admission block, live/total question counters and an
+- A bounded `ClientId: u32` roster maps exact XCM `Location` equality in both directions (or one
+  exact local signer). The record carries remaining native-VIT bond, a separate client-topped-up
+  USDC `delivery_float` at the frozen
+  `PalletId(*b"bl/cdelv").into_sub_account_truncating(client_id)` escrow, admission block,
+  live/total question counters and an
   internal `Optional`/`Required` opaque `sub_id` policy (`Optional` absence canonicalizes to the
   all-zero value and is indistinguishable from an explicit zero). `MaxClients = 64`.
 - `admit_client` and `remove_client` are strict `ConstitutionalValues` acts on the guardian
@@ -280,9 +283,11 @@ decision or settlement inputs.
   every already-live question reaches `Settled` or `Voided`; this avoids stranding trader capital.
 - An admitted transport origin is exactly `ExternalClient(ClientId)`, never a signed, root,
   none or governance origin. It carries the small id rather than the ~306-byte bounded `Location`.
-- The client bond is held natively for registration life and prepays report-egress fees. Its
+- The client bond is held natively for registration life and never pays postage. Its
   live `svc.client_bond` parameter is `[VERIFY]` and absent at genesis, so admission is deliberately
-  fail-closed until a calibration-backed migration seats it.
+  fail-closed until a calibration-backed migration seats it. Exact-client top-up/withdraw calls
+  manage the USDC float; a dry float stops only optional push, while storage/API pull remains
+  authoritative. Push uses a bare non-health router and cannot move XCM health or welfare.
 - Lifecycle: `Registered → Open → Sealed → Settled`, with every failure edge ending `Voided`.
   The report is delivered at `Sealed`; `Settled` and `Voided` are the only terminal states.
 - Each question owns exactly two scalar books, Accept and Reject, in the service ledger — never
@@ -293,7 +298,7 @@ decision or settlement inputs.
   mirror pair with the client, locks the extra raw branch legs in the matching book accounts, and
   terminal cleanup returns surviving inventory only to the immutable exact funder.
 
-Contract v21 makes the hosted question/report API and its external-market schema current. It is a
+Contract v22 makes the hosted question/report API, delivery float and fixed receiver ABI current. It is a
 live integration surface, but doc 11 still assigns it no canonical-app workflow; do not invent
 screen IDs.
 

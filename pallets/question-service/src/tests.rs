@@ -465,6 +465,38 @@ fn seal_publishes_real_hash_and_earns_the_fee_exactly_once() -> TestResult {
 }
 
 #[test]
+fn failed_best_effort_push_cannot_roll_back_or_void_the_authoritative_report() -> TestResult {
+    new_test_ext().execute_with(|| -> TestResult {
+        set_report_push_outcome(ReportPushOutcome::Failed);
+        let (question, _) = register_and_bond()?;
+        open_and_observe(question)?;
+
+        assert_ok!(QuestionService::seal(client_origin(), question));
+        assert_eq!(report_push_count(), 1);
+        let report = Reports::<Test>::get(question).ok_or("authoritative report")?;
+        assert_eq!(QuestionService::hosted_report(question), Some(report));
+        assert_eq!(
+            Questions::<Test>::get(question).map(|stored| stored.phase),
+            Some(QuestionPhase::Sealed)
+        );
+        let meter = pallet_client_registry::IngressMeters::<Test>::get(CLIENT);
+        assert_eq!(meter.report_pushes_total, 1);
+        assert_eq!(meter.report_push_failures_total, 1);
+        assert_eq!(meter.report_push_failures_consecutive, 1);
+
+        // A retry is not implicit: the lifecycle refusal remains authoritative
+        // and the failed optional leg cannot manufacture another attempt.
+        assert_noop!(
+            QuestionService::seal(client_origin(), question),
+            Error::<Test>::AlreadySealed
+        );
+        assert_eq!(report_push_count(), 1);
+        assert!(Reports::<Test>::contains_key(question));
+        Ok(())
+    })
+}
+
+#[test]
 fn try_state_binds_question_pair_and_client_live_counter() -> TestResult {
     new_test_ext().execute_with(|| -> TestResult {
         let (question, terms) = register_and_bond()?;

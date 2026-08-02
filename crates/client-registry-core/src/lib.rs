@@ -49,6 +49,9 @@ pub struct ClientRecord<Location, AccountId> {
     pub admitted_at: BlockNumber,
     pub questions_live: u32,
     pub questions_total: u32,
+    /// USDC held in the registry's per-client delivery escrow. This trailing
+    /// contract-v22 append preserves every v21 field offset.
+    pub delivery_float: Balance,
 }
 
 impl<Location, AccountId> ClientRecord<Location, AccountId> {
@@ -60,6 +63,7 @@ impl<Location, AccountId> ClientRecord<Location, AccountId> {
             admitted_at,
             questions_live: 0,
             questions_total: 0,
+            delivery_float: 0,
         }
     }
 
@@ -75,6 +79,7 @@ impl<Location, AccountId> ClientRecord<Location, AccountId> {
             admitted_at,
             questions_live: 0,
             questions_total: 0,
+            delivery_float: 0,
         }
     }
 
@@ -135,12 +140,27 @@ impl<Location, AccountId> ClientRecord<Location, AccountId> {
 pub struct IngressMeter {
     pub accepted_total: u64,
     pub last_seen: BlockNumber,
+    /// Isolated N9 diagnostics; none of these fields feed XCM health.
+    pub report_pushes_total: u64,
+    pub report_push_failures_total: u64,
+    pub report_push_failures_consecutive: u32,
 }
 
 impl IngressMeter {
     pub fn note(&mut self, now: BlockNumber) {
         self.accepted_total = self.accepted_total.saturating_add(1);
         self.last_seen = now;
+    }
+
+    pub fn note_report_push(&mut self, succeeded: bool) {
+        self.report_pushes_total = self.report_pushes_total.saturating_add(1);
+        if succeeded {
+            self.report_push_failures_consecutive = 0;
+        } else {
+            self.report_push_failures_total = self.report_push_failures_total.saturating_add(1);
+            self.report_push_failures_consecutive =
+                self.report_push_failures_consecutive.saturating_add(1);
+        }
     }
 }
 
@@ -305,6 +325,7 @@ mod tests {
                     admitted_at: 10,
                     questions_live: 0,
                     questions_total: 0,
+                    delivery_float: 0,
                 },
                 sub_id_policy: SubIdPolicy::Required,
             })
@@ -320,6 +341,33 @@ mod tests {
                 && admission.record.location.is_none()
                 && admission.record.local_signer == Some(22))
         );
+    }
+
+    #[test]
+    fn contract_v22_float_is_a_trailing_append_to_the_v21_encoding() {
+        #[derive(Encode)]
+        struct V21Record<Location, AccountId> {
+            location: Option<Location>,
+            local_signer: Option<AccountId>,
+            bond: Balance,
+            admitted_at: BlockNumber,
+            questions_live: u32,
+            questions_total: u32,
+        }
+
+        let current: ClientRecord<u8, u16> = ClientRecord::new_location(7u8, 1_000, 10);
+        let legacy = V21Record::<u8, u16> {
+            location: Some(7),
+            local_signer: None,
+            bond: 1_000,
+            admitted_at: 10,
+            questions_live: 0,
+            questions_total: 0,
+        }
+        .encode();
+        let encoded = current.encode();
+        assert_eq!(encoded.get(..legacy.len()), Some(legacy.as_slice()));
+        assert_eq!(encoded.get(legacy.len()..), Some(0u128.encode().as_slice()));
     }
 
     #[test]
@@ -360,9 +408,28 @@ mod tests {
         let mut meter = IngressMeter {
             accepted_total: u64::MAX,
             last_seen: 1,
+            ..Default::default()
         };
         meter.note(22);
         assert_eq!(meter.accepted_total, u64::MAX);
         assert_eq!(meter.last_seen, 22);
+    }
+
+    #[test]
+    fn report_push_meter_saturates_and_success_resets_only_the_streak() {
+        let mut meter = IngressMeter {
+            report_pushes_total: u64::MAX,
+            report_push_failures_total: u64::MAX,
+            report_push_failures_consecutive: u32::MAX,
+            ..Default::default()
+        };
+        meter.note_report_push(false);
+        assert_eq!(meter.report_pushes_total, u64::MAX);
+        assert_eq!(meter.report_push_failures_total, u64::MAX);
+        assert_eq!(meter.report_push_failures_consecutive, u32::MAX);
+        meter.note_report_push(true);
+        assert_eq!(meter.report_pushes_total, u64::MAX);
+        assert_eq!(meter.report_push_failures_total, u64::MAX);
+        assert_eq!(meter.report_push_failures_consecutive, 0);
     }
 }

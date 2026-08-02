@@ -5,7 +5,7 @@
 //! its shape may change without a 02 §13 bump. Every collection is bounded so
 //! an operations scrape remains deterministic and bounded in runtime work.
 
-use futarchy_primitives::{bounds, Balance, BlockNumber, BoundedVec, MarketId};
+use futarchy_primitives::{bounds, Balance, BlockNumber, BoundedVec, ClientId, MarketId};
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
@@ -91,9 +91,21 @@ pub struct StorageUtilizationTelemetry {
     pub bound: u32,
 }
 
+/// Isolated per-client hosted-report delivery diagnostics (I-36). These
+/// counters are not inputs to any protocol or welfare calculation.
+#[derive(
+    Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo,
+)]
+pub struct ServiceEgressTelemetry {
+    pub client_id: ClientId,
+    pub attempts: u64,
+    pub failures: u64,
+    pub consecutive_failures: u32,
+}
+
 sp_api::decl_runtime_apis! {
     /// Monitoring-only telemetry API owned by 12 §6.3, outside contract 02.
-    #[api_version(3)]
+    #[api_version(4)]
     pub trait TelemetryApi {
         /// Per-live-book realized loss and its identically labeled LMSR bound.
         fn market_books() -> Option<BoundedVec<MarketTelemetry, { bounds::MAX_LIVE_MARKETS }>>;
@@ -111,5 +123,7 @@ sp_api::decl_runtime_apis! {
         fn migration_cursor_stalled() -> bool;
         /// Metadata-invisible bounded collection occupancy rows.
         fn storage_utilization() -> Option<BoundedVec<StorageUtilizationTelemetry, MAX_STORAGE_UTILIZATION_ROWS>>;
+        /// Bounded, sorted client push counters; explicitly non-welfare.
+        fn service_egress() -> Option<BoundedVec<ServiceEgressTelemetry, { bounds::MAX_CLIENTS }>>;
     }
 }

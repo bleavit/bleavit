@@ -189,6 +189,13 @@ impl_runtime_apis! {
         >> {
             crate::telemetry::storage_utilization()
         }
+
+        fn service_egress() -> Option<futarchy_primitives::BoundedVec<
+            futarchy_runtime_api::ServiceEgressTelemetry,
+            { futarchy_primitives::bounds::MAX_CLIENTS },
+        >> {
+            crate::telemetry::service_egress()
+        }
     }
 
     impl sp_block_builder::BlockBuilder<Block> for Runtime {

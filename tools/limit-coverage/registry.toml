@@ -1228,7 +1228,7 @@ reason = "13 §1 / 16 §4: registration refuses a window one block beyond the li
 key = "svc.client_bond"
 class = "value"
 genesis = false
-reason = "13 §1 / 16 §2, §9: the live optional value sets the exact native VIT hold at admission and the remaining source for prepaid egress. Absence is enforced by `ClientBondUnset`; this is a value consumer, not a caller-supplied dispatch bound."
+reason = "13 §1 / 16 §2: the live optional value sets only the exact native VIT security hold at admission and never funds egress; N9's separate client-funded USDC delivery float pays postage. Absence is enforced by `ClientBondUnset`; this is a value consumer, not a caller-supplied dispatch bound."
 
 [[entry]]
 key = "svc.epsilon_min"

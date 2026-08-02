@@ -64,20 +64,79 @@ mod benches {
         let owner = T::BenchmarkHelper::bond_owner();
         T::BenchmarkHelper::prime_client_bond(BENCHMARK_BOND);
         T::BenchmarkHelper::prime_funds(&owner, BENCHMARK_BOND.saturating_mul(2));
-        let admitted = Pallet::<T>::admit_client(
+        let admitted = Pallet::<T>::admit_local_client(
             T::BenchmarkHelper::values(),
-            benchmark_location(),
-            owner,
+            owner.clone(),
+            owner.clone(),
             SubIdPolicy::Optional,
         );
         assert!(admitted.is_ok());
         let metered = Pallet::<T>::note_ingress(0);
         assert!(metered.is_ok());
+        // Exact source drain exercises asset-account reap on top-up; removal
+        // must then recreate the funder while deleting the escrow account.
+        T::BenchmarkHelper::prime_delivery_funds(&owner, BENCHMARK_BOND);
+        let topped_up =
+            Pallet::<T>::top_up_delivery_float(T::BenchmarkHelper::client(0), BENCHMARK_BOND);
+        assert!(topped_up.is_ok());
 
         #[extrinsic_call]
         _(T::BenchmarkHelper::values(), 0);
 
         assert!(!Clients::<T>::contains_key(0));
+    }
+
+    #[benchmark]
+    fn top_up_delivery_float() {
+        let owner = T::BenchmarkHelper::bond_owner();
+        T::BenchmarkHelper::prime_client_bond(BENCHMARK_BOND);
+        T::BenchmarkHelper::prime_funds(&owner, BENCHMARK_BOND.saturating_mul(2));
+        // Worst reachable branch: source asset account is expended exactly
+        // while the destination escrow account is created.
+        T::BenchmarkHelper::prime_delivery_funds(&owner, BENCHMARK_BOND);
+        let admitted = Pallet::<T>::admit_local_client(
+            T::BenchmarkHelper::values(),
+            owner.clone(),
+            owner,
+            SubIdPolicy::Optional,
+        );
+        assert!(admitted.is_ok());
+
+        #[extrinsic_call]
+        _(T::BenchmarkHelper::client(0), BENCHMARK_BOND);
+
+        assert_eq!(
+            Clients::<T>::get(0).map(|record| record.delivery_float),
+            Some(BENCHMARK_BOND)
+        );
+    }
+
+    #[benchmark]
+    fn withdraw_delivery_float() {
+        let owner = T::BenchmarkHelper::bond_owner();
+        T::BenchmarkHelper::prime_client_bond(BENCHMARK_BOND);
+        T::BenchmarkHelper::prime_funds(&owner, BENCHMARK_BOND.saturating_mul(2));
+        T::BenchmarkHelper::prime_delivery_funds(&owner, BENCHMARK_BOND);
+        let admitted = Pallet::<T>::admit_local_client(
+            T::BenchmarkHelper::values(),
+            owner.clone(),
+            owner,
+            SubIdPolicy::Optional,
+        );
+        assert!(admitted.is_ok());
+        let topped_up =
+            Pallet::<T>::top_up_delivery_float(T::BenchmarkHelper::client(0), BENCHMARK_BOND);
+        assert!(topped_up.is_ok());
+
+        #[extrinsic_call]
+        // Worst reachable branch: delete the escrow asset account and recreate
+        // the exact client funder account that top-up expended.
+        _(T::BenchmarkHelper::client(0), BENCHMARK_BOND);
+
+        assert_eq!(
+            Clients::<T>::get(0).map(|record| record.delivery_float),
+            Some(0)
+        );
     }
 
     impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext(), crate::mock::Test);

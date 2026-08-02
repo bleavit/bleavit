@@ -353,12 +353,12 @@ fn runtime_api_id_and_version_are_frozen() {
         [52, 172, 53, 103, 236, 227, 15, 254]
     );
     assert_eq!(runtime_decl_for_futarchy_api::VERSION, 2);
-    // N7 raised this to 3 by adding `service_collateral()` for the I-37
-    // per-instance custody audit. `TelemetryApi` is deliberately outside the 02
-    // contract (12 §6.3 owns it, the ops exporters are its only consumer), so
-    // the bump needs no `INTEGRATION_CONTRACT_VERSION` change — but it is still
-    // frozen here, so a silent version drift fails rather than passes.
-    assert_eq!(runtime_decl_for_telemetry_api::VERSION, 3);
+    // N9 raised this to 4 by adding the isolated I-36 service-egress counters.
+    // `TelemetryApi` is deliberately outside the 02 contract (12 §6.3 owns it,
+    // the ops exporters are its only consumer), so the bump needs no separate
+    // `INTEGRATION_CONTRACT_VERSION` change — but it is still frozen here, so a
+    // silent version drift fails rather than passes.
+    assert_eq!(runtime_decl_for_telemetry_api::VERSION, 4);
 }
 
 #[test]

@@ -39,9 +39,25 @@ pub trait ServiceParamsProvider {
     fn flow_cap() -> FixedU64;
 }
 
-/// Resolves one admitted identity to its only permissible USDC funder.
-pub trait ClientFunding<AccountId> {
-    fn funding_account(client: ClientId) -> Option<AccountId>;
+/// Best-effort delivery result. Only the registry's isolated diagnostic meter
+/// may observe it; report, lifecycle, settlement and welfare state may not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReportPushOutcome {
+    Sent,
+    Failed,
+    /// Local clients have no XCM destination and use the authoritative pull
+    /// surface without creating a false failure alert.
+    NotApplicable,
+}
+
+pub trait ReportPush {
+    fn push(client: ClientId, report: &futarchy_primitives::ReportView) -> ReportPushOutcome;
+}
+
+impl ReportPush for () {
+    fn push(_: ClientId, _: &futarchy_primitives::ReportView) -> ReportPushOutcome {
+        ReportPushOutcome::NotApplicable
+    }
 }
 
 /// Builds the exact N4 custom origin used by N6's external-book API.
@@ -68,11 +84,13 @@ pub trait AccountIdBytes<AccountId> {
 #[cfg(feature = "runtime-benchmarks")]
 pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     fn client_origin(client: ClientId) -> RuntimeOrigin;
+    fn report_egress_origin(client: ClientId) -> RuntimeOrigin;
     fn funder(client: ClientId) -> AccountId;
     fn attestor(index: u32) -> AccountId;
     fn prime_params();
     fn prime_client(client: ClientId, funder: &AccountId);
     fn prime_usdc(who: &AccountId, amount: Balance);
+    fn prime_report_egress(client: ClientId);
     fn prime_register_scan(funder: &AccountId);
     fn prime_keeper_rebate() {}
     fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
@@ -129,10 +147,7 @@ pub mod pallet {
         + pallet_market::Config
         + pallet_conditional_ledger::Config<Instance1>
     {
-        /// N4 client origin, including the local-signer adapter in production.
-        type ClientOrigin: EnsureOrigin<Self::RuntimeOrigin, Success = ClientId>;
         type ServiceParams: ServiceParamsProvider;
-        type ClientFunding: ClientFunding<Self::AccountId>;
         type ExternalMarketOrigin: ExternalMarketOrigin<Self::RuntimeOrigin>;
         type DecisionWindows: DecisionWindowGuard;
         type TvlCapGate: TvlCapGate<Self::AccountId>;
@@ -140,6 +155,7 @@ pub mod pallet {
         /// ledger's local account predicate may stand in for this one.
         type InflowCapExemptAccounts: Contains<Self::AccountId>;
         type AccountIdBytes: AccountIdBytes<Self::AccountId>;
+        type ReportPush: ReportPush;
 
         /// Service-lifecycle sovereign. Distinct from both ledger sovereigns.
         #[pallet::constant]
@@ -219,12 +235,12 @@ pub mod pallet {
         pub attestors: BoundedVec<AccountId, ConstU32<{ bounds::MAX_SERVICE_ATTESTORS }>>,
     }
 
-    /// Contract-v21 question index (02 §4a).
+    /// Contract-v22 question index (introduced at v21; 02 §4a).
     #[pallet::storage]
     pub type Questions<T: Config> =
         CountedStorageMap<_, Blake2_128Concat, QuestionId, QuestionRecord, OptionQuery>;
 
-    /// Contract-v21 immutable report index (02 §4a).
+    /// Contract-v22 immutable report index (introduced at v21; 02 §4a).
     #[pallet::storage]
     pub type Reports<T: Config> =
         StorageMap<_, Blake2_128Concat, QuestionId, ReportView, OptionQuery>;
@@ -276,7 +292,7 @@ pub mod pallet {
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
-        // Exact contract-v21 events (02 §4a).
+        // Exact contract-v22 events (byte-identical to their v21 introduction).
         QuestionRegistered {
             question_id: QuestionId,
             client_id: ClientId,
@@ -396,8 +412,8 @@ pub mod pallet {
             origin: OriginFor<T>,
             input: RegisterInput<T::AccountId>,
         ) -> DispatchResult {
-            let client =
-                T::ClientOrigin::ensure_origin(origin).map_err(|_| Error::<T>::NotRegistered)?;
+            let client = <T as pallet_client_registry::Config>::ClientOrigin::ensure_origin(origin)
+                .map_err(|_| Error::<T>::NotRegistered)?;
             frame_support::storage::with_storage_layer(|| Self::do_register(client, input))
         }
 
@@ -438,8 +454,8 @@ pub mod pallet {
         #[pallet::call_index(2)]
         #[pallet::weight(<T as Config>::WeightInfo::open())]
         pub fn open(origin: OriginFor<T>, question_id: QuestionId) -> DispatchResult {
-            let client =
-                T::ClientOrigin::ensure_origin(origin).map_err(|_| Error::<T>::NotRegistered)?;
+            let client = <T as pallet_client_registry::Config>::ClientOrigin::ensure_origin(origin)
+                .map_err(|_| Error::<T>::NotRegistered)?;
             frame_support::storage::with_storage_layer(|| {
                 Questions::<T>::try_mutate(question_id, |maybe_question| -> DispatchResult {
                     let question = maybe_question.as_mut().ok_or(Error::<T>::UnknownQuestion)?;
@@ -473,9 +489,15 @@ pub mod pallet {
         #[pallet::call_index(3)]
         #[pallet::weight(<T as Config>::WeightInfo::seal())]
         pub fn seal(origin: OriginFor<T>, question_id: QuestionId) -> DispatchResult {
-            let client =
-                T::ClientOrigin::ensure_origin(origin).map_err(|_| Error::<T>::NotRegistered)?;
-            frame_support::storage::with_storage_layer(|| Self::do_seal(client, question_id))
+            let client = <T as pallet_client_registry::Config>::ClientOrigin::ensure_origin(origin)
+                .map_err(|_| Error::<T>::NotRegistered)?;
+            // The authoritative report commits before egress is attempted.
+            // The outcome is then deliberately swallowed: a client can break
+            // only its optional push leg, never publication or settlement.
+            let report =
+                frame_support::storage::with_storage_layer(|| Self::do_seal(client, question_id))?;
+            Self::attempt_report_push(client, &report);
+            Ok(())
         }
 
         /// Store the signed attestor's latest in-window value.
@@ -623,6 +645,21 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
+        /// Run the optional delivery leg after authoritative publication. This
+        /// is deliberately non-dispatchable: neither destination nor payload
+        /// is supplied by a user, and no outcome escapes into protocol state.
+        pub fn attempt_report_push(client: ClientId, report: &ReportView) {
+            match T::ReportPush::push(client, report) {
+                ReportPushOutcome::Sent => {
+                    let _ = pallet_client_registry::Pallet::<T>::note_report_push(client, true);
+                }
+                ReportPushOutcome::Failed => {
+                    let _ = pallet_client_registry::Pallet::<T>::note_report_push(client, false);
+                }
+                ReportPushOutcome::NotApplicable => {}
+            }
+        }
+
         pub fn account_id() -> T::AccountId {
             <T as Config>::PalletId::get().into_account_truncating()
         }
@@ -641,8 +678,9 @@ pub mod pallet {
             Self::ensure_not_paused()?;
             let client_record = pallet_client_registry::Pallet::<T>::active_client(client)
                 .map_err(Self::map_client_registration_error)?;
-            let funder =
-                T::ClientFunding::funding_account(client).ok_or(Error::<T>::NotRegistered)?;
+            let funder = <<T as pallet_client_registry::Config>::ClientFunding as
+                pallet_client_registry::ClientFunding<T::AccountId>>::funding_account(client)
+                .ok_or(Error::<T>::NotRegistered)?;
             ensure!(client_record.identity_is_valid(), Error::<T>::NotRegistered);
             ensure!(
                 !<T as pallet_conditional_ledger::Config<()>>::ReservedProtocolDestinations::contains(&funder)
@@ -853,7 +891,7 @@ pub mod pallet {
             Ok(())
         }
 
-        fn do_seal(client: ClientId, question_id: QuestionId) -> DispatchResult {
+        fn do_seal(client: ClientId, question_id: QuestionId) -> Result<ReportView, DispatchError> {
             Self::ensure_not_paused()?;
             let mut question =
                 Questions::<T>::get(question_id).ok_or(Error::<T>::UnknownQuestion)?;
@@ -1030,7 +1068,7 @@ pub mod pallet {
                 question_id,
                 provenance_hash: view.provenance_hash,
             });
-            Ok(())
+            Ok(view)
         }
 
         fn do_finalize_sealed(question_id: QuestionId) -> DispatchResult {

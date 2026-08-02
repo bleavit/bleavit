@@ -381,8 +381,9 @@ the true sender.
 
 **Egress is not symmetric with ingress.** The only program this chain authors toward a client is a
 best-effort report push on a **dedicated** router that does not wrap `HealthTrackingRouter`, with
-delivery fees prepaid from the client bond and the send outcome never read back into any local state
-(I-36; [16](./16-hosted-question-service.md) §9). XCM v5's `Response` carries no arbitrary data, so
+delivery fees prepaid from the separate USDC `delivery_float` — never the native VIT bond — and the
+send outcome observed only by an isolated non-welfare diagnostic counter, never by protocol,
+XCM-health or welfare state (I-36; [16](./16-hosted-question-service.md) §9). XCM v5's `Response` carries no arbitrary data, so
 `QueryResponse` is structurally not a data channel and is not used as one.
 
 ---

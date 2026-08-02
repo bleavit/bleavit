@@ -136,6 +136,8 @@ mod tests_migration_guard;
 #[cfg(test)]
 mod tests_n8;
 #[cfg(test)]
+mod tests_n9;
+#[cfg(test)]
 mod tests_s5;
 #[cfg(all(test, feature = "bootstrap"))]
 mod tests_s5_behavior;
@@ -188,7 +190,7 @@ pub const RUNTIME_SPEC_VERSION: u32 = 2;
 #[cfg(feature = "recovery")]
 pub const RUNTIME_SPEC_VERSION: u32 = 3;
 /// SDK dispatchable-compatibility counter, deliberately **independent** of
-/// `INTEGRATION_CONTRACT_VERSION` (02 §13; SQ-102, currently contract v21). It denotes
+/// `INTEGRATION_CONTRACT_VERSION` (02 §13; SQ-102, currently contract v22). It denotes
 /// compatibility of existing dispatchables as embedded in signed-transaction
 /// validity, so an additive contract bump MUST NOT move it. Re-baselined to 1
 /// pre-genesis; the SDK forbids this counter ever decreasing after genesis.

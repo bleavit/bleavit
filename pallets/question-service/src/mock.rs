@@ -16,6 +16,7 @@ use futarchy_primitives::{
     kernel, Balance, FixedU64, MarketId,
 };
 use sp_runtime::{traits::AccountIdConversion, BuildStorage, Perbill};
+use std::cell::Cell;
 
 pub type AccountId = u64;
 pub type AssetId = u32;
@@ -35,6 +36,31 @@ pub const CLIENT: u32 = 0;
 pub const UNIT: Balance = currency::USDC;
 const PRIMARY_MARKET_BASE: AccountId = 1 << 48;
 const SERVICE_MARKET_BASE: AccountId = 1 << 56;
+
+std::thread_local! {
+    static REPORT_PUSH_OUTCOME: Cell<pallet_question_service::ReportPushOutcome> =
+        const { Cell::new(pallet_question_service::ReportPushOutcome::NotApplicable) };
+    static REPORT_PUSH_COUNT: Cell<u32> = const { Cell::new(0) };
+}
+
+pub struct MockReportPush;
+impl pallet_question_service::ReportPush for MockReportPush {
+    fn push(
+        _: futarchy_primitives::ClientId,
+        _: &futarchy_primitives::ReportView,
+    ) -> pallet_question_service::ReportPushOutcome {
+        REPORT_PUSH_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+        REPORT_PUSH_OUTCOME.with(Cell::get)
+    }
+}
+
+pub fn set_report_push_outcome(outcome: pallet_question_service::ReportPushOutcome) {
+    REPORT_PUSH_OUTCOME.with(|stored| stored.set(outcome));
+}
+
+pub fn report_push_count() -> u32 {
+    REPORT_PUSH_COUNT.with(Cell::get)
+}
 
 frame_support::construct_runtime!(
     pub enum Test {
@@ -117,6 +143,7 @@ parameter_types! {
     pub const ServiceLedgerPalletId: PalletId = PalletId(*b"t/svcldg");
     pub const MarketPalletId: PalletId = PalletId(*b"t/market");
     pub const QuestionPalletId: PalletId = PalletId(*b"t/qservc");
+    pub const ClientDeliveryPalletId: PalletId = PalletId(*b"t/cliflt");
     pub UsdcAssetId: AssetId = USDC;
     pub MinSplit: Balance = kernel::MIN_SPLIT_USDC;
     pub PositionDeposit: Balance = kernel::POSITION_DEPOSIT_USDC;
@@ -313,9 +340,14 @@ impl pallet_client_registry::ClientBondProvider for ClientBond {
 
 impl pallet_client_registry::Config for Test {
     type ValuesOrigin = EnsureRoot<AccountId>;
+    type ClientOrigin = pallet_client_registry::EnsureExternalClient;
+    type ClientFunding = Funding;
     type ClientBond = ClientBond;
     type Currency = Balances;
     type RuntimeHoldReason = RuntimeHoldReason;
+    type DeliveryAssets = Assets;
+    type DeliveryAssetId = UsdcAssetId;
+    type DeliveryFloatPalletId = ClientDeliveryPalletId;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = ();
@@ -325,6 +357,10 @@ impl pallet_client_registry::Config for Test {
 impl pallet_client_registry::BenchmarkHelper<RuntimeOrigin, AccountId> for () {
     fn values() -> RuntimeOrigin {
         RuntimeOrigin::root()
+    }
+
+    fn client(client: u32) -> RuntimeOrigin {
+        pallet_client_registry::Origin::ExternalClient(client).into()
     }
 
     fn bond_owner() -> AccountId {
@@ -338,6 +374,11 @@ impl pallet_client_registry::BenchmarkHelper<RuntimeOrigin, AccountId> for () {
     fn prime_funds(who: &AccountId, value: Balance) {
         use frame_support::traits::fungible::Mutate;
         let _ = <Balances as Mutate<AccountId>>::set_balance(who, value);
+    }
+
+    fn prime_delivery_funds(who: &AccountId, value: Balance) {
+        use frame_support::traits::fungibles::Mutate;
+        let _ = <Assets as Mutate<AccountId>>::mint_into(USDC, who, value);
     }
 }
 
@@ -373,7 +414,7 @@ impl pallet_question_service::ServiceParamsProvider for Params {
 }
 
 pub struct Funding;
-impl pallet_question_service::ClientFunding<AccountId> for Funding {
+impl pallet_client_registry::ClientFunding<AccountId> for Funding {
     fn funding_account(client: u32) -> Option<AccountId> {
         pallet_client_registry::Clients::<Test>::get(client)?.local_signer
     }
@@ -410,14 +451,13 @@ impl pallet_question_service::AccountIdBytes<AccountId> for Bytes {
 }
 
 impl pallet_question_service::Config for Test {
-    type ClientOrigin = pallet_client_registry::EnsureExternalClient;
     type ServiceParams = Params;
-    type ClientFunding = Funding;
     type ExternalMarketOrigin = MarketOrigin;
     type DecisionWindows = Windows;
     type TvlCapGate = Tvl;
     type InflowCapExemptAccounts = InflowProtocol;
     type AccountIdBytes = Bytes;
+    type ReportPush = MockReportPush;
     type PalletId = QuestionPalletId;
     type KeeperRebate = QuestionKeeperRebate;
     type WeightInfo = ();
@@ -429,6 +469,10 @@ impl pallet_question_service::Config for Test {
 impl pallet_question_service::BenchmarkHelper<RuntimeOrigin, AccountId> for () {
     fn client_origin(client: u32) -> RuntimeOrigin {
         pallet_client_registry::Origin::ExternalClient(client).into()
+    }
+
+    fn report_egress_origin(client: u32) -> RuntimeOrigin {
+        Self::client_origin(client)
     }
 
     fn funder(_: u32) -> AccountId {
@@ -466,6 +510,8 @@ impl pallet_question_service::BenchmarkHelper<RuntimeOrigin, AccountId> for () {
         let minted = <Assets as Mutate<AccountId>>::mint_into(USDC, who, amount);
         assert!(minted.is_ok());
     }
+
+    fn prime_report_egress(_: u32) {}
 
     fn prime_register_scan(funder: &AccountId) {
         for index in 0..bounds::MAX_EXTERNAL_BOOK_PAIRS.saturating_sub(1) {
@@ -507,6 +553,8 @@ pub fn client_origin() -> RuntimeOrigin {
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
+    set_report_push_outcome(pallet_question_service::ReportPushOutcome::NotApplicable);
+    REPORT_PUSH_COUNT.with(|count| count.set(0));
     FeeRate::set(Some(Perbill::from_parts(10_000_000)));
     MaxLive::set(16);
     MaxWindow::set(100);

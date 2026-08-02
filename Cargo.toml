@@ -8,6 +8,7 @@ members = [
   "crates/futarchy-fixed",
   "crates/futarchy-primitives",
   "crates/attestor-core",
+  "crates/bleavit-client-abi",
   "crates/client-registry-core",
   "crates/conditional-ledger-core",
   "crates/constitution-core",

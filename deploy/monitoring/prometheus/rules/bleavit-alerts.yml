@@ -2,7 +2,7 @@ groups:
   - name: bleavit.protocol
     rules:
       - alert: BleavitServiceClientPushFailing
-        expr: bleavit_service_client_push_failures_consecutive >= 3
+        expr: (bleavit_service_client_push_failures_consecutive >= 3) and on(client_id) (bleavit_service_client_push_failures_total > 0) and on(client_id) (bleavit_service_client_pushes_total > 0)
         labels: {severity: warning, runbook: RB-SERVICE, domain: "Client report push"}
         annotations:
           summary: "Client report push: a client has three or more consecutive push failures"
