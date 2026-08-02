@@ -87,6 +87,42 @@
       "spec": "15 \u00a74.7; 09 \u00a77.1; 13 \u00a71"
     },
     {
+      "id": "10-client-integration",
+      "kind": "zombienet",
+      "path": "zombienet/drills/10-client-integration.zndsl",
+      "tier": "release",
+      "gated_on": [],
+      "timeout_seconds": 1800,
+      "spec": "15 §4.7; 16 §2/§3/§11"
+    },
+    {
+      "id": "11-client-return-channel-absent",
+      "kind": "zombienet",
+      "path": "zombienet/drills/11-client-return-channel-absent.zndsl",
+      "tier": "release",
+      "gated_on": [],
+      "timeout_seconds": 1800,
+      "spec": "15 §4.7; 16 §12; I-36"
+    },
+    {
+      "id": "12-client-report-pull",
+      "kind": "zombienet",
+      "path": "zombienet/drills/12-client-report-pull.zndsl",
+      "tier": "release",
+      "gated_on": [],
+      "timeout_seconds": 1800,
+      "spec": "15 §4.7; 16 §12; I-36"
+    },
+    {
+      "id": "13-client-ingress-negative-matrix",
+      "kind": "zombienet",
+      "path": "zombienet/drills/13-client-ingress-negative-matrix.zndsl",
+      "tier": "release",
+      "gated_on": [],
+      "timeout_seconds": 1800,
+      "spec": "15 §4.7; 16 §12; 09 §6.5"
+    },
+    {
       "id": "base",
       "kind": "chopsticks",
       "path": "chopsticks/bleavit.yml",

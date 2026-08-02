@@ -2207,10 +2207,24 @@ fn n8_registry_and_service_negative_origin_matrix_is_exhaustive() {
                 Err(float_error),
                 "withdraw_delivery_float origin result changed for {label}",
             );
+            // What this row asserts is the ORIGIN split, not the specific
+            // domain error: an admitted client is accepted and therefore fails
+            // on the input it supplied, while every other origin is refused at
+            // the origin gate with `NotRegistered` and never reaches validation.
+            //
+            // The admitted arm moved `ServiceRateUnset` -> `WindowTooShort` on
+            // 2026-08-02, and the move is the point rather than an accident:
+            // `ServiceRateUnset` was the arming gate, and the user's adoption of
+            // `svc.fee_bps` at 1,000 bps retired it, so `register` now reaches
+            // the next check. The fixture's 10-block window (10..20) is far
+            // below `svc.max_window`'s companion floor, so `WindowTooShort` is
+            // stable for this input. Keeping the exact error rather than
+            // relaxing to "any non-BadOrigin" preserves the drift detection
+            // that caught this change in the first place.
             assert_eq!(
                 register(origin.clone()),
                 Err(if client_admitted {
-                    pallet_question_service::Error::<Runtime>::ServiceRateUnset.into()
+                    pallet_question_service::Error::<Runtime>::WindowTooShort.into()
                 } else {
                     pallet_question_service::Error::<Runtime>::NotRegistered.into()
                 }),

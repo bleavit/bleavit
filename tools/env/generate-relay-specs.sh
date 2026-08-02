@@ -6,8 +6,21 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=pins.env
 source "$repo_root/tools/env/pins.env"
 
-cache="$repo_root/target/env/paseo-chain-spec-generator-src"
-generator_target="$repo_root/target/env/paseo-chain-spec-generator"
+# Everything cargo writes must be redirectable. `generator_target` is handed to
+# the Paseo sub-build as its literal CARGO_TARGET_DIR, so pinning it under
+# $repo_root makes it unredirectable — and on an ecryptfs $HOME (the documented
+# local configuration for this repo) the Paseo wasm build then dies on the
+# ~143-char filename cap:
+#
+#   error: could not write output to .../wbuild/asset-hub-paseo-runtime/target/
+#   wasm32v1-none/release/deps/...-cgu.0.rcgu.o.rcgu.o: File name too long
+#
+# which names neither this script nor the cause. Deriving from CARGO_TARGET_DIR
+# lets the caller move it; unset, this is `$repo_root/target` exactly as before,
+# so CI is unaffected. The git clone rides along so the two stay adjacent.
+bleavit_target="${CARGO_TARGET_DIR:-$repo_root/target}"
+cache="$bleavit_target/env/paseo-chain-spec-generator-src"
+generator_target="$bleavit_target/env/paseo-chain-spec-generator"
 out="$repo_root/zombienet/specs/out"
 mkdir -p "$(dirname "$cache")" "$generator_target" "$out"
 
@@ -85,11 +98,27 @@ generate_json coretime-paseo-local "$out/coretime-paseo-local.json"
 # built only at session boundaries from the then-active `num_cores`, and the
 # scheduler's `expected_claim_queue_len = min(num_cores, validator_groups)`
 # never polls the zombienet-injected coretime assignments while either factor
-# is 0. Seeding `num_cores = 3` at genesis guarantees the first boundary
-# (block ~10 under fast-runtime above) builds groups with headroom for the
-# largest topology (bleavit-xcm: 4242 + Asset Hub + Coretime; zombienet adds
-# its own per-para bump on top). Relay-side host configuration for the local
-# drill relay only — no 13-owned Bleavit tunable is touched.
+# is 0. Any non-zero seed unwedges that; the seed's job is solely to be > 0.
+#
+# The seed is 1, NOT 3 (SQ-568, corrected 2026-08-02 from live relay state).
+# Zombienet adds **one core per parachain** on top of whatever is seeded, so a
+# seed of 3 gave 3 + n cores against a fixed four validators — and
+# `ValidatorGroups` are built by splitting the validator set across the cores,
+# so any excess core gets an EMPTY group. The claim queue still schedules paras
+# onto those cores, and a para on an empty-group core can never have a candidate
+# backed: it builds locally to `max_candidate_depth`, stalls, and rebuilds from
+# genesis forever. The diagnostic that caught it read
+# `validatorGroups = [[0],[1],[2],[3],[],[]]` with the claim queue putting Asset
+# Hub on core 4 and Coretime on core 5 — both empty.
+#
+# The old comment's reasoning ("headroom for the largest topology") had it
+# backwards: the per-topology headroom already comes from zombienet's bump, so
+# the seed adds to it rather than covering it. Seeding 1 keeps total cores at
+# 1 + n <= 4 for every committed topology (1, 2 and 3 paras), so no group is
+# ever empty. Raising the seed again REQUIRES raising the relay validator count
+# in lockstep — the binding constraint is `seed + parachains <= validators`.
+# Relay-side host configuration for the local drill relay only — no 13-owned
+# Bleavit tunable is touched.
 python3 - "$out/paseo-local.json" <<'PY'
 import json, sys
 path = sys.argv[1]
@@ -101,7 +130,7 @@ config = (
     .setdefault("config", {})
 )
 scheduler = config.setdefault("scheduler_params", {})
-scheduler["num_cores"] = 3
+scheduler["num_cores"] = 1
 with open(path, "w") as handle:
     json.dump(spec, handle, indent=2)
     handle.write("\n")
@@ -113,10 +142,12 @@ PY
 # one drill override, and feed the result through the builder's verified
 # `create ... patch` route.
 "$repo_root/tools/deploy/generate-chain-specs.sh"
-builder="$repo_root/target/tools/bin/chain-spec-builder"
-wasm="$repo_root/target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm"
-preset_patch="$repo_root/target/env/bleavit-local-preset.json"
-drill_patch="$repo_root/target/env/bleavit-drill-patch.json"
+# These READ cargo build outputs of the script invoked on the line above, so
+# they resolve through the same `$bleavit_target` defined at the top.
+builder="$bleavit_target/tools/bin/chain-spec-builder"
+wasm="$bleavit_target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm"
+preset_patch="$bleavit_target/env/bleavit-local-preset.json"
+drill_patch="$bleavit_target/env/bleavit-drill-patch.json"
 properties="tokenSymbol=VIT,tokenDecimals=12,ss58Format=7777"
 
 rm -f "$preset_patch"
@@ -224,7 +255,7 @@ fi
 # drill exercises. Every production preset leaves `migration_halt` false, so no
 # shipped chain boots halted; no Bleavit runtime byte and no 13-owned value
 # changes (drill-env staging, SQ-276).
-migration_patch="$repo_root/target/env/bleavit-drill-migration-patch.json"
+migration_patch="$bleavit_target/env/bleavit-drill-migration-patch.json"
 python3 - "$drill_patch" "$migration_patch" <<'PY'
 import json
 import sys
@@ -272,8 +303,14 @@ python3 "$repo_root/tools/deploy/validate-chain-spec.py" \
 # `drill_patch` as the base drill (no balance/identity change), and `--verify`
 # below re-runs `EpochParams::validate` over the compressed genesis. Built into a
 # distinct CARGO_TARGET_DIR so it never clobbers the release wasm at line ~117.
-fast_wasm="$repo_root/target/fast-timing/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm"
-CARGO_TARGET_DIR="$repo_root/target/fast-timing" cargo build \
+# Distinct from the release target dir but still under `$bleavit_target`, so a
+# caller who redirects CARGO_TARGET_DIR moves this build too. Pinning it under
+# $repo_root reintroduced the ecryptfs filename-cap failure that redirection
+# exists to avoid — the separate-target-dir requirement and the redirectability
+# requirement are independent, and this needs both.
+fast_target="$bleavit_target/fast-timing"
+fast_wasm="$fast_target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm"
+CARGO_TARGET_DIR="$fast_target" cargo build \
   -p bleavit-runtime --release --features substrate-wasm-builder,fast-timing --locked
 if [[ ! -s "$fast_wasm" ]]; then
   echo "fast-timing runtime wasm was not produced at $fast_wasm" >&2
@@ -309,7 +346,7 @@ python3 "$repo_root/tools/deploy/validate-chain-spec.py" \
 # byte changes: both fields default `None` in every production preset
 # (fail-closed — a chain never boots with a renewal authority), so this is
 # drill-env staging against the byte-identical release runtime (SQ-276 extended).
-coretime_patch="$repo_root/target/env/bleavit-drill-coretime-patch.json"
+coretime_patch="$bleavit_target/env/bleavit-drill-coretime-patch.json"
 python3 - "$drill_patch" "$coretime_patch" <<'PY'
 import json
 import sys

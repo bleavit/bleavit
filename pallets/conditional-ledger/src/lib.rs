@@ -1616,6 +1616,102 @@ pub mod pallet {
             T::PalletId::get().into_account_truncating()
         }
 
+        /// Atomically seed a hosted question's external pair. The ordinary
+        /// split/transfer wrappers settle position deposits after each call;
+        /// that is correct for user-visible operations but would make the
+        /// four funder rows created and consumed by this one seed require a
+        /// transient balance beyond the documented escrow and service fee.
+        /// Keeping the complete sequence in one loaded core state makes the
+        /// funder's net position count zero, so no temporary deposit is owed.
+        pub fn seed_external_pair_atomic(
+            origin: OriginFor<T>,
+            question: ProposalId,
+            accept_account: T::AccountId,
+            reject_account: T::AccountId,
+            funder: T::AccountId,
+            headroom: Balance,
+        ) -> DispatchResult {
+            T::MarketAuthority::ensure_origin(origin)?;
+            ensure!(headroom > 0, Error::<T, I>::ArithmeticOverflow);
+            ensure!(
+                accept_account != reject_account,
+                Error::<T, I>::TryStateViolation
+            );
+            ensure!(
+                Self::is_protocol(&accept_account),
+                Error::<T, I>::TryStateViolation
+            );
+            ensure!(
+                Self::is_protocol(&reject_account),
+                Error::<T, I>::TryStateViolation
+            );
+            ensure!(
+                !Self::is_protocol(&funder),
+                Error::<T, I>::TryStateViolation
+            );
+            ensure!(
+                !T::ReservedProtocolDestinations::contains(&funder),
+                Error::<T, I>::TryStateViolation
+            );
+            let branch_inventory = headroom
+                .checked_add(headroom)
+                .ok_or(Error::<T, I>::ArithmeticOverflow)?;
+            let accounts = alloc::vec![
+                funder.clone(),
+                accept_account.clone(),
+                reject_account.clone(),
+            ];
+            frame_support::storage::with_storage_layer(|| {
+                let mut state =
+                    Self::load_proposal(question, &accounts).ok_or(Error::<T, I>::UnknownVault)?;
+                let escrow_before = Self::vault_escrow(&state, question);
+                let counts_before: Vec<u32> = accounts
+                    .iter()
+                    .map(|who| Self::account_count(&state, who))
+                    .collect();
+
+                for _ in 0..2 {
+                    state
+                        .split(LedgerOrigin::MarketAuthority, question, &funder, headroom)
+                        .map_err(Error::<T, I>::from)?;
+                }
+                for (account, branch) in [
+                    (&accept_account, Branch::Accept),
+                    (&reject_account, Branch::Reject),
+                ] {
+                    state
+                        .transfer(
+                            LedgerOrigin::MarketAuthority,
+                            proposal_position(question, branch, PositionKind::BranchUsdc),
+                            &funder,
+                            account,
+                            branch_inventory,
+                        )
+                        .map_err(Error::<T, I>::from)?;
+                    state
+                        .split_scalar(
+                            LedgerOrigin::MarketAuthority,
+                            question,
+                            branch,
+                            account,
+                            headroom,
+                        )
+                        .map_err(Error::<T, I>::from)?;
+                }
+
+                let escrow_after = Self::vault_escrow(&state, question);
+                let counts_after: Vec<u32> = accounts
+                    .iter()
+                    .map(|who| Self::account_count(&state, who))
+                    .collect();
+                Self::persist_proposal(question, &accounts, &state);
+                Self::settle_collateral(&funder, escrow_before, escrow_after, 0)?;
+                Self::settle_deposits(&accounts, &counts_before, &counts_after)?;
+                Self::emit_core_events(&state);
+                Ok(())
+            })
+        }
+
         fn usdc() -> AssetIdOf<T, I> {
             T::UsdcAssetId::get()
         }

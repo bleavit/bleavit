@@ -71,14 +71,15 @@ command = "zombienet/bin/polkadot-parachain"
 name = "coretime-collator-2"
 command = "zombienet/bin/polkadot-parachain"
 
-[[hrmp_channels]]
-sender = 4242
-recipient = 1000
-max_capacity = 8
-max_message_size = 524288
-
-[[hrmp_channels]]
-sender = 1000
-recipient = 4242
-max_capacity = 8
-max_message_size = 524288
+# HRMP channels are opened AFTER both paras are producing blocks, by
+# `zombienet/drills/js/open-hrmp-channels.js`, not by `[[hrmp_channels]]` here
+# (SQ-567). Zombienet's directive preopens them in the relay genesis, which
+# queues DMP notifications stamped `sent_at = 0`; cumulus's first-candidate
+# sentinel is also `{sent_at: 0}`, so it drops every one of them, rebuilds an
+# empty MQC head and traps `set_validation_data` — the parachain never produces
+# block #1. That helper's header comment carries the full derivation with source
+# line references. Channel geometry (capacity 8, 524288 bytes) is unchanged and
+# now lives in the helper.
+#
+# The drill spawning this topology MUST run the helper with "4242:1000,1000:4242"
+# after both collators report a block height.

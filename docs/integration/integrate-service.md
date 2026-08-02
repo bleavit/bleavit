@@ -1,82 +1,51 @@
 # Integrating an off-chain service
 
-You cannot send XCM. You do not need to — the calls are the same ones a parachain makes, from a
-local signed account.
+Use [`@bleavit/client-ts`](../../frontend/packages/bleavit-client-ts/README.md). It supplies the
+registration/open/seal facade, finalized-pin refresh, storage-proof boundary, and v22 provenance
+check. You provide a generated PAPI bridge and a local signer; you do not write XCM, SCALE bytes, or
+fee arithmetic.
 
-Non-normative; [16 §2](../architecture/16-hosted-question-service.md) owns this.
-
----
-
-## How you authenticate
-
-A parachain client is identified by its XCM `Location`. You are identified by an **account**: your
-registry record carries a `local_signer`, and the signed-origin path converts `Signed(who)` to
-`ExternalClient(id)` **only** on an exact match.
-
-A registration carries **exactly one** of the two — `location` or `local_signer`, never both and
-never neither. Same exact-equality discipline either way, same single success path.
-
-*(An earlier draft of the spec proposed identifying local services by `Location::here()`. That is
-identical for every local signer, so it would have authenticated either nobody or anybody. The
-signer binding replaced it.)*
-
----
+Non-normative; [16 §2/§5/§9](../architecture/16-hosted-question-service.md) owns this surface.
 
 ## The flow
 
-```python
-# 1. Ask
-tx = api.tx.QuestionService.register(
-    text_hash=blake2_256(b"..."),
-    sub_id=my_request_id,
-    declared_stake=100_000 * USDC,
-    epsilon=50_000_000,               # 5% on the 1e9 grid
-    window=30 * DAYS,
-    attestors=[alice, bob, carol],
-    rule="AcceptExceedsReject",
-)
-await tx.sign_and_send(my_keypair)     # the account bound as `local_signer`
+```ts
+import { BleavitClient } from "@bleavit/client-ts";
 
-# 2. Read, verifying against a finalized header
-report = await api.rpc.state.call("FutarchyApi_hosted_report", question_id, at=finalized_hash)
+const bleavit = new BleavitClient(papiBridge);
+await bleavit.register({
+  subId: requestId,
+  declaredStake: 100_000n * USDC,
+  epsilon1e9: 50_000_000n,
+  tolerance1e9: 20_000_000n,
+  window: 30 * DAYS,
+  attestors: [alice, bob, carol],
+  rule: { minAcceptImprovement1e9: 10_000_000n },
+}, localSigner);
+
+const report = await bleavit.readReport(questionId);
+// report.status.kind === "verified-finalized"
+// report.value is proof-backed and its provenance hash is v22-verified.
 ```
 
-**Read at a finalized hash.** Reading at the chain head gives you a value that can still be
-reverted; for anything that moves money, `at=finalized_hash` is the difference between a report and
-a rumour.
+The bridge's generated PAPI adapter reads `QuestionService::Reports` at one finalized `chainHead`
+with a verified trie proof and delegates typed `tx.QuestionService.register/open/seal` builders. The
+facade refreshes the finalized pin immediately before signing a registration, so a stale fee/window
+read cannot silently become the transaction the user approves.
 
-## Verify it yourself
+## Authentication and settlement
 
-```python
-preimage = b"bleavit/hosted-report/v1" + scale_encode(report_fields)
-assert blake2_256(preimage) == report.provenance_hash
-```
+The registry binds exactly one local signer to the service client id. The account is the only signed
+origin that can register, open, or seal for that client. Named attestors still report the realized
+value and the permissionless settle/void crank remains part of the service lifecycle.
 
-If you are consuming a report you did not request — someone else's, quoted to you — this check plus
-a storage proof against a finalized header is the whole of what makes it trustworthy. Everything
-else is someone's word.
+For a report you did not request, the same proof and provenance checks apply. Read
+[`reading-the-report.md`](reading-the-report.md) before using `certified`, `manip_floor`, or
+`settlement_trust` as decision inputs.
 
-## Then read it properly
+## Refusal handling
 
-[`reading-the-report.md`](reading-the-report.md), especially:
-
-- **`manip_floor` is a floor, not a ceiling.** Faking the price cost *at least* that. It does not
-  mean nobody did.
-- **`certified` is a relation**, not a badge — read `declared_stake` alongside it.
-- **`settlement_trust`** tells you how much the settlement is worth trusting, which for someone
-  else's report is usually the field that matters most.
-
----
-
-## What you do not get
-
-- **No push.** Push is XCM, so it is a parachain-only convenience. Poll the pull surface; it is the
-  authoritative delivery anyway, so you are not missing anything a parachain has.
-- **No telemetry.** The frontend and this service ship none. What you can read is what the chain
-  exposes.
-
-## What you still owe
-
-Settlement. Your named attestors report the realized value within 72 hours, and the median of a
-`⌈n/2⌉` quorum settles it. If they fail, the question VOIDs and everyone redeems at par — your
-report is unaffected, because it was published at seal. See [`settlement.md`](settlement.md).
+`BleavitClientError` exposes `FE-PROV-001` for an unpinned/unverified read, `FE-PROV-002` for a
+missing or provenance-invalid report, and `FE-TX-001`/`FE-TX-002` for stale preparation or a
+rejected submission. Remote dispatch refusals remain the deterministic architecture-16 names and
+are returned by the generated PAPI transaction result; see [`errors.md`](errors.md).

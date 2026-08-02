@@ -98,6 +98,50 @@ pub trait LedgerOps<AccountId> {
     fn note_protocol_account(&mut self, who: AccountId);
     fn position_balance(&self, id: PositionId, who: &AccountId) -> Balance;
 
+    /// Seed a hosted question's two books in one ledger transaction. The
+    /// default is the reference-model sequence; the FRAME adapter overrides
+    /// it so transient funder positions never cross a storage-operation
+    /// boundary and therefore never require a deposit absent from the
+    /// documented escrow-plus-fee funding requirement.
+    fn seed_external_pair(
+        &mut self,
+        accept: &MarketBook<AccountId>,
+        reject: &MarketBook<AccountId>,
+        funder: &AccountId,
+    ) -> Result<Balance, ()>
+    where
+        AccountId: Clone,
+    {
+        let question = match (accept.kind, reject.kind) {
+            (
+                BookKind::External { question: left, .. },
+                BookKind::External {
+                    question: right, ..
+                },
+            ) if left == right => left,
+            _ => return Err(()),
+        };
+        let headroom = seed_headroom(accept.b).map_err(|_| ())?;
+        let branch_inventory = headroom.checked_add(headroom).ok_or(())?;
+        for book in [accept, reject] {
+            self.note_protocol_account(book.account.clone());
+            self.note_protocol_account(book.fees_account.clone());
+        }
+        for _ in 0..2 {
+            self.do_split(question, funder, headroom)?;
+        }
+        for (book, branch) in [(accept, Branch::Accept), (reject, Branch::Reject)] {
+            self.do_transfer(
+                position(question, branch, PositionKind::BranchUsdc),
+                funder,
+                &book.account,
+                branch_inventory,
+            )?;
+            self.do_split_scalar(question, branch, &book.account, headroom)?;
+        }
+        Ok(headroom)
+    }
+
     // ------------------------------------------------ 08 §8 step 5(b) return
     // The inverse of the seeding ops above: redeem `holder`'s terminal claims
     // and pay the proceeds to `recipient`. Each returns the **real USDC** the
@@ -1616,7 +1660,7 @@ pub fn seed_external_pair<A: Clone + Eq, L: LedgerOps<A>>(
         accept.id != reject.id && accept.b == reject.b,
         Error::TryStateViolation
     );
-    let question = match (accept.kind, reject.kind) {
+    let _question = match (accept.kind, reject.kind) {
         (
             BookKind::External {
                 question: left,
@@ -1631,35 +1675,13 @@ pub fn seed_external_pair<A: Clone + Eq, L: LedgerOps<A>>(
         ) if left == right && left_client == right_client => left,
         _ => return Err(Error::TryStateViolation),
     };
-    let headroom = seed_headroom(accept.b)?;
-    let branch_inventory = add(headroom, headroom)?;
-    for book in [accept, reject] {
-        ledger.note_protocol_account(book.account.clone());
-        ledger.note_protocol_account(book.fees_account.clone());
-    }
     // Two cash deposits are normative even though one proposal split would
     // mint enough mutually-exclusive branch collateral for both scalar books.
     // The extra complete set is locked in the two book accounts, never left as
     // an immediately mergeable client position.
-    for _ in 0..2 {
-        ledger
-            .do_split(question, funder, headroom)
-            .map_err(|_| Error::Ledger)?;
-    }
-    for (book, branch) in [(accept, Branch::Accept), (reject, Branch::Reject)] {
-        ledger
-            .do_transfer(
-                position(question, branch, PositionKind::BranchUsdc),
-                funder,
-                &book.account,
-                branch_inventory,
-            )
-            .map_err(|_| Error::Ledger)?;
-        ledger
-            .do_split_scalar(question, branch, &book.account, headroom)
-            .map_err(|_| Error::Ledger)?;
-    }
-    Ok(headroom)
+    ledger
+        .seed_external_pair(accept, reject, funder)
+        .map_err(|_| Error::Ledger)
 }
 
 /// Seed the Accept/Reject pair from one collateral split. A proposal split

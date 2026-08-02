@@ -36,10 +36,32 @@ function namedValues(value, wanted) {
   return found;
 }
 
-function assertV5(value, label) {
+// Only for fields whose runtime type is genuinely a `Versioned*`. In
+// pallet-xcm-29.0.0 that is `AssetsTrapped { .., assets: VersionedAssets }`
+// (src/lib.rs:577) — but NOT `Sent { origin: Location, destination: Location,
+// message: Xcm<()>, .. }` (src/lib.rs:521), whose fields are unversioned and can
+// therefore never carry a `{v5: ..}` wrapper. Asserting one there is not a
+// strict check, it is an impossible one; see `assertWireVersionV5` for where the
+// wire version actually is observable.
+function assertVersionedV5(value, label) {
   const object = json(value);
   if (!object || typeof object !== "object" || !Object.keys(object).some((key) => key.toLowerCase() === "v5")) {
     throw new Error(`${label} is not an XCM v5 value: ${text(object)}`);
+  }
+}
+
+// The 09 §6.1 / D-19 wire-version pin (XCM_VERSION_PINNED = 5) is not carried in
+// the `Sent` event — by the time it is decoded it is already the runtime's
+// current types. It is observable in `polkadotXcm.safeXcmVersion`, so the drill
+// checks it there once rather than pretending to read it off every event.
+async function assertWireVersionV5(api, label) {
+  const safe = await api.query.polkadotXcm.safeXcmVersion();
+  if (safe.isNone) {
+    throw new Error(`${label}: polkadotXcm.safeXcmVersion is unset; the v5 wire pin is unverifiable`);
+  }
+  const version = safe.unwrap().toNumber();
+  if (version !== 5) {
+    throw new Error(`${label}: safeXcmVersion is ${version}, not the pinned XCM v5 (09 §6.1; D-19)`);
   }
 }
 
@@ -158,9 +180,10 @@ async function waitForProcessed(api, messageId, start) {
 function assertSent(events, alice, expectedBeneficiary, amount) {
   const sent = eventOf(events, "polkadotXcm", "Sent");
   if (!sent) throw new Error("source in-block receipt has no polkadotXcm.Sent");
+  // `Sent`'s destination/message are unversioned Location/Xcm, so there is no
+  // version wrapper to assert here. The correlated-content checks below are the
+  // real assertions; the wire version is checked in `setup`.
   const [origin, destination, message, messageId] = sent.data;
-  assertV5(destination, "Sent.destination");
-  assertV5(message, "Sent.message");
   if (!scalarOccurs(json(origin), alice.address)
       && !scalarOccurs(json(origin), Buffer.from(alice.publicKey).toString("hex"))) {
     throw new Error(`Sent.origin does not identify Alice: ${text(origin)}`);
@@ -197,6 +220,7 @@ function transferInputs(alice, failure) {
 
 async function setup(api, alice, networkInfo) {
   await assertB4DestinationReady(networkInfo); // fail before any AH debit/mint mutation
+  await assertWireVersionV5(api, "Asset Hub");
   const assets = api.tx.assets;
   const sudo = api.tx.sudo?.sudo;
   if (!assets?.forceCreate || !assets?.mint || !sudo) {
@@ -260,7 +284,7 @@ async function trap(networkInfo) {
   if (!trapped) throw new Error("failed inbound block has no polkadotXcm.AssetsTrapped");
   const [hash, origin, assets] = trapped.data;
   assertAhOrigin(origin);
-  assertV5(assets, "AssetsTrapped.assets");
+  assertVersionedV5(assets, "AssetsTrapped.assets");
   const amount = fungibleAmount(assets);
   if (amount <= 0n || amount > BigInt(state.failure.amount)) {
     throw new Error(`trapped amount ${amount} is not correlated to sent amount ${state.failure.amount}`);
@@ -328,8 +352,7 @@ async function recovery(api, alice, networkInfo) {
       "NOTE(B7): Asset Hub sudo send did not produce the bare chain origin required to recover an AH-keyed trap",
     );
   }
-  assertV5(sent.data[1], "recovery Sent.destination");
-  assertV5(sent.data[2], "recovery Sent.message");
+  // Same as the outbound leg: `Sent` carries unversioned Location/Xcm.
   const messageId = sent.data[3].toHex();
   const destinationResult = await waitForProcessed(bleavit, messageId, start);
   if (!destinationResult.processed.data[destinationResult.processed.data.length - 1].isTrue) {

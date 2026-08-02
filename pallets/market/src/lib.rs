@@ -10,7 +10,7 @@
 
 extern crate alloc;
 
-use futarchy_primitives::{BlockNumber, MarketId};
+use futarchy_primitives::{Balance, BlockNumber, MarketId};
 use question_service_core::{ClientId, QuestionId};
 
 pub use market_core as core_market;
@@ -222,6 +222,18 @@ impl<T: pallet::Config> ServiceLedgerAdapter<T> for () {
         None
     }
 
+    fn seed_external_pair_atomic(
+        _: QuestionId,
+        _: &T::AccountId,
+        _: &T::AccountId,
+        _: &T::AccountId,
+        _: Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        Err(sp_runtime::DispatchError::Other(
+            "service ledger unavailable",
+        ))
+    }
+
     fn discard_protocol_inventory(
         _: QuestionId,
         _: &T::AccountId,
@@ -271,6 +283,23 @@ where
         question: QuestionId,
     ) -> Option<frame_system::pallet_prelude::BlockNumberFor<T>> {
         pallet_conditional_ledger::VaultTerminalAt::<T, I>::get(question)
+    }
+
+    fn seed_external_pair_atomic(
+        question: QuestionId,
+        accept_account: &T::AccountId,
+        reject_account: &T::AccountId,
+        funder: &T::AccountId,
+        headroom: Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        pallet_conditional_ledger::Pallet::<T, I>::seed_external_pair_atomic(
+            pallet::InstanceLedger::<T, I>::authority_origin(),
+            question,
+            accept_account.clone(),
+            reject_account.clone(),
+            funder.clone(),
+            headroom,
+        )
     }
 
     fn discard_protocol_inventory(
@@ -438,6 +467,13 @@ pub trait ServiceLedgerAdapter<T: pallet::Config> {
     fn vault_exists(question: QuestionId) -> bool;
     fn terminal_at(question: QuestionId)
         -> Option<frame_system::pallet_prelude::BlockNumberFor<T>>;
+    fn seed_external_pair_atomic(
+        question: QuestionId,
+        accept_account: &T::AccountId,
+        reject_account: &T::AccountId,
+        funder: &T::AccountId,
+        headroom: Balance,
+    ) -> frame_support::dispatch::DispatchResult;
     fn discard_protocol_inventory(
         question: QuestionId,
         book: &T::AccountId,
@@ -1571,6 +1607,31 @@ pub mod pallet {
     impl<T: Config> market_core::LedgerOps<T::AccountId> for RoutedLedger<T> {
         fn do_split(&mut self, pid: ProposalId, who: &T::AccountId, a: Balance) -> Result<(), ()> {
             route_ledger!(self, do_split(pid, who, a))
+        }
+
+        fn seed_external_pair(
+            &mut self,
+            accept: &MarketBook<T::AccountId>,
+            reject: &MarketBook<T::AccountId>,
+            funder: &T::AccountId,
+        ) -> Result<Balance, ()> {
+            let question = match accept.kind {
+                BookKind::External { question, .. } => question,
+                _ => return Err(()),
+            };
+            let headroom = market_core::seed_headroom(accept.b).map_err(|_| ())?;
+            match &mut self.inner {
+                RoutedLedgerInner::Service(_) => T::ServiceLedger::seed_external_pair_atomic(
+                    question,
+                    &accept.account,
+                    &reject.account,
+                    funder,
+                    headroom,
+                )
+                .map_err(|_| ())?,
+                RoutedLedgerInner::Primary(_) => return Err(()),
+            }
+            Ok(headroom)
         }
 
         fn do_transfer(

@@ -4,6 +4,12 @@
 
 Everything above (imported from AGENTS.md) is binding. Below is the Claude-Code-specific wiring.
 
+N10 adds a reusable client-runtime pallet and ABI under `pallets/bleavit-client/` and
+`crates/bleavit-client-abi/`, plus the standalone `runtime/bleavit-client-runtime/` harness,
+`frontend/packages/bleavit-client-ts/`, and client Zombienet drills. The client pallet is never
+added to Bleavit's production `construct_runtime!`; update the executable quickstart binding when
+changing its drill helper.
+
 ## Skills (invoke with `/name`; auto-invoke when the description matches)
 
 | Skill | Use for |

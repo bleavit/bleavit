@@ -1231,6 +1231,58 @@ version = "0.1.0"
 dependencies = [
  "futarchy-primitives",
  "parity-scale-codec",
+ "scale-info",
+ "staging-xcm",
+]
+
+[[package]]
+name = "bleavit-client-runtime"
+version = "0.1.0"
+dependencies = [
+ "cumulus-pallet-aura-ext",
+ "cumulus-pallet-parachain-system",
+ "cumulus-pallet-xcm",
+ "cumulus-pallet-xcmp-queue",
+ "cumulus-primitives-aura",
+ "cumulus-primitives-core",
+ "cumulus-primitives-utility",
+ "frame-executive",
+ "frame-support",
+ "frame-system",
+ "frame-system-rpc-runtime-api",
+ "futarchy-primitives",
+ "pallet-aura",
+ "pallet-authorship",
+ "pallet-balances",
+ "pallet-bleavit-client",
+ "pallet-collator-selection",
+ "pallet-message-queue",
+ "pallet-session",
+ "pallet-sudo",
+ "pallet-timestamp",
+ "pallet-xcm",
+ "parachains-common",
+ "parity-scale-codec",
+ "polkadot-runtime-common",
+ "scale-info",
+ "serde_json",
+ "sp-api",
+ "sp-block-builder",
+ "sp-consensus-aura",
+ "sp-core",
+ "sp-genesis-builder",
+ "sp-inherents",
+ "sp-io",
+ "sp-offchain",
+ "sp-runtime",
+ "sp-session",
+ "sp-transaction-pool",
+ "sp-version",
+ "staging-parachain-info",
+ "staging-xcm",
+ "staging-xcm-builder",
+ "staging-xcm-executor",
+ "substrate-wasm-builder",
 ]
 
 [[package]]
@@ -7769,6 +7821,25 @@ dependencies = [
  "scale-info",
  "sp-core",
  "sp-runtime",
+]
+
+[[package]]
+name = "pallet-bleavit-client"
+version = "0.1.0"
+dependencies = [
+ "bleavit-client-abi",
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
+ "futarchy-primitives",
+ "market-core",
+ "parity-scale-codec",
+ "question-service-core",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+ "staging-xcm",
 ]
 
 [[package]]

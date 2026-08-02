@@ -4863,20 +4863,17 @@ fn cross_instance_signed_transfers_refuse_both_foreign_custody_domains() {
 }
 
 #[test]
-fn external_pair_seed_rolls_back_the_first_split_if_the_second_cannot_fund() {
+fn external_pair_seed_rolls_back_when_final_collateral_cannot_fund() {
     new_test_ext().execute_with(|| {
         create_external_pair();
         let headroom = market_core::seed_headroom(B).map_or(0, |amount| amount);
         assert!(headroom > 0);
         let floor = <Assets as Inspect<AccountId>>::minimum_balance(USDC);
-        // Leave enough transient cash for the first split's collateral plus
-        // both non-protocol position deposits, and exactly one unit too little
-        // for the second. `seed_external_pair` performs both splits before any
-        // transfer into the protocol books, so this reaches a committed first
-        // split and proves the outer storage layer rolls it back; starving the
-        // first deposit move would not exercise that path.
-        let first_only_cash =
-            2 * headroom + 2 * futarchy_primitives::kernel::POSITION_DEPOSIT_USDC + floor - 1;
+        // The FRAME adapter now settles the complete pair in one loaded ledger
+        // state, so the funder has no transient position-deposit requirement.
+        // Leave exactly one unit too little to preserve the collateral transfer
+        // itself; the failure must still roll back both books atomically.
+        let first_only_cash = 2 * headroom + floor - 1;
         assert_ok!(Assets::transfer(
             signed(ALICE),
             USDC,
