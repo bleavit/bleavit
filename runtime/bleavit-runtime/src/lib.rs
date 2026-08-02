@@ -78,7 +78,29 @@ mod benches {
                 [pallet_attestor, Attestor]
                 [pallet_client_registry, ClientRegistry]
                 [pallet_question_service, QuestionService]
-                [pallet_conditional_ledger, ServiceLedger]
+                // `ServiceLedger` (`pallet_conditional_ledger::<Instance1>`) is
+                // deliberately NOT registered here, and the reason is structural
+                // rather than expedient:
+                //
+                //  * both instances bind the SAME `WeightInfo`
+                //    (`weights::pallet_conditional_ledger`), so a second
+                //    measurement can only overwrite the first — the two sets can
+                //    never coexist in one file;
+                //  * the pallet is generic over `I`, so the executed code is
+                //    identical and instance `()`'s measurements are the correct
+                //    weights for both; and
+                //  * `ExternalMarketSweepStatus::baseline_book_swept` is `false`
+                //    unconditionally, because the service domain has no Baseline
+                //    book (16: two books per question, never six). So
+                //    `sweep_dust_baseline` is *structurally* unbenchmarkable on
+                //    that instance — a fixture cannot fix it, and its sibling
+                //    `sweep_dust` is fail-closed for the same reason (only an
+                //    exact registered two-book question authorizes the service
+                //    ledger's dust sweep).
+                //
+                // `runtime_ledger_instances_share_one_weight_schedule` pins
+                // assumption two, so giving the instances different weights fails
+                // loudly instead of silently shipping unmeasured ones.
                 [pallet_epoch, Epoch]
                 [pallet_execution_guard, ExecutionGuard]
             );

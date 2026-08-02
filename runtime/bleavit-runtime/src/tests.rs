@@ -5435,6 +5435,42 @@ fn treasury_rebate_payout_moves_real_usdc_from_the_selected_pot() {
 /// each `#[pallet::weight]` attribute; this test is what makes that structural
 /// rather than a comment asking the next person to re-splice it.
 #[test]
+fn runtime_ledger_instances_share_one_weight_schedule() {
+    use pallet_conditional_ledger::WeightInfo as _;
+
+    type Primary = <Runtime as pallet_conditional_ledger::Config<()>>::WeightInfo;
+    type Service = <Runtime as pallet_conditional_ledger::Config<
+        frame_support::instances::Instance1,
+    >>::WeightInfo;
+
+    // Only instance `()` is benchmarked (see `define_benchmarks!`), and the
+    // service instance charges its numbers. That is sound only while the two
+    // schedules really are one object, so pin it rather than trusting the
+    // config to stay that way.
+    //
+    // It cannot be fixed by benchmarking `ServiceLedger` too: both instances
+    // write to `weights::pallet_conditional_ledger`, so a second measurement
+    // can only overwrite the first, and
+    // `ExternalMarketSweepStatus::baseline_book_swept` is `false`
+    // unconditionally because the service domain has no Baseline book (16 —
+    // two books per question, never six), which makes `sweep_dust_baseline`
+    // structurally unbenchmarkable there rather than merely unfixtured.
+    let primary = Primary::sweep_dust();
+    assert!(
+        primary.ref_time() > 0 && primary.proof_size() > 0,
+        "a zero weight would make this test vacuous"
+    );
+    assert_eq!(
+        primary,
+        Service::sweep_dust(),
+        "the service ledger charges instance ()'s measured weights; if these \
+         diverge, ServiceLedger needs its own benchmarks and its own file"
+    );
+    assert_eq!(Primary::sweep_dust_baseline(), Service::sweep_dust_baseline());
+    assert_eq!(Primary::redeem(), Service::redeem());
+}
+
+#[test]
 fn epoch_paying_calls_declare_the_collator_compensation_term() {
     use frame_support::dispatch::GetDispatchInfo;
     use pallet_epoch::WeightInfo as _;
