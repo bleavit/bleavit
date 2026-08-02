@@ -1,4 +1,4 @@
-//! Read-only assembly for the contract-v21 `FutarchyApi` surface (02 §3-§4a).
+//! Read-only assembly for the contract-v22 `FutarchyApi` surface (02 §3-§4a).
 
 use alloc::vec::Vec;
 
@@ -454,7 +454,7 @@ pub fn open_oracle_rounds() -> BoundedVec<OracleRoundView, { bounds::MAX_OPEN_OR
     out
 }
 
-/// Contract-v21 immutable hosted report projection (02 §4a).
+/// Contract-v22 immutable hosted report projection (unchanged from v21; 02 §4a).
 pub fn hosted_report(question_id: QuestionId) -> Option<ReportView> {
     pallet_question_service::Pallet::<Runtime>::hosted_report(question_id)
 }

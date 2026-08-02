@@ -1415,6 +1415,9 @@ pub(crate) mod xcm_config {
     /// every sibling probe fail local validation (SQ-380).
     pub type NetworkRouter = (RelayRouter, XcmpQueue);
     pub type TopicRouter = WithUniqueTopic<NetworkRouter>;
+    /// I-36 review point: hosted-report egress is the bare topic router. It is
+    /// intentionally not the welfare-observing `Router` alias below.
+    pub type ClientEgressRouter = TopicRouter;
     pub type Router = bleavit_xcm::health::HealthTrackingRouter<TopicRouter, XcmTrafficRecorder>;
     pub type BaseWeigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
     pub type Weigher =
@@ -2794,7 +2797,7 @@ impl pallet_question_service::ServiceParamsProvider for RuntimeServiceParams {
 }
 
 pub struct RuntimeClientFunding;
-impl pallet_question_service::ClientFunding<AccountId> for RuntimeClientFunding {
+impl pallet_client_registry::ClientFunding<AccountId> for RuntimeClientFunding {
     fn funding_account(client: futarchy_primitives::ClientId) -> Option<AccountId> {
         use staging_xcm_executor::traits::ConvertLocation;
 
@@ -2803,6 +2806,73 @@ impl pallet_question_service::ClientFunding<AccountId> for RuntimeClientFunding 
             (Some(location), None) => xcm_config::LocationToAccountId::convert_location(&location),
             (None, Some(signer)) => Some(signer),
             _ => None,
+        }
+    }
+}
+
+pub struct RuntimeClientEgressFees;
+impl bleavit_xcm::egress::DeliveryFeePayment for RuntimeClientEgressFees {
+    fn prepay(
+        client: futarchy_primitives::ClientId,
+        program: &staging_xcm::latest::Xcm<()>,
+        router_quote: staging_xcm::latest::Assets,
+    ) -> Result<(), bleavit_xcm::egress::DeliveryFeeError> {
+        // The stable2606 sibling transport currently quotes no asset. Refuse
+        // any future nonempty quote until its asset incidence is specified;
+        // silently stacking or converting it would recreate SQ-565.
+        if !router_quote.inner().is_empty() {
+            return Err(bleavit_xcm::egress::DeliveryFeeError::RouterQuoteUnsupported);
+        }
+        let instructions = u64::try_from(program.0.len())
+            .map_err(|_| bleavit_xcm::egress::DeliveryFeeError::PricingUnavailable)?;
+        let envelope = xcm_config::UnitWeightCost::get().saturating_mul(instructions);
+        let rate = <ConstitutionTraderRates as bleavit_xcm::trader::TraderRates>::usdc_rate();
+        let fee = bleavit_xcm::trader::price_weight_up(envelope, rate)
+            .map_err(|_| bleavit_xcm::egress::DeliveryFeeError::PricingUnavailable)?;
+        if fee == 0 {
+            return Err(bleavit_xcm::egress::DeliveryFeeError::PricingUnavailable);
+        }
+        pallet_client_registry::Pallet::<Runtime>::prepay_egress(
+            client,
+            &crate::genesis::treasury_account(),
+            fee,
+        )
+        .map_err(|_| bleavit_xcm::egress::DeliveryFeeError::PrepaymentRefused)?;
+        // Postage is a MAIN inflow, never a treasury outflow. This ledger
+        // credit shares the dispatcher's rollback layer with router delivery.
+        FutarchyTreasury::credit_main(fee);
+        Ok(())
+    }
+}
+
+pub struct RuntimeReportPush;
+impl pallet_question_service::ReportPush for RuntimeReportPush {
+    fn push(
+        client: futarchy_primitives::ClientId,
+        report: &futarchy_primitives::ReportView,
+    ) -> pallet_question_service::ReportPushOutcome {
+        if report.client_id != client {
+            return pallet_question_service::ReportPushOutcome::Failed;
+        }
+        // Removal refunds postage before tombstoning. Live questions still
+        // settle, but §2 makes their remaining reports authoritative-pull-only;
+        // do not manufacture Fee failures or alert noise from a zeroed float.
+        if pallet_client_registry::Pallet::<Runtime>::is_removed(client) {
+            return pallet_question_service::ReportPushOutcome::NotApplicable;
+        }
+        let Some(record) = pallet_client_registry::Clients::<Runtime>::get(client) else {
+            return pallet_question_service::ReportPushOutcome::Failed;
+        };
+        let Some(destination) = record.location else {
+            return pallet_question_service::ReportPushOutcome::NotApplicable;
+        };
+        match bleavit_xcm::egress::ReportEgress::<
+            xcm_config::ClientEgressRouter,
+            RuntimeClientEgressFees,
+        >::push(client, destination, report)
+        {
+            Ok(_) => pallet_question_service::ReportPushOutcome::Sent,
+            Err(_) => pallet_question_service::ReportPushOutcome::Failed,
         }
     }
 }
@@ -3271,6 +3341,7 @@ parameter_types! {
     pub const LedgerPalletId: PalletId = PalletId(*b"bl/ledgr");
     pub const ServiceLedgerPalletId: PalletId = PalletId(*b"bl/svclg");
     pub const QuestionServicePalletId: PalletId = PalletId(*b"bl/qserv");
+    pub const ClientDeliveryPalletId: PalletId = PalletId(*b"bl/cdelv");
     pub const MarketPalletId: PalletId = PalletId(*b"bl/mrket");
     pub const EpochPalletId: PalletId = PalletId(*b"bl/epoch");
     pub const ExecutionGuardPalletId: PalletId = PalletId(*b"bl/exgrd");
@@ -6223,7 +6294,7 @@ impl pallet_welfare::WelfareParamsProvider for WelfareParams {
     }
 }
 #[allow(dead_code)]
-fn xcm_health(counters: pallet_welfare::XcmTrafficCounters) -> FixedU64 {
+pub(crate) fn xcm_health(counters: pallet_welfare::XcmTrafficCounters) -> FixedU64 {
     let total = u128::from(counters.accepted)
         .saturating_add(u128::from(counters.failed))
         .saturating_add(u128::from(counters.probe_timeouts));
@@ -8707,23 +8778,27 @@ impl pallet_attestor::Config for Runtime {
 }
 impl pallet_client_registry::Config for Runtime {
     type ValuesOrigin = EnsureGuardianTrack;
+    type ClientOrigin = EnsureQuestionClient;
+    type ClientFunding = RuntimeClientFunding;
     type ClientBond = RuntimeClientBond;
     type Currency = Balances;
     type RuntimeHoldReason = RuntimeHoldReason;
+    type DeliveryAssets = ForeignAssets;
+    type DeliveryAssetId = UsdcAssetId;
+    type DeliveryFloatPalletId = ClientDeliveryPalletId;
     type WeightInfo = crate::weights::pallet_client_registry::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
 
 impl pallet_question_service::Config for Runtime {
-    type ClientOrigin = EnsureQuestionClient;
     type ServiceParams = RuntimeServiceParams;
-    type ClientFunding = RuntimeClientFunding;
     type ExternalMarketOrigin = RuntimeExternalMarketOrigin;
     type DecisionWindows = RuntimeServiceDecisionWindows;
     type TvlCapGate = RuntimeServiceTvlCap;
     type InflowCapExemptAccounts = InflowCapProtocolAccounts;
     type AccountIdBytes = RuntimeAccountIdBytes;
+    type ReportPush = RuntimeReportPush;
     type PalletId = QuestionServicePalletId;
     type KeeperRebate = FutarchyTreasury;
     type WeightInfo = crate::weights::pallet_question_service::WeightInfo<Runtime>;
@@ -11188,6 +11263,10 @@ impl pallet_client_registry::BenchmarkHelper<RuntimeOrigin, AccountId> for Runti
         crate::track_origins::Origin::GuardianTrack.into()
     }
 
+    fn client(client: futarchy_primitives::ClientId) -> RuntimeOrigin {
+        pallet_client_registry::Origin::ExternalClient(client).into()
+    }
+
     fn bond_owner() -> AccountId {
         AccountId32::new([247; 32])
     }
@@ -11218,6 +11297,11 @@ impl pallet_client_registry::BenchmarkHelper<RuntimeOrigin, AccountId> for Runti
             value,
         );
     }
+
+    fn prime_delivery_funds(who: &AccountId, value: Balance) {
+        let minted = <ForeignAssets as Mutate<AccountId>>::mint_into(usdc_location(), who, value);
+        assert!(minted.is_ok());
+    }
 }
 
 #[cfg(feature = "runtime-benchmarks")]
@@ -11232,6 +11316,10 @@ impl pallet_question_service::BenchmarkHelper<RuntimeOrigin, AccountId> for Runt
         let mut bytes = [246_u8; 32];
         bytes[..4].copy_from_slice(&client.to_le_bytes());
         RuntimeOrigin::signed(AccountId32::new(bytes))
+    }
+
+    fn report_egress_origin(client: futarchy_primitives::ClientId) -> RuntimeOrigin {
+        pallet_client_registry::Origin::ExternalClient(client).into()
     }
 
     fn funder(client: futarchy_primitives::ClientId) -> AccountId {
@@ -11286,6 +11374,35 @@ impl pallet_question_service::BenchmarkHelper<RuntimeOrigin, AccountId> for Runt
     fn prime_usdc(who: &AccountId, amount: Balance) {
         let minted = <ForeignAssets as Mutate<AccountId>>::mint_into(usdc_location(), who, amount);
         assert!(minted.is_ok());
+    }
+
+    fn prime_report_egress(client: futarchy_primitives::ClientId) {
+        let para = 4_200u32.saturating_add(client);
+        let location =
+            staging_xcm::latest::Location::new(1, [staging_xcm::latest::Junction::Parachain(para)]);
+        let prior_signer = pallet_client_registry::Clients::<Runtime>::get(client)
+            .and_then(|record| record.local_signer);
+        pallet_client_registry::Clients::<Runtime>::mutate(client, |maybe_record| {
+            if let Some(record) = maybe_record {
+                record.location = Some(location.clone());
+                record.local_signer = None;
+                record.delivery_float = currency::USDC.saturating_mul(1_000_000);
+            }
+        });
+        if let Some(signer) = prior_signer {
+            pallet_client_registry::ClientIdOfSigner::<Runtime>::remove(signer);
+        }
+        pallet_client_registry::ClientIdOf::<Runtime>::insert(&location, client);
+        let custody = pallet_client_registry::Pallet::<Runtime>::delivery_account(client);
+        let minted = <ForeignAssets as Mutate<AccountId>>::mint_into(
+            usdc_location(),
+            &custody,
+            currency::USDC.saturating_mul(1_000_000),
+        );
+        assert!(minted.is_ok());
+        ParachainSystem::open_outbound_hrmp_channel_for_benchmarks_or_tests(
+            cumulus_primitives_core::ParaId::from(para),
+        );
     }
 
     fn prime_register_scan(funder: &AccountId) {

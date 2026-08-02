@@ -37,7 +37,7 @@ REJECT branches, LONG/SHORT, Baseline, `verified-finalized` / `verified-best` /
 S1–S20. Never rename, never synonymize, never soften. Everything the spec does NOT govern —
 typography, palette, layout, motion, personality — is yours, and I want a real point of view.
 
-The hosted question/report integration surface is live contract v21. Do not invent a hosted-service
+The hosted question/report integration surface is live contract v22. Do not invent a hosted-service
 canonical-app screen, screen ID, or user workflow in this iteration because doc 11 assigns none. If
 an integration concept appears, keep it outside the canonical app and preserve the central claim:
 Bleavit sells conditional prices with provenance, not decisions or endorsements.

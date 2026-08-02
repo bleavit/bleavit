@@ -264,6 +264,7 @@ inventory! {
     }
     "ClientRegistry" {
         leaf values => ["admit_client", "admit_local_client", "remove_client"];
+        leaf external_client => ["top_up_delivery_float", "withdraw_delivery_float"];
     }
     "QuestionService" {
         leaf external_client => ["register", "open", "seal"];
@@ -894,6 +895,8 @@ pub(crate) fn assert_n8_external_client_safe_call_filter_equals_complete_invento
         assert_eq!(
             admitted,
             [
+                ("ClientRegistry", "top_up_delivery_float"),
+                ("ClientRegistry", "withdraw_delivery_float"),
                 ("QuestionService", "register"),
                 ("QuestionService", "open"),
                 ("QuestionService", "seal"),

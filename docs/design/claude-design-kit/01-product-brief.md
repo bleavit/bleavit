@@ -68,7 +68,7 @@ The **canonical client is itself decentralized** (10, 11, 12):
 | **Guardian** (7 elected) | 5-of-7 approval console for emergency playbooks; every action retro-ratified | S15 |
 | **Keeper / operator** | Permissionless cranks: ticks, decision finalization, `execute()`, snapshots, the runtime-upgrade crank | S6, S17, S18 |
 | **Treasury recipient** | Claims vested streams; watches NAV and outflow meters | S16 |
-| **External client / integrator** | Registers through values governance, funds hosted conditional books, and consumes a provenance-bound price report; its own rule decides what to do | Hosted question/report surface is live in contract v21; no canonical screen assigned |
+| **External client / integrator** | Registers through values governance, funds hosted conditional books and a separate USDC delivery float, and consumes a provenance-bound price report; its own rule decides what to do | Hosted question/report surface is live in contract v22; no canonical screen assigned |
 
 The first nine personas are served by the one canonical app specified in 11 §11.2. The external
 client is an integration persona, not permission to invent a new canonical screen before doc 11

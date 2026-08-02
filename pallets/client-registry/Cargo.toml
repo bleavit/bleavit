@@ -17,6 +17,7 @@ staging-xcm = { workspace = true }
 frame-benchmarking = { workspace = true, optional = true }
 
 [dev-dependencies]
+pallet-assets = { workspace = true, features = ["std"] }
 pallet-balances = { workspace = true, features = ["std"] }
 pallet-origins = { path = "../origins", features = ["std"] }
 sp-core = { workspace = true, features = ["std"] }
@@ -31,6 +32,7 @@ std = [
   "frame-system/std",
   "futarchy-primitives/std",
   "pallet-balances/std",
+  "pallet-assets/std",
   "parity-scale-codec/std",
   "scale-info/std",
   "sp-runtime/std",

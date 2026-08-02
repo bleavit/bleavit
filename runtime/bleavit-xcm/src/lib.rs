@@ -14,6 +14,7 @@ pub mod barrier;
 pub mod caps;
 pub mod client;
 pub mod coretime;
+pub mod egress;
 pub mod filter;
 pub mod health;
 pub mod identity;

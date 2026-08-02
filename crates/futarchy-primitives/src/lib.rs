@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 21;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 22;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -905,7 +905,8 @@ pub struct OracleRoundView {
     pub escalated: bool,
 }
 
-/// Hosted-question terminal failure reason (02 §4a, contract v21).
+/// Hosted-question terminal failure reason (02 §4a; introduced at contract
+/// v21 and byte-identical at current v22).
 #[derive(
     Clone,
     Copy,
@@ -1901,7 +1902,10 @@ mod tests {
         // external/live/combined market bounds become metadata-readable. The
         // remaining hosted question/report surface lands in v21 (N7), including
         // the twelfth API method and the exact §4a types/events/storage/constants.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 21);
+        // N9 is v22: ClientRecord gains trailing USDC delivery_float and the
+        // fixed outbound receiver ABI becomes contract surface; FutarchyApi is
+        // unchanged.
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 22);
     }
 
     #[test]

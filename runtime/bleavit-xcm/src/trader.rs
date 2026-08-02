@@ -24,6 +24,40 @@ pub trait TraderRates {
     fn usdc_rate() -> WeightRate;
 }
 
+fn component_price_up(value: u128, denominator: u128, rate: u128) -> Option<u128> {
+    let whole = value / denominator;
+    let remainder = value % denominator;
+    let whole_price = whole.checked_mul(rate)?;
+    let remainder_price = if remainder == 0 || rate == 0 {
+        0
+    } else {
+        remainder
+            .checked_mul(rate)?
+            .checked_add(denominator.checked_sub(1)?)?
+            / denominator
+    };
+    whole_price.checked_add(remainder_price)
+}
+
+/// Price a two-dimensional XCM weight at the governed rate, rounding each
+/// dimension up against the payer. N9 reuses this exact calculation for its
+/// fixed outbound execution envelope instead of inventing a delivery tariff.
+pub fn price_weight_up(weight: Weight, rate: WeightRate) -> Result<u128, XcmError> {
+    let reference = component_price_up(
+        u128::from(weight.ref_time()),
+        u128::from(WEIGHT_REF_TIME_PER_SECOND),
+        rate.units_per_second,
+    )
+    .ok_or(XcmError::Overflow)?;
+    let proof = component_price_up(
+        u128::from(weight.proof_size()),
+        u128::from(WEIGHT_PROOF_SIZE_PER_MB),
+        rate.units_per_megabyte,
+    )
+    .ok_or(XcmError::Overflow)?;
+    reference.checked_add(proof).ok_or(XcmError::Overflow)
+}
+
 /// A two-asset trader whose instance is one message's purchase/refund ledger.
 ///
 /// Purchases round up against the payer. Refunds use the frozen rate selected
@@ -40,39 +74,12 @@ pub struct GovernedWeightTrader<Rates, Revenue: TakeRevenue> {
 }
 
 impl<Rates: TraderRates, Revenue: TakeRevenue> GovernedWeightTrader<Rates, Revenue> {
-    fn component_price_up(value: u128, denominator: u128, rate: u128) -> Option<u128> {
-        let whole = value / denominator;
-        let remainder = value % denominator;
-        let whole_price = whole.checked_mul(rate)?;
-        let remainder_price = if remainder == 0 || rate == 0 {
-            0
-        } else {
-            remainder
-                .checked_mul(rate)?
-                .checked_add(denominator.checked_sub(1)?)?
-                / denominator
-        };
-        whole_price.checked_add(remainder_price)
-    }
-
     fn component_price_down(value: u128, denominator: u128, rate: u128) -> Option<u128> {
         value.checked_mul(rate)?.checked_div(denominator)
     }
 
     fn price_up(weight: Weight, rate: WeightRate) -> Result<u128, XcmError> {
-        let reference = Self::component_price_up(
-            u128::from(weight.ref_time()),
-            u128::from(WEIGHT_REF_TIME_PER_SECOND),
-            rate.units_per_second,
-        )
-        .ok_or(XcmError::Overflow)?;
-        let proof = Self::component_price_up(
-            u128::from(weight.proof_size()),
-            u128::from(WEIGHT_PROOF_SIZE_PER_MB),
-            rate.units_per_megabyte,
-        )
-        .ok_or(XcmError::Overflow)?;
-        reference.checked_add(proof).ok_or(XcmError::Overflow)
+        price_weight_up(weight, rate)
     }
 
     fn price_down(weight: Weight, rate: WeightRate) -> Option<u128> {

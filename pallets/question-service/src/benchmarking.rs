@@ -90,7 +90,11 @@ fn prepare_open_observed<T: Config>(count: u32) -> (u64, T::AccountId, Vec<T::Ac
 
 fn prepare_sealed<T: Config>(count: u32) -> (u64, T::AccountId, Vec<T::AccountId>) {
     let (question, funder, attestors) = prepare_open_observed::<T>(count);
-    let sealed = Pallet::<T>::seal(<T as Config>::BenchmarkHelper::client_origin(0), question);
+    <T as Config>::BenchmarkHelper::prime_report_egress(0);
+    let sealed = Pallet::<T>::seal(
+        <T as Config>::BenchmarkHelper::report_egress_origin(0),
+        question,
+    );
     assert!(sealed.is_ok());
     (question, funder, attestors)
 }
@@ -146,9 +150,13 @@ mod benches {
     #[benchmark]
     fn seal() {
         let (question, _, _) = prepare_open_observed::<T>(MAX_ATTESTORS_BOUND);
+        <T as Config>::BenchmarkHelper::prime_report_egress(0);
 
         #[extrinsic_call]
-        _(<T as Config>::BenchmarkHelper::client_origin(0), question);
+        _(
+            <T as Config>::BenchmarkHelper::report_egress_origin(0),
+            question,
+        );
 
         assert!(crate::pallet::Reports::<T>::contains_key(question));
     }

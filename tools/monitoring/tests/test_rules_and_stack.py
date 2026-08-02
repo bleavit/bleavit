@@ -14,9 +14,9 @@ ROOT = Path(__file__).resolve().parents[3]
 RULES = ROOT / "deploy" / "monitoring" / "prometheus" / "rules" / "bleavit-alerts.yml"
 DOC_12 = ROOT / "docs" / "architecture" / "12-release-and-operations.md"
 EXPECTED_EXPRESSIONS = {
-    # D-20 hosted question service (doc 16). Producers are N9 seams; the rules
-    # are pinned here so the expressions cannot drift before the exporters land.
-    "BleavitServiceClientPushFailing": "bleavit_service_client_push_failures_consecutive >= 3",
+    # D-20 hosted question service (doc 16). N9 produces push failures; these
+    # are pinned here so the expressions cannot drift.
+    "BleavitServiceClientPushFailing": "(bleavit_service_client_push_failures_consecutive >= 3) and on(client_id) (bleavit_service_client_push_failures_total > 0) and on(client_id) (bleavit_service_client_pushes_total > 0)",
     "BleavitServiceOccupancyOrCannibalization": "(bleavit_service_questions_live >= 0.9 * bleavit_service_max_live) or ((increase(bleavit_service_not_decision_grade_rejections[3d]) > 0) and (bleavit_service_contest_capital_external > 0))",
     "BleavitServiceExternalWeightQuotaHigh": "bleavit_service_external_weight_used_ratio > 0.8",
     "BleavitEpochTickLag": "bleavit_chain_tick_lag_blocks > 600",
@@ -52,9 +52,9 @@ class RuleAndStackTests(unittest.TestCase):
         # two — the stall detector and BleavitRelayMonitorDisconnected, the
         # monitor-health rule that keeps the stall alert from going silent when
         # collection breaks (SQ-283 review, Finding 1). Three of the 24 domains
-        # are D-20's hosted-question-service rows (doc 16), whose producers are
-        # N9 seams; the rules are pinned now so the expressions cannot drift
-        # before the exporters exist.
+        # are D-20's hosted-question-service rows (doc 16). N9 closes the push
+        # producer; the remaining N7 seams stay pinned until their exporters
+        # exist.
         self.assertEqual(len(rules), 25)
         self.assertEqual(len({rule["alert"] for rule in rules}), 25)
         domains = [rule["labels"]["domain"] for rule in rules]

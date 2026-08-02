@@ -864,3 +864,63 @@ fn telemetry_storage_utilization_reports_inner_maxima_and_live_value_lengths(
         Ok(())
     })
 }
+
+#[test]
+fn telemetry_service_egress_is_sorted_bounded_and_omits_non_attempts_and_tombstones() {
+    tests::development_ext().execute_with(|| {
+        pallet_client_registry::IngressMeters::<Runtime>::insert(
+            9,
+            pallet_client_registry::IngressMeter {
+                report_pushes_total: 11,
+                report_push_failures_total: 5,
+                report_push_failures_consecutive: 3,
+                ..Default::default()
+            },
+        );
+        pallet_client_registry::IngressMeters::<Runtime>::insert(
+            2,
+            pallet_client_registry::IngressMeter {
+                report_pushes_total: 4,
+                report_push_failures_total: 4,
+                report_push_failures_consecutive: 4,
+                ..Default::default()
+            },
+        );
+        pallet_client_registry::IngressMeters::<Runtime>::insert(
+            7,
+            pallet_client_registry::IngressMeter::default(),
+        );
+        pallet_client_registry::IngressMeters::<Runtime>::insert(
+            8,
+            pallet_client_registry::IngressMeter {
+                report_pushes_total: 1,
+                ..Default::default()
+            },
+        );
+        pallet_client_registry::RemovedClients::<Runtime>::insert(9, ());
+
+        let rows = crate::telemetry::service_egress();
+        assert!(rows.is_some());
+        let Some(rows) = rows else { return };
+        let rows = rows.as_slice();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].client_id, 2);
+        assert_eq!(
+            (
+                rows[0].attempts,
+                rows[0].failures,
+                rows[0].consecutive_failures
+            ),
+            (4, 4, 4)
+        );
+        assert_eq!(rows[1].client_id, 8);
+        assert_eq!(
+            (
+                rows[1].attempts,
+                rows[1].failures,
+                rows[1].consecutive_failures
+            ),
+            (1, 0, 0)
+        );
+    });
+}

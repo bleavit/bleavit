@@ -49,7 +49,9 @@ constructor, `ExternalClient(ClientId)`, from exact registered-`Location` equali
 signed/root/none/governance conversion. That closure is not a type-level property of `RuntimeOrigin`;
 it is mechanically reviewed as one converter `Ok(...)` expression plus the negative-origin matrix.
 **I-35** confines ingress to the external-client call domain;
-**I-36** keeps client push failures out of XCM health; **I-37** makes service custody, failure and
+**I-36** keeps client push failures out of XCM health and every welfare input; only its isolated
+per-client attempt/failure/consecutive counter may observe the outcome. Delivery is prepaid from a
+separate USDC float, never the VIT bond or treasury; **I-37** makes service custody, failure and
 funds-moving freeze state independent of Bleavit's primary ledger (each book follows its owning
 instance; an unavailable service binding fails closed); **I-38** makes ingress issuance-neutral. A UI or integration
 guide must never imply that admission is identity verification beyond the chain-level `Location`,

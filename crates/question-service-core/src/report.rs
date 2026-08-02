@@ -167,8 +167,9 @@ impl<const MAX_ATTESTORS: u32> Report<MAX_ATTESTORS> {
     }
 }
 
-/// Domain-separated SCALE preimage of the exact contract-v21 `ReportView`
-/// fields preceding `provenance_hash`. In particular, this commits the public
+/// Domain-separated SCALE preimage of the exact `ReportView` introduced at
+/// contract v21 and unchanged at current v22, excluding only the trailing
+/// `provenance_hash`. In particular, this commits the public
 /// count-only `SettlementTrust` projection, so a proof-only client can
 /// recompute the hash without access to pallet-internal attestor identities.
 pub fn report_view_provenance_preimage(report: &ReportView) -> Vec<u8> {

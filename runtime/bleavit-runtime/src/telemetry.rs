@@ -12,9 +12,9 @@ use alloc::{vec, vec::Vec};
 use frame_support::traits::{fungibles::Inspect, Get};
 use futarchy_primitives::{bounds, Balance, BoundedVec, PositionId, PositionKind, ScalarSide};
 use futarchy_runtime_api::{
-    CollateralTelemetry, MarketTelemetry, PolComponent, PolTelemetry, StorageUtilizationTelemetry,
-    WindowCoverageTelemetry, MAX_POL_TELEMETRY_ROWS, MAX_STORAGE_NAME_BYTES,
-    MAX_STORAGE_UTILIZATION_ROWS, MAX_WINDOW_COVERAGE_ROWS,
+    CollateralTelemetry, MarketTelemetry, PolComponent, PolTelemetry, ServiceEgressTelemetry,
+    StorageUtilizationTelemetry, WindowCoverageTelemetry, MAX_POL_TELEMETRY_ROWS,
+    MAX_STORAGE_NAME_BYTES, MAX_STORAGE_UTILIZATION_ROWS, MAX_WINDOW_COVERAGE_ROWS,
 };
 use pallet_futarchy_treasury::BudgetLine;
 use pallet_market::core_market::{BookKind, MarketBook};
@@ -395,4 +395,26 @@ pub fn storage_utilization(
         )?,
     ];
     BoundedVec::try_from(rows).ok()
+}
+
+/// Bounded, deterministic projection of the registry's isolated I-36 meter.
+pub fn service_egress() -> Option<BoundedVec<ServiceEgressTelemetry, { bounds::MAX_CLIENTS }>> {
+    let mut meters = pallet_client_registry::IngressMeters::<Runtime>::iter().collect::<Vec<_>>();
+    meters.sort_unstable_by_key(|(client_id, _)| *client_id);
+    let mut rows = BoundedVec::new();
+    for (client_id, meter) in meters {
+        if meter.report_pushes_total == 0
+            || pallet_client_registry::RemovedClients::<Runtime>::contains_key(client_id)
+        {
+            continue;
+        }
+        rows.try_push(ServiceEgressTelemetry {
+            client_id,
+            attempts: meter.report_pushes_total,
+            failures: meter.report_push_failures_total,
+            consecutive_failures: meter.report_push_failures_consecutive,
+        })
+        .ok()?;
+    }
+    Some(rows)
 }

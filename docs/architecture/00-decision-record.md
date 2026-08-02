@@ -206,7 +206,9 @@ New FE epic **FE-14 (Governance surface)**: referenda list/detail, vote/delegate
     Bleavit's own welfare. Settlement runs in `pallet-question-service` on a client-named bonded
     attestor median instead.
   - *Health-tracked push* — a client that never opens its return channel would drive `X` down at zero
-    cost, which is exactly what I-24 forbids. The egress router is dedicated and never read back.
+    cost, which is exactly what I-24 forbids. The egress router is dedicated; its outcome is never
+    read into XCM health, welfare or protocol outcome state, and only the isolated I-36 diagnostic
+    counter observes it.
   - *Certification against measured depth* — would let an external question satisfy its security
     relation using Bleavit's own organic liquidity, turning tenants into competitors for the capital
     `dec.v_min` measures. Certification counts only client-funded `C_disp`.

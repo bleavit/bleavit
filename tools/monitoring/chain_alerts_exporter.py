@@ -89,6 +89,9 @@ SERIES: dict[str, SeriesDefinition] = {
         _series("bleavit_runtime_storage_max_utilization_ratio", "gauge", "Occupancy ratio for a metadata-invisible bounded storage shape.", "map"),
         _series("bleavit_runtime_lmsr_domain_rejections_total", "counter", "Finalized Market.PriceBoundExceeded extrinsic failures resolved from live metadata."),
         _series("bleavit_runtime_numeric_anomaly_spike", "gauge", "Anomalous positive ledger rounding residue.", "kind"),
+        _series("bleavit_service_client_pushes_total", "counter", "Best-effort report pushes attempted for one registered client.", "client_id"),
+        _series("bleavit_service_client_push_failures_total", "counter", "Best-effort report pushes that failed for one registered client.", "client_id"),
+        _series("bleavit_service_client_push_failures_consecutive", "gauge", "Consecutive best-effort report-push failures for one registered client.", "client_id"),
         _series("bleavit_chain_keeper_budget_limit", "gauge", "Live keeper.budget Param value in chain balance base units."),
         _series("bleavit_chain_keeper_budget_spent", "gauge", "Current-epoch keeper meter spend in chain balance base units."),
         _series("bleavit_chain_keeper_budget_utilization_ratio", "gauge", "Current keeper spend divided by the live keeper.budget Param."),
@@ -188,6 +191,11 @@ FULL_DOMAIN_FAMILIES = {
     "migration stall": ("bleavit_runtime_migration_cursor_stalled",),
     "storage remainder": ("bleavit_runtime_storage_max_utilization_ratio",),
     "numeric anomalies": ("bleavit_runtime_numeric_anomaly_spike",),
+    "service egress": (
+        "bleavit_service_client_pushes_total",
+        "bleavit_service_client_push_failures_total",
+        "bleavit_service_client_push_failures_consecutive",
+    ),
     "keeper budget": (
         "bleavit_chain_keeper_budget_limit",
         "bleavit_chain_keeper_budget_spent",
@@ -1127,6 +1135,46 @@ class ChainExporter:
             {"kind": "rounding_dust"},
         )
 
+    def _service_egress(self, block_hash: str) -> None:
+        rows = _required_some(
+            self._telemetry_api("service_egress", block_hash),
+            "TelemetryApi.service_egress",
+        )
+        if not isinstance(rows, list):
+            raise MonitoringError("TelemetryApi.service_egress is not a sequence")
+        observed: set[int] = set()
+        decoded: list[tuple[int, int, int, int]] = []
+        for row in rows:
+            client = _integer_field(row, "client_id", "service_egress row")
+            attempts = _integer_field(row, "attempts", "service_egress row")
+            failures = _integer_field(row, "failures", "service_egress row")
+            consecutive = _integer_field(
+                row, "consecutive_failures", "service_egress row"
+            )
+            if client in observed:
+                raise MonitoringError("TelemetryApi.service_egress contains duplicate client")
+            if attempts < 0 or failures < 0 or consecutive < 0:
+                raise MonitoringError("service egress counters must be non-negative")
+            if failures > attempts or consecutive > failures:
+                raise MonitoringError("service egress counters violate their ordering")
+            observed.add(client)
+            decoded.append((client, attempts, failures, consecutive))
+        for family in (
+            "bleavit_service_client_pushes_total",
+            "bleavit_service_client_push_failures_total",
+            "bleavit_service_client_push_failures_consecutive",
+        ):
+            self.store.clear_family(family)
+        for client, attempts, failures, consecutive in decoded:
+            labels = {"client_id": str(client)}
+            self.store.set("bleavit_service_client_pushes_total", attempts, labels)
+            self.store.set("bleavit_service_client_push_failures_total", failures, labels)
+            self.store.set(
+                "bleavit_service_client_push_failures_consecutive",
+                consecutive,
+                labels,
+            )
+
     def _keeper_budget(self, block_hash: str) -> None:
         params = self._runtime_api("params", encode_param_keys(["keeper.budget"]), block_hash)
         if not isinstance(params, list) or len(params) != 1:
@@ -1214,6 +1262,7 @@ class ChainExporter:
             ("migration stall", lambda: self._migration_stall(block_hash)),
             ("storage remainder", lambda: self._storage_remainder(block_hash)),
             ("numeric anomalies", lambda: self._numeric_anomalies(block_hash)),
+            ("service egress", lambda: self._service_egress(block_hash)),
             ("keeper budget", lambda: self._keeper_budget(block_hash)),
             ("descriptor lead time", lambda: self._descriptor_lead_time(block_hash)),
             ("storage", lambda: self._storage_counts(block_hash)),

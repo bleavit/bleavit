@@ -800,6 +800,10 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_client_registry::Call::remove_client { .. } => {
                 leaf(CallDomain::ConstitutionalValues)
             }
+            pallet_client_registry::Call::top_up_delivery_float { .. }
+            | pallet_client_registry::Call::withdraw_delivery_float { .. } => {
+                leaf(CallDomain::ExternalClient)
+            }
             pallet_client_registry::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::QuestionService(call) => match call {

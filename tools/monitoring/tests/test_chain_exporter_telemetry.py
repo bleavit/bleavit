@@ -98,6 +98,16 @@ class TelemetryExporterTests(unittest.TestCase):
                     }
                 ]
             ),
+            "service_egress": some(
+                [
+                    {
+                        "client_id": 7,
+                        "attempts": 11,
+                        "failures": 5,
+                        "consecutive_failures": 3,
+                    }
+                ]
+            ),
         }
         exporter._telemetry_api = (  # type: ignore[method-assign]
             lambda method, _block_hash: responses[method]
@@ -110,6 +120,7 @@ class TelemetryExporterTests(unittest.TestCase):
         exporter._migration_stall("0x01")
         exporter._storage_remainder("0x01")
         exporter._numeric_anomalies("0x01")
+        exporter._service_egress("0x01")
 
         market_labels = (("market", "7"),)
         self.assertEqual(samples(exporter, "bleavit_market_book_loss_usdc"), {market_labels: 11})
@@ -155,6 +166,47 @@ class TelemetryExporterTests(unittest.TestCase):
             samples(exporter, "bleavit_runtime_numeric_anomaly_spike"),
             {(("kind", "rounding_dust"),): 2},
         )
+        self.assertEqual(
+            samples(exporter, "bleavit_service_client_pushes_total"),
+            {(("client_id", "7"),): 11},
+        )
+        self.assertEqual(
+            samples(exporter, "bleavit_service_client_push_failures_total"),
+            {(("client_id", "7"),): 5},
+        )
+        self.assertEqual(
+            samples(exporter, "bleavit_service_client_push_failures_consecutive"),
+            {(("client_id", "7"),): 3},
+        )
+
+        responses["service_egress"] = some([])
+        exporter._service_egress("0x02")
+        self.assertEqual(samples(exporter, "bleavit_service_client_pushes_total"), {})
+        self.assertEqual(
+            samples(exporter, "bleavit_service_client_push_failures_total"), {}
+        )
+        self.assertEqual(
+            samples(exporter, "bleavit_service_client_push_failures_consecutive"), {}
+        )
+
+    def test_service_egress_rejects_duplicate_and_impossible_counters(self) -> None:
+        exporter = self.new_exporter()
+        duplicate = some(
+            [
+                {"client_id": 1, "attempts": 2, "failures": 1, "consecutive_failures": 1},
+                {"client_id": 1, "attempts": 3, "failures": 2, "consecutive_failures": 2},
+            ]
+        )
+        exporter._telemetry_api = lambda *_args: duplicate  # type: ignore[method-assign]
+        with self.assertRaises(exporter_module.MonitoringError):
+            exporter._service_egress("0x01")
+
+        impossible = some(
+            [{"client_id": 2, "attempts": 1, "failures": 2, "consecutive_failures": 1}]
+        )
+        exporter._telemetry_api = lambda *_args: impossible  # type: ignore[method-assign]
+        with self.assertRaises(exporter_module.MonitoringError):
+            exporter._service_egress("0x01")
 
     def test_domain_rejection_identity_is_resolved_from_live_metadata(self) -> None:
         exporter = self.new_exporter()

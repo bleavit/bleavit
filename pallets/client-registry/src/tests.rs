@@ -10,7 +10,8 @@ use crate::{
 use frame_support::assert_noop;
 use frame_support::traits::{
     fungible::{InspectHold, MutateHold},
-    tokens::Precision,
+    fungibles::{Inspect, Mutate},
+    tokens::{Fortitude, Precision, Preservation},
     EnsureOrigin,
 };
 use parity_scale_codec::{Encode, MaxEncodedLen};
@@ -181,6 +182,7 @@ fn admission_fails_closed_when_bond_is_unset_and_places_an_exact_native_hold_whe
             assert_eq!(record.admitted_at, 1);
             assert_eq!(record.questions_live, 0);
             assert_eq!(record.questions_total, 0);
+            assert_eq!(record.delivery_float, 0);
         }
         assert_eq!(ClientPolicies::<Test>::get(0), Some(SubIdPolicy::Required));
         assert_eq!(ClientIdOf::<Test>::get(location(2_000)), Some(0));
@@ -213,6 +215,7 @@ fn local_admission_uses_the_frozen_identity_shape_and_exact_signer_index() {
             assert_eq!(record.admitted_at, 1);
             assert_eq!(record.questions_live, 0);
             assert_eq!(record.questions_total, 0);
+            assert_eq!(record.delivery_float, 0);
         }
         assert_eq!(ClientIdOfSigner::<Test>::get(&signer), Some(0));
         assert_eq!(ClientPolicies::<Test>::get(0), Some(SubIdPolicy::Required));
@@ -389,56 +392,210 @@ fn failed_terminal_release_rolls_back_the_counter_and_tombstone_state() {
 }
 
 #[test]
-fn egress_is_prepaid_from_the_hold_and_insufficient_debit_is_a_no_op() {
+fn egress_is_prepaid_from_usdc_float_and_never_touches_the_vit_bond() {
     new_test_ext().execute_with(|| {
         assert!(admit(location(2_000)).is_ok());
         let beneficiary = account(3);
-        let before = Balances::free_balance(&beneficiary);
+        let asset = DeliveryAssetId::get();
+        let custody = ClientRegistry::delivery_account(0);
+        let before = <Assets as Inspect<_>>::balance(asset, &beneficiary);
+        assert!(ClientRegistry::top_up_delivery_float(external_origin(0), 1_000).is_ok());
+        assert_eq!(<Assets as Inspect<_>>::balance(asset, &custody), 1_000);
+        assert_eq!(
+            Clients::<Test>::get(0).map(|row| row.delivery_float),
+            Some(1_000)
+        );
+        assert_eq!(client_bond_hold(&account(1)), 1_000);
+        assert_eq!(Clients::<Test>::get(0).map(|row| row.bond), Some(1_000));
+
         assert!(ClientRegistry::prepay_egress(0, &beneficiary, 400).is_ok());
-        assert_eq!(Balances::free_balance(&beneficiary), before + 400);
-        assert_eq!(client_bond_hold(&account(1)), 600);
-        assert_eq!(Clients::<Test>::get(0).map(|row| row.bond), Some(600));
+        assert_eq!(
+            <Assets as Inspect<_>>::balance(asset, &beneficiary),
+            before + 400
+        );
+        assert_eq!(<Assets as Inspect<_>>::balance(asset, &custody), 600);
+        assert_eq!(
+            Clients::<Test>::get(0).map(|row| row.delivery_float),
+            Some(600)
+        );
+        assert_eq!(client_bond_hold(&account(1)), 1_000);
+        assert_eq!(Clients::<Test>::get(0).map(|row| row.bond), Some(1_000));
         assert_eq!(ClientRegistry::do_try_state(), Ok(()));
 
         assert_noop!(
             ClientRegistry::prepay_egress(0, &beneficiary, 600),
-            Error::<Test>::BondInsufficient
+            Error::<Test>::DeliveryFloatWouldDrain
         );
-        assert_eq!(Balances::free_balance(&beneficiary), before + 400);
-        assert_eq!(client_bond_hold(&account(1)), 600);
-        assert_eq!(Clients::<Test>::get(0).map(|row| row.bond), Some(600));
-    });
-
-    new_test_ext().execute_with(|| {
-        assert!(admit(location(2_000)).is_ok());
-        let released = <Balances as MutateHold<_>>::release(
-            &HoldReason::ClientBond.into(),
-            &account(1),
-            1_000,
-            Precision::Exact,
-        );
-        assert_eq!(released, Ok(1_000));
         assert_noop!(
-            ClientRegistry::prepay_egress(0, &account(3), 1),
-            Error::<Test>::BondAccounting
+            ClientRegistry::prepay_egress(0, &beneficiary, 601),
+            Error::<Test>::DeliveryFloatInsufficient
+        );
+        assert_noop!(
+            ClientRegistry::prepay_egress(0, &beneficiary, 501),
+            Error::<Test>::DeliveryFloatBelowMinimum
+        );
+        assert_eq!(
+            <Assets as Inspect<_>>::balance(asset, &beneficiary),
+            before + 400
+        );
+        assert_eq!(
+            Clients::<Test>::get(0).map(|row| row.delivery_float),
+            Some(600)
         );
         assert_eq!(Clients::<Test>::get(0).map(|row| row.bond), Some(1_000));
     });
 }
 
 #[test]
-fn shared_bond_owner_accounting_preserves_the_other_clients_exact_hold() {
+fn float_top_up_withdraw_and_removal_refund_are_exact_and_client_scoped() {
     new_test_ext().execute_with(|| {
         assert!(admit(location(2_000)).is_ok());
         assert!(admit(location(2_001)).is_ok());
         assert_eq!(client_bond_hold(&account(1)), 2_000);
+        let asset = DeliveryAssetId::get();
+        let funder_before = <Assets as Inspect<_>>::balance(asset, &account(2));
 
-        assert!(ClientRegistry::prepay_egress(0, &account(3), 400).is_ok());
-        assert_eq!(client_bond_hold(&account(1)), 1_600);
+        assert!(ClientRegistry::top_up_delivery_float(external_origin(0), 800).is_ok());
+        assert!(ClientRegistry::top_up_delivery_float(external_origin(1), 700).is_ok());
+        assert!(ClientRegistry::withdraw_delivery_float(external_origin(0), 300).is_ok());
+        assert_eq!(
+            Clients::<Test>::get(0).map(|row| row.delivery_float),
+            Some(500)
+        );
+        assert_eq!(
+            Clients::<Test>::get(1).map(|row| row.delivery_float),
+            Some(700)
+        );
+        assert_eq!(
+            <Assets as Inspect<_>>::balance(asset, &ClientRegistry::delivery_account(0)),
+            500
+        );
         assert!(ClientRegistry::remove_client(values_origin(), 0).is_ok());
+        assert_eq!(
+            <Assets as Inspect<_>>::balance(asset, &account(2)),
+            funder_before - 700
+        );
         assert_eq!(client_bond_hold(&account(1)), 1_000);
         assert_eq!(Clients::<Test>::get(1).map(|row| row.bond), Some(1_000));
+        assert_eq!(
+            Clients::<Test>::get(1).map(|row| row.delivery_float),
+            Some(700)
+        );
         assert_eq!(ClientRegistry::do_try_state(), Ok(()));
+    });
+}
+
+#[test]
+fn float_refusals_and_transfer_failures_are_status_quo() {
+    new_test_ext().execute_with(|| {
+        assert!(admit(location(2_000)).is_ok());
+        assert_noop!(
+            ClientRegistry::top_up_delivery_float(external_origin(0), 0),
+            Error::<Test>::DeliveryFloatAmountZero
+        );
+        assert_noop!(
+            ClientRegistry::withdraw_delivery_float(external_origin(0), 0),
+            Error::<Test>::DeliveryFloatAmountZero
+        );
+        assert_noop!(
+            ClientRegistry::withdraw_delivery_float(external_origin(0), 1),
+            Error::<Test>::DeliveryFloatInsufficient
+        );
+        assert_eq!(
+            Clients::<Test>::get(0).map(|row| row.delivery_float),
+            Some(0)
+        );
+
+        let asset = DeliveryAssetId::get();
+        let funder_before = <Assets as Inspect<_>>::balance(asset, &account(2));
+        let custody_before =
+            <Assets as Inspect<_>>::balance(asset, &ClientRegistry::delivery_account(0));
+        Clients::<Test>::mutate(0, |maybe_record| {
+            if let Some(record) = maybe_record {
+                record.delivery_float = futarchy_primitives::Balance::MAX;
+            }
+        });
+        assert_noop!(
+            ClientRegistry::top_up_delivery_float(external_origin(0), 1),
+            Error::<Test>::DeliveryFloatOverflow
+        );
+        assert_eq!(
+            Clients::<Test>::get(0).map(|row| row.delivery_float),
+            Some(futarchy_primitives::Balance::MAX)
+        );
+        assert_eq!(
+            <Assets as Inspect<_>>::balance(asset, &account(2)),
+            funder_before
+        );
+        assert_eq!(
+            <Assets as Inspect<_>>::balance(asset, &ClientRegistry::delivery_account(0)),
+            custody_before
+        );
+        Clients::<Test>::mutate(0, |maybe_record| {
+            if let Some(record) = maybe_record {
+                record.delivery_float = 0;
+            }
+        });
+
+        let burned = <Assets as Mutate<_>>::burn_from(
+            asset,
+            &account(2),
+            999_450,
+            Preservation::Preserve,
+            Precision::Exact,
+            Fortitude::Polite,
+        );
+        assert_eq!(burned, Ok(999_450));
+        assert_noop!(
+            ClientRegistry::top_up_delivery_float(external_origin(0), 500),
+            Error::<Test>::DeliveryFundingWouldDust
+        );
+        assert_eq!(<Assets as Inspect<_>>::balance(asset, &account(2)), 550);
+        assert_eq!(
+            <Assets as Inspect<_>>::balance(asset, &ClientRegistry::delivery_account(0)),
+            0
+        );
+        assert_eq!(
+            <Assets as Mutate<_>>::mint_into(asset, &account(2), 999_450),
+            Ok(999_450)
+        );
+        assert_noop!(
+            ClientRegistry::top_up_delivery_float(external_origin(0), 99),
+            Error::<Test>::DeliveryFloatBelowMinimum
+        );
+        assert!(ClientRegistry::top_up_delivery_float(external_origin(0), 500).is_ok());
+        assert_noop!(
+            ClientRegistry::withdraw_delivery_float(external_origin(0), 401),
+            Error::<Test>::DeliveryFloatBelowMinimum
+        );
+        assert_noop!(
+            ClientRegistry::prepay_egress(0, &account(3), 401),
+            Error::<Test>::DeliveryFloatBelowMinimum
+        );
+        // A voluntary withdrawal may close the escrow cleanly; a later top-up
+        // can recreate it at or above the asset minimum.
+        assert!(ClientRegistry::withdraw_delivery_float(external_origin(0), 500).is_ok());
+        assert_eq!(
+            Clients::<Test>::get(0).map(|row| row.delivery_float),
+            Some(0)
+        );
+        assert!(ClientRegistry::top_up_delivery_float(external_origin(0), 500).is_ok());
+        let burned = <Assets as Mutate<_>>::burn_from(
+            asset,
+            &ClientRegistry::delivery_account(0),
+            500,
+            Preservation::Expendable,
+            Precision::Exact,
+            Fortitude::Polite,
+        );
+        assert_eq!(burned, Ok(500));
+        assert_noop!(
+            ClientRegistry::remove_client(values_origin(), 0),
+            Error::<Test>::DeliveryFloatAccounting
+        );
+        assert!(Clients::<Test>::contains_key(0));
+        assert!(!RemovedClients::<Test>::contains_key(0));
+        assert_eq!(client_bond_hold(&account(1)), 1_000);
     });
 }
 
@@ -460,6 +617,7 @@ fn ingress_meter_is_per_client_and_saturates_without_rejecting_ingress() {
             crate::IngressMeter {
                 accepted_total: u64::MAX,
                 last_seen: 9,
+                ..Default::default()
             },
         );
         assert!(ClientRegistry::note_ingress(0).is_ok());
@@ -504,6 +662,52 @@ fn try_state_detects_representative_cross_map_and_custody_corruption() {
             ClientRegistry::do_try_state(),
             Err(TryRuntimeError::Other(
                 "client-registry: native hold mismatch"
+            ))
+        );
+    });
+
+    new_test_ext().execute_with(|| {
+        assert!(admit(location(2_000)).is_ok());
+        Clients::<Test>::mutate(0, |maybe_record| {
+            if let Some(record) = maybe_record {
+                record.delivery_float = 1;
+            }
+        });
+        assert_eq!(
+            ClientRegistry::do_try_state(),
+            Err(TryRuntimeError::Other(
+                "client-registry: nonzero delivery float below asset minimum"
+            ))
+        );
+    });
+
+    new_test_ext().execute_with(|| {
+        assert!(admit(location(2_000)).is_ok());
+        let asset = DeliveryAssetId::get();
+        assert_eq!(
+            <Assets as Mutate<_>>::mint_into(asset, &ClientRegistry::delivery_account(0), 100,),
+            Ok(100)
+        );
+        // A third-party donation is surplus, not an unbacked client claim,
+        // and therefore cannot make try-state an externally triggerable halt.
+        assert_eq!(ClientRegistry::do_try_state(), Ok(()));
+    });
+
+    new_test_ext().execute_with(|| {
+        assert!(admit(location(2_000)).is_ok());
+        IngressMeters::<Test>::insert(
+            0,
+            crate::IngressMeter {
+                report_pushes_total: 1,
+                report_push_failures_total: 2,
+                report_push_failures_consecutive: 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            ClientRegistry::do_try_state(),
+            Err(TryRuntimeError::Other(
+                "client-registry: push failures exceed push attempts"
             ))
         );
     });

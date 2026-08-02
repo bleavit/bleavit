@@ -561,6 +561,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bleavit-client-abi"
+version = "0.1.0"
+dependencies = [
+ "futarchy-primitives",
+ "parity-scale-codec",
+]
+
+[[package]]
 name = "bleavit-fuzz"
 version = "0.0.0"
 dependencies = [
@@ -581,6 +589,7 @@ dependencies = [
 name = "bleavit-xcm"
 version = "0.1.0"
 dependencies = [
+ "bleavit-client-abi",
  "cumulus-primitives-core",
  "frame-support",
  "frame-system",

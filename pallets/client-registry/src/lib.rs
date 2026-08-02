@@ -30,6 +30,12 @@ pub use client_registry_core::{
 
 use futarchy_primitives::Balance;
 
+/// Resolves one admitted identity to its only permissible USDC funder. The
+/// caller never supplies this account on a float mutation.
+pub trait ClientFunding<AccountId> {
+    fn funding_account(client: ClientId) -> Option<AccountId>;
+}
+
 /// Maximum simultaneous registrations. Derived from the hard maximum of
 /// `svc.max_live`: 64 distinct clients can own all 64 live service slots, while
 /// idle registrations add no service capacity and can be replaced by values
@@ -46,9 +52,11 @@ pub trait ClientBondProvider {
 #[cfg(feature = "runtime-benchmarks")]
 pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     fn values() -> RuntimeOrigin;
+    fn client(client: ClientId) -> RuntimeOrigin;
     fn bond_owner() -> AccountId;
     fn prime_client_bond(value: Balance);
     fn prime_funds(who: &AccountId, value: Balance);
+    fn prime_delivery_funds(who: &AccountId, value: Balance);
 }
 
 /// Succeeds only for this pallet's single custom-origin constructor and returns
@@ -78,12 +86,13 @@ where
 pub mod pallet {
     use super::*;
     use alloc::vec::Vec;
-    use frame_support::pallet_prelude::*;
     use frame_support::traits::{
         fungible::{Inspect, InspectHold, MutateHold},
-        tokens::{Fortitude, Precision, Restriction},
+        fungibles::{Inspect as InspectAsset, Mutate as MutateAsset},
+        tokens::{Precision, Preservation},
         EnsureOrigin,
     };
+    use frame_support::{pallet_prelude::*, PalletId};
     use frame_system::pallet_prelude::*;
     use sp_runtime::{SaturatedConversion, TryRuntimeError};
     use staging_xcm::latest::Location;
@@ -105,6 +114,13 @@ pub mod pallet {
         /// Values-track authority for both roster mutations (16 §2).
         type ValuesOrigin: EnsureOrigin<Self::RuntimeOrigin>;
 
+        /// Exact registered-client authority for float top-up/withdrawal.
+        type ClientOrigin: EnsureOrigin<Self::RuntimeOrigin, Success = ClientId>;
+
+        /// Runtime-owned derivation of the only account allowed to fund or
+        /// receive this client's delivery float.
+        type ClientFunding: ClientFunding<Self::AccountId>;
+
         /// Optional live `svc.client_bond` value. Absence fails closed.
         type ClientBond: ClientBondProvider;
 
@@ -115,6 +131,17 @@ pub mod pallet {
 
         /// Aggregate runtime hold reason.
         type RuntimeHoldReason: From<HoldReason>;
+
+        /// USDC custody. This is deliberately independent of native VIT holds.
+        type DeliveryAssets: InspectAsset<Self::AccountId, Balance = Balance>
+            + MutateAsset<Self::AccountId>;
+
+        #[pallet::constant]
+        type DeliveryAssetId: Get<<Self::DeliveryAssets as InspectAsset<Self::AccountId>>::AssetId>;
+
+        /// Root for deterministic, disjoint per-client USDC escrow accounts.
+        #[pallet::constant]
+        type DeliveryFloatPalletId: Get<PalletId>;
 
         type WeightInfo: WeightInfo;
 
@@ -158,7 +185,7 @@ pub mod pallet {
     #[pallet::storage]
     pub type RemovedClients<T: Config> = StorageMap<_, Twox64Concat, ClientId, (), OptionQuery>;
 
-    /// TH-67 per-client accepted-ingress telemetry.
+    /// TH-67 ingress plus I-36's isolated per-client egress diagnostics.
     #[pallet::storage]
     pub type IngressMeters<T: Config> =
         StorageMap<_, Twox64Concat, ClientId, IngressMeter, ValueQuery>;
@@ -219,7 +246,17 @@ pub mod pallet {
             client_id: ClientId,
             beneficiary: T::AccountId,
             amount: Balance,
-            bond_remaining: Balance,
+            delivery_float_remaining: Balance,
+        },
+        DeliveryFloatToppedUp {
+            client_id: ClientId,
+            amount: Balance,
+            delivery_float: Balance,
+        },
+        DeliveryFloatWithdrawn {
+            client_id: ClientId,
+            amount: Balance,
+            delivery_float: Balance,
         },
     }
 
@@ -235,6 +272,13 @@ pub mod pallet {
         NoLiveQuestions,
         BondInsufficient,
         BondAccounting,
+        DeliveryFloatAmountZero,
+        DeliveryFloatInsufficient,
+        DeliveryFloatWouldDrain,
+        DeliveryFloatBelowMinimum,
+        DeliveryFundingWouldDust,
+        DeliveryFloatOverflow,
+        DeliveryFloatAccounting,
     }
 
     #[pallet::hooks]
@@ -373,11 +417,14 @@ pub mod pallet {
         pub fn remove_client(origin: OriginFor<T>, client_id: ClientId) -> DispatchResult {
             T::ValuesOrigin::ensure_origin(origin)?;
             frame_support::storage::with_storage_layer(|| {
-                let record = Clients::<T>::get(client_id).ok_or(Error::<T>::NotRegistered)?;
+                let mut record = Clients::<T>::get(client_id).ok_or(Error::<T>::NotRegistered)?;
                 ensure!(
                     !RemovedClients::<T>::contains_key(client_id),
                     Error::<T>::ClientRemoved
                 );
+                // Return the whole postage escrow before tombstoning. A failed
+                // USDC refund rolls the values-track removal back whole.
+                Self::refund_delivery_float(client_id, &mut record)?;
                 RemovedClients::<T>::insert(client_id, ());
                 Self::deposit_event(Event::ClientRemovalStarted {
                     client_id,
@@ -385,7 +432,114 @@ pub mod pallet {
                 });
                 if record.questions_live == 0 {
                     Self::finalize_removal(client_id, record)?;
+                } else {
+                    Clients::<T>::insert(client_id, record);
                 }
+                Ok(())
+            })
+        }
+
+        /// Move exact USDC from this client's runtime-derived funding account
+        /// into its deterministic delivery escrow.
+        #[pallet::call_index(3)]
+        #[pallet::weight(T::WeightInfo::top_up_delivery_float())]
+        pub fn top_up_delivery_float(origin: OriginFor<T>, amount: Balance) -> DispatchResult {
+            let client_id =
+                T::ClientOrigin::ensure_origin(origin).map_err(|_| Error::<T>::NotRegistered)?;
+            ensure!(amount > 0, Error::<T>::DeliveryFloatAmountZero);
+            frame_support::storage::with_storage_layer(|| {
+                ensure!(
+                    !RemovedClients::<T>::contains_key(client_id),
+                    Error::<T>::ClientRemoved
+                );
+                let mut record = Clients::<T>::get(client_id).ok_or(Error::<T>::NotRegistered)?;
+                let funder = T::ClientFunding::funding_account(client_id)
+                    .ok_or(Error::<T>::DeliveryFloatAccounting)?;
+                // Keep an ordinary underfunded top-up distinct from a validly
+                // funded amount that cannot create a live asset account.
+                let funder_balance = T::DeliveryAssets::balance(T::DeliveryAssetId::get(), &funder);
+                let funder_remaining = funder_balance
+                    .checked_sub(amount)
+                    .ok_or(Error::<T>::DeliveryFloatInsufficient)?;
+                let minimum = T::DeliveryAssets::minimum_balance(T::DeliveryAssetId::get());
+                let preservation = if funder_remaining == 0 {
+                    Preservation::Expendable
+                } else {
+                    ensure!(
+                        funder_remaining >= minimum,
+                        Error::<T>::DeliveryFundingWouldDust
+                    );
+                    Preservation::Preserve
+                };
+                let after = record
+                    .delivery_float
+                    .checked_add(amount)
+                    .ok_or(Error::<T>::DeliveryFloatOverflow)?;
+                ensure!(after >= minimum, Error::<T>::DeliveryFloatBelowMinimum);
+                let moved = T::DeliveryAssets::transfer(
+                    T::DeliveryAssetId::get(),
+                    &funder,
+                    &Self::delivery_account(client_id),
+                    amount,
+                    preservation,
+                )
+                .map_err(|_| Error::<T>::DeliveryFloatAccounting)?;
+                ensure!(moved == amount, Error::<T>::DeliveryFloatAccounting);
+                record.delivery_float = after;
+                Clients::<T>::insert(client_id, record);
+                Self::deposit_event(Event::DeliveryFloatToppedUp {
+                    client_id,
+                    amount,
+                    delivery_float: after,
+                });
+                Ok(())
+            })
+        }
+
+        /// Return exact USDC only to the runtime-derived client funder.
+        #[pallet::call_index(4)]
+        #[pallet::weight(T::WeightInfo::withdraw_delivery_float())]
+        pub fn withdraw_delivery_float(origin: OriginFor<T>, amount: Balance) -> DispatchResult {
+            let client_id =
+                T::ClientOrigin::ensure_origin(origin).map_err(|_| Error::<T>::NotRegistered)?;
+            ensure!(amount > 0, Error::<T>::DeliveryFloatAmountZero);
+            frame_support::storage::with_storage_layer(|| {
+                ensure!(
+                    !RemovedClients::<T>::contains_key(client_id),
+                    Error::<T>::ClientRemoved
+                );
+                let mut record = Clients::<T>::get(client_id).ok_or(Error::<T>::NotRegistered)?;
+                let after = record
+                    .delivery_float
+                    .checked_sub(amount)
+                    .ok_or(Error::<T>::DeliveryFloatInsufficient)?;
+                let preservation = if after == 0 {
+                    Preservation::Expendable
+                } else {
+                    ensure!(
+                        after >= T::DeliveryAssets::minimum_balance(T::DeliveryAssetId::get()),
+                        Error::<T>::DeliveryFloatBelowMinimum
+                    );
+                    Preservation::Preserve
+                };
+                let funder = T::ClientFunding::funding_account(client_id)
+                    .ok_or(Error::<T>::DeliveryFloatAccounting)?;
+                let moved = T::DeliveryAssets::transfer(
+                    T::DeliveryAssetId::get(),
+                    &Self::delivery_account(client_id),
+                    &funder,
+                    amount,
+                    preservation,
+                )
+                .map_err(|_| Error::<T>::DeliveryFloatAccounting)?;
+                ensure!(moved == amount, Error::<T>::DeliveryFloatAccounting);
+                record.delivery_float = after;
+                Clients::<T>::insert(client_id, record);
+                Self::deposit_event(Event::DeliveryFloatWithdrawn {
+                    client_id,
+                    amount,
+                    delivery_float: after,
+                });
                 Ok(())
             })
         }
@@ -465,23 +619,27 @@ pub mod pallet {
             Ok(())
         }
 
-        /// §9 seam: move an exact fee out of the client's hold before egress.
+        /// Isolated I-36 diagnostic. Saturation and even a missing row are
+        /// never allowed to affect report publication or welfare state.
+        pub fn note_report_push(client_id: ClientId, succeeded: bool) -> DispatchResult {
+            ensure!(
+                Clients::<T>::contains_key(client_id),
+                Error::<T>::NotRegistered
+            );
+            IngressMeters::<T>::mutate(client_id, |meter| meter.note_report_push(succeeded));
+            Ok(())
+        }
+
+        /// §9 seam: move an exact USDC fee out of the client's delivery escrow
+        /// before egress. The native VIT bond is intentionally untouched.
         /// The caller is another runtime pallet/router, never an extrinsic; the
         /// destination and fee are chosen by that bounded path.
         ///
-        /// **This draws on the native VIT bond, and SQ-565 superseded that rule
-        /// after this milestone was authored.** 16 §2 now funds egress from a
-        /// separate USDC `delivery_float`, because XCM delivery is paid in DOT
-        /// or USDC and never in VIT — the bond-funded version named a
-        /// conversion that does not exist at a price nothing publishes.
-        ///
-        /// The function is retained rather than deleted because the **custody
-        /// mechanics** it proves (exact amount, hold-to-beneficiary transfer,
-        /// storage-layer rollback, refusal when the remainder would reach zero)
-        /// are what N9 needs; only the *balance it draws on* changes. **N9 MUST
-        /// repoint it at `delivery_float` before wiring any egress**, and MUST
-        /// NOT call it as-is: doing so would spend a security deposit on
-        /// postage. There is no caller today, so nothing is live.
+        /// Exact transfer, storage-layer rollback and the nonzero remainder are
+        /// retained from N4's custody proof. `ForeignAssets` exposes no hold
+        /// provider, so its deterministic keyless escrow is the USDC analogue
+        /// of the old held balance; SQ-565 changes the asset and custody carrier,
+        /// never the exact-debit/beneficiary semantics.
         pub fn prepay_egress(
             client_id: ClientId,
             beneficiary: &T::AccountId,
@@ -489,32 +647,44 @@ pub mod pallet {
         ) -> DispatchResult {
             frame_support::storage::with_storage_layer(|| {
                 let mut record = Clients::<T>::get(client_id).ok_or(Error::<T>::NotRegistered)?;
-                let bond_remaining = record
-                    .bond
+                ensure!(amount > 0, Error::<T>::DeliveryFloatAmountZero);
+                let delivery_float_remaining = record
+                    .delivery_float
                     .checked_sub(amount)
-                    .ok_or(Error::<T>::BondInsufficient)?;
-                ensure!(bond_remaining > 0, Error::<T>::BondInsufficient);
-                let owner = BondOwners::<T>::get(client_id).ok_or(Error::<T>::BondAccounting)?;
-                T::Currency::transfer_on_hold(
-                    &Self::bond_reason(),
-                    &owner,
+                    .ok_or(Error::<T>::DeliveryFloatInsufficient)?;
+                ensure!(
+                    delivery_float_remaining > 0,
+                    Error::<T>::DeliveryFloatWouldDrain
+                );
+                ensure!(
+                    delivery_float_remaining
+                        >= T::DeliveryAssets::minimum_balance(T::DeliveryAssetId::get()),
+                    Error::<T>::DeliveryFloatBelowMinimum
+                );
+                let moved = T::DeliveryAssets::transfer(
+                    T::DeliveryAssetId::get(),
+                    &Self::delivery_account(client_id),
                     beneficiary,
                     amount,
-                    Precision::Exact,
-                    Restriction::Free,
-                    Fortitude::Polite,
+                    Preservation::Preserve,
                 )
-                .map_err(|_| Error::<T>::BondAccounting)?;
-                record.bond = bond_remaining;
+                .map_err(|_| Error::<T>::DeliveryFloatAccounting)?;
+                ensure!(moved == amount, Error::<T>::DeliveryFloatAccounting);
+                record.delivery_float = delivery_float_remaining;
                 Clients::<T>::insert(client_id, record);
                 Self::deposit_event(Event::EgressPrepaid {
                     client_id,
                     beneficiary: beneficiary.clone(),
                     amount,
-                    bond_remaining,
+                    delivery_float_remaining,
                 });
                 Ok(())
             })
+        }
+
+        pub fn delivery_account(client_id: ClientId) -> T::AccountId {
+            use sp_runtime::traits::AccountIdConversion;
+            T::DeliveryFloatPalletId::get().into_sub_account_truncating(client_id)
         }
 
         pub fn is_removed(client_id: ClientId) -> bool {
@@ -558,6 +728,25 @@ pub mod pallet {
                     TryRuntimeError::Other("client-registry: live questions exceed total")
                 );
                 ensure!(
+                    record.delivery_float == 0
+                        || record.delivery_float
+                            >= T::DeliveryAssets::minimum_balance(T::DeliveryAssetId::get()),
+                    TryRuntimeError::Other(
+                        "client-registry: nonzero delivery float below asset minimum"
+                    )
+                );
+                // The deterministic account is publicly addressable, so an
+                // unrelated account can donate USDC to it. Surplus must not
+                // make try-state (and therefore an upgrade) externally
+                // haltable; only an under-backed accounting claim is unsafe.
+                ensure!(
+                    T::DeliveryAssets::balance(
+                        T::DeliveryAssetId::get(),
+                        &Self::delivery_account(client_id)
+                    ) >= record.delivery_float,
+                    TryRuntimeError::Other("client-registry: delivery float custody mismatch")
+                );
+                ensure!(
                     ClientPolicies::<T>::contains_key(client_id),
                     TryRuntimeError::Other("client-registry: missing client policy")
                 );
@@ -567,6 +756,10 @@ pub mod pallet {
                         TryRuntimeError::Other(
                             "client-registry: removable tombstone not finalized"
                         )
+                    );
+                    ensure!(
+                        record.delivery_float == 0,
+                        TryRuntimeError::Other("client-registry: removed client retains float")
                     );
                 }
                 ensure!(
@@ -630,10 +823,21 @@ pub mod pallet {
                     TryRuntimeError::Other("client-registry: orphan removal tombstone")
                 );
             }
-            for client_id in IngressMeters::<T>::iter_keys() {
+            for (client_id, meter) in IngressMeters::<T>::iter() {
                 ensure!(
                     Clients::<T>::contains_key(client_id),
                     TryRuntimeError::Other("client-registry: orphan ingress meter")
+                );
+                ensure!(
+                    meter.report_push_failures_total <= meter.report_pushes_total,
+                    TryRuntimeError::Other("client-registry: push failures exceed push attempts")
+                );
+                ensure!(
+                    u64::from(meter.report_push_failures_consecutive)
+                        <= meter.report_push_failures_total,
+                    TryRuntimeError::Other(
+                        "client-registry: consecutive push failures exceed failures"
+                    )
                 );
             }
             for (owner, expected) in expected_holds {
@@ -674,6 +878,29 @@ pub mod pallet {
                 bond_owner: owner,
                 bond_released: record.bond,
             });
+            Ok(())
+        }
+
+        fn refund_delivery_float(
+            client_id: ClientId,
+            record: &mut ClientRecord<Location, T::AccountId>,
+        ) -> DispatchResult {
+            if record.delivery_float == 0 {
+                return Ok(());
+            }
+            let funder = T::ClientFunding::funding_account(client_id)
+                .ok_or(Error::<T>::DeliveryFloatAccounting)?;
+            let amount = record.delivery_float;
+            let moved = T::DeliveryAssets::transfer(
+                T::DeliveryAssetId::get(),
+                &Self::delivery_account(client_id),
+                &funder,
+                amount,
+                Preservation::Expendable,
+            )
+            .map_err(|_| Error::<T>::DeliveryFloatAccounting)?;
+            ensure!(moved == amount, Error::<T>::DeliveryFloatAccounting);
+            record.delivery_float = 0;
             Ok(())
         }
 

@@ -1226,6 +1226,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bleavit-client-abi"
+version = "0.1.0"
+dependencies = [
+ "futarchy-primitives",
+ "parity-scale-codec",
+]
+
+[[package]]
 name = "bleavit-node"
 version = "0.1.0"
 dependencies = [
@@ -1330,6 +1338,7 @@ dependencies = [
 name = "bleavit-xcm"
 version = "0.1.0"
 dependencies = [
+ "bleavit-client-abi",
  "cumulus-primitives-core",
  "frame-support",
  "frame-system",
@@ -7790,6 +7799,7 @@ dependencies = [
  "frame-support",
  "frame-system",
  "futarchy-primitives",
+ "pallet-assets",
  "pallet-balances",
  "pallet-origins",
  "parity-scale-codec",

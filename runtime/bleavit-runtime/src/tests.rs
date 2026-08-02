@@ -2159,7 +2159,7 @@ fn n8_registry_and_service_negative_origin_matrix_is_exhaustive() {
         }
 
         for (label, kind, origin) in origins {
-            // Every registry dispatchable is GuardianTrack-only. None of the
+            // Registry roster mutations are GuardianTrack-only. None of the
             // twelve negative-matrix origin classes is that track origin.
             assert_eq!(
                 ClientRegistry::admit_client(
@@ -2191,6 +2191,21 @@ fn n8_registry_and_service_negative_origin_matrix_is_exhaustive() {
             // exact `local_signer` registration. Positive local-client
             // authentication is covered in the registry/service pallet suites.
             let client_admitted = matches!(kind, MatrixOrigin::ExternalClient);
+            let float_error: DispatchError = if client_admitted {
+                pallet_client_registry::Error::<Runtime>::DeliveryFloatInsufficient.into()
+            } else {
+                pallet_client_registry::Error::<Runtime>::NotRegistered.into()
+            };
+            assert_eq!(
+                ClientRegistry::top_up_delivery_float(origin.clone(), 1),
+                Err(float_error),
+                "top_up_delivery_float origin result changed for {label}",
+            );
+            assert_eq!(
+                ClientRegistry::withdraw_delivery_float(origin.clone(), 1),
+                Err(float_error),
+                "withdraw_delivery_float origin result changed for {label}",
+            );
             assert_eq!(
                 register(origin.clone()),
                 Err(if client_admitted {
@@ -5541,7 +5556,10 @@ fn runtime_ledger_instances_share_one_weight_schedule() {
         "the service ledger charges instance ()'s measured weights; if these \
          diverge, ServiceLedger needs its own benchmarks and its own file"
     );
-    assert_eq!(Primary::sweep_dust_baseline(), Service::sweep_dust_baseline());
+    assert_eq!(
+        Primary::sweep_dust_baseline(),
+        Service::sweep_dust_baseline()
+    );
     assert_eq!(Primary::redeem(), Service::redeem());
 }
 

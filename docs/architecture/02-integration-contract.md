@@ -4,7 +4,7 @@
 
 **Boundary.** This document owns everything the chain and the canonical frontend must agree on byte-for-byte: shared SCALE types, the `FutarchyApi` runtime API and its view types, the frozen event schema, the storage items and names the frontend reads directly, chain identity constants, the constants-binding rules, the WSS bootnode chain-spec requirement, the backend-published test-artifact feed, and the `ReleaseChannel` raw storage key. It does **not** own the *semantics* behind these surfaces (ledger rules → [03](03-conditional-ledger.md), market mechanics → [04](04-markets-and-pricing.md), decision engine → [05](05-welfare-and-decision-engine.md), oracle game → [07](07-oracle-and-disputes.md), upgrade path → [09](09-execution-upgrades-and-rollout.md)) — but where a name or layout appears both here and there, **this document's spelling is canonical**. Normative language per RFC 2119.
 
-**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 21**; the hosted-question/report surface is in force (§4a/§13). Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
+**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 22**; the hosted-question/report surface and client-paid egress additions are in force (§4a/§13). Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
 
 ---
 
@@ -124,7 +124,7 @@ The `MetricId` assignment registry is owned by [05](05-welfare-and-decision-engi
 
 Proposal positions MUST project a settled proposal vault as `ScalarSettled { winner, s }`; Baseline positions MUST project a settled epoch vault as `BaselineSettled { s }` and MUST NOT fabricate a proposal branch. `RatificationStatus::NoPassedRecord` means only that the execution guard has no passing ratification record. It is deliberately agnostic between no referendum, an in-flight referendum and a failed referendum; the frontend MUST derive that lifecycle from `pallet-referenda` ([06](06-governance-and-guardians.md) §2.2). `Pending` and `Failed` are removed because the guard cannot truthfully produce them in the deployed design. This `RatificationStatus` restructure is a pre-genesis contract-v6 repair; no deployed SCALE value requires migration.
 
-The crate re-exports `INTEGRATION_CONTRACT_VERSION`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9). **It reads whichever version §13's history marks IN FORCE — currently v21.** A bump is always atomic with the surface it describes and is never in force ahead of it, so a consumer reads the constant rather than any prose statement of its value: this sentence used to name the pending version and the condition under which it would change, which made it a second copy of the number that went stale the moment the surface landed (corrected 2026-07-29, milestone E4).
+The crate re-exports `INTEGRATION_CONTRACT_VERSION`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9). **It reads whichever version §13's history marks IN FORCE — currently v22.** A bump is always atomic with the surface it describes and is never in force ahead of it, so a consumer reads the constant rather than any prose statement of its value: this sentence used to name the pending version and the condition under which it would change, which made it a second copy of the number that went stale the moment the surface landed (corrected 2026-07-29, milestone E4).
 
 ---
 
@@ -330,12 +330,13 @@ pub struct OracleRoundView {
 
 `OracleRoundView.escalated` is `round > 1`: it is true iff at least one prior round advanced the game. It MUST be false for a round-1 report even while that round has a live challenger, and MUST NOT be interpreted as “currently challenged”; any future view of that distinct fact requires a separately named field.
 
-### 4a. Hosted question service — contract **v21** (D-20; IN FORCE)
+### 4a. Hosted question service — contract **v22** (D-20; IN FORCE)
 
 Authored here rather than only in §13's history, because a history entry saying a section "gains"
 a surface is not a surface: N7 could not implement a byte-for-byte contract from a changelog, and
-two clients reading only the changelog would encode v21 differently. N7 landed the complete surface
-atomically with `INTEGRATION_CONTRACT_VERSION = 21`; these definitions are now in force.
+two clients reading only the changelog would encode v21 differently. N7 landed that base surface
+atomically at v21. N9 retains every v21 type and method byte-for-byte, appends the client delivery
+float and freezes the push receiver ABI at v22; the definitions below are the current surface.
 
 ```rust
 // §3 — the twelfth `FutarchyApi` method (additive; bumps the sp_api version too)
@@ -405,7 +406,7 @@ Push-failure and ingress-metering events meet none of (a)–(c) and are pallet-l
 
 | Key | Value | Bound |
 |---|---|---|
-| `Clients: map ClientId → ClientRecord` | `{ location: Option<Location>, local_signer: Option<AccountId>, bond: Balance, admitted_at: BlockNumber, questions_live: u32, questions_total: u32 }` — exactly one of the two identity fields is `Some` (16 §2) | `MaxClients` = 64 (13 §4) |
+| `Clients: map ClientId → ClientRecord` | `{ location: Option<Location>, local_signer: Option<AccountId>, bond: Balance, admitted_at: BlockNumber, questions_live: u32, questions_total: u32, delivery_float: Balance }` — exactly one identity field is `Some`; the trailing v22 field is the client's USDC egress liability, never native bond value (16 §2/§9) | `MaxClients` = 64 (13 §4) |
 | `Questions: map QuestionId → QuestionRecord` | `{ client_id: ClientId, phase: QuestionPhase, window_start: BlockNumber, window_end: BlockNumber, declared_stake: Balance, epsilon_1e9: FixedU64, tolerance_1e9: FixedU64, markets: [MarketId; 2] }` | `svc.max_live` live + retention |
 | `Reports: map QuestionId → ReportView` | as above | one per sealed question, retained to archive |
 
@@ -419,6 +420,20 @@ primary domain only.
 `QuestionService::AttestorsMin` (kernel `3`). The `svc.fee_bps` PARAM row binds through `params()`
 like every other tunable and is **absent from metadata while unset** — its unset state is the
 arming gate (16 §8.1).
+
+**Client transaction and outbound-receiver additions (v22).** `ClientRegistry` appends call index `3`,
+`top_up_delivery_float(amount: Balance)`, and call index `4`,
+`withdraw_delivery_float(amount: Balance)`. Both derive the exact client, USDC asset and funding
+account from origin/registry state; neither admits a caller-selected destination, beneficiary or
+asset. Their trailing refusal surface includes `DeliveryFloatBelowMinimum`, which preserves the
+USDC asset minimum for every nonzero escrow claim, and `DeliveryFundingWouldDust`, which prevents
+an exact top-up from reaping uncredited source dust. Existing call indices do not move. The hosted
+push is not a dispatchable on Bleavit: it is
+the fixed v5 program of [16](16-hosted-question-service.md) §9, whose sole `Transact.call` is
+`[66u8, 0u8] ++ SCALE(ReportView)`. Client runtimes reserve pallet index `66` for the drop-in
+`QuestionServiceReceiver` and call index `0` for `receive_report(report)`. `FutarchyApi` remains at
+12 methods and its `sp_api` version does not move; `transaction_version` remains independent and is
+unchanged for these additive calls.
 
 ---
 
@@ -577,7 +592,7 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 | VIT decimals | 12 |
 | VIT existential deposit | **0.01 VIT** (= 10^10 plancks) |
 | Phase flag storage | `pallet-constitution::PhaseFlags` (§7.3) — the trading-enablement key |
-| Contract version | `INTEGRATION_CONTRACT_VERSION` (runtime constant) — **`21` in force** (§13's history is the authority; read the constant, never a prose copy of it) |
+| Contract version | `INTEGRATION_CONTRACT_VERSION` (runtime constant) — **`22` in force** (§13's history is the authority; read the constant, never a prose copy of it) |
 
 ---
 
@@ -762,7 +777,8 @@ No other origin can write the record. The layout MUST NEVER change except by app
 
 **Version history.**
 
-- **v21 (2026-08-01) — hosted questions and reports (D-20, N7). IN FORCE.** N6 made the market half of D-20 real at v20; N7 now lands the remaining surface atomically. It adds the twelfth `FutarchyApi` method `hosted_report(question_id) -> Option<ReportView>` and its §4a types; `QuestionRegistered`, `QuestionSealed`, `QuestionSettled` and `QuestionVoided`; the `Clients`, `Questions` and `Reports` contract storage; and the `svc.*`/client-registry metadata constants. The additive runtime-API method also bumps the `sp_api` version. `INTEGRATION_CONTRACT_VERSION` is **21**; `transaction_version` remains independent. No authored §4a shape changed while implementing it. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-08-01, through the standing autonomous-resolution delegation.**
+- **v22 (2026-08-02) — client-paid hosted-report egress (D-20, N9). IN FORCE.** N9 implements both report-delivery legs without changing the v21 `ReportView`, `hosted_report` method, API method count or `sp_api` version. It appends `delivery_float: Balance` to `ClientRecord` after `questions_total`, fixes that field as USDC liability distinct from the native VIT bond, appends exact-client call indices 3/4 for top-up/withdrawal (including the trailing `DeliveryFloatBelowMinimum` and `DeliveryFundingWouldDust` refusals), and freezes the sole outbound receiver call as `[66, 0] ++ SCALE(ReportView)`. The pallet-local push counters and monitoring-only `TelemetryApi` v4 remain outside this contract. No existing field offset, discriminant or call index moves. `INTEGRATION_CONTRACT_VERSION` is **22**; the additive client calls leave `transaction_version` unchanged under rule 7. This is pre-genesis, so the widened storage value needs no deployed-state migration. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-08-02, through the standing autonomous-resolution delegation.**
+- **v21 (2026-08-01) — hosted questions and reports (D-20, N7). Superseded by v22.** N6 made the market half of D-20 real at v20; N7 now lands the remaining surface atomically. It adds the twelfth `FutarchyApi` method `hosted_report(question_id) -> Option<ReportView>` and its §4a types; `QuestionRegistered`, `QuestionSealed`, `QuestionSettled` and `QuestionVoided`; the `Clients`, `Questions` and `Reports` contract storage; and the `svc.*`/client-registry metadata constants. The additive runtime-API method also bumps the `sp_api` version. `INTEGRATION_CONTRACT_VERSION` is **21**; `transaction_version` remains independent. No authored §4a shape changed while implementing it. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-08-01, through the standing autonomous-resolution delegation.**
 - **v20 (2026-08-01) — external market books (D-20, N6). Superseded by v21.** N6 changes the schema a metadata/direct-storage consumer can already observe, so leaving the constant at 19 until the rest of Track N would violate rule 2. Additively: (i) `MarketBook.kind` gains the trailing `External { question, client, branch }` variant and `Markets` gains independently bounded 196-live/2,240-retained primary and 128-live/128-retained external partitions, with `MaxAllStoredMarkets = 2,368`; (ii) the trailing `ExternalRevenueSwept { market, fee_to_main, subsidy_returned }` event distinguishes treasury-owned service fees from exact-funder subsidy return; (iii) §7.1 makes explicit that the existing conditional-ledger keys name instance `()`, while the service `Instance1` prefix is not canonical-frontend ingest; and (iv) §9 adds `MaxLiveExternalMarkets`, `MaxStoredExternalMarkets` and `MaxAllStoredMarkets`. The release runtime binds external creation fail-closed until N7 supplies the service authority/ledger, but the v20 SCALE/storage/metadata surface itself is present. No existing field, key, discriminant or call index moves; no runtime-API method or dispatchable is added; `transaction_version` is untouched. The additive storage and value-shape revisions are pre-genesis, so no deployed state requires migration. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-08-01, through the standing autonomous-resolution delegation.**
 - **v19 (2026-08-01) — a reporter default settles neutral, and the §3 ladder survives exit (oracle security PR). Superseded by v20.** *Renumbered from v18 on rebase: E6 (#201) merged onto that number first, and §13 entries are allocated in **merge order, not authoring order** — the number a not-yet-merged branch reserves is provisional until it lands.* Two §7.2 **behaviour** changes, no shape change; listed as a contract change under the v15 precedent, because a frontend reading these maps directly observes something the old notes did not describe. (i) `ComponentValues` no longer produces `SettlePath::ChallengerDefault`. [07](07-oracle-and-disputes.md) §5.3's forward settlement let one economic party occupy both roles — this document freezes no distinctness and 07 §4's "entity registry per 05" does not exist — and terminate a game at round 1 risking `B_1` against a `Δs_max` that 07 §6.3 sized against the full `(2^R_max − 1)·B_1` ladder; against §6.3's own worked example the attacker's net moved from the intended −90,000 to +102,000, at 8.6 % of the required ladder. The repair is on the value side because §5.3's own closing sentences forbid debiting an unfunded stack. The variant is **retained**, so no discriminant moves and `SettlePath`'s SCALE encoding is byte-identical. (ii) `Reporters` gains a retention/continuity rule: the 07 §3 offense record survives `deregister_reporter` and ejection in a pallet-internal, non-§7 store, re-registration carries it forward and re-seats at the 07 §2(5) half stake past the second offense, and an ejected account is refused. Neither the `ReporterInfo` nor the `SettledComponent` value shape changes; the new store is an **additive internal storage item** and is not contract surface (§7's own rule, and the v17 precedent). No event name or field shape moves — the one new pallet event (`ReporterRecordsFull`) fails §6's criteria (a)–(c) and is an off-contract operational diagnostic. Two trailing pallet error variants only (the v8 precedent). No call index moves and no dispatchable is added, so per §13 rule 7 `transaction_version` is untouched. **Pre-genesis revision** — no runtime is deployed, so §13's point-3 migration clause does not apply. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-31, through the standing autonomous-resolution delegation.**
 

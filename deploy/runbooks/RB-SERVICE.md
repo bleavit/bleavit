@@ -50,15 +50,18 @@ wrong action:
 
 ## Diagnosis
 
-**Client report push failures.** Read the per-client failure counter and the last error. Almost
-always this is the client's side:
+**Client report push failures.** Read the per-client attempted, total-failure and consecutive-failure
+counters. The deliberately aggregate counter does not persist a last-error code because the outcome
+may not become protocol state. Diagnose the bounded possibilities from custody and channel state:
 
 - `NoChannel` — the client never opened, or has since closed, its return HRMP channel. This is the
   I-36 case the design anticipated; nothing on this chain is wrong.
 - `Unroutable` / `Transport` — relay-side or XCMP congestion. Correlate with the XCM domain's own
   series; if *protocol* sends are also failing, this is RB-XCM, not this runbook.
-- Fee exhaustion — the client's bond can no longer prepay delivery. Confirm against the registry's
-  held bond; a client whose bond has drained cannot be pushed to and must top up.
+- Fee exhaustion — the client's separate USDC `delivery_float` can no longer prepay delivery.
+  Confirm the contract-v22 registry field; the native VIT security bond is unrelated and MUST NOT
+  be spent on postage. The exact client calls are `top_up_delivery_float(amount)` and
+  `withdraw_delivery_float(amount)`; neither accepts a destination, asset or beneficiary.
 
 Confirm the client is actually being served: fetch the question's report through `hosted_report` and
 check `provenance_hash` is present. If it is, the product was delivered; only the courtesy copy
@@ -80,12 +83,13 @@ not holding and PT-10's property is violated in production.
 
 ## Remediation
 
-**Push failures.** Notify the client through the operational contact on its registry record; there is
-no on-chain action and none should be invented. Do **not** retry from the chain, do not re-route, and
-do not add the client path to the health-tracking router to "get visibility" — that is precisely the
-I-36 violation. Point the client at the pull surface and
-`docs/integration/reading-the-report.md`. If the client's bond has drained, it must top up before
-pushes resume; report delivery by pull continues regardless.
+**Push failures.** Notify the client through the off-chain operational contact established during
+admission; the on-chain registry deliberately carries no contact field. There is no on-chain action
+and none should be invented. Do **not** retry from the chain, do not re-route, and do not add the
+client path to the health-tracking router to "get visibility" — that is precisely the I-36
+violation. Point the client at [02 §4a](../../docs/architecture/02-integration-contract.md) and its
+authoritative pull surface. If the client's delivery float has drained, it must top up before pushes
+resume; report delivery by pull continues regardless.
 
 **Occupancy — headroom.** No action. Record the observation for the values-layer review that sizes
 `svc.max_live`.
@@ -134,7 +138,8 @@ pushes resume; report delivery by pull continues regardless.
 - [05 §4.3](../../docs/architecture/05-welfare-and-decision-engine.md) — `H` and the primary-capacity
   reservation; the P-pillar exclusion
 - [12 §6.3](../../docs/architecture/12-release-and-operations.md) — the alert tables these rows come from
-- [13 §1](../../docs/architecture/13-parameters.md) — `svc.max_live`, `svc.fee_bps`, `svc.client_bond`
+- [13 §1](../../docs/architecture/13-parameters.md) — `svc.max_live`, `svc.fee_bps`,
+  `svc.client_bond`, and the reused `xcm.usdc_per_sec` / `xcm.usdc_per_mb` postage rate card
 - [14](../../docs/architecture/14-threat-model.md) TH-69 (egress abuse), TH-72 (liquidity diversion),
   TH-73 (pressure on `svc.max_live` and the certification threshold)
 - [RB-XCM](RB-XCM.md) — when protocol sends are failing too
