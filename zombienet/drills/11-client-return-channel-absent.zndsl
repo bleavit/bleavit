@@ -4,4 +4,5 @@ Creds: config
 
 bleavit-collator-1: reports block height is at least 10 within 300 seconds
 client-collator-1: reports block height is at least 10 within 300 seconds
+relay-alice: js-script ./js/open-hrmp-channels.js with "4343:4242" within 300 seconds
 client-collator-1: js-script ./js/client-return-channel-absent.js with "lifecycle" within 900 seconds

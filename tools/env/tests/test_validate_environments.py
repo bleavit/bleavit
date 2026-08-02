@@ -72,15 +72,37 @@ class ValidateEnvironmentsTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         self.assert_fails_with("no duplicates or extras")
 
-    def test_missing_hrmp_direction_is_release_blocking(self) -> None:
+    def test_genesis_hrmp_preopen_is_release_blocking(self) -> None:
+        # SQ-567: a genesis `[[hrmp_channels]]` preopen queues sent_at=0 DMP
+        # notifications that cumulus's first-candidate sentinel drops wholesale,
+        # so the parachain never produces block #1. Reintroducing the directive
+        # must fail loudly rather than stall a drill at height 0.
         path = self.root / "zombienet" / "networks" / "bleavit-xcm.toml"
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + "\n[[hrmp_channels]]\nsender = 4242\nrecipient = 1000\n"
+            "max_capacity = 8\nmax_message_size = 524288\n",
+            encoding="utf-8",
+        )
+        self.assert_fails_with("declares [[hrmp_channels]]")
+
+    def test_drill_without_post_genesis_hrmp_open_is_release_blocking(self) -> None:
+        path = self.root / "zombienet" / "drills" / "10-client-integration.zndsl"
+        text = path.read_text(encoding="utf-8")
+        kept = [line for line in text.splitlines(True) if "open-hrmp-channels.js" not in line]
+        path.write_text("".join(kept), encoding="utf-8")
+        self.assert_fails_with("must open its HRMP channels post-genesis")
+
+    def test_extra_hrmp_direction_in_the_i36_witness_is_release_blocking(self) -> None:
+        # Drill 11 witnesses I-36 with the return channel ABSENT. Opening the
+        # reverse direction would make the drill pass while proving nothing, so
+        # the pair set is matched exactly rather than as a subset.
+        path = self.root / "zombienet" / "drills" / "11-client-return-channel-absent.zndsl"
         text = path.read_text(encoding="utf-8").replace(
-            "sender = 1000\nrecipient = 4242",
-            "sender = 4242\nrecipient = 1000",
-            1,
+            'with "4343:4242"', 'with "4343:4242,4242:4343"', 1
         )
         path.write_text(text, encoding="utf-8")
-        self.assert_fails_with("missing HRMP direction")
+        self.assert_fails_with("must open its HRMP channels post-genesis")
 
     def test_non_localhost_endpoint_is_release_blocking(self) -> None:
         path = self.root / "chopsticks" / "scenarios" / "pb-depeg.yml"

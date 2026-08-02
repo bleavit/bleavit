@@ -56,14 +56,13 @@ command = "target/release/bleavit-node"
 name = "client-collator-2"
 command = "target/release/bleavit-node"
 
-[[hrmp_channels]]
-sender = 4343
-recipient = 4242
-max_capacity = 8
-max_message_size = 524288
-
-[[hrmp_channels]]
-sender = 4242
-recipient = 4343
-max_capacity = 8
-max_message_size = 524288
+# HRMP channels are opened AFTER both paras are producing blocks, by
+# `zombienet/drills/js/open-hrmp-channels.js`, not by `[[hrmp_channels]]` here
+# (SQ-567). See that helper's header comment for the derivation: a genesis
+# preopen queues DMP notifications stamped `sent_at = 0`, which cumulus's
+# first-candidate sentinel drops wholesale, trapping `set_validation_data` so the
+# parachain never produces block #1. Channel geometry (capacity 8, 524288 bytes)
+# is unchanged and now lives in the helper.
+#
+# The drill spawning this topology MUST run the helper with "4343:4242,4242:4343"
+# after both collators report a block height.
