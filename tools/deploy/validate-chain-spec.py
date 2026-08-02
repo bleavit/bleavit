@@ -166,8 +166,20 @@ FORBIDDEN_NONEMPTY_TOP_LEVEL_KEYS = {
 # Bleavit spec may carry (`runtime/bleavit-runtime/src/genesis.rs`). Also an
 # allowlist: an unknown section is either a typo that silently defaults a real
 # one, or a pallet config nothing here reviews.
+#
+# **This list must cover every `construct_runtime!` pallet that declares a
+# `#[pallet::genesis_config]`, not merely the sections the dev/local presets
+# happen to emit.** It was originally derived from the latter and so omitted
+# `welfare`, `oracle`, `guardian` and `attestor` — all real, settable sections.
+# Only the drill genesis sets one (`guardian`, seeding seven seat bonds per
+# 06 §5.1), so the gap was invisible to every per-commit gate and surfaced only
+# when the B7 drill pipeline was next actually run — long after the allowlist
+# landed. `tools/deploy/tests/test_validate_chain_spec_sections.py` now
+# cross-checks this set against `construct_runtime!` so it cannot silently go
+# stale again; a new genesis-bearing pallet fails that test until it is listed.
 ALLOWED_GENESIS_SECTIONS = frozenset(
     {
+        # stock FRAME / Cumulus
         "balances",
         "vesting",
         "foreignAssets",
@@ -175,11 +187,16 @@ ALLOWED_GENESIS_SECTIONS = frozenset(
         "collatorSelection",
         "session",
         "polkadotXcm",
+        "sudo",
+        # Bleavit pallets carrying a genesis config
         "constitution",
         "epoch",
         "futarchyTreasury",
         "executionGuard",
-        "sudo",
+        "welfare",
+        "oracle",
+        "guardian",
+        "attestor",
     }
 )
 # 02 §7.3 phase-flag bits (`constitution_core::PhaseFlagsValue`).

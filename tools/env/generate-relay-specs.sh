@@ -6,8 +6,21 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=pins.env
 source "$repo_root/tools/env/pins.env"
 
-cache="$repo_root/target/env/paseo-chain-spec-generator-src"
-generator_target="$repo_root/target/env/paseo-chain-spec-generator"
+# Everything cargo writes must be redirectable. `generator_target` is handed to
+# the Paseo sub-build as its literal CARGO_TARGET_DIR, so pinning it under
+# $repo_root makes it unredirectable — and on an ecryptfs $HOME (the documented
+# local configuration for this repo) the Paseo wasm build then dies on the
+# ~143-char filename cap:
+#
+#   error: could not write output to .../wbuild/asset-hub-paseo-runtime/target/
+#   wasm32v1-none/release/deps/...-cgu.0.rcgu.o.rcgu.o: File name too long
+#
+# which names neither this script nor the cause. Deriving from CARGO_TARGET_DIR
+# lets the caller move it; unset, this is `$repo_root/target` exactly as before,
+# so CI is unaffected. The git clone rides along so the two stay adjacent.
+bleavit_target="${CARGO_TARGET_DIR:-$repo_root/target}"
+cache="$bleavit_target/env/paseo-chain-spec-generator-src"
+generator_target="$bleavit_target/env/paseo-chain-spec-generator"
 out="$repo_root/zombienet/specs/out"
 mkdir -p "$(dirname "$cache")" "$generator_target" "$out"
 
@@ -113,8 +126,10 @@ PY
 # one drill override, and feed the result through the builder's verified
 # `create ... patch` route.
 "$repo_root/tools/deploy/generate-chain-specs.sh"
-builder="$repo_root/target/tools/bin/chain-spec-builder"
-wasm="$repo_root/target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm"
+# These READ cargo build outputs of the script invoked on the line above, so
+# they resolve through the same `$bleavit_target` defined at the top.
+builder="$bleavit_target/tools/bin/chain-spec-builder"
+wasm="$bleavit_target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm"
 preset_patch="$repo_root/target/env/bleavit-local-preset.json"
 drill_patch="$repo_root/target/env/bleavit-drill-patch.json"
 properties="tokenSymbol=VIT,tokenDecimals=12,ss58Format=7777"
@@ -272,8 +287,14 @@ python3 "$repo_root/tools/deploy/validate-chain-spec.py" \
 # `drill_patch` as the base drill (no balance/identity change), and `--verify`
 # below re-runs `EpochParams::validate` over the compressed genesis. Built into a
 # distinct CARGO_TARGET_DIR so it never clobbers the release wasm at line ~117.
-fast_wasm="$repo_root/target/fast-timing/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm"
-CARGO_TARGET_DIR="$repo_root/target/fast-timing" cargo build \
+# Distinct from the release target dir but still under `$bleavit_target`, so a
+# caller who redirects CARGO_TARGET_DIR moves this build too. Pinning it under
+# $repo_root reintroduced the ecryptfs filename-cap failure that redirection
+# exists to avoid — the separate-target-dir requirement and the redirectability
+# requirement are independent, and this needs both.
+fast_target="$bleavit_target/fast-timing"
+fast_wasm="$fast_target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm"
+CARGO_TARGET_DIR="$fast_target" cargo build \
   -p bleavit-runtime --release --features substrate-wasm-builder,fast-timing --locked
 if [[ ! -s "$fast_wasm" ]]; then
   echo "fast-timing runtime wasm was not produced at $fast_wasm" >&2
