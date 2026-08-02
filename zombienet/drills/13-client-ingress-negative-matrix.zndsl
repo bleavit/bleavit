@@ -1,0 +1,7 @@
+Description: Eight malformed positional-ingress programs are sent through the harness-only raw sender and every MessageQueue receipt is refused; the application path remains BleavitClient.ask (16 §12; 09 §6.5).
+Network: ./zombienet/networks/bleavit-client-para.toml
+Creds: config
+
+bleavit-collator-1: reports block height is at least 10 within 300 seconds
+client-collator-1: reports block height is at least 10 within 300 seconds
+client-collator-1: js-script ./js/client-ingress-negative.js with "malformed" within 600 seconds

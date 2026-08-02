@@ -1,0 +1,10 @@
+{
+  "name": "@bleavit/frontend",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc -b"
+  }
+}

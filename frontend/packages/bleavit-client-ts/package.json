@@ -1,0 +1,22 @@
+{
+  "name": "@bleavit/client-ts",
+  "version": "0.1.0",
+  "description": "Proof-backed TypeScript/PAPI client for Bleavit hosted questions",
+  "license": "GPL-3.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@noble/hashes": "1.8.0"
+  },
+  "peerDependencies": {
+    "polkadot-api": "2.1.8"
+  }
+}

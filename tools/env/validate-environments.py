@@ -55,6 +55,10 @@ REQUIRED_DRILLS = {
     "07-xcm-reserve-transfer.zndsl": "15 §4.7; 09 §6.1",
     "08-expedited-code-under-freeze.zndsl": "09 §2.1/§3.2/§7.1",
     "09-three-unattended-epochs.zndsl": "15 §4.7; 09 §7.1; 13 §1",
+    "10-client-integration.zndsl": "15 §4.7; 16 §2/§3/§11",
+    "11-client-return-channel-absent.zndsl": "15 §4.7; 16 §12; I-36",
+    "12-client-report-pull.zndsl": "15 §4.7; 16 §12; I-36",
+    "13-client-ingress-negative-matrix.zndsl": "15 §4.7; 16 §12; 09 §6.5",
 }
 
 # 02 §11 forked-state rows plus the exhaustive 06 §6.2 playbook registry.
@@ -74,6 +78,8 @@ REQUIRED_SCENARIOS = {
 NETWORKS = {
     "bleavit-local.toml": {4242},
     "bleavit-xcm.toml": {4242, 1000, 1005},
+    "bleavit-client-para.toml": {4242, 4343},
+    "bleavit-client-no-return.toml": {4242, 4343},
 }
 RELAY_SPEC_PATH = "zombienet/specs/out/paseo-local.json"
 CHOPSTICKS_GENESIS = "zombienet/specs/out/bleavit-drill-raw.json"
