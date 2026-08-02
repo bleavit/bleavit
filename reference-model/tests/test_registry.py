@@ -484,14 +484,18 @@ class RegistryGroundingTests(unittest.TestCase):
         classified_bytes = {param_key_bytes(key) for key in classified_genesis}
         # 194 at S7-S11; +5 with D-20's `svc.*` keys, +1 with N4's `MaxClients`,
         # +4 with N6's external-book structural envelopes, and +1 with N7's
-        # `MaxServiceAttestors`. Three D-20 values (`svc.max_live`,
-        # `svc.max_window`, and `svc.epsilon_min`) are genesis-seeded; the other
-        # eight additions are not. These counters are the tripwire that makes
-        # every registry addition explicit.
+        # `MaxServiceAttestors`. FOUR D-20 values are now genesis-seeded:
+        # `svc.max_live`, `svc.max_window`, `svc.epsilon_min`, and — since the
+        # user adopted it at 1,000 bps on 2026-08-02 — `svc.fee_bps`, whose
+        # seeding is the act that arms the hosted service. `svc.client_bond`
+        # remains deliberately unseeded, so its consumer still fails closed.
+        # These counters are the tripwire that makes every registry addition
+        # explicit, and it did its job: the count moved 110 -> 111 in three
+        # independent artifacts and this test is the thing that checks they agree.
         self.assertEqual(len(entries), 205)
-        self.assertEqual(len(json_keys), 110)
-        self.assertEqual(len(classified_genesis), 110)
-        self.assertEqual(len(model_bytes), 110)
+        self.assertEqual(len(json_keys), 111)
+        self.assertEqual(len(classified_genesis), 111)
+        self.assertEqual(len(model_bytes), 111)
         self.assertEqual(model_bytes, json_bytes)
         self.assertEqual(model_bytes, classified_bytes)
 

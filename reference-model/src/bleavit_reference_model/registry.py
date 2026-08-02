@@ -418,9 +418,18 @@ _row("xcm.dot_per_mb", ParamKind.BALANCE, "DOT planck/MiB", 10_000_000_000, 100_
 _row("xcm.usdc_per_sec", ParamKind.BALANCE, "µUSDC/s", 50_000_000, 500_000, 5_000_000_000, factor(2), 1, AmendmentClass.PARAM)
 _row("xcm.usdc_per_mb", ParamKind.BALANCE, "µUSDC/MiB", 5_000_000, 50_000, 500_000_000, factor(2), 1, AmendmentClass.PARAM)
 
-# Hosted service registration bounds (13 §1; 16 §4, §5.2, §8.5). The fee and
-# client-bond rows are intentionally absent at genesis and therefore do not
-# materialize in this seeded registry model.
+# Hosted service registration bounds (13 §1; 16 §4, §5.2, §8.5). `svc.client_bond`
+# is still intentionally absent at genesis and therefore does not materialize in
+# this seeded registry model. `svc.fee_bps` was absent for the same reason until
+# the user adopted it at 1,000 bps on 2026-08-02, and seeding it is the act that
+# arms the hosted service.
+#
+# Written through `PERBILL_PER_BPS` rather than as a literal, because 13 §1 states
+# this row in **bps** while the stored kind is **Perbill** (parts per 1e9) — the two
+# scales differ by 100,000×, and `orc.bond_bps` already uses this exact idiom.
+# 1,000 bps = 10 % = 100,000,000 ppb. Adopted at the row maximum, so the ×2 max-Δ
+# is exercisable downward only.
+_row("svc.fee_bps", ParamKind.PERBILL, "ppb", 1_000 * PERBILL_PER_BPS, 0, 1_000 * PERBILL_PER_BPS, factor(2), 2, AmendmentClass.PARAM)
 _row("svc.max_live", ParamKind.U32, "questions", 16, 1, 64, factor(2), 2, AmendmentClass.PARAM)
 _row("svc.max_window", ParamKind.U32, "blocks", 302_400, 43_200, 302_400, factor(2), 1, AmendmentClass.PARAM)
 _row("svc.epsilon_min", ParamKind.PERBILL, "ppb fraction", 10_000_000, 5_000_000, 250_000_000, factor(2), 1, AmendmentClass.PARAM)
