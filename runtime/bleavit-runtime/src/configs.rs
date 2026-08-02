@@ -67,7 +67,12 @@ parameter_types! {
     pub RuntimeBlockWeights: BlockWeights = BlockWeights::builder()
         .base_block(BlockExecutionWeight::get())
         .for_class(DispatchClass::all(), |w| w.base_extrinsic = ExtrinsicBaseWeight::get())
-        .for_class(DispatchClass::Normal, |w| w.max_total = Some(NORMAL_DISPATCH_RATIO * MAXIMUM_BLOCK_WEIGHT))
+        // N7: `CheckWeight` must be able to see both sides of the explicit
+        // partition. The resource extension enforces the 75/25 split; keeping
+        // Normal at 75 % here would make the external quota unusable after a
+        // primary call, while making it `max_block` does not grant borrowing
+        // because the extension refuses a primary call above its reservation.
+        .for_class(DispatchClass::Normal, |w| w.max_total = Some(MAXIMUM_BLOCK_WEIGHT))
         .for_class(DispatchClass::Operational, |w| {
             w.max_total = Some(MAXIMUM_BLOCK_WEIGHT);
             w.reserved = Some(MAXIMUM_BLOCK_WEIGHT - NORMAL_DISPATCH_RATIO * MAXIMUM_BLOCK_WEIGHT);
@@ -1493,7 +1498,7 @@ pub(crate) mod xcm_config {
         type FeeManager = ();
         type MessageExporter = ();
         type UniversalAliases = Nothing;
-        type CallDispatcher = RuntimeCall;
+        type CallDispatcher = crate::resource_partition::ResourcePartitionCallDispatcher;
         type SafeCallFilter = SafeCallFilter;
         type Aliasers = Nothing;
         type TransactionalProcessor = FrameTransactionalProcessor;
@@ -6616,22 +6621,24 @@ fn block_production(counters: pallet_welfare::BlockProductionCounters) -> Option
     Some(FixedU64(u64::try_from(scaled).ok()?))
 }
 
-/// Weight headroom `H` for 05 §4.3, or `None` when the window sampled no block.
+/// Primary/system weight headroom `H` for 05 §4.3 and 16 §8.5, or `None` when
+/// the primary window sampled no block.
 ///
 /// §4.3 gives `H = 1 − mean(block weight used ÷ limit)`, "mapped so 40% target
-/// utilization ⇒ 1". Two facts fix the mapping and neither is a free choice:
-/// `H` must read **exactly** 1 at the 40 % target, and it must fall as
-/// utilization rises above it. The affine map that does both is
+/// utilization ⇒ 1". `PrimaryBlockWeightSamples` excludes external work before
+/// sampling, but remains in the physical `max_block` coordinate system. The
+/// original affine map therefore runs literally, with no transformed target or
+/// scale:
 ///
 /// ```text
 /// H = clamp( (1 − mean) / (1 − target), 0, 1 ),  target = 0.40
 /// ```
 ///
-/// — the raw `1 − mean` rescaled by the headroom a chain running exactly at
-/// target has left. Below 40 % the quotient exceeds 1 and clamps: spare capacity
-/// is *healthy*, not better than healthy, and letting `H` run above 1 would push
-/// `C_onchain` above the [0,1] domain every other component and both §4.1 gates
-/// are defined on.
+/// — the raw physical-coordinate headroom rescaled by the headroom a chain
+/// running exactly at target has left. Below that target the quotient exceeds 1
+/// and clamps: spare capacity is *healthy*, not better than healthy, and
+/// letting `H` run above 1 would push `C_onchain` above the [0,1] domain every
+/// other component and both §4.1 gates are defined on.
 ///
 /// **A window with no sampled block is absent, never 1.** §4.3's missing-data
 /// column gives `H` no "no data ⇒ 1" rule — unlike `X` ("no traffic ⇒ 1") and
@@ -6642,11 +6649,11 @@ fn block_production(counters: pallet_welfare::BlockProductionCounters) -> Option
 /// `C_onchain` out of a window nothing measured. Returning `None` makes
 /// `record_snapshot` refuse and the crank fail status-quo-safe (G-1).
 ///
-/// Both divisions truncate, and both truncate in the safe direction: the mean is
-/// rounded **up** (so utilization is never understated) and the quotient down
-/// (so `H` is never overstated).
-#[allow(dead_code)]
-fn weight_headroom(sample: pallet_welfare::BlockWeightSample) -> Option<FixedU64> {
+/// The mean is rounded **up** (so utilization is never understated), and the
+/// quotient is rounded down (so `H` is never overstated). There is no second
+/// scale or converted target: independently rounded constants would break the
+/// required zero-external bit identity with the pre-partition formula.
+pub(crate) fn weight_headroom(sample: pallet_welfare::BlockWeightSample) -> Option<FixedU64> {
     let blocks = u128::from(sample.blocks);
     if blocks == 0 {
         return None;
@@ -6768,11 +6775,13 @@ fn metric_components(
             // exactly equivalent for `C_onchain` (S and `C_onchain` are both
             // on-chain/relay-derived; `C_attested` and `A` are both attested),
             // so nothing that used to be emitted stops being emitted and no
-            // attested component can ever reach this path. `P` is also
-            // on-chain-sourced and therefore admitted by the filter, and falls
-            // through the `_` arm below unresolved — the same status-quo-safe
-            // outcome it had before.
+            // attested component can ever reach this path. `P` is deliberately
+            // excluded here even though its current class is on-chain: its
+            // fees/users/settled-value producers are not implemented, and this
+            // primary-only seam must never become a route by which hosted
+            // activity inflates P (05 §4.3; 16 §8.5).
             spec.activation_epoch <= epoch
+                && !matches!(spec.pillar, pallet_welfare::Pillar::P)
                 && matches!(
                     spec.source,
                     pallet_welfare::SourceClass::Onchain
@@ -6887,7 +6896,7 @@ fn benchmark_measure_block_production_reads(epoch: EpochId, day: Option<u8>) {
 /// block-production series each keep an on-write epoch aggregate, so their
 /// epoch-granularity read is one key; `H` and `Π` have none, so
 /// `onchain_components` **folds the whole day prefix** of each
-/// (`block_weight_epoch`, `integrity_failures_epoch`). Left unwalked, the
+/// (`primary_block_weight_epoch`, `integrity_failures_epoch`). Left unwalked, the
 /// fabricating arm returns component values having touched neither map, and the
 /// generated weight declares nothing for a dispatch that reads up to 2 × 256
 /// keys — the largest instance of the SQ-490 shape in this file rather than the
@@ -6899,11 +6908,11 @@ fn benchmark_measure_block_production_reads(epoch: EpochId, day: Option<u8>) {
 fn benchmark_measure_h_pi_reads(epoch: EpochId, day: Option<u8>) {
     match day {
         Some(day) => {
-            let _ = pallet_welfare::Pallet::<Runtime>::block_weight_sample(epoch, day);
+            let _ = pallet_welfare::Pallet::<Runtime>::primary_block_weight_sample(epoch, day);
             let _ = pallet_welfare::Pallet::<Runtime>::integrity_failures(epoch, day);
         }
         None => {
-            let _ = pallet_welfare::Pallet::<Runtime>::block_weight_epoch(epoch);
+            let _ = pallet_welfare::Pallet::<Runtime>::primary_block_weight_epoch(epoch);
             let _ = pallet_welfare::Pallet::<Runtime>::integrity_failures_epoch(epoch);
         }
     }
@@ -6963,7 +6972,7 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
                     block_production: pallet_welfare::Pallet::<Runtime>::block_production_epoch(
                         epoch,
                     ),
-                    headroom: pallet_welfare::Pallet::<Runtime>::block_weight_epoch(epoch),
+                    headroom: pallet_welfare::Pallet::<Runtime>::primary_block_weight_epoch(epoch),
                     integrity_events: pallet_welfare::Pallet::<Runtime>::integrity_failures_epoch(
                         epoch,
                     ),
@@ -7121,7 +7130,9 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
                 reserve: reserve_probe_daily_value(epoch, day),
                 authorship: AuthorshipWindowInput::day(epoch, day),
                 block_production: pallet_welfare::Pallet::<Runtime>::block_production(epoch, day),
-                headroom: pallet_welfare::Pallet::<Runtime>::block_weight_sample(epoch, day),
+                headroom: pallet_welfare::Pallet::<Runtime>::primary_block_weight_sample(
+                    epoch, day,
+                ),
                 integrity_events: pallet_welfare::Pallet::<Runtime>::integrity_failures(epoch, day),
             },
         )
@@ -7193,10 +7204,79 @@ impl pallet_welfare::SnapshotSchedule for RuntimeSnapshotSchedule {
     }
 }
 
+/// Canonical metric provenance is a runtime decision, not a field a
+/// governance caller can self-declare. The high id namespace is reserved for
+/// hosted-book metrics and is rejected by welfare before a spec is stored.
+pub struct RuntimeMetricProvenance;
+impl pallet_welfare::MetricProvenanceProvider for RuntimeMetricProvenance {
+    fn provenance(
+        id: futarchy_primitives::MetricId,
+        declared: pallet_welfare::SourceClass,
+    ) -> pallet_welfare::MetricProvenance {
+        use futarchy_primitives::metric_ids;
+        let _ = declared;
+        // Hosted-book provenance is runtime-owned in every build, including
+        // the benchmark runtime: a fixture cannot make a hosted id primary by
+        // declaring another class.
+        if id >= metric_ids::HOSTED_BOOK_MIN {
+            return pallet_welfare::MetricProvenance::HostedBook;
+        }
+
+        // Production ignores the caller's declaration; only the runtime-owned
+        // map is authoritative. The benchmark-only fallback is solely for the
+        // welfare pallet's synthetic 1..=16 ids, whose artificial source mix
+        // overlaps production ids 10..12. It never ships and cannot cross the
+        // hosted namespace above.
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            // The welfare pallet's synthetic 16-component benchmark fixture
+            // deliberately exercises more slots than the production v1 map.
+            // Even there provenance remains keyed by the runtime-owned id,
+            // never by `MetricSpec.source`; these ids are a benchmark-only
+            // namespace and cannot cross the hosted boundary above.
+            let source = match id {
+                // Synthetic 13/14 stand in for the on-chain P group; 15/16
+                // stand in for A and therefore retain its attested class.
+                1..=9 | 13..=14 => pallet_welfare::SourceClass::Onchain,
+                10..=12 | 15..=16 => pallet_welfare::SourceClass::Attested,
+                _ => return pallet_welfare::MetricProvenance::Unassigned,
+            };
+            return pallet_welfare::MetricProvenance::Primary(source);
+        }
+
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        {
+            let canonical = match id {
+                metric_ids::X
+                | metric_ids::R
+                | metric_ids::E
+                | metric_ids::H
+                | metric_ids::PI
+                | metric_ids::K
+                | metric_ids::U
+                | metric_ids::D_EFF
+                | metric_ids::P_FEES
+                | metric_ids::P_QUALIFIED_USERS
+                | metric_ids::P_SETTLED_VALUE => Some(pallet_welfare::SourceClass::Onchain),
+                metric_ids::F => Some(pallet_welfare::SourceClass::RelayDerived),
+                metric_ids::A_SHIPPED_UPGRADES
+                | metric_ids::A_RUNTIME_PERF
+                | metric_ids::A_INTEGRATIONS => Some(pallet_welfare::SourceClass::Attested),
+                _ => None,
+            };
+            match canonical {
+                Some(source) => pallet_welfare::MetricProvenance::Primary(source),
+                None => pallet_welfare::MetricProvenance::Unassigned,
+            }
+        }
+    }
+}
+
 impl pallet_welfare::Config for Runtime {
     type MetricGovernanceOrigin = EnsureValuesScoped<MetricTrack>;
     type Params = WelfareParams;
     type MetricInputs = RuntimeMetricInputs;
+    type MetricProvenance = RuntimeMetricProvenance;
     type Ledger = WelfareLedger;
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
     type CurrentWindow = RuntimeMeasurementWindow;
@@ -8356,6 +8436,7 @@ impl RuntimeGuardianEffects {
             ),
             DispatchError::Other("emergency playbook call is not admissible")
         );
+        // N7-DISPATCH-TRIPWIRE: guardian-playbook
         call.dispatch_bypass_filter(pallet_origins::Origin::EmergencyPlaybook.into())
             .map(|_| ())
             .map_err(|error| error.error)
@@ -9876,11 +9957,13 @@ fn schedule_committed_recovery_image() -> DispatchResult {
         RecoveryCodeApplied::kill();
         RecoveryBypass::put(true);
         let result = (|| {
+            // N7-DISPATCH-TRIPWIRE: recovery-authorize
             RuntimeCall::System(frame_system::Call::authorize_upgrade {
                 code_hash: Hash::from(recovery.hash),
             })
             .dispatch_bypass_filter(RuntimeOrigin::root())
             .map_err(|error| error.error)?;
+            // N7-DISPATCH-TRIPWIRE: recovery-apply
             RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { code })
                 .dispatch_bypass_filter(RuntimeOrigin::none())
                 .map_err(|error| error.error)?;
@@ -12548,6 +12631,7 @@ impl pallet_execution_guard::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmark
         let _ = RuntimeCall::System(frame_system::Call::authorize_upgrade {
             code_hash: hash.into(),
         })
+        // N7-DISPATCH-TRIPWIRE: benchmark-authorize
         .dispatch_bypass_filter(RuntimeOrigin::root());
         pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::put(
             pallet_execution_guard::PendingUpgrade {

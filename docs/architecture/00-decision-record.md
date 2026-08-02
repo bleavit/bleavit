@@ -216,6 +216,16 @@ New FE epic **FE-14 (Governance surface)**: referenda list/detail, vote/delegate
   settlement input (I-34/I-37, PT-10); no external `Transact` reaching any non-`ExternalClient` call
   (I-35); no externally-triggered send feeding XCM health (I-36); ingress issuance-neutral (I-38);
   per-domain solvency as the existing invariant evaluated twice (PT-9).
+- **Resource-partition residual ruling (2026-08-02).** `Normal.max_total = 100%` is intentional:
+  the signed extension and external XCM dispatcher enforce the 75/25 split on extension-traversing
+  external calls, while authority-gating protects the three residual Normal paths that bypass both:
+  scheduler direct dispatch is `InternalSchedulerOnly` governance/internal work; an
+  `ExecutionGuard` queued payload has a permissionless trigger but a governance-authorized payload;
+  and guardian emergency playbooks require the five-of-seven council authority. None is externally
+  reachable or lets an unprivileged account choose the payload, and a refusal cap could block the
+  recovery it exists to protect. Their weight is still folded into `PrimaryUsed`. The local raw
+  dispatch inventory is tripwired in the runtime; the SDK scheduler's internal dispatch is guarded
+  by its exact origin binding because it is not source-visible here.
 - **Cost accepted:** this is the largest relaxation of the chain's XCM posture to date, and G2–G4 gain
   a materially larger surface to prove before sudo removal. Taken deliberately: [10](10-frontend-architecture.md)–[11](11-frontend-workflows.md)
   are unbuilt, so the contract bump is cheap now and expensive after F2 binds.

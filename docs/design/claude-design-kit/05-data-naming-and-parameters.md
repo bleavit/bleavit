@@ -362,6 +362,15 @@ live. For mock data these are the correct realistic values.
 | `svc.max_window` | 302,400 blocks (= one epoch) | live hosted-question window ceiling |
 | `svc.epsilon_min` | 0.01 | live declared manipulation displacement floor |
 
+The external resource quota is not a second governance parameter: it is the runtime's existing
+operational reserved `Weight` in both dimensions, with the primary reservation as the block
+complement. Admission refuses overflow, and an absent or invalid `svc.max_live` fails closed. The
+welfare `H` display uses the primary-only sample in the physical `max_block` coordinates with the
+original integer formula, while total block weight remains visible as a diagnostic; zero external
+work is bit-identical to the pre-partition H path. Metric ids are runtime-owned: ids at or above `0x8000` are the rejected hosted-book
+namespace, and unknown production ids are unassigned rather than authorized by a self-declared
+`MetricSpec.source` class.
+
 **Unset-by-spec ([VERIFY], sim-/ops-gated — never invent values):**
 `sec.flow_cap`, `collator.bond_req_vit`, `ops.*` budget lines, `pol.b_baseline` calibration,
 `fee.vit_usdc_rate_ref` at TGE, `phase3.*` caps before Phase-3 arming.

@@ -502,7 +502,7 @@ fn seed_code_decision_markets(
     )
 }
 
-fn seed_decision_markets(
+pub(crate) fn seed_decision_markets(
     pid: futarchy_primitives::ProposalId,
     class: ProposalClass,
     end: BlockNumber,
@@ -1733,6 +1733,7 @@ fn signed_vit_transfer(destination: AccountId, amount: crate::Balance) -> Unchec
             frame_metadata_hash_extension::CheckMetadataHash::<Runtime>::new(false),
             crate::StorageWeightReclaim::new(),
         ),
+        crate::resource_partition::ResourcePartition,
     );
     let payload = match SignedPayload::new(call, extensions) {
         Ok(payload) => payload,
@@ -21213,22 +21214,22 @@ fn sq341_attested_admission_is_gated_on_live_oracle_seats() {
 fn spec_set(version: futarchy_primitives::MetricSpecVersion) -> Vec<pallet_welfare::MetricSpec> {
     [
         (
-            1u16,
+            futarchy_primitives::metric_ids::X,
             pallet_welfare::Pillar::S,
             pallet_welfare::SourceClass::Onchain,
         ),
         (
-            2,
+            futarchy_primitives::metric_ids::H,
             pallet_welfare::Pillar::COnchain,
             pallet_welfare::SourceClass::Onchain,
         ),
         (
-            3,
+            futarchy_primitives::metric_ids::P_FEES,
             pallet_welfare::Pillar::P,
             pallet_welfare::SourceClass::Onchain,
         ),
         (
-            4,
+            futarchy_primitives::metric_ids::A_SHIPPED_UPGRADES,
             pallet_welfare::Pillar::A,
             pallet_welfare::SourceClass::Attested,
         ),

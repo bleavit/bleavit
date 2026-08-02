@@ -2,8 +2,9 @@
 
 use crate as pallet_welfare;
 use crate::{
-    ComponentValue, GateKind, LedgerSettlement, MetricInputs, MetricSpec, Pillar, SourceClass,
-    WelfareParamsProvider, EPSILON_PILLAR, HISTORY_PRIORS, ONE, THETA_C_HI as CORE_THETA_C_HI,
+    ComponentValue, GateKind, LedgerSettlement, MetricInputs, MetricProvenance,
+    MetricProvenanceProvider, MetricSpec, Pillar, SourceClass, WelfareParamsProvider,
+    EPSILON_PILLAR, HISTORY_PRIORS, ONE, THETA_C_HI as CORE_THETA_C_HI,
     THETA_C_LO as CORE_THETA_C_LO, THETA_S_HI as CORE_THETA_S_HI, THETA_S_LO as CORE_THETA_S_LO,
     W_A as CORE_W_A, W_P as CORE_W_P,
 };
@@ -368,6 +369,16 @@ impl pallet_welfare::OracleAdmission for SeatedOracle {
     }
 }
 
+/// The mock uses synthetic ids throughout the core/property suites. It still
+/// exercises the pallet boundary: the provider supplies the provenance result,
+/// while the production runtime supplies a canonical id-owned result.
+pub struct TestMetricProvenance;
+impl MetricProvenanceProvider for TestMetricProvenance {
+    fn provenance(_: MetricId, declared: SourceClass) -> MetricProvenance {
+        MetricProvenance::Primary(declared)
+    }
+}
+
 /// Deliberately far below the runtime's 120: the overflow direction of the
 /// 05 §4.3 authorship series is a behavior these suites must exercise, and a
 /// mock that needs 120 distinct accounts to reach it would not.
@@ -378,6 +389,7 @@ impl pallet_welfare::Config for Test {
     type MetricGovernanceOrigin = TestMetricGovernanceOrigin;
     type Params = TestParams;
     type MetricInputs = TestMetricInputs;
+    type MetricProvenance = TestMetricProvenance;
     type Ledger = TestLedger;
     type CurrentEpoch = CurrentEpochValue;
     type CurrentWindow = CurrentWindowValue;

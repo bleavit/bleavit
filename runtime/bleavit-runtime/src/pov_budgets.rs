@@ -43,20 +43,20 @@ const SPEC_TWAP_CHECKPOINTS_BYTES: usize = 8 * (4 + 32) + 1;
 /// benchmark-cfg'd, so restated here): 4 MiB.
 const RUNTIME_CODE_BYTES_BOUND: u32 = 4_194_304;
 
-/// The normal-class total budget: 75 % of the relay `MAX_POV_SIZE` /
-/// 2-second ref-time block (`configs::MAXIMUM_BLOCK_WEIGHT`).
+/// The reserved primary-side budget.  The resource partition owns the
+/// primary/external split; the normal class is intentionally exposed to the
+/// full physical block so `CheckWeight` cannot reject an external call before
+/// the partition extension gets to apply the hard external quota.
 fn normal_class_budget() -> Weight {
-    RuntimeBlockWeights::get()
-        .get(DispatchClass::Normal)
-        .max_total
-        .unwrap_or_else(|| RuntimeBlockWeights::get().max_block)
+    pallet_welfare::Pallet::<Runtime>::primary_capacity()
 }
 
 fn operational_class_budget() -> Weight {
-    RuntimeBlockWeights::get()
-        .get(DispatchClass::Operational)
-        .max_total
-        .unwrap_or_else(|| RuntimeBlockWeights::get().max_block)
+    let weights = <Runtime as frame_system::Config>::BlockWeights::get();
+    match weights.get(DispatchClass::Operational).max_total {
+        Some(max_total) => max_total,
+        None => weights.max_block,
+    }
 }
 
 fn assert_fits(name: &str, w: Weight) {

@@ -131,6 +131,13 @@ counter. Both records already carry bounds, ×2 max-Δ and a one-epoch cooldown.
 
 **`svc.max_live` is the row whose unsafe direction has no measurement behind it.** It bounds worst-case external block-weight consumption, which reaches [05](05-welfare-and-decision-engine.md) §4.3's `H` through resource use rather than through data — the one channel no import lint can close. Its value must be set so worst-case external load stays inside the reserved external quota, and **there is no measurement in this repository to size that against**, so 16 ships conservative and `[VERIFY]`-tagged. TH-73 is the pressure on it; PT-10 is the proof that the partition holds; and 16 §8.4's `NotDecisionGrade` falsifier is the standing instruction to **cut** it if external occupancy correlates with Bleavit proposals failing their depth floor.
 
+N7 does not introduce a second quota or reservation parameter. The runtime derives the external
+two-dimensional `Weight` quota from the existing operational reserved block capacity and derives
+the primary reservation from its complement; `svc.max_live` remains the only values-layer input to
+the service occupancy bound. Until the required worst-case service-load evidence exists, an absent
+or invalid `svc.max_live` reads as zero at the consumer, so service admission fails closed rather
+than silently running above an unverified quota.
+
 **`collator.comp_epoch`: the one row whose value is a market price, and where it comes from (normative record; added 2026-07-31, milestone E5, SQ-536).** Every other default in this section is derived from a kernel constant, another key, or this document set's own arithmetic. Collator compensation cannot be: it is what an operator will accept to run a node, which no amount of internal derivation reaches. Rule R-2 forbids inventing such a number, and the row's error direction is **unsafe in the low direction** — underpaid collators stop authoring and the chain stalls — so the seed was carried at D-15's 2,000 with no costing behind it until this milestone.
 
 It is now anchored to **published, governance-approved evidence for the same role**: Polkadot OpenGov referendum **#1870** (passed and executed) funds **38** system-parachain collators at **$250/collator/month**, or **$307.24** fully loaded once the bounty's own fixed hosting, curator and coordinator lines are spread across the funded set. An epoch is **21.0 days, not a month**, so the rate in this row's units is **211.97 USDC/epoch** — making the superseded 2,000 seed **9.44×**, and the shipped 500 **2.36×**, a rate real operators demonstrably accepted.

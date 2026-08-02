@@ -57,6 +57,14 @@ instance; an unavailable service binding fails closed); **I-38** makes ingress i
 guide must never imply that admission is identity verification beyond the chain-level `Location`,
 that a report is an endorsement, or that push delivery is the trustworthy source (the pull surface is).
 
+The N7 resource partition is part of that honesty boundary: external calls consume a hard quota in
+both `Weight` dimensions and cannot borrow reserved primary/system capacity. `PrimaryUsed` carries
+the full primary charge plus residual system overhead into `H` in the physical `max_block`
+coordinates; the total-weight diagnostic is not subtracted to manufacture health. PT-10 is the
+falsifier: replaying the same primary scenario with
+admissible service calls at every schedulable point must produce byte-identical welfare snapshots
+and decision inputs.
+
 ## 2. Threat-model rows that are UI obligations (doc 14)
 
 **Fake frontends & phishing.** TH-38: self-check mismatch ⇒ red banner, signing disabled

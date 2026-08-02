@@ -874,6 +874,28 @@ impl SafetyClassifier for BleavitSafetyClassifier {
     }
 }
 
+/// Exact-leaf resource classification shared by the signed transaction
+/// extension and the XCM call dispatcher. Wrappers are intentionally not
+/// treated as external: the closed safety classifier projects only the exact
+/// `ExternalClient` leaves, so a wrapper cannot smuggle primary work into the
+/// service quota. A permissionless market observation is the one dynamic seam:
+/// its call origin is a keeper signature, so the immutable market kind supplies
+/// the external-domain fact that the static call shape cannot carry.
+pub(crate) fn is_external_client_call(call: &RuntimeCall) -> bool {
+    if let RuntimeCall::Market(pallet_market::Call::crank_observe { market }) = call {
+        return pallet_market::Markets::<Runtime>::get(*market).is_some_and(|book| {
+            matches!(
+                book.kind,
+                pallet_market::core_market::BookKind::External { .. }
+            )
+        });
+    }
+    matches!(
+        BleavitSafetyClassifier::project(call),
+        FilterCall::Leaf(CallDomain::ExternalClient)
+    )
+}
+
 fn pending_upgrade_is_applicable(code: &[u8]) -> bool {
     PendingExecutionGuard::applicable_at().is_some_and(|at| System::block_number() >= at)
         && crate::configs::direct_system_upgrade_allowed(code)
@@ -1141,6 +1163,7 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
             call => {
                 let origin = pallet_origins::Origin::from_proposal_class(class)
                     .ok_or(DispatchError::BadOrigin)?;
+                // N7-DISPATCH-TRIPWIRE: execution-guard-payload
                 call.dispatch_bypass_filter(RuntimeOrigin::from(origin))
                     .map(|_| ())
                     .map_err(|error| error.error)
@@ -1149,6 +1172,7 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
     }
 
     fn dispatch_authorize_upgrade(code_hash: H256) -> frame_support::dispatch::DispatchResult {
+        // N7-DISPATCH-TRIPWIRE: execution-guard-authorize
         RuntimeCall::System(frame_system::Call::authorize_upgrade {
             code_hash: code_hash.into(),
         })
@@ -1171,6 +1195,7 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
             #[cfg(not(feature = "runtime-benchmarks"))]
             System::can_set_code(&code, true).into_result()?;
 
+            // N7-DISPATCH-TRIPWIRE: execution-guard-apply
             RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { code })
                 .dispatch(RuntimeOrigin::none())
                 .map_err(|error| error.error)?;

@@ -6,9 +6,12 @@
 
 use alloc::{vec, vec::Vec};
 
-use frame_support::{assert_ok, traits::Get};
+use frame_support::{assert_ok, traits::Get, weights::Weight};
 
-use crate::{configs::RuntimeEpochWelfare, Runtime};
+use crate::{
+    configs::{RuntimeBlockWeights, RuntimeEpochWelfare},
+    Runtime,
+};
 
 use pallet_epoch::WelfareSettlement;
 
@@ -244,6 +247,89 @@ fn sq82_the_runtime_register_spec_origin_set_is_closed_and_lead_bound() {
         assert_eq!(
             current,
             <Runtime as pallet_welfare::Config>::CurrentEpoch::get(),
+        );
+    });
+}
+
+#[test]
+fn n7_register_spec_rejects_hosted_book_ids_for_every_declared_source_class() {
+    crate::tests::development_ext().execute_with(|| {
+        let current = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        for (offset, source) in [
+            (0_u16, pallet_welfare::SourceClass::Onchain),
+            (1, pallet_welfare::SourceClass::RelayDerived),
+            (2, pallet_welfare::SourceClass::Attested),
+        ] {
+            let version = 90_u16.saturating_add(offset);
+            let spec = metric_spec(
+                futarchy_primitives::metric_ids::HOSTED_BOOK_MIN,
+                version,
+                current.saturating_add(2),
+                pallet_welfare::Pillar::COnchain,
+                source,
+            );
+            let bounded = pallet_welfare::BoundedSpecSet::try_from(vec![spec]);
+            assert!(
+                bounded.is_ok(),
+                "hosted-book provenance fixture must be bounded"
+            );
+            let Ok(bounded) = bounded else {
+                return;
+            };
+            let result = pallet_welfare::Pallet::<Runtime>::register_spec(
+                pallet_origins::Origin::ConstitutionalValues.into(),
+                version,
+                bounded,
+            );
+            assert_eq!(
+                result,
+                Err(pallet_welfare::Error::<Runtime>::BadSourceClass.into()),
+                "hosted-book id must be rejected before source-class/core validation",
+            );
+            assert!(!pallet_welfare::MetricSpecs::<Runtime>::contains_key(
+                version
+            ));
+        }
+    });
+}
+
+#[test]
+fn n7_primary_metric_seam_does_not_produce_p_pillar_values() {
+    use pallet_welfare::MetricInputs;
+
+    crate::tests::development_ext().execute_with(|| {
+        const VERSION: futarchy_primitives::MetricSpecVersion = 93;
+        install_specs(
+            VERSION,
+            vec![
+                metric_spec(
+                    futarchy_primitives::metric_ids::P_FEES,
+                    VERSION,
+                    0,
+                    pallet_welfare::Pillar::P,
+                    pallet_welfare::SourceClass::Onchain,
+                ),
+                metric_spec(
+                    futarchy_primitives::metric_ids::P_QUALIFIED_USERS,
+                    VERSION,
+                    0,
+                    pallet_welfare::Pillar::P,
+                    pallet_welfare::SourceClass::Onchain,
+                ),
+                metric_spec(
+                    futarchy_primitives::metric_ids::P_SETTLED_VALUE,
+                    VERSION,
+                    0,
+                    pallet_welfare::Pillar::P,
+                    pallet_welfare::SourceClass::Onchain,
+                ),
+            ],
+        );
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let produced = crate::configs::RuntimeMetricInputs::onchain_components(epoch, VERSION);
+        assert!(
+            produced.is_empty(),
+            "unimplemented P producers must not inherit the primary metric seam"
         );
     });
 }
@@ -1354,6 +1440,56 @@ fn seed_sample(epoch: futarchy_primitives::EpochId, day: u8, utilization: u64, b
             blocks,
         },
     );
+    pallet_welfare::PrimaryBlockWeightSamples::<Runtime>::insert(
+        epoch,
+        day,
+        pallet_welfare::BlockWeightSample {
+            utilization_sum: utilization,
+            blocks,
+        },
+    );
+}
+
+fn seed_physical_sample(epoch: futarchy_primitives::EpochId, day: u8, physical_utilization: u64) {
+    pallet_welfare::Pallet::<Runtime>::note_xcm_traffic(
+        epoch,
+        day,
+        pallet_welfare::XcmTrafficKind::Accepted,
+    );
+    let one = u128::from(pallet_welfare::ONE);
+    let maximum = RuntimeBlockWeights::get().max_block;
+    let used = Weight::from_parts(
+        u64::try_from(
+            u128::from(maximum.ref_time()).saturating_mul(u128::from(physical_utilization)) / one,
+        )
+        .unwrap_or(u64::MAX),
+        u64::try_from(
+            u128::from(maximum.proof_size()).saturating_mul(u128::from(physical_utilization)) / one,
+        )
+        .unwrap_or(u64::MAX),
+    );
+    let (Some(total), Some(primary)) = (
+        pallet_welfare::block_utilization(used, maximum),
+        pallet_welfare::block_utilization(used, maximum),
+    ) else {
+        panic!("physical threshold probe must be measurable");
+    };
+    pallet_welfare::BlockWeightSamples::<Runtime>::insert(
+        epoch,
+        day,
+        pallet_welfare::BlockWeightSample {
+            utilization_sum: total,
+            blocks: 1,
+        },
+    );
+    pallet_welfare::PrimaryBlockWeightSamples::<Runtime>::insert(
+        epoch,
+        day,
+        pallet_welfare::BlockWeightSample {
+            utilization_sum: primary,
+            blocks: 1,
+        },
+    );
 }
 
 fn component_of(
@@ -1381,7 +1517,8 @@ fn daily_component_of(
         .map(|c| c.value)
 }
 
-/// 05 §4.3: `H = 1 − mean(used ÷ limit)`, "mapped so 40% target utilization ⇒ 1".
+/// 05 §4.3/16 §8.5: `H` is mapped in physical block coordinates after external
+/// work is removed from the primary accumulator.
 ///
 /// The two properties that fix the mapping: **exactly** 1 at the 40 % target,
 /// and falling from there as utilization rises. Below target it clamps — spare
@@ -1391,12 +1528,10 @@ fn daily_component_of(
 fn a14_h_reads_one_at_target_falls_above_it_and_clamps_below() {
     const VERSION: futarchy_primitives::MetricSpecVersion = 61;
     const ONE: u64 = pallet_welfare::ONE;
-    // The 40 % is a kernel constant, never a literal in the consumer (rule 4).
-    let target = futarchy_primitives::kernel::WEIGHT_HEADROOM_TARGET_UTILIZATION;
-
     crate::tests::development_ext().execute_with(|| {
         install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::H);
         let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let target = futarchy_primitives::kernel::WEIGHT_HEADROOM_TARGET_UTILIZATION;
         let h_at = |utilization: u64| {
             seed_sample(epoch, 0, utilization, 1);
             component_of(futarchy_primitives::metric_ids::H, epoch, VERSION)
@@ -1412,19 +1547,96 @@ fn a14_h_reads_one_at_target_falls_above_it_and_clamps_below() {
             "H must fall the moment utilization passes the target",
         );
         let seventy = h_at(700_000_000).expect("sampled");
-        // (1 − 0.7) / (1 − 0.4) = 0.5 exactly on the 1e9 grid.
-        assert_eq!(seventy, futarchy_primitives::FixedU64(500_000_000));
+        let expected_seventy = futarchy_primitives::FixedU64(pre_partition_headroom(700_000_000));
+        assert_eq!(seventy, expected_seventy);
         assert!(
             seventy.0 < just_above.0,
             "H must be monotone in utilization"
         );
-        // A saturated block leaves no headroom at all.
+        // Physical saturation is exactly one billion on the shared grid.
         assert_eq!(h_at(ONE), Some(futarchy_primitives::FixedU64(0)));
 
         // Below target it clamps at 1 rather than exceeding the pillar domain.
         assert_eq!(h_at(target - 1), Some(futarchy_primitives::FixedU64(ONE)));
         assert_eq!(h_at(100_000_000), Some(futarchy_primitives::FixedU64(ONE)));
         assert_eq!(h_at(0), Some(futarchy_primitives::FixedU64(ONE)));
+    });
+}
+
+fn pre_partition_headroom(physical_utilization: u64) -> u64 {
+    let one = u128::from(pallet_welfare::ONE);
+    let target = u128::from(futarchy_primitives::kernel::WEIGHT_HEADROOM_TARGET_UTILIZATION);
+    if u128::from(physical_utilization) <= target {
+        return pallet_welfare::ONE;
+    }
+    u64::try_from(
+        (one.saturating_sub(u128::from(physical_utilization))).saturating_mul(one)
+            / one.saturating_sub(target),
+    )
+    .unwrap_or_default()
+}
+
+#[test]
+fn a14_h_zero_external_is_bit_identical_on_the_physical_grid() {
+    const VERSION: futarchy_primitives::MetricSpecVersion = 65;
+    const ONE: u64 = pallet_welfare::ONE;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::H);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let h_at = |physical: u64| {
+            seed_physical_sample(epoch, 0, physical);
+            component_of(futarchy_primitives::metric_ids::H, epoch, VERSION).map(|value| value.0)
+        };
+        let physical_target = futarchy_primitives::kernel::WEIGHT_HEADROOM_TARGET_UTILIZATION;
+        // Systematic 1e9-grid sweep at stride 1,000,000, plus every point in
+        // the ±2 neighborhoods of both affine crossovers. The expected value
+        // is the pre-partition formula, never a production-derived target.
+        let mut probes: Vec<u64> = (0..=ONE).step_by(1_000_000).collect();
+        for center in [physical_target, ONE] {
+            for offset in 0..=2 {
+                probes.push(center.saturating_sub(offset));
+                probes.push(center.saturating_add(offset).min(ONE));
+            }
+        }
+        probes.sort_unstable();
+        probes.dedup();
+        for physical in probes {
+            assert_eq!(
+                h_at(physical).unwrap_or_default(),
+                pre_partition_headroom(physical),
+                "zero-external H changed at physical utilization {physical}"
+            );
+        }
+    });
+}
+
+#[test]
+fn a14_h_proof_size_bound_uses_the_shared_worst_dimension() {
+    const VERSION: futarchy_primitives::MetricSpecVersion = 66;
+    const PROOF_LIMIT: u64 = 2_000;
+    const PROOF_USED: u64 = 1_500;
+
+    crate::tests::development_ext().execute_with(|| {
+        install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::H);
+        let utilization = pallet_welfare::block_utilization(
+            Weight::from_parts(1, PROOF_USED),
+            Weight::from_parts(1_000, PROOF_LIMIT),
+        )
+        .expect("proof-size-bound block must be measurable");
+        assert_eq!(utilization, 750_000_000);
+
+        let sample = pallet_welfare::BlockWeightSample {
+            utilization_sum: utilization,
+            blocks: 1,
+        };
+        assert_eq!(
+            crate::configs::weight_headroom(sample),
+            Some(futarchy_primitives::FixedU64(pre_partition_headroom(
+                utilization
+            ))),
+            "H must consume the same max-dimension utilization that selected proof size"
+        );
     });
 }
 
@@ -1439,7 +1651,7 @@ fn a14_h_is_block_weighted_across_the_epoch_and_day_resolved_within_it() {
     crate::tests::development_ext().execute_with(|| {
         install_spec_for(VERSION, 0, futarchy_primitives::metric_ids::H);
         let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
-        // Day 0: one saturated block. Day 1: one idle block.
+        // Day 0: one physically saturated block. Day 1: one idle block.
         seed_sample(epoch, 0, ONE, 1);
         seed_sample(epoch, 1, 0, 1);
 
@@ -1453,7 +1665,8 @@ fn a14_h_is_block_weighted_across_the_epoch_and_day_resolved_within_it() {
             Some(futarchy_primitives::FixedU64(ONE)),
         );
 
-        // Epoch-wide: mean 0.5 ⇒ (1 − 0.5)/0.6 = 0.8333…, truncated down.
+        // Epoch-wide: the physical mean is 0.5, so the original map gives
+        // 0.8333… exactly as it did before partitioning.
         assert_eq!(
             component_of(futarchy_primitives::metric_ids::H, epoch, VERSION),
             Some(futarchy_primitives::FixedU64(833_333_333)),

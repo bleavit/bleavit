@@ -813,11 +813,13 @@ capital rather than information, and nothing in this repository can measure it.
 
 External load reaches Bleavit's welfare through **`H`**, the weight-headroom sub-metric of
 [05](./05-welfare-and-decision-engine.md) §4.3: its producer samples `block_weight().total()` at
-finalization, so **every** successful external dispatch contributes. No import lint closes a
-resource-consumption channel.
+finalization, so **every** successful external dispatch contributes to the physical/diagnostic
+sample. No import lint closes a resource-consumption channel. After the partition, that total sample
+is not itself the welfare input: `H` uses the separately accumulated `PrimaryUsed`, while the total
+remains available to prove that external work was physically charged.
 
-Two qualifications matter for sizing, and an earlier draft had both wrong: `H` **clamps to 1** at mean
-utilization ≤ 40 %, so external work moves nothing until total utilization crosses that target; and
+Two qualifications matter for sizing, and an earlier draft had both wrong: `H` **clamps to 1** at physical
+mean utilization ≤ 40 %, so external work moves nothing until physical utilization crosses that target; and
 `0.15` is a **geometric-product exponent**, not a 15 % linear share of `W`.
 
 **Naive exclusion is unsafe and is refused.** Subtracting service-pallet weight from the numerator
@@ -827,8 +829,61 @@ fixes. The defensible shape is a **resource partition**:
 - hard per-block external quotas in **both** ref-time and proof-size;
 - reserved primary/system capacity that external work may not borrow;
 - a separately accumulated `PrimaryUsed` including system overhead;
-- `H_primary` computed against the reserved primary capacity, with full top-level post-dispatch
-  accounting (nested ledger work, failures, refunds, base-extrinsic weight).
+- `H` computed in the physical `max_block` coordinates from the primary-only accumulator, with the
+  same two-dimensional max reduction as the total sample and full top-level post-dispatch accounting
+  (nested ledger work, failures, refunds, base-extrinsic weight).
+
+The initial runtime binding derives the two reservations from the existing block envelope; it does
+not add a values-layer quota key. `ExternalCapacity` is the pre-existing
+`RuntimeBlockWeights::Operational.reserved` `Weight` (the complement of the existing 75% normal
+dispatch ratio) in **both** dimensions, and `PrimaryCapacity` is `max_block − ExternalCapacity` in
+both dimensions. The normal-class `max_total` is exposed to the physical block only so the ordinary
+`CheckWeight` extension cannot reject an external call before this partition runs; the partition's
+side admission is authoritative, so that exposure does not permit borrowing. `PrimaryUsed` is then
+converted back to the physical coordinate by the same shared `block_utilization(used, max_block)`
+helper used for the total diagnostic. No separately rounded scale or target is materialized, so with
+zero external usage the H value is bit-identical to the pre-partition formula on the entire 1e9 grid.
+
+Operational and Mandatory calls are exempt from this extension's *refusal* path: FRAME's own class
+budgets govern whether they dispatch, and their weight is still attributed to `PrimaryUsed` by the
+residual fold. External calls remain partitioned even if their dispatch metadata names one of those
+classes.
+
+Raising `Normal.max_total` to the full physical block remains necessary after that exemption: a
+Normal external call must reach this extension's side quota instead of being rejected by FRAME's
+old 75 % structural ceiling. **`Normal.max_total = 100%` is not a FRAME-level 75/25 guarantee.** The
+75/25 split is enforced by the extension for extension-traversing external dispatches and by
+authority-gating for the residual paths below. Signed external calls are structurally routed through
+the runtime's `TxExtension`, and external XCM calls through `ResourcePartitionCallDispatcher`.
+
+Three Normal dispatch paths intentionally bypass both the extension and the XCM dispatcher:
+
+1. the SDK scheduler's direct dispatch, reachable only through the runtime's
+   `InternalSchedulerOnly` origin and therefore only from governance/internal referenda;
+2. the `ExecutionGuard` queued-payload path, whose permissionless `execute` trigger can be called by
+   anyone but whose payload was already governance-authorized and is re-derived by the guard; and
+3. the guardian emergency-playbook path, whose five-of-seven council approval constructs the bounded
+   payload before the runtime dispatches it.
+
+None is reachable by an external client, and no unprivileged account chooses its payload. Adding a
+refusal cap to these paths could block emergency recovery while the cap binds, which is the unsafe
+direction under R-7. Their registered weight still reaches `PrimaryUsed` through the residual fold.
+The runtime's N7 tripwire inventories every local raw dispatch site and freezes the scheduler's
+authority binding; the SDK's internal scheduler dispatch is not source-visible, so that binding is
+the mechanizable limit of the tripwire.
+
+For a signed extrinsic, the partition extension captures the pre-`CheckWeight` total, refuses an
+over-quota side before dispatch, reserves the full top-level charge, and settles the reservation
+after `CheckWeight`/storage-reclaim post-dispatch accounting. A successful call releases only the
+reported actual refund; a failed call retains the complete reservation. XCM `Transact` uses the
+same reservation and refund adapter because it has no signed-extension pipeline. Work not attached
+to a top-level dispatch is residual system overhead and is attributed to `PrimaryUsed` at
+finalization. Thus the external side cannot fill the primary reservation, while primary/system
+overhead cannot disappear from `H`. Because FRAME Mandatory/system registration is unchecked, the
+partition ledger's `PrimaryUsed` counter is a saturating physical-coordinate **upper-bound estimate**:
+primary-at-cap plus Mandatory work may exceed the physical max in FRAME's own accounting, but the
+partition counter clamps rather than implying a combined-envelope guarantee. The total diagnostic
+sample remains the actual clamped physical utilization.
 
 `svc.max_live` MUST be sized so worst-case external load stays inside its quota. **There is no
 measurement in this repository to size that against**, so the initial value ships conservative and
@@ -845,7 +900,11 @@ markets; only its economic ownership is external). The defect is that **nothing 
 `MetricSpec` carries a source *class* and an opaque `formula_ref` with **no provenance**, and while
 unknown on-chain metric ids fail closed, **attested values are consumed generically by id**. So
 `register_spec` MUST reject any component bound to a hosted book, across every instance and client,
-and metric ids MUST carry runtime-owned provenance rather than a self-declared class.
+and metric ids MUST carry runtime-owned provenance rather than a self-declared class. The production
+id registry reserves `MetricId >= 0x8000` for hosted-book provenance; every such id is rejected for
+all three declared source classes, while an unknown id below that boundary is unassigned and also
+fails closed. The registry is keyed by id, not by client or ledger instance, so changing the client
+or hosted ledger cannot evade the exclusion.
 
 ---
 
@@ -962,9 +1021,12 @@ owns the regime.
 - **PT-9 — domain segregation.** No operation on one ledger instance changes any storage, balance or
   invariant reading of the other.
 - **PT-10 — external-outcome containment.** Replay a Bleavit-only scenario; replay it again with
-  arbitrary service traffic interleaved; assert every welfare snapshot and every `decide()` input is
-  **byte-identical**. This is the test that makes §1's boundary rule falsifiable, and §8.5's `H`
-  partition is the reason it can pass at all.
+  arbitrary admissible service traffic interleaved **before and after every primary schedulable
+  point**. The service leg covers the real `register`/`open`/`observe`/`seal` lifecycle, nested
+  ledger work, the signed `TransactionExtension`, the XCM dispatcher, varied proof sizes and both
+  successful and failed/refunded reservations. Assert every welfare snapshot and every `decide()`
+  input is **byte-identical**. This is the test that makes §1's boundary rule falsifiable, and
+  §8.5's `H` partition is the reason it can pass at all.
 - **Negative origins:** every registry and service call × {Signed, Root, None, all eight governance
   origins, `ExternalClient`}; and under `Transact`, all of `system.set_storage`, `system.set_code`,
   `pallet_xcm.send`, `Balances.transfer`, `sudo.sudo`, `Utility.batch`, `Proxy.proxy` rejected.
