@@ -44,7 +44,9 @@ use staging_xcm::latest::{
 };
 use staging_xcm::{IdentifyVersion, VersionedAssets, VersionedLocation};
 use staging_xcm_executor::{
-    test_helpers::mock_asset_to_holding, traits::WeightTrader, AssetsInHolding,
+    test_helpers::mock_asset_to_holding,
+    traits::{ConvertOrigin, WeightTrader},
+    AssetsInHolding,
 };
 
 use crate::{
@@ -2034,7 +2036,7 @@ fn n4_client_bond_and_guardian_track_are_live_only_when_explicitly_seated() {
 }
 
 #[test]
-fn n7_registry_and_service_origin_matrix_is_exhaustive() {
+fn n8_registry_and_service_negative_origin_matrix_is_exhaustive() {
     fn register(origin: RuntimeOrigin) -> frame_support::dispatch::DispatchResult {
         QuestionService::register(
             origin,
@@ -2064,12 +2066,76 @@ fn n7_registry_and_service_origin_matrix_is_exhaustive() {
     }
 
     development_ext().execute_with(|| {
+        assert_eq!(pallet_origins::Origin::ALL.len(), 8);
         let signer = account(240);
-        // The Signed matrix row is an admitted local client, not merely an
-        // arbitrary account. This distinguishes the intended registry-backed
-        // path from the storage-free ExternalClient custom origin.
-        pallet_client_registry::ClientIdOfSigner::<Runtime>::insert(&signer, 0);
-
+        let transport = staging_xcm::latest::Location::new(
+            1,
+            [staging_xcm::latest::Junction::Parachain(4_242)],
+        );
+        pallet_client_registry::ClientIdOf::<Runtime>::insert(&transport, 0);
+        pallet_client_registry::Clients::<Runtime>::insert(
+            0,
+            pallet_client_registry::ClientRecord::new_location(
+                transport.clone(),
+                0,
+                System::block_number(),
+            ),
+        );
+        let converted = crate::configs::xcm_config::OriginConverter::convert_origin(
+            transport.clone(),
+            staging_xcm::latest::OriginKind::Xcm,
+        );
+        let Ok(converted) = converted else {
+            assert!(false, "registered exact location must convert");
+            return;
+        };
+        let client_origin: Result<pallet_client_registry::Origin, RuntimeOrigin> = converted.into();
+        assert!(matches!(
+            client_origin,
+            Ok(pallet_client_registry::Origin::ExternalClient(0))
+        ));
+        assert_eq!(
+            pallet_client_registry::IngressMeters::<Runtime>::get(0).accepted_total,
+            1,
+        );
+        for kind in [
+            staging_xcm::latest::OriginKind::Native,
+            staging_xcm::latest::OriginKind::SovereignAccount,
+            staging_xcm::latest::OriginKind::Superuser,
+        ] {
+            assert!(matches!(
+                crate::configs::xcm_config::OriginConverter::convert_origin(
+                    transport.clone(),
+                    kind,
+                ),
+                Err(ref rejected) if rejected == &transport
+            ));
+        }
+        let unregistered = staging_xcm::latest::Location::new(
+            1,
+            [staging_xcm::latest::Junction::Parachain(4_243)],
+        );
+        assert!(matches!(
+            crate::configs::xcm_config::OriginConverter::convert_origin(
+                unregistered.clone(),
+                staging_xcm::latest::OriginKind::Xcm,
+            ),
+            Err(ref rejected) if rejected == &unregistered
+        ));
+        let descended = staging_xcm::latest::Location::new(
+            1,
+            [
+                staging_xcm::latest::Junction::Parachain(4_242),
+                staging_xcm::latest::Junction::PalletInstance(9),
+            ],
+        );
+        assert!(matches!(
+            crate::configs::xcm_config::OriginConverter::convert_origin(
+                descended.clone(),
+                staging_xcm::latest::OriginKind::Xcm,
+            ),
+            Err(ref rejected) if rejected == &descended
+        ));
         let mut origins = vec![
             (
                 "Signed",
@@ -2121,8 +2187,10 @@ fn n7_registry_and_service_origin_matrix_is_exhaustive() {
                 "remove_client accepted {label}",
             );
 
-            let client_admitted =
-                matches!(kind, MatrixOrigin::Signed | MatrixOrigin::ExternalClient);
+            // §16 §3.1 scopes the negative Signed row to an account with no
+            // exact `local_signer` registration. Positive local-client
+            // authentication is covered in the registry/service pallet suites.
+            let client_admitted = matches!(kind, MatrixOrigin::ExternalClient);
             assert_eq!(
                 register(origin.clone()),
                 Err(if client_admitted {
@@ -3528,7 +3596,14 @@ fn production_xcm_config_binds_capped_assets_reserves_barrier_and_trap_claims() 
         bleavit_xcm::assets::BleavitReserves,
     >();
     assert_same_type::<<xcm_config::XcmConfig as ExecutorConfig>::IsTeleporter, ()>();
-    assert_same_type::<<xcm_config::XcmConfig as ExecutorConfig>::OriginConverter, ()>();
+    assert_same_type::<
+        <xcm_config::XcmConfig as ExecutorConfig>::OriginConverter,
+        xcm_config::OriginConverter,
+    >();
+    assert_same_type::<
+        <xcm_config::XcmConfig as ExecutorConfig>::SafeCallFilter,
+        xcm_config::SafeCallFilter,
+    >();
     assert_same_type::<<xcm_config::XcmConfig as ExecutorConfig>::Barrier, xcm_config::Barrier>();
     assert_same_type::<<xcm_config::XcmConfig as ExecutorConfig>::AssetTrap, PolkadotXcm>();
     fn assert_trap_and_claim<T: TrapAndClaimAssets>() {}

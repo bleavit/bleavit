@@ -46,7 +46,9 @@ of principal on any protocol path" MUST NOT be used (SQ-171).
 
 Track N backend invariants with honesty consequences: **I-34** permits exactly one external-origin
 constructor, `ExternalClient(ClientId)`, from exact registered-`Location` equality and forbids every
-signed/root/none/governance conversion; **I-35** confines ingress to the external-client call domain;
+signed/root/none/governance conversion. That closure is not a type-level property of `RuntimeOrigin`;
+it is mechanically reviewed as one converter `Ok(...)` expression plus the negative-origin matrix.
+**I-35** confines ingress to the external-client call domain;
 **I-36** keeps client push failures out of XCM health; **I-37** makes service custody, failure and
 funds-moving freeze state independent of Bleavit's primary ledger (each book follows its owning
 instance; an unavailable service binding fails closed); **I-38** makes ingress issuance-neutral. A UI or integration

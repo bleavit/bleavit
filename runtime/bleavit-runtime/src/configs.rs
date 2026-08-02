@@ -1401,6 +1401,10 @@ pub(crate) mod xcm_config {
         LocationToAccountId,
         AccountId,
     >;
+    pub type OriginConverter = bleavit_xcm::client::RegisteredClientOriginConverter<Runtime>;
+    pub type SafeCallFilter = bleavit_xcm::client::ExternalClientSafeCallFilter<
+        crate::classifier::BleavitSafetyClassifier,
+    >;
     pub type RelayRouter = cumulus_primitives_utility::ParentAsUmp<
         ParachainSystem,
         PolkadotXcm,
@@ -1454,7 +1458,7 @@ pub(crate) mod xcm_config {
         type XcmSender = Router;
         type XcmEventEmitter = PolkadotXcm;
         type AssetTransactor = Assets;
-        type OriginConverter = ();
+        type OriginConverter = OriginConverter;
         type IsReserve = bleavit_xcm::assets::BleavitReserves;
         type IsTeleporter = ();
         type UniversalLocation = UniversalLocation;
@@ -1487,7 +1491,7 @@ pub(crate) mod xcm_config {
         type MessageExporter = ();
         type UniversalAliases = Nothing;
         type CallDispatcher = RuntimeCall;
-        type SafeCallFilter = Nothing;
+        type SafeCallFilter = SafeCallFilter;
         type Aliasers = Nothing;
         type TransactionalProcessor = FrameTransactionalProcessor;
         type HrmpNewChannelOpenRequestHandler = ();

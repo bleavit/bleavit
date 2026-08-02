@@ -392,8 +392,9 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
-        /// I-34 review point: exact lookup has one success expression and the
-        /// return type itself admits only `ExternalClient(ClientId)`.
+        /// Exact registry lookup used by N8's converter. I-34's one-success-
+        /// expression review point lives in that `ConvertOrigin` implementation;
+        /// `RuntimeOrigin` itself is intentionally not a narrow return type.
         pub fn origin_for(location: &Location) -> Option<Origin> {
             ClientIdOf::<T>::get(location).map(Origin::ExternalClient)
         }

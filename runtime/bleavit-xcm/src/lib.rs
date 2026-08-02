@@ -12,6 +12,7 @@ extern crate alloc;
 pub mod assets;
 pub mod barrier;
 pub mod caps;
+pub mod client;
 pub mod coretime;
 pub mod filter;
 pub mod health;
@@ -21,5 +22,7 @@ pub mod trader;
 
 #[cfg(test)]
 mod mock;
+#[cfg(test)]
+mod n8_tests;
 #[cfg(test)]
 mod tests;

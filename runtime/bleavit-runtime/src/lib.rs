@@ -134,6 +134,8 @@ mod tests_constitution_params;
 #[cfg(test)]
 mod tests_migration_guard;
 #[cfg(test)]
+mod tests_n8;
+#[cfg(test)]
 mod tests_s5;
 #[cfg(all(test, feature = "bootstrap"))]
 mod tests_s5_behavior;

@@ -3,6 +3,7 @@
 use alloc::{collections::BTreeSet, format, string::String, vec, vec::Vec};
 
 use frame_support::__private::metadata::{RuntimeMetadata, RuntimeMetadataPrefixed};
+use frame_support::traits::Contains;
 use origins_core::CallDomain;
 use parity_scale_codec::{Compact, Decode, Encode};
 use scale_info::{form::PortableForm, PortableRegistry, TypeDef, TypeDefPrimitive, Variant};
@@ -868,5 +869,35 @@ fn every_inventory_row_materializes_as_a_real_runtime_call() {
         for row in active_inventory() {
             let _ = metadata.materialize(row);
         }
+    });
+}
+
+pub(crate) fn assert_n8_external_client_safe_call_filter_equals_complete_inventory_domain() {
+    with_metadata(|metadata| {
+        let mut admitted = Vec::new();
+        for row in active_inventory() {
+            let call = metadata.materialize(row);
+            let expected = matches!(
+                row.expected,
+                ExpectedTreatment::Leaf(CallDomain::ExternalClient)
+            );
+            let observed = crate::configs::xcm_config::SafeCallFilter::contains(&call);
+            assert_eq!(
+                observed, expected,
+                "N8 SafeCallFilter/domain disagreement for {}.{}",
+                row.pallet, row.call
+            );
+            if observed {
+                admitted.push((row.pallet, row.call));
+            }
+        }
+        assert_eq!(
+            admitted,
+            [
+                ("QuestionService", "register"),
+                ("QuestionService", "open"),
+                ("QuestionService", "seal"),
+            ]
+        );
     });
 }

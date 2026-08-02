@@ -14,6 +14,7 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = "1.4.1"
+bleavit-xcm = { path = "../runtime/bleavit-xcm" }
 execution-guard-core = { path = "../crates/execution-guard-core" }
 futarchy-fixed = { path = "../crates/futarchy-fixed" }
 futarchy-primitives = { path = "../crates/futarchy-primitives" }
@@ -22,6 +23,7 @@ market-core = { path = "../crates/market-core" }
 origins-core = { path = "../crates/origins-core" }
 parity-scale-codec = { version = "3.7.5", features = ["derive", "max-encoded-len"] }
 question-service-core = { path = "../crates/question-service-core" }
+staging-xcm = "=24.0.0"
 
 [[bin]]
 name = "payload_scale_decode"
@@ -47,6 +49,13 @@ bench = false
 [[bin]]
 name = "service_settlement_paths"
 path = "fuzz_targets/service_settlement_paths.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xcm_client_ingress"
+path = "fuzz_targets/xcm_client_ingress.rs"
 test = false
 doc = false
 bench = false
