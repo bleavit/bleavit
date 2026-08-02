@@ -55,6 +55,28 @@ REQUIRED_DRILLS = {
     "07-xcm-reserve-transfer.zndsl": "15 §4.7; 09 §6.1",
     "08-expedited-code-under-freeze.zndsl": "09 §2.1/§3.2/§7.1",
     "09-three-unattended-epochs.zndsl": "15 §4.7; 09 §7.1; 13 §1",
+    "10-client-integration.zndsl": "15 §4.7; 16 §2/§3/§11",
+    "11-client-return-channel-absent.zndsl": "15 §4.7; 16 §12; I-36",
+    "12-client-report-pull.zndsl": "15 §4.7; 16 §12; I-36",
+    "13-client-ingress-negative-matrix.zndsl": "15 §4.7; 16 §12; 09 §6.5",
+}
+
+# SQ-567 — HRMP channels are opened after both paras produce blocks, never at
+# relay genesis. Zombienet's `[[hrmp_channels]]` directive preopens them in the
+# relay genesis, which queues DMP notifications stamped `sent_at = 0`; cumulus's
+# first-candidate sentinel is also `{sent_at: 0}`, so it drops every one, rebuilds
+# an empty MQC head and traps `set_validation_data` — the parachain never produces
+# block #1. The derivation with source line references lives in the helper's
+# header comment. This inventory is the mechanical binding: no topology may carry
+# the genesis directive, and every drill needing a channel must open it itself.
+HRMP_OPEN_HELPER = "./js/open-hrmp-channels.js"
+HRMP_OPEN_PAIRS = {
+    "07-xcm-reserve-transfer.zndsl": "4242:1000,1000:4242",
+    "10-client-integration.zndsl": "4343:4242,4242:4343",
+    # 11 is the I-36 witness: the client->Bleavit direction ONLY.
+    "11-client-return-channel-absent.zndsl": "4343:4242",
+    "12-client-report-pull.zndsl": "4343:4242,4242:4343",
+    "13-client-ingress-negative-matrix.zndsl": "4343:4242,4242:4343",
 }
 
 # 02 §11 forked-state rows plus the exhaustive 06 §6.2 playbook registry.
@@ -74,6 +96,8 @@ REQUIRED_SCENARIOS = {
 NETWORKS = {
     "bleavit-local.toml": {4242},
     "bleavit-xcm.toml": {4242, 1000, 1005},
+    "bleavit-client-para.toml": {4242, 4343},
+    "bleavit-client-no-return.toml": {4242, 4343},
 }
 RELAY_SPEC_PATH = "zombienet/specs/out/paseo-local.json"
 CHOPSTICKS_GENESIS = "zombienet/specs/out/bleavit-drill-raw.json"
@@ -548,20 +572,22 @@ def validate_networks(root: Path, failures: list[str]) -> None:
                     f"15 §4.7: keeper wrapper must exist and be executable: {KEEPER_COMMAND}"
                 )
 
-    xcm = parsed.get("bleavit-xcm.toml")
-    if xcm is not None:
-        channels = xcm.get("hrmp_channels")
-        directions = {
-            (channel.get("sender"), channel.get("recipient"))
-            for channel in channels
-            if isinstance(channel, dict)
-        } if isinstance(channels, list) else set()
-        required = {(4242, 1000), (1000, 4242)}
-        missing = required - directions
-        if missing:
+    # SQ-567: the genesis preopen is what stalls every HRMP topology at block #0.
+    # Channels are opened post-genesis by the drill instead, so no topology may
+    # carry the directive at all.
+    for name, config in parsed.items():
+        channels = config.get("hrmp_channels")
+        if isinstance(channels, list) and channels:
+            directions = ", ".join(
+                f"{channel.get('sender')}->{channel.get('recipient')}"
+                for channel in channels
+                if isinstance(channel, dict)
+            )
             failures.append(
-                "15 §4.7; 09 §6.1: bleavit-xcm.toml is missing HRMP direction(s): "
-                + ", ".join(f"{sender}->{recipient}" for sender, recipient in sorted(missing))
+                f"15 §4.7; 09 §6.1; SQ-567: {name} declares [[hrmp_channels]] ({directions}); "
+                "a genesis preopen queues sent_at=0 DMP notifications that cumulus's "
+                "first-candidate sentinel drops, so the parachain never produces block #1. "
+                f"Open the channels post-genesis with {HRMP_OPEN_HELPER} instead."
             )
 
 
@@ -589,6 +615,20 @@ def validate_drills(root: Path, failures: list[str]) -> None:
             if not helper.is_file():
                 failures.append(
                     f"15 §4.7: {name} references missing js helper {raw!r}"
+                )
+
+        # SQ-567: the topologies no longer preopen HRMP at relay genesis, so a
+        # drill needing a channel must open it itself — with the exact pair set,
+        # since an extra direction would silently defeat the I-36 witness and a
+        # missing one leaves the drill without its transport.
+        expected_pairs = HRMP_OPEN_PAIRS.get(name)
+        if expected_pairs is not None:
+            expected_step = f'{HRMP_OPEN_HELPER} with "{expected_pairs}"'
+            if expected_step not in text:
+                failures.append(
+                    f"15 §4.7; 09 §6.1; SQ-567: {name} must open its HRMP channels "
+                    f"post-genesis via `{expected_step}`, after both collators report "
+                    "a block height"
                 )
 
 

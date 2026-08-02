@@ -734,7 +734,7 @@ with honest `declared_stake`.
 | Leg | Derivation |
 |---|---|
 | **Floor** | Marginal cost is the keeper crank load: `2 · ceil(svc.max_window / mkt.obs_interval) · keeper.rebate` = `2 · 30,240 · 0.000255` = **15.42 USDC/question** at a full-epoch window. Fully-allocated recovery is `C ÷ (svc.max_live × epochs/yr)`; at `C` = 109,281 ([08](./08-treasury-and-economics.md) §10.1), 17.39 epochs/yr and 16 slots that is **≈ 393 USDC/question**. The floor is anchored to fully-allocated cost, not to marginal cost — a slot is scarce, and pricing scarce capacity at marginal cost prices it at zero. Ships as a kernel constant |
-| **Rate** | **Not derivable from anything in this repository.** It is a market price for a service nobody has sold. Ships `[VERIFY]`-tagged with its consumer **fail-closed**: while unset, `register` refuses with `ServiceRateUnset` and the service is inert. That is R-2's legitimate state — and it doubles as the arming gate, so **no new `PhaseFlags` bit is needed** and the 02 §7.3-frozen bitset does not widen |
+| **Rate** | **Not derivable from anything in this repository** — it is a market price for a service nobody has sold, so R-2's escalation clause applies and the value is the user's. **Adopted at 1,000 bps on 2026-08-02** (the row max; see [13](./13-parameters.md) §1). Before adoption the key was absent from the registry entirely, `fee_rate()` returned `None`, and `register` refused `ServiceRateUnset` — so the absence, not a `PhaseFlags` bit, was the arming gate, and the 02 §7.3-frozen bitset never widened. **Seeding the row is what arms the service.** At the ceiling the ×2 max-Δ is exercisable downward only |
 
 ### 8.2 What instrument D is actually worth — corrected
 
@@ -756,8 +756,11 @@ cash that funds it — the same class of error as SQ-562 one layer up. Corrected
 figure below is the corrected one.)*
 
 At `ledger.redeem_fee` = 30 bps and β = 0.50, instrument **B** on that escrow is `≈ 0.0296·S`,
-against instrument **D** at 100 bps of `0.010·S`. **Instrument D is therefore ≈ 25 % of the
-evidenced per-question revenue — not 2 %.** The correction *raised* D's share, so charging per
+against instrument **D** at the adopted 1,000 bps of `0.100·S`. **Instrument D is therefore ≈ 77 % of
+the evidenced per-question revenue.** (At the 100 bps this section illustrated before the rate was
+adopted, D would be `0.010·S` and ≈ 25 %; both figures are far above the ≈ 2 % the superseded draft
+claimed.) Note that at 1,000 bps the `svc.fee_floor` leg binds only below `S` = 3,930 USDC, so for
+any consequential question the rate leg is the whole price. The correction *raised* D's share, so charging per
 question is more load-bearing than either draft made it look.
 
 > **The honest division, and it must be stated this way round.** The *evidenced* revenue is D plus B,

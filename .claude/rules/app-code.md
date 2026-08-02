@@ -5,8 +5,9 @@ paths: ["app/**"]
 # App code rules (canonical cross-platform Bleavit client)
 
 The frontend invariants INV-FE-1…15 (`docs/architecture/15 §2`) are normative and
-certification binds to their exact texts. The app lives at `app/` (10 §10.1); the
-former `frontend/` placeholder is retired. Practical consequences:
+certification binds to their exact texts. The app lives at `app/` (10 §10.1) — the single client monorepo, moved there from
+`frontend/` on 2026-08-03 with N10's `packages/bleavit-client-ts` unchanged.
+Practical consequences:
 
 1. **Authoritative reads (INV-FE-1).** Transaction-critical values come only from
    finalized, light-client-verified state. RPC-fallback, provider, or **host-routed

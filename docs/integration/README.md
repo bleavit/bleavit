@@ -46,10 +46,16 @@ The single most important line in this entire tier:
 
 ---
 
-## Three ways in
+## Ways in
+
+**The protocol is XCM.** One program, one fixed shape, one encoded call —
+[`integrate-xcm.md`](integrate-xcm.md) documents it completely, and nothing is held back for the
+convenience layers. Everything below is a wrapper that produces exactly those bytes, so picking one
+is a convenience rather than a dependency.
 
 | You are | Read |
 |---|---|
+| Anyone who wants **the wire protocol itself** | [`integrate-xcm.md`](integrate-xcm.md) — the positional template, the frozen call indices, the SCALE shapes. No Bleavit dependency of any kind |
 | A **parachain** with a runtime you control | [`integrate-parachain.md`](integrate-parachain.md) — add one pallet, implement a small `Config`, done. You never write XCM by hand |
 | A **smart contract** on another chain | [`integrate-contract.md`](integrate-contract.md) — note the chain-granular identity model first; it will shape your design |
 | An **off-chain service** | [`integrate-service.md`](integrate-service.md) — no XCM at all; a local account and RPC |

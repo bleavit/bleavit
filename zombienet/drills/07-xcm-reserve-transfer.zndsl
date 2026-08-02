@@ -4,6 +4,7 @@ Creds: config
 
 asset-hub-collator-1: reports block height is at least 10 within 300 seconds
 bleavit-collator-1: reports block height is at least 10 within 300 seconds
+relay-alice: js-script ./js/open-hrmp-channels.js with "4242:1000,1000:4242" within 300 seconds
 asset-hub-collator-1: js-script ./js/xcm-reserve-transfer.js with "setup" within 300 seconds
 asset-hub-collator-1: js-script ./js/xcm-reserve-transfer.js with "success" within 300 seconds
 asset-hub-collator-1: js-script ./js/xcm-reserve-transfer.js with "failure" within 300 seconds

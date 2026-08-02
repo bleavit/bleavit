@@ -2869,8 +2869,35 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             ParamClass::Param,
             false
         ),
-        // Hosted service admission bounds (13 §1 / 16). `svc.fee_bps` is
-        // deliberately absent: its `[VERIFY]` state is the arming gate.
+        // Hosted service admission bounds (13 §1 / 16).
+        //
+        // `svc.fee_bps` — ADOPTED at 1,000 bps by the user, 2026-08-02, closing
+        // the `[VERIFY]` tag. It is a market price for a service nobody has
+        // sold, so R-2 permits no derivation: this is a values call, not an
+        // implementation one. Seeding the row ARMS the hosted service —
+        // `fee_rate()` starts returning `Some` and `register` stops refusing
+        // `ServiceRateUnset`.
+        //
+        // Unit note, because the two scales differ by 100,000×: 13 §1 states
+        // this row in **bps**, the stored kind is **Perbill** (parts per 1e9),
+        // and the convention is pinned by `mkt.fee` = 30 bps = Perbill(3e6).
+        // So 1,000 bps = 10 % = Perbill(100_000_000).
+        //
+        // The adopted value sits AT the row max, with one consequence worth
+        // stating: `MaxDelta::Factor(2)` can then only be exercised downward,
+        // and raising the rate later needs a META `amend_registry` to lift the
+        // max first. Down is the reversible direction, so this is a safe place
+        // to start from rather than a trap.
+        row(
+            b"svc.fee_bps",
+            ParamValue::Perbill(100_000_000),
+            ParamValue::Perbill(0),
+            ParamValue::Perbill(100_000_000),
+            Some(MaxDelta::Factor(2)),
+            2,
+            ParamClass::Param,
+            false
+        ),
         row(
             b"svc.max_live",
             ParamValue::U32(16),

@@ -4,8 +4,16 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
 
-wasm="target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm"
-builder="target/tools/bin/chain-spec-builder"
+# Honour CARGO_TARGET_DIR. The build below writes into it, so reading the
+# artifacts back from a hardcoded `target/` silently looks in the wrong place —
+# and on this project redirecting the target dir is not exotic, it is required
+# (an ecryptfs $HOME hits a ~143-char filename cap during the wasm build). The
+# failure mode is a bare "wasm blob shall be readable", which reads like a build
+# error rather than a path error. `generate-client-chain-spec.sh` already does
+# this; the two scripts now agree.
+target_dir="${CARGO_TARGET_DIR:-target}"
+wasm="$target_dir/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm"
+builder="$target_dir/tools/bin/chain-spec-builder"
 out="deploy/chain-specs/out"
 properties="tokenSymbol=VIT,tokenDecimals=12,ss58Format=7777"
 profile_tool="tools/release/runtime_profiles.py"
@@ -30,7 +38,7 @@ cargo build -p bleavit-runtime --release --no-default-features \
 builder_version="19.0.0"
 if [[ ! -x "$builder" ]] || [[ "$("$builder" --version 2>/dev/null || true)" != *"$builder_version"* ]]; then
   cargo install staging-chain-spec-builder --version "$builder_version" --locked \
-    --root target/tools --force
+    --root "$target_dir/tools" --force
 fi
 
 mkdir -p "$out"

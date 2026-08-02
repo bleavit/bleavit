@@ -1,0 +1,9 @@
+Description: Client runtime builds the positional ingress and Bleavit processes the message to a deterministic fail-closed service refusal (16 §2/§3/§11).
+Network: ./zombienet/networks/bleavit-client-para.toml
+Creds: config
+
+bleavit-collator-1: reports block height is at least 10 within 300 seconds
+client-collator-1: reports block height is at least 10 within 300 seconds
+relay-alice: js-script ./js/open-hrmp-channels.js with "4343:4242,4242:4343" within 300 seconds
+client-collator-1: js-script ./js/client-quickstart.js with "register" within 300 seconds
+bleavit-collator-1: js-script ./js/client-quickstart.js with "remote-refusal" within 300 seconds

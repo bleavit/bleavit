@@ -1,0 +1,8 @@
+Description: With the return HRMP channel intentionally absent, the drill reads ClientRegistry.ClientCount and runs the leg that chain state makes reachable — on an inert chain (no admitted client, svc.client_bond [VERIFY]-unset) a real ingress crosses, is refused fail-closed, pushes nothing back and moves no Welfare.XcmTraffic byte; once a client is admitted the same entry point runs register to open to seal to report instead. The push-failure half of I-36 is unwitnessed while inert and is recorded as such in the artifact (16 §12; 15 I-36).
+Network: ./zombienet/networks/bleavit-client-no-return.toml
+Creds: config
+
+bleavit-collator-1: reports block height is at least 10 within 300 seconds
+client-collator-1: reports block height is at least 10 within 300 seconds
+relay-alice: js-script ./js/open-hrmp-channels.js with "4343:4242" within 300 seconds
+client-collator-1: js-script ./js/client-return-channel-absent.js with "lifecycle" within 900 seconds

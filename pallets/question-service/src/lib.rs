@@ -842,7 +842,11 @@ pub mod pallet {
                 )
                 .map_err(Self::map_external_market_error)?;
             }
-            Self::transfer(&funder, &Self::account_id(), fee)?;
+            // Registration is allowed to consume the client's exact
+            // escrow-plus-fee balance. The fee is the final debit from that
+            // funding account, so preserving an asset account minimum here
+            // would manufacture a hidden extra funding requirement.
+            Self::transfer_expendable(&funder, &Self::account_id(), fee)?;
             pallet_client_registry::Pallet::<T>::note_question_registered(client)
                 .map_err(Self::map_client_registration_error)?;
 
@@ -1330,6 +1334,19 @@ pub mod pallet {
                 Preservation::Preserve
             };
             CollateralOf::<T>::transfer(Self::usdc(), from, to, amount, preservation)
+                .map(|_| ())
+                .map_err(|_| Error::<T>::EscrowInsufficient.into())
+        }
+
+        fn transfer_expendable(
+            from: &T::AccountId,
+            to: &T::AccountId,
+            amount: Balance,
+        ) -> DispatchResult {
+            if amount == 0 {
+                return Ok(());
+            }
+            CollateralOf::<T>::transfer(Self::usdc(), from, to, amount, Preservation::Expendable)
                 .map(|_| ())
                 .map_err(|_| Error::<T>::EscrowInsufficient.into())
         }
