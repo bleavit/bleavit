@@ -1010,9 +1010,7 @@ fn side_position(kind: BookKind, side: ScalarSide) -> PositionId {
         } => proposal_position(proposal, branch, gate_side_kind(gate, side)),
         BookKind::Baseline { epoch } => baseline_position(epoch, side),
         BookKind::External {
-            question,
-            branch,
-            ..
+            question, branch, ..
         } => proposal_position(question, branch, scalar_kind(side)),
     }
 }
@@ -1425,8 +1423,8 @@ fn assert_book_state(
         (ScalarSide::Short, book.q_short),
     ] {
         let scalar = ledger.balance(side_position(book.kind, side), &book.account);
-        let funded_headroom = i128::try_from(headroom.saturating_add(locked_raw))
-            .map_or(i128::MAX, |value| value);
+        let funded_headroom =
+            i128::try_from(headroom.saturating_add(locked_raw)).map_or(i128::MAX, |value| value);
         let quoted_inventory = i128::try_from(q).map_or(i128::MAX, |value| value);
         let expected_available = funded_headroom + inventory - quoted_inventory;
         assert!(expected_available >= 0, "seeded headroom was exhausted");
