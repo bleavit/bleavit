@@ -96,7 +96,14 @@ impl ResourcePartition {
         System::block_weight().total().saturating_sub(before)
     }
 
+    /// The extension's own declared weight for this call, including one
+    /// `Markets` lookup per market leaf the classification will walk.
+    fn own_weight(call: &RuntimeCall) -> Weight {
+        Welfare::<Runtime>::resource_partition_weight(crate::classifier::market_leaf_count(call))
+    }
+
     fn actual_with_overhead(
+        own_weight: Weight,
         info: &DispatchInfo,
         post_info: &PostDispatchInfo,
         len: usize,
@@ -109,7 +116,7 @@ impl ResourcePartition {
                 pays_fee: info.pays_fee,
             },
             len,
-            Welfare::<Runtime>::resource_partition_weight(),
+            own_weight,
         )
     }
 }
@@ -120,8 +127,8 @@ impl TransactionExtension<RuntimeCall> for ResourcePartition {
     type Val = ResourcePartitionValidation;
     type Pre = Option<pallet_welfare::ResourceReservation<crate::BlockNumber>>;
 
-    fn weight(&self, _: &RuntimeCall) -> Weight {
-        Welfare::<Runtime>::resource_partition_weight()
+    fn weight(&self, call: &RuntimeCall) -> Weight {
+        Self::own_weight(call)
     }
 
     fn validate(
@@ -217,7 +224,7 @@ impl CallDispatcher<RuntimeCall> for ResourcePartitionCallDispatcher {
         }
         let info = call.get_dispatch_info();
         let len = call.encode().len();
-        let partition_weight = Welfare::<Runtime>::resource_partition_weight();
+        let partition_weight = ResourcePartition::own_weight(&call);
         let amount = Welfare::<Runtime>::dispatch_resource_weight(&info, len, partition_weight);
         let before = System::block_weight().total();
         let is_external = ResourcePartition::is_external(&call);
@@ -243,7 +250,8 @@ impl CallDispatcher<RuntimeCall> for ResourcePartitionCallDispatcher {
             Ok(post_info) => post_info,
             Err(error) => &error.post_info,
         };
-        let reported = ResourcePartition::actual_with_overhead(&info, post_info, len);
+        let reported =
+            ResourcePartition::actual_with_overhead(partition_weight, &info, post_info, len);
         // A malformed post-dispatch report must not turn an observed physical
         // excess into a refund; the side ledger keeps it.
         let nested = ResourcePartition::physical_delta(before).saturating_sub(amount);

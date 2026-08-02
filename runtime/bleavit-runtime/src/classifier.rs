@@ -951,11 +951,14 @@ pub(crate) fn is_external_client_call(call: &RuntimeCall) -> bool {
 /// `None` if `call` is not a wrapper; otherwise whether any leaf anywhere
 /// beneath it is hosted work.
 ///
-/// This is the closed 06 §3.3 wrapper set, walked with the same nesting budget
-/// the projection uses. A depth overrun answers `true`, so an over-deep tree is
-/// refused rather than admitted.
+/// This is the closed 06 §3.3 wrapper set, walked against the projection's own
+/// **depth** bound — `MAX_NESTED_LEVELS`, not the `MAX_NESTED_CALLS` count
+/// bound. Using the count as a depth limit would let a tree the base filter
+/// rejects as too deep pass this walk first, reserve capacity, and then keep
+/// that reservation when the filter refuses it. A depth overrun therefore
+/// answers `true`, so an over-deep tree is refused here rather than admitted.
 fn wrapper_holds_external(call: &RuntimeCall, depth: u32) -> Option<bool> {
-    if depth > kernel::MAX_NESTED_CALLS {
+    if depth > kernel::MAX_NESTED_LEVELS {
         return Some(true);
     }
     let nested = |inner: &RuntimeCall| -> bool {
@@ -1004,6 +1007,59 @@ fn wrapper_holds_external(call: &RuntimeCall, depth: u32) -> Option<bool> {
 /// Wrappers holding no hosted work keep their existing behaviour exactly.
 pub(crate) fn is_wrapped_hosted_work(call: &RuntimeCall) -> bool {
     wrapper_holds_external(call, 0).unwrap_or(false)
+}
+
+/// How many `Market::Markets` lookups the resource classification performs for
+/// this call tree — one per market leaf.
+///
+/// The classification of a wrapper recurses, so its dynamic-read cost is *not*
+/// one: a batch pays one lookup per market leaf it carries. Declaring a flat
+/// worst case would charge every transaction for sixteen lookups to cover the
+/// rare batch, so the extension declares this per call instead — which is what
+/// `TransactionExtension::weight` receives the call for.
+pub(crate) fn market_leaf_count(call: &RuntimeCall) -> u32 {
+    fn walk(call: &RuntimeCall, depth: u32, count: &mut u32) {
+        if depth > kernel::MAX_NESTED_LEVELS || *count >= kernel::MAX_NESTED_CALLS {
+            return;
+        }
+        match call {
+            RuntimeCall::Utility(
+                pallet_utility::Call::batch { calls }
+                | pallet_utility::Call::batch_all { calls }
+                | pallet_utility::Call::force_batch { calls },
+            ) => {
+                for inner in calls {
+                    walk(inner, depth.saturating_add(1), count);
+                }
+            }
+            RuntimeCall::Utility(
+                pallet_utility::Call::as_derivative { call, .. }
+                | pallet_utility::Call::dispatch_as { call, .. }
+                | pallet_utility::Call::with_weight { call, .. },
+            )
+            | RuntimeCall::Proxy(
+                pallet_proxy::Call::proxy { call, .. }
+                | pallet_proxy::Call::proxy_announced { call, .. },
+            )
+            | RuntimeCall::Multisig(
+                pallet_multisig::Call::as_multi { call, .. }
+                | pallet_multisig::Call::as_multi_threshold_1 { call, .. },
+            ) => walk(call, depth.saturating_add(1), count),
+            #[cfg(feature = "bootstrap")]
+            RuntimeCall::Sudo(
+                pallet_sudo::Call::sudo { call }
+                | pallet_sudo::Call::sudo_unchecked_weight { call, .. },
+            ) => walk(call, depth.saturating_add(1), count),
+            // Every market call is counted, including the two that return
+            // before reading storage: an upper bound that cannot go stale when
+            // a market call is added is worth more than one read of precision.
+            RuntimeCall::Market(_) => *count = count.saturating_add(1),
+            _ => {}
+        }
+    }
+    let mut count = 0;
+    walk(call, 0, &mut count);
+    count.min(kernel::MAX_NESTED_CALLS)
 }
 
 fn pending_upgrade_is_applicable(code: &[u8]) -> bool {

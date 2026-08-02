@@ -917,11 +917,34 @@ primary-at-cap plus Mandatory work may exceed the physical max in FRAME's own ac
 partition counter clamps rather than implying a combined-envelope guarantee. The total diagnostic
 sample remains the actual clamped physical utilization.
 
-The extension's **own** bookkeeping is declared at its enumerated worst case over the whole
-validate/prepare/post-dispatch pipeline, not at the storage touched by any single hook, and it is
-charged to the same side as the call it partitions. Under-declaring it would be unsafe twice over:
-it understates what `CheckWeight` books into the block, and — because the same figure sizes the
-reservation the XCM adapter makes — it would hand the external side quota it never paid for.
+The extension's **own** bookkeeping is declared at its enumerated worst case over **both** entry
+points — the signed-extension pipeline and the XCM adapter, whose access sets differ — not at the
+storage touched by any single hook of either, and it is charged to the same side as the call it
+partitions. Under-declaring it would be unsafe twice over: it understates what `CheckWeight` books
+into the block, and — because the same figure sizes the reservation the XCM adapter makes — it would
+hand the external side quota it never paid for. The classification's dynamic book-kind lookups are
+declared **per call** rather than as a flat worst case, because a wrapper performs one per market
+leaf and a flat figure would tax every transaction for the rare batch.
+
+**The partition bounds dispatch, not transport, and that limit is stated rather than implied.**
+Everything above concerns work reached through a top-level dispatch. XCM *transport* work — message
+queue servicing, decode, barrier evaluation, origin conversion, and the processing of a message
+whose call is then refused by the safe-call filter — runs as `Mandatory` `on_initialize` work
+attached to no dispatch, so the residual fold attributes it to `PrimaryUsed`. **A client's XCM
+traffic therefore still reaches `H`**, and in the refused-call case it does so with no external
+reservation at all.
+
+This is a real residual and it MUST NOT be described as closed. Three things bound it, none of which
+make it disappear: the exposure is capped by the message queue's configured `ServiceWeight`; `H`
+clamps to 1 below the 40 % utilization target, so transport must first push total utilization past
+that target to move anything; and the traffic is **priced**, since inbound execution buys weight
+credit through the [09](./09-execution-upgrades-and-rollout.md) §6 trader at `xcm.usdc_per_sec` — it is not free
+the way an unpriced channel would be.
+
+Consequently [15](./15-invariants-and-testing.md)'s PT-10 byte-identical property is scoped to
+**dispatch-attributable** service work. Closing the transport half requires attributing queue
+servicing to the originating domain, which the message queue does not currently expose per message;
+that is tracked as a spec question and is not claimed here.
 
 `svc.max_live` MUST be sized so worst-case external load stays inside its quota. **There is no
 measurement in this repository to size that against**, so the initial value ships conservative and

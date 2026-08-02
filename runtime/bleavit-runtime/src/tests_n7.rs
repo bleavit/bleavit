@@ -780,8 +780,11 @@ fn n7_failed_external_dispatch_keeps_its_full_reservation() {
             });
         let info = call.get_dispatch_info();
         let len = call.encode().len();
-        let amount =
-            Welfare::dispatch_resource_weight(&info, len, Welfare::resource_partition_weight());
+        let amount = Welfare::dispatch_resource_weight(
+            &info,
+            len,
+            Welfare::resource_partition_weight(crate::classifier::market_leaf_count(&call)),
+        );
         let result = ResourcePartitionCallDispatcher::dispatch(
             call,
             pallet_client_registry::Origin::ExternalClient(PT10_CLIENT).into(),
@@ -1115,6 +1118,46 @@ fn n7_wrappers_cannot_launder_hosted_work_into_the_primary_quota() {
         // A bare call is never "wrapped", on either side of the partition.
         assert!(!crate::classifier::is_wrapped_hosted_work(&hosted_call));
         assert!(!crate::classifier::is_wrapped_hosted_work(&primary_call));
+
+        // A tree deeper than the projection's own depth bound is refused HERE,
+        // not admitted for a later filter to reject. Otherwise it reserves
+        // primary capacity and — because a failed dispatch keeps its full
+        // reservation — never gives it back. The bound is MAX_NESTED_LEVELS
+        // (4), not MAX_NESTED_CALLS (16): using the call-count limit as a depth
+        // limit leaves exactly this gap.
+        let mut deep = RuntimeCall::System(frame_system::Call::remark { remark: vec![] });
+        for _ in 0..(kernel::MAX_NESTED_LEVELS + 1) {
+            deep = wrap_batch(vec![deep]);
+        }
+        assert!(
+            crate::classifier::is_wrapped_hosted_work(&deep),
+            "a wrapper nested past MAX_NESTED_LEVELS must be refused by the partition",
+        );
+
+        // The classification walk's dynamic reads are charged per call, because
+        // a wrapper multiplies them. A flat worst case would tax every
+        // transaction for the rare batch.
+        assert_eq!(crate::classifier::market_leaf_count(&primary_call), 1);
+        assert_eq!(crate::classifier::market_leaf_count(&hosted_call), 1);
+        assert_eq!(
+            crate::classifier::market_leaf_count(&RuntimeCall::System(
+                frame_system::Call::remark { remark: vec![] }
+            )),
+            0,
+        );
+        let many = wrap_batch((0..15).map(|_| primary_call.clone()).collect());
+        assert_eq!(
+            crate::classifier::market_leaf_count(&many),
+            15,
+            "a batch pays one Markets lookup per market leaf, not one in total",
+        );
+        // `RuntimeDbWeight::reads_writes` populates ref_time only, so compare
+        // that dimension rather than asserting on both.
+        assert!(
+            Welfare::resource_partition_weight(15).ref_time()
+                > Welfare::resource_partition_weight(1).ref_time(),
+            "the declared weight must grow with the number of dynamic reads",
+        );
 
         // And the refusal is real at the dispatch boundary, not just in the
         // classifier: the XCM adapter rejects the batch before dispatching it.

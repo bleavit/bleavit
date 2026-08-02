@@ -1483,29 +1483,46 @@ pub mod pallet {
         /// post-dispatch. The extension is deliberately non-zero: its storage
         /// path is part of the declared weight, not hidden in a `()` extension.
         ///
-        /// The count is the enumerated worst case over the whole extension
-        /// pipeline, not the storage touched by any single one of its hooks.
-        /// Under-declaring here is unsafe in two ways at once: it understates
-        /// what `CheckWeight` books into the block, and — because this same
-        /// figure sizes the reservation the XCM dispatcher makes — it hands
-        /// the external side a quota it never paid for. So the enumeration is
-        /// exhaustive and the rounding is against the caller (R-7):
+        /// The count is the enumerated worst case over **both** partition entry
+        /// points — the signed-extension pipeline and the XCM adapter — not the
+        /// storage touched by any single hook of either. Under-declaring is
+        /// unsafe twice over: it understates what `CheckWeight` books into the
+        /// block, and — because the same figure sizes the reservation the XCM
+        /// adapter makes — it hands the external side quota it never paid for.
+        /// So the enumeration is exhaustive and rounds against the caller (R-7).
+        ///
+        /// Fixed accesses, signed-extension path (**7r / 2w**):
         ///
         /// | Hook | Storage | R | W |
         /// |---|---|---|---|
-        /// | `validate` | dynamic book-kind read (`Market::Markets`) | 1 | 0 |
         /// | `validate` | `frame_system::BlockWeight` | 1 | 0 |
-        /// | `validate` | `frame_system::Number`, `BlockResourceUsage` | 2 | 0 |
-        /// | `prepare` | `frame_system::Number`, `BlockResourceUsage` r/w | 2 | 1 |
-        /// | `post_dispatch` | `frame_system::BlockWeight` | 1 | 0 |
+        /// | `validate` | `Number`, `BlockResourceUsage` | 2 | 0 |
+        /// | `prepare` | `Number`, `BlockResourceUsage` r/w | 2 | 1 |
+        /// | `post_dispatch` | `BlockWeight` | 1 | 0 |
         /// | `post_dispatch` | `BlockResourceUsage` mutate | 1 | 1 |
         ///
-        /// The book-kind read is charged unconditionally rather than per call
-        /// shape: a per-shape figure would have to be re-derived every time a
-        /// market call is added, and the one-read difference is not worth a
-        /// declaration that can silently go stale.
-        pub fn resource_partition_weight() -> Weight {
-            <T as frame_system::Config>::DbWeight::get().reads_writes(8, 2)
+        /// Fixed accesses, XCM adapter path (**8r / 4w** — the binding one):
+        ///
+        /// | Step | Storage | R | W |
+        /// |---|---|---|---|
+        /// | `before` | `BlockWeight` | 1 | 0 |
+        /// | `reserve_resource` | `Number`, `BlockResourceUsage` r + put | 2 | 1 |
+        /// | `register_extra_weight_unchecked` | `BlockWeight` r/w | 1 | 1 |
+        /// | `physical_delta` | `BlockWeight` | 1 | 0 |
+        /// | refund | `BlockWeight` mutate | 1 | 1 |
+        /// | `finish_resource_dispatch` | `BlockWeight` | 1 | 0 |
+        /// | `finish_resource_dispatch` | `BlockResourceUsage` mutate | 1 | 1 |
+        ///
+        /// `dynamic_reads` is the number of `Market::Markets` lookups the
+        /// resource classification will perform for this call — one per market
+        /// leaf in the tree. It is charged **per call** rather than as a flat
+        /// worst case because a wrapper multiplies it: a bare call costs at
+        /// most one lookup, while a full batch can cost sixteen, and declaring
+        /// sixteen on every transaction would tax the common case to cover the
+        /// rare one.
+        pub fn resource_partition_weight(dynamic_reads: u32) -> Weight {
+            <T as frame_system::Config>::DbWeight::get()
+                .reads_writes(8u64.saturating_add(dynamic_reads.into()), 4)
         }
 
         fn encoded_length_weight(len: usize) -> Weight {
