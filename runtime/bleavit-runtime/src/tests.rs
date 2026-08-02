@@ -5556,7 +5556,10 @@ fn runtime_ledger_instances_share_one_weight_schedule() {
         "the service ledger charges instance ()'s measured weights; if these \
          diverge, ServiceLedger needs its own benchmarks and its own file"
     );
-    assert_eq!(Primary::sweep_dust_baseline(), Service::sweep_dust_baseline());
+    assert_eq!(
+        Primary::sweep_dust_baseline(),
+        Service::sweep_dust_baseline()
+    );
     assert_eq!(Primary::redeem(), Service::redeem());
 }
 
