@@ -5,9 +5,11 @@
 //! origin gates, rollback-safe error paths, and shell≡core differential.
 
 use crate::{
-    mock::*, ActiveMarketCount, BaselineMarketOf, ClosedAt, DecisionWindowOwners, DecisionWindows,
-    Error, Event, MarketAccountProvider, MarketProtocolAccounts, Markets, SealedBaselineTwap,
-    SettlementObservedAt, TwapCheckpoints,
+    mock::*, ActiveExternalMarketCount, ActiveMarketCount, BaselineMarketOf, ClosedAt,
+    DecisionWindowOwners, DecisionWindows, Error, Event, ExternalBookPairs, ExternalPairInput,
+    FundingDomain, LedgerRoute, LivePolCommitments, MarketAccountProvider, MarketProtocolAccounts,
+    Markets, SealedBaselineTwap, SeededMarkets, SettlementObservedAt, StoredExternalMarketCount,
+    SweptMarkets, TwapCheckpoints,
 };
 use frame_support::{
     assert_err, assert_noop, assert_ok,
@@ -59,6 +61,15 @@ fn event_scale_discriminants_are_append_only() {
         .encode()[0],
         11,
     );
+    assert_eq!(
+        Event::<Test>::ExternalRevenueSwept {
+            market: 0,
+            fee_to_main: 0,
+            subsidy_returned: 0,
+        }
+        .encode()[0],
+        12,
+    );
 }
 
 const MARKET_ID: MarketId = 7;
@@ -67,6 +78,9 @@ const PROPOSAL: u64 = 1;
 const EPOCH: u32 = 3;
 const B: Balance = 10_000 * UNIT;
 const TRADE: Balance = 1_000 * UNIT;
+const QUESTION: u64 = futarchy_primitives::kernel::SERVICE_ID_BASE;
+const EXTERNAL_ACCEPT: MarketId = QUESTION + 1;
+const EXTERNAL_REJECT: MarketId = QUESTION + 2;
 
 fn signed(who: AccountId) -> RuntimeOrigin {
     RawOrigin::Signed(who).into()
@@ -112,6 +126,42 @@ fn create_baseline() {
         FEES,
         B,
     ));
+}
+
+fn create_external_pair() {
+    assert_ok!(Market::create_external_pair(
+        signed(ALICE),
+        ExternalPairInput {
+            question: QUESTION,
+            client: EXTERNAL_CLIENT_ID,
+            funder: ALICE,
+            accept: EXTERNAL_ACCEPT,
+            accept_account: TestMarketAccounts::book(EXTERNAL_ACCEPT),
+            accept_fees: TestMarketAccounts::fees(EXTERNAL_ACCEPT),
+            reject: EXTERNAL_REJECT,
+            reject_account: TestMarketAccounts::book(EXTERNAL_REJECT),
+            reject_fees: TestMarketAccounts::fees(EXTERNAL_REJECT),
+            b: B,
+        },
+    ));
+}
+
+fn seed_external_pair() {
+    assert_ok!(Market::seed_external_pair(signed(ALICE), QUESTION, ALICE));
+}
+
+fn settle_external() {
+    assert_ok!(ServiceLedger::resolve(
+        signed(RESOLVER),
+        QUESTION,
+        Branch::Accept,
+    ));
+    assert_ok!(ServiceLedger::settle_scalar(
+        signed(SETTLER),
+        QUESTION,
+        FixedU64(500_000_000),
+    ));
+    assert_ok!(Market::observe_external_terminal(QUESTION));
 }
 
 fn seed(id: MarketId) {
@@ -168,6 +218,10 @@ fn sweep_proposal_vault(pid: u64) {
 
 fn position_balance(id: PositionId, who: AccountId) -> Balance {
     pallet_conditional_ledger::Positions::<Test>::get(id, who)
+}
+
+fn service_position_balance(id: PositionId, who: AccountId) -> Balance {
+    pallet_conditional_ledger::Positions::<Test, frame_support::instances::Instance1>::get(id, who)
 }
 
 fn core_position_balance(
@@ -1631,6 +1685,52 @@ fn stored_market_bound_retains_archives_and_recycles_after_bounded_book_reap() {
 }
 
 #[test]
+fn shared_market_map_refuses_a_row_past_the_physical_ceiling() {
+    // limit-coverage: MaxAllStoredMarkets
+    new_test_ext().execute_with(|| {
+        for id in 0..u64::from(futarchy_primitives::bounds::MAX_ALL_STORED_MARKETS) {
+            Markets::<Test>::insert(
+                id,
+                MarketBook::open(id, BookKind::Baseline { epoch: 0 }, BOOK, FEES, B),
+            );
+        }
+        // Reach the physical guard independently from the primary partition
+        // guard. This deliberately constructed state models migration/counter
+        // drift; the dispatch must still fail before creating a vault or row.
+        StoredExternalMarketCount::<Test>::put(
+            futarchy_primitives::bounds::MAX_STORED_EXTERNAL_MARKETS + 1,
+        );
+        assert_eq!(
+            Markets::<Test>::count(),
+            futarchy_primitives::bounds::MAX_ALL_STORED_MARKETS,
+        );
+
+        assert_noop!(
+            Market::create_market(
+                signed(MARKET_ADMIN),
+                100_000,
+                BookKind::Decision {
+                    proposal: 100_000,
+                    branch: Branch::Accept,
+                },
+                EPOCH,
+                BOOK,
+                FEES,
+                B,
+            ),
+            E::TooManyStoredMarkets
+        );
+        assert!(!pallet_conditional_ledger::Vaults::<Test>::contains_key(
+            100_000
+        ));
+        assert_eq!(
+            Markets::<Test>::count(),
+            futarchy_primitives::bounds::MAX_ALL_STORED_MARKETS,
+        );
+    });
+}
+
+#[test]
 fn origins_are_narrow_for_trading_and_admin_operations() {
     new_test_ext().execute_with(|| {
         create_decision();
@@ -1688,6 +1788,25 @@ fn emergency_creation_freeze_is_bounded_origin_gated_and_lazily_expires() {
             E::CreationFrozen
         );
         assert_noop!(
+            Market::create_external_pair(
+                signed(ALICE),
+                ExternalPairInput {
+                    question: QUESTION,
+                    client: EXTERNAL_CLIENT_ID,
+                    funder: ALICE,
+                    accept: EXTERNAL_ACCEPT,
+                    accept_account: TestMarketAccounts::book(EXTERNAL_ACCEPT),
+                    accept_fees: TestMarketAccounts::fees(EXTERNAL_ACCEPT),
+                    reject: EXTERNAL_REJECT,
+                    reject_account: TestMarketAccounts::book(EXTERNAL_REJECT),
+                    reject_fees: TestMarketAccounts::fees(EXTERNAL_REJECT),
+                    b: B,
+                },
+            ),
+            E::CreationFrozen
+        );
+        assert!(!ExternalBookPairs::<Test>::contains_key(QUESTION));
+        assert_noop!(
             Market::freeze_creation(signed(ALICE), until),
             sp_runtime::DispatchError::BadOrigin
         );
@@ -1701,6 +1820,7 @@ fn emergency_creation_freeze_is_bounded_origin_gated_and_lazily_expires() {
 
         System::set_block_number(until);
         create_decision();
+        create_external_pair();
         assert_ok!(Market::freeze_creation(signed(MARKET_ADMIN), 30));
         assert_noop!(
             Market::seed(signed(MARKET_ADMIN), MARKET_ID, TREASURY),
@@ -1710,9 +1830,15 @@ fn emergency_creation_freeze_is_bounded_origin_gated_and_lazily_expires() {
             Market::seed_branch_pair(signed(MARKET_ADMIN), MARKET_ID, 999, TREASURY),
             E::CreationFrozen
         );
+        assert_noop!(
+            Market::seed_external_pair(signed(ALICE), QUESTION, ALICE),
+            E::CreationFrozen
+        );
         System::set_block_number(30);
         seed(MARKET_ID);
+        seed_external_pair();
         assert_try_state();
+        assert_ok!(ServiceLedger::do_try_state());
     });
 }
 
@@ -1802,6 +1928,131 @@ fn ledger_freeze_blocks_trading_and_the_revenue_crank_and_renews_once() {
         assert_ok!(Market::set_frozen(signed(MARKET_ADMIN), true));
         assert_ok!(Market::sweep_revenue(signed(BOB), MARKET_ID));
         assert_try_state();
+    });
+}
+
+#[test]
+fn market_freezes_follow_the_owning_ledger_domain_without_crossing() {
+    // I-37, primary -> service: a primary-ledger freeze refuses every
+    // protocol market movement but cannot strand independent client capital.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        create_external_pair();
+        seed_external_pair();
+        System::set_block_number(10);
+        assert_ok!(Market::set_frozen(signed(MARKET_ADMIN), true));
+
+        assert_noop!(
+            Market::buy(
+                signed(BOB),
+                MARKET_ID,
+                ScalarSide::Long,
+                TRADE,
+                Balance::MAX,
+            ),
+            E::Frozen
+        );
+        assert_noop!(
+            Market::sell(signed(BOB), MARKET_ID, ScalarSide::Long, TRADE, 0),
+            E::Frozen
+        );
+        assert_noop!(Market::crank_observe(signed(BOB), MARKET_ID), E::Frozen);
+
+        assert_ok!(Market::buy(
+            signed(BOB),
+            EXTERNAL_ACCEPT,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        assert_ok!(Market::sell(
+            signed(BOB),
+            EXTERNAL_ACCEPT,
+            ScalarSide::Long,
+            TRADE,
+            0,
+        ));
+        System::set_block_number(20);
+        assert_ok!(Market::crank_observe(signed(BOB), EXTERNAL_ACCEPT));
+        settle_external();
+        assert_ok!(Market::sweep_revenue(signed(CHARLIE), EXTERNAL_ACCEPT,));
+        assert_ok!(Market::sweep_revenue(signed(CHARLIE), EXTERNAL_REJECT,));
+        assert!(SweptMarkets::<Test>::contains_key(EXTERNAL_ACCEPT));
+        assert!(SweptMarkets::<Test>::contains_key(EXTERNAL_REJECT));
+        assert_ok!(Market::do_try_state());
+        assert_ok!(ServiceLedger::do_try_state());
+    });
+
+    // I-37, service -> primary: a service-instance freeze refuses service
+    // market movement while primary trading stays live. Settlement remains
+    // reachable, but Sweep fails before moving fees or client subsidy and is
+    // fully retryable once the owning ledger is payout-safe again.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        create_external_pair();
+        seed_external_pair();
+        System::set_block_number(10);
+        assert_ok!(ServiceLedger::set_frozen(signed(SETTLER), true));
+
+        assert_noop!(
+            Market::buy(
+                signed(BOB),
+                EXTERNAL_ACCEPT,
+                ScalarSide::Long,
+                TRADE,
+                Balance::MAX,
+            ),
+            E::Frozen
+        );
+        assert_noop!(
+            Market::sell(signed(BOB), EXTERNAL_ACCEPT, ScalarSide::Long, TRADE, 0,),
+            E::Frozen
+        );
+        assert_noop!(
+            Market::crank_observe(signed(BOB), EXTERNAL_ACCEPT),
+            E::Frozen
+        );
+        assert_ok!(Market::buy(
+            signed(BOB),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+
+        settle_external();
+        let main_before = usdc(MAIN);
+        let recognized_before = MainCreditedTotal::get();
+        let funder_before = usdc(ALICE);
+        let escrow_before = pallet_conditional_ledger::Vaults::<
+            Test,
+            frame_support::instances::Instance1,
+        >::get(QUESTION)
+        .map(|vault| vault.escrowed);
+        assert_noop!(
+            Market::sweep_revenue(signed(CHARLIE), EXTERNAL_ACCEPT),
+            E::Frozen
+        );
+        assert_eq!(usdc(MAIN), main_before);
+        assert_eq!(MainCreditedTotal::get(), recognized_before);
+        assert_eq!(usdc(ALICE), funder_before);
+        assert_eq!(
+            pallet_conditional_ledger::Vaults::<Test, frame_support::instances::Instance1>::get(
+                QUESTION
+            )
+            .map(|vault| vault.escrowed),
+            escrow_before,
+        );
+        assert!(!SweptMarkets::<Test>::contains_key(EXTERNAL_ACCEPT));
+
+        assert_ok!(ServiceLedger::set_frozen(signed(SETTLER), false));
+        assert_ok!(Market::sweep_revenue(signed(CHARLIE), EXTERNAL_ACCEPT,));
+        assert_ok!(Market::sweep_revenue(signed(CHARLIE), EXTERNAL_REJECT,));
+        assert_ok!(Market::do_try_state());
+        assert_ok!(Ledger::do_try_state());
+        assert_ok!(ServiceLedger::do_try_state());
     });
 }
 
@@ -4198,6 +4449,748 @@ fn do_try_state_rejects_noncanonical_reserved_custody_even_when_index_matches() 
         // only the market-id/role binding is corrupt.
         assert!(Protocol::contains(&POL));
         assert!(Protocol::contains(&INSURANCE));
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
+    });
+}
+
+#[test]
+fn ledger_route_and_funding_domain_are_exhaustive_and_disjoint() {
+    let protocol = [
+        BookKind::Decision {
+            proposal: 1,
+            branch: Branch::Accept,
+        },
+        BookKind::Gate {
+            proposal: 1,
+            branch: Branch::Reject,
+            gate: futarchy_primitives::GateType::Security,
+        },
+        BookKind::Baseline { epoch: 1 },
+    ];
+    for kind in protocol {
+        assert_eq!(LedgerRoute::for_book(kind), LedgerRoute::Primary);
+        assert!(matches!(
+            FundingDomain::of(kind),
+            FundingDomain::Protocol(_)
+        ));
+    }
+    for branch in [Branch::Accept, Branch::Reject] {
+        let kind = BookKind::External {
+            question: QUESTION,
+            client: EXTERNAL_CLIENT_ID,
+            branch,
+        };
+        assert_eq!(LedgerRoute::for_book(kind), LedgerRoute::Service);
+        assert_eq!(
+            FundingDomain::of(kind),
+            FundingDomain::ExternalClient(EXTERNAL_CLIENT_ID)
+        );
+    }
+}
+
+#[test]
+fn external_pair_uses_disjoint_capacity_and_never_touches_pol() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        let proposal_line = PolLineBalance::get(crate::PolLine::Proposal);
+        let baseline_line = PolLineBalance::get(crate::PolLine::Baseline);
+        let client_cash_before = usdc(ALICE);
+
+        create_external_pair();
+        assert_eq!(ActiveMarketCount::<Test>::get(), 1);
+        assert_eq!(ActiveExternalMarketCount::<Test>::get(), 2);
+        assert_eq!(StoredExternalMarketCount::<Test>::get(), 2);
+        assert_eq!(Markets::<Test>::count(), 3);
+        assert!(LivePolCommitments::<Test>::get().is_empty());
+        assert_eq!(
+            ExternalBookPairs::<Test>::get(QUESTION).map(|pair| pair.funder),
+            Some(ALICE)
+        );
+
+        seed_external_pair();
+        let headroom = market_core::seed_headroom(B).map_or(0, |amount| amount);
+        assert!(headroom > 0);
+        let escrow_before_merge = pallet_conditional_ledger::Vaults::<
+            Test,
+            frame_support::instances::Instance1,
+        >::get(QUESTION)
+        .map_or(0, |vault| vault.escrowed);
+        assert_eq!(escrow_before_merge, 2 * headroom);
+        assert_eq!(client_cash_before - usdc(ALICE), 2 * headroom);
+        for branch in [Branch::Accept, Branch::Reject] {
+            assert_eq!(
+                service_position_balance(
+                    position(QUESTION, branch, PositionKind::BranchUsdc),
+                    ALICE,
+                ),
+                0,
+                "the client must retain no early-merge branch leg",
+            );
+        }
+        for (branch, book) in [
+            (Branch::Accept, TestMarketAccounts::book(EXTERNAL_ACCEPT)),
+            (Branch::Reject, TestMarketAccounts::book(EXTERNAL_REJECT)),
+        ] {
+            assert_eq!(
+                service_position_balance(
+                    position(QUESTION, branch, PositionKind::BranchUsdc),
+                    book,
+                ),
+                headroom,
+            );
+            assert_eq!(
+                service_position_balance(position(QUESTION, branch, PositionKind::Long), book),
+                headroom,
+            );
+            assert_eq!(
+                service_position_balance(position(QUESTION, branch, PositionKind::Short), book),
+                headroom,
+            );
+        }
+        let client_cash_before_merge = usdc(ALICE);
+        assert_noop!(
+            ServiceLedger::merge(signed(ALICE), QUESTION, headroom),
+            pallet_conditional_ledger::Error::<
+                Test,
+                frame_support::instances::Instance1,
+            >::InsufficientPosition
+        );
+        assert_eq!(
+            pallet_conditional_ledger::Vaults::<Test, frame_support::instances::Instance1>::get(
+                QUESTION
+            )
+            .map(|stored| stored.escrowed),
+            Some(escrow_before_merge),
+        );
+        assert_eq!(usdc(ALICE), client_cash_before_merge);
+        assert_eq!(PolLineBalance::get(crate::PolLine::Proposal), proposal_line);
+        assert_eq!(PolLineBalance::get(crate::PolLine::Baseline), baseline_line);
+        assert!(LivePolCommitments::<Test>::get().is_empty());
+        assert_ok!(Market::do_try_state());
+        assert_ok!(Ledger::do_try_state());
+        assert_ok!(ServiceLedger::do_try_state());
+    });
+}
+
+#[test]
+fn external_capacity_is_exactly_128_books_and_never_borrows_primary_slots() {
+    // limit-coverage: MaxExternalBookPairs
+    new_test_ext().execute_with(|| {
+        for pair_index in 0_u64..u64::from(futarchy_primitives::bounds::MAX_EXTERNAL_BOOK_PAIRS) {
+            let question = QUESTION + pair_index * 3;
+            let accept = question + 1;
+            let reject = question + 2;
+            assert_ok!(Market::create_external_pair(
+                signed(ALICE),
+                ExternalPairInput {
+                    question,
+                    client: EXTERNAL_CLIENT_ID,
+                    funder: ALICE,
+                    accept,
+                    accept_account: TestMarketAccounts::book(accept),
+                    accept_fees: TestMarketAccounts::fees(accept),
+                    reject,
+                    reject_account: TestMarketAccounts::book(reject),
+                    reject_fees: TestMarketAccounts::fees(reject),
+                    b: B,
+                },
+            ));
+        }
+
+        assert_eq!(ActiveMarketCount::<Test>::get(), 0);
+        assert_eq!(ActiveExternalMarketCount::<Test>::get(), 128);
+        assert_eq!(StoredExternalMarketCount::<Test>::get(), 128);
+        assert_eq!(Markets::<Test>::count(), 128);
+        assert!(LivePolCommitments::<Test>::get().is_empty());
+
+        let question =
+            QUESTION + u64::from(futarchy_primitives::bounds::MAX_EXTERNAL_BOOK_PAIRS) * 3;
+        let accept = question + 1;
+        let reject = question + 2;
+        assert_noop!(
+            Market::create_external_pair(
+                signed(ALICE),
+                ExternalPairInput {
+                    question,
+                    client: EXTERNAL_CLIENT_ID,
+                    funder: ALICE,
+                    accept,
+                    accept_account: TestMarketAccounts::book(accept),
+                    accept_fees: TestMarketAccounts::fees(accept),
+                    reject,
+                    reject_account: TestMarketAccounts::book(reject),
+                    reject_fees: TestMarketAccounts::fees(reject),
+                    b: B,
+                },
+            ),
+            E::TooManyExternalMarkets
+        );
+        assert_eq!(Markets::<Test>::count(), 128);
+        assert_ok!(Market::do_try_state());
+        assert_ok!(ServiceLedger::do_try_state());
+    });
+}
+
+#[test]
+fn external_live_partition_refuses_the_next_pair_before_mutation() {
+    // limit-coverage: MaxLiveExternalMarkets
+    new_test_ext().execute_with(|| {
+        ActiveExternalMarketCount::<Test>::put(
+            futarchy_primitives::bounds::MAX_LIVE_EXTERNAL_MARKETS,
+        );
+        assert_noop!(
+            Market::create_external_pair(
+                signed(ALICE),
+                ExternalPairInput {
+                    question: QUESTION,
+                    client: EXTERNAL_CLIENT_ID,
+                    funder: ALICE,
+                    accept: EXTERNAL_ACCEPT,
+                    accept_account: TestMarketAccounts::book(EXTERNAL_ACCEPT),
+                    accept_fees: TestMarketAccounts::fees(EXTERNAL_ACCEPT),
+                    reject: EXTERNAL_REJECT,
+                    reject_account: TestMarketAccounts::book(EXTERNAL_REJECT),
+                    reject_fees: TestMarketAccounts::fees(EXTERNAL_REJECT),
+                    b: B,
+                },
+            ),
+            E::TooManyExternalMarkets
+        );
+        assert_eq!(Markets::<Test>::count(), 0);
+        assert!(!ExternalBookPairs::<Test>::contains_key(QUESTION));
+        assert!(!pallet_conditional_ledger::Vaults::<
+            Test,
+            frame_support::instances::Instance1,
+        >::contains_key(QUESTION));
+    });
+}
+
+#[test]
+fn external_retained_partition_refuses_the_next_pair_before_mutation() {
+    // limit-coverage: MaxStoredExternalMarkets
+    new_test_ext().execute_with(|| {
+        StoredExternalMarketCount::<Test>::put(
+            futarchy_primitives::bounds::MAX_STORED_EXTERNAL_MARKETS,
+        );
+        assert_noop!(
+            Market::create_external_pair(
+                signed(ALICE),
+                ExternalPairInput {
+                    question: QUESTION,
+                    client: EXTERNAL_CLIENT_ID,
+                    funder: ALICE,
+                    accept: EXTERNAL_ACCEPT,
+                    accept_account: TestMarketAccounts::book(EXTERNAL_ACCEPT),
+                    accept_fees: TestMarketAccounts::fees(EXTERNAL_ACCEPT),
+                    reject: EXTERNAL_REJECT,
+                    reject_account: TestMarketAccounts::book(EXTERNAL_REJECT),
+                    reject_fees: TestMarketAccounts::fees(EXTERNAL_REJECT),
+                    b: B,
+                },
+            ),
+            E::TooManyExternalMarkets
+        );
+        assert_eq!(Markets::<Test>::count(), 0);
+        assert!(!ExternalBookPairs::<Test>::contains_key(QUESTION));
+        assert!(!pallet_conditional_ledger::Vaults::<
+            Test,
+            frame_support::instances::Instance1,
+        >::contains_key(QUESTION));
+    });
+}
+
+#[test]
+fn external_pair_creation_and_seed_refuse_wrong_domain_or_funder_atomically() {
+    new_test_ext().execute_with(|| {
+        let external = BookKind::External {
+            question: QUESTION,
+            client: EXTERNAL_CLIENT_ID,
+            branch: Branch::Accept,
+        };
+        assert_noop!(
+            Market::create_market(
+                signed(MARKET_ADMIN),
+                EXTERNAL_ACCEPT,
+                external,
+                EPOCH,
+                TestMarketAccounts::book(EXTERNAL_ACCEPT),
+                TestMarketAccounts::fees(EXTERNAL_ACCEPT),
+                B,
+            ),
+            E::WrongFundingDomain
+        );
+        assert_eq!(Markets::<Test>::count(), 0);
+
+        create_external_pair();
+        let next_question = QUESTION + 10;
+        let next_reject = QUESTION + 11;
+        assert_noop!(
+            Market::create_external_pair(
+                signed(ALICE),
+                ExternalPairInput {
+                    question: next_question,
+                    client: EXTERNAL_CLIENT_ID,
+                    funder: ALICE,
+                    // A retained pair owns this id even if its market row is
+                    // later reaped; service ids are globally role-disjoint.
+                    accept: EXTERNAL_ACCEPT,
+                    accept_account: TestMarketAccounts::book(EXTERNAL_ACCEPT),
+                    accept_fees: TestMarketAccounts::fees(EXTERNAL_ACCEPT),
+                    reject: next_reject,
+                    reject_account: TestMarketAccounts::book(next_reject),
+                    reject_fees: TestMarketAccounts::fees(next_reject),
+                    b: B,
+                },
+            ),
+            E::InvalidIdBand
+        );
+        assert!(!ExternalBookPairs::<Test>::contains_key(next_question));
+        let before =
+            pallet_conditional_ledger::Vaults::<Test, frame_support::instances::Instance1>::get(
+                QUESTION,
+            );
+        assert_noop!(
+            Market::seed_external_pair(signed(ALICE), QUESTION, BOB),
+            E::FunderMismatch
+        );
+        assert!(!SeededMarkets::<Test>::contains_key(EXTERNAL_ACCEPT));
+        assert_eq!(
+            pallet_conditional_ledger::Vaults::<Test, frame_support::instances::Instance1>::get(
+                QUESTION
+            ),
+            before
+        );
+        assert_noop!(
+            Market::seed_external_pair(signed(MARKET_ADMIN), QUESTION, ALICE),
+            E::BadOrigin
+        );
+        assert_noop!(
+            Market::seed(signed(ALICE), EXTERNAL_ACCEPT, ALICE),
+            E::WrongFundingDomain
+        );
+
+        let another_question = QUESTION + 20;
+        assert_noop!(
+            Market::create_external_pair(
+                signed(ALICE),
+                ExternalPairInput {
+                    question: another_question,
+                    client: EXTERNAL_CLIENT_ID,
+                    funder: MAIN,
+                    accept: another_question + 1,
+                    accept_account: TestMarketAccounts::book(another_question + 1),
+                    accept_fees: TestMarketAccounts::fees(another_question + 1),
+                    reject: another_question + 2,
+                    reject_account: TestMarketAccounts::book(another_question + 2),
+                    reject_fees: TestMarketAccounts::fees(another_question + 2),
+                    b: B,
+                },
+            ),
+            E::FunderMismatch
+        );
+    });
+}
+
+#[test]
+fn cross_instance_signed_transfers_refuse_both_foreign_custody_domains() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        create_external_pair();
+        let amount = 10 * UNIT;
+        let service_book = TestMarketAccounts::book(EXTERNAL_ACCEPT);
+
+        assert!(!Protocol::contains(&service_book));
+        assert!(!ServiceProtocol::contains(&BOOK));
+        assert!(ReservedProtocolDestinations::contains(&service_book));
+        assert!(ReservedProtocolDestinations::contains(&BOOK));
+
+        assert_ok!(Ledger::split(signed(ALICE), PROPOSAL, amount));
+        assert_noop!(
+            Ledger::transfer(
+                signed(ALICE),
+                position(PROPOSAL, Branch::Accept, PositionKind::BranchUsdc),
+                service_book,
+                amount,
+            ),
+            pallet_conditional_ledger::Error::<Test>::ProtocolDestination
+        );
+
+        assert_ok!(ServiceLedger::split(signed(BOB), QUESTION, amount));
+        assert_noop!(
+            ServiceLedger::transfer(
+                signed(BOB),
+                position(QUESTION, Branch::Accept, PositionKind::BranchUsdc),
+                BOOK,
+                amount,
+            ),
+            pallet_conditional_ledger::Error::<
+                Test,
+                frame_support::instances::Instance1,
+            >::ProtocolDestination
+        );
+        assert_ok!(Ledger::do_try_state());
+        assert_ok!(ServiceLedger::do_try_state());
+    });
+}
+
+#[test]
+fn external_pair_seed_rolls_back_the_first_split_if_the_second_cannot_fund() {
+    new_test_ext().execute_with(|| {
+        create_external_pair();
+        let headroom = market_core::seed_headroom(B).map_or(0, |amount| amount);
+        assert!(headroom > 0);
+        let floor = <Assets as Inspect<AccountId>>::minimum_balance(USDC);
+        // Leave enough transient cash for the first split's collateral plus
+        // both non-protocol position deposits, and exactly one unit too little
+        // for the second. `seed_external_pair` performs both splits before any
+        // transfer into the protocol books, so this reaches a committed first
+        // split and proves the outer storage layer rolls it back; starving the
+        // first deposit move would not exercise that path.
+        let first_only_cash =
+            2 * headroom + 2 * futarchy_primitives::kernel::POSITION_DEPOSIT_USDC + floor - 1;
+        assert_ok!(Assets::transfer(
+            signed(ALICE),
+            USDC,
+            BOB,
+            usdc(ALICE) - first_only_cash,
+        ));
+        let cash_before = usdc(ALICE);
+
+        assert_noop!(
+            Market::seed_external_pair(signed(ALICE), QUESTION, ALICE),
+            E::Ledger
+        );
+        assert_eq!(usdc(ALICE), cash_before);
+        assert_eq!(
+            pallet_conditional_ledger::Vaults::<Test, frame_support::instances::Instance1>::get(
+                QUESTION
+            )
+            .map(|vault| vault.escrowed),
+            Some(0),
+        );
+        assert!(!SeededMarkets::<Test>::contains_key(EXTERNAL_ACCEPT));
+        assert!(!SeededMarkets::<Test>::contains_key(EXTERNAL_REJECT));
+        for branch in [Branch::Accept, Branch::Reject] {
+            for who in [
+                ALICE,
+                TestMarketAccounts::book(EXTERNAL_ACCEPT),
+                TestMarketAccounts::book(EXTERNAL_REJECT),
+            ] {
+                for kind in [
+                    PositionKind::BranchUsdc,
+                    PositionKind::Long,
+                    PositionKind::Short,
+                ] {
+                    assert_eq!(
+                        service_position_balance(position(QUESTION, branch, kind), who),
+                        0,
+                    );
+                }
+            }
+        }
+        assert_ok!(Market::do_try_state());
+        assert_ok!(ServiceLedger::do_try_state());
+    });
+}
+
+#[test]
+fn external_sweep_returns_subsidy_only_to_funder_and_routes_fees_to_main() {
+    new_test_ext().execute_with(|| {
+        create_external_pair();
+        seed_external_pair();
+        let proposal_line = PolLineBalance::get(crate::PolLine::Proposal);
+        let baseline_line = PolLineBalance::get(crate::PolLine::Baseline);
+        let main_before = Assets::balance(USDC, MAIN);
+
+        assert_ok!(Market::buy(
+            signed(BOB),
+            EXTERNAL_ACCEPT,
+            ScalarSide::Long,
+            TRADE,
+            10_000 * UNIT,
+        ));
+        settle_external();
+        assert_eq!(ActiveMarketCount::<Test>::get(), 0);
+        assert_eq!(ActiveExternalMarketCount::<Test>::get(), 0);
+
+        assert_ok!(Market::sweep_revenue(signed(CHARLIE), EXTERNAL_ACCEPT));
+        assert_ok!(Market::sweep_revenue(signed(CHARLIE), EXTERNAL_REJECT));
+        assert!(SweptMarkets::<Test>::contains_key(EXTERNAL_ACCEPT));
+        assert!(SweptMarkets::<Test>::contains_key(EXTERNAL_REJECT));
+        assert!(Assets::balance(USDC, MAIN) > main_before);
+        assert!(MainCreditedTotal::get() > 0);
+        assert_eq!(PolLineBalance::get(crate::PolLine::Proposal), proposal_line);
+        assert_eq!(PolLineBalance::get(crate::PolLine::Baseline), baseline_line);
+        assert!(LivePolCommitments::<Test>::get().is_empty());
+
+        let swept = System::events()
+            .into_iter()
+            .filter_map(|record| match record.event {
+                RuntimeEvent::Market(Event::ExternalRevenueSwept {
+                    market,
+                    fee_to_main,
+                    subsidy_returned,
+                }) => Some((market, fee_to_main, subsidy_returned)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(swept.len(), 2);
+        assert!(swept.iter().any(|(market, fee, returned)| {
+            *market == EXTERNAL_ACCEPT && *fee > 0 && *returned > 0
+        }));
+        assert!(swept.iter().any(|(market, fee, returned)| {
+            *market == EXTERNAL_REJECT && *fee == 0 && *returned == 0
+        }));
+        assert_ok!(Market::do_try_state());
+        assert_ok!(ServiceLedger::do_try_state());
+    });
+}
+
+#[test]
+fn external_void_returns_the_full_pair_subsidy_before_dust_and_reap() {
+    new_test_ext().execute_with(|| {
+        create_external_pair();
+        let headroom = market_core::seed_headroom(B).map_or(0, |amount| amount);
+        assert!(headroom > 0);
+        let funder_before = usdc(ALICE);
+        let main_before = usdc(MAIN);
+        let proposal_line = PolLineBalance::get(crate::PolLine::Proposal);
+        let baseline_line = PolLineBalance::get(crate::PolLine::Baseline);
+
+        seed_external_pair();
+        let funder_after_seed = usdc(ALICE);
+        assert_eq!(funder_before - funder_after_seed, 2 * headroom);
+        assert_ok!(ServiceLedger::void(signed(RESOLVER), QUESTION));
+        assert_ok!(Market::observe_external_terminal(QUESTION));
+
+        assert_ok!(Market::sweep_revenue(signed(CHARLIE), EXTERNAL_ACCEPT));
+        assert_ok!(Market::sweep_revenue(signed(CHARLIE), EXTERNAL_REJECT));
+        assert_eq!(usdc(ALICE) - funder_after_seed, 2 * headroom);
+        assert_eq!(usdc(ALICE), funder_before);
+        assert_eq!(usdc(MAIN), main_before);
+        assert_eq!(MainCreditedTotal::get(), 0);
+
+        let swept = System::events()
+            .into_iter()
+            .filter_map(|record| match record.event {
+                RuntimeEvent::Market(Event::ExternalRevenueSwept {
+                    market,
+                    fee_to_main,
+                    subsidy_returned,
+                }) => Some((market, fee_to_main, subsidy_returned)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(swept.len(), 2);
+        assert_eq!(
+            swept
+                .iter()
+                .map(|(_, fee, _)| *fee)
+                .fold(0_u128, u128::saturating_add),
+            0,
+        );
+        assert_eq!(
+            swept
+                .iter()
+                .map(|(_, _, returned)| *returned)
+                .fold(0_u128, u128::saturating_add),
+            2 * headroom,
+        );
+        assert_eq!(
+            pallet_conditional_ledger::Vaults::<Test, frame_support::instances::Instance1>::get(
+                QUESTION
+            )
+            .map(|vault| vault.escrowed),
+            Some(0),
+        );
+        assert_eq!(PolLineBalance::get(crate::PolLine::Proposal), proposal_line);
+        assert_eq!(PolLineBalance::get(crate::PolLine::Baseline), baseline_line);
+        assert!(LivePolCommitments::<Test>::get().is_empty());
+
+        System::set_block_number(102);
+        assert_ok!(ServiceLedger::sweep_dust(signed(BOB), QUESTION));
+        assert_ok!(Market::reap(signed(BOB), EXTERNAL_ACCEPT));
+        assert_ok!(Market::reap(signed(BOB), EXTERNAL_REJECT));
+        assert_eq!(StoredExternalMarketCount::<Test>::get(), 0);
+        assert_ok!(Market::do_try_state());
+        assert_ok!(ServiceLedger::do_try_state());
+    });
+}
+
+#[test]
+fn external_redemption_fee_is_service_revenue_and_never_pol() {
+    new_test_ext().execute_with(|| {
+        let key = constitution_core::key16(b"ledger.rdm_fee");
+        let fee = constitution_core::genesis_params()
+            .into_iter()
+            .find_map(|record| {
+                if record.key == key {
+                    if let constitution_core::ParamValue::Perbill(parts) = record.value {
+                        return Some(sp_runtime::Perbill::from_parts(parts));
+                    }
+                }
+                None
+            })
+            .map_or(sp_runtime::Perbill::from_parts(0), |value| value);
+        assert_ne!(fee, sp_runtime::Perbill::from_parts(0));
+        RedemptionFee::set(fee);
+        create_external_pair();
+        let amount = 10 * UNIT;
+        let proposal_line = PolLineBalance::get(crate::PolLine::Proposal);
+        let baseline_line = PolLineBalance::get(crate::PolLine::Baseline);
+
+        assert_ok!(ServiceLedger::split(signed(BOB), QUESTION, amount));
+        assert_ok!(ServiceLedger::split_scalar(
+            signed(BOB),
+            QUESTION,
+            Branch::Accept,
+            amount,
+        ));
+        assert_ok!(ServiceLedger::resolve(
+            signed(RESOLVER),
+            QUESTION,
+            Branch::Accept,
+        ));
+        assert_ok!(ServiceLedger::settle_scalar(
+            signed(SETTLER),
+            QUESTION,
+            FixedU64(500_000_000),
+        ));
+        assert_ok!(ServiceLedger::redeem_scalar(
+            signed(BOB),
+            QUESTION,
+            ScalarSide::Long,
+            amount,
+        ));
+
+        let accrued = pallet_conditional_ledger::RedemptionFeesAccrued::<
+            Test,
+            frame_support::instances::Instance1,
+        >::get();
+        assert!(accrued > 0);
+        assert_eq!(
+            pallet_conditional_ledger::RedemptionFeesAccrued::<Test>::get(),
+            0,
+        );
+        let main_before = usdc(MAIN);
+        assert_ok!(ServiceLedger::sweep_redemption_fees(signed(CHARLIE)));
+        assert_eq!(usdc(MAIN) - main_before, accrued);
+        assert_eq!(MainCreditedTotal::get(), accrued);
+        assert_eq!(
+            pallet_conditional_ledger::RedemptionFeesAccrued::<
+                Test,
+                frame_support::instances::Instance1,
+            >::get(),
+            0,
+        );
+        assert_eq!(PolLineBalance::get(crate::PolLine::Proposal), proposal_line);
+        assert_eq!(PolLineBalance::get(crate::PolLine::Baseline), baseline_line);
+        assert!(LivePolCommitments::<Test>::get().is_empty());
+        assert_ok!(Ledger::do_try_state());
+        assert_ok!(ServiceLedger::do_try_state());
+    });
+}
+
+#[test]
+fn service_dust_sweep_is_blocked_until_both_external_books_are_swept() {
+    new_test_ext().execute_with(|| {
+        create_external_pair();
+        seed_external_pair();
+        settle_external();
+        System::set_block_number(102);
+
+        assert_noop!(
+            ServiceLedger::sweep_dust(signed(BOB), QUESTION),
+            pallet_conditional_ledger::Error::<
+                Test,
+                frame_support::instances::Instance1,
+            >::ReapNotDue
+        );
+        assert_ok!(Market::sweep_revenue(signed(BOB), EXTERNAL_ACCEPT));
+        assert_noop!(
+            ServiceLedger::sweep_dust(signed(BOB), QUESTION),
+            pallet_conditional_ledger::Error::<
+                Test,
+                frame_support::instances::Instance1,
+            >::ReapNotDue
+        );
+        assert_ok!(Market::sweep_revenue(signed(BOB), EXTERNAL_REJECT));
+        assert_ok!(ServiceLedger::sweep_dust(signed(BOB), QUESTION));
+        assert_ok!(Market::reap(signed(BOB), EXTERNAL_ACCEPT));
+        assert_ok!(Market::reap(signed(BOB), EXTERNAL_REJECT));
+        assert_eq!(StoredExternalMarketCount::<Test>::get(), 0);
+        // Cleanup is permissionless once no market/vault state remains; a
+        // tombstoned client's identity must not strand bounded pair capacity.
+        assert_ok!(Market::archive_external_pair(signed(CHARLIE), QUESTION));
+        assert!(!ExternalBookPairs::<Test>::contains_key(QUESTION));
+    });
+}
+
+#[test]
+fn try_state_enforces_both_sides_of_the_service_id_band() {
+    new_test_ext().execute_with(|| {
+        create_external_pair();
+        assert_ok!(Market::do_try_state());
+
+        Markets::<Test>::mutate(EXTERNAL_ACCEPT, |maybe_book| {
+            if let Some(book) = maybe_book {
+                book.kind = BookKind::External {
+                    question: 1,
+                    client: EXTERNAL_CLIENT_ID,
+                    branch: Branch::Accept,
+                };
+            }
+        });
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
+
+        Markets::<Test>::mutate(EXTERNAL_ACCEPT, |maybe_book| {
+            if let Some(book) = maybe_book {
+                book.kind = BookKind::External {
+                    question: QUESTION,
+                    client: EXTERNAL_CLIENT_ID,
+                    branch: Branch::Accept,
+                };
+            }
+        });
+        crate::NextMarketId::<Test>::put(futarchy_primitives::kernel::SERVICE_ID_BASE + 1);
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
+
+        crate::NextMarketId::<Test>::put(futarchy_primitives::kernel::SERVICE_ID_BASE);
+        NEXT_PRIMARY_PROPOSAL_ID
+            .with(|next| next.set(futarchy_primitives::kernel::SERVICE_ID_BASE + 1));
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
+    });
+}
+
+#[test]
+fn try_state_enforces_external_pair_atomicity_and_immutable_funder() {
+    new_test_ext().execute_with(|| {
+        create_external_pair();
+        assert_ok!(Market::do_try_state());
+
+        Markets::<Test>::mutate(EXTERNAL_REJECT, |maybe_book| {
+            if let Some(book) = maybe_book {
+                book.b += 1;
+            }
+        });
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
+        Markets::<Test>::mutate(EXTERNAL_REJECT, |maybe_book| {
+            if let Some(book) = maybe_book {
+                book.b -= 1;
+            }
+        });
+
+        SeededMarkets::<Test>::insert(EXTERNAL_ACCEPT, ALICE);
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
+        SeededMarkets::<Test>::remove(EXTERNAL_ACCEPT);
+
+        SeededMarkets::<Test>::insert(EXTERNAL_ACCEPT, BOB);
+        SeededMarkets::<Test>::insert(EXTERNAL_REJECT, BOB);
+        assert_err!(Market::do_try_state(), E::TryStateViolation);
+        SeededMarkets::<Test>::remove(EXTERNAL_ACCEPT);
+        SeededMarkets::<Test>::remove(EXTERNAL_REJECT);
+
+        SettlementObservedAt::<Test>::insert(EXTERNAL_ACCEPT, 1);
         assert_err!(Market::do_try_state(), E::TryStateViolation);
     });
 }

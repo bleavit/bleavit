@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 19;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 20;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -904,6 +904,13 @@ pub struct OracleRoundView {
 }
 
 pub mod bounds {
+    /// Maximum simultaneous hosted-service clients (13 §4). This is also
+    /// the hard maximum of `svc.max_live` questions.
+    pub const MAX_CLIENTS: u32 = 64;
+    /// Retained immutable external question/book/funder records. It reuses the
+    /// roster ceiling by derivation, but remains a separately named consumer
+    /// bound so the two cannot drift silently.
+    pub const MAX_EXTERNAL_BOOK_PAIRS: u32 = MAX_CLIENTS;
     pub const MAX_PROPOSAL_SUMMARIES: u32 = 32;
     pub const MAX_ACCOUNT_POSITIONS: u32 = 64;
     /// Canonical on-chain execution-history ring bound (09 §1.5 / 13 §4).
@@ -921,6 +928,9 @@ pub mod bounds {
     /// Books whose ledger terminal latch has not yet been observed. This is
     /// also the maximum live POL-commitment vector length.
     pub const MAX_LIVE_MARKETS: u32 = 196;
+    /// Two external books for each question at the hard `svc.max_live` ceiling.
+    /// External books never consume [`MAX_LIVE_MARKETS`].
+    pub const MAX_LIVE_EXTERNAL_MARKETS: u32 = MAX_EXTERNAL_BOOK_PAIRS * 2;
     pub const BOOKS_PER_PROPOSAL: u32 = 6;
     /// Maximum books opened by one epoch at the registry's maximum slot count.
     pub const MAX_MARKETS_PER_EPOCH: u32 = MAX_COHORT_PROPOSALS * BOOKS_PER_PROPOSAL + 1;
@@ -934,6 +944,11 @@ pub mod bounds {
     /// 196 + 28 * (12 * 6 + 1) = 2,240.
     pub const MAX_STORED_MARKETS: u32 =
         MAX_LIVE_MARKETS + MAX_ARCHIVE_MARKET_BATCHES * MAX_MARKETS_PER_EPOCH;
+    /// Retained external-book partition. Terminal rows apply backpressure until
+    /// reap rather than consuming the primary domain's archive budget.
+    pub const MAX_STORED_EXTERNAL_MARKETS: u32 = MAX_LIVE_EXTERNAL_MARKETS;
+    /// Physical upper bound of the shared `Markets` map across both partitions.
+    pub const MAX_ALL_STORED_MARKETS: u32 = MAX_STORED_MARKETS + MAX_STORED_EXTERNAL_MARKETS;
     /// Maximum TWAP checkpoints and registered decision windows per market
     /// (13 §4). Shared by market storage and the monitoring API row bound.
     pub const MAX_TWAP_WINDOWS_PER_MARKET: u32 = 8;
@@ -983,6 +998,10 @@ pub mod chain_identity {
 }
 
 pub mod kernel {
+    /// First identifier reserved for hosted-question-service questions, vaults,
+    /// and books (03 §1a; 13 §3.5; 16 §7.1). Primary-domain allocators
+    /// stay strictly below this boundary; service allocators start at it.
+    pub const SERVICE_ID_BASE: u64 = 1_u64 << 63;
     /// Fixed-point scale of a settlement score `s` (`FixedU64`, 1e9).
     pub const SCORE_SCALE: u64 = 1_000_000_000;
     /// The neutral Baseline score a cohort VOID or orphan-epoch finalization
@@ -1361,11 +1380,11 @@ pub mod kernel {
     // derivation by `occupancy_envelopes_reproduce_the_published_13_5_figures`.
 
     /// 13 §5 item 1: measured `MarketBook<AccountId>` `MaxEncodedLen`
-    /// (B10 re-measurement, 2026-07-17, after the accumulator widened to the
-    /// 04 §7 two-limb u256 shape). The runtime asserts the real
+    /// (N6 re-measurement, 2026-08-01, after `BookKind::External` became the
+    /// largest discriminant payload). The runtime asserts the real
     /// `max_encoded_len()` against this figure, so struct growth reopens the
     /// derivation rather than silently invalidating it.
-    pub const MARKET_BOOK_MAX_BYTES: u32 = 205;
+    pub const MARKET_BOOK_MAX_BYTES: u32 = 208;
     /// 13 §5 item 1: the retained `Markets` map byte budget (512 KiB).
     pub const RETAINED_MARKETS_BUDGET_BYTES: u32 = 512 * 1024;
     /// 13 §5 item 2: the **pinned** per-vault ceiling. Deliberately the pinned
@@ -1774,7 +1793,12 @@ mod tests {
         // `transaction_version` is untouched (02 §13 rule 7). Renumbered from
         // v18 on rebase: E6 (#201) landed on that number first, and 02 §13
         // entries are allocated in merge order, not authoring order.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 19);
+        //
+        // v20 (N6): `MarketBook.kind` gains the trailing external-book variant,
+        // the market event gains trailing `ExternalRevenueSwept`, and the
+        // external/live/combined market bounds become metadata-readable. The
+        // remaining hosted question/report surface is pending v21.
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 20);
     }
 
     #[test]
@@ -2359,6 +2383,10 @@ mod tests {
         );
         assert_eq!(bounds::MAX_LIVE_MARKETS, 196);
         assert_eq!(bounds::MAX_STORED_MARKETS, 2_240);
+        assert_eq!(bounds::MAX_EXTERNAL_BOOK_PAIRS, bounds::MAX_CLIENTS);
+        assert_eq!(bounds::MAX_LIVE_EXTERNAL_MARKETS, 128);
+        assert_eq!(bounds::MAX_STORED_EXTERNAL_MARKETS, 128);
+        assert_eq!(bounds::MAX_ALL_STORED_MARKETS, 2_368);
     }
 
     /// SQ-501: the occupancy derivations must reproduce 13 §5 items 1–4's
@@ -2396,11 +2424,17 @@ mod tests {
         let retained = kernel::derived_retained_markets(&worst_case).expect("derivable");
         assert_eq!(retained, 2_240);
         assert_eq!(retained, bounds::MAX_STORED_MARKETS);
-        // "2,240 books × 205 B = 459,200 B ≈ 448.4 KiB, within a 512 KiB budget".
+        // "2,240 books × 208 B = 465,920 B = 455 KiB, within a 512 KiB budget".
         let retained_bytes = retained * kernel::MARKET_BOOK_MAX_BYTES;
-        assert_eq!(retained_bytes, 459_200);
-        assert_eq!(retained_bytes * 10 / 1024, 4_484); // 448.4 KiB
+        assert_eq!(retained_bytes, 465_920);
+        assert_eq!(retained_bytes / 1024, 455);
         assert!(retained_bytes <= kernel::RETAINED_MARKETS_BUDGET_BYTES);
+        // N6's disjoint 128-row external partition keeps the shared physical
+        // map under the same byte budget without consuming the primary rows.
+        let all_retained = bounds::MAX_ALL_STORED_MARKETS * kernel::MARKET_BOOK_MAX_BYTES;
+        assert_eq!(all_retained, 492_544);
+        assert_eq!(all_retained / 1024, 481);
+        assert!(all_retained <= kernel::RETAINED_MARKETS_BUDGET_BYTES);
 
         // --- item 2 -------------------------------------------------------
         // "≤ 32 live + 4 cohorts × 5 settling = ≤ 52 × 160 B ≈ 8.1 KiB, within

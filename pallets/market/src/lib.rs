@@ -11,8 +11,10 @@
 extern crate alloc;
 
 use futarchy_primitives::{BlockNumber, MarketId};
+use question_service_core::{ClientId, QuestionId};
 
 pub use market_core as core_market;
+pub use market_core::LedgerRoute;
 pub use pallet::*;
 pub use pallet_conditional_ledger::MainRevenueSink;
 pub use weights::WeightInfo;
@@ -41,6 +43,243 @@ pub trait BenchmarkHelper {
     fn prime_pol_custody(_: PolLine, _: futarchy_primitives::Balance) {}
 }
 
+#[doc(hidden)]
+pub struct UnavailableLedger<AccountId>(core::marker::PhantomData<AccountId>);
+
+#[allow(clippy::result_unit_err)]
+impl<AccountId> market_core::LedgerOps<AccountId> for UnavailableLedger<AccountId> {
+    fn do_split(&mut self, _: u64, _: &AccountId, _: u128) -> Result<(), ()> {
+        Err(())
+    }
+    fn do_transfer(
+        &mut self,
+        _: futarchy_primitives::PositionId,
+        _: &AccountId,
+        _: &AccountId,
+        _: u128,
+    ) -> Result<(), ()> {
+        Err(())
+    }
+    fn do_split_scalar(
+        &mut self,
+        _: u64,
+        _: futarchy_primitives::Branch,
+        _: &AccountId,
+        _: u128,
+    ) -> Result<(), ()> {
+        Err(())
+    }
+    fn do_split_gate(
+        &mut self,
+        _: u64,
+        _: futarchy_primitives::Branch,
+        _: futarchy_primitives::GateType,
+        _: &AccountId,
+        _: u128,
+    ) -> Result<(), ()> {
+        Err(())
+    }
+    fn do_split_baseline(&mut self, _: u32, _: &AccountId, _: u128) -> Result<(), ()> {
+        Err(())
+    }
+    fn do_merge(&mut self, _: u64, _: &AccountId, _: u128) -> Result<(), ()> {
+        Err(())
+    }
+    fn do_merge_scalar(
+        &mut self,
+        _: u64,
+        _: futarchy_primitives::Branch,
+        _: &AccountId,
+        _: u128,
+    ) -> Result<(), ()> {
+        Err(())
+    }
+    fn do_merge_gate(
+        &mut self,
+        _: u64,
+        _: futarchy_primitives::Branch,
+        _: futarchy_primitives::GateType,
+        _: &AccountId,
+        _: u128,
+    ) -> Result<(), ()> {
+        Err(())
+    }
+    fn do_merge_baseline(&mut self, _: u32, _: &AccountId, _: u128) -> Result<(), ()> {
+        Err(())
+    }
+    fn note_protocol_account(&mut self, _: AccountId) {}
+    fn position_balance(&self, _: futarchy_primitives::PositionId, _: &AccountId) -> u128 {
+        0
+    }
+    fn vault_terminal(&self, _: u64) -> Option<market_core::VaultTerminal> {
+        None
+    }
+    fn gate_outcome(&self, _: u64, _: futarchy_primitives::GateType) -> Option<bool> {
+        None
+    }
+    fn baseline_terminal(&self, _: u32) -> Option<market_core::BaselineTerminal> {
+        None
+    }
+    fn do_redeem(&mut self, _: u64, _: &AccountId, _: &AccountId, _: u128) -> Result<u128, ()> {
+        Err(())
+    }
+    fn do_redeem_scalar(
+        &mut self,
+        _: u64,
+        _: futarchy_primitives::ScalarSide,
+        _: &AccountId,
+        _: &AccountId,
+        _: u128,
+    ) -> Result<u128, ()> {
+        Err(())
+    }
+    fn do_redeem_scalar_pair(
+        &mut self,
+        _: u64,
+        _: &AccountId,
+        _: &AccountId,
+        _: u128,
+    ) -> Result<u128, ()> {
+        Err(())
+    }
+    fn do_redeem_gate(
+        &mut self,
+        _: u64,
+        _: futarchy_primitives::GateType,
+        _: &AccountId,
+        _: &AccountId,
+        _: u128,
+    ) -> Result<u128, ()> {
+        Err(())
+    }
+    fn do_redeem_void(
+        &mut self,
+        _: u64,
+        _: futarchy_primitives::Branch,
+        _: futarchy_primitives::PositionKind,
+        _: &AccountId,
+        _: &AccountId,
+        _: u128,
+    ) -> Result<u128, ()> {
+        Err(())
+    }
+    fn do_redeem_baseline(
+        &mut self,
+        _: u32,
+        _: futarchy_primitives::ScalarSide,
+        _: &AccountId,
+        _: &AccountId,
+        _: u128,
+    ) -> Result<u128, ()> {
+        Err(())
+    }
+    fn do_redeem_baseline_pair(
+        &mut self,
+        _: u32,
+        _: &AccountId,
+        _: &AccountId,
+        _: u128,
+    ) -> Result<u128, ()> {
+        Err(())
+    }
+}
+
+impl<T: pallet::Config> ServiceLedgerAdapter<T> for () {
+    type Ledger = UnavailableLedger<T::AccountId>;
+
+    fn funds_frozen() -> bool {
+        // N6 leaves the release runtime's service slot deliberately unbound.
+        // Treat an unavailable status source as frozen so no future caller can
+        // move service-domain funds before N7 installs the real instance.
+        true
+    }
+
+    fn ledger(_: ReturnPolicy<T::AccountId>) -> Self::Ledger {
+        UnavailableLedger(core::marker::PhantomData)
+    }
+
+    fn create_vault(_: QuestionId) -> frame_support::dispatch::DispatchResult {
+        Err(sp_runtime::DispatchError::Other(
+            "service ledger unavailable",
+        ))
+    }
+
+    fn vault_exists(_: QuestionId) -> bool {
+        false
+    }
+    fn terminal_at(_: QuestionId) -> Option<frame_system::pallet_prelude::BlockNumberFor<T>> {
+        None
+    }
+
+    fn discard_protocol_inventory(
+        _: QuestionId,
+        _: &T::AccountId,
+        _: &T::AccountId,
+    ) -> frame_support::dispatch::DispatchResult {
+        Err(sp_runtime::DispatchError::Other(
+            "service ledger unavailable",
+        ))
+    }
+
+    fn is_local_protocol_account(_: &T::AccountId) -> bool {
+        false
+    }
+}
+
+impl<T, I> ServiceLedgerAdapter<T> for ConditionalLedgerInstance<I>
+where
+    T: pallet::Config + pallet_conditional_ledger::Config<I>,
+    I: 'static,
+{
+    type Ledger = pallet::InstanceLedger<T, I>;
+
+    fn funds_frozen() -> bool {
+        let now = frame_system::Pallet::<T>::block_number();
+        pallet_conditional_ledger::FrozenUntil::<T, I>::get().is_some_and(|until| now < until)
+    }
+
+    fn ledger(policy: ReturnPolicy<T::AccountId>) -> Self::Ledger {
+        pallet::InstanceLedger::new(policy)
+    }
+
+    fn create_vault(question: QuestionId) -> frame_support::dispatch::DispatchResult {
+        pallet_conditional_ledger::Pallet::<T, I>::create_vault(
+            pallet::InstanceLedger::<T, I>::authority_origin(),
+            question,
+            0,
+        )
+    }
+
+    fn vault_exists(question: QuestionId) -> bool {
+        pallet_conditional_ledger::Vaults::<T, I>::contains_key(question)
+    }
+
+    fn terminal_at(
+        question: QuestionId,
+    ) -> Option<frame_system::pallet_prelude::BlockNumberFor<T>> {
+        pallet_conditional_ledger::VaultTerminalAt::<T, I>::get(question)
+    }
+
+    fn discard_protocol_inventory(
+        question: QuestionId,
+        book: &T::AccountId,
+        fees: &T::AccountId,
+    ) -> frame_support::dispatch::DispatchResult {
+        pallet_conditional_ledger::Pallet::<T, I>::discard_proposal_protocol_inventory(
+            pallet::InstanceLedger::<T, I>::authority_origin(),
+            question,
+            book,
+            fees,
+        )
+    }
+
+    fn is_local_protocol_account(who: &T::AccountId) -> bool {
+        <<T as pallet_conditional_ledger::Config<I>>::ProtocolAccounts as frame_support::traits::Contains<
+            T::AccountId,
+        >>::contains(who)
+    }
+}
+
 #[cfg(feature = "runtime-benchmarks")]
 impl BenchmarkHelper for () {}
 
@@ -51,6 +290,19 @@ impl BenchmarkHelper for () {}
 pub trait MarketAccountProvider<AccountId> {
     fn book(id: futarchy_primitives::MarketId) -> AccountId;
     fn fees(id: futarchy_primitives::MarketId) -> AccountId;
+}
+
+/// Read-only high-water mark for the primary proposal allocator. Market
+/// try-state owns the cross-domain id-band proof without coupling this pallet
+/// to `pallet-epoch`; production binds the provider to `Epoch::NextProposalId`.
+pub trait PrimaryProposalIdProvider {
+    fn next_proposal_id() -> futarchy_primitives::ProposalId;
+}
+
+impl PrimaryProposalIdProvider for () {
+    fn next_proposal_id() -> futarchy_primitives::ProposalId {
+        0
+    }
 }
 
 /// Raw per-check facts behind the boolean decision grade
@@ -118,19 +370,68 @@ pub enum PolLine {
     Baseline,
 }
 
-impl PolLine {
-    /// The funding line a book of this kind is seeded from and returns to.
+/// Typed source of a book's maker subsidy (04 §3; 16 §7.3). The external
+/// arm carries its owner and can never be silently treated as protocol POL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FundingDomain {
+    Protocol(PolLine),
+    ExternalClient(ClientId),
+}
+
+impl FundingDomain {
     pub const fn of(kind: market_core::BookKind) -> Self {
         match kind {
-            market_core::BookKind::Baseline { .. } => Self::Baseline,
             market_core::BookKind::Decision { .. } | market_core::BookKind::Gate { .. } => {
-                Self::Proposal
+                Self::Protocol(PolLine::Proposal)
             }
+            market_core::BookKind::Baseline { .. } => Self::Protocol(PolLine::Baseline),
+            market_core::BookKind::External { client, .. } => Self::ExternalClient(client),
         }
     }
 }
 
-impl<T: pallet::Config> pallet_conditional_ledger::MarketSweepStatus for pallet::Pallet<T> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub enum ReturnPolicy<AccountId> {
+    Protocol,
+    ExactFunder {
+        holder: AccountId,
+        funder: AccountId,
+    },
+}
+
+/// N6's market-side seam for the N7-owned `ServiceLedger` runtime slot. Unit
+/// is a fail-closed adapter; N7 replaces it with
+/// [`ConditionalLedgerInstance<frame_support::instances::Instance1>`].
+pub trait ServiceLedgerAdapter<T: pallet::Config> {
+    type Ledger: market_core::LedgerOps<T::AccountId>;
+
+    /// Whether this service instance's own I-4 payout-safety freeze is live.
+    /// This is deliberately not the hosted-service pause: pause refuses new
+    /// registration/sealing but never strands terminal settlement or Sweep.
+    fn funds_frozen() -> bool;
+    fn ledger(policy: ReturnPolicy<T::AccountId>) -> Self::Ledger;
+    fn create_vault(question: QuestionId) -> frame_support::dispatch::DispatchResult;
+    fn vault_exists(question: QuestionId) -> bool;
+    fn terminal_at(question: QuestionId)
+        -> Option<frame_system::pallet_prelude::BlockNumberFor<T>>;
+    fn discard_protocol_inventory(
+        question: QuestionId,
+        book: &T::AccountId,
+        fees: &T::AccountId,
+    ) -> frame_support::dispatch::DispatchResult;
+    fn is_local_protocol_account(who: &T::AccountId) -> bool;
+}
+
+pub struct ConditionalLedgerInstance<I>(core::marker::PhantomData<I>);
+
+/// Primary-instance ordering guard. Its bounded proposal/Baseline indexes can
+/// never answer for a service question.
+pub struct PrimaryMarketSweepStatus<T>(core::marker::PhantomData<T>);
+
+impl<T: pallet::Config> pallet_conditional_ledger::MarketSweepStatus
+    for PrimaryMarketSweepStatus<T>
+{
     fn proposal_books_swept(pid: futarchy_primitives::ProposalId) -> bool {
         pallet::ProposalMarketIds::<T>::get(pid)
             .iter()
@@ -145,6 +446,29 @@ impl<T: pallet::Config> pallet_conditional_ledger::MarketSweepStatus for pallet:
             !pallet::SeededMarkets::<T>::contains_key(market)
                 || pallet::SweptMarkets::<T>::contains_key(market)
         })
+    }
+}
+
+/// Service-instance ordering guard. Absence is fail-closed: only an exact
+/// registered two-book question can authorize the service ledger's dust sweep.
+pub struct ExternalMarketSweepStatus<T>(core::marker::PhantomData<T>);
+
+impl<T: pallet::Config> pallet_conditional_ledger::MarketSweepStatus
+    for ExternalMarketSweepStatus<T>
+{
+    fn proposal_books_swept(question: futarchy_primitives::ProposalId) -> bool {
+        let Some(pair) = pallet::ExternalBookPairs::<T>::get(question) else {
+            return false;
+        };
+        [pair.accept, pair.reject].into_iter().all(|market| {
+            !pallet::Markets::<T>::contains_key(market)
+                || !pallet::SeededMarkets::<T>::contains_key(market)
+                || pallet::SweptMarkets::<T>::contains_key(market)
+        })
+    }
+
+    fn baseline_book_swept(_: futarchy_primitives::EpochId) -> bool {
+        false
     }
 }
 
@@ -191,10 +515,14 @@ pub mod pallet {
     use crate::weights::WeightInfo;
     use crate::BaselineGrade;
     use crate::DecisionGradeFacts;
+    use crate::FundingDomain;
+    use crate::LedgerRoute;
     use crate::MainRevenueSink;
     use crate::MarketAccountProvider;
     use crate::PolCommitmentSync;
-    use crate::PolLine;
+    use crate::PrimaryProposalIdProvider;
+    use crate::ReturnPolicy;
+    use crate::ServiceLedgerAdapter;
     use alloc::{collections::BTreeMap, vec::Vec};
     use core::marker::PhantomData;
     use frame_support::{
@@ -214,11 +542,12 @@ pub mod pallet {
         PositionId, PositionKind, ProposalId, ScalarSide, TradeSide, VaultState,
     };
     use market_core::{
-        BookKind, MarketBook, MarketParams, MarketPhase, TwapCumulative, TwapWindow,
+        BookKind, LedgerOps, MarketBook, MarketParams, MarketPhase, TwapCumulative, TwapWindow,
     };
     use pallet_conditional_ledger::core_ledger::{
         baseline as baseline_position, position as proposal_position, BaselineState,
     };
+    use question_service_core::{ClientId, QuestionId};
     use sp_runtime::{
         traits::{AccountIdConversion, CheckedAdd, Saturating, UniqueSaturatedInto},
         DispatchError,
@@ -245,6 +574,27 @@ pub mod pallet {
 
         /// Internal `pallet-epoch` authority for create/seed/close (06 §3.2).
         type MarketAdmin: EnsureOrigin<Self::RuntimeOrigin>;
+
+        /// Hosted-question authority. Its success value is compared with the
+        /// `ClientId` embedded in `BookKind::External`; protocol administration
+        /// can never reach an external book and vice versa.
+        type ExternalMarketAdmin: EnsureOrigin<Self::RuntimeOrigin, Success = ClientId>;
+
+        /// N7-owned service-ledger binding. N6's release runtime uses `()`
+        /// (fail closed); its mock binds the real `Instance1` adapter.
+        type ServiceLedger: crate::ServiceLedgerAdapter<Self>;
+
+        /// Primary proposal allocator high-water mark for the 03 §1a / 16 §7.1
+        /// `SERVICE_ID_BASE` try-state assertion.
+        type PrimaryProposalIds: crate::PrimaryProposalIdProvider;
+
+        /// Union destination reservation across both ledger instances. Market
+        /// book/fee accounts must be in it; external funders must be outside it.
+        type ReservedProtocolDestinations: Contains<Self::AccountId>;
+
+        /// Live external-book limit (`2 * svc.max_live`), independently bounded
+        /// by `MAX_LIVE_EXTERNAL_MARKETS = 128`.
+        type MaxLiveExternalMarkets: Get<u32>;
 
         /// Kernel-enumerated playbook effect origin (06 §6.2/§6.3).
         type EmergencyPlaybookOrigin: EnsureOrigin<Self::RuntimeOrigin>;
@@ -296,10 +646,9 @@ pub mod pallet {
     pub struct Pallet<T>(_);
 
     /// Present market books (02 §7.4), including terminal books retained through
-    /// the archive delay. A `CountedStorageMap` enforces `MaxStoredMarkets = 2240`
-    /// in O(1); [`ActiveMarketCount`] separately enforces the 196-book unsettled
-    /// bound. Each value is statically `MaxEncodedLen` bounded. The map key/value
-    /// shape the frontend reads is unchanged.
+    /// the archive delay. The shared physical map is partitioned by the O(1)
+    /// protocol/external stored counters below: external retention can never
+    /// consume the protocol's 2,240-row archive envelope.
     #[pallet::storage]
     pub type Markets<T: Config> =
         CountedStorageMap<_, Blake2_128Concat, MarketId, MarketBook<T::AccountId>, OptionQuery>;
@@ -309,6 +658,55 @@ pub mod pallet {
     /// it in the same storage transaction; reap affects only the stored count.
     #[pallet::storage]
     pub type ActiveMarketCount<T: Config> = StorageValue<_, u32, ValueQuery>;
+
+    /// External books whose service-ledger terminal latch has not been observed.
+    /// Completely disjoint from [`ActiveMarketCount`] and `LivePolCommitments`.
+    #[pallet::storage]
+    pub type ActiveExternalMarketCount<T: Config> = StorageValue<_, u32, ValueQuery>;
+
+    /// External-domain rows in [`Markets`], live or retained. The hard 128-row
+    /// partition applies storage backpressure until reap rather than borrowing
+    /// the protocol archive budget.
+    #[pallet::storage]
+    pub type StoredExternalMarketCount<T: Config> = StorageValue<_, u32, ValueQuery>;
+
+    /// Immutable creation record for the service question's exact two books and
+    /// exact subsidy funder. It survives market reap until N7 observes service-
+    /// ledger archive, so an absent record can never vacuously authorize dust.
+    #[derive(
+        Clone, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, Debug, TypeInfo,
+    )]
+    pub struct ExternalBookPair<AccountId> {
+        pub client: ClientId,
+        pub funder: AccountId,
+        pub accept: MarketId,
+        pub reject: MarketId,
+    }
+
+    /// Atomic creation input. There is intentionally no singular external-book
+    /// creation API: one call creates exactly Accept and Reject or no state.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct ExternalPairInput<AccountId> {
+        pub question: QuestionId,
+        pub client: ClientId,
+        pub funder: AccountId,
+        pub accept: MarketId,
+        pub accept_account: AccountId,
+        pub accept_fees: AccountId,
+        pub reject: MarketId,
+        pub reject_account: AccountId,
+        pub reject_fees: AccountId,
+        pub b: Balance,
+    }
+
+    #[pallet::storage]
+    pub type ExternalBookPairs<T: Config> = CountedStorageMap<
+        _,
+        Blake2_128Concat,
+        QuestionId,
+        ExternalBookPair<T::AccountId>,
+        OptionQuery,
+    >;
 
     /// O(1) membership index for dynamically allocated book and fee custody
     /// accounts. Refcounts make the index correct even when a runtime or test
@@ -521,6 +919,15 @@ pub mod pallet {
             fee_to_main: Balance,
             pol_returned: Balance,
         },
+        /// External counterpart. It deliberately does not reuse
+        /// `RevenueSwept.pol_returned`, whose frozen field means treasury POL.
+        /// Trading fees remain service revenue in `MAIN`; only the client
+        /// subsidy is returned here (04 §3; 16 §7.3–§7.4).
+        ExternalRevenueSwept {
+            market: MarketId,
+            fee_to_main: Balance,
+            subsidy_returned: Balance,
+        },
     }
 
     #[pallet::error]
@@ -564,6 +971,16 @@ pub mod pallet {
         /// owning vault is not terminal, or a gate outcome it must price is not
         /// recorded yet. Status-quo and retryable — never a silent empty sweep.
         NotSweepable,
+        /// External live/retained capacity is independent from protocol POL.
+        TooManyExternalMarkets,
+        /// A protocol-only operation was presented an external book or vice versa.
+        WrongFundingDomain,
+        /// The supplied external subsidy account is not the immutable funder.
+        FunderMismatch,
+        /// A hosted question already owns its immutable two-book record.
+        DuplicateExternalQuestion,
+        /// A primary/service identifier crossed `SERVICE_ID_BASE`.
+        InvalidIdBand,
     }
 
     impl<T: Config> From<market_core::Error> for Error<T> {
@@ -595,27 +1012,64 @@ pub mod pallet {
         }
     }
 
-    /// Zero-sized production adapter from the core wrapper to the real ledger pallet.
-    pub struct PalletLedger<T>(PhantomData<T>);
+    /// Ledger adapter for one concrete conditional-ledger instance. The return
+    /// policy is operation-scoped: fee realization uses `Protocol`, while an
+    /// external subsidy return binds one exact book holder to its immutable
+    /// non-protocol funder.
+    pub struct InstanceLedger<T: Config, I: 'static = ()> {
+        policy: ReturnPolicy<T::AccountId>,
+        marker: PhantomData<I>,
+    }
 
-    impl<T: Config> PalletLedger<T> {
-        fn new() -> Self {
-            Self(PhantomData)
+    pub type PalletLedger<T> = InstanceLedger<T, ()>;
+
+    impl<T: Config, I: 'static> InstanceLedger<T, I> {
+        pub(crate) fn new(policy: ReturnPolicy<T::AccountId>) -> Self {
+            Self {
+                policy,
+                marker: PhantomData,
+            }
         }
 
-        fn authority_origin() -> OriginFor<T> {
+        pub(crate) fn authority_origin() -> OriginFor<T> {
             frame_system::RawOrigin::Signed(Pallet::<T>::account_id()).into()
+        }
+
+        fn return_destination(
+            &self,
+            holder: &T::AccountId,
+            recipient: &T::AccountId,
+        ) -> Result<pallet_conditional_ledger::InventoryReturn<T::AccountId>, ()> {
+            match &self.policy {
+                ReturnPolicy::Protocol => Ok(pallet_conditional_ledger::InventoryReturn::Protocol(
+                    recipient.clone(),
+                )),
+                ReturnPolicy::ExactFunder {
+                    holder: expected_holder,
+                    funder,
+                } if expected_holder == holder && funder == recipient => {
+                    Ok(pallet_conditional_ledger::InventoryReturn::ExactFunder {
+                        holder: expected_holder.clone(),
+                        funder: funder.clone(),
+                    })
+                }
+                ReturnPolicy::ExactFunder { .. } => Err(()),
+            }
         }
     }
 
-    impl<T: Config> market_core::LedgerOps<T::AccountId> for PalletLedger<T> {
+    impl<T, I> market_core::LedgerOps<T::AccountId> for InstanceLedger<T, I>
+    where
+        T: Config + pallet_conditional_ledger::Config<I>,
+        I: 'static,
+    {
         fn do_split(
             &mut self,
             pid: ProposalId,
             who: &T::AccountId,
             amount: Balance,
         ) -> Result<(), ()> {
-            pallet_conditional_ledger::Pallet::<T>::do_split(
+            pallet_conditional_ledger::Pallet::<T, I>::do_split(
                 Self::authority_origin(),
                 pid,
                 who.clone(),
@@ -631,7 +1085,7 @@ pub mod pallet {
             to: &T::AccountId,
             amount: Balance,
         ) -> Result<(), ()> {
-            pallet_conditional_ledger::Pallet::<T>::do_transfer(
+            pallet_conditional_ledger::Pallet::<T, I>::do_transfer(
                 Self::authority_origin(),
                 id,
                 from.clone(),
@@ -648,7 +1102,7 @@ pub mod pallet {
             who: &T::AccountId,
             amount: Balance,
         ) -> Result<(), ()> {
-            pallet_conditional_ledger::Pallet::<T>::do_split_scalar(
+            pallet_conditional_ledger::Pallet::<T, I>::do_split_scalar(
                 Self::authority_origin(),
                 pid,
                 branch,
@@ -666,7 +1120,7 @@ pub mod pallet {
             who: &T::AccountId,
             amount: Balance,
         ) -> Result<(), ()> {
-            pallet_conditional_ledger::Pallet::<T>::do_split_gate(
+            pallet_conditional_ledger::Pallet::<T, I>::do_split_gate(
                 Self::authority_origin(),
                 pid,
                 branch,
@@ -683,7 +1137,7 @@ pub mod pallet {
             who: &T::AccountId,
             amount: Balance,
         ) -> Result<(), ()> {
-            pallet_conditional_ledger::Pallet::<T>::do_split_baseline(
+            pallet_conditional_ledger::Pallet::<T, I>::do_split_baseline(
                 Self::authority_origin(),
                 epoch,
                 who.clone(),
@@ -698,7 +1152,7 @@ pub mod pallet {
             who: &T::AccountId,
             amount: Balance,
         ) -> Result<(), ()> {
-            pallet_conditional_ledger::Pallet::<T>::do_merge(
+            pallet_conditional_ledger::Pallet::<T, I>::do_merge(
                 Self::authority_origin(),
                 pid,
                 who.clone(),
@@ -714,7 +1168,7 @@ pub mod pallet {
             who: &T::AccountId,
             amount: Balance,
         ) -> Result<(), ()> {
-            pallet_conditional_ledger::Pallet::<T>::do_merge_scalar(
+            pallet_conditional_ledger::Pallet::<T, I>::do_merge_scalar(
                 Self::authority_origin(),
                 pid,
                 branch,
@@ -732,7 +1186,7 @@ pub mod pallet {
             who: &T::AccountId,
             amount: Balance,
         ) -> Result<(), ()> {
-            pallet_conditional_ledger::Pallet::<T>::do_merge_gate(
+            pallet_conditional_ledger::Pallet::<T, I>::do_merge_gate(
                 Self::authority_origin(),
                 pid,
                 branch,
@@ -749,7 +1203,7 @@ pub mod pallet {
             who: &T::AccountId,
             amount: Balance,
         ) -> Result<(), ()> {
-            pallet_conditional_ledger::Pallet::<T>::do_merge_baseline(
+            pallet_conditional_ledger::Pallet::<T, I>::do_merge_baseline(
                 Self::authority_origin(),
                 epoch,
                 who.clone(),
@@ -763,11 +1217,11 @@ pub mod pallet {
         }
 
         fn position_balance(&self, id: PositionId, who: &T::AccountId) -> Balance {
-            pallet_conditional_ledger::Positions::<T>::get(id, who)
+            pallet_conditional_ledger::Positions::<T, I>::get(id, who)
         }
 
         fn vault_terminal(&self, pid: ProposalId) -> Option<market_core::VaultTerminal> {
-            let Some(info) = pallet_conditional_ledger::Vaults::<T>::get(pid) else {
+            let Some(info) = pallet_conditional_ledger::Vaults::<T, I>::get(pid) else {
                 return Some(market_core::VaultTerminal::Archived);
             };
             match info.state {
@@ -780,11 +1234,11 @@ pub mod pallet {
         }
 
         fn gate_outcome(&self, pid: ProposalId, gate: GateType) -> Option<bool> {
-            pallet_conditional_ledger::Vaults::<T>::get(pid)?.gate_outcomes[gate_index(gate)]
+            pallet_conditional_ledger::Vaults::<T, I>::get(pid)?.gate_outcomes[gate_index(gate)]
         }
 
         fn baseline_terminal(&self, epoch: EpochId) -> Option<market_core::BaselineTerminal> {
-            let Some(info) = pallet_conditional_ledger::BaselineVaults::<T>::get(epoch) else {
+            let Some(info) = pallet_conditional_ledger::BaselineVaults::<T, I>::get(epoch) else {
                 return Some(market_core::BaselineTerminal::Archived);
             };
             match info.state {
@@ -800,11 +1254,12 @@ pub mod pallet {
             recipient: &T::AccountId,
             amount: Balance,
         ) -> Result<Balance, ()> {
-            pallet_conditional_ledger::Pallet::<T>::do_redeem(
+            let destination = self.return_destination(holder, recipient)?;
+            pallet_conditional_ledger::Pallet::<T, I>::do_redeem(
                 Self::authority_origin(),
                 pid,
                 holder.clone(),
-                recipient.clone(),
+                destination,
                 amount,
             )
             .map_err(|_| ())
@@ -818,12 +1273,13 @@ pub mod pallet {
             recipient: &T::AccountId,
             amount: Balance,
         ) -> Result<Balance, ()> {
-            pallet_conditional_ledger::Pallet::<T>::do_redeem_scalar(
+            let destination = self.return_destination(holder, recipient)?;
+            pallet_conditional_ledger::Pallet::<T, I>::do_redeem_scalar(
                 Self::authority_origin(),
                 pid,
                 side,
                 holder.clone(),
-                recipient.clone(),
+                destination,
                 amount,
             )
             .map_err(|_| ())
@@ -836,11 +1292,12 @@ pub mod pallet {
             recipient: &T::AccountId,
             amount: Balance,
         ) -> Result<Balance, ()> {
-            pallet_conditional_ledger::Pallet::<T>::do_redeem_scalar_pair(
+            let destination = self.return_destination(holder, recipient)?;
+            pallet_conditional_ledger::Pallet::<T, I>::do_redeem_scalar_pair(
                 Self::authority_origin(),
                 pid,
                 holder.clone(),
-                recipient.clone(),
+                destination,
                 amount,
             )
             .map_err(|_| ())
@@ -854,12 +1311,13 @@ pub mod pallet {
             recipient: &T::AccountId,
             amount: Balance,
         ) -> Result<Balance, ()> {
-            pallet_conditional_ledger::Pallet::<T>::do_redeem_gate(
+            let destination = self.return_destination(holder, recipient)?;
+            pallet_conditional_ledger::Pallet::<T, I>::do_redeem_gate(
                 Self::authority_origin(),
                 pid,
                 gate,
                 holder.clone(),
-                recipient.clone(),
+                destination,
                 amount,
             )
             .map_err(|_| ())
@@ -874,13 +1332,14 @@ pub mod pallet {
             recipient: &T::AccountId,
             amount: Balance,
         ) -> Result<Balance, ()> {
-            pallet_conditional_ledger::Pallet::<T>::do_redeem_void(
+            let destination = self.return_destination(holder, recipient)?;
+            pallet_conditional_ledger::Pallet::<T, I>::do_redeem_void(
                 Self::authority_origin(),
                 pid,
                 branch,
                 kind,
                 holder.clone(),
-                recipient.clone(),
+                destination,
                 amount,
             )
             .map_err(|_| ())
@@ -894,12 +1353,13 @@ pub mod pallet {
             recipient: &T::AccountId,
             amount: Balance,
         ) -> Result<Balance, ()> {
-            pallet_conditional_ledger::Pallet::<T>::do_redeem_baseline(
+            let destination = self.return_destination(holder, recipient)?;
+            pallet_conditional_ledger::Pallet::<T, I>::do_redeem_baseline(
                 Self::authority_origin(),
                 epoch,
                 side,
                 holder.clone(),
-                recipient.clone(),
+                destination,
                 amount,
             )
             .map_err(|_| ())
@@ -912,14 +1372,346 @@ pub mod pallet {
             recipient: &T::AccountId,
             amount: Balance,
         ) -> Result<Balance, ()> {
-            pallet_conditional_ledger::Pallet::<T>::do_redeem_baseline_pair(
+            let destination = self.return_destination(holder, recipient)?;
+            pallet_conditional_ledger::Pallet::<T, I>::do_redeem_baseline_pair(
                 Self::authority_origin(),
                 epoch,
                 holder.clone(),
-                recipient.clone(),
+                destination,
                 amount,
             )
             .map_err(|_| ())
+        }
+    }
+
+    type ServiceLedgerOf<T> =
+        <<T as Config>::ServiceLedger as crate::ServiceLedgerAdapter<T>>::Ledger;
+
+    /// One operation-scoped adapter selected exclusively through
+    /// `LedgerRoute::for_book`. No caller can provide a route independently of
+    /// the stored `BookKind`.
+    pub struct RoutedLedger<T: Config> {
+        inner: RoutedLedgerInner<T>,
+    }
+
+    enum RoutedLedgerInner<T: Config> {
+        Primary(PalletLedger<T>),
+        Service(ServiceLedgerOf<T>),
+    }
+
+    impl<T: Config> RoutedLedger<T> {
+        fn for_book(kind: BookKind, policy: ReturnPolicy<T::AccountId>) -> Self {
+            let inner = match LedgerRoute::for_book(kind) {
+                LedgerRoute::Primary => RoutedLedgerInner::Primary(PalletLedger::<T>::new(policy)),
+                LedgerRoute::Service => {
+                    RoutedLedgerInner::Service(T::ServiceLedger::ledger(policy))
+                }
+            };
+            Self { inner }
+        }
+
+        fn protocol_for(kind: BookKind) -> Self {
+            Self::for_book(kind, ReturnPolicy::Protocol)
+        }
+
+        /// Create the vault owned by `kind` in the instance selected solely by
+        /// `LedgerRoute::for_book`. Lifecycle code must not choose an instance
+        /// with its own `BookKind` match (16 §7.1).
+        fn create_book_vault(kind: BookKind) -> DispatchResult {
+            let routed = Self::protocol_for(kind);
+            match (routed.inner, kind) {
+                (
+                    RoutedLedgerInner::Primary(_),
+                    BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. },
+                ) => {
+                    if !pallet_conditional_ledger::Vaults::<T>::contains_key(proposal) {
+                        pallet_conditional_ledger::Pallet::<T>::create_vault(
+                            PalletLedger::<T>::authority_origin(),
+                            proposal,
+                            0,
+                        )?;
+                    }
+                    Ok(())
+                }
+                (RoutedLedgerInner::Primary(_), BookKind::Baseline { epoch }) => {
+                    pallet_conditional_ledger::Pallet::<T>::create_baseline_vault(
+                        PalletLedger::<T>::authority_origin(),
+                        epoch,
+                    )
+                }
+                (RoutedLedgerInner::Service(_), BookKind::External { question, .. }) => {
+                    T::ServiceLedger::create_vault(question)
+                }
+                _ => Err(Error::<T>::TryStateViolation.into()),
+            }
+        }
+
+        fn book_vault_exists(kind: BookKind) -> Result<bool, DispatchError> {
+            let routed = Self::protocol_for(kind);
+            match (routed.inner, kind) {
+                (
+                    RoutedLedgerInner::Primary(_),
+                    BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. },
+                ) => Ok(pallet_conditional_ledger::Vaults::<T>::contains_key(
+                    proposal,
+                )),
+                (RoutedLedgerInner::Primary(_), BookKind::Baseline { epoch }) => {
+                    Ok(pallet_conditional_ledger::BaselineVaults::<T>::contains_key(epoch))
+                }
+                (RoutedLedgerInner::Service(_), BookKind::External { question, .. }) => {
+                    Ok(T::ServiceLedger::vault_exists(question))
+                }
+                _ => Err(Error::<T>::TryStateViolation.into()),
+            }
+        }
+
+        fn book_terminal_at(kind: BookKind) -> Result<Option<BlockNumberFor<T>>, DispatchError> {
+            let routed = Self::protocol_for(kind);
+            match (routed.inner, kind) {
+                (
+                    RoutedLedgerInner::Primary(_),
+                    BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. },
+                ) => Ok(pallet_conditional_ledger::VaultTerminalAt::<T>::get(
+                    proposal,
+                )),
+                (RoutedLedgerInner::Primary(_), BookKind::Baseline { epoch }) => Ok(
+                    pallet_conditional_ledger::BaselineTerminalAt::<T>::get(epoch),
+                ),
+                (RoutedLedgerInner::Service(_), BookKind::External { question, .. }) => {
+                    Ok(T::ServiceLedger::terminal_at(question))
+                }
+                _ => Err(Error::<T>::TryStateViolation.into()),
+            }
+        }
+
+        fn discard_book_inventory(
+            kind: BookKind,
+            book: &T::AccountId,
+            fees: &T::AccountId,
+        ) -> DispatchResult {
+            let routed = Self::protocol_for(kind);
+            match (routed.inner, kind) {
+                (
+                    RoutedLedgerInner::Primary(_),
+                    BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. },
+                ) => pallet_conditional_ledger::Pallet::<T>::discard_proposal_protocol_inventory(
+                    PalletLedger::<T>::authority_origin(),
+                    proposal,
+                    book,
+                    fees,
+                ),
+                (RoutedLedgerInner::Primary(_), BookKind::Baseline { epoch }) => {
+                    pallet_conditional_ledger::Pallet::<T>::discard_baseline_protocol_inventory(
+                        PalletLedger::<T>::authority_origin(),
+                        epoch,
+                        book,
+                        fees,
+                    )
+                }
+                (RoutedLedgerInner::Service(_), BookKind::External { question, .. }) => {
+                    T::ServiceLedger::discard_protocol_inventory(question, book, fees)
+                }
+                _ => Err(Error::<T>::TryStateViolation.into()),
+            }
+        }
+    }
+
+    macro_rules! route_ledger {
+        ($self:expr, $method:ident($($argument:expr),* $(,)?)) => {
+            match &mut $self.inner {
+                RoutedLedgerInner::Primary(ledger) => ledger.$method($($argument),*),
+                RoutedLedgerInner::Service(ledger) => ledger.$method($($argument),*),
+            }
+        };
+    }
+
+    impl<T: Config> market_core::LedgerOps<T::AccountId> for RoutedLedger<T> {
+        fn do_split(&mut self, pid: ProposalId, who: &T::AccountId, a: Balance) -> Result<(), ()> {
+            route_ledger!(self, do_split(pid, who, a))
+        }
+
+        fn do_transfer(
+            &mut self,
+            id: PositionId,
+            from: &T::AccountId,
+            to: &T::AccountId,
+            a: Balance,
+        ) -> Result<(), ()> {
+            route_ledger!(self, do_transfer(id, from, to, a))
+        }
+
+        fn do_split_scalar(
+            &mut self,
+            pid: ProposalId,
+            branch: Branch,
+            who: &T::AccountId,
+            a: Balance,
+        ) -> Result<(), ()> {
+            route_ledger!(self, do_split_scalar(pid, branch, who, a))
+        }
+
+        fn do_split_gate(
+            &mut self,
+            pid: ProposalId,
+            branch: Branch,
+            gate: GateType,
+            who: &T::AccountId,
+            a: Balance,
+        ) -> Result<(), ()> {
+            route_ledger!(self, do_split_gate(pid, branch, gate, who, a))
+        }
+
+        fn do_split_baseline(
+            &mut self,
+            epoch: EpochId,
+            who: &T::AccountId,
+            a: Balance,
+        ) -> Result<(), ()> {
+            route_ledger!(self, do_split_baseline(epoch, who, a))
+        }
+
+        fn do_merge(&mut self, pid: ProposalId, who: &T::AccountId, a: Balance) -> Result<(), ()> {
+            route_ledger!(self, do_merge(pid, who, a))
+        }
+
+        fn do_merge_scalar(
+            &mut self,
+            pid: ProposalId,
+            branch: Branch,
+            who: &T::AccountId,
+            a: Balance,
+        ) -> Result<(), ()> {
+            route_ledger!(self, do_merge_scalar(pid, branch, who, a))
+        }
+
+        fn do_merge_gate(
+            &mut self,
+            pid: ProposalId,
+            branch: Branch,
+            gate: GateType,
+            who: &T::AccountId,
+            a: Balance,
+        ) -> Result<(), ()> {
+            route_ledger!(self, do_merge_gate(pid, branch, gate, who, a))
+        }
+
+        fn do_merge_baseline(
+            &mut self,
+            epoch: EpochId,
+            who: &T::AccountId,
+            a: Balance,
+        ) -> Result<(), ()> {
+            route_ledger!(self, do_merge_baseline(epoch, who, a))
+        }
+
+        fn note_protocol_account(&mut self, who: T::AccountId) {
+            route_ledger!(self, note_protocol_account(who))
+        }
+
+        fn position_balance(&self, id: PositionId, who: &T::AccountId) -> Balance {
+            match &self.inner {
+                RoutedLedgerInner::Primary(ledger) => ledger.position_balance(id, who),
+                RoutedLedgerInner::Service(ledger) => ledger.position_balance(id, who),
+            }
+        }
+
+        fn vault_terminal(&self, pid: ProposalId) -> Option<market_core::VaultTerminal> {
+            match &self.inner {
+                RoutedLedgerInner::Primary(ledger) => ledger.vault_terminal(pid),
+                RoutedLedgerInner::Service(ledger) => ledger.vault_terminal(pid),
+            }
+        }
+
+        fn gate_outcome(&self, pid: ProposalId, gate: GateType) -> Option<bool> {
+            match &self.inner {
+                RoutedLedgerInner::Primary(ledger) => ledger.gate_outcome(pid, gate),
+                RoutedLedgerInner::Service(ledger) => ledger.gate_outcome(pid, gate),
+            }
+        }
+
+        fn baseline_terminal(&self, epoch: EpochId) -> Option<market_core::BaselineTerminal> {
+            match &self.inner {
+                RoutedLedgerInner::Primary(ledger) => ledger.baseline_terminal(epoch),
+                RoutedLedgerInner::Service(ledger) => ledger.baseline_terminal(epoch),
+            }
+        }
+
+        fn do_redeem(
+            &mut self,
+            pid: ProposalId,
+            holder: &T::AccountId,
+            recipient: &T::AccountId,
+            a: Balance,
+        ) -> Result<Balance, ()> {
+            route_ledger!(self, do_redeem(pid, holder, recipient, a))
+        }
+
+        fn do_redeem_scalar(
+            &mut self,
+            pid: ProposalId,
+            side: ScalarSide,
+            holder: &T::AccountId,
+            recipient: &T::AccountId,
+            a: Balance,
+        ) -> Result<Balance, ()> {
+            route_ledger!(self, do_redeem_scalar(pid, side, holder, recipient, a))
+        }
+
+        fn do_redeem_scalar_pair(
+            &mut self,
+            pid: ProposalId,
+            holder: &T::AccountId,
+            recipient: &T::AccountId,
+            a: Balance,
+        ) -> Result<Balance, ()> {
+            route_ledger!(self, do_redeem_scalar_pair(pid, holder, recipient, a))
+        }
+
+        fn do_redeem_gate(
+            &mut self,
+            pid: ProposalId,
+            gate: GateType,
+            holder: &T::AccountId,
+            recipient: &T::AccountId,
+            a: Balance,
+        ) -> Result<Balance, ()> {
+            route_ledger!(self, do_redeem_gate(pid, gate, holder, recipient, a))
+        }
+
+        fn do_redeem_void(
+            &mut self,
+            pid: ProposalId,
+            branch: Branch,
+            kind: PositionKind,
+            holder: &T::AccountId,
+            recipient: &T::AccountId,
+            a: Balance,
+        ) -> Result<Balance, ()> {
+            route_ledger!(
+                self,
+                do_redeem_void(pid, branch, kind, holder, recipient, a)
+            )
+        }
+
+        fn do_redeem_baseline(
+            &mut self,
+            epoch: EpochId,
+            side: ScalarSide,
+            holder: &T::AccountId,
+            recipient: &T::AccountId,
+            a: Balance,
+        ) -> Result<Balance, ()> {
+            route_ledger!(self, do_redeem_baseline(epoch, side, holder, recipient, a))
+        }
+
+        fn do_redeem_baseline_pair(
+            &mut self,
+            epoch: EpochId,
+            holder: &T::AccountId,
+            recipient: &T::AccountId,
+            a: Balance,
+        ) -> Result<Balance, ()> {
+            route_ledger!(self, do_redeem_baseline_pair(epoch, holder, recipient, a))
         }
     }
 
@@ -943,6 +1735,21 @@ pub mod pallet {
         #[pallet::constant_name(MaxStoredMarkets)]
         fn max_stored_markets() -> u32 {
             bounds::MAX_STORED_MARKETS
+        }
+
+        #[pallet::constant_name(MaxLiveExternalMarkets)]
+        fn max_live_external_markets() -> u32 {
+            bounds::MAX_LIVE_EXTERNAL_MARKETS
+        }
+
+        #[pallet::constant_name(MaxStoredExternalMarkets)]
+        fn max_stored_external_markets() -> u32 {
+            bounds::MAX_STORED_EXTERNAL_MARKETS
+        }
+
+        #[pallet::constant_name(MaxAllStoredMarkets)]
+        fn max_all_stored_markets() -> u32 {
+            bounds::MAX_ALL_STORED_MARKETS
         }
 
         #[pallet::constant_name(GatePMaxCeiling)]
@@ -978,13 +1785,13 @@ pub mod pallet {
             max_cost: Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            Self::ensure_not_frozen()?;
             let mut book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
+            Self::ensure_book_domain_not_frozen(book.kind)?;
             Self::ensure_trade_admissible(market, &book)?;
             let before = book.clone();
             Self::seal_due_windows(market, &before, Self::now_u64(), false)?;
             Self::accrue_contest(market, &before, Self::now_u64());
-            let mut ledger = PalletLedger::<T>::new();
+            let mut ledger = RoutedLedger::<T>::protocol_for(book.kind);
             let events = market_core::buy_book(
                 &mut book,
                 &mut ledger,
@@ -1015,13 +1822,13 @@ pub mod pallet {
             min_proceeds: Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            Self::ensure_not_frozen()?;
             let mut book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
+            Self::ensure_book_domain_not_frozen(book.kind)?;
             Self::ensure_trade_admissible(market, &book)?;
             let before = book.clone();
             Self::seal_due_windows(market, &before, Self::now_u64(), false)?;
             Self::accrue_contest(market, &before, Self::now_u64());
-            let mut ledger = PalletLedger::<T>::new();
+            let mut ledger = RoutedLedger::<T>::protocol_for(book.kind);
             let events = market_core::sell_book(
                 &mut book,
                 &mut ledger,
@@ -1047,8 +1854,8 @@ pub mod pallet {
         #[pallet::weight(<T as Config>::WeightInfo::crank_observe())]
         pub fn crank_observe(origin: OriginFor<T>, market: MarketId) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            Self::ensure_not_frozen()?;
             let mut book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
+            Self::ensure_book_domain_not_frozen(book.kind)?;
             // The accumulator is sealed at Close (04 §2): a permissionless keeper must
             // not record observations on a Closed/Settled book (it would mutate the
             // frozen TWAP). The shared trade preflight closes the standalone
@@ -1112,14 +1919,16 @@ pub mod pallet {
         /// computed from the treasury's internal `main_usdc` counter, so the
         /// arrival is recognized through [`MainRevenueSink`] in the same layer.
         ///
-        /// **Frozen under `PB-LEDGER-FREEZE`** (06 §6.3; SQ-517), because the
-        /// fee leg redeems through the ledger's *internal* path, which carries
-        /// no `Frozen` check — so an unguarded sweep would collect the
-        /// protocol's own claim out of a possibly-short sovereign at the moment
-        /// every claimant's `redeem` is refused. Freezing it strands nothing:
-        /// the crank effects no terminal transition, the value stays fully
-        /// collateralized in place, and the cost is an NAV-recognition delay
-        /// bounded by the freeze's own ≤ 28-day ceiling.
+        /// **Frozen by the owning ledger domain's I-4 status** (04 §2; 06
+        /// §6.3; 16 §10; I-37), because the fee leg redeems through an
+        /// *internal* ledger path. Protocol books consult the primary market
+        /// freeze; external books consult only the service instance's freeze.
+        /// An unguarded sweep could collect the protocol's own claim out of a
+        /// possibly-short sovereign while that domain's claimants are refused,
+        /// while consulting the other domain would wrongly strand independent
+        /// capital. The crank effects no terminal transition, so delaying it
+        /// until its own ledger is payout-safe leaves value collateralized and
+        /// retryable.
         #[pallet::call_index(6)]
         #[pallet::weight(<T as Config>::WeightInfo::sweep_revenue())]
         pub fn sweep_revenue(origin: OriginFor<T>, market: MarketId) -> DispatchResult {
@@ -1131,17 +1940,15 @@ pub mod pallet {
             if SweptMarkets::<T>::contains_key(market) {
                 return Ok(());
             }
-            // 06 §6.3 (SQ-517): the revenue cranks freeze with the rest of the
-            // value-moving surface. The fee leg below redeems through the
-            // ledger's *internal* path, which carries no `Frozen` check — so
-            // without this the protocol would collect its own claim out of a
-            // possibly-short sovereign at the moment every claimant's `redeem`
-            // is refused. Placed after the idempotence return, so a freeze
-            // never changes what an already-swept book answers, and before
-            // every sweepability check, so `Frozen` is the reported reason
-            // wherever it applies — the same precedence 06 §6.3 gives the
-            // freeze test over the decide-time static guards.
-            Self::ensure_not_frozen()?;
+            // 04 §2 / 16 §10 / I-37: the revenue crank follows the owning
+            // ledger's payout-safety domain. Protocol books consult the
+            // primary market freeze; external books consult the service
+            // instance's own I-4 status. The fee leg below uses an internal
+            // ledger path, so bypassing the owning status could pay the
+            // protocol before claimants from a short sovereign. Placed after
+            // the idempotence return so a later freeze never changes what an
+            // already-swept book answers, and before every value movement.
+            Self::ensure_book_domain_not_frozen(book.kind)?;
             ensure!(
                 matches!(book.phase, MarketPhase::Closed)
                     && SettlementObservedAt::<T>::contains_key(market),
@@ -1152,26 +1959,42 @@ pub mod pallet {
                 // 04 §2 / 04 §6.1 revenue leg. It runs for every book, seeded or
                 // not: a book that traded accrued fee value regardless of who
                 // funded its subsidy, and reap would discard it (08 §10.5).
-                let mut ledger = PalletLedger::<T>::new();
-                let fee_to_main = market_core::withdraw_fees(&book, &mut ledger, &main)
+                let mut fee_ledger = RoutedLedger::<T>::protocol_for(book.kind);
+                let fee_to_main = market_core::withdraw_fees(&book, &mut fee_ledger, &main)
                     .map_err(Error::<T>::from)?
                     .checked_add(Self::withdraw_baseline_fee_usdc(&book, &main)?)
                     .ok_or(Error::<T>::ArithmeticOverflow)?;
                 if fee_to_main > 0 {
                     <T as Config>::MainRevenueSink::credit_main(fee_to_main)?;
                 }
-                let pol_returned = match SeededMarkets::<T>::get(market) {
-                    Some(treasury) => {
-                        let returned = market_core::withdraw_book(&book, &mut ledger, &treasury)
-                            .map_err(Error::<T>::from)?;
-                        if returned > 0 {
-                            T::PolCommitmentSync::credit_pol_custody(
-                                PolLine::of(book.kind),
-                                returned,
-                            )?;
+                let subsidy_returned = match SeededMarkets::<T>::get(market) {
+                    Some(funder) => match FundingDomain::of(book.kind) {
+                        FundingDomain::Protocol(line) => {
+                            let mut ledger = RoutedLedger::<T>::protocol_for(book.kind);
+                            let returned = market_core::withdraw_book(&book, &mut ledger, &funder)
+                                .map_err(Error::<T>::from)?;
+                            if returned > 0 {
+                                T::PolCommitmentSync::credit_pol_custody(line, returned)?;
+                            }
+                            returned
                         }
-                        returned
-                    }
+                        FundingDomain::ExternalClient(client) => {
+                            let pair = Self::external_pair_for_book(&book)?;
+                            ensure!(
+                                pair.client == client && pair.funder == funder,
+                                Error::<T>::FunderMismatch
+                            );
+                            let mut ledger = RoutedLedger::<T>::for_book(
+                                book.kind,
+                                ReturnPolicy::ExactFunder {
+                                    holder: book.account.clone(),
+                                    funder: pair.funder.clone(),
+                                },
+                            );
+                            market_core::withdraw_book(&book, &mut ledger, &pair.funder)
+                                .map_err(Error::<T>::from)?
+                        }
+                    },
                     // An unseeded book has no funding line to return to, and
                     // normally no subsidy custody either — it is swept for the
                     // marker alone so reap keeps exactly one precondition
@@ -1187,11 +2010,20 @@ pub mod pallet {
                     }
                 };
                 SweptMarkets::<T>::insert(market, ());
-                Self::deposit_event(Event::RevenueSwept {
-                    market,
-                    fee_to_main,
-                    pol_returned,
-                });
+                match FundingDomain::of(book.kind) {
+                    FundingDomain::Protocol(_) => Self::deposit_event(Event::RevenueSwept {
+                        market,
+                        fee_to_main,
+                        pol_returned: subsidy_returned,
+                    }),
+                    FundingDomain::ExternalClient(_) => {
+                        Self::deposit_event(Event::ExternalRevenueSwept {
+                            market,
+                            fee_to_main,
+                            subsidy_returned,
+                        });
+                    }
+                }
                 Ok(())
             })?;
             <T as Config>::KeeperRebate::rebate(&who, CrankClass::General);
@@ -1239,24 +2071,11 @@ pub mod pallet {
                 // inventory across this vault's fixed position universe (14 for a
                 // proposal, two for Baseline). Claimant rows and vault collateral
                 // remain available to the independently cranked ledger archive.
-                match book.kind {
-                    BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. } => {
-                        pallet_conditional_ledger::Pallet::<T>::discard_proposal_protocol_inventory(
-                            PalletLedger::<T>::authority_origin(),
-                            proposal,
-                            &book.account,
-                            &book.fees_account,
-                        )?;
-                    }
-                    BookKind::Baseline { epoch } => {
-                        pallet_conditional_ledger::Pallet::<T>::discard_baseline_protocol_inventory(
-                            PalletLedger::<T>::authority_origin(),
-                            epoch,
-                            &book.account,
-                            &book.fees_account,
-                        )?;
-                    }
-                }
+                RoutedLedger::<T>::discard_book_inventory(
+                    book.kind,
+                    &book.account,
+                    &book.fees_account,
+                )?;
                 if let BookKind::Baseline { epoch } = book.kind {
                     ensure!(
                         BaselineMarketOf::<T>::get(epoch) == Some(market),
@@ -1271,7 +2090,14 @@ pub mod pallet {
                 SweptMarkets::<T>::remove(market);
                 RerunSeededMarkets::<T>::remove(market);
                 SettlementObservedAt::<T>::remove(market);
-                Self::remove_pol_commitment(market);
+                match FundingDomain::of(book.kind) {
+                    FundingDomain::Protocol(_) => {
+                        Self::remove_pol_commitment(market);
+                    }
+                    FundingDomain::ExternalClient(_) => {
+                        Self::release_stored_external_market_slot()?;
+                    }
+                }
                 Self::unregister_market_accounts(&book)?;
                 if let BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. } =
                     book.kind
@@ -1286,7 +2112,9 @@ pub mod pallet {
                 TwapCheckpoints::<T>::remove(market);
                 DecisionWindows::<T>::remove(market);
                 DecisionWindowOwners::<T>::remove(market);
-                T::PolCommitmentSync::sync_pol_commitments()?;
+                if matches!(FundingDomain::of(book.kind), FundingDomain::Protocol(_)) {
+                    T::PolCommitmentSync::sync_pol_commitments()?;
+                }
                 Self::deposit_event(Event::MarketReaped { market });
                 Ok(())
             })?;
@@ -1344,6 +2172,7 @@ pub mod pallet {
             T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
             NextMarketId::<T>::try_mutate(|next| {
                 let id = (*next).max(1);
+                ensure!(id < kernel::SERVICE_ID_BASE, Error::<T>::InvalidIdBand);
                 ensure!(!Markets::<T>::contains_key(id), Error::<T>::DuplicateMarket);
                 *next = id.checked_add(1).ok_or(Error::<T>::ArithmeticOverflow)?;
                 Ok(id)
@@ -1374,8 +2203,8 @@ pub mod pallet {
             trailing_start: BlockNumber,
             end: BlockNumber,
         ) -> DispatchResult {
-            T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
             let book = Markets::<T>::get(id).ok_or(Error::<T>::UnknownMarket)?;
+            Self::ensure_admin_for_book(origin, book.kind)?;
             ensure!(
                 start < trailing_start && trailing_start < end,
                 Error::<T>::TryStateViolation
@@ -1444,11 +2273,11 @@ pub mod pallet {
             old_end: BlockNumber,
             shift_by: BlockNumber,
         ) -> DispatchResult {
-            T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            let book = Markets::<T>::get(id).ok_or(Error::<T>::UnknownMarket)?;
+            Self::ensure_admin_for_book(origin, book.kind)?;
             let new_end = old_end
                 .checked_add(shift_by)
                 .ok_or(Error::<T>::ArithmeticOverflow)?;
-            ensure!(Markets::<T>::contains_key(id), Error::<T>::UnknownMarket);
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
                 let mut shifted = None;
                 DecisionWindows::<T>::try_mutate(id, |windows| -> DispatchResult {
@@ -1496,7 +2325,8 @@ pub mod pallet {
             id: MarketId,
             proposal: ProposalId,
         ) -> DispatchResult {
-            T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            let book = Markets::<T>::get(id).ok_or(Error::<T>::UnknownMarket)?;
+            Self::ensure_admin_for_book(origin, book.kind)?;
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
                 let owned = DecisionWindowOwners::<T>::get(id)
                     .iter()
@@ -1558,7 +2388,7 @@ pub mod pallet {
                 Markets::<T>::try_mutate(id, |maybe_book| -> DispatchResult {
                     let book = maybe_book.as_mut().ok_or(Error::<T>::UnknownMarket)?;
                     ensure!(
-                        !matches!(book.kind, BookKind::Baseline { .. }),
+                        matches!(book.kind, BookKind::Decision { .. } | BookKind::Gate { .. }),
                         Error::<T>::BadOrigin
                     );
                     book.phase = MarketPhase::Extended;
@@ -1621,7 +2451,7 @@ pub mod pallet {
             Markets::<T>::try_mutate(id, |maybe_book| -> DispatchResult {
                 let book = maybe_book.as_mut().ok_or(Error::<T>::UnknownMarket)?;
                 ensure!(
-                    !matches!(book.kind, BookKind::Baseline { .. }),
+                    matches!(book.kind, BookKind::Decision { .. } | BookKind::Gate { .. }),
                     Error::<T>::BadOrigin
                 );
                 ensure!(
@@ -1649,10 +2479,21 @@ pub mod pallet {
             );
             let accept_book = Markets::<T>::get(accept).ok_or(Error::<T>::UnknownMarket)?;
             let reject_book = Markets::<T>::get(reject).ok_or(Error::<T>::UnknownMarket)?;
+            let line = match (
+                FundingDomain::of(accept_book.kind),
+                FundingDomain::of(reject_book.kind),
+            ) {
+                (FundingDomain::Protocol(left), FundingDomain::Protocol(right))
+                    if left == right =>
+                {
+                    left
+                }
+                _ => return Err(Error::<T>::WrongFundingDomain.into()),
+            };
             Self::ensure_market_book_indexed(&accept_book)?;
             Self::ensure_market_book_indexed(&reject_book)?;
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
-                let mut ledger = PalletLedger::<T>::new();
+                let mut ledger = RoutedLedger::<T>::protocol_for(accept_book.kind);
                 let headroom = market_core::seed_branch_pair(
                     &accept_book,
                     &reject_book,
@@ -1671,7 +2512,7 @@ pub mod pallet {
                 // One dual-minting split funds both branches, so the cash that
                 // left the line is `headroom` once — half the pair's §3
                 // commitment, exactly as 08 §10.5 computes it (I-33).
-                T::PolCommitmentSync::debit_pol_custody(PolLine::of(accept_book.kind), headroom)?;
+                T::PolCommitmentSync::debit_pol_custody(line, headroom)?;
                 T::PolCommitmentSync::sync_pol_commitments()?;
                 Ok(())
             })
@@ -1699,10 +2540,21 @@ pub mod pallet {
             );
             let accept_book = Markets::<T>::get(accept).ok_or(Error::<T>::UnknownMarket)?;
             let reject_book = Markets::<T>::get(reject).ok_or(Error::<T>::UnknownMarket)?;
+            let line = match (
+                FundingDomain::of(accept_book.kind),
+                FundingDomain::of(reject_book.kind),
+            ) {
+                (FundingDomain::Protocol(left), FundingDomain::Protocol(right))
+                    if left == right =>
+                {
+                    left
+                }
+                _ => return Err(Error::<T>::WrongFundingDomain.into()),
+            };
             Self::ensure_market_book_indexed(&accept_book)?;
             Self::ensure_market_book_indexed(&reject_book)?;
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
-                let mut ledger = PalletLedger::<T>::new();
+                let mut ledger = RoutedLedger::<T>::protocol_for(accept_book.kind);
                 let headroom = market_core::seed_branch_pair(
                     &accept_book,
                     &reject_book,
@@ -1726,7 +2578,7 @@ pub mod pallet {
                         headroom,
                     });
                 }
-                T::PolCommitmentSync::debit_pol_custody(PolLine::of(accept_book.kind), headroom)?;
+                T::PolCommitmentSync::debit_pol_custody(line, headroom)?;
                 T::PolCommitmentSync::sync_pol_commitments()?;
                 Ok(())
             })
@@ -1749,9 +2601,12 @@ pub mod pallet {
                 Error::<T>::AlreadySeeded
             );
             let book = Markets::<T>::get(id).ok_or(Error::<T>::UnknownMarket)?;
+            let FundingDomain::Protocol(line) = FundingDomain::of(book.kind) else {
+                return Err(Error::<T>::WrongFundingDomain.into());
+            };
             Self::ensure_market_book_indexed(&book)?;
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
-                let mut ledger = PalletLedger::<T>::new();
+                let mut ledger = RoutedLedger::<T>::protocol_for(book.kind);
                 let headroom = market_core::seed_book(&book, &mut ledger, &treasury)
                     .map_err(Error::<T>::from)?;
                 Markets::<T>::try_mutate(id, |maybe_book| -> DispatchResult {
@@ -1765,7 +2620,7 @@ pub mod pallet {
                     market: id,
                     headroom,
                 });
-                T::PolCommitmentSync::debit_pol_custody(PolLine::of(book.kind), headroom)?;
+                T::PolCommitmentSync::debit_pol_custody(line, headroom)?;
                 T::PolCommitmentSync::sync_pol_commitments()?;
                 Ok(())
             })
@@ -2034,6 +2889,17 @@ pub mod pallet {
         ) -> DispatchResult {
             T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
             Self::ensure_creation_open()?;
+            ensure!(
+                matches!(FundingDomain::of(kind), FundingDomain::Protocol(_)),
+                Error::<T>::WrongFundingDomain
+            );
+            ensure!(id < kernel::SERVICE_ID_BASE, Error::<T>::InvalidIdBand);
+            if let BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. } = kind {
+                ensure!(
+                    proposal < kernel::SERVICE_ID_BASE,
+                    Error::<T>::InvalidIdBand
+                );
+            }
             ensure!(!Markets::<T>::contains_key(id), Error::<T>::DuplicateMarket);
             ensure!(b > 0, Error::<T>::TryStateViolation);
             if let BookKind::Baseline {
@@ -2043,7 +2909,8 @@ pub mod pallet {
                 ensure!(baseline_epoch == epoch, Error::<T>::EpochMismatch);
             }
             ensure!(
-                Self::market_accounts_are_canonical(id, &account, &fees_account),
+                Self::market_accounts_are_canonical(id, &account, &fees_account)
+                    && Self::market_accounts_are_local(kind, &account, &fees_account),
                 Error::<T>::UnreservedProtocolAccount
             );
             // I-21: cap unsettled books independently from archive-retained rows.
@@ -2053,8 +2920,15 @@ pub mod pallet {
                 ActiveMarketCount::<T>::get() < bounds::MAX_LIVE_MARKETS,
                 Error::<T>::TooManyMarkets
             );
+            let stored_protocol = Markets::<T>::count()
+                .checked_sub(StoredExternalMarketCount::<T>::get())
+                .ok_or(Error::<T>::TryStateViolation)?;
             ensure!(
-                Markets::<T>::count() < bounds::MAX_STORED_MARKETS,
+                stored_protocol < bounds::MAX_STORED_MARKETS,
+                Error::<T>::TooManyStoredMarkets
+            );
+            ensure!(
+                Markets::<T>::count() < bounds::MAX_ALL_STORED_MARKETS,
                 Error::<T>::TooManyStoredMarkets
             );
 
@@ -2065,34 +2939,14 @@ pub mod pallet {
                 );
             }
 
-            let (market_kind, pid, event_epoch) = Self::describe_kind(kind, epoch);
+            let (market_kind, pid, event_epoch) = Self::describe_protocol_kind(kind, epoch)?;
             // Same reasoning as `seed`: this internal path creates a ledger vault and
             // writes market storage, so wrap it in a storage layer so a partial failure
             // cannot outlive its caller's error handling (G-1).
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
-                match kind {
-                    BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. } => {
-                        // A proposal's ≤ 6 books (2 decision + 4 gate, 04 §1.1) share ONE
-                        // conditional-ledger vault (03 §2.1). Create it on the first book
-                        // for this proposal and reuse it for the rest: the ledger rejects a
-                        // duplicate `create_vault`, so without this guard every multi-book
-                        // proposal — including a bare PARAM decision *pair* — would fail on
-                        // its second `create_market` (G-1: reuse, never error out).
-                        if !pallet_conditional_ledger::Vaults::<T>::contains_key(proposal) {
-                            pallet_conditional_ledger::Pallet::<T>::create_vault(
-                                PalletLedger::<T>::authority_origin(),
-                                proposal,
-                                0,
-                            )?;
-                        }
-                    }
-                    BookKind::Baseline { epoch } => {
-                        pallet_conditional_ledger::Pallet::<T>::create_baseline_vault(
-                            PalletLedger::<T>::authority_origin(),
-                            epoch,
-                        )?;
-                        BaselineMarketOf::<T>::insert(epoch, id);
-                    }
+                RoutedLedger::<T>::create_book_vault(kind)?;
+                if let BookKind::Baseline { epoch } = kind {
+                    BaselineMarketOf::<T>::insert(epoch, id);
                 }
 
                 Self::register_market_accounts(&account, &fees_account)?;
@@ -2120,11 +2974,242 @@ pub mod pallet {
             })
         }
 
-        /// Internal epoch-authority API: seed worst-case-loss headroom (04 §10).
-        pub fn seed(origin: OriginFor<T>, id: MarketId, treasury: T::AccountId) -> DispatchResult {
-            T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+        /// Atomically create the service question's exact Accept/Reject pair.
+        /// There is deliberately no singular external-book constructor: a
+        /// question either owns two scalar books and one service vault, or it
+        /// leaves no state behind (16 §7.6; G-1).
+        pub fn create_external_pair(
+            origin: OriginFor<T>,
+            input: ExternalPairInput<T::AccountId>,
+        ) -> DispatchResult {
+            let caller =
+                T::ExternalMarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            ensure!(caller == input.client, Error::<T>::BadOrigin);
             Self::ensure_creation_open()?;
+            ensure!(input.b > 0, Error::<T>::TryStateViolation);
+            ensure!(
+                input.question >= kernel::SERVICE_ID_BASE
+                    && input.accept >= kernel::SERVICE_ID_BASE
+                    && input.reject >= kernel::SERVICE_ID_BASE
+                    && input.accept != input.reject
+                    && input.question != input.accept
+                    && input.question != input.reject,
+                Error::<T>::InvalidIdBand
+            );
+            ensure!(
+                !ExternalBookPairs::<T>::contains_key(input.question),
+                Error::<T>::DuplicateExternalQuestion
+            );
+            // Question and market ids share the service allocator's u64 band.
+            // Reusing any retained pair id would defeat the id-band firewall:
+            // a mistyped id could then name a valid object in the other role.
+            // The scan is bounded by `MAX_CLIENTS = 64`.
+            ensure!(
+                ExternalBookPairs::<T>::iter().all(|(question, pair)| {
+                    [question, pair.accept, pair.reject]
+                        .into_iter()
+                        .all(|existing| {
+                            existing != input.question
+                                && existing != input.accept
+                                && existing != input.reject
+                        })
+                }),
+                Error::<T>::InvalidIdBand
+            );
+            ensure!(
+                ExternalBookPairs::<T>::count() < bounds::MAX_EXTERNAL_BOOK_PAIRS,
+                Error::<T>::TooManyExternalMarkets
+            );
+            ensure!(
+                !Markets::<T>::contains_key(input.accept)
+                    && !Markets::<T>::contains_key(input.reject),
+                Error::<T>::DuplicateMarket
+            );
+            ensure!(
+                !<T as Config>::ReservedProtocolDestinations::contains(&input.funder)
+                    && !T::ProtocolAccounts::contains(&input.funder)
+                    && !T::ServiceLedger::is_local_protocol_account(&input.funder),
+                Error::<T>::FunderMismatch
+            );
+
+            let accept_kind = BookKind::External {
+                question: input.question,
+                client: input.client,
+                branch: Branch::Accept,
+            };
+            let reject_kind = BookKind::External {
+                question: input.question,
+                client: input.client,
+                branch: Branch::Reject,
+            };
+            ensure!(
+                Self::market_accounts_are_canonical(
+                    input.accept,
+                    &input.accept_account,
+                    &input.accept_fees,
+                ) && Self::market_accounts_are_local(
+                    accept_kind,
+                    &input.accept_account,
+                    &input.accept_fees,
+                ) && Self::market_accounts_are_canonical(
+                    input.reject,
+                    &input.reject_account,
+                    &input.reject_fees,
+                ) && Self::market_accounts_are_local(
+                    reject_kind,
+                    &input.reject_account,
+                    &input.reject_fees,
+                ),
+                Error::<T>::UnreservedProtocolAccount
+            );
+
+            let hard_limit = bounds::MAX_LIVE_EXTERNAL_MARKETS;
+            let configured_limit = T::MaxLiveExternalMarkets::get();
+            ensure!(
+                configured_limit <= hard_limit && configured_limit % 2 == 0,
+                Error::<T>::TryStateViolation
+            );
+            let active_after = ActiveExternalMarketCount::<T>::get()
+                .checked_add(2)
+                .ok_or(Error::<T>::ArithmeticOverflow)?;
+            let stored_after = StoredExternalMarketCount::<T>::get()
+                .checked_add(2)
+                .ok_or(Error::<T>::ArithmeticOverflow)?;
+            ensure!(
+                active_after <= configured_limit,
+                Error::<T>::TooManyExternalMarkets
+            );
+            ensure!(
+                stored_after <= bounds::MAX_STORED_EXTERNAL_MARKETS,
+                Error::<T>::TooManyExternalMarkets
+            );
+            ensure!(
+                Markets::<T>::count().saturating_add(2) <= bounds::MAX_ALL_STORED_MARKETS,
+                Error::<T>::TooManyStoredMarkets
+            );
+
+            frame_support::storage::with_storage_layer(|| -> DispatchResult {
+                ensure!(
+                    !RoutedLedger::<T>::book_vault_exists(accept_kind)?,
+                    Error::<T>::DuplicateExternalQuestion
+                );
+                RoutedLedger::<T>::create_book_vault(accept_kind)?;
+                Self::register_market_accounts(&input.accept_account, &input.accept_fees)?;
+                Self::register_market_accounts(&input.reject_account, &input.reject_fees)?;
+                ActiveExternalMarketCount::<T>::put(active_after);
+                StoredExternalMarketCount::<T>::put(stored_after);
+                Markets::<T>::insert(
+                    input.accept,
+                    MarketBook::open(
+                        input.accept,
+                        accept_kind,
+                        input.accept_account,
+                        input.accept_fees,
+                        input.b,
+                    ),
+                );
+                Markets::<T>::insert(
+                    input.reject,
+                    MarketBook::open(
+                        input.reject,
+                        reject_kind,
+                        input.reject_account,
+                        input.reject_fees,
+                        input.b,
+                    ),
+                );
+                ExternalBookPairs::<T>::insert(
+                    input.question,
+                    ExternalBookPair {
+                        client: input.client,
+                        funder: input.funder,
+                        accept: input.accept,
+                        reject: input.reject,
+                    },
+                );
+                Ok(())
+            })
+        }
+
+        /// Permissionlessly remove a service pair record only after both market
+        /// rows and the service vault are archived. Pair records hold creation
+        /// capacity until this proof succeeds, so neglected cleanup applies
+        /// backpressure instead of growing unbounded state; client removal can
+        /// never strand that capacity.
+        pub fn archive_external_pair(origin: OriginFor<T>, question: QuestionId) -> DispatchResult {
+            let _ = ensure_signed(origin)?;
+            let pair =
+                ExternalBookPairs::<T>::get(question).ok_or(Error::<T>::TryStateViolation)?;
+            ensure!(
+                !Markets::<T>::contains_key(pair.accept)
+                    && !Markets::<T>::contains_key(pair.reject)
+                    && !RoutedLedger::<T>::book_vault_exists(BookKind::External {
+                        question,
+                        client: pair.client,
+                        branch: Branch::Accept,
+                    })?,
+                Error::<T>::TryStateViolation
+            );
+            ExternalBookPairs::<T>::remove(question);
+            Ok(())
+        }
+
+        /// Internal hosted-service API: atomically seed both external books.
+        /// Two funder splits post `2 * b * ln(2)` cash, and every minted branch
+        /// leg moves into one of the immutable book accounts before either
+        /// seeded marker is written (04 §3; 16 §7.3/§8.2).
+        pub fn seed_external_pair(
+            origin: OriginFor<T>,
+            question: QuestionId,
+            funder: T::AccountId,
+        ) -> DispatchResult {
+            let caller =
+                T::ExternalMarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            Self::ensure_creation_open()?;
+            let pair =
+                ExternalBookPairs::<T>::get(question).ok_or(Error::<T>::TryStateViolation)?;
+            ensure!(caller == pair.client, Error::<T>::BadOrigin);
+            ensure!(pair.funder == funder, Error::<T>::FunderMismatch);
+            ensure!(
+                !SeededMarkets::<T>::contains_key(pair.accept)
+                    && !SeededMarkets::<T>::contains_key(pair.reject),
+                Error::<T>::AlreadySeeded
+            );
+            let accept_book = Markets::<T>::get(pair.accept).ok_or(Error::<T>::UnknownMarket)?;
+            let reject_book = Markets::<T>::get(pair.reject).ok_or(Error::<T>::UnknownMarket)?;
+            ensure!(
+                Self::external_pair_for_book(&accept_book)? == pair
+                    && Self::external_pair_for_book(&reject_book)? == pair,
+                Error::<T>::TryStateViolation
+            );
+            Self::ensure_market_book_indexed(&accept_book)?;
+            Self::ensure_market_book_indexed(&reject_book)?;
+
+            frame_support::storage::with_storage_layer(|| -> DispatchResult {
+                let mut ledger = RoutedLedger::<T>::protocol_for(accept_book.kind);
+                let headroom = market_core::seed_external_pair(
+                    &accept_book,
+                    &reject_book,
+                    &mut ledger,
+                    &funder,
+                )
+                .map_err(Error::<T>::from)?;
+                for id in [pair.accept, pair.reject] {
+                    SeededMarkets::<T>::insert(id, funder.clone());
+                    Self::deposit_event(Event::Seeded {
+                        market: id,
+                        headroom,
+                    });
+                }
+                Ok(())
+            })
+        }
+
+        /// Internal epoch-authority API: seed protocol worst-case-loss headroom (04 §10).
+        pub fn seed(origin: OriginFor<T>, id: MarketId, treasury: T::AccountId) -> DispatchResult {
             let book = Markets::<T>::get(id).ok_or(Error::<T>::UnknownMarket)?;
+            Self::ensure_admin_for_book(origin, book.kind)?;
+            Self::ensure_creation_open()?;
             // Seed once: re-seeding splits fresh POL headroom into an already
             // collateralized book (04 §10), double-spending the subsidy.
             ensure!(
@@ -2132,6 +3217,9 @@ pub mod pallet {
                 Error::<T>::AlreadySeeded
             );
             Self::ensure_market_book_indexed(&book)?;
+            let FundingDomain::Protocol(line) = FundingDomain::of(book.kind) else {
+                return Err(Error::<T>::WrongFundingDomain.into());
+            };
             // Internal (non-`#[pallet::call]`) path: FRAME's per-dispatch storage layer
             // wraps only public extrinsics, so an epoch-tick caller that swallows the
             // error would strand a partial seed (`seed_book` drives several ledger
@@ -2139,28 +3227,29 @@ pub mod pallet {
             // and `SeededMarkets` would go unwritten → a retry could double-seed). Wrap
             // the whole sequence so any partial failure rolls back atomically (G-1).
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
-                let mut ledger = PalletLedger::<T>::new();
+                let mut ledger = RoutedLedger::<T>::protocol_for(book.kind);
                 let headroom = market_core::seed_book(&book, &mut ledger, &treasury)
                     .map_err(Error::<T>::from)?;
                 SeededMarkets::<T>::insert(id, treasury);
                 Self::insert_pol_commitment(id, headroom)?;
-                // The split above moved exactly `headroom` of real USDC out of
-                // the funding line's custody account (08 §8 steps 1–2), so the
-                // line is debited by the same amount or NAV counts cash the
-                // treasury no longer holds (08 §8 step 5; I-33).
-                T::PolCommitmentSync::debit_pol_custody(PolLine::of(book.kind), headroom)?;
+                // The split above moved exactly `headroom` of real USDC out
+                // of protocol subsidy custody. External client subsidy is
+                // admitted only by `seed_external_pair` above and therefore
+                // cannot reach this treasury/POL branch (I-37).
+                T::PolCommitmentSync::debit_pol_custody(line, headroom)?;
+                T::PolCommitmentSync::sync_pol_commitments()?;
                 Self::deposit_event(Event::Seeded {
                     market: id,
                     headroom,
                 });
-                T::PolCommitmentSync::sync_pol_commitments()?;
                 Ok(())
             })
         }
 
         /// Internal epoch-authority API: close a book and start its archive delay.
         pub fn close(origin: OriginFor<T>, id: MarketId) -> DispatchResult {
-            T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+            let book = Markets::<T>::get(id).ok_or(Error::<T>::UnknownMarket)?;
+            Self::ensure_admin_for_book(origin, book.kind)?;
             frame_support::storage::with_storage_layer(|| Self::close_book(id))
         }
 
@@ -2208,6 +3297,34 @@ pub mod pallet {
             Ok(())
         }
 
+        /// Select the freeze latch through the same exhaustive route that
+        /// selects the ledger instance. This is the market-side half of I-37:
+        /// a primary deficit cannot stop service funds, and a service deficit
+        /// cannot admit service movement or stop the primary domain.
+        fn ensure_book_domain_not_frozen(kind: BookKind) -> DispatchResult {
+            match LedgerRoute::for_book(kind) {
+                LedgerRoute::Primary => Self::ensure_not_frozen(),
+                LedgerRoute::Service => {
+                    ensure!(!T::ServiceLedger::funds_frozen(), Error::<T>::Frozen);
+                    Ok(())
+                }
+            }
+        }
+
+        fn ensure_admin_for_book(origin: OriginFor<T>, kind: BookKind) -> DispatchResult {
+            match FundingDomain::of(kind) {
+                FundingDomain::Protocol(_) => {
+                    T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
+                }
+                FundingDomain::ExternalClient(expected) => {
+                    let actual = T::ExternalMarketAdmin::ensure_origin(origin)
+                        .map_err(|_| Error::<T>::BadOrigin)?;
+                    ensure!(actual == expected, Error::<T>::BadOrigin);
+                }
+            }
+            Ok(())
+        }
+
         /// Epoch-authority boundary seal for a particular proposal window.
         /// Shared Baseline books remain open, but this window becomes immutable.
         pub fn seal_decision_window(
@@ -2215,8 +3332,8 @@ pub mod pallet {
             id: MarketId,
             end: BlockNumber,
         ) -> DispatchResult {
-            T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
             let book = Markets::<T>::get(id).ok_or(Error::<T>::UnknownMarket)?;
+            Self::ensure_admin_for_book(origin, book.kind)?;
             ensure!(Self::now_u64() >= u64::from(end), Error::<T>::NotTrading);
             Self::seal_window(id, &book, end)
         }
@@ -2237,11 +3354,12 @@ pub mod pallet {
         /// of its bounded book obligations, and mirror treasury in the same
         /// transaction. The latch survives later ledger sweeping.
         pub fn observe_proposal_terminal(proposal: ProposalId) -> DispatchResult {
-            let terminal = pallet_conditional_ledger::VaultTerminalAt::<T>::get(proposal)
+            let ids = ProposalMarketIds::<T>::get(proposal);
+            let first = ids.first().copied().ok_or(Error::<T>::TryStateViolation)?;
+            let first_book = Markets::<T>::get(first).ok_or(Error::<T>::TryStateViolation)?;
+            let terminal = RoutedLedger::<T>::book_terminal_at(first_book.kind)?
                 .ok_or(Error::<T>::TryStateViolation)?;
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
-                let ids = ProposalMarketIds::<T>::get(proposal);
-                ensure!(!ids.is_empty(), Error::<T>::TryStateViolation);
                 for id in ids {
                     let book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
                     ensure!(
@@ -2270,9 +3388,10 @@ pub mod pallet {
 
         /// Baseline counterpart of `observe_proposal_terminal`.
         pub fn observe_baseline_terminal(epoch: EpochId) -> DispatchResult {
-            let terminal = pallet_conditional_ledger::BaselineTerminalAt::<T>::get(epoch)
-                .ok_or(Error::<T>::TryStateViolation)?;
             let id = BaselineMarketOf::<T>::get(epoch).ok_or(Error::<T>::TryStateViolation)?;
+            let indexed = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
+            let terminal = RoutedLedger::<T>::book_terminal_at(indexed.kind)?
+                .ok_or(Error::<T>::TryStateViolation)?;
             frame_support::storage::with_storage_layer(|| -> DispatchResult {
                 let book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
                 ensure!(
@@ -2300,6 +3419,49 @@ pub mod pallet {
                 Self::clear_terminal_window_state(id);
                 Self::remove_pol_commitment(id);
                 T::PolCommitmentSync::sync_pol_commitments()
+            })
+        }
+
+        /// Service-domain counterpart of `observe_proposal_terminal`. It
+        /// releases only the external live-book counter and never consults or
+        /// mutates POL state (16 §7.3).
+        pub fn observe_external_terminal(question: QuestionId) -> DispatchResult {
+            let pair =
+                ExternalBookPairs::<T>::get(question).ok_or(Error::<T>::TryStateViolation)?;
+            let indexed = Markets::<T>::get(pair.accept).ok_or(Error::<T>::TryStateViolation)?;
+            let terminal = RoutedLedger::<T>::book_terminal_at(indexed.kind)?
+                .ok_or(Error::<T>::TryStateViolation)?;
+            frame_support::storage::with_storage_layer(|| -> DispatchResult {
+                for (id, branch) in [(pair.accept, Branch::Accept), (pair.reject, Branch::Reject)] {
+                    let book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
+                    ensure!(
+                        matches!(book.kind,
+                            BookKind::External {
+                                question: owner,
+                                client,
+                                branch: actual,
+                            } if owner == question && client == pair.client && actual == branch
+                        ),
+                        Error::<T>::TryStateViolation
+                    );
+                    if !matches!(book.phase, MarketPhase::Closed) {
+                        Self::close_book(id)?;
+                    }
+                    if let Some(observed) = SettlementObservedAt::<T>::get(id) {
+                        ensure!(observed == terminal, Error::<T>::TryStateViolation);
+                    } else {
+                        SettlementObservedAt::<T>::insert(id, terminal);
+                        Self::release_active_external_market_slot()?;
+                    }
+                    Self::clear_terminal_window_state(id);
+                    ensure!(
+                        !LivePolCommitments::<T>::get()
+                            .iter()
+                            .any(|(market, _)| *market == id),
+                        Error::<T>::TryStateViolation
+                    );
+                }
+                Ok(())
             })
         }
 
@@ -2358,35 +3520,42 @@ pub mod pallet {
         /// A vault the ledger's independent archive crank already swept carries
         /// nothing left to value; the market-side latch stays authoritative.
         fn book_return_is_complete(book: &MarketBook<T::AccountId>) -> bool {
+            let ledger = RoutedLedger::<T>::protocol_for(book.kind);
             let (proposal, branch, gate) = match book.kind {
-                BookKind::Decision { proposal, branch } => (proposal, branch, None),
+                BookKind::Decision { proposal, branch }
+                | BookKind::External {
+                    question: proposal,
+                    branch,
+                    ..
+                } => (proposal, branch, None),
                 BookKind::Gate {
                     proposal,
                     branch,
                     gate,
                 } => (proposal, branch, Some(gate)),
                 BookKind::Baseline { epoch } => {
-                    if !pallet_conditional_ledger::BaselineVaults::<T>::contains_key(epoch) {
-                        return true;
-                    }
-                    return [ScalarSide::Long, ScalarSide::Short]
-                        .into_iter()
-                        .all(|side| {
-                            pallet_conditional_ledger::Positions::<T>::get(
-                                baseline_position(epoch, side),
-                                &book.account,
-                            ) == 0
-                        });
+                    return match ledger.baseline_terminal(epoch) {
+                        Some(market_core::BaselineTerminal::Archived) => true,
+                        Some(market_core::BaselineTerminal::Settled) => {
+                            [ScalarSide::Long, ScalarSide::Short]
+                                .into_iter()
+                                .all(|side| {
+                                    ledger.position_balance(
+                                        baseline_position(epoch, side),
+                                        &book.account,
+                                    ) == 0
+                                })
+                        }
+                        None => false,
+                    };
                 }
             };
-            let Some(info) = pallet_conditional_ledger::Vaults::<T>::get(proposal) else {
+            let terminal = ledger.vault_terminal(proposal);
+            if matches!(terminal, Some(market_core::VaultTerminal::Archived)) {
                 return true;
-            };
+            }
             let held = |kind| {
-                pallet_conditional_ledger::Positions::<T>::get(
-                    proposal_position(proposal, branch, kind),
-                    &book.account,
-                )
+                ledger.position_balance(proposal_position(proposal, branch, kind), &book.account)
             };
             // A book only ever holds its own branch's own instruments — seeding,
             // the D-3 wrapper and revenue recycling all mint into that one set —
@@ -2395,8 +3564,8 @@ pub mod pallet {
                 Some(gate) => [PositionKind::GateYes(gate), PositionKind::GateNo(gate)],
                 None => [PositionKind::Long, PositionKind::Short],
             };
-            match info.state {
-                VaultState::ScalarSettled { winner, .. } => {
+            match terminal {
+                Some(market_core::VaultTerminal::Settled { winner }) => {
                     // On the losing branch every leg pays 0: that is exactly the
                     // worthless residue reap is allowed to discard.
                     if winner != branch {
@@ -2409,7 +3578,7 @@ pub mod pallet {
                         // The losing gate side is reap-only; an unrecorded
                         // outcome leaves both live, and the sweep refuses such a
                         // book rather than leaving one behind.
-                        Some(gate) => match info.gate_outcomes[gate_index(gate)] {
+                        Some(gate) => match ledger.gate_outcome(proposal, gate) {
                             Some(true) => held(PositionKind::GateYes(gate)) == 0,
                             Some(false) => held(PositionKind::GateNo(gate)) == 0,
                             None => legs.into_iter().all(|leg| held(leg) == 0),
@@ -2419,7 +3588,7 @@ pub mod pallet {
                 }
                 // Under VOID every instrument carries the D-1 neutral value, so
                 // nothing the book holds may remain.
-                VaultState::Voided => {
+                Some(market_core::VaultTerminal::Voided) => {
                     held(PositionKind::BranchUsdc) == 0
                         && legs.into_iter().all(|leg| held(leg) == 0)
                 }
@@ -2432,10 +3601,12 @@ pub mod pallet {
         /// terminal settlement marker and is then durably latched by the market
         /// before the ledger marker can be swept.
         pub fn pol_obligation_live(id: MarketId, book: &MarketBook<T::AccountId>) -> bool {
+            if !matches!(FundingDomain::of(book.kind), FundingDomain::Protocol(_)) {
+                return false;
+            }
             if !SeededMarkets::<T>::contains_key(id) {
                 return false;
             }
-            let _ = book;
             !SettlementObservedAt::<T>::contains_key(id)
         }
 
@@ -2463,7 +3634,7 @@ pub mod pallet {
                 // that grants deposit exemption. This defense keeps an unsafe
                 // runtime configuration from reclassifying claimant state.
                 ensure!(
-                    T::ProtocolAccounts::contains(who),
+                    <T as Config>::ReservedProtocolDestinations::contains(who),
                     Error::<T>::UnreservedProtocolAccount
                 );
                 MarketProtocolAccounts::<T>::try_mutate(who, |references| -> DispatchResult {
@@ -2472,7 +3643,7 @@ pub mod pallet {
                             *count = count.checked_add(1).ok_or(Error::<T>::ArithmeticOverflow)?;
                         }
                         None => {
-                            let bound = bounds::MAX_STORED_MARKETS
+                            let bound = bounds::MAX_ALL_STORED_MARKETS
                                 .checked_mul(2)
                                 .ok_or(Error::<T>::ArithmeticOverflow)?;
                             ensure!(
@@ -2496,8 +3667,25 @@ pub mod pallet {
             *account == T::MarketAccounts::book(id)
                 && *fees_account == T::MarketAccounts::fees(id)
                 && account != fees_account
-                && T::ProtocolAccounts::contains(account)
-                && T::ProtocolAccounts::contains(fees_account)
+                && <T as Config>::ReservedProtocolDestinations::contains(account)
+                && <T as Config>::ReservedProtocolDestinations::contains(fees_account)
+        }
+
+        fn market_accounts_are_local(
+            kind: BookKind,
+            account: &T::AccountId,
+            fees_account: &T::AccountId,
+        ) -> bool {
+            match LedgerRoute::for_book(kind) {
+                LedgerRoute::Primary => {
+                    T::ProtocolAccounts::contains(account)
+                        && T::ProtocolAccounts::contains(fees_account)
+                }
+                LedgerRoute::Service => {
+                    T::ServiceLedger::is_local_protocol_account(account)
+                        && T::ServiceLedger::is_local_protocol_account(fees_account)
+                }
+            }
         }
 
         fn release_active_market_slot() -> DispatchResult {
@@ -2505,6 +3693,44 @@ pub mod pallet {
                 *count = count.checked_sub(1).ok_or(Error::<T>::TryStateViolation)?;
                 Ok(())
             })
+        }
+
+        fn release_active_external_market_slot() -> DispatchResult {
+            ActiveExternalMarketCount::<T>::try_mutate(|count| -> DispatchResult {
+                *count = count.checked_sub(1).ok_or(Error::<T>::TryStateViolation)?;
+                Ok(())
+            })
+        }
+
+        fn release_stored_external_market_slot() -> DispatchResult {
+            StoredExternalMarketCount::<T>::try_mutate(|count| -> DispatchResult {
+                *count = count.checked_sub(1).ok_or(Error::<T>::TryStateViolation)?;
+                Ok(())
+            })
+        }
+
+        fn external_pair_for_book(
+            book: &MarketBook<T::AccountId>,
+        ) -> Result<ExternalBookPair<T::AccountId>, DispatchError> {
+            let BookKind::External {
+                question,
+                client,
+                branch,
+            } = book.kind
+            else {
+                return Err(Error::<T>::WrongFundingDomain.into());
+            };
+            let pair =
+                ExternalBookPairs::<T>::get(question).ok_or(Error::<T>::TryStateViolation)?;
+            let expected = match branch {
+                Branch::Accept => pair.accept,
+                Branch::Reject => pair.reject,
+            };
+            ensure!(
+                pair.client == client && expected == book.id,
+                Error::<T>::TryStateViolation
+            );
+            Ok(pair)
         }
 
         fn clear_terminal_window_state(id: MarketId) {
@@ -2777,11 +4003,11 @@ pub mod pallet {
             Ok(())
         }
 
-        fn describe_kind(
+        fn describe_protocol_kind(
             kind: BookKind,
             epoch: EpochId,
-        ) -> (MarketKind, Option<ProposalId>, EpochId) {
-            match kind {
+        ) -> Result<(MarketKind, Option<ProposalId>, EpochId), DispatchError> {
+            let described = match kind {
                 BookKind::Decision { proposal, branch } => (
                     if matches!(branch, Branch::Accept) {
                         MarketKind::DecisionAccept
@@ -2805,7 +4031,11 @@ pub mod pallet {
                     (kind, Some(proposal), epoch)
                 }
                 BookKind::Baseline { epoch } => (MarketKind::Baseline, None, epoch),
-            }
+                BookKind::External { .. } => {
+                    return Err(Error::<T>::WrongFundingDomain.into());
+                }
+            };
+            Ok(described)
         }
 
         fn deposit_trade_event(event: market_core::Event<T::AccountId>) -> DispatchResult {
@@ -2843,15 +4073,127 @@ pub mod pallet {
         /// obligation (15 I-12: "differential vs MPFR; fuzz"), not a try-state check.
         pub fn do_try_state() -> Result<(), DispatchError> {
             let now: u64 = Self::now_u64();
+            ensure!(
+                NextMarketId::<T>::get() <= kernel::SERVICE_ID_BASE,
+                Error::<T>::TryStateViolation
+            );
+            ensure!(
+                T::PrimaryProposalIds::next_proposal_id() <= kernel::SERVICE_ID_BASE,
+                Error::<T>::TryStateViolation
+            );
+            ensure!(
+                ExternalBookPairs::<T>::count() <= bounds::MAX_EXTERNAL_BOOK_PAIRS,
+                Error::<T>::TryStateViolation
+            );
+            let configured_external_limit = T::MaxLiveExternalMarkets::get();
+            ensure!(
+                configured_external_limit <= bounds::MAX_LIVE_EXTERNAL_MARKETS
+                    && configured_external_limit % 2 == 0,
+                Error::<T>::TryStateViolation
+            );
+
+            let mut paired_markets = BTreeMap::<MarketId, QuestionId>::new();
+            let mut service_ids = BTreeMap::<u64, ()>::new();
+            for (question, pair) in ExternalBookPairs::<T>::iter() {
+                ensure!(
+                    question >= kernel::SERVICE_ID_BASE
+                        && pair.accept >= kernel::SERVICE_ID_BASE
+                        && pair.reject >= kernel::SERVICE_ID_BASE
+                        && pair.accept != pair.reject
+                        && question != pair.accept
+                        && question != pair.reject
+                        && !<T as Config>::ReservedProtocolDestinations::contains(&pair.funder)
+                        && !T::ProtocolAccounts::contains(&pair.funder)
+                        && !T::ServiceLedger::is_local_protocol_account(&pair.funder)
+                        && service_ids.insert(question, ()).is_none()
+                        && service_ids.insert(pair.accept, ()).is_none()
+                        && service_ids.insert(pair.reject, ()).is_none()
+                        && paired_markets.insert(pair.accept, question).is_none()
+                        && paired_markets.insert(pair.reject, question).is_none(),
+                    Error::<T>::TryStateViolation
+                );
+                for (id, branch) in [(pair.accept, Branch::Accept), (pair.reject, Branch::Reject)] {
+                    if let Some(book) = Markets::<T>::get(id) {
+                        ensure!(
+                            matches!(book.kind,
+                                BookKind::External {
+                                    question: owner,
+                                    client,
+                                    branch: actual,
+                                } if owner == question
+                                    && client == pair.client
+                                    && actual == branch
+                            ),
+                            Error::<T>::TryStateViolation
+                        );
+                    }
+                }
+                let accept_book = Markets::<T>::get(pair.accept);
+                let reject_book = Markets::<T>::get(pair.reject);
+                match (&accept_book, &reject_book) {
+                    (Some(accept), Some(reject)) => {
+                        let accept_seed = SeededMarkets::<T>::get(pair.accept);
+                        let reject_seed = SeededMarkets::<T>::get(pair.reject);
+                        ensure!(
+                            accept.b == reject.b
+                                && accept_seed == reject_seed
+                                && accept_seed.as_ref().is_none_or(|who| who == &pair.funder)
+                                && SettlementObservedAt::<T>::get(pair.accept)
+                                    == SettlementObservedAt::<T>::get(pair.reject),
+                            Error::<T>::TryStateViolation
+                        );
+                    }
+                    (Some(_), None) => ensure!(
+                        SettlementObservedAt::<T>::contains_key(pair.accept)
+                            && SeededMarkets::<T>::get(pair.accept)
+                                .as_ref()
+                                .is_none_or(|who| who == &pair.funder),
+                        Error::<T>::TryStateViolation
+                    ),
+                    (None, Some(_)) => ensure!(
+                        SettlementObservedAt::<T>::contains_key(pair.reject)
+                            && SeededMarkets::<T>::get(pair.reject)
+                                .as_ref()
+                                .is_none_or(|who| who == &pair.funder),
+                        Error::<T>::TryStateViolation
+                    ),
+                    (None, None) => {}
+                }
+            }
             for (id, book) in Markets::<T>::iter() {
                 // Permanent custody classification is keyed by the market id,
                 // not reconstructed from the mutable ownership index. Catch a
                 // migration or storage corruption that swaps roles or assigns
                 // another market's otherwise-reserved pair (03 §5.4; TH-11).
                 ensure!(
-                    Self::market_accounts_are_canonical(id, &book.account, &book.fees_account,),
+                    Self::market_accounts_are_canonical(id, &book.account, &book.fees_account,)
+                        && Self::market_accounts_are_local(
+                            book.kind,
+                            &book.account,
+                            &book.fees_account,
+                        ),
                     Error::<T>::TryStateViolation
                 );
+                match book.kind {
+                    BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. } => {
+                        ensure!(
+                            id < kernel::SERVICE_ID_BASE && proposal < kernel::SERVICE_ID_BASE,
+                            Error::<T>::TryStateViolation
+                        );
+                    }
+                    BookKind::Baseline { .. } => {
+                        ensure!(id < kernel::SERVICE_ID_BASE, Error::<T>::TryStateViolation);
+                    }
+                    BookKind::External { question, .. } => {
+                        ensure!(
+                            id >= kernel::SERVICE_ID_BASE
+                                && question >= kernel::SERVICE_ID_BASE
+                                && paired_markets.get(&id) == Some(&question),
+                            Error::<T>::TryStateViolation
+                        );
+                        let _ = Self::external_pair_for_book(&book)?;
+                    }
+                }
                 if let BookKind::Baseline { epoch } = book.kind {
                     ensure!(
                         BaselineMarketOf::<T>::get(epoch) == Some(id),
@@ -2886,14 +4228,7 @@ pub mod pallet {
                     Error::<T>::TryStateViolation
                 );
                 // I-12 (structural): the book is backed by a live ledger vault.
-                let vault_exists = match book.kind {
-                    BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. } => {
-                        pallet_conditional_ledger::Vaults::<T>::contains_key(proposal)
-                    }
-                    BookKind::Baseline { epoch } => {
-                        pallet_conditional_ledger::BaselineVaults::<T>::contains_key(epoch)
-                    }
-                };
+                let vault_exists = RoutedLedger::<T>::book_vault_exists(book.kind)?;
                 ensure!(
                     vault_exists || SettlementObservedAt::<T>::contains_key(id),
                     Error::<T>::TryStateViolation
@@ -2915,21 +4250,41 @@ pub mod pallet {
                 );
             }
             ensure!(
-                Markets::<T>::count() <= bounds::MAX_STORED_MARKETS,
+                Markets::<T>::count() <= bounds::MAX_ALL_STORED_MARKETS,
                 Error::<T>::TryStateViolation
             );
             ensure!(
                 MarketProtocolAccounts::<T>::count()
-                    <= bounds::MAX_STORED_MARKETS.saturating_mul(2),
+                    <= bounds::MAX_ALL_STORED_MARKETS.saturating_mul(2),
                 Error::<T>::TryStateViolation
             );
             let mut expected_accounts = BTreeMap::<T::AccountId, u16>::new();
-            let mut expected_active = 0_u32;
+            let mut expected_active_protocol = 0_u32;
+            let mut expected_active_external = 0_u32;
+            let mut expected_stored_protocol = 0_u32;
+            let mut expected_stored_external = 0_u32;
             for (id, book) in Markets::<T>::iter() {
-                if !SettlementObservedAt::<T>::contains_key(id) {
-                    expected_active = expected_active
-                        .checked_add(1)
-                        .ok_or(Error::<T>::TryStateViolation)?;
+                match FundingDomain::of(book.kind) {
+                    FundingDomain::Protocol(_) => {
+                        expected_stored_protocol = expected_stored_protocol
+                            .checked_add(1)
+                            .ok_or(Error::<T>::TryStateViolation)?;
+                        if !SettlementObservedAt::<T>::contains_key(id) {
+                            expected_active_protocol = expected_active_protocol
+                                .checked_add(1)
+                                .ok_or(Error::<T>::TryStateViolation)?;
+                        }
+                    }
+                    FundingDomain::ExternalClient(_) => {
+                        expected_stored_external = expected_stored_external
+                            .checked_add(1)
+                            .ok_or(Error::<T>::TryStateViolation)?;
+                        if !SettlementObservedAt::<T>::contains_key(id) {
+                            expected_active_external = expected_active_external
+                                .checked_add(1)
+                                .ok_or(Error::<T>::TryStateViolation)?;
+                        }
+                    }
                 }
                 for who in [&book.account, &book.fees_account] {
                     let count = expected_accounts.entry(who.clone()).or_default();
@@ -2937,8 +4292,14 @@ pub mod pallet {
                 }
             }
             ensure!(
-                expected_active == ActiveMarketCount::<T>::get()
-                    && expected_active <= bounds::MAX_LIVE_MARKETS,
+                expected_active_protocol == ActiveMarketCount::<T>::get()
+                    && expected_active_protocol <= bounds::MAX_LIVE_MARKETS
+                    && expected_active_external == ActiveExternalMarketCount::<T>::get()
+                    && expected_active_external <= bounds::MAX_LIVE_EXTERNAL_MARKETS
+                    && expected_active_external % 2 == 0
+                    && expected_stored_external == StoredExternalMarketCount::<T>::get()
+                    && expected_stored_external <= bounds::MAX_STORED_EXTERNAL_MARKETS
+                    && expected_stored_protocol <= bounds::MAX_STORED_MARKETS,
                 Error::<T>::TryStateViolation
             );
             ensure!(
@@ -2965,19 +4326,18 @@ pub mod pallet {
             for (proposal, ids) in ProposalMarketIds::<T>::iter() {
                 ensure!(!ids.is_empty(), Error::<T>::TryStateViolation);
                 let mut previous = None;
-                let ledger_terminal =
-                    pallet_conditional_ledger::VaultTerminalAt::<T>::get(proposal);
                 for id in ids {
                     let book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
                     ensure!(
                         previous.is_none_or(|prior| prior < id)
                             && matches!(book.kind,
-                                BookKind::Decision { proposal: owner, .. }
-                                | BookKind::Gate { proposal: owner, .. }
-                                if owner == proposal
+                                    BookKind::Decision { proposal: owner, .. }
+                                    | BookKind::Gate { proposal: owner, .. }
+                                    if owner == proposal
                             ),
                         Error::<T>::TryStateViolation
                     );
+                    let ledger_terminal = RoutedLedger::<T>::book_terminal_at(book.kind)?;
                     if let Some(terminal) = ledger_terminal {
                         ensure!(
                             SettlementObservedAt::<T>::get(id) == Some(terminal),
@@ -2993,9 +4353,7 @@ pub mod pallet {
                     matches!(book.kind, BookKind::Baseline { epoch: e } if e == epoch),
                     Error::<T>::TryStateViolation
                 );
-                if let Some(terminal) =
-                    pallet_conditional_ledger::BaselineTerminalAt::<T>::get(epoch)
-                {
+                if let Some(terminal) = RoutedLedger::<T>::book_terminal_at(book.kind)? {
                     ensure!(
                         SettlementObservedAt::<T>::get(market) == Some(terminal),
                         Error::<T>::TryStateViolation
@@ -3125,14 +4483,7 @@ pub mod pallet {
                 // archived, which preserves the specified market-first and
                 // ledger-first cleanup interleavings.
                 if !SweptMarkets::<T>::contains_key(id) {
-                    let vault_present = match book.kind {
-                        BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. } => {
-                            pallet_conditional_ledger::Vaults::<T>::contains_key(proposal)
-                        }
-                        BookKind::Baseline { epoch } => {
-                            pallet_conditional_ledger::BaselineVaults::<T>::contains_key(epoch)
-                        }
-                    };
+                    let vault_present = RoutedLedger::<T>::book_vault_exists(book.kind)?;
                     ensure!(vault_present, Error::<T>::TryStateViolation);
                 }
             }
@@ -3157,6 +4508,10 @@ pub mod pallet {
             let mut previous_commitment = None;
             for (id, amount) in &commitments {
                 let book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
+                ensure!(
+                    matches!(FundingDomain::of(book.kind), FundingDomain::Protocol(_)),
+                    Error::<T>::TryStateViolation
+                );
                 let expected = if RerunSeededMarkets::<T>::contains_key(id) {
                     let original_b = book.b.checked_div(2).ok_or(Error::<T>::TryStateViolation)?;
                     market_core::seed_headroom(original_b)
@@ -3176,11 +4531,25 @@ pub mod pallet {
                 previous_commitment = Some(*id);
             }
             for id in SeededMarkets::<T>::iter_keys() {
+                let book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
                 let indexed = commitments.iter().any(|(market, _)| *market == id);
-                ensure!(
-                    indexed != SettlementObservedAt::<T>::contains_key(id),
-                    Error::<T>::TryStateViolation
-                );
+                match FundingDomain::of(book.kind) {
+                    FundingDomain::Protocol(_) => ensure!(
+                        indexed != SettlementObservedAt::<T>::contains_key(id),
+                        Error::<T>::TryStateViolation
+                    ),
+                    FundingDomain::ExternalClient(_) => {
+                        let funder =
+                            SeededMarkets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
+                        let pair = Self::external_pair_for_book(&book)?;
+                        ensure!(
+                            !indexed
+                                && pair.funder == funder
+                                && !RerunSeededMarkets::<T>::contains_key(id),
+                            Error::<T>::TryStateViolation
+                        );
+                    }
+                }
             }
             for (id, terminal) in SettlementObservedAt::<T>::iter() {
                 let book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
@@ -3201,32 +4570,19 @@ pub mod pallet {
                         && !DecisionWindowOwners::<T>::contains_key(id),
                     Error::<T>::TryStateViolation
                 );
-                match book.kind {
-                    BookKind::Decision { proposal, .. } | BookKind::Gate { proposal, .. } => {
-                        let ledger_terminal =
-                            pallet_conditional_ledger::VaultTerminalAt::<T>::get(proposal);
-                        if pallet_conditional_ledger::Vaults::<T>::contains_key(proposal) {
-                            ensure!(ledger_terminal.is_some(), Error::<T>::TryStateViolation);
-                        }
-                        if let Some(ledger_terminal) = ledger_terminal {
-                            ensure!(ledger_terminal == terminal, Error::<T>::TryStateViolation);
-                        }
-                    }
-                    BookKind::Baseline { epoch } => {
-                        let ledger_terminal =
-                            pallet_conditional_ledger::BaselineTerminalAt::<T>::get(epoch);
-                        if pallet_conditional_ledger::BaselineVaults::<T>::contains_key(epoch) {
-                            ensure!(ledger_terminal.is_some(), Error::<T>::TryStateViolation);
-                        }
-                        if let Some(ledger_terminal) = ledger_terminal {
-                            ensure!(ledger_terminal == terminal, Error::<T>::TryStateViolation);
-                        }
-                    }
+                let ledger_terminal = RoutedLedger::<T>::book_terminal_at(book.kind)?;
+                if RoutedLedger::<T>::book_vault_exists(book.kind)? {
+                    ensure!(ledger_terminal.is_some(), Error::<T>::TryStateViolation);
+                }
+                if let Some(ledger_terminal) = ledger_terminal {
+                    ensure!(ledger_terminal == terminal, Error::<T>::TryStateViolation);
                 }
             }
             for id in RerunSeededMarkets::<T>::iter_keys() {
+                let book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
                 ensure!(
-                    Markets::<T>::contains_key(id) && SeededMarkets::<T>::contains_key(id),
+                    SeededMarkets::<T>::contains_key(id)
+                        && matches!(FundingDomain::of(book.kind), FundingDomain::Protocol(_)),
                     Error::<T>::TryStateViolation
                 );
             }

@@ -191,6 +191,8 @@ class SurfaceManifestTests(unittest.TestCase):
                 "MarketReaped",
                 # contract v17 (E1/E2): the 04 §2 Sweep stage.
                 "RevenueSwept",
+                # contract v20 (N6): external service fees and exact-funder return.
+                "ExternalRevenueSwept",
             },
             "pallet-epoch": {
                 "ProposalSubmitted",

@@ -2,7 +2,7 @@
 
 > Generated 2026-07-12 from the frozen specification in `docs/architecture/` at commit
 > `9f250be`; refreshed through Track N / N4 on 2026-08-01. Contract v19 is in force;
-> hosted-question-service contract v20 is authored but not yet in force. This pack exists
+> external-market contract v20 is in force; hosted question/report contract v21 is authored but not yet in force. This pack exists
 > because design tools cap attachments (Claude Design: 10 files)
 > and the full spec is ~677 KB across 17 documents. It compresses the spec into 7 files
 > without losing anything a frontend designer needs. **The spec always wins over this pack.**

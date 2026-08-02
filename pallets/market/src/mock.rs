@@ -3,7 +3,9 @@
 
 use crate as pallet_market;
 use frame_support::{
-    derive_impl, parameter_types,
+    derive_impl,
+    instances::Instance1,
+    parameter_types,
     traits::{AsEnsureOriginWithArg, Contains, EnsureOrigin},
     PalletId,
 };
@@ -27,6 +29,7 @@ pub const CHARLIE: AccountId = 3;
 pub const RESOLVER: AccountId = 101;
 pub const SETTLER: AccountId = 102;
 pub const MARKET_ADMIN: AccountId = 103;
+pub const EXTERNAL_CLIENT_ID: question_service_core::ClientId = 7;
 pub const BOOK: AccountId = 900;
 pub const FEES: AccountId = 901;
 pub const POL: AccountId = 902;
@@ -44,9 +47,11 @@ pub const UNIT: Balance = 1_000_000;
 // unit-test ids retain the compact BOOK/FEES fixtures below.
 const BENCHMARK_MARKET_ID_BASE: MarketId = 1 << 32;
 const BENCHMARK_MARKET_ACCOUNT_BASE: AccountId = 1 << 48;
+const SERVICE_MARKET_ACCOUNT_BASE: AccountId = 1 << 56;
 
 thread_local! {
     pub static BASELINE_GRADE_ALLOWED: Cell<bool> = const { Cell::new(true) };
+    pub static NEXT_PRIMARY_PROPOSAL_ID: Cell<u64> = const { Cell::new(1) };
 }
 
 frame_support::construct_runtime!(
@@ -55,6 +60,7 @@ frame_support::construct_runtime!(
         Balances: pallet_balances,
         Assets: pallet_assets,
         Ledger: pallet_conditional_ledger,
+        ServiceLedger: pallet_conditional_ledger::<Instance1>,
         Market: pallet_market,
     }
 );
@@ -106,6 +112,23 @@ ensure_account!(EnsureResolver, RESOLVER);
 ensure_account!(EnsureSettler, SETTLER);
 ensure_account!(EnsureMarketAdmin, MARKET_ADMIN);
 
+pub struct EnsureExternalClient;
+impl EnsureOrigin<RuntimeOrigin> for EnsureExternalClient {
+    type Success = question_service_core::ClientId;
+
+    fn try_origin(origin: RuntimeOrigin) -> Result<Self::Success, RuntimeOrigin> {
+        match origin.clone().into() {
+            Ok(RawOrigin::Signed(who)) if who == ALICE => Ok(EXTERNAL_CLIENT_ID),
+            _ => Err(origin),
+        }
+    }
+
+    #[cfg(feature = "runtime-benchmarks")]
+    fn try_successful_origin() -> Result<RuntimeOrigin, ()> {
+        Ok(RawOrigin::Signed(ALICE).into())
+    }
+}
+
 pub struct EnsureMarketPallet;
 impl EnsureOrigin<RuntimeOrigin> for EnsureMarketPallet {
     type Success = ();
@@ -132,14 +155,36 @@ impl Contains<AccountId> for Protocol {
             || *who == market_account()
             || *who == ledger_account()
             || (BENCHMARK_MARKET_ACCOUNT_BASE..benchmark_account_end).contains(who)
-            || crate::MarketProtocolAccounts::<Test>::contains_key(who)
+    }
+}
+
+pub struct ServiceProtocol;
+impl Contains<AccountId> for ServiceProtocol {
+    fn contains(who: &AccountId) -> bool {
+        matches!(*who, INSURANCE | MAIN)
+            || *who == market_account()
+            || *who == service_ledger_account()
+            // Model the production AccountId32 domain prefix, not current
+            // occupancy: canonical addresses remain reserved after reap and
+            // the monotone service-id allocator does not recycle offsets.
+            || *who >= SERVICE_MARKET_ACCOUNT_BASE
+    }
+}
+
+pub struct ReservedProtocolDestinations;
+impl Contains<AccountId> for ReservedProtocolDestinations {
+    fn contains(who: &AccountId) -> bool {
+        Protocol::contains(who) || ServiceProtocol::contains(who)
     }
 }
 
 pub struct TestMarketAccounts;
 impl crate::MarketAccountProvider<AccountId> for TestMarketAccounts {
     fn book(id: futarchy_primitives::MarketId) -> AccountId {
-        if id >= BENCHMARK_MARKET_ID_BASE {
+        if id >= kernel::SERVICE_ID_BASE {
+            SERVICE_MARKET_ACCOUNT_BASE
+                .saturating_add(id.saturating_sub(kernel::SERVICE_ID_BASE).saturating_mul(2))
+        } else if id >= BENCHMARK_MARKET_ID_BASE {
             BENCHMARK_MARKET_ACCOUNT_BASE.saturating_add(
                 id.saturating_sub(BENCHMARK_MARKET_ID_BASE)
                     .saturating_mul(2),
@@ -173,8 +218,16 @@ impl pallet_market::BaselineGrade for TestBaselineGrade {
     }
 }
 
+pub struct TestPrimaryProposalIds;
+impl crate::PrimaryProposalIdProvider for TestPrimaryProposalIds {
+    fn next_proposal_id() -> futarchy_primitives::ProposalId {
+        NEXT_PRIMARY_PROPOSAL_ID.with(Cell::get)
+    }
+}
+
 parameter_types! {
     pub const LedgerPalletId: PalletId = PalletId(*b"bl/ledgr");
+    pub const ServiceLedgerPalletId: PalletId = PalletId(*b"bl/svcld");
     pub const MarketPalletId: PalletId = PalletId(*b"bl/mrket");
     pub static MinSplit: Balance = kernel::MIN_SPLIT_USDC;
     pub PositionDeposit: Balance = kernel::POSITION_DEPOSIT_USDC;
@@ -202,6 +255,7 @@ parameter_types! {
     pub static MainCreditedTotal: Balance = 0;
     pub static MainRevenueRefuses: bool = false;
     pub MainAccount: AccountId = MAIN;
+    pub const MaxLiveExternalMarkets: u32 = bounds::MAX_LIVE_EXTERNAL_MARKETS;
 }
 
 pub struct TestInDecisionWindow;
@@ -353,13 +407,42 @@ impl pallet_conditional_ledger::Config for Test {
     type ArchiveDelay = LedgerArchiveDelay;
     type ReapBatch = ReapBatch;
     type ProtocolAccounts = Protocol;
+    type ReservedProtocolDestinations = ReservedProtocolDestinations;
     type RedemptionFee = RedemptionFee;
     type InsuranceAccount = InsuranceAccount;
-    type MarketSweepStatus = Market;
+    type MarketSweepStatus = pallet_market::PrimaryMarketSweepStatus<Test>;
     type ResidueReporter = TestResidueReporter;
     type TreasuryMainAccount = TreasuryMainAccount;
     type MainRevenueSink = TestMainRevenueSink;
     type PalletId = LedgerPalletId;
+    type KeeperRebate = ();
+    type InflowCapGate = ();
+    type WeightInfo = ();
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = ();
+}
+
+impl pallet_conditional_ledger::Config<Instance1> for Test {
+    type Collateral = Assets;
+    type UsdcAssetId = UsdcAssetId;
+    type MarketAuthority = EnsureMarketPallet;
+    type ResolveAuthority = EnsureResolver;
+    type SettleAuthority = EnsureSettler;
+    type EmergencyPlaybookOrigin = EnsureSettler;
+    type MinSplit = MinSplit;
+    type PositionDeposit = PositionDeposit;
+    type MaxPositionsPerAccount = MaxPositionsPerAccount;
+    type ArchiveDelay = LedgerArchiveDelay;
+    type ReapBatch = ReapBatch;
+    type ProtocolAccounts = ServiceProtocol;
+    type ReservedProtocolDestinations = ReservedProtocolDestinations;
+    type RedemptionFee = RedemptionFee;
+    type InsuranceAccount = InsuranceAccount;
+    type MarketSweepStatus = pallet_market::ExternalMarketSweepStatus<Test>;
+    type ResidueReporter = TestResidueReporter;
+    type TreasuryMainAccount = TreasuryMainAccount;
+    type MainRevenueSink = TestMainRevenueSink;
+    type PalletId = ServiceLedgerPalletId;
     type KeeperRebate = ();
     type InflowCapGate = ();
     type WeightInfo = ();
@@ -375,6 +458,11 @@ impl pallet_market::Config for Test {
     type ObsInterval = ObsInterval;
     type Kappa1e9 = Kappa1e9;
     type MarketAdmin = EnsureMarketAdmin;
+    type ExternalMarketAdmin = EnsureExternalClient;
+    type ServiceLedger = pallet_market::ConditionalLedgerInstance<Instance1>;
+    type PrimaryProposalIds = TestPrimaryProposalIds;
+    type ReservedProtocolDestinations = ReservedProtocolDestinations;
+    type MaxLiveExternalMarkets = MaxLiveExternalMarkets;
     type EmergencyPlaybookOrigin = EnsureMarketAdmin;
     type ArchiveDelay = MarketArchiveDelay;
     type PalletId = MarketPalletId;
@@ -389,6 +477,10 @@ impl pallet_market::Config for Test {
 
 pub fn ledger_account() -> AccountId {
     LedgerPalletId::get().into_account_truncating()
+}
+
+pub fn service_ledger_account() -> AccountId {
+    ServiceLedgerPalletId::get().into_account_truncating()
 }
 
 pub fn market_account() -> AccountId {
@@ -423,6 +515,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         INSURANCE,
         MAIN,
         ledger_account(),
+        service_ledger_account(),
         market_account(),
     ];
     pallet_balances::GenesisConfig::<Test> {
@@ -454,6 +547,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
             .into_iter()
             .map(|who| (USDC, who, 100_000 * UNIT))
             .chain(core::iter::once((USDC, ledger_account(), 10_000)))
+            .chain(core::iter::once((USDC, service_ledger_account(), 10_000)))
             .collect(),
         next_asset_id: None,
         reserves: vec![],
@@ -462,6 +556,9 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     .expect("mock assets genesis builds");
 
     let mut ext = sp_io::TestExternalities::new(storage);
-    ext.execute_with(|| System::set_block_number(1));
+    ext.execute_with(|| {
+        NEXT_PRIMARY_PROPOSAL_ID.with(|next| next.set(1));
+        System::set_block_number(1);
+    });
     ext
 }

@@ -27,8 +27,8 @@ use crate::{
     usdc_location, ForeignAssets, FutarchyTreasury, Runtime, System,
 };
 
-fn book_positions(book: &MarketBook<crate::AccountId>) -> (PositionId, PositionId) {
-    match book.kind {
+fn book_positions(book: &MarketBook<crate::AccountId>) -> Option<(PositionId, PositionId)> {
+    let positions = match book.kind {
         BookKind::Decision { proposal, branch } => (
             PositionId::Proposal {
                 proposal,
@@ -67,7 +67,9 @@ fn book_positions(book: &MarketBook<crate::AccountId>) -> (PositionId, PositionI
                 side: ScalarSide::Short,
             },
         ),
-    }
+        BookKind::External { .. } => return None,
+    };
+    Some(positions)
 }
 
 /// Exact current inventory loss for a seeded book.
@@ -88,7 +90,7 @@ fn realized_book_loss(
     book: &MarketBook<crate::AccountId>,
     seed_capital: Balance,
 ) -> Option<Balance> {
-    let (long, short) = book_positions(book);
+    let (long, short) = book_positions(book)?;
     let retained_sets =
         pallet_conditional_ledger::Positions::<Runtime>::get(long, &book.account).min(
             pallet_conditional_ledger::Positions::<Runtime>::get(short, &book.account),
@@ -198,11 +200,13 @@ pub fn pol() -> Option<BoundedVec<PolTelemetry, MAX_POL_TELEMETRY_ROWS>> {
         // A missing backing book makes collection itself impossible, so the
         // family degrades absent per 12 §6.3.
         let book = pallet_market::Markets::<Runtime>::get(market)?;
-        let component = if matches!(book.kind, BookKind::Baseline { .. }) {
-            baseline_books = baseline_books.checked_add(1)?;
-            &mut baseline_live
-        } else {
-            &mut proposal_live
+        let component = match book.kind {
+            BookKind::Baseline { .. } => {
+                baseline_books = baseline_books.checked_add(1)?;
+                &mut baseline_live
+            }
+            BookKind::Decision { .. } | BookKind::Gate { .. } => &mut proposal_live,
+            BookKind::External { .. } => return None,
         };
         *component = component.checked_add(amount)?;
     }

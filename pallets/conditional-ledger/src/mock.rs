@@ -233,6 +233,7 @@ impl pallet_conditional_ledger::Config<()> for Test {
     type ArchiveDelay = ArchiveDelay;
     type ReapBatch = ReapBatch;
     type ProtocolAccounts = Protocol;
+    type ReservedProtocolDestinations = Protocol;
     type RedemptionFee = RedemptionFee;
     type InsuranceAccount = InsuranceAccount;
     type MarketSweepStatus = TestMarketSweepStatus;

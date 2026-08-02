@@ -29,8 +29,8 @@ const KIB: usize = 1024;
 
 /// 13 §4: `MaxLiveMarkets` = 196 = 32·6 + 4.
 const MAX_LIVE_MARKETS: usize = futarchy_primitives::bounds::MAX_LIVE_MARKETS as usize;
-/// 13 §4: archive-derived present `Markets` rows, including terminal books.
-const MAX_STORED_MARKETS: usize = futarchy_primitives::bounds::MAX_STORED_MARKETS as usize;
+/// 13 §4: primary plus external present `Markets` rows, including terminal books.
+const MAX_ALL_STORED_MARKETS: usize = futarchy_primitives::bounds::MAX_ALL_STORED_MARKETS as usize;
 /// 13 §5 item 2: ≤ 32 live + 4 cohorts × 5 settling = 52 vaults. Single-homed
 /// in the kernel since SQ-501, where the occupancy screen re-derives it.
 const MAX_LIVE_VAULTS: usize = futarchy_primitives::kernel::LIVE_VAULT_ENVELOPE as usize;
@@ -85,13 +85,16 @@ fn market_map_ceiling_within_13_5_budget() {
         futarchy_primitives::kernel::MARKET_BOOK_MAX_BYTES as usize,
         "MarketBook measured MaxEncodedLen drifted from the 13 §5 item 1 figure"
     );
-    assert_eq!(MAX_STORED_MARKETS, 2_240, "stored-market bound drifted");
+    assert_eq!(
+        MAX_ALL_STORED_MARKETS, 2_368,
+        "all-stored-market bound drifted"
+    );
     let budget = futarchy_primitives::kernel::RETAINED_MARKETS_BUDGET_BYTES as usize;
     assert_eq!(budget, 512 * KIB);
     assert!(
-        MAX_STORED_MARKETS * book <= budget,
+        MAX_ALL_STORED_MARKETS * book <= budget,
         "stored-market map ceiling exceeds the 512 KiB budget: {} B",
-        MAX_STORED_MARKETS * book
+        MAX_ALL_STORED_MARKETS * book
     );
 }
 

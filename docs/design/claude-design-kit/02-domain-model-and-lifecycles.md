@@ -179,7 +179,8 @@ guard's `ratify` call. Missing/unfinished ratification ⇒ proposal stays Queued
 - **Playbooks** (the only emergency mechanism): `PB-DEPEG` (freeze new-market creation),
   `PB-MIGRATION` (migration recovery), `PB-ORACLE-VOID` (void the cohort), `PB-HALT-INTAKE`,
   `PB-RESERVE` (halt split inflows only; merge/redeem/exit stay open), `PB-LEDGER-FREEZE`
-  (all ledger + market calls error `Frozen`; ≤ 14 d + one renewal). Active playbooks show
+  (all primary-ledger + Protocol-book market calls error `Frozen`; ≤ 14 d + one renewal;
+  External books follow only the service instance). Active playbooks show
   trigger + expiry countdown.
 - **Attestors**: ≥ 3 bonded members (25k VIT); CODE/META upgrades need a 2-of-N signed
   attestation (reproducible build + kernel invariants preserved), challengeable for 72 h.
@@ -283,9 +284,17 @@ decision or settlement inputs.
   fail-closed until a calibration-backed migration seats it.
 - Lifecycle: `Registered → Open → Sealed → Settled`, with every failure edge ending `Voided`.
   The report is delivered at `Sealed`; `Settled` and `Voided` are the only terminal states.
+- Each question owns exactly two scalar books, Accept and Reject, in the service ledger — never
+  Bleavit gate or Baseline books. Their 128-live/128-retained envelope is independent of the
+  primary 196-live/2,240-retained POL envelope; the shared physical map caps at 2,368 rows.
+- Trading and redemption fees are Bleavit service revenue in treasury `MAIN`. The client's maker
+  subsidy is not treasury capital: pair-atomic seeding posts two headrooms, leaves no mergeable
+  mirror pair with the client, locks the extra raw branch legs in the matching book accounts, and
+  terminal cleanup returns surviving inventory only to the immutable exact funder.
 
-Contract v20 describes the eventual report/API surface but is **authored, not in force** while the
-runtime constant remains v19. Treat this as domain context; do not mock it as a live canonical-app
+Contract v20 makes the external-market schema current; v21 describes the eventual report/API
+surface and is **authored, not in force** while the runtime constant remains v20. Treat the latter
+as domain context; do not mock it as a live canonical-app
 workflow or invent screen IDs.
 
 ## 12. Merged glossary (canonical; supplement to kit file 05's naming tables)

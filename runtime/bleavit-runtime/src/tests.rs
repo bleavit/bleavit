@@ -408,6 +408,9 @@ fn seed_decision_grade_market(
                 .find_map(|record| (record.3 == end).then_some(record.0))
                 .ok_or(DispatchError::Other("baseline window owner"))?
         }
+        pallet_market::core_market::BookKind::External { .. } => {
+            return Err(DispatchError::Other("external book is not decision grade"));
+        }
     };
     let (window, trailing) = windows;
     let start = end
