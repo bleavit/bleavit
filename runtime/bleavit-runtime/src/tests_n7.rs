@@ -1036,3 +1036,95 @@ fn n7_hosted_domain_work_is_external_whoever_signs_it() {
         }
     });
 }
+
+/// A wrapper reserves once, against one side. So a wrapper holding hosted
+/// leaves cannot be accounted honestly either way — charging it to primary
+/// launders hosted volume back into `H`, charging it to external hides primary
+/// load from `H` — and the partition refuses the shape instead of guessing.
+///
+/// Without this, `Utility::batch` was a complete bypass: the batch classified
+/// as primary, so hosted trades got the 75 % primary budget *and* moved `H`.
+#[test]
+fn n7_wrappers_cannot_launder_hosted_work_into_the_primary_quota() {
+    development_ext().execute_with(|| {
+        seed_pt10_metric_spec();
+        seed_pt10_service_params();
+        seed_pt10_client();
+        seed_pt10_decision_fixture();
+
+        let start = System::block_number();
+        System::set_block_number(start.saturating_add(PT10_SERVICE_START_OFFSET));
+        let question = seed_pt10_service_question(start);
+        let hosted = pallet_question_service::Questions::<Runtime>::get(question)
+            .expect("the fixture registers a hosted question")
+            .markets;
+        let hosted_call =
+            RuntimeCall::Market(pallet_market::Call::crank_observe { market: hosted[0] });
+        let primary_call =
+            RuntimeCall::Market(pallet_market::Call::crank_observe { market: 90_701 });
+
+        // Every closed wrapper shape, hosted-only and mixed, at one and two
+        // levels of nesting.
+        let wrap_batch =
+            |calls: Vec<RuntimeCall>| RuntimeCall::Utility(pallet_utility::Call::batch { calls });
+        let refused = [
+            wrap_batch(vec![hosted_call.clone()]),
+            wrap_batch(vec![hosted_call.clone(), primary_call.clone()]),
+            wrap_batch(vec![primary_call.clone(), hosted_call.clone()]),
+            RuntimeCall::Utility(pallet_utility::Call::batch_all {
+                calls: vec![hosted_call.clone()],
+            }),
+            RuntimeCall::Utility(pallet_utility::Call::force_batch {
+                calls: vec![hosted_call.clone()],
+            }),
+            RuntimeCall::Utility(pallet_utility::Call::as_derivative {
+                index: 0,
+                call: alloc::boxed::Box::new(hosted_call.clone()),
+            }),
+            RuntimeCall::Utility(pallet_utility::Call::with_weight {
+                call: alloc::boxed::Box::new(hosted_call.clone()),
+                weight: frame_support::weights::Weight::from_parts(1, 1),
+            }),
+            RuntimeCall::Multisig(pallet_multisig::Call::as_multi_threshold_1 {
+                other_signatories: vec![account(2)],
+                call: alloc::boxed::Box::new(hosted_call.clone()),
+            }),
+            // Nested two deep — the walk must not stop at the first level.
+            wrap_batch(vec![wrap_batch(vec![hosted_call.clone()])]),
+        ];
+        for call in refused {
+            assert!(
+                crate::classifier::is_wrapped_hosted_work(&call),
+                "a wrapper carrying hosted work must be refused: {call:?}",
+            );
+        }
+
+        // Wrappers with no hosted leaf keep their existing behaviour exactly.
+        let admitted = [
+            wrap_batch(vec![primary_call.clone()]),
+            wrap_batch(vec![primary_call.clone(), primary_call.clone()]),
+            wrap_batch(vec![wrap_batch(vec![primary_call.clone()])]),
+        ];
+        for call in admitted {
+            assert!(
+                !crate::classifier::is_wrapped_hosted_work(&call),
+                "an all-primary wrapper must be unaffected: {call:?}",
+            );
+        }
+
+        // A bare call is never "wrapped", on either side of the partition.
+        assert!(!crate::classifier::is_wrapped_hosted_work(&hosted_call));
+        assert!(!crate::classifier::is_wrapped_hosted_work(&primary_call));
+
+        // And the refusal is real at the dispatch boundary, not just in the
+        // classifier: the XCM adapter rejects the batch before dispatching it.
+        let result = ResourcePartitionCallDispatcher::dispatch(
+            wrap_batch(vec![hosted_call]),
+            RuntimeOrigin::signed(account(1)),
+        );
+        assert!(
+            result.is_err(),
+            "the partition dispatcher must refuse wrapped hosted work",
+        );
+    });
+}

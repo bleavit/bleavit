@@ -948,6 +948,64 @@ pub(crate) fn is_external_client_call(call: &RuntimeCall) -> bool {
     }
 }
 
+/// `None` if `call` is not a wrapper; otherwise whether any leaf anywhere
+/// beneath it is hosted work.
+///
+/// This is the closed 06 §3.3 wrapper set, walked with the same nesting budget
+/// the projection uses. A depth overrun answers `true`, so an over-deep tree is
+/// refused rather than admitted.
+fn wrapper_holds_external(call: &RuntimeCall, depth: u32) -> Option<bool> {
+    if depth > kernel::MAX_NESTED_CALLS {
+        return Some(true);
+    }
+    let nested = |inner: &RuntimeCall| -> bool {
+        wrapper_holds_external(inner, depth.saturating_add(1))
+            .unwrap_or_else(|| is_external_client_call(inner))
+    };
+    Some(match call {
+        RuntimeCall::Utility(
+            pallet_utility::Call::batch { calls }
+            | pallet_utility::Call::batch_all { calls }
+            | pallet_utility::Call::force_batch { calls },
+        ) => calls.iter().any(nested),
+        RuntimeCall::Utility(
+            pallet_utility::Call::as_derivative { call, .. }
+            | pallet_utility::Call::dispatch_as { call, .. }
+            | pallet_utility::Call::with_weight { call, .. },
+        )
+        | RuntimeCall::Proxy(
+            pallet_proxy::Call::proxy { call, .. }
+            | pallet_proxy::Call::proxy_announced { call, .. },
+        )
+        | RuntimeCall::Multisig(
+            pallet_multisig::Call::as_multi { call, .. }
+            | pallet_multisig::Call::as_multi_threshold_1 { call, .. },
+        ) => nested(call),
+        #[cfg(feature = "bootstrap")]
+        RuntimeCall::Sudo(
+            pallet_sudo::Call::sudo { call }
+            | pallet_sudo::Call::sudo_unchecked_weight { call, .. },
+        ) => nested(call),
+        _ => return None,
+    })
+}
+
+/// Is this a wrapper carrying hosted work?
+///
+/// The partition reserves against exactly one side per top-level dispatch, so a
+/// wrapper holding hosted leaves cannot be accounted honestly on either side:
+/// charging it to primary launders hosted volume straight back into
+/// `PrimaryUsed` and therefore into `H`, which is the channel 16 §8.5 exists to
+/// close, while charging it to external hides any primary leaves from `H` and
+/// overstates the chain's health. Both directions are unsafe, so the partition
+/// refuses the shape rather than guessing — the same calls sent as separate
+/// extrinsics are always admissible.
+///
+/// Wrappers holding no hosted work keep their existing behaviour exactly.
+pub(crate) fn is_wrapped_hosted_work(call: &RuntimeCall) -> bool {
+    wrapper_holds_external(call, 0).unwrap_or(false)
+}
+
 fn pending_upgrade_is_applicable(code: &[u8]) -> bool {
     PendingExecutionGuard::applicable_at().is_some_and(|at| System::block_number() >= at)
         && crate::configs::direct_system_upgrade_allowed(code)

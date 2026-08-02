@@ -864,6 +864,18 @@ three residual dispatch paths below. Rule 3 costs one storage read of an immutab
 runtime's match over market calls MUST be exhaustive, so that a market call added later fails to
 compile rather than silently defaulting to the primary quota.
 
+**A wrapper carrying hosted work MUST be refused, not classified.** The partition reserves against
+exactly one side per top-level dispatch, so a [06](./06-governance-and-guardians.md) §3.3 wrapper
+whose leaves include hosted work cannot be accounted honestly on either side, and **both** wrong
+answers are unsafe: charging it to the primary side launders hosted volume straight back into
+`PrimaryUsed` and therefore into `H` — reopening this section's whole subject, and at the primary
+budget rather than the client quota — while charging it to the external side hides any primary
+leaves from `H` and overstates the chain's health. So the shape is refused. This is a
+resource-accounting refusal and not an authority one: the same calls submitted as separate
+extrinsics are always admissible, and a wrapper carrying no hosted leaf is entirely unaffected. The
+walk covers the closed wrapper set at every nesting depth under the projection's own budget, and a
+depth overrun refuses rather than admits.
+
 Operational and Mandatory calls are exempt from this extension's *refusal* path: FRAME's own class
 budgets govern whether they dispatch, and their weight is still attributed to `PrimaryUsed` by the
 residual fold. External calls remain partitioned even if their dispatch metadata names one of those

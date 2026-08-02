@@ -70,6 +70,21 @@ impl ResourcePartition {
         InvalidTransaction::ExhaustsResources.into()
     }
 
+    /// A wrapper carrying hosted work is refused: the partition reserves
+    /// against exactly one side, and neither side can account for a mixed tree
+    /// honestly. This is a resource-accounting refusal, not an authority one —
+    /// the same calls submitted separately are admissible.
+    fn unaccountable() -> TransactionValidityError {
+        InvalidTransaction::Call.into()
+    }
+
+    fn xcm_unaccountable() -> DispatchErrorWithPostInfo<PostDispatchInfo> {
+        DispatchErrorWithPostInfo {
+            error: DispatchError::Other("wrapped hosted work cannot be partitioned"),
+            post_info: PostDispatchInfo::default(),
+        }
+    }
+
     fn xcm_exhausted() -> DispatchErrorWithPostInfo<PostDispatchInfo> {
         DispatchErrorWithPostInfo {
             error: DispatchError::Exhausted,
@@ -119,6 +134,9 @@ impl TransactionExtension<RuntimeCall> for ResourcePartition {
         _inherited_implication: &impl sp_runtime::traits::Implication,
         source: TransactionSource,
     ) -> sp_runtime::traits::ValidateResult<Self::Val, RuntimeCall> {
+        if crate::classifier::is_wrapped_hosted_work(call) {
+            return Err(Self::unaccountable());
+        }
         let is_external = Self::is_external(call);
         let partitioned = Self::is_partitioned(is_external, info);
         let in_block = matches!(source, TransactionSource::InBlock);
@@ -194,6 +212,9 @@ impl CallDispatcher<RuntimeCall> for ResourcePartitionCallDispatcher {
         call: RuntimeCall,
         origin: RuntimeOrigin,
     ) -> Result<PostDispatchInfo, DispatchErrorWithPostInfo<PostDispatchInfo>> {
+        if crate::classifier::is_wrapped_hosted_work(&call) {
+            return Err(ResourcePartition::xcm_unaccountable());
+        }
         let info = call.get_dispatch_info();
         let len = call.encode().len();
         let partition_weight = Welfare::<Runtime>::resource_partition_weight();
