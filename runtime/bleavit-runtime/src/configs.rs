@@ -7241,7 +7241,7 @@ impl pallet_welfare::MetricProvenanceProvider for RuntimeMetricProvenance {
                 10..=12 | 15..=16 => pallet_welfare::SourceClass::Attested,
                 _ => return pallet_welfare::MetricProvenance::Unassigned,
             };
-            return pallet_welfare::MetricProvenance::Primary(source);
+            pallet_welfare::MetricProvenance::Primary(source)
         }
 
         #[cfg(not(feature = "runtime-benchmarks"))]

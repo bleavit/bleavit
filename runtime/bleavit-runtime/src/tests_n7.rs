@@ -914,3 +914,125 @@ fn n7_service_traffic_containment_sample() {
         assert_containment_sample(&primary, &service);
     }
 }
+
+/// Every market call shape that names one book, for both partitions to be
+/// checked against the same list.
+fn book_call_shapes(market: futarchy_primitives::MarketId) -> Vec<RuntimeCall> {
+    vec![
+        RuntimeCall::Market(pallet_market::Call::buy {
+            market,
+            side: futarchy_primitives::ScalarSide::Long,
+            amount: currency::USDC,
+            max_cost: currency::USDC,
+        }),
+        RuntimeCall::Market(pallet_market::Call::sell {
+            market,
+            side: futarchy_primitives::ScalarSide::Long,
+            amount: currency::USDC,
+            min_proceeds: 0,
+        }),
+        RuntimeCall::Market(pallet_market::Call::crank_observe { market }),
+        RuntimeCall::Market(pallet_market::Call::sweep_revenue { market }),
+        RuntimeCall::Market(pallet_market::Call::reap { market }),
+    ]
+}
+
+/// The partition classifies by *resource domain*, which is not the authority
+/// domain. Hosted work is charged to the client quota whoever signs it —
+/// otherwise an ordinary signed trade in a hosted book is booked as primary
+/// work, and hosted volume walks straight back into `PrimaryUsed` and moves
+/// `H` (05 §4.3), which is the one channel 16 §8.5 exists to close.
+///
+/// The inverse direction matters just as much and is asserted here too:
+/// Bleavit's own books, its own ledger instance and its own emergency
+/// authority over the hosted pallets must never be charged to a quota an
+/// external client can saturate.
+#[test]
+fn n7_hosted_domain_work_is_external_whoever_signs_it() {
+    development_ext().execute_with(|| {
+        seed_pt10_metric_spec();
+        seed_pt10_service_params();
+        seed_pt10_client();
+        seed_pt10_decision_fixture();
+
+        let start = System::block_number();
+        System::set_block_number(start.saturating_add(PT10_SERVICE_START_OFFSET));
+        let question = seed_pt10_service_question(start);
+        let hosted = pallet_question_service::Questions::<Runtime>::get(question)
+            .expect("the fixture registers a hosted question")
+            .markets;
+        assert!(
+            !hosted.is_empty(),
+            "a hosted question must own at least one book for this test to bind",
+        );
+
+        // Permissionless, ordinarily-signed work against a hosted book.
+        for market in hosted.iter().copied() {
+            for call in book_call_shapes(market) {
+                assert!(
+                    crate::classifier::is_external_client_call(&call),
+                    "hosted-book work must be charged externally: {call:?}",
+                );
+            }
+        }
+
+        // The identical call shapes against Bleavit's own decision books.
+        for market in [90_701, 90_702, 90_703, 90_707] {
+            for call in book_call_shapes(market) {
+                assert!(
+                    !crate::classifier::is_external_client_call(&call),
+                    "Bleavit-book work must stay primary: {call:?}",
+                );
+            }
+        }
+
+        // The hosted ledger instance and the settlement game are hosted work
+        // by call shape alone — no storage read decides it.
+        for call in [
+            RuntimeCall::ServiceLedger(pallet_conditional_ledger::Call::redeem {
+                pid: question,
+                amount: currency::USDC,
+            }),
+            RuntimeCall::ServiceLedger(pallet_conditional_ledger::Call::sweep_dust {
+                pid: question,
+            }),
+            RuntimeCall::QuestionService(pallet_question_service::Call::settle {
+                question_id: question,
+            }),
+            RuntimeCall::QuestionService(pallet_question_service::Call::void {
+                question_id: question,
+            }),
+            RuntimeCall::QuestionService(pallet_question_service::Call::archive {
+                question_id: question,
+            }),
+        ] {
+            assert!(
+                crate::classifier::is_external_client_call(&call),
+                "hosted-domain call must be charged externally: {call:?}",
+            );
+        }
+
+        // Bleavit's own ledger instance, and Bleavit's own emergency authority
+        // over the hosted pallets. A saturated client quota must never be able
+        // to block a pause or a freeze (R-7).
+        for call in [
+            RuntimeCall::ConditionalLedger(pallet_conditional_ledger::Call::redeem {
+                pid: PT10_PID,
+                amount: currency::USDC,
+            }),
+            RuntimeCall::ServiceLedger(pallet_conditional_ledger::Call::set_frozen {
+                frozen: true,
+            }),
+            RuntimeCall::ServiceLedger(pallet_conditional_ledger::Call::set_split_paused {
+                paused: true,
+                expiry: System::block_number().saturating_add(1),
+            }),
+            RuntimeCall::QuestionService(pallet_question_service::Call::set_paused { until: None }),
+        ] {
+            assert!(
+                !crate::classifier::is_external_client_call(&call),
+                "Bleavit's own authority must never be charged to the client quota: {call:?}",
+            );
+        }
+    });
+}

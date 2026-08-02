@@ -874,26 +874,78 @@ impl SafetyClassifier for BleavitSafetyClassifier {
     }
 }
 
-/// Exact-leaf resource classification shared by the signed transaction
-/// extension and the XCM call dispatcher. Wrappers are intentionally not
-/// treated as external: the closed safety classifier projects only the exact
-/// `ExternalClient` leaves, so a wrapper cannot smuggle primary work into the
-/// service quota. A permissionless market observation is the one dynamic seam:
-/// its call origin is a keeper signature, so the immutable market kind supplies
-/// the external-domain fact that the static call shape cannot carry.
+/// Does this market call name a book in the hosted domain?
+///
+/// The match is exhaustive on purpose. A market call added later that carries
+/// a `MarketId` fails to compile here rather than silently defaulting to the
+/// primary quota, which is exactly the failure this classification exists to
+/// prevent — the same tripwire discipline the ingress template uses.
+fn market_call_targets_external_book(call: &pallet_market::Call<Runtime>) -> bool {
+    let market = match call {
+        pallet_market::Call::buy { market, .. }
+        | pallet_market::Call::sell { market, .. }
+        | pallet_market::Call::crank_observe { market }
+        | pallet_market::Call::sweep_revenue { market }
+        | pallet_market::Call::reap { market } => *market,
+        // Chain-wide creation controls, not per-book work.
+        pallet_market::Call::freeze_creation { .. }
+        | pallet_market::Call::set_frozen { .. }
+        | pallet_market::Call::__Ignore(_, _) => return false,
+    };
+    pallet_market::Markets::<Runtime>::get(market).is_some_and(|book| {
+        matches!(
+            book.kind,
+            pallet_market::core_market::BookKind::External { .. }
+        )
+    })
+}
+
+/// Resource classification shared by the signed transaction extension and the
+/// XCM call dispatcher — the 16 §8.5 question of *whose budget pays*, which is
+/// deliberately not the safety classifier's question of *who may call*. A
+/// hosted market's trades are permissionless `Public` calls by authority and
+/// hosted work by resource domain; conflating the two is what would let
+/// external volume reach `H` (05 §4.3) through the back door this partition
+/// exists to close.
+///
+/// Wrappers are intentionally not treated as external: the closed safety
+/// classifier projects only exact leaves, so a wrapper cannot smuggle primary
+/// work into the service quota.
 pub(crate) fn is_external_client_call(call: &RuntimeCall) -> bool {
-    if let RuntimeCall::Market(pallet_market::Call::crank_observe { market }) = call {
-        return pallet_market::Markets::<Runtime>::get(*market).is_some_and(|book| {
-            matches!(
-                book.kind,
-                pallet_market::core_market::BookKind::External { .. }
-            )
-        });
+    let FilterCall::Leaf(domain) = BleavitSafetyClassifier::project(call) else {
+        return false;
+    };
+
+    // 1. The client's own authenticated calls are external by construction.
+    if domain == CallDomain::ExternalClient {
+        return true;
     }
-    matches!(
-        BleavitSafetyClassifier::project(call),
-        FilterCall::Leaf(CallDomain::ExternalClient)
-    )
+
+    // 2. Emergency and governance authority is never charged to the client
+    //    quota, whichever pallet it lives in. A saturated external quota must
+    //    never be able to block Bleavit's own pause, freeze or recovery act —
+    //    the direction R-7 forbids, and the same reasoning that settled the
+    //    §8.5 residual-D ruling for the paths bypassing this extension.
+    if domain != CallDomain::Public {
+        return false;
+    }
+
+    // 3. Permissionless work that exists only because a hosted question
+    //    exists. Its origin is an ordinary signature, so the static call shape
+    //    (a service-domain pallet) or the immutable book kind has to supply
+    //    the external-domain fact the origin cannot carry.
+    match call {
+        // The whole second ledger instance is the hosted domain: instance `()`
+        // is Bleavit's and instance 1 exists for nothing else (03 §1a).
+        RuntimeCall::ServiceLedger(_) => true,
+        // Registration, sealing, settlement and the attestor game are all
+        // hosted work, including the cranks anyone may run.
+        RuntimeCall::QuestionService(_) => true,
+        // Trading, observing, sweeping and reaping a hosted book. Dynamic: one
+        // immutable-kind read decides which side of the partition pays.
+        RuntimeCall::Market(call) => market_call_targets_external_book(call),
+        _ => false,
+    }
 }
 
 fn pending_upgrade_is_applicable(code: &[u8]) -> bool {

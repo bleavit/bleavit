@@ -844,6 +844,26 @@ converted back to the physical coordinate by the same shared `block_utilization(
 helper used for the total diagnostic. No separately rounded scale or target is materialized, so with
 zero external usage the H value is bit-identical to the pre-partition formula on the entire 1e9 grid.
 
+**The external set is a *resource* domain, and deliberately not the authority domain.** The safety
+classifier ([06](./06-governance-and-guardians.md) §3) answers *who may call*; this partition answers
+*whose budget pays*. A hosted question generates far more work than the client's own authenticated
+calls, and almost all of it arrives as ordinary signed dispatches: a trade in a hosted book, a
+hosted-ledger split or redeem, and every permissionless crank of the settlement game. Charging those
+to the primary side would leave hosted **volume** — by far the largest term — moving `H`, which is
+precisely what this section exists to prevent. A call is therefore external when any of:
+
+1. its authority domain is `ExternalClient` — the client's own calls; or
+2. it belongs to a pallet that exists only for the hosted domain — the hosted ledger instance
+   (§3) and the question service; or
+3. it names a market whose immutable `BookKind` is `External`.
+
+subject to one overriding exception: **emergency and governance authority is never external**,
+whichever pallet it lives in. A saturated client quota must never be able to block Bleavit's own
+pause, freeze or recovery act — the direction R-7 forbids, and the same reasoning that exempts the
+three residual dispatch paths below. Rule 3 costs one storage read of an immutable field, and the
+runtime's match over market calls MUST be exhaustive, so that a market call added later fails to
+compile rather than silently defaulting to the primary quota.
+
 Operational and Mandatory calls are exempt from this extension's *refusal* path: FRAME's own class
 budgets govern whether they dispatch, and their weight is still attributed to `PrimaryUsed` by the
 residual fold. External calls remain partitioned even if their dispatch metadata names one of those
@@ -884,6 +904,12 @@ partition ledger's `PrimaryUsed` counter is a saturating physical-coordinate **u
 primary-at-cap plus Mandatory work may exceed the physical max in FRAME's own accounting, but the
 partition counter clamps rather than implying a combined-envelope guarantee. The total diagnostic
 sample remains the actual clamped physical utilization.
+
+The extension's **own** bookkeeping is declared at its enumerated worst case over the whole
+validate/prepare/post-dispatch pipeline, not at the storage touched by any single hook, and it is
+charged to the same side as the call it partitions. Under-declaring it would be unsafe twice over:
+it understates what `CheckWeight` books into the block, and — because the same figure sizes the
+reservation the XCM adapter makes — it would hand the external side quota it never paid for.
 
 `svc.max_live` MUST be sized so worst-case external load stays inside its quota. **There is no
 measurement in this repository to size that against**, so the initial value ships conservative and

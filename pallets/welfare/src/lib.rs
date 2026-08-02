@@ -1482,8 +1482,30 @@ pub mod pallet {
         /// Weight of the partition bookkeeping performed at pre- and
         /// post-dispatch. The extension is deliberately non-zero: its storage
         /// path is part of the declared weight, not hidden in a `()` extension.
+        ///
+        /// The count is the enumerated worst case over the whole extension
+        /// pipeline, not the storage touched by any single one of its hooks.
+        /// Under-declaring here is unsafe in two ways at once: it understates
+        /// what `CheckWeight` books into the block, and — because this same
+        /// figure sizes the reservation the XCM dispatcher makes — it hands
+        /// the external side a quota it never paid for. So the enumeration is
+        /// exhaustive and the rounding is against the caller (R-7):
+        ///
+        /// | Hook | Storage | R | W |
+        /// |---|---|---|---|
+        /// | `validate` | dynamic book-kind read (`Market::Markets`) | 1 | 0 |
+        /// | `validate` | `frame_system::BlockWeight` | 1 | 0 |
+        /// | `validate` | `frame_system::Number`, `BlockResourceUsage` | 2 | 0 |
+        /// | `prepare` | `frame_system::Number`, `BlockResourceUsage` r/w | 2 | 1 |
+        /// | `post_dispatch` | `frame_system::BlockWeight` | 1 | 0 |
+        /// | `post_dispatch` | `BlockResourceUsage` mutate | 1 | 1 |
+        ///
+        /// The book-kind read is charged unconditionally rather than per call
+        /// shape: a per-shape figure would have to be re-derived every time a
+        /// market call is added, and the one-read difference is not worth a
+        /// declaration that can silently go stale.
         pub fn resource_partition_weight() -> Weight {
-            <T as frame_system::Config>::DbWeight::get().reads_writes(2, 2)
+            <T as frame_system::Config>::DbWeight::get().reads_writes(8, 2)
         }
 
         fn encoded_length_weight(len: usize) -> Weight {
