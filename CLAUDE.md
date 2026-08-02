@@ -29,9 +29,13 @@ it refuses follow-up instructions like "poll and report". For a review round who
 constraints must actually reach Codex, prefer direct `codex exec` (with `</dev/null`),
 or drive the companion runtime from the main loop:
 `node ~/.claude/plugins/cache/openai-codex/codex/<ver>/scripts/codex-companion.mjs
-status --all | result <job> | cancel <job>`. Model for this repo: `gpt-5.6-sol` at
-**`max`** reasoning effort (raised from `xhigh` by explicit user instruction, 2026-08-01;
-pass it as `-c model_reasoning_effort="max"` — verified accepted by codex-cli 0.146.0).
+status --all | result <job> | cancel <job>`. Model for this repo: **`gpt-5.6-luna`** at
+**`max`** reasoning effort — pass both explicitly, as
+`-m gpt-5.6-luna -c model_reasoning_effort="max"`. Both halves were set by explicit user
+instruction and each replaced a prior pin: the effort was raised from `xhigh` on
+2026-08-01, and the model was switched from `gpt-5.6-sol` on 2026-08-02. Verified
+accepted by codex-cli 0.146.0 by reading `model:` / `reasoning effort:` back from the
+job header rather than assuming the flags took.
 If Codex hits a capacity/quota wall, fall back to Claude subagents at matched
 model/effort and disclose the substitution in PLAN.md — losing the provider must not
 lose the independent-second-opinion pattern.
