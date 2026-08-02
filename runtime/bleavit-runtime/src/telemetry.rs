@@ -240,10 +240,12 @@ pub fn pol() -> Option<BoundedVec<PolTelemetry, MAX_POL_TELEMETRY_ROWS>> {
     .ok()
 }
 
-/// Ledger custody/liability totals from the pallet's L-2 helper.
-pub fn collateral() -> Option<CollateralTelemetry> {
+fn collateral_for<I: 'static>() -> Option<CollateralTelemetry>
+where
+    Runtime: pallet_conditional_ledger::Config<I>,
+{
     let (custody_usdc, liability_usdc) =
-        pallet_conditional_ledger::Pallet::<Runtime>::collateral_totals().ok()?;
+        pallet_conditional_ledger::Pallet::<Runtime, I>::collateral_totals().ok()?;
     // The ledger has no independent dust accumulator: claimant-adverse residue
     // is transferred out to INSURANCE when a vault is swept. Consequently the
     // only honest anomalous-dust component is unexplained positive custody
@@ -255,6 +257,16 @@ pub fn collateral() -> Option<CollateralTelemetry> {
         liability_usdc,
         anomalous_rounding_dust_usdc,
     })
+}
+
+/// Primary-ledger custody/liability totals from that instance's L-2 helper.
+pub fn collateral() -> Option<CollateralTelemetry> {
+    collateral_for::<()>()
+}
+
+/// Service-ledger custody/liability totals from its independent L-2 helper.
+pub fn service_collateral() -> Option<CollateralTelemetry> {
+    collateral_for::<frame_support::instances::Instance1>()
 }
 
 /// Local funding available to the reserve-probe dispatcher.

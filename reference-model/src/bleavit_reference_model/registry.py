@@ -27,9 +27,9 @@ registry box is safe:
   either threshold, fee or conversion rate; the remote USDC inventory check is
   likewise not repeated after ``res.probe_amount`` changes.
 
-The repository artifacts at commit 0b160ab contain **107** seeded keys and
-**194** classified limits, not the 98/179 counts in the audit brief.  Tests
-byte-check the model's canonical 16-byte keys against both artifacts.
+The N7 repository artifacts contain **110** seeded keys and **205** classified
+limits. Tests byte-check the model's canonical 16-byte keys against both
+artifacts, so additions cannot move either count silently.
 
 Values use the raw scalar representation fixed by 13 rule 8 / 02 §4: Fixed
 and Perbill are on the 1e9 grid, Percent is an integer percent, Balance uses
@@ -238,6 +238,7 @@ KERNEL_BOUNDED_KEYS = frozenset(
         "sec.prize.code",
         "sec.prize.meta",
         "sec.prize.param",
+        "svc.max_live",
         "trs.cap_180d",
         "trs.cap_30d",
         "trs.cap_proposal",
@@ -416,6 +417,13 @@ _row("xcm.dot_per_sec", ParamKind.BALANCE, "DOT planck/s", 100_000_000_000, 1_00
 _row("xcm.dot_per_mb", ParamKind.BALANCE, "DOT planck/MiB", 10_000_000_000, 100_000_000, 1_000_000_000_000, factor(2), 1, AmendmentClass.PARAM)
 _row("xcm.usdc_per_sec", ParamKind.BALANCE, "µUSDC/s", 50_000_000, 500_000, 5_000_000_000, factor(2), 1, AmendmentClass.PARAM)
 _row("xcm.usdc_per_mb", ParamKind.BALANCE, "µUSDC/MiB", 5_000_000, 50_000, 500_000_000, factor(2), 1, AmendmentClass.PARAM)
+
+# Hosted service registration bounds (13 §1; 16 §4, §5.2, §8.5). The fee and
+# client-bond rows are intentionally absent at genesis and therefore do not
+# materialize in this seeded registry model.
+_row("svc.max_live", ParamKind.U32, "questions", 16, 1, 64, factor(2), 2, AmendmentClass.PARAM)
+_row("svc.max_window", ParamKind.U32, "blocks", 302_400, 43_200, 302_400, factor(2), 1, AmendmentClass.PARAM)
+_row("svc.epsilon_min", ParamKind.PERBILL, "ppb fraction", 10_000_000, 5_000_000, 250_000_000, factor(2), 1, AmendmentClass.PARAM)
 
 REGISTRY: dict[str, ParamRecord] = dict(sorted(_records.items()))
 del _records

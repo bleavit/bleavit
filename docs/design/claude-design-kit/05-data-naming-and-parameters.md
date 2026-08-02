@@ -1,7 +1,7 @@
 # Data surface, canonical naming & UI-visible parameter values
 
-> **DERIVED, NON-NORMATIVE.** Refreshed 2026-08-01 through Track N / N4 from the frozen spec —
-> doc 02 (external-market contract v20 in force; hosted-service v21 authored but not in force), doc 13 (the
+> **DERIVED, NON-NORMATIVE.** Refreshed 2026-08-01 through Track N / N7 from the frozen spec —
+> doc 02 (hosted-service contract v21 in force), doc 13 (the
 > single home of parameter values), and doc 16 (hosted question service) —
 > for upload to Claude Design. Where this file and the spec disagree, the spec wins. All names
 > below are CANONICAL: use these exact spellings in UI copy, labels and mock data. Values
@@ -21,11 +21,11 @@ Block-time basis for human-time conversions: **6 s/block, 14,400 blocks/day** (1
 | **VIT** (native governance token) | **12 decimals**; total supply 10^9; existential deposit 0.01 VIT |
 | Prices / scores | fixed-point, **1e9 scale** at every API/event boundary; quote clamp [0.001, 0.999]; `p_S = 1 − p_L`; gate books map YES ↦ LONG |
 | Time | all deadlines are block numbers (`decide_at`, `maturity`, `grace_end`, `challenge_deadline`, `next_boundary`) — the UI computes countdowns from them |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 20`, a runtime constant, echoed in `release.json`; hosted question/report v21 is authored but not in force |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 21`, a runtime constant, echoed in `release.json` |
 
 ### A2. What the UI can read and display (02 §3–§4, §7)
 
-Eleven read-only `FutarchyApi` runtime-API methods, callable via the light client; every value
+Twelve read-only `FutarchyApi` runtime-API methods, callable via the light client; every value
 is also recomputable client-side from storage ("an optimization, never a trust root").
 
 **Epoch clock (global header)** — `epoch_status()` → `EpochStatusView`: epoch `index`, current
@@ -197,22 +197,21 @@ expert detail + documented recovery per code; no free-text errors.
 9. Trading enablement + sudo banner bind to `PhaseFlags`; dead-man and ledger-freeze states
    come from `EpochStatusView`.
 
-### A6. Hosted-service names present at N4 (16 §2, §11)
+### A6. Hosted-service names present at N7 (16 §2, §11)
 
-N4 provides the registry boundary, not the hosted-report contract. Canonical registry calls are
-`client_registry.admit_client` and `client_registry.remove_client`; both are guardian-track
-`ConstitutionalValues` calls. Canonical registry errors are `NotRegistered`, `ClientRemoved`,
+The registry boundary and hosted-report contract are live. Canonical registry calls are
+`client_registry.admit_client`, `client_registry.admit_local_client`, and
+`client_registry.remove_client`; both transport forms and removal are values-governed, with the
+local form recording an exact signer instead of an XCM `Location`. Canonical registry errors are `NotRegistered`, `ClientRemoved`,
 `ClientBondUnset`, `DuplicateLocation`, `ClientsFull`, `ClientIdExhausted`, `BondInsufficient`,
 `BondAccounting`, `QuestionCounterOverflow`, and `NoLiveQuestions`. The custom transport origin is
 exactly `ExternalClient(ClientId)`.
 
 Contract-v21 report names (`hosted_report`, `QuestionRegistered`, `QuestionSealed`,
-`QuestionSettled`, `QuestionVoided`, `ExternalRevenueSwept`, `Reports`) remain
-authored-but-not-in-force. Contract v20 already appends `BookKind::External { question, client,
-branch }` and the metadata constants `MaxLiveExternalMarkets`, `MaxStoredExternalMarkets`, and
-`MaxAllStoredMarkets`; that schema does not itself arm service registration. Do not render the v21
-question/report names as live or assign them a screen until the runtime constant moves and doc 11
-owns the workflow.
+`QuestionSettled`, `QuestionVoided`, `ExternalRevenueSwept`, `Reports`) are live, alongside
+`BookKind::External { question, client, branch }` and the metadata constants
+`MaxLiveExternalMarkets`, `MaxStoredExternalMarkets`, and `MaxAllStoredMarkets`. Do not assign them
+a canonical-app screen until doc 11 owns the workflow.
 
 ## SECTION B — UI-visible parameter values (doc 13)
 
@@ -346,14 +345,15 @@ live. For mock data these are the correct realistic values.
 | Parameter | Value | Consumer / design consequence |
 |---|---|---|
 | `MaxClients` | **64** | hard bounded roster; a 65th admission refuses before taking a bond |
+| `MaxServiceAttestors` | **16** | SCALE-bounded named settlement set; the 17th name refuses before dispatch or custody |
 | `MaxExternalBookPairs` | **64** | retained question→Accept/Reject/funder records; cleanup backpressure is bounded |
 | `MaxLiveExternalMarkets` / `MaxStoredExternalMarkets` | **128 / 128** | service books never consume primary live-POL or retained capacity; a `svc.max_live` cut gates new admission while existing questions drain |
 | `MaxAllStoredMarkets` | **2,368** | physical shared-map ceiling = 2,240 primary + 128 external rows |
 | `svc.client_bond` | **`[VERIFY]`, unset at genesis, native VIT** | admission returns `ClientBondUnset`; never invent a mock value or show the service as armed |
-| `svc.fee_bps` | **`[VERIFY]`, unset at genesis** | N7 service registration will return `ServiceRateUnset` while absent |
+| `svc.fee_bps` | **`[VERIFY]`, unset at genesis** | service registration returns `ServiceRateUnset` while absent |
 | `svc.max_live` | provisional **16**, hard max 64, `[VERIFY]` | external resource partition; not a demand target |
-| `svc.max_window` | 302,400 blocks (= one epoch), `[VERIFY]` consumer pending N7 | hosted-question window ceiling |
-| `svc.epsilon_min` | 0.01, `[VERIFY]` consumer pending N7 | declared manipulation displacement floor |
+| `svc.max_window` | 302,400 blocks (= one epoch) | live hosted-question window ceiling |
+| `svc.epsilon_min` | 0.01 | live declared manipulation displacement floor |
 
 **Unset-by-spec ([VERIFY], sim-/ops-gated — never invent values):**
 `sec.flow_cap`, `collator.bond_req_vit`, `ops.*` budget lines, `pol.b_baseline` calibration,

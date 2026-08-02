@@ -47,6 +47,7 @@ dependencies = [
  "market-core",
  "origins-core",
  "parity-scale-codec",
+ "question-service-core",
 ]
 
 [[package]]

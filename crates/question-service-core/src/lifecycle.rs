@@ -1,6 +1,6 @@
 //! Architecture 16 §4's two-terminal hosted-question state machine.
 
-use futarchy_primitives::FixedU64;
+use futarchy_primitives::{FixedU64, QuestionPhase, VoidReason};
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
@@ -8,49 +8,6 @@ use crate::{
     attestor_median, AttestorError, AttestorMedian, AttestorReport, QuestionId, Report,
     ServiceError,
 };
-
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Decode,
-    DecodeWithMemTracking,
-    Encode,
-    Eq,
-    MaxEncodedLen,
-    PartialEq,
-    TypeInfo,
-)]
-pub enum QuestionPhase {
-    Registered,
-    Open,
-    Sealed,
-    Settled,
-    Voided,
-}
-
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Decode,
-    DecodeWithMemTracking,
-    Encode,
-    Eq,
-    MaxEncodedLen,
-    PartialEq,
-    TypeInfo,
-)]
-pub enum VoidReason {
-    QuorumNotReached,
-    MedianOutOfRange,
-    DeadlineMissed,
-    ServicePaused,
-    EscrowInsufficient,
-    ClientDeregistered,
-    AttestorSetCollapsed,
-    ClientVanished,
-}
 
 #[derive(
     Clone,
@@ -293,7 +250,7 @@ impl<const MAX_ATTESTORS: u32> Question<Sealed<MAX_ATTESTORS>> {
         match attestor_median(named, reports, tolerance) {
             Ok(median) => Terminal::Settled(self.settle(median)),
             Err(AttestorError::QuorumNotReached) => {
-                Terminal::Voided(self.void(VoidReason::QuorumNotReached))
+                Terminal::Voided(self.void(VoidReason::NoQuorum))
             }
             Err(AttestorError::MedianOutOfRange | AttestorError::ToleranceOutOfRange) => {
                 Terminal::Voided(self.void(VoidReason::MedianOutOfRange))
@@ -435,10 +392,10 @@ mod tests {
 
         let open = Question::<Registered>::register(2)
             .open()
-            .void(VoidReason::ClientDeregistered);
+            .void(VoidReason::ClientUnreachable);
         assert_eq!(open.phase(), QuestionPhase::Voided);
 
-        let sealed = sealed(3)?.void(VoidReason::ClientVanished);
+        let sealed = sealed(3)?.void(VoidReason::ClientUnreachable);
         assert_eq!(sealed.phase(), QuestionPhase::Voided);
         assert_eq!(sealed.delivered_report().question_id, 3);
         Ok(())
@@ -455,7 +412,7 @@ mod tests {
         );
         assert!(matches!(
             terminal,
-            Terminal::Voided(ref q) if q.reason() == VoidReason::QuorumNotReached
+            Terminal::Voided(ref q) if q.reason() == VoidReason::NoQuorum
         ));
         Ok(())
     }

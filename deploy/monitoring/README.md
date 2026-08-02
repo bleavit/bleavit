@@ -131,7 +131,7 @@ not part of `check_alert_coverage.py`.
 | TWAP | live unsealed-window coverage projection (`TelemetryApi`) | live; `decision_stats` is sealed-window only |
 | Liquidity floors | runtime-side effective POL/floor (`TelemetryApi`) | live |
 | Oracle | chain exporter (`open_oracle_rounds`) | live |
-| Collateralization | runtime-side escrow/custody reconciliation (`TelemetryApi`) | live; page |
+| Collateralization | runtime-side escrow/custody reconciliation per primary/service ledger instance (`TelemetryApi`) | live; page |
 | Treasury | chain exporter (`nav`) | live |
 | XCM | chain exporter trap count plus local/independent-Asset-Hub reserve-probe runway; node/runtime send/fail detail remains operational context | live alert threshold |
 | Keepers | existing keeper daemon series | live |

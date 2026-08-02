@@ -291,6 +291,12 @@ class SurfaceManifestTests(unittest.TestCase):
                 "AttestorRemovedForCause",
                 "AttestationRevoked",
             },
+            "pallet-question-service": {
+                "QuestionRegistered",
+                "QuestionSealed",
+                "QuestionSettled",
+                "QuestionVoided",
+            },
             "frame-system": {"CodeUpdated", "UpgradeAuthorized"},
         }
         expected_attestor_storage = {
@@ -323,6 +329,8 @@ class SurfaceManifestTests(unittest.TestCase):
         )[0]
         contract_events: dict[str, set[str]] = {}
         for pallet in expected_events:
+            if pallet == "pallet-question-service":
+                continue
             row = next(
                 line
                 for line in section_six.splitlines()
@@ -341,6 +349,11 @@ class SurfaceManifestTests(unittest.TestCase):
         )[0].split("Events:", 1)[1]
         contract_events["pallet-oracle"] = event_table_names(oracle_events)
 
+        hosted_events = contract.split("**§6 additions — client-facing events.**", 1)[
+            1
+        ].split("**§7 additions — storage", 1)[0]
+        contract_events["pallet-question-service"] = event_table_names(hosted_events)
+
         attestor_section = contract.split("### 7.5 `pallet-attestor`", 1)[1].split(
             "\n---\n", 1
         )[0]
@@ -358,6 +371,7 @@ class SurfaceManifestTests(unittest.TestCase):
             "MilestoneRegistry": "pallet-registry",
             "Guardian": "pallet-guardian",
             "Attestor": "pallet-attestor",
+            "QuestionService": "pallet-question-service",
             "System": "frame-system",
         }
         manifest_events = {pallet: set() for pallet in expected_events}
@@ -537,6 +551,33 @@ class SurfaceManifestTests(unittest.TestCase):
                 "MinEpochLength",
                 {"type": "u32", "value": "0x80130300"},
             ),
+            "constant.client_registry.client_bond": (
+                "ClientBond",
+                {"type": "Optionenum[None=0|Some=1(u128)]", "value": "0x00"},
+            ),
+            "constant.question_service.fee_floor": (
+                "FeeFloor",
+                {"type": "u128", "value": "0x40b46c17000000000000000000000000"},
+            ),
+            "constant.question_service.max_live": (
+                "MaxLive",
+                {"type": "u32", "value": "0x10000000"},
+            ),
+            "constant.question_service.max_window": (
+                "MaxWindow",
+                {"type": "u32", "value": "0x409d0400"},
+            ),
+            "constant.question_service.epsilon_min": (
+                "EpsilonMin",
+                {
+                    "type": "futarchy_primitives::FixedU64(u64)",
+                    "value": "0x8096980000000000",
+                },
+            ),
+            "constant.question_service.attestors_min": (
+                "AttestorsMin",
+                {"type": "u32", "value": "0x03000000"},
+            ),
         }
         by_id = {entry["id"]: entry for entry in self.entries}
         for identifier, (constant, layout) in expected.items():
@@ -553,11 +594,11 @@ class SurfaceManifestTests(unittest.TestCase):
         ]
         self.assertEqual(offenders, [])
 
-    def test_b2_api_and_epoch_constant_wiring_blockers_are_cleared(self) -> None:
+    def test_runtime_api_and_epoch_constant_wiring_blockers_are_cleared(self) -> None:
         runtime_apis = [
             entry for entry in self.entries if entry["kind"] == "runtime_api"
         ]
-        self.assertEqual(len(runtime_apis), 11)
+        self.assertEqual(len(runtime_apis), 12)
         for entry in runtime_apis:
             self.assertNotIn("blocked_by", entry, entry["id"])
             # Runtime API layout is resolved from released metadata; this
@@ -755,6 +796,15 @@ class SurfaceManifestTests(unittest.TestCase):
             "constant.epoch.length_floor",
             "constant.registry.archive_delay.incident",
             "constant.registry.archive_delay.milestone",
+            "constant.client_registry.client_bond",
+            "constant.question_service.fee_floor",
+            "constant.question_service.max_live",
+            "constant.question_service.max_window",
+            "constant.question_service.epsilon_min",
+            "constant.question_service.attestors_min",
+            "storage.client_registry.clients",
+            "storage.question_service.questions",
+            "storage.question_service.reports",
             "storage.identity.usdc_asset",
             "storage.identity.usdc_metadata",
         }
@@ -768,7 +818,7 @@ class SurfaceManifestTests(unittest.TestCase):
             }.isdisjoint(identifiers)
         )
 
-    def test_all_eleven_runtime_api_methods_are_present(self) -> None:
+    def test_all_twelve_runtime_api_methods_are_present(self) -> None:
         methods = {
             entry["method"]
             for entry in self.entries
@@ -788,6 +838,7 @@ class SurfaceManifestTests(unittest.TestCase):
                 "nav",
                 "recent_cohorts",
                 "open_oracle_rounds",
+                "hosted_report",
             },
         )
 

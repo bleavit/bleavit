@@ -3,6 +3,7 @@
 use alloc::vec;
 
 use frame_support::{
+    instances::Instance1,
     traits::{fungibles::Inspect, fungibles::Mutate, Get},
     BoundedVec,
 };
@@ -614,6 +615,59 @@ fn telemetry_collateral_reuses_ledger_l2_and_flags_only_positive_residue(
                 .custody_usdc
                 .saturating_sub(telemetry.liability_usdc)
         );
+        Ok(())
+    })
+}
+
+#[test]
+fn telemetry_collateral_is_reported_independently_for_service_instance() -> Result<(), &'static str>
+{
+    tests::development_ext().execute_with(|| {
+        let primary_before = required(
+            crate::telemetry::collateral(),
+            "primary ledger totals must be readable",
+        )?;
+        let service_before = required(
+            crate::telemetry::service_collateral(),
+            "service ledger totals must be readable",
+        )?;
+        let liability_delta = futarchy_primitives::currency::USDC.saturating_add(19);
+        let mut vault = pallet_conditional_ledger::core_ledger::VaultInfo::open(1);
+        vault.escrowed = liability_delta;
+        pallet_conditional_ledger::Vaults::<Runtime, Instance1>::insert(
+            futarchy_primitives::kernel::SERVICE_ID_BASE,
+            vault,
+        );
+
+        let service_account =
+            <Runtime as pallet_conditional_ledger::Config<Instance1>>::PalletId::get()
+                .into_account_truncating();
+        let asset = <Runtime as pallet_conditional_ledger::Config<Instance1>>::UsdcAssetId::get();
+        assert!(ForeignAssets::mint_into(asset, &service_account, liability_delta).is_ok());
+
+        let direct = required(
+            pallet_conditional_ledger::Pallet::<Runtime, Instance1>::collateral_totals().ok(),
+            "service L-2 checked sums must remain valid",
+        )?;
+        let service_after = required(
+            crate::telemetry::service_collateral(),
+            "valid service totals must produce telemetry",
+        )?;
+        assert_eq!(
+            direct,
+            (service_after.custody_usdc, service_after.liability_usdc)
+        );
+        assert_eq!(
+            service_after.custody_usdc,
+            service_before.custody_usdc.saturating_add(liability_delta)
+        );
+        assert_eq!(
+            service_after.liability_usdc,
+            service_before
+                .liability_usdc
+                .saturating_add(liability_delta)
+        );
+        assert_eq!(crate::telemetry::collateral(), Some(primary_before));
         Ok(())
     })
 }

@@ -12,7 +12,7 @@ use staging_xcm::latest::Location;
 #[cfg(feature = "bootstrap")]
 use crate::SudoConfig;
 use crate::{
-    configs::{LedgerPalletId, TreasuryPalletId},
+    configs::{LedgerPalletId, ServiceLedgerPalletId, TreasuryPalletId},
     usdc_location, AccountId, Balance, BalancesConfig, CollatorSelectionConfig, ConstitutionConfig,
     EpochConfig, ExecutionGuardConfig, ForeignAssetsConfig, FutarchyTreasuryConfig,
     ParachainInfoConfig, PolkadotXcmConfig, RuntimeGenesisConfig, SessionConfig, SessionKeys,
@@ -78,6 +78,11 @@ pub fn usdc_genesis_endowments() -> Vec<(Location, AccountId, Balance)> {
         (
             asset.clone(),
             LedgerPalletId::get().into_account_truncating(),
+            amount,
+        ),
+        (
+            asset.clone(),
+            ServiceLedgerPalletId::get().into_account_truncating(),
             amount,
         ),
         (asset.clone(), crate::configs::insurance_account(), amount),

@@ -639,6 +639,38 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             }
             pallet_conditional_ledger::Call::__Ignore(_, _) => denied(),
         },
+        RuntimeCall::ServiceLedger(call) => match call {
+            pallet_conditional_ledger::Call::split { .. }
+            | pallet_conditional_ledger::Call::merge { .. }
+            | pallet_conditional_ledger::Call::split_scalar { .. }
+            | pallet_conditional_ledger::Call::merge_scalar { .. }
+            | pallet_conditional_ledger::Call::split_gate { .. }
+            | pallet_conditional_ledger::Call::merge_gate { .. }
+            | pallet_conditional_ledger::Call::transfer { .. }
+            | pallet_conditional_ledger::Call::split_baseline { .. }
+            | pallet_conditional_ledger::Call::merge_baseline { .. }
+            | pallet_conditional_ledger::Call::resolve { .. }
+            | pallet_conditional_ledger::Call::void { .. }
+            | pallet_conditional_ledger::Call::settle_scalar { .. }
+            | pallet_conditional_ledger::Call::settle_gate { .. }
+            | pallet_conditional_ledger::Call::settle_baseline { .. }
+            | pallet_conditional_ledger::Call::redeem { .. }
+            | pallet_conditional_ledger::Call::redeem_scalar { .. }
+            | pallet_conditional_ledger::Call::redeem_scalar_pair { .. }
+            | pallet_conditional_ledger::Call::redeem_gate { .. }
+            | pallet_conditional_ledger::Call::redeem_void { .. }
+            | pallet_conditional_ledger::Call::redeem_baseline { .. }
+            | pallet_conditional_ledger::Call::redeem_baseline_pair { .. }
+            | pallet_conditional_ledger::Call::sweep_dust { .. }
+            | pallet_conditional_ledger::Call::sweep_dust_baseline { .. }
+            | pallet_conditional_ledger::Call::sweep_redemption_fees { .. }
+            | pallet_conditional_ledger::Call::reconcile { .. } => leaf(CallDomain::Public),
+            pallet_conditional_ledger::Call::set_split_paused { .. }
+            | pallet_conditional_ledger::Call::set_frozen { .. } => {
+                leaf(CallDomain::EmergencyPlaybook)
+            }
+            pallet_conditional_ledger::Call::__Ignore(_, _) => denied(),
+        },
         RuntimeCall::Market(call) => match call {
             pallet_market::Call::buy { .. }
             | pallet_market::Call::sell { .. }
@@ -764,10 +796,23 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
         },
         RuntimeCall::ClientRegistry(call) => match call {
             pallet_client_registry::Call::admit_client { .. }
+            | pallet_client_registry::Call::admit_local_client { .. }
             | pallet_client_registry::Call::remove_client { .. } => {
                 leaf(CallDomain::ConstitutionalValues)
             }
             pallet_client_registry::Call::__Ignore(_, _) => denied(),
+        },
+        RuntimeCall::QuestionService(call) => match call {
+            pallet_question_service::Call::register { .. }
+            | pallet_question_service::Call::open { .. }
+            | pallet_question_service::Call::seal { .. } => leaf(CallDomain::ExternalClient),
+            pallet_question_service::Call::bond_attestor { .. }
+            | pallet_question_service::Call::submit_attestation { .. }
+            | pallet_question_service::Call::settle { .. }
+            | pallet_question_service::Call::void { .. }
+            | pallet_question_service::Call::archive { .. } => leaf(CallDomain::Public),
+            pallet_question_service::Call::set_paused { .. } => leaf(CallDomain::EmergencyPlaybook),
+            pallet_question_service::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::Epoch(call) => match call {
             pallet_epoch::Call::submit { .. }
@@ -1202,6 +1247,7 @@ pub fn is_values_enactment_leaf(call: &RuntimeCall) -> bool {
             | RuntimeCall::Attestor(pallet_attestor::Call::resolve_challenge { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::remove_for_cause { .. })
             | RuntimeCall::ClientRegistry(pallet_client_registry::Call::admit_client { .. })
+            | RuntimeCall::ClientRegistry(pallet_client_registry::Call::admit_local_client { .. })
             | RuntimeCall::ClientRegistry(pallet_client_registry::Call::remove_client { .. })
             | RuntimeCall::Oracle(pallet_oracle::Call::adjudicate { .. })
             // Both registry instances gate `resolve_challenge` on

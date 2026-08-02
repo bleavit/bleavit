@@ -45,4 +45,13 @@ pub enum ServiceError {
     MedianOutOfRange,
     DeadlineNotReached,
     UnknownQuestion,
+    DeadlinePassed,
+    CreationFrozen,
+    DuplicateAttestor,
+    UnknownAttestor,
+    AlreadyBonded,
+    InvalidSubId,
+    ArithmeticOverflow,
+    ArchiveNotReady,
+    TryStateViolation,
 }

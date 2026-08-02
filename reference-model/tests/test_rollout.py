@@ -397,10 +397,10 @@ class PhaseCapCompositionTests(unittest.TestCase):
             with self.subTest(link=key):
                 self.assertTrue(ok)
 
-    def test_genesis_seeds_twelve_cents_not_the_treasury_target(self):
+    def test_genesis_seeds_thirteen_cents_not_the_treasury_target(self):
         self.assertEqual(USDC_MIN_BALANCE, D("0.01"))
-        self.assertEqual(GENESIS_PROTOCOL_ACCOUNTS * USDC_MIN_BALANCE, D("0.12"))
-        self.assertEqual(GENESIS_PROTOCOL_USDC, D("0.12"))
+        self.assertEqual(GENESIS_PROTOCOL_ACCOUNTS * USDC_MIN_BALANCE, D("0.13"))
+        self.assertEqual(GENESIS_PROTOCOL_USDC, D("0.13"))
         self.assertLess(GENESIS_PROTOCOL_USDC, TREASURY_FUNDING_TARGET)
 
     def test_the_nav_bound_gives_the_arming_claimant_every_benefit(self):

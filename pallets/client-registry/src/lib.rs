@@ -124,14 +124,29 @@ pub mod pallet {
 
     /// Canonical forward registry (16 §2).
     #[pallet::storage]
-    pub type Clients<T: Config> =
-        StorageMap<_, Blake2_128Concat, ClientId, ClientRecord<Location>, OptionQuery>;
+    pub type Clients<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        ClientId,
+        ClientRecord<Location, T::AccountId>,
+        OptionQuery,
+    >;
 
     /// Exact-equality reverse registry. No prefix, alias, or descended-origin
     /// matching exists anywhere in this pallet.
     #[pallet::storage]
     pub type ClientIdOf<T: Config> =
         StorageMap<_, Blake2_128Concat, Location, ClientId, OptionQuery>;
+
+    /// Exact-equality reverse index for locally authenticated services.
+    #[pallet::storage]
+    pub type ClientIdOfSigner<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, ClientId, OptionQuery>;
+
+    /// The sub-id presence policy is not part of 02 §4a's frozen client row.
+    #[pallet::storage]
+    pub type ClientPolicies<T: Config> =
+        StorageMap<_, Twox64Concat, ClientId, SubIdPolicy, OptionQuery>;
 
     /// Local account funding the native hold. Kept out of the canonical record
     /// because it is custody metadata, not external client identity.
@@ -184,6 +199,13 @@ pub mod pallet {
             bond: Balance,
             sub_id_policy: SubIdPolicy,
         },
+        LocalClientAdmitted {
+            client_id: ClientId,
+            local_signer: T::AccountId,
+            bond_owner: T::AccountId,
+            bond: Balance,
+            sub_id_policy: SubIdPolicy,
+        },
         ClientRemovalStarted {
             client_id: ClientId,
             questions_live: u32,
@@ -230,6 +252,13 @@ pub mod pallet {
         fn max_clients() -> u32 {
             MAX_CLIENTS
         }
+
+        /// Live optional admission bond. `None` is the intentional
+        /// calibration-pending state and is visible without inventing a zero.
+        #[pallet::constant_name(ClientBond)]
+        fn client_bond() -> Option<Balance> {
+            T::ClientBond::client_bond()
+        }
     }
 
     #[pallet::call]
@@ -247,7 +276,7 @@ pub mod pallet {
             T::ValuesOrigin::ensure_origin(origin)?;
             frame_support::storage::with_storage_layer(|| {
                 let location_taken = ClientIdOf::<T>::contains_key(&location);
-                let admission = client_registry_core::admit(
+                let admission = client_registry_core::admit_location::<_, T::AccountId>(
                     location,
                     sub_id_policy,
                     T::ClientBond::client_bond(),
@@ -267,14 +296,68 @@ pub mod pallet {
 
                 let client_id = admission.client_id;
                 let bond = admission.record.bond;
-                ClientIdOf::<T>::insert(&admission.record.location, client_id);
+                let location = admission
+                    .record
+                    .location
+                    .clone()
+                    .ok_or(Error::<T>::BondAccounting)?;
+                ClientIdOf::<T>::insert(&location, client_id);
+                ClientPolicies::<T>::insert(client_id, admission.sub_id_policy);
                 BondOwners::<T>::insert(client_id, &bond_owner);
                 Clients::<T>::insert(client_id, &admission.record);
                 NextClientId::<T>::put(admission.next_client_id);
                 ClientCount::<T>::put(ClientCount::<T>::get().saturating_add(1));
                 Self::deposit_event(Event::ClientAdmitted {
                     client_id,
-                    location: admission.record.location,
+                    location,
+                    bond_owner,
+                    bond,
+                    sub_id_policy,
+                });
+                Ok(())
+            })
+        }
+
+        /// Admit one exact local signer. The identity account is also the only
+        /// account the question service may debit for USDC escrow.
+        #[pallet::call_index(2)]
+        #[pallet::weight(T::WeightInfo::admit_local_client())]
+        pub fn admit_local_client(
+            origin: OriginFor<T>,
+            local_signer: T::AccountId,
+            bond_owner: T::AccountId,
+            sub_id_policy: SubIdPolicy,
+        ) -> DispatchResult {
+            T::ValuesOrigin::ensure_origin(origin)?;
+            frame_support::storage::with_storage_layer(|| {
+                let signer_taken = ClientIdOfSigner::<T>::contains_key(&local_signer);
+                let admission = client_registry_core::admit_local::<Location, _>(
+                    local_signer.clone(),
+                    sub_id_policy,
+                    T::ClientBond::client_bond(),
+                    client_registry_core::AdmissionContext {
+                        admitted_at: Self::now(),
+                        client_count: ClientCount::<T>::get(),
+                        max_clients: MAX_CLIENTS,
+                        next_client_id: NextClientId::<T>::get(),
+                        location_taken: signer_taken,
+                    },
+                )
+                .map_err(Self::map_core_error)?;
+
+                T::Currency::hold(&Self::bond_reason(), &bond_owner, admission.record.bond)
+                    .map_err(|_| Error::<T>::BondInsufficient)?;
+                let client_id = admission.client_id;
+                let bond = admission.record.bond;
+                ClientIdOfSigner::<T>::insert(&local_signer, client_id);
+                ClientPolicies::<T>::insert(client_id, admission.sub_id_policy);
+                BondOwners::<T>::insert(client_id, &bond_owner);
+                Clients::<T>::insert(client_id, &admission.record);
+                NextClientId::<T>::put(admission.next_client_id);
+                ClientCount::<T>::put(ClientCount::<T>::get().saturating_add(1));
+                Self::deposit_event(Event::LocalClientAdmitted {
+                    client_id,
+                    local_signer,
                     bond_owner,
                     bond,
                     sub_id_policy,
@@ -319,8 +402,18 @@ pub mod pallet {
             ClientIdOf::<T>::get(location)
         }
 
+        pub fn client_id_of_signer(signer: &T::AccountId) -> Option<ClientId> {
+            ClientIdOfSigner::<T>::get(signer)
+        }
+
+        pub fn sub_id_policy(client_id: ClientId) -> Option<SubIdPolicy> {
+            ClientPolicies::<T>::get(client_id)
+        }
+
         /// Read a client only when new-question admission remains open.
-        pub fn active_client(client_id: ClientId) -> Result<ClientRecord<Location>, DispatchError> {
+        pub fn active_client(
+            client_id: ClientId,
+        ) -> Result<ClientRecord<Location, T::AccountId>, DispatchError> {
             let record = Clients::<T>::get(client_id).ok_or(Error::<T>::NotRegistered)?;
             ensure!(
                 !RemovedClients::<T>::contains_key(client_id),
@@ -441,16 +534,31 @@ pub mod pallet {
                     TryRuntimeError::Other("client-registry: Clients over MaxClients")
                 );
                 ensure!(
-                    ClientIdOf::<T>::get(&record.location) == Some(client_id),
-                    TryRuntimeError::Other("client-registry: reverse location index mismatch")
+                    record.identity_is_valid(),
+                    TryRuntimeError::Other("client-registry: invalid identity cardinality")
+                );
+                let reverse_ok = record
+                    .location
+                    .as_ref()
+                    .is_some_and(|location| ClientIdOf::<T>::get(location) == Some(client_id))
+                    || record.local_signer.as_ref().is_some_and(|signer| {
+                        ClientIdOfSigner::<T>::get(signer) == Some(client_id)
+                    });
+                ensure!(
+                    reverse_ok,
+                    TryRuntimeError::Other("client-registry: reverse identity index mismatch")
                 );
                 ensure!(
                     record.bond > 0,
                     TryRuntimeError::Other("client-registry: zero remaining bond")
                 );
                 ensure!(
-                    record.questions_total >= u64::from(record.questions_live),
+                    record.questions_total >= record.questions_live,
                     TryRuntimeError::Other("client-registry: live questions exceed total")
+                );
+                ensure!(
+                    ClientPolicies::<T>::contains_key(client_id),
+                    TryRuntimeError::Other("client-registry: missing client policy")
                 );
                 if RemovedClients::<T>::contains_key(client_id) {
                     ensure!(
@@ -490,8 +598,23 @@ pub mod pallet {
                     "client-registry: reverse index names missing client",
                 ))?;
                 ensure!(
-                    record.location == location,
+                    record.location.as_ref() == Some(&location),
                     TryRuntimeError::Other("client-registry: reverse index location differs")
+                );
+            }
+            for (signer, client_id) in ClientIdOfSigner::<T>::iter() {
+                let record = Clients::<T>::get(client_id).ok_or(TryRuntimeError::Other(
+                    "client-registry: signer index names missing client",
+                ))?;
+                ensure!(
+                    record.local_signer.as_ref() == Some(&signer),
+                    TryRuntimeError::Other("client-registry: reverse signer differs")
+                );
+            }
+            for client_id in ClientPolicies::<T>::iter_keys() {
+                ensure!(
+                    Clients::<T>::contains_key(client_id),
+                    TryRuntimeError::Other("client-registry: orphan client policy")
                 );
             }
             for client_id in BondOwners::<T>::iter_keys() {
@@ -521,7 +644,10 @@ pub mod pallet {
             Ok(())
         }
 
-        fn finalize_removal(client_id: ClientId, record: ClientRecord<Location>) -> DispatchResult {
+        fn finalize_removal(
+            client_id: ClientId,
+            record: ClientRecord<Location, T::AccountId>,
+        ) -> DispatchResult {
             let owner = BondOwners::<T>::get(client_id).ok_or(Error::<T>::BondAccounting)?;
             let next_count = ClientCount::<T>::get()
                 .checked_sub(1)
@@ -530,8 +656,14 @@ pub mod pallet {
                 T::Currency::release(&Self::bond_reason(), &owner, record.bond, Precision::Exact)
                     .map_err(|_| Error::<T>::BondAccounting)?;
             }
-            ClientIdOf::<T>::remove(&record.location);
+            if let Some(location) = record.location {
+                ClientIdOf::<T>::remove(location);
+            }
+            if let Some(local_signer) = record.local_signer {
+                ClientIdOfSigner::<T>::remove(local_signer);
+            }
             Clients::<T>::remove(client_id);
+            ClientPolicies::<T>::remove(client_id);
             BondOwners::<T>::remove(client_id);
             RemovedClients::<T>::remove(client_id);
             IngressMeters::<T>::remove(client_id);

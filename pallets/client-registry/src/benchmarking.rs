@@ -1,4 +1,4 @@
-//! `frame-benchmarking` v2 harness for both N4 dispatchables.
+//! `frame-benchmarking` v2 harness for the client-registry dispatchables.
 
 use super::*;
 use crate::pallet::Clients;
@@ -35,6 +35,23 @@ mod benches {
         _(
             T::BenchmarkHelper::values(),
             benchmark_location(),
+            owner,
+            SubIdPolicy::Required,
+        );
+
+        assert!(Clients::<T>::contains_key(0));
+    }
+
+    #[benchmark]
+    fn admit_local_client() {
+        let owner = T::BenchmarkHelper::bond_owner();
+        T::BenchmarkHelper::prime_client_bond(BENCHMARK_BOND);
+        T::BenchmarkHelper::prime_funds(&owner, BENCHMARK_BOND.saturating_mul(2));
+
+        #[extrinsic_call]
+        _(
+            T::BenchmarkHelper::values(),
+            owner.clone(),
             owner,
             SubIdPolicy::Required,
         );

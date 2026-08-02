@@ -12,8 +12,9 @@ use futarchy_fixed::{
 };
 use futarchy_primitives::{
     currency::USDC,
-    kernel::{LMSR_DOMAIN_BOUND, MAX_NESTED_CALLS, MAX_NESTED_LEVELS},
-    Balance, BoundedVec, Branch, GateType, PositionId, PositionKind, ProposalClass, ScalarSide,
+    kernel::{LMSR_DOMAIN_BOUND, MAX_NESTED_CALLS, MAX_NESTED_LEVELS, SCORE_SCALE},
+    Balance, BoundedVec, Branch, FixedU64, GateType, PositionId, PositionKind, ProposalClass,
+    QuestionPhase, ScalarSide, VoidReason, H256,
 };
 use market_core::{
     buy_book, fee_up, seed_book, seed_external_pair, sell_book, BaselineTerminal, BookKind,
@@ -24,6 +25,10 @@ use origins_core::{
     BoxedCall, CallDomain, Error as FilterError, Origin, RuntimeCall, SafetyFilter,
 };
 use parity_scale_codec::{DecodeLimit, Encode, MemTrackingInput};
+use question_service_core::{
+    assemble_report, AttestorReport, Question, Registered, Report, ReportDraft, SealOutcome,
+    ServiceError, SettlementTrust, Terminal,
+};
 use std::convert::TryFrom;
 
 /// Enough codec reference depth for the payload vector plus the four protocol
@@ -1607,6 +1612,247 @@ fn assert_fixed_domain(b: Balance, selector: u16) {
     assert!(seeded.raw() > 0);
 }
 
+const SERVICE_MAX_ATTESTORS: u32 = 3;
+const SERVICE_QUESTION_ID: u64 = 7;
+const SERVICE_ATTESTORS: [[u8; 32]; SERVICE_MAX_ATTESTORS as usize] = [[1; 32], [2; 32], [3; 32]];
+
+#[derive(Clone, Copy, Debug)]
+pub struct ServiceAttestorInput {
+    pub attestor_selector: u8,
+    pub value: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ServiceSettlementCase {
+    pub route: u8,
+    pub void_reason: u8,
+    pub tolerance: u64,
+    pub reports: Vec<ServiceAttestorInput>,
+}
+
+impl<'a> Arbitrary<'a> for ServiceSettlementCase {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let count = u.int_in_range(0u8..=6)?;
+        let mut reports = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            reports.push(ServiceAttestorInput {
+                attestor_selector: u.arbitrary()?,
+                value: u.arbitrary()?,
+            });
+        }
+        Ok(Self {
+            route: u.arbitrary()?,
+            void_reason: u.arbitrary()?,
+            tolerance: u.arbitrary()?,
+            reports,
+        })
+    }
+}
+
+fn service_hash(bytes: &[u8]) -> H256 {
+    let mut out = [0u8; 32];
+    for (index, byte) in bytes.iter().enumerate() {
+        let slot = index % out.len();
+        out[slot] = out[slot]
+            .wrapping_add(*byte)
+            .rotate_left((index % 8) as u32);
+    }
+    out
+}
+
+fn service_report(question_id: u64) -> Option<Report<SERVICE_MAX_ATTESTORS>> {
+    let attestors = BoundedVec::try_from(SERVICE_ATTESTORS.to_vec()).ok()?;
+    let Ok(trust) = SettlementTrust::new(attestors, 30_000 * USDC) else {
+        return None;
+    };
+    assemble_report(
+        ReportDraft {
+            question_id,
+            client_id: 2,
+            sub_id: [3; 32],
+            twap_accept_1e9: FixedU64(500_000_000),
+            twap_reject_1e9: FixedU64(500_000_000),
+            observations: 100,
+            window_start: 10,
+            window_end: 110,
+            b_accept: 10_000 * USDC,
+            b_reject: 10_000 * USDC,
+            declared_stake: 100 * USDC,
+            epsilon_1e9: FixedU64(50_000_000),
+            tolerance_1e9: FixedU64(10_000_000),
+            settlement_trust: trust,
+        },
+        0,
+        FixedU64(16_000_000_000),
+        service_hash,
+    )
+    .ok()
+}
+
+fn service_void_reason(selector: u8) -> VoidReason {
+    match selector % 7 {
+        0 => VoidReason::NoQuorum,
+        1 => VoidReason::MedianOutOfRange,
+        2 => VoidReason::DeadlineMissed,
+        3 => VoidReason::ServicePaused,
+        4 => VoidReason::EscrowInsufficient,
+        5 => VoidReason::AttestorSetCollapsed,
+        _ => VoidReason::ClientUnreachable,
+    }
+}
+
+fn service_attestor(selector: u8) -> [u8; 32] {
+    match selector % 4 {
+        0 => SERVICE_ATTESTORS[0],
+        1 => SERVICE_ATTESTORS[1],
+        2 => SERVICE_ATTESTORS[2],
+        _ => [9; 32],
+    }
+}
+
+/// Architecture 16 §12 fuzz battery over every terminal route. The type-state
+/// API makes a second terminal transition unrepresentable; this harness also
+/// asserts report retention byte-for-byte and classifies every attestor
+/// refusal into the normative terminal VOID family.
+pub fn assert_service_settlement_case(case: &ServiceSettlementCase) {
+    let report = service_report(SERVICE_QUESTION_ID);
+    assert!(
+        report.is_some(),
+        "fixed service report fixture must assemble"
+    );
+    let Some(report) = report else {
+        return;
+    };
+    assert!(
+        report.manip_floor > 0,
+        "a sealed report cannot carry a placeholder"
+    );
+    assert!(report.verify_provenance(service_hash));
+    let reason = service_void_reason(case.void_reason);
+    let mut terminal_count = 0u8;
+
+    match case.route % 5 {
+        0 => {
+            let terminal = Question::<Registered>::register(SERVICE_QUESTION_ID).void(reason);
+            terminal_count += 1;
+            assert_eq!(terminal.phase(), QuestionPhase::Voided);
+            assert_eq!(terminal.reason(), reason);
+        }
+        1 => {
+            let terminal = Question::<Registered>::register(SERVICE_QUESTION_ID)
+                .open()
+                .void(reason);
+            terminal_count += 1;
+            assert_eq!(terminal.phase(), QuestionPhase::Voided);
+            assert_eq!(terminal.reason(), reason);
+        }
+        2 => {
+            let mismatched = service_report(SERVICE_QUESTION_ID + 1);
+            assert!(
+                mismatched.is_some(),
+                "mismatched service report fixture must assemble"
+            );
+            let Some(mismatched) = mismatched else {
+                return;
+            };
+            let original = mismatched.clone();
+            let outcome = Question::<Registered>::register(SERVICE_QUESTION_ID)
+                .open()
+                .seal(mismatched);
+            assert!(
+                matches!(&outcome, SealOutcome::Refused(_)),
+                "a question-id mismatch must refuse sealing"
+            );
+            let SealOutcome::Refused(refusal) = outcome else {
+                return;
+            };
+            assert_eq!(refusal.error(), ServiceError::UnknownQuestion);
+            let (open, returned, error) = refusal.into_parts();
+            assert_eq!(error, ServiceError::UnknownQuestion);
+            assert_eq!(
+                returned, original,
+                "seal refusal must return the sold report"
+            );
+            let terminal = open.void(reason);
+            terminal_count += 1;
+            assert_eq!(terminal.phase(), QuestionPhase::Voided);
+        }
+        3 => {
+            let original = report.clone();
+            let outcome = Question::<Registered>::register(SERVICE_QUESTION_ID)
+                .open()
+                .seal(report);
+            assert!(
+                matches!(&outcome, SealOutcome::Sealed(_)),
+                "matching report must seal"
+            );
+            let SealOutcome::Sealed(sealed) = outcome else {
+                return;
+            };
+            let terminal = sealed.void(reason);
+            terminal_count += 1;
+            assert_eq!(terminal.phase(), QuestionPhase::Voided);
+            assert_eq!(terminal.reason(), reason);
+            assert_eq!(terminal.delivered_report(), &original);
+        }
+        _ => {
+            let original = report.clone();
+            let outcome = Question::<Registered>::register(SERVICE_QUESTION_ID)
+                .open()
+                .seal(report);
+            assert!(
+                matches!(&outcome, SealOutcome::Sealed(_)),
+                "matching report must seal"
+            );
+            let SealOutcome::Sealed(sealed) = outcome else {
+                return;
+            };
+            let reports = case
+                .reports
+                .iter()
+                .map(|input| AttestorReport {
+                    attestor: service_attestor(input.attestor_selector),
+                    value: FixedU64(input.value),
+                })
+                .collect::<Vec<_>>();
+            let terminal = sealed.settle_from_attestors(&reports, FixedU64(case.tolerance));
+            terminal_count += 1;
+            match terminal {
+                Terminal::Settled(settled) => {
+                    assert_eq!(settled.phase(), QuestionPhase::Settled);
+                    assert_eq!(settled.report(), &original);
+                    assert!(settled.median().value().0 <= SCORE_SCALE);
+                    assert_eq!(
+                        settled.median().quorum(),
+                        original.settlement_trust.quorum()
+                    );
+                    for submitted in &reports {
+                        let deviation = settled.median().value().0.abs_diff(submitted.value.0);
+                        assert_eq!(
+                            settled.median().within_tolerance(submitted.value),
+                            deviation <= case.tolerance
+                        );
+                    }
+                }
+                Terminal::Voided(voided) => {
+                    assert_eq!(voided.phase(), QuestionPhase::Voided);
+                    assert_eq!(voided.delivered_report(), &original);
+                    assert!(matches!(
+                        voided.reason(),
+                        VoidReason::NoQuorum
+                            | VoidReason::MedianOutOfRange
+                            | VoidReason::AttestorSetCollapsed
+                    ));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        terminal_count, 1,
+        "escrow reaches exactly one terminal route"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2012,5 +2258,26 @@ mod tests {
             255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0,
         ]);
         assert_lmsr_case(&case);
+    }
+
+    #[test]
+    fn service_settlement_harness_covers_terminal_classes() {
+        for route in 0..=4 {
+            assert_service_settlement_case(&ServiceSettlementCase {
+                route,
+                void_reason: route,
+                tolerance: 10,
+                reports: vec![
+                    ServiceAttestorInput {
+                        attestor_selector: 0,
+                        value: 500_000_000,
+                    },
+                    ServiceAttestorInput {
+                        attestor_selector: 1,
+                        value: 500_000_001,
+                    },
+                ],
+            });
+        }
     }
 }

@@ -74,6 +74,8 @@ USDC_LOCATION = {
 USDC_ENDOWED_ACCOUNTS = {
     # PalletId b"bl/ledgr", no sub-seed.
     "ledger_sovereign": "fvGJck7fS1t2ejm7TyRMiteKHuDAN2G8Fb4bUq4N7pC8vwE3u",
+    # PalletId b"bl/svclg", no sub-seed.
+    "service_ledger_sovereign": "fvGJck7fS1t2fh9vRid3Yxs6DU4cPizZZFW1Ek1SJ2K9qGhbR",
     # PalletId b"bl/ledgr", sub-seed b"INSURANC".
     "ledger_insurance": "fvGJck7fS1t2ejm7TyRhcrwJWAdTsdZmqdcDWshHCJSChV9T5",
     # PalletId b"bl/ledgr", sub-seed b"BOOK____".
@@ -92,6 +94,10 @@ USDC_ENDOWED_ACCOUNTS = {
     "treasury_keeper": "fvGJck7fS1t2fpsb9pwGivHa8vtqjyagJ7ewS1GG86JyNUMK4",
     # PalletId b"bl/trsry", sub-seed b"ORACLE__".
     "treasury_oracle": "fvGJck7fS1t2fpsb9pwHpghdH5GxgxAp1Ry3utTBSxzNF4xkN",
+    # PalletId b"bl/trsry", sub-seed b"REWARDS_".
+    "treasury_rewards": "fvGJck7fS1t2fpsb9pwJd7it7GJzrhrAYqbvh4vLzVgHyUFo9",
+    # PalletId b"bl/trsry", sub-seed b"COLLATOR".
+    "treasury_collators": "fvGJck7fS1t2fpsb9pwEZbqSAbfbk4vUMedfFaLX8i2iF96mR",
 }
 # 09 §4/§6.1: DOT is held locally under the parent Location and funds coretime
 # renewal. `identity.rs::dot_location()` is `Location::parent()`, and

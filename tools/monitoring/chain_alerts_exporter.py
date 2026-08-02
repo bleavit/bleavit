@@ -84,7 +84,7 @@ SERIES: dict[str, SeriesDefinition] = {
         _series("bleavit_market_mid_window_coverage_percent", "gauge", "Projected scheduled-observation coverage for an active unsealed decision window.", "market", "start", "end"),
         _series("bleavit_market_effective_pol_usdc", "gauge", "Funded balance for one independently accounted POL component in USDC base units.", "component"),
         _series("bleavit_market_pol_floor_usdc", "gauge", "Matching requirement for one independently accounted POL component in USDC base units.", "component"),
-        _series("bleavit_ledger_collateral_drift_usdc", "gauge", "Signed ledger custody minus audited L-2 liability in USDC base units."),
+        _series("bleavit_ledger_collateral_drift_usdc", "gauge", "Signed per-instance ledger custody minus audited L-2 liability in USDC base units.", "instance"),
         _series("bleavit_runtime_migration_cursor_stalled", "gauge", "Canonical migration halt/live-stall detector state."),
         _series("bleavit_runtime_storage_max_utilization_ratio", "gauge", "Occupancy ratio for a metadata-invisible bounded storage shape.", "map"),
         _series("bleavit_runtime_lmsr_domain_rejections_total", "counter", "Finalized Market.PriceBoundExceeded extrinsic failures resolved from live metadata."),
@@ -1062,15 +1062,22 @@ class ChainExporter:
             self.store.set("bleavit_market_pol_floor_usdc", floor, labels)
 
     def _collateral(self, block_hash: str) -> None:
-        value = _required_some(
-            self._telemetry_api("collateral", block_hash),
-            "TelemetryApi.collateral",
-        )
-        if not isinstance(value, dict):
-            raise MonitoringError("TelemetryApi.collateral is not a struct")
-        custody = _integer_field(value, "custody_usdc", "TelemetryApi.collateral")
-        liability = _integer_field(value, "liability_usdc", "TelemetryApi.collateral")
-        self.store.set("bleavit_ledger_collateral_drift_usdc", custody - liability)
+        self.store.clear_family("bleavit_ledger_collateral_drift_usdc")
+        for method, instance in (
+            ("collateral", "primary"),
+            ("service_collateral", "service"),
+        ):
+            context = f"TelemetryApi.{method}"
+            value = _required_some(self._telemetry_api(method, block_hash), context)
+            if not isinstance(value, dict):
+                raise MonitoringError(f"{context} is not a struct")
+            custody = _integer_field(value, "custody_usdc", context)
+            liability = _integer_field(value, "liability_usdc", context)
+            self.store.set(
+                "bleavit_ledger_collateral_drift_usdc",
+                custody - liability,
+                {"instance": instance},
+            )
 
     def _migration_stall(self, block_hash: str) -> None:
         value = self._telemetry_api("migration_cursor_stalled", block_hash)
@@ -1106,17 +1113,13 @@ class ChainExporter:
             )
 
     def _numeric_anomalies(self, block_hash: str) -> None:
-        value = _required_some(
-            self._telemetry_api("collateral", block_hash),
-            "TelemetryApi.collateral",
-        )
-        if not isinstance(value, dict):
-            raise MonitoringError("TelemetryApi.collateral is not a struct")
-        dust = _integer_field(
-            value,
-            "anomalous_rounding_dust_usdc",
-            "TelemetryApi.collateral",
-        )
+        dust = 0
+        for method in ("collateral", "service_collateral"):
+            context = f"TelemetryApi.{method}"
+            value = _required_some(self._telemetry_api(method, block_hash), context)
+            if not isinstance(value, dict):
+                raise MonitoringError(f"{context} is not a struct")
+            dust += _integer_field(value, "anomalous_rounding_dust_usdc", context)
         self.store.clear_family("bleavit_runtime_numeric_anomaly_spike")
         self.store.set(
             "bleavit_runtime_numeric_anomaly_spike",

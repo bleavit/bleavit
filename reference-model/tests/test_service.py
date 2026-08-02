@@ -29,10 +29,13 @@ from bleavit_reference_model.service import (
     b_min_multiple,
     certified,
     coverage_bps,
+    displacement_floor,
     manip_floor,
     minimum_bond_bps,
     outgoing_states,
+    provenance_hash,
     quorum,
+    report_provenance_preimage,
     settlement_bond,
 )
 
@@ -85,15 +88,14 @@ class LifecycleTests(unittest.TestCase):
         )
         draft = ReportDraft(
             11, 7, bytes([4]) * 32, 500_000_000, 500_000_000, 100,
-            10, 110, D(10_000), D(10_000), D(500), 37_500_000, trust,
+            10, 110, D(10_000), D(10_000), D(500), 37_500_000, 10_000_000, trust,
         )
-        hasher = lambda fields: repr(fields).encode("utf-8")
-        report = assemble_report(draft, 0, 16, hasher)
+        report = assemble_report(draft, 0, 16)
         sealed = Question(11).advance().advance(report=report)
-        voided = sealed.void(VoidReason.CLIENT_VANISHED)
+        voided = sealed.void(VoidReason.CLIENT_UNREACHABLE)
         self.assertEqual(voided.state, QuestionState.VOIDED)
         self.assertIs(voided.report, report)
-        self.assertTrue(voided.report.verifies(hasher))
+        self.assertTrue(voided.report.verifies())
         with self.assertRaises(ServiceModelError):
             Question(12).advance().advance(report=report)
 
@@ -158,6 +160,15 @@ class ManipulationBoundTests(unittest.TestCase):
         displacement = manip_floor(self._books("100"), D("0.10"), 0, 1)
         capped = manip_floor(self._books("100"), D("0.10"), 1000, 1)
         self.assertEqual(capped - displacement, D("20.000000"))
+
+    def test_certification_excludes_the_hold_leg(self):
+        books = self._books()
+        epsilon = D("0.0375")
+        displacement = displacement_floor(books, epsilon)
+        published = manip_floor(books, epsilon, 10_000, 16)
+        self.assertLess(displacement, D(1_800))
+        self.assertGreaterEqual(published, D(1_800))
+        self.assertFalse(certified(displacement, D(600)))
 
     def test_invalid_claim_inputs_refuse(self):
         with self.assertRaises(ServiceModelError):
@@ -250,12 +261,6 @@ class SettlementTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
-    @staticmethod
-    def _hasher(fields: tuple[object, ...]) -> bytes:
-        # The specification fixes the binding set, not a hash algorithm.  This
-        # injective test token checks the boundary without inventing one.
-        return repr(fields).encode("utf-8")
-
     def _draft(self) -> ReportDraft:
         trust = SettlementTrust.from_attestors(
             NAMED_ATTESTORS, D(30_000)
@@ -273,16 +278,23 @@ class ReportTests(unittest.TestCase):
             b_reject=D(10_000),
             declared_stake=D(500),
             epsilon_1e9=37_500_000,
+            tolerance_1e9=10_000_000,
             settlement_trust=trust,
         )
 
     def test_report_assembly_binds_every_published_field(self):
-        report = assemble_report(self._draft(), 0, 16, self._hasher)
+        report = assemble_report(self._draft(), 0, 16)
         self.assertEqual(report.manip_floor, D("1559.230829"))
         self.assertTrue(report.certified)
         self.assertEqual(report.settlement_trust.quorum, 2)
-        self.assertTrue(report.verifies(self._hasher))
+        self.assertTrue(report.verifies())
         self.assertIn(report.sub_id, report.provenance_fields())
+
+    def test_report_certification_uses_displacement_not_published_total(self):
+        draft = ReportDraft(**{**self._draft().__dict__, "declared_stake": D(600)})
+        report = assemble_report(draft, 10_000, 16)
+        self.assertGreaterEqual(report.manip_floor, D(1_800))
+        self.assertFalse(report.certified)
 
     def test_reject_leg_uses_short_price(self):
         draft = self._draft()
@@ -293,7 +305,7 @@ class ReportTests(unittest.TestCase):
                 "twap_reject_1e9": 600_000_000,
             }
         )
-        report = assemble_report(draft, 0, 16, self._hasher)
+        report = assemble_report(draft, 0, 16)
         expected = manip_floor(
             (
                 ManipulationBook(D(10_000), D("0.4")),
@@ -304,6 +316,25 @@ class ReportTests(unittest.TestCase):
             16,
         )
         self.assertEqual(report.manip_floor, expected)
+
+    def test_provenance_known_vector_matches_scale_and_blake2_256(self):
+        report = assemble_report(self._draft(), 0, 16)
+        preimage = report_provenance_preimage(report)
+        self.assertEqual(report.provenance_hash, provenance_hash(report))
+        self.assertEqual(
+            preimage.hex(),
+            "626c65617669742f686f737465642d7265706f72742f76310900000000000000"
+            "0700000004040404040404040404040404040404040404040404040404040404"
+            "040404040065cd1d000000000065cd1d00000000e01000000a000000caa80000"
+            "00e40b5402000000000000000000000000e40b54020000000000000000000000"
+            "6df9ef5c0000000000000000000000000065cd1d000000000000000000000000"
+            "60343c0200000000809698000000000001030000000200000000ac23fc060000"
+            "000000000000000000",
+        )
+        self.assertEqual(
+            report.provenance_hash.hex(),
+            "2d2e978e8f5df77092754fb76330b236a1b9263c574d6f863e0db92349d0656f",
+        )
 
     def test_duplicate_attestors_do_not_form_a_named_set(self):
         account = bytes([1]) * 32
@@ -322,6 +353,10 @@ class ErrorSurfaceTests(unittest.TestCase):
             "ClientIsProtocolAccount", "EscrowInsufficient", "NotSealed",
             "AlreadySealed", "AlreadyTerminal", "QuorumNotReached",
             "MedianOutOfRange", "DeadlineNotReached", "UnknownQuestion",
+            "DeadlinePassed", "CreationFrozen",
+            "DuplicateAttestor", "UnknownAttestor", "AlreadyBonded",
+            "InvalidSubId", "ArithmeticOverflow", "ArchiveNotReady",
+            "TryStateViolation",
         )
         actual = tuple(error.value for error in ServiceError)
         self.assertEqual(actual, expected)

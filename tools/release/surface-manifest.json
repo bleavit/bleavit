@@ -1,6 +1,6 @@
 {
   "schema": "bleavit.critical-surface.v1",
-  "integration_contract_version": 20,
+  "integration_contract_version": 21,
   "description": "Critical chain/frontend surface frozen by architecture 02 sections 3, 6-9, and 12.",
   "release_blockers": [
     {
@@ -143,6 +143,221 @@
       "params_hex": "0x",
       "required": true,
       "citation": "02 §3"
+    },
+    {
+      "id": "api.hosted_report",
+      "kind": "runtime_api",
+      "api": "FutarchyApi",
+      "method": "hosted_report",
+      "state_call": "FutarchyApi_hosted_report",
+      "params_hex": "0x0000000000000000",
+      "params_description": "QuestionId(0)",
+      "required": true,
+      "citation": "02 §3; 02 §4a"
+    },
+    {
+      "id": "storage.client_registry.clients",
+      "kind": "storage",
+      "pallet": "ClientRegistry",
+      "item": "Clients",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §4a; 02 §7",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u32",
+        "value": "client_registry_core::ClientRecord{location:Optionenum[None=0|Some=1(staging_xcm::v5::location::Location{parents:u8,interior:staging_xcm::v5::junctions::Junctionsenum[Here=0|X1=1([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];1])|X2=2([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];2])|X3=3([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];3])|X4=4([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];4])|X5=5([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];5])|X6=6([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];6])|X7=7([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];7])|X8=8([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];8])]})],local_signer:Optionenum[None=0|Some=1(sp_core::crypto::AccountId32([u8;32]))],bond:u128,admitted_at:u32,questions_live:u32,questions_total:u32}"
+      }
+    },
+    {
+      "id": "storage.question_service.questions",
+      "kind": "storage",
+      "pallet": "QuestionService",
+      "item": "Questions",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §4a; 02 §7",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u64",
+        "value": "pallet_question_service::pallet::QuestionRecord{client_id:u32,phase:futarchy_primitives::QuestionPhaseenum[Registered=0|Open=1|Sealed=2|Settled=3|Voided=4],window_start:u32,window_end:u32,declared_stake:u128,epsilon_1e9:futarchy_primitives::FixedU64(u64),tolerance_1e9:futarchy_primitives::FixedU64(u64),markets:[u64;2]}"
+      }
+    },
+    {
+      "id": "storage.question_service.reports",
+      "kind": "storage",
+      "pallet": "QuestionService",
+      "item": "Reports",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §4a; 02 §7",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u64",
+        "value": "futarchy_primitives::ReportView{question_id:u64,client_id:u32,sub_id:[u8;32],twap_accept_1e9:futarchy_primitives::FixedU64(u64),twap_reject_1e9:futarchy_primitives::FixedU64(u64),observations:u32,window_start:u32,window_end:u32,b_accept:u128,b_reject:u128,manip_floor:u128,declared_stake:u128,epsilon_1e9:futarchy_primitives::FixedU64(u64),certified:bool,settlement_trust:futarchy_primitives::SettlementTrust{attestors:u32,quorum:u32,bond_total:u128},provenance_hash:[u8;32]}"
+      }
+    },
+    {
+      "id": "constant.client_registry.client_bond",
+      "kind": "constant",
+      "pallet": "ClientRegistry",
+      "constant": "ClientBond",
+      "required": true,
+      "citation": "02 §4a; 02 §9",
+      "layout": {
+        "type": "Optionenum[None=0|Some=1(u128)]",
+        "value": "0x00"
+      }
+    },
+    {
+      "id": "constant.question_service.fee_floor",
+      "kind": "constant",
+      "pallet": "QuestionService",
+      "constant": "FeeFloor",
+      "required": true,
+      "citation": "02 §4a; 02 §9",
+      "layout": {
+        "type": "u128",
+        "value": "0x40b46c17000000000000000000000000"
+      }
+    },
+    {
+      "id": "constant.question_service.max_live",
+      "kind": "constant",
+      "pallet": "QuestionService",
+      "constant": "MaxLive",
+      "required": true,
+      "citation": "02 §4a; 02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x10000000"
+      }
+    },
+    {
+      "id": "constant.question_service.max_window",
+      "kind": "constant",
+      "pallet": "QuestionService",
+      "constant": "MaxWindow",
+      "required": true,
+      "citation": "02 §4a; 02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x409d0400"
+      }
+    },
+    {
+      "id": "constant.question_service.epsilon_min",
+      "kind": "constant",
+      "pallet": "QuestionService",
+      "constant": "EpsilonMin",
+      "required": true,
+      "citation": "02 §4a; 02 §9",
+      "layout": {
+        "type": "futarchy_primitives::FixedU64(u64)",
+        "value": "0x8096980000000000"
+      }
+    },
+    {
+      "id": "constant.question_service.attestors_min",
+      "kind": "constant",
+      "pallet": "QuestionService",
+      "constant": "AttestorsMin",
+      "required": true,
+      "citation": "02 §4a; 02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x03000000"
+      }
+    },
+    {
+      "id": "event.question_service.question_registered",
+      "kind": "event",
+      "pallet": "QuestionService",
+      "event": "QuestionRegistered",
+      "required": true,
+      "citation": "02 §4a; 02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "question_id",
+            "type": "u64"
+          },
+          {
+            "name": "client_id",
+            "type": "u32"
+          },
+          {
+            "name": "window_end",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.question_service.question_sealed",
+      "kind": "event",
+      "pallet": "QuestionService",
+      "event": "QuestionSealed",
+      "required": true,
+      "citation": "02 §4a; 02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "question_id",
+            "type": "u64"
+          },
+          {
+            "name": "provenance_hash",
+            "type": "[u8;32]"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.question_service.question_settled",
+      "kind": "event",
+      "pallet": "QuestionService",
+      "event": "QuestionSettled",
+      "required": true,
+      "citation": "02 §4a; 02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "question_id",
+            "type": "u64"
+          },
+          {
+            "name": "value_1e9",
+            "type": "futarchy_primitives::FixedU64(u64)"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.question_service.question_voided",
+      "kind": "event",
+      "pallet": "QuestionService",
+      "event": "QuestionVoided",
+      "required": true,
+      "citation": "02 §4a; 02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "question_id",
+            "type": "u64"
+          },
+          {
+            "name": "reason",
+            "type": "futarchy_primitives::VoidReasonenum[NoQuorum=0|MedianOutOfRange=1|DeadlineMissed=2|ServicePaused=3|EscrowInsufficient=4|AttestorSetCollapsed=5|ClientUnreachable=6]"
+          }
+        ]
+      }
     },
     {
       "id": "storage.epoch.proposals",
@@ -762,7 +977,7 @@
       "citation": "02 §8; 02 §13",
       "layout": {
         "type": "u32",
-        "value": "0x14000000"
+        "value": "0x15000000"
       }
     },
     {

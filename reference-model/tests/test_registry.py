@@ -173,7 +173,7 @@ def _raw_unit(kind: ParamKind, doc_unit: str) -> str:
             "× of (b_acc + b_rej)": "1e-9 multiple",
         }[unit]
     if kind is ParamKind.PERBILL:
-        return {"bps": "ppb", "NAV": "ppb NAV"}[unit]
+        return {"bps": "ppb", "NAV": "ppb NAV", "—": "ppb fraction"}[unit]
     if kind is ParamKind.PERCENT:
         return {
             "%": "percent",
@@ -226,6 +226,8 @@ def _to_raw(
         value *= (
             Decimal(10_000_000)
             if suffix == "%" or unit == "NAV"
+            else scales["fixed"]
+            if unit == "—"
             else scales["perbill_per_bps"]
         )
     elif kind is ParamKind.BALANCE:
@@ -240,7 +242,12 @@ def _to_raw(
 
 
 def _variants(cell: str, count: int) -> tuple[str, ...]:
-    head = _plain_markdown(cell).split(" — ", 1)[0]
+    plain = _plain_markdown(cell)
+    head = plain.split(" — ", 1)[0]
+    # A fail-closed unverified row may lead with `[VERIFY] — <seed>`; retain
+    # the full cell when the qualifier itself contains no scalar.
+    if _NUMBER.search(head) is None:
+        head = plain
     parts = tuple(part.strip() for part in head.split("/"))
     if count > 1 and len(parts) >= count:
         return parts[:count]
@@ -476,14 +483,15 @@ class RegistryGroundingTests(unittest.TestCase):
         json_bytes = {param_key_bytes(key) for key in json_keys}
         classified_bytes = {param_key_bytes(key) for key in classified_genesis}
         # 194 at S7-S11; +5 with D-20's `svc.*` keys, +1 with N4's `MaxClients`,
-        # and +4 with N6's external-book structural envelopes. All ten are
-        # `genesis = false`, so the three seeded-key assertions below stay at
-        # 107 — this counter is the tripwire that makes every registry addition
-        # explicit.
-        self.assertEqual(len(entries), 204)
-        self.assertEqual(len(json_keys), 107)
-        self.assertEqual(len(classified_genesis), 107)
-        self.assertEqual(len(model_bytes), 107)
+        # +4 with N6's external-book structural envelopes, and +1 with N7's
+        # `MaxServiceAttestors`. Three D-20 values (`svc.max_live`,
+        # `svc.max_window`, and `svc.epsilon_min`) are genesis-seeded; the other
+        # eight additions are not. These counters are the tripwire that makes
+        # every registry addition explicit.
+        self.assertEqual(len(entries), 205)
+        self.assertEqual(len(json_keys), 110)
+        self.assertEqual(len(classified_genesis), 110)
+        self.assertEqual(len(model_bytes), 110)
         self.assertEqual(model_bytes, json_bytes)
         self.assertEqual(model_bytes, classified_bytes)
 

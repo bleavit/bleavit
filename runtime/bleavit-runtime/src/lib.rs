@@ -77,6 +77,30 @@ mod benches {
                 [pallet_guardian, Guardian]
                 [pallet_attestor, Attestor]
                 [pallet_client_registry, ClientRegistry]
+                [pallet_question_service, QuestionService]
+                // `ServiceLedger` (`pallet_conditional_ledger::<Instance1>`) is
+                // deliberately NOT registered here, and the reason is structural
+                // rather than expedient:
+                //
+                //  * both instances bind the SAME `WeightInfo`
+                //    (`weights::pallet_conditional_ledger`), so a second
+                //    measurement can only overwrite the first — the two sets can
+                //    never coexist in one file;
+                //  * the pallet is generic over `I`, so the executed code is
+                //    identical and instance `()`'s measurements are the correct
+                //    weights for both; and
+                //  * `ExternalMarketSweepStatus::baseline_book_swept` is `false`
+                //    unconditionally, because the service domain has no Baseline
+                //    book (16: two books per question, never six). So
+                //    `sweep_dust_baseline` is *structurally* unbenchmarkable on
+                //    that instance — a fixture cannot fix it, and its sibling
+                //    `sweep_dust` is fail-closed for the same reason (only an
+                //    exact registered two-book question authorizes the service
+                //    ledger's dust sweep).
+                //
+                // `runtime_ledger_instances_share_one_weight_schedule` pins
+                // assumption two, so giving the instances different weights fails
+                // loudly instead of silently shipping unmeasured ones.
                 [pallet_epoch, Epoch]
                 [pallet_execution_guard, ExecutionGuard]
             );
@@ -162,7 +186,7 @@ pub const RUNTIME_SPEC_VERSION: u32 = 2;
 #[cfg(feature = "recovery")]
 pub const RUNTIME_SPEC_VERSION: u32 = 3;
 /// SDK dispatchable-compatibility counter, deliberately **independent** of
-/// `INTEGRATION_CONTRACT_VERSION` (02 §13; SQ-102, currently contract v16). It denotes
+/// `INTEGRATION_CONTRACT_VERSION` (02 §13; SQ-102, currently contract v21). It denotes
 /// compatibility of existing dispatchables as embedded in signed-transaction
 /// validity, so an additive contract bump MUST NOT move it. Re-baselined to 1
 /// pre-genesis; the SDK forbids this counter ever decreasing after genesis.
@@ -305,6 +329,8 @@ construct_runtime!(
         // Runtime-internal origin-only shim for the five scoped values tracks.
         TrackOrigins: track_origins = 64,
         ClientRegistry: pallet_client_registry = 65,
+        QuestionService: pallet_question_service = 66,
+        ServiceLedger: pallet_conditional_ledger::<Instance1> = 67,
     }
 );
 

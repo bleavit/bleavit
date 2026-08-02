@@ -719,6 +719,13 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
             ensure!(matches!(v.state, VaultState::Open), Error::WrongVaultState);
             Ok(())
         })??;
+        // Signed creation is bound to the live floor overlaid by the FRAME
+        // shell. Keep this after the state check so terminal calls preserve
+        // the normative WrongVaultState refusal; MarketAuthority movements
+        // remain exact-by-construction and exempt (03 §7 R-2).
+        if matches!(origin, LedgerOrigin::Signed) {
+            ensure!(a >= self.min_split, Error::AmountTooSmall);
+        }
         self.burn(position(pid, b, PositionKind::BranchUsdc), who, a)?;
         self.with_vault_mut(pid, |v| {
             let bs = &mut v.branches[bix(b)];
@@ -778,6 +785,9 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
             ensure!(matches!(v.state, VaultState::Open), Error::WrongVaultState);
             Ok(())
         })??;
+        if matches!(origin, LedgerOrigin::Signed) {
+            ensure!(a >= self.min_split, Error::AmountTooSmall);
+        }
         self.burn(position(pid, b, PositionKind::BranchUsdc), who, a)?;
         self.with_vault_mut(pid, |v| {
             let bs = &mut v.branches[bix(b)];

@@ -1274,12 +1274,19 @@ fn extrinsic_value_types_do_not_admit_wrong_kinds_via_scale() {
 fn genesis_registry_matches_13_1_row_encodings() {
     new_test_ext().execute_with(|| {
         // Every 13 §1 row with a scalar concrete default and no open
-        // [VERIFY] tag is seeded (107 total, incl. per-class suffix keys and
+        // [VERIFY] tag is seeded (110 total, incl. per-class suffix keys and
         // rule-6 short keys; +2 for keeper.rebate/dis.merit_min, +2 for the
         // reserve-probe pricing rows, +3 for the SQ-173 sec.prize.* class
-        // envelopes, +1 for SQ-486's adopted sec.flow_cap and +1 for E1's
-        // ledger.rdm_fee); spot-pin the unit encodings per kind.
-        assert_eq!(Params::<Test>::count(), 107);
+        // envelopes, +1 for SQ-486's adopted sec.flow_cap, +1 for E1's
+        // ledger.rdm_fee and +3 for N7's svc.max_live/svc.max_window/
+        // svc.epsilon_min); spot-pin the unit encodings per kind.
+        //
+        // N7 seeds exactly three of the four `svc.*` rows. `svc.fee_bps` is
+        // deliberately NOT seeded: it carries an open [VERIFY] tag, and its
+        // absence is the service's fail-closed arming gate — `register`
+        // refuses with `ServiceRateUnset` while it is unset, so seeding it
+        // here would silently arm the hosted service.
+        assert_eq!(Params::<Test>::count(), 110);
 
         // Per-class suffix keys (13 rule 6) — δ floors, kernel-capped.
         // Phase-0-calibrated (V-12): dec.delta.meta 0.090 on the 1e9 grid.

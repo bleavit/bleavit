@@ -13,6 +13,7 @@ use crate::{
 };
 use frame_support::{
     assert_err, assert_noop, assert_ok,
+    dispatch::GetDispatchInfo,
     traits::{fungibles::Inspect, Contains},
 };
 use frame_system::RawOrigin;
@@ -26,6 +27,34 @@ use parity_scale_codec::Encode;
 use sp_runtime::traits::Dispatchable;
 
 type E = Error<Test>;
+
+#[test]
+fn external_route_weight_composition_includes_measured_pov_surcharges() {
+    use crate::weights::WeightInfo;
+
+    let buy = crate::Call::<Test>::buy {
+        market: MARKET_ID,
+        side: ScalarSide::Long,
+        amount: TRADE,
+        max_cost: TRADE,
+    };
+    let sweep = crate::Call::<Test>::sweep_revenue { market: MARKET_ID };
+
+    // Mock DbWeight contributes ref-time only.  These exact deltas pin the
+    // measured MaxEncodedLen proof bounds composed above the generated primary
+    // fixtures: LedgerDrifted (496) + Questions (2,560) for trade admission,
+    // and LedgerDrifted alone for Sweep.
+    assert_eq!(
+        buy.get_dispatch_info().call_weight.proof_size(),
+        <() as WeightInfo>::buy().proof_size()
+            + crate::pallet::EXTERNAL_TRADE_ROUTE_PROOF_SURCHARGE,
+    );
+    assert_eq!(
+        sweep.get_dispatch_info().call_weight.proof_size(),
+        <() as WeightInfo>::sweep_revenue().proof_size()
+            + crate::pallet::EXTERNAL_SWEEP_ROUTE_PROOF_SURCHARGE,
+    );
+}
 
 #[test]
 fn error_scale_discriminants_are_append_only() {

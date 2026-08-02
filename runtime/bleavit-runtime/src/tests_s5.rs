@@ -102,6 +102,9 @@ macro_rules! treatment {
     (leaf emergency_playbook) => {
         ExpectedTreatment::Leaf(CallDomain::EmergencyPlaybook)
     };
+    (leaf external_client) => {
+        ExpectedTreatment::Leaf(CallDomain::ExternalClient)
+    };
     (leaf internal_root) => {
         ExpectedTreatment::Leaf(CallDomain::InternalRoot)
     };
@@ -221,6 +224,10 @@ inventory! {
         leaf public => ["split", "merge", "split_scalar", "merge_scalar", "split_gate", "merge_gate", "transfer", "split_baseline", "merge_baseline", "resolve", "void", "settle_scalar", "settle_gate", "settle_baseline", "redeem", "redeem_scalar", "redeem_scalar_pair", "redeem_gate", "redeem_void", "redeem_baseline", "redeem_baseline_pair", "sweep_dust", "sweep_dust_baseline", "sweep_redemption_fees", "reconcile"];
         leaf emergency_playbook => ["set_split_paused", "set_frozen"];
     }
+    "ServiceLedger" {
+        leaf public => ["split", "merge", "split_scalar", "merge_scalar", "split_gate", "merge_gate", "transfer", "split_baseline", "merge_baseline", "resolve", "void", "settle_scalar", "settle_gate", "settle_baseline", "redeem", "redeem_scalar", "redeem_scalar_pair", "redeem_gate", "redeem_void", "redeem_baseline", "redeem_baseline_pair", "sweep_dust", "sweep_dust_baseline", "sweep_redemption_fees", "reconcile"];
+        leaf emergency_playbook => ["set_split_paused", "set_frozen"];
+    }
     "Market" {
         leaf public => ["buy", "sell", "crank_observe", "sweep_revenue", "reap"];
         leaf emergency_playbook => ["freeze_creation", "set_frozen"];
@@ -255,7 +262,12 @@ inventory! {
         leaf public => ["attest", "challenge_attestation", "reap_attestation"];
     }
     "ClientRegistry" {
-        leaf values => ["admit_client", "remove_client"];
+        leaf values => ["admit_client", "admit_local_client", "remove_client"];
+    }
+    "QuestionService" {
+        leaf external_client => ["register", "open", "seal"];
+        leaf public => ["bond_attestor", "submit_attestation", "settle", "void", "archive"];
+        leaf emergency_playbook => ["set_paused"];
     }
     "Epoch" {
         leaf public => ["submit", "withdraw", "tick", "decide", "settle_cohort", "finalize_epoch_baseline", "drive_oracle_boundaries", "bind_ratification", "mark_executed", "mark_failed_executed", "retry_exhausted_to_measurement", "expire_or_stale_queue"];

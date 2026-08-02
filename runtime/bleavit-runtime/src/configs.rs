@@ -46,9 +46,9 @@ use crate::{
     usdc_location, AccountId, AssetId, Aura, Balance, Balances, Block, BlockNumber,
     CollatorSelection, ConditionalLedger, ConsensusHook, Epoch, ExecutionGuard, ForeignAssets,
     FutarchyTreasury, Hash, Market, MessageQueue, Migrations, Nonce, PalletInfo, ParachainSystem,
-    PolkadotXcm, Preimage, Referenda, Runtime, RuntimeCall, RuntimeEvent, RuntimeFreezeReason,
-    RuntimeHoldReason, RuntimeOrigin, RuntimeTask, Scheduler, Session, SessionKeys, System,
-    Vesting, XcmpQueue, VERSION,
+    PolkadotXcm, Preimage, QuestionService, Referenda, Runtime, RuntimeCall, RuntimeEvent,
+    RuntimeFreezeReason, RuntimeHoldReason, RuntimeOrigin, RuntimeTask, Scheduler, Session,
+    SessionKeys, System, Vesting, XcmpQueue, VERSION,
 };
 
 const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
@@ -2737,6 +2737,122 @@ impl pallet_client_registry::ClientBondProvider for RuntimeClientBond {
     }
 }
 
+pub struct RuntimeServiceParams;
+impl pallet_question_service::ServiceParamsProvider for RuntimeServiceParams {
+    fn fee_rate() -> Option<Perbill> {
+        match live_param(pallet_constitution::key16(b"svc.fee_bps")) {
+            Some(pallet_constitution::ParamValue::Perbill(parts))
+                if u64::from(parts) <= kernel::SCORE_SCALE =>
+            {
+                Some(Perbill::from_parts(parts))
+            }
+            _ => None,
+        }
+    }
+
+    fn max_live() -> u32 {
+        u32_param_or(b"svc.max_live", 0).min(bounds::MAX_CLIENTS)
+    }
+
+    fn max_window() -> BlockNumber {
+        u32_param_or(b"svc.max_window", 0)
+    }
+
+    fn epsilon_min() -> FixedU64 {
+        FixedU64(u64::from(perbill_param_or(
+            b"svc.epsilon_min",
+            kernel::SCORE_SCALE as u32,
+        )))
+    }
+
+    fn oracle_window() -> BlockNumber {
+        u32_param_or(b"orc.window", pallet_oracle::OracleParams::DEFAULT.window)
+    }
+
+    fn oracle_rounds() -> u8 {
+        u8_param_or(b"orc.rounds", pallet_oracle::OracleParams::DEFAULT.rounds)
+    }
+
+    fn oracle_bond_bps() -> u32 {
+        perbill_bps_param_or(
+            b"orc.bond_bps",
+            pallet_oracle::OracleParams::DEFAULT.bond_bps,
+        )
+    }
+
+    fn attestor_bond_floor() -> Balance {
+        balance_param(b"reg.bond_mile")
+    }
+
+    fn flow_cap() -> FixedU64 {
+        FixedU64(sec_flow_cap_1e9())
+    }
+}
+
+pub struct RuntimeClientFunding;
+impl pallet_question_service::ClientFunding<AccountId> for RuntimeClientFunding {
+    fn funding_account(client: futarchy_primitives::ClientId) -> Option<AccountId> {
+        use staging_xcm_executor::traits::ConvertLocation;
+
+        let record = pallet_client_registry::Clients::<Runtime>::get(client)?;
+        match (record.location, record.local_signer) {
+            (Some(location), None) => xcm_config::LocationToAccountId::convert_location(&location),
+            (None, Some(signer)) => Some(signer),
+            _ => None,
+        }
+    }
+}
+
+pub struct RuntimeExternalMarketOrigin;
+impl pallet_question_service::ExternalMarketOrigin<RuntimeOrigin> for RuntimeExternalMarketOrigin {
+    fn for_client(client: futarchy_primitives::ClientId) -> RuntimeOrigin {
+        pallet_client_registry::Origin::ExternalClient(client).into()
+    }
+}
+
+pub struct RuntimeServiceDecisionWindows;
+impl pallet_question_service::DecisionWindowGuard for RuntimeServiceDecisionWindows {
+    fn collides(start: BlockNumber, end: BlockNumber) -> bool {
+        let width = u32_param(b"dec.window");
+        pallet_epoch::Proposals::<Runtime>::iter_values().any(|proposal| {
+            proposal
+                .decide_at
+                .checked_sub(width)
+                .is_some_and(|decision_start| start < proposal.decide_at && end > decision_start)
+        })
+    }
+}
+
+pub struct RuntimeServiceTvlCap;
+impl pallet_question_service::TvlCapGate<AccountId> for RuntimeServiceTvlCap {
+    fn escrow_admissible(funder: &AccountId, amount: Balance) -> bool {
+        if !pallet_inflow_caps::Pallet::<Runtime>::escrow_admissible(funder) {
+            return false;
+        }
+        let cap =
+            <ConstitutionInflowCapParams as pallet_inflow_caps::InflowCapParams>::tvl_cap_usdc();
+        if cap == u128::MAX {
+            return true;
+        }
+        pallet_conditional_ledger::TotalEscrowed::<Runtime>::get()
+            .checked_add(pallet_conditional_ledger::TotalEscrowed::<
+                Runtime,
+                frame_support::instances::Instance1,
+            >::get())
+            .and_then(|used| used.checked_add(amount))
+            .is_some_and(|after| after <= cap)
+    }
+}
+
+pub struct RuntimeAccountIdBytes;
+impl pallet_question_service::AccountIdBytes<AccountId> for RuntimeAccountIdBytes {
+    fn into_bytes(account: &AccountId) -> [u8; 32] {
+        let mut bytes = [0_u8; 32];
+        bytes.copy_from_slice(account.as_ref());
+        bytes
+    }
+}
+
 /// Live 06 §5.4 retrospective-review deadline. The guardian core snapshots
 /// this value when it creates a review record.
 pub struct GuardianReviewDeadline;
@@ -3149,6 +3265,8 @@ impl frame_support::traits::Get<u32> for RegistryArchiveDelay {
 
 parameter_types! {
     pub const LedgerPalletId: PalletId = PalletId(*b"bl/ledgr");
+    pub const ServiceLedgerPalletId: PalletId = PalletId(*b"bl/svclg");
+    pub const QuestionServicePalletId: PalletId = PalletId(*b"bl/qserv");
     pub const MarketPalletId: PalletId = PalletId(*b"bl/mrket");
     pub const EpochPalletId: PalletId = PalletId(*b"bl/epoch");
     pub const ExecutionGuardPalletId: PalletId = PalletId(*b"bl/exgrd");
@@ -3256,20 +3374,65 @@ impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureEpochAccount {
     }
 }
 
-/// N6 lands the market-side service seam before N7 owns runtime slots 66/67.
-/// The release runtime therefore refuses every external lifecycle operation;
-/// unit tests bind the real `Instance1` ledger instead.
-pub struct NoExternalMarketAdmin;
-impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for NoExternalMarketAdmin {
-    type Success = u32;
+pub struct EnsureQuestionServiceAccount;
+impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureQuestionServiceAccount {
+    type Success = AccountId;
 
-    fn try_origin(origin: RuntimeOrigin) -> Result<Self::Success, RuntimeOrigin> {
-        Err(origin)
+    fn try_origin(origin: RuntimeOrigin) -> Result<AccountId, RuntimeOrigin> {
+        match EnsureSigned::<AccountId>::try_origin(origin.clone()) {
+            Ok(who) if who == QuestionService::account_id() => Ok(who),
+            _ => Err(origin),
+        }
     }
 
     #[cfg(feature = "runtime-benchmarks")]
     fn try_successful_origin() -> Result<RuntimeOrigin, ()> {
-        Err(())
+        Ok(RuntimeOrigin::signed(QuestionService::account_id()))
+    }
+}
+
+/// Market-internal verifier for the compact client id manufactured by the
+/// question pallet. The market API itself is not dispatchable.
+pub struct EnsureQuestionServiceClient;
+impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureQuestionServiceClient {
+    type Success = futarchy_primitives::ClientId;
+
+    fn try_origin(origin: RuntimeOrigin) -> Result<Self::Success, RuntimeOrigin> {
+        <pallet_client_registry::EnsureExternalClient as frame_support::traits::EnsureOrigin<
+            RuntimeOrigin,
+        >>::try_origin(origin)
+    }
+
+    #[cfg(feature = "runtime-benchmarks")]
+    fn try_successful_origin() -> Result<RuntimeOrigin, ()> {
+        Ok(pallet_client_registry::Origin::ExternalClient(0).into())
+    }
+}
+
+/// Client-facing question origin: XCM supplies the exact N4 custom origin;
+/// admitted off-chain services authenticate with their exact local signer.
+pub struct EnsureQuestionClient;
+impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureQuestionClient {
+    type Success = futarchy_primitives::ClientId;
+
+    fn try_origin(origin: RuntimeOrigin) -> Result<Self::Success, RuntimeOrigin> {
+        if let Ok(client) =
+            <pallet_client_registry::EnsureExternalClient as frame_support::traits::EnsureOrigin<
+                RuntimeOrigin,
+            >>::try_origin(origin.clone())
+        {
+            return Ok(client);
+        }
+        match EnsureSigned::<AccountId>::try_origin(origin.clone()) {
+            Ok(signer) => pallet_client_registry::Pallet::<Runtime>::client_id_of_signer(&signer)
+                .ok_or(origin),
+            Err(_) => Err(origin),
+        }
+    }
+
+    #[cfg(feature = "runtime-benchmarks")]
+    fn try_successful_origin() -> Result<RuntimeOrigin, ()> {
+        Ok(pallet_client_registry::Origin::ExternalClient(0).into())
     }
 }
 pub struct EnsureExecutionGuardAccount;
@@ -3286,8 +3449,26 @@ impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureExecutionGuard
         Ok(RuntimeOrigin::signed(execution_guard_account()))
     }
 }
-fn is_canonical_protocol_account(who: &AccountId) -> bool {
-    if is_reserved_market_account(who) {
+fn reserved_market_id(who: &AccountId) -> Option<u64> {
+    let bytes: &[u8] = who.as_ref();
+    if bytes[..MARKET_ACCOUNT_PREFIX.len()] != MARKET_ACCOUNT_PREFIX
+        || !matches!(bytes[16], MARKET_BOOK_KIND | MARKET_FEES_KIND)
+        || !bytes[25..].iter().all(|byte| *byte == 0)
+    {
+        return None;
+    }
+    let mut id = [0_u8; 8];
+    id.copy_from_slice(&bytes[17..25]);
+    Some(u64::from_le_bytes(id))
+}
+
+#[cfg(test)]
+pub(crate) fn is_reserved_market_account(who: &AccountId) -> bool {
+    reserved_market_id(who).is_some()
+}
+
+fn is_primary_protocol_account(who: &AccountId) -> bool {
+    if reserved_market_id(who).is_some_and(|id| id < kernel::SERVICE_ID_BASE) {
         return true;
     }
     let accounts = [
@@ -3309,19 +3490,28 @@ fn is_canonical_protocol_account(who: &AccountId) -> bool {
     accounts.contains(who)
 }
 
+fn is_service_protocol_account(who: &AccountId) -> bool {
+    reserved_market_id(who).is_some_and(|id| id >= kernel::SERVICE_ID_BASE)
+        || *who == ServiceLedgerPalletId::get().into_account_truncating()
+        || *who == QuestionServicePalletId::get().into_account_truncating()
+}
+
 /// Pure canonical predicate used inside the XCM inflow precheck. It performs
 /// no storage reads, so the barrier's fixed execution budget remains honest.
 pub struct InflowCapProtocolAccounts;
 impl Contains<AccountId> for InflowCapProtocolAccounts {
     fn contains(who: &AccountId) -> bool {
-        is_canonical_protocol_account(who)
+        // This predicate remains independently owned by 09 §5.2. Both
+        // protocol domains are internal inflow destinations, but membership
+        // here does not grant either ledger's local position exemptions.
+        is_primary_protocol_account(who) || is_service_protocol_account(who)
     }
 }
 
 pub struct ProtocolAccounts;
 impl Contains<AccountId> for ProtocolAccounts {
     fn contains(who: &AccountId) -> bool {
-        is_canonical_protocol_account(who)
+        is_primary_protocol_account(who)
             // The treasury `MAIN` account (E2). 03 §7 R-4 already lists it among
             // the twelve genesis-endowed permanent protocol accounts, and 04 §2
             // / 04 §6.1 make it the recipient of the Sweep's fee remittance —
@@ -3341,7 +3531,25 @@ impl Contains<AccountId> for ProtocolAccounts {
             // The refcounted index records ownership of live/retained market
             // accounts. Classification does not depend on this index: every
             // canonical future/present/past address is reserved above.
-            || pallet_market::Pallet::<Runtime>::is_market_protocol_account(who)
+            || reserved_market_id(who).is_some_and(|id| id < kernel::SERVICE_ID_BASE)
+    }
+}
+
+/// Per-instance service exemptions. This must never include a primary book,
+/// primary ledger sovereign, or client funder (03 §1a / I-37).
+pub struct ServiceProtocolAccounts;
+impl Contains<AccountId> for ServiceProtocolAccounts {
+    fn contains(who: &AccountId) -> bool {
+        is_service_protocol_account(who)
+    }
+}
+
+/// Destination-only union across both instances. It grants no deposit, fee,
+/// or inflow-cap exemption (03 §1a).
+pub struct ReservedProtocolAccounts;
+impl Contains<AccountId> for ReservedProtocolAccounts {
+    fn contains(who: &AccountId) -> bool {
+        ProtocolAccounts::contains(who) || ServiceProtocolAccounts::contains(who)
     }
 }
 parameter_types! { pub InsuranceAccount: AccountId = insurance_account(); }
@@ -3376,12 +3584,40 @@ impl pallet_conditional_ledger::Config<()> for Runtime {
     type ArchiveDelay = LedgerArchiveDelay;
     type ReapBatch = ConstU32<{ kernel::REAP_BATCH }>;
     type ProtocolAccounts = ProtocolAccounts;
-    type ReservedProtocolDestinations = ProtocolAccounts;
+    type ReservedProtocolDestinations = ReservedProtocolAccounts;
     type InsuranceAccount = InsuranceAccount;
     type MarketSweepStatus = pallet_market::PrimaryMarketSweepStatus<Runtime>;
     type ResidueReporter = RuntimeResidueReporter;
     type MainRevenueSink = RuntimeMainRevenueSink;
     type PalletId = LedgerPalletId;
+    type KeeperRebate = FutarchyTreasury;
+    type InflowCapGate = RuntimeLedgerInflowCapGate;
+    type WeightInfo = crate::weights::pallet_conditional_ledger::WeightInfo<Runtime>;
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = RuntimeBenchmarkHelper;
+}
+
+impl pallet_conditional_ledger::Config<frame_support::instances::Instance1> for Runtime {
+    type Collateral = ForeignAssets;
+    type UsdcAssetId = UsdcAssetId;
+    type RedemptionFee = LedgerRedemptionFee;
+    type TreasuryMainAccount = TreasuryMainAccount;
+    type MarketAuthority = EnsureMarketAccount;
+    type ResolveAuthority = EnsureQuestionServiceAccount;
+    type SettleAuthority = EnsureQuestionServiceAccount;
+    type EmergencyPlaybookOrigin = pallet_origins::EnsureEmergencyPlaybook;
+    type MinSplit = LedgerMinSplit;
+    type PositionDeposit = LedgerPositionDeposit;
+    type MaxPositionsPerAccount = ConstU32<{ bounds::MAX_ACCOUNT_POSITIONS }>;
+    type ArchiveDelay = LedgerArchiveDelay;
+    type ReapBatch = ConstU32<{ kernel::REAP_BATCH }>;
+    type ProtocolAccounts = ServiceProtocolAccounts;
+    type ReservedProtocolDestinations = ReservedProtocolAccounts;
+    type InsuranceAccount = InsuranceAccount;
+    type MarketSweepStatus = pallet_market::ExternalMarketSweepStatus<Runtime>;
+    type ResidueReporter = RuntimeResidueReporter;
+    type MainRevenueSink = RuntimeMainRevenueSink;
+    type PalletId = ServiceLedgerPalletId;
     type KeeperRebate = FutarchyTreasury;
     type InflowCapGate = RuntimeLedgerInflowCapGate;
     type WeightInfo = crate::weights::pallet_conditional_ledger::WeightInfo<Runtime>;
@@ -3399,13 +3635,6 @@ fn reserved_market_account(kind: u8, id: futarchy_primitives::MarketId) -> Accou
     bytes[16] = kind;
     bytes[17..25].copy_from_slice(&id.to_le_bytes());
     AccountId::new(bytes)
-}
-
-pub(crate) fn is_reserved_market_account(who: &AccountId) -> bool {
-    let bytes: &[u8] = who.as_ref();
-    bytes[..MARKET_ACCOUNT_PREFIX.len()] == MARKET_ACCOUNT_PREFIX
-        && matches!(bytes[16], MARKET_BOOK_KIND | MARKET_FEES_KIND)
-        && bytes[25..].iter().all(|byte| *byte == 0)
 }
 
 pub(crate) fn market_book_account(id: futarchy_primitives::MarketId) -> AccountId {
@@ -4722,11 +4951,13 @@ impl pallet_market::Config for Runtime {
     type ObsInterval = MarketObsInterval;
     type Kappa1e9 = MarketKappa;
     type MarketAdmin = EnsureEpochAccount;
-    type ExternalMarketAdmin = NoExternalMarketAdmin;
-    type ServiceLedger = ();
+    type ExternalMarketAdmin = EnsureQuestionServiceClient;
+    type ServiceLedger =
+        pallet_market::ConditionalLedgerInstance<frame_support::instances::Instance1>;
     type PrimaryProposalIds = RuntimePrimaryProposalIds;
-    type ReservedProtocolDestinations = ProtocolAccounts;
-    type MaxLiveExternalMarkets = ConstU32<0>;
+    type ExternalQuestionStatus = RuntimeExternalQuestionStatus;
+    type ReservedProtocolDestinations = ReservedProtocolAccounts;
+    type MaxLiveExternalMarkets = RuntimeMaxLiveExternalMarkets;
     type EmergencyPlaybookOrigin = pallet_origins::EnsureEmergencyPlaybook;
     type ArchiveDelay = LedgerArchiveDelay;
     type PalletId = MarketPalletId;
@@ -4743,6 +4974,22 @@ pub struct RuntimePrimaryProposalIds;
 impl pallet_market::PrimaryProposalIdProvider for RuntimePrimaryProposalIds {
     fn next_proposal_id() -> futarchy_primitives::ProposalId {
         pallet_epoch::NextProposalId::<Runtime>::get()
+    }
+}
+
+pub struct RuntimeExternalQuestionStatus;
+impl pallet_market::ExternalQuestionStatus for RuntimeExternalQuestionStatus {
+    fn trading_open(question: futarchy_primitives::QuestionId) -> bool {
+        QuestionService::trading_open(question)
+    }
+}
+
+pub struct RuntimeMaxLiveExternalMarkets;
+impl Get<u32> for RuntimeMaxLiveExternalMarkets {
+    fn get() -> u32 {
+        u32_param_or(b"svc.max_live", 0)
+            .saturating_mul(2)
+            .min(bounds::MAX_LIVE_EXTERNAL_MARKETS)
     }
 }
 
@@ -8109,10 +8356,16 @@ impl RuntimeGuardianEffects {
                     target.is_none(),
                     DispatchError::Other("unexpected playbook target")
                 );
-                vec![RuntimeCall::Epoch(pallet_epoch::Call::set_intake_paused {
-                    paused: true,
-                    expiry: expiry.min(bounded_expiry),
-                })]
+                let until = expiry.min(bounded_expiry);
+                vec![
+                    RuntimeCall::Epoch(pallet_epoch::Call::set_intake_paused {
+                        paused: true,
+                        expiry: until,
+                    }),
+                    RuntimeCall::QuestionService(pallet_question_service::Call::set_paused {
+                        until: Some(until),
+                    }),
+                ]
             }
             pallet_guardian::PlaybookId::Reserve => {
                 frame_support::ensure!(
@@ -8217,10 +8470,15 @@ impl pallet_guardian::GuardianEffectDispatcher for RuntimeGuardianEffects {
                 Vec::new()
             }
             pallet_guardian::PlaybookId::HaltIntake => {
-                vec![RuntimeCall::Epoch(pallet_epoch::Call::set_intake_paused {
-                    paused: false,
-                    expiry: 0,
-                })]
+                vec![
+                    RuntimeCall::Epoch(pallet_epoch::Call::set_intake_paused {
+                        paused: false,
+                        expiry: 0,
+                    }),
+                    RuntimeCall::QuestionService(pallet_question_service::Call::set_paused {
+                        until: None,
+                    }),
+                ]
             }
             pallet_guardian::PlaybookId::Reserve => vec![RuntimeCall::ConditionalLedger(
                 pallet_conditional_ledger::Call::set_split_paused {
@@ -8449,6 +8707,22 @@ impl pallet_client_registry::Config for Runtime {
     type Currency = Balances;
     type RuntimeHoldReason = RuntimeHoldReason;
     type WeightInfo = crate::weights::pallet_client_registry::WeightInfo<Runtime>;
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = RuntimeBenchmarkHelper;
+}
+
+impl pallet_question_service::Config for Runtime {
+    type ClientOrigin = EnsureQuestionClient;
+    type ServiceParams = RuntimeServiceParams;
+    type ClientFunding = RuntimeClientFunding;
+    type ExternalMarketOrigin = RuntimeExternalMarketOrigin;
+    type DecisionWindows = RuntimeServiceDecisionWindows;
+    type TvlCapGate = RuntimeServiceTvlCap;
+    type InflowCapExemptAccounts = InflowCapProtocolAccounts;
+    type AccountIdBytes = RuntimeAccountIdBytes;
+    type PalletId = QuestionServicePalletId;
+    type KeeperRebate = FutarchyTreasury;
+    type WeightInfo = crate::weights::pallet_question_service::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
@@ -10388,8 +10662,21 @@ impl pallet_conditional_ledger::BenchmarkHelper for RuntimeBenchmarkHelper {
 }
 
 #[cfg(feature = "runtime-benchmarks")]
-impl pallet_market::BenchmarkHelper for RuntimeBenchmarkHelper {
+impl pallet_market::BenchmarkHelper<AccountId> for RuntimeBenchmarkHelper {
     benchmark_keeper_rebate_hooks!();
+
+    fn external_funder() -> AccountId {
+        AccountId32::new([244; 32])
+    }
+
+    fn prime_external_capacity() {
+        let key = pallet_constitution::key16(b"svc.max_live");
+        pallet_constitution::Params::<Runtime>::mutate(key, |maybe_record| {
+            if let Some(record) = maybe_record {
+                record.value = pallet_constitution::ParamValue::U32(bounds::MAX_CLIENTS);
+            }
+        });
+    }
 
     fn prime_pol_custody(line: pallet_market::PolLine, amount: Balance) {
         let line = budget_line_of(line);
@@ -10926,6 +11213,106 @@ impl pallet_client_registry::BenchmarkHelper<RuntimeOrigin, AccountId> for Runti
             sp_runtime::MultiAddress::Id(who.clone()),
             value,
         );
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_question_service::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmarkHelper {
+    benchmark_keeper_rebate_hooks!();
+
+    fn client_origin(client: futarchy_primitives::ClientId) -> RuntimeOrigin {
+        // Measure the heavier admitted branch. `prime_client` installs this
+        // exact signer in `ClientIdOfSigner`, so register/open/seal include the
+        // registry lookup that a local hosted client pays; the custom XCM
+        // origin is storage-free and therefore already covered by this weight.
+        let mut bytes = [246_u8; 32];
+        bytes[..4].copy_from_slice(&client.to_le_bytes());
+        RuntimeOrigin::signed(AccountId32::new(bytes))
+    }
+
+    fn funder(client: futarchy_primitives::ClientId) -> AccountId {
+        let mut bytes = [246_u8; 32];
+        bytes[..4].copy_from_slice(&client.to_le_bytes());
+        AccountId32::new(bytes)
+    }
+
+    fn attestor(index: u32) -> AccountId {
+        let mut bytes = [245_u8; 32];
+        bytes[..4].copy_from_slice(&index.to_le_bytes());
+        AccountId32::new(bytes)
+    }
+
+    fn prime_params() {
+        for record in pallet_constitution::genesis_params() {
+            pallet_constitution::Params::<Runtime>::insert(record.key, record);
+        }
+        let key = pallet_constitution::key16(b"svc.fee_bps");
+        pallet_constitution::Params::<Runtime>::insert(
+            key,
+            pallet_constitution::ParamRecord {
+                key,
+                value: pallet_constitution::ParamValue::Perbill(10_000_000),
+                min: pallet_constitution::ParamValue::Perbill(0),
+                max: pallet_constitution::ParamValue::Perbill(100_000_000),
+                max_delta: None,
+                cooldown_epochs: 0,
+                last_changed_epoch: 0,
+                last_change_block: 0,
+                class: pallet_constitution::ParamClass::Param,
+                kernel_bounded: false,
+            },
+        );
+    }
+
+    fn prime_client(client: futarchy_primitives::ClientId, funder: &AccountId) {
+        pallet_client_registry::Clients::<Runtime>::insert(
+            client,
+            pallet_client_registry::ClientRecord::new_local(funder.clone(), 1, 0),
+        );
+        pallet_client_registry::ClientIdOfSigner::<Runtime>::insert(funder, client);
+        pallet_client_registry::ClientPolicies::<Runtime>::insert(
+            client,
+            pallet_client_registry::SubIdPolicy::Optional,
+        );
+        pallet_client_registry::BondOwners::<Runtime>::insert(client, funder);
+        pallet_client_registry::ClientCount::<Runtime>::put(1);
+        pallet_client_registry::NextClientId::<Runtime>::put(client.saturating_add(1));
+    }
+
+    fn prime_usdc(who: &AccountId, amount: Balance) {
+        let minted = <ForeignAssets as Mutate<AccountId>>::mint_into(usdc_location(), who, amount);
+        assert!(minted.is_ok());
+    }
+
+    fn prime_register_scan(funder: &AccountId) {
+        for pid in 1..=bounds::MAX_LIVE_PROPOSALS {
+            let mut proposal = benchmark_epoch_proposal(
+                u64::from(pid),
+                futarchy_primitives::H256::from([233; 32]),
+                0,
+                futarchy_primitives::ProposalState::Settled,
+            );
+            proposal.decide_at = BlockNumber::MAX;
+            pallet_epoch::Proposals::<Runtime>::insert(u64::from(pid), proposal);
+        }
+        for index in 0..bounds::MAX_EXTERNAL_BOOK_PAIRS.saturating_sub(1) {
+            let question = kernel::SERVICE_ID_BASE
+                .saturating_add(1_000)
+                .saturating_add(u64::from(index).saturating_mul(3));
+            pallet_market::ExternalBookPairs::<Runtime>::insert(
+                question,
+                pallet_market::ExternalBookPair {
+                    client: 0,
+                    funder: funder.clone(),
+                    accept: question.saturating_add(1),
+                    reject: question.saturating_add(2),
+                },
+            );
+        }
+    }
+
+    fn advance_to(block: BlockNumber) {
+        System::set_block_number(block);
     }
 }
 

@@ -33,7 +33,11 @@ mod tests;
 /// Runtime fixture hooks for rebate-bearing market benchmarks. Mock runtimes
 /// may keep the defaults; the assembled runtime primes the treasury payout.
 #[cfg(feature = "runtime-benchmarks")]
-pub trait BenchmarkHelper {
+pub trait BenchmarkHelper<AccountId> {
+    /// Non-protocol collateral owner used by the saturated external partition.
+    fn external_funder() -> AccountId;
+    /// Seat the governed live external-book envelope at its hard benchmark max.
+    fn prime_external_capacity() {}
     fn prime_keeper_rebate() {}
     fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 
@@ -41,6 +45,13 @@ pub trait BenchmarkHelper {
     /// seed has a line to debit (08 §8 step 5; I-33). Setup only — the measured
     /// call still performs the real debit and its storage writes.
     fn prime_pol_custody(_: PolLine, _: futarchy_primitives::Balance) {}
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+impl<AccountId: Default> BenchmarkHelper<AccountId> for () {
+    fn external_funder() -> AccountId {
+        AccountId::default()
+    }
 }
 
 #[doc(hidden)]
@@ -235,7 +246,9 @@ where
 
     fn funds_frozen() -> bool {
         let now = frame_system::Pallet::<T>::block_number();
-        pallet_conditional_ledger::FrozenUntil::<T, I>::get().is_some_and(|until| now < until)
+        pallet_conditional_ledger::LedgerDrifted::<T, I>::get()
+            || pallet_conditional_ledger::FrozenUntil::<T, I>::get()
+                .is_some_and(|until| now < until)
     }
 
     fn ledger(policy: ReturnPolicy<T::AccountId>) -> Self::Ledger {
@@ -280,9 +293,6 @@ where
     }
 }
 
-#[cfg(feature = "runtime-benchmarks")]
-impl BenchmarkHelper for () {}
-
 /// Canonical per-market custody-account derivation. Production uses a
 /// permanently reserved `AccountId32` namespace, so an address is classified
 /// as protocol custody before its market exists and cannot be pre-squatted by
@@ -297,6 +307,19 @@ pub trait MarketAccountProvider<AccountId> {
 /// to `pallet-epoch`; production binds the provider to `Epoch::NextProposalId`.
 pub trait PrimaryProposalIdProvider {
     fn next_proposal_id() -> futarchy_primitives::ProposalId;
+}
+
+/// Read-only lifecycle gate for external books. Production binds this to the
+/// owning question pallet so pair creation and escrow seeding at `Registered`
+/// cannot make either book tradeable before the atomic `open` transition.
+pub trait ExternalQuestionStatus {
+    fn trading_open(question: QuestionId) -> bool;
+}
+
+impl ExternalQuestionStatus for () {
+    fn trading_open(_: QuestionId) -> bool {
+        true
+    }
 }
 
 impl PrimaryProposalIdProvider for () {
@@ -515,6 +538,7 @@ pub mod pallet {
     use crate::weights::WeightInfo;
     use crate::BaselineGrade;
     use crate::DecisionGradeFacts;
+    use crate::ExternalQuestionStatus;
     use crate::FundingDomain;
     use crate::LedgerRoute;
     use crate::MainRevenueSink;
@@ -532,6 +556,7 @@ pub mod pallet {
             tokens::{Fortitude, Preservation},
             Contains,
         },
+        weights::Weight,
         PalletId,
     };
     use frame_system::pallet_prelude::*;
@@ -552,6 +577,22 @@ pub mod pallet {
         traits::{AccountIdConversion, CheckedAdd, Saturating, UniqueSaturatedInto},
         DispatchError,
     };
+
+    // The canonical primary-book benchmarks cannot simultaneously exercise the
+    // external route.  An external trade keeps the benchmarked DecisionWindows
+    // read, replaces Market::FrozenUntil with the equally sized
+    // ServiceLedger::FrozenUntil proof, and adds these two reads:
+    //
+    // - ServiceLedger::LedgerDrifted: 1-byte value + trie proof = 496 bytes;
+    // - QuestionService::Questions: 85-byte value + trie proof = 2,560 bytes.
+    //
+    // `DbWeight::reads` accounts only for ref-time, so the measured MaxEncodedLen
+    // storage bounds must be added explicitly to keep the external path's PoV
+    // conservative.  Sweep has no question-phase lookup and therefore adds only
+    // LedgerDrifted.  Regeneration records the same bounds in the runtime weight
+    // files; changing either storage shape must update these derived surcharges.
+    pub const EXTERNAL_TRADE_ROUTE_PROOF_SURCHARGE: u64 = 496 + 2_560;
+    pub const EXTERNAL_SWEEP_ROUTE_PROOF_SURCHARGE: u64 = 496;
 
     #[pallet::config]
     pub trait Config:
@@ -587,6 +628,8 @@ pub mod pallet {
         /// Primary proposal allocator high-water mark for the 03 §1a / 16 §7.1
         /// `SERVICE_ID_BASE` try-state assertion.
         type PrimaryProposalIds: crate::PrimaryProposalIdProvider;
+
+        type ExternalQuestionStatus: crate::ExternalQuestionStatus;
 
         /// Union destination reservation across both ledger instances. Market
         /// book/fee accounts must be in it; external funders must be outside it.
@@ -639,7 +682,7 @@ pub mod pallet {
 
         /// Cross-pallet keeper-rebate fixture used only by runtime benchmarks.
         #[cfg(feature = "runtime-benchmarks")]
-        type BenchmarkHelper: crate::BenchmarkHelper;
+        type BenchmarkHelper: crate::BenchmarkHelper<Self::AccountId>;
     }
 
     #[pallet::pallet]
@@ -1776,7 +1819,14 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// Buy LONG or SHORT from an LMSR book (04 §6).
         #[pallet::call_index(0)]
-        #[pallet::weight(<T as Config>::WeightInfo::buy())]
+        // The generated fixture is the heavier primary trade path. External
+        // routing has two net additional reads; the explicit proof surcharge
+        // closes the corresponding PoV delta documented above.
+        #[pallet::weight(
+            <T as Config>::WeightInfo::buy()
+                .saturating_add(<T as frame_system::Config>::DbWeight::get().reads(2))
+                .saturating_add(Weight::from_parts(0, EXTERNAL_TRADE_ROUTE_PROOF_SURCHARGE))
+        )]
         pub fn buy(
             origin: OriginFor<T>,
             market: MarketId,
@@ -1813,7 +1863,11 @@ pub mod pallet {
 
         /// Sell LONG or SHORT into an LMSR book (04 §6).
         #[pallet::call_index(1)]
-        #[pallet::weight(<T as Config>::WeightInfo::sell())]
+        #[pallet::weight(
+            <T as Config>::WeightInfo::sell()
+                .saturating_add(<T as frame_system::Config>::DbWeight::get().reads(2))
+                .saturating_add(Weight::from_parts(0, EXTERNAL_TRADE_ROUTE_PROOF_SURCHARGE))
+        )]
         pub fn sell(
             origin: OriginFor<T>,
             market: MarketId,
@@ -1851,7 +1905,11 @@ pub mod pallet {
         /// Permissionless TWAP observation keeper (04 §7).
         #[pallet::call_index(2)]
         // B5: recalibrate for the keeper-rebate sink's additional storage path.
-        #[pallet::weight(<T as Config>::WeightInfo::crank_observe())]
+        #[pallet::weight(
+            <T as Config>::WeightInfo::crank_observe()
+                .saturating_add(<T as frame_system::Config>::DbWeight::get().reads(2))
+                .saturating_add(Weight::from_parts(0, EXTERNAL_TRADE_ROUTE_PROOF_SURCHARGE))
+        )]
         pub fn crank_observe(origin: OriginFor<T>, market: MarketId) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let mut book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
@@ -1930,7 +1988,13 @@ pub mod pallet {
         /// until its own ledger is payout-safe leaves value collateralized and
         /// retryable.
         #[pallet::call_index(6)]
-        #[pallet::weight(<T as Config>::WeightInfo::sweep_revenue())]
+        // External sweep replaces the primary market-freeze read with the two
+        // service-ledger freeze reads; it has no question-phase lookup.
+        #[pallet::weight(
+            <T as Config>::WeightInfo::sweep_revenue()
+                .saturating_add(<T as frame_system::Config>::DbWeight::get().reads(1))
+                .saturating_add(Weight::from_parts(0, EXTERNAL_SWEEP_ROUTE_PROOF_SURCHARGE))
+        )]
         pub fn sweep_revenue(origin: OriginFor<T>, market: MarketId) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
@@ -3992,6 +4056,12 @@ pub mod pallet {
             id: MarketId,
             book: &MarketBook<T::AccountId>,
         ) -> DispatchResult {
+            if let BookKind::External { question, .. } = book.kind {
+                ensure!(
+                    T::ExternalQuestionStatus::trading_open(question),
+                    Error::<T>::NotTrading
+                );
+            }
             let windows = DecisionWindows::<T>::get(id);
             if let Some(latest_end) = windows.iter().map(|window| window.end).max() {
                 ensure!(

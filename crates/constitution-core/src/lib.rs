@@ -2869,6 +2869,38 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             ParamClass::Param,
             false
         ),
+        // Hosted service admission bounds (13 §1 / 16). `svc.fee_bps` is
+        // deliberately absent: its `[VERIFY]` state is the arming gate.
+        row(
+            b"svc.max_live",
+            ParamValue::U32(16),
+            ParamValue::U32(1),
+            ParamValue::U32(futarchy_primitives::bounds::MAX_CLIENTS),
+            Some(MaxDelta::Factor(2)),
+            2,
+            ParamClass::Param,
+            true
+        ),
+        row(
+            b"svc.max_window",
+            ParamValue::U32(302_400),
+            ParamValue::U32(43_200),
+            ParamValue::U32(302_400),
+            Some(MaxDelta::Factor(2)),
+            1,
+            ParamClass::Param,
+            false
+        ),
+        row(
+            b"svc.epsilon_min",
+            ParamValue::Perbill(10_000_000),
+            ParamValue::Perbill(5_000_000),
+            ParamValue::Perbill(250_000_000),
+            Some(MaxDelta::Factor(2)),
+            1,
+            ParamClass::Param,
+            false
+        ),
     ]
 }
 

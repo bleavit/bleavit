@@ -3,7 +3,7 @@
 
 //! Bleavit runtime-API declarations.
 //!
-//! The frozen 11-method [`FutarchyApi`] surface is specified by the integration
+//! The frozen 12-method [`FutarchyApi`] surface is specified by the integration
 //! contract (02 §3). The separate [`telemetry`] module is monitoring-only and
 //! explicitly outside that contract (12 §6.3). Both are read-only, bounded, and
 //! shared with their respective clients.
@@ -24,7 +24,8 @@ pub use telemetry::{
 use futarchy_primitives::{
     bounds, AccountId, Balance, BoundedVec, CohortSummaryView, DecisionStatsView, EpochStatusView,
     MarketId, NavView, OracleRoundView, ParamKey, ParamView, PositionView, ProposalId,
-    ProposalSummaryView, QueuedExecutionView, QuoteView, TradeSide, WelfareView,
+    ProposalSummaryView, QuestionId, QueuedExecutionView, QuoteView, ReportView, TradeSide,
+    WelfareView,
 };
 
 /// Maximum number of queued executions returned by [`FutarchyApi::execution_queue`]
@@ -36,6 +37,7 @@ pub const MAX_QUEUED_EXECUTIONS: u32 = bounds::MAX_LIVE_PROPOSALS;
 
 sp_api::decl_runtime_apis! {
     /// The frozen Bleavit read-only runtime API (02 §3).
+    #[api_version(2)]
     pub trait FutarchyApi {
         /// Epoch clock: index, phase, boundaries, dead-man, freeze and phase flags.
         fn epoch_status() -> EpochStatusView;
@@ -59,6 +61,8 @@ sp_api::decl_runtime_apis! {
         fn recent_cohorts() -> BoundedVec<CohortSummaryView, { bounds::RECENT_COHORT_SUMMARIES }>;
         /// Oracle rounds currently open.
         fn open_oracle_rounds() -> BoundedVec<OracleRoundView, { bounds::MAX_OPEN_ORACLE_ROUNDS }>;
+        /// Immutable hosted report, available from `Sealed` through archive.
+        fn hosted_report(question_id: QuestionId) -> Option<ReportView>;
     }
 }
 
