@@ -1281,12 +1281,20 @@ fn genesis_registry_matches_13_1_row_encodings() {
         // ledger.rdm_fee and +3 for N7's svc.max_live/svc.max_window/
         // svc.epsilon_min); spot-pin the unit encodings per kind.
         //
-        // N7 seeds exactly three of the four `svc.*` rows. `svc.fee_bps` is
-        // deliberately NOT seeded: it carries an open [VERIFY] tag, and its
-        // absence is the service's fail-closed arming gate — `register`
-        // refuses with `ServiceRateUnset` while it is unset, so seeding it
-        // here would silently arm the hosted service.
-        assert_eq!(Params::<Test>::count(), 110);
+        // All four `svc.*` rows are now seeded. `svc.fee_bps` was deliberately
+        // absent through N7 — its absence was the service's fail-closed arming
+        // gate — and was ADOPTED at 1,000 bps by the user on 2026-08-02, which
+        // arms the hosted service by design rather than by accident.
+        assert_eq!(Params::<Test>::count(), 111);
+        // Pin the adopted rate AND its unit, because 13 §1 states this row in
+        // bps while the stored kind is Perbill: 1,000 bps = 10 % = 1e8 parts.
+        // A 100,000× unit slip here would be silent and would misprice every
+        // hosted question, so it is asserted rather than assumed.
+        let fee_bps = Params::<Test>::get(key16(b"svc.fee_bps")).unwrap();
+        assert_eq!(fee_bps.value, ParamValue::Perbill(100_000_000));
+        assert_eq!(fee_bps.max, ParamValue::Perbill(100_000_000));
+        assert_eq!(fee_bps.min, ParamValue::Perbill(0));
+        assert!(!fee_bps.kernel_bounded);
 
         // Per-class suffix keys (13 rule 6) — δ floors, kernel-capped.
         // Phase-0-calibrated (V-12): dec.delta.meta 0.090 on the 1e9 grid.

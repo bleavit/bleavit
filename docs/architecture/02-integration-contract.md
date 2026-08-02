@@ -418,8 +418,12 @@ primary domain only.
 **§9 additions — metadata constants.** `QuestionService::FeeFloor`, `QuestionService::MaxLive`,
 `QuestionService::MaxWindow`, `QuestionService::EpsilonMin`, `ClientRegistry::ClientBond`, and
 `QuestionService::AttestorsMin` (kernel `3`). The `svc.fee_bps` PARAM row binds through `params()`
-like every other tunable and is **absent from metadata while unset** — its unset state is the
-arming gate (16 §8.1).
+like every other tunable. It was **absent from metadata while unset**, and that absence was the
+arming gate (16 §8.1); it was **adopted at 1,000 bps on 2026-08-02**, so the key is now present and
+the service is armed. This is not a contract change — `params()` takes arbitrary keys and its shape
+is unchanged, so no `INTEGRATION_CONTRACT_VERSION` bump is owed for it — but an integrator reading
+the previous sentence would have concluded the service was inert, which is why it is corrected here
+rather than left to be inferred from 13 §1.
 
 **Client transaction and outbound-receiver additions (v22).** `ClientRegistry` appends call index `3`,
 `top_up_delivery_float(amount: Balance)`, and call index `4`,

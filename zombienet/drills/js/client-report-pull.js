@@ -32,14 +32,21 @@ async function reportProof(api, pin) {
   const reports = api.query.questionService?.reports;
   if (!reports?.key) throw new Error("QuestionService.Reports is absent from metadata");
   const key = reports.key(0);
-  const value = await api.rpc.state.getStorage(key, pin.hash);
+  const raw = await api.rpc.state.getStorage(key, pin.hash);
   const proof = await api.rpc.state.getReadProof([key], pin.hash);
   if (!proof?.proof || proof.proof.length === 0) {
     throw new Error("state_getReadProof returned no trie nodes for QuestionService.Reports[0]");
   }
+  // `state_getStorage` on an ABSENT key yields `None`, and `None.toHex()` is
+  // `"0x"` — not null. `?? null` therefore never fired, so absence read as a
+  // present-but-empty report and tripped the "uncertified report appeared"
+  // guard below. Absence is the EXPECTED state here (the governed service rate
+  // is deliberately unset), so the two must be told apart explicitly rather
+  // than by optional chaining.
+  const hex = raw?.isNone === true ? null : (raw?.toHex?.() ?? null);
   return {
     key,
-    value: value?.toHex?.() ?? null,
+    value: hex === null || hex === "0x" ? null : hex,
     proofNodes: proof.proof.length,
   };
 }

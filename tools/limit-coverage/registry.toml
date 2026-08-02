@@ -1207,8 +1207,8 @@ reason = "13 §1 / 09 §6.1: governed XCM trader rate (proof-size dimension); am
 [[entry]]
 key = "svc.fee_bps"
 class = "value"
-genesis = false
-reason = "13 §1 / 16 §8.1: optional live price input, deliberately absent at genesis. The N7 consumer fails closed with QuestionService::ServiceRateUnset before custody; it is not caller-supplied capacity."
+genesis = true
+reason = "13 §1 / 16 §8.1: the hosted-service price. Adopted at 1,000 bps by the user 2026-08-02, closing its [VERIFY] tag; seeding the row is what arms the service, since the N7 consumer fails closed with QuestionService::ServiceRateUnset while fee_rate() is None. Still class=value rather than a dispatch limit: it prices a question, it does not bound caller-supplied capacity."
 
 [[entry]]
 key = "svc.max_live"

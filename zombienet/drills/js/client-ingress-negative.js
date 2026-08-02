@@ -36,12 +36,23 @@ function asset(id = USDC_ID, amount = 1_000_000_000n) {
   return { id, fun: { Fungible: amount } };
 }
 
+// `Transact.call` is a SCALE `DoubleEncoded`, which polkadot-js types as the
+// struct `{ encoded: Bytes }`. Handing it a bare hex string makes it decode that
+// string AS the struct, so the first byte is read as the Bytes length prefix —
+// `0x4200` then fails with "required length less than remainder, expected at
+// least 4, found 2". Wrapping in `{ encoded }` supplies the byte content and
+// lets polkadot-js add the prefix.
+//
+// The payload is the frozen `[66, 0]` selector (QuestionService::register). Its
+// arguments are deliberately absent: every program here is refused at the
+// barrier for its SHAPE, so the call body is never decoded and its content is
+// irrelevant to what these cases assert.
 function transact(originKind = "Xcm", call = "0x4200") {
   return {
     Transact: {
       originKind,
       fallbackMaxWeight: null,
-      call,
+      call: { encoded: call },
     },
   };
 }
@@ -119,29 +130,101 @@ async function connect(networkInfo, nodeName) {
   return zombie.connect(node.wsUri, node.userDefinedTypes);
 }
 
+// A refusal reaches `pallet-message-queue` as ONE OF TWO events, and which one
+// depends on how deep the program got:
+//
+//   * the barrier rejects a mis-shaped program with `ProcessMessageError`
+//     (`AllowClientIngress` returns `Unsupported`, client.rs:94), and the queue
+//     reports that as `ProcessingFailed { id, origin, error }`;
+//   * a program whose SHAPE matches but whose decoded call the ExternalClient
+//     filter refuses gets far enough to execute, and the queue reports
+//     `Processed { .., success: false }`.
+//
+// MEASURED (2026-08-02, first green run): all eight cases produce
+// `ProcessingFailed` — every one dies at the barrier, none reaches execution.
+// That is a STRONGER result than "refused" and the `receipt` field records it
+// per case, so a case silently migrating to the later, weaker stage is visible
+// in the artifact rather than hidden behind a green tick. An earlier revision of
+// this comment claimed the matrix deliberately spans both stages; it does not,
+// and the claim was written before any run had ever reported one.
+//
+// `Processed { success: false }` is still accepted, because it is a genuine
+// refusal and the barrier/filter split is an implementation detail this drill
+// must not freeze. `Processed { success: true }` is a hard failure either way:
+// the point of the matrix is that none of these programs may execute. Watching
+// only for `Processed` is what made every barrier-stage refusal invisible and
+// timed out as "no refusal receipt" — reporting the strongest possible refusal
+// as a missing one.
+// Correlation is by QUEUE ORIGIN plus position, never by message id.
+//
+// Two facts make the obvious approaches wrong, and both cost this drill a run:
+//
+//   1. `polkadotXcm.Sent.message_id` on the sender and the `id` in the
+//      receiver's `messageQueue` events are different quantities — the first is
+//      the XCM message id, the second the queue's own hash of the enqueued
+//      message. A barrier-refused program never executes `SetTopic`, so nothing
+//      ever reconciles them and matching one against the other cannot fire. That
+//      is what made this drill report a correct refusal as "no refusal receipt".
+//   2. Matching the first queue event in range instead is ALSO wrong here: the
+//      post-genesis HRMP open (SQ-567) makes the relay send channel
+//      notifications to Bleavit over DMP, and those are `Processed
+//      { success: true }`. Taking the first event in range therefore read a
+//      relay housekeeping message as this program's receipt and failed with
+//      "was EXECUTED".
+//
+// Both `Processed` and `ProcessingFailed` carry the `AggregateMessageOrigin` as
+// their second field, which separates the two cleanly: the client's programs
+// arrive as `Sibling(CLIENT_PARA)`, relay notifications as `Parent`. Position
+// then disambiguates within that origin, which is sound because the caller sends
+// one program and awaits its receipt before sending the next. The sender's id is
+// still recorded per case so a human can audit the pairing.
+const CLIENT_PARA = 4343;
+
+function isFromClient(event) {
+  const origin = event.data[1];
+  return origin?.isSibling === true && origin.asSibling.toNumber() === CLIENT_PARA;
+}
+
 async function waitForRefusal(api, id, start) {
-  const deadline = Date.now() + 300_000;
+  const deadline = Date.now() + 240_000;
   let next = start;
+  const seen = [];
   while (Date.now() < deadline) {
     const head = (await api.rpc.chain.getHeader()).number.toNumber();
     while (next <= head) {
       const hash = await api.rpc.chain.getBlockHash(next);
-      const events = await (await api.at(hash)).query.system.events();
-      const processed = events
-        .map(({ event }) => event)
-        .find((event) => event.section === "messageQueue"
-          && event.method === "Processed"
-          && event.data.some((value) => value.toHex?.() === id));
-      if (processed) {
-        const result = processed.data[processed.data.length - 1];
-        if (!result?.isFalse) throw new Error(`negative ingress ${id} was not refused`);
-        return next;
+      const events = (await (await api.at(hash)).query.system.events()).map(({ event }) => event);
+      for (const event of events) {
+        if (event.section !== "messageQueue") continue;
+        seen.push(`${event.method}(${event.data[1]?.toString?.()})@${next}`);
+        if (!isFromClient(event)) continue;
+        if (event.method === "ProcessingFailed") {
+          return { block: next, receipt: "ProcessingFailed", queueId: event.data[0]?.toHex?.() };
+        }
+        if (event.method === "Processed") {
+          const success = event.data[event.data.length - 1];
+          if (!success?.isFalse) {
+            throw new Error(`negative ingress ${id} was EXECUTED (Processed success=true) at #${next}`);
+          }
+          return {
+            block: next,
+            receipt: "Processed(success=false)",
+            queueId: event.data[0]?.toHex?.(),
+          };
+        }
       }
       next += 1;
     }
     await new Promise((resolve) => setTimeout(resolve, 6_000));
   }
-  throw new Error(`no refusal receipt for negative ingress ${id}`);
+  // Report every queue event seen WITH its origin, so a timeout distinguishes
+  // "never arrived", "arrived from an unexpected origin" and "arrived in a shape
+  // this waiter does not recognise" instead of collapsing all three.
+  throw new Error(
+    `no messageQueue refusal receipt from Sibling(${CLIENT_PARA}) for negative ingress ${id} `
+      + `in blocks ${start}..${next}; messageQueue events seen: `
+      + `${seen.length ? seen.join(", ") : "NONE"}`,
+  );
 }
 
 async function malformed(networkInfo) {
@@ -155,8 +238,18 @@ async function malformed(networkInfo) {
     const start = (await bleavit.rpc.chain.getHeader()).number.toNumber();
     const events = await submit(client.tx.polkadotXcm.send(DESTINATION, message), alice);
     const id = messageId(events);
-    const block = await waitForRefusal(bleavit, id, start);
-    results.push({ name, messageId: id, processedBlock: block, result: "refused" });
+    const refusal = await waitForRefusal(bleavit, id, start);
+    // Record WHICH receipt each case produced: a barrier-stage refusal
+    // (ProcessingFailed) and a filter-stage one (Processed success=false) are
+    // different guarantees, and a case silently migrating between them is a
+    // change in what this matrix proves.
+    results.push({
+      name,
+      messageId: id,
+      processedBlock: refusal.block,
+      receipt: refusal.receipt,
+      result: "refused",
+    });
   }
   writeState({ cases: results });
 }

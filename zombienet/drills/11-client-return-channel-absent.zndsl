@@ -1,4 +1,4 @@
-Description: The client drives register to open to seal and report publication with the return HRMP channel intentionally absent; the authoritative report still publishes, the client receives no push, and Welfare.XcmTraffic X is unchanged (16 §12; 15 I-36).
+Description: With the return HRMP channel intentionally absent, the drill reads ClientRegistry.ClientCount and runs the leg that chain state makes reachable — on an inert chain (no admitted client, svc.client_bond [VERIFY]-unset) a real ingress crosses, is refused fail-closed, pushes nothing back and moves no Welfare.XcmTraffic byte; once a client is admitted the same entry point runs register to open to seal to report instead. The push-failure half of I-36 is unwitnessed while inert and is recorded as such in the artifact (16 §12; 15 I-36).
 Network: ./zombienet/networks/bleavit-client-no-return.toml
 Creds: config
 
