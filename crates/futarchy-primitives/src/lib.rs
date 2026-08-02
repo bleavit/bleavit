@@ -33,6 +33,11 @@ pub type BlockNumber = u32;
 pub mod metric_ids {
     use super::MetricId;
 
+    /// Runtime-owned namespace boundary for metric ids. Values at or above
+    /// this boundary are reserved for hosted-book provenance and are never
+    /// admitted as welfare inputs by the production runtime.
+    pub const HOSTED_BOOK_MIN: MetricId = 0x8000;
+
     pub const X: MetricId = 1;
     pub const R: MetricId = 2;
     pub const E: MetricId = 3;

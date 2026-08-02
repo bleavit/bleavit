@@ -1,7 +1,8 @@
 # Bleavit design-context pack — START HERE
 
 > Generated 2026-07-12 from the frozen specification in `docs/architecture/` at commit
-> `9f250be`; refreshed through Track N / N9 on 2026-08-02. Contract v22 is in force,
+> `9f250be`; refreshed through Track N / N9 and the N7 resource-partition closure on 2026-08-02.
+> Contract v22 is in force,
 > including client-paid hosted-report egress. This pack exists
 > because design tools cap attachments (Claude Design: 10 files)
 > and the full spec is ~677 KB across 17 documents. It compresses the spec into 7 files

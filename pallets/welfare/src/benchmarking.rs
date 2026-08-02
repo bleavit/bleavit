@@ -299,6 +299,7 @@ fn seed_h_pi_worst_case<T: Config>(epoch: EpochId) {
     for day in 0..BENCH_HPI_DAYS {
         let day = day as u8;
         BlockWeightSamples::<T>::insert(epoch, day, BENCH_BLOCK_WEIGHT_SAMPLE);
+        PrimaryBlockWeightSamples::<T>::insert(epoch, day, BENCH_BLOCK_WEIGHT_SAMPLE);
         IntegrityFailures::<T>::insert(epoch, day, BENCH_INTEGRITY_FAILURES);
     }
 }
@@ -312,6 +313,10 @@ fn seed_h_pi_worst_case<T: Config>(epoch: EpochId) {
 fn assert_h_pi_worst_case<T: Config>(epoch: EpochId) {
     assert_eq!(
         BlockWeightSamples::<T>::iter_prefix(epoch).count(),
+        BENCH_HPI_DAYS as usize
+    );
+    assert_eq!(
+        PrimaryBlockWeightSamples::<T>::iter_prefix(epoch).count(),
         BENCH_HPI_DAYS as usize
     );
     assert_eq!(
@@ -637,6 +642,7 @@ mod benches {
 
         assert!(XcmTrafficEpochs::<T>::get().contains(&epoch));
         assert_eq!(BlockWeightSamples::<T>::get(epoch, day).blocks, 1);
+        assert_eq!(PrimaryBlockWeightSamples::<T>::get(epoch, day).blocks, 1);
         Ok(())
     }
 

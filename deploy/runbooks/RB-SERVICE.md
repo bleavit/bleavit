@@ -78,7 +78,7 @@ failed.
 
 **External weight quota.** Distinguish *saturated* (at or under the reserved allocation — expected)
 from *breached* (external work consumed capacity outside its reservation — a defect). Only the second
-is an incident. Check whether `H_primary` moved: it must not have, and if it did, the partition is
+is an incident. Check whether primary-only `H` moved: it must not have, and if it did, the partition is
 not holding and PT-10's property is violated in production.
 
 ## Remediation
@@ -113,7 +113,7 @@ resume; report delivery by pull continues regardless.
 1. Guardian-**pause** the service (16 §10). Pause refuses `register` and `seal` and takes live
    questions to VOID at their deadlines — deliberately *not* a freeze, which would strand client and
    trader capital in books with no terminal path.
-2. Confirm `H_primary` against the reserved primary capacity and check whether any welfare snapshot
+2. Confirm primary-only `H` in physical `max_block` coordinates and check whether any welfare snapshot
    in the affected window is contaminated.
 3. Escalate — this is a code defect in the accounting, not an operational condition.
 
@@ -122,7 +122,7 @@ resume; report delivery by pull continues regardless.
 - **Push failures:** client-facing only. No escalation path on this chain.
 - **Falsifier fires:** to the values layer, as a PARAM amendment. Notify treasury ops, since the cut
   reduces instrument-D and instrument-A/B revenue.
-- **Quota breached, or `H_primary` moved with external load:** immediate engineering escalation. This
+- **Quota breached, or `H` moved with external load:** immediate engineering escalation. This
   falsifies PT-10 in production and calls the [16](../../docs/architecture/16-hosted-question-service.md)
   §1 boundary rule into question; the service stays paused until the accounting is repaired and the
   property re-proved.

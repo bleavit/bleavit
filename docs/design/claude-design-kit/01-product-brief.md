@@ -87,12 +87,16 @@ denser information, no simplified summaries (11 §11.2).
 4. **Honest degradation.** Every failure state has specified visuals, copy and recovery
    (E-rows E1–E23). Loading is dominated by light-client sync — a first verified render can
    take ~30–90 s; the design must make that wait legible and trustworthy, not hide it. (10 §9.4, 11 §11.12)
-5. **No dark patterns, mandated honesty copy.** Examples the spec literally requires: VOID
+5. **External traffic is not a governance input.** Hosted-client calls are hard-bounded in both
+   weight dimensions and use a separately reserved capacity partition; the welfare dashboard's
+   `H` is based on primary/system usage, never a subtractive "service exclusion". Show the external
+   quota and its fail-closed state as operational diagnostics, not as extra protocol health.
+6. **No dark patterns, mandated honesty copy.** Examples the spec literally requires: VOID
    redemption must lead with the 100%-recovery merge path and may not describe the 0.5/0.25
    fallback rates as a penalty (11 §11.6); the NAV screen must never show full backing while the
    reserve-health flag is set (11 §11.8.3); a non-dismissable "Bootstrap governance: sudo
    active" banner on every route during early phases (11 §11.10).
-6. **Dense, professional, self-serve.** Users range from citizens to professional reporters and
+7. **Dense, professional, self-serve.** Users range from citizens to professional reporters and
    guardians. The Advanced area is intentionally dense. Everything is explorable without any
    account, server or API key — expert mode exposes raw storage keys and SCALE bytes. (11 §11.4)
 

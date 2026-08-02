@@ -38,7 +38,11 @@ mod mock;
 mod tests;
 
 use alloc::vec::Vec;
-use frame_support::pallet_prelude::DispatchResult;
+use frame_support::{
+    dispatch::{DispatchInfo, PostDispatchInfo},
+    pallet_prelude::DispatchResult,
+    weights::Weight,
+};
 use futarchy_primitives::{
     integrity::IntegrityFault,
     keeper::{CrankClass, KeeperRebateSink},
@@ -112,7 +116,8 @@ pub fn block_utilization(
             // Ceiling division: round the *utilization* up.
             .checked_add(u128::from(limit).saturating_sub(1))?
             .checked_div(u128::from(limit))?;
-        Some(u64::try_from(scaled.min(u128::from(ONE))).unwrap_or(ONE))
+        let scaled = scaled.min(u128::from(ONE));
+        u64::try_from(scaled).ok()
     };
     let ref_time = dimension(used.ref_time(), limit.ref_time());
     let proof_size = dimension(used.proof_size(), limit.proof_size());
@@ -165,6 +170,13 @@ pub trait OracleAdmission {
 /// raw counter mapping, and attestation plumbing are runtime-composition work;
 /// this pallet aggregates only already-normalized `[0, 1]` components.
 pub trait MetricInputs {
+    /// Return only inputs derived from Bleavit's primary/runtime-owned state.
+    ///
+    /// In particular, this seam MUST NOT read either hosted-book ledger
+    /// instance or any client-owned service activity. The P-pillar producers
+    /// are intentionally not implemented yet; when they land, they must keep
+    /// the same primary-only boundary before their values reach aggregation
+    /// (05 §4.3; 16 §8.5; PT-10).
     fn onchain_components(epoch: EpochId, spec_version: MetricSpecVersion) -> Vec<ComponentValue>;
     /// The components whose settled value for `(epoch, spec_version)` is a
     /// **flagged carry-last** rather than a fresh measurement — 07 §10's flag
@@ -192,6 +204,24 @@ pub trait MetricInputs {
         day: u8,
         spec_version: MetricSpecVersion,
     ) -> Vec<ComponentValue>;
+}
+
+/// Runtime-owned provenance for a metric id (05 §4.1; 16 §8.5).
+///
+/// `MetricSpec::source` remains the aggregation class, but it is not an
+/// authorization to read a source. The runtime binds an id to one of these
+/// provenance outcomes before the pallet accepts a spec. Hosted-book ids are
+/// therefore rejected regardless of the self-declared class, formula bytes,
+/// client or ledger instance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MetricProvenance {
+    Primary(SourceClass),
+    HostedBook,
+    Unassigned,
+}
+
+pub trait MetricProvenanceProvider {
+    fn provenance(id: MetricId, declared: SourceClass) -> MetricProvenance;
 }
 
 /// Epoch-owned schedule projection: snapshot deadlines and the day domain a
@@ -316,6 +346,10 @@ pub mod pallet {
         type Params: WelfareParamsProvider;
         /// Normalized epoch and daily component inputs.
         type MetricInputs: MetricInputs;
+        /// Runtime-owned metric-id provenance. A production binding MUST
+        /// reject unassigned ids and hosted-book provenance; the pallet never
+        /// treats `MetricSpec::source` or `formula_ref` as authority.
+        type MetricProvenance: MetricProvenanceProvider;
         /// Conditional-ledger settlement seam used by the measured
         /// `compute_settlement` path and the neutral `settle_baseline_void`
         /// passthrough (05 §6).
@@ -544,6 +578,56 @@ pub mod pallet {
         /// Blocks sampled into `utilization_sum`. **Zero means the window was
         /// never sampled**, which resolves `H` *absent* rather than healthy.
         pub blocks: u32,
+    }
+
+    /// Per-block resource accounting for the current block. This is a
+    /// transient, pallet-internal value: it is consumed by the finalization
+    /// sampler and never becomes a frontend surface.
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        Decode,
+        DecodeWithMemTracking,
+        Encode,
+        Eq,
+        MaxEncodedLen,
+        PartialEq,
+        TypeInfo,
+    )]
+    pub struct ResourcePartitionUsage<BlockNumber> {
+        pub block: BlockNumber,
+        /// A saturating physical-coordinate upper-bound estimate of
+        /// primary/system work, including residual system overhead that is not
+        /// attached to a signed dispatch. Mandatory/system work is registered
+        /// by FRAME without this ledger's admission check, so this counter is
+        /// deliberately not a promise that the combined primary and external
+        /// work fits the physical block envelope.
+        pub primary_used: Weight,
+        /// External work admitted against the hard service quota.
+        pub external_used: Weight,
+    }
+
+    /// The reservation token passed from pre-dispatch to post-dispatch. A
+    /// failed dispatch deliberately keeps the entire `reserved` amount on its
+    /// side; only a successful, explicitly reported refund can release it.
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        Decode,
+        DecodeWithMemTracking,
+        Encode,
+        Eq,
+        MaxEncodedLen,
+        PartialEq,
+        TypeInfo,
+    )]
+    pub struct ResourceReservation<BlockNumber> {
+        pub block: BlockNumber,
+        pub is_external: bool,
+        pub reserved: Weight,
+        pub before_total: Weight,
     }
 
     /// Bounded mirror of the core snapshot, whose transient component `Vec`
@@ -915,6 +999,20 @@ pub mod pallet {
     pub type BlockWeightSamples<T: Config> =
         StorageDoubleMap<_, Twox64Concat, EpochId, Twox64Concat, u8, BlockWeightSample, ValueQuery>;
 
+    /// The separately accumulated primary/system resource usage for the
+    /// current block. A parallel `(epoch, day)` sample is written at
+    /// finalization so `H` excludes external work while remaining in the same
+    /// physical `max_block` coordinate system as the total diagnostic sample.
+    #[pallet::storage]
+    pub type PrimaryBlockWeightSamples<T: Config> =
+        StorageDoubleMap<_, Twox64Concat, EpochId, Twox64Concat, u8, BlockWeightSample, ValueQuery>;
+
+    /// Current-block reservation ledger. It is replaced at the first
+    /// observation of a new block and consumed by `sample_block_weight`.
+    #[pallet::storage]
+    pub type BlockResourceUsage<T: Config> =
+        StorageValue<_, ResourcePartitionUsage<BlockNumberFor<T>>, OptionQuery>;
+
     /// Qualifying defensive-path failures by `(epoch, day)` (05 §4.3 `Π`).
     ///
     /// The **single** counter behind `Π = max(0, 1 − 0.25 · events)`, with
@@ -1098,6 +1196,8 @@ pub mod pallet {
             specs: BoundedSpecSet,
         ) -> DispatchResult {
             T::MetricGovernanceOrigin::ensure_origin(origin)?;
+            let specs = specs.into_inner();
+            Self::ensure_metric_provenance(&specs)?;
             Self::mutate(|state| {
                 // SQ-82: a live dispatch is always `Live`, even when the clock
                 // reads 0. The genesis relaxation belongs to the genesis build
@@ -1107,7 +1207,7 @@ pub mod pallet {
                         current_epoch: T::CurrentEpoch::get(),
                     },
                     version,
-                    specs.into_inner(),
+                    specs,
                     &T::OracleAdmission::admission(),
                 )
             })?;
@@ -1307,21 +1407,22 @@ pub mod pallet {
             let mut state = WelfareState::new();
             for (version, specs) in &self.specs {
                 assert!(
-                    state
-                        .register_metric_spec(
-                            Registration::Genesis,
-                            *version,
-                            specs.clone(),
-                            // 07 §2(5) binds the genesis build too. A genesis
-                            // spec carrying an attested component is refused
-                            // unless the oracle's seats are already filled at
-                            // this point in the genesis sequence — which depends
-                            // on `construct_runtime!` ordering, so an attested
-                            // genesis spec is a deliberate choice a preset must
-                            // sequence for, not something that quietly works.
-                            &T::OracleAdmission::admission(),
-                        )
-                        .is_ok(),
+                    Pallet::<T>::ensure_metric_provenance(specs).is_ok()
+                        && state
+                            .register_metric_spec(
+                                Registration::Genesis,
+                                *version,
+                                specs.clone(),
+                                // 07 §2(5) binds the genesis build too. A genesis
+                                // spec carrying an attested component is refused
+                                // unless the oracle's seats are already filled at
+                                // this point in the genesis sequence — which depends
+                                // on `construct_runtime!` ordering, so an attested
+                                // genesis spec is a deliberate choice a preset must
+                                // sequence for, not something that quietly works.
+                                &T::OracleAdmission::admission(),
+                            )
+                            .is_ok(),
                     "welfare genesis metric specs violate core validation"
                 );
             }
@@ -1336,6 +1437,335 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
+        fn metric_provenance_valid(spec: &MetricSpec) -> bool {
+            matches!(
+                T::MetricProvenance::provenance(spec.id, spec.source),
+                MetricProvenance::Primary(source) if source == spec.source
+            )
+        }
+
+        fn ensure_metric_provenance(specs: &[MetricSpec]) -> DispatchResult {
+            if specs.iter().all(Self::metric_provenance_valid) {
+                Ok(())
+            } else {
+                // Keep the existing source-class refusal as the public error:
+                // hosted-book provenance is not a new opt-in class and must
+                // not become a new metadata/error-surface authorization path.
+                Err(Error::<T>::BadSourceClass.into())
+            }
+        }
+
+        /// The runtime's hard external quota. It is the pre-existing
+        /// `Operational.reserved` capacity, so both Weight dimensions are
+        /// bounded by the same chain-owned reservation and no new tunable is
+        /// introduced for N7.
+        pub fn external_capacity() -> Option<Weight> {
+            <T as frame_system::Config>::BlockWeights::get()
+                .get(frame_support::dispatch::DispatchClass::Operational)
+                .reserved
+        }
+
+        /// The hard primary/system reservation is the remainder of the block
+        /// after the external quota. Saturating subtraction is deliberately
+        /// fail-closed if a malformed runtime configuration reverses the two.
+        pub fn primary_capacity() -> Weight {
+            let weights = <T as frame_system::Config>::BlockWeights::get();
+            let Some(external) = weights
+                .get(frame_support::dispatch::DispatchClass::Operational)
+                .reserved
+            else {
+                return Weight::zero();
+            };
+            weights.max_block.saturating_sub(external)
+        }
+
+        /// Weight of the partition bookkeeping performed at pre- and
+        /// post-dispatch. The extension is deliberately non-zero: its storage
+        /// path is part of the declared weight, not hidden in a `()` extension.
+        ///
+        /// The count is the enumerated worst case over **both** partition entry
+        /// points — the signed-extension pipeline and the XCM adapter — not the
+        /// storage touched by any single hook of either. Under-declaring is
+        /// unsafe twice over: it understates what `CheckWeight` books into the
+        /// block, and — because the same figure sizes the reservation the XCM
+        /// adapter makes — it hands the external side quota it never paid for.
+        /// So the enumeration is exhaustive and rounds against the caller (R-7).
+        ///
+        /// Fixed accesses, signed-extension path (**7r / 2w**):
+        ///
+        /// | Hook | Storage | R | W |
+        /// |---|---|---|---|
+        /// | `validate` | `frame_system::BlockWeight` | 1 | 0 |
+        /// | `validate` | `Number`, `BlockResourceUsage` | 2 | 0 |
+        /// | `prepare` | `Number`, `BlockResourceUsage` r/w | 2 | 1 |
+        /// | `post_dispatch` | `BlockWeight` | 1 | 0 |
+        /// | `post_dispatch` | `BlockResourceUsage` mutate | 1 | 1 |
+        ///
+        /// Fixed accesses, XCM adapter path (**8r / 4w** — the binding one):
+        ///
+        /// | Step | Storage | R | W |
+        /// |---|---|---|---|
+        /// | `before` | `BlockWeight` | 1 | 0 |
+        /// | `reserve_resource` | `Number`, `BlockResourceUsage` r + put | 2 | 1 |
+        /// | `register_extra_weight_unchecked` | `BlockWeight` r/w | 1 | 1 |
+        /// | `physical_delta` | `BlockWeight` | 1 | 0 |
+        /// | refund | `BlockWeight` mutate | 1 | 1 |
+        /// | `finish_resource_dispatch` | `BlockWeight` | 1 | 0 |
+        /// | `finish_resource_dispatch` | `BlockResourceUsage` mutate | 1 | 1 |
+        ///
+        /// `dynamic_reads` is the number of `Market::Markets` lookups the
+        /// resource classification will perform for this call — one per market
+        /// leaf in the tree. It is charged **per call** rather than as a flat
+        /// worst case because a wrapper multiplies it: a bare call costs at
+        /// most one lookup, while a full batch can cost sixteen, and declaring
+        /// sixteen on every transaction would tax the common case to cover the
+        /// rare one.
+        pub fn resource_partition_weight(dynamic_reads: u32) -> Weight {
+            <T as frame_system::Config>::DbWeight::get()
+                .reads_writes(8u64.saturating_add(dynamic_reads.into()), 4)
+        }
+
+        fn encoded_length_weight(len: usize) -> Weight {
+            let len = match u64::try_from(len) {
+                Ok(len) => len,
+                Err(_) => u64::MAX,
+            };
+            Weight::from_parts(0, len)
+        }
+
+        /// The same charge that `CheckWeight` books, plus a caller-supplied
+        /// fixed bookkeeping weight for non-transaction dispatch paths.
+        pub fn dispatch_resource_weight(info: &DispatchInfo, len: usize, extra: Weight) -> Weight {
+            info.total_weight()
+                .saturating_add(
+                    <T as frame_system::Config>::BlockWeights::get()
+                        .get(info.class)
+                        .base_extrinsic,
+                )
+                .saturating_add(Self::encoded_length_weight(len))
+                .saturating_add(extra)
+        }
+
+        fn residual_system_weight(total: Weight, accounted: Weight) -> Weight {
+            total.saturating_sub(accounted)
+        }
+
+        fn max_weight(left: Weight, right: Weight) -> Weight {
+            Weight::from_parts(
+                left.ref_time().max(right.ref_time()),
+                left.proof_size().max(right.proof_size()),
+            )
+        }
+
+        fn clamp_weight_to_limit(value: Weight, limit: Weight) -> Weight {
+            Weight::from_parts(
+                value.ref_time().min(limit.ref_time()),
+                value.proof_size().min(limit.proof_size()),
+            )
+        }
+
+        fn usage_for_block(
+            block: BlockNumberFor<T>,
+            before_total: Weight,
+        ) -> ResourcePartitionUsage<BlockNumberFor<T>> {
+            let Some(mut usage) = BlockResourceUsage::<T>::get() else {
+                return ResourcePartitionUsage {
+                    block,
+                    primary_used: Self::clamp_weight_to_limit(
+                        before_total,
+                        <T as frame_system::Config>::BlockWeights::get().max_block,
+                    ),
+                    external_used: Weight::zero(),
+                };
+            };
+            if usage.block != block {
+                return ResourcePartitionUsage {
+                    block,
+                    primary_used: Self::clamp_weight_to_limit(
+                        before_total,
+                        <T as frame_system::Config>::BlockWeights::get().max_block,
+                    ),
+                    external_used: Weight::zero(),
+                };
+            }
+            let accounted = usage.primary_used.saturating_add(usage.external_used);
+            usage.primary_used = usage
+                .primary_used
+                .saturating_add(Self::residual_system_weight(before_total, accounted));
+            usage.primary_used = Self::clamp_weight_to_limit(
+                usage.primary_used,
+                <T as frame_system::Config>::BlockWeights::get().max_block,
+            );
+            usage
+        }
+
+        fn side_fits(
+            usage: &ResourcePartitionUsage<BlockNumberFor<T>>,
+            is_external: bool,
+            amount: Weight,
+        ) -> bool {
+            let Some(capacity) = (if is_external {
+                Self::external_capacity()
+            } else {
+                Some(Self::primary_capacity())
+            }) else {
+                return false;
+            };
+            let used = if is_external {
+                usage.external_used
+            } else {
+                usage.primary_used
+            };
+            used.saturating_add(amount).all_lte(capacity)
+        }
+
+        /// Read-only admission check used by transaction validation. `before`
+        /// is the block total before `CheckWeight` books this call.
+        pub fn can_reserve_resource(is_external: bool, amount: Weight, before: Weight) -> bool {
+            let block = frame_system::Pallet::<T>::block_number();
+            let usage = Self::usage_for_block(block, before);
+            Self::side_fits(&usage, is_external, amount)
+                && before
+                    .saturating_add(amount)
+                    .all_lte(<T as frame_system::Config>::BlockWeights::get().max_block)
+        }
+
+        /// Reserve a top-level dispatch on its side of the partition. The
+        /// caller supplies the pre-`CheckWeight` total because this method is
+        /// also used by the XCM dispatcher, which has no transaction extension
+        /// pipeline of its own.
+        pub fn reserve_resource(
+            is_external: bool,
+            amount: Weight,
+            before: Weight,
+        ) -> Option<ResourceReservation<BlockNumberFor<T>>> {
+            let block = frame_system::Pallet::<T>::block_number();
+            let mut usage = Self::usage_for_block(block, before);
+            if !Self::side_fits(&usage, is_external, amount)
+                || !before
+                    .saturating_add(amount)
+                    .all_lte(<T as frame_system::Config>::BlockWeights::get().max_block)
+            {
+                return None;
+            }
+            if is_external {
+                usage.external_used = usage.external_used.saturating_add(amount);
+            } else {
+                usage.primary_used = Self::clamp_weight_to_limit(
+                    usage.primary_used.saturating_add(amount),
+                    <T as frame_system::Config>::BlockWeights::get().max_block,
+                );
+            }
+            BlockResourceUsage::<T>::put(usage);
+            Some(ResourceReservation {
+                block,
+                is_external,
+                reserved: amount,
+                before_total: before,
+            })
+        }
+
+        /// Apply top-level post-dispatch accounting. An error retains the
+        /// complete pre-dispatch reservation. On success, only the actual
+        /// dispatch refund is released; base-extrinsic and encoded-length
+        /// weight remain consumed, and `extra` accounts for non-transaction
+        /// bookkeeping such as the XCM dispatcher wrapper.
+        pub fn finish_resource_dispatch(
+            reservation: ResourceReservation<BlockNumberFor<T>>,
+            info: &DispatchInfo,
+            post_info: &PostDispatchInfo,
+            len: usize,
+            result: &DispatchResult,
+            extra: Weight,
+            unreported: Weight,
+        ) {
+            let reported = if result.is_err() {
+                reservation.reserved.saturating_add(unreported)
+            } else {
+                post_info
+                    .calc_actual_weight(info)
+                    .saturating_add(
+                        <T as frame_system::Config>::BlockWeights::get()
+                            .get(info.class)
+                            .base_extrinsic,
+                    )
+                    .saturating_add(Self::encoded_length_weight(len))
+                    .saturating_add(extra)
+                    .saturating_add(unreported)
+            };
+            // `StorageWeightReclaim` and nested runtime work can adjust the
+            // frame-system total after the call's PostDispatchInfo was
+            // produced. The physical delta is therefore the authoritative
+            // lower bound for the side ledger; using the component-wise max
+            // keeps a malformed report from manufacturing a refund while
+            // preserving the explicit full-reservation rule on failure.
+            let observed = frame_system::Pallet::<T>::block_weight()
+                .total()
+                .saturating_sub(reservation.before_total);
+            let charged = Self::max_weight(reported, observed);
+            BlockResourceUsage::<T>::mutate(|maybe_usage| {
+                let Some(usage) = maybe_usage.as_mut() else {
+                    // Losing the accounting record is the safe direction: do
+                    // not release a reservation that can no longer be proven.
+                    return;
+                };
+                if usage.block != reservation.block {
+                    return;
+                }
+                let used = if reservation.is_external {
+                    &mut usage.external_used
+                } else {
+                    &mut usage.primary_used
+                };
+                if charged.any_gt(reservation.reserved) {
+                    *used = used.saturating_add(charged.saturating_sub(reservation.reserved));
+                } else {
+                    *used = used.saturating_sub(reservation.reserved.saturating_sub(charged));
+                }
+                if !reservation.is_external {
+                    *used = Self::clamp_weight_to_limit(
+                        *used,
+                        <T as frame_system::Config>::BlockWeights::get().max_block,
+                    );
+                }
+            });
+        }
+
+        /// Current reservation state, exposed for runtime diagnostics and the
+        /// PT-10 harness. `None` means no top-level dispatch has reserved a
+        /// side in this block yet.
+        pub fn resource_usage() -> Option<ResourcePartitionUsage<BlockNumberFor<T>>> {
+            BlockResourceUsage::<T>::get()
+        }
+
+        fn primary_used_at_finalize(
+            usage: Option<ResourcePartitionUsage<BlockNumberFor<T>>>,
+            current_block: BlockNumberFor<T>,
+            total: Weight,
+        ) -> Weight {
+            let Some(usage) = usage else {
+                return Self::clamp_weight_to_limit(
+                    total,
+                    <T as frame_system::Config>::BlockWeights::get().max_block,
+                );
+            };
+            if usage.block != current_block {
+                return Self::clamp_weight_to_limit(
+                    total,
+                    <T as frame_system::Config>::BlockWeights::get().max_block,
+                );
+            }
+            Self::clamp_weight_to_limit(
+                usage
+                    .primary_used
+                    .saturating_add(Self::residual_system_weight(
+                        total,
+                        usage.primary_used.saturating_add(usage.external_used),
+                    )),
+                <T as frame_system::Config>::BlockWeights::get().max_block,
+            )
+        }
+
         /// True only after the oldest outstanding snapshot has been overdue
         /// for strictly more than the 13 §2 four-day grace.
         pub fn snapshot_overdue(now: BlockNumber) -> bool {
@@ -1664,6 +2094,11 @@ pub mod pallet {
                     // per-prefix work stays the fixed multiple of `u8::MAX + 1`
                     // this walk was budgeted for.
                     let _ = BlockWeightSamples::<T>::clear_prefix(epoch, u8::MAX as u32 + 1, None);
+                    let _ = PrimaryBlockWeightSamples::<T>::clear_prefix(
+                        epoch,
+                        u8::MAX as u32 + 1,
+                        None,
+                    );
                     let _ = IntegrityFailures::<T>::clear_prefix(epoch, u8::MAX as u32 + 1, None);
                     if let Some(position) = epochs.iter().position(|stored| *stored == epoch) {
                         epochs.remove(position);
@@ -1954,6 +2389,12 @@ pub mod pallet {
         /// "observation dropped to keep a bounded index consistent", whose
         /// defined recovery is the bounded reaper freeing the index.
         pub fn sample_block_weight() {
+            let block = frame_system::Pallet::<T>::block_number();
+            // Consume the reservation ledger before registering this hook's
+            // own cost. The hook is primary/system overhead, so it is folded
+            // into the residual below rather than silently attributed to the
+            // preceding dispatch.
+            let usage = BlockResourceUsage::<T>::take();
             frame_system::Pallet::<T>::register_extra_weight_unchecked(
                 T::WeightInfo::sample_block_weight(),
                 DispatchClass::Mandatory,
@@ -1963,12 +2404,23 @@ pub mod pallet {
             let Some(ratio) = block_utilization(used, limit) else {
                 return;
             };
+            let primary_used = Self::primary_used_at_finalize(usage, block, used);
+            let Some(primary_ratio) = block_utilization(primary_used, limit) else {
+                // A missing primary capacity is unmeasurable, not healthy.
+                // The total sample is also dropped so the window cannot make
+                // the absence look like a valid H value.
+                return;
+            };
             let (epoch, day) = T::CurrentWindow::get();
             if !Self::track_traffic_epoch(epoch) {
                 return;
             }
             BlockWeightSamples::<T>::mutate(epoch, day, |sample| {
                 sample.utilization_sum = sample.utilization_sum.saturating_add(ratio);
+                sample.blocks = sample.blocks.saturating_add(1);
+            });
+            PrimaryBlockWeightSamples::<T>::mutate(epoch, day, |sample| {
+                sample.utilization_sum = sample.utilization_sum.saturating_add(primary_ratio);
                 sample.blocks = sample.blocks.saturating_add(1);
             });
         }
@@ -2028,6 +2480,29 @@ pub mod pallet {
         /// a day that produced two blocks must not weigh the same as a full one.
         pub fn block_weight_epoch(epoch: EpochId) -> BlockWeightSample {
             BlockWeightSamples::<T>::iter_prefix(epoch).fold(
+                BlockWeightSample::default(),
+                |mut total, (_, sample)| {
+                    total.utilization_sum =
+                        total.utilization_sum.saturating_add(sample.utilization_sum);
+                    total.blocks = total.blocks.saturating_add(sample.blocks);
+                    total
+                },
+            )
+        }
+
+        /// Return one day's primary/system block-weight accumulator used by
+        /// `H` (05 §4.3; 16 §8.5). The total accumulator remains
+        /// available through [`Self::block_weight_sample`] for diagnostics.
+        pub fn primary_block_weight_sample(epoch: EpochId, day: u8) -> BlockWeightSample {
+            PrimaryBlockWeightSamples::<T>::get(epoch, day)
+        }
+
+        /// Return the epoch-wide primary/system accumulator. It is kept as a
+        /// separate fold rather than subtracting external usage from the total
+        /// sample: subtraction would permit service traffic to fill a block
+        /// while reporting full health, the failure mode §8.5 rejects.
+        pub fn primary_block_weight_epoch(epoch: EpochId) -> BlockWeightSample {
+            PrimaryBlockWeightSamples::<T>::iter_prefix(epoch).fold(
                 BlockWeightSample::default(),
                 |mut total, (_, sample)| {
                     total.utilization_sum =
@@ -2346,6 +2821,14 @@ pub mod pallet {
                         "welfare metric-spec map key does not match its value",
                     ));
                 }
+                if specs
+                    .iter()
+                    .any(|spec| !Self::metric_provenance_valid(spec))
+                {
+                    return Err(TryRuntimeError::Other(
+                        "welfare metric spec lacks runtime-owned provenance",
+                    ));
+                }
             }
             for (key, snapshot) in Snapshots::<T>::iter() {
                 if key != (snapshot.epoch, snapshot.spec_version) {
@@ -2427,6 +2910,9 @@ pub mod pallet {
                     && !CollatorAuthorshipEpoch::<T>::contains_key(*epoch)
                     && BlockProduction::<T>::iter_prefix(*epoch).next().is_none()
                     && BlockWeightSamples::<T>::iter_prefix(*epoch)
+                        .next()
+                        .is_none()
+                    && PrimaryBlockWeightSamples::<T>::iter_prefix(*epoch)
                         .next()
                         .is_none()
                     && IntegrityFailures::<T>::iter_prefix(*epoch).next().is_none()
@@ -2617,6 +3103,59 @@ pub mod pallet {
                 {
                     return Err(TryRuntimeError::Other(
                         "welfare block-weight sample exceeds full utilization",
+                    ));
+                }
+            }
+            for (epoch, _, sample) in PrimaryBlockWeightSamples::<T>::iter() {
+                if epoch > current_epoch {
+                    return Err(TryRuntimeError::Other(
+                        "welfare primary block-weight sample lies in the future",
+                    ));
+                }
+                if !traffic_epochs.contains(&epoch) {
+                    return Err(TryRuntimeError::Other(
+                        "welfare primary block-weight sample has no indexed epoch",
+                    ));
+                }
+                if sample.blocks == 0 {
+                    return Err(TryRuntimeError::Other(
+                        "welfare primary block-weight sample records no sampled block",
+                    ));
+                }
+                if u128::from(sample.utilization_sum)
+                    > u128::from(sample.blocks).saturating_mul(u128::from(ONE))
+                {
+                    return Err(TryRuntimeError::Other(
+                        "welfare primary block-weight sample exceeds full physical utilization",
+                    ));
+                }
+            }
+            if let Some(usage) = BlockResourceUsage::<T>::get() {
+                if usage.block != frame_system::Pallet::<T>::block_number() {
+                    return Err(TryRuntimeError::Other(
+                        "welfare resource reservation belongs to another block",
+                    ));
+                }
+                let Some(external_capacity) = Self::external_capacity() else {
+                    return Err(TryRuntimeError::Other(
+                        "welfare external resource quota is unavailable",
+                    ));
+                };
+                if !usage.external_used.all_lte(external_capacity) {
+                    return Err(TryRuntimeError::Other(
+                        "welfare external resource reservation exceeds its hard quota",
+                    ));
+                }
+                // Mandatory/system work is registered by FRAME without the
+                // partition's refusal hook.  The primary counter is therefore
+                // a saturating physical-coordinate estimate, not a guarantee
+                // that primary plus external work fits the block envelope.
+                if !usage
+                    .primary_used
+                    .all_lte(<T as frame_system::Config>::BlockWeights::get().max_block)
+                {
+                    return Err(TryRuntimeError::Other(
+                        "welfare primary resource estimate exceeds the physical block envelope",
                     ));
                 }
             }

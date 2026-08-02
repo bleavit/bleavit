@@ -118,6 +118,7 @@ mod classifier;
 mod configs;
 mod genesis;
 pub mod migrations;
+mod resource_partition;
 pub mod telemetry;
 pub mod track_origins;
 pub mod views;
@@ -133,6 +134,8 @@ mod tests_b15_recovery;
 mod tests_constitution_params;
 #[cfg(test)]
 mod tests_migration_guard;
+#[cfg(test)]
+mod tests_n7;
 #[cfg(test)]
 mod tests_n8;
 #[cfg(test)]
@@ -257,6 +260,7 @@ pub type TxExtension = (
         frame_metadata_hash_extension::CheckMetadataHash<Runtime>,
         StorageWeightReclaim,
     ),
+    resource_partition::ResourcePartition,
 );
 
 pub type UncheckedExtrinsic =

@@ -141,8 +141,15 @@ Outcome: `Adopt` / `Extend` (once) / `Reject(reason)` — all 17 `RejectReason`s
   class-4 part (incident score — one S1 incident zeroes it). Daily gate flags use only the
   committed part: no class-4 reporter/dispute discretion enters them. Reserve health `R` is
   the sole authenticated asynchronous class-3 input.
+- Weight headroom is the primary/system partition's `H`: hosted calls have hard ref-time and
+  proof-size quotas and cannot borrow the reserved primary capacity. `PrimaryUsed` includes full
+  top-level charges, nested work, failures, refunds/base weight and residual system overhead; the
+  total-weight sample remains a physical diagnostic, and the primary sample uses the same physical
+  two-dimensional max helper as the total. With zero external work, `H` is bit-identical to the
+  pre-partition formula across the 1e9 grid; no sampled block means `H` is unavailable, not healthy.
 - **P** (usage): fees burned/paid, qualified users, settled value. **A** (progress): shipped
-  audited upgrades, runtime performance, integrations.
+  audited upgrades, runtime performance, integrations. The P producers are primary-only; hosted
+  service activity is excluded before those producers are implemented.
 - `g` = smoothstep gates with floors/ceilings; **daily gate-breach flags** (`s_breached`,
   `c_breached` + per-day bitmap — display-ready) settle the gate books.
 - Settlement score `s = GeoMean(W_{e+1}, W_{e+2})` — one number per cohort; both branches

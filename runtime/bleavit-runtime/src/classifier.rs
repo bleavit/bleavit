@@ -874,6 +874,194 @@ impl SafetyClassifier for BleavitSafetyClassifier {
     }
 }
 
+/// Does this market call name a book in the hosted domain?
+///
+/// The match is exhaustive on purpose. A market call added later that carries
+/// a `MarketId` fails to compile here rather than silently defaulting to the
+/// primary quota, which is exactly the failure this classification exists to
+/// prevent — the same tripwire discipline the ingress template uses.
+fn market_call_targets_external_book(call: &pallet_market::Call<Runtime>) -> bool {
+    let market = match call {
+        pallet_market::Call::buy { market, .. }
+        | pallet_market::Call::sell { market, .. }
+        | pallet_market::Call::crank_observe { market }
+        | pallet_market::Call::sweep_revenue { market }
+        | pallet_market::Call::reap { market } => *market,
+        // Chain-wide creation controls, not per-book work.
+        pallet_market::Call::freeze_creation { .. }
+        | pallet_market::Call::set_frozen { .. }
+        | pallet_market::Call::__Ignore(_, _) => return false,
+    };
+    pallet_market::Markets::<Runtime>::get(market).is_some_and(|book| {
+        matches!(
+            book.kind,
+            pallet_market::core_market::BookKind::External { .. }
+        )
+    })
+}
+
+/// Resource classification shared by the signed transaction extension and the
+/// XCM call dispatcher — the 16 §8.5 question of *whose budget pays*, which is
+/// deliberately not the safety classifier's question of *who may call*. A
+/// hosted market's trades are permissionless `Public` calls by authority and
+/// hosted work by resource domain; conflating the two is what would let
+/// external volume reach `H` (05 §4.3) through the back door this partition
+/// exists to close.
+///
+/// Wrappers are intentionally not treated as external: the closed safety
+/// classifier projects only exact leaves, so a wrapper cannot smuggle primary
+/// work into the service quota.
+pub(crate) fn is_external_client_call(call: &RuntimeCall) -> bool {
+    let FilterCall::Leaf(domain) = BleavitSafetyClassifier::project(call) else {
+        return false;
+    };
+
+    // 1. The client's own authenticated calls are external by construction.
+    if domain == CallDomain::ExternalClient {
+        return true;
+    }
+
+    // 2. Emergency and governance authority is never charged to the client
+    //    quota, whichever pallet it lives in. A saturated external quota must
+    //    never be able to block Bleavit's own pause, freeze or recovery act —
+    //    the direction R-7 forbids, and the same reasoning that settled the
+    //    §8.5 residual-D ruling for the paths bypassing this extension.
+    if domain != CallDomain::Public {
+        return false;
+    }
+
+    // 3. Permissionless work that exists only because a hosted question
+    //    exists. Its origin is an ordinary signature, so the static call shape
+    //    (a service-domain pallet) or the immutable book kind has to supply
+    //    the external-domain fact the origin cannot carry.
+    match call {
+        // The whole second ledger instance is the hosted domain: instance `()`
+        // is Bleavit's and instance 1 exists for nothing else (03 §1a).
+        RuntimeCall::ServiceLedger(_) => true,
+        // Registration, sealing, settlement and the attestor game are all
+        // hosted work, including the cranks anyone may run.
+        RuntimeCall::QuestionService(_) => true,
+        // Trading, observing, sweeping and reaping a hosted book. Dynamic: one
+        // immutable-kind read decides which side of the partition pays.
+        RuntimeCall::Market(call) => market_call_targets_external_book(call),
+        _ => false,
+    }
+}
+
+/// `None` if `call` is not a wrapper; otherwise whether any leaf anywhere
+/// beneath it is hosted work.
+///
+/// This is the closed 06 §3.3 wrapper set, walked against the projection's own
+/// **depth** bound — `MAX_NESTED_LEVELS`, not the `MAX_NESTED_CALLS` count
+/// bound. Using the count as a depth limit would let a tree the base filter
+/// rejects as too deep pass this walk first, reserve capacity, and then keep
+/// that reservation when the filter refuses it. A depth overrun therefore
+/// answers `true`, so an over-deep tree is refused here rather than admitted.
+fn wrapper_holds_external(call: &RuntimeCall, depth: u32) -> Option<bool> {
+    if depth > kernel::MAX_NESTED_LEVELS {
+        return Some(true);
+    }
+    let nested = |inner: &RuntimeCall| -> bool {
+        wrapper_holds_external(inner, depth.saturating_add(1))
+            .unwrap_or_else(|| is_external_client_call(inner))
+    };
+    Some(match call {
+        RuntimeCall::Utility(
+            pallet_utility::Call::batch { calls }
+            | pallet_utility::Call::batch_all { calls }
+            | pallet_utility::Call::force_batch { calls },
+        ) => calls.iter().any(nested),
+        RuntimeCall::Utility(
+            pallet_utility::Call::as_derivative { call, .. }
+            | pallet_utility::Call::dispatch_as { call, .. }
+            | pallet_utility::Call::with_weight { call, .. },
+        )
+        | RuntimeCall::Proxy(
+            pallet_proxy::Call::proxy { call, .. }
+            | pallet_proxy::Call::proxy_announced { call, .. },
+        )
+        | RuntimeCall::Multisig(
+            pallet_multisig::Call::as_multi { call, .. }
+            | pallet_multisig::Call::as_multi_threshold_1 { call, .. },
+        ) => nested(call),
+        #[cfg(feature = "bootstrap")]
+        RuntimeCall::Sudo(
+            pallet_sudo::Call::sudo { call }
+            | pallet_sudo::Call::sudo_unchecked_weight { call, .. },
+        ) => nested(call),
+        _ => return None,
+    })
+}
+
+/// Is this a wrapper carrying hosted work?
+///
+/// The partition reserves against exactly one side per top-level dispatch, so a
+/// wrapper holding hosted leaves cannot be accounted honestly on either side:
+/// charging it to primary launders hosted volume straight back into
+/// `PrimaryUsed` and therefore into `H`, which is the channel 16 §8.5 exists to
+/// close, while charging it to external hides any primary leaves from `H` and
+/// overstates the chain's health. Both directions are unsafe, so the partition
+/// refuses the shape rather than guessing — the same calls sent as separate
+/// extrinsics are always admissible.
+///
+/// Wrappers holding no hosted work keep their existing behaviour exactly.
+pub(crate) fn is_wrapped_hosted_work(call: &RuntimeCall) -> bool {
+    wrapper_holds_external(call, 0).unwrap_or(false)
+}
+
+/// How many `Market::Markets` lookups the resource classification performs for
+/// this call tree — one per market leaf.
+///
+/// The classification of a wrapper recurses, so its dynamic-read cost is *not*
+/// one: a batch pays one lookup per market leaf it carries. Declaring a flat
+/// worst case would charge every transaction for sixteen lookups to cover the
+/// rare batch, so the extension declares this per call instead — which is what
+/// `TransactionExtension::weight` receives the call for.
+pub(crate) fn market_leaf_count(call: &RuntimeCall) -> u32 {
+    fn walk(call: &RuntimeCall, depth: u32, count: &mut u32) {
+        if depth > kernel::MAX_NESTED_LEVELS || *count >= kernel::MAX_NESTED_CALLS {
+            return;
+        }
+        match call {
+            RuntimeCall::Utility(
+                pallet_utility::Call::batch { calls }
+                | pallet_utility::Call::batch_all { calls }
+                | pallet_utility::Call::force_batch { calls },
+            ) => {
+                for inner in calls {
+                    walk(inner, depth.saturating_add(1), count);
+                }
+            }
+            RuntimeCall::Utility(
+                pallet_utility::Call::as_derivative { call, .. }
+                | pallet_utility::Call::dispatch_as { call, .. }
+                | pallet_utility::Call::with_weight { call, .. },
+            )
+            | RuntimeCall::Proxy(
+                pallet_proxy::Call::proxy { call, .. }
+                | pallet_proxy::Call::proxy_announced { call, .. },
+            )
+            | RuntimeCall::Multisig(
+                pallet_multisig::Call::as_multi { call, .. }
+                | pallet_multisig::Call::as_multi_threshold_1 { call, .. },
+            ) => walk(call, depth.saturating_add(1), count),
+            #[cfg(feature = "bootstrap")]
+            RuntimeCall::Sudo(
+                pallet_sudo::Call::sudo { call }
+                | pallet_sudo::Call::sudo_unchecked_weight { call, .. },
+            ) => walk(call, depth.saturating_add(1), count),
+            // Every market call is counted, including the two that return
+            // before reading storage: an upper bound that cannot go stale when
+            // a market call is added is worth more than one read of precision.
+            RuntimeCall::Market(_) => *count = count.saturating_add(1),
+            _ => {}
+        }
+    }
+    let mut count = 0;
+    walk(call, 0, &mut count);
+    count.min(kernel::MAX_NESTED_CALLS)
+}
+
 fn pending_upgrade_is_applicable(code: &[u8]) -> bool {
     PendingExecutionGuard::applicable_at().is_some_and(|at| System::block_number() >= at)
         && crate::configs::direct_system_upgrade_allowed(code)
@@ -1141,6 +1329,7 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
             call => {
                 let origin = pallet_origins::Origin::from_proposal_class(class)
                     .ok_or(DispatchError::BadOrigin)?;
+                // N7-DISPATCH-TRIPWIRE: execution-guard-payload
                 call.dispatch_bypass_filter(RuntimeOrigin::from(origin))
                     .map(|_| ())
                     .map_err(|error| error.error)
@@ -1149,6 +1338,7 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
     }
 
     fn dispatch_authorize_upgrade(code_hash: H256) -> frame_support::dispatch::DispatchResult {
+        // N7-DISPATCH-TRIPWIRE: execution-guard-authorize
         RuntimeCall::System(frame_system::Call::authorize_upgrade {
             code_hash: code_hash.into(),
         })
@@ -1171,6 +1361,7 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
             #[cfg(not(feature = "runtime-benchmarks"))]
             System::can_set_code(&code, true).into_result()?;
 
+            // N7-DISPATCH-TRIPWIRE: execution-guard-apply
             RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { code })
                 .dispatch(RuntimeOrigin::none())
                 .map_err(|error| error.error)?;
