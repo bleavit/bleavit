@@ -1,7 +1,7 @@
 # Trust, safety & degraded-state UX obligations
 
 > **DERIVED, NON-NORMATIVE.** Distilled 2026-07-12 (commit `9f250be`) and refreshed
-> 2026-07-22 for the reserve-probe/I-24 amendments from the frozen spec —
+> 2026-08-01 through Track N / N4 from the frozen spec —
 > doc 00 (decision record), doc 14 (threat model), doc 15 (invariants & testing) — for upload
 > to Claude Design. Where this file and the spec disagree, the spec wins. IDs (D-n, TH-n, I-n,
 > INV-FE-n, E-n) are canonical and must be kept verbatim in any design annotations.
@@ -44,6 +44,14 @@ neutral prior — buyer net delta is `neutral recovery − cost − fees`, and i
 if the *realized average execution price* was 0.5. The retired copy "buyers recover par / no loss
 of principal on any protocol path" MUST NOT be used (SQ-171).
 
+Track N backend invariants with honesty consequences: **I-34** permits exactly one external-origin
+constructor, `ExternalClient(ClientId)`, from exact registered-`Location` equality and forbids every
+signed/root/none/governance conversion; **I-35** confines ingress to the external-client call domain;
+**I-36** keeps client push failures out of XCM health; **I-37** makes service custody and failure
+independent of Bleavit's primary ledger; **I-38** makes ingress issuance-neutral. A UI or integration
+guide must never imply that admission is identity verification beyond the chain-level `Location`,
+that a report is an endorsement, or that push delivery is the trustworthy source (the pull surface is).
+
 ## 2. Threat-model rows that are UI obligations (doc 14)
 
 **Fake frontends & phishing.** TH-38: self-check mismatch ⇒ red banner, signing disabled
@@ -83,6 +91,15 @@ persistent launch.
 
 **Privacy.** TH-60/61: no telemetry ever; per-provider disclosure ("this operator sees the
 addresses you look up") and per-use consent for address-history queries.
+
+**External-client honesty (TH-66…TH-73).** Admission and a held bond do not make a client honest;
+they bound and price access. Per-client ingress counters expose spam pressure. Reports must say
+that Bleavit publishes prices, not an endorsement of the client, question or outcome, and must show
+the settlement-trust fields rather than collapse them into a reassuring badge. Removal refuses new
+questions but drains live ones; the immediate guardian response VOIDs rather than strands them.
+External occupancy can crowd attention and liquidity away from Bleavit books, and informed-attention
+diversion is not measurable by `dec.v_min`; never claim the resource partition proves otherwise.
+Revenue pressure may raise `svc.max_live`, but cannot weaken the kernel-fixed certification relation.
 
 **Accepted residuals as copy obligations (14 §4).** Twelve accepted residual risks must appear
 in user-facing honesty surfaces where applicable — e.g. deep-history forgery limits ("sampling

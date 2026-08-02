@@ -1,7 +1,7 @@
 # Bleavit — Product brief for frontend design
 
 > **DERIVED, NON-NORMATIVE.** Synthesized 2026-07-12 (commit `9f250be`) and reviewed
-> through the reserve-probe/I-24 amendments of 2026-07-22 against the frozen specification
+> through Track N / N4 on 2026-08-01 against the frozen specification
 > in `docs/architecture/` (mainly 00, 01, 10, 11) for upload to Claude Design.
 > Where this brief and the spec disagree, the spec wins. Citations like "(01 §4)" point into
 > the architecture set.
@@ -29,9 +29,10 @@ values, bet on beliefs.*
   screened, traded for ~13 days, decided by a gate-first decision rule, executed, then measured
   against reality for weeks, and finally settled — with several epoch cohorts in flight at once. (05)
 
-Money: **USDC** (a USDC-backed stable asset, 6 decimals) is the sole market collateral, bond
-currency and settlement unit. **VIT** (native token, 12 decimals) is for values voting,
-guardian/collator bonds, and fees (fees payable in either currency). Blocks every 6 seconds. (01 §4, 02)
+Money: **USDC** (a USDC-backed stable asset, 6 decimals) is the sole market collateral and
+settlement unit and backs the USDC-denominated protocol bonds. **VIT** (native token, 12
+decimals) is for values voting, native operator/guardian/attestor bonds, the external-client
+registration bond, and fees (fees payable in either currency). Blocks every 6 seconds. (01 §4, 02, 16 §2)
 
 ## 2. What this frontend is
 
@@ -54,7 +55,7 @@ The **canonical client is itself decentralized** (10, 11, 12):
   runtime, missing history ("holes" render as visible gaps, never interpolated), unverified
   RPC fallback mode with a persistent warning banner. (10 §3, §6; 11 §11.12)
 
-## 3. Who uses it (all served by ONE app — 11 §11.2)
+## 3. Who uses it
 
 | Persona | What they do | Main surfaces |
 |---|---|---|
@@ -67,8 +68,11 @@ The **canonical client is itself decentralized** (10, 11, 12):
 | **Guardian** (7 elected) | 5-of-7 approval console for emergency playbooks; every action retro-ratified | S15 |
 | **Keeper / operator** | Permissionless cranks: ticks, decision finalization, `execute()`, snapshots, the runtime-upgrade crank | S6, S17, S18 |
 | **Treasury recipient** | Claims vested streams; watches NAV and outflow meters | S16 |
+| **External client / integrator** | Registers through values governance, funds hosted conditional books, and consumes a provenance-bound price report; its own rule decides what to do | Hosted-service integration surface (contract v20 authored, not yet in force; no canonical screen assigned) |
 
-Operator surfaces (S14–S19) live under an explicit **"Advanced"** area: same trust rules,
+The first nine personas are served by the one canonical app specified in 11 §11.2. The external
+client is an integration persona, not permission to invent a new canonical screen before doc 11
+assigns one. Operator surfaces (S14–S19) live under an explicit **"Advanced"** area: same trust rules,
 denser information, no simplified summaries (11 §11.2).
 
 ## 4. Product principles the design must embody

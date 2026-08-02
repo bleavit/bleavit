@@ -2033,6 +2033,28 @@ impl<Allowed: AllowedValuesTracks> frame_support::traits::EnsureOrigin<RuntimeOr
     }
 }
 
+/// Values authority that accepts only the named scoped referenda track.
+///
+/// Unlike `EnsureValuesScoped`, this does not retain the legacy unscoped
+/// `ConstitutionalValues` compatibility path, which maps to the entrenched
+/// track. New surfaces with an explicitly owned track use this stricter form.
+pub struct EnsureGuardianTrack;
+impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureGuardianTrack {
+    type Success = ();
+
+    fn try_origin(origin: RuntimeOrigin) -> Result<Self::Success, RuntimeOrigin> {
+        let scoped: Result<crate::track_origins::Origin, RuntimeOrigin> = origin.clone().into();
+        matches!(scoped, Ok(crate::track_origins::Origin::GuardianTrack))
+            .then_some(())
+            .ok_or(origin)
+    }
+
+    #[cfg(feature = "runtime-benchmarks")]
+    fn try_successful_origin() -> Result<RuntimeOrigin, ()> {
+        Ok(crate::track_origins::Origin::GuardianTrack.into())
+    }
+}
+
 parameter_types! {
     pub const SubmissionDeposit: Balance = currency::VIT;
     pub const MaxQueued: u32 = 100;
@@ -2701,6 +2723,17 @@ impl pallet_attestor::AttestorParamsProvider for RuntimeAttestorParams {
             bond: balance_param_or(b"att.bond", defaults.bond),
             challenge_window: u32_param_or(b"att.window", defaults.challenge_window),
         }
+    }
+}
+
+/// N4 intentionally reads only the live constitution row. The `[VERIFY]`
+/// `svc.client_bond` key has no genesis seed, so the service remains inert
+/// until a calibration-backed runtime migration seats the governed row (the
+/// existing amendment calls cannot create an absent key).
+pub struct RuntimeClientBond;
+impl pallet_client_registry::ClientBondProvider for RuntimeClientBond {
+    fn client_bond() -> Option<Balance> {
+        live_balance_param(b"svc.client_bond").filter(|bond| *bond > 0)
     }
 }
 
@@ -8378,6 +8411,15 @@ impl pallet_attestor::Config for Runtime {
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
+impl pallet_client_registry::Config for Runtime {
+    type ValuesOrigin = EnsureGuardianTrack;
+    type ClientBond = RuntimeClientBond;
+    type Currency = Balances;
+    type RuntimeHoldReason = RuntimeHoldReason;
+    type WeightInfo = crate::weights::pallet_client_registry::WeightInfo<Runtime>;
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = RuntimeBenchmarkHelper;
+}
 
 // --- A8/A11 execution-guard production wiring ------------------------------
 
@@ -10814,6 +10856,44 @@ impl pallet_attestor::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper 
             futarchy_primitives::ProposalState::Queued,
         );
         pallet_epoch::Proposals::<Runtime>::insert(pid, proposal);
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_client_registry::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmarkHelper {
+    fn values() -> RuntimeOrigin {
+        crate::track_origins::Origin::GuardianTrack.into()
+    }
+
+    fn bond_owner() -> AccountId {
+        AccountId32::new([247; 32])
+    }
+
+    fn prime_client_bond(value: Balance) {
+        let key = pallet_constitution::key16(b"svc.client_bond");
+        pallet_constitution::Params::<Runtime>::insert(
+            key,
+            pallet_constitution::ParamRecord {
+                key,
+                value: pallet_constitution::ParamValue::Balance(value),
+                min: pallet_constitution::ParamValue::Balance(1),
+                max: pallet_constitution::ParamValue::Balance(Balance::MAX),
+                max_delta: None,
+                cooldown_epochs: 0,
+                last_changed_epoch: 0,
+                last_change_block: 0,
+                class: pallet_constitution::ParamClass::Param,
+                kernel_bounded: false,
+            },
+        );
+    }
+
+    fn prime_funds(who: &AccountId, value: Balance) {
+        let _ = Balances::force_set_balance(
+            RuntimeOrigin::root(),
+            sp_runtime::MultiAddress::Id(who.clone()),
+            value,
+        );
     }
 }
 

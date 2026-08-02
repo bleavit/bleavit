@@ -76,6 +76,7 @@ mod benches {
                 [pallet_futarchy_treasury, FutarchyTreasury]
                 [pallet_guardian, Guardian]
                 [pallet_attestor, Attestor]
+                [pallet_client_registry, ClientRegistry]
                 [pallet_epoch, Epoch]
                 [pallet_execution_guard, ExecutionGuard]
             );
@@ -303,6 +304,7 @@ construct_runtime!(
         InflowCaps: pallet_inflow_caps = 63,
         // Runtime-internal origin-only shim for the five scoped values tracks.
         TrackOrigins: track_origins = 64,
+        ClientRegistry: pallet_client_registry = 65,
     }
 );
 

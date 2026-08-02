@@ -1,7 +1,7 @@
 # Domain model & lifecycles — what every screen's objects are
 
 > **DERIVED, NON-NORMATIVE.** Distilled 2026-07-12 (commit `9f250be`) and refreshed
-> 2026-07-23 for B20/SQ-107 and the reserve-probe/I-24 amendments from the frozen spec —
+> 2026-08-01 through Track N / N4 from the frozen spec —
 > docs 03 (conditional ledger), 04 (markets & pricing), 05 (welfare & decision engine),
 > 06 (governance & guardians), 07 (oracle & disputes), 08 (treasury & economics),
 > 09 (execution & upgrades) — for upload to Claude Design. Where this file and the spec
@@ -9,8 +9,8 @@
 
 ## 1. The money system (03)
 
-- **USDC** is the collateral: all trading, bonds and payouts. **VIT** is for values voting and
-  operator bonds.
+- **USDC** is the collateral for trading, payouts and USDC-denominated protocol bonds. **VIT**
+  is for values voting and native bonds, including external-client registration.
 - `ledger.split` turns `a` USDC into `a` **AcceptUsdc** + `a` **RejectUsdc** (**branch-USDC**):
   conditional USDC that exists "in the ACCEPT world" / "in the REJECT world". A complete pair
   (1 AcceptUsdc + 1 RejectUsdc) always merges back to 1 USDC at par.
@@ -262,7 +262,33 @@ resolves deterministic disputes mechanically. Evidence is content-addressed
   manifest TXID, `min_supported_version`, `pending_authorized_at`, SECURITY / EXPEDITED /
   URGENT_UPGRADE flags — drives the "newer release exists" banner.
 
-## 11. Merged glossary (canonical; supplement to kit file 05's naming tables)
+## 11. Hosted question service and client registry (16)
+
+Bleavit may host conditional markets for an admitted external chain or service. The product is
+**price discovery, not a decision or endorsement**: a sealed report publishes the conditional
+TWAPs, provenance and manipulation-cost floor; the client's own pre-committed rule and local
+system decide what to do. No external question, report or failure may enter Bleavit's welfare,
+decision or settlement inputs.
+
+- A bounded `ClientId: u32` roster maps exact XCM `Location` equality in both directions. The
+  record carries remaining native-VIT bond, admission block, live/total question counters and an
+  `Optional`/`Required` opaque `sub_id` policy. `MaxClients = 64`.
+- `admit_client` and `remove_client` are strict `ConstitutionalValues` acts on the guardian
+  track. Removal tombstones immediately, refuses new questions, and keeps identity plus bond until
+  every already-live question reaches `Settled` or `Voided`; this avoids stranding trader capital.
+- An admitted transport origin is exactly `ExternalClient(ClientId)`, never a signed, root,
+  none or governance origin. It carries the small id rather than the ~306-byte bounded `Location`.
+- The client bond is held natively for registration life and prepays report-egress fees. Its
+  live `svc.client_bond` parameter is `[VERIFY]` and absent at genesis, so admission is deliberately
+  fail-closed until a calibration-backed migration seats it.
+- Lifecycle: `Registered → Open → Sealed → Settled`, with every failure edge ending `Voided`.
+  The report is delivered at `Sealed`; `Settled` and `Voided` are the only terminal states.
+
+Contract v20 describes the eventual report/API surface but is **authored, not in force** while the
+runtime constant remains v19. Treat this as domain context; do not mock it as a live canonical-app
+workflow or invent screen IDs.
+
+## 12. Merged glossary (canonical; supplement to kit file 05's naming tables)
 
 **branch-USDC / AcceptUsdc / RejectUsdc** conditional USDC per branch · **complete pair**
 Accept+Reject pair (par) · **complete set** LONG+SHORT of one branch · **mirror credit**

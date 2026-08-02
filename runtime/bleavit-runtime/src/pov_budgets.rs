@@ -273,6 +273,11 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
             remove_for_cause, reap_attestation,
         }),
     );
+    all.extend(
+        pallet_call_weights!(pallet_client_registry as pallet_client_registry::WeightInfo {
+            admit_client, remove_client,
+        }),
+    );
     // The three clock-syncing cranks charge the A13 collator payout on top of
     // their own benchmarked work, composed at each `#[pallet::weight]` attribute
     // (SQ-490). The generated function is therefore only *one addend* of what the
@@ -360,6 +365,7 @@ const FUTARCHY_DISPATCHING_MODULES: &[(&str, &str)] = &[
     ("FutarchyTreasury", "pallet_futarchy_treasury"),
     ("Guardian", "pallet_guardian"),
     ("Attestor", "pallet_attestor"),
+    ("ClientRegistry", "pallet_client_registry"),
     ("Epoch", "pallet_epoch"),
     ("ExecutionGuard", "pallet_execution_guard"),
 ];

@@ -54,12 +54,23 @@ holds the roster.
 | `bond: Balance` | Native **VIT**, held for the life of the registration on the B19 (`pallet-attestor`) custody discipline. The first loss on abuse |
 | `delivery_float: Balance` | **USDC**, client-topped-up, and the *only* source of egress delivery fees (§9). Separate from the bond deliberately — see below |
 | `admitted_at`, `questions_live`, `questions_total` | Meter state |
+| `sub_id_policy: SubIdPolicy` | Presence policy (`Optional` or `Required`) for the opaque `sub_id`; it never grants meaning to those bytes |
+
+The roster is bounded by [13](./13-parameters.md) §4's `MaxClients = 64`: the hard maximum of
+`svc.max_live`, so even the extreme allocation in which every live question belongs to a distinct
+client fits. An idle 65th registration adds no hosting capacity and is refused with `ClientsFull`
+before its bond is touched. The forward `Clients: ClientId → ClientRecord` map and exact reverse
+`ClientIdOf: Location → ClientId` map are counted together by `ClientCount` and cross-checked by
+try-state.
 
 **Admission is a values-track act** (`ConstitutionalValues`, per [06](./06-governance-and-guardians.md)
 §2.1), and **removal is one too** — but removal is *not* a kill switch on live questions. Removing a
 client refuses *new* registrations immediately and lets live questions run to their own terminal
 state, because the alternative strands trader capital in books nobody can settle. A client whose
 removal must be immediate is handled by the guardian pause of §10, which VOIDs rather than strands.
+Mechanically, removal writes a tombstone: exact-location authentication and the native hold remain
+until `questions_live` reaches zero; only then are both indexes deleted and the exact remaining hold
+released. A tombstoned client gets `ClientRemoved` on a new question registration.
 
 **Identity is chain-granular, deliberately.** A contract on another chain authenticates as *that
 chain*, not as itself. `DescendOrigin` and `AliasOrigin` stay out of the ingress template (§3), so
@@ -761,7 +772,9 @@ Every refusal is a distinct, documented code — an integration surface, not a d
 that cannot tell *which* precondition it missed cannot integrate without a support channel, and this
 service is meant to be integrated without one.
 
-`NotRegistered` · `ClientRemoved` · `ServicePaused` · `ServiceRateUnset` · `CertificationUnavailable` ·
+`NotRegistered` · `ClientRemoved` · `ClientBondUnset` · `DuplicateLocation` · `ClientsFull` ·
+`ClientIdExhausted` · `BondInsufficient` · `BondAccounting` · `QuestionCounterOverflow` ·
+`NoLiveQuestions` · `ServicePaused` · `ServiceRateUnset` · `CertificationUnavailable` ·
 `StakeBelowFloor` · `SubsidyBelowMinimum` · `EpsilonOutOfRange` · `WindowTooLong` · `WindowTooShort` ·
 `WindowCollidesWithDecision` · `SlotsExhausted` · `TvlCapWouldBind` · `AttestorSetTooSmall` ·
 `AttestorBondInsufficient` · `ClientIsProtocolAccount` · `EscrowInsufficient` · `NotSealed` ·

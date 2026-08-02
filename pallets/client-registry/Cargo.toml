@@ -1,0 +1,53 @@
+[package]
+name = "pallet-client-registry"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+client-registry-core = { path = "../../crates/client-registry-core", default-features = false }
+futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
+parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive", "max-encoded-len"] }
+scale-info = { version = "2.11.6", default-features = false, features = ["derive"] }
+frame-support = { workspace = true }
+frame-system = { workspace = true }
+sp-runtime = { workspace = true }
+staging-xcm = { workspace = true }
+frame-benchmarking = { workspace = true, optional = true }
+
+[dev-dependencies]
+pallet-balances = { workspace = true, features = ["std"] }
+pallet-origins = { path = "../origins", features = ["std"] }
+sp-core = { workspace = true, features = ["std"] }
+sp-io = { workspace = true, features = ["std"] }
+
+[features]
+default = ["std"]
+std = [
+  "client-registry-core/std",
+  "frame-benchmarking?/std",
+  "frame-support/std",
+  "frame-system/std",
+  "futarchy-primitives/std",
+  "pallet-balances/std",
+  "parity-scale-codec/std",
+  "scale-info/std",
+  "sp-runtime/std",
+  "staging-xcm/std",
+]
+runtime-benchmarks = [
+  "client-registry-core/runtime-benchmarks",
+  "dep:frame-benchmarking",
+  "frame-benchmarking/runtime-benchmarks",
+  "frame-support/runtime-benchmarks",
+  "frame-system/runtime-benchmarks",
+  "pallet-origins/runtime-benchmarks",
+  "sp-runtime/runtime-benchmarks",
+  "staging-xcm/runtime-benchmarks",
+]
+try-runtime = [
+  "frame-support/try-runtime",
+  "frame-system/try-runtime",
+  "sp-runtime/try-runtime",
+]
