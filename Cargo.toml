@@ -1,9 +1,12 @@
 [workspace]
 resolver = "2"
-# `keeper/` and `fuzz/` are deliberately separate cargo workspaces: their
+# `app/`, `keeper/` and `fuzz/` are deliberately separate cargo workspaces: their
 # off-chain/nightly dependency trees must never perturb the `=`-exact
 # polkadot-stable2606 pins of this runtime workspace (01 §9; PLAN V-1).
-exclude = ["keeper", "fuzz"]
+# `app/` is the canonical client (10 §10.1); its `src-tauri` shell pulls the
+# Tauri stack and desktop/mobile target triples, and its own
+# `app/rust-toolchain.toml` must not inherit this workspace's wasm targets.
+exclude = ["app", "keeper", "fuzz"]
 members = [
   "crates/futarchy-fixed",
   "crates/futarchy-primitives",

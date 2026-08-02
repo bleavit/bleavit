@@ -44,6 +44,8 @@ The canonical frontend serves **every** protocol workflow — including the valu
 | S18 | Welfare snapshot crank | **FE-15** | snapshot staleness | `welfare.snapshot(epoch)` | §11.8.5 |
 | S19 | Incident / Milestone registry: file + challenge | **FE-15** | `pallet-registry` storage per [07](07-oracle-and-disputes.md) | `registry.file_incident/file_milestone/challenge` | §11.8.6 |
 | S20 | Balances & funding status | core | `System.Account`, `ForeignAssets.Account(USDC_LOCATION, who)` | — | [02](02-integration-contract.md) |
+| S21 | Share verified context | **handoff** | the union of the S2/S3/S4 reads for the selected capsule kind — all `Finalized<T>` or the export is refused | — | §11.14 |
+| S22 | Review an imported action | **handoff** | the precondition rows of the calls it constructs (§11.5 P-1) | `market.buy` / `market.sell` — constructed by the client, never carried by the import | §11.14 |
 
 USDC balance reads use the `ForeignAssets` instance keyed by the pinned XCM `Location` (D-17, frozen in [02](02-integration-contract.md), incl. the `[VERIFY asset index 1337]` that lives there) — never `Assets.Account`.
 
@@ -398,6 +400,8 @@ Rows E1–E14 carry forward from FE §19 with two corrections: **E3** no longer 
 **E21 Sudo era (Phases 0–3).** V: non-dismissable banner (§11.10) on every route and confirm screen. A: PhaseFlags verified each head. F: — (informational, permanent for the phase). R: disappears on verified Phase ≥ 4.
 **E22 Oracle evidence unretrievable.** V: "evidence unretrievable — treated as absent by the protocol" in dispute/ballot views; hash shown. A: on-chain round state unaffected. U: evidence body. F: hash mismatch ⇒ same treatment plus provider flagged. R: alternate gateway/user-supplied source (re-hashed on arrival).
 **E23 Ratification deadline at risk.** V: proposal-detail ratification panel shows the cannot-complete warning (§11.7.4) when the referendum can no longer pass before `grace_end`. A: referendum + queue state live. F: `execute` precondition row 5 blocks with `NotRatified`. R: resubmission per protocol rules.
+**E24 Imported action reviewed.** V: the action in fixed in-bundle copy; the **chain-read identity of what the id resolves to** (class, state, `payload_hash`, ask, `decide_at`) rendered alongside the id at `verified-finalized`; asked-vs-encoded limits side by side; the context-age diff naming what changed in the book, the phase, the balance and the fee rate since the capsule was made; and the fixed non-dismissible origin disclosure. L: the normal B′ refresh — no separate loading state, because the import performs no I/O. A: everything the confirm screen shows is chain-read; the import contributes a choice, an id and ceilings, nothing else. U: none — the whole surface is convenience, and its absence blocks no workflow. F: each `FE-HANDOFF-*` code with its fixed copy and stated fix; a refusal rejects the whole document and never partially accepts. R: return to Draft with the imported values preserved, or discard.
+**E25 Context export unavailable.** V: export disabled with the reason stated — unverified RPC mode, degraded sync, or `read-only-incompatible` — never a silently degraded capsule. A: —. F: `FE-HANDOFF-013`; the exporter's input type is `Finalized<T>`, so there is nothing to construct a capsule from. R: restore verified operation; the control re-enables itself on the first fresh finalized head.
 
 ---
 
@@ -424,8 +428,59 @@ The frozen integration contract ([02](02-integration-contract.md), D-2) unblocks
 | **FE-14** | **Governance surface (§11.7)**: referenda list/detail (six tracks), vote/delegate/undelegate/unlock with conviction, ratification panel + execute-deadline logic, OracleResolution ballot with snapshot rule | FE-1..4 | G-rows implemented; ratification-deadline e2e (Chopsticks); snapshot-power display test | 4 |
 | **FE-15** | **Operator surface (§11.8)**: reporter console + recompute proofs + evidence display, guardian 5-of-7 console, treasury claims + `nav()` w/ haircut flag, upgrade crank (+ FE-P10 spike), snapshot crank, registry filing/challenge | FE-1..4, FE-9 (artifact fetch) | each S14–S19 workflow e2e on Zombienet; `FE-UPG-001` suite | 5 |
 | **FE-16** | **Funding flow (§11.9)**: AH connection UX, deposit construction, withdrawal, two-leg tracker, cap/fee-viability checks | FE-1, FE-2 (AH descriptors), FE-4 | deposit+withdraw e2e against Chopsticks AH+para; cap-block test | 3 |
+| **FE-17** | **External-tool handoff (§11.14)**: `contexts`/`intents`/`receipts`/`llm-handoff` packages, S21/S22, the `FE-HANDOFF-*` refusal family, the portable Skill and prompt set, the hostile-intent corpus | FE-4, FE-5 | hostile corpus rejected by class (one code each); tx-machine edge-enumeration test green with the import entry point included; **no-infra certification run unaffected with the handoff surfaces disabled** | 4 |
 
-New prototype: **FE-P10** — multi-MB extrinsic submission through smoldot/PAPI (§11.8.4); gates the FE-15 upgrade-crank tier, with the verified fallback path shipping regardless.
+New prototypes: **FE-P10** — multi-MB extrinsic submission through smoldot/PAPI (§11.8.4); gates the FE-15 upgrade-crank tier, with the verified fallback path shipping regardless. **FE-P11** — Web Share with files across the matrix, and confirmation that Share/clipboard/File-System-Access are not `connect-src`-governed ([10](10-frontend-architecture.md) §12); gates whether Share ships as a primary or fallback transport for FE-17.
+
+---
+
+## 11.14 External-tool handoff — share context, import an action (D-21)
+
+Architecture and formats: [10](10-frontend-architecture.md) §13. This section owns the *workflow*.
+
+```
+export a capsule → analyse it anywhere → import a proposed action → admission checks
+→ Draft → refreshAndGate at B′ → confirm → wallet signs → submit → finalize → receipt
+```
+
+### 11.14.1 Admission checks are not preconditions
+
+The distinction is load-bearing and must not be collapsed. **Admission checks** are properties of a *file*: schema equality, digest, chain binding, expiry, replay memory, closed-object shape, limit presence and internal consistency. **Preconditions** (§11.5) are re-reads of *chain state* at B′, and §11.4 rule 2 requires every row in that table to be an exact chain read. Putting a file-derived row into the precondition table would make that rule false.
+
+Admission checks therefore run **before the transaction enters Draft**. A document that fails any of them never becomes a transaction at all, and the user sees a `FE-HANDOFF-*` refusal with its fixed copy and stated fix rather than a blocked confirm screen.
+
+From Draft onward the imported action is indistinguishable from one the user assembled by hand: same screens, same `refreshAndGate`, same P-1 row, same confirm surface decoded from `prep.scaleHex`.
+
+### 11.14.2 The action vocabulary is closed
+
+Three actions, matching the trading workflows S3/S4 already offer: **prepare a PASS position**, **prepare a FAIL position**, **close a fraction of a held position**.
+
+Three encoding choices, each earning itself:
+
+- **The intent names an economic goal; the client computes the calls.** This is not a stylistic preference. Under D-3 the market wrapper splits internally, so a tool that emitted a call *sequence* would very plausibly emit a ledger split *and* a market buy and double-split the user's collateral. The correct call count is a function of chain semantics that changes between contract versions, so it is the client's to determine, always.
+- **Size is expressed as collateral, never as instrument quantity.** Users budget in USDC, and the LMSR inversion from collateral to quantity is exactly the arithmetic an external tool gets wrong. Doing it client-side is also what makes the cost ceiling derivable and therefore clampable.
+- **A close is expressed as a fraction, never an absolute amount.** An absolute amount taken from a stale capsule can exceed the current holding (a dispatch failure) or leave unredeemable dust. A fraction is stale-safe and clamps naturally against a freshly read balance. This is a security choice, not a convenience.
+
+Governance votes and delegation, transfers to an arbitrary address, the Asset Hub funding legs, the operator surfaces of §11.8, and redemptions are **out of scope**, each for a stated reason: irreversible values-layer acts on possibly someone else's proposal; the classic send-to-the-attacker primitive that no analytical workflow needs; two-leg cross-chain flows that §11.9 gates separately; bonded adversarial operator actions that are not analysis-driven; and — for redemptions — that the client's own "you have redeemable positions" prompt does the job better, so admitting them would grow the vocabulary for no analytical gain.
+
+### 11.14.3 Clamping: the client asserts authority over the tool
+
+**A limit is never widened, only narrowed.** For a buy the encoded ceiling is the minimum of what the intent asked, what the client's own recomputed cost at B′ permits under the stated slippage, and the client's own policy cap; symmetrically a floor on proceeds is only raised. When the client's number is the binding one, **the difference is shown, not silently applied**.
+
+A stated deadline is compared against B′, the chain clock, never the device clock. A stated maximum context age is honored only in the narrowing direction: a tool may make its own advice expire sooner, and cannot make it expire later — staleness needs no timer, because it is bounded structurally by `refreshAndGate`. The capsule's age is **displayed and diffed**, never trusted.
+
+Every limit is re-expressed on the confirm screen as the value that will actually be encoded, and that screen is decoded from `prep.scaleHex` (INV-FE-14) — so even a clamping bug cannot make the display disagree with the bytes.
+
+### 11.14.4 Required UX
+
+- The **chain-read identity of the action's target** renders alongside the id at `verified-finalized` status. Id substitution is the sharpest attack this surface admits, and rendering what the id actually resolves to is what defeats it.
+- The origin disclosure is **fixed in-bundle copy and non-dismissible**. No format carries a tool-supplied label, because a label reading "Bleavit Official Assistant" inside the confirm flow would be a phishing primitive.
+- Expert mode exposes the full clamp derivation — asked ceiling, chain-derived value at B′, encoded value — alongside the capsule's block height and age, in the same habit §11.4 rule 3 establishes for preconditions.
+- Export requires **per-export consent** with the scope shown. What leaks is linkage rather than content: holdings on a public chain are already a fingerprint, but a capsule pasted into a hosted service ties them to an account in a third party's logs, and it cannot be un-sent.
+
+### 11.14.5 Scope statement
+
+This surface is convenience only. Every action expressible as an intent is a strict subset of what S3/S4 already do by hand; no protocol workflow depends on it; and it may be disabled entirely without affecting any INV-FE-4 workflow — which is why the no-infrastructure certification run executes with these surfaces disabled ([15](15-invariants-and-testing.md) §4.8). The external tool is IN scope as a recipient of exported files and a source of proposed actions; embedding a model, calling one over the network, or running any tool-protocol server, tunnel or sidecar is OUT of scope (INV-FE-6, INV-FE-13; D-21).
 
 ---
 

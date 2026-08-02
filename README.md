@@ -66,7 +66,7 @@ rollout that removes `sudo` at Phase 4.
 | [`models/`](models/README.md), `tools/verify/` | S1: TLA⁺ formal models of the conditional ledger and the T1–T24 proposal machine (15 §4.1) plus the pinned-TLC runner — main configs prove the invariants above anti-vacuity floors, witness configs must *violate* (reachability), mutation configs prove the invariants can fail |
 | [`fuzz/`](fuzz/README.md) | S2 + Track N: `bleavit-fuzz` — five cargo-fuzz targets covering SCALE payload decode, nested-wrapper filtering, LMSR trade paths, hosted-service settlement and N8's exact XCM ingress template. Each asserts a protocol invariant rather than mere no-panic. A separate nightly-pinned cargo workspace (like `keeper/`) keeps libFuzzer + nightly from disturbing the runtime's exact pins; curated seed corpora + the `fuzz` CI job (`tools/ci/fuzz-gates.sh`) |
 | [`tools/phase-gates/`](tools/phase-gates/README.md) | G0: the machine-checked 09 §7.1 Phase-0 exit gate — `check-phase0-exit.py` runs the reference-model ≡ pallets differential legs against the real repo and consumes the S4-published sim-calibration artifact **fail-closed** (absent ⇒ pending, never pass), publishing `bleavit.phase0-evidence.v1` |
-| `frontend/` | Implementation root for Track F; currently a placeholder until the track begins |
+| `app/` | The canonical cross-platform Bleavit client (Track F): Arweave-distributed web app and installable PWA, with a serverless LLM handoff — verified context out, semantic intent in, Bleavit re-derives and reconstructs every transaction itself |
 
 ## How this gets built
 

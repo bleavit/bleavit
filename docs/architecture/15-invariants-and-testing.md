@@ -94,6 +94,14 @@ The superseded FRONTEND_PLAN.md cited INV-FE-1…15 at ~79 sites and certified a
 
 These texts are normative and version-controlled with this document. Amending any INV-FE text requires the same joint sign-off as [02-integration-contract.md](02-integration-contract.md) changes. D-11 extended the *workflow list* inside INV-FE-4 (governance, operator, funding surfaces) without amending the invariant's obligation — that reading is ratified here.
 
+**Ratified readings (D-21, 2026-08-03).** The external-tool handoff of [10 §13](10-frontend-architecture.md) / [11 §11.14](11-frontend-workflows.md) is admitted under the existing texts. **No INV-FE text is amended, so no joint sign-off is triggered.** Three readings are ratified:
+
+1. **An external analysis tool is not infrastructure** under INV-FE-4 and INV-FE-6. No workflow's correctness depends on one; every INV-FE-4 workflow completes with none present; and the handoff adds no workflow to INV-FE-4's list, because analysis assistance is not a protocol workflow. INV-FE-6's *"features that inherently require servers are out of scope rather than centralized"* is what **selects** the file/clipboard/share transport, so the design is an application of the invariant rather than an exception to it.
+2. **A user-initiated export is not telemetry** under INV-FE-13. The application collects nothing, chooses no destination, and emits nothing unbidden. Three adjacent things *would* violate the invariant and are prohibited by name: any fetch to check for a newer Skill or prompt set; any counting, sampling, or reporting of exports and imports, including locally aggregated; and any inbound document carrying configuration — foreclosed by the closed action vocabulary.
+3. **An imported action is user-authored input, not a data item**, under INV-FE-9. Its scalars are the same class as a typed amount, which has never carried a `VerificationStatus`, so no sixth status variant is added. It carries a mandatory fixed origin disclosure instead. This depends on the format carrying no free text: the alternative — a variant admitting tool-authored prose — would require amending an INV-FE text to buy a phishing surface on the confirm screen, and was rejected.
+
+Reading 3 exposed a pre-existing defect in [10 §10.2](10-frontend-architecture.md), whose text asserted that *transaction form state* is typed `Finalized<T>` — unsatisfiable, since a user-typed amount then could not inhabit tx state. §10.2 now states the rule as it must actually be: tx state is the product of user-authored scalars and `Finalized<T>` chain values, while **every `PreconditionCheck` input remains `Finalized<T>` without exception**. That is a repair, not a weakening: the firewall's target — provider- and index-fed values structurally unable to seed tx state — is unchanged.
+
 ### 2.2 Provenance of the texts
 
 | Invariant | Basis | Confidence |
@@ -255,9 +263,11 @@ Generated from the parameter/meter registry in [13-parameters.md](13-parameters.
 | Mock-runtime | client against the **published chainHead fixture transcripts (§5)** for every screen store | PR |
 | Chopsticks | forked-state: upgrade transition (full → read-only-incompatible → newer release), stale-queue display, **Voided-epoch rendering incl. the E16 redeem flow**, manufactured precondition failures | nightly |
 | Zombienet | full relay+para: e2e proposal lifecycle through the real UI data layer, cranks, execution, settlement, dead-man drill — against the **published topology (§5)** | nightly + release |
-| Browser/device, wallets, distribution | boot machine, tx machine, degradation rows E1–E23 scripted; browser grid; wallet matrix incl. raw-payload and multisig; Arweave routing/failover fault injection (tampered bytes fail closed) | release |
+| Browser/device, wallets, distribution | boot machine, tx machine, degradation rows E1–E25 scripted; browser grid; wallet matrix incl. raw-payload and multisig; Arweave routing/failover fault injection (tampered bytes fail closed) | release |
 | Malicious-provider + corruption | lying indexer ⇒ sampler auto-disable; forged-snapshot corpus rejected per class; IndexedDB corruption/migration paths | PR |
-| No-infra certification run | every INV-FE-4 workflow with providers disabled, RPC disabled, cleared storage, one failed gateway (I-25 evidence) | release gate |
+| **Structural firewall (negative)** | the [10 §10.2](10-frontend-architecture.md) negative-compilation corpus: one fixture per forbidden package edge and per forbidden cross-unit import, each asserted to **fail `tsc -b`**, and each forbidden dependency-cruiser edge asserted to be reported. Every other layer here tests that the app *works*; this is the only one that tests that the firewall **rejects**, and a corpus entry that starts passing is a regression | PR |
+| **Hostile handoff corpus** | the [10 §13.3](10-frontend-architecture.md) refusal family exercised by class — malformed, unknown schema, unknown action, **foreign field inside `action`/`limits`**, wrong chain, newer-than-live runtime, limit missing/out-of-range/inconsistent, expired, replayed, digest mismatch, infeasible at B′, scope refused, export-from-unverified-state — each mapping to exactly one `FE-HANDOFF-*` code, each rejecting the **whole** document; plus digest round-trip determinism, the clamp property (*an encoded limit is never wider than both the asked limit and the chain-derived value at B′*), the tx-machine edge-enumeration test with the import entry point included, the handoff no-network source gate, and a build-time diff asserting the emitted `connect-src` allowlist gained no entry | PR |
+| No-infra certification run | every INV-FE-4 workflow with providers disabled, RPC disabled, cleared storage, one failed gateway (I-25 evidence), **and the handoff surfaces disabled** — the mechanical proof that no protocol workflow depends on them (D-21) | release gate |
 | Reproducible build + attestation | two independent environments byte-identical; `verify-release` from a clean container; ≥ 2 attestation signatures | release gate |
 
 ### 4.9 Economic simulation, contests, audits
@@ -318,11 +328,11 @@ The frontend compliance apparatus (old §32) is now verifiable because §2 exist
 | Invariant (§2 text) | Enforcing component(s) | Certifying test(s) (§4.8) |
 |---|---|---|
 | INV-FE-1 | finalized-pinned reads in the chain package; `Verified<T>` typing; no-promotion rule (D-6) | mock-runtime store tests; e2e no-RPC suite; lying-peer test **[VERIFY chainHead runtime-call verification semantics through smoldot — FE-P2 carried forward in [10](10-frontend-architecture.md); until verified, runtime-call results remain cross-checked against direct storage reads on every tx path]** |
-| INV-FE-2 | `refreshAndGate` structurally on every submit path | tx-machine browser suite + Chopsticks manufactured-failure suite |
-| INV-FE-3 | package firewall incl. in-app build-time import boundary; provider quarantine; actionable-object chain-fetch rule | dependency-cruiser CI; malicious-provider suite |
+| INV-FE-2 | `refreshAndGate` structurally on every submit path, **with the handoff import path in the enumerated edge set** | tx-machine browser suite + Chopsticks manufactured-failure suite + edge-enumeration test (§4.8) |
+| INV-FE-3 | package firewall incl. in-app build-time import boundary; provider quarantine; actionable-object chain-fetch rule | dependency-cruiser CI; malicious-provider suite; **negative-compilation corpus (§4.8)** |
 | INV-FE-4 | screen→source matrix, all sources = chain ([11](11-frontend-workflows.md)) | no-infra certification run (§4.8) over E1–E23 workflows |
 | INV-FE-5 | static bundle; no secrets by construction | CI secret scan; release diff |
-| INV-FE-6 | static output; no server package exists | Arweave routing suite; repo audit |
+| INV-FE-6 | static output; no server package exists; **no network primitive in the handoff packages** | Arweave routing suite; repo audit; **handoff no-network source gate + CSP-allowlist diff gate (§4.8)** |
 | INV-FE-7 | rebuild path; tx path never reads local DB | corruption suite; firewall |
 | INV-FE-8 | content verification; quote double-derivation; precondition refresh; sampling; resolution cross-check | gateway-tamper, lying-peer, provider suites |
 | INV-FE-9 | `VerificationStatus` union; badge-typed components | unit tests asserting rejection of unlabeled values; visual regression |
@@ -330,7 +340,7 @@ The frontend compliance apparatus (old §32) is now verifiable because §2 exist
 | INV-FE-11 | verification panel; boot identity check | e2e panel-vs-manifest assertion; wrong-genesis terminal test |
 | INV-FE-12 | compat state machine; no-guess decoding | Chopsticks upgrade suite |
 | INV-FE-13 | no remote-config code paths; in-bundle data only | code audit + release diff; CI grep gates on fetch-to-config patterns |
-| INV-FE-14 | payload-derived rendering; expert mode | e2e expert-mode suite |
+| INV-FE-14 | payload-derived rendering; expert mode incl. **the clamp derivation** (asked ceiling → chain-derived value at B′ → encoded value) | e2e expert-mode suite; clamp property test (§4.8) |
 | INV-FE-15 | provider interface; reproducible snapshots; origin labeling; gap-visible history | provider suites; snapshot determinism test; gap-rendering test |
 
 Backend certification is the invariant table of §1: each machine-class row is certified by its named suite in CI on every release; each convention-class row (I-22, I-24) is certified by its generated suite/lint **plus** a named reviewer sign-off recorded in the release notes — the honest form of "enforced by convention".
