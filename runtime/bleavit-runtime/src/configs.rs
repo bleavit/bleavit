@@ -2799,6 +2799,19 @@ impl pallet_question_service::ServiceParamsProvider for RuntimeServiceParams {
     fn flow_cap() -> FixedU64 {
         FixedU64(sec_flow_cap_1e9())
     }
+
+    /// 16 §8.6. Reads the LIVE row only, with no default fallback and no floor:
+    /// absence must reach the pallet as `None` so the multiplier stays 1, which
+    /// is the flat two-part tariff the chain has today. A default here would
+    /// silently arm a surcharge the values layer never adopted, and a floor
+    /// would make an unset row indistinguishable from a deliberate `1`.
+    fn price_cap() -> Option<FixedU64> {
+        let key = pallet_constitution::key16(b"svc.price_cap");
+        match live_param(key) {
+            Some(pallet_constitution::ParamValue::Fixed(value)) => Some(value),
+            _ => None,
+        }
+    }
 }
 
 pub struct RuntimeClientFunding;

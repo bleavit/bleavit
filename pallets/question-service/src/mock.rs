@@ -166,6 +166,7 @@ parameter_types! {
     pub static Collision: bool = false;
     pub static MainCredited: Balance = 0;
     pub static KeeperRebates: Vec<(AccountId, CrankClass)> = Vec::new();
+    pub static MockPriceCap: Option<FixedU64> = None;
 }
 
 pub struct QuestionKeeperRebate;
@@ -410,6 +411,13 @@ impl pallet_question_service::ServiceParamsProvider for Params {
     }
     fn flow_cap() -> FixedU64 {
         FixedU64(16_000_000_000)
+    }
+
+    /// Unset by default, matching the shipped 13 §1 row: the multiplier stays 1
+    /// and every pre-N14 test sees the flat tariff unchanged. Tests that
+    /// exercise 16 §8.6 set `MockPriceCap` explicitly.
+    fn price_cap() -> Option<FixedU64> {
+        MockPriceCap::get()
     }
 }
 

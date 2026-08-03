@@ -1028,13 +1028,30 @@ would make scarcity directly profitable here, and TH-73 names exactly that press
 [15](15-invariants-and-testing.md) §4.9's competing-venue leg measured why the two
 cases differ: additional hosted depth degrades Bleavit's own decision formation.
 
-**Where the premium goes.** The floor continues to `MAIN` as cost recovery (§8.1).
-The amount **above** the floor is protocol-owned liquidity, credited at `Sealed` with
-the rest of instrument D and never before — the fee is refunded on VOID (§6.4), so
-routing any part of it earlier would move money the client may still be owed. Routing
-the premium to POL is not a preference: the premium exists only when hosted questions
-are contending for capacity, which is when Bleavit's own books most need depth, so
-the charge for congestion funds the repair for it.
+**Where the premium goes: `MAIN`, with the rest of instrument D.** The whole scaled
+fee is credited at `Sealed` and never before — the fee is refunded on VOID (§6.4), so
+routing any part of it earlier would move money the client may still be owed.
+
+An earlier revision of this section routed the amount **above** the floor directly to
+POL, reasoning that the premium exists only when hosted questions contend for
+capacity, which is when Bleavit's own books most need depth. **Implementation
+refuted the routing, not the reasoning.** `pallet-market` does not hold Bleavit's
+protocol subsidy custody account — `seed` receives it as a caller-supplied argument —
+so a direct credit would require naming that account inside
+`pallet-question-service`, opening a **second** money path into POL custody where
+today there is exactly one: the §2 Sweep returning what POL itself spent. §7.2–§7.5
+exist to keep precisely that class of cross-domain path from opening, and a
+deliberate one is not safer than an accidental one merely because it was intended.
+The premium is also **zero until `svc.price_cap` is adopted**, so the seam would be
+dead code guarding a firewall it had already breached.
+
+The intent survives the change of route. `MAIN` is where 08 §1.1's allocation to POL
+is funded from, so congestion revenue still reaches depth — through a governed
+allocation rather than an automatic side-channel, which is the more defensible of the
+two given that the premium is collected at `Sealed` and the congestion it priced may
+be an epoch old by then. And the premium stays **measurable with no new storage and
+no new event**: `premium = fee − max(svc.fee_floor, svc.fee_bps × declared_stake)`,
+and both the charged fee and the declared stake are already stored per question.
 
 **`M` is inert until its ceiling is adopted.** The bound on `M` is a values-layer
 number that nothing in this repository yet anchors — the natural anchor would be the

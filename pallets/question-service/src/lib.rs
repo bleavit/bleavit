@@ -37,6 +37,10 @@ pub trait ServiceParamsProvider {
     fn oracle_bond_bps() -> u32;
     fn attestor_bond_floor() -> Balance;
     fn flow_cap() -> FixedU64;
+    /// 16 §8.6 ceiling on the scarcity multiplier. `None` while the row is
+    /// unset, and that is **not** a refusal — it means `M = 1`, i.e. the flat
+    /// two-part tariff. Contrast `fee_rate`, whose absence *is* the arming gate.
+    fn price_cap() -> Option<FixedU64>;
 }
 
 /// Best-effort delivery result. Only the registry's isolated diagnostic meter
@@ -298,6 +302,16 @@ pub mod pallet {
     /// put an O(live) read on an extrinsic that must stay O(1).
     #[pallet::storage]
     pub type LiveExternalDepth<T: Config> = StorageValue<_, Balance, ValueQuery>;
+
+    /// 16 §8.6 scarcity state: `(multiplier, block it was last raised)`.
+    ///
+    /// `None` means the multiplier is at its floor of 1 — the flat tariff — so
+    /// the common case costs one read and no arithmetic. Decay is applied
+    /// lazily on read rather than by a hook: nothing else needs the value
+    /// between registrations, and a hook would spend block weight every block
+    /// to maintain a number only `register` consumes.
+    #[pallet::storage]
+    pub type ScarcityMultiplier<T: Config> = StorageValue<_, (FixedU64, BlockNumber), OptionQuery>;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -686,6 +700,76 @@ pub mod pallet {
             Reports::<T>::get(question_id)
         }
 
+        /// 16 §8.6: the scarcity multiplier as of now, on the `SCORE_SCALE` grid.
+        ///
+        /// Linear decay toward 1 over `svc.max_window`, so a price cannot
+        /// outlive the demand that set it. Linear rather than exponential
+        /// because runtime code carries no transcendentals outside the
+        /// `futarchy-fixed` kernel, and the property that matters — a freed slot
+        /// descends rather than dropping — holds under either shape.
+        ///
+        /// Returns exactly `SCORE_SCALE` (M = 1) when the ceiling row is unset,
+        /// when nothing has been raised, or once a full window has elapsed.
+        pub fn scarcity_multiplier() -> FixedU64 {
+            let one = FixedU64(kernel::SCORE_SCALE);
+            if T::ServiceParams::price_cap().is_none() {
+                return one;
+            }
+            let Some((raised_to, raised_at)) = ScarcityMultiplier::<T>::get() else {
+                return one;
+            };
+            if raised_to.0 <= one.0 {
+                return one;
+            }
+            let window = T::ServiceParams::max_window();
+            if window == 0 {
+                return one;
+            }
+            let elapsed = Self::now().saturating_sub(raised_at);
+            if elapsed >= window {
+                return one;
+            }
+            // excess * (window - elapsed) / window, in u128 so the product of a
+            // 1e9-grid excess and a block count cannot overflow.
+            let excess = u128::from(raised_to.0.saturating_sub(one.0));
+            let remaining = u128::from(window.saturating_sub(elapsed));
+            let decayed = excess
+                .saturating_mul(remaining)
+                .checked_div(u128::from(window))
+                .unwrap_or(0);
+            FixedU64(one.0.saturating_add(decayed.try_into().unwrap_or(u64::MAX)))
+        }
+
+        /// Test-only alias. `raise_scarcity` stays private so no production
+        /// caller can move the price outside `register`.
+        #[cfg(test)]
+        pub fn raise_scarcity_for_test() {
+            Self::raise_scarcity();
+        }
+
+        /// Raise the multiplier by one admission's worth, capped.
+        ///
+        /// The step is additive — `(cap - 1) / max_live` — so taking every slot
+        /// at once arrives exactly at the ceiling and never past it, in exact
+        /// integer arithmetic.
+        fn raise_scarcity() {
+            let Some(cap) = T::ServiceParams::price_cap() else {
+                return;
+            };
+            let one = kernel::SCORE_SCALE;
+            if cap.0 <= one {
+                return;
+            }
+            let max_live = T::ServiceParams::max_live();
+            if max_live == 0 {
+                return;
+            }
+            let step = cap.0.saturating_sub(one) / u64::from(max_live);
+            let current = Self::scarcity_multiplier().0;
+            let raised = current.saturating_add(step).min(cap.0);
+            ScarcityMultiplier::<T>::put((FixedU64(raised), Self::now()));
+        }
+
         fn do_register(client: ClientId, input: RegisterInput<T::AccountId>) -> DispatchResult {
             let fee_rate = T::ServiceParams::fee_rate().ok_or(Error::<T>::ServiceRateUnset)?;
             Self::ensure_not_paused()?;
@@ -796,7 +880,25 @@ pub mod pallet {
                 .checked_mul(2)
                 .ok_or(Error::<T>::ArithmeticOverflow)?;
             let proportional_fee = Self::mul_perbill_ceil(input.declared_stake, fee_rate)?;
-            let fee = proportional_fee.max(kernel::SVC_FEE_FLOOR_USDC);
+            let base_fee = proportional_fee.max(kernel::SVC_FEE_FLOOR_USDC);
+            // 16 §8.6: scale the tariff by the scarcity multiplier. Rounds UP
+            // (R-7, against the party relying on the charge being small), and
+            // is exactly `base_fee` whenever `M = 1`, which is the unset-ceiling
+            // default — so the flat-tariff path is bit-identical to pre-N14.
+            let multiplier = Self::scarcity_multiplier();
+            let fee = if multiplier.0 == kernel::SCORE_SCALE {
+                base_fee
+            } else {
+                let scaled = base_fee
+                    .checked_mul(u128::from(multiplier.0))
+                    .ok_or(Error::<T>::ArithmeticOverflow)?;
+                let one = u128::from(kernel::SCORE_SCALE);
+                scaled
+                    .checked_add(one.saturating_sub(1))
+                    .ok_or(Error::<T>::ArithmeticOverflow)?
+                    .checked_div(one)
+                    .ok_or(Error::<T>::ArithmeticOverflow)?
+            };
             let required = escrow
                 .checked_add(fee)
                 .ok_or(Error::<T>::ArithmeticOverflow)?;
@@ -927,6 +1029,9 @@ pub mod pallet {
             // above and is the post-state by construction, so this cannot
             // disagree with what the arming bound was evaluated against.
             LiveExternalDepth::<T>::put(external_after);
+            // Raise AFTER the fee for this admission is fixed: the arriving
+            // client pays the price its arrival found, not the one it created.
+            Self::raise_scarcity();
             Self::deposit_event(Event::QuestionRegistered {
                 question_id,
                 client_id: client,
@@ -1059,6 +1164,13 @@ pub mod pallet {
                 question_id,
                 winner,
             )?;
+            // The WHOLE fee — floor plus any 16 §8.6 scarcity premium — lands in
+            // `MAIN`. Crediting the premium straight to POL would need this
+            // pallet to name Bleavit's protocol subsidy custody account, which
+            // is a second money path into that custody where §7.2-§7.5 leave
+            // exactly one (the Sweep returning what POL itself spent). The
+            // premium is recoverable off-chain without a new event or field:
+            // `terms.fee - max(fee_floor, fee_rate * declared_stake)`.
             Self::transfer(
                 &Self::account_id(),
                 &<T as pallet_conditional_ledger::Config<Instance1>>::TreasuryMainAccount::get(),

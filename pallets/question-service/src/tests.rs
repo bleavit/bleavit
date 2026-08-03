@@ -505,6 +505,133 @@ fn seal_publishes_real_hash_and_earns_the_fee_exactly_once() -> TestResult {
 }
 
 #[test]
+fn unset_price_cap_leaves_the_tariff_flat() -> TestResult {
+    new_test_ext().execute_with(|| -> TestResult {
+        // 16 §8.6 / 13 §1: an unset ceiling means M = 1, NOT a refusal. This is
+        // the property that lets N14 ship inert, and it is the opposite of
+        // `svc.client_bond`, whose absence does refuse.
+        assert_eq!(MockPriceCap::get(), None);
+        assert_eq!(
+            QuestionService::scarcity_multiplier().0,
+            kernel::SCORE_SCALE
+        );
+
+        let (_question, terms) = register_and_bond()?;
+        // Registration succeeded and paid the flat floor, unscaled.
+        assert_eq!(terms.fee, kernel::SVC_FEE_FLOOR_USDC);
+        // Nothing was raised, so nothing has to decay.
+        assert!(ScarcityMultiplier::<Test>::get().is_none());
+        assert_eq!(
+            QuestionService::scarcity_multiplier().0,
+            kernel::SCORE_SCALE
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn scarcity_rises_on_admission_and_decays_linearly_to_one() -> TestResult {
+    new_test_ext().execute_with(|| -> TestResult {
+        let one = kernel::SCORE_SCALE;
+        // Ceiling of 3x over MaxLive = 16 slots: step = (3 - 1)/16 = 0.125.
+        MockPriceCap::set(Some(FixedU64(3 * one)));
+        let step = (3 * one - one) / 16;
+
+        let start = System::block_number();
+        QuestionService::raise_scarcity_for_test();
+        assert_eq!(QuestionService::scarcity_multiplier().0, one + step);
+
+        // Half the window elapsed -> half the excess remains (linear decay).
+        System::set_block_number(start + u64::from(MaxWindow::get()) / 2);
+        assert_eq!(QuestionService::scarcity_multiplier().0, one + step / 2);
+
+        // A full window returns exactly to 1, not merely near it.
+        System::set_block_number(start + u64::from(MaxWindow::get()));
+        assert_eq!(QuestionService::scarcity_multiplier().0, one);
+
+        // And past the window it stays at 1 rather than going below.
+        System::set_block_number(start + u64::from(MaxWindow::get()) * 3);
+        assert_eq!(QuestionService::scarcity_multiplier().0, one);
+        Ok(())
+    })
+}
+
+#[test]
+fn taking_every_slot_at_once_lands_exactly_on_the_ceiling() -> TestResult {
+    new_test_ext().execute_with(|| -> TestResult {
+        let one = kernel::SCORE_SCALE;
+        let cap = 3 * one;
+        MockPriceCap::set(Some(FixedU64(cap)));
+
+        // The additive step is (cap - 1)/max_live, so max_live admissions in the
+        // same block must arrive AT the ceiling -- never past it, and never
+        // short of it by more than integer division's remainder.
+        for _ in 0..MaxLive::get() {
+            QuestionService::raise_scarcity_for_test();
+        }
+        let reached = QuestionService::scarcity_multiplier().0;
+        assert_eq!(reached, cap);
+
+        // Further admissions cannot exceed the ceiling.
+        QuestionService::raise_scarcity_for_test();
+        assert_eq!(QuestionService::scarcity_multiplier().0, cap);
+        Ok(())
+    })
+}
+
+#[test]
+fn an_arriving_client_pays_the_price_it_found_not_the_one_it_created() -> TestResult {
+    new_test_ext().execute_with(|| -> TestResult {
+        MockPriceCap::set(Some(FixedU64(3 * kernel::SCORE_SCALE)));
+        // The first client arrives at M = 1 and must pay the flat floor: the
+        // raise happens after its own fee is fixed. Charging it the price its
+        // own arrival created would make the first registration the most
+        // expensive, which is backwards.
+        let (_question, terms) = register_and_bond()?;
+        assert_eq!(terms.fee, kernel::SVC_FEE_FLOOR_USDC);
+        // ...but it did move the price for whoever comes next.
+        assert!(QuestionService::scarcity_multiplier().0 > kernel::SCORE_SCALE);
+        Ok(())
+    })
+}
+
+#[test]
+fn the_scarcity_premium_lands_in_main_with_the_rest_of_the_fee() -> TestResult {
+    new_test_ext().execute_with(|| -> TestResult {
+        let one = kernel::SCORE_SCALE;
+        let cap = 3 * one;
+        MockPriceCap::set(Some(FixedU64(cap)));
+        // Push the price all the way to the ceiling before anyone registers, so
+        // the fee under test is unambiguously floor + premium and not the floor
+        // alone. 3x is chosen to make the premium the larger of the two terms.
+        for _ in 0..MaxLive::get() {
+            QuestionService::raise_scarcity_for_test();
+        }
+        assert_eq!(QuestionService::scarcity_multiplier().0, cap);
+
+        let (question, terms) = register_and_bond()?;
+        // The charge really is scaled -- otherwise the assertion below would
+        // pass trivially on an unscaled fee.
+        assert_eq!(terms.fee, kernel::SVC_FEE_FLOOR_USDC * 3);
+        let premium = terms.fee - kernel::SVC_FEE_FLOOR_USDC;
+        assert!(premium > kernel::SVC_FEE_FLOOR_USDC);
+
+        open_and_observe(question)?;
+        let main_before = usdc(MAIN);
+        seal(question)?;
+
+        // 16 §8.6: the WHOLE scaled fee goes to MAIN. An earlier revision of
+        // that section routed `premium` to POL instead; this pins the routing
+        // that replaced it, so a future edit reinstating the POL leg has to
+        // fail here rather than pass silently by crediting less to MAIN.
+        assert_eq!(usdc(MAIN) - main_before, terms.fee);
+        assert_eq!(MainCredited::get(), terms.fee);
+        QuestionService::do_try_state().map_err(|_| "try-state")?;
+        Ok(())
+    })
+}
+
+#[test]
 fn external_depth_accounting_tracks_register_and_terminal() -> TestResult {
     new_test_ext().execute_with(|| -> TestResult {
         // 16 §8.4 / SQ-575. The condition was normative from N1 and had no
