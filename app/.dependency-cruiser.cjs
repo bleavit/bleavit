@@ -11,7 +11,7 @@
  * so a future `node-linker=hoisted` — or a `paths` alias added for convenience —
  * would silently demote it. These rules keep failing in that case.
  */
-const { EXTERNAL, WORKSPACE_SUBPATH } = require('./tools/depcruise-external.cjs');
+const { EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = require('./tools/depcruise-external.cjs');
 
 module.exports = {
   forbidden: [
@@ -84,8 +84,26 @@ module.exports = {
         'cannot tell the difference. `bleavit-client-ts` is exempt because it is not part of ' +
         'the canonical client: it is N10\'s facade for third parties integrating the hosted ' +
         'question service, and nothing in `src/` may import it.',
-      from: { pathNot: '^packages/(chain-client|bleavit-client-ts|papi-descriptors)/' },
+      from: { pathNot: '^packages/(chain-client|bleavit-client-ts|papi-descriptors|signing)/' },
       to: { path: EXTERNAL('polkadot-api|smoldot') },
+    },
+    {
+      name: 'signing-may-only-reach-the-signer-surface',
+      severity: 'error',
+      comment:
+        '`packages/signing` is exempt from the rule above for the *signer* subpaths only ' +
+        '(`polkadot-api/pjs-signer`, `polkadot-api/signer`), and this rule is what makes ' +
+        '"only" true. The exemption follows the rule above\'s own stated reason rather than ' +
+        'its letter: the danger it names is a second package able to construct a chain or a ' +
+        'provider and serve reads that never passed the finalized-only discipline. ' +
+        '`getPolkadotSignerFromPjs(address, signPayload, signRaw)` constructs neither and ' +
+        'cannot read anything — it takes two callbacks and returns a signer. The root entry ' +
+        'point, `polkadot-api/smoldot` and the provider subpaths remain forbidden here, ' +
+        'because those *can*.',
+      from: { path: '^packages/signing/' },
+      // `polkadot-api` and every subpath except the two signer ones. smoldot has no
+      // signer surface at all, so it stays wholly forbidden via the rule above.
+      to: { path: POLKADOT_API_NON_SIGNER },
     },
     {
       name: 'no-test-signer-in-the-bundle',

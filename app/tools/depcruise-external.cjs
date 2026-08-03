@@ -36,4 +36,37 @@ const EXTERNAL = (names) => `^(${names})(/|$)|/node_modules/(${names})/`;
 const WORKSPACE_SUBPATH = (specifier, distPath) =>
   `^${specifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|/)|^${distPath}`;
 
-module.exports = { EXTERNAL, WORKSPACE_SUBPATH };
+/**
+ * `polkadot-api`, minus the two subpaths that are only a signer.
+ *
+ * `packages/signing` is exempt from `only-chain-client-opens-a-chain-connection` for
+ * `polkadot-api/pjs-signer` and `polkadot-api/signer`, and this pattern is what keeps
+ * "only" true. The exemption follows that rule's own stated reason rather than its
+ * letter: the danger named there is a second package able to construct a chain or a
+ * provider and serve reads that never passed the finalized-only discipline.
+ * `getPolkadotSignerFromPjs(address, signPayload, signRaw)` takes two callbacks and
+ * returns a signer — it cannot read anything. The root entry point, `/smoldot` and the
+ * provider subpaths still *can*, so they stay forbidden.
+ *
+ * Shared with the witness rather than restated there, for V-86's reason: a witness
+ * carrying its own copy of a pattern proves the copy fires, not the rule.
+ *
+ * **Both recorded forms, and here the split is not hypothetical — it is measured.**
+ * `import 'polkadot-api'` *resolves*, so it is recorded as
+ * `node_modules/.pnpm/polkadot-api@…/dist/…`; every subpath (`/smoldot`, `/ws-provider`,
+ * `/pjs-signer`) is hidden from enhanced-resolve by the package's `exports` map and is
+ * recorded as the bare specifier with `couldNotResolve: true`. A bare-only pattern
+ * therefore forbids the subpaths and lets the **root entry point** — the one that can
+ * construct everything — straight through. That version was written, with a comment
+ * citing V-86 directly above it, and the root import passed clean.
+ *
+ * The `node_modules` alternative carries the signer exclusion too. Today it is redundant,
+ * because the signer subpaths never resolve; it is there so that a resolver or packaging
+ * change which *does* resolve them cannot silently flip a permitted import into a
+ * forbidden one.
+ */
+const POLKADOT_API_NON_SIGNER =
+  '^polkadot-api(?!/(pjs-signer|signer)($|/))(/|$)' +
+  '|/node_modules/polkadot-api/(?!dist/reexports/(pjs-signer|signer)\\.)';
+
+module.exports = { EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER };

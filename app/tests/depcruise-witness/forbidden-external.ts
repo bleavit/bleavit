@@ -16,3 +16,9 @@ export const usesAnExternalChainSdk = true;
 // dependency-cruiser records the bare specifier. INV-FE-5's "no test signer in a release
 // chunk" rule first shipped unable to fire for exactly that reason.
 import '@bleavit/signing/testing';
+
+// The signing exemption's boundary, witnessed. `packages/signing` may reach
+// `polkadot-api/pjs-signer` because a signer factory cannot serve a read; everything else
+// under `polkadot-api` still constructs chains and providers, so it must still fail. A
+// narrowed rule that nobody watches fail is how the next V-86 ships.
+import 'polkadot-api/ws-provider';
