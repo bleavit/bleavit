@@ -321,6 +321,18 @@ class ArtifactCheckerTests(unittest.TestCase):
             "arming_diversion": ARMING,
             "security_leg_clean": True,
             "liveness_loss_at_arming": {name: "0.0000" for name in CLASSES},
+            "liveness": {
+                name: {
+                    "decision_grade_control": "0.500000",
+                    "decision_grade_at_arming": "0.500000",
+                    "decision_grade_loss": "0.000000",
+                    "not_decision_grade_control": 1,
+                    "not_decision_grade_at_arming": 1,
+                    "baseline_carried_control": 0,
+                    "baseline_carried_at_arming": 0,
+                }
+                for name in CLASSES
+            },
             "control_matches_primary": True,
             "stress_by_class": {name: True for name in CLASSES},
             "stress_diversion": ladder[-1],
@@ -383,14 +395,26 @@ class ArtifactCheckerTests(unittest.TestCase):
                     "decidable_harm_false_pass_rate": "0.050000",
                     "decision_grade_formation_rate": "0.100000",
                     "not_decision_grade": 8,
+                    "baseline_carried": 4,
                 },
             }
         payload["competing_venue"]["arming_by_class"]["meta"] = False
         payload["competing_venue"]["security_leg_clean"] = False
-        # The fixture fails `meta` at EVERY rung, so the stress verdict has to
-        # move with it. Leaving it True is what the checker is for, and it
-        # caught this fixture when the stress leg was first added.
+        # The fixture fails `meta` at EVERY rung, so everything derived from
+        # meta's rungs has to move with it: the stress verdict AND the liveness
+        # detail. Leaving either stale is what the checker is for, and it
+        # caught this same fixture twice — once when the stress leg was added
+        # and again when liveness stopped being validated by truthiness.
         payload["competing_venue"]["stress_by_class"]["meta"] = False
+        payload["competing_venue"]["liveness"]["meta"] = {
+            "decision_grade_control": "0.100000",
+            "decision_grade_at_arming": "0.100000",
+            "decision_grade_loss": "0.000000",
+            "not_decision_grade_control": 8,
+            "not_decision_grade_at_arming": 8,
+            "baseline_carried_control": 4,
+            "baseline_carried_at_arming": 4,
+        }
         self.assertEqual(self._errors(payload), [])
 
     def test_an_arming_verdict_that_ignores_a_failing_class_is_refused(self):
@@ -411,6 +435,24 @@ class ArtifactCheckerTests(unittest.TestCase):
     def test_a_missing_liveness_magnitude_is_refused(self):
         payload = self._payload()
         del payload["competing_venue"]["liveness_loss_at_arming"]
+        self.assertTrue(self._errors(payload))
+
+    def test_a_liveness_magnitude_that_disagrees_with_its_rungs_is_refused(self):
+        # Truthiness was the earlier check, and it would accept any non-empty
+        # value — on the ONLY measured half of the analysis, the one number a
+        # reader has nothing else to cross-check against.
+        payload = self._payload()
+        payload["competing_venue"]["liveness_loss_at_arming"]["meta"] = "0.9999"
+        self.assertTrue(self._errors(payload))
+
+    def test_liveness_detail_that_contradicts_its_rungs_is_refused(self):
+        payload = self._payload()
+        payload["competing_venue"]["liveness"]["code"]["baseline_carried_at_arming"] = 99
+        self.assertTrue(self._errors(payload))
+
+    def test_a_missing_liveness_class_is_refused(self):
+        payload = self._payload()
+        del payload["competing_venue"]["liveness"]["param"]
         self.assertTrue(self._errors(payload))
 
     def test_dropping_the_stress_rung_is_refused(self):

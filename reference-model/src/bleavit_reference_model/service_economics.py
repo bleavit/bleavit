@@ -119,7 +119,14 @@ def b_min(stake: Decimal, epsilon: Decimal) -> Decimal:
     `SECURITY_FACTOR = 3`. Rounds UP, against the party relying on the claim.
     """
     denominator = 2 * _ln(Decimal("0.5") / (Decimal("0.5") - epsilon))
-    return Decimal(math.ceil(float(3 * stake / denominator)))
+    # Ceil the Decimal quotient directly. Routing it through `float` first --
+    # as an earlier revision did -- silently rounds DOWN once the quotient
+    # exceeds float's 53-bit mantissa: at stake 10,000,005,521 and eps 0.05 it
+    # returns ...317 where the exact ceiling is ...318. One unit is trivial in
+    # absolute terms and the direction is not: R-7 puts rounding against the
+    # party relying on the claim, and here that is the client's counterparty,
+    # so a short b_min underfunds the certification it certifies.
+    return Decimal(math.ceil(3 * stake / denominator))
 
 
 def b_min_superseded(stake: Decimal, epsilon: Decimal) -> Decimal:
@@ -132,7 +139,7 @@ def b_min_superseded(stake: Decimal, epsilon: Decimal) -> Decimal:
     denominator = 2 * _ln(
         (Decimal("0.5") + epsilon) / (Decimal("0.5") - epsilon)
     )
-    return Decimal(math.ceil(float(3 * stake / denominator)))
+    return Decimal(math.ceil(3 * stake / denominator))
 
 
 def client_subsidy(stake: Decimal, epsilon: Decimal) -> Decimal:

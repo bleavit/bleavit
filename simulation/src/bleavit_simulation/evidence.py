@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DivisionByZero, InvalidOperation
 import json
 from pathlib import Path
 
@@ -378,8 +378,50 @@ def _check_competing_venue(
             "the security and liveness legs are not commensurable (see "
             "`no_single_verdict`)"
         )
-    if not block.get("liveness_loss_at_arming"):
-        errors.append("competing-venue liveness magnitude is missing")
+    # Derive the liveness half from the rungs and compare it, rather than
+    # checking that the field is merely non-empty. It is the ONLY measured
+    # half of the Phase-4 denial analysis — the security half is a screen —
+    # so a stale or edited value here is the one number a reader has nothing
+    # else to cross-check against. Truthiness would accept wrong class keys,
+    # arbitrary rates, or values inconsistent with the rungs beside them.
+    control_rung = rungs["0.00"]
+    try:
+        expected_liveness = {}
+        for name in CLASSES:
+            control = Decimal(control_rung[name]["decision_grade_formation_rate"])
+            at_arming = Decimal(arming[name]["decision_grade_formation_rate"])
+            expected_liveness[name] = format(
+                (control - at_arming) / control if control else Decimal(0), ".4f"
+            )
+    except (KeyError, TypeError, InvalidOperation, DivisionByZero):
+        errors.append("competing-venue liveness magnitude cannot be derived")
+        expected_liveness = None
+    if expected_liveness is not None:
+        if block.get("liveness_loss_at_arming") != expected_liveness:
+            errors.append(
+                "competing-venue liveness magnitude disagrees with its rungs"
+            )
+        liveness = block.get("liveness")
+        if not isinstance(liveness, dict) or set(liveness) != set(CLASSES):
+            errors.append("competing-venue liveness detail is missing a class")
+        else:
+            for name in CLASSES:
+                row = liveness[name]
+                paired = (
+                    ("decision_grade_control", control_rung, "decision_grade_formation_rate"),
+                    ("decision_grade_at_arming", arming, "decision_grade_formation_rate"),
+                    ("not_decision_grade_control", control_rung, "not_decision_grade"),
+                    ("not_decision_grade_at_arming", arming, "not_decision_grade"),
+                    ("baseline_carried_control", control_rung, "baseline_carried"),
+                    ("baseline_carried_at_arming", arming, "baseline_carried"),
+                )
+                for field, source, key in paired:
+                    if field not in row or str(row[field]) != str(source[name][key]):
+                        errors.append(
+                            f"competing-venue liveness {field} disagrees with "
+                            f"its rung for {name}"
+                        )
+                        break
 
 
 def check_artifact(path: Path) -> dict:

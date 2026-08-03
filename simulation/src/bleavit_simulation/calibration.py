@@ -963,7 +963,22 @@ def run_full_calibration(*, seed: int = DEFAULT_SEED, config: SimulationConfig |
         primary_results=primary,
     )
     thin = _thin_market_capture(primary)
-    competing_venue = _competing_venue(proposals, seed, config, flow_cap, primary)
+    # The competing-venue leg takes the PROBE flow cap, the same input the
+    # primary population above was simulated with -- not the `flow_cap`
+    # calibrated from that population one line earlier. Handing it the
+    # calibrated value (16 against the probe's 17) would make its "control" a
+    # different simulation from `primary`, so `control_matches_primary` would
+    # be comparing two populations that differ in a second variable and could
+    # still read True whenever the flow-cap change happens not to flip an
+    # outcome. Same class of confound as the partial-epoch-slate sampling
+    # above, and the same fix: hold everything but the diversion fixed.
+    competing_venue = _competing_venue(
+        proposals,
+        seed,
+        config,
+        Decimal(config.diagnostic_probe_flow_cap),
+        primary,
+    )
     publication = _publication(metrics, attack, flow_cap, config)
     violations = normative_violations(metrics, attack)
     counts = Counter(row.proposal_class for row in proposals)
@@ -983,7 +998,7 @@ def run_full_calibration(*, seed: int = DEFAULT_SEED, config: SimulationConfig |
             "a2_arbitrage": "A-2 corrective capacity is L/2 per day at elasticity 1; it is empirical and phase-revalidated.",
             "baseline_contest_floor": "The 250,000-USDC Baseline contest floor is the TREASURY-tier dec.v_min.trs mandated by 05 §5.2 (SQ-232 resolution 2026-07-18).",
             "contest_measure": "Per the SQ-231 amendment (04 §7a; 05 §5.2/§5.4/§5.6; 08 §5.2-§5.4), step-5 grading and the step-9 certificate consume time-averaged marked net open interest (contest capital) with the sec.flow_cap ceiling; gross traded notional is recorded as flow telemetry only. Organic formation is modeled as directional informed exposure plus balanced maker-bought pair holdings topped up to the stratum target - balanced pairs are settlement-riskless but lock capital for the window and count per the 04 §7a definition.",
-            "competing_venue": "Phase 0 runs at zero competing-venue diversion, which is the chain state Phase 0 describes: the hosted question service (doc 16, D-20) arms in Phase 4. The `competing_venue` block is a Phase-4 arming input measured on a stratified sample against its own 0 % control, never a Phase-0 gate, and its verdict never enters `violations`. Its upper rung is derived from 16 §8.4's own arming condition rather than chosen: `Σ b_ext <= Σ pol.b(live)` caps proportional diversion at one half.",
+            "competing_venue": "Phase 0 runs at zero competing-venue diversion, which is the chain state Phase 0 describes: the hosted question service (doc 16, D-20) arms in Phase 4. The `competing_venue` block is a Phase-4 arming input measured on whole epoch slates against its own 0 % control at the same probe flow cap as the primary run, never a Phase-0 gate, and its verdict never enters `violations`. Its arming rung is ANCHORED, not derived: 16 §8.4's `Σ b_ext <= Σ pol.b(live)` bounds external DEPTH at parity, and one half follows only under proportional-to-depth allocation -- a behavioural assumption, not a protocol guarantee. That assumption's error direction is unsafe (an equally deep venue with better fees or returns can take more), which is why the ladder carries a rung ABOVE the anchor and the block publishes `stress_by_class` beside `arming_by_class`. See `competing_venue.flow_model`.",
             "coverage_leg": "Scheduled observations provide an always-clean coverage leg in Phase-0 synthetic runs.",
             "pol_leg": "POL is assumed seeded at the class schedule and undisturbed for step-5 grading.",
             "pre_registered_strata": {
