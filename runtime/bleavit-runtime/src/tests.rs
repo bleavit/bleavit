@@ -18288,7 +18288,7 @@ fn unavailable_prize_keeps_the_base_contest_floor_and_never_slashes_the_proposer
 
         let param_index = crate::configs::proposal_class_index(ProposalClass::Param);
         assert_eq!(
-            crate::configs::effective_decision_contest_floor(&proposal, &params),
+            crate::configs::effective_decision_contest_floor(&proposal, &params.v_min),
             params.v_min[param_index],
             "an unbacked prize must keep the base dec.v_min floor, not void the grade",
         );
@@ -19401,6 +19401,121 @@ fn baseline_carry_reads_the_sealed_market_snapshot_before_late_summary() {
             None,
             "a late cohort summary must not substitute for a missing sealed window"
         );
+    });
+}
+
+#[test]
+fn service_starvation_probe_reads_the_weakest_bleavit_decision_book() {
+    use pallet_question_service::ContestHealthProbe;
+
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 8_120;
+        let one = futarchy_primitives::kernel::SCORE_SCALE;
+        let probe = || crate::configs::RuntimeServiceContestHealth::starvation_1e9().0;
+
+        // No live decision book: nothing to measure, and 16 §8.7 reads that as
+        // healthy rather than starved, because at that moment the hosted
+        // service is provably not competing with a decision.
+        assert_eq!(probe(), 0, "no measurable book must read as healthy");
+
+        let params =
+            <crate::configs::RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
+        let index = crate::configs::proposal_class_index(ProposalClass::Param);
+        let floor = params.v_min[index];
+        assert_ne!(floor, 0, "the Param decision floor anchors this fixture");
+        let end = params.decision_window;
+        let markets = MarketSet {
+            accept: 91_001,
+            reject: 91_002,
+            gates: None,
+            baseline: 91_003,
+        };
+        let b = crate::configs::class_pol_floor(ProposalClass::Param).saturating_mul(4);
+
+        // Accept sits at the floor; Reject at a quarter of it. The probe must
+        // report the WEAKEST book, because decision-grade is per book and one
+        // starved book rejects the proposal -- an average would hide it.
+        let seed = |id, branch, contest| {
+            seed_decision_grade_market(
+                id,
+                pallet_market::core_market::BookKind::Decision {
+                    proposal: PID,
+                    branch,
+                },
+                futarchy_primitives::FixedU64(500_000_000),
+                end,
+                (params.decision_window, params.trailing_window),
+                b,
+                contest,
+            )
+        };
+        pallet_epoch::Proposals::<Runtime>::insert(
+            PID,
+            Proposal {
+                id: PID,
+                proposer: account(70),
+                funder: account(70),
+                class: ProposalClass::Param,
+                state: ProposalState::Trading,
+                epoch: pallet_epoch::EpochOf::<Runtime>::get().index,
+                submitted_at: 0,
+                payload_hash: [0u8; 32],
+                payload_len: 0,
+                ask: 0,
+                bond: 0,
+                resources: Default::default(),
+                metric_spec: 1,
+                decide_at: end,
+                rerun: false,
+                extended: false,
+                delayed_once: false,
+                markets: Some(markets),
+                maturity: None,
+                grace_end: None,
+                version_constraint: None,
+                decision: None,
+            },
+        );
+
+        assert!(seed(markets.accept, futarchy_primitives::Branch::Accept, floor).is_ok());
+        assert!(seed(
+            markets.reject,
+            futarchy_primitives::Branch::Reject,
+            floor / 4
+        )
+        .is_ok());
+        // 1 - 1/4 = 0.75 starved, from the Reject book alone.
+        assert_eq!(probe(), one - one / 4);
+
+        // Healthy on both sides reads exactly zero, not merely small.
+        assert!(seed(markets.reject, futarchy_primitives::Branch::Reject, floor).is_ok());
+        assert_eq!(probe(), 0);
+
+        // Depth far above the floor cannot read as NEGATIVE starvation and so
+        // cannot subsidize a starved sibling book.
+        assert!(seed(
+            markets.accept,
+            futarchy_primitives::Branch::Accept,
+            floor.saturating_mul(50)
+        )
+        .is_ok());
+        assert!(seed(
+            markets.reject,
+            futarchy_primitives::Branch::Reject,
+            floor / 4
+        )
+        .is_ok());
+        assert_eq!(probe(), one - one / 4);
+
+        // An invalidated accumulator never grades, so it must never price
+        // either -- neither as starved nor as healthy. Dropping the Reject book
+        // from the reading leaves the (healthy) Accept book as the minimum.
+        pallet_market::DecisionWindows::<Runtime>::mutate(markets.reject, |windows| {
+            if let Some(window) = windows.iter_mut().find(|window| window.end == end) {
+                window.contest_valid = false;
+            }
+        });
+        assert_eq!(probe(), 0);
     });
 }
 

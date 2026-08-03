@@ -804,7 +804,12 @@ today.** Mitigations, primary first:
   market on the chain.
 - **Measurement with a stated falsifier:** per-epoch Bleavit vs external contest capital and the
   `NotDecisionGrade` rejection count on the monitoring-only `TelemetryApi`. If rejections rise with
-  external occupancy, the values layer **MUST** reduce `svc.max_live`.
+  external occupancy, the values layer **MUST** reduce `svc.max_live`. **That obligation is no longer
+  the only response, and is no longer the first one** — it asks for a vote at exactly the moment
+  revenue argues the other way, on evidence that will always be arguable, in a system whose every
+  other protection (the I-4 latch, PB-LEDGER-FREEZE, the dead-man switch) is automatic. §8.7 makes
+  the first response automatic and graduated. The vote remains available and remains the only thing
+  that can move the **quantity**; §8.7 moves the price.
 - **Recalibration:** the Phase-0 calibration assumed no competing venue, so S4 re-run with a
   competing-venue term is a **Phase-4 arming condition** — if external markets divert flow, the
   calibrated δ is under-sized. **The term is now executable** ([15](15-invariants-and-testing.md)
@@ -1064,6 +1069,70 @@ consumer default here is `M = 1` and **not** a refusal: an unset ceiling must no
 close admission, because the mechanism it gates is an allocation refinement and not a
 safety gate, and refusing would be a strictly worse status quo than the one this
 section replaces.
+
+### 8.7 Starvation raises the same price, automatically
+
+§8.4's fourth mitigation ends in *"the values layer **MUST** reduce `svc.max_live`"*.
+As the only response that is a governance promise, not a mechanism: it requires a vote
+precisely when revenue argues against one, on evidence that will always be arguable.
+This section makes the first response automatic, and it deliberately reuses §8.6's
+machinery rather than adding any.
+
+**Trigger on the input, not the output.** A `NotDecisionGrade` rejection caused by the
+hosted service is indistinguishable from one caused by nobody finding the proposal
+interesting, so the rejection count can never settle the argument no matter how long it
+is collected. Contest capital in Bleavit's own decision books *is* the quantity `dec.v_min`
+gates on, so it is measured directly.
+
+**The measure.** For each live Bleavit **decision** book, the time-averaged contest
+capital accrued so far in its current window — the 04 §7a integral divided by the blocks
+actually integrated, **not** by the full window width, since dividing a partial integral by
+the full width would report every young window as starved. That average is compared with
+the same per-proposal decision-grade contest floor the grading path uses, and the **minimum
+ratio across books** is taken, because decision-grade is per book and one starved book
+rejects the proposal. Starvation is `1 −` that ratio, clamped to `[0, 1]`.
+
+**The response is graduated and applies to everyone:**
+
+```
+M = min( svc.price_cap ,  max( M_contention , 1 + starvation × (svc.price_cap − 1) ) )
+```
+
+Each half of that shape is load-bearing, and both were chosen against a specific attack:
+
+- **Graduated, because a cliff is a race.** A binary latch creates the behaviour it
+  exists to prevent: operators watching contest capital approach the threshold register
+  *before* it trips, which is a burst of admissions at exactly the worst moment. A
+  continuous response has no threshold to race.
+- **The price rises for everyone, and the door never closes.** A latch that stops new
+  registrations while live questions keep running pays a slot-holder to cause it: their
+  slot becomes exclusive precisely when Bleavit is damaged, and §8.4 states that damaging
+  Bleavit's books costs an attacker only round-trip fees. Under a price response there is
+  no exclusivity to win, and the incumbent's own next question costs more too — so
+  starving Bleavit's books buys the attacker nothing.
+- **`max`, not a product.** One ceiling governs both terms, so `M ≤ svc.price_cap` holds
+  by construction rather than by argument, and no second registry row is needed. A product
+  would reach `svc.price_cap²` and would need its own bound to say what that means.
+- **Starvation is read live and never stored.** §8.6's contention term is stored and
+  decays; this one is a reading of present state. Folding it into the stored term would
+  bake a transient starvation into a slowly-decaying price — hysteresis that nothing here
+  asks for, and that would outlast the condition that justified it.
+
+**What this is, stated honestly.** It is a Pigouvian charge, not a repair: it does not add
+depth to a starved Bleavit book, and the revenue goes to `MAIN` like the rest of
+instrument D (§8.6). What it does is make hosted capacity most expensive exactly when it
+is most costly to Bleavit, and do so without a vote. The harm remains **bounded by
+`svc.max_live`**, which this section does not touch — price clears, quantity does not,
+and that separation is the same one §8.6 draws.
+
+**Two limits, neither smoothed over.** When no Bleavit decision book is live there is
+nothing to measure and starvation reads **0**, because at that moment the hosted service
+is provably not competing with a decision — but a client can therefore register into a
+quiet gap and contend with the windows that open afterwards. §8.4's scheduling refusal
+covers overlap with proposals that are live *at registration* and cannot see proposals
+submitted later. And the response magnitude is bounded by `svc.price_cap`, which is
+`[VERIFY]`-unset (§8.6), so **this section is inert on exactly the same condition** —
+one adopted row arms both halves of `M`, which is why no second row is introduced.
 
 ---
 

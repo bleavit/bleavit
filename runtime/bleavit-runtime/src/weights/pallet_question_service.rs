@@ -39,7 +39,7 @@ pub struct WeightInfo<T>(PhantomData<T>);
 impl<T: frame_system::Config> pallet_question_service::WeightInfo for WeightInfo<T> {
 	/// Storage: `ClientRegistry::ClientIdOfSigner` (r:1 w:0)
 	/// Proof: `ClientRegistry::ClientIdOfSigner` (`max_values`: None, `max_size`: Some(52), added: 2527, mode: `MaxEncodedLen`)
-	/// Storage: `Constitution::Params` (r:16 w:0)
+	/// Storage: `Constitution::Params` (r:20 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	/// Storage: `QuestionService::PausedUntil` (r:1 w:0)
 	/// Proof: `QuestionService::PausedUntil` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
@@ -61,6 +61,10 @@ impl<T: frame_system::Config> pallet_question_service::WeightInfo for WeightInfo
 	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(358), added: 2833, mode: `MaxEncodedLen`)
 	/// Storage: `ClientRegistry::ClientPolicies` (r:1 w:0)
 	/// Proof: `ClientRegistry::ClientPolicies` (`max_values`: None, `max_size`: Some(13), added: 2488, mode: `MaxEncodedLen`)
+	/// Storage: `QuestionService::ScarcityMultiplier` (r:1 w:1)
+	/// Proof: `QuestionService::ScarcityMultiplier` (`max_values`: Some(1), `max_size`: Some(12), added: 507, mode: `MaxEncodedLen`)
+	/// Storage: `Market::DecisionWindows` (r:66 w:2)
+	/// Proof: `Market::DecisionWindows` (`max_values`: None, `max_size`: Some(409), added: 2884, mode: `MaxEncodedLen`)
 	/// Storage: `ForeignAssets::Asset` (r:1 w:1)
 	/// Proof: `ForeignAssets::Asset` (`max_values`: None, `max_size`: Some(808), added: 3283, mode: `MaxEncodedLen`)
 	/// Storage: `InflowCaps::CumulativeDeposits` (r:1 w:0)
@@ -101,8 +105,6 @@ impl<T: frame_system::Config> pallet_question_service::WeightInfo for WeightInfo
 	/// Proof: `ServiceLedger::Positions` (`max_values`: None, `max_size`: Some(92), added: 2567, mode: `MaxEncodedLen`)
 	/// Storage: `ServiceLedger::PositionCount` (r:3 w:3)
 	/// Proof: `ServiceLedger::PositionCount` (`max_values`: None, `max_size`: Some(52), added: 2527, mode: `MaxEncodedLen`)
-	/// Storage: `Market::DecisionWindows` (r:2 w:2)
-	/// Proof: `Market::DecisionWindows` (`max_values`: None, `max_size`: Some(409), added: 2884, mode: `MaxEncodedLen`)
 	/// Storage: `Market::DecisionWindowOwners` (r:2 w:2)
 	/// Proof: `Market::DecisionWindowOwners` (`max_values`: None, `max_size`: Some(5146), added: 7621, mode: `MaxEncodedLen`)
 	/// Storage: `System::Account` (r:1 w:1)
@@ -112,15 +114,17 @@ impl<T: frame_system::Config> pallet_question_service::WeightInfo for WeightInfo
 	/// Storage: `QuestionService::Terms` (r:0 w:1)
 	/// Proof: `QuestionService::Terms` (`max_values`: None, `max_size`: Some(693), added: 3168, mode: `MaxEncodedLen`)
 	/// The range of component `a` is `[3, 16]`.
-	fn register(_a: u32, ) -> Weight {
+	fn register(a: u32, ) -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `18957 + a * (3 ±0)`
-		//  Estimated: `166805`
-		// Minimum execution time: 863_770_000 picoseconds.
-		Weight::from_parts(910_643_825, 0)
-			.saturating_add(Weight::from_parts(0, 166805))
-			.saturating_add(T::DbWeight::get().reads(212))
-			.saturating_add(T::DbWeight::get().writes(91))
+		//  Measured:  `46094 + a * (3 ±0)`
+		//  Estimated: `191334`
+		// Minimum execution time: 1_133_080_000 picoseconds.
+		Weight::from_parts(1_240_045_550, 0)
+			.saturating_add(Weight::from_parts(0, 191334))
+			// Standard Error: 117_248
+			.saturating_add(Weight::from_parts(150_881, 0).saturating_mul(a.into()))
+			.saturating_add(T::DbWeight::get().reads(281))
+			.saturating_add(T::DbWeight::get().writes(92))
 	}
 	/// Storage: `QuestionService::Questions` (r:1 w:0)
 	/// Proof: `QuestionService::Questions` (`max_values`: None, `max_size`: Some(85), added: 2560, mode: `MaxEncodedLen`)
@@ -134,10 +138,10 @@ impl<T: frame_system::Config> pallet_question_service::WeightInfo for WeightInfo
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn bond_attestor() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `1505`
+		//  Measured:  `1536`
 		//  Estimated: `7404`
-		// Minimum execution time: 60_810_000 picoseconds.
-		Weight::from_parts(65_070_000, 0)
+		// Minimum execution time: 61_750_000 picoseconds.
+		Weight::from_parts(66_720_000, 0)
 			.saturating_add(Weight::from_parts(0, 7404))
 			.saturating_add(T::DbWeight::get().reads(6))
 			.saturating_add(T::DbWeight::get().writes(4))
@@ -152,10 +156,10 @@ impl<T: frame_system::Config> pallet_question_service::WeightInfo for WeightInfo
 	/// Proof: `QuestionService::AttestorBonds` (`max_values`: None, `max_size`: Some(72), added: 2547, mode: `MaxEncodedLen`)
 	fn open() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `2213`
+		//  Measured:  `2244`
 		//  Estimated: `41742`
-		// Minimum execution time: 67_570_000 picoseconds.
-		Weight::from_parts(71_490_000, 0)
+		// Minimum execution time: 67_610_000 picoseconds.
+		Weight::from_parts(70_500_000, 0)
 			.saturating_add(Weight::from_parts(0, 41742))
 			.saturating_add(T::DbWeight::get().reads(19))
 			.saturating_add(T::DbWeight::get().writes(1))
@@ -204,10 +208,10 @@ impl<T: frame_system::Config> pallet_question_service::WeightInfo for WeightInfo
 	/// Proof: `QuestionService::Reports` (`max_values`: None, `max_size`: Some(233), added: 2708, mode: `MaxEncodedLen`)
 	fn seal() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `6811`
+		//  Measured:  `6875`
 		//  Estimated: `36256`
-		// Minimum execution time: 283_220_000 picoseconds.
-		Weight::from_parts(297_110_000, 0)
+		// Minimum execution time: 282_830_000 picoseconds.
+		Weight::from_parts(294_650_000, 0)
 			.saturating_add(Weight::from_parts(0, 36256))
 			.saturating_add(T::DbWeight::get().reads(41))
 			.saturating_add(T::DbWeight::get().writes(29))
@@ -220,10 +224,10 @@ impl<T: frame_system::Config> pallet_question_service::WeightInfo for WeightInfo
 	/// Proof: `QuestionService::Attestations` (`max_values`: None, `max_size`: Some(80), added: 2555, mode: `MaxEncodedLen`)
 	fn submit_attestation() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `665`
+		//  Measured:  `696`
 		//  Estimated: `4158`
-		// Minimum execution time: 18_740_000 picoseconds.
-		Weight::from_parts(20_140_000, 0)
+		// Minimum execution time: 19_150_000 picoseconds.
+		Weight::from_parts(21_430_000, 0)
 			.saturating_add(Weight::from_parts(0, 4158))
 			.saturating_add(T::DbWeight::get().reads(2))
 			.saturating_add(T::DbWeight::get().writes(1))
@@ -293,13 +297,13 @@ impl<T: frame_system::Config> pallet_question_service::WeightInfo for WeightInfo
 	/// The range of component `a` is `[3, 16]`.
 	fn settle(a: u32, ) -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `16032 + a * (222 ±0)`
+		//  Measured:  `16099 + a * (222 ±0)`
 		//  Estimated: `36256 + a * (3207 ±0)`
-		// Minimum execution time: 453_320_000 picoseconds.
-		Weight::from_parts(270_436_271, 0)
+		// Minimum execution time: 488_670_000 picoseconds.
+		Weight::from_parts(285_268_307, 0)
 			.saturating_add(Weight::from_parts(0, 36256))
-			// Standard Error: 57_891
-			.saturating_add(Weight::from_parts(68_428_058, 0).saturating_mul(a.into()))
+			// Standard Error: 18_570
+			.saturating_add(Weight::from_parts(70_685_599, 0).saturating_mul(a.into()))
 			.saturating_add(T::DbWeight::get().reads(52))
 			.saturating_add(T::DbWeight::get().reads((3_u64).saturating_mul(a.into())))
 			.saturating_add(T::DbWeight::get().writes(40))
@@ -373,13 +377,13 @@ impl<T: frame_system::Config> pallet_question_service::WeightInfo for WeightInfo
 	/// The range of component `a` is `[3, 16]`.
 	fn void(a: u32, ) -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `15933 + a * (161 ±0)`
+		//  Measured:  `15997 + a * (161 ±0)`
 		//  Estimated: `36256 + a * (3207 ±0)`
-		// Minimum execution time: 440_970_000 picoseconds.
-		Weight::from_parts(345_277_846, 0)
+		// Minimum execution time: 469_300_000 picoseconds.
+		Weight::from_parts(355_000_065, 0)
 			.saturating_add(Weight::from_parts(0, 36256))
-			// Standard Error: 51_263
-			.saturating_add(Weight::from_parts(38_066_695, 0).saturating_mul(a.into()))
+			// Standard Error: 17_005
+			.saturating_add(Weight::from_parts(39_615_940, 0).saturating_mul(a.into()))
 			.saturating_add(T::DbWeight::get().reads(55))
 			.saturating_add(T::DbWeight::get().reads((3_u64).saturating_mul(a.into())))
 			.saturating_add(T::DbWeight::get().writes(40))
@@ -397,11 +401,11 @@ impl<T: frame_system::Config> pallet_question_service::WeightInfo for WeightInfo
 		// Proof Size summary in bytes:
 		//  Measured:  `127 + q * (91 ±0)`
 		//  Estimated: `3550 + q * (2560 ±0)`
-		// Minimum execution time: 6_500_000 picoseconds.
-		Weight::from_parts(8_683_642, 0)
+		// Minimum execution time: 6_850_000 picoseconds.
+		Weight::from_parts(9_006_876, 0)
 			.saturating_add(Weight::from_parts(0, 3550))
-			// Standard Error: 1_186
-			.saturating_add(Weight::from_parts(4_285_261, 0).saturating_mul(q.into()))
+			// Standard Error: 1_138
+			.saturating_add(Weight::from_parts(4_416_541, 0).saturating_mul(q.into()))
 			.saturating_add(T::DbWeight::get().reads(1))
 			.saturating_add(T::DbWeight::get().reads((1_u64).saturating_mul(q.into())))
 			.saturating_add(T::DbWeight::get().writes(1))
@@ -449,11 +453,11 @@ impl<T: frame_system::Config> pallet_question_service::WeightInfo for WeightInfo
 		// Proof Size summary in bytes:
 		//  Measured:  `13461 + a * (32 ±0)`
 		//  Estimated: `26846`
-		// Minimum execution time: 133_500_000 picoseconds.
-		Weight::from_parts(131_163_370, 0)
+		// Minimum execution time: 143_000_000 picoseconds.
+		Weight::from_parts(136_089_043, 0)
 			.saturating_add(Weight::from_parts(0, 26846))
-			// Standard Error: 6_459
-			.saturating_add(Weight::from_parts(3_820_737, 0).saturating_mul(a.into()))
+			// Standard Error: 6_317
+			.saturating_add(Weight::from_parts(4_043_929, 0).saturating_mul(a.into()))
 			.saturating_add(T::DbWeight::get().reads(22))
 			.saturating_add(T::DbWeight::get().writes(13))
 			.saturating_add(T::DbWeight::get().writes((2_u64).saturating_mul(a.into())))

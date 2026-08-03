@@ -157,6 +157,34 @@ class ArmingConditionTests(unittest.TestCase):
         self.assertFalse(f["fully_enforced"])
 
 
+class StarvationResponseTests(unittest.TestCase):
+    """16 §8.7. Pinned on mechanism, per the SQ-575 tripwire's lesson."""
+
+    def test_the_response_shipped_and_is_no_longer_only_a_promise(self) -> None:
+        f = sp.check_starvation_response_shape(REPO_ROOT)
+        self.assertTrue(f["section_present"])
+        self.assertTrue(f["implemented"])
+        self.assertFalse(f["still_only_a_governance_promise"])
+
+    def test_the_two_halves_combine_by_max_not_by_a_product(self) -> None:
+        """A product reaches svc.price_cap^2, so `M <= cap` would stop holding
+        by construction and would need a second row to bound."""
+        self.assertTrue(sp.check_starvation_response_shape(REPO_ROOT)["combines_by_max"])
+
+    def test_starvation_is_never_ratcheted_into_the_stored_price(self) -> None:
+        """Storing it would decay a transient starvation out over svc.max_window
+        — a price outliving the condition that set it."""
+        f = sp.check_starvation_response_shape(REPO_ROOT)
+        self.assertTrue(f["starvation_never_stored"])
+
+    def test_no_second_ceiling_key_was_added(self) -> None:
+        """R-2 step 1: a new key whose job an existing key already does is a
+        defect. One adopted row must keep arming both halves of M."""
+        f = sp.check_starvation_response_shape(REPO_ROOT)
+        self.assertEqual(f["extra_ceiling_keys"], [])
+        self.assertTrue(f["shares_one_ceiling"])
+
+
 class ThreatRowTests(unittest.TestCase):
     def test_th72_cost_cell_carries_no_figure(self) -> None:
         finding = sp.check_th72_attack_cost_is_unpriced(REPO_ROOT)

@@ -2915,6 +2915,77 @@ impl pallet_question_service::DecisionWindowGuard for RuntimeServiceDecisionWind
     }
 }
 
+/// 16 §8.7: how starved Bleavit's own decision books are, right now.
+///
+/// Reads `1 - min(realized/floor)` over the live decision pairs, where
+/// `realized` is the 04 §7a contest-capital integral divided by the blocks
+/// **actually integrated** rather than by the full window width — dividing a
+/// partial integral by the full width would report every young window as
+/// starved and fire the latch at the start of every epoch.
+///
+/// Bounded by the same live-proposal set `collides` already scans, so the added
+/// cost is that scan's two book reads per proposal and nothing unbounded.
+pub struct RuntimeServiceContestHealth;
+impl pallet_question_service::ContestHealthProbe for RuntimeServiceContestHealth {
+    fn starvation_1e9() -> FixedU64 {
+        let one = futarchy_primitives::kernel::SCORE_SCALE;
+        let v_min: [Balance; 5] = [
+            balance_param(b"dec.v_min.param"),
+            balance_param(b"dec.v_min.trs"),
+            balance_param(b"dec.v_min.code"),
+            balance_param(b"dec.v_min.meta"),
+            0,
+        ];
+        let mut weakest: Option<u64> = None;
+        for proposal in pallet_epoch::Proposals::<Runtime>::iter_values() {
+            let Some(markets) = proposal.markets else {
+                continue;
+            };
+            let floor = effective_decision_contest_floor(&proposal, &v_min);
+            if floor == 0 {
+                // No floor means no decision-grade contest requirement, so this
+                // book cannot be starved relative to one.
+                continue;
+            }
+            for market in [markets.accept, markets.reject] {
+                let Some(ratio) = contest_ratio_1e9(market, proposal.decide_at, floor) else {
+                    continue;
+                };
+                weakest = Some(weakest.map_or(ratio, |current| current.min(ratio)));
+            }
+        }
+        // No measurable book -> no evidence of starvation. Not a fallback: with
+        // no live decision book the service is not competing with one.
+        FixedU64(one.saturating_sub(weakest.unwrap_or(one)))
+    }
+}
+
+/// `min(1, realized_contest / floor)` on the `SCORE_SCALE` grid for one book,
+/// or `None` when the book has no valid, non-empty accrual to read.
+fn contest_ratio_1e9(
+    market: futarchy_primitives::MarketId,
+    decide_at: BlockNumber,
+    floor: Balance,
+) -> Option<u64> {
+    let one = futarchy_primitives::kernel::SCORE_SCALE;
+    let window = pallet_market::DecisionWindows::<Runtime>::get(market)
+        .into_iter()
+        .find(|record| record.end == decide_at)?;
+    if !window.contest_valid {
+        // An overflowed accumulator never grades, so it may not price either.
+        return None;
+    }
+    let accrued = window.contest_accrued_until.checked_sub(window.start)?;
+    if accrued == 0 {
+        return None;
+    }
+    let realized = window
+        .contest_capital_blocks
+        .checked_div(u128::from(accrued))?;
+    let ratio = realized.checked_mul(u128::from(one))?.checked_div(floor)?;
+    Some(u64::try_from(ratio).unwrap_or(one).min(one))
+}
+
 pub struct RuntimeServiceTvlCap;
 impl pallet_question_service::TvlCapGate<AccountId> for RuntimeServiceTvlCap {
     fn escrow_admissible(funder: &AccountId, amount: Balance) -> bool {
@@ -3921,11 +3992,15 @@ fn scaled_decision_delta(
 ///
 /// The `2P` doubling saturates: it can only raise the floor, never wrap it
 /// down into a permissive value.
+/// Takes `v_min` rather than the whole `CoreEpochParams` so the 16 §8.7
+/// starvation probe can call it after four parameter reads instead of the ~30
+/// that materializing a full `CoreEpochParams` costs. One definition, so the
+/// probe's floor and the grading path's floor cannot diverge.
 pub(crate) fn effective_decision_contest_floor(
     proposal: &futarchy_primitives::Proposal<AccountId>,
-    params: &pallet_epoch::CoreEpochParams,
+    v_min: &[Balance; 5],
 ) -> Balance {
-    let base = params.v_min[proposal_class_index(proposal.class)];
+    let base = v_min[proposal_class_index(proposal.class)];
     match <RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<AccountId>>::in_cap_prize(
         proposal,
     ) {
@@ -3948,7 +4023,7 @@ fn contest_floor_for_grade(
                 .then_some(())
                 .and_then(|()| pallet_epoch::Proposals::<Runtime>::get(proposal))
                 .filter(|proposal| proposal.class == class && proposal.decide_at == end)
-                .map(|proposal| effective_decision_contest_floor(&proposal, params))
+                .map(|proposal| effective_decision_contest_floor(&proposal, &params.v_min))
         }
         pallet_market::core_market::BookKind::Gate { proposal, .. } => {
             matches!(role, pallet_epoch::BookRole::Gate)
@@ -3971,7 +4046,7 @@ fn contest_floor_for_grade(
                             .markets
                             .is_some_and(|markets| markets.baseline == market)
                 })
-                .map(|proposal| effective_decision_contest_floor(&proposal, params))
+                .map(|proposal| effective_decision_contest_floor(&proposal, &params.v_min))
                 .max()
         }
         pallet_market::core_market::BookKind::External { .. } => None,
@@ -8889,6 +8964,7 @@ impl pallet_question_service::Config for Runtime {
     type ServiceParams = RuntimeServiceParams;
     type ExternalMarketOrigin = RuntimeExternalMarketOrigin;
     type DecisionWindows = RuntimeServiceDecisionWindows;
+    type ContestHealth = RuntimeServiceContestHealth;
     type TvlCapGate = RuntimeServiceTvlCap;
     type InflowCapExemptAccounts = InflowCapProtocolAccounts;
     type AccountIdBytes = RuntimeAccountIdBytes;
@@ -11450,6 +11526,36 @@ impl pallet_question_service::BenchmarkHelper<RuntimeOrigin, AccountId> for Runt
                 kernel_bounded: false,
             },
         );
+        // `svc.price_cap` ships `[VERIFY]`-unset, and its consumers SHORT-CIRCUIT
+        // when it is absent: `starvation_multiplier` returns before it ever
+        // calls the 16 §8.7 probe. Benchmarking the unset state would therefore
+        // measure the inert path and declare a `register` weight that omits the
+        // probe's scan over every live decision pair — an under-declaration that
+        // arrives the day the row is adopted, with no code change to notice it.
+        // Seed it, so the measured worst case is the armed one. Same reason
+        // `svc.fee_bps` is seeded above.
+        let key = pallet_constitution::key16(b"svc.price_cap");
+        pallet_constitution::Params::<Runtime>::insert(
+            key,
+            pallet_constitution::ParamRecord {
+                key,
+                value: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(
+                    kernel::SCORE_SCALE.saturating_mul(4),
+                )),
+                min: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(
+                    kernel::SCORE_SCALE,
+                )),
+                max: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(
+                    kernel::SCORE_SCALE.saturating_mul(64),
+                )),
+                max_delta: None,
+                cooldown_epochs: 0,
+                last_changed_epoch: 0,
+                last_change_block: 0,
+                class: pallet_constitution::ParamClass::Param,
+                kernel_bounded: false,
+            },
+        );
     }
 
     fn prime_client(client: futarchy_primitives::ClientId, funder: &AccountId) {
@@ -11510,6 +11616,47 @@ impl pallet_question_service::BenchmarkHelper<RuntimeOrigin, AccountId> for Runt
                 futarchy_primitives::ProposalState::Settled,
             );
             proposal.decide_at = BlockNumber::MAX;
+            // DISTINCT decision books per proposal, and a full window vector on
+            // each. `benchmark_epoch_proposal` points every proposal at markets
+            // 1 and 2, so the 16 §8.7 starvation probe would read two keys the
+            // overlay caches and the measured weight would understate the real
+            // scan by a factor of `MAX_LIVE_PROPOSALS`. `decide_at` stays
+            // `BlockNumber::MAX` so `collides` still cannot refuse the
+            // registration under benchmark; the seeded windows carry the same
+            // `end` so the probe's `find` hits rather than reading an empty vec.
+            let accept = u64::from(pid).saturating_mul(2).saturating_add(600_000);
+            let reject = accept.saturating_add(1);
+            if let Some(markets) = proposal.markets.as_mut() {
+                markets.accept = accept;
+                markets.reject = reject;
+            }
+            for market in [accept, reject] {
+                pallet_market::DecisionWindows::<Runtime>::insert(
+                    market,
+                    frame_support::BoundedVec::truncate_from(
+                        (0..8)
+                            .map(|slot: u32| pallet_market::core_market::TwapWindow {
+                                start: 0,
+                                trailing_start: 0,
+                                // The matching record last, so the scan walks
+                                // the whole bounded vector before it hits.
+                                end: if slot == 7 {
+                                    BlockNumber::MAX
+                                } else {
+                                    slot.saturating_add(1)
+                                },
+                                observations: u32::MAX,
+                                stale_events: u8::MAX,
+                                contest_capital_blocks: u128::MAX,
+                                contest_accrued_until: BlockNumber::MAX,
+                                contest_valid: true,
+                                close_spot: Some(futarchy_primitives::FixedU64(u64::MAX)),
+                                sealed: true,
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                );
+            }
             pallet_epoch::Proposals::<Runtime>::insert(u64::from(pid), proposal);
         }
         for index in 0..bounds::MAX_EXTERNAL_BOOK_PAIRS.saturating_sub(1) {

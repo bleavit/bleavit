@@ -74,6 +74,22 @@ pub trait DecisionWindowGuard {
     fn collides(start: BlockNumber, end: BlockNumber) -> bool;
 }
 
+/// 16 §8.7: how starved Bleavit's *own* decision books currently are.
+///
+/// Read-only, and deliberately a probe rather than a notification: nothing in
+/// `pallet-market`'s seal path calls into the service, so Bleavit's critical
+/// path gains no dependency on the hosted domain.
+pub trait ContestHealthProbe {
+    /// `0` = every measurable decision book is at or above its decision-grade
+    /// contest floor; `SCORE_SCALE` = the weakest one has no contest capital at
+    /// all. Values above `SCORE_SCALE` are clamped by the consumer.
+    ///
+    /// Returns `0` when no book is measurable. That is a statement about the
+    /// present, not a fallback: with no live Bleavit decision book, the hosted
+    /// service is not competing with one.
+    fn starvation_1e9() -> FixedU64;
+}
+
 /// Conservative global TVL reservation preflight for new service escrow.
 pub trait TvlCapGate<AccountId> {
     fn escrow_admissible(funder: &AccountId, amount: Balance) -> bool;
@@ -154,6 +170,8 @@ pub mod pallet {
         type ServiceParams: ServiceParamsProvider;
         type ExternalMarketOrigin: ExternalMarketOrigin<Self::RuntimeOrigin>;
         type DecisionWindows: DecisionWindowGuard;
+        /// 16 §8.7 starvation probe over Bleavit's own decision books.
+        type ContestHealth: ContestHealthProbe;
         type TvlCapGate: TvlCapGate<Self::AccountId>;
         /// Independent 03 §1a inflow-meter exemption predicate. Neither
         /// ledger's local account predicate may stand in for this one.
@@ -700,7 +718,54 @@ pub mod pallet {
             Reports::<T>::get(question_id)
         }
 
-        /// 16 §8.6: the scarcity multiplier as of now, on the `SCORE_SCALE` grid.
+        /// The 16 §8.6/§8.7 price multiplier `M` charged on the next admission.
+        ///
+        /// `M = min(cap, max(contention, starvation))`. `max` rather than a
+        /// product so one ceiling governs both terms and `M <= cap` holds by
+        /// construction — a product would reach `cap^2` and would need a second
+        /// registry row to say what that means.
+        pub fn scarcity_multiplier() -> FixedU64 {
+            let contention = Self::contention_multiplier();
+            let starvation = Self::starvation_multiplier();
+            FixedU64(contention.0.max(starvation.0))
+        }
+
+        /// 16 §8.7: the starvation half of `M`, read live and never stored.
+        ///
+        /// Storing it would bake a transient starvation into §8.6's slowly
+        /// decaying term — hysteresis outliving the condition that justified
+        /// it. Returns `SCORE_SCALE` (no effect) when the ceiling is unset or
+        /// when no Bleavit decision book is currently measurable, which is a
+        /// true statement about the present rather than a fallback: with no
+        /// live decision book the hosted service is not competing with one.
+        pub fn starvation_multiplier() -> FixedU64 {
+            let one = FixedU64(kernel::SCORE_SCALE);
+            let Some(cap) = T::ServiceParams::price_cap() else {
+                return one;
+            };
+            if cap.0 <= one.0 {
+                return one;
+            }
+            let starvation = T::ContestHealth::starvation_1e9().0.min(one.0);
+            if starvation == 0 {
+                return one;
+            }
+            // one + starvation * (cap - 1), on the SCORE_SCALE grid. Rounds
+            // DOWN: this is a charge on a client, and R-7 puts the residue with
+            // the party that did not choose the reading.
+            let span = u128::from(cap.0.saturating_sub(one.0));
+            let lift = span
+                .saturating_mul(u128::from(starvation))
+                .checked_div(u128::from(kernel::SCORE_SCALE))
+                .unwrap_or(0);
+            FixedU64(
+                one.0
+                    .saturating_add(lift.try_into().unwrap_or(u64::MAX))
+                    .min(cap.0),
+            )
+        }
+
+        /// 16 §8.6: the contention half of `M`, as of now.
         ///
         /// Linear decay toward 1 over `svc.max_window`, so a price cannot
         /// outlive the demand that set it. Linear rather than exponential
@@ -710,7 +775,7 @@ pub mod pallet {
         ///
         /// Returns exactly `SCORE_SCALE` (M = 1) when the ceiling row is unset,
         /// when nothing has been raised, or once a full window has elapsed.
-        pub fn scarcity_multiplier() -> FixedU64 {
+        pub fn contention_multiplier() -> FixedU64 {
             let one = FixedU64(kernel::SCORE_SCALE);
             if T::ServiceParams::price_cap().is_none() {
                 return one;
@@ -747,11 +812,17 @@ pub mod pallet {
             Self::raise_scarcity();
         }
 
-        /// Raise the multiplier by one admission's worth, capped.
+        /// Raise the contention multiplier by one admission's worth, capped.
         ///
         /// The step is additive — `(cap - 1) / max_live` — so taking every slot
         /// at once arrives exactly at the ceiling and never past it, in exact
         /// integer arithmetic.
+        ///
+        /// Reads `contention_multiplier`, **not** `scarcity_multiplier`: the
+        /// starvation half is a live reading of Bleavit's own books, and
+        /// ratcheting it into the stored term would leave a transient
+        /// starvation decaying slowly out of the price long after the books
+        /// recovered. Admission demand raises this term; nothing else does.
         fn raise_scarcity() {
             let Some(cap) = T::ServiceParams::price_cap() else {
                 return;
@@ -765,7 +836,7 @@ pub mod pallet {
                 return;
             }
             let step = cap.0.saturating_sub(one) / u64::from(max_live);
-            let current = Self::scarcity_multiplier().0;
+            let current = Self::contention_multiplier().0;
             let raised = current.saturating_add(step).min(cap.0);
             ScarcityMultiplier::<T>::put((FixedU64(raised), Self::now()));
         }

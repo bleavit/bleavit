@@ -75,6 +75,7 @@ __all__ = [
     "check_fee_is_flat_in_depth",
     "check_no_valid_denial_benchmark",
     "check_arming_condition_enforcement",
+    "check_starvation_response_shape",
     "check_th72_attack_cost_is_unpriced",
 ]
 
@@ -321,6 +322,62 @@ def check_arming_condition_enforcement(repo_root: Path) -> dict[str, object]:
             "does not blink between decision windows; the instantaneous "
             "LivePolCommitments sum cannot be it"
         ),
+    }
+
+
+def check_starvation_response_shape(repo_root: Path) -> dict[str, object]:
+    """16 §8.7's response shape, checked against the code rather than the prose.
+
+    Three properties, each guarding a change that would otherwise be silent
+    because it reads as a refinement:
+
+    - **graduated, not binary.** A cliff is the failure mode N15 exists to
+      avoid: operators race to register before a threshold trips. Detected as
+      the absence of a comparison against a starvation *threshold* and the
+      presence of the proportional lift.
+    - **`max`, not a product.** A product of the two halves reaches
+      `svc.price_cap²`, so `M ≤ cap` would stop holding by construction and
+      would need a second registry row to bound. Detected on the combinator.
+    - **one ceiling, not two.** The whole point of reusing `svc.price_cap` is
+      that a single adopted row arms both halves. A `svc.*` key carrying a
+      second starvation ceiling would be R-2 step 1's "a new key whose job an
+      existing key already does".
+
+    Follows the [SQ-575] tripwire's lesson: match on **mechanism**, never on
+    prose that a documentation-only edit could satisfy.
+    """
+    pallet = (repo_root / "pallets/question-service/src/lib.rs").read_text(
+        encoding="utf-8"
+    )
+    doc = (repo_root / "docs/architecture/16-hosted-question-service.md").read_text(
+        encoding="utf-8"
+    )
+    registry = (repo_root / "tools/limit-coverage/registry.toml").read_text(
+        encoding="utf-8"
+    )
+    implemented = (
+        "starvation_multiplier" in pallet and "ContestHealthProbe" in pallet
+    )
+    # The combined read takes the larger half; a product would multiply them.
+    combines_by_max = "contention.0.max(starvation.0)" in pallet
+    # The stored term must be ratcheted from the contention half alone, or a
+    # transient starvation persists as a slowly decaying price.
+    starvation_not_stored = "Self::contention_multiplier().0;" in pallet
+    starvation_ceilings = [
+        line
+        for line in registry.splitlines()
+        if line.strip().startswith("key = ")
+        and "svc." in line
+        and ("starv" in line or "latch" in line)
+    ]
+    return {
+        "section_present": "8.7 Starvation raises the same price" in doc,
+        "implemented": implemented,
+        "combines_by_max": combines_by_max,
+        "starvation_never_stored": starvation_not_stored,
+        "extra_ceiling_keys": starvation_ceilings,
+        "shares_one_ceiling": not starvation_ceilings,
+        "still_only_a_governance_promise": not implemented,
     }
 
 
