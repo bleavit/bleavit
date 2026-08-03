@@ -2,7 +2,7 @@
   "assumptions": {
     "a2_arbitrage": "A-2 corrective capacity is L/2 per day at elasticity 1; it is empirical and phase-revalidated.",
     "baseline_contest_floor": "The 250,000-USDC Baseline contest floor is the TREASURY-tier dec.v_min.trs mandated by 05 \u00a75.2 (SQ-232 resolution 2026-07-18).",
-    "competing_venue": "Phase 0 runs at zero competing-venue diversion, which is the chain state Phase 0 describes: the hosted question service (doc 16, D-20) arms in Phase 4. The `competing_venue` block is a Phase-4 arming input measured on a stratified sample against its own 0 % control, never a Phase-0 gate, and its verdict never enters `violations`. Its upper rung is derived from 16 \u00a78.4's own arming condition rather than chosen: `\u03a3 b_ext <= \u03a3 pol.b(live)` caps proportional diversion at one half.",
+    "competing_venue": "Phase 0 runs at zero competing-venue diversion, which is the chain state Phase 0 describes: the hosted question service (doc 16, D-20) arms in Phase 4. The `competing_venue` block is a Phase-4 arming input measured on whole epoch slates against its own 0 % control at the same probe flow cap as the primary run, never a Phase-0 gate, and its verdict never enters `violations`. Its arming rung is ANCHORED, not derived: 16 \u00a78.4's `\u03a3 b_ext <= \u03a3 pol.b(live)` bounds external DEPTH at parity, and one half follows only under proportional-to-depth allocation -- a behavioural assumption, not a protocol guarantee. That assumption's error direction is unsafe (an equally deep venue with better fees or returns can take more), which is why the ladder carries a rung ABOVE the anchor and the block publishes `stress_by_class` beside `arming_by_class`. See `competing_venue.flow_model`.",
     "contest_measure": "Per the SQ-231 amendment (04 \u00a77a; 05 \u00a75.2/\u00a75.4/\u00a75.6; 08 \u00a75.2-\u00a75.4), step-5 grading and the step-9 certificate consume time-averaged marked net open interest (contest capital) with the sec.flow_cap ceiling; gross traded notional is recorded as flow telemetry only. Organic formation is modeled as directional informed exposure plus balanced maker-bought pair holdings topped up to the stratum target - balanced pairs are settlement-riskless but lock capital for the window and count per the 04 \u00a77a definition.",
     "coverage_leg": "Scheduled observations provide an always-clean coverage leg in Phase-0 synthetic runs.",
     "envelope_validation": "05 \u00a75.6/08 \u00a75.5 applies only to causal, PROFITABLE wrong-PASS displacement flips (realized cost < prize); observed loss non-monotonicity is reported fail-closed as inconclusive rather than inferred from endpoints.",
@@ -4650,7 +4650,7 @@
       "param": "0.003",
       "treasury": "0.005"
     },
-    "source_model_sha256": "6ac8d52c3fb666bbc71bcea7f2d7939bad1bd82a4e736f351f42e635189670ee",
+    "source_model_sha256": "5ab64510ab5d06884fecc1435edc984e751a7acf0aa34aa60b6855dd304d58b2",
     "subsample_size": 24,
     "thin_market_flow_multiplier": "0.72",
     "threshold_max_budget_multiple": "3.00",
@@ -4665,7 +4665,7 @@
       "treasury": "250000"
     }
   },
-  "config_digest": "04469f4d0d8379b1b8c1558d6510400ceb9d92653b4e9dc17702e48671f1c5a4",
+  "config_digest": "a1801d6f9e90c87168e870262d8d34a53584508703657a5874e01b934ec60b2b",
   "gate_veto_counts": {
     "GateVetoSecurity": 782,
     "GateVetoSurvival": 2742
