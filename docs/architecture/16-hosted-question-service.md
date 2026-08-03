@@ -1299,7 +1299,18 @@ owns the regime.
   ledger work, the signed `TransactionExtension`, the XCM dispatcher, varied proof sizes and both
   successful and failed/refunded reservations. Assert every welfare snapshot and every `decide()`
   input is **byte-identical**. This is the test that makes §1's boundary rule falsifiable, and
-  §8.5's `H` partition is the reason it can pass at all.
+  §8.5's `H` partition is the reason it can pass at all. **Implemented as
+  `pt10_external_outcome_containment`.** The interleaving is *generated* over the service alphabet
+  at every schedulable point of every block, rather than replayed from fixed patterns — while it
+  was fixed patterns over a single call shape the test was deliberately named
+  `..._containment_sample`, because [15](./15-invariants-and-testing.md) §4.3 states that a test
+  claiming the unscoped property MUST NOT be named PT-10. Two knobs follow from it being a runtime
+  **replay** property rather than a proptest over a frame-free core: it does not read
+  `PROPTEST_CASES` (each case is two full multi-block replays, so a ≥10⁶ count is not reachable),
+  and it carries its own `BLEAVIT_PT10_CASES`, small in `cargo test --workspace` and deep in the
+  `containment` shard of the property-suites gate — the same reduced/deep split PT-1…PT-8 use. A
+  companion assertion requires the swept seeds to reach every letter of the alphabet, so narrowing
+  the generator cannot silently narrow the property.
 - **Negative origins:** every registry and service call × {Signed, Root, None, all eight governance
   origins, `ExternalClient`}; and under `Transact`, all of `system.set_storage`, `system.set_code`,
   `pallet_xcm.send`, `Balances.transfer`, `sudo.sudo`, `Utility.batch`, `Proxy.proxy` rejected.

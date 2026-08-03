@@ -49,19 +49,37 @@ run_welfare() {
   cargo test --locked -p welfare-core --release --test property
 }
 
+# PT-10 is a runtime REPLAY property, not a proptest over a frame-free core, so
+# it does not read PROPTEST_CASES: each case is two full 22-block runtime
+# replays and a millionth of that is not reachable. `BLEAVIT_PT10_CASES` is its
+# own knob, and the default here is the deep sweep -- `cargo test --workspace`
+# runs the same property at its own small default, exactly the reduced/deep
+# split the PT-1..PT-8 suites use.
+run_containment() {
+  local cases="${BLEAVIT_PT10_CASES:-192}"
+  if [[ ! "${cases}" =~ ^[0-9]+$ ]] || [[ "${cases}" -lt 64 ]]; then
+    echo "property-suites: BLEAVIT_PT10_CASES must be numeric and >= 64 (got '${cases}')" >&2
+    exit 2
+  fi
+  echo "property-suites: PT-10 external-outcome containment (BLEAVIT_PT10_CASES=${cases})"
+  BLEAVIT_PT10_CASES="${cases}" cargo test --locked -p bleavit-runtime --release --lib pt10
+}
+
 case "${suite}" in
   ledger) run_ledger ;;
   market) run_market ;;
   constitution) run_constitution ;;
   welfare) run_welfare ;;
+  containment) run_containment ;;
   all)
     run_ledger
     run_market
     run_constitution
     run_welfare
+    run_containment
     ;;
   *)
-    echo "property-suites: unknown shard '${suite}' (expected ledger|market|constitution|welfare, or no argument for all)" >&2
+    echo "property-suites: unknown shard '${suite}' (expected ledger|market|constitution|welfare|containment, or no argument for all)" >&2
     exit 2
     ;;
 esac
