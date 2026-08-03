@@ -17925,6 +17925,36 @@ fn view_positions_bound_is_per_instance_not_shared() {
     });
 }
 
+/// 02 §9 (contract v23): the client is required to *show* a row's ledger domain
+/// and forbidden a chain literal, so the boundary it tests against must be
+/// metadata-readable. This asserts the three properties the frontend rule set
+/// actually leans on — that the constant exists, that it is exactly the kernel
+/// value, and that both instances publish the *same* number.
+///
+/// The last one is the one worth a test rather than a comment: two instances of
+/// one pallet each get their own metadata constants section, so "one boundary"
+/// is a property of how the pallet computes it, not something the type system
+/// guarantees. If a later change ever made this per-instance, ids in the seam
+/// between the two values would be claimed by both domains or neither.
+#[test]
+fn service_id_base_is_metadata_readable_and_identical_across_instances() {
+    use frame_support::instances::Instance1;
+    use futarchy_primitives::kernel::SERVICE_ID_BASE;
+
+    development_ext().execute_with(|| {
+        let primary = pallet_conditional_ledger::Pallet::<Runtime>::service_id_base();
+        let service = pallet_conditional_ledger::Pallet::<Runtime, Instance1>::service_id_base();
+
+        assert_eq!(primary, SERVICE_ID_BASE);
+        assert_eq!(primary, 1_u64 << 63);
+        assert_eq!(
+            primary, service,
+            "the id band partitions one shared id space; a per-instance boundary \
+             would leave ids between the two values claimed by both domains or neither",
+        );
+    });
+}
+
 #[test]
 fn view_account_positions_includes_baseline_instruments_and_terminal_state() {
     use futarchy_primitives::{FixedU64, ScalarSide, VaultState};

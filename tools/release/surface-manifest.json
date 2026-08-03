@@ -1105,6 +1105,18 @@
       }
     },
     {
+      "id": "constant.ledger.service_id_base",
+      "kind": "constant",
+      "pallet": "ConditionalLedger",
+      "constant": "ServiceIdBase",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u64",
+        "value": "0x0000000000000080"
+      }
+    },
+    {
       "id": "constant.registry.archive_delay.incident",
       "kind": "constant",
       "pallet": "IncidentRegistry",

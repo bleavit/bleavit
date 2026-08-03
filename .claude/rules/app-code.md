@@ -61,13 +61,19 @@ Practical consequences:
    generated from `tools/release/surface-manifest.json`, never hand-listed.
 8. **Two ledger domains, never merged (11 §11.2a, 10 §11 — contract v23).** The client serves
    external/hosted books as ordinary S3/S4 surfaces. Domain is a property of the **datum**, derived
-   from `SERVICE_ID_BASE = 1 << 63` on an id you already hold — never from the call site, the cache
-   key, or a name. **No selector, store slice or component may produce a cross-domain total**:
+   by comparing an id you already hold against the **`ConditionalLedger::ServiceIdBase` metadata
+   constant** — never from the call site, the cache key, or a name, and never from the literal
+   `1n << 63n`, which rule 7 forbids and which is why 02 §9 gives the boundary a metadata home at
+   all. **No selector, store slice or component may produce a cross-domain total**:
    solvency (I-4) holds per instance against its own sovereign account, so a merged figure asserts a
    backing pool that does not exist. `account_positions()` ↔ instance `()`, `service_positions()` ↔
    `ServiceLedger`; the FE-P2 conservative cross-check runs against that domain's own prefix, never
-   the other's. External activity renders as an operational diagnostic, never as governance
-   participation or protocol health.
+   the other's. **Writes route the same way**: the two ledgers are two pallets, so a service-domain
+   split/merge/transfer/redeem is built against `ServiceLedger.*` and a primary one against
+   `ledger.*`. Only `market.buy/sell` are domain-agnostic (the market pallet routes internally).
+   Never give a transaction builder a default instance — and do not offer the gate or `*_baseline`
+   calls on a hosted position, which has neither leg. External activity renders as an operational
+   diagnostic, never as governance participation or protocol health.
 9. **Local storage is disposable (INV-FE-7).** The transaction path never reads
    IndexedDB; rebuilds are automatic; treat eviction as a performance event.
 10. **Fail safe (INV-FE-12).** Unknown runtime ⇒ explicit `restricted`/`read-only-

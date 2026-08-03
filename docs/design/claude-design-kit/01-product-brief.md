@@ -86,12 +86,15 @@ The **canonical client is itself decentralized** (10, 11, 12):
 All the human personas are served by the one canonical app specified in 11 §11.2. The external
 *client* remains an integration persona with no screen — it talks to Bleavit over XCM — but a
 **human trading that client's book is an ordinary trader** and uses the ordinary screens (11 §11.2a,
-contract v23). Four rules govern how those books render, and the design must carry all four: domain
+contract v23). Five rules govern how those books render, and the design must carry all of them: domain
 is always visible (a single bit test on the id, never inferred from a name); **the two ledger domains
 never share a total**, because solvency is guaranteed per domain and one merged figure would assert a
 backing pool that does not exist; external activity is an operational diagnostic and is **never**
-drawn as governance participation or protocol health; and the trading and redemption rituals do not
-relax. That is a genuine visual-design problem — two co-equal domains, one of which must never be
+drawn as governance participation or protocol health; the trading and redemption rituals do not
+relax; and a write is addressed to the ledger instance that owns the row, with a hosted position
+offering a **smaller** action set than a governance one (no gate or Baseline legs exist there) — so
+the same screen shows two action sets, and which one is live is itself a piece of information the
+design has to convey. That is a genuine visual-design problem — two co-equal domains, one of which must never be
 allowed to look like the other — and it is design territory, not a solved question. Operator surfaces (S14–S19) live under an explicit **"Advanced"** area: same trust rules,
 denser information, no simplified summaries (11 §11.2).
 
