@@ -321,7 +321,13 @@ pub mod pallet {
     #[pallet::storage]
     pub type LiveExternalDepth<T: Config> = StorageValue<_, Balance, ValueQuery>;
 
-    /// 16 §8.6 scarcity state: `(multiplier, block it was last raised)`.
+    /// 16 §8.6 scarcity state: `(multiplier, block last raised, decay window)`.
+    ///
+    /// The window is stored rather than re-read because `svc.max_window` is
+    /// amendable: decaying against the live row would let one amendment expire
+    /// every outstanding price at once, and §8.6 says the price moves down only
+    /// gradually. Each stored price decays on the schedule that was in force
+    /// when it was set.
     ///
     /// `None` means the multiplier is at its floor of 1 — the flat tariff — so
     /// the common case costs one read and no arithmetic. Decay is applied
@@ -329,7 +335,8 @@ pub mod pallet {
     /// between registrations, and a hook would spend block weight every block
     /// to maintain a number only `register` consumes.
     #[pallet::storage]
-    pub type ScarcityMultiplier<T: Config> = StorageValue<_, (FixedU64, BlockNumber), OptionQuery>;
+    pub type ScarcityMultiplier<T: Config> =
+        StorageValue<_, (FixedU64, BlockNumber, BlockNumber), OptionQuery>;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -751,12 +758,16 @@ pub mod pallet {
                 return one;
             }
             // one + starvation * (cap - 1), on the SCORE_SCALE grid. Rounds
-            // DOWN: this is a charge on a client, and R-7 puts the residue with
-            // the party that did not choose the reading.
+            // UP, matching the fee path in `do_register`: R-7 puts the residue
+            // against the party relying on the charge being small, and having
+            // one step of the same expression round down while the next rounds
+            // up let the composite land one base unit under the exact charge.
             let span = u128::from(cap.0.saturating_sub(one.0));
+            let grid = u128::from(kernel::SCORE_SCALE);
             let lift = span
                 .saturating_mul(u128::from(starvation))
-                .checked_div(u128::from(kernel::SCORE_SCALE))
+                .saturating_add(grid.saturating_sub(1))
+                .checked_div(grid)
                 .unwrap_or(0);
             FixedU64(
                 one.0
@@ -775,18 +786,34 @@ pub mod pallet {
         ///
         /// Returns exactly `SCORE_SCALE` (M = 1) when the ceiling row is unset,
         /// when nothing has been raised, or once a full window has elapsed.
+        ///
+        /// The stored value is **clamped against the LIVE ceiling on every
+        /// read**, not only when it is written. `svc.price_cap` is amendable
+        /// (13 §1, ×2 max-Δ), and without this clamp a governance amendment
+        /// that lowers the ceiling would leave an already-stored price above
+        /// it — `M > svc.price_cap`, which 16 §8.6 states can never happen —
+        /// until the next admission happened to rewrite the value. It also
+        /// removed a price *drop* on rising demand: the first arrival after
+        /// such an amendment paid the stale higher price and the raise then
+        /// clamped, so the second arrival paid less than the first.
+        ///
+        /// Decay runs against the window **in force when the price was set**,
+        /// carried in storage beside it. Reading the live `svc.max_window`
+        /// instead let an amendment lowering that row expire every outstanding
+        /// price at once, which contradicts this section's own "down only
+        /// gradually" — a governance action is not a decay.
         pub fn contention_multiplier() -> FixedU64 {
             let one = FixedU64(kernel::SCORE_SCALE);
-            if T::ServiceParams::price_cap().is_none() {
-                return one;
-            }
-            let Some((raised_to, raised_at)) = ScarcityMultiplier::<T>::get() else {
+            let Some(cap) = T::ServiceParams::price_cap() else {
                 return one;
             };
-            if raised_to.0 <= one.0 {
+            let Some((raised_to, raised_at, window)) = ScarcityMultiplier::<T>::get() else {
+                return one;
+            };
+            let raised_to = raised_to.0.min(cap.0);
+            if raised_to <= one.0 {
                 return one;
             }
-            let window = T::ServiceParams::max_window();
             if window == 0 {
                 return one;
             }
@@ -796,7 +823,7 @@ pub mod pallet {
             }
             // excess * (window - elapsed) / window, in u128 so the product of a
             // 1e9-grid excess and a block count cannot overflow.
-            let excess = u128::from(raised_to.0.saturating_sub(one.0));
+            let excess = u128::from(raised_to.saturating_sub(one.0));
             let remaining = u128::from(window.saturating_sub(elapsed));
             let decayed = excess
                 .saturating_mul(remaining)
@@ -815,8 +842,16 @@ pub mod pallet {
         /// Raise the contention multiplier by one admission's worth, capped.
         ///
         /// The step is additive — `(cap - 1) / max_live` — so taking every slot
-        /// at once arrives exactly at the ceiling and never past it, in exact
-        /// integer arithmetic.
+        /// at once reaches the ceiling **up to integer division's remainder**
+        /// and can never exceed it. It lands *exactly* on the ceiling only when
+        /// `max_live` divides `cap - 1`; otherwise it stops short by less than
+        /// `max_live` grid units, which is the price of exact integer
+        /// arithmetic and is the safe direction (short, never over).
+        ///
+        /// A ceiling barely above 1 truncates the step to **zero** and the
+        /// mechanism does nothing. That is the intended reading of such a
+        /// ceiling, not a failure: `svc.price_cap = 1` means "off" (13 §1 min),
+        /// and a value one grid unit above it means very nearly off.
         ///
         /// Reads `contention_multiplier`, **not** `scarcity_multiplier`: the
         /// starvation half is a live reading of Bleavit's own books, and
@@ -835,10 +870,11 @@ pub mod pallet {
             if max_live == 0 {
                 return;
             }
+            let window = T::ServiceParams::max_window();
             let step = cap.0.saturating_sub(one) / u64::from(max_live);
             let current = Self::contention_multiplier().0;
             let raised = current.saturating_add(step).min(cap.0);
-            ScarcityMultiplier::<T>::put((FixedU64(raised), Self::now()));
+            ScarcityMultiplier::<T>::put((FixedU64(raised), Self::now(), window));
         }
 
         fn do_register(client: ClientId, input: RegisterInput<T::AccountId>) -> DispatchResult {

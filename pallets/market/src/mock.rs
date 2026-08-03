@@ -163,6 +163,15 @@ impl Contains<AccountId> for Protocol {
 pub struct ServiceProtocol;
 impl Contains<AccountId> for ServiceProtocol {
     fn contains(who: &AccountId) -> bool {
+        // `MAIN` here models the runtime's `ServiceProtocolAccounts`, which
+        // must contain it so 16 §7.4's external fee sweep can pay Bleavit
+        // through 03 §5.5's protocol-only return surface. Until 2026-08-03 the
+        // runtime predicate did NOT, so this mock was more permissive than
+        // production and the external `sweep_revenue` tests below passed
+        // against a path that failed on chain. The runtime side is pinned by
+        // `runtime/.../tests.rs` (`ServiceProtocolAccounts::contains(&main)`);
+        // the two assertions exist as a pair -- this one proves the sweep path
+        // works, that one proves production classifies the account it needs.
         matches!(*who, INSURANCE | MAIN)
             || *who == market_account()
             || *who == service_ledger_account()

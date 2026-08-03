@@ -760,3 +760,81 @@ fn malformed_row_overflow_and_release_row_bound_fail_closed_without_partial_comm
         assert_terminal_evidence_preserved(retired, recovery_hash);
     });
 }
+
+/// 16 §8.4's external arming bound must bind the **terminal recovery lane**,
+/// and the way it binds there cannot be a refusal.
+///
+/// Adversarial review, 2026-08-03 (blocker). The bound first shipped inside
+/// `transition_phase_four`'s `enforce_arming_gate` branch, which exists so
+/// recovery can skip the *treasury* floor -- a chain wedged under
+/// `OnlyInherents` cannot dispatch anything that would fund the treasury, so
+/// enforcing that floor there bricks it. The external bound inherited the
+/// exemption and recovery armed Phase 4 with external depth dominant: exactly
+/// the state the clause forbids, via the one path nobody watches.
+///
+/// Refusing on the recovery lane would recreate the brick -- under
+/// `OnlyInherents` no call can void a hosted question or seed POL either, so
+/// the bound could never be satisfied. The lane therefore PAUSES the hosted
+/// service: no new question is admitted, live ones drain to their own
+/// deadlines, and the bound is restored by the lifecycle instead of by a vote.
+#[cfg(any(feature = "phase-four", feature = "recovery"))]
+#[test]
+fn terminal_recovery_pauses_the_service_instead_of_arming_past_the_external_bound() {
+    crate::tests::development_ext().execute_with(|| {
+        let plan = pallet_execution_guard::PhaseFourPlan {
+            tvl_cap: u128::MAX,
+            deposit_cap: u128::MAX,
+        };
+        // External depth with no protocol depth behind it: the violating state.
+        pallet_question_service::LiveExternalDepth::<Runtime>::put(2_000u128);
+        assert!(
+            crate::Market::live_pol_commitments().is_empty(),
+            "fixture requires zero protocol commitments"
+        );
+        assert!(pallet_question_service::PausedUntil::<Runtime>::get().is_none());
+
+        // The primary lane refuses, and leaves the service unpaused.
+        assert!(
+            frame_support::storage::with_storage_layer(|| {
+                crate::migrations::transition_phase_four(plan, true)
+            })
+            .is_err(),
+            "the primary arming path must refuse while external depth dominates"
+        );
+        assert!(
+            pallet_question_service::PausedUntil::<Runtime>::get().is_none(),
+            "a refused transition must roll back, pausing nothing"
+        );
+
+        // The recovery lane completes -- and pauses.
+        frame_support::assert_ok!(frame_support::storage::with_storage_layer(|| {
+            crate::migrations::transition_phase_four(plan, false)
+        }));
+        assert!(
+            pallet_question_service::PausedUntil::<Runtime>::get().is_some(),
+            "recovery must pause the hosted service rather than arm past the bound"
+        );
+    });
+}
+
+/// The mirror: when the bound already holds, recovery must NOT pause. A fix
+/// that paused unconditionally would pass the test above while silently
+/// switching the hosted service off on every recovery.
+#[cfg(any(feature = "phase-four", feature = "recovery"))]
+#[test]
+fn terminal_recovery_leaves_the_service_running_when_the_bound_holds() {
+    crate::tests::development_ext().execute_with(|| {
+        let plan = pallet_execution_guard::PhaseFourPlan {
+            tvl_cap: u128::MAX,
+            deposit_cap: u128::MAX,
+        };
+        pallet_question_service::LiveExternalDepth::<Runtime>::put(0u128);
+        frame_support::assert_ok!(frame_support::storage::with_storage_layer(|| {
+            crate::migrations::transition_phase_four(plan, false)
+        }));
+        assert!(
+            pallet_question_service::PausedUntil::<Runtime>::get().is_none(),
+            "recovery must not pause a service that is within its bound"
+        );
+    });
+}

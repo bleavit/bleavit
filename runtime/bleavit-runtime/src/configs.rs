@@ -3705,6 +3705,24 @@ pub struct ServiceProtocolAccounts;
 impl Contains<AccountId> for ServiceProtocolAccounts {
     fn contains(who: &AccountId) -> bool {
         is_service_protocol_account(who)
+            // The treasury `MAIN` account, for the SAME reason the primary
+            // wrapper above carries it, and it was missing here — found by
+            // adversarial review, 2026-08-03. 16 §7.4 makes external trading
+            // and redemption fees accrue to Bleavit `MAIN` as service revenue,
+            // `sweep_revenue` pays that leg through the owning instance's
+            // ledger return surface, and 03 §5.5 `ensure_protocol_return` only
+            // pays protocol custody. Without this the external fee sweep failed
+            // `TryStateViolation` and stranded every hosted book's revenue and
+            // its fee positions with it — the one instrument-A/B path 16 §8.1
+            // calls "no new code" was the path that did not work.
+            //
+            // Same three consequences the primary carve-out wants, and each is
+            // wanted here too: `MAIN` is refused as a Signed transfer
+            // destination in this instance as well, its fee redemptions skip
+            // the 03 §5.3a redemption fee so service revenue does not pay
+            // itself a fee, and it stays out of `is_service_protocol_account`
+            // so `InflowCapProtocolAccounts` is not widened.
+            || *who == crate::genesis::treasury_account()
     }
 }
 

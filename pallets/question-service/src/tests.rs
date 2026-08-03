@@ -557,15 +557,17 @@ fn scarcity_rises_on_admission_and_decays_linearly_to_one() -> TestResult {
 }
 
 #[test]
-fn taking_every_slot_at_once_lands_exactly_on_the_ceiling() -> TestResult {
+fn taking_every_slot_at_once_lands_on_a_divisible_ceiling_exactly() -> TestResult {
     new_test_ext().execute_with(|| -> TestResult {
         let one = kernel::SCORE_SCALE;
         let cap = 3 * one;
         MockPriceCap::set(Some(FixedU64(cap)));
 
-        // The additive step is (cap - 1)/max_live, so max_live admissions in the
-        // same block must arrive AT the ceiling -- never past it, and never
-        // short of it by more than integer division's remainder.
+        // The additive step is (cap - 1)/max_live, so max_live admissions in
+        // the same block land AT the ceiling -- for a span that divides evenly,
+        // which 2e9/16 does. The indivisible case is the separate test above;
+        // this one would pass on a broken implementation that ignored the
+        // remainder, which is exactly why both exist.
         for _ in 0..MaxLive::get() {
             QuestionService::raise_scarcity_for_test();
         }
@@ -591,6 +593,119 @@ fn an_arriving_client_pays_the_price_it_found_not_the_one_it_created() -> TestRe
         assert_eq!(terms.fee, kernel::SVC_FEE_FLOOR_USDC);
         // ...but it did move the price for whoever comes next.
         assert!(QuestionService::scarcity_multiplier().0 > kernel::SCORE_SCALE);
+        Ok(())
+    })
+}
+
+#[test]
+fn lowering_the_ceiling_binds_a_price_that_was_already_stored_above_it() -> TestResult {
+    new_test_ext().execute_with(|| -> TestResult {
+        // Adversarial review finding (2026-08-03, HIGH): `svc.price_cap` is
+        // amendable at ×2, and the stored contention term was only clamped when
+        // WRITTEN. Lower the ceiling and the old price kept being served, so
+        // `M > svc.price_cap` -- which 16 §8.6 says can never happen. It also
+        // produced a price DROP on rising demand: the first arrival after the
+        // amendment paid the stale 4x, the raise then clamped, and the second
+        // arrival paid 2x. Both are fixed by clamping on every read.
+        let one = kernel::SCORE_SCALE;
+        MockPriceCap::set(Some(FixedU64(4 * one)));
+        for _ in 0..MaxLive::get() {
+            QuestionService::raise_scarcity_for_test();
+        }
+        assert_eq!(QuestionService::contention_multiplier().0, 4 * one);
+
+        // Governance halves the ceiling. No admission has happened since.
+        MockPriceCap::set(Some(FixedU64(2 * one)));
+        assert_eq!(
+            QuestionService::contention_multiplier().0,
+            2 * one,
+            "a stored price above the live ceiling must be clamped on READ"
+        );
+        assert_eq!(QuestionService::scarcity_multiplier().0, 2 * one);
+
+        // And the sequence is monotone in demand: the next raise cannot make
+        // the following client pay LESS than this one.
+        QuestionService::raise_scarcity_for_test();
+        assert_eq!(QuestionService::scarcity_multiplier().0, 2 * one);
+        Ok(())
+    })
+}
+
+#[test]
+fn shortening_the_decay_window_does_not_expire_outstanding_prices_at_once() -> TestResult {
+    new_test_ext().execute_with(|| -> TestResult {
+        // Adversarial review finding: decay read the LIVE `svc.max_window`, so
+        // lowering that row below the elapsed time dropped every outstanding
+        // price straight to 1 -- an abrupt fall where 16 §8.6 promises a
+        // gradual one. A governance amendment is not a decay. Each stored price
+        // now decays on the window in force when it was set.
+        let one = kernel::SCORE_SCALE;
+        MockPriceCap::set(Some(FixedU64(3 * one)));
+        let full = MaxWindow::get();
+        let start = System::block_number();
+        QuestionService::raise_scarcity_for_test();
+        let raised = QuestionService::contention_multiplier().0;
+        assert!(raised > one);
+
+        // Two thirds of the ORIGINAL window elapse.
+        System::set_block_number(start + u64::from(full) * 2 / 3);
+        let midway = QuestionService::contention_multiplier().0;
+        assert!(midway > one && midway < raised);
+
+        // Governance halves the window -- now shorter than the elapsed time.
+        MaxWindow::set(full / 2);
+        assert_eq!(
+            QuestionService::contention_multiplier().0,
+            midway,
+            "an amendment to svc.max_window must not expire a live price"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn the_additive_step_stops_short_of_an_indivisible_ceiling_and_never_over() -> TestResult {
+    new_test_ext().execute_with(|| -> TestResult {
+        // Adversarial review finding: the docs claimed full occupancy lands
+        // EXACTLY on the ceiling. With integer division that holds only when
+        // `max_live` divides `cap - 1`. Pin the true property -- short by less
+        // than max_live, never over -- so the weaker claim cannot drift back.
+        let one = kernel::SCORE_SCALE;
+        let max_live = u64::from(MaxLive::get());
+        let cap = 3 * one + 7; // span 2e9+7, indivisible by 16
+        MockPriceCap::set(Some(FixedU64(cap)));
+        for _ in 0..max_live {
+            QuestionService::raise_scarcity_for_test();
+        }
+        let reached = QuestionService::contention_multiplier().0;
+        assert!(reached <= cap, "must never exceed the ceiling");
+        assert!(
+            cap - reached < max_live,
+            "shortfall {} must stay under one grid unit per slot",
+            cap - reached
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn a_ceiling_at_the_floor_is_off_rather_than_a_broken_mechanism() -> TestResult {
+    new_test_ext().execute_with(|| -> TestResult {
+        // A ceiling within `max_live` grid units of 1 truncates the step to
+        // zero, and the proportional starvation lift rounds to nothing. That is
+        // the correct reading of a ceiling that close to the 13 §1 minimum of
+        // 1, which means OFF -- pinned so it reads as intent, not as a bug
+        // someone later "fixes" by rounding a charge up into existence.
+        let one = kernel::SCORE_SCALE;
+        MockPriceCap::set(Some(FixedU64(one + 1)));
+        for _ in 0..MaxLive::get() {
+            QuestionService::raise_scarcity_for_test();
+        }
+        assert_eq!(QuestionService::contention_multiplier().0, one);
+        MockStarvation::set(FixedU64(one / 2));
+        // The starvation lift rounds UP, so it reaches the one-unit ceiling
+        // rather than vanishing -- and is still clamped by it.
+        assert_eq!(QuestionService::scarcity_multiplier().0, one + 1);
         Ok(())
     })
 }

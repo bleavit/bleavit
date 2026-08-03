@@ -1897,11 +1897,26 @@ fn service_instance_predicates_and_i37_freeze_latches_are_directional() {
         let main = crate::genesis::treasury_account();
         let client = account(211);
 
-        for primary in [&primary_sovereign, &primary_book, &main] {
+        // I-37's real content: a primary sovereign or book is never a service
+        // protocol account. MAIN is deliberately NOT in this group -- see below.
+        for primary in [&primary_sovereign, &primary_book] {
             assert!(crate::configs::ProtocolAccounts::contains(primary));
             assert!(!crate::configs::ServiceProtocolAccounts::contains(primary));
             assert!(crate::configs::ReservedProtocolAccounts::contains(primary));
         }
+
+        // MAIN belongs to BOTH instances' local sets, and this assertion used
+        // to read `!ServiceProtocolAccounts::contains(&main)` -- it encoded a
+        // blocker rather than catching it (adversarial review, 2026-08-03).
+        // 16 §7.4 accrues external trading and redemption fees to Bleavit MAIN,
+        // and 03 §5.5's return surface pays only protocol custody, so excluding
+        // MAIN here made `sweep_revenue` fail `TryStateViolation` on every
+        // hosted book and strand its revenue. MAIN is protocol-owned in both
+        // domains; it is not a foreign account inheriting an exemption, which
+        // is the direction 16 §7.2 warns about.
+        assert!(crate::configs::ProtocolAccounts::contains(&main));
+        assert!(crate::configs::ServiceProtocolAccounts::contains(&main));
+        assert!(crate::configs::ReservedProtocolAccounts::contains(&main));
         for service in [
             &service_sovereign,
             &service_book,

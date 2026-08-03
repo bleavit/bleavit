@@ -1004,8 +1004,14 @@ fee(q) = max( svc.fee_floor , svc.fee_bps × declared_stake ) × M
 ```
 
 `M` moves **up immediately when a question is admitted, and down only gradually
-toward 1** — including after a question terminates and frees its slot. The asymmetry
-is the whole mechanism, and each half is load-bearing:
+toward 1** — including after a question terminates and frees its slot. `M` is clamped
+to `svc.price_cap` **on every read**, not only when it is written, because that row is
+amendable: an amendment lowering the ceiling must bind a price that was already stored
+above it. And the gradual descent runs on the window **in force when the price was
+set**, carried in storage beside it — reading the live `svc.max_window` would let one
+amendment lowering that row expire every outstanding price at once, and a governance
+action is not a decay. The asymmetry is the whole mechanism, and each half is
+load-bearing:
 
 - **Down-moves are gradual, so immediacy costs money.** A freed slot's price
   descends from the pre-release level toward the post-release one rather than
@@ -1064,7 +1070,18 @@ measured cost of governance denial, and [14](14-threat-model.md) TH-72's attack-
 cell carries no figure (SQ-574). Until `svc.price_cap` is set, `M ≡ 1` and this
 section describes today's behaviour exactly: the posted two-part tariff, first come
 first served. That is the `svc.fee_bps` and `svc.client_bond` precedent — a row ships
-unset with its consumer defaulting to the status quo rather than to a guess. Note the
+unset with its consumer defaulting to the status quo rather than to a guess.
+
+**Inert means the *charge* is unchanged, not the declared weight.** `register`'s
+benchmark deliberately arms the ceiling, so the weight it declares always includes the
+§8.7 probe's scan over the live decision pairs even while `M ≡ 1` and the scan does not
+run. That is the intended direction: a weight declared for the armed case over-charges
+the inert one, whereas benchmarking the unset row would under-declare the armed one on
+the day the values layer adopted it, with no code change to notice (SQ-576). A claim
+that this section is byte-for-byte invisible until adoption would be false, and the
+visible residue is a fee-market cost, never a difference in what a client is charged.
+
+Note the
 consumer default here is `M = 1` and **not** a refusal: an unset ceiling must not
 close admission, because the mechanism it gates is an allocation refinement and not a
 safety gate, and refusing would be a strictly worse status quo than the one this
@@ -1107,9 +1124,24 @@ Each half of that shape is load-bearing, and both were chosen against a specific
 - **The price rises for everyone, and the door never closes.** A latch that stops new
   registrations while live questions keep running pays a slot-holder to cause it: their
   slot becomes exclusive precisely when Bleavit is damaged, and §8.4 states that damaging
-  Bleavit's books costs an attacker only round-trip fees. Under a price response there is
-  no exclusivity to win, and the incumbent's own next question costs more too — so
-  starving Bleavit's books buys the attacker nothing.
+  Bleavit's books costs an attacker only round-trip fees. A price response admits every
+  client that is willing to pay, so no entrant is excluded outright and the incumbent's
+  own *next* question costs the raised price like anyone else's.
+
+  **It reduces the incumbent's advantage; it does not eliminate it, and the earlier
+  claim that it did was wrong.** The fee is charged once, at registration, so a client
+  already holding a slot has already paid — any mechanism that raises the price of
+  *future* registrations advantages those already in, and that is inherent to a one-shot
+  fee rather than to this particular response. Concretely: an incumbent can hold a live
+  question, keep its net position in a Bleavit decision book near zero so the §7a contest
+  integral stays flat, drive the starvation reading toward 1 for round-trip fees, and
+  price marginal entrants out while paying nothing more itself. What the price response
+  *does* guarantee against the quantity latch it replaced is strictly weaker and strictly
+  true: an entrant who values the slot above the raised price still gets it, where a
+  latch would refuse it at any price. The attack also requires the attacker to actually
+  suppress Bleavit's contest capital — the mechanism is responding correctly to a real
+  condition, and `svc.max_live` still bounds how much of the service the incumbent can
+  hold.
 - **`max`, not a product.** One ceiling governs both terms, so `M ≤ svc.price_cap` holds
   by construction rather than by argument, and no second registry row is needed. A product
   would reach `svc.price_cap²` and would need its own bound to say what that means.
@@ -1125,14 +1157,27 @@ is most costly to Bleavit, and do so without a vote. The harm remains **bounded 
 `svc.max_live`**, which this section does not touch — price clears, quantity does not,
 and that separation is the same one §8.6 draws.
 
-**Two limits, neither smoothed over.** When no Bleavit decision book is live there is
-nothing to measure and starvation reads **0**, because at that moment the hosted service
-is provably not competing with a decision — but a client can therefore register into a
-quiet gap and contend with the windows that open afterwards. §8.4's scheduling refusal
-covers overlap with proposals that are live *at registration* and cannot see proposals
-submitted later. And the response magnitude is bounded by `svc.price_cap`, which is
-`[VERIFY]`-unset (§8.6), so **this section is inert on exactly the same condition** —
-one adopted row arms both halves of `M`, which is why no second row is introduced.
+**Three limits, none smoothed over.**
+
+1. **The quiet gap.** When no Bleavit decision book is live there is nothing to measure
+   and starvation reads **0**, because at that moment the hosted service is provably not
+   competing with a decision — but a client can therefore register into a quiet gap and
+   contend with the windows that open afterwards. §8.4's scheduling refusal covers
+   overlap with proposals live *at registration* and cannot see proposals submitted later.
+2. **Un-accrued is not starved, and the probe cannot tell the difference.** Contest
+   capital accrues only when a book is observed, so a book with no accrual at all is
+   **skipped** rather than read as empty. This is deliberate: reading it as starved would
+   fire the response at the first block of every window, before anyone has traded. The
+   cost is that the probe under-reports — the *unsafe* direction — for a book nobody is
+   cranking. That state is not left unprotected: a book without observations already
+   fails decision-grade on coverage, so the proposal rejects through a different rule.
+   Inferring starvation from a stalled crank would price a **keeper-liveness** failure as
+   a capital failure, which is the wrong instrument, and drawing the line between the two
+   needs a staleness threshold that nothing here derives.
+3. **Inert until the ceiling is adopted.** The response magnitude is bounded by
+   `svc.price_cap`, which is `[VERIFY]`-unset (§8.6), so this section is inert on exactly
+   the same condition — one adopted row arms both halves of `M`, which is why no second
+   row is introduced.
 
 ---
 
