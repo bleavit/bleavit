@@ -29,12 +29,34 @@ export interface StorageItem {
  * The minimum a transport must do. Deliberately narrow: exactly the two chainHead
  * operations 02 §11's fixtures record, so the mock-runtime test double and a real
  * smoldot connection satisfy the same interface with nothing to diverge on.
+ *
+ * Two properties of this interface were wrong when it first shipped, and both were found
+ * by writing the smoldot transport against it rather than by reasoning about it:
+ *
+ * - **It is asynchronous, necessarily** (V-83). smoldot runs in a Web Worker (§4.1) and
+ *   every answer arrives by `postMessage`, so a synchronous read could only be served by
+ *   blocking the main thread on `Atomics.wait` — which needs cross-origin isolation the
+ *   Arweave distribution does not control, and which freezes the UI for the duration of a
+ *   proof-backed read. The synchronous shape was satisfiable by a test double and by
+ *   nothing else, which is the precise shape of a mock that agrees with an interface no
+ *   real implementation can meet.
+ * - **Reads take the block explicitly** (V-84). When the transport chose the block, a
+ *   reader pinned at N could be handed a value read at N+1 and would label it N — each
+ *   read individually verified, the label a lie. A guard that re-checked the head
+ *   *before* issuing the read did not prevent it, because the read happened after the
+ *   check. Passing `at` makes "read at the block I pinned" unbypassable rather than
+ *   merely checked around: the transport reads that block or fails.
  */
 export interface ChainHeadTransport {
-  /** The finalized block every read in a batch is pinned to. */
-  pinnedBlock(): FinalizedBlockRef;
-  storage(key: string, type: 'value' | 'descendantsValues'): readonly StorageItem[];
-  call(api: string, argsHex?: string): string;
+  /** The current finalized head. */
+  pinnedBlock(): Promise<FinalizedBlockRef>;
+  /** Read at `at`. MUST throw rather than substitute another block if `at` is gone. */
+  storage(
+    at: FinalizedBlockRef,
+    key: string,
+    type: 'value' | 'descendantsValues',
+  ): Promise<readonly StorageItem[]>;
+  call(at: FinalizedBlockRef, api: string, argsHex?: string): Promise<string>;
 }
 
 export class UnverifiedReadError extends Error {
@@ -51,17 +73,34 @@ export class UnverifiedReadError extends Error {
  * evaluated at a single finalized block, and a reader that re-pinned per call would
  * produce a set of values no block ever held simultaneously — each individually
  * verified, the combination fictional.
+ *
+ * The finalized head advancing is **not** an error and does not invalidate a reader —
+ * that is what pinning is for, and a reader that died every time the chain moved would
+ * have a useful life of one block time. What ends a reader is its block ceasing to be
+ * readable, which the transport reports by failing the read.
  */
 export class FinalizedReader {
   readonly #transport: ChainHeadTransport;
   readonly #pin: FinalizedBlockRef;
 
-  constructor(transport: ChainHeadTransport) {
+  private constructor(transport: ChainHeadTransport, pin: FinalizedBlockRef) {
     this.#transport = transport;
-    this.#pin = transport.pinnedBlock();
-    if (!/^0x[0-9a-f]{64}$/i.test(this.#pin.blockHash)) {
-      throw new UnverifiedReadError(`transport pinned a malformed block hash: ${this.#pin.blockHash}`);
+    this.#pin = pin;
+  }
+
+  /**
+   * Open a reader at the transport's current finalized block.
+   *
+   * A factory rather than a constructor because the pin is fetched across the worker
+   * boundary. Taking it *once*, here, is what makes every read this reader ever serves
+   * belong to the same block.
+   */
+  static async open(transport: ChainHeadTransport): Promise<FinalizedReader> {
+    const pin = await transport.pinnedBlock();
+    if (!/^0x[0-9a-f]{64}$/i.test(pin.blockHash)) {
+      throw new UnverifiedReadError(`transport pinned a malformed block hash: ${pin.blockHash}`);
     }
+    return new FinalizedReader(transport, pin);
   }
 
   /** The block every value from this reader is true at. */
@@ -70,23 +109,25 @@ export class FinalizedReader {
   }
 
   /** A raw storage read, finalized at this reader's pinned block. */
-  storage(key: string, type: 'value' | 'descendantsValues' = 'value'): Finalized<readonly StorageItem[]> {
-    this.#assertStillPinned();
-    return finalize(this.#transport.storage(key, type), this.#pin);
+  async storage(
+    key: string,
+    type: 'value' | 'descendantsValues' = 'value',
+  ): Promise<Finalized<readonly StorageItem[]>> {
+    return finalize(await this.#transport.storage(this.#pin, key, type), this.#pin);
   }
 
   /**
    * A runtime-API result.
    *
-   * 10 §4.2 flags **FE-P2** as pivotal and unresolved: whether PAPI routes typed runtime
-   * calls through `chainHead_call` pinned to a finalized hash. Until it resolves, "every
-   * `FutarchyApi` result used on the tx path is cross-checked against direct storage
-   * reads (the conservative mode is the **default**, not the fallback)". So this method
-   * is deliberately not the transaction path's entry point — `crossCheckedCall` is.
+   * 10 §4.2 flags **FE-P2** as pivotal: whether PAPI routes typed runtime calls through
+   * `chainHead_call` pinned to a finalized hash. Its routing half is answered (V-82) but
+   * its execution half rides the B7 drills, so "every `FutarchyApi` result used on the tx
+   * path is cross-checked against direct storage reads (the conservative mode is the
+   * **default**, not the fallback)" still stands. This method is therefore deliberately
+   * not the transaction path's entry point — `crossCheckedCall` is.
    */
-  call(api: string, argsHex = '0x'): Finalized<string> {
-    this.#assertStillPinned();
-    return finalize(this.#transport.call(api, argsHex), this.#pin);
+  async call(api: string, argsHex = '0x'): Promise<Finalized<string>> {
+    return finalize(await this.#transport.call(this.#pin, api, argsHex), this.#pin);
   }
 
   /**
@@ -97,13 +138,20 @@ export class FinalizedReader {
    * other's keys would make the check vacuous in exactly the case it exists for. The
    * prefix is therefore not a caller-supplied argument — it is derived from the domain
    * along with the API name, so the pairing cannot be got wrong at a call site.
+   *
+   * Both legs are read at `this.#pin`, so the comparison is between two views of one
+   * state. A cross-check whose halves came from different blocks would be worse than no
+   * check at all: disagreement would be expected, so agreement would prove nothing.
    */
-  crossCheckedCall(
+  async crossCheckedCall(
     source: { readonly api: string; readonly storagePrefix: string; readonly argsHex?: string },
-  ): Finalized<{ readonly result: string; readonly witness: readonly StorageItem[] }> {
-    this.#assertStillPinned();
-    const result = this.#transport.call(`FutarchyApi_${source.api}`, source.argsHex ?? '0x');
-    const witness = this.#transport.storage(source.storagePrefix, 'descendantsValues');
+  ): Promise<Finalized<{ readonly result: string; readonly witness: readonly StorageItem[] }>> {
+    const result = await this.#transport.call(
+      this.#pin,
+      `FutarchyApi_${source.api}`,
+      source.argsHex ?? '0x',
+    );
+    const witness = await this.#transport.storage(this.#pin, source.storagePrefix, 'descendantsValues');
     return finalize({ result, witness }, this.#pin);
   }
 
@@ -116,19 +164,6 @@ export class FinalizedReader {
       );
     }
     return finalize({ domain: domainOf(id, boundary), value: value.value }, this.#pin);
-  }
-
-  #assertStillPinned(): void {
-    const now = this.#transport.pinnedBlock();
-    if (now.blockHash !== this.#pin.blockHash) {
-      // The pin moved under us. Returning a value read at a different block than this
-      // reader claims would produce a `Finalized<T>` whose status is a lie — the one
-      // outcome the brand exists to make impossible.
-      throw new UnverifiedReadError(
-        `the transport re-pinned from ${this.#pin.blockHash} to ${now.blockHash}; ` +
-          'open a new reader rather than mixing blocks (INV-FE-2)',
-      );
-    }
   }
 }
 

@@ -11,6 +11,8 @@
  * so a future `node-linker=hoisted` — or a `paths` alias added for convenience —
  * would silently demote it. These rules keep failing in that case.
  */
+const { EXTERNAL } = require('./tools/depcruise-external.cjs');
+
 module.exports = {
   forbidden: [
     {
@@ -69,7 +71,21 @@ module.exports = {
         '10 §10.1: `platform` is the only package permitted to import a native or host ' +
         'SDK. Concrete adapters are injected, so a tx surface cannot reach one.',
       from: { pathNot: '^packages/platform' },
-      to: { path: 'node_modules/(@tauri-apps|@parity/product-sdk)' },
+      to: { path: EXTERNAL('@tauri-apps|@parity/product-sdk') },
+    },
+    {
+      name: 'only-chain-client-opens-a-chain-connection',
+      severity: 'error',
+      comment:
+        '10 §2.1/§4.1: `chain-client` is the sole home of the light-client connection, and ' +
+        'therefore the sole source of `Finalized<T>`. A second package able to construct a ' +
+        'smoldot chain or a PAPI provider would not need to forge the brand — it could serve ' +
+        'reads that never passed the finalized-only discipline and hand them to a UI that ' +
+        'cannot tell the difference. `bleavit-client-ts` is exempt because it is not part of ' +
+        'the canonical client: it is N10\'s facade for third parties integrating the hosted ' +
+        'question service, and nothing in `src/` may import it.',
+      from: { pathNot: '^packages/(chain-client|bleavit-client-ts|papi-descriptors)/' },
+      to: { path: EXTERNAL('polkadot-api|smoldot') },
     },
     {
       name: 'no-mock-signer-in-the-bundle',
@@ -87,7 +103,7 @@ module.exports = {
         'D-21 / INV-FE-6: the handoff packages contain no network primitive at all. ' +
         'The source gate in CI covers the global forms; this covers module imports.',
       from: { path: '^packages/(contexts|intents|receipts|llm-handoff)/' },
-      to: { path: 'node_modules/(axios|node-fetch|undici|ws|socket\\.io)' },
+      to: { path: EXTERNAL('axios|node-fetch|undici|ws|socket\\.io') },
     },
     { name: 'no-circular', severity: 'error', from: {}, to: { circular: true } },
     { name: 'no-orphans', severity: 'warn', from: { orphan: true, pathNot: '\\.d\\.ts$' }, to: {} },

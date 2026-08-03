@@ -5,6 +5,7 @@
 // cruising a graph with no edges in it. A witness that does not share the thing it
 // witnesses is decoration.
 const production = require('../../.dependency-cruiser.cjs');
+const { EXTERNAL } = require('../../tools/depcruise-external.cjs');
 
 module.exports = {
   forbidden: [
@@ -13,6 +14,15 @@ module.exports = {
       severity: 'error',
       from: { path: '^tests/depcruise-witness/' },
       to: { path: '^packages/(providers|local-index|contexts|intents|receipts|llm-handoff)/' },
+    },
+    {
+      // The EXTERNAL matcher itself, imported from production rather than restated — the
+      // `node_modules/…` form it replaced could never fire (V-86), and a witness that
+      // carried its own copy of the pattern would not have noticed.
+      name: 'witness-external-package-matcher',
+      severity: 'error',
+      from: { path: '^tests/depcruise-witness/' },
+      to: { path: EXTERNAL('polkadot-api|smoldot') },
     },
   ],
   // Verbatim, minus the exclude that would hide the witness from itself.

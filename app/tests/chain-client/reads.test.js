@@ -1,102 +1,69 @@
 /**
  * The finalized-only read layer — 10 §2.2, §4.1, §4.2, §11.
  *
- * Driven by F2's `packages/mock-runtime` over the recorded chainHead transcripts, so this
- * runs per commit with no node and no network. That is not a convenience: the properties
- * being checked here are about what the reader *refuses*, and a suite that needed a live
- * chain would be run rarely enough that the refusals could rot unnoticed.
+ * Driven through the **real** `ChainHeadConnection` over F2's recorded transcripts, not
+ * through a bespoke adapter written for this suite. That distinction earned itself: the
+ * bespoke adapter this file used to carry satisfied a synchronous interface no smoldot
+ * transport can implement (V-83) and let the transport choose the block a read was
+ * labelled with (V-84). A test double built to match an interface will always match it —
+ * which is why the double here is a *provider*, at the wire, and the transport under it
+ * is production code.
+ *
+ * Everything asserted below is a **refusal**, and refusals rot unnoticed in a suite that
+ * runs rarely, so this runs per commit with no node and no network.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join, resolve } from 'node:path';
 
-import { createFixtureBundle, createMockRuntime } from '@bleavit/mock-runtime';
 import {
+  ChainHeadConnection,
   FinalizedReader,
   UnverifiedReadError,
   domainBoundaryFrom,
   positionSourceFor,
   providerRead,
 } from '@bleavit/chain-client';
+import { createMockRuntime } from '@bleavit/mock-runtime';
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const FIXTURE_DIR = resolve(HERE, '..', '..', 'fixtures', 'chainhead');
-
-function bundle() {
-  const names = readdirSync(FIXTURE_DIR).filter((n) => n.endsWith('.json') && n !== 'fixtures-report.json');
-  const report = JSON.parse(readFileSync(join(FIXTURE_DIR, 'fixtures-report.json'), 'utf8'));
-  return createFixtureBundle(report, names.map((n) => JSON.parse(readFileSync(join(FIXTURE_DIR, n), 'utf8'))));
-}
-
-/** Adapt the recorded transcripts to the transport interface. */
-function transportFrom(runtime, overridePin) {
-  return {
-    pinnedBlock: () => overridePin?.() ?? { blockHash: runtime.pinnedBlock(), blockNumber: 1 },
-    storage(key, type) {
-      const response = runtime.respond('chainHead_v1_storage', [
-        'subscription-1', runtime.pinnedBlock(), [{ key, type }], null,
-      ]);
-      const items = [];
-      for (const event of response.events ?? []) {
-        if (event.event === 'operationStorageItems') items.push(...(event.items ?? []));
-      }
-      return items;
-    },
-    call(api, argsHex = '0x') {
-      const response = runtime.respond('chainHead_v1_call', [
-        'subscription-1', runtime.pinnedBlock(), api, argsHex,
-      ]);
-      for (const event of response.events ?? []) {
-        if (event.event === 'operationCallDone') return event.output;
-      }
-      throw new Error(`${api} produced no result in the recorded transcript`);
-    },
-  };
-}
+import { argsFor, bundle, keyFor, recordedProvider } from './recorded-provider.mjs';
 
 const fixtures = bundle();
 
-/** The storage key a recorded surface reads, taken from the transcript itself. */
-function keyFor(surface) {
-  const request = fixtures.fixtures.get(surface).requests.find((r) => r.method === 'chainHead_v1_storage');
-  return request.params[2][0];
+async function reader() {
+  const { provider } = recordedProvider(createMockRuntime(fixtures));
+  return FinalizedReader.open(await ChainHeadConnection.open(provider));
 }
 
-test('a storage read yields Finalized<T> pinned to the reader block', () => {
-  const reader = new FinalizedReader(transportFrom(createMockRuntime(fixtures)));
-  const { key, type } = keyFor('storage.epoch.recent_cohort_summaries');
-  const read = reader.storage(key, type);
+test('a storage read yields Finalized<T> pinned to the reader block', async () => {
+  const r = await reader();
+  const { key, type } = keyFor(fixtures, 'storage.epoch.recent_cohort_summaries');
+  const read = await r.storage(key, type);
   assert.equal(read.status.kind, 'verified-finalized');
-  assert.equal(read.status.blockHash, reader.at.blockHash);
+  assert.equal(read.status.blockHash, r.at.blockHash);
   assert.ok(Array.isArray(read.value));
 });
 
-test('a runtime-API result is finalized at the same block', () => {
-  const reader = new FinalizedReader(transportFrom(createMockRuntime(fixtures)));
-  const read = reader.call('FutarchyApi_epoch_status');
+test('a runtime-API result is finalized at the same block', async () => {
+  const r = await reader();
+  const read = await r.call('FutarchyApi_epoch_status');
   assert.equal(read.status.kind, 'verified-finalized');
   assert.match(read.value, /^0x[0-9a-f]+$/);
-  assert.equal(read.status.blockHash, reader.at.blockHash);
+  assert.equal(read.status.blockHash, r.at.blockHash);
 });
 
-/** The argument a recorded runtime-API call was made with, from the transcript itself. */
-function argsFor(surface) {
-  const request = fixtures.fixtures.get(surface).requests.find((r) => r.method === 'chainHead_v1_call');
-  return request.params[3];
-}
-
-test('the FE-P2 cross-check pairs each domain view with its OWN prefix (10 §11)', () => {
-  const reader = new FinalizedReader(transportFrom(createMockRuntime(fixtures)));
+test('the FE-P2 cross-check pairs each domain view with its OWN prefix (10 §11)', async () => {
+  const r = await reader();
   for (const domain of ['primary', 'service']) {
     const source = positionSourceFor(domain);
-    const prefix = keyFor(domain === 'service' ? 'storage.service_ledger.positions' : 'storage.ledger.positions');
-    const read = reader.crossCheckedCall({
+    const prefix = keyFor(
+      fixtures,
+      domain === 'service' ? 'storage.service_ledger.positions' : 'storage.ledger.positions',
+    );
+    const read = await r.crossCheckedCall({
       api: source.api,
       storagePrefix: prefix.key,
-      argsHex: argsFor(`api.${source.api}`),
+      argsHex: argsFor(fixtures, `api.${source.api}`),
     });
     assert.equal(read.status.kind, 'verified-finalized');
     assert.match(read.value.result, /^0x[0-9a-f]*$/);
@@ -108,39 +75,64 @@ test('the FE-P2 cross-check pairs each domain view with its OWN prefix (10 §11)
   assert.notEqual(positionSourceFor('primary').api, positionSourceFor('service').api);
 });
 
-test('a reader refuses to serve reads after the transport re-pins (INV-FE-2)', () => {
-  const runtime = createMockRuntime(fixtures);
-  let moved = false;
-  const transport = transportFrom(runtime, () =>
-    moved
-      ? { blockHash: `0x${'ab'.repeat(32)}`, blockNumber: 99 }
-      : { blockHash: runtime.pinnedBlock(), blockNumber: 1 },
+test('both legs of the cross-check are issued at the same block', async () => {
+  // A cross-check whose halves came from different blocks is worse than no check at all:
+  // disagreement would be expected, so agreement would prove nothing.
+  //
+  // The head is moved **between the two legs**, which is the only arrangement that can
+  // detect the defect. An earlier version of this test let the head sit still, so a
+  // witness leg that re-read "the current head" agreed with the call leg by coincidence
+  // and the assertion passed on a broken implementation — a vacuous test that looked like
+  // a real one (caught by mutation R1).
+  const moved = `0x${'ab'.repeat(32)}`;
+  let calls = 0;
+  const { provider, sent, state } = recordedProvider(createMockRuntime(fixtures), {
+    intercept(request) {
+      if (request.method === 'chainHead_v1_call') {
+        calls += 1;
+        queueMicrotask(() =>
+          state.followEvent({ event: 'finalized', finalizedBlockHashes: [moved] }),
+        );
+      }
+      return false;
+    },
+  });
+  const r = await FinalizedReader.open(await ChainHeadConnection.open(provider));
+  const source = positionSourceFor('primary');
+  await r.crossCheckedCall({
+    api: source.api,
+    storagePrefix: keyFor(fixtures, 'storage.ledger.positions').key,
+    argsHex: argsFor(fixtures, `api.${source.api}`),
+  });
+
+  assert.equal(calls, 1, 'the call leg never ran, so the head never moved');
+  const blocks = new Set(
+    sent
+      .filter((s) => s.method === 'chainHead_v1_call' || s.method === 'chainHead_v1_storage')
+      .map((s) => s.params[1]),
   );
-  const reader = new FinalizedReader(transport);
-  const { key, type } = keyFor('storage.constitution.phase_flags');
-  reader.storage(key, type); // fine while the pin holds
-  moved = true;
-  // A set of values from different blocks is not a consistent view: each individually
-  // verified, the combination fictional.
-  assert.throws(() => reader.storage(key, type), UnverifiedReadError);
-  assert.throws(() => reader.call('FutarchyApi_epoch_status'), UnverifiedReadError);
+  assert.deepEqual([...blocks], [r.at.blockHash]);
+  assert.notEqual(r.at.blockHash, moved);
 });
 
-test('a malformed pin is refused at construction', () => {
-  const runtime = createMockRuntime(fixtures);
-  const transport = transportFrom(runtime, () => ({ blockHash: '0xdead', blockNumber: 1 }));
-  assert.throws(() => new FinalizedReader(transport), UnverifiedReadError);
+test('a malformed pin is refused when the reader is opened', async () => {
+  const transport = {
+    pinnedBlock: async () => ({ blockHash: '0xdead', blockNumber: 1 }),
+    storage: async () => [],
+    call: async () => '0x',
+  };
+  await assert.rejects(() => FinalizedReader.open(transport), UnverifiedReadError);
 });
 
-test('attaching a domain refuses a value from a different block', () => {
-  const reader = new FinalizedReader(transportFrom(createMockRuntime(fixtures)));
+test('attaching a domain refuses a value from a different block', async () => {
+  const r = await reader();
   const boundary = domainBoundaryFrom(1n << 63n);
-  const good = reader.storage(keyFor('storage.ledger.positions').key, 'descendantsValues');
-  assert.equal(reader.domained(1n, good, boundary).value.domain, 'primary');
-  assert.equal(reader.domained(1n << 63n, good, boundary).value.domain, 'service');
+  const good = await r.storage(keyFor(fixtures, 'storage.ledger.positions').key, 'descendantsValues');
+  assert.equal(r.domained(1n, good, boundary).value.domain, 'primary');
+  assert.equal(r.domained(1n << 63n, good, boundary).value.domain, 'service');
 
   const foreign = { ...good, status: { ...good.status, blockHash: `0x${'cd'.repeat(32)}` } };
-  assert.throws(() => reader.domained(1n, foreign, boundary), UnverifiedReadError);
+  assert.throws(() => r.domained(1n, foreign, boundary), UnverifiedReadError);
 });
 
 test('there is no path from a provider read to Finalized<T> (10 §2.2)', () => {
@@ -154,12 +146,12 @@ test('there is no path from a provider read to Finalized<T> (10 §2.2)', () => {
   assert.equal('blockHash' in read.status, false, 'a provider read must carry no block reference');
 });
 
-test('the reader offers no archive-depth read (10 §4.2)', () => {
+test('the reader offers no archive-depth read (10 §4.2)', async () => {
   // smoldot exposes the chainHead group only; there are no `archive_*` methods. A read
   // API that offered depth would have to fall back to a provider to honour it, which is
   // exactly the promotion path §2.2 deleted.
-  const reader = new FinalizedReader(transportFrom(createMockRuntime(fixtures)));
-  const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(reader));
+  const r = await reader();
+  const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(r));
   assert.deepEqual(
     methods.filter((m) => /archive|history|at\b|depth/i.test(m) && m !== 'at').sort(),
     [],

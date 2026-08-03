@@ -128,7 +128,24 @@ Practical consequences:
     metadata is self-consistent. Likewise a **whitelist is not a surface check**: PAPI's
     `applyWhitelist` filters silently, so an entry naming an absent surface yields a
     smaller descriptor set rather than an error.
-13. **Pinned versions.** The stack pins live in 01 §9 / 10 — PAPI 2.x, smoldot 3.x,
+13. **One chain connection, one home (10 §2.1/§4.1, F3).** `packages/chain-client` is the only
+    package that may import `polkadot-api` or `smoldot`, enforced by
+    `only-chain-client-opens-a-chain-connection`. The reason is not tidiness: a second package
+    able to construct a chain connection would not need to forge the brand — it could serve reads
+    that never passed the finalized-only discipline. `bleavit-client-ts` and `papi-descriptors`
+    are exempt because they are not part of the canonical client. Inside the package, the
+    transport is **injected** and reads take the block **explicitly** (`storage(at, …)`), so
+    "read at the block I pinned" is unbypassable rather than checked around — a guard that
+    re-checks the head before issuing a read does not prevent the read happening after it (V-84).
+    A chain spec is trusted input to smoldot: verify the **bundled bytes** against the release
+    pin first, apply any expert bootnodes after, and treat the §3.1 genesis check as a separate
+    obligation the hash pin does not discharge.
+
+    **A `node_modules/…` matcher in dependency-cruiser can never fire** (V-86): an unresolvable
+    external specifier is recorded by its bare name. Use `EXTERNAL()` from
+    `app/tools/depcruise-external.cjs`, and add a witness module — a rule proven only by a green
+    run is not proven.
+14. **Pinned versions.** The stack pins live in 01 §9 / 10 — PAPI 2.x, smoldot 3.x,
     Vite 8, Dexie 4, Tauri 2.x. Do not bump majors without a PLAN.md decision-log
     entry. `app/` is its own pnpm workspace and its own cargo workspace (excluded from
     the root one); never let its dependency tree reach the runtime pins.
