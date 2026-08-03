@@ -323,6 +323,14 @@ jobs:
         # against 02 §9's frozen table — not against the recording, which would
         # prove nothing.
         run: pnpm run test:mock-runtime
+      - name: Two ledger domains, never merged (10 §11, 11 §11.2a)
+        working-directory: app
+        # Reads the boundary from the recorded `ConditionalLedger::ServiceIdBase`
+        # metadata constant rather than spelling `1n << 63n` — the same no-hardcode
+        # rule 10 §5.4 applies to every chain value, and the reason v23 gave the
+        # boundary a metadata home. A suite carrying the literal would keep passing
+        # after the chain moved it.
+        run: pnpm run test:chain-client
 
   environments:
     name: Environment definitions

@@ -9,3 +9,4 @@ packages:
   - 'tests/depcruise-witness'
   - 'tests/protocol'
   - 'tests/mock-runtime'
+  - 'tests/chain-client'

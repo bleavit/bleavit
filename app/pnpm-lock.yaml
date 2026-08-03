@@ -234,6 +234,12 @@ importers:
         specifier: workspace:*
         version: link:../../../packages/ui
 
+  tests/chain-client:
+    dependencies:
+      '@bleavit/chain-client':
+        specifier: workspace:*
+        version: link:../../packages/chain-client
+
   tests/depcruise-witness:
     dependencies:
       '@bleavit/providers':
