@@ -1,77 +1,52 @@
-"""TH-72's unpriced attack cost, and the slot price that closes it (N14).
+"""What a hosted question actually costs, and what this module may not claim (N14).
 
-14's TH-72 is the row this module exists for, and its attack-cost cell is not a
-number. It reads *"round-trip fees only — governance denial at a price that does
-not exist in the system today"*, which is a true sentence and an empty column.
-`threat_costs.py` prices exactly three rows (TH-11, TH-16, TH-64); TH-72 is not
-among them, so the threat model cannot compare the hosted service's denial
-channel against any other denial channel it already prices. N14 cannot derive a
-slot price against a blank cell, so the cell is filled here first.
+**Read the withdrawal notice before using anything here.** Two successive
+adversarial reviews refuted most of what this module originally asserted. It is
+kept, corrected, because the refutations are the useful part: each one is a way
+the hosted service looked cheaper or more dangerous than it is.
 
-**The equalization, and why it beats valuing a lost decision.** The obvious
-anchor — multiply measured formation loss by `sec.prize.*` — requires a value for
-a decision that never formed. A proposal that fails to form falls back to the
-status quo, so the loss is not the capability envelope but the *forgone
-improvement*, and pinning that down is a values judgement no evidence in this
-repository settles. R-2 forbids inventing it. The equalization needs no such
-number: 08 §7 already prices four ways to buy governance denial, so the hosted
-door only has to be **no cheaper than the cheapest door that is already priced**.
-That is also 16 §8.4's own complaint answered in its own words — it objects that
-this is denial "at a price that does not exist", so the repair is to make the
-price exist, at parity with the channel that has one.
+**Refuted claim A — "a flat 393 USDC buys arbitrary market depth."** Wrong, and
+wrong in a way this module's own arithmetic contradicted. The *fee* really is
+flat in depth: `register` admits `declared_stake = 1` base unit, so
+`max(svc.fee_bps · stake, SVC_FEE_FLOOR_USDC)` collapses to the 393-USDC floor
+however large `b` is. But depth is not bought with the fee. Registration derives
+`escrow = 2 · seed_headroom(b) = 2·b·ln 2`, the funder must actually hold it, and
+it is checked against the Phase-3 TVL cap. Under the documented 2,000,000-USDC
+cap, depth tops out at `b ≈ 1,442,695 USDC`. So the precise, surviving statement
+is narrow: **the fee does not scale with depth; the capital requirement does.**
+Whether flat *fees* on unbounded depth is a defect is a live question, but it is
+not the "depth is free" headline this module shipped.
 
-**Finding 1 — posted depth is free (code-verified, `pallets/question-service`).**
-`register` requires `declared_stake > 0`, so a stake of **one base unit** is
-legal; the fee is `max(svc.fee_bps · stake, SVC_FEE_FLOOR_USDC)`, so at that
-stake the flat 393-USDC floor binds; and `b` carries only a *lower* bound
-(`b >= b_min(stake, ε)`, which at stake 1 is ~15) with **no upper bound at all**.
-So an attacker pays 393 USDC flat and posts arbitrary market depth. Depth is what
-diverts flow, and depth is currently free. This is the defect N14 must repair,
-and it is not repaired by occupancy pricing: occupancy and velocity govern *who
-gets a slot*, while one slot can hold unlimited depth.
+**Refuted claim B — the equalization benchmark.** The original anchor priced the
+hosted denial channel against the cheapest 08 §7 channel (`intake_denial`,
+6,400 USDC/epoch). The two deny **different things**. Intake denial blocks
+*admission* — it fills the 64-entry queue so new submissions get `IntakeFull` —
+and cannot block the decision call for a proposal already in `Trading`. Depth
+thinning attacks exactly that already-admitted proposal, driving contest capital
+under the per-book floor to `Insufficient` and then `Reject(NotDecisionGrade)`.
+Crowding a queue and starving a live decision are not the same harm, so the
+cheaper one is not a valid price for the other. The benchmark is removed rather
+than re-pointed: `slot_capture` is closer in kind but is a different strategy at
+a different price, and choosing between them is exactly the judgement that needs
+evidence this repository does not have.
 
-**Finding 2 — WITHDRAWN 2026-08-03, and the withdrawal is the record.** An
-earlier revision published per-class ratios (1.23×–3.16×) and per-epoch uplift
-targets, claiming the hosted door was cheaper than the cheapest 08 §7 channel on
-every class. An adversarial review refuted the arithmetic under all of them and
-they are **withdrawn, not corrected**, because two of the three defects are
-missing *inputs* rather than slips:
+**What that leaves.** This module publishes **no ratio, no benchmark and no price
+target**. It publishes the cost structure of a hosted registration — which legs
+scale with depth and which do not — plus findings accessors naming what is
+missing. N14's case for demand-responsive pricing rests on *allocation* (denying
+slot sniping and first-come-first-served under contention), which needs none of
+this; the separate claim that hosted denial is **underpriced** is unsubstantiated
+and must not be asserted until a commensurable benchmark exists.
 
-1. `parity_depth_cash` double-counted the branch structure — `pol.b` is quoted
-   per branch, i.e. per book, and the function multiplied by a further 2 for
-   "the question's two books". A slip, now fixed. Worth recording anyway: the
-   error direction was **against this module's own conclusion**, inflating the
-   attacker's cost and understating the hole, and it regressed a figure that had
-   already been computed correctly by hand hours earlier.
-2. The ratios divided by the hosted attack's *measured* harm while treating the
-   benchmark channel's harm as **1.0**, which is stated nowhere. 08 §7 prices the
-   intake channel's cost; nothing measures its harm.
-3. Only carrying cost was counted. Worst-case LMSR maker loss *is* the posted
-   cash, on the order of 350× that — so the omission does not make the figure
-   conservative, it makes it not a figure.
+**One finding that outlived every refutation, and it is the largest.** 16 §8.4
+makes `Σ b_ext ≤ Σ pol.b(live)` a normative arming condition. **No code enforces
+it.** `b_ext` appears in no pallet and in no migration; the Phase-4 transition
+applies the treasury arming gate and the cap plan and nothing else. N12 spent a
+full calibration run measuring governance damage *at* that condition and recorded
+its error direction as unsafe — while nothing makes the condition true. Tracked
+separately; see `check_arming_condition_unenforced`.
 
-`check_equalization_not_yet_computable` reports that state. This module publishes
-**no ratio and no price target** until (2) and (3) have inputs.
-
-**Finding 3 — WITHDRAWN with Finding 2.** The Track N plan's unsourced
-"≈ 3,000 USDC/epoch" appeared corroborated at 2,786 for CODE. That agreement was
-an artifact of defect 1: the corrected figure is ~1,589, so the two derivations
-do **not** agree, and the apparent corroboration was two different errors landing
-near each other. Recorded because a coincidence that looks like confirmation is
-worth more as a warning than as a deleted line.
-
-**What survives, and why it is independent.** `check_depth_is_unpriced` reads off
-the registration path: `declared_stake = 1` base unit is legal, the fee is
-`max(svc.fee_bps · stake, SVC_FEE_FLOOR_USDC)` so the flat floor binds, and `b`
-has no upper bound. It depends on none of the withdrawn arithmetic.
-
-**One caveat still binds what remains.** Every depth figure sits on the
-proportional-to-depth flow model that 16 §8.4 records as *anchored, not derived*,
-with an **unsafe** error direction — a venue more attractive than proportional
-needs less depth, so the attack is cheaper than this module says.
-
-Units: USDC in whole units (Decimal), matching `sustainability.py` and
-`service_economics.py`. Costs are per epoch, matching 08 §7.
+Units: USDC in whole units (Decimal). Costs are per epoch, matching 08 §7.
 
 Do not set `getcontext().prec` here — it is process-wide and would perturb the
 normative LMSR kernel. Use `localcontext()`, as `lmsr.py` does.
@@ -93,11 +68,13 @@ __all__ = [
     "EPOCH_SLATE_SIZE",
     "CarryingCost",
     "carrying_cost_per_epoch",
-    "cheapest_priced_denial_channel",
     "fee_at_minimum_declared_stake",
     "harm_at_arming_rung",
-    "check_equalization_not_yet_computable",
-    "check_depth_is_unpriced",
+    "PHASE3_TVL_CAP_USDC",
+    "max_depth_under_tvl_cap",
+    "check_fee_is_flat_in_depth",
+    "check_no_valid_denial_benchmark",
+    "check_arming_condition_unenforced",
     "check_th72_attack_cost_is_unpriced",
 ]
 
@@ -111,6 +88,9 @@ POL_B_DECISION = {
     "code": Decimal(60_000),
     "meta": Decimal(100_000),
 }
+
+# 13 §1 phase3.tvl_cap — the bound that actually limits posted depth.
+PHASE3_TVL_CAP_USDC = Decimal(2_000_000)
 
 # 15 §4.9 / the Phase-0 simulation's per-epoch proposal slate.
 EPOCH_SLATE_SIZE = 5
@@ -211,22 +191,6 @@ def carrying_cost_per_epoch(
     )
 
 
-def cheapest_priced_denial_channel() -> tuple[str, Decimal]:
-    """The cheapest 08 §7 channel — the benchmark the hosted door must not undercut.
-
-    Benchmarked against the **cheapest** channel, not the mean: pricing against an
-    expensive route would leave the cheap route open, which is the whole defect.
-    """
-    best: tuple[str, Decimal] | None = None
-    for strategy in ("intake_denial", "slot_capture", "combined", "refund_path"):
-        cost = threat_costs.intake_monopolization_cost(strategy).cost_per_epoch
-        value = Decimal(cost.numerator) / Decimal(cost.denominator)
-        if best is None or value < best[1]:
-            best = (strategy, value)
-    assert best is not None
-    return best
-
-
 def harm_at_arming_rung(proposal_class: str, artifact: Path) -> Decimal:
     """Measured decision-grade formation loss at 16 §8.4's arming rung (N12).
 
@@ -244,61 +208,100 @@ def harm_at_arming_rung(proposal_class: str, artifact: Path) -> Decimal:
         return (control - armed) / control
 
 
-def check_equalization_not_yet_computable(artifact: Path) -> dict[str, object]:
-    """Why this module publishes no ratio and no price target (2026-08-03).
+def max_depth_under_tvl_cap(cap: Decimal = None) -> Decimal:
+    """Largest `b` a single hosted question can post, bounded by the TVL cap.
 
-    An earlier revision published per-class ratios and per-epoch uplifts. An
-    adversarial review refuted the arithmetic under both, and they are withdrawn
-    rather than corrected, because two blockers are not arithmetic errors — they
-    are missing inputs, and R-2 forbids filling them by assumption:
-
-    **(a) The benchmark's harm is unmeasured.** Every ratio divides the hosted
-    attack's *measured* formation loss by `intake_denial`'s harm — which the
-    earlier revision silently treated as 1.0 (total denial). Nothing states or
-    justifies that, so each ratio was wrong by `1/H_I`. 08 §7 prices the intake
-    channel's *cost*; nothing measures its *harm*.
-
-    **(b) The dominant cost term is missing.** The model counted only carrying
-    cost on posted escrow. Worst-case LMSR maker loss *is* the posted cash — on
-    the order of 350× the carrying cost — so omitting it does not make the figure
-    conservative, it makes it not a figure.
-
-    What survives is `check_depth_is_unpriced`, which reads off the registration
-    path and depends on none of this.
+    `escrow = 2 · seed_headroom(b) = 2·b·ln 2` must fit under `phase3.tvl_cap`
+    (13 §1), so `b <= cap / (2·ln 2)`. This is the bound that refutes the
+    "arbitrary depth" claim: the fee is flat, the capital is not.
     """
-    harms = {c: harm_at_arming_rung(c, artifact) for c in POL_B_DECISION}
+    ceiling = PHASE3_TVL_CAP_USDC if cap is None else cap
+    if ceiling <= 0:
+        raise SlotPricingError("cap must be positive")
+    with localcontext() as ctx:
+        ctx.prec = _PRECISION
+        return ceiling / (Decimal(2) * _ln2())
+
+
+def check_fee_is_flat_in_depth() -> dict[str, object]:
+    """The surviving, narrowed form of the original headline claim.
+
+    The original said 393 USDC buys arbitrary depth. It does not — depth is
+    bought with escrow, which scales as `2·b·ln 2` and is TVL-capped. What is
+    true is only that the *fee leg* is invariant in `b`.
+    """
     return {
-        "publishes_ratio": False,
-        "publishes_price_target": False,
-        "hosted_harm_measured": True,
-        "hosted_harm_at_arming_rung": harms,
-        "benchmark_harm_measured": False,
-        "dominant_cost_term_modelled": False,
-        "blockers": (
-            "intake_denial harm is unmeasured (was smuggled as 1.0); "
-            "LMSR maker loss is unmodelled and ~350x the carrying cost counted"
+        "fee_at_minimum_stake": fee_at_minimum_declared_stake(),
+        "fee_scales_with_depth": False,
+        "capital_scales_with_depth": True,
+        "escrow_formula": "2 * seed_headroom(b) = 2*b*ln 2",
+        "max_b_under_phase3_tvl_cap": max_depth_under_tvl_cap(),
+        "superseded_claim": "393 USDC buys arbitrary depth — REFUTED 2026-08-03",
+        "open_question": (
+            "whether a fee flat in depth is itself a defect, given the capital "
+            "requirement is not — unresolved, and not asserted either way here"
         ),
-        "surviving_finding": "check_depth_is_unpriced",
     }
 
 
-def check_depth_is_unpriced() -> dict[str, object]:
-    """Finding 1 as a findings accessor: the fee does not move with depth.
+def check_no_valid_denial_benchmark() -> dict[str, object]:
+    """Why this module publishes no ratio and no price target.
 
-    Reported rather than asserted, per the S6–S11 convention — the defect is
-    exposed through a `check_*` accessor so a suite pins the *derived* behaviour
-    instead of encoding the wrong number as if it were right.
+    `intake_denial` blocks admission (the 64-entry queue, `IntakeFull`); depth
+    thinning starves a proposal already in `Trading` into
+    `Reject(NotDecisionGrade)`. Different harms, so the cheaper is not a price
+    for the other. Two further blockers survive from the first review: the
+    benchmark channel's *harm* is unmeasured, and worst-case LMSR maker loss —
+    the dominant cost term — is unmodelled.
     """
-    thin = fee_at_minimum_declared_stake()
     return {
-        "fee_at_minimum_stake": thin,
-        "fee_is_independent_of_posted_depth": True,
-        "why": (
-            "register admits declared_stake = 1 base unit, the fee is "
-            "max(svc.fee_bps * stake, SVC_FEE_FLOOR_USDC) so the kernel floor "
-            "binds, and b carries a lower bound only. Arbitrary depth for 393 USDC."
+        "publishes_ratio": False,
+        "publishes_price_target": False,
+        "benchmark_removed": "intake_denial — incommensurable harm",
+        "blockers": (
+            "intake denial blocks admission, not the decision call; benchmark "
+            "harm unmeasured; LMSR maker loss unmodelled and dominant"
         ),
-        "repaired_by": "N14 — the fee needs a depth-proportional leg",
+        "n14_rationale_that_survives": (
+            "allocation — slot sniping and first-come-first-served under "
+            "contention — which needs no threat-cost benchmark"
+        ),
+        "n14_rationale_that_does_not": (
+            "that hosted denial is underpriced relative to existing channels"
+        ),
+    }
+
+
+def check_arming_condition_unenforced(repo_root: Path) -> dict[str, object]:
+    """16 §8.4's arming condition is normative and no code enforces it.
+
+    The largest finding here, and it outlived every refutation of the rest.
+    `Σ b_ext <= Σ pol.b(live)` bounds external depth at parity with Bleavit's own
+    at switch-on. N12 anchored its whole competing-venue rung to this condition
+    and measured the governance damage at it — while nothing makes it true.
+    """
+    hits: list[str] = []
+    for rel in (
+        "runtime/bleavit-runtime/src/migrations.rs",
+        "pallets/question-service/src/lib.rs",
+        "pallets/client-registry/src/lib.rs",
+    ):
+        path = repo_root / rel
+        if path.exists() and "b_ext" in path.read_text(encoding="utf-8"):
+            hits.append(rel)
+    doc = (repo_root / "docs/architecture/16-hosted-question-service.md").read_text(
+        encoding="utf-8"
+    )
+    return {
+        "condition": "sum(b_ext) <= sum(pol.b(live)) at arming (16 §8.4)",
+        "stated_normatively": "Σ b_ext ≤ Σ pol.b(live)" in doc,
+        "enforcement_sites_found": hits,
+        "enforced": bool(hits),
+        "why_it_matters": (
+            "N12 anchored the competing-venue arming rung to this condition and "
+            "recorded its error direction as unsafe; an unenforced precondition "
+            "makes that measurement describe a state nothing guarantees"
+        ),
     }
 
 

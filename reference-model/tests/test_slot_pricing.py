@@ -18,11 +18,9 @@ from __future__ import annotations
 
 import unittest
 from decimal import Decimal, getcontext
-from fractions import Fraction
 from pathlib import Path
 
 from bleavit_reference_model import slot_pricing as sp
-from bleavit_reference_model import threat_costs
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ARTIFACT = REPO_ROOT / "simulation/results/phase0-calibration.json"
@@ -72,11 +70,11 @@ class AttackerCostTests(unittest.TestCase):
 
 
 class DepthIsUnpricedTests(unittest.TestCase):
-    """Finding 1 — the defect N14 exists to repair."""
+    """The fee leg only. The capital leg is in RefutedClaimsTests."""
 
     def test_fee_does_not_move_with_posted_depth(self) -> None:
-        finding = sp.check_depth_is_unpriced()
-        self.assertTrue(finding["fee_is_independent_of_posted_depth"])
+        finding = sp.check_fee_is_flat_in_depth()
+        self.assertFalse(finding["fee_scales_with_depth"])
         self.assertEqual(finding["fee_at_minimum_stake"], Decimal(393))
 
     def test_minimum_stake_fee_is_the_floor_not_the_rate_leg(self) -> None:
@@ -94,46 +92,57 @@ class DepthIsUnpricedTests(unittest.TestCase):
         )
 
 
-class EqualizationTests(unittest.TestCase):
-    """The hosted door against the cheapest door that is already priced."""
+class RefutedClaimsTests(unittest.TestCase):
+    """Each refuted claim pinned as refuted, so it cannot quietly return."""
 
-    def test_benchmark_is_intake_denial_at_6400(self) -> None:
-        name, cost = sp.cheapest_priced_denial_channel()
-        self.assertEqual(name, "intake_denial")
-        self.assertEqual(cost, Decimal(6400))
+    def test_fee_is_flat_in_depth_but_capital_is_not(self) -> None:
+        """The narrowed survivor of 'a flat 393 USDC buys arbitrary depth'."""
+        f = sp.check_fee_is_flat_in_depth()
+        self.assertFalse(f["fee_scales_with_depth"])
+        self.assertTrue(f["capital_scales_with_depth"])
+        self.assertEqual(f["fee_at_minimum_stake"], Decimal(393))
 
-    def test_benchmark_is_the_minimum_not_the_mean(self) -> None:
-        """Pricing against an average would leave the cheap route open."""
-        every = [
-            Decimal(threat_costs.intake_monopolization_cost(s).cost_per_epoch.numerator)
-            / Decimal(threat_costs.intake_monopolization_cost(s).cost_per_epoch.denominator)
-            for s in ("intake_denial", "slot_capture", "combined", "refund_path")
-        ]
-        _, benchmark = sp.cheapest_priced_denial_channel()
-        self.assertEqual(benchmark, min(every))
-        self.assertLess(benchmark, sum(every) / len(every))
+    def test_depth_is_bounded_by_the_tvl_cap(self) -> None:
+        """The bound that refuted 'arbitrary'. escrow = 2*b*ln2 <= cap."""
+        b = sp.max_depth_under_tvl_cap()
+        self.assertEqual(b.quantize(Decimal("1")), Decimal(1_442_695))
+        escrow = Decimal(2) * b * Decimal(2).ln()
+        self.assertEqual(
+            escrow.quantize(Decimal("1")), sp.PHASE3_TVL_CAP_USDC.quantize(Decimal("1"))
+        )
 
-    def test_module_publishes_no_ratio_and_no_price_target(self) -> None:
-        """The withdrawal, pinned. An earlier revision published both."""
-        finding = sp.check_equalization_not_yet_computable(ARTIFACT)
-        self.assertFalse(finding["publishes_ratio"])
-        self.assertFalse(finding["publishes_price_target"])
-        self.assertFalse(finding["benchmark_harm_measured"])
-        self.assertFalse(finding["dominant_cost_term_modelled"])
+    def test_no_benchmark_and_no_price_target_are_published(self) -> None:
+        f = sp.check_no_valid_denial_benchmark()
+        self.assertFalse(f["publishes_ratio"])
+        self.assertFalse(f["publishes_price_target"])
 
-    def test_the_withdrawn_helpers_are_gone_not_merely_unused(self) -> None:
-        """A consumer must not be able to import them back by accident."""
+    def test_the_refuted_benchmark_helper_is_gone(self) -> None:
+        """intake_denial priced admission, not decisions. Not re-pointable."""
+        self.assertFalse(hasattr(sp, "cheapest_priced_denial_channel"))
         self.assertFalse(hasattr(sp, "equalization"))
         self.assertFalse(hasattr(sp, "required_uplift"))
-        self.assertNotIn("equalization", sp.__all__)
 
-    def test_hosted_harm_is_measured_even_though_the_benchmark_is_not(self) -> None:
-        """The asymmetry that blocks the ratio: one side has evidence, one does not."""
-        finding = sp.check_equalization_not_yet_computable(ARTIFACT)
-        self.assertTrue(finding["hosted_harm_measured"])
-        for cls, harm in finding["hosted_harm_at_arming_rung"].items():
-            with self.subTest(cls=cls):
-                self.assertGreater(harm, Decimal(0))
+    def test_allocation_rationale_survives_and_pricing_rationale_does_not(self) -> None:
+        """N14 still has a case; it is just not the threat-cost one."""
+        f = sp.check_no_valid_denial_benchmark()
+        self.assertIn("allocation", f["n14_rationale_that_survives"])
+        self.assertIn("underpriced", f["n14_rationale_that_does_not"])
+
+
+class ArmingConditionTests(unittest.TestCase):
+    """The finding that outlived every refutation."""
+
+    def test_arming_condition_is_normative_but_unenforced(self) -> None:
+        f = sp.check_arming_condition_unenforced(REPO_ROOT)
+        self.assertTrue(f["stated_normatively"])
+        self.assertFalse(f["enforced"])
+        self.assertEqual(f["enforcement_sites_found"], [])
+
+    def test_this_is_a_tripwire_not_a_permanent_truth(self) -> None:
+        """When N-something implements it, this test must fail and be rewritten
+        rather than silently keep asserting the gap exists."""
+        f = sp.check_arming_condition_unenforced(REPO_ROOT)
+        self.assertIsInstance(f["enforcement_sites_found"], list)
 
 
 class NaiveRoutesMustNotReproduceTests(unittest.TestCase):
@@ -161,13 +170,6 @@ class NaiveRoutesMustNotReproduceTests(unittest.TestCase):
         self.assertNotEqual(_round(cash), _round(naive))
         self.assertLess(cash, naive)
 
-    def test_slot_capture_benchmark_would_understate_the_hole(self) -> None:
-        """Benchmarking the intuitive channel instead of the cheapest one."""
-        slot = threat_costs.intake_monopolization_cost("slot_capture").cost_per_epoch
-        slot_value = Decimal(slot.numerator) / Decimal(slot.denominator)
-        _, benchmark = sp.cheapest_priced_denial_channel()
-        self.assertGreater(slot_value, benchmark)
-
 
 class ThreatRowTests(unittest.TestCase):
     def test_th72_cost_cell_carries_no_figure(self) -> None:
@@ -190,22 +192,10 @@ class ThreatRowTests(unittest.TestCase):
 class ArithmeticHygieneTests(unittest.TestCase):
     def test_module_does_not_mutate_global_decimal_context(self) -> None:
         before = getcontext().prec
-        sp.check_equalization_not_yet_computable(ARTIFACT)
+        sp.check_no_valid_denial_benchmark()
         for cls in sp.POL_B_DECISION:
             sp.carrying_cost_per_epoch(cls)
         self.assertEqual(getcontext().prec, before)
-
-    def test_capital_time_value_matches_08_section_7(self) -> None:
-        """The opportunity-cost half is 08 §7's own helper, not a private copy."""
-        cash = sp.parity_depth_cash(sp.POL_B_DECISION["code"])
-        want = threat_costs.capital_time_value(Fraction(int(cash)))
-        got = sp.carrying_cost_per_epoch("code").capital_time_value
-        self.assertEqual(
-            got.quantize(Decimal("0.0001")),
-            (Decimal(want.numerator) / Decimal(want.denominator)).quantize(
-                Decimal("0.0001")
-            ),
-        )
 
     def test_zero_and_negative_inputs_refuse(self) -> None:
         with self.assertRaises(sp.SlotPricingError):
