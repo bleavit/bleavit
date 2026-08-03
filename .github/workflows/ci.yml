@@ -240,6 +240,65 @@ jobs:
         run: python3 tools/ci/regenerate-weights.py --check --steps 2 --repeat 1
 
   # B7 environment release artifacts — 15 §4.7; 02 §11.
+  app:
+    name: App (Track F)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # app/.nvmrc is the single home of the Node pin. It deliberately does NOT
+          # live in tools/env/pins.env: that file is 15 §4.7's exact-key manifest for
+          # digest-pinned *test-environment* binaries, and the app's build toolchain
+          # is 12 §1.1. Putting it there conflated two specs and the env validator
+          # was right to refuse it.
+          node-version-file: app/.nvmrc
+      - name: Enable corepack (pnpm pin comes from packageManager)
+        working-directory: app
+        # corepack reads `packageManager` from package.json, so the pin has exactly
+        # one home and there is nothing to cross-check against.
+        run: corepack enable && corepack install
+      - name: Assert the Node pin and the engines range agree
+        working-directory: app
+        run: |
+          set -euo pipefail
+          pinned=$(cat .nvmrc)
+          node -e "
+            const {engines}=require('./package.json');
+            const semver=process.argv[1];
+            if(!engines?.node) { console.error('engines.node missing'); process.exit(1); }
+            const [maj]=semver.split('.');
+            if(!engines.node.includes(semver) && !engines.node.includes('>='+semver)) {
+              console.error(\`.nvmrc \${semver} not admitted by engines.node \${engines.node}\`); process.exit(1);
+            }
+            console.log(\`.nvmrc \${semver} agrees with engines.node \${engines.node}\`);
+          " "$pinned"
+      - name: Install (frozen lockfile)
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck and build the project graph
+        working-directory: app
+        # `tsc -b` is the PRIMARY firewall gate: a forbidden import fails module
+        # resolution here, it is not merely reported.
+        run: pnpm run build
+      - name: Package firewall (dependency-cruiser)
+        working-directory: app
+        run: pnpm run depcruise
+      - name: Firewall witness — the rules MUST still be able to fail
+        working-directory: app
+        # A checker that can no longer detect anything reports success. This asserts
+        # a known-forbidden edge is still caught; a silent config change that made
+        # every rule vacuous once passed a full green run here.
+        run: pnpm run depcruise:witness
+      - name: Negative-compilation corpus (10 §10.2)
+        working-directory: app
+        # The only suite that tests the firewall REJECTS rather than that the app
+        # works. Includes an anti-vacuity positive control.
+        run: pnpm run test:firewall
+      - name: Finalized<T> assertion gate (10 §2.1)
+        working-directory: app
+        run: pnpm run check:casts
+
   environments:
     name: Environment definitions
     runs-on: ubuntu-latest

@@ -1,0 +1,9 @@
+{
+  "name": "@bleavit/depcruise-witness",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@bleavit/providers": "workspace:*"
+  }
+}

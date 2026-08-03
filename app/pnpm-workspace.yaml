@@ -1,0 +1,9 @@
+# The single client monorepo (10 §10.1). `src/features/*` are workspace packages,
+# not plain folders: their package.json dependencies ARE the §10.2 reference sets,
+# and pnpm's isolated node_modules is what makes an undeclared import unresolvable
+# rather than merely un-referenced. See .npmrc — node-linker is pinned, not defaulted.
+packages:
+  - 'packages/*'
+  - 'src/features/*'
+  - 'tests/firewall'
+  - 'tests/depcruise-witness'

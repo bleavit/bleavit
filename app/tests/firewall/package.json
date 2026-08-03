@@ -1,0 +1,13 @@
+{
+  "name": "@bleavit/firewall-fixtures",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test *.test.js"
+  },
+  "dependencies": {
+    "@bleavit/shared-types": "workspace:*",
+    "@bleavit/chain-client": "workspace:*"
+  }
+}

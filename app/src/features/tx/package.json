@@ -1,0 +1,27 @@
+{
+  "name": "@bleavit/features-tx",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@bleavit/shared-types": "workspace:*",
+    "@bleavit/chain-client": "workspace:*",
+    "@bleavit/protocol": "workspace:*",
+    "@bleavit/simulation": "workspace:*",
+    "@bleavit/transaction-builder": "workspace:*",
+    "@bleavit/signing": "workspace:*",
+    "@bleavit/platform": "workspace:*",
+    "@bleavit/ui": "workspace:*"
+  }
+}

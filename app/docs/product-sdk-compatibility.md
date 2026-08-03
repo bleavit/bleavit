@@ -75,21 +75,48 @@ Only if Bleavit's genesis hash is in that host's configuration, and **that confi
 operator-driven and remote** — the client receives its endpoints from a devnet configuration
 service.
 
-**The decisive finding is what the host is.** A code search across the SDK's source returns zero
-hits for `smoldot`; the provider is a WebSocket RPC proxy built on PAPI's `ws-provider`. The host
-proxies the `chainHead_v1_*` method set — the *same* JSON-RPC surface smoldot exposes and the one
-[10 §4.2](../../docs/architecture/10-frontend-architecture.md) already constrains us to — but it
-serves it from an RPC endpoint, not from verified light-client state.
+**CORRECTED 2026-08-03.** An earlier version of this report said *"the host is a WebSocket RPC
+proxy, not a light client"*, on the evidence that a code search across the SDK's source returns zero
+hits for `smoldot`. **That inference was wrong.** The zero-hit result is real, but it means the
+light-client wiring is a documented *recipe for the host implementer* rather than that the
+capability is absent — absence in the source of a library is not absence of capability in the thing
+that wires it up.
 
-Under [10 §2.2](../../docs/architecture/10-frontend-architecture.md)'s never-promote rule, that
-makes host-routed data `provider` status **forever**. Hash equality authenticates a header, not the
-values under it. Therefore:
+**What the host connection layer actually does.** `packages/host-substrate-chain-connection`
+supports **both** transports, and says so: *"one underlying WebSocket (or light client) per chain,
+multiplexed across consumers."* It ships a full smoldot recipe using `getSmProvider` and
+`polkadot-api/smoldot`.
+
+**But the light-client path is closed to parachains, and the README says so outright:**
+
+> Smoldot syncs chain state directly in the browser without trusting a remote RPC node. It works
+> for well-known relay chains (Polkadot, Kusama, Westend) — **parachains fall back to WebSocket**.
+
+The mechanism is a genesis-hash lookup into chain specs that `polkadot-api` ships built in — for
+relay chains only. Any other chain hits
+`throw new Error(\`Light client for chain "\${chain.name}" is not supported\`)`. That connects
+directly to the finding in question 3 above: the host protocol's chain config is a genesis hash and
+nothing else, with **no channel for a Product to supply a chain spec** — which is exactly why a
+custom parachain cannot obtain a light client through the host. The two findings are the same fact
+seen from two sides.
+
+**So the conclusion survives, for a narrower and better-evidenced reason.** Bleavit is a custom
+parachain, so a host-routed Bleavit connection is WebSocket-backed. Under
+[10 §2.2](../../docs/architecture/10-frontend-architecture.md)'s never-promote rule that data is
+`provider` forever, and therefore:
 
 > **A Product build whose chain access is host-routed can never sign in normal mode.**
-> Structurally it is the RPC quarantine of [10 §4.5](../../docs/architecture/10-frontend-architecture.md),
-> wearing an official badge.
+> Not because the host lacks light-client capability — it has it — but because that capability
+> requires a bundled chain spec and there is no way to supply one for a chain the host does not
+> already ship.
 
 This is not a defect in the SDK and not a defect in Bleavit. It is INV-FE-1 working.
+
+**What is still unknown for the deployed devnet.** Whether the *shipped* Polkadot app enables even
+the relay light-client path is **not determinable from public sources**: the client architecture
+page says only that each client *"receives the current RPC endpoints … from the Devnet
+configuration service"*, and never states the transport. Everything above is the behavior of the
+open reference implementation. Settling it for the deployed host is PROD-2.
 
 **There is an escape hatch, and it is the right one.** The protocol has a remote-permission
 capability by which a Product requests permission to open WebSocket connections to named domain

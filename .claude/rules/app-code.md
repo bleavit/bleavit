@@ -15,11 +15,17 @@ Practical consequences:
    light-client re-read. `transport-host` reads are `provider` forever — there is no
    promotion path, so a host-routed build cannot sign in normal mode.
 2. **Provenance typing (INV-FE-9, 10 §2.1).** Every displayed value carries a typed
-   status (`verified-finalized` / `verified-best` / `derived-local` / `provider` /
-   `stale-cache`). **`Finalized<T>` is constructible only inside
-   `app/packages/chain-client`** — its brand is a module-private `unique symbol`, the
-   single `as Finalized<T>` cast lives in `chain-client/src/finalize.ts`, and
-   `as unknown as` is banned repo-wide in `app/`. Never put the brand in
+   status — six of them: `verified-finalized` / `verified-best` / `derived-local` /
+   `provider` / `stale-cache` / `external-proposal`. **`Finalized<T>` is constructible
+   only inside `app/packages/chain-client`** — its brand is a module-private
+   `unique symbol` **in the type itself** (a structural intersection over
+   `status.kind` alone is satisfiable by any object literal, which is the defect an
+   earlier draft of 10 §2.1 shipped). The single `as Finalized<T>` lives in
+   `chain-client/src/provenance.ts`, and `as unknown as` is banned across `app/`.
+   **The brand does not stop assertions** — `x as Finalized<T>` is a narrowing
+   assertion TypeScript permits, proven empirically by the corpus — so
+   `app/tools/check-finalized-casts.mjs` is the other half of the control, not a
+   belt-and-braces extra. Never put the brand in
    `shared-types`: if the universal sink package can construct it, 10 §2.1 is void
    silently, with green CI. UI components reject unlabeled values by type.
 3. **Package firewall (INV-FE-3, 10 §10).** Respect the dependency-cruiser boundaries:
@@ -36,6 +42,13 @@ Practical consequences:
    indexer, no RPC, no provider, no external tool, cleared storage. If a feature needs
    a server, it is out of scope — do not centralize it. **No MCP** in any form: no
    local or hosted server, no tunnel, no sidecar, no background service (D-21).
+   **The handoff is the *default* surface (11 §11.2) but never load-bearing:
+   demoting a screen behind "Advanced" is permitted, removing one is not.** The two
+   properties are independent, and the one that matters is asserted by the 15 §4.8
+   no-infra certification run — which executes with the handoff surfaces disabled, so
+   a screen that only exists on the imported-action path fails it. When simplifying the
+   front door, move surfaces; never delete them, and never make one reachable *only*
+   through an external tool.
 6. **No telemetry, no remote config (INV-FE-13).** No analytics, no fetch-to-configure
    patterns; behavior changes only by shipping a new verifiable release. The handoff
    packages contain **no network primitive at all** — `fetch`, `XMLHttpRequest`,
