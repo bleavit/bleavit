@@ -205,6 +205,10 @@ impl_runtime_apis! {
         >> {
             crate::telemetry::service_egress()
         }
+
+        fn service_partition() -> Option<futarchy_runtime_api::ServicePartitionTelemetry> {
+            crate::telemetry::service_partition()
+        }
     }
 
     impl sp_block_builder::BlockBuilder<Block> for Runtime {

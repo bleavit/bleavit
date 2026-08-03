@@ -37,6 +37,10 @@ pub trait ServiceParamsProvider {
     fn oracle_bond_bps() -> u32;
     fn attestor_bond_floor() -> Balance;
     fn flow_cap() -> FixedU64;
+    /// 16 §8.6 ceiling on the scarcity multiplier. `None` while the row is
+    /// unset, and that is **not** a refusal — it means `M = 1`, i.e. the flat
+    /// two-part tariff. Contrast `fee_rate`, whose absence *is* the arming gate.
+    fn price_cap() -> Option<FixedU64>;
 }
 
 /// Best-effort delivery result. Only the registry's isolated diagnostic meter
@@ -68,6 +72,22 @@ pub trait ExternalMarketOrigin<RuntimeOrigin> {
 /// Read-only primary-decision schedule collision check.
 pub trait DecisionWindowGuard {
     fn collides(start: BlockNumber, end: BlockNumber) -> bool;
+}
+
+/// 16 §8.7: how starved Bleavit's *own* decision books currently are.
+///
+/// Read-only, and deliberately a probe rather than a notification: nothing in
+/// `pallet-market`'s seal path calls into the service, so Bleavit's critical
+/// path gains no dependency on the hosted domain.
+pub trait ContestHealthProbe {
+    /// `0` = every measurable decision book is at or above its decision-grade
+    /// contest floor; `SCORE_SCALE` = the weakest one has no contest capital at
+    /// all. Values above `SCORE_SCALE` are clamped by the consumer.
+    ///
+    /// Returns `0` when no book is measurable. That is a statement about the
+    /// present, not a fallback: with no live Bleavit decision book, the hosted
+    /// service is not competing with one.
+    fn starvation_1e9() -> FixedU64;
 }
 
 /// Conservative global TVL reservation preflight for new service escrow.
@@ -150,6 +170,8 @@ pub mod pallet {
         type ServiceParams: ServiceParamsProvider;
         type ExternalMarketOrigin: ExternalMarketOrigin<Self::RuntimeOrigin>;
         type DecisionWindows: DecisionWindowGuard;
+        /// 16 §8.7 starvation probe over Bleavit's own decision books.
+        type ContestHealth: ContestHealthProbe;
         type TvlCapGate: TvlCapGate<Self::AccountId>;
         /// Independent 03 §1a inflow-meter exemption predicate. Neither
         /// ledger's local account predicate may stand in for this one.
@@ -289,6 +311,33 @@ pub mod pallet {
     #[pallet::storage]
     pub type LiveQuestionCount<T: Config> = StorageValue<_, u32, ValueQuery>;
 
+    /// Aggregate posted external subsidy over live questions, in cash
+    /// (`Σ 2·b·ln 2`) — the external side of 16 §8.4's arming condition.
+    ///
+    /// Exists because that condition had no implementation at all (SQ-575). It
+    /// is a running total rather than a fold over `Terms` because the check runs
+    /// on every `register` and `Terms` is unbounded in principle; a fold would
+    /// put an O(live) read on an extrinsic that must stay O(1).
+    #[pallet::storage]
+    pub type LiveExternalDepth<T: Config> = StorageValue<_, Balance, ValueQuery>;
+
+    /// 16 §8.6 scarcity state: `(multiplier, block last raised, decay window)`.
+    ///
+    /// The window is stored rather than re-read because `svc.max_window` is
+    /// amendable: decaying against the live row would let one amendment expire
+    /// every outstanding price at once, and §8.6 says the price moves down only
+    /// gradually. Each stored price decays on the schedule that was in force
+    /// when it was set.
+    ///
+    /// `None` means the multiplier is at its floor of 1 — the flat tariff — so
+    /// the common case costs one read and no arithmetic. Decay is applied
+    /// lazily on read rather than by a hook: nothing else needs the value
+    /// between registrations, and a hook would spend block weight every block
+    /// to maintain a number only `register` consumes.
+    #[pallet::storage]
+    pub type ScarcityMultiplier<T: Config> =
+        StorageValue<_, (FixedU64, BlockNumber, BlockNumber), OptionQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -338,6 +387,9 @@ pub mod pallet {
         ServiceRateUnset,
         CertificationUnavailable,
         StakeBelowFloor,
+        /// 16 §8.4: admitting this question would push `Σ b_ext` above
+        /// `Σ pol.b(live)`, making the external side the dominant market.
+        ArmingBoundExceeded,
         SubsidyBelowMinimum,
         EpsilonOutOfRange,
         WindowTooLong,
@@ -673,6 +725,158 @@ pub mod pallet {
             Reports::<T>::get(question_id)
         }
 
+        /// The 16 §8.6/§8.7 price multiplier `M` charged on the next admission.
+        ///
+        /// `M = min(cap, max(contention, starvation))`. `max` rather than a
+        /// product so one ceiling governs both terms and `M <= cap` holds by
+        /// construction — a product would reach `cap^2` and would need a second
+        /// registry row to say what that means.
+        pub fn scarcity_multiplier() -> FixedU64 {
+            let contention = Self::contention_multiplier();
+            let starvation = Self::starvation_multiplier();
+            FixedU64(contention.0.max(starvation.0))
+        }
+
+        /// 16 §8.7: the starvation half of `M`, read live and never stored.
+        ///
+        /// Storing it would bake a transient starvation into §8.6's slowly
+        /// decaying term — hysteresis outliving the condition that justified
+        /// it. Returns `SCORE_SCALE` (no effect) when the ceiling is unset or
+        /// when no Bleavit decision book is currently measurable, which is a
+        /// true statement about the present rather than a fallback: with no
+        /// live decision book the hosted service is not competing with one.
+        pub fn starvation_multiplier() -> FixedU64 {
+            let one = FixedU64(kernel::SCORE_SCALE);
+            let Some(cap) = T::ServiceParams::price_cap() else {
+                return one;
+            };
+            if cap.0 <= one.0 {
+                return one;
+            }
+            let starvation = T::ContestHealth::starvation_1e9().0.min(one.0);
+            if starvation == 0 {
+                return one;
+            }
+            // one + starvation * (cap - 1), on the SCORE_SCALE grid. Rounds
+            // UP, matching the fee path in `do_register`: R-7 puts the residue
+            // against the party relying on the charge being small, and having
+            // one step of the same expression round down while the next rounds
+            // up let the composite land one base unit under the exact charge.
+            let span = u128::from(cap.0.saturating_sub(one.0));
+            let grid = u128::from(kernel::SCORE_SCALE);
+            let lift = span
+                .saturating_mul(u128::from(starvation))
+                .saturating_add(grid.saturating_sub(1))
+                .checked_div(grid)
+                .unwrap_or(0);
+            FixedU64(
+                one.0
+                    .saturating_add(lift.try_into().unwrap_or(u64::MAX))
+                    .min(cap.0),
+            )
+        }
+
+        /// 16 §8.6: the contention half of `M`, as of now.
+        ///
+        /// Linear decay toward 1 over `svc.max_window`, so a price cannot
+        /// outlive the demand that set it. Linear rather than exponential
+        /// because runtime code carries no transcendentals outside the
+        /// `futarchy-fixed` kernel, and the property that matters — a freed slot
+        /// descends rather than dropping — holds under either shape.
+        ///
+        /// Returns exactly `SCORE_SCALE` (M = 1) when the ceiling row is unset,
+        /// when nothing has been raised, or once a full window has elapsed.
+        ///
+        /// The stored value is **clamped against the LIVE ceiling on every
+        /// read**, not only when it is written. `svc.price_cap` is amendable
+        /// (13 §1, ×2 max-Δ), and without this clamp a governance amendment
+        /// that lowers the ceiling would leave an already-stored price above
+        /// it — `M > svc.price_cap`, which 16 §8.6 states can never happen —
+        /// until the next admission happened to rewrite the value. It also
+        /// removed a price *drop* on rising demand: the first arrival after
+        /// such an amendment paid the stale higher price and the raise then
+        /// clamped, so the second arrival paid less than the first.
+        ///
+        /// Decay runs against the window **in force when the price was set**,
+        /// carried in storage beside it. Reading the live `svc.max_window`
+        /// instead let an amendment lowering that row expire every outstanding
+        /// price at once, which contradicts this section's own "down only
+        /// gradually" — a governance action is not a decay.
+        pub fn contention_multiplier() -> FixedU64 {
+            let one = FixedU64(kernel::SCORE_SCALE);
+            let Some(cap) = T::ServiceParams::price_cap() else {
+                return one;
+            };
+            let Some((raised_to, raised_at, window)) = ScarcityMultiplier::<T>::get() else {
+                return one;
+            };
+            let raised_to = raised_to.0.min(cap.0);
+            if raised_to <= one.0 {
+                return one;
+            }
+            if window == 0 {
+                return one;
+            }
+            let elapsed = Self::now().saturating_sub(raised_at);
+            if elapsed >= window {
+                return one;
+            }
+            // excess * (window - elapsed) / window, in u128 so the product of a
+            // 1e9-grid excess and a block count cannot overflow.
+            let excess = u128::from(raised_to.saturating_sub(one.0));
+            let remaining = u128::from(window.saturating_sub(elapsed));
+            let decayed = excess
+                .saturating_mul(remaining)
+                .checked_div(u128::from(window))
+                .unwrap_or(0);
+            FixedU64(one.0.saturating_add(decayed.try_into().unwrap_or(u64::MAX)))
+        }
+
+        /// Test-only alias. `raise_scarcity` stays private so no production
+        /// caller can move the price outside `register`.
+        #[cfg(test)]
+        pub fn raise_scarcity_for_test() {
+            Self::raise_scarcity();
+        }
+
+        /// Raise the contention multiplier by one admission's worth, capped.
+        ///
+        /// The step is additive — `(cap - 1) / max_live` — so taking every slot
+        /// at once reaches the ceiling **up to integer division's remainder**
+        /// and can never exceed it. It lands *exactly* on the ceiling only when
+        /// `max_live` divides `cap - 1`; otherwise it stops short by less than
+        /// `max_live` grid units, which is the price of exact integer
+        /// arithmetic and is the safe direction (short, never over).
+        ///
+        /// A ceiling barely above 1 truncates the step to **zero** and the
+        /// mechanism does nothing. That is the intended reading of such a
+        /// ceiling, not a failure: `svc.price_cap = 1` means "off" (13 §1 min),
+        /// and a value one grid unit above it means very nearly off.
+        ///
+        /// Reads `contention_multiplier`, **not** `scarcity_multiplier`: the
+        /// starvation half is a live reading of Bleavit's own books, and
+        /// ratcheting it into the stored term would leave a transient
+        /// starvation decaying slowly out of the price long after the books
+        /// recovered. Admission demand raises this term; nothing else does.
+        fn raise_scarcity() {
+            let Some(cap) = T::ServiceParams::price_cap() else {
+                return;
+            };
+            let one = kernel::SCORE_SCALE;
+            if cap.0 <= one {
+                return;
+            }
+            let max_live = T::ServiceParams::max_live();
+            if max_live == 0 {
+                return;
+            }
+            let window = T::ServiceParams::max_window();
+            let step = cap.0.saturating_sub(one) / u64::from(max_live);
+            let current = Self::contention_multiplier().0;
+            let raised = current.saturating_add(step).min(cap.0);
+            ScarcityMultiplier::<T>::put((FixedU64(raised), Self::now(), window));
+        }
+
         fn do_register(client: ClientId, input: RegisterInput<T::AccountId>) -> DispatchResult {
             let fee_rate = T::ServiceParams::fee_rate().ok_or(Error::<T>::ServiceRateUnset)?;
             Self::ensure_not_paused()?;
@@ -783,7 +987,25 @@ pub mod pallet {
                 .checked_mul(2)
                 .ok_or(Error::<T>::ArithmeticOverflow)?;
             let proportional_fee = Self::mul_perbill_ceil(input.declared_stake, fee_rate)?;
-            let fee = proportional_fee.max(kernel::SVC_FEE_FLOOR_USDC);
+            let base_fee = proportional_fee.max(kernel::SVC_FEE_FLOOR_USDC);
+            // 16 §8.6: scale the tariff by the scarcity multiplier. Rounds UP
+            // (R-7, against the party relying on the charge being small), and
+            // is exactly `base_fee` whenever `M = 1`, which is the unset-ceiling
+            // default — so the flat-tariff path is bit-identical to pre-N14.
+            let multiplier = Self::scarcity_multiplier();
+            let fee = if multiplier.0 == kernel::SCORE_SCALE {
+                base_fee
+            } else {
+                let scaled = base_fee
+                    .checked_mul(u128::from(multiplier.0))
+                    .ok_or(Error::<T>::ArithmeticOverflow)?;
+                let one = u128::from(kernel::SCORE_SCALE);
+                scaled
+                    .checked_add(one.saturating_sub(1))
+                    .ok_or(Error::<T>::ArithmeticOverflow)?
+                    .checked_div(one)
+                    .ok_or(Error::<T>::ArithmeticOverflow)?
+            };
             let required = escrow
                 .checked_add(fee)
                 .ok_or(Error::<T>::ArithmeticOverflow)?;
@@ -795,6 +1017,29 @@ pub mod pallet {
                 CollateralOf::<T>::balance(Self::usdc(), &funder) >= required,
                 Error::<T>::EscrowInsufficient
             );
+            // 16 §8.4's external side (SQ-575). `Σ b_ext` is *accounted* here and
+            // asserted by try-state; it is deliberately **not** compared against
+            // `Σ pol.b(live)` at this site, and the reason is a measured one
+            // rather than an omission.
+            //
+            // `LivePolCommitments` holds protocol subsidy only while decision
+            // books are seeded, so the instantaneous sum is zero for most of an
+            // epoch. Enforcing `Σ b_ext ≤ Σ pol.b(live)` here would therefore
+            // refuse essentially every registration outside Bleavit's own
+            // decision windows — 21 of this pallet's 28 tests fail that way, not
+            // because the tests are wrong but because the mock has no live POL,
+            // which is also the chain's ordinary state between windows.
+            //
+            // 16 §8.4 says the bound holds "at switch-on"; the Phase-4 transition
+            // enforces exactly that, against this total. Whether it must also
+            // hold *continuously* — and if so against what non-blinking measure,
+            // since the instantaneous one cannot be it — is a design question
+            // with no derivable answer yet and is tracked in SQ-575 rather than
+            // guessed at here. Accounting first; the bound it enables can only
+            // be as good as the measure it compares against.
+            let external_after = LiveExternalDepth::<T>::get()
+                .checked_add(escrow)
+                .ok_or(Error::<T>::ArithmeticOverflow)?;
 
             let bond_each = Self::attestor_bond(escrow)?;
             let bond_total = bond_each
@@ -887,6 +1132,13 @@ pub mod pallet {
                     .checked_add(1)
                     .ok_or(Error::<T>::ArithmeticOverflow)?,
             );
+            // `external_after` was computed under the same admission checks
+            // above and is the post-state by construction, so this cannot
+            // disagree with what the arming bound was evaluated against.
+            LiveExternalDepth::<T>::put(external_after);
+            // Raise AFTER the fee for this admission is fixed: the arriving
+            // client pays the price its arrival found, not the one it created.
+            Self::raise_scarcity();
             Self::deposit_event(Event::QuestionRegistered {
                 question_id,
                 client_id: client,
@@ -1019,6 +1271,13 @@ pub mod pallet {
                 question_id,
                 winner,
             )?;
+            // The WHOLE fee — floor plus any 16 §8.6 scarcity premium — lands in
+            // `MAIN`. Crediting the premium straight to POL would need this
+            // pallet to name Bleavit's protocol subsidy custody account, which
+            // is a second money path into that custody where §7.2-§7.5 leave
+            // exactly one (the Sweep returning what POL itself spent). The
+            // premium is recoverable off-chain without a new event or field:
+            // `terms.fee - max(fee_floor, fee_rate * declared_stake)`.
             Self::transfer(
                 &Self::account_id(),
                 &<T as pallet_conditional_ledger::Config<Instance1>>::TreasuryMainAccount::get(),
@@ -1205,6 +1464,17 @@ pub mod pallet {
                 *count = count.checked_sub(1).ok_or(Error::<T>::TryStateViolation)?;
                 Ok(())
             })?;
+            // Release this question's contribution to the 16 §8.4 external side.
+            // Saturating rather than checked on the *floor* only: a terminal
+            // transition must never be blocked by an accounting slip, because a
+            // question stuck live is a worse failure than a total that reads
+            // low — and try-state below catches any divergence loudly.
+            let released = Terms::<T>::get(question_id)
+                .map(|terms| terms.escrow)
+                .unwrap_or_default();
+            LiveExternalDepth::<T>::mutate(|depth| {
+                *depth = depth.saturating_sub(released);
+            });
             pallet_client_registry::Pallet::<T>::note_question_terminal(client)
                 .map_err(|_| Error::<T>::TryStateViolation.into())
         }
@@ -1729,6 +1999,34 @@ pub mod pallet {
             ensure!(
                 live == LiveQuestionCount::<T>::get(),
                 TryRuntimeError::Other("question-service: LiveQuestionCount mismatch",)
+            );
+            // 16 §8.4 / SQ-575. The running total is the only thing standing
+            // between the arming condition and the sentence it used to be, so it
+            // is folded from scratch here rather than trusted. A drift low would
+            // silently re-open the bound; a drift high would deny honest clients.
+            let mut folded_external: Balance = 0;
+            for (question_id, question) in Questions::<T>::iter() {
+                if matches!(
+                    question.phase,
+                    QuestionPhase::Settled | QuestionPhase::Voided
+                ) {
+                    continue;
+                }
+                let escrow = Terms::<T>::get(question_id)
+                    .map(|terms| terms.escrow)
+                    .ok_or(TryRuntimeError::Other(
+                        "question-service: live question without terms",
+                    ))?;
+                folded_external =
+                    folded_external
+                        .checked_add(escrow)
+                        .ok_or(TryRuntimeError::Other(
+                            "question-service: external depth overflow",
+                        ))?;
+            }
+            ensure!(
+                folded_external == LiveExternalDepth::<T>::get(),
+                TryRuntimeError::Other("question-service: LiveExternalDepth mismatch")
             );
             let custody = CollateralOf::<T>::balance(Self::usdc(), &Self::account_id());
             let total_liability =

@@ -384,12 +384,16 @@ fn runtime_api_id_and_version_are_frozen() {
     // would move it, and this assertion would then fail loudly rather than
     // letting a breaking change ship as an additive one.
     assert_eq!(runtime_decl_for_futarchy_api::VERSION, 3);
-    // N9 raised this to 4 by adding the isolated I-36 service-egress counters.
+    // N9 raised this to 4 by adding the isolated I-36 service-egress counters;
+    // **N7 raised it to 5** by appending `service_partition`, the row that
+    // retired the last five declared monitoring seams — 16 §8.4's
+    // cannibalization falsifier and §8.5's partition occupancy.
     // `TelemetryApi` is deliberately outside the 02 contract (12 §6.3 owns it,
     // the ops exporters are its only consumer), so the bump needs no separate
     // `INTEGRATION_CONTRACT_VERSION` change — but it is still frozen here, so a
-    // silent version drift fails rather than passes.
-    assert_eq!(runtime_decl_for_telemetry_api::VERSION, 4);
+    // silent version drift fails rather than passes. It just did its job: the
+    // bump was intentional and this assertion is what made it explicit.
+    assert_eq!(runtime_decl_for_telemetry_api::VERSION, 5);
 }
 
 #[test]

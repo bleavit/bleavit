@@ -1897,11 +1897,26 @@ fn service_instance_predicates_and_i37_freeze_latches_are_directional() {
         let main = crate::genesis::treasury_account();
         let client = account(211);
 
-        for primary in [&primary_sovereign, &primary_book, &main] {
+        // I-37's real content: a primary sovereign or book is never a service
+        // protocol account. MAIN is deliberately NOT in this group -- see below.
+        for primary in [&primary_sovereign, &primary_book] {
             assert!(crate::configs::ProtocolAccounts::contains(primary));
             assert!(!crate::configs::ServiceProtocolAccounts::contains(primary));
             assert!(crate::configs::ReservedProtocolAccounts::contains(primary));
         }
+
+        // MAIN belongs to BOTH instances' local sets, and this assertion used
+        // to read `!ServiceProtocolAccounts::contains(&main)` -- it encoded a
+        // blocker rather than catching it (adversarial review, 2026-08-03).
+        // 16 §7.4 accrues external trading and redemption fees to Bleavit MAIN,
+        // and 03 §5.5's return surface pays only protocol custody, so excluding
+        // MAIN here made `sweep_revenue` fail `TryStateViolation` on every
+        // hosted book and strand its revenue. MAIN is protocol-owned in both
+        // domains; it is not a foreign account inheriting an exemption, which
+        // is the direction 16 §7.2 warns about.
+        assert!(crate::configs::ProtocolAccounts::contains(&main));
+        assert!(crate::configs::ServiceProtocolAccounts::contains(&main));
+        assert!(crate::configs::ReservedProtocolAccounts::contains(&main));
         for service in [
             &service_sovereign,
             &service_book,
@@ -18288,7 +18303,7 @@ fn unavailable_prize_keeps_the_base_contest_floor_and_never_slashes_the_proposer
 
         let param_index = crate::configs::proposal_class_index(ProposalClass::Param);
         assert_eq!(
-            crate::configs::effective_decision_contest_floor(&proposal, &params),
+            crate::configs::effective_decision_contest_floor(&proposal, &params.v_min),
             params.v_min[param_index],
             "an unbacked prize must keep the base dec.v_min floor, not void the grade",
         );
@@ -19401,6 +19416,179 @@ fn baseline_carry_reads_the_sealed_market_snapshot_before_late_summary() {
             None,
             "a late cohort summary must not substitute for a missing sealed window"
         );
+    });
+}
+
+#[test]
+fn service_starvation_probe_reads_the_weakest_bleavit_decision_book() {
+    use pallet_question_service::ContestHealthProbe;
+
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 8_120;
+        let one = futarchy_primitives::kernel::SCORE_SCALE;
+        let probe = || crate::configs::RuntimeServiceContestHealth::starvation_1e9().0;
+
+        // No live decision book: nothing to measure, and 16 §8.7 reads that as
+        // healthy rather than starved, because at that moment the hosted
+        // service is provably not competing with a decision.
+        assert_eq!(probe(), 0, "no measurable book must read as healthy");
+
+        let params =
+            <crate::configs::RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
+        let index = crate::configs::proposal_class_index(ProposalClass::Param);
+        let floor = params.v_min[index];
+        assert_ne!(floor, 0, "the Param decision floor anchors this fixture");
+        let end = params.decision_window;
+        let markets = MarketSet {
+            accept: 91_001,
+            reject: 91_002,
+            gates: None,
+            baseline: 91_003,
+        };
+        let b = crate::configs::class_pol_floor(ProposalClass::Param).saturating_mul(4);
+
+        // Accept sits at the floor; Reject at a quarter of it. The probe must
+        // report the WEAKEST book, because decision-grade is per book and one
+        // starved book rejects the proposal -- an average would hide it.
+        // `seed_decision_grade_market` seals its window, which is right for the
+        // grading tests that share it and wrong here: 16 §8.7 prices *present*
+        // competition, so it reads only windows still accruing. Reopen it, or
+        // this fixture would model a decision that is already over.
+        let seed = |id, branch, contest| {
+            seed_decision_grade_market(
+                id,
+                pallet_market::core_market::BookKind::Decision {
+                    proposal: PID,
+                    branch,
+                },
+                futarchy_primitives::FixedU64(500_000_000),
+                end,
+                (params.decision_window, params.trailing_window),
+                b,
+                contest,
+            )?;
+            pallet_market::DecisionWindows::<Runtime>::mutate(id, |windows| {
+                for window in windows.iter_mut() {
+                    window.sealed = false;
+                }
+            });
+            Ok::<(), DispatchError>(())
+        };
+        pallet_epoch::Proposals::<Runtime>::insert(
+            PID,
+            Proposal {
+                id: PID,
+                proposer: account(70),
+                funder: account(70),
+                class: ProposalClass::Param,
+                state: ProposalState::Trading,
+                epoch: pallet_epoch::EpochOf::<Runtime>::get().index,
+                submitted_at: 0,
+                payload_hash: [0u8; 32],
+                payload_len: 0,
+                ask: 0,
+                bond: 0,
+                resources: Default::default(),
+                metric_spec: 1,
+                decide_at: end,
+                rerun: false,
+                extended: false,
+                delayed_once: false,
+                markets: Some(markets),
+                maturity: None,
+                grace_end: None,
+                version_constraint: None,
+                decision: None,
+            },
+        );
+
+        assert!(seed(markets.accept, futarchy_primitives::Branch::Accept, floor).is_ok());
+        assert!(seed(
+            markets.reject,
+            futarchy_primitives::Branch::Reject,
+            floor / 4
+        )
+        .is_ok());
+        // 1 - 1/4 = 0.75 starved, from the Reject book alone.
+        assert_eq!(probe(), one - one / 4);
+
+        // Healthy on both sides reads exactly zero, not merely small.
+        assert!(seed(markets.reject, futarchy_primitives::Branch::Reject, floor).is_ok());
+        assert_eq!(probe(), 0);
+
+        // Depth far above the floor cannot read as NEGATIVE starvation and so
+        // cannot subsidize a starved sibling book.
+        assert!(seed(
+            markets.accept,
+            futarchy_primitives::Branch::Accept,
+            floor.saturating_mul(50)
+        )
+        .is_ok());
+        assert!(seed(
+            markets.reject,
+            futarchy_primitives::Branch::Reject,
+            floor / 4
+        )
+        .is_ok());
+        assert_eq!(probe(), one - one / 4);
+
+        // An invalidated accumulator never grades, so it must never price
+        // either -- neither as starved nor as healthy. Dropping the Reject book
+        // from the reading leaves the (healthy) Accept book as the minimum.
+        pallet_market::DecisionWindows::<Runtime>::mutate(markets.reject, |windows| {
+            if let Some(window) = windows.iter_mut().find(|window| window.end == end) {
+                window.contest_valid = false;
+            }
+        });
+        assert_eq!(probe(), 0);
+
+        // A CLOSED window is history, not competition. `pallet_epoch` retains
+        // nonterminal proposals and a closed window keeps its final integral
+        // forever, so without this filter one book that was underfunded once
+        // would stay the minimum and surcharge every later admission -- a price
+        // outliving its cause, which is the very thing §8.7 refuses to allow
+        // through the stored multiplier. Restore the starved Reject book, then
+        // close it each of the two ways a window can close.
+        assert!(seed(
+            markets.reject,
+            futarchy_primitives::Branch::Reject,
+            floor / 4
+        )
+        .is_ok());
+        assert_eq!(probe(), one - one / 4, "the starved book prices while live");
+
+        let close = |flag: bool| {
+            pallet_market::DecisionWindows::<Runtime>::mutate(markets.reject, |windows| {
+                if let Some(window) = windows.iter_mut().find(|window| window.end == end) {
+                    window.sealed = flag;
+                }
+            });
+        };
+        // (1) Sealed by the market pallet, clock still inside the window.
+        close(true);
+        assert_eq!(
+            probe(),
+            0,
+            "a sealed window is frozen, so it may not price a later admission"
+        );
+        close(false);
+        assert_eq!(probe(), one - one / 4, "unsealing restores the reading");
+
+        // (2) Past its end and not yet sealed, because the epoch crank has not
+        // run. The integral is equally frozen and must be equally inert.
+        System::set_block_number(end);
+        assert_eq!(
+            probe(),
+            0,
+            "a window past its end may not price, sealed or not"
+        );
+        System::set_block_number(end.saturating_add(params.decision_window));
+        assert_eq!(probe(), 0, "and it does not come back later");
+
+        // Live again once the clock is back inside the window: the filter is a
+        // liveness test, not a one-way latch that silently disarms the probe.
+        System::set_block_number(end.saturating_sub(1));
+        assert_eq!(probe(), one - one / 4);
     });
 }
 

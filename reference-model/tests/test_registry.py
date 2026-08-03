@@ -492,7 +492,16 @@ class RegistryGroundingTests(unittest.TestCase):
         # These counters are the tripwire that makes every registry addition
         # explicit, and it did its job: the count moved 110 -> 111 in three
         # independent artifacts and this test is the thing that checks they agree.
-        self.assertEqual(len(entries), 205)
+        #
+        # 205 -> 206 on 2026-08-03 with N14's `svc.price_cap` (16 §8.6), the
+        # scarcity multiplier's ceiling. It is the ONLY row that milestone adds:
+        # the multiplier's decay anchors to `svc.max_window` and its per-admission
+        # step is `svc.price_cap^(1/svc.max_live)`, both derived from keys already
+        # here. The genesis counters do NOT move — the row ships `[VERIFY]`-unset
+        # like `svc.client_bond`, but unlike it the unset consumer defaults to
+        # `M = 1` (today's flat tariff) rather than refusing, because it gates an
+        # allocation refinement and not a safety gate.
+        self.assertEqual(len(entries), 206)
         self.assertEqual(len(json_keys), 111)
         self.assertEqual(len(classified_genesis), 111)
         self.assertEqual(len(model_bytes), 111)

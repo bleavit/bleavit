@@ -803,8 +803,21 @@ today.** Mitigations, primary first:
 - **Arming:** `Σ b_ext ≤ Σ pol.b(live)` at switch-on, so the external side is never the dominant
   market on the chain.
 - **Measurement with a stated falsifier:** per-epoch Bleavit vs external contest capital and the
-  `NotDecisionGrade` rejection count on the monitoring-only `TelemetryApi`. If rejections rise with
-  external occupancy, the values layer **MUST** reduce `svc.max_live`.
+  `NotDecisionGrade` rejection count on the monitoring-only `TelemetryApi`. **Implemented** as that
+  API's `service_partition` row (v5): live hosted-question count, the live `svc.max_live` it is
+  measured against, external posted subsidy in the units `LivePolCommitments` stores, the
+  `NotDecisionGrade` count **over the retained cohort window** — a moving window is what "rise with
+  external occupancy" is a claim about, and a cumulative counter would need new storage on
+  `decide()`'s hot path to say less — and §8.5's external-quota utilization. The two must be read
+  **together**: this section's own point is that a rejection caused by the service is
+  indistinguishable from one caused by disinterest, so the capital is the trigger and the rejection
+  count is corroboration. If rejections rise with
+  external occupancy, the values layer **MUST** reduce `svc.max_live`. **That obligation is no longer
+  the only response, and is no longer the first one** — it asks for a vote at exactly the moment
+  revenue argues the other way, on evidence that will always be arguable, in a system whose every
+  other protection (the I-4 latch, PB-LEDGER-FREEZE, the dead-man switch) is automatic. §8.7 makes
+  the first response automatic and graduated. The vote remains available and remains the only thing
+  that can move the **quantity**; §8.7 moves the price.
 - **Recalibration:** the Phase-0 calibration assumed no competing venue, so S4 re-run with a
   competing-venue term is a **Phase-4 arming condition** — if external markets divert flow, the
   calibrated δ is under-sized. **The term is now executable** ([15](15-invariants-and-testing.md)
@@ -984,6 +997,215 @@ all three declared source classes, while an unknown id below that boundary is un
 fails closed. The registry is keyed by id, not by client or ledger instance, so changing the client
 or hosted ledger cannot evade the exclusion.
 
+### 8.6 Admission under contention — a descending price, not a queue
+
+`svc.max_live` bounds how many questions run at once. It does **not** say who gets
+a slot when more clients want one than the cap admits, and until N14 the answer was
+whichever transaction landed first. That allocates by latency, not by value: sixteen
+low-value questions can lock out an important one, and a slot freed by a terminating
+question is a race that a bot wins by construction.
+
+**The rule.** The instrument-D fee of §8.1 is multiplied by a scarcity factor `M ≥ 1`:
+
+```
+fee(q) = max( svc.fee_floor , svc.fee_bps × declared_stake ) × M
+```
+
+`M` moves **up immediately when a question is admitted, and down only gradually
+toward 1** — including after a question terminates and frees its slot. `M` is clamped
+to `svc.price_cap` **on every read**, not only when it is written, because that row is
+amendable: an amendment lowering the ceiling must bind a price that was already stored
+above it. And the gradual descent runs on the window **in force when the price was
+set**, carried in storage beside it — reading the live `svc.max_window` would let one
+amendment lowering that row expire every outstanding price at once, and a governance
+action is not a decay. The asymmetry is the whole mechanism, and each half is
+load-bearing:
+
+- **Down-moves are gradual, so immediacy costs money.** A freed slot's price
+  descends from the pre-release level toward the post-release one rather than
+  dropping to it. A client that must have the slot *now* pays the top of that
+  descent; a patient client waits. This is the per-slot descending-price auction,
+  and it prices sniping rather than forbidding it — a client that values the slot
+  above the premium still wins it, which is the mechanism working.
+- **Up-moves are immediate, so velocity is visible.** A burst of registrations
+  compounds faster than decay removes it, so `M` reflects *how fast* capacity is
+  being taken and not merely how much is taken. Occupancy alone is a state
+  function with no memory: sixteen slots filled over three weeks and sixteen
+  filled in one block would otherwise price identically.
+
+**There is deliberately no starting price.** Each descent begins from the running
+`M`, which *is* the accumulated record of prior demand. This differs from a periodic
+sale with a controller-set opening price, and the difference is forced rather than
+stylistic: hosted questions carry client-chosen windows and free asynchronously, so
+there is no batch of identical units and no shared clock to open a sale on.
+
+**Quantity is never market-discovered.** `svc.max_live` remains a governance-set hard
+cap the mechanism can never sell past. Price clears; quantity does not. A
+quantity-discovering controller — the shape Polkadot's bulk coretime sale uses, which
+is correct where selling more capacity does not degrade the capacity already sold —
+would make scarcity directly profitable here, and TH-73 names exactly that pressure.
+[15](15-invariants-and-testing.md) §4.9's competing-venue leg measured why the two
+cases differ: additional hosted depth degrades Bleavit's own decision formation.
+
+**Where the premium goes: `MAIN`, with the rest of instrument D.** The whole scaled
+fee is credited at `Sealed` and never before — the fee is refunded on VOID (§6.4), so
+routing any part of it earlier would move money the client may still be owed.
+
+An earlier revision of this section routed the amount **above** the floor directly to
+POL, reasoning that the premium exists only when hosted questions contend for
+capacity, which is when Bleavit's own books most need depth. **Implementation
+refuted the routing, not the reasoning.** `pallet-market` does not hold Bleavit's
+protocol subsidy custody account — `seed` receives it as a caller-supplied argument —
+so a direct credit would require naming that account inside
+`pallet-question-service`, opening a **second** money path into POL custody where
+today there is exactly one: the §2 Sweep returning what POL itself spent. §7.2–§7.5
+exist to keep precisely that class of cross-domain path from opening, and a
+deliberate one is not safer than an accidental one merely because it was intended.
+The premium is also **zero until `svc.price_cap` is adopted**, so the seam would be
+dead code guarding a firewall it had already breached.
+
+The intent survives the change of route. `MAIN` is where 08 §1.1's allocation to POL
+is funded from, so congestion revenue still reaches depth — through a governed
+allocation rather than an automatic side-channel, which is the more defensible of the
+two given that the premium is collected at `Sealed` and the congestion it priced may
+be an epoch old by then. And the premium stays **measurable with no new storage and
+no new event**: `premium = fee − max(svc.fee_floor, svc.fee_bps × declared_stake)`,
+and both the charged fee and the declared stake are already stored per question.
+
+**`M` is inert until its ceiling is adopted.** The bound on `M` is a values-layer
+number that nothing in this repository yet anchors — the natural anchor would be the
+measured cost of governance denial, and [14](14-threat-model.md) TH-72's attack-cost
+cell carries no figure (SQ-574). Until `svc.price_cap` is set, `M ≡ 1` and this
+section describes today's behaviour exactly: the posted two-part tariff, first come
+first served. That is the `svc.fee_bps` and `svc.client_bond` precedent — a row ships
+unset with its consumer defaulting to the status quo rather than to a guess.
+
+**Inert means the *charge* is unchanged, not the declared weight.** `register`'s
+benchmark deliberately arms the ceiling, so the weight it declares always includes the
+§8.7 probe's scan over the live decision pairs even while `M ≡ 1` and the scan does not
+run. That is the intended direction: a weight declared for the armed case over-charges
+the inert one, whereas benchmarking the unset row would under-declare the armed one on
+the day the values layer adopted it, with no code change to notice (SQ-576). A claim
+that this section is byte-for-byte invisible until adoption would be false, and the
+visible residue is a fee-market cost, never a difference in what a client is charged.
+
+Note the
+consumer default here is `M = 1` and **not** a refusal: an unset ceiling must not
+close admission, because the mechanism it gates is an allocation refinement and not a
+safety gate, and refusing would be a strictly worse status quo than the one this
+section replaces.
+
+### 8.7 Starvation raises the same price, automatically
+
+§8.4's fourth mitigation ends in *"the values layer **MUST** reduce `svc.max_live`"*.
+As the only response that is a governance promise, not a mechanism: it requires a vote
+precisely when revenue argues against one, on evidence that will always be arguable.
+This section makes the first response automatic, and it deliberately reuses §8.6's
+machinery rather than adding any.
+
+**Trigger on the input, not the output.** A `NotDecisionGrade` rejection caused by the
+hosted service is indistinguishable from one caused by nobody finding the proposal
+interesting, so the rejection count can never settle the argument no matter how long it
+is collected. Contest capital in Bleavit's own decision books *is* the quantity `dec.v_min`
+gates on, so it is measured directly.
+
+**The measure.** For each live Bleavit **decision** book, the time-averaged contest
+capital accrued so far in its current window — the 04 §7a integral divided by the blocks
+actually integrated, **not** by the full window width, since dividing a partial integral by
+the full width would report every young window as starved. That average is compared with
+the same per-proposal decision-grade contest floor the grading path uses, and the **minimum
+ratio across books** is taken, because decision-grade is per book and one starved book
+rejects the proposal. Starvation is `1 −` that ratio, clamped to `[0, 1]`.
+
+**"Live" is normative here, and it means *still accruing*.** A window counts only while it
+can still take capital: not sealed, and the current block inside `[start, end)`. Both
+conditions are required, because each closes a case the other misses — a window can be
+sealed early by a market close while the clock still says it is open, and a window can be
+past its end but unsealed because the epoch crank has not yet run. A window that fails
+either test has a frozen integral, and a frozen integral is history rather than present
+competition. Reading one would let a book that was underfunded *once* stay the minimum and
+surcharge every later admission — a price outliving the condition that set it, which is
+the same failure this section already refuses when it declines to ratchet starvation into
+the stored multiplier (§8.6), and a worse form of it: the stored term decays over
+`svc.max_window`, whereas a stale input never decays at all. Implementations MUST filter
+on liveness at the point of reading; proposal storage retains records long after their
+decision, so the retained set is not a safe proxy for the competing set.
+
+A direct consequence, and the expected reading rather than a degradation: **for most of an
+epoch, starvation is exactly 0**, because decision windows occupy a minority of it and
+outside them nothing is being contested. The service is provably not competing with a
+decision at those times, so it is not surcharged for one.
+
+**The response is graduated and applies to everyone:**
+
+```
+M = min( svc.price_cap ,  max( M_contention , 1 + starvation × (svc.price_cap − 1) ) )
+```
+
+Each half of that shape is load-bearing, and both were chosen against a specific attack:
+
+- **Graduated, because a cliff is a race.** A binary latch creates the behaviour it
+  exists to prevent: operators watching contest capital approach the threshold register
+  *before* it trips, which is a burst of admissions at exactly the worst moment. A
+  continuous response has no threshold to race.
+- **The price rises for everyone, and the door never closes.** A latch that stops new
+  registrations while live questions keep running pays a slot-holder to cause it: their
+  slot becomes exclusive precisely when Bleavit is damaged, and §8.4 states that damaging
+  Bleavit's books costs an attacker only round-trip fees. A price response admits every
+  client that is willing to pay, so no entrant is excluded outright and the incumbent's
+  own *next* question costs the raised price like anyone else's.
+
+  **It reduces the incumbent's advantage; it does not eliminate it, and the earlier
+  claim that it did was wrong.** The fee is charged once, at registration, so a client
+  already holding a slot has already paid — any mechanism that raises the price of
+  *future* registrations advantages those already in, and that is inherent to a one-shot
+  fee rather than to this particular response. Concretely: an incumbent can hold a live
+  question, keep its net position in a Bleavit decision book near zero so the §7a contest
+  integral stays flat, drive the starvation reading toward 1 for round-trip fees, and
+  price marginal entrants out while paying nothing more itself. What the price response
+  *does* guarantee against the quantity latch it replaced is strictly weaker and strictly
+  true: an entrant who values the slot above the raised price still gets it, where a
+  latch would refuse it at any price. The attack also requires the attacker to actually
+  suppress Bleavit's contest capital — the mechanism is responding correctly to a real
+  condition, and `svc.max_live` still bounds how much of the service the incumbent can
+  hold.
+- **`max`, not a product.** One ceiling governs both terms, so `M ≤ svc.price_cap` holds
+  by construction rather than by argument, and no second registry row is needed. A product
+  would reach `svc.price_cap²` and would need its own bound to say what that means.
+- **Starvation is read live and never stored.** §8.6's contention term is stored and
+  decays; this one is a reading of present state. Folding it into the stored term would
+  bake a transient starvation into a slowly-decaying price — hysteresis that nothing here
+  asks for, and that would outlast the condition that justified it.
+
+**What this is, stated honestly.** It is a Pigouvian charge, not a repair: it does not add
+depth to a starved Bleavit book, and the revenue goes to `MAIN` like the rest of
+instrument D (§8.6). What it does is make hosted capacity most expensive exactly when it
+is most costly to Bleavit, and do so without a vote. The harm remains **bounded by
+`svc.max_live`**, which this section does not touch — price clears, quantity does not,
+and that separation is the same one §8.6 draws.
+
+**Three limits, none smoothed over.**
+
+1. **The quiet gap.** When no Bleavit decision book is live there is nothing to measure
+   and starvation reads **0**, because at that moment the hosted service is provably not
+   competing with a decision — but a client can therefore register into a quiet gap and
+   contend with the windows that open afterwards. §8.4's scheduling refusal covers
+   overlap with proposals live *at registration* and cannot see proposals submitted later.
+2. **Un-accrued is not starved, and the probe cannot tell the difference.** Contest
+   capital accrues only when a book is observed, so a book with no accrual at all is
+   **skipped** rather than read as empty. This is deliberate: reading it as starved would
+   fire the response at the first block of every window, before anyone has traded. The
+   cost is that the probe under-reports — the *unsafe* direction — for a book nobody is
+   cranking. That state is not left unprotected: a book without observations already
+   fails decision-grade on coverage, so the proposal rejects through a different rule.
+   Inferring starvation from a stalled crank would price a **keeper-liveness** failure as
+   a capital failure, which is the wrong instrument, and drawing the line between the two
+   needs a staleness threshold that nothing here derives.
+3. **Inert until the ceiling is adopted.** The response magnitude is bounded by
+   `svc.price_cap`, which is `[VERIFY]`-unset (§8.6), so this section is inert on exactly
+   the same condition — one adopted row arms both halves of `M`, which is why no second
+   row is introduced.
+
 ---
 
 ## 9. Egress
@@ -1104,7 +1326,18 @@ owns the regime.
   ledger work, the signed `TransactionExtension`, the XCM dispatcher, varied proof sizes and both
   successful and failed/refunded reservations. Assert every welfare snapshot and every `decide()`
   input is **byte-identical**. This is the test that makes §1's boundary rule falsifiable, and
-  §8.5's `H` partition is the reason it can pass at all.
+  §8.5's `H` partition is the reason it can pass at all. **Implemented as
+  `pt10_external_outcome_containment`.** The interleaving is *generated* over the service alphabet
+  at every schedulable point of every block, rather than replayed from fixed patterns — while it
+  was fixed patterns over a single call shape the test was deliberately named
+  `..._containment_sample`, because [15](./15-invariants-and-testing.md) §4.3 states that a test
+  claiming the unscoped property MUST NOT be named PT-10. Two knobs follow from it being a runtime
+  **replay** property rather than a proptest over a frame-free core: it does not read
+  `PROPTEST_CASES` (each case is two full multi-block replays, so a ≥10⁶ count is not reachable),
+  and it carries its own `BLEAVIT_PT10_CASES`, small in `cargo test --workspace` and deep in the
+  `containment` shard of the property-suites gate — the same reduced/deep split PT-1…PT-8 use. A
+  companion assertion requires the swept seeds to reach every letter of the alphabet, so narrowing
+  the generator cannot silently narrow the property.
 - **Negative origins:** every registry and service call × {Signed, Root, None, all eight governance
   origins, `ExternalClient`}; and under `Transact`, all of `system.set_storage`, `system.set_code`,
   `pallet_xcm.send`, `Balances.transfer`, `sudo.sudo`, `Utility.batch`, `Proxy.proxy` rejected.

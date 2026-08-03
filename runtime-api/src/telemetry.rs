@@ -5,7 +5,7 @@
 //! its shape may change without a 02 §13 bump. Every collection is bounded so
 //! an operations scrape remains deterministic and bounded in runtime work.
 
-use futarchy_primitives::{bounds, Balance, BlockNumber, BoundedVec, ClientId, MarketId};
+use futarchy_primitives::{bounds, Balance, BlockNumber, BoundedVec, ClientId, FixedU64, MarketId};
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
@@ -103,9 +103,41 @@ pub struct ServiceEgressTelemetry {
     pub consecutive_failures: u32,
 }
 
+/// 16 §8.4's cannibalization falsifier and §8.5's partition occupancy, as one
+/// row (12 §6.3). Monitoring-only, like every other member of this trait: none
+/// of these values is an input to a protocol or welfare calculation, and the
+/// §8.4 falsifier in particular is *evidence for a values decision*, not a
+/// controller input — nothing on chain reads it back.
+#[derive(
+    Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo,
+)]
+pub struct ServicePartitionTelemetry {
+    /// Hosted questions in a non-terminal phase, right now.
+    pub questions_live: u32,
+    /// The live `svc.max_live` cap they are counted against. Published beside
+    /// the count so the alert rule compares occupancy against the *current*
+    /// governed bound rather than against a literal the exporter would have to
+    /// carry (13 reading rules; 15 §5.4).
+    pub max_live: u32,
+    /// 16 §8.4's falsifier, external side: posted client subsidy across live
+    /// hosted books, in the same units `LivePolCommitments` stores, so the two
+    /// sides of `Σ b_ext ≤ Σ pol.b(live)` are directly comparable.
+    pub contest_capital_external: Balance,
+    /// 16 §8.4's falsifier, outcome side: cumulative Bleavit proposals rejected
+    /// `NotDecisionGrade`. **Read together with the line above, never alone** —
+    /// §8.4 states plainly that a rejection caused by the hosted service is
+    /// indistinguishable from one caused by disinterest, which is why the
+    /// external capital is the trigger and this is corroboration.
+    pub not_decision_grade_rejections: u64,
+    /// 16 §8.5: external weight consumed as a fraction of the external quota,
+    /// on the `SCORE_SCALE` grid. Saturates at one rather than reporting past
+    /// the quota, because the partition refuses rather than overruns.
+    pub external_weight_used_ratio_1e9: FixedU64,
+}
+
 sp_api::decl_runtime_apis! {
     /// Monitoring-only telemetry API owned by 12 §6.3, outside contract 02.
-    #[api_version(4)]
+    #[api_version(5)]
     pub trait TelemetryApi {
         /// Per-live-book realized loss and its identically labeled LMSR bound.
         fn market_books() -> Option<BoundedVec<MarketTelemetry, { bounds::MAX_LIVE_MARKETS }>>;
@@ -125,5 +157,7 @@ sp_api::decl_runtime_apis! {
         fn storage_utilization() -> Option<BoundedVec<StorageUtilizationTelemetry, MAX_STORAGE_UTILIZATION_ROWS>>;
         /// Bounded, sorted client push counters; explicitly non-welfare.
         fn service_egress() -> Option<BoundedVec<ServiceEgressTelemetry, { bounds::MAX_CLIENTS }>>;
+        /// 16 §8.4 cannibalization falsifier + §8.5 partition occupancy (N7).
+        fn service_partition() -> Option<ServicePartitionTelemetry>;
     }
 }

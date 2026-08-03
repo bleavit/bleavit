@@ -145,6 +145,12 @@ jobs:
         run: tools/verify/run-model-checks.sh
 
   # S1 property suites at the normative ≥10^6 case count — 15 §4.2–4.3; 03 §11.
+  # The `containment` shard is PT-10 (15 §4.3), a runtime REPLAY property rather
+  # than a proptest over a frame-free core: it does not read PROPTEST_CASES,
+  # because each case is two full 22-block runtime replays. It carries its own
+  # BLEAVIT_PT10_CASES knob and rides this job for the same reason the others
+  # do — the reduced count runs in `cargo test --workspace`, the deep sweep runs
+  # here.
   # Sharded per-crate across fresh parallel runners: a single combined run is
   # ~70-85 min and intermittently trips "runner lost communication"
   # (CPU/memory starvation on one marathon job). fail-fast: false so every
@@ -157,7 +163,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [ledger, market, constitution, welfare]
+        suite: [ledger, market, constitution, welfare, containment]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.89.0

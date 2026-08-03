@@ -418,3 +418,80 @@ pub fn service_egress() -> Option<BoundedVec<ServiceEgressTelemetry, { bounds::M
     }
     Some(rows)
 }
+
+/// 16 §8.4's cannibalization falsifier and §8.5's partition occupancy (N7).
+///
+/// Every value is read from state that already exists; nothing here adds a
+/// counter to a hot path, and nothing on chain reads any of it back — this is
+/// evidence for the values decision 16 §8.4 mandates, not a controller input.
+///
+/// **The rejection count is over the retained cohort window, not all time**,
+/// and that is deliberate rather than a shortcut: a cumulative counter would
+/// need new storage written by `decide()`, and the value it would carry is
+/// worth less than it costs. §8.4 wants to know whether rejections *rise with
+/// external occupancy*, which is a comparison over a moving window, and the
+/// retained cohorts are exactly the window the chain already keeps. Read it
+/// beside `contest_capital_external`, never alone: §8.4 states plainly that a
+/// rejection caused by the hosted service is indistinguishable from one caused
+/// by nobody finding the proposal interesting, which is why the external
+/// capital is the trigger and this is corroboration.
+pub fn service_partition() -> Option<futarchy_runtime_api::ServicePartitionTelemetry> {
+    use futarchy_primitives::{DecisionOutcome, FixedU64, RejectReason};
+
+    let questions_live = pallet_question_service::LiveQuestionCount::<Runtime>::get();
+    let max_live = crate::configs::u32_param(b"svc.max_live");
+    let contest_capital_external = pallet_question_service::LiveExternalDepth::<Runtime>::get();
+
+    let mut not_decision_grade_rejections: u64 = 0;
+    for summary in pallet_epoch::RecentCohortSummaries::<Runtime>::get() {
+        for (_, _, outcome) in summary.proposals {
+            if matches!(
+                outcome,
+                DecisionOutcome::Reject(RejectReason::NotDecisionGrade)
+            ) {
+                not_decision_grade_rejections = not_decision_grade_rejections.saturating_add(1);
+            }
+        }
+    }
+
+    // External weight consumed as a fraction of the hard external quota. Both
+    // dimensions are compared and the larger fraction wins, matching how the
+    // partition itself admits: a dispatch is refused when EITHER dimension
+    // would overrun, so reporting only ref_time would under-report a book that
+    // is proof-size bound.
+    let usage = pallet_welfare::BlockResourceUsage::<Runtime>::get();
+    let capacity = pallet_welfare::Pallet::<Runtime>::external_capacity();
+    let ratio = match (usage, capacity) {
+        (Some(usage), Some(capacity)) => {
+            let fraction = |used: u64, cap: u64| -> u64 {
+                if cap == 0 {
+                    return 0;
+                }
+                u128::from(used)
+                    .saturating_mul(u128::from(futarchy_primitives::kernel::SCORE_SCALE))
+                    .checked_div(u128::from(cap))
+                    .unwrap_or(0)
+                    .try_into()
+                    .unwrap_or(futarchy_primitives::kernel::SCORE_SCALE)
+            };
+            let time = fraction(usage.external_used.ref_time(), capacity.ref_time());
+            let proof = fraction(usage.external_used.proof_size(), capacity.proof_size());
+            // Saturate at 1: the partition refuses rather than overruns, so a
+            // value past the quota would describe a state that cannot exist and
+            // would read as an alert about the wrong thing.
+            FixedU64(
+                time.max(proof)
+                    .min(futarchy_primitives::kernel::SCORE_SCALE),
+            )
+        }
+        _ => FixedU64(0),
+    };
+
+    Some(futarchy_runtime_api::ServicePartitionTelemetry {
+        questions_live,
+        max_live,
+        contest_capital_external,
+        not_decision_grade_rejections,
+        external_weight_used_ratio_1e9: ratio,
+    })
+}
