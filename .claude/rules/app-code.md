@@ -55,7 +55,11 @@ Practical consequences:
    `WebSocket`, `EventSource`, `sendBeacon` and dynamic URL `import()` are gated out
    by CI. Never add a `connect-src` entry for an external tool vendor (12 §5.1).
 7. **No hardcoded chain constants.** Everything in 02 §9 is read from chain
-   metadata/storage; the no-literal lint gate fails the release otherwise. The TS
+   metadata/storage; the no-literal lint gate fails the release otherwise.
+   **`CRITICAL_SURFACE` and `SUPPORTED_RUNTIMES` are generated and compared, never typed** (F4):
+   the first re-derives from `tools/release/surface-manifest.json`, the second is checked in
+   both directions against `app/fixtures/chain-feed/`. Run `pnpm -C app run surface:generate`;
+   never hand-edit the output and never edit a source to match an output. The TS
    protocol math (`packages/protocol`) must match the CI-regenerated vector corpus
    (04 §5, 15 §4.4) — never hand-adjust an expected value. `CRITICAL_SURFACE` is
    generated from `tools/release/surface-manifest.json`, never hand-listed.

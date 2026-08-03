@@ -332,6 +332,19 @@ jobs:
         # after the chain moved it.
         run: pnpm run test:chain-client
 
+      - name: CRITICAL_SURFACE and the supported-runtime map vs their sources (10 §5.1, §5.4)
+        # Both are *generated* claims about frozen artifacts. `CRITICAL_SURFACE` re-derives
+        # from `tools/release/surface-manifest.json`; `SUPPORTED_RUNTIMES` is compared in
+        # both directions against `app/fixtures/chain-feed/`, so a stale metadata hash or
+        # half a primary/recovery pair is a build failure rather than a runtime surprise.
+        run: pnpm run surface:check
+
+      - name: Compatibility classifier (10 §5.2, §3.2)
+        # The classifier decides whether the app may sign, so what it is tested on is the
+        # probe outcomes a healthy chain never produces — which is why it is a pure
+        # function over probe results with the PAPI shape adapted separately.
+        run: pnpm run test:descriptors
+
   environments:
     name: Environment definitions
     runs-on: ubuntu-latest

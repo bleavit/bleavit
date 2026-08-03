@@ -10,3 +10,4 @@ packages:
   - 'tests/protocol'
   - 'tests/mock-runtime'
   - 'tests/chain-client'
+  - 'tests/descriptors'

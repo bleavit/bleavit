@@ -252,6 +252,15 @@ importers:
         specifier: workspace:*
         version: link:../../packages/providers
 
+  tests/descriptors:
+    dependencies:
+      '@bleavit/descriptors':
+        specifier: workspace:*
+        version: link:../../packages/descriptors
+      '@bleavit/mock-runtime':
+        specifier: workspace:*
+        version: link:../../packages/mock-runtime
+
   tests/firewall:
     dependencies:
       '@bleavit/chain-client':
