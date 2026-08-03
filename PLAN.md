@@ -20,55 +20,49 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 
 ## Current focus
 
-> ### ⇨ CURRENT (2026-08-03) — F3 ✅: writing the real transport found four defects the interface's own suite could not
+> ### ⇨ CURRENT (2026-08-03) — F6: both signers landed; four spec questions of one shape blocked the rest
 >
-> F3's remaining piece was described in this file as "a transport adapter over the interface
-> `reads.ts` already fixes". Writing it established that the interface was wrong in two ways and
-> that its green suite could not have told anyone:
+> The session's throughline is not any one fix. It is that **a client obligation written in
+> docs 10/11 does not create the frozen 02 surface it needs, and nothing in the gate set
+> notices** — every checker verifies that what *is* declared agrees; none asks whether what
+> is *required* was ever declared. Four instances, found in four different ways:
 >
-> 1. **V-83 — the interface was synchronous, and no smoldot transport can implement it.** smoldot
->    runs in a Web Worker; every answer arrives by `postMessage`. The only synchronous
->    implementation blocks the main thread on `Atomics.wait`, which needs cross-origin isolation
->    the Arweave distribution does not control and freezes the UI for the length of a proof-backed
->    read. The interface was satisfiable by a **test double and by nothing else**.
-> 2. **V-84 — the transport chose the block a value was labelled with.** A reader pinned at N could
->    be handed a value read at N+1 and would stamp it `verified-finalized` at N. The
->    `#assertStillPinned()` guard looked like it prevented that and did not: it ran *before* the
->    read. Nothing about the value can detect it — it is individually valid and its provenance is a
->    lie, which is the one outcome `Finalized<T>` exists to make impossible.
-> 3. **V-85 — an operation event arriving before its `started` response was dropped**, and the read
->    hung forever. Worth carrying for the failure mode as much as the bug: a hung read is
->    indistinguishable on screen from a slow chain, so it produces a bug report about the network.
-> 4. **V-86 — three CI-fatal firewall rules could never fire.** `to: { path: 'node_modules/(…)' }`
->    never matches, because dependency-cruiser records an unresolvable external specifier by its
->    **bare name**. Proven by injecting `import 'ws';` into a handoff package: zero errors,
->    silently. So D-21's *"the handoff packages contain no network primitive at all"* had a
->    module-import half that was decoration — and the source-level half its own comment credits
->    does not exist yet.
+> - **SQ-552** (resolved) — 09 §1.2 and 11 §11.5 each mandate a precondition diff and each
+>   credit a contract test in doc 15 with running it. Doc 15 mandated no such test. That is
+>   why an `execute` precondition on a clock `execute` itself starts survived since X-11i.
+>   Ruled four ways; the missing test is now the 15 §4.8 *Dispatch-check mirror*.
+> - **SQ-574** (open) — 10 §5.2 names calls in `CRITICAL_SURFACE`; 02 freezes none.
+> - **SQ-577** (open) — 11 §11.3 reads `Multisig.Multisigs`; 02 mentions Multisig zero times.
+>   Blocks F6's multisig/proxy paths. Not coded around: inventing a `SurfaceId` would be the
+>   hand-listing app-code rule 7 forbids.
+> - **SQ-578** (open, **money path**) — 11 §11.5 calls `Market::Fee` and
+>   `ConditionalLedger::RedemptionFee` *frozen* constants the client MUST read and
+>   cross-check. The runtime publishes both; the manifest contains neither. No compat probe
+>   covers them, so a rename leaves 10 §5.2's classifier reporting `full` while every quote
+>   and net-payout figure loses its rate — a dead trading surface under a green banner.
 >
-> **The method that found the first three is worth stating.** The old suite's double was written to
-> the transport *interface*, so it satisfied the interface by construction and called its methods in
-> the order the implementation expected. The new one is a **provider, at the wire** — the same
-> `(onMessage) => {send, disconnect}` shape `getSmProvider` returns — replaying F2's recorded
-> transcripts, so the production request path, operation demultiplexing and started/items/done
-> handshake all run per commit with no node. V-85 surfaced the moment that double delivered messages
-> in an order the implementation had assumed away.
+> **What shipped.** The SQ-552 ruling + mirror gate; the reference-model re-point it forced
+> (the tests pinned SQ-552 as *open*, so repairing the spec falsified them — re-pointed and
+> inverted, live docs asserted repaired and the defect re-introduced as the witness); three
+> chainHead transport defects from Codex review (V-93 boot hang, V-94 a refused query read
+> as an empty result, V-95 pins never released); the P-1…P-15 tables; the fee-currency
+> selector and mortality/nonce; the polkadot-api firewall narrowed to the connection surface
+> so `packages/signing` may reach the signer subpaths; and both signer adapters.
 >
-> V-86 is the third time in this repository a green checker has turned out to be incapable of
-> failing, after F0's dependency-cruiser and F2's whitelist. The fix carries a permanent witness
-> module that imports the production matcher rather than restating one.
+> **What the next session should weigh most.** Six vacuous controls surfaced in this
+> session's own work, every one found by mutating rather than re-reading — including two
+> inside tests that read as careful, and the P-1 fee clause that cited
+> `constant.market.min_trade` because the right constant was not citable. **A test that
+> names the right property is not evidence it exercises it.**
 >
-> **What is honestly not verified.** Everything below the structural seam: that smoldot syncs, that
-> browser-WSS peers are reachable (FE-P4), that a real node's follow subscription behaves as
-> specified. `light-client.ts` is type-checked and small enough to read in one sitting, and it binds
-> the structural interfaces to the real PAPI/smoldot types by assignability so a stack drift breaks
-> the build — but it is unexecuted until the B7 drills. The transport's failure branches are driven
-> by injected events, because the recorder only ever met a healthy node.
->
-> **Next:** F4 — the `@bleavit/descriptors` wrapper over F2's committed `papi-descriptors`, the
-> Asset Hub set (D-12; a whitelist is right there and correct for that set, per Decision-log D7),
-> and 10 §5.2's three-mode compat classifier, which the boot machine's `CompatCheck` state already
-> has an edge waiting for.
+> **State.** Tree clean; every local gate green (app 186 tests across six suites,
+> reference-model 671, tools/ci 167, tsc -b, depcruise 0 errors + witness firing).
+> **CI caveat, stated because it is easy to misread:** `cancel-in-progress` killed the three
+> long jobs (Rust workspace, Model checking, Benchmark smoke) on every push this session —
+> the last run where they *completed* is `74a62c6`, before all of the above. Risk is low
+> (nothing outside `app/`, `docs/`, `reference-model/`, `tools/` was touched, and the
+> Reference-model job passed repeatedly) but it is not verified. Let the run on `a31463f`
+> finish before treating the branch as green, and do not push over it.
 
 
 ## Milestones
