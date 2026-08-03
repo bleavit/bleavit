@@ -119,6 +119,9 @@ importers:
       '@bleavit/transaction-builder':
         specifier: workspace:*
         version: link:../transaction-builder
+      polkadot-api:
+        specifier: 2.1.8
+        version: 2.1.8(esbuild@0.28.1)(rxjs@7.8.2)
 
   packages/simulation:
     dependencies:

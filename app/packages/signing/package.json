@@ -21,6 +21,7 @@
   "dependencies": {
     "@bleavit/shared-types": "workspace:*",
     "@bleavit/chain-client": "workspace:*",
-    "@bleavit/transaction-builder": "workspace:*"
+    "@bleavit/transaction-builder": "workspace:*",
+    "polkadot-api": "2.1.8"
   }
 }

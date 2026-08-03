@@ -190,7 +190,11 @@ test('the registry refuses a test-only signer (INV-FE-5)', () => {
   assert.deepEqual(registry.list(), []);
   assert.equal(MOCK_SIGNER_DESCRIPTOR.testOnly, true);
   assert.equal(RAW_PAYLOAD_DESCRIPTOR.testOnly, false);
-  assert.equal(INJECTED_DESCRIPTOR.testOnly, false);
+  // A function of the extension name since the adapter landed — a single `injected`
+  // id cannot distinguish two installed extensions. Strict-equal against `false`
+  // rather than `assert.ok(!…)`, which would have passed vacuously on `undefined`
+  // and hidden this change.
+  assert.equal(INJECTED_DESCRIPTOR('talisman').testOnly, false);
 });
 
 test('capabilities are fail-closed: unproven means absent, with a named reason', () => {

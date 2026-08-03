@@ -146,16 +146,9 @@ export const RAW_PAYLOAD_DESCRIPTOR: SignerDescriptor = Object.freeze({
   testOnly: false,
 });
 
-/**
- * The injected browser-extension descriptor — 11 §11.3.
- *
- * Exact export names on `polkadot-api/pjs-signer` are FE-P1's remaining slice; the
- * capability surface is decided here rather than inferred from whatever an extension
- * happens to expose at runtime.
- */
-export const INJECTED_DESCRIPTOR: SignerDescriptor = Object.freeze({
-  id: 'injected',
-  label: 'Browser extension',
-  capabilities: new Set<SignerCapability>(['decoded-payload', 'external-key-custody']),
-  testOnly: false,
-});
+// The injected browser-extension descriptor moved to `injected.ts` when the adapter
+// landed: it is a **function of the extension name**, not a constant. A single `injected`
+// id cannot distinguish two installed extensions, and a generic "Browser extension" label
+// asks the user to confirm a signature without saying which wallet will be asked.
+// The capability surface is unchanged, and still decided here rather than inferred from
+// whatever an extension happens to expose at runtime.
