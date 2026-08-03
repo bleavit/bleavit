@@ -45,6 +45,46 @@ FORMATION_STRATA = (
     ("marginal", "0.97", "1.08", "0.35"),
     ("deep", "1.08", "1.44", "0.40"),
 )
+#: 16 §8.4 — the competing-venue diversion ladder for the **Phase-4** arming leg.
+#:
+#: **The arming rung is anchored, not derived, and the distinction is
+#: load-bearing** (corrected 2026-08-03 after an adversarial review; an earlier
+#: revision of this comment and of 16 §8.4 claimed "derived", which overstated
+#: it). 16 §8.4's arming condition is `Σ b_ext ≤ Σ pol.b(live)`: at switch-on
+#: the hosted service's aggregate **liquidity** may at most equal Bleavit's own.
+#: That is a bound on *depth*. Converting it into a bound on *flow* needs a
+#: behavioural model, and the neutral one — trader capital allocating in
+#: proportion to available depth — gives `b_ext / (b_ext + b_bl)` = **1/2**.
+#: So `0.50` is what the arming condition implies **under proportional
+#: allocation**, and the model is doing real work: an external venue of equal
+#: depth but better fees, better returns or more interesting questions could
+#: attract far more than half the flow. Depth parity does not imply flow parity.
+#:
+#: **The model's error direction is therefore unsafe**, which is why the ladder
+#: runs *past* the arming rung rather than stopping at it. An earlier revision
+#: refused any rung above `0.50` as "a chain state 16 §8.4 forbids" — that was
+#: backwards twice over: a higher rung describes a different *flow* model on a
+#: perfectly admissible chain state, and refusing it forbade probing the one
+#: direction in which the anchor is optimistic. The ladder now REQUIRES a rung
+#: above the arming rung, so the arming decision always ships beside the
+#: evidence of how much it depends on the flow model being right.
+#:
+#: `0.25` is the midpoint, carried so the response's *shape* is visible rather
+#: than just its endpoint: a rate that degrades linearly and one that falls off
+#: a cliff need different values-layer answers.
+#:
+#: Phase 0 has no hosted service, so the *run* default is `0.00` and the
+#: published Phase-0 result is untouched by this leg — see
+#: `SimulationConfig.competing_venue_diversion`.
+COMPETING_VENUE_DIVERSIONS = ("0.25", "0.50", "0.75")
+#: The rung the Phase-4 arming criterion is READ at — the proportional-flow
+#: reading of 16 §8.4's depth-parity bound.
+COMPETING_VENUE_ARMING_DIVERSION = "0.50"
+#: The rung that probes the proportional-flow model itself. Reported beside the
+#: arming verdict, never gated on: it answers "how much does this decision rest
+#: on flow tracking depth?", which is a question the arming rung cannot ask.
+COMPETING_VENUE_STRESS_DIVERSION = "0.75"
+
 ATTACK_STRATEGY_MIX = (
     ("th1_displace_hold", "0.25"),
     ("th2_late_spike", "0.15"),
@@ -96,6 +136,9 @@ class SimulationConfig:
     publication_round_usdc: int = 10_000
     subsample_size: int = 24
     sensitivity_sample_per_class: int = 64
+    competing_venue_diversion: str = "0.00"
+    competing_venue_diversions: tuple[str, ...] = COMPETING_VENUE_DIVERSIONS
+    competing_venue_sample_per_class: int = 64
     threshold_sample_per_class: int = 8
     pol_sample_per_class: int = 125
     baseline_sensitivity_epoch_count: int = 50
@@ -153,6 +196,30 @@ class SimulationConfig:
             raise ValueError("attack strategy weights must sum to one")
         if not Decimal(0) <= Decimal(self.noise_flow_share) <= Decimal(1):
             raise ValueError("noise flow share must be in [0, 1]")
+        if not Decimal(0) <= Decimal(self.competing_venue_diversion) < Decimal(1):
+            raise ValueError("competing-venue diversion must be in [0, 1)")
+        if self.competing_venue_sample_per_class <= 0:
+            raise ValueError("competing-venue sample per class must be positive")
+        if not self.competing_venue_diversions:
+            raise ValueError("the competing-venue ladder must not be empty")
+        ladder = [Decimal(row) for row in self.competing_venue_diversions]
+        if any(not Decimal(0) < row < Decimal(1) for row in ladder):
+            raise ValueError("competing-venue ladder rungs must be in (0, 1)")
+        if ladder != sorted(ladder) or len(set(ladder)) != len(ladder):
+            raise ValueError("competing-venue ladder must be strictly increasing")
+        # The arming rung must be present, or the Phase-4 criterion has nothing
+        # to read; and at least one rung must sit ABOVE it, because the
+        # proportional-flow model that puts the anchor at 1/2 errs in the
+        # unsafe direction (flow can exceed depth share) and an arming decision
+        # that never probes that is an arming decision that hides its own
+        # weakest assumption. See the ladder's comment.
+        arming = Decimal(COMPETING_VENUE_ARMING_DIVERSION)
+        if arming not in ladder:
+            raise ValueError("competing-venue ladder omits the arming rung")
+        if ladder[-1] <= arming:
+            raise ValueError(
+                "competing-venue ladder must probe above the arming rung"
+            )
         if Decimal(self.diagnostic_probe_flow_cap) < FLOW_CAP_MIN:
             raise ValueError(
                 "probe sec.flow_cap below its 08 §5.3 hard minimum of 7"
@@ -166,6 +233,7 @@ class SimulationConfig:
             "manipulator_budget_multiples",
             "delta_multipliers",
             "pol_b_multipliers",
+            "competing_venue_diversions",
             "effect_strata",
             "formation_strata",
             "attack_strategy_mix",
