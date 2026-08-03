@@ -245,25 +245,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Load pinned toolchain versions
-        run: |
-          set -euo pipefail
-          # tools/env/pins.env is the single home of these versions (10 §10.1).
-          grep -E '^APP_(NODE|PNPM)_VERSION=' tools/env/pins.env >> "$GITHUB_ENV"
-      - name: Cross-check the pnpm pin against packageManager
-        run: |
-          set -euo pipefail
-          # app/package.json's `packageManager` is what corepack obeys; pins.env is
-          # what everything else reads. If they drift, the "pinned" recipe is a
-          # fiction, so fail loudly rather than let one of them win silently.
-          declared=$(python3 -c "import json;print(json.load(open('app/package.json'))['packageManager'])")
-          test "$declared" = "pnpm@${APP_PNPM_VERSION}" \
-            || { echo "packageManager=$declared disagrees with pins.env APP_PNPM_VERSION=${APP_PNPM_VERSION}"; exit 1; }
       - uses: actions/setup-node@v7
         with:
-          node-version: ${{ env.APP_NODE_VERSION }}
-      - name: Install pnpm
-        run: npm install -g pnpm@${APP_PNPM_VERSION}
+          # app/.nvmrc is the single home of the Node pin. It deliberately does NOT
+          # live in tools/env/pins.env: that file is 15 §4.7's exact-key manifest for
+          # digest-pinned *test-environment* binaries, and the app's build toolchain
+          # is 12 §1.1. Putting it there conflated two specs and the env validator
+          # was right to refuse it.
+          node-version-file: app/.nvmrc
+      - name: Enable corepack (pnpm pin comes from packageManager)
+        working-directory: app
+        # corepack reads `packageManager` from package.json, so the pin has exactly
+        # one home and there is nothing to cross-check against.
+        run: corepack enable && corepack install
+      - name: Assert the Node pin and the engines range agree
+        working-directory: app
+        run: |
+          set -euo pipefail
+          pinned=$(cat .nvmrc)
+          node -e "
+            const {engines}=require('./package.json');
+            const semver=process.argv[1];
+            if(!engines?.node) { console.error('engines.node missing'); process.exit(1); }
+            const [maj]=semver.split('.');
+            if(!engines.node.includes(semver) && !engines.node.includes('>='+semver)) {
+              console.error(\`.nvmrc \${semver} not admitted by engines.node \${engines.node}\`); process.exit(1);
+            }
+            console.log(\`.nvmrc \${semver} agrees with engines.node \${engines.node}\`);
+          " "$pinned"
       - name: Install (frozen lockfile)
         working-directory: app
         run: pnpm install --frozen-lockfile
