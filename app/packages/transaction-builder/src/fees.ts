@@ -1,0 +1,170 @@
+/**
+ * Fee currency and mortality/nonce — 11 §11.3, §11.5 (D-12, X-14 resolved).
+ *
+ * Two things that look like presentation and are not. A fee estimate decides whether an
+ * account can transact at all, and a mortality era decides how long a signed payload stays
+ * replayable; both are computed from finalized reads or not computed.
+ *
+ * **The rate is read, bounded, and never defaulted.** `fee.vit_usdc_rate` is a
+ * `Constitution.Params` storage read, light-client verified, PARAM-adjustable and bounded
+ * to [0.1×, 10×] of its reference. All three matter separately: unreadable means *no
+ * figure* rather than a stale one, and a rate outside its own bounds means the key is not
+ * usable rather than clamped — clamping would quietly transact at a price the constitution
+ * says is impossible, which is worse than refusing, because the user would never learn the
+ * chain and the client disagreed.
+ *
+ * **USDC-only accounts are always viable**, which is why headroom is computed in the
+ * *selected* asset rather than converted to VIT for a single comparison. An account with
+ * no VIT at all must be able to pay, so a viability check denominated in VIT would deny
+ * exactly the accounts D-12 exists to serve.
+ */
+
+import type { Finalized } from '@bleavit/chain-client';
+
+export type FeeAsset = 'VIT' | 'USDC';
+
+export class FeeRateUnusableError extends Error {
+  readonly code = 'FE-FEE-001';
+  constructor(message: string) {
+    super(message);
+    this.name = 'FeeRateUnusableError';
+  }
+}
+
+/**
+ * `fee.vit_usdc_rate` as the constitution publishes it, with the bounds it is held to.
+ *
+ * The reference is carried alongside the live value because the bound is *relative* to it
+ * ([0.1×, 10×]); a client holding only the live value cannot tell an amended rate from an
+ * out-of-range one, and would have to trust whichever it was handed.
+ */
+export interface VitUsdcRate {
+  /** USDC per VIT, scaled by `scale`. Integer arithmetic throughout — see `packages/protocol`. */
+  readonly value: bigint;
+  readonly reference: bigint;
+  readonly scale: bigint;
+}
+
+const LOWER_NUMERATOR = 1n;
+const LOWER_DENOMINATOR = 10n;
+const UPPER_MULTIPLE = 10n;
+
+/**
+ * Admit a rate only if it is within [0.1×, 10×] of its reference.
+ *
+ * Cross-multiplied rather than divided: a division would floor the bound itself, and a
+ * rate one unit outside a floored bound reads as inside it.
+ */
+export function admitRate(read: Finalized<VitUsdcRate>): VitUsdcRate {
+  const rate = read.value;
+  if (rate.scale <= 0n) {
+    throw new FeeRateUnusableError('fee.vit_usdc_rate has a non-positive scale; no figure can be computed');
+  }
+  if (rate.value <= 0n || rate.reference <= 0n) {
+    throw new FeeRateUnusableError('fee.vit_usdc_rate is non-positive; refusing to price a fee from it');
+  }
+  if (rate.value * LOWER_DENOMINATOR < rate.reference * LOWER_NUMERATOR) {
+    throw new FeeRateUnusableError(
+      `fee.vit_usdc_rate ${rate.value} is below 0.1× its reference ${rate.reference}; the ` +
+        'constitution does not admit this rate, and clamping it would transact at a price ' +
+        'the chain says is impossible',
+    );
+  }
+  if (rate.value > rate.reference * UPPER_MULTIPLE) {
+    throw new FeeRateUnusableError(
+      `fee.vit_usdc_rate ${rate.value} is above 10× its reference ${rate.reference}; the ` +
+        'constitution does not admit this rate',
+    );
+  }
+  return rate;
+}
+
+export interface FeeEstimate {
+  readonly vit: bigint;
+  readonly usdc: bigint;
+  readonly selected: FeeAsset;
+  /** The amount that must be free in the selected asset. */
+  readonly headroom: bigint;
+  /** Shown in expert mode — 11 §11.5 requires the key and its bounds to be displayed. */
+  readonly disclosure: string;
+}
+
+/**
+ * Both currencies for one fee, and the headroom in the selected one.
+ *
+ * Rounds the USDC leg **up**. A fee estimate that rounds down understates what the account
+ * must hold, and the failure lands as a rejected transaction after signing — the one point
+ * in the flow where the user has already committed.
+ */
+export function estimateFee(
+  feeInVit: bigint,
+  rate: VitUsdcRate,
+  selected: FeeAsset,
+): FeeEstimate {
+  if (feeInVit < 0n) throw new FeeRateUnusableError('a negative fee is not an estimate');
+  const usdc = (feeInVit * rate.value + rate.scale - 1n) / rate.scale;
+  return {
+    vit: feeInVit,
+    usdc,
+    selected,
+    headroom: selected === 'VIT' ? feeInVit : usdc,
+    disclosure:
+      `fee.vit_usdc_rate = ${rate.value}/${rate.scale} (reference ${rate.reference}, ` +
+      'bounded [0.1×, 10×], PARAM-adjustable)',
+  };
+}
+
+/* --------------------------------------------------------------- mortality and nonce */
+
+/** 11 §11.3: era 64 blocks from B′, 256 for a raw-external payload. */
+export const MORTAL_ERA_BLOCKS = 64;
+export const MORTAL_ERA_BLOCKS_RAW_EXTERNAL = 256;
+/** 11 §11.3: warn when a relevant phase boundary is closer than this. */
+export const PHASE_PROXIMITY_WARNING_BLOCKS = 25;
+
+export interface Mortality {
+  readonly periodBlocks: number;
+  readonly fromBlock: number;
+}
+
+/**
+ * The era for a payload signed against B′.
+ *
+ * A raw-external payload gets the longer era because it makes a round trip through an
+ * air-gapped device or a QR scan, and a 64-block era would expire mid-transcription. It is
+ * a *longer replay window*, so it is opt-in per payload rather than the default — the
+ * shorter era is the safer one and the one every in-app signature uses.
+ */
+export function mortalityFor(at: number, rawExternal = false): Mortality {
+  if (!Number.isInteger(at) || at < 0) throw new RangeError(`not a block number: ${at}`);
+  return {
+    periodBlocks: rawExternal ? MORTAL_ERA_BLOCKS_RAW_EXTERNAL : MORTAL_ERA_BLOCKS,
+    fromBlock: at,
+  };
+}
+
+/**
+ * The nonce to sign with: the finalized nonce at B′ plus what is already in flight.
+ *
+ * The in-flight count is *added*, never substituted: a broadcast transaction has consumed
+ * a nonce the finalized state has not yet observed, so signing the finalized nonce again
+ * produces a second transaction the chain will drop as a duplicate. Taking the finalized
+ * read as the base is what keeps this from drifting — an internal counter alone loses
+ * track the moment anything is signed elsewhere for the same account.
+ */
+export function nonceFor(finalizedNonce: Finalized<bigint>, inFlight: number): bigint {
+  if (!Number.isInteger(inFlight) || inFlight < 0) {
+    throw new RangeError(`in-flight count must be a non-negative integer: ${inFlight}`);
+  }
+  return finalizedNonce.value + BigInt(inFlight);
+}
+
+/** 11 §11.3's proximity warning: a boundary inside the window invalidates the plan, not the tx. */
+export function phaseBoundaryWarning(at: number, boundaryAt: number): string | undefined {
+  const distance = boundaryAt - at;
+  if (distance < 0 || distance >= PHASE_PROXIMITY_WARNING_BLOCKS) return undefined;
+  return (
+    `a phase boundary is ${distance} block(s) away (< ${PHASE_PROXIMITY_WARNING_BLOCKS}); ` +
+    'preconditions evaluated now may not hold when this is included'
+  );
+}

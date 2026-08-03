@@ -2,3 +2,4 @@
 export * from './preconditions.js';
 export * from './machine.js';
 export * from './rows.js';
+export * from './fees.js';
