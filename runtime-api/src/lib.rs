@@ -17,8 +17,9 @@ pub use telemetry::runtime_decl_for_telemetry_api;
 pub use telemetry::TelemetryApi;
 pub use telemetry::{
     CollateralTelemetry, MarketTelemetry, PolComponent, PolTelemetry, ServiceEgressTelemetry,
-    StorageUtilizationTelemetry, WindowCoverageTelemetry, MAX_POL_TELEMETRY_ROWS,
-    MAX_STORAGE_NAME_BYTES, MAX_STORAGE_UTILIZATION_ROWS, MAX_WINDOW_COVERAGE_ROWS,
+    ServicePartitionTelemetry, StorageUtilizationTelemetry, WindowCoverageTelemetry,
+    MAX_POL_TELEMETRY_ROWS, MAX_STORAGE_NAME_BYTES, MAX_STORAGE_UTILIZATION_ROWS,
+    MAX_WINDOW_COVERAGE_ROWS,
 };
 
 use futarchy_primitives::{

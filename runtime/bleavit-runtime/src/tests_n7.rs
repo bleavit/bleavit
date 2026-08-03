@@ -46,9 +46,13 @@ const PT10_SERVICE_START_OFFSET: BlockNumber = 1;
 const PT10_SERVICE_OPEN_OFFSET: BlockNumber = PT10_SERVICE_START_OFFSET + 1;
 const PT10_SERVICE_END_OFFSET: BlockNumber = 22;
 // Every block has ten schedulable points: before the first primary call, between
-// each adjacent primary call, and after the last primary call. The rotated
-// patterns make the service trace vary at every point over the whole lifecycle
-// rather than replaying one fixed schedule.
+// each adjacent primary call, and after the last primary call.
+//
+// These two rotated patterns are what PT-10's interleaving used to be, before it
+// was generated. They are KEPT, as seed-independent regressions: they are the
+// interleavings the first implementation was verified against, and a change to
+// the generator must not silently drop them. Counts here mean call counts of the
+// one shape the old harness had -- 1 -> `Deliver`, 2 -> `DeliverTwice`.
 const SERVICE_CONTAINMENT_SCHEDULES: [[u8; 10]; 2] = [
     [1, 2, 1, 1, 2, 1, 1, 2, 1, 1],
     [2, 1, 2, 2, 1, 2, 2, 1, 2, 2],

@@ -2634,7 +2634,7 @@ pub(crate) fn sec_flow_cap_1e9() -> u64 {
     fixed_param(b"sec.flow_cap").max(kernel::SEC_FLOW_CAP_FLOOR_1E9)
 }
 
-fn u32_param(name: &[u8]) -> u32 {
+pub(crate) fn u32_param(name: &[u8]) -> u32 {
     u32_param_or(name, 0)
 }
 fn u32_param_or(name: &[u8], default: u32) -> u32 {

@@ -48,6 +48,9 @@ MAX_EVENT_CATCH_UP_BLOCKS = 512
 USDC_ASSET_ID = 1337
 ASSET_HUB_PARA_ID = 1000
 RATE_SCALE = 10_000_000_000
+# `futarchy_primitives::kernel::SCORE_SCALE` — the 1e9 fixed-point grid every
+# `FixedU64` on the telemetry surface is quoted on.
+SCORE_SCALE = 1_000_000_000
 U128_MAX = (1 << 128) - 1
 
 
@@ -92,6 +95,11 @@ SERIES: dict[str, SeriesDefinition] = {
         _series("bleavit_service_client_pushes_total", "counter", "Best-effort report pushes attempted for one registered client.", "client_id"),
         _series("bleavit_service_client_push_failures_total", "counter", "Best-effort report pushes that failed for one registered client.", "client_id"),
         _series("bleavit_service_client_push_failures_consecutive", "gauge", "Consecutive best-effort report-push failures for one registered client.", "client_id"),
+        _series("bleavit_service_questions_live", "gauge", "Hosted questions in a non-terminal phase."),
+        _series("bleavit_service_max_live", "gauge", "Live svc.max_live cap the hosted-question count is measured against."),
+        _series("bleavit_service_contest_capital_external", "gauge", "Posted client subsidy across live hosted books (16 §8.4 falsifier, external side)."),
+        _series("bleavit_service_not_decision_grade_rejections", "gauge", "Bleavit proposals rejected NotDecisionGrade across the retained cohort window."),
+        _series("bleavit_service_external_weight_used_ratio", "gauge", "External weight consumed as a fraction of the hard external quota (16 §8.5)."),
         _series("bleavit_chain_keeper_budget_limit", "gauge", "Live keeper.budget Param value in chain balance base units."),
         _series("bleavit_chain_keeper_budget_spent", "gauge", "Current-epoch keeper meter spend in chain balance base units."),
         _series("bleavit_chain_keeper_budget_utilization_ratio", "gauge", "Current keeper spend divided by the live keeper.budget Param."),
@@ -195,6 +203,13 @@ FULL_DOMAIN_FAMILIES = {
         "bleavit_service_client_pushes_total",
         "bleavit_service_client_push_failures_total",
         "bleavit_service_client_push_failures_consecutive",
+    ),
+    "service partition": (
+        "bleavit_service_questions_live",
+        "bleavit_service_max_live",
+        "bleavit_service_contest_capital_external",
+        "bleavit_service_not_decision_grade_rejections",
+        "bleavit_service_external_weight_used_ratio",
     ),
     "keeper budget": (
         "bleavit_chain_keeper_budget_limit",
@@ -1175,6 +1190,49 @@ class ChainExporter:
                 labels,
             )
 
+    def _service_partition(self, block_hash: str) -> None:
+        """16 §8.4's cannibalization falsifier and §8.5's partition occupancy.
+
+        Fails closed per family like every other producer here: a malformed or
+        absent row must not publish a healthy zero, because a falsifier that
+        silently reads 0 is worse than one that is visibly missing -- it would
+        argue *against* the values action §8.4 mandates.
+        """
+        context = "TelemetryApi.service_partition"
+        row = _required_some(self._telemetry_api("service_partition", block_hash), context)
+        if not isinstance(row, dict):
+            raise MonitoringError(f"{context} is not a struct")
+        live = _integer_field(row, "questions_live", "service_partition")
+        cap = _integer_field(row, "max_live", "service_partition")
+        external = _integer_field(row, "contest_capital_external", "service_partition")
+        rejections = _integer_field(
+            row, "not_decision_grade_rejections", "service_partition"
+        )
+        ratio = _integer_field(
+            row, "external_weight_used_ratio_1e9", "service_partition"
+        )
+        if min(live, cap, external, rejections, ratio) < 0:
+            raise MonitoringError("service partition values must be non-negative")
+        if ratio > SCORE_SCALE:
+            raise MonitoringError(
+                "external weight ratio exceeds one; the partition refuses rather "
+                "than overruns, so this state cannot exist"
+            )
+        if live > cap:
+            raise MonitoringError(
+                "hosted questions live exceed svc.max_live; the cap is enforced at "
+                "register, so exceeding it means the counter or the cap is wrong"
+            )
+        self.store.set("bleavit_service_questions_live", live, {})
+        self.store.set("bleavit_service_max_live", cap, {})
+        self.store.set("bleavit_service_contest_capital_external", external, {})
+        self.store.set("bleavit_service_not_decision_grade_rejections", rejections, {})
+        self.store.set(
+            "bleavit_service_external_weight_used_ratio",
+            ratio / SCORE_SCALE,
+            {},
+        )
+
     def _keeper_budget(self, block_hash: str) -> None:
         params = self._runtime_api("params", encode_param_keys(["keeper.budget"]), block_hash)
         if not isinstance(params, list) or len(params) != 1:
@@ -1263,6 +1321,7 @@ class ChainExporter:
             ("storage remainder", lambda: self._storage_remainder(block_hash)),
             ("numeric anomalies", lambda: self._numeric_anomalies(block_hash)),
             ("service egress", lambda: self._service_egress(block_hash)),
+            ("service partition", lambda: self._service_partition(block_hash)),
             ("keeper budget", lambda: self._keeper_budget(block_hash)),
             ("descriptor lead time", lambda: self._descriptor_lead_time(block_hash)),
             ("storage", lambda: self._storage_counts(block_hash)),

@@ -803,7 +803,15 @@ today.** Mitigations, primary first:
 - **Arming:** `Σ b_ext ≤ Σ pol.b(live)` at switch-on, so the external side is never the dominant
   market on the chain.
 - **Measurement with a stated falsifier:** per-epoch Bleavit vs external contest capital and the
-  `NotDecisionGrade` rejection count on the monitoring-only `TelemetryApi`. If rejections rise with
+  `NotDecisionGrade` rejection count on the monitoring-only `TelemetryApi`. **Implemented** as that
+  API's `service_partition` row (v5): live hosted-question count, the live `svc.max_live` it is
+  measured against, external posted subsidy in the units `LivePolCommitments` stores, the
+  `NotDecisionGrade` count **over the retained cohort window** — a moving window is what "rise with
+  external occupancy" is a claim about, and a cumulative counter would need new storage on
+  `decide()`'s hot path to say less — and §8.5's external-quota utilization. The two must be read
+  **together**: this section's own point is that a rejection caused by the service is
+  indistinguishable from one caused by disinterest, so the capital is the trigger and the rejection
+  count is corroboration. If rejections rise with
   external occupancy, the values layer **MUST** reduce `svc.max_live`. **That obligation is no longer
   the only response, and is no longer the first one** — it asks for a vote at exactly the moment
   revenue argues the other way, on evidence that will always be arguable, in a system whose every
