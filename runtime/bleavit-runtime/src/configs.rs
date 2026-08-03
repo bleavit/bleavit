@@ -2917,18 +2917,30 @@ impl pallet_question_service::DecisionWindowGuard for RuntimeServiceDecisionWind
 
 /// 16 §8.7: how starved Bleavit's own decision books are, right now.
 ///
-/// Reads `1 - min(realized/floor)` over the live decision pairs, where
-/// `realized` is the 04 §7a contest-capital integral divided by the blocks
-/// **actually integrated** rather than by the full window width — dividing a
-/// partial integral by the full width would report every young window as
-/// starved and fire the latch at the start of every epoch.
+/// Reads `1 - min(realized/floor)` over the decision pairs that are **still
+/// accruing**, where `realized` is the 04 §7a contest-capital integral divided
+/// by the blocks **actually integrated** rather than by the full window width —
+/// dividing a partial integral by the full width would report every young
+/// window as starved and fire the latch at the start of every epoch.
 ///
-/// Bounded by the same live-proposal set `collides` already scans, so the added
-/// cost is that scan's two book reads per proposal and nothing unbounded.
+/// The liveness filter is load-bearing and was missing until 2026-08-03.
+/// `pallet_epoch::Proposals` retains every nonterminal proposal, and a closed
+/// window keeps its final integral forever, so an unfiltered read let a book
+/// that was underfunded *once* remain the minimum and surcharge every later
+/// admission. That is the same failure §8.7 forbids when it refuses to ratchet
+/// starvation into the stored multiplier — a price outliving the condition that
+/// set it — arriving through the input instead of through storage, and worse:
+/// the stored term at least decays over `svc.max_window`, while a stale input
+/// never does.
+///
+/// Bounded by the same proposal set `collides` already scans (that one filters
+/// by time in its own predicate, which is why it never had this defect), so the
+/// added cost is two book reads per proposal and nothing unbounded.
 pub struct RuntimeServiceContestHealth;
 impl pallet_question_service::ContestHealthProbe for RuntimeServiceContestHealth {
     fn starvation_1e9() -> FixedU64 {
         let one = futarchy_primitives::kernel::SCORE_SCALE;
+        let now = frame_system::Pallet::<Runtime>::block_number();
         let v_min: [Balance; 5] = [
             balance_param(b"dec.v_min.param"),
             balance_param(b"dec.v_min.trs"),
@@ -2948,24 +2960,27 @@ impl pallet_question_service::ContestHealthProbe for RuntimeServiceContestHealth
                 continue;
             }
             for market in [markets.accept, markets.reject] {
-                let Some(ratio) = contest_ratio_1e9(market, proposal.decide_at, floor) else {
+                let Some(ratio) = contest_ratio_1e9(market, proposal.decide_at, floor, now) else {
                     continue;
                 };
                 weakest = Some(weakest.map_or(ratio, |current| current.min(ratio)));
             }
         }
         // No measurable book -> no evidence of starvation. Not a fallback: with
-        // no live decision book the service is not competing with one.
+        // no live decision book the service is not competing with one. This is
+        // the reading for most of an epoch, by construction: decision windows
+        // occupy a minority of it, and outside them nothing is contested.
         FixedU64(one.saturating_sub(weakest.unwrap_or(one)))
     }
 }
 
 /// `min(1, realized_contest / floor)` on the `SCORE_SCALE` grid for one book,
-/// or `None` when the book has no valid, non-empty accrual to read.
+/// or `None` when the book has no valid, non-empty, **still-open** accrual.
 fn contest_ratio_1e9(
     market: futarchy_primitives::MarketId,
     decide_at: BlockNumber,
     floor: Balance,
+    now: BlockNumber,
 ) -> Option<u64> {
     let one = futarchy_primitives::kernel::SCORE_SCALE;
     let window = pallet_market::DecisionWindows::<Runtime>::get(market)
@@ -2973,6 +2988,16 @@ fn contest_ratio_1e9(
         .find(|record| record.end == decide_at)?;
     if !window.contest_valid {
         // An overflowed accumulator never grades, so it may not price either.
+        return None;
+    }
+    // Two independent staleness doors, each closing a case the other misses.
+    // `sealed` is the market pallet's own statement that no further accrual is
+    // possible (an early close, or the decision-boundary read), and it can be
+    // set while the clock still says the window is open. The clock catches the
+    // mirror case: a window past its end that nothing has sealed yet because
+    // the epoch crank has not run. Either way the integral is frozen, and a
+    // frozen integral is history rather than present competition.
+    if window.sealed || now >= window.end || now < window.start {
         return None;
     }
     let accrued = window.contest_accrued_until.checked_sub(window.start)?;
@@ -11642,6 +11667,14 @@ impl pallet_question_service::BenchmarkHelper<RuntimeOrigin, AccountId> for Runt
             // `BlockNumber::MAX` so `collides` still cannot refuse the
             // registration under benchmark; the seeded windows carry the same
             // `end` so the probe's `find` hits rather than reading an empty vec.
+            //
+            // The matching record must also be **live** (`sealed: false`, and
+            // `start <= now < end`), because the probe short-circuits on a
+            // frozen window. Seeding it sealed would benchmark the branch that
+            // does no arithmetic while the real call does all of it — SQ-576's
+            // defect exactly, reached through the fixture instead of through an
+            // unset parameter. The two are the same mistake: a benchmark whose
+            // fixture makes the expensive path unreachable.
             let accept = u64::from(pid).saturating_mul(2).saturating_add(600_000);
             let reject = accept.saturating_add(1);
             if let Some(markets) = proposal.markets.as_mut() {
@@ -11669,7 +11702,7 @@ impl pallet_question_service::BenchmarkHelper<RuntimeOrigin, AccountId> for Runt
                                 contest_accrued_until: BlockNumber::MAX,
                                 contest_valid: true,
                                 close_spot: Some(futarchy_primitives::FixedU64(u64::MAX)),
-                                sealed: true,
+                                sealed: false,
                             })
                             .collect::<Vec<_>>(),
                     ),

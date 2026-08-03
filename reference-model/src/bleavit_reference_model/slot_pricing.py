@@ -173,12 +173,19 @@ class CarryingCost:
 def carrying_cost_per_epoch(
     proposal_class: str, slate: int = EPOCH_SLATE_SIZE
 ) -> CarryingCost:
-    """TH-72's missing attack-cost cell, for one proposal class.
+    """A lower bound on what denying one proposal class costs per epoch.
 
-    Two terms only, both already normative: the flat service fee (Finding 1 —
-    it does not scale with depth), and 08 §7's own `capital_time_value` on the
-    posted cash. Adverse-selection loss is deliberately excluded; see the module
-    docstring's caveats.
+    NOT the attack cost, and so NOT a figure doc 14's TH-72 cell may publish:
+    two terms only, both already normative — the flat service fee (Finding 1 —
+    it does not scale with depth) and 08 §7's own `capital_time_value` on the
+    posted cash. Adverse-selection loss, the term that would make this an
+    attacker's real outlay, is deliberately excluded; see the module docstring's
+    caveats. SQ-574 stays open for exactly that gap.
+
+    The headline of this docstring used to read "TH-72's missing attack-cost
+    cell", which is how the contradictory `repaired_by` status downstream came
+    to be written. A carrying cost that omits maker loss understates, and an
+    understated attack cost is the direction that gets a defense under-built.
     """
     if proposal_class not in POL_B_DECISION:
         raise SlotPricingError(f"unknown proposal class {proposal_class!r}")
@@ -342,6 +349,14 @@ def check_starvation_response_shape(repo_root: Path) -> dict[str, object]:
       that a single adopted row arms both halves. A `svc.*` key carrying a
       second starvation ceiling would be R-2 step 1's "a new key whose job an
       existing key already does".
+    - **only live windows price.** §8.7 measures present competition, so the
+      probe must refuse a window that can no longer accrue. `pallet_epoch`
+      retains nonterminal proposals and a closed window keeps its integral
+      forever, so an unfiltered read lets one historically underfunded book
+      surcharge every later admission — the same "price outliving its cause"
+      §8.6 refuses via the no-store rule, reached through the input and with
+      no decay to end it. Detected on the guard, and on BOTH of its halves,
+      because either alone leaves a live staleness door open.
 
     Follows the [SQ-575] tripwire's lesson: match on **mechanism**, never on
     prose that a documentation-only edit could satisfy.
@@ -355,9 +370,19 @@ def check_starvation_response_shape(repo_root: Path) -> dict[str, object]:
     registry = (repo_root / "tools/limit-coverage/registry.toml").read_text(
         encoding="utf-8"
     )
+    # The probe itself is a runtime binding, not pallet code: the pallet owns
+    # the *shape* of the response and the runtime owns what "starved" reads.
+    configs = (repo_root / "runtime/bleavit-runtime/src/configs.rs").read_text(
+        encoding="utf-8"
+    )
     implemented = (
         "starvation_multiplier" in pallet and "ContestHealthProbe" in pallet
     )
+    # Both halves of the liveness guard, checked separately. `sealed` alone
+    # misses a window past its end that no crank has sealed; the clock alone
+    # misses a window sealed early by a market close.
+    rejects_sealed_windows = "window.sealed ||" in configs
+    rejects_closed_windows = "now >= window.end" in configs
     # The combined read takes the larger half; a product would multiply them.
     combines_by_max = "contention.0.max(starvation.0)" in pallet
     # The stored term must be ratcheted from the contention half alone, or a
@@ -378,6 +403,9 @@ def check_starvation_response_shape(repo_root: Path) -> dict[str, object]:
         "extra_ceiling_keys": starvation_ceilings,
         "shares_one_ceiling": not starvation_ceilings,
         "still_only_a_governance_promise": not implemented,
+        "rejects_sealed_windows": rejects_sealed_windows,
+        "rejects_closed_windows": rejects_closed_windows,
+        "only_live_windows_price": rejects_sealed_windows and rejects_closed_windows,
     }
 
 
@@ -392,5 +420,17 @@ def check_th72_attack_cost_is_unpriced(repo_root: Path) -> dict[str, object]:
         "cost_cell_mentions_round_trip_fees_only": "round-trip fees only" in row,
         "cost_cell_has_no_figure": "price that does not exist" in row,
         "priced_in_threat_costs": False,
-        "repaired_by": "N14 — attacker_cost_per_epoch fills the cell",
+        # Deliberately UNRESOLVED, and the field says so in machine-readable
+        # form. A `repaired_by` string here once claimed N14 filled the cell via
+        # `attacker_cost_per_epoch` -- a function this module has never defined,
+        # naming a repair that never happened, in the one dict a report tool
+        # would read to decide whether the gap is closed. It contradicted the
+        # three fields above it, and nothing asserted it, so it drifted freely.
+        #
+        # What N14 actually derived is the *carrying* cost of denial
+        # (`carrying_cost_per_epoch`), which is a lower bound on the attacker's
+        # outlay and NOT the attack cost: the maker-loss term is absent, and
+        # doc 14 may not publish a figure that omits it.
+        "open_question": "SQ-574",
+        "resolved": False,
     }

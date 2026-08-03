@@ -177,6 +177,21 @@ class StarvationResponseTests(unittest.TestCase):
         f = sp.check_starvation_response_shape(REPO_ROOT)
         self.assertTrue(f["starvation_never_stored"])
 
+    def test_only_still_accruing_windows_price(self) -> None:
+        """A closed window's integral is frozen, so reading it would let one
+        historically underfunded book surcharge every later admission — the
+        very 'price outliving its cause' §8.6 refuses to store."""
+        f = sp.check_starvation_response_shape(REPO_ROOT)
+        self.assertTrue(f["only_live_windows_price"])
+
+    def test_both_halves_of_the_liveness_guard_are_present(self) -> None:
+        """Separately, because each closes a case the other misses: a window
+        sealed early while the clock says it is open, and a window past its end
+        that the epoch crank has not sealed yet."""
+        f = sp.check_starvation_response_shape(REPO_ROOT)
+        self.assertTrue(f["rejects_sealed_windows"])
+        self.assertTrue(f["rejects_closed_windows"])
+
     def test_no_second_ceiling_key_was_added(self) -> None:
         """R-2 step 1: a new key whose job an existing key already does is a
         defect. One adopted row must keep arming both halves of M."""
@@ -191,6 +206,39 @@ class ThreatRowTests(unittest.TestCase):
         self.assertTrue(finding["row_found"])
         self.assertTrue(finding["cost_cell_has_no_figure"])
         self.assertFalse(finding["priced_in_threat_costs"])
+
+    def test_the_finding_reports_itself_unresolved(self) -> None:
+        """The dict is the machine-readable status, so it must not claim a
+        repair the module did not make. It once carried
+        `repaired_by: "N14 - attacker_cost_per_epoch fills the cell"`, naming a
+        function that has never existed and contradicting the three fields
+        beside it -- a report tool reading this would have closed SQ-574."""
+        finding = sp.check_th72_attack_cost_is_unpriced(REPO_ROOT)
+        self.assertFalse(finding["resolved"])
+        self.assertEqual(finding["open_question"], "SQ-574")
+        self.assertNotIn("repaired_by", finding)
+
+    def test_no_field_claims_a_repair_that_does_not_exist(self) -> None:
+        """Structural, not string-matched on the old key: any *future* field
+        may claim a repair only by naming a callable this module really has."""
+        finding = sp.check_th72_attack_cost_is_unpriced(REPO_ROOT)
+        self.assertFalse(hasattr(sp, "attacker_cost_per_epoch"))
+        for key, value in finding.items():
+            if not isinstance(value, str):
+                continue
+            for word in value.replace(",", " ").split():
+                name = word.strip("`'\"()")
+                if name.endswith("_per_epoch") or name.startswith("check_"):
+                    self.assertTrue(
+                        hasattr(sp, name),
+                        f"{key} names {name!r}, which this module does not define",
+                    )
+
+    def test_carrying_cost_is_a_lower_bound_not_the_attack_cost(self) -> None:
+        """Why the cell stays empty: the maker-loss term is missing, so the
+        derived figure understates and doc 14 may not publish it as the cost."""
+        self.assertTrue(hasattr(sp, "carrying_cost_per_epoch"))
+        self.assertIn("NOT the attack cost", sp.carrying_cost_per_epoch.__doc__ or "")
 
     def test_threat_costs_still_prices_only_three_rows(self) -> None:
         """A tripwire: if TH-72 gains a priced model upstream, this module's

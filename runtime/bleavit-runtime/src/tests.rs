@@ -19450,6 +19450,10 @@ fn service_starvation_probe_reads_the_weakest_bleavit_decision_book() {
         // Accept sits at the floor; Reject at a quarter of it. The probe must
         // report the WEAKEST book, because decision-grade is per book and one
         // starved book rejects the proposal -- an average would hide it.
+        // `seed_decision_grade_market` seals its window, which is right for the
+        // grading tests that share it and wrong here: 16 §8.7 prices *present*
+        // competition, so it reads only windows still accruing. Reopen it, or
+        // this fixture would model a decision that is already over.
         let seed = |id, branch, contest| {
             seed_decision_grade_market(
                 id,
@@ -19462,7 +19466,13 @@ fn service_starvation_probe_reads_the_weakest_bleavit_decision_book() {
                 (params.decision_window, params.trailing_window),
                 b,
                 contest,
-            )
+            )?;
+            pallet_market::DecisionWindows::<Runtime>::mutate(id, |windows| {
+                for window in windows.iter_mut() {
+                    window.sealed = false;
+                }
+            });
+            Ok::<(), DispatchError>(())
         };
         pallet_epoch::Proposals::<Runtime>::insert(
             PID,
@@ -19531,6 +19541,54 @@ fn service_starvation_probe_reads_the_weakest_bleavit_decision_book() {
             }
         });
         assert_eq!(probe(), 0);
+
+        // A CLOSED window is history, not competition. `pallet_epoch` retains
+        // nonterminal proposals and a closed window keeps its final integral
+        // forever, so without this filter one book that was underfunded once
+        // would stay the minimum and surcharge every later admission -- a price
+        // outliving its cause, which is the very thing §8.7 refuses to allow
+        // through the stored multiplier. Restore the starved Reject book, then
+        // close it each of the two ways a window can close.
+        assert!(seed(
+            markets.reject,
+            futarchy_primitives::Branch::Reject,
+            floor / 4
+        )
+        .is_ok());
+        assert_eq!(probe(), one - one / 4, "the starved book prices while live");
+
+        let close = |flag: bool| {
+            pallet_market::DecisionWindows::<Runtime>::mutate(markets.reject, |windows| {
+                if let Some(window) = windows.iter_mut().find(|window| window.end == end) {
+                    window.sealed = flag;
+                }
+            });
+        };
+        // (1) Sealed by the market pallet, clock still inside the window.
+        close(true);
+        assert_eq!(
+            probe(),
+            0,
+            "a sealed window is frozen, so it may not price a later admission"
+        );
+        close(false);
+        assert_eq!(probe(), one - one / 4, "unsealing restores the reading");
+
+        // (2) Past its end and not yet sealed, because the epoch crank has not
+        // run. The integral is equally frozen and must be equally inert.
+        System::set_block_number(end);
+        assert_eq!(
+            probe(),
+            0,
+            "a window past its end may not price, sealed or not"
+        );
+        System::set_block_number(end.saturating_add(params.decision_window));
+        assert_eq!(probe(), 0, "and it does not come back later");
+
+        // Live again once the clock is back inside the window: the filter is a
+        // liveness test, not a one-way latch that silently disarms the probe.
+        System::set_block_number(end.saturating_sub(1));
+        assert_eq!(probe(), one - one / 4);
     });
 }
 

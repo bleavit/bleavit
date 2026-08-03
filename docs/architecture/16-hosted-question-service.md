@@ -1117,6 +1117,25 @@ the same per-proposal decision-grade contest floor the grading path uses, and th
 ratio across books** is taken, because decision-grade is per book and one starved book
 rejects the proposal. Starvation is `1 −` that ratio, clamped to `[0, 1]`.
 
+**"Live" is normative here, and it means *still accruing*.** A window counts only while it
+can still take capital: not sealed, and the current block inside `[start, end)`. Both
+conditions are required, because each closes a case the other misses — a window can be
+sealed early by a market close while the clock still says it is open, and a window can be
+past its end but unsealed because the epoch crank has not yet run. A window that fails
+either test has a frozen integral, and a frozen integral is history rather than present
+competition. Reading one would let a book that was underfunded *once* stay the minimum and
+surcharge every later admission — a price outliving the condition that set it, which is
+the same failure this section already refuses when it declines to ratchet starvation into
+the stored multiplier (§8.6), and a worse form of it: the stored term decays over
+`svc.max_window`, whereas a stale input never decays at all. Implementations MUST filter
+on liveness at the point of reading; proposal storage retains records long after their
+decision, so the retained set is not a safe proxy for the competing set.
+
+A direct consequence, and the expected reading rather than a degradation: **for most of an
+epoch, starvation is exactly 0**, because decision windows occupy a minority of it and
+outside them nothing is being contested. The service is provably not competing with a
+decision at those times, so it is not surcharged for one.
+
 **The response is graduated and applies to everyone:**
 
 ```
