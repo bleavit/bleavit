@@ -120,6 +120,11 @@ jobs:
         run: python3 tools/ci/check-plan-tables.py
       - name: Check spec-question batch index
         run: python3 tools/ci/check-spec-question-batches.py
+      - name: Dispatch-check mirror — 09 §1.2 ↔ 11 §11.5 (15 §4.8)
+        # Both documents mandated this diff and both credited it to doc 15, which
+        # mandated nothing (SQ-552). It must fail on a frontend precondition with no
+        # backend check behind it — a client refusing an action the runtime accepts.
+        run: python3 tools/ci/check-dispatch-mirror.py
       - name: Bind the quickstart to the executable integration drill
         run: python3 tools/ci/check-quickstart-drill.py
       - name: Bind the pure-XCM integration page to the frozen client ABI
