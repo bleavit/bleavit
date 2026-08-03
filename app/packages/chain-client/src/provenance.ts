@@ -72,7 +72,55 @@ export function meet<A, B, C>(
   return finalize(combine(a.value, b.value), a.status);
 }
 
-/** Narrowing helper: never promotes, only recognises an already-finalized value. */
-export function isFinalized<T>(v: Verified<T>): v is Finalized<T> {
+/**
+ * The status narrowing — deliberately **not** a `v is Finalized<T>` predicate.
+ *
+ * It used to be one, and that quietly defeated the entire brand (F3, V-81). A type
+ * predicate returning `v is Finalized<T>` *asserts* the phantom field; it cannot check
+ * it, because the field has no runtime representation — that absence is the whole
+ * reason the design survives structured clone. So a predicate is a **third mint
+ * mechanism**, indistinguishable in effect from `as Finalized<T>`, and it was exported
+ * from the package root. Measured under the corpus's own toolchain: the forged literal
+ * `{value, status:{kind:'verified-finalized',…}}` is rejected outright, and the *same
+ * literal* passed through the old `isFinalized` compiled clean. Anything that could
+ * name `Verified<T>` — which is every package, since it lives in `shared-types` — could
+ * therefore mint a value the transaction path accepts, with green CI. That is precisely
+ * the failure 10 §2.1 warns is "void silently".
+ *
+ * Narrowing the *status* is still useful and is safe, because the returned type carries
+ * no brand: a caller that needs `Finalized<T>` must make a read or go through
+ * `readmitFromLeader`, neither of which a forged literal can reach.
+ */
+export function hasFinalizedStatus<T>(
+  v: Verified<T>,
+): v is Verified<T> & { status: { kind: 'verified-finalized'; blockHash: HexString; blockNumber: number } } {
   return v.status.kind === 'verified-finalized';
+}
+
+/**
+ * The second — and only other — mint site: re-admitting a value that crossed a
+ * structured-clone boundary from this tab's leader (10 §4.4).
+ *
+ * 10 §4.4 makes follower tabs render from finalized-state slices the leader broadcasts
+ * over `BroadcastChannel`, and states the provenance ruling explicitly: those are
+ * `verified-finalized` values verified *by the leader tab* — same origin, same release,
+ * same TCB — "so this is not a provenance downgrade". Structured clone strips the
+ * phantom field's *type* (it never had a runtime form), so the value arrives as a plain
+ * `Verified<T>` and something must put the brand back.
+ *
+ * This is named for what it is: a **trust decision**, not a verification. It cannot
+ * check anything about the sender — that is why it is not a predicate, why it takes the
+ * leader's block pin explicitly rather than reading it off the payload, and why it
+ * refuses any value that does not already claim finalized status at that exact block. A
+ * caller must therefore already know which block the leader pinned, which a forged
+ * literal arriving from nowhere does not.
+ */
+export function readmitFromLeader<T>(
+  v: Verified<T>,
+  leaderPin: FinalizedBlockRef,
+): Finalized<T> | undefined {
+  if (!hasFinalizedStatus(v)) return undefined;
+  if (v.status.blockHash !== leaderPin.blockHash) return undefined;
+  if (v.status.blockNumber !== leaderPin.blockNumber) return undefined;
+  return finalize(v.value, leaderPin);
 }
