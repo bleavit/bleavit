@@ -458,6 +458,12 @@ is unchanged, so no `INTEGRATION_CONTRACT_VERSION` bump is owed for it — but a
 the previous sentence would have concluded the service was inert, which is why it is corrected here
 rather than left to be inferred from 13 §1.
 
+`svc.price_cap` (16 §8.6, N14) binds the same way and owes **no bump** for the same reason. One
+difference an integrator must not miss: while `svc.fee_bps` was unset the service was *inert*, but
+while `svc.price_cap` is unset the service is fully **operational** — the row's absence means the
+scarcity multiplier is `1`, i.e. the flat two-part tariff, not a refusal. A client reading a missing
+key as "closed" would be wrong in the opposite direction from the row above it.
+
 **Client transaction and outbound-receiver additions (v22).** `ClientRegistry` appends call index `3`,
 `top_up_delivery_float(amount: Balance)`, and call index `4`,
 `withdraw_delivery_float(amount: Balance)`. Both derive the exact client, USDC asset and funding

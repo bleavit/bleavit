@@ -8,7 +8,7 @@ Two numbers, and the second one is much larger than people expect. Non-normative
 ## 1. The service fee — small
 
 ```
-fee = max( svc.fee_floor ,  svc.fee_bps × declared_stake )
+fee = max( svc.fee_floor ,  svc.fee_bps × declared_stake )  ×  M
 ```
 
 Charged **once per question** — not per market, even though every question runs two — and **earned
@@ -16,6 +16,19 @@ when the report is published**, not when it settles. That sequencing is delibera
 price discovery, and a settlement failure does not un-discover it.
 
 `svc.fee_bps` ships **unset**, and while it is unset `register` refuses with `ServiceRateUnset`.
+
+**`M` is a scarcity multiplier, and today it is 1.** When more clients want a slot than the cap
+admits, the fee is multiplied by `M`, which rises the moment a slot is taken and falls back toward 1
+over time. The point is that a slot freed by a finishing question does not become instantly cheap —
+its price walks down. If you need that slot *now* you pay more than someone who can wait, which is
+what stops the whole thing being a race won by whoever has the fastest bot.
+
+You are not exposed to this yet: `svc.price_cap`, the bound on `M`, ships **unset**, and unset means
+`M = 1` — the plain formula above, first come first served. Unlike `svc.fee_bps`, an unset
+`svc.price_cap` does **not** close the service; it just means there is no surcharge. Read the live
+value from chain metadata rather than assuming either state, and size your budget from the fee you
+actually get quoted.
+
 That is not a bug; it is the arming gate. The service is inert until the values layer sets a rate.
 
 ## 2. The subsidy you post — large, and mostly returned

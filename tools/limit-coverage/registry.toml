@@ -1231,6 +1231,12 @@ genesis = false
 reason = "13 §1 / 16 §2: the live optional value sets only the exact native VIT security hold at admission and never funds egress; N9's separate client-funded USDC delivery float pays postage. Absence is enforced by `ClientBondUnset`; this is a value consumer, not a caller-supplied dispatch bound."
 
 [[entry]]
+key = "svc.price_cap"
+class = "value"
+genesis = false
+reason = "13 §1 / 16 §8.6: bounds the scarcity multiplier M that re-prices a hosted slot under contention. A value consumer, not a caller-supplied dispatch bound — no registration argument is compared against it; it scales the fee the caller then has to fund. Absence is NOT a refusal: unset means M = 1, which reproduces the flat two-part tariff the chain has today, because this row gates an allocation refinement rather than a safety gate and closing admission would be strictly worse than the status quo it replaces."
+
+[[entry]]
 key = "svc.epsilon_min"
 class = "dispatch-limit"
 genesis = true

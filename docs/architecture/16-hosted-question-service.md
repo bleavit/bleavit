@@ -984,6 +984,70 @@ all three declared source classes, while an unknown id below that boundary is un
 fails closed. The registry is keyed by id, not by client or ledger instance, so changing the client
 or hosted ledger cannot evade the exclusion.
 
+### 8.6 Admission under contention — a descending price, not a queue
+
+`svc.max_live` bounds how many questions run at once. It does **not** say who gets
+a slot when more clients want one than the cap admits, and until N14 the answer was
+whichever transaction landed first. That allocates by latency, not by value: sixteen
+low-value questions can lock out an important one, and a slot freed by a terminating
+question is a race that a bot wins by construction.
+
+**The rule.** The instrument-D fee of §8.1 is multiplied by a scarcity factor `M ≥ 1`:
+
+```
+fee(q) = max( svc.fee_floor , svc.fee_bps × declared_stake ) × M
+```
+
+`M` moves **up immediately when a question is admitted, and down only gradually
+toward 1** — including after a question terminates and frees its slot. The asymmetry
+is the whole mechanism, and each half is load-bearing:
+
+- **Down-moves are gradual, so immediacy costs money.** A freed slot's price
+  descends from the pre-release level toward the post-release one rather than
+  dropping to it. A client that must have the slot *now* pays the top of that
+  descent; a patient client waits. This is the per-slot descending-price auction,
+  and it prices sniping rather than forbidding it — a client that values the slot
+  above the premium still wins it, which is the mechanism working.
+- **Up-moves are immediate, so velocity is visible.** A burst of registrations
+  compounds faster than decay removes it, so `M` reflects *how fast* capacity is
+  being taken and not merely how much is taken. Occupancy alone is a state
+  function with no memory: sixteen slots filled over three weeks and sixteen
+  filled in one block would otherwise price identically.
+
+**There is deliberately no starting price.** Each descent begins from the running
+`M`, which *is* the accumulated record of prior demand. This differs from a periodic
+sale with a controller-set opening price, and the difference is forced rather than
+stylistic: hosted questions carry client-chosen windows and free asynchronously, so
+there is no batch of identical units and no shared clock to open a sale on.
+
+**Quantity is never market-discovered.** `svc.max_live` remains a governance-set hard
+cap the mechanism can never sell past. Price clears; quantity does not. A
+quantity-discovering controller — the shape Polkadot's bulk coretime sale uses, which
+is correct where selling more capacity does not degrade the capacity already sold —
+would make scarcity directly profitable here, and TH-73 names exactly that pressure.
+[15](15-invariants-and-testing.md) §4.9's competing-venue leg measured why the two
+cases differ: additional hosted depth degrades Bleavit's own decision formation.
+
+**Where the premium goes.** The floor continues to `MAIN` as cost recovery (§8.1).
+The amount **above** the floor is protocol-owned liquidity, credited at `Sealed` with
+the rest of instrument D and never before — the fee is refunded on VOID (§6.4), so
+routing any part of it earlier would move money the client may still be owed. Routing
+the premium to POL is not a preference: the premium exists only when hosted questions
+are contending for capacity, which is when Bleavit's own books most need depth, so
+the charge for congestion funds the repair for it.
+
+**`M` is inert until its ceiling is adopted.** The bound on `M` is a values-layer
+number that nothing in this repository yet anchors — the natural anchor would be the
+measured cost of governance denial, and [14](14-threat-model.md) TH-72's attack-cost
+cell carries no figure (SQ-574). Until `svc.price_cap` is set, `M ≡ 1` and this
+section describes today's behaviour exactly: the posted two-part tariff, first come
+first served. That is the `svc.fee_bps` and `svc.client_bond` precedent — a row ships
+unset with its consumer defaulting to the status quo rather than to a guess. Note the
+consumer default here is `M = 1` and **not** a refusal: an unset ceiling must not
+close admission, because the mechanism it gates is an allocation refinement and not a
+safety gate, and refusing would be a strictly worse status quo than the one this
+section replaces.
+
 ---
 
 ## 9. Egress
