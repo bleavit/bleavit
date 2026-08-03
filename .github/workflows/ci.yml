@@ -337,18 +337,21 @@ jobs:
         # from `tools/release/surface-manifest.json`; `SUPPORTED_RUNTIMES` is compared in
         # both directions against `app/fixtures/chain-feed/`, so a stale metadata hash or
         # half a primary/recovery pair is a build failure rather than a runtime surprise.
+        working-directory: app
         run: pnpm run surface:check
 
       - name: Compatibility classifier (10 §5.2, §3.2)
         # The classifier decides whether the app may sign, so what it is tested on is the
         # probe outcomes a healthy chain never produces — which is why it is a pure
         # function over probe results with the PAPI shape adapted separately.
+        working-directory: app
         run: pnpm run test:descriptors
 
       - name: smoldot artifact budget (10 §9.3, FE-P4)
         # A budget nothing measures is a sentence, and the one certain thing about a
         # dependency's compressed size is that it changes. Fails closed if the pinned
         # package's layout moved, so a version bump cannot measure nothing and pass.
+        working-directory: app
         run: pnpm run check:budget
 
   environments:
