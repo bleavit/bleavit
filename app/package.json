@@ -1,13 +1,25 @@
 {
   "name": "@bleavit/app",
+  "version": "0.0.0",
   "private": true,
-  "workspaces": [
-    "packages/*"
-  ],
+  "type": "module",
+  "packageManager": "pnpm@10.23.0",
+  "engines": {
+    "node": ">=22.18.0 <23",
+    "pnpm": ">=10.23.0 <11"
+  },
   "scripts": {
-    "typecheck": "tsc -b"
+    "typecheck": "tsc -b",
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "depcruise": "depcruise packages src --config .dependency-cruiser.cjs",
+    "test:firewall": "node --test tests/firewall/*.test.js",
+    "test": "pnpm run test:firewall && pnpm run check:casts && pnpm run depcruise:witness",
+    "depcruise:witness": "depcruise tests/depcruise-witness --config tests/depcruise-witness/.dependency-cruiser.cjs --output-type err && (echo 'WITNESS DID NOT FIRE \u2014 the rule set is vacuous' && exit 1) || echo 'witness fired: rules are live'",
+    "check:casts": "node tools/check-finalized-casts.mjs"
   },
   "devDependencies": {
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "dependency-cruiser": "17.0.1"
   }
 }

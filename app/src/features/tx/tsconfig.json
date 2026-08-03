@@ -1,0 +1,36 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "references": [
+    {
+      "path": "../../../packages/shared-types"
+    },
+    {
+      "path": "../../../packages/chain-client"
+    },
+    {
+      "path": "../../../packages/protocol"
+    },
+    {
+      "path": "../../../packages/simulation"
+    },
+    {
+      "path": "../../../packages/transaction-builder"
+    },
+    {
+      "path": "../../../packages/signing"
+    },
+    {
+      "path": "../../../packages/platform"
+    },
+    {
+      "path": "../../../packages/ui"
+    }
+  ]
+}

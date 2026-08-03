@@ -240,6 +240,56 @@ jobs:
         run: python3 tools/ci/regenerate-weights.py --check --steps 2 --repeat 1
 
   # B7 environment release artifacts — 15 §4.7; 02 §11.
+  app:
+    name: App (Track F)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Load pinned toolchain versions
+        run: |
+          set -euo pipefail
+          # tools/env/pins.env is the single home of these versions (10 §10.1).
+          grep -E '^APP_(NODE|PNPM)_VERSION=' tools/env/pins.env >> "$GITHUB_ENV"
+      - name: Cross-check the pnpm pin against packageManager
+        run: |
+          set -euo pipefail
+          # app/package.json's `packageManager` is what corepack obeys; pins.env is
+          # what everything else reads. If they drift, the "pinned" recipe is a
+          # fiction, so fail loudly rather than let one of them win silently.
+          declared=$(python3 -c "import json;print(json.load(open('app/package.json'))['packageManager'])")
+          test "$declared" = "pnpm@${APP_PNPM_VERSION}" \
+            || { echo "packageManager=$declared disagrees with pins.env APP_PNPM_VERSION=${APP_PNPM_VERSION}"; exit 1; }
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.APP_NODE_VERSION }}
+      - name: Install pnpm
+        run: npm install -g pnpm@${APP_PNPM_VERSION}
+      - name: Install (frozen lockfile)
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck and build the project graph
+        working-directory: app
+        # `tsc -b` is the PRIMARY firewall gate: a forbidden import fails module
+        # resolution here, it is not merely reported.
+        run: pnpm run build
+      - name: Package firewall (dependency-cruiser)
+        working-directory: app
+        run: pnpm run depcruise
+      - name: Firewall witness — the rules MUST still be able to fail
+        working-directory: app
+        # A checker that can no longer detect anything reports success. This asserts
+        # a known-forbidden edge is still caught; a silent config change that made
+        # every rule vacuous once passed a full green run here.
+        run: pnpm run depcruise:witness
+      - name: Negative-compilation corpus (10 §10.2)
+        working-directory: app
+        # The only suite that tests the firewall REJECTS rather than that the app
+        # works. Includes an anti-vacuity positive control.
+        run: pnpm run test:firewall
+      - name: Finalized<T> assertion gate (10 §2.1)
+        working-directory: app
+        run: pnpm run check:casts
+
   environments:
     name: Environment definitions
     runs-on: ubuntu-latest
