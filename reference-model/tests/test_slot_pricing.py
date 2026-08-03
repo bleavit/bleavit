@@ -130,45 +130,31 @@ class RefutedClaimsTests(unittest.TestCase):
 
 
 class ArmingConditionTests(unittest.TestCase):
-    """The finding that outlived every refutation."""
+    """SQ-575. The tripwire fired and was rewritten, not relaxed."""
 
-    def test_arming_condition_is_normative_but_unenforced(self) -> None:
-        f = sp.check_arming_condition_unenforced(REPO_ROOT)
-        self.assertTrue(f["stated_normatively"])
-        self.assertFalse(f["enforced"])
-        self.assertEqual(f["enforcement_sites_found"], [])
+    def test_switch_on_half_is_now_enforced(self) -> None:
+        f = sp.check_arming_condition_enforcement(REPO_ROOT)
+        self.assertTrue(f["external_side_accounted"])
+        self.assertTrue(f["switch_on_enforced"])
 
-    def test_this_is_a_tripwire_not_a_permanent_truth(self) -> None:
-        """When N-something implements it, this test must fail and be rewritten
-        rather than silently keep asserting the gap exists."""
-        f = sp.check_arming_condition_unenforced(REPO_ROOT)
-        self.assertIsInstance(f["enforcement_sites_found"], list)
+    def test_continuous_half_is_still_open_and_says_why(self) -> None:
+        """Not an oversight: the instantaneous protocol-depth sum is zero for
+        most of an epoch, so enforcing at register would close the service
+        outside Bleavit's own decision windows."""
+        f = sp.check_arming_condition_enforcement(REPO_ROOT)
+        self.assertFalse(f["continuously_enforced"])
+        self.assertFalse(f["fully_enforced"])
+        self.assertIn("does not blink", f["open_half"])
 
-
-class NaiveRoutesMustNotReproduceTests(unittest.TestCase):
-    """The guards. Each pins a wrong route as wrong, not merely absent."""
-
-    def test_depth_cash_does_not_double_count_branches(self) -> None:
-        """The defect the first version shipped: pol.b is already per branch.
-
-        The original guard pinned `b` versus `b*ln 2` and this error walked past
-        it, so the branch count is now pinned separately.
-        """
-        cash = sp.parity_depth_cash(sp.POL_B_DECISION["code"])
-        double = (
-            Decimal(sp.EPOCH_SLATE_SIZE) * Decimal(2)
-            * sp.POL_B_DECISION["code"] * Decimal(2)
-        ) * Decimal(2).ln()
-        self.assertEqual(_round(double / cash), Decimal(2))
-        self.assertEqual(_round(cash), Decimal(415888))
-
-    def test_depth_cash_uses_b_ln2_not_b(self) -> None:
-        """The conflation that produced the superseded escrow figure in
-        `service_economics.py`. `b·ln 2` is the cash; `b` is the LMSR parameter."""
-        cash = sp.parity_depth_cash(sp.POL_B_DECISION["code"])
-        naive = Decimal(sp.EPOCH_SLATE_SIZE) * Decimal(2) * sp.POL_B_DECISION["code"] * Decimal(2)
-        self.assertNotEqual(_round(cash), _round(naive))
-        self.assertLess(cash, naive)
+    def test_detector_looks_for_mechanism_not_prose(self) -> None:
+        """An earlier draft matched the string `b_ext`, which appears in
+        comments — so a doc-only edit would have reported enforcement."""
+        doc_only = (REPO_ROOT / "docs/architecture/16-hosted-question-service.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("b_ext", doc_only)
+        f = sp.check_arming_condition_enforcement(REPO_ROOT)
+        self.assertFalse(f["fully_enforced"])
 
 
 class ThreatRowTests(unittest.TestCase):

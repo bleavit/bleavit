@@ -74,7 +74,7 @@ __all__ = [
     "max_depth_under_tvl_cap",
     "check_fee_is_flat_in_depth",
     "check_no_valid_denial_benchmark",
-    "check_arming_condition_unenforced",
+    "check_arming_condition_enforcement",
     "check_th72_attack_cost_is_unpriced",
 ]
 
@@ -272,35 +272,54 @@ def check_no_valid_denial_benchmark() -> dict[str, object]:
     }
 
 
-def check_arming_condition_unenforced(repo_root: Path) -> dict[str, object]:
-    """16 §8.4's arming condition is normative and no code enforces it.
+def check_arming_condition_enforcement(repo_root: Path) -> dict[str, object]:
+    """How much of 16 §8.4's arming condition has an implementer (SQ-575).
 
-    The largest finding here, and it outlived every refutation of the rest.
-    `Σ b_ext <= Σ pol.b(live)` bounds external depth at parity with Bleavit's own
-    at switch-on. N12 anchored its whole competing-venue rung to this condition
-    and measured the governance damage at it — while nothing makes it true.
+    Renamed from `check_arming_condition_unenforced` on 2026-08-03, when the
+    tripwire it carried did its job: the earlier version asserted the condition
+    was enforced *nowhere*, and it failed the moment the switch-on half shipped.
+    Rewritten rather than relaxed, because a tripwire that gets loosened to stay
+    green is worse than no tripwire.
+
+    Detects the **mechanism**, not the phrase. An earlier draft searched for the
+    string `b_ext`, which appears in prose comments — so a doc-only change would
+    have reported the condition enforced. It now looks for the storage item that
+    carries the external side and the error that refuses on it.
+
+    Two halves, deliberately reported apart:
+
+    - **switch-on** — 16 §8.4's own wording, checked in the Phase-4 transition.
+      Implemented.
+    - **continuous** — the same bound held at every registration. NOT
+      implemented, and not an oversight: `LivePolCommitments` holds protocol
+      subsidy only while decision books are seeded, so the instantaneous
+      `Σ pol.b(live)` is zero for most of an epoch and the check would refuse
+      essentially every registration outside Bleavit's own decision windows
+      (21 of 28 pallet tests failed exactly that way). What non-blinking measure
+      it should use instead is not derivable from anything here yet.
     """
-    hits: list[str] = []
-    for rel in (
-        "runtime/bleavit-runtime/src/migrations.rs",
-        "pallets/question-service/src/lib.rs",
-        "pallets/client-registry/src/lib.rs",
-    ):
-        path = repo_root / rel
-        if path.exists() and "b_ext" in path.read_text(encoding="utf-8"):
-            hits.append(rel)
-    doc = (repo_root / "docs/architecture/16-hosted-question-service.md").read_text(
+    migration = (repo_root / "runtime/bleavit-runtime/src/migrations.rs").read_text(
         encoding="utf-8"
     )
+    pallet = (repo_root / "pallets/question-service/src/lib.rs").read_text(
+        encoding="utf-8"
+    )
+    switch_on = (
+        "LiveExternalDepth" in migration and "ArmingBoundExceeded" in migration
+    )
+    external_side_accounted = "LiveExternalDepth" in pallet
+    # The continuous half would have to compare at the registration site itself.
+    continuous = "ArmingBoundExceeded" in pallet and "live_pol_commitments" in pallet
     return {
-        "condition": "sum(b_ext) <= sum(pol.b(live)) at arming (16 §8.4)",
-        "stated_normatively": "Σ b_ext ≤ Σ pol.b(live)" in doc,
-        "enforcement_sites_found": hits,
-        "enforced": bool(hits),
-        "why_it_matters": (
-            "N12 anchored the competing-venue arming rung to this condition and "
-            "recorded its error direction as unsafe; an unenforced precondition "
-            "makes that measurement describe a state nothing guarantees"
+        "condition": "sum(b_ext) <= sum(pol.b(live)) (16 §8.4)",
+        "external_side_accounted": external_side_accounted,
+        "switch_on_enforced": switch_on,
+        "continuously_enforced": continuous,
+        "fully_enforced": switch_on and continuous,
+        "open_half": (
+            "continuous enforcement — needs a measure of protocol depth that "
+            "does not blink between decision windows; the instantaneous "
+            "LivePolCommitments sum cannot be it"
         ),
     }
 
