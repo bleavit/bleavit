@@ -304,3 +304,174 @@ test('buffered events for operations that never register are bounded', async () 
   const orphans = connection.orphanCountForTest();
   assert.ok(orphans <= 32, `orphan buffer grew to ${orphans}`);
 });
+
+/* ------------------------------------------------ the three Codex P1 findings (PR #229) */
+
+test('V-93: a subscription that stops before initialized fails boot rather than hanging', async () => {
+  // `chainHead_v1_follow` succeeds, then the subscription stops before ever announcing a
+  // finalized block — an early worker or connection failure does exactly this. The follow
+  // request has already left `#pending` by then, so nothing rejected the wait for the
+  // first block and boot hung. The race below is deliberate: a regression must fail this
+  // test in two seconds rather than hang the suite, because a hang in CI reads as an
+  // infrastructure problem and gets retried instead of diagnosed.
+  const mock = runtime();
+  const { provider } = recordedProvider(mock, {
+    onFollow({ id, emit, followEvent }) {
+      emit({ jsonrpc: '2.0', id, result: 'subscription-1' });
+      queueMicrotask(() => followEvent({ event: 'stop' }));
+      return true;
+    },
+  });
+
+  const hang = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('open() never settled — the boot hang is back')), 2000).unref();
+  });
+  await assert.rejects(
+    () => Promise.race([ChainHeadConnection.open(provider), hang]),
+    SubscriptionStoppedError,
+  );
+});
+
+test('V-94: a discarded storage item is a refusal, never an empty result', async () => {
+  // The node answers `started` *and* declines to run the query. For a one-key request that
+  // is `discardedItems: 1`, `operationStorageDone` with no items, and — before this fix —
+  // a resolved read of `[]`. The pinned `@polkadot-api/substrate-client` raises
+  // `OperationLimitError` on exactly this (`discardedItems === inputs.length`), so it is a
+  // refusal by the reference implementation's own reading, not a strictness of ours.
+  const mock = runtime();
+  const { provider } = recordedProvider(mock, {
+    intercept(request, { emit, followEvent }) {
+      if (request.method !== 'chainHead_v1_storage') return false;
+      emit({
+        jsonrpc: '2.0',
+        id: request.id,
+        result: { result: 'started', operationId: 'op-discard', discardedItems: 1 },
+      });
+      queueMicrotask(() => followEvent({ event: 'operationStorageDone', operationId: 'op-discard' }));
+      return true;
+    },
+  });
+  const connection = await ChainHeadConnection.open(provider);
+  const pin = await connection.pinnedBlock();
+
+  await assert.rejects(
+    () => connection.storage(pin, '0x00', 'value'),
+    (error) => error instanceof ChainHeadError && /discarded 1 of 1/.test(error.message),
+    'a discarded query resolved as "this key holds nothing"',
+  );
+});
+
+test('V-94: discardedItems: 0 still resolves — the guard is not "always refuse"', async () => {
+  // Positive control. Every recorded transcript carries `discardedItems: 0`, so a guard
+  // written as an unconditional refusal would fail here; without this, "rejects on 1" is
+  // equally satisfied by "rejects on everything".
+  const mock = runtime();
+  const { provider } = recordedProvider(mock);
+  const connection = await ChainHeadConnection.open(provider);
+  const pin = await connection.pinnedBlock();
+  const { key, type } = keyFor(fixtures, 'storage.ledger.positions');
+
+  const items = await connection.storage(pin, key, type);
+  assert.ok(Array.isArray(items));
+});
+
+test('V-95: pins are released as finality advances, and never the current head', async () => {
+  // chainHead pins every block it announces until told otherwise, and the node's pin
+  // budget is finite — so a transport that never unpins does not degrade, it accumulates
+  // until the node ends the subscription and every read fails at once, after an uptime
+  // long enough that nobody connects the two events.
+  const mock = runtime();
+  const { provider, sent, state } = recordedProvider(mock);
+  const connection = await ChainHeadConnection.open(provider, { pinWindow: 4 });
+
+  const hash = (n) => `0x${n.toString(16).padStart(64, '0')}`;
+  for (let n = 2; n <= 40; n += 1) {
+    state.followEvent({ event: 'newBlock', blockHash: hash(n) });
+    state.followEvent({ event: 'finalized', finalizedBlockHashes: [hash(n)], prunedBlockHashes: [] });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const pinned = connection.pinnedCountForTest();
+  assert.ok(pinned <= 6, `pins grew unbounded: ${pinned} held after 39 blocks with a window of 4`);
+
+  const unpins = sent.filter((request) => request.method === 'chainHead_v1_unpin');
+  assert.ok(unpins.length > 0, 'the transport never released a pin');
+});
+
+test('V-95: the finalized head survives a flood of unfinalized announcements', async () => {
+  // The head-protection branch, given the only workload that reaches it. Under normal
+  // block production the head has always moved past whatever the window is trimming, so
+  // asserting "the head was not released" during a finalizing run asserts nothing — that
+  // version of this test passed with the protection deleted.
+  //
+  // `newBlock` without `finalized` is the case the guard exists for: announcements pile
+  // up, the head stays put, and it reaches the front of the window while still being the
+  // block every reader is about to pin.
+  const mock = runtime();
+  const { provider, sent, state } = recordedProvider(mock);
+  const connection = await ChainHeadConnection.open(provider, { pinWindow: 4 });
+  const head = (await connection.pinnedBlock()).blockHash;
+
+  for (let n = 2; n <= 20; n += 1) {
+    state.followEvent({ event: 'newBlock', blockHash: `0x${n.toString(16).padStart(64, '0')}` });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const released = sent
+    .filter((request) => request.method === 'chainHead_v1_unpin')
+    .flatMap((request) => request.params[1]);
+  assert.ok(released.length > 0, 'nothing was trimmed — this test would be vacuous');
+  assert.ok(
+    !released.includes(head),
+    'the current finalized head was unpinned; every reader about to pin it would fail',
+  );
+});
+
+test('V-95: pruned blocks are released immediately', async () => {
+  const mock = runtime();
+  const { provider, sent, state } = recordedProvider(mock);
+  await ChainHeadConnection.open(provider, { pinWindow: 64 });
+
+  const orphan = `0x${'ab'.repeat(32)}`;
+  const head = `0x${'cd'.repeat(32)}`;
+  state.followEvent({ event: 'newBlock', blockHash: orphan });
+  state.followEvent({
+    event: 'finalized',
+    finalizedBlockHashes: [head],
+    prunedBlockHashes: [orphan],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // The window is wide enough that nothing ages out; only pruning can have released it.
+  const released = sent
+    .filter((request) => request.method === 'chainHead_v1_unpin')
+    .flatMap((request) => request.params[1]);
+  assert.deepEqual(released, [orphan]);
+});
+
+test('V-95: the block-number cache is evicted with the pin it belongs to', async () => {
+  // The second, quieter leak in the same handler: `#headerNumbers` is keyed by block hash
+  // and grew once per finalized block for the life of the tab. Nothing about a read would
+  // ever look wrong, which is why it needs its own observable rather than a symptom.
+  const mock = runtime();
+  const { provider, state } = recordedProvider(mock, {
+    intercept(request, { emit }) {
+      if (request.method !== 'chainHead_v1_header') return false;
+      emit({ jsonrpc: '2.0', id: request.id, result: `0x${'11'.repeat(32)}08${'00'.repeat(64)}` });
+      return true;
+    },
+  });
+  const connection = await ChainHeadConnection.open(provider, { pinWindow: 2 });
+
+  const hash = (n) => `0x${n.toString(16).padStart(64, '0')}`;
+  for (let n = 2; n <= 20; n += 1) {
+    state.followEvent({ event: 'newBlock', blockHash: hash(n) });
+    state.followEvent({ event: 'finalized', finalizedBlockHashes: [hash(n)], prunedBlockHashes: [] });
+    await connection.pinnedBlock(); // caches a number for each head in turn
+  }
+
+  assert.ok(
+    connection.headerCacheCountForTest() <= 4,
+    `the header cache grew with the chain: ${connection.headerCacheCountForTest()} entries after 19 blocks`,
+  );
+});

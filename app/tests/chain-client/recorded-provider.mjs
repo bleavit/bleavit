@@ -64,12 +64,21 @@ export function recordedProvider(runtime, options = {}) {
         const { id, method, params } = request;
 
         if (method === 'chainHead_v1_follow') {
+          // `onFollow` exists for the boot-failure branch: a node can answer the follow
+          // and then stop before `initialized`, and that sequence cannot be reached
+          // through `intercept`, which runs after this.
+          if (options.onFollow?.({ id, emit, followEvent })) return;
           emit({ jsonrpc: '2.0', id, result: SUBSCRIPTION });
           followEvent({ event: 'initialized', finalizedBlockHashes: [state.finalized] });
           return;
         }
         // Acknowledgement of a paused operation; the node returns nothing.
         if (method === 'chainHead_v1_continue') return;
+        // Releasing pins as finality advances; the node answers `null`.
+        if (method === 'chainHead_v1_unpin') {
+          emit({ jsonrpc: '2.0', id, result: null });
+          return;
+        }
 
         if (options.intercept?.(request, { emit, followEvent })) return;
 

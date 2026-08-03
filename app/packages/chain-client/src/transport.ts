@@ -154,7 +154,31 @@ interface PendingOperation {
 export interface ChainHeadConnectionOptions {
   /** `chainHead_v1_follow(withRuntime)`. Runtime updates are what make `_call` possible. */
   readonly withRuntime?: boolean;
+  /** How many announced blocks to keep pinned. See `PIN_WINDOW`. */
+  readonly pinWindow?: number;
 }
+
+/**
+ * How many announced blocks stay pinned.
+ *
+ * chainHead pins **every** block it announces and keeps it until we send
+ * `chainHead_v1_unpin`; the node's pin budget is finite, and exceeding it makes the node
+ * end the subscription. So a transport that never unpins does not leak quietly — it
+ * accumulates until the chain kills every read at once, after an uptime long enough that
+ * nobody connects the two events.
+ *
+ * A **window** rather than a reader refcount, deliberately. A refcount is more precise and
+ * it can leak: one caller that forgets to release reintroduces exactly the unbounded
+ * resource this bound exists to remove, and the failure returns in a form no test of this
+ * module can see. The window cannot — it depends on nothing a caller does. What it costs
+ * is that a reader older than the window loses its block, which is the behaviour
+ * `FinalizedReader` already documents and already fails loudly on ("what ends a reader is
+ * its block ceasing to be readable, which the transport reports by failing the read").
+ *
+ * 16 blocks is ~3 minutes at a 12 s parachain slot — three orders of magnitude beyond the
+ * lifetime of a read, and small enough that the pin budget is never the binding constraint.
+ */
+const PIN_WINDOW = 16;
 
 /**
  * A live chainHead follow subscription, exposing the two operations the read layer needs.
@@ -170,43 +194,77 @@ export class ChainHeadConnection implements ChainHeadTransport {
   readonly #operations = new Map<string, PendingOperation>();
   readonly #orphanEvents = new Map<string, Record<string, unknown>[]>();
   readonly #headerNumbers = new Map<string, number>();
+  readonly #pinWindow: number;
+  #pinnedOrder: HexString[] = [];
   #nextId = 1;
   #subscription: string | undefined;
   #finalized: HexString | undefined;
   #initialized: ((hash: HexString) => void) | undefined;
+  #initializationFailed: ((error: Error) => void) | undefined;
   #stopped: string | undefined;
 
-  private constructor(provider: JsonRpcProviderLike) {
+  private constructor(provider: JsonRpcProviderLike, pinWindow: number) {
+    this.#pinWindow = pinWindow;
     this.#connection = provider((message) => {
       this.#onMessage(message);
     });
   }
 
-  /** Open a connection and follow the chain, resolving once a finalized block is known. */
+  /**
+   * Open a connection and follow the chain, resolving once a finalized block is known.
+   *
+   * The wait for that first block has a **failure** path as well as a success one, which
+   * it did not when this shipped. `chainHead_v1_follow` can succeed and the subscription
+   * then emit `stop` before `initialized` ever arrives — an early worker or connection
+   * failure does exactly that. The follow request has already left `#pending` by then, so
+   * the `stop` handler had nothing to reject, and boot waited forever instead of failing
+   * into a state the caller could retry or degrade from. A promise with no reject path is
+   * a hang wearing the costume of an await.
+   */
   static async open(
     provider: JsonRpcProviderLike,
     options: ChainHeadConnectionOptions = {},
   ): Promise<ChainHeadConnection> {
-    const connection = new ChainHeadConnection(provider);
-    const firstFinalized = new Promise<HexString>((resolve) => {
+    const connection = new ChainHeadConnection(provider, options.pinWindow ?? PIN_WINDOW);
+    const firstFinalized = new Promise<HexString>((resolve, reject) => {
       connection.#initialized = resolve;
+      connection.#initializationFailed = reject;
     });
-    const subscription = await connection.#request('chainHead_v1_follow', [options.withRuntime ?? true]);
-    if (typeof subscription !== 'string') {
-      throw new ChainHeadError(`chainHead_v1_follow returned ${JSON.stringify(subscription)}`);
+    try {
+      const subscription = await connection.#request('chainHead_v1_follow', [
+        options.withRuntime ?? true,
+      ]);
+      if (typeof subscription !== 'string') {
+        throw new ChainHeadError(`chainHead_v1_follow returned ${JSON.stringify(subscription)}`);
+      }
+      connection.#subscription = subscription;
+      connection.#finalized = await firstFinalized;
+    } catch (error) {
+      // Never leave a live socket behind a failed boot; the caller has no handle to close.
+      connection.#connection.disconnect();
+      throw error;
     }
-    connection.#subscription = subscription;
-    connection.#finalized = await firstFinalized;
     return connection;
   }
 
   close(): void {
+    this.#failInitialization('the connection was closed before a finalized block arrived');
     this.#connection.disconnect();
   }
 
   /** How many operations currently have buffered events. Bound assertion only. */
   orphanCountForTest(): number {
     return this.#orphanEvents.size;
+  }
+
+  /** How many blocks this connection believes are pinned. Bound assertion only. */
+  pinnedCountForTest(): number {
+    return this.#pinnedOrder.length;
+  }
+
+  /** How many block numbers are cached. Bound assertion only. */
+  headerCacheCountForTest(): number {
+    return this.#headerNumbers.size;
   }
 
   async pinnedBlock(): Promise<FinalizedBlockRef> {
@@ -228,7 +286,7 @@ export class ChainHeadConnection implements ChainHeadTransport {
       [{ key, type }],
       null,
     ]);
-    const items = await this.#awaitOperation(started, `storage ${key} at ${at.blockHash}`);
+    const items = await this.#awaitOperation(started, `storage ${key} at ${at.blockHash}`, 1);
     return items as readonly StorageItem[];
   }
 
@@ -251,6 +309,50 @@ export class ChainHeadConnection implements ChainHeadTransport {
 
   #assertLive(): void {
     if (this.#stopped !== undefined) throw new SubscriptionStoppedError(this.#stopped);
+  }
+
+  /** Fail a boot that is still waiting for its first finalized block. */
+  #failInitialization(reason: string): void {
+    const fail = this.#initializationFailed;
+    this.#initialized = undefined;
+    this.#initializationFailed = undefined;
+    fail?.(new SubscriptionStoppedError(reason));
+  }
+
+  /** Record blocks the node has announced, and therefore pinned on our behalf. */
+  #announcePinned(hashes: readonly (HexString | undefined)[]): void {
+    for (const hash of hashes) {
+      if (hash !== undefined && !this.#pinnedOrder.includes(hash)) this.#pinnedOrder.push(hash);
+    }
+  }
+
+  /**
+   * Release pins, never including the current finalized head.
+   *
+   * The head is excluded unconditionally rather than by position: `newBlock` announcements
+   * arrive between finalizations and could otherwise push the one block every reader is
+   * about to pin out of the window.
+   */
+  #unpin(hashes: readonly HexString[]): void {
+    if (this.#subscription === undefined) return; // Announced pre-`open`; trimmed later.
+    const releasable = hashes.filter((hash) => hash !== this.#finalized);
+    if (releasable.length === 0) return;
+    for (const hash of releasable) {
+      const at = this.#pinnedOrder.indexOf(hash);
+      if (at >= 0) this.#pinnedOrder.splice(at, 1);
+      // The block-number cache is keyed by hash and was never evicted either — a second,
+      // quieter unbounded map, growing once per finalized block for the life of the tab.
+      this.#headerNumbers.delete(hash);
+    }
+    void this.#request('chainHead_v1_unpin', [this.#subscription, releasable]).catch(() => {
+      // A failed unpin means the node has already dropped the block, which is the state
+      // we asked for. There is nothing to recover and nothing to report.
+    });
+  }
+
+  #trimPins(): void {
+    if (this.#pinnedOrder.length <= this.#pinWindow) return;
+    this.#unpin(this.#pinnedOrder.slice(0, this.#pinnedOrder.length - this.#pinWindow));
   }
 
   #followSubscription(): string {
@@ -287,9 +389,25 @@ export class ChainHeadConnection implements ChainHeadTransport {
    * non-`started` results are refusals, and each is a distinct condition worth naming —
    * a transport that treated `limitReached` as an empty result would report "this account
    * holds no positions" when the truth is "the light client declined to look".
+   *
+   * **`discardedItems` is the other door into that same room**, and this code missed it
+   * while the paragraph above described it. Under operation pressure the node answers
+   * `started` *and* discards some of the requested keys; for a one-key request that means
+   * `discardedItems: 1`, `operationStorageDone` with no items, and a resolved read of
+   * `[]`. The pinned `@polkadot-api/substrate-client` treats exactly this as an operation
+   * limit — `response.result === "limitReached" || response.discardedItems ===
+   * inputs.length` raise the same `OperationLimitError` — so a refusal is not a result
+   * here either. `requestedItems` is passed for storage and omitted for `_call`, which
+   * has no items to discard.
    */
-  async #awaitOperation(started: unknown, what: string): Promise<unknown> {
-    const response = started as { result?: string; operationId?: string } | null;
+  async #awaitOperation(
+    started: unknown,
+    what: string,
+    requestedItems?: number,
+  ): Promise<unknown> {
+    const response = started as
+      | { result?: string; operationId?: string; discardedItems?: number }
+      | null;
     if (response === null || typeof response !== 'object') {
       throw new ChainHeadError(`${what}: malformed operation response ${JSON.stringify(started)}`);
     }
@@ -298,6 +416,20 @@ export class ChainHeadConnection implements ChainHeadTransport {
     }
     if (response.result !== 'started' || typeof response.operationId !== 'string') {
       throw new ChainHeadError(`${what}: unexpected operation response ${JSON.stringify(started)}`);
+    }
+    const discarded = response.discardedItems ?? 0;
+    if (requestedItems !== undefined && discarded > 0) {
+      // Stricter than PAPI, which only errors on a *full* discard. A partial discard
+      // silently shortens the answer, and a short `descendantsValues` witness is worse
+      // than a refused one: `crossCheckedCall` compares an API result against that prefix,
+      // so a truncated witness turns the FE-P2 check into a verdict about how loaded the
+      // node was. We request one key, so any discard is a full one anyway.
+      throw new ChainHeadError(
+        `${what}: the light client discarded ${discarded} of ${requestedItems} requested ` +
+          'item(s) under operation pressure. Refusing rather than answering with the ' +
+          'items that survived — an empty or short result reads as "this key holds ' +
+          'nothing" when the truth is "the query did not run".',
+      );
     }
     const operationId = response.operationId;
     return new Promise<unknown>((resolve, reject) => {
@@ -360,18 +492,33 @@ export class ChainHeadConnection implements ChainHeadTransport {
   #onFollowEvent(event: Record<string, unknown>): void {
     switch (event['event']) {
       case 'initialized': {
-        const hashes = event['finalizedBlockHashes'] as string[] | undefined;
+        const hashes = event['finalizedBlockHashes'] as HexString[] | undefined;
         const hash = (hashes?.at(-1) ?? event['finalizedBlockHash']) as HexString | undefined;
         if (hash === undefined) return;
         this.#finalized = hash;
+        this.#announcePinned(hashes ?? [hash]);
         this.#initialized?.(hash);
         this.#initialized = undefined;
+        this.#initializationFailed = undefined;
+        return;
+      }
+      case 'newBlock': {
+        // Announced blocks are pinned by the node whether or not we ever read at them,
+        // so they have to enter the window; dropping them here would leak the majority
+        // of pins, since most blocks are announced and never finalized-and-read.
+        this.#announcePinned([event['blockHash'] as HexString | undefined]);
+        this.#trimPins();
         return;
       }
       case 'finalized': {
-        const hashes = event['finalizedBlockHashes'] as string[] | undefined;
+        const hashes = event['finalizedBlockHashes'] as HexString[] | undefined;
         const hash = hashes?.at(-1) as HexString | undefined;
         if (hash !== undefined) this.#finalized = hash;
+        this.#announcePinned(hashes ?? []);
+        // Pruned blocks are unreadable from this moment regardless, so releasing them is
+        // free; keeping them was pure accumulation.
+        this.#unpin((event['prunedBlockHashes'] as HexString[] | undefined) ?? []);
+        this.#trimPins();
         return;
       }
       case 'operationStorageItems': {
@@ -423,6 +570,8 @@ export class ChainHeadConnection implements ChainHeadTransport {
       case 'stop': {
         this.#stopped = 'the node ended the subscription';
         this.#orphanEvents.clear();
+        this.#pinnedOrder = [];
+        this.#failInitialization(this.#stopped);
         for (const [id, operation] of this.#operations) {
           this.#operations.delete(id);
           operation.reject(new SubscriptionStoppedError(this.#stopped));
@@ -434,9 +583,8 @@ export class ChainHeadConnection implements ChainHeadTransport {
         return;
       }
       default:
-        // `newBlock`, `bestBlockChanged`, `operationBodyDone` and anything a later
-        // chainHead revision adds. Ignoring an unknown event is right; guessing at one
-        // is not.
+        // `bestBlockChanged`, `operationBodyDone` and anything a later chainHead
+        // revision adds. Ignoring an unknown event is right; guessing at one is not.
         return;
     }
   }
