@@ -983,11 +983,9 @@ pub(crate) fn transition_phase_four(
         if external > 0 {
             let mut protocol: futarchy_primitives::Balance = 0;
             for commitment in crate::Market::live_pol_commitments() {
-                protocol = protocol
-                    .checked_add(commitment)
-                    .ok_or(sp_runtime::DispatchError::Arithmetic(
-                        sp_runtime::ArithmeticError::Overflow,
-                    ))?;
+                protocol = protocol.checked_add(commitment).ok_or(
+                    sp_runtime::DispatchError::Arithmetic(sp_runtime::ArithmeticError::Overflow),
+                )?;
             }
             frame_support::ensure!(
                 external <= protocol,

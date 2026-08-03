@@ -1787,7 +1787,10 @@ pub mod pallet {
             // silently re-open the bound; a drift high would deny honest clients.
             let mut folded_external: Balance = 0;
             for (question_id, question) in Questions::<T>::iter() {
-                if matches!(question.phase, QuestionPhase::Settled | QuestionPhase::Voided) {
+                if matches!(
+                    question.phase,
+                    QuestionPhase::Settled | QuestionPhase::Voided
+                ) {
                     continue;
                 }
                 let escrow = Terms::<T>::get(question_id)
@@ -1795,9 +1798,12 @@ pub mod pallet {
                     .ok_or(TryRuntimeError::Other(
                         "question-service: live question without terms",
                     ))?;
-                folded_external = folded_external.checked_add(escrow).ok_or(
-                    TryRuntimeError::Other("question-service: external depth overflow"),
-                )?;
+                folded_external =
+                    folded_external
+                        .checked_add(escrow)
+                        .ok_or(TryRuntimeError::Other(
+                            "question-service: external depth overflow",
+                        ))?;
             }
             ensure!(
                 folded_external == LiveExternalDepth::<T>::get(),
