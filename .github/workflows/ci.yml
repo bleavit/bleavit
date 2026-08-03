@@ -305,6 +305,32 @@ jobs:
       - name: Finalized<T> assertion gate (10 §2.1)
         working-directory: app
         run: pnpm run check:casts
+      - name: Chain feed vs the runtime source (02 §11, F2)
+        # The cheap per-commit half of the descriptor-drift gate: no build, no node.
+        # Compares the committed feed against `construct_runtime!` and
+        # `INTEGRATION_CONTRACT_VERSION` — the comparison whose absence let a stale
+        # metadata blob sit in the tree for eleven days under green CI.
+        run: python3 tools/ci/check-chain-feed.py
+      - name: Descriptor drift — regenerate and byte-compare (02 §11 row 1)
+        working-directory: app
+        # `papi generate` is deterministic given (metadata, cliVersion), so the
+        # committed descriptors must reproduce exactly. PAPI's own `generated.json`
+        # check is not enough: it hashes the metadata *input* and never reads `dist/`.
+        run: pnpm run descriptors:check
+      - name: Mock-runtime fixture suites (02 §11 row 4, FE-R1)
+        working-directory: app
+        # Replays the recorded chainHead transcripts and asserts FE-R1's bounds
+        # against 02 §9's frozen table — not against the recording, which would
+        # prove nothing.
+        run: pnpm run test:mock-runtime
+      - name: Two ledger domains, never merged (10 §11, 11 §11.2a)
+        working-directory: app
+        # Reads the boundary from the recorded `ConditionalLedger::ServiceIdBase`
+        # metadata constant rather than spelling `1n << 63n` — the same no-hardcode
+        # rule 10 §5.4 applies to every chain value, and the reason v23 gave the
+        # boundary a metadata home. A suite carrying the literal would keep passing
+        # after the chain moved it.
+        run: pnpm run test:chain-client
 
   environments:
     name: Environment definitions

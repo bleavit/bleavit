@@ -30,6 +30,13 @@ const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'fixtures']);
 
 const FINALIZED_CAST = /\bas\s+Finalized\s*</;
 const DOUBLE_CAST = /\bas\s+unknown\s+as\b/;
+// The third mint mechanism, and the one this gate was blind to (V-81). A type predicate
+// `x is Finalized<T>` *asserts* the phantom field — it cannot check it, because the field
+// has no runtime representation, which is the property that makes the design survive
+// structured clone. So a predicate is exactly as powerful as `as Finalized<T>` and must
+// be governed identically. A shipped `isFinalized(v: Verified<T>): v is Finalized<T>`
+// let any package launder a forged literal into the transaction path with green CI.
+const FINALIZED_PREDICATE = /\bis\s+Finalized\s*</;
 
 function* walk(dir) {
   for (const entry of readdirSync(dir)) {
@@ -51,6 +58,12 @@ for (const file of walk(appRoot)) {
     }
     if (FINALIZED_CAST.test(line) && !isMintSite) {
       violations.push(`${rel}:${i + 1}  \`as Finalized<...>\` outside ${ALLOWED_MINT_SITE}`);
+    }
+    if (FINALIZED_PREDICATE.test(line) && !isMintSite) {
+      violations.push(
+        `${rel}:${i + 1}  \`... is Finalized<...>\` type predicate outside ${ALLOWED_MINT_SITE} ` +
+          `— a predicate asserts the brand it cannot check, so it mints`,
+      );
     }
   });
 }

@@ -1,0 +1,13 @@
+{
+  "name": "@bleavit/chain-client-suite",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test *.test.js"
+  },
+  "dependencies": {
+    "@bleavit/chain-client": "workspace:*",
+    "@bleavit/mock-runtime": "workspace:*"
+  }
+}

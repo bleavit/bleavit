@@ -108,7 +108,27 @@ Practical consequences:
     limit, only narrows it**. Never accept an encoded call from any external source.
     A capsule MUST carry a labelled book `kind` so an external book's prices can never
     leave the app looking like a governance market's (11 §11.2a).
-12. **Pinned versions.** The stack pins live in 01 §9 / 10 — PAPI 2.x, smoldot 3.x,
+12. **The chain feed is generated, committed and drift-gated — never hand-edited (F2, 10 §5.1).**
+    `app/fixtures/chain-feed/<spec_version>/`, `app/fixtures/chainhead/` and
+    `app/packages/papi-descriptors/` are all **produced** by `tools/release/` and PAPI,
+    and all three are committed because 10 §5.1 requires descriptors committed per
+    `spec_version` and because `install --frozen-lockfile && tsc -b` must work offline
+    (the Arweave distribution and the INV-FE-4 no-infra run depend on it). Regenerate
+    from `app/fixtures/chain-feed/README.md`; never patch a file in place, and never
+    "fix" a red drift gate by editing the artifact it is comparing.
+    **The pair is not optional**: a primary runtime and its terminal-recovery runtime
+    are separate live-capable `spec_version`s and both must be present, because the
+    recovery image can become current under `OnlyInherents` and treating its descriptors
+    as operator-only strands the canonical frontend during exactly the incident they
+    exist for. `tools/ci/check-chain-feed.py` enforces the pairing itself — half a pair
+    reads as a complete feed to any consumer that opens one directory.
+    **Assert bounds against the specification, not against the recording.** Reading 32
+    out of a fixture and asserting it equals 32 proves nothing; 02 §9's frozen table is
+    the expected value, so a runtime that changed a bound fails even though its own
+    metadata is self-consistent. Likewise a **whitelist is not a surface check**: PAPI's
+    `applyWhitelist` filters silently, so an entry naming an absent surface yields a
+    smaller descriptor set rather than an error.
+13. **Pinned versions.** The stack pins live in 01 §9 / 10 — PAPI 2.x, smoldot 3.x,
     Vite 8, Dexie 4, Tauri 2.x. Do not bump majors without a PLAN.md decision-log
     entry. `app/` is its own pnpm workspace and its own cargo workspace (excluded from
     the root one); never let its dependency tree reach the runtime pins.

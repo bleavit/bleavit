@@ -67,6 +67,10 @@ GATE_SCRIPTS = (
 
 # Standalone gates the CI docs/tooling jobs run directly.
 STANDALONE_GATES: tuple[tuple[str, ...], ...] = (
+    # F2's per-commit feed gate sweeps `app/fixtures/chain-feed/` and reads the runtime
+    # source, so it is squarely in this checker's bug class: it passes trivially if the
+    # committed artifact is absent from CI's checkout for any reason.
+    ("python3", "tools/ci/check-chain-feed.py"),
     ("python3", "tools/ci/check-doc-links.py"),
     ("python3", "tools/ci/check-plan-tables.py"),
     ("python3", "tools/ci/check-spec-question-batches.py"),

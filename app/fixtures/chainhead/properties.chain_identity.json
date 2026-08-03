@@ -1,0 +1,17 @@
+{
+  "headers": {
+    "pinned_block": "0xd9029737efefb8ad3cc9cd5b4bb7ae6bbfc4790a223b90dd543b74d0774ba647"
+  },
+  "requests": [
+    {
+      "method": "system_properties",
+      "params": [],
+      "response": {
+        "ss58Format": 7777,
+        "tokenDecimals": 12,
+        "tokenSymbol": "VIT"
+      }
+    }
+  ],
+  "surface": "properties.chain_identity"
+}

@@ -17,6 +17,11 @@ from release_common import write_json
 from runtime_profiles import validate_build_profile
 from scale_metadata import MetadataDecodeError, decode_metadata
 
+# Versions `scale_metadata.decode_metadata` can read. v16 exists and this runtime
+# advertises it, but the decoder does not implement it yet; asking for a version we
+# cannot decode would trade one unusable artifact for another.
+SUPPORTED_METADATA = frozenset({15})
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -37,6 +42,74 @@ def parse_args() -> argparse.Namespace:
         help="boot a temporary copy of the plain chain spec with --wasm as genesis :code",
     )
     return parser.parse_args()
+
+
+def decode_compact(raw: bytes, offset: int = 0) -> tuple[int, int]:
+    """SCALE compact integer -> (value, bytes consumed)."""
+    first = raw[offset]
+    mode = first & 0b11
+    if mode == 0:
+        return first >> 2, 1
+    if mode == 1:
+        return int.from_bytes(raw[offset : offset + 2], "little") >> 2, 2
+    if mode == 2:
+        return int.from_bytes(raw[offset : offset + 4], "little") >> 2, 4
+    width = (first >> 2) + 4
+    return int.from_bytes(raw[offset + 1 : offset + 1 + width], "little"), 1 + width
+
+
+def fetch_metadata(rpc: JsonRpcHttp) -> tuple[bytes, int]:
+    """Return the best metadata this runtime offers, and the version it is.
+
+    `state_getMetadata` is the *legacy* RPC: it returns **v14** for backwards
+    compatibility no matter what the runtime supports. v14 predates the
+    runtime-APIs section entirely, so a v14 blob cannot describe a single one of
+    [02](../../docs/architecture/02-integration-contract.md) §3's frozen thirteen
+    `FutarchyApi` methods — and 02 §11 names this artifact as the input to
+    *descriptor regeneration*. Publishing v14 therefore ships a metadata blob that
+    is structurally incapable of serving the surface it exists to serve.
+
+    Measured on this runtime (2026-08-03): `Metadata_metadata_versions` advertises
+    **14, 15 and 16**, and the v15 blob carries 19 runtime APIs including
+    `FutarchyApi`, while `state_getMetadata` returned v14 with zero.
+
+    So ask for the newest version the toolchain can actually decode, and fail
+    closed below v15 rather than silently emitting an unusable artifact.
+    """
+    offered: list[int] = []
+    try:
+        raw = decode_hex(
+            rpc.call("state_call", ["Metadata_metadata_versions", "0x"]),
+            "Metadata_metadata_versions",
+        )
+        count, consumed = decode_compact(raw)
+        offered = [
+            int.from_bytes(raw[consumed + i * 4 : consumed + i * 4 + 4], "little")
+            for i in range(count)
+        ]
+    except Exception:  # noqa: BLE001 - a runtime without the API falls back below
+        offered = []
+
+    for version in sorted((v for v in offered if v in SUPPORTED_METADATA), reverse=True):
+        blob = decode_hex(
+            rpc.call(
+                "state_call",
+                ["Metadata_metadata_at_version", "0x" + version.to_bytes(4, "little").hex()],
+            ),
+            f"Metadata_metadata_at_version({version})",
+        )
+        if not blob or blob[0] != 1:
+            continue  # Option::None - this runtime does not really serve it
+        body = blob[1:]
+        _, consumed = decode_compact(body)
+        return body[consumed:], version
+
+    raise RuntimeError(
+        "runtime offers no metadata version this tooling supports "
+        f"(advertised={offered or 'unknown'}, supported={sorted(SUPPORTED_METADATA)}). "
+        "The legacy state_getMetadata blob is v14, which has no runtime-APIs section "
+        "and cannot describe the frozen FutarchyApi (02 §3, §11)."
+    )
 
 
 def decode_hex(raw: str, label: str) -> bytes:
@@ -96,7 +169,7 @@ def main() -> int:
             args.node, chain_spec, boot_timeout=args.boot_timeout
         ) as node:
             rpc = JsonRpcHttp(node.http_url)
-            metadata = decode_hex(rpc.call("state_getMetadata"), "state_getMetadata")
+            metadata, served_metadata_version = fetch_metadata(rpc)
             runtime_version = rpc.call("state_getRuntimeVersion")
             properties = rpc.call("system_properties")
             on_chain_code = rpc.call("state_getStorage", ["0x3a636f6465"])

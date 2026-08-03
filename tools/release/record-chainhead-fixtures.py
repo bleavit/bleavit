@@ -635,22 +635,35 @@ def main() -> int:
         except MetadataDecodeError as error:
             metadata = {"version": None, "types": {}, "pallets": {}}
             metadata_error = str(error)
+        # An *absent* paired recovery metadata and a *defective* one are different
+        # failures and must not read the same. Decoding `b""` raises "truncated at
+        # offset 0", which then renders as 220 entries claiming the recovery runtime
+        # lacks `FutarchyApi` — a report that names the wrong problem, since no
+        # recovery runtime was built at all. Say which it is.
+        recovery_metadata_present = args.recovery_metadata.is_file()
         recovery_metadata_bytes = (
-            args.recovery_metadata.read_bytes()
-            if args.recovery_metadata.is_file()
-            else b""
+            args.recovery_metadata.read_bytes() if recovery_metadata_present else b""
         )
-        try:
-            recovery_metadata = decode_metadata(recovery_metadata_bytes)
-            recovery_metadata_error = None
-        except MetadataDecodeError as error:
-            recovery_metadata = {
-                "version": None,
-                "types": {},
-                "pallets": {},
-                "apis": {},
-            }
-            recovery_metadata_error = str(error)
+        empty_metadata: dict[str, Any] = {
+            "version": None,
+            "types": {},
+            "pallets": {},
+            "apis": {},
+        }
+        if not recovery_metadata_present:
+            recovery_metadata = empty_metadata
+            recovery_metadata_error = (
+                f"no paired recovery metadata at {args.recovery_metadata} — build the "
+                "terminal-recovery profile (10 §5.1: a primary runtime is not eligible "
+                "until its paired recovery descriptors are published)"
+            )
+        else:
+            try:
+                recovery_metadata = decode_metadata(recovery_metadata_bytes)
+                recovery_metadata_error = None
+            except MetadataDecodeError as error:
+                recovery_metadata = empty_metadata
+                recovery_metadata_error = str(error)
         recovery_recorded, recovery_missing = metadata_surface_coverage(
             recovery_metadata, entries
         )
@@ -769,6 +782,7 @@ def main() -> int:
         ).hexdigest(),
         "recovery_metadata_version": recovery_metadata.get("version"),
         "recovery_metadata_error": recovery_metadata_error,
+        "recovery_metadata_present": recovery_metadata_present,
         "pinned_block": block_hash,
         "recorded": sorted(recorded),
         "missing": sorted(missing, key=lambda item: item["surface"]),
@@ -781,10 +795,21 @@ def main() -> int:
     }
     write_json(args.out_dir / "fixtures-report.json", report)
     if not args.allow_missing and not report["strict_ready"]:
+        # `strict_ready` is falsified by *either* side, so a message counting only the
+        # primary printed "0 required surface items missing" while failing on 220
+        # recovery items — an error that reads as a tool bug and invites
+        # `--allow-missing`, which is exactly the wrong response. Report both, and the
+        # recovery metadata's own error when that is the real cause.
+        primary_required = sum(item["required"] for item in missing)
+        recovery_required = sum(item["required"] for item in recovery_missing)
         print(
-            f"strict fixture recording failed: {sum(item['required'] for item in missing)} required surface items missing",
+            "strict fixture recording failed: "
+            f"{primary_required} required primary surface item(s) missing, "
+            f"{recovery_required} required paired-recovery item(s) missing",
             file=sys.stderr,
         )
+        if recovery_required and recovery_metadata_error:
+            print(f"  recovery metadata: {recovery_metadata_error}", file=sys.stderr)
         return 1
     return 0
 

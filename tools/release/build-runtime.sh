@@ -6,7 +6,13 @@ cd "$repo_root"
 
 out_dir=${1:-release-work/runtime}
 requested_profile=${2:-${RUNTIME_PROFILE:-}}
-wasm_source="target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm"
+# Honour CARGO_TARGET_DIR: AGENTS.md *requires* redirecting it off $HOME on an ecryptfs
+# workstation (the ~143-char filename cap kills the release+benchmarks build), so a
+# hardcoded `target/` makes this script unusable under the very setup the manual
+# mandates — cargo writes to the redirected dir and the copy below then reports the wasm
+# "was not produced". Same defect `tools/ci/regenerate-weights.py` carries a `--runtime`
+# flag for; here the env var is enough, since cargo already honours it.
+wasm_source="${CARGO_TARGET_DIR:-target}/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm"
 profile_tool="tools/release/runtime_profiles.py"
 profile_args=()
 if [[ -n "$requested_profile" ]]; then

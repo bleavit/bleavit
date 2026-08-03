@@ -1,0 +1,91 @@
+{
+  "headers": {
+    "pinned_block": "0xd9029737efefb8ad3cc9cd5b4bb7ae6bbfc4790a223b90dd543b74d0774ba647"
+  },
+  "requests": [
+    {
+      "method": "chainHead_v1_storage",
+      "params": [
+        "subscription-1",
+        "0xd9029737efefb8ad3cc9cd5b4bb7ae6bbfc4790a223b90dd543b74d0774ba647",
+        [
+          {
+            "key": "0x5ebf094108ead4fefa73f7a3b13cb4a7d8426954fc0e154310293fc43493f582",
+            "type": "descendantsValues"
+          }
+        ],
+        null
+      ],
+      "response": {
+        "direct": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "discardedItems": 0,
+            "operationId": "operation-1",
+            "result": "started"
+          }
+        },
+        "events": [
+          {
+            "event": "operationStorageDone",
+            "operationId": "operation-1"
+          }
+        ]
+      }
+    },
+    {
+      "method": "metadata_presence",
+      "params": {
+        "kind": "storage",
+        "surface": "storage.market.markets"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "hashers": [
+            "Blake2_128Concat"
+          ],
+          "key": "u64",
+          "value": "market_core::MarketBook{id:u64,kind:market_core::BookKindenum[Decision=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1]}|Gate=1{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],gate:futarchy_primitives::GateTypeenum[Survival=0|Security=1]}|Baseline=2{epoch:u32}|External=3{question:u64,client:u32,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1]}],phase:market_core::MarketPhaseenum[Trading=0|Extended=1|Closed=2|Settled=3],account:sp_core::crypto::AccountId32([u8;32]),fees_account:sp_core::crypto::AccountId32([u8;32]),b:u128,q_long:u128,q_short:u128,fees_accrued:u128,last_quote_1e9:futarchy_primitives::FixedU64(u64),last_observation_1e9:futarchy_primitives::FixedU64(u64),last_observed_block:u64,cumulative_price_blocks:market_core::TwapCumulative{hi:u128,lo:u128},stale_events:u8}"
+        },
+        "layout": {
+          "hashers": [
+            "Blake2_128Concat"
+          ],
+          "key": "u64",
+          "value": "market_core::MarketBook{id:u64,kind:market_core::BookKindenum[Decision=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1]}|Gate=1{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],gate:futarchy_primitives::GateTypeenum[Survival=0|Security=1]}|Baseline=2{epoch:u32}|External=3{question:u64,client:u32,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1]}],phase:market_core::MarketPhaseenum[Trading=0|Extended=1|Closed=2|Settled=3],account:sp_core::crypto::AccountId32([u8;32]),fees_account:sp_core::crypto::AccountId32([u8;32]),b:u128,q_long:u128,q_short:u128,fees_accrued:u128,last_quote_1e9:futarchy_primitives::FixedU64(u64),last_observation_1e9:futarchy_primitives::FixedU64(u64),last_observed_block:u64,cumulative_price_blocks:market_core::TwapCumulative{hi:u128,lo:u128},stale_events:u8}"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    },
+    {
+      "method": "recovery_metadata_presence",
+      "params": {
+        "kind": "storage",
+        "surface": "storage.market.markets"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "hashers": [
+            "Blake2_128Concat"
+          ],
+          "key": "u64",
+          "value": "market_core::MarketBook{id:u64,kind:market_core::BookKindenum[Decision=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1]}|Gate=1{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],gate:futarchy_primitives::GateTypeenum[Survival=0|Security=1]}|Baseline=2{epoch:u32}|External=3{question:u64,client:u32,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1]}],phase:market_core::MarketPhaseenum[Trading=0|Extended=1|Closed=2|Settled=3],account:sp_core::crypto::AccountId32([u8;32]),fees_account:sp_core::crypto::AccountId32([u8;32]),b:u128,q_long:u128,q_short:u128,fees_accrued:u128,last_quote_1e9:futarchy_primitives::FixedU64(u64),last_observation_1e9:futarchy_primitives::FixedU64(u64),last_observed_block:u64,cumulative_price_blocks:market_core::TwapCumulative{hi:u128,lo:u128},stale_events:u8}"
+        },
+        "layout": {
+          "hashers": [
+            "Blake2_128Concat"
+          ],
+          "key": "u64",
+          "value": "market_core::MarketBook{id:u64,kind:market_core::BookKindenum[Decision=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1]}|Gate=1{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],gate:futarchy_primitives::GateTypeenum[Survival=0|Security=1]}|Baseline=2{epoch:u32}|External=3{question:u64,client:u32,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1]}],phase:market_core::MarketPhaseenum[Trading=0|Extended=1|Closed=2|Settled=3],account:sp_core::crypto::AccountId32([u8;32]),fees_account:sp_core::crypto::AccountId32([u8;32]),b:u128,q_long:u128,q_short:u128,fees_accrued:u128,last_quote_1e9:futarchy_primitives::FixedU64(u64),last_observation_1e9:futarchy_primitives::FixedU64(u64),last_observed_block:u64,cumulative_price_blocks:market_core::TwapCumulative{hi:u128,lo:u128},stale_events:u8}"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    }
+  ],
+  "surface": "storage.market.markets"
+}
