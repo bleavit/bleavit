@@ -505,6 +505,49 @@ fn seal_publishes_real_hash_and_earns_the_fee_exactly_once() -> TestResult {
 }
 
 #[test]
+fn external_depth_accounting_tracks_register_and_terminal() -> TestResult {
+    new_test_ext().execute_with(|| -> TestResult {
+        // 16 §8.4 / SQ-575. The condition was normative from N1 and had no
+        // implementation at all; this is the external side of it, so the
+        // accounting is asserted rather than assumed.
+        assert_eq!(LiveExternalDepth::<Test>::get(), 0);
+        let (question, terms) = register_and_bond()?;
+        assert_eq!(LiveExternalDepth::<Test>::get(), terms.escrow);
+        assert!(terms.escrow > 0, "a live question must post depth");
+        QuestionService::do_try_state().map_err(|_| "try-state after register")?;
+
+        open_and_observe(question)?;
+        seal(question)?;
+        // Still live between seal and terminal: the report is delivered but the
+        // depth is not released until the question actually terminates.
+        assert_eq!(LiveExternalDepth::<Test>::get(), terms.escrow);
+        QuestionService::do_try_state().map_err(|_| "try-state after seal")?;
+        Ok(())
+    })
+}
+
+#[test]
+fn try_state_catches_external_depth_drift_in_both_directions() -> TestResult {
+    new_test_ext().execute_with(|| -> TestResult {
+        let (_question, terms) = register_and_bond()?;
+        QuestionService::do_try_state().map_err(|_| "initial try-state")?;
+
+        // Low reads as headroom the arming bound does not have; high denies
+        // honest clients. Both must fail, so the fold is pinned in both
+        // directions rather than only against under-counting.
+        LiveExternalDepth::<Test>::put(terms.escrow.saturating_sub(1));
+        assert!(QuestionService::do_try_state().is_err());
+
+        LiveExternalDepth::<Test>::put(terms.escrow.saturating_add(1));
+        assert!(QuestionService::do_try_state().is_err());
+
+        LiveExternalDepth::<Test>::put(terms.escrow);
+        QuestionService::do_try_state().map_err(|_| "restored try-state")?;
+        Ok(())
+    })
+}
+
+#[test]
 fn failed_best_effort_push_cannot_roll_back_or_void_the_authoritative_report() -> TestResult {
     new_test_ext().execute_with(|| -> TestResult {
         set_report_push_outcome(ReportPushOutcome::Failed);

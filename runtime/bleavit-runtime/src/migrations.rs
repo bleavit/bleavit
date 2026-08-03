@@ -960,6 +960,40 @@ pub(crate) fn transition_phase_four(
         <crate::configs::TreasuryPhaseArmingGate as pallet_constitution::PhaseArmingGate>::ensure_armable(
             futarchy_primitives::ProposalClass::Param,
         )?;
+        // 16 §8.4, "at switch-on": `Σ b_ext ≤ Σ pol.b(live)`, so the external
+        // side is never the dominant market on the chain. Normative since N1 and
+        // enforced by nothing until now (SQ-575) — `b_ext` appeared in no pallet
+        // and no migration, so N12 measured governance damage *at* a condition
+        // that nothing made true.
+        //
+        // Not vacuous: registration is not phase-gated, so hosted questions can
+        // accumulate through Phase 3 under `phase3.tvl_cap` and be live at this
+        // moment. Both sides are compared in posted cash (`b·ln 2` per book),
+        // the units `LivePolCommitments` already stores.
+        //
+        // Guarded on a non-zero external side so that arming with no hosted
+        // questions cannot be blocked by POL merely being uncommitted between
+        // decision windows. When the external side *is* non-zero the comparison
+        // binds and can refuse the transition — that is the condition doing its
+        // job, and the remedy is to let hosted questions reach a terminal state
+        // or to seed protocol depth, then re-attempt. Failing closed here is
+        // correct under G-1: arming while external depth dominates is the state
+        // this clause exists to prevent.
+        let external = pallet_question_service::LiveExternalDepth::<Runtime>::get();
+        if external > 0 {
+            let mut protocol: futarchy_primitives::Balance = 0;
+            for commitment in crate::Market::live_pol_commitments() {
+                protocol = protocol
+                    .checked_add(commitment)
+                    .ok_or(sp_runtime::DispatchError::Arithmetic(
+                        sp_runtime::ArithmeticError::Overflow,
+                    ))?;
+            }
+            frame_support::ensure!(
+                external <= protocol,
+                pallet_question_service::Error::<Runtime>::ArmingBoundExceeded
+            );
+        }
     }
     // 09 §5.2 (SQ-197): the arming bits are written **before** the cap plan is
     // applied. The two Phase-3 exposure caps are raisable only from Phase 4

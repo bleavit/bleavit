@@ -289,6 +289,16 @@ pub mod pallet {
     #[pallet::storage]
     pub type LiveQuestionCount<T: Config> = StorageValue<_, u32, ValueQuery>;
 
+    /// Aggregate posted external subsidy over live questions, in cash
+    /// (`Σ 2·b·ln 2`) — the external side of 16 §8.4's arming condition.
+    ///
+    /// Exists because that condition had no implementation at all (SQ-575). It
+    /// is a running total rather than a fold over `Terms` because the check runs
+    /// on every `register` and `Terms` is unbounded in principle; a fold would
+    /// put an O(live) read on an extrinsic that must stay O(1).
+    #[pallet::storage]
+    pub type LiveExternalDepth<T: Config> = StorageValue<_, Balance, ValueQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -338,6 +348,9 @@ pub mod pallet {
         ServiceRateUnset,
         CertificationUnavailable,
         StakeBelowFloor,
+        /// 16 §8.4: admitting this question would push `Σ b_ext` above
+        /// `Σ pol.b(live)`, making the external side the dominant market.
+        ArmingBoundExceeded,
         SubsidyBelowMinimum,
         EpsilonOutOfRange,
         WindowTooLong,
@@ -795,6 +808,29 @@ pub mod pallet {
                 CollateralOf::<T>::balance(Self::usdc(), &funder) >= required,
                 Error::<T>::EscrowInsufficient
             );
+            // 16 §8.4's external side (SQ-575). `Σ b_ext` is *accounted* here and
+            // asserted by try-state; it is deliberately **not** compared against
+            // `Σ pol.b(live)` at this site, and the reason is a measured one
+            // rather than an omission.
+            //
+            // `LivePolCommitments` holds protocol subsidy only while decision
+            // books are seeded, so the instantaneous sum is zero for most of an
+            // epoch. Enforcing `Σ b_ext ≤ Σ pol.b(live)` here would therefore
+            // refuse essentially every registration outside Bleavit's own
+            // decision windows — 21 of this pallet's 28 tests fail that way, not
+            // because the tests are wrong but because the mock has no live POL,
+            // which is also the chain's ordinary state between windows.
+            //
+            // 16 §8.4 says the bound holds "at switch-on"; the Phase-4 transition
+            // enforces exactly that, against this total. Whether it must also
+            // hold *continuously* — and if so against what non-blinking measure,
+            // since the instantaneous one cannot be it — is a design question
+            // with no derivable answer yet and is tracked in SQ-575 rather than
+            // guessed at here. Accounting first; the bound it enables can only
+            // be as good as the measure it compares against.
+            let external_after = LiveExternalDepth::<T>::get()
+                .checked_add(escrow)
+                .ok_or(Error::<T>::ArithmeticOverflow)?;
 
             let bond_each = Self::attestor_bond(escrow)?;
             let bond_total = bond_each
@@ -887,6 +923,10 @@ pub mod pallet {
                     .checked_add(1)
                     .ok_or(Error::<T>::ArithmeticOverflow)?,
             );
+            // `external_after` was computed under the same admission checks
+            // above and is the post-state by construction, so this cannot
+            // disagree with what the arming bound was evaluated against.
+            LiveExternalDepth::<T>::put(external_after);
             Self::deposit_event(Event::QuestionRegistered {
                 question_id,
                 client_id: client,
@@ -1205,6 +1245,17 @@ pub mod pallet {
                 *count = count.checked_sub(1).ok_or(Error::<T>::TryStateViolation)?;
                 Ok(())
             })?;
+            // Release this question's contribution to the 16 §8.4 external side.
+            // Saturating rather than checked on the *floor* only: a terminal
+            // transition must never be blocked by an accounting slip, because a
+            // question stuck live is a worse failure than a total that reads
+            // low — and try-state below catches any divergence loudly.
+            let released = Terms::<T>::get(question_id)
+                .map(|terms| terms.escrow)
+                .unwrap_or_default();
+            LiveExternalDepth::<T>::mutate(|depth| {
+                *depth = depth.saturating_sub(released);
+            });
             pallet_client_registry::Pallet::<T>::note_question_terminal(client)
                 .map_err(|_| Error::<T>::TryStateViolation.into())
         }
@@ -1729,6 +1780,28 @@ pub mod pallet {
             ensure!(
                 live == LiveQuestionCount::<T>::get(),
                 TryRuntimeError::Other("question-service: LiveQuestionCount mismatch",)
+            );
+            // 16 §8.4 / SQ-575. The running total is the only thing standing
+            // between the arming condition and the sentence it used to be, so it
+            // is folded from scratch here rather than trusted. A drift low would
+            // silently re-open the bound; a drift high would deny honest clients.
+            let mut folded_external: Balance = 0;
+            for (question_id, question) in Questions::<T>::iter() {
+                if matches!(question.phase, QuestionPhase::Settled | QuestionPhase::Voided) {
+                    continue;
+                }
+                let escrow = Terms::<T>::get(question_id)
+                    .map(|terms| terms.escrow)
+                    .ok_or(TryRuntimeError::Other(
+                        "question-service: live question without terms",
+                    ))?;
+                folded_external = folded_external.checked_add(escrow).ok_or(
+                    TryRuntimeError::Other("question-service: external depth overflow"),
+                )?;
+            }
+            ensure!(
+                folded_external == LiveExternalDepth::<T>::get(),
+                TryRuntimeError::Other("question-service: LiveExternalDepth mismatch")
             );
             let custody = CollateralOf::<T>::balance(Self::usdc(), &Self::account_id());
             let total_liability =
