@@ -38,7 +38,11 @@
       "state_call": "FutarchyApi_epoch_status",
       "params_hex": "0x",
       "required": true,
-      "citation": "02 §3"
+      "citation": "02 §3",
+      "layout": {
+        "params": [],
+        "return": "futarchy_primitives::EpochStatusView{index:u32,phase:futarchy_primitives::EpochPhaseenum[Intake=0|Qualify=1|Seed=2|Trade=3|Decide=4|Review=5|Execute=6|Housekeeping=7],phase_start_block:u32,next_boundary:u32,dead_man_armed:bool,ledger_frozen:bool,phase_flags:u32}"
+      }
     },
     {
       "id": "api.proposal_summaries",
@@ -48,7 +52,11 @@
       "state_call": "FutarchyApi_proposal_summaries",
       "params_hex": "0x",
       "required": true,
-      "citation": "02 §3"
+      "citation": "02 §3",
+      "layout": {
+        "params": [],
+        "return": "futarchy_primitives::BoundedVec(Vec<futarchy_primitives::ProposalSummaryView{id:u64,class:futarchy_primitives::ProposalClassenum[Param=0|Treasury=1|Code=2|Meta=3|Constitutional=4],state:futarchy_primitives::ProposalStateenum[Submitted=0|Screening=1|Qualified=2|Trading=3|Extended=4|Queued=5|Suspended=6|Rerun=7|Rejected=8(futarchy_primitives::RejectReasonenum[NotDecisionGrade=0|GateVetoSurvival=1|GateVetoSecurity=2|HurdleNotMet=3|ConvergenceFailed=4|SecondExtensionFailed=5|ProcessHold=6|ConstitutionViolation=7|ResourceConflict=8|RateLimited=9|VetoUpheldByReview=10|StaleQueue=11|PayloadReverted=12|NotRatified=13|SecuritySizing=14|AttestationMissing=15|RolloverExhausted=16])|Executed=9|FailedExecuted=10|Measuring=11|Settled=12|Cancelled=13|Expired=14],proposer:[u8;32],epoch:u32,payload_hash:[u8;32],ask:u128,decision_market:Optionenum[None=0|Some=1((u64,u64))],gate_markets:Optionenum[None=0|Some=1([u64;4])],decide_at:u32,maturity:Optionenum[None=0|Some=1(u32)],ratification:futarchy_primitives::RatificationStatusenum[NotRequired=0|NoPassedRecord=1|Passed=2{referendum:u32}],funder:[u8;32]}>)"
+      }
     },
     {
       "id": "api.quote",
@@ -59,7 +67,24 @@
       "params_hex": "0x00000000000000000001000000000000000000000000000000",
       "params_description": "MarketId(0) ++ TradeSide::BuyLong(0) ++ Balance(1), SCALE little-endian",
       "required": true,
-      "citation": "02 §3"
+      "citation": "02 §3",
+      "layout": {
+        "params": [
+          {
+            "name": "market",
+            "type": "u64"
+          },
+          {
+            "name": "side",
+            "type": "futarchy_primitives::TradeSideenum[BuyLong=0|BuyShort=1|SellLong=2|SellShort=3]"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ],
+        "return": "futarchy_primitives::QuoteView{cost:u128,fee:u128,p_after_1e9:futarchy_primitives::FixedU64(u64),max_trade:u128,within_domain:bool,evaluable:bool}"
+      }
     },
     {
       "id": "api.decision_stats",
@@ -70,7 +95,16 @@
       "params_hex": "0x0000000000000000",
       "params_description": "ProposalId(0)",
       "required": true,
-      "citation": "02 §3"
+      "citation": "02 §3",
+      "layout": {
+        "params": [
+          {
+            "name": "pid",
+            "type": "u64"
+          }
+        ],
+        "return": "Optionenum[None=0|Some=1(futarchy_primitives::DecisionStatsView{pid:u64,twap_accept_1e9:futarchy_primitives::FixedU64(u64),twap_reject_1e9:futarchy_primitives::FixedU64(u64),twap_baseline_1e9:futarchy_primitives::FixedU64(u64),r_eff_1e9:futarchy_primitives::FixedU64(u64),trailing_accept_1e9:futarchy_primitives::FixedU64(u64),trailing_reject_1e9:futarchy_primitives::FixedU64(u64),coverage_pct:u8,traded_volume:u128,v_min_required:u128,converged:bool,gate_twaps_1e9:Optionenum[None=0|Some=1([futarchy_primitives::FixedU64(u64);4])],attack_cost_hat:u128,in_cap_prize:u128})]"
+      }
     },
     {
       "id": "api.account_positions",
@@ -81,7 +115,16 @@
       "params_hex": "0x0000000000000000000000000000000000000000000000000000000000000000",
       "params_description": "AccountId([0;32])",
       "required": true,
-      "citation": "02 §3"
+      "citation": "02 §3",
+      "layout": {
+        "params": [
+          {
+            "name": "who",
+            "type": "[u8;32]"
+          }
+        ],
+        "return": "futarchy_primitives::BoundedVec(Vec<futarchy_primitives::PositionView{position:futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}],balance:u128,vault_state:futarchy_primitives::VaultStateenum[Open=0|Resolved=1(futarchy_primitives::Branchenum[Accept=0|Reject=1])|ScalarSettled=2{winner:futarchy_primitives::Branchenum[Accept=0|Reject=1],s:futarchy_primitives::FixedU64(u64)}|Voided=3|BaselineSettled=4{s:futarchy_primitives::FixedU64(u64)}]}>)"
+      }
     },
     {
       "id": "api.execution_queue",
@@ -91,7 +134,11 @@
       "state_call": "FutarchyApi_execution_queue",
       "params_hex": "0x",
       "required": true,
-      "citation": "02 §3"
+      "citation": "02 §3",
+      "layout": {
+        "params": [],
+        "return": "futarchy_primitives::BoundedVec(Vec<futarchy_primitives::QueuedExecutionView{pid:u64,class:futarchy_primitives::ProposalClassenum[Param=0|Treasury=1|Code=2|Meta=3|Constitutional=4],payload_hash:[u8;32],maturity:u32,grace_end:u32,version_constraint:futarchy_primitives::RuntimeVersionConstraint{spec_name:futarchy_primitives::BoundedVec(Vec<u8>),spec_version:u32},cancelled:bool,ratification:futarchy_primitives::RatificationStatusenum[NotRequired=0|NoPassedRecord=1|Passed=2{referendum:u32}],meters_clear:bool}>)"
+      }
     },
     {
       "id": "api.welfare_current",
@@ -101,7 +148,11 @@
       "state_call": "FutarchyApi_welfare_current",
       "params_hex": "0x",
       "required": true,
-      "citation": "02 §3"
+      "citation": "02 §3",
+      "layout": {
+        "params": [],
+        "return": "futarchy_primitives::WelfareView{epoch:u32,spec_version:u16,s_pillar_1e9:futarchy_primitives::FixedU64(u64),c_onchain_1e9:futarchy_primitives::FixedU64(u64),c_attested_1e9:futarchy_primitives::FixedU64(u64),p_pillar_1e9:futarchy_primitives::FixedU64(u64),a_pillar_1e9:futarchy_primitives::FixedU64(u64),gate_s_1e9:futarchy_primitives::FixedU64(u64),gate_c_1e9:futarchy_primitives::FixedU64(u64),w_current_1e9:futarchy_primitives::FixedU64(u64),s_breached:bool,c_breached:bool,reserve_flag:bool,active_spec_available:bool}"
+      }
     },
     {
       "id": "api.params",
@@ -112,7 +163,16 @@
       "params_hex": "0x00",
       "params_description": "empty BoundedVec<ParamKey>",
       "required": true,
-      "citation": "02 §3"
+      "citation": "02 §3",
+      "layout": {
+        "params": [
+          {
+            "name": "keys",
+            "type": "futarchy_primitives::BoundedVec(Vec<[u8;16]>)"
+          }
+        ],
+        "return": "futarchy_primitives::BoundedVec(Vec<futarchy_primitives::ParamView{key:[u8;16],value:u128,min:u128,max:u128,max_delta:u128,cooldown_blocks:u32,last_change:u32,class:futarchy_primitives::ProposalClassenum[Param=0|Treasury=1|Code=2|Meta=3|Constitutional=4],min_next:u128,max_next:u128}>)"
+      }
     },
     {
       "id": "api.nav",
@@ -122,7 +182,11 @@
       "state_call": "FutarchyApi_nav",
       "params_hex": "0x",
       "required": true,
-      "citation": "02 §3"
+      "citation": "02 §3",
+      "layout": {
+        "params": [],
+        "return": "futarchy_primitives::NavView{total:u128,main:u128,pol:u128,insurance:u128,keeper:u128,oracle:u128,rewards:u128,stream_remainders:u128,obligations:u128,haircut_flag:bool,spendable_nav:u128,meter_utilization_bps:u32,class_floors:[u128;4]}"
+      }
     },
     {
       "id": "api.recent_cohorts",
@@ -132,7 +196,11 @@
       "state_call": "FutarchyApi_recent_cohorts",
       "params_hex": "0x",
       "required": true,
-      "citation": "02 §3"
+      "citation": "02 §3",
+      "layout": {
+        "params": [],
+        "return": "futarchy_primitives::BoundedVec(Vec<futarchy_primitives::CohortSummary{epoch:u32,s_1e9:futarchy_primitives::FixedU64(u64),baseline_twap_1e9:futarchy_primitives::FixedU64(u64),proposals:futarchy_primitives::BoundedVec(Vec<(u64,futarchy_primitives::ProposalClassenum[Param=0|Treasury=1|Code=2|Meta=3|Constitutional=4],futarchy_primitives::DecisionOutcomeenum[Adopt=0|Reject=1(futarchy_primitives::RejectReasonenum[NotDecisionGrade=0|GateVetoSurvival=1|GateVetoSecurity=2|HurdleNotMet=3|ConvergenceFailed=4|SecondExtensionFailed=5|ProcessHold=6|ConstitutionViolation=7|ResourceConflict=8|RateLimited=9|VetoUpheldByReview=10|StaleQueue=11|PayloadReverted=12|NotRatified=13|SecuritySizing=14|AttestationMissing=15|RolloverExhausted=16])|Extend=2])>),voided:bool,settled_at:u32}>)"
+      }
     },
     {
       "id": "api.open_oracle_rounds",
@@ -142,7 +210,11 @@
       "state_call": "FutarchyApi_open_oracle_rounds",
       "params_hex": "0x",
       "required": true,
-      "citation": "02 §3"
+      "citation": "02 §3",
+      "layout": {
+        "params": [],
+        "return": "futarchy_primitives::BoundedVec(Vec<futarchy_primitives::OracleRoundView{component:u16,epoch:u32,spec_version:u16,round:u8,reporter:[u8;32],value_1e9:futarchy_primitives::FixedU64(u64),evidence_hash:[u8;32],bond:u128,challenge_deadline:u32,acked_by_watchtowers:u8,escalated:bool}>)"
+      }
     },
     {
       "id": "api.hosted_report",
@@ -153,7 +225,16 @@
       "params_hex": "0x0000000000000000",
       "params_description": "QuestionId(0)",
       "required": true,
-      "citation": "02 §3; 02 §4a"
+      "citation": "02 §3; 02 §4a",
+      "layout": {
+        "params": [
+          {
+            "name": "question_id",
+            "type": "u64"
+          }
+        ],
+        "return": "Optionenum[None=0|Some=1(futarchy_primitives::ReportView{question_id:u64,client_id:u32,sub_id:[u8;32],twap_accept_1e9:futarchy_primitives::FixedU64(u64),twap_reject_1e9:futarchy_primitives::FixedU64(u64),observations:u32,window_start:u32,window_end:u32,b_accept:u128,b_reject:u128,manip_floor:u128,declared_stake:u128,epsilon_1e9:futarchy_primitives::FixedU64(u64),tolerance_1e9:futarchy_primitives::FixedU64(u64),certified:bool,settlement_trust:futarchy_primitives::SettlementTrust{attestors:u32,quorum:u32,bond_total:u128},provenance_hash:[u8;32]})]"
+      }
     },
     {
       "id": "api.service_positions",
@@ -164,7 +245,16 @@
       "params_hex": "0x0000000000000000000000000000000000000000000000000000000000000000",
       "params_description": "AccountId([0;32])",
       "required": true,
-      "citation": "02 §3; 02 §7.1"
+      "citation": "02 §3; 02 §7.1",
+      "layout": {
+        "params": [
+          {
+            "name": "who",
+            "type": "[u8;32]"
+          }
+        ],
+        "return": "futarchy_primitives::BoundedVec(Vec<futarchy_primitives::PositionView{position:futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}],balance:u128,vault_state:futarchy_primitives::VaultStateenum[Open=0|Resolved=1(futarchy_primitives::Branchenum[Accept=0|Reject=1])|ScalarSettled=2{winner:futarchy_primitives::Branchenum[Accept=0|Reject=1],s:futarchy_primitives::FixedU64(u64)}|Voided=3|BaselineSettled=4{s:futarchy_primitives::FixedU64(u64)}]}>)"
+      }
     },
     {
       "id": "storage.client_registry.clients",

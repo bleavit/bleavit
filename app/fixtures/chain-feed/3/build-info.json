@@ -1,0 +1,45 @@
+{
+  "base_profile": "bootstrap",
+  "cargo_default_features": false,
+  "cargo_features": [
+    "std",
+    "substrate-wasm-builder",
+    "bootstrap",
+    "recovery"
+  ],
+  "cargo_version": "cargo 1.89.0 (c24e10642 2025-06-23)",
+  "git_commit": "224ec2f5783369fad92c99072740f8edaae120e6",
+  "host_triple": "x86_64-unknown-linux-gnu",
+  "multi_block_migrations": "disabled",
+  "normalized_environment": {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_TERM_COLOR": "never",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "SOURCE_DATE_EPOCH": "1785764822",
+    "TZ": "UTC"
+  },
+  "profile_verification": {
+    "command": "cargo test -p bleavit-runtime --no-default-features --features std,bootstrap,recovery --locked recovery_profile_has_zero_multi_block_migrations",
+    "result": "passed",
+    "test": "recovery_profile_has_zero_multi_block_migrations"
+  },
+  "recipe": "cargo build -p bleavit-runtime --release --no-default-features --features std,substrate-wasm-builder,bootstrap,recovery --locked",
+  "recovery": true,
+  "reproducibility_scope": "same toolchain + same source => same bytes; host/container image is not yet digest-pinned",
+  "rfc78_metadata_hash": {
+    "enabled": false,
+    "reason": "runtime build.rs uses build_using_defaults and Cargo.toml has no metadata-hash feature"
+  },
+  "runtime_profile": "bootstrap-recovery",
+  "rustc_verbose_version": "rustc 1.89.0 (29483883e 2025-08-04)\nbinary: rustc\ncommit-hash: 29483883eed69d5fb4db01964cdf2af4d86e9cb2\ncommit-date: 2025-08-04\nhost: x86_64-unknown-linux-gnu\nrelease: 1.89.0\nLLVM version: 20.1.7",
+  "rustc_version": "rustc 1.89.0 (29483883e 2025-08-04)",
+  "schema": "bleavit.runtime-build.v2",
+  "source_date_epoch": 1785764822,
+  "toolchain": "1.89.0",
+  "wasm": {
+    "path": "runtime.wasm",
+    "sha256": "cae7d9763a2a2c95308d0f90eb1ccedbcfca69e29cf685bac27803c7f95557b4",
+    "size": 1890968
+  }
+}

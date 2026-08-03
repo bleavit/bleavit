@@ -1,0 +1,113 @@
+{
+  "headers": {
+    "pinned_block": "0xd9029737efefb8ad3cc9cd5b4bb7ae6bbfc4790a223b90dd543b74d0774ba647"
+  },
+  "requests": [
+    {
+      "method": "chainHead_v1_storage",
+      "params": [
+        "subscription-1",
+        "0xd9029737efefb8ad3cc9cd5b4bb7ae6bbfc4790a223b90dd543b74d0774ba647",
+        [
+          {
+            "key": "0x26aa394eea5630e07c48ae0c9558cef780d41e5e16056765bc8461851072c9d7",
+            "type": "value"
+          }
+        ],
+        null
+      ],
+      "response": {
+        "direct": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "discardedItems": 0,
+            "operationId": "operation-1",
+            "result": "started"
+          }
+        },
+        "events": [
+          {
+            "event": "operationStorageItems",
+            "items": [
+              {
+                "key": "0x26aa394eea5630e07c48ae0c9558cef780d41e5e16056765bc8461851072c9d7",
+                "value": "0x0800000000000000226cf83e5517020000000100000000002261c91900020000"
+              }
+            ],
+            "operationId": "operation-1"
+          },
+          {
+            "event": "operationStorageDone",
+            "operationId": "operation-1"
+          }
+        ]
+      }
+    },
+    {
+      "method": "state_getStorage",
+      "params": [
+        "0x26aa394eea5630e07c48ae0c9558cef780d41e5e16056765bc8461851072c9d7",
+        "0xd9029737efefb8ad3cc9cd5b4bb7ae6bbfc4790a223b90dd543b74d0774ba647"
+      ],
+      "response": "0x0800000000000000226cf83e5517020000000100000000002261c91900020000"
+    },
+    {
+      "method": "metadata_presence",
+      "params": {
+        "kind": "event",
+        "surface": "event.epoch.screening_started"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "fields": [
+            {
+              "name": null,
+              "type": "u64"
+            }
+          ]
+        },
+        "layout": {
+          "fields": [
+            {
+              "name": null,
+              "type": "u64"
+            }
+          ]
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    },
+    {
+      "method": "recovery_metadata_presence",
+      "params": {
+        "kind": "event",
+        "surface": "event.epoch.screening_started"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "fields": [
+            {
+              "name": null,
+              "type": "u64"
+            }
+          ]
+        },
+        "layout": {
+          "fields": [
+            {
+              "name": null,
+              "type": "u64"
+            }
+          ]
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    }
+  ],
+  "surface": "event.epoch.screening_started"
+}

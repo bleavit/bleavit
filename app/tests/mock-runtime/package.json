@@ -1,0 +1,12 @@
+{
+  "name": "@bleavit/mock-runtime-suite",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test *.test.js"
+  },
+  "dependencies": {
+    "@bleavit/mock-runtime": "workspace:*"
+  }
+}

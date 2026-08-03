@@ -45,6 +45,14 @@ app/node_modules/
 app/**/node_modules/
 app/dist/
 app/**/dist/
+# ...except the PAPI descriptor set, whose `dist/` is not build output — it IS the
+# artifact (the package has no `src/`; PAPI emits compiled js + d.ts directly). 10 §5.1
+# requires descriptors *committed per spec_version*, and a pinned or stranded release
+# must build from the repository alone. The negation must name the directory as well as
+# its contents: git does not descend into an ignored directory, so un-ignoring only the
+# files inside it would silently keep excluding all of them.
+!app/packages/papi-descriptors/dist/
+!app/packages/papi-descriptors/dist/**
 app/**/*.tsbuildinfo
 app/src-tauri/target/
 app/native/**/build/

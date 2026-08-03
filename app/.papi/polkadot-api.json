@@ -1,0 +1,15 @@
+{
+  "version": 0,
+  "descriptorPath": "packages/papi-descriptors",
+  "options": {
+    "noDescriptorsPackage": true
+  },
+  "entries": {
+    "bleavit": {
+      "metadata": "fixtures/chain-feed/2/metadata.scale"
+    },
+    "bleavit_recovery": {
+      "metadata": "fixtures/chain-feed/3/metadata.scale"
+    }
+  }
+}

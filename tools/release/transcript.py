@@ -14,6 +14,7 @@ class TranscriptNormalizer:
     def __init__(self) -> None:
         self.subscription_ids: dict[str, str] = {}
         self.operation_ids: dict[str, str] = {}
+        self.request_ids: dict[int, int] = {}
 
     @staticmethod
     def _stable(mapping: dict[str, str], raw: str, label: str) -> str:
@@ -26,9 +27,22 @@ class TranscriptNormalizer:
             return [self.normalize(item) for item in value]
         if isinstance(value, dict):
             output: dict[str, Any] = {}
+            # A JSON-RPC envelope's `id` is a *client-chosen* request counter that runs
+            # across the whole recording session, so the same call recorded while
+            # gathering two different surfaces carries two different ids. Left raw it
+            # defeats the determinism this module exists to provide twice over: the
+            # bytes depend on the order surfaces were recorded in, and two fixtures for
+            # one underlying call disagree — which a replaying consumer can only read as
+            # a conflict. Renumber per transcript, exactly as subscription and operation
+            # ids already are. (Found by the mock-runtime replay suite, F2.)
+            is_envelope = "jsonrpc" in value
             for key in sorted(value):
                 item = value[key]
-                if key in ("subscription", "followSubscription") and isinstance(
+                if key == "id" and is_envelope and isinstance(item, int):
+                    if item not in self.request_ids:
+                        self.request_ids[item] = len(self.request_ids) + 1
+                    output[key] = self.request_ids[item]
+                elif key in ("subscription", "followSubscription") and isinstance(
                     item, str
                 ):
                     output[key] = self._stable(

@@ -29,6 +29,7 @@ it would have caught the live defect on day one, by all four of its checks indep
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -206,18 +207,132 @@ def check_feed(metadata_path: Path, info_path: Path | None, features: set[str]) 
     return problems
 
 
+def check_pair(feed_root: Path) -> int:
+    """The D5 / 10 §5.1 pairing rule, over the whole committed feed.
+
+    A primary runtime is not eligible until its *exact paired* terminal-recovery
+    runtime has published descriptors, and the pair is defined by spec version: the
+    recovery image sits at exactly the next one (B16). Checking each directory in
+    isolation cannot see a feed that ships only half the pair, or a pair whose
+    versions drifted apart — and half a pair reads as a complete feed to every
+    consumer that only ever opens one directory.
+    """
+    problems = 0
+    profiles = json.loads(
+        (REPO / "tools" / "release" / "runtime-profiles.json").read_text(encoding="utf-8")
+    )["profiles"]
+
+    feeds: dict[int, dict] = {}
+    for directory in sorted(feed_root.iterdir()):
+        if not directory.is_dir():
+            continue
+        info_path = directory / "runtime-info.json"
+        if not info_path.is_file():
+            fail(f"{directory} carries no runtime-info.json")
+            problems += 1
+            continue
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        # The directory name is the index every consumer selects by, so a directory
+        # whose name disagrees with the runtime inside it hands out the wrong artifact
+        # while every internal check still passes.
+        if directory.name != str(info["spec_version"]):
+            fail(
+                f"{directory.name}/ holds spec_version {info['spec_version']} — "
+                "the directory name is the selector and must equal it"
+            )
+            problems += 1
+        blob = (directory / "metadata.scale").read_bytes()
+        actual_sha = hashlib.sha256(blob).hexdigest()
+        if info["metadata_sha256"] != actual_sha:
+            fail(f"{directory.name}/runtime-info.json metadata_sha256 does not match metadata.scale")
+            problems += 1
+        feeds[info["spec_version"]] = info
+
+    primaries = [v for v, i in feeds.items() if not profiles[i["runtime_profile"]]["recovery"]]
+    recoveries = [v for v, i in feeds.items() if profiles[i["runtime_profile"]]["recovery"]]
+    if len(primaries) != 1 or len(recoveries) != 1:
+        fail(
+            f"the feed must hold exactly one primary and one paired recovery profile; "
+            f"found primaries={primaries} recoveries={recoveries}"
+        )
+        return problems + 1
+
+    primary, recovery = primaries[0], recoveries[0]
+    if recovery != primary + 1:
+        fail(f"recovery spec_version {recovery} is not exactly primary {primary} + 1")
+        problems += 1
+    declared = profiles[feeds[primary]["runtime_profile"]].get("recovery_profile")
+    if feeds[recovery]["runtime_profile"] != declared:
+        fail(
+            f"spec {recovery} is profile {feeds[recovery]['runtime_profile']}, but "
+            f"{feeds[primary]['runtime_profile']} pairs with {declared}"
+        )
+        problems += 1
+    if feeds[primary]["integration_contract_version"] != feeds[recovery]["integration_contract_version"]:
+        fail("the paired runtimes declare different integration contract versions")
+        problems += 1
+
+    if problems == 0:
+        print(
+            f"OK  paired feed: spec {primary} ({feeds[primary]['runtime_profile']}) + "
+            f"spec {recovery} ({feeds[recovery]['runtime_profile']}) at contract "
+            f"v{feeds[primary]['integration_contract_version']}"
+        )
+    return problems
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--metadata", type=Path, required=True)
+    parser.add_argument(
+        "--metadata",
+        type=Path,
+        default=None,
+        help="check a single blob instead of sweeping the committed feed",
+    )
     parser.add_argument("--runtime-info", type=Path, default=None)
     parser.add_argument(
+        "--feed-root",
+        type=Path,
+        default=REPO / "app" / "fixtures" / "chain-feed",
+        help="directory of per-spec_version feed directories (the default sweep)",
+    )
+    parser.add_argument(
         "--features",
-        default="bootstrap",
-        help="comma-separated cargo features the feed's runtime profile was built with",
+        default=None,
+        help="comma-separated cargo features the feed's runtime profile was built with; "
+        "derived per directory from runtime-profiles.json when sweeping",
     )
     args = parser.parse_args()
-    features = {f.strip() for f in args.features.split(",") if f.strip()}
-    return 1 if check_feed(args.metadata, args.runtime_info, features) else 0
+
+    if args.metadata is not None:
+        features = {f.strip() for f in (args.features or "bootstrap").split(",") if f.strip()}
+        return 1 if check_feed(args.metadata, args.runtime_info, features) else 0
+
+    root = args.feed_root
+    if not root.is_dir():
+        fail(f"no committed chain feed at {root}")
+        return 1
+    directories = [d for d in sorted(root.iterdir()) if d.is_dir()]
+    if not directories:
+        fail(f"{root} holds no feed directories — this gate would pass by checking nothing")
+        return 1
+
+    profiles = json.loads(
+        (REPO / "tools" / "release" / "runtime-profiles.json").read_text(encoding="utf-8")
+    )["profiles"]
+    problems = 0
+    for directory in directories:
+        info_path = directory / "runtime-info.json"
+        info = json.loads(info_path.read_text(encoding="utf-8")) if info_path.is_file() else {}
+        profile = profiles.get(info.get("runtime_profile"), {})
+        # Feature-derived, never assumed: `Sudo` sits behind `#[cfg(feature =
+        # "bootstrap")]`, so the lawful pallet set is a property of the profile.
+        features = {f for f in profile.get("cargo_features", ["bootstrap"]) if f not in
+                    ("std", "substrate-wasm-builder")}
+        print(f"-- {directory.name}/ ({info.get('runtime_profile', 'unknown profile')})")
+        problems += check_feed(directory / "metadata.scale", info_path, features)
+    problems += check_pair(root)
+    return 1 if problems else 0
 
 
 if __name__ == "__main__":

@@ -601,9 +601,20 @@ class SurfaceManifestTests(unittest.TestCase):
         self.assertEqual(len(runtime_apis), 13)
         for entry in runtime_apis:
             self.assertNotIn("blocked_by", entry, entry["id"])
-            # Runtime API layout is resolved from released metadata; this
-            # manifest must not guess a portable-registry rendering.
-            self.assertNotIn("layout", entry, entry["id"])
+            # These entries carried no `layout` until F2, under the rule that this
+            # manifest "must not guess a portable-registry rendering". The rule was
+            # right and its premise has changed: no released metadata existed then, so
+            # any rendering would have been hand-authored. F2 produces the artifact
+            # (`app/fixtures/chain-feed/`), so the layouts below are *resolved from
+            # released metadata* by `scale_metadata.surface_layout` — the same function
+            # the recorder compares against — and cross-checked against the paired
+            # terminal-recovery runtime. Freezing them is required, not optional:
+            # 02 §3 says of the thirteen methods that "the generated metadata path and
+            # composite form are part of the freeze", and presence-only checking let a
+            # return type change without any gate seeing it.
+            self.assertIn("layout", entry, entry["id"])
+            self.assertIn("params", entry["layout"], entry["id"])
+            self.assertIn("return", entry["layout"], entry["id"])
 
         epoch_constants = [
             entry
