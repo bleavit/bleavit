@@ -11,3 +11,4 @@ packages:
   - 'tests/mock-runtime'
   - 'tests/chain-client'
   - 'tests/descriptors'
+  - 'tests/transaction-builder'

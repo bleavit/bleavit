@@ -116,6 +116,9 @@ importers:
       '@bleavit/shared-types':
         specifier: workspace:*
         version: link:../shared-types
+      '@bleavit/transaction-builder':
+        specifier: workspace:*
+        version: link:../transaction-builder
 
   packages/simulation:
     dependencies:
@@ -269,6 +272,12 @@ importers:
       '@bleavit/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
+      '@bleavit/signing':
+        specifier: workspace:*
+        version: link:../../packages/signing
+      '@bleavit/transaction-builder':
+        specifier: workspace:*
+        version: link:../../packages/transaction-builder
 
   tests/mock-runtime:
     dependencies:
@@ -281,6 +290,21 @@ importers:
       '@bleavit/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+
+  tests/transaction-builder:
+    dependencies:
+      '@bleavit/chain-client':
+        specifier: workspace:*
+        version: link:../../packages/chain-client
+      '@bleavit/mock-runtime':
+        specifier: workspace:*
+        version: link:../../packages/mock-runtime
+      '@bleavit/signing':
+        specifier: workspace:*
+        version: link:../../packages/signing
+      '@bleavit/transaction-builder':
+        specifier: workspace:*
+        version: link:../../packages/transaction-builder
 
 packages:
 

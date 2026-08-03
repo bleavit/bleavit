@@ -11,7 +11,7 @@
  * so a future `node-linker=hoisted` — or a `paths` alias added for convenience —
  * would silently demote it. These rules keep failing in that case.
  */
-const { EXTERNAL } = require('./tools/depcruise-external.cjs');
+const { EXTERNAL, WORKSPACE_SUBPATH } = require('./tools/depcruise-external.cjs');
 
 module.exports = {
   forbidden: [
@@ -86,6 +86,17 @@ module.exports = {
         'question service, and nothing in `src/` may import it.',
       from: { pathNot: '^packages/(chain-client|bleavit-client-ts|papi-descriptors)/' },
       to: { path: EXTERNAL('polkadot-api|smoldot') },
+    },
+    {
+      name: 'no-test-signer-in-the-bundle',
+      severity: 'error',
+      comment:
+        'INV-FE-5 / 10 §10.1: "no signer adapter marked test-only may appear in a release ' +
+        'chunk". `@bleavit/signing/testing` is reachable only by a deliberate subpath import, ' +
+        'and this makes that deliberate act fail. The runtime refusal in `SignerRegistry` is ' +
+        'the third control, and the only one that survives someone copying the file.',
+      from: { path: '^(src|packages)/', pathNot: '^tests/' },
+      to: { path: WORKSPACE_SUBPATH('@bleavit/signing/testing', 'packages/signing/dist/testing') },
     },
     {
       name: 'no-mock-signer-in-the-bundle',

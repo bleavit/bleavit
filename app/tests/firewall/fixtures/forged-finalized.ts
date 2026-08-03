@@ -1,3 +1,4 @@
+// expect-error: TS2322 — the object literal lacks the module-private brand, so it is not a `Finalized<T>` however well it matches the documented shape
 // MUST FAIL: the whole point of 10 §2.1's brand.
 // This is the exact defect an earlier draft of the spec shipped — a structural
 // intersection over `status.kind` that any object literal satisfies. With the

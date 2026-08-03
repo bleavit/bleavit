@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
     }
   },
   "scripts": {
@@ -16,6 +20,7 @@
   },
   "dependencies": {
     "@bleavit/shared-types": "workspace:*",
-    "@bleavit/chain-client": "workspace:*"
+    "@bleavit/chain-client": "workspace:*",
+    "@bleavit/transaction-builder": "workspace:*"
   }
 }

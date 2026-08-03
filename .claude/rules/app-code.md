@@ -145,10 +145,16 @@ Practical consequences:
     pin first, apply any expert bootnodes after, and treat the §3.1 genesis check as a separate
     obligation the hash pin does not discharge.
 
-    **A `node_modules/…` matcher in dependency-cruiser can never fire** (V-86): an unresolvable
-    external specifier is recorded by its bare name. Use `EXTERNAL()` from
-    `app/tools/depcruise-external.cjs`, and add a witness module — a rule proven only by a green
-    run is not proven.
+    **dependency-cruiser records any specifier it cannot resolve verbatim** (V-86, V-92) — an
+    uninstalled external package *and* a workspace subpath export like
+    `@bleavit/signing/testing`, whose `exports` map enhanced-resolve does not follow. A rule
+    written against only the resolved path can never fire. Use `EXTERNAL()` /
+    `WORKSPACE_SUBPATH()` from `app/tools/depcruise-external.cjs`, and add a witness module —
+    a rule proven only by a green run is not proven.
+
+    **The same applies to the negative-compilation corpus** (V-91): a fixture must declare the
+    error it produces (`// expect-error: TSxxxx` on line 1), because "did not compile" is also
+    what a missing dependency looks like.
 14. **Pinned versions.** The stack pins live in 01 §9 / 10 — PAPI 2.x, smoldot 3.x,
     Vite 8, Dexie 4, Tauri 2.x. Do not bump majors without a PLAN.md decision-log
     entry. `app/` is its own pnpm workspace and its own cargo workspace (excluded from

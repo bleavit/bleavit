@@ -8,6 +8,8 @@
   },
   "dependencies": {
     "@bleavit/shared-types": "workspace:*",
-    "@bleavit/chain-client": "workspace:*"
+    "@bleavit/chain-client": "workspace:*",
+    "@bleavit/transaction-builder": "workspace:*",
+    "@bleavit/signing": "workspace:*"
   }
 }

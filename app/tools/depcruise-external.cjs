@@ -19,4 +19,21 @@
  */
 const EXTERNAL = (names) => `^(${names})(/|$)|/node_modules/(${names})/`;
 
-module.exports = { EXTERNAL };
+/**
+ * The same trap, one layer in: a **workspace subpath export**.
+ *
+ * `@bleavit/signing/testing` resolves at build time through the package's `exports` map,
+ * but enhanced-resolve does not follow it, so dependency-cruiser records the bare
+ * specifier with `couldNotResolve: true` — exactly as it does for an uninstalled external
+ * package. A rule written against the resolved `packages/signing/dist/testing` path is
+ * therefore vacuous, which is how INV-FE-5's "no test signer in a release chunk" rule
+ * first shipped unable to fire.
+ *
+ * The general statement, worth keeping in one place: **dependency-cruiser records any
+ * specifier it cannot resolve verbatim.** Always match both the specifier a source file
+ * writes and the path it would resolve to.
+ */
+const WORKSPACE_SUBPATH = (specifier, distPath) =>
+  `^${specifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|/)|^${distPath}`;
+
+module.exports = { EXTERNAL, WORKSPACE_SUBPATH };

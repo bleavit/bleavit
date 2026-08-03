@@ -10,3 +10,9 @@
 // matcher has gone vacuous again and every green production run above it means nothing.
 import 'polkadot-api/sm-provider';
 export const usesAnExternalChainSdk = true;
+
+// The workspace-subpath half of the same trap: `@bleavit/signing/testing` resolves through
+// the package's `exports` map at build time, but enhanced-resolve does not follow it, so
+// dependency-cruiser records the bare specifier. INV-FE-5's "no test signer in a release
+// chunk" rule first shipped unable to fire for exactly that reason.
+import '@bleavit/signing/testing';

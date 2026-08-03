@@ -347,6 +347,13 @@ jobs:
         working-directory: app
         run: pnpm run test:descriptors
 
+      - name: Tx machine, the gate and the signer boundary (11 §11.3–§11.4)
+        # 11 §11.4 rule 1 asks for "structurally (the tx machine has no bypass edge), not
+        # by convention", so what this asserts is mostly the shape of the state space:
+        # which states can reach a signer, and what a GatePassed costs to obtain.
+        working-directory: app
+        run: pnpm run test:tx
+
       - name: smoldot artifact budget (10 §9.3, FE-P4)
         # A budget nothing measures is a sentence, and the one certain thing about a
         # dependency's compressed size is that it changes. Fails closed if the pinned

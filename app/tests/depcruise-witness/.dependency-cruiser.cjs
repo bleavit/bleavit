@@ -5,7 +5,7 @@
 // cruising a graph with no edges in it. A witness that does not share the thing it
 // witnesses is decoration.
 const production = require('../../.dependency-cruiser.cjs');
-const { EXTERNAL } = require('../../tools/depcruise-external.cjs');
+const { EXTERNAL, WORKSPACE_SUBPATH } = require('../../tools/depcruise-external.cjs');
 
 module.exports = {
   forbidden: [
@@ -23,6 +23,13 @@ module.exports = {
       severity: 'error',
       from: { path: '^tests/depcruise-witness/' },
       to: { path: EXTERNAL('polkadot-api|smoldot') },
+    },
+    {
+      // The workspace-subpath matcher, likewise imported rather than restated.
+      name: 'witness-workspace-subpath-matcher',
+      severity: 'error',
+      from: { path: '^tests/depcruise-witness/' },
+      to: { path: WORKSPACE_SUBPATH('@bleavit/signing/testing', 'packages/signing/dist/testing') },
     },
   ],
   // Verbatim, minus the exclude that would hide the witness from itself.
