@@ -76,11 +76,31 @@ def _strategy_for(proposal_id: int, config: SimulationConfig) -> str:
     return config.attack_strategy_mix[-1][0]
 
 
+def _diverted(formation: Decimal, config: SimulationConfig) -> Decimal:
+    """Thin an organic depth ratio by the 16 §8.4 competing-venue diversion.
+
+    Applied to **organic** formation only, never to an attacker budget. That
+    asymmetry is the whole content of the term and is deliberate: an adversary
+    targeting one specific proposal is not diverted by a venue elsewhere, while
+    the honest capital that would have defended the book is. Diversion
+    therefore thins the defense without thinning the attack — the direction
+    14 TH-72 names and the reason the calibrated δ could be under-sized.
+
+    `diversion == 0` returns the argument untouched, consuming no RNG and
+    performing no arithmetic, so the Phase-0 population is byte-identical to a
+    run predating this term (asserted in `test_competing_venue`).
+    """
+    diversion = Decimal(config.competing_venue_diversion)
+    if not diversion:
+        return formation
+    return formation * (Decimal(1) - diversion)
+
+
 def _formation_ratio(proposal: Proposal, seed: int, config: SimulationConfig) -> Decimal:
     row = next(row for row in config.formation_strata if row[0] == proposal.formation_regime)
     rng = proposal_rng(seed, proposal.proposal_id, 0x464F524D)
     lo, hi = Decimal(row[1]), Decimal(row[2])
-    return lo + (hi - lo) * Decimal(str(rng.random()))
+    return _diverted(lo + (hi - lo) * Decimal(str(rng.random())), config)
 
 
 def _segment_starts(config: SimulationConfig) -> tuple[int, ...]:
@@ -1094,7 +1114,17 @@ def simulate_proposal(
     baseline_book = ExecutedBook("baseline", baseline_b)
     baseline_floor = Decimal(config.baseline_contest_floor)
     baseline_rng = proposal_rng(seed, proposal.proposal_id // config.epoch_slate_size, 0x42464C4F57)
-    baseline_formation = Decimal(config.baseline_flow_min_floor) + Decimal(config.baseline_flow_range_floor) * Decimal(str(baseline_rng.random()))
+    # Diverted like every other organic book: the Baseline draws on the same
+    # trader pool, and 16 §8.4's harm is diversion from Bleavit's markets, not
+    # from decision pairs specifically. The prior-epoch `prior_carried`
+    # classification in `_epoch_baseline_truth` is deliberately NOT diverted —
+    # it is a fact about a previous epoch's realized depth, not a funding site,
+    # and re-deriving history under a counterfactual would make the leg
+    # unreadable against the primary population.
+    baseline_formation = _diverted(
+        Decimal(config.baseline_flow_min_floor) + Decimal(config.baseline_flow_range_floor) * Decimal(str(baseline_rng.random())),
+        config,
+    )
     _execute_organic_window(baseline_book, truth=baseline_truth, desired_contest=baseline_floor * baseline_formation, seed=seed, proposal_id=proposal.proposal_id // config.epoch_slate_size, salt=0x424153, config=config, extension=False)
     _apply_baseline_attack(baseline_book, config=config, strategy=strategy, budget=baseline_budget, truth=baseline_truth, organic_contest=contest_capital(baseline_book, decision_window=config.decision_window))
     accept = _summary(accept_book, config)

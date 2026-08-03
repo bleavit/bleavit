@@ -2,6 +2,7 @@
   "assumptions": {
     "a2_arbitrage": "A-2 corrective capacity is L/2 per day at elasticity 1; it is empirical and phase-revalidated.",
     "baseline_contest_floor": "The 250,000-USDC Baseline contest floor is the TREASURY-tier dec.v_min.trs mandated by 05 \u00a75.2 (SQ-232 resolution 2026-07-18).",
+    "competing_venue": "Phase 0 runs at zero competing-venue diversion, which is the chain state Phase 0 describes: the hosted question service (doc 16, D-20) arms in Phase 4. The `competing_venue` block is a Phase-4 arming input measured on a stratified sample against its own 0 % control, never a Phase-0 gate, and its verdict never enters `violations`. Its upper rung is derived from 16 \u00a78.4's own arming condition rather than chosen: `\u03a3 b_ext <= \u03a3 pol.b(live)` caps proportional diversion at one half.",
     "contest_measure": "Per the SQ-231 amendment (04 \u00a77a; 05 \u00a75.2/\u00a75.4/\u00a75.6; 08 \u00a75.2-\u00a75.4), step-5 grading and the step-9 certificate consume time-averaged marked net open interest (contest capital) with the sec.flow_cap ceiling; gross traded notional is recorded as flow telemetry only. Organic formation is modeled as directional informed exposure plus balanced maker-bought pair holdings topped up to the stratum target - balanced pairs are settlement-riskless but lock capital for the window and count per the 04 \u00a77a definition.",
     "coverage_leg": "Scheduled observations provide an always-clean coverage leg in Phase-0 synthetic runs.",
     "envelope_validation": "05 \u00a75.6/08 \u00a75.5 applies only to causal, PROFITABLE wrong-PASS displacement flips (realized cost < prize); observed loss non-monotonicity is reported fail-closed as inconclusive rather than inferred from endpoints.",
@@ -4285,6 +4286,219 @@
     "sub_3p_every_class_clean": true,
     "wrong_pass_candidates": 62
   },
+  "competing_venue": {
+    "arming_by_class": {
+      "code": true,
+      "meta": true,
+      "param": true,
+      "treasury": true
+    },
+    "arming_diversion": "0.50",
+    "control_matches_primary": true,
+    "criterion": "16 \u00a78.4 Phase-4 arming, two legs. SECURITY (gated): with organic formation thinned by the diversion the arming condition \u03a3 b_ext <= \u03a3 pol.b(live) admits under proportional allocation (one half), every class must still hold decidable-harm false-pass < 1 %; if it does not, the calibrated \u03b4 is under-sized for a chain running the service and 13 \u00a71's \u03b4 rows MUST be raised before arming. LIVENESS (measured, not gated): the decision-grade formation loss under the same diversion is TH-72's named harm \u2014 governance denial \u2014 and 16 \u00a78.4 states its falsifier without a number, so the values layer owns the response (cut svc.max_live). Read the two together: diversion denies decisions before it corrupts them, so a clean security leg beside a large liveness loss is the expected shape and is NOT a clean bill of health. Neither leg is a Phase-0 gate \u2014 Phase 0 has no hosted service \u2014 so this verdict never enters `violations`.",
+    "diversion_is_organic_only": "Diversion thins organic formation on decision, gate and Baseline books. Attacker budgets are untouched: an adversary targeting one proposal is not diverted by a venue elsewhere (14 TH-72).",
+    "flow_model": "The arming rung is ANCHORED, not derived. 16 \u00a78.4 bounds external DEPTH at parity (\u03a3 b_ext <= \u03a3 pol.b(live)); turning that into a bound on FLOW needs a behavioural model, and proportional-to-depth allocation \u2014 the neutral one \u2014 is what puts the anchor at one half. The model errs in the unsafe direction: an external venue of equal depth but better fees or returns could take far more than half the flow. The ladder therefore runs past the arming rung, and `stress_by_class` reports the verdict there. Disagreement between `arming_by_class` and `stress_by_class` means the arming decision depends on proportional allocation holding.",
+    "liveness": {
+      "code": {
+        "baseline_carried_at_arming": 257,
+        "baseline_carried_control": 71,
+        "decision_grade_at_arming": "0.130872",
+        "decision_grade_control": "0.449664",
+        "decision_grade_loss": "0.318792",
+        "not_decision_grade_at_arming": 298,
+        "not_decision_grade_control": 123
+      },
+      "meta": {
+        "baseline_carried_at_arming": 261,
+        "baseline_carried_control": 72,
+        "decision_grade_at_arming": "0.076433",
+        "decision_grade_control": "0.480892",
+        "decision_grade_loss": "0.404459",
+        "not_decision_grade_at_arming": 314,
+        "not_decision_grade_control": 129
+      },
+      "param": {
+        "baseline_carried_at_arming": 252,
+        "baseline_carried_control": 70,
+        "decision_grade_at_arming": "0.227891",
+        "decision_grade_control": "0.374150",
+        "decision_grade_loss": "0.146259",
+        "not_decision_grade_at_arming": 95,
+        "not_decision_grade_control": 74
+      },
+      "treasury": {
+        "baseline_carried_at_arming": 259,
+        "baseline_carried_control": 75,
+        "decision_grade_at_arming": "0.174757",
+        "decision_grade_control": "0.443366",
+        "decision_grade_loss": "0.268609",
+        "not_decision_grade_at_arming": 247,
+        "not_decision_grade_control": 89
+      }
+    },
+    "liveness_loss_at_arming": {
+      "code": "0.7090",
+      "meta": "0.8411",
+      "param": "0.3909",
+      "treasury": "0.6058"
+    },
+    "no_single_verdict": "By design there is no composite 'ready to arm' field. The security leg is gated but, at this sample, is a screen that detects gross failure rather than a measurement of a sub-1 % rate \u2014 see `resolution`. The liveness leg has a magnitude and a stated falsifier (16 \u00a78.4) but no threshold any document names, and R-2 forbids inventing one. A consumer that needs a single boolean must supply the missing values judgement itself, explicitly, rather than read one out of this artifact.",
+    "resolution": {
+      "code": {
+        "decidable_harm_at_arming": 98,
+        "gate_is_all_or_nothing": true,
+        "smallest_detectable_rate": "0.010204"
+      },
+      "meta": {
+        "decidable_harm_at_arming": 91,
+        "gate_is_all_or_nothing": true,
+        "smallest_detectable_rate": "0.010989"
+      },
+      "param": {
+        "decidable_harm_at_arming": 12,
+        "gate_is_all_or_nothing": true,
+        "smallest_detectable_rate": "0.083333"
+      },
+      "treasury": {
+        "decidable_harm_at_arming": 75,
+        "gate_is_all_or_nothing": true,
+        "smallest_detectable_rate": "0.013333"
+      }
+    },
+    "rungs": {
+      "0.00": {
+        "code": {
+          "baseline_carried": 71,
+          "decidable_harm": 98,
+          "decidable_harm_false_pass_rate": "0.000000",
+          "decision_grade_formation_rate": "0.449664",
+          "not_decision_grade": 123
+        },
+        "meta": {
+          "baseline_carried": 72,
+          "decidable_harm": 91,
+          "decidable_harm_false_pass_rate": "0.010989",
+          "decision_grade_formation_rate": "0.480892",
+          "not_decision_grade": 129
+        },
+        "param": {
+          "baseline_carried": 70,
+          "decidable_harm": 12,
+          "decidable_harm_false_pass_rate": "0.000000",
+          "decision_grade_formation_rate": "0.374150",
+          "not_decision_grade": 74
+        },
+        "treasury": {
+          "baseline_carried": 75,
+          "decidable_harm": 75,
+          "decidable_harm_false_pass_rate": "0.000000",
+          "decision_grade_formation_rate": "0.443366",
+          "not_decision_grade": 89
+        }
+      },
+      "0.25": {
+        "code": {
+          "baseline_carried": 163,
+          "decidable_harm": 98,
+          "decidable_harm_false_pass_rate": "0.000000",
+          "decision_grade_formation_rate": "0.218121",
+          "not_decision_grade": 244
+        },
+        "meta": {
+          "baseline_carried": 168,
+          "decidable_harm": 91,
+          "decidable_harm_false_pass_rate": "0.000000",
+          "decision_grade_formation_rate": "0.200637",
+          "not_decision_grade": 266
+        },
+        "param": {
+          "baseline_carried": 140,
+          "decidable_harm": 12,
+          "decidable_harm_false_pass_rate": "0.000000",
+          "decision_grade_formation_rate": "0.292517",
+          "not_decision_grade": 81
+        },
+        "treasury": {
+          "baseline_carried": 155,
+          "decidable_harm": 75,
+          "decidable_harm_false_pass_rate": "0.000000",
+          "decision_grade_formation_rate": "0.252427",
+          "not_decision_grade": 194
+        }
+      },
+      "0.50": {
+        "code": {
+          "baseline_carried": 257,
+          "decidable_harm": 98,
+          "decidable_harm_false_pass_rate": "0.000000",
+          "decision_grade_formation_rate": "0.130872",
+          "not_decision_grade": 298
+        },
+        "meta": {
+          "baseline_carried": 261,
+          "decidable_harm": 91,
+          "decidable_harm_false_pass_rate": "0.000000",
+          "decision_grade_formation_rate": "0.076433",
+          "not_decision_grade": 314
+        },
+        "param": {
+          "baseline_carried": 252,
+          "decidable_harm": 12,
+          "decidable_harm_false_pass_rate": "0.000000",
+          "decision_grade_formation_rate": "0.227891",
+          "not_decision_grade": 95
+        },
+        "treasury": {
+          "baseline_carried": 259,
+          "decidable_harm": 75,
+          "decidable_harm_false_pass_rate": "0.000000",
+          "decision_grade_formation_rate": "0.174757",
+          "not_decision_grade": 247
+        }
+      },
+      "0.75": {
+        "code": {
+          "baseline_carried": 257,
+          "decidable_harm": 98,
+          "decidable_harm_false_pass_rate": "0.000000",
+          "decision_grade_formation_rate": "0.016779",
+          "not_decision_grade": 298
+        },
+        "meta": {
+          "baseline_carried": 261,
+          "decidable_harm": 91,
+          "decidable_harm_false_pass_rate": "0.000000",
+          "decision_grade_formation_rate": "0.006369",
+          "not_decision_grade": 314
+        },
+        "param": {
+          "baseline_carried": 255,
+          "decidable_harm": 12,
+          "decidable_harm_false_pass_rate": "0.000000",
+          "decision_grade_formation_rate": "0.132653",
+          "not_decision_grade": 122
+        },
+        "treasury": {
+          "baseline_carried": 259,
+          "decidable_harm": 75,
+          "decidable_harm_false_pass_rate": "0.000000",
+          "decision_grade_formation_rate": "0.045307",
+          "not_decision_grade": 270
+        }
+      }
+    },
+    "sample_per_class": 64,
+    "sample_unit": "whole epoch slates. `_simulate_population` pools TH-7's baseline-suppression budget per epoch group and rebuilds groups from the list it is given, so a sample of loose proposal ids would hand it partial slates and shrink that attacker budget (~58x at four-per-class). Expanding each sampled id to its full slate makes the pooled budget identical to the primary run by construction rather than by luck.",
+    "security_leg_clean": true,
+    "security_leg_is_a_screen_not_a_measurement": true,
+    "stress_by_class": {
+      "code": true,
+      "meta": true,
+      "param": true,
+      "treasury": true
+    },
+    "stress_diversion": "0.75"
+  },
   "config": {
     "arbitrage_elasticity": "1.0",
     "attack_strategy_mix": [
@@ -4323,6 +4537,13 @@
     "belief_error_scale": "0.45",
     "cap_proposal": "0.05",
     "class_mix_block": 4,
+    "competing_venue_diversion": "0.00",
+    "competing_venue_diversions": [
+      "0.25",
+      "0.50",
+      "0.75"
+    ],
+    "competing_venue_sample_per_class": 64,
     "decision_window": 43200,
     "delta_floors": {
       "code": "0.060",
@@ -4429,7 +4650,7 @@
       "param": "0.003",
       "treasury": "0.005"
     },
-    "source_model_sha256": "97d2784f2d00808f32a2d78a57c336be31dfd83a29a831ff3795385e854c7316",
+    "source_model_sha256": "6ac8d52c3fb666bbc71bcea7f2d7939bad1bd82a4e736f351f42e635189670ee",
     "subsample_size": 24,
     "thin_market_flow_multiplier": "0.72",
     "threshold_max_budget_multiple": "3.00",
@@ -4444,7 +4665,7 @@
       "treasury": "250000"
     }
   },
-  "config_digest": "e6db23cdabefecd54d83267bac230891967eec924cafa4d96ea3a3b6c6f025cb",
+  "config_digest": "04469f4d0d8379b1b8c1558d6510400ceb9d92653b4e9dc17702e48671f1c5a4",
   "gate_veto_counts": {
     "GateVetoSecurity": 782,
     "GateVetoSurvival": 2742

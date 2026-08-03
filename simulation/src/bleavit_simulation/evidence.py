@@ -11,7 +11,12 @@ from .calibration import (
     outcome_digest,
     outcome_merkle_root,
 )
-from .config import CLASSES, DEFAULT_SEED, SimulationConfig
+from .config import (
+    CLASSES,
+    COMPETING_VENUE_ARMING_DIVERSION,
+    DEFAULT_SEED,
+    SimulationConfig,
+)
 from .proposals import generate_proposal_with_config
 
 
@@ -290,6 +295,93 @@ def _check_subsample(payload: dict, config: SimulationConfig, errors: list[str])
     return len(ids)
 
 
+def _check_competing_venue(
+    payload: dict, config: SimulationConfig, errors: list[str]
+) -> None:
+    """Validate the 16 §8.4 Phase-4 arming block (structure and self-agreement).
+
+    Deliberately structural rather than economic. The block's *verdict* is not
+    a Phase-0 gate — a `False` `arming_ready` is a legitimate, informative
+    state that must not fail `--check` — but a block that disagrees with its
+    own rungs, or that silently lost the 0 % control it is read against, would
+    make the Phase-4 decision on numbers nothing re-derived. That is exactly
+    the failure this artifact exists to prevent.
+    """
+    block = payload.get("competing_venue")
+    if not isinstance(block, dict):
+        errors.append("competing-venue arming block is missing")
+        return
+    rungs = block.get("rungs")
+    if not isinstance(rungs, dict):
+        errors.append("competing-venue rungs are missing")
+        return
+    expected_rungs = ["0.00", *config.competing_venue_diversions]
+    if list(rungs) != expected_rungs:
+        errors.append("competing-venue rungs disagree with the configured ladder")
+        return
+    if block.get("arming_diversion") != COMPETING_VENUE_ARMING_DIVERSION:
+        errors.append("competing-venue arming rung is not the 16 §8.4 bound")
+        return
+    for level, rows in rungs.items():
+        if not isinstance(rows, dict) or set(rows) != set(CLASSES):
+            errors.append(f"competing-venue rung {level} is not per-class")
+            return
+    try:
+        arming = rungs[COMPETING_VENUE_ARMING_DIVERSION]
+        derived = {
+            name: arming[name]["decidable_harm"] > 0
+            and Decimal(arming[name]["decidable_harm_false_pass_rate"])
+            < Decimal("0.01")
+            for name in CLASSES
+        }
+    except (KeyError, TypeError, InvalidOperation):
+        errors.append("competing-venue arming gate cannot be derived from its rungs")
+        return
+    if block.get("arming_by_class") != derived:
+        errors.append("competing-venue class verdicts disagree with measured rates")
+    # The stress rung must be the ladder's top and must be strictly above the
+    # arming rung: it is what makes the proportional-flow model's error
+    # direction visible, and an artifact that silently dropped it would present
+    # an anchored verdict as an unconditional one.
+    stress_level = config.competing_venue_diversions[-1]
+    if block.get("stress_diversion") != stress_level:
+        errors.append("competing-venue stress rung is not the ladder's top")
+    elif Decimal(stress_level) <= Decimal(COMPETING_VENUE_ARMING_DIVERSION):
+        errors.append("competing-venue stress rung does not probe above arming")
+    else:
+        stress = rungs[stress_level]
+        try:
+            stress_derived = {
+                name: stress[name]["decidable_harm"] > 0
+                and Decimal(stress[name]["decidable_harm_false_pass_rate"])
+                < Decimal("0.01")
+                for name in CLASSES
+            }
+        except (KeyError, TypeError, InvalidOperation):
+            errors.append("competing-venue stress verdict cannot be derived")
+            stress_derived = None
+        if stress_derived is not None and block.get("stress_by_class") != stress_derived:
+            errors.append("competing-venue stress verdicts disagree with measured rates")
+    matches = block.get("control_matches_primary")
+    if not isinstance(matches, bool):
+        errors.append("competing-venue control-agreement flag is missing")
+        matches = False
+    if block.get("security_leg_clean") != (all(derived.values()) and matches):
+        errors.append("competing-venue security verdict disagrees with its own gates")
+    # A composite "ready to arm" boolean must never reappear: it would compose
+    # a gated security screen with an ungated liveness magnitude, and on the
+    # committed corpus that read True while decision-grade formation collapsed
+    # 39-84 %. Refusing it here is what stops it coming back by accident.
+    if "arming_ready" in block:
+        errors.append(
+            "competing-venue block publishes a composite arming verdict; "
+            "the security and liveness legs are not commensurable (see "
+            "`no_single_verdict`)"
+        )
+    if not block.get("liveness_loss_at_arming"):
+        errors.append("competing-venue liveness magnitude is missing")
+
+
 def check_artifact(path: Path) -> dict:
     payload = load_artifact(path)
     errors: list[str] = []
@@ -363,6 +455,7 @@ def check_artifact(path: Path) -> dict:
     thin = payload.get("thin_market_capture", {})
     if "contest capital" not in thin.get("mechanism_note", ""):
         errors.append("thin-market contest-capital mechanism note is missing")
+    _check_competing_venue(payload, config, errors)
     violations = payload.get("violations")
     if not isinstance(violations, list):
         errors.append("violations must be a list")
