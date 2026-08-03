@@ -1,8 +1,9 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
-> Verbatim copy of `docs/architecture/10-frontend-architecture.md` (the frozen source of truth),
-> regenerated 2026-07-31 from integration contract v17, picking up the E1 redemption-fee
-> and `NavView` rulings the previous copy predated, on top of the design-kit copy at commit
-> `5d9c9ce`. If this copy and the source ever differ, the source
+> Verbatim copy of `docs/architecture/10-frontend-architecture.md` (the source of truth),
+> regenerated 2026-08-03 at integration contract v22, picking up the D-21 handoff (§13), the
+> `app/` re-rooting and merged package list (§10.1), the §10.2 firewall restatement and its
+> negative-compilation corpus, the branded `Finalized<T>` and the new `external-proposal`
+> provenance status (§2.1). If this copy and the source ever differ, the source
 > wins. Regenerate by re-copying the source file.
 
 # 10 — Frontend Architecture
@@ -25,7 +26,7 @@ The selected architecture is unchanged in shape from the reviewed design and is 
 6. **IndexedDB (Dexie 4)** as a non-authoritative cache and the substrate of a **gap-tolerant** local historical index (§7). Loss of it is a performance event only (INV-FE-7).
 7. **No backend, no SSR, no required RPC endpoint, no required indexer.** Optional acceleration providers exist behind a structural firewall and **ship as an empty list, strictly opt-in** (§8).
 
-What changed relative to FRONTEND_PLAN.md, and why, is the subject of the rest of this document: the history model is rebuilt on three truthful layers (D-6, §6), the RPC promotion rule is deleted (F-2, §2.2), the boot machine gains its missing states (§3), the growth/backfill arithmetic is recomputed honestly at maximum chain load (§9), providers are opt-in everywhere (§8.1), the firewall becomes structural inside `apps/web` (§10), and every chain constant is read from the chain (§5.4).
+What changed relative to FRONTEND_PLAN.md, and why, is the subject of the rest of this document: the history model is rebuilt on three truthful layers (D-6, §6), the RPC promotion rule is deleted (F-2, §2.2), the boot machine gains its missing states (§3), the growth/backfill arithmetic is recomputed honestly at maximum chain load (§9), providers are opt-in everywhere (§8.1), the firewall becomes structural inside `app/src` (§10), and every chain constant is read from the chain (§5.4).
 
 ---
 
@@ -41,16 +42,34 @@ export type VerificationStatus =
   | { kind: 'verified-best'; blockHash: HexString; blockNumber: number }      // display-only
   | { kind: 'derived-local'; coverage: CoverageRef }                          // local index, layer 3
   | { kind: 'provider'; providerId: string; sampled: boolean }                // untrusted, labelled
-  | { kind: 'stale-cache'; asOfBlock: number; ageMs: number };                // pre-sync IndexedDB
+  | { kind: 'stale-cache'; asOfBlock: number; ageMs: number }                 // pre-sync IndexedDB
+  | { kind: 'external-proposal' };                                           // imported request, §13
 
 export interface Verified<T> { value: T; status: VerificationStatus; }
 
+/** Declared inside packages/chain-client and NOT exported. Nothing outside that
+ *  module can name this symbol, so nothing outside it can produce the field. */
+declare const FINALIZED: unique symbol;
+
 /** The only type the transaction path accepts. Constructible solely inside
- *  packages/chain from a smoldot-verified finalized read. */
-export type Finalized<T> = Verified<T> & { status: { kind: 'verified-finalized' } };
+ *  packages/chain-client from a smoldot-verified finalized read. The brand is
+ *  part of the type, not a comment about it: without the phantom field a value
+ *  is merely structurally shaped like a finalized read, and any package could
+ *  mint one by writing an object literal. */
+export type Finalized<T> = Verified<T>
+  & { status: { kind: 'verified-finalized' } }
+  & { readonly [FINALIZED]: true };
 ```
 
-`Finalized<T>` has **no public constructor outside `packages/chain`**. Provider-status and derived-local values are unrepresentable as `Finalized<T>` at the type level; the promotion bug class of F-2 is therefore not merely forbidden but untypeable.
+`Finalized<T>` has **no public constructor outside `packages/chain-client`**. Provider-status and derived-local values are unrepresentable as `Finalized<T>` at the type level; the promotion bug class of F-2 is therefore not merely forbidden but untypeable.
+
+Three implementation constraints follow, and all three are normative because the invariant is silent when they are violated:
+
+- **The brand is part of the type, not a remark about it.** A structural intersection over `status.kind` alone is satisfied by any object literal, so a package that never touches the light client could mint a value the transaction path accepts. The non-exported `unique symbol` field is what makes the type nominal; it is unnameable outside `chain-client`, so no literal, spread, or `satisfies` can produce it, and only a deliberate double assertion can — which is grep-able and lint-banned.
+- **`Verified<T>` and `VerificationStatus` live in the dependency-free `shared-types` package; `Finalized<T>`'s brand MUST NOT.** If the brand lives in the package every other package depends on, every package can construct it, and this section's guarantee is void — silently, with green CI. `chain-client` imports `Verified<T>` and defines `Finalized<T>` locally.
+- **The brand is a module-private phantom, not a class private member.** These values cross `postMessage` from the smoldot worker (§4.1) and are written to IndexedDB (§7). Structured clone strips prototypes, so a class instance arrives as a plain object and nominality is lost at exactly the one boundary that matters. A phantom field has no runtime representation, so structured clone is a no-op on it. The single assignment site, an ESLint ban on `Finalized`-shaped type assertions and on `as unknown as`, and a `package.json` `exports` map restricted to `"."` and `"./testing"` are the three enforcement layers; the production build aliases `"./testing"` to a module that throws at import. The §10.2 negative-compilation corpus carries a fixture that **forges a finalized-shaped object literal and asserts it fails to typecheck** — without it the brand is a claim rather than a tested property.
+
+**`external-proposal` (§13).** A value carried by an imported document — a requested ceiling, a requested size — is a *request*, not an observation of the chain, and it is the only status with no block reference because there is nothing it is true *at*. It exists so that INV-FE-9's obligation holds without exception on the import surface: an asked ceiling rendered beside its chain-derived clamp is a displayed item, and every displayed item carries a typed status. `external-proposal` is inert by construction — it satisfies no precondition, is never promoted, never persists, and the transaction payload is built from the clamped result rather than from it.
 
 ### 2.2 The never-promote rule (F-2 — unconditional)
 
@@ -392,7 +411,7 @@ Measured in CI (Lighthouse + Playwright timers) on reference hardware (desktop =
 | Mobile CPU | ≤ 15% avg of one core steady-state after sync | profiling budget, FE-P4 |
 | Ingest throughput | ≥ 20 finalized blocks/s catch-up on desktop **[VERIFY — FE-P4]**; all backfill arithmetic in §6.4 derives from this single number | perf test |
 
-Error taxonomy: as reviewed (`FE-BOOT-001..004`, `FE-CHAIN-001..005`, `FE-COMPAT-001..002`, `FE-TX-001..007`, `FE-IDX-001..002`, `FE-REL-001..004`, `FE-PROV-001..004`), now with every `FE-BOOT` code owning a state in §3.1. Fixed user copy + expert detail + documented recovery per code; no free-text errors.
+Error taxonomy: as reviewed (`FE-BOOT-001..004`, `FE-CHAIN-001..005`, `FE-COMPAT-001..002`, `FE-TX-001..007`, `FE-IDX-001..002`, `FE-REL-001..004`, `FE-PROV-001..004`), plus `FE-HANDOFF-001..013` (§13.3), now with every `FE-BOOT` code owning a state in §3.1. Fixed user copy + expert detail + documented recovery per code; no free-text errors.
 
 ---
 
@@ -400,17 +419,43 @@ Error taxonomy: as reviewed (`FE-BOOT-001..004`, `FE-CHAIN-001..005`, `FE-COMPAT
 
 ### 10.1 Monorepo and dependency direction
 
-As reviewed: `apps/web`; `packages/{chain, descriptors, protocol, local-index, providers, verify, wallet, ui}`; `tools/{release, verify-release, snapshot}`. CI-fatal forbidden edges (dependency-cruiser): `wallet → {providers, local-index}`; `chain → anything above it`; `providers` never imported by `wallet`.
+The client is rooted at **`app/`** in the chain repository — one workspace, one attested asset tree, every distribution target built from it. `app/` is its own pnpm workspace **and** its own cargo workspace, excluded from the root one, so neither the Tauri stack nor the npm tree can perturb the `=`-exact `polkadot-stable2606` pins (01 §9). Its `tools/{release, verify-release, snapshot}` sit under `app/` deliberately: the repository root already has a `tools/release/` for chain-release tooling, and the two must not be confused.
 
-### 10.2 Structural firewall inside `apps/web` (F-medium: provider firewall)
+- **Shell** — `app/src/{application, components, routes, styles}`.
+- **Compilation units** — `app/src/features/{tx, analysis, handoff}` (§10.2).
+- **Packages** — `app/packages/{shared-types, chain-client, descriptors, protocol, simulation, transaction-builder, signing, contexts, intents, receipts, llm-handoff, ui, verify, local-index, providers, platform, mock-runtime}`.
+
+The names differ from the reviewed design; the **edges** are what carry the invariant, and they are preserved intact. `chain-client` is the reviewed `chain`; `transaction-builder` + `signing` together are the reviewed `wallet`; `protocol` keeps its name and its normative role, with `simulation` layered above it for what-if derivation only.
+
+CI-fatal forbidden edges (dependency-cruiser, with the TypeScript project graph of §10.2 as the primary, redundant gate):
+
+- `transaction-builder`, `signing` → `{providers, local-index, contexts, intents, receipts, llm-handoff}`
+- `chain-client` → anything above it
+- `providers` never imported by `transaction-builder` or `signing`
+- `shared-types` → **nothing** (it is the dependency-free root, and it MUST NOT contain `Finalized<T>`'s brand — §2.1)
+- `llm-handoff`, `contexts`, `intents`, `receipts` → `{transaction-builder, signing, providers, local-index}`; permitted: `→ {shared-types, chain-client, protocol}`
+- `platform` is the only package permitted to import a host or native SDK (`@tauri-apps/*`, `@parity/product-sdk`); `src/features/tx/**` may reference `platform` but never a concrete platform implementation
+- nothing outside test builds imports `mock-runtime` or `chain-client/testing`, and no signer adapter marked test-only may appear in a release chunk
+
+### 10.2 Structural firewall inside `app/src` (F-medium: provider firewall)
 
 The reviewed design enforced the firewall structurally *between packages* but only by lint *inside* `apps/web`, where provider-fed store data could seed transaction form state. Corrected, normative:
 
-- `apps/web` is split into **separate build-time compilation units**: `apps/web/src/tx/**` (transaction surfaces, form state, confirm flows) is its own TypeScript project (project references) whose reference set is exactly `{chain, protocol, wallet, ui}`. `apps/web/src/history/**` (provider-fed and local-index-fed stores and screens) references `{local-index, providers, protocol, ui}`. An import from `tx/**` into `history/**` or into `providers`/`local-index` **fails compilation** — module resolution cannot see it. dependency-cruiser remains as the second, redundant gate.
-- **Type-level enforcement on top of the import boundary**: transaction form state and every `PreconditionCheck` input are typed `Finalized<T>` (§2.1). Since `Finalized<T>` is constructible only inside `packages/chain`, a provider- or index-fed value cannot inhabit tx state even if a future refactor breached the import boundary.
-- Cross-unit UI composition happens only through `ui`-package components that accept already-rendered, provenance-badged children — data does not flow from history stores into tx stores through props, context, or global state; the stores live in different compilation units with no shared mutable module.
+- `app/src` is split into **separate build-time compilation units**, each its own TypeScript project (project references) with an exact reference set:
+  - `app/src/features/tx/**` — transaction surfaces, form state, confirm flows — references exactly `{shared-types, chain-client, protocol, simulation, transaction-builder, signing, platform, ui}`.
+  - `app/src/features/analysis/**` — provider-fed and local-index-fed stores and screens — references `{shared-types, chain-client, protocol, simulation, local-index, providers, receipts, ui}`.
+  - `app/src/features/handoff/**` — context export and intent review — references `{shared-types, chain-client, protocol, contexts, intents, receipts, llm-handoff, ui}`.
+
+  An import from `tx/**` into `analysis/**` or `handoff/**`, or into `providers`/`local-index`, **fails compilation** — module resolution cannot see it. This requires an isolated `node_modules` layout: under a hoisted layout the undeclared import resolves and only `tsc -b` objects, which demotes the primary gate to the secondary one. dependency-cruiser remains as the second, redundant gate.
+- **Type-level enforcement on top of the import boundary.** Transaction form state is the product of two things, and conflating them is a defect this section previously carried: **(a) user-authored scalars** — a typed amount, a selected account, a chosen fee asset — which carry no `VerificationStatus` because they are not data *about the chain*, and **(b) `Finalized<T>` chain values**. Every `PreconditionCheck` input is `Finalized<T>` without exception. Since `Finalized<T>` is constructible only inside `packages/chain-client` (§2.1), a provider- or index-fed value cannot inhabit either role even if a future refactor breached the import boundary. The firewall's target — provider- and index-fed values structurally unable to seed tx state — is unchanged and unweakened by this restatement.
+- **An imported intent's scalars are requests, and carry `external-proposal` status** (§2.1, §13, [11](11-frontend-workflows.md) §11.14). They are handled by the same code path as typed input and are subject to clamping that can only narrow, but unlike a typed amount they carry a status, because a third party authored them and INV-FE-9 admits no unlabeled rendering path. They are never promoted, never rendered as chain facts, and never satisfy a precondition.
+
+  **Why this is consistent with INV-FE-1 rather than an exception to it.** That invariant's subject is *what the client believes about the chain*: it forbids a transaction-critical value being sourced from anything but verified finalized state, because the failure it prevents is the user being **lied to about chain state**. A requested ceiling asserts nothing about the chain — it is a bound the user is asking for, in the same category as an amount typed into a field, and no reading of INV-FE-1 can forbid a user from choosing an amount without forbidding the transaction screens themselves. What the invariant does require, and what §11.14.3 enforces, is that **every chain-derived quantity the request is evaluated against is `Finalized<T>`**: the cost recomputation, the balance, the phase, the fee rate, the feasibility check. The request selects; the chain decides; the clamp can only narrow; and the confirm surface is decoded from the bytes that will be signed rather than from either.
+- Cross-unit UI composition happens only through `ui`-package components that accept already-rendered, provenance-badged children — data does not flow from analysis or handoff stores into tx stores through props, context, or global state; the stores live in different compilation units with no shared mutable module.
 
 This makes INV-FE-3 structural at both levels: package graph and in-app module graph, with the type system as a third, independent layer.
+
+**Certifying the firewall rejects, not merely that the app works.** The suites of [15](15-invariants-and-testing.md) §4.8 exercise the app's correct paths. A firewall is only proven by the imports it refuses, so the build additionally carries a **negative-compilation corpus**: fixture modules containing each forbidden edge above, asserted to fail `tsc -b`, and each forbidden dependency-cruiser edge asserted to be reported. A corpus entry that starts passing is a firewall regression and fails CI.
 
 ---
 
@@ -444,6 +489,63 @@ The [VERIFY]/prototype epistemics of the reviewed design are retained deliberate
 | FE-P8 | Long-range checkpoint policy: max safe release age before warning | analysis vs unbonding period | verification-panel copy |
 | FE-P9 | Bulletin mirror dry run (deferred D-Bulletin triggers T1–T4) | TestNet pipeline run | secondary mirror only; never canonical |
 | FE-P10 | Multi-MB Wasm extrinsic submission through smoldot/PAPI in-browser: transaction-pool/gossip size limits, peer banning on oversized transactions, mobile memory headroom ([11](11-frontend-workflows.md) §11.8.4) | instrumented testnet submission of a real runtime artifact (extends FE-P4) | gates the FE-15 upgrade-crank submission tier; the in-browser fetch + hash-verify path ships regardless, with the operator-CLI handoff as fallback |
+| FE-P11 | Handoff transports (§13.4): `navigator.share({ files })` availability across the browser/OS matrix, and confirmation that Web Share, the async Clipboard API and File System Access are **not** governed by CSP `connect-src`. The second half is load-bearing for §13's INV-FE-6 claim, so it is verified rather than assumed | read the Web Share security section, then a matrix test asserting a successful share and clipboard round-trip under `default-src 'none'` | decides whether Share ships as a primary or fallback transport. Conservative assumption in force until resolved: **clipboard and file are primary, Share is a fallback**; a negative result on the CSP half blocks §13 entirely and is the outcome to look for first |
+
+---
+
+## 13. Portable handoff packages (tool-agnostic export/import)
+
+D-21. The client can hand a user's *verified* view of the chain to any external analysis tool — a hosted assistant, a local model, a spreadsheet, another person — and accept back a *proposed* action. The whole subsystem exists to make that useful without making it trusted.
+
+The design is dictated by INV-FE-6, not excused from it. That invariant's closing sentence reads *"features that inherently require servers are out of scope rather than centralized"*, and a hosted or local tool-protocol server, a tunnel, a sidecar, or a direct model-API client is each a server whose availability the feature's correctness would depend on. The transport is therefore the user agent and the operating system: files, the clipboard, and the platform share sheet. **The client makes no network request on any handoff path, and a release MUST NOT add an external-tool vendor host to the `connect-src` allowlist ([12](12-release-and-operations.md) §5.1).**
+
+Three sentences carry the security of this section:
+
+1. **An imported action is exactly as trusted as keyboard input, and travels the same code path.** The external tool is a keyboard, not a data source.
+2. **The only inbound format carries no chain state — only a request.** Context is export-only, receipt is export-only, intent is import-only, and no field of an intent asserts anything about the chain.
+3. **No format carries an encoded call, in either direction.** Not inbound, for the obvious reason; and not outbound either, because a receipt containing call bytes teaches a naive tool to echo them back.
+
+### 13.1 The three formats
+
+`bleavit.context.v1` (out) · `bleavit.intent.v1` (in) · `bleavit.receipt.v1` (out). They follow the repository's established envelope conventions: a top-level `schema` string validated by **exact equality**, a frozen field core with consumer-tolerated extras at the top level only, canonical JSON (`sort_keys`, minimal separators, UTF-8), and a digest computed over a defined core projection under a NUL-terminated domain-separation tag.
+
+Every format carries a **chain binding** — genesis hash, `spec_version`, and `INTEGRATION_CONTRACT_VERSION` — and every inbound document is gated on it by exact equality.
+
+**The digest authenticates nothing.** It is an integrity check against truncation and transcription damage, not a signature; capsules are deliberately unsigned, because signing one with the user's chain key would reuse a signing key for a non-chain purpose and manufacture an artifact that looks authoritative. What verifies a capsule is re-reading the chain, which anyone can do.
+
+**Export is structurally impossible from unverified state.** The exporter's input type is `Finalized<T>` (§2.1), so a `provider`-, `derived-local`- or `stale-cache`-status value is untypeable in a capsule. In RPC-only, degraded, or `read-only-incompatible` modes there is nothing to construct a capsule from, and export is disabled with a stated reason (`FE-HANDOFF-013`) rather than silently degraded.
+
+### 13.2 The inbound discipline
+
+An intent supplies exactly three things — a **choice** among a closed action set, an **id**, and **ceilings** — and every one of them is re-derived or re-validated against chain state before anything is signed.
+
+- **`action` and `limits` are closed objects.** An unknown key inside either is refused. This is a deliberate asymmetry against the top-level tolerated-extras rule: at the top level an unknown key is a producer annotation no consumer reads, whereas inside `action` it is a *proposed semantic*, and it is precisely where an encoded call would be placed. Tolerating it there would be tolerating the attack.
+- **No field has a type that can carry arbitrary bytes.** There is no bytes, hex, blob, or unbounded-string field anywhere in the schema, and no free text at all — rendered tool prose would be a social-engineering surface on the confirm screen.
+- **The client never widens a limit; it may only narrow it.** A missing, unparseable, or out-of-range limit is refused, never defaulted; there is no safe default for money.
+- **Parser bounds are computed, not chosen.** Byte and depth caps derive from the [02](02-integration-contract.md)-frozen view bounds (`MAX_ACCOUNT_POSITIONS`, the six-book proposal set, `MAX_OPEN_ORACLE_ROUNDS`, `MAX_PARAM_KEYS`) times a per-field ceiling. They are client resource bounds, not chain values, so they live here and not in [13](13-parameters.md).
+- **A document that fails any check is refused whole.** The parser never strips a field and proceeds, never partially accepts, and never falls back to a "safe subset".
+
+The import path's only output is a `TxPreparation` entering **Draft**. It constructs no signer call and adds no edge to the transaction machine; `refreshAndGate` ([11](11-frontend-workflows.md) §11.4) remains the sole path to a signer, and the structural no-bypass assertion is re-run with this entry point in its enumerated edge set.
+
+### 13.3 Refusals
+
+`FE-HANDOFF-001..013`, joining the §9.4 taxonomy with the same discipline — fixed user copy, expert detail, and a documented recovery per code, no free text. The classes are: unknown schema, malformed document, unknown action, **foreign field inside `action`/`limits`**, wrong chain, newer-than-live runtime, limit missing/out-of-range/inconsistent, expired, replayed, digest mismatch, action infeasible at the refreshed block, scope refused, and export-from-unverified-state.
+
+Two asymmetries are deliberate. A document from a **newer** runtime is refused (INV-FE-12 fails safe when the runtime surface is unknown) while one from an **older** runtime is displayed and rebuilt against live descriptors — an intent's version never selects an encoding. And the replay guard is honestly labelled a **session-local convenience, not a security boundary**: one changed byte yields a new digest. What actually prevents a replayed action from doing harm is that it is rebuilt, re-clamped, and re-reviewed at the refreshed block every time.
+
+**Replay memory MUST live in volatile session memory and MUST NOT be persisted.** Two independent reasons, and either alone is sufficient. INV-FE-7 states that the transaction path never reads browser-local storage; a replay set in IndexedDB would make an import-path decision depend on a persisted read, and the fact that the check runs before `Draft` is too fine a distinction to rest an invariant on. And a guard already declared not to be a security boundary buys nothing by surviving a reload, while persisting it would make a *cleared* browser store change which documents the client accepts — turning INV-FE-7's "loss is a convenience event" into a behavioral difference. The same rule forecloses the adjacent hazard: **no imported document may write any persisted setting, default, or preference.** An import affects one transaction under review and nothing else, ever.
+
+### 13.4 Transports and disclosure
+
+Files (`<a download>` / File System Access / `<input type=file>`), the async Clipboard API, the platform share sheet, and inbound deep links into the client's own origin. Outbound links to named tool vendors are permitted and ship in-bundle; because they are top-level navigations rather than fetches they add no `connect-src` entry, but three obligations attach: the vendor list is **in the signed release and auditable** — never fetched, never remotely configured (INV-FE-13); a one-time disclosure interstitial names the vendor and states what its logs learn; and because URL length is bounded, a capsule that does not fit **falls back to clipboard or file automatically and is never truncated**. Availability and the CSP question are FE-P11.
+
+Every confirm screen reached from an import carries a **fixed, non-dismissible** origin disclosure. The disclosure text is in-bundle copy, never derived from the document — an attacker-supplied tool label rendered in the confirm flow would be a phishing primitive, so no format carries one.
+
+### 13.5 Scope
+
+Convenience only. No protocol workflow depends on this subsystem, every action expressible as an intent is a strict subset of what the transaction screens already do by hand, and disabling the whole thing breaks no INV-FE-4 workflow — which is why the no-infrastructure certification run is executed with these surfaces disabled ([15](15-invariants-and-testing.md) §4.8). DB-5 holds by construction: convenience is not load-bearing.
+
+The residual this subsystem cannot remove is that a persuasive tool can shape a user's judgement. It cannot alter the client, or the client's reading of chain state, or what the user is shown before signing — but it can argue for a bad trade, and no detection mechanism changes that. It is recorded as an accepted residual in the [14](14-threat-model.md) TH-49 class, and the control is the transaction boundary, not detection.
 
 ---
 
@@ -458,7 +560,7 @@ The [VERIFY]/prototype epistemics of the reviewed design are retained deliberate
 | F-med: transaction-critical | §2.3 narrows the definition honestly to precondition/payload/confirm values; provider-fed charts are a declared accepted residual with mandatory provenance labelling; §8.4 states the sampling limits (no detection of self-consistent deep forgeries); the threat row moves to [14-threat-model.md](14-threat-model.md). |
 | F-med: boot machine | §3.1 adds the missing states (`WorkerFailed`/FE-BOOT-002, `WasmFailed`/FE-BOOT-004, `StorageOpen`→MemoryOnly/FE-BOOT-001), boot-time `ReadyRestricted`, and pre-Ready `SyncDegraded`; §3.2 defines the composite mapping to the compat machine. |
 | F-med: growth arithmetic | §9.1–§9.2 recompute at 196-book max load (~21 MB/day raw), publish the honest verified-depth table against the 300 MB / 75 MB caps, and make retention auto-tune to budget — degrading depth/resolution, never correctness. |
-| F-med: provider firewall | §10.2 makes the firewall structural inside `apps/web`: separate TypeScript compilation units for `tx/**` vs `history/**` (imports fail at build), dependency-cruiser as redundant gate, and `Finalized<T>`-typed tx state as a third layer. |
+| F-med: provider firewall | §10.2 makes the firewall structural inside `app/src`: separate TypeScript compilation units for `features/tx/**` vs `features/analysis/**` vs `features/handoff/**` (imports fail at build, given an isolated `node_modules` layout), dependency-cruiser as redundant gate, `Finalized<T>`-typed precondition inputs as a third layer, and a negative-compilation corpus certifying that the firewall *rejects* rather than only that the app works. |
 | F-med: backfill math | §6.4 standardizes on the single budgeted rate (20 blk/s): 5 days of chain per hour of tab time, 6 hours for the full 30-day window; the 50 blk/s / "~9 days" inconsistency is corrected and the rate is anchored to the §9.4 budget line FE-P4 measures. |
 | F-med: txHistory | §6.5: the ingest loop detects the user's extrinsics via event phases and fetches extrinsic bodies **only** for blocks containing them, with honest provenance for bodies fetched beyond the pinned window. |
 | F-med: proof-size conflation | §6.6 separates encoded value size (≤ 16 KiB for the Proposals map) from storage-proof size (trie-path overhead; tens–hundreds of KiB), adds a per-refresh proof-traffic budget (§9.4), and notes the design conclusion survives the corrected arithmetic. |

@@ -18,7 +18,7 @@ The selected architecture is unchanged in shape from the reviewed design and is 
 6. **IndexedDB (Dexie 4)** as a non-authoritative cache and the substrate of a **gap-tolerant** local historical index (§7). Loss of it is a performance event only (INV-FE-7).
 7. **No backend, no SSR, no required RPC endpoint, no required indexer.** Optional acceleration providers exist behind a structural firewall and **ship as an empty list, strictly opt-in** (§8).
 
-What changed relative to FRONTEND_PLAN.md, and why, is the subject of the rest of this document: the history model is rebuilt on three truthful layers (D-6, §6), the RPC promotion rule is deleted (F-2, §2.2), the boot machine gains its missing states (§3), the growth/backfill arithmetic is recomputed honestly at maximum chain load (§9), providers are opt-in everywhere (§8.1), the firewall becomes structural inside `apps/web` (§10), and every chain constant is read from the chain (§5.4).
+What changed relative to FRONTEND_PLAN.md, and why, is the subject of the rest of this document: the history model is rebuilt on three truthful layers (D-6, §6), the RPC promotion rule is deleted (F-2, §2.2), the boot machine gains its missing states (§3), the growth/backfill arithmetic is recomputed honestly at maximum chain load (§9), providers are opt-in everywhere (§8.1), the firewall becomes structural inside `app/src` (§10), and every chain constant is read from the chain (§5.4).
 
 ---
 
@@ -34,21 +34,34 @@ export type VerificationStatus =
   | { kind: 'verified-best'; blockHash: HexString; blockNumber: number }      // display-only
   | { kind: 'derived-local'; coverage: CoverageRef }                          // local index, layer 3
   | { kind: 'provider'; providerId: string; sampled: boolean }                // untrusted, labelled
-  | { kind: 'stale-cache'; asOfBlock: number; ageMs: number };                // pre-sync IndexedDB
+  | { kind: 'stale-cache'; asOfBlock: number; ageMs: number }                 // pre-sync IndexedDB
+  | { kind: 'external-proposal' };                                           // imported request, §13
 
 export interface Verified<T> { value: T; status: VerificationStatus; }
 
+/** Declared inside packages/chain-client and NOT exported. Nothing outside that
+ *  module can name this symbol, so nothing outside it can produce the field. */
+declare const FINALIZED: unique symbol;
+
 /** The only type the transaction path accepts. Constructible solely inside
- *  packages/chain-client from a smoldot-verified finalized read. */
-export type Finalized<T> = Verified<T> & { status: { kind: 'verified-finalized' } };
+ *  packages/chain-client from a smoldot-verified finalized read. The brand is
+ *  part of the type, not a comment about it: without the phantom field a value
+ *  is merely structurally shaped like a finalized read, and any package could
+ *  mint one by writing an object literal. */
+export type Finalized<T> = Verified<T>
+  & { status: { kind: 'verified-finalized' } }
+  & { readonly [FINALIZED]: true };
 ```
 
 `Finalized<T>` has **no public constructor outside `packages/chain-client`**. Provider-status and derived-local values are unrepresentable as `Finalized<T>` at the type level; the promotion bug class of F-2 is therefore not merely forbidden but untypeable.
 
-Two implementation constraints follow, and both are normative because the invariant is silent when they are violated:
+Three implementation constraints follow, and all three are normative because the invariant is silent when they are violated:
 
+- **The brand is part of the type, not a remark about it.** A structural intersection over `status.kind` alone is satisfied by any object literal, so a package that never touches the light client could mint a value the transaction path accepts. The non-exported `unique symbol` field is what makes the type nominal; it is unnameable outside `chain-client`, so no literal, spread, or `satisfies` can produce it, and only a deliberate double assertion can — which is grep-able and lint-banned.
 - **`Verified<T>` and `VerificationStatus` live in the dependency-free `shared-types` package; `Finalized<T>`'s brand MUST NOT.** If the brand lives in the package every other package depends on, every package can construct it, and this section's guarantee is void — silently, with green CI. `chain-client` imports `Verified<T>` and defines `Finalized<T>` locally.
-- **The brand is a module-private phantom, not a class private member.** These values cross `postMessage` from the smoldot worker (§4.1) and are written to IndexedDB (§7). Structured clone strips prototypes, so a class instance arrives as a plain object and nominality is lost at exactly the one boundary that matters. A phantom field declared with a non-exported `unique symbol` has no runtime representation, so structured clone is a no-op on it. The single assignment site, an ESLint ban on `Finalized`-shaped type assertions and on `as unknown as`, and a `package.json` `exports` map restricted to `"."` and `"./testing"` are the three enforcement layers; the production build aliases `"./testing"` to a module that throws at import.
+- **The brand is a module-private phantom, not a class private member.** These values cross `postMessage` from the smoldot worker (§4.1) and are written to IndexedDB (§7). Structured clone strips prototypes, so a class instance arrives as a plain object and nominality is lost at exactly the one boundary that matters. A phantom field has no runtime representation, so structured clone is a no-op on it. The single assignment site, an ESLint ban on `Finalized`-shaped type assertions and on `as unknown as`, and a `package.json` `exports` map restricted to `"."` and `"./testing"` are the three enforcement layers; the production build aliases `"./testing"` to a module that throws at import. The §10.2 negative-compilation corpus carries a fixture that **forges a finalized-shaped object literal and asserts it fails to typecheck** — without it the brand is a claim rather than a tested property.
+
+**`external-proposal` (§13).** A value carried by an imported document — a requested ceiling, a requested size — is a *request*, not an observation of the chain, and it is the only status with no block reference because there is nothing it is true *at*. It exists so that INV-FE-9's obligation holds without exception on the import surface: an asked ceiling rendered beside its chain-derived clamp is a displayed item, and every displayed item carries a typed status. `external-proposal` is inert by construction — it satisfies no precondition, is never promoted, never persists, and the transaction payload is built from the clamped result rather than from it.
 
 ### 2.2 The never-promote rule (F-2 — unconditional)
 
@@ -427,7 +440,9 @@ The reviewed design enforced the firewall structurally *between packages* but on
 
   An import from `tx/**` into `analysis/**` or `handoff/**`, or into `providers`/`local-index`, **fails compilation** — module resolution cannot see it. This requires an isolated `node_modules` layout: under a hoisted layout the undeclared import resolves and only `tsc -b` objects, which demotes the primary gate to the secondary one. dependency-cruiser remains as the second, redundant gate.
 - **Type-level enforcement on top of the import boundary.** Transaction form state is the product of two things, and conflating them is a defect this section previously carried: **(a) user-authored scalars** — a typed amount, a selected account, a chosen fee asset — which carry no `VerificationStatus` because they are not data *about the chain*, and **(b) `Finalized<T>` chain values**. Every `PreconditionCheck` input is `Finalized<T>` without exception. Since `Finalized<T>` is constructible only inside `packages/chain-client` (§2.1), a provider- or index-fed value cannot inhabit either role even if a future refactor breached the import boundary. The firewall's target — provider- and index-fed values structurally unable to seed tx state — is unchanged and unweakened by this restatement.
-- **An imported intent's scalars are user-authored scalars of external origin** (§13, [11](11-frontend-workflows.md) §11.14). They are handled by the same code path as typed input, carry a mandatory fixed origin disclosure, and are subject to clamping that can only narrow. They are never promoted, never rendered as chain facts, and never satisfy a precondition.
+- **An imported intent's scalars are requests, and carry `external-proposal` status** (§2.1, §13, [11](11-frontend-workflows.md) §11.14). They are handled by the same code path as typed input and are subject to clamping that can only narrow, but unlike a typed amount they carry a status, because a third party authored them and INV-FE-9 admits no unlabeled rendering path. They are never promoted, never rendered as chain facts, and never satisfy a precondition.
+
+  **Why this is consistent with INV-FE-1 rather than an exception to it.** That invariant's subject is *what the client believes about the chain*: it forbids a transaction-critical value being sourced from anything but verified finalized state, because the failure it prevents is the user being **lied to about chain state**. A requested ceiling asserts nothing about the chain — it is a bound the user is asking for, in the same category as an amount typed into a field, and no reading of INV-FE-1 can forbid a user from choosing an amount without forbidding the transaction screens themselves. What the invariant does require, and what §11.14.3 enforces, is that **every chain-derived quantity the request is evaluated against is `Finalized<T>`**: the cost recomputation, the balance, the phase, the fee rate, the feasibility check. The request selects; the chain decides; the clamp can only narrow; and the confirm surface is decoded from the bytes that will be signed rather than from either.
 - Cross-unit UI composition happens only through `ui`-package components that accept already-rendered, provenance-badged children — data does not flow from analysis or handoff stores into tx stores through props, context, or global state; the stores live in different compilation units with no shared mutable module.
 
 This makes INV-FE-3 structural at both levels: package graph and in-app module graph, with the type system as a third, independent layer.
@@ -508,7 +523,9 @@ The import path's only output is a `TxPreparation` entering **Draft**. It constr
 
 `FE-HANDOFF-001..013`, joining the §9.4 taxonomy with the same discipline — fixed user copy, expert detail, and a documented recovery per code, no free text. The classes are: unknown schema, malformed document, unknown action, **foreign field inside `action`/`limits`**, wrong chain, newer-than-live runtime, limit missing/out-of-range/inconsistent, expired, replayed, digest mismatch, action infeasible at the refreshed block, scope refused, and export-from-unverified-state.
 
-Two asymmetries are deliberate. A document from a **newer** runtime is refused (INV-FE-12 fails safe when the runtime surface is unknown) while one from an **older** runtime is displayed and rebuilt against live descriptors — an intent's version never selects an encoding. And the replay guard is honestly labelled a **device-local convenience, not a security boundary**: one changed byte yields a new digest. What actually prevents a replayed action from doing harm is that it is rebuilt, re-clamped, and re-reviewed at the refreshed block every time.
+Two asymmetries are deliberate. A document from a **newer** runtime is refused (INV-FE-12 fails safe when the runtime surface is unknown) while one from an **older** runtime is displayed and rebuilt against live descriptors — an intent's version never selects an encoding. And the replay guard is honestly labelled a **session-local convenience, not a security boundary**: one changed byte yields a new digest. What actually prevents a replayed action from doing harm is that it is rebuilt, re-clamped, and re-reviewed at the refreshed block every time.
+
+**Replay memory MUST live in volatile session memory and MUST NOT be persisted.** Two independent reasons, and either alone is sufficient. INV-FE-7 states that the transaction path never reads browser-local storage; a replay set in IndexedDB would make an import-path decision depend on a persisted read, and the fact that the check runs before `Draft` is too fine a distinction to rest an invariant on. And a guard already declared not to be a security boundary buys nothing by surviving a reload, while persisting it would make a *cleared* browser store change which documents the client accepts — turning INV-FE-7's "loss is a convenience event" into a behavioral difference. The same rule forecloses the adjacent hazard: **no imported document may write any persisted setting, default, or preference.** An import affects one transaction under review and nothing else, ever.
 
 ### 13.4 Transports and disclosure
 

@@ -421,7 +421,7 @@ The frozen integration contract ([02](02-integration-contract.md), D-2) unblocks
 | FE-7 | `providers` + `tools/snapshot` + sampler + forged-corpus tests | FE-6 | T-5/T-7 suites | 4 |
 | FE-8 | `verify` + release panel + self-check + ArNS cross-check | — | E11/T-1 suites | 3 |
 | FE-9 | Distribution: Vite/Arweave/manifest/SW/CSP/SRI; deploy + repoint tooling | FE-8 | routing/failover suites; staging name live | 4 |
-| FE-10 | Degradation UX (**E1–E23**), error-copy registry, a11y, i18n scaffold, **sudo banner (§11.10)** | FE-5..9 | matrix scripted in Playwright; banner non-dismissability asserted | 4 |
+| FE-10 | Degradation UX (**E1–E25**), error-copy registry, a11y, i18n scaffold, **sudo banner (§11.10)** | FE-5..9 | matrix scripted in Playwright; banner non-dismissability asserted | 4 |
 | FE-11 | Reproducible build + attestations + verify-release CLI + key ceremony | FE-9 | two-environment identical hash | 3 |
 | FE-12 | Perf hardening to budgets ([10](10-frontend-architecture.md)); mobile lab; **AH second-chain memory validated** | all | release gates green on device lab | 3 |
 | FE-13 | Ops handbook, bootnode program, ArNS ceremony, launch ([12](12-release-and-operations.md)) | FE-11 | dry-run rollback executed | 2 |
@@ -474,9 +474,11 @@ Every limit is re-expressed on the confirm screen as the value that will actuall
 ### 11.14.4 Required UX
 
 - The **chain-read identity of the action's target** renders alongside the id at `verified-finalized` status. Id substitution is the sharpest attack this surface admits, and rendering what the id actually resolves to is what defeats it.
+- Every imported value renders with **`external-proposal` status** ([10](10-frontend-architecture.md) §2.1) wherever it is shown — including the asked side of the asked-vs-encoded pair. INV-FE-9 admits no unlabeled rendering path, and a requested ceiling displayed beside a chain-derived one is exactly where an unlabeled number would be mistaken for a verified one.
 - The origin disclosure is **fixed in-bundle copy and non-dismissible**. No format carries a tool-supplied label, because a label reading "Bleavit Official Assistant" inside the confirm flow would be a phishing primitive.
 - Expert mode exposes the full clamp derivation — asked ceiling, chain-derived value at B′, encoded value — alongside the capsule's block height and age, in the same habit §11.4 rule 3 establishes for preconditions.
-- Export requires **per-export consent** with the scope shown. What leaks is linkage rather than content: holdings on a public chain are already a fingerprint, but a capsule pasted into a hosted service ties them to an account in a third party's logs, and it cannot be un-sent.
+- Export requires **per-export consent** with the scope shown, and the **default scope excludes account-specific data** — positions, balances and addresses are opt-in per export, never included because the last export included them. **Pseudonymization MUST be offered** for the account-bearing scopes, and MUST be labelled for what it is: it replaces the address in the capsule and does nothing about the holdings themselves, which remain a fingerprint. What leaks is linkage rather than content: holdings on a public chain are already public, but a capsule pasted into a hosted service ties them to an identity in a third party's logs, and it cannot be un-sent.
+- An imported document **writes nothing that outlives the transaction under review** — no setting, no default, no preference, and no persisted replay record ([10](10-frontend-architecture.md) §13.3).
 
 ### 11.14.5 Scope statement
 

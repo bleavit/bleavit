@@ -379,7 +379,7 @@ Every DESIGN_REVIEW.md finding, its resolution, and the owning component documen
 | F-med: ArNS lease | Moot per D-16 permabuy | 12 |
 | F-med: system.remark | D-14 fixed-layout raw storage key | 09, 12 |
 | F-med: signer disjointness | D-16 | 12, 14 |
-| F-med: provider firewall | Structural enforcement inside `apps/web` too (build-time import boundary, not lint-only) | 10 |
+| F-med: provider firewall | Structural enforcement inside `app/src` too (build-time import boundary, not lint-only) | 10 |
 | F-med: backfill math | Recomputed consistently at 20 blk/s | 10 |
 | F-med: txHistory | Ingest fetches extrinsic bodies for blocks containing the user's extrinsics (only) | 10 |
 | F-med: proof-size conflation | §14.3 corrected | 10 |

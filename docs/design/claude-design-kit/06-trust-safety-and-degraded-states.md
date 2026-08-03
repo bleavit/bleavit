@@ -12,8 +12,15 @@ texts, and doc 14's accepted residual risks "MUST be carried into user-facing ho
 ## 1. The fifteen frontend invariants (doc 15 §2) — design consequences
 
 Canonical provenance labels (exact spellings, INV-FE-9): `verified-finalized`, `verified-best`,
-`derived-local`, `provider`, `stale-cache`. Canonical fail-safe modes (INV-FE-12): `restricted`,
-`read-only-incompatible`.
+`derived-local`, `provider`, `stale-cache`, `external-proposal`. Canonical fail-safe modes
+(INV-FE-12): `restricted`, `read-only-incompatible`.
+
+`external-proposal` (D-21, 10 §2.1) is the newest and the odd one out: it labels a value an
+*external tool requested* — a ceiling, a size — rather than anything observed on the chain, and it
+is the only label with no block reference, because there is nothing it is true *at*. Design
+consequence: wherever an asked value is shown beside the chain-derived one it is clamped to, the
+two must be visually distinguishable at a glance, and the asked one must never be able to read as
+the settled number.
 
 | ID | Rule | What the design must show |
 |---|---|---|

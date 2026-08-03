@@ -85,7 +85,7 @@ denser information, no simplified summaries (11 §11.2).
 3. **Status-quo default is a feature.** Rejection, timeout and dispute all resolve to "nothing
    happens". Copy and visuals treat a rejected proposal as the system working, not failing. (01 §2.1 G-1)
 4. **Honest degradation.** Every failure state has specified visuals, copy and recovery
-   (E-rows E1–E23). Loading is dominated by light-client sync — a first verified render can
+   (E-rows E1–E25). Loading is dominated by light-client sync — a first verified render can
    take ~30–90 s; the design must make that wait legible and trustworthy, not hide it. (10 §9.4, 11 §11.12)
 5. **External traffic is not a governance input.** Hosted-client calls are hard-bounded in both
    weight dimensions and use a separately reserved capacity partition; the welfare dashboard's
