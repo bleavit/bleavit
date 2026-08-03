@@ -59,6 +59,26 @@ Practical consequences:
    protocol math (`packages/protocol`) must match the CI-regenerated vector corpus
    (04 §5, 15 §4.4) — never hand-adjust an expected value. `CRITICAL_SURFACE` is
    generated from `tools/release/surface-manifest.json`, never hand-listed.
+
+   **The rule governs chain *tunables*, not the math kernel** (classified
+   2026-08-03, PLAN.md · Decision log). `packages/protocol` compiles in the 64-entry
+   `exp2` factor table, `ln 2` to 96 bits, the guard-bit count and
+   `LMSR_DOMAIN_BOUND = 48` because the package **is** the 04 §4 kernel: none of
+   those has a 02 §9 row, a `Params` key, or a governance track that can move it,
+   and there is nowhere to read them from. `USDC_ONE` (D-17 identity pin) and
+   `BPS_DENOMINATOR` (the unit 02 §9 publishes `Market::Fee` in) are classified the
+   same way. Everything that *is* a tunable — `mkt.fee`, `mkt.kappa`,
+   `mkt.obs_interval`, `MinTrade`, `MaxTradeRatio` — is a **function argument with
+   no default**, so a caller that forgets one gets a type error rather than a stale
+   launch value baked into a quote. When the no-literal gate lands (F11), carry the
+   kernel constants as a classified group, not as UI-only allowlist entries.
+
+   **Corollary — the port reproduces the runtime's integer path, deliberately.**
+   Arbitrary-precision decimals would be *more accurate* and would be wrong: 04 §6.1
+   refuses a trade when `cost + fee > max_cost`, and three roundings decide the last
+   base unit (`fx` floors, the ×10⁶ rescale truncates, the charge ceils). Never
+   "improve" the precision of `packages/protocol` — a quote a base unit under the
+   chain's own figure hands the user a transaction that reverts.
 8. **Two ledger domains, never merged (11 §11.2a, 10 §11 — contract v23).** The client serves
    external/hosted books as ordinary S3/S4 surfaces. Domain is a property of the **datum**, derived
    by comparing an id you already hold against the **`ConditionalLedger::ServiceIdBase` metadata

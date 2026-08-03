@@ -241,6 +241,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/shared-types
 
+  tests/protocol:
+    dependencies:
+      '@bleavit/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+
 packages:
 
   '@noble/hashes@1.8.0':

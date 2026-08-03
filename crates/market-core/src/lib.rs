@@ -18,6 +18,9 @@ use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use question_service_core::{ClientId, QuestionId};
 use scale_info::TypeInfo;
 
+#[cfg(test)]
+mod quote_agreement;
+
 pub const FEE_BPS: u128 = 30;
 pub const BPS_DENOM: u128 = 10_000;
 pub const MIN_TRADE: Balance = futarchy_primitives::kernel::MIN_TRADE_USDC;
