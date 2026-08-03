@@ -239,6 +239,9 @@ importers:
       '@bleavit/chain-client':
         specifier: workspace:*
         version: link:../../packages/chain-client
+      '@bleavit/mock-runtime':
+        specifier: workspace:*
+        version: link:../../packages/mock-runtime
 
   tests/depcruise-witness:
     dependencies:
