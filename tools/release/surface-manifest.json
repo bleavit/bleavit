@@ -1704,6 +1704,10 @@
           {
             "name": "payout",
             "type": "u128"
+          },
+          {
+            "name": "fee",
+            "type": "u128"
           }
         ]
       }
@@ -1723,6 +1727,10 @@
           },
           {
             "name": "amount",
+            "type": "u128"
+          },
+          {
+            "name": "fee",
             "type": "u128"
           }
         ]
@@ -1747,6 +1755,10 @@
           },
           {
             "name": "amount",
+            "type": "u128"
+          },
+          {
+            "name": "fee",
             "type": "u128"
           }
         ]
@@ -1863,6 +1875,10 @@
           },
           {
             "name": "payout",
+            "type": "u128"
+          },
+          {
+            "name": "fee",
             "type": "u128"
           }
         ]
@@ -3498,6 +3514,10 @@
           {
             "name": "aggregate",
             "type": "futarchy_primitives::FixedU64(u64)"
+          },
+          {
+            "name": "spec_version",
+            "type": "u16"
           }
         ]
       }
@@ -3522,6 +3542,10 @@
           {
             "name": "aggregate",
             "type": "futarchy_primitives::FixedU64(u64)"
+          },
+          {
+            "name": "spec_version",
+            "type": "u16"
           }
         ]
       }
@@ -4033,7 +4057,7 @@
           },
           {
             "name": "cause_hash",
-            "type": "primitive_types::H256([u8;32])"
+            "type": "[u8;32]"
           }
         ]
       }
@@ -4061,7 +4085,7 @@
           },
           {
             "name": "cause_hash",
-            "type": "primitive_types::H256([u8;32])"
+            "type": "[u8;32]"
           }
         ]
       }
