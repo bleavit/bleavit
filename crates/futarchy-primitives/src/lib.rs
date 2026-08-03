@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 22;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 23;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -1910,7 +1910,7 @@ mod tests {
         // N9 is v22: ClientRecord gains trailing USDC delivery_float and the
         // fixed outbound receiver ABI becomes contract surface; FutarchyApi is
         // unchanged.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 22);
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 23);
     }
 
     #[test]

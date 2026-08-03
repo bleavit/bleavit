@@ -598,7 +598,7 @@ class SurfaceManifestTests(unittest.TestCase):
         runtime_apis = [
             entry for entry in self.entries if entry["kind"] == "runtime_api"
         ]
-        self.assertEqual(len(runtime_apis), 12)
+        self.assertEqual(len(runtime_apis), 13)
         for entry in runtime_apis:
             self.assertNotIn("blocked_by", entry, entry["id"])
             # Runtime API layout is resolved from released metadata; this
@@ -818,7 +818,7 @@ class SurfaceManifestTests(unittest.TestCase):
             }.isdisjoint(identifiers)
         )
 
-    def test_all_twelve_runtime_api_methods_are_present(self) -> None:
+    def test_all_thirteen_runtime_api_methods_are_present(self) -> None:
         methods = {
             entry["method"]
             for entry in self.entries
@@ -839,6 +839,11 @@ class SurfaceManifestTests(unittest.TestCase):
                 "recent_cohorts",
                 "open_oracle_rounds",
                 "hosted_report",
+                # Contract v23 (SQ-571): the service ledger's positions. Separate
+                # from `account_positions` because MAX_ACCOUNT_POSITIONS is a
+                # per-instance cap, so one shared return vector could truncate a
+                # user's real holdings (02 §3).
+                "service_positions",
             },
         )
 

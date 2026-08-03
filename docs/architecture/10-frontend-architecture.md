@@ -467,6 +467,12 @@ For orientation (screens and full source matrix: [11-frontend-workflows.md](11-f
 | Layer-3 local index | self-ingested finalized events + opt-in imports | `derived-local` (with coverage) / `provider` | §9.2 auto-tuned |
 | Opt-in providers | snapshots/indexers, empty default list | `provider`, sampled | §8.4 quotas |
 
+**Two ledger domains, one data layer (contract v23, SQ-571).** The first row spans **both** conditional-ledger instances: the primary domain (`()`) and the service domain (`ServiceLedger` = `pallet_conditional_ledger::<Instance1>`), whose `{Vaults, BaselineVaults, Positions, PositionTotals}` became canonical ingest surface at contract v23 ([02](02-integration-contract.md) §7.1). Nothing about provenance changes — both are smoldot finalized storage reads and both yield `Finalized<T>` on the same terms — so this adds a **dimension to the data, not a status to `VerificationStatus`**. Three consequences the store layer must carry rather than leave to screens:
+
+- **Domain is a property of the datum, not of the query that fetched it.** A position, vault or book record carries its domain from `kernel::SERVICE_ID_BASE = 1 << 63` ([16](16-hosted-question-service.md) §7.1) — a total function of an id the client already holds. Deriving it from call site or cache key instead is how a service row ends up rendered as a primary one after a refactor.
+- **The two domains never aggregate.** I-4 solvency is per instance against its own sovereign, so any store selector producing a combined total is wrong at the data layer, not merely at the display layer ([11](11-frontend-workflows.md) §11.2a rule 2). Per-domain selectors only.
+- **The FE-P2 conservative cross-check is per domain.** While FE-P2 is unresolved every `FutarchyApi` result on the transaction path is re-derived from direct storage reads (§4.2); `service_positions()` cross-checks against the `ServiceLedger` prefix and `account_positions()` against instance `()`. Satisfying one with the other's keys would make the check vacuous in exactly the case it exists for.
+
 ---
 
 ## 12. Prototype experiments and open questions (carried forward, updated)

@@ -59,19 +59,30 @@ Practical consequences:
    protocol math (`packages/protocol`) must match the CI-regenerated vector corpus
    (04 §5, 15 §4.4) — never hand-adjust an expected value. `CRITICAL_SURFACE` is
    generated from `tools/release/surface-manifest.json`, never hand-listed.
-8. **Local storage is disposable (INV-FE-7).** The transaction path never reads
+8. **Two ledger domains, never merged (11 §11.2a, 10 §11 — contract v23).** The client serves
+   external/hosted books as ordinary S3/S4 surfaces. Domain is a property of the **datum**, derived
+   from `SERVICE_ID_BASE = 1 << 63` on an id you already hold — never from the call site, the cache
+   key, or a name. **No selector, store slice or component may produce a cross-domain total**:
+   solvency (I-4) holds per instance against its own sovereign account, so a merged figure asserts a
+   backing pool that does not exist. `account_positions()` ↔ instance `()`, `service_positions()` ↔
+   `ServiceLedger`; the FE-P2 conservative cross-check runs against that domain's own prefix, never
+   the other's. External activity renders as an operational diagnostic, never as governance
+   participation or protocol health.
+9. **Local storage is disposable (INV-FE-7).** The transaction path never reads
    IndexedDB; rebuilds are automatic; treat eviction as a performance event.
-9. **Fail safe (INV-FE-12).** Unknown runtime ⇒ explicit `restricted`/`read-only-
-   incompatible` modes; undecodable data renders as raw SCALE with a warning; never
-   guess at encodings. Platform and signer capabilities are a fail-closed lattice: an
-   unproven capability is **absent**, and absence disables the dependent surface with
-   a named reason — never a silent fallback.
-10. **Imported intents are input, not data (10 §10.2, 11 §11.14).** An intent supplies
+10. **Fail safe (INV-FE-12).** Unknown runtime ⇒ explicit `restricted`/`read-only-
+    incompatible` modes; undecodable data renders as raw SCALE with a warning; never
+    guess at encodings. Platform and signer capabilities are a fail-closed lattice: an
+    unproven capability is **absent**, and absence disables the dependent surface with
+    a named reason — never a silent fallback.
+11. **Imported intents are input, not data (10 §10.2, 11 §11.14).** An intent supplies
     a choice among a closed action set, an id, and ceilings — nothing else. It carries
     no free text and no bytes-typed field; `action` and `limits` are closed objects and
     an unknown key inside them is refused (`FE-HANDOFF-004`). Bleavit **never widens a
     limit, only narrows it**. Never accept an encoded call from any external source.
-11. **Pinned versions.** The stack pins live in 01 §9 / 10 — PAPI 2.x, smoldot 3.x,
+    A capsule MUST carry a labelled book `kind` so an external book's prices can never
+    leave the app looking like a governance market's (11 §11.2a).
+12. **Pinned versions.** The stack pins live in 01 §9 / 10 — PAPI 2.x, smoldot 3.x,
     Vite 8, Dexie 4, Tauri 2.x. Do not bump majors without a PLAN.md decision-log
     entry. `app/` is its own pnpm workspace and its own cargo workspace (excluded from
     the root one); never let its dependency tree reach the runtime pins.

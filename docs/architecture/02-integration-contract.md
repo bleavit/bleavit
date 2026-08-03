@@ -128,9 +128,9 @@ The crate re-exports `INTEGRATION_CONTRACT_VERSION`, exposed as a `pallet-consti
 
 ---
 
-## 3. `FutarchyApi` runtime API (12 methods, normative)
+## 3. `FutarchyApi` runtime API (13 methods, normative)
 
-Declared in the `runtime-api/` crate; **the runtime MUST implement all 12 methods**. All view types are plain SCALE structs in `futarchy-primitives` (§4/§4a) under the append-only discipline, so the TypeScript side decodes them with generated descriptors. API collections use the shipped const-generic `futarchy_primitives::BoundedVec<T, N>` composite wrapper (a `Vec<T>` field under that exact type path), not FRAME's `BoundedVec<T, ConstU32<N>>`; the generated metadata path and composite form are part of the freeze. All methods are read-only, executed by callers via `chainHead_call` through the light client — no dispatch weight; implementations MUST be O(bounded-collection) with the bounds shown (every backing map is bounded).
+Declared in the `runtime-api/` crate; **the runtime MUST implement all 13 methods**. All view types are plain SCALE structs in `futarchy-primitives` (§4/§4a) under the append-only discipline, so the TypeScript side decodes them with generated descriptors. API collections use the shipped const-generic `futarchy_primitives::BoundedVec<T, N>` composite wrapper (a `Vec<T>` field under that exact type path), not FRAME's `BoundedVec<T, ConstU32<N>>`; the generated metadata path and composite form are part of the freeze. All methods are read-only, executed by callers via `chainHead_call` through the light client — no dispatch weight; implementations MUST be O(bounded-collection) with the bounds shown (every backing map is bounded).
 
 ```rust
 sp_api::decl_runtime_apis! {
@@ -143,7 +143,8 @@ sp_api::decl_runtime_apis! {
         fn quote(market: MarketId, side: TradeSide, amount: Balance) -> QuoteView;   // ≤ 96 B
         /// Finalized decision statistics from sealed registered windows (incl. D-4 sizing).
         fn decision_stats(pid: ProposalId) -> Option<DecisionStatsView>;             // ≤ 512 B
-        /// All positions of an account across proposal, gate and Baseline instruments.
+        /// All positions of an account across proposal, gate and Baseline instruments,
+        /// in the **primary** ledger domain (instance `()`) only — see `service_positions`.
         fn account_positions(who: AccountId) -> futarchy_primitives::BoundedVec<PositionView, 64>;
         /// Execution queue incl. maturity/grace/version/ratification state.
         fn execution_queue() -> futarchy_primitives::BoundedVec<QueuedExecutionView, 32>;
@@ -159,9 +160,14 @@ sp_api::decl_runtime_apis! {
         fn open_oracle_rounds() -> futarchy_primitives::BoundedVec<OracleRoundView, 192>; // ≤128 live (16×4×2 per-version); cap 192
         /// Immutable hosted-question report projection once the question is sealed.
         fn hosted_report(question_id: QuestionId) -> Option<ReportView>;
+        /// All positions of an account in the **service** ledger domain
+        /// (`ServiceLedger` = `pallet_conditional_ledger::<Instance1>`, §7.1).
+        fn service_positions(who: AccountId) -> futarchy_primitives::BoundedVec<PositionView, 64>;
     }
 }
 ```
+
+**The two position methods are separate by necessity, not by taste.** `MAX_ACCOUNT_POSITIONS = 64` is a per-account cap enforced *within* each ledger instance, so an account may lawfully hold 64 primary and 64 service positions at once. Merging both domains into one 64-slot return would make truncation reachable for ordinary user accounts — and truncation here is not a display artifact but money the canonical client would not show. The implementations' shared truncation argument ("user accounts cannot exceed the bound; [13](13-parameters.md) §4 exempts only protocol accounts") is instance-scoped, and it stays true only while each domain answers in its own vector. `PositionView` is unchanged and identical in both, and the id bands of [16](16-hosted-question-service.md) §7.1 (`kernel::SERVICE_ID_BASE = 1 << 63`) make a returned position's domain decidable from its id alone, so a consumer that concatenates the two results never has to guess which domain a row came from.
 
 `decision_stats(pid)` MUST return `None` until the proposal's registered decision windows have been sealed and every input required by the decision path is evaluable. It is a finalized decision-statistics view, not an in-Trade projected TWAP.
 
@@ -410,10 +416,37 @@ Push-failure and ingress-metering events meet none of (a)–(c) and are pallet-l
 | `Questions: map QuestionId → QuestionRecord` | `{ client_id: ClientId, phase: QuestionPhase, window_start: BlockNumber, window_end: BlockNumber, declared_stake: Balance, epsilon_1e9: FixedU64, tolerance_1e9: FixedU64, markets: [MarketId; 2] }` | `svc.max_live` live + retention |
 | `Reports: map QuestionId → ReportView` | as above | one per sealed question, retained to archive |
 
-**§7.1 scoping (normative).** Every existing conditional-ledger row in §7 is scoped to instance
-`()`. `ServiceLedger` (`pallet_conditional_ledger::<Instance1>`) has its own storage prefix and is
-**not** canonical-frontend ingest surface; a frontend reading the ledger's raw keys reads the
-primary domain only.
+**§7.1 scoping (normative; reversed at v23, 2026-08-03).** Every conditional-ledger row named in §7
+without qualification is scoped to instance `()`. `ServiceLedger`
+(`pallet_conditional_ledger::<Instance1>`) has its own storage prefix, and **its
+`{Vaults, BaselineVaults, Positions, PositionTotals}` rows are canonical-frontend ingest surface**
+under exactly the shapes, bounds and key orders §7.4 freezes for the primary instance — the two
+instances are the same pallet, so no second set of shapes is being frozen here.
+
+Until v23 this paragraph said the opposite, and the exclusion was wrong in a way worth recording
+rather than quietly deleting. Every other layer of the system already admits a Bleavit account into
+a hosted book: `market.buy` is a `CallDomain::Public` call ([16](16-hosted-question-service.md)
+§6.2), `LedgerRoute::for_book` routes such a trade to `Instance1` with no caller-visible difference,
+`quote()` prices external books through the same physical `Markets` map (§7.4), and 16's economics
+depend on it — the fee term is sized on organic order flow, and an underfunded client is expected to
+reach its certificate *out of ordinary trader activity* ([16](16-hosted-question-service.md) §10).
+The excluded surface was therefore not an unused one: it was the record of money real users can
+already commit, hidden from the one client whose stated purpose is proving what it shows. A client
+that cannot read it does not degrade gracefully — it reports a balance that is missing a position,
+which INV-FE-1's honesty obligation does not survive.
+
+**What the reversal does not license.** Admission to the ingest surface is a *read* grant and
+nothing more. External books remain outside every governance and welfare input: `H` is computed on
+primary/system usage, never by subtracting service traffic, and no service-domain row may feed a
+decision statistic, a gate, a NAV component or a welfare pillar ([16](16-hosted-question-service.md)
+§8.5, [05](05-welfare-and-decision-engine.md)). The client MUST render the two domains as
+distinguishable at a glance and MUST NOT aggregate them into a single portfolio total that implies
+one solvency pool — [03](03-conditional-ledger.md)'s I-4 solvency invariant holds *per instance,
+against its own sovereign account*, which is the whole reason the second instance exists
+([16](16-hosted-question-service.md) §7.1), and a merged total would assert a guarantee neither
+domain gives. The id bands make this cheap rather than a matter of care: `kernel::SERVICE_ID_BASE
+= 1 << 63` partitions every question, book, vault and position id, so domain is a single bit test on
+an id the client already holds, not a lookup it could get wrong.
 
 **§9 additions — metadata constants.** `QuestionService::FeeFloor`, `QuestionService::MaxLive`,
 `QuestionService::MaxWindow`, `QuestionService::EpsilonMin`, `ClientRegistry::ClientBond`, and
@@ -435,9 +468,10 @@ an exact top-up from reaping uncredited source dust. Existing call indices do no
 push is not a dispatchable on Bleavit: it is
 the fixed v5 program of [16](16-hosted-question-service.md) §9, whose sole `Transact.call` is
 `[66u8, 0u8] ++ SCALE(ReportView)`. Client runtimes reserve pallet index `66` for the drop-in
-`QuestionServiceReceiver` and call index `0` for `receive_report(report)`. `FutarchyApi` remains at
-12 methods and its `sp_api` version does not move; `transaction_version` remains independent and is
-unchanged for these additive calls.
+`QuestionServiceReceiver` and call index `0` for `receive_report(report)`. **This egress surface adds
+no `FutarchyApi` method and does not move its `sp_api` version** — it left the API at the 12 methods
+of v22, and v23's separate `service_positions` append is what carries it to 13 (§3);
+`transaction_version` remains independent and is unchanged for these additive calls.
 
 ---
 
@@ -565,7 +599,7 @@ Events:
 | `Markets` | `map MarketId → MarketBook<AccountId>` | One physical map with two independently enforced logical partitions: ≤ `MaxStoredMarkets = 2,240` primary rows, of which ≤ `MaxLiveMarkets = 196` lack a durable terminal latch; plus ≤ `MaxStoredExternalMarkets = 128` external rows, of which ≤ `MaxLiveExternalMarkets = 128` lack the paired service-terminal latch. The physical ceiling is therefore `MaxAllStoredMarkets = 2,368` *(normative values: [13](13-parameters.md))* and external backlog cannot consume the primary POL envelope. Contract v20 appends `BookKind::External { question: QuestionId, client: ClientId, branch: Branch }`; its two rows are created atomically and route only to `ServiceLedger`, while every pre-v20 kind routes only to instance `()`. First terminal observation removes the book's checkpoint/decision-window auxiliaries and releases the applicable domain's live slot; only a primary book releases POL. Once the latch, archive delay **and the book's domain-correct revenue-sweep marker** permit reap, it atomically discards only the book/fee accounts' fixed-universe **residual** inventory, removes their protocol-account registrations, the book and any `BaselineMarketOf` inverse; it neither waits for nor removes the owning ledger vault, marker or claimant rows. `MarketState` is the frame-free core's whole-state aggregate and is not the stored value |
 | `pallet-inflow-caps::CumulativeDeposits` | `map AccountId → u128` | Per-account cumulative XCM USDC inflow meter for the Phase-3 deposit-cap precheck ([09](09-execution-upgrades-and-rollout.md) §5.2) |
 
-`pallet-conditional-ledger::{Vaults, BaselineVaults, Positions, PositionTotals}` — note the **key order of `Positions` is `(PositionId, AccountId)`** (per-vault drainable, B-med); a per-account storage prefix scan is therefore NOT available, and the frontend MUST use `account_positions()` (the runtime API iterates the bounded live-vault set) or the per-account key index maintained by the ledger ([03](03-conditional-ledger.md)). `pallet-execution-guard::{Queue, Ratifications, ExecutionRecords}` (a `RatificationRecord` is written by the frozen governance call `execution_guard.ratify(proposal_id, referendum_index)`, binding `(pid, payload_hash)` — [06 §2.2](06-governance-and-guardians.md)); `pallet-welfare::{Snapshots, MetricSpecs, GateBreachFlags}`; `pallet-guardian` membership/allowances; `System.Account`, `ForeignAssets.Account(USDC_LOCATION, who)` (NOT `Assets.Account(1337, who)` — X-11a; the USDC identifier is the XCM Location of §8).
+`pallet-conditional-ledger::{Vaults, BaselineVaults, Positions, PositionTotals}` — note the **key order of `Positions` is `(PositionId, AccountId)`** (per-vault drainable, B-med); a per-account storage prefix scan is therefore NOT available, and the frontend MUST use `account_positions()` (the runtime API iterates the bounded live-vault set) or the per-account key index maintained by the ledger ([03](03-conditional-ledger.md)). **Both statements hold identically for the `ServiceLedger` instance, whose method is `service_positions()`** (§3, §4a scoping): the key order is a property of the pallet, not of the instance, so the service domain is exactly as prefix-unscannable and is enumerable only the same two ways. A frontend operating under the FE-P2 conservative posture — cross-checking every runtime-API result used on the transaction path against direct storage reads (§3) — performs that cross-check per domain against that domain's own prefix, and MUST NOT satisfy a service-domain read with a primary-domain key. `pallet-execution-guard::{Queue, Ratifications, ExecutionRecords}` (a `RatificationRecord` is written by the frozen governance call `execution_guard.ratify(proposal_id, referendum_index)`, binding `(pid, payload_hash)` — [06 §2.2](06-governance-and-guardians.md)); `pallet-welfare::{Snapshots, MetricSpecs, GateBreachFlags}`; `pallet-guardian` membership/allowances; `System.Account`, `ForeignAssets.Account(USDC_LOCATION, who)` (NOT `Assets.Account(1337, who)` — X-11a; the USDC identifier is the XCM Location of §8).
 
 ### 7.5 `pallet-attestor`
 
@@ -596,7 +630,7 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 | VIT decimals | 12 |
 | VIT existential deposit | **0.01 VIT** (= 10^10 plancks) |
 | Phase flag storage | `pallet-constitution::PhaseFlags` (§7.3) — the trading-enablement key |
-| Contract version | `INTEGRATION_CONTRACT_VERSION` (runtime constant) — **`22` in force** (§13's history is the authority; read the constant, never a prose copy of it) |
+| Contract version | `INTEGRATION_CONTRACT_VERSION` (runtime constant) — **`23` in force** (§13's history is the authority; read the constant, never a prose copy of it) |
 
 ---
 
@@ -781,7 +815,8 @@ No other origin can write the record. The layout MUST NEVER change except by app
 
 **Version history.**
 
-- **v22 (2026-08-02) — client-paid hosted-report egress (D-20, N9). IN FORCE.** N9 implements both report-delivery legs without changing the v21 `ReportView`, `hosted_report` method, API method count or `sp_api` version. It appends `delivery_float: Balance` to `ClientRecord` after `questions_total`, fixes that field as USDC liability distinct from the native VIT bond, appends exact-client call indices 3/4 for top-up/withdrawal (including the trailing `DeliveryFloatBelowMinimum` and `DeliveryFundingWouldDust` refusals), and freezes the sole outbound receiver call as `[66, 0] ++ SCALE(ReportView)`. The pallet-local push counters and monitoring-only `TelemetryApi` v4 remain outside this contract. No existing field offset, discriminant or call index moves. `INTEGRATION_CONTRACT_VERSION` is **22**; the additive client calls leave `transaction_version` unchanged under rule 7. This is pre-genesis, so the widened storage value needs no deployed-state migration. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-08-02, through the standing autonomous-resolution delegation.**
+- **v23 (2026-08-03) — the canonical client serves external books (D-20, SQ-571). IN FORCE.** A scope ruling by the user, and a repair of a defect it exposed. **What changes.** (i) §4a's **§7.1 scoping paragraph is reversed**: `ServiceLedger`'s `{Vaults, BaselineVaults, Positions, PositionTotals}` become canonical-frontend ingest surface under the *same* shapes, bounds and key orders §7.4 already freezes — two instances of one pallet, so no second shape set is frozen and nothing about instance `()` moves. (ii) §3 gains a **thirteenth** method, `service_positions(who) -> BoundedVec<PositionView, 64>`, appended after `hosted_report`; the twelve existing methods keep their names, signatures and order byte-for-byte, and the additive method bumps the `sp_api` version per §13 rule 2. **Why a second method and not a wider first one.** `MAX_ACCOUNT_POSITIONS = 64` is enforced per account *per instance*, so 64 primary and 64 service positions are simultaneously lawful; a merged return would make truncation reachable for ordinary users, and the runtime's own truncation-safety argument — that only [13](13-parameters.md) §4-exempt protocol accounts can overflow — is instance-scoped and would silently become false. Truncating here hides money rather than detail, so the shape follows the invariant instead of the aesthetics. **Why it is named for the domain.** `hosted_report` is named for the product a client buys; this is named for the ledger instance the rows live in, matching §7.1's `ServiceLedger` and [16](16-hosted-question-service.md) §7.1's `LedgerRoute::Service`/`SERVICE_ID_BASE` vocabulary, so the method and the storage a consumer cross-checks it against carry the same word. **What does not change.** No existing SCALE type, view type, storage key, event, constant or call index; `PositionView` is untouched and identical across both domains; no dispatchable is added, so `transaction_version` is untouched under rule 7. **What the grant explicitly is not.** Read admission only: external books stay out of every governance and welfare input, `H` remains primary/system-based and never a subtractive service exclusion, and the client MUST NOT present one merged portfolio total — I-4 solvency is per instance against its own sovereign, which is why the instance exists at all ([16](16-hosted-question-service.md) §7.1). **The defect this repairs, stated plainly:** every other layer already admitted Bleavit accounts into hosted books — `market.buy` is `CallDomain::Public`, `LedgerRoute::for_book` routes the trade with no caller-visible difference, `quote()` already prices external books through the shared `Markets` map, and 16's fee economics *assume* organic trader flow — while this document alone forbade the canonical client from reading the resulting position. The client could take a user's money into a hosted book and then not show it. **Pre-genesis revision** — no runtime is deployed, so §13's point-3 migration clause does not apply. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-08-03, by explicit ruling ("the canonical app should serve external books too").**
+- **v22 (2026-08-02) — client-paid hosted-report egress (D-20, N9). Superseded by v23.** N9 implements both report-delivery legs without changing the v21 `ReportView`, `hosted_report` method, API method count or `sp_api` version. It appends `delivery_float: Balance` to `ClientRecord` after `questions_total`, fixes that field as USDC liability distinct from the native VIT bond, appends exact-client call indices 3/4 for top-up/withdrawal (including the trailing `DeliveryFloatBelowMinimum` and `DeliveryFundingWouldDust` refusals), and freezes the sole outbound receiver call as `[66, 0] ++ SCALE(ReportView)`. The pallet-local push counters and monitoring-only `TelemetryApi` v4 remain outside this contract. No existing field offset, discriminant or call index moves. `INTEGRATION_CONTRACT_VERSION` is **22**; the additive client calls leave `transaction_version` unchanged under rule 7. This is pre-genesis, so the widened storage value needs no deployed-state migration. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-08-02, through the standing autonomous-resolution delegation.**
 - **v21 (2026-08-01) — hosted questions and reports (D-20, N7). Superseded by v22.** N6 made the market half of D-20 real at v20; N7 now lands the remaining surface atomically. It adds the twelfth `FutarchyApi` method `hosted_report(question_id) -> Option<ReportView>` and its §4a types; `QuestionRegistered`, `QuestionSealed`, `QuestionSettled` and `QuestionVoided`; the `Clients`, `Questions` and `Reports` contract storage; and the `svc.*`/client-registry metadata constants. The additive runtime-API method also bumps the `sp_api` version. `INTEGRATION_CONTRACT_VERSION` is **21**; `transaction_version` remains independent. No authored §4a shape changed while implementing it. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-08-01, through the standing autonomous-resolution delegation.**
 - **v20 (2026-08-01) — external market books (D-20, N6). Superseded by v21.** N6 changes the schema a metadata/direct-storage consumer can already observe, so leaving the constant at 19 until the rest of Track N would violate rule 2. Additively: (i) `MarketBook.kind` gains the trailing `External { question, client, branch }` variant and `Markets` gains independently bounded 196-live/2,240-retained primary and 128-live/128-retained external partitions, with `MaxAllStoredMarkets = 2,368`; (ii) the trailing `ExternalRevenueSwept { market, fee_to_main, subsidy_returned }` event distinguishes treasury-owned service fees from exact-funder subsidy return; (iii) §7.1 makes explicit that the existing conditional-ledger keys name instance `()`, while the service `Instance1` prefix is not canonical-frontend ingest; and (iv) §9 adds `MaxLiveExternalMarkets`, `MaxStoredExternalMarkets` and `MaxAllStoredMarkets`. The release runtime binds external creation fail-closed until N7 supplies the service authority/ledger, but the v20 SCALE/storage/metadata surface itself is present. No existing field, key, discriminant or call index moves; no runtime-API method or dispatchable is added; `transaction_version` is untouched. The additive storage and value-shape revisions are pre-genesis, so no deployed state requires migration. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-08-01, through the standing autonomous-resolution delegation.**
 - **v19 (2026-08-01) — a reporter default settles neutral, and the §3 ladder survives exit (oracle security PR). Superseded by v20.** *Renumbered from v18 on rebase: E6 (#201) merged onto that number first, and §13 entries are allocated in **merge order, not authoring order** — the number a not-yet-merged branch reserves is provisional until it lands.* Two §7.2 **behaviour** changes, no shape change; listed as a contract change under the v15 precedent, because a frontend reading these maps directly observes something the old notes did not describe. (i) `ComponentValues` no longer produces `SettlePath::ChallengerDefault`. [07](07-oracle-and-disputes.md) §5.3's forward settlement let one economic party occupy both roles — this document freezes no distinctness and 07 §4's "entity registry per 05" does not exist — and terminate a game at round 1 risking `B_1` against a `Δs_max` that 07 §6.3 sized against the full `(2^R_max − 1)·B_1` ladder; against §6.3's own worked example the attacker's net moved from the intended −90,000 to +102,000, at 8.6 % of the required ladder. The repair is on the value side because §5.3's own closing sentences forbid debiting an unfunded stack. The variant is **retained**, so no discriminant moves and `SettlePath`'s SCALE encoding is byte-identical. (ii) `Reporters` gains a retention/continuity rule: the 07 §3 offense record survives `deregister_reporter` and ejection in a pallet-internal, non-§7 store, re-registration carries it forward and re-seats at the 07 §2(5) half stake past the second offense, and an ejected account is refused. Neither the `ReporterInfo` nor the `SettledComponent` value shape changes; the new store is an **additive internal storage item** and is not contract surface (§7's own rule, and the v17 precedent). No event name or field shape moves — the one new pallet event (`ReporterRecordsFull`) fails §6's criteria (a)–(c) and is an off-contract operational diagnostic. Two trailing pallet error variants only (the v8 precedent). No call index moves and no dispatchable is added, so per §13 rule 7 `transaction_version` is untouched. **Pre-genesis revision** — no runtime is deployed, so §13's point-3 migration clause does not apply. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-31, through the standing autonomous-resolution delegation.**
@@ -814,7 +849,7 @@ No other origin can write the record. The layout MUST NEVER change except by app
 
 | Finding | Resolution in this document |
 |---|---|
-| X-1a | §3–§4a: the complete 12-method `FutarchyApi` with every view type fully defined in `futarchy-primitives`; light-client-callable; P-5/P-7 and D-20 applied and completed |
+| X-1a | §3–§4a: the complete 13-method `FutarchyApi` with every view type fully defined in `futarchy-primitives`; light-client-callable; P-5/P-7 and D-20 applied and completed |
 | X-1b | §5: `Traded { market, side, amount, cost, p_after }` and `Observed { market, o_t }` with an explicit Events table for `pallet-market` |
 | X-1c | §7.1: `RecentCohortSummaries` ring (last **32** cohorts) added to `pallet-epoch` storage — the §5.2.3 storage-list edit P-5 missed — with push point, eviction and weight argument |
 | X-10 | §7.4: `BaselineMarketOf: map EpochId → MarketId` declared (in `pallet-market`, per [04 §8.3](04-markets-and-pricing.md)) as the backing storage for Baseline-market discovery, with write point and pruning rule |

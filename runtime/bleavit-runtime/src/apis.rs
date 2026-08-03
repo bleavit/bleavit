@@ -143,6 +143,15 @@ impl_runtime_apis! {
         ) -> Option<futarchy_primitives::ReportView> {
             crate::views::hosted_report(question_id)
         }
+
+        fn service_positions(
+            who: futarchy_primitives::AccountId,
+        ) -> futarchy_primitives::BoundedVec<
+            futarchy_primitives::PositionView,
+            { futarchy_primitives::bounds::MAX_ACCOUNT_POSITIONS },
+        > {
+            crate::views::service_positions(who)
+        }
     }
 
     impl futarchy_runtime_api::TelemetryApi<Block> for Runtime {

@@ -1115,6 +1115,35 @@ owns the regime.
 
 ---
 
+## 12a. The canonical client serves these books (SQ-571, contract v23)
+
+This document specifies the service; it does not specify a frontend, and the two client-facing
+documents own that. Recorded here because the boundary was previously drawn in the wrong place and a
+reader of §6.2/§7.1 alone would still infer the old one.
+
+The **canonical Bleavit client serves external books as ordinary trading and position surfaces**
+([11](11-frontend-workflows.md) §11.2a): `BookKind::External` books trade on S3, and holdings in them
+appear on S4 through the thirteenth `FutarchyApi` method `service_positions()` or the `ServiceLedger`
+storage prefix, both admitted to the canonical ingest surface at contract v23
+([02](02-integration-contract.md) §3, §7.1).
+
+Nothing in this document changes as a result, and that is the point: every mechanism it specifies
+**already admitted the Bleavit public**. `market.buy` is a `CallDomain::Public` call (§3.1), a trade
+in a hosted book is an ordinary signed dispatch (§8.1), `LedgerRoute::for_book` routes it into
+`Instance1` with no caller-visible difference (§7.1), and §8's revenue arithmetic is *sized on organic
+order flow* — §8.2's instrument-D term is the larger one only if external traders show up, and §5.2
+expects an underfunded client to reach its certificate out of that same organic activity. What was
+missing was not permission but **visibility**: contract 02 excluded the service instance from
+canonical ingest, so the client could route a user's money into a hosted book and then be unable to
+show the position it created.
+
+Two properties this document *does* own remain binding on that client, and
+[11](11-frontend-workflows.md) §11.2a restates them as rules rather than leaving them inferred:
+per-instance solvency means the client **MUST NOT** present one merged portfolio total across the two
+domains (§7.1's whole argument for instancing), and §8.5's quota discipline means external activity is
+rendered as an **operational diagnostic and never as governance participation or protocol health** —
+`H` is primary/system usage, never a subtractive service exclusion.
+
 ## 13. Non-goals
 
 - **Bleavit does not decide for clients.** No client rule, threshold or payload is evaluated for its
