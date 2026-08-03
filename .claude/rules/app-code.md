@@ -42,6 +42,13 @@ Practical consequences:
    indexer, no RPC, no provider, no external tool, cleared storage. If a feature needs
    a server, it is out of scope — do not centralize it. **No MCP** in any form: no
    local or hosted server, no tunnel, no sidecar, no background service (D-21).
+   **The handoff is the *default* surface (11 §11.2) but never load-bearing:
+   demoting a screen behind "Advanced" is permitted, removing one is not.** The two
+   properties are independent, and the one that matters is asserted by the 15 §4.8
+   no-infra certification run — which executes with the handoff surfaces disabled, so
+   a screen that only exists on the imported-action path fails it. When simplifying the
+   front door, move surfaces; never delete them, and never make one reachable *only*
+   through an external tool.
 6. **No telemetry, no remote config (INV-FE-13).** No analytics, no fetch-to-configure
    patterns; behavior changes only by shipping a new verifiable release. The handoff
    packages contain **no network primitive at all** — `fetch`, `XMLHttpRequest`,

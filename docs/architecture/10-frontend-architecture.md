@@ -547,6 +547,8 @@ Every confirm screen reached from an import carries a **fixed, non-dismissible**
 
 Convenience only. No protocol workflow depends on this subsystem, every action expressible as an intent is a strict subset of what the transaction screens already do by hand, and disabling the whole thing breaks no INV-FE-4 workflow — which is why the no-infrastructure certification run is executed with these surfaces disabled ([15](15-invariants-and-testing.md) §4.8). DB-5 holds by construction: convenience is not load-bearing.
 
+**This survives the handoff being the client's default surface ([11 §11.2](11-frontend-workflows.md), 2026-08-03), and the two statements are not in tension.** *Default* is which surface a user meets first; *load-bearing* is whether a workflow can be completed without it. Only the first changed. The test that keeps them apart is mechanical and already exists: the certification run disables these surfaces and every INV-FE-4 workflow must still complete. A release in which that run fails has made the subsystem load-bearing regardless of what this section claims, which is why the property is asserted by a suite and not by this paragraph.
+
 The residual this subsystem cannot remove is that a persuasive tool can shape a user's judgement. It cannot alter the client, or the client's reading of chain state, or what the user is shown before signing — but it can argue for a bad trade, and no detection mechanism changes that. It is recorded as an accepted residual in the [14](14-threat-model.md) TH-49 class, and the control is the transaction boundary, not detection.
 
 ---

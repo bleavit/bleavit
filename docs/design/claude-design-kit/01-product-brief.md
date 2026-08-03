@@ -53,6 +53,16 @@ The **canonical client is itself decentralized** (10, 11, 12):
 - **Transaction safety is a visible ritual**: before any signature, the app re-checks every
   precondition against a freshly finalized block and shows expected-vs-actual; the confirm
   screen is decoded from the exact bytes being signed, never from form state. (11 §11.3–§11.4)
+- **The default navigation is handoff-first** (11 §11.2, user ruling 2026-08-03). Two primary
+  surfaces — *prepare a capsule for an external tool* (S21) and *review, confirm and sign*
+  (S22 + the confirm flow); everything analytical sits behind **"Advanced."** The analysis,
+  explanation and visualization a dashboard would carry is expected to happen in an external
+  tool, and the client's job narrows to the part only it can do: re-read the chain and build the
+  bytes. **This is presentation, not architecture** — every screen still ships, still works with
+  no external tool present, and the no-infrastructure certification run still executes with the
+  handoff surfaces disabled. Demoting a surface is permitted; removing one would falsify
+  INV-FE-4. Design consequence: the **confirm screen carries the density that left the
+  dashboard**, and it is the surface most users will meet most often.
 - The app must be honest when degraded: light-client sync states, peer loss, incompatible
   runtime, missing history ("holes" render as visible gaps, never interpolated), unverified
   RPC fallback mode with a persistent warning banner. (10 §3, §6; 11 §11.12)
@@ -120,7 +130,10 @@ denser information, no simplified summaries (11 §11.2).
 
 ## 6. Current status
 
-Specification is complete and frozen; implementation has not started. This design prototype is
-a **precursor artifact for Track F** (frontend) of PLAN.md — it explores what the specified
-product should look like. It must therefore *conform to* the spec's UX obligations, but visual
-style, layout, typography and identity are open design territory.
+The specification is complete; the client is **early in implementation** (PLAN.md Track F: F19
+spec batch and F0 scaffold ✅ as of 2026-08-03 — workspace, compilation firewall and the
+`Finalized<T>` boundary exist; no screen does). This design work is therefore no longer a
+precursor to an empty directory: it feeds F7, the first screen milestone, and the shape it
+chooses will be built. It must *conform to* the spec's UX obligations, but visual style, layout,
+typography and identity remain open design territory — nothing in `docs/architecture/` governs
+them, and no palette, type scale or component library exists yet.
