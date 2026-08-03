@@ -42,6 +42,16 @@ canonical-app screen, screen ID, or user workflow in this iteration because doc 
 an integration concept appears, keep it outside the canonical app and preserve the central claim:
 Bleavit sells conditional prices with provenance, not decisions or endorsements.
 
+**External books are not Bleavit markets, and the design must not let them look like one
+(SQ-571, open).** `Markets` is one physical map holding both partitions, so anything that
+enumerates markets will meet `BookKind::External` rows — hosted questions belonging to a
+registered external client, carrying no proposal, no epoch and no governance decision. Whether the
+canonical app serves them at all is an open scope ruling; **until it is ruled, design to the
+fail-closed reading**: an external book is out of scope, renders no quote and no trade action, and
+never enters an exported capsule. Rendering one beside a governance market with the same treatment
+would imply Bleavit decided or endorsed a question it merely priced for someone else — which is the
+one claim doc 16 exists to keep separate.
+
 ## The product's shape — read this before the deliverable
 
 **Bleavit is handoff-first (11 §11.2, user ruling 2026-08-03).** The client has **two primary
