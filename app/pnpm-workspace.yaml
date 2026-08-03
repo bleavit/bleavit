@@ -7,3 +7,4 @@ packages:
   - 'src/features/*'
   - 'tests/firewall'
   - 'tests/depcruise-witness'
+  - 'tests/protocol'

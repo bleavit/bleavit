@@ -295,6 +295,13 @@ jobs:
         # The only suite that tests the firewall REJECTS rather than that the app
         # works. Includes an anti-vacuity positive control.
         run: pnpm run test:firewall
+      - name: Protocol math vs the reference corpus (04 §5, 15 §4.8)
+        working-directory: app
+        # Reads `reference-model/fixtures/vectors.json` in place — the single
+        # generated artifact the backend certifies against too (04 §5, rule 1),
+        # never a copy under `app/`. The suite fails closed if the corpus is
+        # missing or if its exact integers lose precision on load.
+        run: pnpm run test:protocol
       - name: Finalized<T> assertion gate (10 §2.1)
         working-directory: app
         run: pnpm run check:casts
