@@ -708,10 +708,16 @@ TWAPs are the slew-capped accumulator means of [doc 04](./04-markets-and-pricing
 
 ### 5.5 Reason-code truth table (steps 1–11)
 
+**Steps 6–8 do not short-circuit (normative; SQ-552 resolution, 2026-08-03).** §5.4 evaluates `full_pass`, `tail_pass` and `converged` and then dispatches on the **triple**, so a single `✘` at step 6 does not determine an outcome and the superseded one-line *Valid fail → `Reject(HurdleNotMet)`* row was wrong in two directions at once: with steps 6 and 7 disagreeing the engine returns **`Extend`** (or `SecondExtensionFailed` after an extension), not a hurdle rejection at all; and with step 8 also failing it returns **`ConvergenceFailed`**, because a series that has not converged is not evidence that the hurdle was genuinely missed. `HurdleNotMet` is correct only for `full_pass = tail_pass = false ∧ converged`. The five rows below replace it. A dash still means *not evaluated*; `✔✘`/`✘✔` in the same column pair means the two disagree, in either order.
+
 | Scenario | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | Outcome / reason |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Valid pass | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ADOPT → Queued |
-| Valid fail | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | – | – | – | – | – | Reject(HurdleNotMet) |
+| Valid fail — hurdle missed, series converged | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | ✘ | ✔ | – | – | – | Reject(HurdleNotMet) |
+| Valid fail — hurdle missed, series not converged | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | ✘ | ✘ | – | – | – | Reject(ConvergenceFailed) |
+| Hurdle met but not converged | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | – | – | – | Reject(ConvergenceFailed) |
+| Full/trailing disagreement (first) | ✔ | ✔ | ✔ | ✔ | ✔ | ✔✘ | ✘✔ | – | – | – | – | Extend (once) |
+| Full/trailing disagreement (after extension) | ✔ | ✔ | ✔ | ✔ | ✔ | ✔✘ | ✘✔ | – | – | – | – | Reject(SecondExtensionFailed) |
 | Insufficient info (first) | ✔ | ✔ | ✔ | ✔ | ✘grade | – | – | – | – | – | – | Extend (once) |
 | Insufficient info (second) | ✔ | ✔ | ✔ | ✔ | ✘ | – | – | – | – | – | – | Reject(NotDecisionGrade) |
 | Stale market | ✔ | ✔ | ✔ | ✔ | ✘cov | – | – | – | – | – | – | Extend → Reject(NotDecisionGrade) |
