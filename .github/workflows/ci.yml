@@ -345,6 +345,12 @@ jobs:
         # function over probe results with the PAPI shape adapted separately.
         run: pnpm run test:descriptors
 
+      - name: smoldot artifact budget (10 §9.3, FE-P4)
+        # A budget nothing measures is a sentence, and the one certain thing about a
+        # dependency's compressed size is that it changes. Fails closed if the pinned
+        # package's layout moved, so a version bump cannot measure nothing and pass.
+        run: pnpm run check:budget
+
   environments:
     name: Environment definitions
     runs-on: ubuntu-latest
