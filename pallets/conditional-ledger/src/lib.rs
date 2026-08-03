@@ -669,6 +669,27 @@ pub mod pallet {
         fn redemption_fee_bps() -> u128 {
             u128::from(T::RedemptionFee::get().deconstruct() / 100_000)
         }
+
+        /// 02 §9 (contract v23): the kernel id-band boundary separating the
+        /// **primary** domain from the **service** domain (16 §7.1). One
+        /// number partitions every question, book, vault and position id, so
+        /// a consumer decides which ledger instance a row belongs to by a
+        /// single comparison against an id it already holds.
+        ///
+        /// Exposed here because 02 §9.4 forbids the frontend a chain literal
+        /// and 11 §11.2a requires it to render the domain: without a metadata
+        /// home the client would have to hardcode `1 << 63`, which is the one
+        /// thing that rule set does not permit. Both instances publish it and
+        /// the value is identical — it is a property of the id space, not of
+        /// either instance, and instancing it per side would invite exactly
+        /// the drift the single kernel constant exists to prevent.
+        /// `pub` where its siblings are private, deliberately: the runtime
+        /// suite asserts both instances publish the identical boundary, which
+        /// is a cross-instance property no in-pallet test can observe.
+        #[pallet::constant_name(ServiceIdBase)]
+        pub fn service_id_base() -> u64 {
+            kernel::SERVICE_ID_BASE
+        }
     }
 
     // --------------------------------------------------------------------- hooks

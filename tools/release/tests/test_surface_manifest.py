@@ -598,7 +598,7 @@ class SurfaceManifestTests(unittest.TestCase):
         runtime_apis = [
             entry for entry in self.entries if entry["kind"] == "runtime_api"
         ]
-        self.assertEqual(len(runtime_apis), 12)
+        self.assertEqual(len(runtime_apis), 13)
         for entry in runtime_apis:
             self.assertNotIn("blocked_by", entry, entry["id"])
             # Runtime API layout is resolved from released metadata; this
@@ -802,6 +802,7 @@ class SurfaceManifestTests(unittest.TestCase):
             "constant.question_service.max_window",
             "constant.question_service.epsilon_min",
             "constant.question_service.attestors_min",
+            "constant.ledger.service_id_base",
             "storage.client_registry.clients",
             "storage.question_service.questions",
             "storage.question_service.reports",
@@ -818,7 +819,25 @@ class SurfaceManifestTests(unittest.TestCase):
             }.isdisjoint(identifiers)
         )
 
-    def test_all_twelve_runtime_api_methods_are_present(self) -> None:
+    def test_service_id_base_constant_is_the_frozen_domain_boundary(self) -> None:
+        """02 §9 (v23): the client derives a row's ledger domain from this
+        constant, so it must be exactly ``kernel::SERVICE_ID_BASE`` and nothing
+        near it. The expectation is *computed* rather than copied from the
+        manifest — a test that restates the shipped bytes agrees with a wrong
+        value as readily as a right one, and this number decides which pallet
+        instance a user's redemption is sent to."""
+        by_id = {entry["id"]: entry for entry in self.entries}
+        entry = by_id["constant.ledger.service_id_base"]
+        self.assertEqual(entry["pallet"], "ConditionalLedger")
+        self.assertEqual(entry["constant"], "ServiceIdBase")
+        self.assertTrue(entry["required"])
+        self.assertEqual(entry["layout"]["type"], "u64")
+        self.assertEqual(
+            entry["layout"]["value"],
+            "0x" + (2**63).to_bytes(8, "little").hex(),
+        )
+
+    def test_all_thirteen_runtime_api_methods_are_present(self) -> None:
         methods = {
             entry["method"]
             for entry in self.entries
@@ -839,6 +858,11 @@ class SurfaceManifestTests(unittest.TestCase):
                 "recent_cohorts",
                 "open_oracle_rounds",
                 "hosted_report",
+                # Contract v23 (SQ-571): the service ledger's positions. Separate
+                # from `account_positions` because MAX_ACCOUNT_POSITIONS is a
+                # per-instance cap, so one shared return vector could truncate a
+                # user's real holdings (02 §3).
+                "service_positions",
             },
         )
 

@@ -17805,6 +17805,156 @@ fn view_account_positions_uses_vault_order_and_truncates_protocol_accounts() {
     });
 }
 
+/// Contract v23 (SQ-571): the two ledger domains answer separately, and neither
+/// leaks into the other. The isolation is the property under test — a client that
+/// showed a service position among primary ones, or vice versa, would assert one
+/// solvency pool where 03's I-4 gives two (16 §7.1).
+#[test]
+fn view_positions_are_partitioned_by_ledger_instance() {
+    use frame_support::instances::Instance1;
+    use futarchy_primitives::kernel::SERVICE_ID_BASE;
+    use pallet_conditional_ledger::core_ledger::{proposal_positions, VaultInfo};
+
+    development_ext().execute_with(|| {
+        let who = crate::configs::insurance_account();
+        let who_raw: [u8; 32] = who.clone().into();
+
+        // One primary vault and one service vault, the latter in the 16 §7.1
+        // service id band so its domain is decidable from the id alone.
+        let primary = 4_u64;
+        let service = SERVICE_ID_BASE + 4;
+
+        pallet_conditional_ledger::Vaults::<Runtime>::insert(primary, VaultInfo::open(1));
+        pallet_conditional_ledger::Positions::<Runtime>::insert(
+            proposal_positions(primary)[0],
+            &who,
+            111,
+        );
+
+        pallet_conditional_ledger::Vaults::<Runtime, Instance1>::insert(
+            service,
+            VaultInfo::open(1),
+        );
+        pallet_conditional_ledger::Positions::<Runtime, Instance1>::insert(
+            proposal_positions(service)[0],
+            &who,
+            222,
+        );
+
+        let primary_view = crate::views::account_positions(who_raw);
+        let service_view = crate::views::service_positions(who_raw);
+
+        let only = |v: &futarchy_primitives::BoundedVec<
+            futarchy_primitives::PositionView,
+            { futarchy_primitives::bounds::MAX_ACCOUNT_POSITIONS },
+        >| {
+            assert_eq!(v.len(), 1);
+            v.iter().next().expect("exactly one row").clone()
+        };
+
+        let primary_row = only(&primary_view);
+        assert_eq!(primary_row.position, proposal_positions(primary)[0]);
+        assert_eq!(primary_row.balance, 111);
+
+        let service_row = only(&service_view);
+        assert_eq!(service_row.position, proposal_positions(service)[0]);
+        assert_eq!(service_row.balance, 222);
+
+        // Neither view contains the other's row — the assertion that would fail
+        // if `positions_for` ever lost its instance parameter.
+        assert!(primary_view
+            .iter()
+            .all(|v| v.position != proposal_positions(service)[0]));
+        assert!(service_view
+            .iter()
+            .all(|v| v.position != proposal_positions(primary)[0]));
+    });
+}
+
+/// Both domains can be simultaneously full at `MAX_ACCOUNT_POSITIONS`, which is
+/// why contract v23 gives them separate return vectors: merged, this account's
+/// service holdings would be entirely invisible behind its primary ones.
+#[test]
+fn view_positions_bound_is_per_instance_not_shared() {
+    use frame_support::instances::Instance1;
+    use futarchy_primitives::{bounds, kernel::SERVICE_ID_BASE};
+    use pallet_conditional_ledger::core_ledger::{proposal_positions, VaultInfo};
+
+    development_ext().execute_with(|| {
+        let who = crate::configs::insurance_account();
+        let who_raw: [u8; 32] = who.clone().into();
+
+        // 5 vaults × 14 instruments = 70 candidate rows per domain, so each view
+        // fills its own 64-slot bound independently.
+        for n in 1..=5_u64 {
+            pallet_conditional_ledger::Vaults::<Runtime>::insert(n, VaultInfo::open(1));
+            pallet_conditional_ledger::Vaults::<Runtime, Instance1>::insert(
+                SERVICE_ID_BASE + n,
+                VaultInfo::open(1),
+            );
+            for position in proposal_positions(n) {
+                pallet_conditional_ledger::Positions::<Runtime>::insert(position, &who, 1);
+            }
+            for position in proposal_positions(SERVICE_ID_BASE + n) {
+                pallet_conditional_ledger::Positions::<Runtime, Instance1>::insert(
+                    position, &who, 1,
+                );
+            }
+        }
+
+        let bound = bounds::MAX_ACCOUNT_POSITIONS as usize;
+        let primary_view = crate::views::account_positions(who_raw);
+        let service_view = crate::views::service_positions(who_raw);
+        assert_eq!(primary_view.len(), bound);
+        assert_eq!(service_view.len(), bound);
+
+        // Counts alone are vacuous here — with both views reading one instance
+        // each would still be full. What makes this a real partition test is
+        // that every returned id falls in its own 16 §7.1 band, which is also
+        // the property 11 §11.2a rule 1 lets the client decide domain by.
+        let vault_of = |p: &futarchy_primitives::PositionId| match p {
+            futarchy_primitives::PositionId::Proposal { proposal, .. } => *proposal,
+            futarchy_primitives::PositionId::Baseline { epoch, .. } => u64::from(*epoch),
+        };
+        assert!(primary_view
+            .iter()
+            .all(|v| vault_of(&v.position) < SERVICE_ID_BASE));
+        assert!(service_view
+            .iter()
+            .all(|v| vault_of(&v.position) >= SERVICE_ID_BASE));
+    });
+}
+
+/// 02 §9 (contract v23): the client is required to *show* a row's ledger domain
+/// and forbidden a chain literal, so the boundary it tests against must be
+/// metadata-readable. This asserts the three properties the frontend rule set
+/// actually leans on — that the constant exists, that it is exactly the kernel
+/// value, and that both instances publish the *same* number.
+///
+/// The last one is the one worth a test rather than a comment: two instances of
+/// one pallet each get their own metadata constants section, so "one boundary"
+/// is a property of how the pallet computes it, not something the type system
+/// guarantees. If a later change ever made this per-instance, ids in the seam
+/// between the two values would be claimed by both domains or neither.
+#[test]
+fn service_id_base_is_metadata_readable_and_identical_across_instances() {
+    use frame_support::instances::Instance1;
+    use futarchy_primitives::kernel::SERVICE_ID_BASE;
+
+    development_ext().execute_with(|| {
+        let primary = pallet_conditional_ledger::Pallet::<Runtime>::service_id_base();
+        let service = pallet_conditional_ledger::Pallet::<Runtime, Instance1>::service_id_base();
+
+        assert_eq!(primary, SERVICE_ID_BASE);
+        assert_eq!(primary, 1_u64 << 63);
+        assert_eq!(
+            primary, service,
+            "the id band partitions one shared id space; a per-instance boundary \
+             would leave ids between the two values claimed by both domains or neither",
+        );
+    });
+}
+
 #[test]
 fn view_account_positions_includes_baseline_instruments_and_terminal_state() {
     use futarchy_primitives::{FixedU64, ScalarSide, VaultState};

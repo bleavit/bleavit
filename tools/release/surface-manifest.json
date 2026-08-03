@@ -1,6 +1,6 @@
 {
   "schema": "bleavit.critical-surface.v1",
-  "integration_contract_version": 22,
+  "integration_contract_version": 23,
   "description": "Critical chain/frontend surface frozen by architecture 02 sections 3, 6-9, and 12.",
   "release_blockers": [
     {
@@ -154,6 +154,17 @@
       "params_description": "QuestionId(0)",
       "required": true,
       "citation": "02 §3; 02 §4a"
+    },
+    {
+      "id": "api.service_positions",
+      "kind": "runtime_api",
+      "api": "FutarchyApi",
+      "method": "service_positions",
+      "state_call": "FutarchyApi_service_positions",
+      "params_hex": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "params_description": "AccountId([0;32])",
+      "required": true,
+      "citation": "02 §3; 02 §7.1"
     },
     {
       "id": "storage.client_registry.clients",
@@ -655,6 +666,71 @@
       }
     },
     {
+      "id": "storage.service_ledger.vaults",
+      "kind": "storage",
+      "pallet": "ServiceLedger",
+      "item": "Vaults",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.1; 02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u64",
+        "value": "conditional_ledger_core::VaultInfo{escrowed:u128,branches:[conditional_ledger_core::BranchSupply{usdc:u128,scalar_sets:u128,gate_sets:[u128;2]};2],state:futarchy_primitives::VaultStateenum[Open=0|Resolved=1(futarchy_primitives::Branchenum[Accept=0|Reject=1])|ScalarSettled=2{winner:futarchy_primitives::Branchenum[Accept=0|Reject=1],s:futarchy_primitives::FixedU64(u64)}|Voided=3|BaselineSettled=4{s:futarchy_primitives::FixedU64(u64)}],gate_outcomes:[Optionenum[None=0|Some=1(bool)];2],spec:u16}"
+      }
+    },
+    {
+      "id": "storage.service_ledger.baseline_vaults",
+      "kind": "storage",
+      "pallet": "ServiceLedger",
+      "item": "BaselineVaults",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.1; 02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u32",
+        "value": "conditional_ledger_core::BaselineVaultInfo{escrowed:u128,sets:u128,state:conditional_ledger_core::BaselineStateenum[Open=0|Settled=1(futarchy_primitives::FixedU64(u64))]}"
+      }
+    },
+    {
+      "id": "storage.service_ledger.positions",
+      "kind": "storage",
+      "pallet": "ServiceLedger",
+      "item": "Positions",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.1; 02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat",
+          "Blake2_128Concat"
+        ],
+        "key": "(futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}],sp_core::crypto::AccountId32([u8;32]))",
+        "value": "u128"
+      }
+    },
+    {
+      "id": "storage.service_ledger.position_totals",
+      "kind": "storage",
+      "pallet": "ServiceLedger",
+      "item": "PositionTotals",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.1; 02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}]",
+        "value": "u128"
+      }
+    },
+    {
       "id": "storage.execution_guard.queue",
       "kind": "storage",
       "pallet": "ExecutionGuard",
@@ -977,7 +1053,7 @@
       "citation": "02 §8; 02 §13",
       "layout": {
         "type": "u32",
-        "value": "0x16000000"
+        "value": "0x17000000"
       }
     },
     {
@@ -1026,6 +1102,18 @@
       "layout": {
         "type": "u128",
         "value": "0x10270000000000000000000000000000"
+      }
+    },
+    {
+      "id": "constant.ledger.service_id_base",
+      "kind": "constant",
+      "pallet": "ConditionalLedger",
+      "constant": "ServiceIdBase",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u64",
+        "value": "0x0000000000000080"
       }
     },
     {

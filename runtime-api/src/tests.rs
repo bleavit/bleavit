@@ -71,6 +71,10 @@ sp_api::mock_impl_runtime_apis! {
         fn hosted_report(question_id: u64) -> Option<ReportView> {
             Some(hosted_report(question_id))
         }
+
+        fn service_positions(who: AccountId) -> BoundedVec<PositionView, { bounds::MAX_ACCOUNT_POSITIONS }> {
+            singleton(service_position(who))
+        }
     }
 }
 
@@ -182,6 +186,21 @@ fn position(who: AccountId) -> PositionView {
         },
         balance: u128::from(who[0]),
         vault_state: VaultState::Resolved(Branch::Accept),
+    }
+}
+
+/// A service-domain position. The vault id sits in the 16 §7.1 service band
+/// (`kernel::SERVICE_ID_BASE = 1 << 63`), which is what makes a returned row's
+/// domain decidable from its id alone (02 §7.1, contract v23).
+fn service_position(who: AccountId) -> PositionView {
+    PositionView {
+        position: PositionId::Proposal {
+            proposal: futarchy_primitives::kernel::SERVICE_ID_BASE + 3,
+            branch: Branch::Reject,
+            kind: PositionKind::Long,
+        },
+        balance: u128::from(who[0]) + 1,
+        vault_state: VaultState::Open,
     }
 }
 
@@ -314,6 +333,11 @@ fn all_methods_are_callable_through_api_ref() {
         singleton(position([7; 32]))
     );
     assert_eq!(
+        api.service_positions(at, [7; 32])
+            .expect("service positions call succeeds"),
+        singleton(service_position([7; 32]))
+    );
+    assert_eq!(
         api.execution_queue(at)
             .expect("execution queue call succeeds"),
         singleton(queued_execution())
@@ -352,7 +376,14 @@ fn runtime_api_id_and_version_are_frozen() {
         runtime_decl_for_futarchy_api::ID,
         [52, 172, 53, 103, 236, 227, 15, 254]
     );
-    assert_eq!(runtime_decl_for_futarchy_api::VERSION, 2);
+    // Contract v23 raised this to 3 by appending the thirteenth method,
+    // `service_positions` (02 §3, §13 rule 2 — an additive method bumps the
+    // `sp_api` version *and* the contract version). The `ID` above is a hash of
+    // the trait's name and does not move when methods are appended, which is
+    // precisely the append-only property being pinned: a *rename* or a removal
+    // would move it, and this assertion would then fail loudly rather than
+    // letting a breaking change ship as an additive one.
+    assert_eq!(runtime_decl_for_futarchy_api::VERSION, 3);
     // N9 raised this to 4 by adding the isolated I-36 service-egress counters.
     // `TelemetryApi` is deliberately outside the 02 contract (12 §6.3 owns it,
     // the ops exporters are its only consumer), so the bump needs no separate

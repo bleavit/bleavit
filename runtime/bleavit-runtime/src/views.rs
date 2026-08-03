@@ -179,13 +179,16 @@ pub fn quote(market: MarketId, side: TradeSide, amount: Balance) -> QuoteView {
     }
 }
 
-fn push_position(
+fn push_position<I: 'static>(
     out: &mut BoundedVec<PositionView, { bounds::MAX_ACCOUNT_POSITIONS }>,
     who: &AccountId,
     position: futarchy_primitives::PositionId,
     vault_state: VaultState,
-) -> bool {
-    let balance = pallet_conditional_ledger::Positions::<Runtime>::get(position, who);
+) -> bool
+where
+    Runtime: pallet_conditional_ledger::Config<I>,
+{
+    let balance = pallet_conditional_ledger::Positions::<Runtime, I>::get(position, who);
     balance == 0
         || out
             .try_push(PositionView {
@@ -196,35 +199,41 @@ fn push_position(
             .is_ok()
 }
 
-/// Assemble `FutarchyApi::account_positions` per 02 §3/§7.4 and 03 §2.
+/// Assemble one ledger instance's positions per 02 §3/§7.4 and 03 §2.
 /// Proposal vaults sort by proposal id and precede Baseline vaults sorted by
 /// epoch; each vault uses conditional-ledger-core's canonical instrument order.
-/// Truncation at 64 is deterministic. User accounts cannot exceed 64, while
-/// 13 §4 explicitly exempts protocol accounts, so only those can be truncated.
-pub fn account_positions(
+/// Truncation at 64 is deterministic. User accounts cannot exceed 64 **within an
+/// instance**, while 13 §4 explicitly exempts protocol accounts, so only those
+/// can be truncated — which is exactly why the two domains answer in separate
+/// vectors rather than one shared one (02 §3, contract v23).
+fn positions_for<I: 'static>(
     who: ViewAccountId,
-) -> BoundedVec<PositionView, { bounds::MAX_ACCOUNT_POSITIONS }> {
+) -> BoundedVec<PositionView, { bounds::MAX_ACCOUNT_POSITIONS }>
+where
+    Runtime: pallet_conditional_ledger::Config<I>,
+{
     let who = AccountId::new(who);
     let mut out = BoundedVec::new();
     let mut proposals =
-        pallet_conditional_ledger::Vaults::<Runtime>::iter_keys().collect::<Vec<_>>();
+        pallet_conditional_ledger::Vaults::<Runtime, I>::iter_keys().collect::<Vec<_>>();
     proposals.sort_unstable();
     for proposal in proposals {
-        let Some(vault) = pallet_conditional_ledger::Vaults::<Runtime>::get(proposal) else {
+        let Some(vault) = pallet_conditional_ledger::Vaults::<Runtime, I>::get(proposal) else {
             continue;
         };
         for position in pallet_conditional_ledger::core_ledger::proposal_positions(proposal) {
-            if !push_position(&mut out, &who, position, vault.state) {
+            if !push_position::<I>(&mut out, &who, position, vault.state) {
                 return out;
             }
         }
     }
 
     let mut baselines =
-        pallet_conditional_ledger::BaselineVaults::<Runtime>::iter_keys().collect::<Vec<_>>();
+        pallet_conditional_ledger::BaselineVaults::<Runtime, I>::iter_keys().collect::<Vec<_>>();
     baselines.sort_unstable();
     for epoch in baselines {
-        let Some(vault) = pallet_conditional_ledger::BaselineVaults::<Runtime>::get(epoch) else {
+        let Some(vault) = pallet_conditional_ledger::BaselineVaults::<Runtime, I>::get(epoch)
+        else {
             continue;
         };
         // Contract v6 gives Baseline settlement a branch-free projection: a
@@ -236,12 +245,35 @@ pub fn account_positions(
             }
         };
         for position in pallet_conditional_ledger::core_ledger::baseline_positions(epoch) {
-            if !push_position(&mut out, &who, position, state) {
+            if !push_position::<I>(&mut out, &who, position, state) {
                 return out;
             }
         }
     }
     out
+}
+
+/// Assemble `FutarchyApi::account_positions` — the **primary** ledger domain
+/// (instance `()`) per 02 §3/§7.1.
+pub fn account_positions(
+    who: ViewAccountId,
+) -> BoundedVec<PositionView, { bounds::MAX_ACCOUNT_POSITIONS }> {
+    positions_for::<()>(who)
+}
+
+/// Assemble `FutarchyApi::service_positions` — the **service** ledger domain
+/// (`ServiceLedger` = `pallet_conditional_ledger::<Instance1>`) per 02 §3/§7.1,
+/// admitted to the canonical client surface by contract v23 (SQ-571).
+///
+/// A Bleavit account can already trade a hosted book — `market.buy` is a
+/// `CallDomain::Public` call and `LedgerRoute::for_book` routes it to this
+/// instance with no caller-visible difference (16 §6.2/§7.1) — so without this
+/// view the canonical client takes a user's money into a book and then cannot
+/// show the resulting position.
+pub fn service_positions(
+    who: ViewAccountId,
+) -> BoundedVec<PositionView, { bounds::MAX_ACCOUNT_POSITIONS }> {
+    positions_for::<frame_support::instances::Instance1>(who)
 }
 
 /// Assemble `FutarchyApi::execution_queue` per 02 §3/§4 and 09 §1.
