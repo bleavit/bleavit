@@ -116,6 +116,19 @@ export const INTEGRATION_CONTRACT_VERSION = ${manifest.integration_contract_vers
 /** Manifest entries with no metadata surface to probe (raw fixed-layout key, chain properties). */
 export const UNPROBED_MANIFEST_ENTRIES = ${unprobed};
 
+/**
+ * Every published surface id, as a **literal union**.
+ *
+ * Generated rather than derived from \`CRITICAL_SURFACE\` with
+ * \`(typeof CRITICAL_SURFACE)[number]['id']\`, which looks equivalent and is not: the array
+ * carries an explicit \`readonly CriticalSurfaceEntry[]\` annotation, so its \`id\`s widen to
+ * \`string\` and any consumer indexing into it gets a type that accepts every string. That
+ * version shipped, and a clause citing \`storage.epoch.nonexistent\` compiled clean — a
+ * binding that reads as a compile-time check and is not one.
+ */
+export type SurfaceId =
+${rows.map((r) => `  | ${JSON.stringify(r.id)}`).join('\n')};
+
 export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
 ${rows
   .map(
